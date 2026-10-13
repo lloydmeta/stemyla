@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use web_time::Instant;
 
 pub struct LiveOutput {
-    _stream: cpal::Stream,
+    stream: cpal::Stream,
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
@@ -86,11 +86,23 @@ pub fn start(mut player: Player) -> Result<LiveOutput> {
         .context("building output stream")?;
     stream.play().context("starting output stream")?;
     Ok(LiveOutput {
-        _stream: stream,
+        stream,
         device_name: device_label(&device),
         sample_rate: rate,
         channels: config.channels,
     })
+}
+
+impl LiveOutput {
+    /// Starts the output if the platform held it back.  Browsers create a Web
+    /// Audio context in the "suspended" state when the page has had no click
+    /// or key press yet (as when a song is restored from storage at page
+    /// load), and Safari resumes one only from inside a user-gesture event
+    /// handler.  Calling this while handling a click lets the audio play;
+    /// on a running output it changes nothing.
+    pub fn resume(&self) -> Result<()> {
+        self.stream.play().context("resuming the audio output")
+    }
 }
 
 fn device_label(device: &cpal::Device) -> String {

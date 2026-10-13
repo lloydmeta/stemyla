@@ -1120,6 +1120,16 @@ fn draw_wave(painter: &egui::Painter, rect: Rect, lane: &Lane, color: Color32) {
 impl eframe::App for StemApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // On a click, eframe runs this frame inside the browser's pointer
+        // event handler, where a suspended Web Audio context may be resumed
+        // (see `LiveOutput::resume`).
+        #[cfg(feature = "audio")]
+        if let Some(Output::Live(live)) = &self.output
+            && ctx.input(|i| i.pointer.any_released())
+            && let Err(e) = live.resume()
+        {
+            log::warn!("{e:#}");
+        }
         self.handle_drops(&ctx);
         self.poll_jobs(&ctx);
         #[cfg(target_arch = "wasm32")]
