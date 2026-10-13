@@ -85,11 +85,16 @@ async fn refresh_storage(pending: &std::rc::Rc<std::cell::RefCell<Inbox>>) {
     inbox.sessions = Some(sessions);
 }
 
-/// Where the model comes from, with links: shown in the transport bar.
+/// The app's source and where the model comes from, with links: shown in the transport bar.
 #[cfg(target_arch = "wasm32")]
 pub fn about_menu(ui: &mut egui::Ui) {
     ui.menu_button("About", |ui| {
         ui.set_max_width(420.0);
+        ui.hyperlink_to(
+            "Source code (GitHub): lloydmeta/stemyla",
+            "https://github.com/lloydmeta/stemyla",
+        );
+        ui.separator();
         ui.label(
             "Stems are separated by BS-RoFormer SW, a six-stem Band-Split RoPE Transformer, running on this computer's GPU.",
         );
