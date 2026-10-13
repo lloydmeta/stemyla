@@ -1,6 +1,6 @@
 # How Stemyla works
 
-Stemyla is a Rust workspace compiled to WebAssembly.  The page has two parts: the app on the page's main thread (drawing, playback, storage) and a Web Worker that runs the separation model on the GPU through WebGPU.  Nothing is sent to a server; the only network use is downloading the page and, once, the model.
+Stemyla is a Rust workspace compiled to WebAssembly.  The page has two parts: the app on the page's main thread (drawing, playback, storage) and a Web Worker that runs the separation model on the GPU through WebGPU.  Nothing is sent to a server; the only network use is downloading the page and, once, the model.  Terms such as STFT, mask or workgroup are explained under [Vocabulary](#vocabulary).
 
 ```mermaid
 flowchart LR
@@ -36,31 +36,134 @@ flowchart LR
 * `worker`: the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark and MP3 encoding.
 * `xtask`: tools run with Cargo: the static file server, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.
 
-## The model
+## From a song to six stems
 
-BS-RoFormer SW separates a stereo 44.1 kHz song into six stems: bass, drums, other, vocals, guitar and piano.  For each 13.35 s chunk:
+A song is handled in chunks of 13.35 s (588,800 samples), and a new chunk starts every 6.68 s (294,400 samples), so every sample away from the ends lies in two chunks.  A song longer than 13.35 s is first reflect-padded by 6.68 s at each end, so its first and last seconds are covered twice as well.  `Demixer::new` skips that padding for a song of 13.35 s or less, so its first 6.68 s lie in one chunk only, which keeps full weight there because the first chunk has no fade-in.  For each chunk:
+
+1. The STFT, on the CPU, turns each channel into a grid of 1,151 time slices by 1,025 frequency bins.  Each slice is a 2,048-sample (46 ms) Hann window, and the window moves 512 samples (11.6 ms) at a time, so neighbouring slices overlap by 75 %.  Each cell is a complex number: its magnitude is how loud that frequency is in that slice, its phase where it is in its cycle.  The two channels' grids are flattened into the network input, 4,100 numbers per slice.
+2. The network, on the GPU, takes the whole grid in one run of about 1,000 GPU steps and returns six masks of the same size, one per stem.  It needs the whole grid at once because its time transformers compare all 1,151 slices of a band with each other.
+3. Back on the CPU, the mix's grid is multiplied cell by cell by each mask (a complex multiply, so both loudness and phase change), and the inverse STFT turns each masked grid back into 13.35 s of audio: an inverse FFT per slice, then an overlap-add of the slices.
+
+Each chunk's six stems are faded in and out over 1.34 s at their edges (no fade-in on the first chunk, no fade-out on the last), added into song-length buffers, and divided by the summed fade weights, which crossfades neighbouring chunks.  Trimming the padding leaves six stems as long as the song.  So there are overlaps at two scales, each undone by its own overlap-add: 75 % between slices within a chunk, and 50 % between chunks across the song.  `roformer::demix::Demixer` does the chunking and crossfading as `bs_roformer.utils.demix_track` in the reference Python does, and `roformer::stft` follows `torch.stft` and `torch.istft`.
 
 ```mermaid
 flowchart TD
-  A["audio chunk, 2 x 588,800 samples"] --> B["STFT: 1,151 frames x 1,025 bins x 2 channels"]
-  B --> C["band split: 62 bands, each projected to 256 numbers"]
-  C --> D["12 layers: transformer along time, then along frequency"]
-  D --> E["6 mask estimators: a complex mask per stem"]
-  E --> F["spectrum x mask, inverse STFT"]
-  F --> G["overlap-add with the neighbouring chunks"]
+  SONG["song, stereo, 44.1 kHz"] --> PAD["reflect-pad by 6.68 s at each end<br/>(songs over 13.35 s only)"]
+  PAD --> CUT["13.35 s chunks, a new one every 6.68 s"]
+  subgraph chunk["for each chunk"]
+    STFT["STFT on the CPU<br/>1,151 slices x 1,025 bins x 2 channels"]
+    NET["network on the GPU<br/>about 1,000 steps"]
+    MASKS["6 complex masks, the size of the grid"]
+    APPLY["grid x mask on the CPU, once per stem"]
+    ISTFT["inverse STFT on the CPU<br/>inverse FFT per slice, overlap-add the slices"]
+    STFT --> NET --> MASKS --> APPLY --> ISTFT
+  end
+  CUT --> STFT
+  ISTFT --> XF["fade each chunk's edges over 1.34 s,<br/>add, divide by the summed fades"]
+  XF --> TRIM["trim the padding"]
+  TRIM --> STEMS["6 stems, each as long as the song"]
 ```
 
-A chunk is about 6.1 TFLOP of arithmetic, nearly all of it matrix multiplication.  The 212 s test song is 34 chunks.
+## The model
+
+BS-RoFormer SW separates a stereo 44.1 kHz song into six stems: bass, drums, other, vocals, guitar and piano.  Inside the network, one chunk's grid goes through:
+
+```mermaid
+flowchart TD
+  F["features: 1,151 slices x 4,100"] --> B["band split: 62 bands of bins,<br/>each projected to 256 numbers"]
+  B --> L["12 layers: a transformer along time within each band,<br/>then one along frequency within each slice"]
+  L --> N["final RMS normalisation"]
+  N --> M["6 mask estimators: one small MLP per band per stem"]
+  M --> O["6 complex masks: 1,151 x 4,100"]
+```
+
+The bands are narrow at low frequencies, 2 bins (43 Hz) each up to 1 kHz, and wide at the top: 48 bins each up to 16.5 kHz, then two bands of 128 and 129 bins.  A chunk is about 6.1 TFLOP of arithmetic, nearly all of it matrix multiplication.  The 212 s test song is 34 chunks.
+
+The parameters and the arithmetic are spread very unevenly:
+
+| Part | Parameters | Matmul work per chunk |
+| - | - | - |
+| band split | 1.07 M (0.6 %) | 2.4 GFLOP (0.04 %) |
+| 24 transformer blocks | 25.26 M (14.5 %) | 5,726 GFLOP (94.3 %) |
+| 6 mask estimators | 148.33 M (84.9 %) | 341 GFLOP (5.6 %) |
+| total | 174.66 M (about 699 MB as f32) | 6,069 GFLOP |
+
+The cause is reuse.  Each transformer weight is applied to every token of a chunk, 1,151 slices times 62 bands, on top of the attention products, which use no weights at all.  Each mask estimator has its own MLP per band, and that MLP sees only its band's 1,151 slices.
 
 ## Running it on the GPU
 
-`roformer-gpu` has four WGSL files: a matrix multiply (strided, batched, with bias, GELU or tanh, and accumulate), row softmax, RMS normalisation, and small element-wise kernels (rotary position embedding, attention gates, transpose, gated linear unit).  The design rules:
+`roformer-gpu` has five WGSL files: two matrix multiplies, the original and a template for its register-tiled variants (strided, batched, with bias, GELU or tanh, and accumulate), row softmax, RMS normalisation, and small element-wise kernels (rotary position embedding, attention gates, transpose, gated linear unit).  The design rules:
 
 * **Portable limits.**  Every kernel fits WebGPU's default limits (256 threads per workgroup, 16 KiB of workgroup memory, 128 MiB per buffer binding), and the device is requested with exactly those, so nothing depends on what one GPU offers beyond them.
 * **Short steps.**  A chunk is split into about 1,000 steps, each one short command buffer (for example one band of one time transformer, about 5 GFLOP).  The worker waits for the GPU after every step, so the display never waits long, and stops the run if a step takes over 5 s.  The operating system's GPU watchdog is never approached.
 * **Kernels checked on every GPU.**  When the GPU opens, every matrix-multiply kernel runs two small products and is compared with the CPU.  A kernel that disagrees is not used on that GPU.
 * **Kernels chosen per GPU.**  There are five matrix-multiply kernels with different tile shapes.  The fastest differs by GPU (the original kernel is the fastest on a Radeon Pro 5500M and the slowest, by a factor of 5, on an Intel UHD 630), so each GPU times the checked kernels once, for a few seconds, and the choice is kept in browser storage.
 * **Self-test.**  `?selftest` compares each stage of the network, and one full chunk, with reference files made by the CPU version (`xtask roformer-selftest`).
+
+### How `net.rs` drives the kernels
+
+The WGSL kernels know almost nothing about BS-RoFormer.  The matmul kernels multiply two strided matrices, with an optional bias, GELU or tanh, scale and accumulate, and the softmax kernel normalises rows; both work on any shape.  The smaller kernels do fix some of the network's sizes: `rope` assumes rows of 1,536 holding 8 heads of 32 pairs, `gate` 8 heads of 64, `rmsnorm` and `transpose3` a width of 256, and `glu` rows of 4,100.
+
+The architecture lives in `roformer-gpu/src/net.rs`, in four forms:
+
+* Parameters: `Net::load` asks the safetensors file for every tensor by its PyTorch name and shape, and `Store::finish` rejects a file that holds any tensor it did not ask for.  Some are adjusted for the kernels on the way in.  RMSNorm gains are multiplied by √width once, so the kernel computes only `x / |x| * g`.  Band-split weights are stacked per band group.  The band-split norm gains stay on the CPU, where `Job::set_input` applies them.
+* Dataflow: `Job::steps` gives the order across the network and `Job::transformer` the order inside one block, one dispatch per line of the maths.
+* Layouts: the hidden state is `[62, T, 256]` for time attention and `[T, 62, 256]` for frequency attention, `qkv` is packed as `[q | k | v]` with 8 heads of 64 in each, and the mask is `[T, 4100]`.  Each matmul's `View` strides encode these layouts, so weights stay in torch's `[out, in]` layout and are read transposed, and each head's q, k and v are read straight out of `qkv` without a copy.
+* Sizes: the constants in `roformer/src/lib.rs` (`DIM`, `HEADS`, `DIM_HEAD`, `DEPTH`, `HIDDEN`, `FREQS_PER_BANDS`).
+
+To the GPU, parameters and activations are both just storage buffers.  `Net` owns the parameters, uploaded once and never written again.  `Job` owns one chunk's activations, rewritten at every step.  A dispatch combines a pipeline (which kernel), a bind group (which buffers), a 256-byte slot of the uniform buffer (shapes, strides, bias, activation, scale, accumulate) and a grid of workgroups.  Here is the query, key and value projection of layer 3's time transformer:
+
+```mermaid
+flowchart LR
+  subgraph net["Net: parameters, uploaded once"]
+    W["layers[3].0.qkv<br/>1,536 x 256, torch layout"]
+  end
+  subgraph job["Job: one chunk's activations"]
+    XN["xn<br/>1,151 x 256"]
+    QKV["qkv<br/>1,151 x 1,536"]
+  end
+  subgraph gpu["Gpu"]
+    P["matmul pipeline<br/>picked by MatMulPolicy for m x n"]
+    U["uniform slot<br/>m, n, k, strides, flags"]
+  end
+  XN -->|"binding 0: A"| D(("dispatch"))
+  W -->|"binding 1: B, read transposed"| D
+  P --> D
+  U --> D
+  D -->|"binding 2: C"| QKV
+```
+
+Every matrix product in the network goes through the same `Rec::matmul` interface and the same family of tiled kernels, only with other bindings and uniforms.  Which kernel runs is decided per product: `MatMulPolicy::pick` returns one fixed kernel, or, for a `Split` policy, the `large` kernel when both sides of the output exceed 64 and the `small` kernel otherwise (frequency attention, gates).  In layer 11 the weight binding is `layers[11].0.qkv`.  For the attention scores both operands are views into `qkv`, so no parameter is involved.  For the mask estimators the weight is one band group's stacked MLPs, batched over the bands through a batch stride.  The attention scores, softmax, `P·v`, rotary embedding and transposes all run on activations only.
+
+A time-transformer step is the most common kind (744 per chunk).  It runs 12 dispatches on one band's `[1151, 256]` slice of the hidden state `x`, updated in place:
+
+```text
+ 1  rmsnorm  attn_norm                     -> xn      [1151, 256]
+ 2  matmul   xn . Wqkv^T                   -> qkv     [1151, 1536]
+ 3  rope     q and k, in place             -> qkv
+ 4  matmul   xn . Wgates^T + b             -> gates   [1151, 8]
+ 5  matmul   q . k^T / 8, per head         -> scores  [8, 1151, 1151]
+ 6  softmax  rows                          -> scores
+ 7  matmul   P . v, per head               -> o       [1151, 512]
+ 8  gate     o * sigmoid(gates)            -> o
+ 9  matmul   o . Wout^T, accumulate        -> x       (residual)
+10  rmsnorm  ff_norm                       -> xn
+11  matmul   xn . W1^T + b1, GELU          -> h       [1151, 1024]
+12  matmul   h . W2^T + b2, accumulate     -> x       (residual)
+```
+
+The worker (`worker/src/web.rs`) paces the steps.  It submits one, waits for the GPU, checks the time taken and any WebGPU error, then goes on, and it reads a stem's mask back when that stem's last mask step finishes.  `Job::masks` does the same without the pacing, for tests and native runs.
+
+What a change to the model would touch:
+
+* Another checkpoint of the same configuration: only the weights file.
+* More or fewer layers: `DEPTH`.
+* Other heads or width: the constants in `roformer/src/lib.rs`, and the fixed sizes in `elementwise.wgsl` and `rmsnorm.wgsl`.
+* Another band split: `FREQS_PER_BANDS`, and the group and band counts asserted in its test.  Every valid split still sums to 1,025 bins, so `FEATURES` stays 4,100.
+* Another STFT size: `N_FFT`, a `FREQS_PER_BANDS` that sums to the new `BINS`, and the 4,100 in `glu`, which is `FEATURES = BINS * CHANNELS * 2`.
+* A new operation, such as SiLU in place of GELU: a branch in the matmul epilogue, a variant of `Act`, and CPU checks for it.
+
+Any change to the shapes also touches `roformer-gpu/src/bench.rs`, whose kernel calibration and benchmark hard-code this model's matrix sizes and step counts.
 
 ## Browser storage
 
@@ -78,3 +181,57 @@ The Storage menu lists the stored songs, opens or forgets one, shows the space u
 * `cargo test -p roformer --release`: the CPU network against PyTorch (needs fixtures from `tools/roformer_export.py`; skipped without them).
 * `cargo test -p roformer-gpu --release`: every GPU kernel against CPU loops, and the whole network against PyTorch.  Without a GPU, point Vulkan at SwiftShader (see the README).
 * `tools/*.mjs`: headless Chromium checks of the built page (self-test, worker against PyTorch, storage, benchmark), using Playwright.
+
+## Vocabulary
+
+Each term links to a fuller explanation.
+
+### Audio and signal processing
+
+* [Stem](https://en.wikipedia.org/wiki/Stem_mixing_and_mastering): one part of a mix, such as the vocals or the drums, as its own audio track.
+* [Source separation](https://source-separation.github.io/tutorial/intro/src_sep_101.html): recovering the individual sources (here, stems) from a recording in which they are mixed together.
+* [Sample](https://en.wikipedia.org/wiki/Sampling_(signal_processing)): one measurement of the sound wave.  At 44.1 kHz there are 44,100 samples per second per channel, so 588,800 samples is 13.35 s.
+* [FFT](https://en.wikipedia.org/wiki/Fast_Fourier_transform) (fast Fourier transform): a fast way to express a block of samples as a sum of sine waves, one per frequency, each with an amplitude and a phase.  The inverse FFT turns those back into samples.
+* [STFT](https://en.wikipedia.org/wiki/Short-time_Fourier_transform) (short-time Fourier transform): slides a short window along the audio and takes an FFT at each position, giving a grid of time slices by frequency bins, often called a spectrogram.  The inverse STFT turns such a grid back into audio.  Here the window is 2,048 samples and moves 512 at a time, as in [`torch.stft`](https://docs.pytorch.org/docs/stable/generated/torch.stft.html).
+* [Frequency bin](https://source-separation.github.io/tutorial/basics/tf_and_masking.html): one frequency row of the STFT grid.  A 2,048-sample FFT of real audio has 1,025 distinct bins (2,048 / 2 + 1), 21.5 Hz apart at 44.1 kHz.
+* [Hann window](https://en.wikipedia.org/wiki/Hann_function): a bell-shaped weighting that tapers to zero at the edges (here the periodic form, as `torch.hann_window`), applied to each slice before its FFT so the hard cut at the slice's edges does not smear energy across frequencies (spectral leakage).
+* [Magnitude and phase](https://en.wikipedia.org/wiki/Complex_number#Polar_form): the two halves of a complex number in polar form.  In an STFT cell the magnitude is how loud that frequency is in that slice and the phase is where its wave is in its cycle.
+* [Overlap-add](https://ccrma.stanford.edu/~jos/sasp/Overlap_Add_OLA_STFT_Processing.html): rebuilding a long signal from overlapping pieces by adding them where they overlap, with window weights that sum to a constant or are divided out, so the joins do not show.  Used twice here: between STFT slices and between chunks.
+* [Reflect padding](https://numpy.org/doc/stable/reference/generated/numpy.pad.html): extending a signal by mirroring it at its edge without repeating the edge sample, so `[1, 2, 3, 4]` padded by 2 becomes `[3, 2, 1, 2, 3, 4, 3, 2]`.  It avoids a sudden jump to silence at the ends.
+* [Crossfade](https://en.wikipedia.org/wiki/Fade_(audio_engineering)): fading one piece out while the next fades in over the same span, so the join is smooth.
+* [Time-frequency mask](https://source-separation.github.io/tutorial/basics/tf_and_masking.html): a grid the size of the STFT that says, cell by cell, how much of the mix belongs to one stem.  BS-RoFormer's masks are complex, so they can change the phase of each cell as well as its loudness.
+* [WSOLA](https://doi.org/10.1109/ICASSP.1993.319366) (waveform similarity overlap-add): a time-stretch that changes tempo without changing pitch.  It cuts the audio into overlapping pieces and re-spaces them, nudging each piece to where its waveform best matches the previous one.
+* [Harmonic/percussive separation](https://librosa.org/doc/0.11.0/generated/librosa.decompose.hpss.html): splits audio into sustained tones and short hits by median-filtering the spectrogram along time, which keeps the tones, and along frequency, which keeps the hits.
+
+### The model
+
+* [BS-RoFormer](https://arxiv.org/abs/2309.02612) (band-split RoPE transformer): the separation network.  It groups the STFT bins into bands, projects each band to 256 numbers, runs transformers alternately along time within each band and along frequency across the bands, and estimates one mask per stem.
+* [Band split](https://arxiv.org/abs/2209.15174): grouping neighbouring frequency bins into bands that the network treats as units.  Here there are 62 bands, narrow (2 bins) at low frequencies and wide (up to 129 bins) at high ones.  The idea comes from the band-split RNN.
+* [Transformer](https://arxiv.org/abs/1706.03762): a network block made of attention followed by a small feed-forward network, each wrapped in a normalisation and a residual connection.
+* [Attention](https://arxiv.org/abs/1706.03762): each token (here, one band in one time slice) computes a query, a key and a value.  A token's output is the average of all tokens' values, weighted by how well its query matches each key, so every token can draw on every other.  With 8 heads, this happens 8 times in parallel, each on 64 of the numbers.
+* [RoPE](https://arxiv.org/abs/2104.09864) (rotary position embedding): rotates pairs of numbers in each query and key by an angle that grows with position, so the match between two tokens depends on how far apart they are.
+* [RMSNorm](https://arxiv.org/abs/1910.07467): divides a vector by its root mean square, then scales each element by a learned gain.  It is layer normalisation without subtracting the mean.
+* [Residual connection](https://arxiv.org/abs/1512.03385): adds a block's output to its input instead of replacing it.  The matmul kernel's accumulate flag does this.
+* [Softmax](https://en.wikipedia.org/wiki/Softmax_function): turns a row of scores into positive weights that sum to 1.  Attention uses it on the query-key scores.
+* [MLP](https://en.wikipedia.org/wiki/Multilayer_perceptron) (multilayer perceptron): matrix multiplies with a non-linear function between them.  There is one per band per stem in the mask estimators, which is why they hold 85 % of the parameters.
+* [GELU](https://arxiv.org/abs/1606.08415): a smooth non-linear function, `x` times the probability that a standard normal variable is below `x`.  The transformers' feed-forward networks use it.
+* [GLU](https://arxiv.org/abs/1612.08083) (gated linear unit): splits a vector into halves `a` and `b` and returns `a * sigmoid(b)`.  Each mask estimator ends with one.
+* [FLOP](https://en.wikipedia.org/wiki/FLOPS): one floating-point operation.  A GFLOP is 10^9 of them and a TFLOP 10^12.  A multiply-add counts as two.
+* [safetensors](https://huggingface.co/docs/safetensors/index): a file format for tensors that, unlike PyTorch's pickle files, holds only data, so loading one runs no code.
+* [f16](https://en.wikipedia.org/wiki/Half-precision_floating-point_format) and [bf16](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format): 16-bit floating-point formats.  f16 is more precise with less range; bf16 keeps f32's range with less precision.  Weights in either are widened to f32 when loaded.
+
+### Browser and GPU
+
+* [WebAssembly](https://developer.mozilla.org/en-US/docs/WebAssembly): a compact binary format that browsers run at close to native speed.  The Rust crates compile to it.
+* [Web Worker](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API): a script on a background thread, so long work does not freeze the page.  It talks to the page by `postMessage`.
+* [OPFS](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system) (origin private file system): file storage private to the page's origin and not visible in the user's own file system.
+* [WebGPU](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API): the browser API for the GPU, for general computation as well as graphics.  [The specification](https://www.w3.org/TR/webgpu/) defines it.
+* [WGSL](https://www.w3.org/TR/WGSL/) (WebGPU Shading Language): the language WebGPU programs are written in.
+* [Kernel](https://webgpufundamentals.org/webgpu/lessons/webgpu-compute-shaders.html) (compute shader): a function the GPU runs on many threads at once.
+* [Workgroup and dispatch](https://webgpufundamentals.org/webgpu/lessons/webgpu-compute-shaders.html): a workgroup is a group of threads that run together and share fast workgroup memory.  A dispatch is one launch of a kernel over a grid of workgroups.
+* [Pipeline and bind group](https://webgpufundamentals.org/webgpu/lessons/webgpu-fundamentals.html): a pipeline is a compiled kernel ready to run.  A bind group is the set of buffers it reads and writes in one dispatch.
+* [Uniform and storage buffers](https://webgpufundamentals.org/webgpu/lessons/webgpu-uniforms.html): a uniform buffer holds small read-only settings that are the same for every thread (here shapes, strides and flags).  Storage buffers hold the large arrays (weights and activations).
+* [Default limits](https://www.w3.org/TR/webgpu/#limits): the resource limits every WebGPU device must support, such as 256 threads per workgroup, 16 KiB of workgroup memory and 128 MiB per storage buffer binding.  A page can ask for more, but only on GPUs that have it.
+* [Tiled matrix multiply](https://siboehm.com/articles/22/CUDA-MMM): each workgroup loads blocks of both inputs into workgroup memory, and each thread keeps a small block of the output in registers, so every number loaded is reused many times.  The five matmul kernels differ in these block sizes.
+* [GPU watchdog](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/timeout-detection-and-recovery): the operating system resets a GPU that does not finish its current work in time, two seconds by default on Windows (TDR).
+* [SwiftShader](https://github.com/google/swiftshader): a CPU implementation of Vulkan, used to run the GPU tests on a machine without a GPU.
