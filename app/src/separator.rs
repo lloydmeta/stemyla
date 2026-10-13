@@ -31,16 +31,38 @@ const WORKER_URL: &str = "./stem-worker_loader.js";
 
 pub enum Event {
     ModelLoading,
-    Model { ok: bool, text: String },
-    Progress { done: u32, total: u32, secs: f64 },
-    Stem { name: String, left: Vec<f32>, right: Vec<f32> },
-    Done { secs: f64 },
+    Model {
+        ok: bool,
+        text: String,
+    },
+    Progress {
+        done: u32,
+        total: u32,
+        secs: f64,
+    },
+    Stem {
+        name: String,
+        left: Vec<f32>,
+        right: Vec<f32>,
+    },
+    Done {
+        secs: f64,
+    },
     Error(String),
     Log(String),
-    Selftest { ok: bool, text: String },
+    Selftest {
+        ok: bool,
+        text: String,
+    },
     Bench(String),
-    Download { done: f64, total: f64 },
-    Mp3 { name: String, bytes: Vec<u8> },
+    Download {
+        done: f64,
+        total: f64,
+    },
+    Mp3 {
+        name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 pub struct Separator {
@@ -68,7 +90,11 @@ pub struct Separator {
 fn has_param(name: &str) -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
-        .is_some_and(|s| s.trim_start_matches('?').split('&').any(|p| p == name || p.starts_with(&format!("{name}="))))
+        .is_some_and(|s| {
+            s.trim_start_matches('?')
+                .split('&')
+                .any(|p| p == name || p.starts_with(&format!("{name}=")))
+        })
 }
 
 fn get(o: &JsValue, k: &str) -> JsValue {
@@ -93,14 +119,18 @@ fn url_settings() -> Vec<(String, JsValue)> {
         return out;
     };
     for pair in search.trim_start_matches('?').split('&') {
-        let Some((k, v)) = pair.split_once('=') else { continue };
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         match k {
             "chunk" | "overlap" | "max_elems" | "step_limit" | "bench_quick" => {
                 if let Ok(n) = v.parse::<f64>() {
                     out.push((k.to_string(), JsValue::from_f64(n)));
                 }
             }
-            "gpu" | "selftest" | "mm" | "model_url" => out.push((k.to_string(), JsValue::from_str(v))),
+            "gpu" | "selftest" | "mm" | "model_url" => {
+                out.push((k.to_string(), JsValue::from_str(v)))
+            }
             _ => {}
         }
     }
@@ -119,7 +149,11 @@ impl Separator {
         let worker = Worker::new_with_options(WORKER_URL, &opts).map_err(|e| format!("{e:?}"))?;
         let events: Rc<RefCell<VecDeque<Event>>> = Default::default();
         let settings = url_settings();
-        let (ev, w, init) = (events.clone(), worker.clone(), object(&[("type", "init".into())], &settings));
+        let (ev, w, init) = (
+            events.clone(),
+            worker.clone(),
+            object(&[("type", "init".into())], &settings),
+        );
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
             let d = e.data();
             let text = || get(&d, "text").as_string().unwrap_or_default();
@@ -130,12 +164,22 @@ impl Separator {
                     let _ = w.post_message(&init);
                     None
                 }
-                Some("model") => Some(Event::Model { ok: get(&d, "ok").is_truthy(), text: text() }),
-                Some("progress") => {
-                    Some(Event::Progress { done: num("done") as u32, total: num("total") as u32, secs: num("secs") })
-                }
+                Some("model") => Some(Event::Model {
+                    ok: get(&d, "ok").is_truthy(),
+                    text: text(),
+                }),
+                Some("progress") => Some(Event::Progress {
+                    done: num("done") as u32,
+                    total: num("total") as u32,
+                    secs: num("secs"),
+                }),
                 Some("stem") => {
-                    let ch = |k: &str| get(&d, k).dyn_into::<Float32Array>().map(|a| a.to_vec()).unwrap_or_default();
+                    let ch = |k: &str| {
+                        get(&d, k)
+                            .dyn_into::<Float32Array>()
+                            .map(|a| a.to_vec())
+                            .unwrap_or_default()
+                    };
                     Some(Event::Stem {
                         name: get(&d, "name").as_string().unwrap_or_default(),
                         left: ch("left"),
@@ -145,13 +189,22 @@ impl Separator {
                 Some("done") => Some(Event::Done { secs: num("secs") }),
                 Some("error") => Some(Event::Error(text())),
                 Some("log") => Some(Event::Log(text())),
-                Some("selftest") => Some(Event::Selftest { ok: get(&d, "ok").is_truthy(), text: text() }),
+                Some("selftest") => Some(Event::Selftest {
+                    ok: get(&d, "ok").is_truthy(),
+                    text: text(),
+                }),
                 Some("bench") => Some(Event::Bench(text())),
                 Some("mp3") => Some(Event::Mp3 {
                     name: get(&d, "name").as_string().unwrap_or_default(),
-                    bytes: get(&d, "bytes").dyn_into::<js_sys::Uint8Array>().map(|a| a.to_vec()).unwrap_or_default(),
+                    bytes: get(&d, "bytes")
+                        .dyn_into::<js_sys::Uint8Array>()
+                        .map(|a| a.to_vec())
+                        .unwrap_or_default(),
                 }),
-                Some("download") => Some(Event::Download { done: num("done"), total: num("total") }),
+                Some("download") => Some(Event::Download {
+                    done: num("done"),
+                    total: num("total"),
+                }),
                 _ => None,
             };
             if let Some(event) = event {
@@ -164,12 +217,13 @@ impl Separator {
         // aborted a command buffer) ends the worker; tell the user instead
         // of leaving the progress bar running.
         let ev = events.clone();
-        let onerror = Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |e: web_sys::ErrorEvent| {
-            ev.borrow_mut().push_back(Event::Error(format!(
-                "the separation worker stopped ({}); reload the page to start a new one",
-                e.message()
-            )));
-        });
+        let onerror =
+            Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |e: web_sys::ErrorEvent| {
+                ev.borrow_mut().push_back(Event::Error(format!(
+                    "the separation worker stopped ({}); reload the page to start a new one",
+                    e.message()
+                )));
+            });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         Ok(Self {
             worker,
@@ -195,7 +249,10 @@ impl Separator {
 
     /// Hands a dropped model file to the worker, which reads it.
     pub fn send_model_file(&mut self, file: &web_sys::File) {
-        let msg = object(&[("type", "model".into()), ("file", file.into())], &self.settings);
+        let msg = object(
+            &[("type", "model".into()), ("file", file.into())],
+            &self.settings,
+        );
         if self.worker.post_message(&msg).is_ok() {
             self.model_loading = true;
         }
@@ -204,17 +261,29 @@ impl Separator {
     /// Opens the browser's file picker; the chosen file goes straight to the
     /// worker as a `File`, unread on this thread.
     pub fn pick_model_file(&mut self) {
-        let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
-        let Ok(input) = doc.create_element("input").map(|e| e.unchecked_into::<HtmlInputElement>()) else {
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Ok(input) = doc
+            .create_element("input")
+            .map(|e| e.unchecked_into::<HtmlInputElement>())
+        else {
             return;
         };
         input.set_type("file");
         input.set_accept(".safetensors");
-        let (worker, settings, events) = (self.worker.clone(), self.settings.clone(), self.events.clone());
+        let (worker, settings, events) = (
+            self.worker.clone(),
+            self.settings.clone(),
+            self.events.clone(),
+        );
         let picked = input.clone();
         let onchange = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
             if let Some(file) = picked.files().and_then(|f| f.get(0)) {
-                let msg = object(&[("type", "model".into()), ("file", file.into())], &settings);
+                let msg = object(
+                    &[("type", "model".into()), ("file", file.into())],
+                    &settings,
+                );
                 if worker.post_message(&msg).is_ok() {
                     events.borrow_mut().push_back(Event::ModelLoading);
                 }
@@ -240,10 +309,18 @@ impl Separator {
     pub fn encode_mp3(&self, name: &str, left: &[f32], right: &[f32], rate: u32) {
         let (l, r) = (Float32Array::from(left), Float32Array::from(right));
         let msg = object(
-            &[("type", "mp3".into()), ("name", name.into()), ("left", l.clone().into()), ("right", r.clone().into()), ("rate", rate.into())],
+            &[
+                ("type", "mp3".into()),
+                ("name", name.into()),
+                ("left", l.clone().into()),
+                ("right", r.clone().into()),
+                ("rate", rate.into()),
+            ],
             &[],
         );
-        let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())].into_iter().collect();
+        let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())]
+            .into_iter()
+            .collect();
         let _ = self.worker.post_message_with_transfer(&msg, &transfer);
     }
 
@@ -272,9 +349,22 @@ impl Separator {
     /// Starts separating a 44.1 kHz stereo mix.
     pub fn separate(&mut self, left: &[f32], right: &[f32]) {
         let (l, r) = (Float32Array::from(left), Float32Array::from(right));
-        let msg = object(&[("type", "separate".into()), ("left", l.clone().into()), ("right", r.clone().into())], &self.settings);
-        let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())].into_iter().collect();
-        if self.worker.post_message_with_transfer(&msg, &transfer).is_ok() {
+        let msg = object(
+            &[
+                ("type", "separate".into()),
+                ("left", l.clone().into()),
+                ("right", r.clone().into()),
+            ],
+            &self.settings,
+        );
+        let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())]
+            .into_iter()
+            .collect();
+        if self
+            .worker
+            .post_message_with_transfer(&msg, &transfer)
+            .is_ok()
+        {
             self.running = true;
             self.progress = (0, 0, 0.0);
             self.stems.clear();

@@ -20,7 +20,9 @@ use crate::separate::write_wav;
 
 pub fn run(args: &[String]) -> Result<()> {
     let [weights, input, out, rest @ ..] = args else {
-        bail!("usage: xtask roformer <weights.safetensors> <in.wav|mp3> <out_dir> [start_s] [dur_s]");
+        bail!(
+            "usage: xtask roformer <weights.safetensors> <in.wav|mp3> <out_dir> [start_s] [dur_s]"
+        );
     };
     let start: f64 = rest.first().map_or(Ok(0.0), |s| s.parse())?;
     let dur: Option<f64> = rest.get(1).map(|s| s.parse()).transpose()?;
@@ -28,11 +30,16 @@ pub fn run(args: &[String]) -> Result<()> {
 
     let audio = engine::decode_path(Path::new(input))?;
     if audio.sample_rate != SAMPLE_RATE {
-        bail!("{} Hz input; the model needs {SAMPLE_RATE} Hz", audio.sample_rate);
+        bail!(
+            "{} Hz input; the model needs {SAMPLE_RATE} Hz",
+            audio.sample_rate
+        );
     }
     let ch = |c: usize| audio.channels[c.min(audio.channels.len() - 1)].clone();
     let from = (start * SAMPLE_RATE as f64) as usize;
-    let to = dur.map_or(audio.frames(), |d| (from + (d * SAMPLE_RATE as f64) as usize).min(audio.frames()));
+    let to = dur.map_or(audio.frames(), |d| {
+        (from + (d * SAMPLE_RATE as f64) as usize).min(audio.frames())
+    });
     let mix = [ch(0)[from..to].to_vec(), ch(1)[from..to].to_vec()];
 
     let t = Instant::now();
@@ -49,16 +56,28 @@ pub fn run(args: &[String]) -> Result<()> {
         let i = d.chunk_index();
         let y = separate_chunk(&model, &x);
         d.accept(&y);
-        eprintln!("chunk {}/{total}: {:.1} s", i + 1, tc.elapsed().as_secs_f64());
+        eprintln!(
+            "chunk {}/{total}: {:.1} s",
+            i + 1,
+            tc.elapsed().as_secs_f64()
+        );
     }
     let stems = d.finish();
     let secs = t.elapsed().as_secs_f64();
     let dur_s = (to - from) as f64 / SAMPLE_RATE as f64;
     std::fs::create_dir_all(out)?;
     for (name, s) in STEMS.iter().zip(&stems) {
-        write_wav(&Path::new(out).join(format!("{name}.wav")), &s[0], &s[1], SAMPLE_RATE)?;
+        write_wav(
+            &Path::new(out).join(format!("{name}.wav")),
+            &s[0],
+            &s[1],
+            SAMPLE_RATE,
+        )?;
     }
-    println!("separated {dur_s:.1} s in {secs:.0} s (RTF {:.1}), overlap {overlap}", secs / dur_s);
+    println!(
+        "separated {dur_s:.1} s in {secs:.0} s (RTF {:.1}), overlap {overlap}",
+        secs / dur_s
+    );
     Ok(())
 }
 
@@ -70,23 +89,34 @@ pub fn convert(args: &[String]) -> Result<()> {
         bail!("usage: xtask roformer-convert <checkpoint.ckpt> <out.safetensors> [f32]");
     };
     let f32_out = rest.first().is_some_and(|a| a == "f32");
-    let reader = burn_store::pytorch::PytorchReader::new(ckpt).with_context(|| format!("reading {ckpt}"))?;
+    let reader =
+        burn_store::pytorch::PytorchReader::new(ckpt).with_context(|| format!("reading {ckpt}"))?;
     let mut names: Vec<String> = reader.keys();
     names.sort();
     // The rotary frequencies are recomputed by the model; check, then drop.
-    let expected: Vec<f32> = (0..32).map(|i| 1.0 / 10000f32.powf((2 * i) as f32 / 64.0)).collect();
+    let expected: Vec<f32> = (0..32)
+        .map(|i| 1.0 / 10000f32.powf((2 * i) as f32 / 64.0))
+        .collect();
     let mut bufs: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
     let mut params = 0usize;
     for name in names {
         let snap = reader.get(&name).expect("listed key");
-        let data = snap.to_data().map_err(|e| anyhow::anyhow!("{name}: {e:?}"))?;
+        let data = snap
+            .to_data()
+            .map_err(|e| anyhow::anyhow!("{name}: {e:?}"))?;
         if data.dtype != DType::F32 {
             bail!("{name}: expected f32, found {:?}", data.dtype);
         }
         let shape = data.shape.clone();
-        let v: Vec<f32> = data.to_vec().map_err(|e| anyhow::anyhow!("{name}: {e:?}"))?;
+        let v: Vec<f32> = data
+            .to_vec()
+            .map_err(|e| anyhow::anyhow!("{name}: {e:?}"))?;
         if name.ends_with("rotary_embed.freqs") {
-            let err = v.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            let err = v
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
             if err > 1e-6 {
                 bail!("{name} differs from the default rotary frequencies by {err}");
             }
@@ -96,7 +126,9 @@ pub fn convert(args: &[String]) -> Result<()> {
         let bytes: Vec<u8> = if f32_out {
             v.iter().flat_map(|x| x.to_le_bytes()).collect()
         } else {
-            v.iter().flat_map(|x| half::f16::from_f32(*x).to_le_bytes()).collect()
+            v.iter()
+                .flat_map(|x| half::f16::from_f32(*x).to_le_bytes())
+                .collect()
         };
         bufs.push((name, shape, bytes));
     }
@@ -113,8 +145,13 @@ pub fn convert(args: &[String]) -> Result<()> {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
-    safetensors::serialize_to_file(views, Some(meta), Path::new(out)).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    println!("wrote {out}: {} tensors, {params} parameters, {}", bufs.len(), if f32_out { "f32" } else { "f16" });
+    safetensors::serialize_to_file(views, Some(meta), Path::new(out))
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    println!(
+        "wrote {out}: {} tensors, {params} parameters, {}",
+        bufs.len(),
+        if f32_out { "f32" } else { "f16" }
+    );
     Ok(())
 }
 
@@ -151,7 +188,11 @@ pub fn selftest_fixtures(args: &[String]) -> Result<()> {
     let model = BsRoformer::<NdArray>::load(&bytes, &dev, Options::default())?;
     drop(bytes);
 
-    let f16 = |v: Vec<f32>| -> Vec<u8> { v.iter().flat_map(|x| half::f16::from_f32(*x).to_le_bytes()).collect() };
+    let f16 = |v: Vec<f32>| -> Vec<u8> {
+        v.iter()
+            .flat_map(|x| half::f16::from_f32(*x).to_le_bytes())
+            .collect()
+    };
     let f32b = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     let read3 = |t: burn::tensor::Tensor<NdArray, 3>| -> (Vec<usize>, Vec<f32>) {
         let d = t.into_data();
@@ -169,10 +210,18 @@ pub fn selftest_fixtures(args: &[String]) -> Result<()> {
 
     // Stages, 1 s from 10 s.
     let t = Instant::now();
-    let clip = [mix[0][10 * sr..11 * sr].to_vec(), mix[1][10 * sr..11 * sr].to_vec()];
+    let clip = [
+        mix[0][10 * sr..11 * sr].to_vec(),
+        mix[1][10 * sr..11 * sr].to_vec(),
+    ];
     let (_, feats) = analyse(&clip);
     let frames = feats.len() / roformer::FEATURES;
-    let mut items = vec![("features".to_string(), Dtype::F32, vec![frames, roformer::FEATURES], f32b(&feats))];
+    let mut items = vec![(
+        "features".to_string(),
+        Dtype::F32,
+        vec![frames, roformer::FEATURES],
+        f32b(&feats),
+    )];
     let mut x = model.band_split(to_tensor::<NdArray>(feats, &dev));
     let (s, v) = read3(x.clone());
     items.push(("band_split".into(), Dtype::F16, s, f16(v)));
@@ -189,14 +238,25 @@ pub fn selftest_fixtures(args: &[String]) -> Result<()> {
     for st in 0..STEMS.len() {
         let d = model.mask_one(st, x.clone()).into_data();
         let s = d.shape.clone();
-        items.push((format!("mask{st}"), Dtype::F16, s, f16(d.to_vec().expect("f32"))));
+        items.push((
+            format!("mask{st}"),
+            Dtype::F16,
+            s,
+            f16(d.to_vec().expect("f32")),
+        ));
     }
     write(&Path::new(out).join("stages.safetensors"), items)?;
-    eprintln!("stages ({frames} frames) in {:.1} s", t.elapsed().as_secs_f64());
+    eprintln!(
+        "stages ({frames} frames) in {:.1} s",
+        t.elapsed().as_secs_f64()
+    );
 
     // One full chunk from 5 s.
     let t = Instant::now();
-    let chunk = [mix[0][5 * sr..5 * sr + CHUNK].to_vec(), mix[1][5 * sr..5 * sr + CHUNK].to_vec()];
+    let chunk = [
+        mix[0][5 * sr..5 * sr + CHUNK].to_vec(),
+        mix[1][5 * sr..5 * sr + CHUNK].to_vec(),
+    ];
     let stems = separate_chunk(&model, &chunk);
     let mut audio = chunk[0].clone();
     audio.extend_from_slice(&chunk[1]);
@@ -209,7 +269,12 @@ pub fn selftest_fixtures(args: &[String]) -> Result<()> {
         &Path::new(out).join("chunk.safetensors"),
         vec![
             ("audio".into(), Dtype::F32, vec![2, CHUNK], f32b(&audio)),
-            ("stems".into(), Dtype::F16, vec![STEMS.len(), 2, CHUNK], f16(all)),
+            (
+                "stems".into(),
+                Dtype::F16,
+                vec![STEMS.len(), 2, CHUNK],
+                f16(all),
+            ),
         ],
     )?;
     eprintln!("chunk in {:.1} s", t.elapsed().as_secs_f64());

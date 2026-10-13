@@ -16,14 +16,23 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_EMAIL", "t@example.com")
         .output()
         .unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// A committer identity for the git commands `xtask::publish` runs (every
 /// test sets the same values, so running them in parallel is harmless).
 fn identity() {
-    for (k, v) in [("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@example.com"), ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@example.com")] {
+    for (k, v) in [
+        ("GIT_AUTHOR_NAME", "t"),
+        ("GIT_AUTHOR_EMAIL", "t@example.com"),
+        ("GIT_COMMITTER_NAME", "t"),
+        ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ] {
         // SAFETY: tests only read these through child processes.
         unsafe { std::env::set_var(k, v) };
     }
@@ -56,8 +65,18 @@ fn repo(root: &Path) -> PathBuf {
 
 fn site(dir: &Path, version: &str) {
     std::fs::create_dir_all(dir.join("snippets/x")).unwrap();
-    std::fs::write(dir.join("index.html"), format!("<script src=\"/stemyla/app.js\"></script>{version}")).unwrap();
-    for f in ["app.js", "app_bg.wasm", "stem-worker.js", "stem-worker_bg.wasm", "stem-worker_loader.js"] {
+    std::fs::write(
+        dir.join("index.html"),
+        format!("<script src=\"/stemyla/app.js\"></script>{version}"),
+    )
+    .unwrap();
+    for f in [
+        "app.js",
+        "app_bg.wasm",
+        "stem-worker.js",
+        "stem-worker_bg.wasm",
+        "stem-worker_loader.js",
+    ] {
         std::fs::write(dir.join(f), version).unwrap();
     }
     std::fs::write(dir.join("snippets/x/inline0.js"), version).unwrap();
@@ -70,32 +89,63 @@ fn commits_the_site_without_touching_the_checkout() {
     let r = repo(&root);
     let dist = root.join("dist");
     site(&dist, "v1");
-    let before = (git(&r, &["status", "--porcelain"]), git(&r, &["rev-parse", "HEAD"]), git(&r, &["symbolic-ref", "HEAD"]));
+    let before = (
+        git(&r, &["status", "--porcelain"]),
+        git(&r, &["rev-parse", "HEAD"]),
+        git(&r, &["symbolic-ref", "HEAD"]),
+    );
 
     identity();
-    let c1 = commit_dir(&r, &dist, "gh-pages", "Publish 1").unwrap().expect("first commit");
+    let c1 = commit_dir(&r, &dist, "gh-pages", "Publish 1")
+        .unwrap()
+        .expect("first commit");
     let files = git(&r, &["ls-tree", "-r", "--name-only", "gh-pages"]);
     let mut files: Vec<&str> = files.lines().collect();
     files.sort();
     assert_eq!(
         files,
-        [".nojekyll", "app.js", "app_bg.wasm", "index.html", "snippets/x/inline0.js", "stem-worker.js", "stem-worker_bg.wasm", "stem-worker_loader.js"]
+        [
+            ".nojekyll",
+            "app.js",
+            "app_bg.wasm",
+            "index.html",
+            "snippets/x/inline0.js",
+            "stem-worker.js",
+            "stem-worker_bg.wasm",
+            "stem-worker_loader.js"
+        ]
     );
     assert_eq!(git(&r, &["show", "gh-pages:app_bg.wasm"]), "v1");
-    assert_eq!(git(&r, &["rev-list", "--count", "gh-pages"]), "1", "no parent on the first publish");
-    let after = (git(&r, &["status", "--porcelain"]), git(&r, &["rev-parse", "HEAD"]), git(&r, &["symbolic-ref", "HEAD"]));
+    assert_eq!(
+        git(&r, &["rev-list", "--count", "gh-pages"]),
+        "1",
+        "no parent on the first publish"
+    );
+    let after = (
+        git(&r, &["status", "--porcelain"]),
+        git(&r, &["rev-parse", "HEAD"]),
+        git(&r, &["symbolic-ref", "HEAD"]),
+    );
     assert_eq!(before, after, "working tree, index or HEAD changed");
 
     // Same content: nothing new.
-    assert_eq!(commit_dir(&r, &dist, "gh-pages", "Publish 1 again").unwrap(), None);
+    assert_eq!(
+        commit_dir(&r, &dist, "gh-pages", "Publish 1 again").unwrap(),
+        None
+    );
     // New content, a file removed: a child commit with exactly the new files.
     std::fs::remove_file(dist.join("snippets/x/inline0.js")).unwrap();
     site(&dist, "v2");
     std::fs::remove_file(dist.join("snippets/x/inline0.js")).unwrap();
-    let c2 = commit_dir(&r, &dist, "gh-pages", "Publish 2").unwrap().expect("second commit");
+    let c2 = commit_dir(&r, &dist, "gh-pages", "Publish 2")
+        .unwrap()
+        .expect("second commit");
     assert_eq!(git(&r, &["rev-parse", &format!("{c2}^")]), c1);
     assert!(!git(&r, &["ls-tree", "-r", "--name-only", "gh-pages"]).contains("inline0.js"));
-    assert_eq!(git(&r, &["log", "-1", "--format=%s", "gh-pages"]), "Publish 2");
+    assert_eq!(
+        git(&r, &["log", "-1", "--format=%s", "gh-pages"]),
+        "Publish 2"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -117,7 +167,15 @@ fn deploys_to_a_remote_and_builds_on_its_branch() {
     // A second clone without a local gh-pages publishes on top of the
     // remote's, not over it.
     let other = root.join("other");
-    git(&root, &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+    git(
+        &root,
+        &[
+            "clone",
+            "-q",
+            remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
     git(&other, &["checkout", "-q", "-b", "main"]);
     site(&dist, "v2");
     let c2 = deploy(&other, &dist, &o, "Publish 2").unwrap().unwrap();
@@ -129,7 +187,11 @@ fn deploys_to_a_remote_and_builds_on_its_branch() {
     let o3 = Options::parse(&["--no-push".into()]).unwrap();
     let c3 = deploy(&r, &dist, &o3, "Publish 3").unwrap().unwrap();
     assert_eq!(git(&remote, &["rev-parse", "gh-pages"]), c2);
-    assert_eq!(git(&r, &["rev-parse", &format!("{c3}^")]), c2, "fetched the other clone's publish first");
+    assert_eq!(
+        git(&r, &["rev-parse", &format!("{c3}^")]),
+        c2,
+        "fetched the other clone's publish first"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -141,10 +203,24 @@ fn checks_the_build() {
     check_build(&dist, "/stemyla/").unwrap();
     assert!(check_build(&dist, "/other/").is_err(), "wrong public URL");
     std::fs::remove_file(dist.join("stem-worker_bg.wasm")).unwrap();
-    assert!(check_build(&dist, "/stemyla/").unwrap_err().to_string().contains("stem-worker_bg.wasm"));
+    assert!(
+        check_build(&dist, "/stemyla/")
+            .unwrap_err()
+            .to_string()
+            .contains("stem-worker_bg.wasm")
+    );
     let _ = std::fs::remove_dir_all(&root);
 
-    let o = Options::parse(&["--public-url".into(), "pages".into(), "--remote".into(), "up".into()]).unwrap();
-    assert_eq!((o.public_url.as_str(), o.remote.as_str(), o.push), ("/pages/", "up", true));
+    let o = Options::parse(&[
+        "--public-url".into(),
+        "pages".into(),
+        "--remote".into(),
+        "up".into(),
+    ])
+    .unwrap();
+    assert_eq!(
+        (o.public_url.as_str(), o.remote.as_str(), o.push),
+        ("/pages/", "up", true)
+    );
     assert!(Options::parse(&["--bogus".into()]).is_err());
 }

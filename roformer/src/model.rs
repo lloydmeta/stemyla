@@ -43,7 +43,10 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         // 32 M f32 elements = 128 MiB, WebGPU's default maxStorageBufferBindingSize.
-        Self { max_elems: 32 << 20, attention: AttentionKind::Naive }
+        Self {
+            max_elems: 32 << 20,
+            attention: AttentionKind::Naive,
+        }
     }
 }
 
@@ -55,8 +58,14 @@ struct Norm<B: Backend> {
 impl<B: Backend> Norm<B> {
     fn load(s: &mut Store, name: &str, dim: usize, dev: &B::Device) -> Result<Self, WeightError> {
         let scale = (dim as f32).sqrt();
-        let g: Vec<f32> = s.get(name, &[dim])?.into_iter().map(|v| v * scale).collect();
-        Ok(Self { g: Tensor::from_data(TensorData::new(g, [dim]), dev) })
+        let g: Vec<f32> = s
+            .get(name, &[dim])?
+            .into_iter()
+            .map(|v| v * scale)
+            .collect();
+        Ok(Self {
+            g: Tensor::from_data(TensorData::new(g, [dim]), dev),
+        })
     }
 
     fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
@@ -66,7 +75,10 @@ impl<B: Backend> Norm<B> {
 
 /// `F.normalize(x, dim=-1) * g`, with `g` broadcastable to `x`.
 fn rms_norm<B: Backend, const D: usize>(x: Tensor<B, D>, g: Tensor<B, D>) -> Tensor<B, D> {
-    let n = (x.clone() * x.clone()).sum_dim(D - 1).sqrt().clamp_min(1e-12);
+    let n = (x.clone() * x.clone())
+        .sum_dim(D - 1)
+        .sqrt()
+        .clamp_min(1e-12);
     x / n * g
 }
 
@@ -82,8 +94,16 @@ fn lin_w<B: Backend>(
     Ok(Tensor::from_data(TensorData::new(w, [inp, out]), dev))
 }
 
-fn vec1<B: Backend>(s: &mut Store, name: &str, n: usize, dev: &B::Device) -> Result<Tensor<B, 1>, WeightError> {
-    Ok(Tensor::from_data(TensorData::new(s.get(name, &[n])?, [n]), dev))
+fn vec1<B: Backend>(
+    s: &mut Store,
+    name: &str,
+    n: usize,
+    dev: &B::Device,
+) -> Result<Tensor<B, 1>, WeightError> {
+    Ok(Tensor::from_data(
+        TensorData::new(s.get(name, &[n])?, [n]),
+        dev,
+    ))
 }
 
 struct Attention<B: Backend> {
@@ -152,7 +172,12 @@ impl<B: Backend> Block<B> {
         let a = &self.attn;
         let xn = a.norm.forward(x.clone());
         let qkv = linear(xn.clone(), a.qkv.clone(), None).reshape([b, n, 3, HEADS, DIM_HEAD]);
-        let part = |i: usize| qkv.clone().narrow(2, i, 1).reshape([b, n, HEADS, DIM_HEAD]).swap_dims(1, 2);
+        let part = |i: usize| {
+            qkv.clone()
+                .narrow(2, i, 1)
+                .reshape([b, n, HEADS, DIM_HEAD])
+                .swap_dims(1, 2)
+        };
         let (q, k, v) = (rope.apply(part(0)), rope.apply(part(1)), part(2));
         let out = match opts.attention {
             AttentionKind::Backend => attention(q, k, v, None),
@@ -168,7 +193,11 @@ impl<B: Backend> Block<B> {
         let x = x + linear(out, a.out.clone(), None);
 
         let f = &self.ff;
-        let h = gelu(linear(f.norm.forward(x.clone()), f.w1.clone(), Some(f.b1.clone())));
+        let h = gelu(linear(
+            f.norm.forward(x.clone()),
+            f.w1.clone(),
+            Some(f.b1.clone()),
+        ));
         x + linear(h, f.w2.clone(), Some(f.b2.clone()))
     }
 }
@@ -260,7 +289,10 @@ fn stacked_w<B: Backend>(
     for n in names {
         all.extend(transpose(&s.get(n, &[out, inp])?, out, inp));
     }
-    Ok(Tensor::from_data(TensorData::new(all, [names.len(), inp, out]), dev))
+    Ok(Tensor::from_data(
+        TensorData::new(all, [names.len(), inp, out]),
+        dev,
+    ))
 }
 
 /// Stack per-band vectors `[n]` into `[count, 1, n]`, each scaled by `scale`.
@@ -275,7 +307,10 @@ fn stacked_v<B: Backend>(
     for name in names {
         all.extend(s.get(name, &[n])?.into_iter().map(|v| v * scale));
     }
-    Ok(Tensor::from_data(TensorData::new(all, [names.len(), 1, n]), dev))
+    Ok(Tensor::from_data(
+        TensorData::new(all, [names.len(), 1, n]),
+        dev,
+    ))
 }
 
 pub struct BsRoformer<B: Backend> {
@@ -299,7 +334,9 @@ impl<B: Backend> BsRoformer<B> {
         let mut split = Vec::new();
         for g in &groups {
             let names = |suffix: &str| -> Vec<String> {
-                (g.first..g.first + g.count).map(|k| format!("band_split.to_features.{k}.{suffix}")).collect()
+                (g.first..g.first + g.count)
+                    .map(|k| format!("band_split.to_features.{k}.{suffix}"))
+                    .collect()
             };
             split.push(SplitGroup {
                 g: *g,
@@ -311,7 +348,10 @@ impl<B: Backend> BsRoformer<B> {
 
         let mut layers = Vec::with_capacity(DEPTH);
         for i in 0..DEPTH {
-            layers.push((Block::load(s, &format!("layers.{i}.0"), dev)?, Block::load(s, &format!("layers.{i}.1"), dev)?));
+            layers.push((
+                Block::load(s, &format!("layers.{i}.0"), dev)?,
+                Block::load(s, &format!("layers.{i}.1"), dev)?,
+            ));
         }
         let final_norm = Norm::load(s, "final_norm.gamma", DIM, dev)?;
 
@@ -335,7 +375,14 @@ impl<B: Backend> BsRoformer<B> {
             masks.push(per_group);
         }
         store.finish()?;
-        Ok(Self { split, layers, final_norm, masks, opts, device: device.clone() })
+        Ok(Self {
+            split,
+            layers,
+            final_norm,
+            masks,
+            opts,
+            device: device.clone(),
+        })
     }
 
     pub fn device(&self) -> &B::Device {
@@ -388,7 +435,11 @@ impl<B: Backend> BsRoformer<B> {
         let [bands, t, _] = x.dims();
         let (time, freq) = &self.layers[i];
         let x = time.forward(x, &Rope::new(t, &self.device), &self.opts);
-        let x = freq.forward(x.swap_dims(0, 1), &Rope::new(bands, &self.device), &self.opts);
+        let x = freq.forward(
+            x.swap_dims(0, 1),
+            &Rope::new(bands, &self.device),
+            &self.opts,
+        );
         x.swap_dims(0, 1)
     }
 
@@ -416,7 +467,9 @@ impl<B: Backend> BsRoformer<B> {
 
     /// `[BANDS, T, DIM]` to `[STEMS, T, FEATURES]`.
     pub fn mask(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let stems = (0..self.masks.len()).map(|s| self.mask_one(s, x.clone())).collect();
+        let stems = (0..self.masks.len())
+            .map(|s| self.mask_one(s, x.clone()))
+            .collect();
         Tensor::stack(stems, 0)
     }
 
@@ -433,12 +486,15 @@ impl<B: Backend> BsRoformer<B> {
             while k < g.count {
                 let n = step.min(g.count - k);
                 let xg = x.clone().narrow(0, g.first + k, n);
-                let h = (xg.matmul(mg.w1.clone().narrow(0, k, n)) + mg.b1.clone().narrow(0, k, n)).tanh();
+                let h = (xg.matmul(mg.w1.clone().narrow(0, k, n)) + mg.b1.clone().narrow(0, k, n))
+                    .tanh();
                 let y = h.matmul(mg.w2.clone().narrow(0, k, n)) + mg.b2.clone().narrow(0, k, n);
                 outs.push(glu(y, 2)); // [n, T, width]
                 k += n;
             }
-            let y = Tensor::cat(outs, 0).swap_dims(0, 1).reshape([t, g.count * g.width]);
+            let y = Tensor::cat(outs, 0)
+                .swap_dims(0, 1)
+                .reshape([t, g.count * g.width]);
             parts.push(y);
         }
         Tensor::cat(parts, 1)
@@ -455,12 +511,16 @@ mod tests {
         let dev = Default::default();
         let rope = Rope::<NdArray>::new(3, &dev);
         let x: Vec<f32> = (0..3 * DIM_HEAD).map(|i| (i % 7) as f32 - 3.0).collect();
-        let t = Tensor::<NdArray, 4>::from_data(TensorData::new(x.clone(), [1, 1, 3, DIM_HEAD]), &dev);
+        let t =
+            Tensor::<NdArray, 4>::from_data(TensorData::new(x.clone(), [1, 1, 3, DIM_HEAD]), &dev);
         let y: Vec<f32> = rope.apply(t).into_data().to_vec().unwrap();
         for p in 0..3 {
             for i in 0..DIM_HEAD / 2 {
                 let theta = p as f64 / 10000f64.powf(2.0 * i as f64 / DIM_HEAD as f64);
-                let (a, b) = (x[p * DIM_HEAD + 2 * i] as f64, x[p * DIM_HEAD + 2 * i + 1] as f64);
+                let (a, b) = (
+                    x[p * DIM_HEAD + 2 * i] as f64,
+                    x[p * DIM_HEAD + 2 * i + 1] as f64,
+                );
                 let e0 = a * theta.cos() - b * theta.sin();
                 let e1 = b * theta.cos() + a * theta.sin();
                 assert!((y[p * DIM_HEAD + 2 * i] as f64 - e0).abs() < 1e-5);
@@ -472,7 +532,10 @@ mod tests {
     #[test]
     fn rms_norm_is_unit_rms_times_gamma() {
         let dev = Default::default();
-        let x = Tensor::<NdArray, 2>::from_data(TensorData::new(vec![3.0f32, 4.0, 0.0, 0.0], [2, 2]), &dev);
+        let x = Tensor::<NdArray, 2>::from_data(
+            TensorData::new(vec![3.0f32, 4.0, 0.0, 0.0], [2, 2]),
+            &dev,
+        );
         let g = Tensor::<NdArray, 2>::from_data(TensorData::new(vec![2.0f32, 2.0], [1, 2]), &dev);
         let y: Vec<f32> = rms_norm(x, g).into_data().to_vec().unwrap();
         assert_eq!(y, vec![1.2, 1.6, 0.0, 0.0]);

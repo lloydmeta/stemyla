@@ -44,7 +44,6 @@ fn clean(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

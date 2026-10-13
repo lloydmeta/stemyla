@@ -13,7 +13,10 @@ fn get(port: u16, path: &str) -> (String, Vec<u8>) {
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).unwrap();
     let split = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
-    (String::from_utf8(buf[..split].to_vec()).unwrap(), buf[split + 4..].to_vec())
+    (
+        String::from_utf8(buf[..split].to_vec()).unwrap(),
+        buf[split + 4..].to_vec(),
+    )
 }
 
 #[test]
@@ -30,7 +33,10 @@ fn serves_files_with_types_and_refuses_escapes() {
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let mounts = vec![("/".to_string(), site.clone()), ("/extra/".to_string(), extra.clone())];
+    let mounts = vec![
+        ("/".to_string(), site.clone()),
+        ("/extra/".to_string(), extra.clone()),
+    ];
     std::thread::spawn(move || serve(listener, mounts));
 
     let (h, body) = get(port, "/?x=1");
@@ -48,11 +54,22 @@ fn serves_files_with_types_and_refuses_escapes() {
 
     assert!(get(port, "/missing.js").0.starts_with("HTTP/1.1 404"));
     assert!(get(port, "/../secret.txt").0.starts_with("HTTP/1.1 403"));
-    assert!(get(port, "/%2e%2e/secret.txt").0.starts_with("HTTP/1.1 403"));
-    assert!(get(port, "/extra/../../secret.txt").0.starts_with("HTTP/1.1 403"));
+    assert!(
+        get(port, "/%2e%2e/secret.txt")
+            .0
+            .starts_with("HTTP/1.1 403")
+    );
+    assert!(
+        get(port, "/extra/../../secret.txt")
+            .0
+            .starts_with("HTTP/1.1 403")
+    );
 
     let m = vec![("/".to_string(), PathBuf::from("/srv"))];
-    assert_eq!(resolve(&m, "/js/app.js"), Some(PathBuf::from("/srv/js/app.js")));
+    assert_eq!(
+        resolve(&m, "/js/app.js"),
+        Some(PathBuf::from("/srv/js/app.js"))
+    );
     assert_eq!(resolve(&m, "//etc/passwd"), None);
     let _ = std::fs::remove_dir_all(&dir);
 }

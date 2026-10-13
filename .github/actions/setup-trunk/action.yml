@@ -1,0 +1,27 @@
+name: Setup Trunk
+description: Download a pinned, checksum-verified Trunk binary and add it to PATH.
+
+inputs:
+  version:
+    description: Trunk release version, without the leading "v".
+    required: true
+  sha256:
+    description: Expected SHA-256 of the x86_64-unknown-linux-gnu tarball.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download Trunk ${{ inputs.version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        url="https://github.com/trunk-rs/trunk/releases/download/v${{ inputs.version }}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+        curl --proto '=https' --tlsv1.2 -fsSL "$url" -o trunk.tar.gz
+        echo "${{ inputs.sha256 }}  trunk.tar.gz" | sha256sum --check --status
+        mkdir -p "$HOME/.local/bin"
+        tar -xzf trunk.tar.gz -C "$HOME/.local/bin" trunk
+        chmod +x "$HOME/.local/bin/trunk"
+        rm -f trunk.tar.gz
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/bin/trunk" --version

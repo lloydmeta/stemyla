@@ -83,7 +83,12 @@ pub fn band_groups() -> Vec<BandGroup> {
         let width = f * CHANNELS * 2;
         match groups.last_mut() {
             Some(g) if g.width == width => g.count += 1,
-            _ => groups.push(BandGroup { first: i, count: 1, width, offset }),
+            _ => groups.push(BandGroup {
+                first: i,
+                count: 1,
+                width,
+                offset,
+            }),
         }
         offset += width;
     }

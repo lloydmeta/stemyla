@@ -42,11 +42,19 @@ pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
         Some(i) => source.stems[i].clone(),
         None => {
             let (left, right) = mix_of_sources(source);
-            Stem { name: "original".into(), left, right }
+            Stem {
+                name: "original".into(),
+                left,
+                right,
+            }
         }
     };
     stems.push(original);
-    Song { sample_rate: source.sample_rate, frames: source.frames, stems }
+    Song {
+        sample_rate: source.sample_rate,
+        frames: source.frames,
+        stems,
+    }
 }
 
 /// Results of browser work (reading files, browser storage) for the UI
@@ -268,8 +276,13 @@ impl StemApp {
                     let mut inbox = pending.borrow_mut();
                     match r {
                         Ok((id, song, meta)) => {
-                            let what = if meta.stems.is_empty() { "" } else { " and its separated stems" };
-                            let text = format!("Restored \"{}\"{what} from this browser.", meta.name);
+                            let what = if meta.stems.is_empty() {
+                                ""
+                            } else {
+                                " and its separated stems"
+                            };
+                            let text =
+                                format!("Restored \"{}\"{what} from this browser.", meta.name);
                             log::info!("{text}");
                             inbox.status = Some(text);
                             inbox.session = Some(Some(id));
@@ -278,7 +291,8 @@ impl StemApp {
                         }
                         Err(e) => {
                             log::warn!("could not restore the stored song: {e:#}");
-                            inbox.status = Some(format!("Could not restore the stored song: {e:#}"));
+                            inbox.status =
+                                Some(format!("Could not restore the stored song: {e:#}"));
                         }
                     }
                 }
@@ -584,7 +598,9 @@ impl StemApp {
             let pending = self.pending.clone();
             let ctx = ctx.clone();
             self.status = format!("Reading {} files…", dropped.len());
-            self.song_name = dropped.first().map(|f| store_meta::file_title(&f.path().to_string_lossy()));
+            self.song_name = dropped
+                .first()
+                .map(|f| store_meta::file_title(&f.path().to_string_lossy()));
             wasm_bindgen_futures::spawn_local(async move {
                 let mut files = Vec::new();
                 for f in &dropped {
@@ -681,10 +697,16 @@ impl StemApp {
     /// "Load model…", "Separate 6 stems" and the progress bar.
     #[cfg(target_arch = "wasm32")]
     fn separator_controls(&mut self, ui: &mut egui::Ui) {
-        let Some(sep) = &mut self.separator else { return };
+        let Some(sep) = &mut self.separator else {
+            return;
+        };
         if sep.running {
             let (done, total, secs) = sep.progress;
-            let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+            let frac = if total > 0 {
+                done as f32 / total as f32
+            } else {
+                0.0
+            };
             ui.add(
                 egui::ProgressBar::new(frac)
                     .desired_width(260.0)
@@ -697,11 +719,19 @@ impl StemApp {
                 // Hugging Face may not say the size; the file is 349.5 MB.
                 let total = if total > 0.0 { total } else { 349_521_144.0 };
                 let text = if done < total {
-                    format!("Downloading model: {:.0} / {:.0} MB", done / 1e6, total / 1e6)
+                    format!(
+                        "Downloading model: {:.0} / {:.0} MB",
+                        done / 1e6,
+                        total / 1e6
+                    )
                 } else {
                     "Checking and loading model…".to_string()
                 };
-                ui.add(egui::ProgressBar::new((done / total) as f32).desired_width(260.0).text(text));
+                ui.add(
+                    egui::ProgressBar::new((done / total) as f32)
+                        .desired_width(260.0)
+                        .text(text),
+                );
                 return;
             }
             if sep.model_loading {
@@ -727,14 +757,19 @@ impl StemApp {
             }
             return;
         }
-        let Some(song) = self.song.clone() else { return };
+        let Some(song) = self.song.clone() else {
+            return;
+        };
         if ui
             .button("Separate 6 stems")
             .on_hover_text("BS-RoFormer SW on the GPU: bass, drums, other, vocals, guitar, piano")
             .clicked()
         {
             if song.sample_rate != 44_100 {
-                self.status = format!("Separation needs 44.1 kHz audio; this song is {} Hz", song.sample_rate);
+                self.status = format!(
+                    "Separation needs 44.1 kHz audio; this song is {} Hz",
+                    song.sample_rate
+                );
                 return;
             }
             let (l, r) = match song.stem_index("original") {
@@ -799,12 +834,15 @@ impl StemApp {
                     let mut inbox = pending.borrow_mut();
                     match r {
                         Ok((id, song, meta)) => {
-                            inbox.status = Some(format!("Opened \"{}\" from this browser.", meta.name));
+                            inbox.status =
+                                Some(format!("Opened \"{}\" from this browser.", meta.name));
                             inbox.session = Some(Some(id));
                             inbox.name = Some(meta.name);
                             inbox.song = Some(Ok(song));
                         }
-                        Err(e) => inbox.status = Some(format!("Could not open the stored song: {e:#}")),
+                        Err(e) => {
+                            inbox.status = Some(format!("Could not open the stored song: {e:#}"))
+                        }
                     }
                 }
                 refresh_storage(&pending).await;
@@ -815,7 +853,9 @@ impl StemApp {
             }
             wasm_bindgen_futures::spawn_local(async move {
                 store::forget(&id).await;
-                pending.borrow_mut().status = Some("Song forgotten; if it is open, it stays open until another is loaded.".into());
+                pending.borrow_mut().status = Some(
+                    "Song forgotten; if it is open, it stays open until another is loaded.".into(),
+                );
                 refresh_storage(&pending).await;
             });
         }
@@ -825,7 +865,9 @@ impl StemApp {
     #[cfg(target_arch = "wasm32")]
     fn poll_separator(&mut self) {
         use separator::Event;
-        let Some(sep) = &mut self.separator else { return };
+        let Some(sep) = &mut self.separator else {
+            return;
+        };
         let mut finished = None;
         for ev in sep.take_events() {
             match ev {
@@ -889,15 +931,19 @@ impl StemApp {
             }
         }
         if let (Some((stems, secs)), Some(song)) = (finished, self.song.clone()) {
-            let new_stems: Vec<Stem> =
-                stems.into_iter().map(|(name, left, right)| Stem { name, left, right }).collect();
+            let new_stems: Vec<Stem> = stems
+                .into_iter()
+                .map(|(name, left, right)| Stem { name, left, right })
+                .collect();
             let n = new_stems.len();
             if let Some(id) = self.session.clone() {
                 // Keep the stems with the song in browser storage.
-                let (rate, to_save, pending) = (song.sample_rate, new_stems.clone(), self.pending.clone());
+                let (rate, to_save, pending) =
+                    (song.sample_rate, new_stems.clone(), self.pending.clone());
                 wasm_bindgen_futures::spawn_local(async move {
                     if let Err(e) = store::save_stems(&id, rate, &to_save).await {
-                        pending.borrow_mut().status = Some(format!("Stems not kept in browser storage: {e:#}"));
+                        pending.borrow_mut().status =
+                            Some(format!("Stems not kept in browser storage: {e:#}"));
                     }
                     refresh_storage(&pending).await;
                 });
@@ -921,16 +967,29 @@ impl StemApp {
             #[cfg(target_arch = "wasm32")]
             if let (Some(stem), Some(song)) = (l.stem, self.song.clone()) {
                 let s = &song.stems[stem];
-                let base = format!("{} - {}", self.song_name.as_deref().unwrap_or("song"), s.name);
+                let base = format!(
+                    "{} - {}",
+                    self.song_name.as_deref().unwrap_or("song"),
+                    s.name
+                );
                 let mut status = None;
                 ui.menu_button("Save", |ui| {
                     if ui.button("WAV (16-bit, lossless)").clicked() {
-                        store::download(&format!("{base}.wav"), &engine::wav::encode_pcm16(&s.left, &s.right, song.sample_rate), "audio/wav");
+                        store::download(
+                            &format!("{base}.wav"),
+                            &engine::wav::encode_pcm16(&s.left, &s.right, song.sample_rate),
+                            "audio/wav",
+                        );
                         ui.close();
                     }
                     if ui.button("MP3 (192 kbps)").clicked() {
                         if let Some(sep) = &self.separator {
-                            sep.encode_mp3(&format!("{base}.mp3"), &s.left, &s.right, song.sample_rate);
+                            sep.encode_mp3(
+                                &format!("{base}.mp3"),
+                                &s.left,
+                                &s.right,
+                                song.sample_rate,
+                            );
                             status = Some(format!("Encoding {base}.mp3…"));
                         }
                         ui.close();

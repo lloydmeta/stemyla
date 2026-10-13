@@ -5,7 +5,9 @@ use xtask::{bench, publish, roformer_cli, separate, serve, synth};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
-        bail!("usage: xtask <serve|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]");
+        bail!(
+            "usage: xtask <serve|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
+        );
     };
     match cmd.as_str() {
         "gen-song" => {

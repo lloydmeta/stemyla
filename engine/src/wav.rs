@@ -41,7 +41,9 @@ mod tests {
     fn round_trip_through_the_decoder() {
         let n = 10_000;
         let left: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin() * 0.9).collect();
-        let right: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { 1.5 } else { -0.25 }).collect();
+        let right: Vec<f32> = (0..n)
+            .map(|i| if i % 2 == 0 { 1.5 } else { -0.25 })
+            .collect();
         let bytes = encode_pcm16(&left, &right, 44_100);
         assert_eq!(bytes.len(), 44 + n * 4);
         let audio = decode_bytes(bytes, Some("wav")).unwrap();
@@ -49,9 +51,15 @@ mod tests {
         assert_eq!(audio.channels.len(), 2);
         assert_eq!(audio.channels[0].len(), n);
         for i in 0..n {
-            assert!((audio.channels[0][i] - left[i]).abs() <= 0.5 / 32768.0 + 1e-7, "left {i}");
+            assert!(
+                (audio.channels[0][i] - left[i]).abs() <= 0.5 / 32768.0 + 1e-7,
+                "left {i}"
+            );
             let want = right[i].clamp(-1.0, 32767.0 / 32768.0);
-            assert!((audio.channels[1][i] - want).abs() <= 0.5 / 32768.0 + 1e-7, "right {i}");
+            assert!(
+                (audio.channels[1][i] - want).abs() <= 0.5 / 32768.0 + 1e-7,
+                "right {i}"
+            );
         }
     }
 }
