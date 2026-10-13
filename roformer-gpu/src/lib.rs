@@ -182,7 +182,10 @@ impl MatMulPolicy {
     pub fn parse(s: &str) -> Option<Self> {
         let find = |name: &str| TILES.iter().position(|t| t.name == name);
         match s.split_once(',') {
-            Some((l, m)) => Some(MatMulPolicy::Split { large: find(l)?, small: find(m)? }),
+            Some((l, m)) => Some(MatMulPolicy::Split {
+                large: find(l)?,
+                small: find(m)?,
+            }),
             None => find(s).map(MatMulPolicy::Fixed),
         }
     }
@@ -191,7 +194,9 @@ impl MatMulPolicy {
     pub fn name(self) -> String {
         match self {
             MatMulPolicy::Fixed(t) => TILES[t].name.to_string(),
-            MatMulPolicy::Split { large, small } => format!("{},{}", TILES[large].name, TILES[small].name),
+            MatMulPolicy::Split { large, small } => {
+                format!("{},{}", TILES[large].name, TILES[small].name)
+            }
         }
     }
 }
@@ -501,14 +506,23 @@ impl Gpu {
                 for j in 0..n {
                     let mut s = 0.0f64;
                     for kk in 0..k {
-                        s += a[va.off + i * va.rs + kk * va.cs] as f64 * b[vb.off + kk * vb.rs + j * vb.cs] as f64;
+                        s += a[va.off + i * va.rs + kk * va.cs] as f64
+                            * b[vb.off + kk * vb.rs + j * vb.cs] as f64;
                     }
-                    out[i * n + j] = if acc { (out[i * n + j] as f64 + s) as f32 } else { (s + bias[j] as f64) as f32 };
+                    out[i * n + j] = if acc {
+                        (out[i * n + j] as f64 + s) as f32
+                    } else {
+                        (s + bias[j] as f64) as f32
+                    };
                 }
             }
             want.push(out);
         }
-        let (ab, bb, biasb) = (self.upload("check a", &a), self.upload("check b", &b), self.upload("check bias", &bias));
+        let (ab, bb, biasb) = (
+            self.upload("check a", &a),
+            self.upload("check b", &b),
+            self.upload("check bias", &bias),
+        );
         let mut usable = [true; TILES.len()];
         let mut problems = Vec::new();
         for (t, tile) in TILES.iter().enumerate() {
@@ -527,12 +541,21 @@ impl Gpu {
                 let worst = got
                     .iter()
                     .zip(&want[case])
-                    .map(|(g, w)| if g.is_finite() { (g - w).abs() / (1.0 + w.abs()) } else { f32::INFINITY })
+                    .map(|(g, w)| {
+                        if g.is_finite() {
+                            (g - w).abs() / (1.0 + w.abs())
+                        } else {
+                            f32::INFINITY
+                        }
+                    })
                     .fold(0.0f32, f32::max);
                 let errors = self.take_errors();
                 if worst > 1e-4 || !errors.is_empty() {
                     usable[t] = false;
-                    let why = errors.first().cloned().unwrap_or_else(|| format!("relative error {worst:.1e}"));
+                    let why = errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("relative error {worst:.1e}"));
                     problems.push(format!("matmul kernel {} gives wrong results on this GPU (case {}: {why}); not used", tile.name, case + 1));
                     break;
                 }
@@ -540,7 +563,10 @@ impl Gpu {
         }
         self.usable.set(usable);
         if !usable[0] {
-            return Err(format!("this GPU computes matrix products wrongly: {}", problems.join("; ")));
+            return Err(format!(
+                "this GPU computes matrix products wrongly: {}",
+                problems.join("; ")
+            ));
         }
         Ok(problems)
     }

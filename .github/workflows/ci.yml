@@ -1,0 +1,134 @@
+name: CI
+
+# Pull requests are gated on formatting, clippy, tests and the web build.
+# A push to main re-runs those gates and, only if they all pass, publishes
+# the site to the gh-pages branch with `xtask publish`.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege by default; the publish job widens this for itself.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same pull request, but let main (and any
+# in-flight publish) finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned so CI matches the local toolchain and clippy/rustfmt results do
+  # not drift when a new stable is released.  Bump deliberately.
+  RUST_VERSION: "1.99.0"
+  TRUNK_VERSION: "0.21.14"
+  TRUNK_SHA256: "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install ALSA headers (cpal links libasound on Linux)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      # --all-targets compiles roformer-gpu and every test target, so clippy
+      # is also the native compile gate for the GPU crate.
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    env:
+      # egui_kittest renders through wgpu; on a headless runner the only
+      # adapter is Mesa's software Vulkan (lavapipe).
+      WGPU_BACKEND: vulkan
+      # The snapshot PNGs are generated on macOS/Metal and will not match a
+      # Linux software renderer.  UPDATE_SNAPSHOTS makes egui_kittest write
+      # instead of pixel-compare (and pass), so every interaction and logic
+      # test still runs while the platform-sensitive image diff is skipped.
+      # The written PNGs are discarded with the runner.
+      UPDATE_SNAPSHOTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install ALSA headers and software Vulkan (lavapipe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev mesa-vulkan-drivers libvulkan1
+      # roformer-gpu is excluded on purpose: its kernels are validated against
+      # a real GPU and in-browser, never on software alone (see CLAUDE.md).
+      # The crate still gets a native compile check from clippy --all-targets
+      # and a wasm compile check from the trunk build below.
+      - run: cargo test --locked --workspace --exclude roformer-gpu
+
+  wasm-build:
+    name: wasm build (trunk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/setup-trunk
+        with:
+          version: ${{ env.TRUNK_VERSION }}
+          sha256: ${{ env.TRUNK_SHA256 }}
+      # Builds both the app and the stem-worker (which compiles roformer-gpu
+      # for wasm32), the same build xtask publish performs.
+      - run: trunk build --release
+        working-directory: app
+
+  publish:
+    name: publish to gh-pages
+    needs: [fmt, clippy, test, wasm-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Keep the GITHUB_TOKEN wired into the origin remote so xtask can
+          # fetch and push the gh-pages branch.
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/setup-trunk
+        with:
+          version: ${{ env.TRUNK_VERSION }}
+          sha256: ${{ env.TRUNK_SHA256 }}
+      - name: Identity for the publish commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      # xtask publish builds the app for /stemyla/ with trunk, verifies the
+      # output, commits it as the whole gh-pages tree and pushes.  Built in
+      # debug: it only orchestrates git and trunk, so optimising it is waste.
+      - run: cargo run --locked -p xtask -- publish

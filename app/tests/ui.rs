@@ -291,7 +291,10 @@ fn render_folder() {
     let dir = std::env::var("STEMS_DIR").expect("STEMS_DIR");
     let out = std::env::var("OUT_PNG").expect("OUT_PNG");
     let spectro = std::env::var("SPECTROGRAMS").is_ok();
-    let height: f32 = std::env::var("HEIGHT").ok().and_then(|h| h.parse().ok()).unwrap_or(420.0);
+    let height: f32 = std::env::var("HEIGHT")
+        .ok()
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(420.0);
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let song = engine::Song::load_folder(&root.join(&dir)).unwrap();
     let mut h = Harness::builder()

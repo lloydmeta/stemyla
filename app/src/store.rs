@@ -13,8 +13,8 @@
 //! Ids are creation times in milliseconds.  Every dropped song gets its own
 //! session; the Storage menu lists them, opens one or forgets it.
 
-use anyhow::{Result, anyhow};
 use crate::store_meta::Meta;
+use anyhow::{Result, anyhow};
 use engine::{Song, Stem};
 use js_sys::{Array, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -92,18 +92,32 @@ async fn write(path: &str, bytes: &[u8]) -> Result<()> {
     if st_write(path, &Uint8Array::from(bytes)).await.as_bool() == Some(true) {
         Ok(())
     } else {
-        Err(anyhow!("browser storage refused {path} (full, or not available)"))
+        Err(anyhow!(
+            "browser storage refused {path} (full, or not available)"
+        ))
     }
 }
 
 async fn read(path: &str) -> Option<Vec<u8>> {
     let v = st_read(path).await;
-    if v.is_null() { None } else { Some(v.unchecked_into::<Uint8Array>().to_vec()) }
+    if v.is_null() {
+        None
+    } else {
+        Some(v.unchecked_into::<Uint8Array>().to_vec())
+    }
 }
 
 /// A stem name as a file name: letters, digits, spaces and dashes only.
 fn file_stem(name: &str) -> String {
-    name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect()
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Starts a session for files the user dropped and makes it current.
@@ -111,14 +125,25 @@ fn file_stem(name: &str) -> String {
 pub async fn save_sources(files: &[(String, Vec<u8>)], rate: u32) -> Result<String> {
     let id = format!("{}", js_sys::Date::now() as u64);
     let base = format!("{ROOT}/{id}");
-    let mut meta = Meta { rate, ..Default::default() };
+    let mut meta = Meta {
+        rate,
+        ..Default::default()
+    };
     for (i, (name, bytes)) in files.iter().enumerate() {
-        let ext = name.rsplit('.').next().filter(|e| e.len() <= 5 && *e != name).unwrap_or("bin").to_ascii_lowercase();
+        let ext = name
+            .rsplit('.')
+            .next()
+            .filter(|e| e.len() <= 5 && *e != name)
+            .unwrap_or("bin")
+            .to_ascii_lowercase();
         let stored = format!("{i}.{ext}");
         write(&format!("{base}/src/{stored}"), bytes).await?;
         meta.files.push((name.clone(), stored));
     }
-    meta.name = files.first().map(|(n, _)| crate::store_meta::file_title(n)).unwrap_or_default();
+    meta.name = files
+        .first()
+        .map(|(n, _)| crate::store_meta::file_title(n))
+        .unwrap_or_default();
     write(&format!("{base}/meta"), meta.to_text().as_bytes()).await?;
     write(&format!("{ROOT}/current"), id.as_bytes()).await?;
     Ok(id)
@@ -127,17 +152,28 @@ pub async fn save_sources(files: &[(String, Vec<u8>)], rate: u32) -> Result<Stri
 /// Adds separated stems to session `id`.
 pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     let base = format!("{ROOT}/{id}");
-    let mut meta = Meta::parse(&String::from_utf8_lossy(&read(&format!("{base}/meta")).await.ok_or_else(|| anyhow!("session {id} is gone"))?));
+    let mut meta = Meta::parse(&String::from_utf8_lossy(
+        &read(&format!("{base}/meta"))
+            .await
+            .ok_or_else(|| anyhow!("session {id} is gone"))?,
+    ));
     meta.stems.clear();
     for s in stems {
-        write(&format!("{base}/stems/{}.wav", file_stem(&s.name)), &engine::wav::encode_pcm16(&s.left, &s.right, rate)).await?;
+        write(
+            &format!("{base}/stems/{}.wav", file_stem(&s.name)),
+            &engine::wav::encode_pcm16(&s.left, &s.right, rate),
+        )
+        .await?;
         meta.stems.push(s.name.clone());
     }
     write(&format!("{base}/meta"), meta.to_text().as_bytes()).await
 }
 
 pub async fn current() -> Option<String> {
-    read(&format!("{ROOT}/current")).await.map(|b| String::from_utf8_lossy(&b).trim().to_string()).filter(|s| !s.is_empty())
+    read(&format!("{ROOT}/current"))
+        .await
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Every stored session, newest first.
@@ -172,9 +208,17 @@ pub async fn restore() -> Option<Result<(String, Song, Meta)>> {
 pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
     let id = id.to_string();
     let base = format!("{ROOT}/{id}");
-    let meta = Meta::parse(&String::from_utf8_lossy(&read(&format!("{base}/meta")).await?));
-    let r = rebuild(&base, &meta).await.map(|song| (id.clone(), song, meta));
-    if r.is_ok() && write(&format!("{ROOT}/current"), id.as_bytes()).await.is_err() {
+    let meta = Meta::parse(&String::from_utf8_lossy(
+        &read(&format!("{base}/meta")).await?,
+    ));
+    let r = rebuild(&base, &meta)
+        .await
+        .map(|song| (id.clone(), song, meta));
+    if r.is_ok()
+        && write(&format!("{ROOT}/current"), id.as_bytes())
+            .await
+            .is_err()
+    {
         log::warn!("could not mark session {id} as current");
     }
     Some(r)
@@ -183,7 +227,9 @@ pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
 async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     let mut files = Vec::new();
     for (orig, stored) in &meta.files {
-        let bytes = read(&format!("{base}/src/{stored}")).await.ok_or_else(|| anyhow!("{orig} is missing from browser storage"))?;
+        let bytes = read(&format!("{base}/src/{stored}"))
+            .await
+            .ok_or_else(|| anyhow!("{orig} is missing from browser storage"))?;
         files.push((orig.clone(), bytes));
     }
     let source = Song::load_files(files)?;
@@ -192,25 +238,32 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     }
     let mut stems = Vec::new();
     for name in &meta.stems {
-        let bytes = read(&format!("{base}/stems/{}.wav", file_stem(name))).await.ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
+        let bytes = read(&format!("{base}/stems/{}.wav", file_stem(name)))
+            .await
+            .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
         let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
         let mut ch = audio.channels.into_iter();
         let left = ch.next().unwrap_or_default();
         let right = ch.next().unwrap_or_else(|| left.clone());
-        stems.push(Stem { name: name.clone(), left, right });
+        stems.push(Stem {
+            name: name.clone(),
+            left,
+            right,
+        });
     }
     Ok(crate::with_original(&source, stems))
 }
 
-
 /// Bytes used and available to this site, as the browser estimates them.
 pub async fn usage() -> (f64, f64) {
     let v: Array = st_usage().await.unchecked_into();
-    (v.get(0).as_f64().unwrap_or(0.0), v.get(1).as_f64().unwrap_or(0.0))
+    (
+        v.get(0).as_f64().unwrap_or(0.0),
+        v.get(1).as_f64().unwrap_or(0.0),
+    )
 }
 
 /// Offers `bytes` to the user as a download named `name`.
 pub fn download(name: &str, bytes: &[u8], mime: &str) {
     save_file(name, &Uint8Array::from(bytes), mime);
 }
-

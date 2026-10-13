@@ -13,7 +13,14 @@ fn matmul_throughput() {
         let b = g.buffer("b", k * n);
         let c = g.buffer("c", m * n);
         for (t, tile) in TILES.iter().enumerate() {
-            let mut mm = MatMul::new((&a, View::rows(0, k)), (&b, View::t(0, k)), (&c, View::rows(0, n)), m, n, k);
+            let mut mm = MatMul::new(
+                (&a, View::rows(0, k)),
+                (&b, View::t(0, k)),
+                (&c, View::rows(0, n)),
+                m,
+                n,
+                k,
+            );
             mm.tile = Some(t);
             for rep in 0..2 {
                 let t0 = std::time::Instant::now();
@@ -23,7 +30,10 @@ fn matmul_throughput() {
                 pollster::block_on(g.done());
                 let s = t0.elapsed().as_secs_f64();
                 let rate = 2.0 * (m * n * k) as f64 / s / 1e9;
-                eprintln!("{m}x{n}x{k} {} run {rep}: {s:.3} s, {rate:.2} GFLOP/s", tile.name);
+                eprintln!(
+                    "{m}x{n}x{k} {} run {rep}: {s:.3} s, {rate:.2} GFLOP/s",
+                    tile.name
+                );
             }
         }
     }
@@ -67,7 +77,13 @@ fn layer_steps() {
 fn bench_runs() {
     let g = pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)).unwrap();
     let t0 = std::time::Instant::now();
-    let table = pollster::block_on(roformer_gpu::bench::measure(&g, 0.0, 0.0, || t0.elapsed().as_secs_f64(), |l| eprintln!("{l}")));
+    let table = pollster::block_on(roformer_gpu::bench::measure(
+        &g,
+        0.0,
+        0.0,
+        || t0.elapsed().as_secs_f64(),
+        |l| eprintln!("{l}"),
+    ));
     for l in roformer_gpu::bench::summary(&table) {
         eprintln!("{l}");
     }

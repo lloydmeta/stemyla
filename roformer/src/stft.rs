@@ -110,12 +110,18 @@ mod tests {
     #[test]
     fn round_trip_recovers_the_signal() {
         let n = HOP * 40;
-        let x: Vec<f32> = (0..n).map(|i| ((i * 7919) % 1000) as f32 / 1000.0 - 0.5).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i * 7919) % 1000) as f32 / 1000.0 - 0.5)
+            .collect();
         let s = stft(&x);
         assert_eq!(s.frames, 41);
         let y = istft(&s);
         assert_eq!(y.len(), n);
-        let err = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let err = x
+            .iter()
+            .zip(&y)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
         assert!(err < 1e-5, "max error {err}");
     }
 

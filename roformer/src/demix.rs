@@ -36,24 +36,44 @@ fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
     let step = (end - start) / (n - 1) as f32;
     // torch fills the first half from the start and the second from the end
     (0..n)
-        .map(|k| if k < n / 2 { start + step * k as f32 } else { end - step * (n - 1 - k) as f32 })
+        .map(|k| {
+            if k < n / 2 {
+                start + step * k as f32
+            } else {
+                end - step * (n - 1 - k) as f32
+            }
+        })
         .collect()
 }
 
 /// Reflect padding on the right, numpy/torch `reflect` mode.
 fn reflect_right(x: &[f32], to: usize) -> Vec<f32> {
     let n = x.len();
-    assert!(to - n < n, "reflect padding must be shorter than the signal");
-    (0..to).map(|j| if j < n { x[j] } else { x[2 * (n - 1) - j] }).collect()
+    assert!(
+        to - n < n,
+        "reflect padding must be shorter than the signal"
+    );
+    (0..to)
+        .map(|j| if j < n { x[j] } else { x[2 * (n - 1) - j] })
+        .collect()
 }
 
 /// Reflect padding by `p` on both sides.
 fn reflect_both(x: &[f32], p: usize) -> Vec<f32> {
     let n = x.len() as isize;
-    assert!((p as isize) < n, "reflect padding must be shorter than the signal");
+    assert!(
+        (p as isize) < n,
+        "reflect padding must be shorter than the signal"
+    );
     (-(p as isize)..n + p as isize)
         .map(|i| {
-            let j = if i < 0 { -i } else if i >= n { 2 * (n - 1) - i } else { i };
+            let j = if i < 0 {
+                -i
+            } else if i >= n {
+                2 * (n - 1) - i
+            } else {
+                i
+            };
             x[j as usize]
         })
         .collect()
@@ -67,7 +87,11 @@ impl Demixer {
         let fade = chunk / 10;
         let border = chunk - step;
         let padded = mix[0].len() > 2 * border && border > 0;
-        let mix = if padded { [reflect_both(&mix[0], border), reflect_both(&mix[1], border)] } else { mix };
+        let mix = if padded {
+            [reflect_both(&mix[0], border), reflect_both(&mix[1], border)]
+        } else {
+            mix
+        };
         let mut window = vec![1.0f32; chunk];
         let fade_in = linspace(0.0, 1.0, fade);
         let fade_out = linspace(1.0, 0.0, fade);
@@ -86,7 +110,9 @@ impl Demixer {
             padded,
             pos: 0,
             window,
-            result: (0..stems).map(|_| [vec![0.0; total], vec![0.0; total]]).collect(),
+            result: (0..stems)
+                .map(|_| [vec![0.0; total], vec![0.0; total]])
+                .collect(),
             counter: vec![0.0; total],
             mix,
         }
@@ -158,13 +184,25 @@ impl Demixer {
     /// Divides by the summed window and strips the padding.
     pub fn finish(self) -> Vec<Stereo> {
         let total = self.total();
-        let (from, to) = if self.padded { (self.border, total - self.border) } else { (0, total) };
+        let (from, to) = if self.padded {
+            (self.border, total - self.border)
+        } else {
+            (0, total)
+        };
         let counter = self.counter;
         self.result
             .into_iter()
             .map(|stem| {
                 stem.map(|ch| {
-                    (from..to).map(|k| if counter[k] == 0.0 { 0.0 } else { ch[k] / counter[k] }).collect()
+                    (from..to)
+                        .map(|k| {
+                            if counter[k] == 0.0 {
+                                0.0
+                            } else {
+                                ch[k] / counter[k]
+                            }
+                        })
+                        .collect()
                 })
             })
             .collect()
@@ -184,7 +222,10 @@ mod tests {
     #[test]
     fn identity_model_returns_the_mix() {
         let n: usize = 5000;
-        let mix: Stereo = [(0..n).map(|i| (i as f32 * 0.01).sin()).collect(), (0..n).map(|i| i as f32 / n as f32).collect()];
+        let mix: Stereo = [
+            (0..n).map(|i| (i as f32 * 0.01).sin()).collect(),
+            (0..n).map(|i| i as f32 / n as f32).collect(),
+        ];
         let mut d = Demixer::new(mix.clone(), 1000, 2, 1);
         let mut chunks = 0;
         while let Some(x) = d.next_input() {
@@ -196,7 +237,10 @@ mod tests {
         for c in 0..2 {
             assert_eq!(out[0][c].len(), n);
             for k in 0..n {
-                assert!((out[0][c][k] - mix[c][k]).abs() < 1e-5, "channel {c} sample {k}");
+                assert!(
+                    (out[0][c][k] - mix[c][k]).abs() < 1e-5,
+                    "channel {c} sample {k}"
+                );
             }
         }
     }

@@ -18,7 +18,8 @@ const CACHE_NAME: &str = "bs_roformer_sw.safetensors";
 /// checkpoint, SHA-256 24e7d35e..., as our own conversion).  The weights
 /// carry no stated licence, so this app links to them rather than hosting
 /// a copy.  `?model_url=` overrides it (the hash check is then skipped).
-const MODEL_URL: &str = "https://huggingface.co/lumabeat/bs-roformer-sw/resolve/main/bs_roformer_sw.safetensors";
+const MODEL_URL: &str =
+    "https://huggingface.co/lumabeat/bs-roformer-sw/resolve/main/bs_roformer_sw.safetensors";
 /// SHA-256 of that file as Hugging Face lists it.
 const MODEL_SHA256: &str = "6c8303a829575d03f21562ea185be7b6b23e922052883dec1b9518ca00a920fc";
 const DOWNLOAD_NAME: &str = "download.part";
@@ -99,7 +100,11 @@ extern "C" {
     async fn blob_bytes(blob: &JsValue) -> JsValue;
     async fn fetch_bytes(url: &str) -> JsValue;
     #[wasm_bindgen(catch)]
-    async fn download_to_opfs(url: &str, name: &str, progress: &js_sys::Function) -> Result<JsValue, JsValue>;
+    async fn download_to_opfs(
+        url: &str,
+        name: &str,
+        progress: &js_sys::Function,
+    ) -> Result<JsValue, JsValue>;
     async fn opfs_remove(name: &str) -> JsValue;
     async fn sha256_hex(bytes: &Uint8Array) -> JsValue;
 }
@@ -134,7 +139,14 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
 }
 
 fn post_model(ok: bool, text: &str) {
-    post(&[("type", "model".into()), ("ok", ok.into()), ("text", text.into())], &[]);
+    post(
+        &[
+            ("type", "model".into()),
+            ("ok", ok.into()),
+            ("text", text.into()),
+        ],
+        &[],
+    );
 }
 
 fn log(text: &str) {
@@ -160,7 +172,12 @@ async fn gpu_text(gpu: &Gpu) -> String {
     let pref = STATE.with_borrow(|s| s.power);
     let name = gpu_info(pref).await.as_string().unwrap_or_default();
     let l = gpu.device.limits();
-    let usable: Vec<&str> = roformer_gpu::TILES.iter().zip(gpu.usable.get()).filter(|(_, u)| *u).map(|(t, _)| t.name).collect();
+    let usable: Vec<&str> = roformer_gpu::TILES
+        .iter()
+        .zip(gpu.usable.get())
+        .filter(|(_, u)| *u)
+        .map(|(t, _)| t.name)
+        .collect();
     let policy = gpu.policy.get().name();
     format!(
         "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}",
@@ -178,7 +195,11 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
         return Ok(g);
     }
     let integrated = get(msg, "gpu").as_string().as_deref() == Some("integrated");
-    let power = if integrated { wgpu::PowerPreference::LowPower } else { wgpu::PowerPreference::HighPerformance };
+    let power = if integrated {
+        wgpu::PowerPreference::LowPower
+    } else {
+        wgpu::PowerPreference::HighPerformance
+    };
     let g = Rc::new(Gpu::new(power).await?);
     // Every matmul kernel against the CPU on small products; one that
     // fails on this GPU is never used (the original one failing is fatal).
@@ -191,14 +212,20 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
         choose_kernels(&g).await;
     }
     STATE.with_borrow_mut(|s| {
-        s.power = if integrated { "low-power" } else { "high-performance" };
+        s.power = if integrated {
+            "low-power"
+        } else {
+            "high-performance"
+        };
         s.gpu = Some(g.clone());
     });
     Ok(g)
 }
 
 fn budget(msg: &JsValue) -> usize {
-    get(msg, "max_elems").as_f64().map_or(BUDGET, |v| v as usize)
+    get(msg, "max_elems")
+        .as_f64()
+        .map_or(BUDGET, |v| v as usize)
 }
 
 async fn handle(msg: JsValue) {
@@ -249,7 +276,10 @@ async fn init(msg: &JsValue) -> Result<(), String> {
     }
     let bytes = cached.unchecked_into::<Uint8Array>().to_vec();
     let (secs, gpu) = build(&bytes, msg).await?;
-    post_model(true, &format!("model loaded from browser storage in {secs:.1} s ({gpu})"));
+    post_model(
+        true,
+        &format!("model loaded from browser storage in {secs:.1} s ({gpu})"),
+    );
     Ok(())
 }
 
@@ -258,14 +288,23 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
     let arr: Uint8Array = if !file.is_undefined() {
         blob_bytes(&file).await.unchecked_into()
     } else {
-        get(msg, "bytes").dyn_into().map_err(|_| "model message without file or bytes".to_string())?
+        get(msg, "bytes")
+            .dyn_into()
+            .map_err(|_| "model message without file or bytes".to_string())?
     };
     let bytes = arr.to_vec();
     match build(&bytes, msg).await {
         Ok((secs, gpu)) => {
             let cached = cache_put(CACHE_NAME, &arr).await.as_bool().unwrap_or(false);
-            let note = if cached { "saved in browser storage" } else { "could not be saved in browser storage" };
-            post_model(true, &format!("model loaded in {secs:.1} s, {note} ({gpu})"));
+            let note = if cached {
+                "saved in browser storage"
+            } else {
+                "could not be saved in browser storage"
+            };
+            post_model(
+                true,
+                &format!("model loaded in {secs:.1} s, {note} ({gpu})"),
+            );
             Ok(())
         }
         Err(e) => {
@@ -317,7 +356,15 @@ struct Pace {
 impl Pace {
     fn new(msg: &JsValue) -> Self {
         let limit = get(msg, "step_limit").as_f64().unwrap_or(5.0);
-        Self { limit, seen: HashSet::new(), worst: 0.0, worst_what: String::new(), steps: 0, flops: 0.0, secs: 0.0 }
+        Self {
+            limit,
+            seen: HashSet::new(),
+            worst: 0.0,
+            worst_what: String::new(),
+            steps: 0,
+            flops: 0.0,
+            secs: 0.0,
+        }
     }
 
     /// Submits `step`, waits for the GPU, and checks time and errors.
@@ -344,7 +391,11 @@ impl Pace {
                 errors[0]
             ));
         }
-        let limit = if first { self.limit.max(60.0) } else { self.limit };
+        let limit = if first {
+            self.limit.max(60.0)
+        } else {
+            self.limit
+        };
         if dt > limit {
             return Err(format!(
                 "one GPU step ({step}) took {dt:.1} s, over the {limit:.0} s limit; stopped so the computer stays responsive"
@@ -370,21 +421,36 @@ fn trace(on: bool, text: &str) {
 
 async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
     let debug = get(msg, "debug").is_truthy();
-    let left: Float32Array = get(msg, "left").dyn_into().map_err(|_| "left must be a Float32Array")?;
-    let right: Float32Array = get(msg, "right").dyn_into().map_err(|_| "right must be a Float32Array")?;
+    let left: Float32Array = get(msg, "left")
+        .dyn_into()
+        .map_err(|_| "left must be a Float32Array")?;
+    let right: Float32Array = get(msg, "right")
+        .dyn_into()
+        .map_err(|_| "right must be a Float32Array")?;
     let chunk = get(msg, "chunk").as_f64().map_or(CHUNK, |v| v as usize);
     let overlap = get(msg, "overlap").as_f64().map_or(OVERLAP, |v| v as usize);
     let t0 = now_s();
     let mut d = Demixer::new([left.to_vec(), right.to_vec()], chunk, overlap, STEMS.len());
     let mut pace = Pace::new(msg);
     let total = d.num_chunks();
-    post(&[("type", "progress".into()), ("done", 0.into()), ("total", (total as u32).into()), ("secs", 0.into())], &[]);
+    post(
+        &[
+            ("type", "progress".into()),
+            ("done", 0.into()),
+            ("total", (total as u32).into()),
+            ("secs", 0.into()),
+        ],
+        &[],
+    );
     let mut job: Option<Job> = None;
     while let Some(x) = d.next_input() {
         let tc = now_s();
         let (spec, feats) = analyse(&x);
         let frames = feats.len() / FEATURES;
-        trace(debug, &format!("chunk {}: stft {:.2} s", d.chunk_index(), now_s() - tc));
+        trace(
+            debug,
+            &format!("chunk {}: stft {:.2} s", d.chunk_index(), now_s() - tc),
+        );
         if job.as_ref().is_none_or(|j| j.frames != frames) {
             job = Some(Job::new(gpu, net, frames));
         }
@@ -395,7 +461,15 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             pace.run(gpu, j, &step).await?;
             if let Step::Mask { last: true, .. } = step {
                 out.push(apply_masks(&spec, &j.mask().await?));
-                trace(debug, &format!("chunk {}: mask {} at {:.2} s", d.chunk_index(), out.len(), now_s() - tc));
+                trace(
+                    debug,
+                    &format!(
+                        "chunk {}: mask {} at {:.2} s",
+                        d.chunk_index(),
+                        out.len(),
+                        now_s() - tc
+                    ),
+                );
             }
         }
         d.accept(&out);
@@ -406,7 +480,12 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             pace.summary()
         ));
         post(
-            &[("type", "progress".into()), ("done", done.into()), ("total", (total as u32).into()), ("secs", (now_s() - t0).into())],
+            &[
+                ("type", "progress".into()),
+                ("done", done.into()),
+                ("total", (total as u32).into()),
+                ("secs", (now_s() - t0).into()),
+            ],
             &[],
         );
     }
@@ -414,12 +493,20 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
         let l = Float32Array::from(stem[0].as_slice());
         let r = Float32Array::from(stem[1].as_slice());
         post(
-            &[("type", "stem".into()), ("name", (*name).into()), ("left", l.clone().into()), ("right", r.clone().into())],
+            &[
+                ("type", "stem".into()),
+                ("name", (*name).into()),
+                ("left", l.clone().into()),
+                ("right", r.clone().into()),
+            ],
             &[l.buffer().into(), r.buffer().into()],
         );
     }
     log(&format!("separation: {}", pace.summary()));
-    post(&[("type", "done".into()), ("secs", (now_s() - t0).into())], &[]);
+    post(
+        &[("type", "done".into()), ("secs", (now_s() - t0).into())],
+        &[],
+    );
     Ok(())
 }
 
@@ -433,15 +520,29 @@ fn snr(got: &[f32], want: &[f32]) -> f64 {
     if got.len() != want.len() || !e.is_finite() {
         return f64::NEG_INFINITY;
     }
-    if e == 0.0 { f64::INFINITY } else { 10.0 * (s / e).log10() }
+    if e == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (s / e).log10()
+    }
 }
 
 /// One tensor from a reference file as f32, with its shape.
 fn tensor_f32(st: &safetensors::SafeTensors, name: &str) -> Result<(Vec<usize>, Vec<f32>), String> {
-    let v = st.tensor(name).map_err(|_| format!("reference file lacks {name}"))?;
+    let v = st
+        .tensor(name)
+        .map_err(|_| format!("reference file lacks {name}"))?;
     let data = match v.dtype() {
-        safetensors::Dtype::F32 => v.data().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
-        safetensors::Dtype::F16 => v.data().chunks_exact(2).map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
+        safetensors::Dtype::F32 => v
+            .data()
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        safetensors::Dtype::F16 => v
+            .data()
+            .chunks_exact(2)
+            .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+            .collect(),
         d => return Err(format!("{name}: unexpected dtype {d:?}")),
     };
     Ok((v.shape().to_vec(), data))
@@ -454,17 +555,25 @@ fn tensor_f32(st: &safetensors::SafeTensors, name: &str) -> Result<(Vec<usize>, 
 /// under 30 dB is wrong) and any WebGPU errors seen during that stage.
 async fn selftest(msg: &JsValue) -> Result<(), String> {
     let (gpu, net) = loaded()?;
-    let base = get(msg, "base").as_string().unwrap_or_else(|| "/selftest/".into());
+    let base = get(msg, "base")
+        .as_string()
+        .unwrap_or_else(|| "/selftest/".into());
     log(&format!("selftest: GPU {}", gpu_text(&gpu).await));
     let before = gpu.take_errors();
     if !before.is_empty() {
-        log(&format!("selftest: {} WebGPU error(s) before the test, first: {}", before.len(), before[0]));
+        log(&format!(
+            "selftest: {} WebGPU error(s) before the test, first: {}",
+            before.len(),
+            before[0]
+        ));
     }
     let mut worst = f64::INFINITY;
 
     let stages = fetch_bytes(&format!("{base}stages.safetensors")).await;
     if stages.is_null() {
-        return Err(format!("no reference files at {base} (run xtask roformer-selftest and serve them with --mount /selftest=<dir>)"));
+        return Err(format!(
+            "no reference files at {base} (run xtask roformer-selftest and serve them with --mount /selftest=<dir>)"
+        ));
     }
     let stages = stages.unchecked_into::<Uint8Array>().to_vec();
     let st = safetensors::SafeTensors::deserialize(&stages).map_err(|e| e.to_string())?;
@@ -476,12 +585,21 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
     pace.run(&gpu, &job, &Step::Split).await?;
     let (_, want) = tensor_f32(&st, "band_split")?;
     report(&mut worst, "band split", snr(&job.hidden().await?, &want));
-    for (i, input) in [(0usize, "band_split"), (1, "layer0"), (10, "layer9"), (11, "layer10")] {
+    for (i, input) in [
+        (0usize, "band_split"),
+        (1, "layer0"),
+        (10, "layer9"),
+        (11, "layer10"),
+    ] {
         let (_, x) = tensor_f32(&st, input)?;
         let (_, want) = tensor_f32(&st, &format!("layer{i}"))?;
         job.set_hidden(&x);
         pace.all(&gpu, &job, &job.layer_steps(i)).await?;
-        report(&mut worst, &format!("layer {i}"), snr(&job.hidden().await?, &want));
+        report(
+            &mut worst,
+            &format!("layer {i}"),
+            snr(&job.hidden().await?, &want),
+        );
     }
     let (_, x) = tensor_f32(&st, "layer11")?;
     let (_, want) = tensor_f32(&st, "final_norm")?;
@@ -493,7 +611,11 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         let (_, want) = tensor_f32(&st, &format!("mask{s}"))?;
         job.set_normed(&x);
         pace.all(&gpu, &job, &job.mask_steps(s)).await?;
-        report(&mut worst, &format!("mask {name}"), snr(&job.mask().await?, &want));
+        report(
+            &mut worst,
+            &format!("mask {name}"),
+            snr(&job.mask().await?, &want),
+        );
     }
     let (_, want) = tensor_f32(&st, "final_norm")?;
     job.set_input(&feats);
@@ -502,8 +624,17 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         pace.all(&gpu, &job, &job.layer_steps(i)).await?;
     }
     pace.run(&gpu, &job, &Step::FinalNorm).await?;
-    report(&mut worst, "all 12 layers chained", snr(&job.normed().await?, &want));
-    log(&format!("selftest: stages took {:.1} s; longest GPU step {:.2} s ({})", now_s() - t0, pace.worst, pace.worst_what));
+    report(
+        &mut worst,
+        "all 12 layers chained",
+        snr(&job.normed().await?, &want),
+    );
+    log(&format!(
+        "selftest: stages took {:.1} s; longest GPU step {:.2} s ({})",
+        now_s() - t0,
+        pace.worst,
+        pace.worst_what
+    ));
     drop(job);
 
     // One full 13.35 s chunk; every step is paced, so it stops early (with
@@ -534,9 +665,21 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
                     let out = apply_masks(&spec, &job.mask().await?);
                     let w = &want[s * 2 * n..(s + 1) * 2 * n];
                     let got: Vec<f32> = out[0].iter().chain(out[1].iter()).copied().collect();
-                    let err: f64 = got.iter().zip(w).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum();
+                    let err: f64 = got
+                        .iter()
+                        .zip(w)
+                        .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+                        .sum();
                     let db_mix = 10.0 * (mix_energy / err).log10();
-                    report(&mut worst, &format!("full chunk {} (vs stem {:.1} dB, vs mix)", STEMS[s], snr(&got, w)), db_mix);
+                    report(
+                        &mut worst,
+                        &format!(
+                            "full chunk {} (vs stem {:.1} dB, vs mix)",
+                            STEMS[s],
+                            snr(&got, w)
+                        ),
+                        db_mix,
+                    );
                     s += 1;
                 }
             }
@@ -556,7 +699,14 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         format!("selftest FAILED: worst stage {worst:.1} dB; see the lines above")
     };
     log(&text);
-    post(&[("type", "selftest".into()), ("ok", ok.into()), ("text", text.into())], &[]);
+    post(
+        &[
+            ("type", "selftest".into()),
+            ("ok", ok.into()),
+            ("text", text.into()),
+        ],
+        &[],
+    );
     Ok(())
 }
 
@@ -568,7 +718,11 @@ fn report(worst: &mut f64, name: &str, db: f64) {
 impl Pace {
     /// "N GPU steps, longest ..., about X TFLOP/s" for log lines.
     fn summary(&self) -> String {
-        let rate = if self.secs > 0.0 { self.flops / self.secs / 1e12 } else { 0.0 };
+        let rate = if self.secs > 0.0 {
+            self.flops / self.secs / 1e12
+        } else {
+            0.0
+        };
         format!(
             "{} GPU steps, longest {:.2} s ({}), {rate:.2} TFLOP/s on average (steps after the first of each kind)",
             self.steps, self.worst, self.worst_what
@@ -579,7 +733,11 @@ impl Pace {
 /// `?mm=` in the page URL: which matmul kernel to use (`auto` or a name
 /// from `roformer_gpu::TILES`).
 fn apply_policy(gpu: &Gpu, msg: &JsValue) {
-    if let Some(p) = get(msg, "mm").as_string().as_deref().and_then(roformer_gpu::MatMulPolicy::parse) {
+    if let Some(p) = get(msg, "mm")
+        .as_string()
+        .as_deref()
+        .and_then(roformer_gpu::MatMulPolicy::parse)
+    {
         gpu.policy.set(p);
     }
 }
@@ -589,12 +747,19 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
     let g = gpu(msg).await?;
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
-    let (warm, round) = if get(msg, "bench_quick").is_truthy() { (0.0, 0.0) } else { (0.3, 0.2) };
+    let (warm, round) = if get(msg, "bench_quick").is_truthy() {
+        (0.0, 0.0)
+    } else {
+        (0.3, 0.2)
+    };
     let table = roformer_gpu::bench::measure(&g, warm, round, now_s, |l| log(&l)).await;
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
     }
-    let text = format!("bench finished in {:.0} s; results in the browser console", now_s() - t0);
+    let text = format!(
+        "bench finished in {:.0} s; results in the browser console",
+        now_s() - t0
+    );
     post(&[("type", "bench".into()), ("text", text.into())], &[]);
     Ok(())
 }
@@ -603,29 +768,52 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
 /// (`{type: "download", done, total}`), checks its hash, then loads it like
 /// a picked file.
 async fn download(msg: &JsValue) -> Result<(), String> {
-    let url = get(msg, "model_url").as_string().unwrap_or_else(|| MODEL_URL.to_string());
+    let url = get(msg, "model_url")
+        .as_string()
+        .unwrap_or_else(|| MODEL_URL.to_string());
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|done: f64, total: f64| {
-        post(&[("type", "download".into()), ("done", done.into()), ("total", total.into())], &[]);
+        post(
+            &[
+                ("type", "download".into()),
+                ("done", done.into()),
+                ("total", total.into()),
+            ],
+            &[],
+        );
     });
     let t0 = now_s();
     let fetched = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
     drop(progress);
     if let Err(e) = fetched {
         opfs_remove(DOWNLOAD_NAME).await;
-        post_model(false, &format!("model download failed: {}", e.as_string().unwrap_or_else(|| format!("{e:?}"))));
+        post_model(
+            false,
+            &format!(
+                "model download failed: {}",
+                e.as_string().unwrap_or_else(|| format!("{e:?}"))
+            ),
+        );
         return Ok(());
     }
     let part = cache_get(DOWNLOAD_NAME).await;
     opfs_remove(DOWNLOAD_NAME).await;
     if part.is_null() {
-        post_model(false, "model download failed: the browser did not keep the file");
+        post_model(
+            false,
+            "model download failed: the browser did not keep the file",
+        );
         return Ok(());
     }
     let arr: Uint8Array = part.unchecked_into();
     if url == MODEL_URL {
         let hash = sha256_hex(&arr).await.as_string().unwrap_or_default();
         if hash != MODEL_SHA256 {
-            post_model(false, &format!("the downloaded model is not the expected file (SHA-256 {hash}); not used"));
+            post_model(
+                false,
+                &format!(
+                    "the downloaded model is not the expected file (SHA-256 {hash}); not used"
+                ),
+            );
             return Ok(());
         }
     }
@@ -633,10 +821,22 @@ async fn download(msg: &JsValue) -> Result<(), String> {
     match build(&arr.to_vec(), msg).await {
         Ok((load, gpu)) => {
             let cached = cache_put(CACHE_NAME, &arr).await.as_bool().unwrap_or(false);
-            let note = if cached { "saved in browser storage" } else { "could not be saved in browser storage" };
-            post_model(true, &format!("model downloaded in {secs:.0} s and loaded in {load:.1} s, {note} ({gpu})"));
+            let note = if cached {
+                "saved in browser storage"
+            } else {
+                "could not be saved in browser storage"
+            };
+            post_model(
+                true,
+                &format!(
+                    "model downloaded in {secs:.0} s and loaded in {load:.1} s, {note} ({gpu})"
+                ),
+            );
         }
-        Err(e) => post_model(false, &format!("the downloaded file is not a usable BS-RoFormer SW model: {e}")),
+        Err(e) => post_model(
+            false,
+            &format!("the downloaded file is not a usable BS-RoFormer SW model: {e}"),
+        ),
     }
     Ok(())
 }
@@ -646,9 +846,15 @@ async fn download(msg: &JsValue) -> Result<(), String> {
 /// here, not on the page, because the encoder does most of its work in one
 /// final call (seconds for a whole song).
 async fn mp3(msg: &JsValue) -> Result<(), String> {
-    let name = get(msg, "name").as_string().unwrap_or_else(|| "stem.mp3".into());
-    let left: Float32Array = get(msg, "left").dyn_into().map_err(|_| "left must be a Float32Array")?;
-    let right: Float32Array = get(msg, "right").dyn_into().map_err(|_| "right must be a Float32Array")?;
+    let name = get(msg, "name")
+        .as_string()
+        .unwrap_or_else(|| "stem.mp3".into());
+    let left: Float32Array = get(msg, "left")
+        .dyn_into()
+        .map_err(|_| "left must be a Float32Array")?;
+    let right: Float32Array = get(msg, "right")
+        .dyn_into()
+        .map_err(|_| "right must be a Float32Array")?;
     let rate = get(msg, "rate").as_f64().unwrap_or(44_100.0) as u32;
     let (l, r) = (left.to_vec(), right.to_vec());
     let mut pcm = Vec::with_capacity(2 * l.len());
@@ -656,15 +862,26 @@ async fn mp3(msg: &JsValue) -> Result<(), String> {
         pcm.push(*a);
         pcm.push(*b);
     }
-    let mut enc = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig { bitrate_kbps: 192, vbr_quality: None });
-    enc.push_pcm_f32(&pcm, 2, rate).map_err(|e| format!("MP3 encoder: {e:?}"))?;
+    let mut enc = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig {
+        bitrate_kbps: 192,
+        vbr_quality: None,
+    });
+    enc.push_pcm_f32(&pcm, 2, rate)
+        .map_err(|e| format!("MP3 encoder: {e:?}"))?;
     enc.finish();
     let mut out = Vec::new();
     while let Ok(packet) = enc.next_packet() {
         out.extend_from_slice(&packet);
     }
     let bytes = Uint8Array::from(out.as_slice());
-    post(&[("type", "mp3".into()), ("name", name.into()), ("bytes", bytes.clone().into())], &[bytes.buffer().into()]);
+    post(
+        &[
+            ("type", "mp3".into()),
+            ("name", name.into()),
+            ("bytes", bytes.clone().into()),
+        ],
+        &[bytes.buffer().into()],
+    );
     Ok(())
 }
 
@@ -675,10 +892,15 @@ const KERNEL_CHOICE: &str = "matmul_kernels";
 /// `roformer_gpu::bench::calibrate`, whose result is then kept.
 async fn choose_kernels(gpu: &Gpu) {
     let pref = STATE.with_borrow(|s| s.power);
-    let key = format!("{}|{:016x}", gpu_info(pref).await.as_string().unwrap_or_default(), roformer_gpu::kernels_id());
+    let key = format!(
+        "{}|{:016x}",
+        gpu_info(pref).await.as_string().unwrap_or_default(),
+        roformer_gpu::kernels_id()
+    );
     let stored = cache_get(KERNEL_CHOICE).await;
     if !stored.is_null() {
-        let text = String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string();
+        let text =
+            String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string();
         for line in text.lines() {
             if let Some((k, v)) = line.split_once('\t')
                 && k == key

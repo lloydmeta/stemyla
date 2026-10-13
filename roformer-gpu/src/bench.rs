@@ -45,18 +45,63 @@ impl Shape {
 /// mask-estimator steps (14 x 6 stems; the second mask matmul's width varies
 /// by band group, 96 stands for it).
 pub fn shapes() -> Vec<Shape> {
-    let lin = |name, m, n, k, outer, per_chunk, act| Shape { name, m, n, k, outer, inner: 1, per_chunk, kind: Kind::Linear(act) };
+    let lin = |name, m, n, k, outer, per_chunk, act| Shape {
+        name,
+        m,
+        n,
+        k,
+        outer,
+        inner: 1,
+        per_chunk,
+        kind: Kind::Linear(act),
+    };
     vec![
         lin("time qkv", T, 1536, 256, 1, 744, Act::None),
         lin("time gates", T, 8, 256, 1, 744, Act::None),
-        Shape { name: "time scores", m: T, n: T, k: 64, outer: 1, inner: 8, per_chunk: 744, kind: Kind::Scores },
-        Shape { name: "time p·v", m: T, n: 64, k: T, outer: 1, inner: 8, per_chunk: 744, kind: Kind::Values },
+        Shape {
+            name: "time scores",
+            m: T,
+            n: T,
+            k: 64,
+            outer: 1,
+            inner: 8,
+            per_chunk: 744,
+            kind: Kind::Scores,
+        },
+        Shape {
+            name: "time p·v",
+            m: T,
+            n: 64,
+            k: T,
+            outer: 1,
+            inner: 8,
+            per_chunk: 744,
+            kind: Kind::Values,
+        },
         lin("time attn out", T, 256, 512, 1, 744, Act::None),
         lin("time ff up", T, 1024, 256, 1, 744, Act::Gelu),
         lin("time ff down", T, 256, 1024, 1, 744, Act::None),
         lin("freq qkv", FREQ_TOKENS, 1536, 256, 1, 168, Act::None),
-        Shape { name: "freq scores", m: 62, n: 62, k: 64, outer: 88, inner: 8, per_chunk: 168, kind: Kind::Scores },
-        Shape { name: "freq p·v", m: 62, n: 64, k: 62, outer: 88, inner: 8, per_chunk: 168, kind: Kind::Values },
+        Shape {
+            name: "freq scores",
+            m: 62,
+            n: 62,
+            k: 64,
+            outer: 88,
+            inner: 8,
+            per_chunk: 168,
+            kind: Kind::Scores,
+        },
+        Shape {
+            name: "freq p·v",
+            m: 62,
+            n: 64,
+            k: 62,
+            outer: 88,
+            inner: 8,
+            per_chunk: 168,
+            kind: Kind::Values,
+        },
         lin("freq attn out", FREQ_TOKENS, 256, 512, 1, 168, Act::None),
         lin("freq ff up", FREQ_TOKENS, 1024, 256, 1, 168, Act::Gelu),
         lin("freq ff down", FREQ_TOKENS, 256, 1024, 1, 168, Act::None),
@@ -90,9 +135,36 @@ fn matmul<'a>(s: &Shape, b: &'a Buffers, tile: usize) -> MatMul<'a> {
         Kind::Scores => {
             let seq = s.m;
             MatMul::new(
-                (&b.qkv, View { off: 0, rs: row, cs: 1, bo: seq * row, bi: 64 }),
-                (&b.qkv, View { off: 512, rs: 1, cs: row, bo: seq * row, bi: 64 }),
-                (&b.out, View { off: 0, rs: seq, cs: 1, bo: 8 * seq * seq, bi: seq * seq }),
+                (
+                    &b.qkv,
+                    View {
+                        off: 0,
+                        rs: row,
+                        cs: 1,
+                        bo: seq * row,
+                        bi: 64,
+                    },
+                ),
+                (
+                    &b.qkv,
+                    View {
+                        off: 512,
+                        rs: 1,
+                        cs: row,
+                        bo: seq * row,
+                        bi: 64,
+                    },
+                ),
+                (
+                    &b.out,
+                    View {
+                        off: 0,
+                        rs: seq,
+                        cs: 1,
+                        bo: 8 * seq * seq,
+                        bi: seq * seq,
+                    },
+                ),
                 seq,
                 seq,
                 64,
@@ -101,9 +173,36 @@ fn matmul<'a>(s: &Shape, b: &'a Buffers, tile: usize) -> MatMul<'a> {
         Kind::Values => {
             let seq = s.m;
             MatMul::new(
-                (&b.out, View { off: 0, rs: seq, cs: 1, bo: 8 * seq * seq, bi: seq * seq }),
-                (&b.qkv, View { off: 1024, rs: row, cs: 1, bo: seq * row, bi: 64 }),
-                (&b.act, View { off: 0, rs: 512, cs: 1, bo: seq * 512, bi: 64 }),
+                (
+                    &b.out,
+                    View {
+                        off: 0,
+                        rs: seq,
+                        cs: 1,
+                        bo: 8 * seq * seq,
+                        bi: seq * seq,
+                    },
+                ),
+                (
+                    &b.qkv,
+                    View {
+                        off: 1024,
+                        rs: row,
+                        cs: 1,
+                        bo: seq * row,
+                        bi: 64,
+                    },
+                ),
+                (
+                    &b.act,
+                    View {
+                        off: 0,
+                        rs: 512,
+                        cs: 1,
+                        bo: seq * 512,
+                        bi: 64,
+                    },
+                ),
                 seq,
                 64,
                 seq,
@@ -130,7 +229,15 @@ fn buffers(gpu: &Gpu) -> Buffers {
 /// load), then two rounds of at least `round` seconds, keeping the faster.
 /// Submissions hold at most 4 GFLOP, so no command buffer runs long even on
 /// a slow GPU.
-async fn time_one(gpu: &Gpu, b: &Buffers, s: &Shape, tile: usize, warm: f64, round: f64, now: &impl Fn() -> f64) -> f64 {
+async fn time_one(
+    gpu: &Gpu,
+    b: &Buffers,
+    s: &Shape,
+    tile: usize,
+    warm: f64,
+    round: f64,
+    now: &impl Fn() -> f64,
+) -> f64 {
     let mm = matmul(s, b, tile);
     let per_submit = ((4e9 / s.flops()) as usize).clamp(1, 32);
     let submit = async || {
@@ -164,7 +271,13 @@ async fn time_one(gpu: &Gpu, b: &Buffers, s: &Shape, tile: usize, warm: f64, rou
 /// infinite for kernels that failed [`Gpu::check_kernels`]).  `now` is a
 /// clock in seconds (the browser has no `std::time`).  With `warm` 0.3 and
 /// `round` 0.2 it takes a few minutes on a real GPU.
-pub async fn measure(gpu: &Gpu, warm: f64, round: f64, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Vec<Vec<f64>> {
+pub async fn measure(
+    gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    now: impl Fn() -> f64,
+    mut log: impl FnMut(String),
+) -> Vec<Vec<f64>> {
     let b = buffers(gpu);
     let mut table = Vec::new();
     for s in &shapes() {
@@ -172,7 +285,10 @@ pub async fn measure(gpu: &Gpu, warm: f64, round: f64, now: impl Fn() -> f64, mu
         for (t, tile) in TILES.iter().enumerate() {
             if !gpu.usable.get()[t] {
                 row.push(f64::INFINITY);
-                log(format!("bench: {} {}: skipped (failed the start-up check on this GPU)", s.name, tile.name));
+                log(format!(
+                    "bench: {} {}: skipped (failed the start-up check on this GPU)",
+                    s.name, tile.name
+                ));
                 continue;
             }
             let secs = time_one(gpu, &b, s, t, warm, round, &now).await;
@@ -203,7 +319,11 @@ pub async fn measure(gpu: &Gpu, warm: f64, round: f64, now: impl Fn() -> f64, mu
 /// best kernel differs by GPU: on a Radeon Pro 5500M the original kernel
 /// won every shape, on an Intel UHD 630 it was the slowest by 5x.
 /// Takes a few seconds; the caller keeps the result per GPU.
-pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> MatMulPolicy {
+pub async fn calibrate(
+    gpu: &Gpu,
+    now: impl Fn() -> f64,
+    mut log: impl FnMut(String),
+) -> MatMulPolicy {
     let all = shapes();
     let by_name = |n: &str| all.iter().find(|s| s.name == n).copied().expect("shape");
     let large = [by_name("time qkv"), by_name("time scores")];
@@ -246,17 +366,34 @@ pub fn summary(table: &[Vec<f64>]) -> Vec<String> {
     let shapes = shapes();
     let flops: f64 = shapes.iter().map(|s| s.flops() * s.per_chunk as f64).sum();
     let total = |pick: &dyn Fn(usize) -> usize| -> f64 {
-        shapes.iter().enumerate().map(|(i, s)| table[i][pick(i)] * s.per_chunk as f64).sum()
+        shapes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| table[i][pick(i)] * s.per_chunk as f64)
+            .sum()
     };
     let mut out = Vec::new();
-    let line = |label: &str, secs: f64| format!("bench: {label}: {secs:.2} s of matmul per chunk ({:.2} TFLOP/s)", flops / secs / 1e12);
+    let line = |label: &str, secs: f64| {
+        format!(
+            "bench: {label}: {secs:.2} s of matmul per chunk ({:.2} TFLOP/s)",
+            flops / secs / 1e12
+        )
+    };
     for (t, tile) in TILES.iter().enumerate() {
         out.push(line(&format!("all {}", tile.name), total(&|_| t)));
     }
-    let best = |i: usize| (0..TILES.len()).min_by(|&a, &b| table[i][a].total_cmp(&table[i][b])).unwrap_or(0);
+    let best = |i: usize| {
+        (0..TILES.len())
+            .min_by(|&a, &b| table[i][a].total_cmp(&table[i][b]))
+            .unwrap_or(0)
+    };
     out.push(line("best per shape", total(&best)));
     for (i, s) in shapes.iter().enumerate() {
-        out.push(format!("bench: best for {}: {}", s.name, TILES[best(i)].name));
+        out.push(format!(
+            "bench: best for {}: {}",
+            s.name,
+            TILES[best(i)].name
+        ));
     }
     out
 }
@@ -269,7 +406,10 @@ mod tests {
     /// about 5% (full-size frequency steps and one mask width overcount it).
     #[test]
     fn shapes_cover_a_chunk() {
-        let total: f64 = shapes().iter().map(|s| s.flops() * s.per_chunk as f64).sum();
+        let total: f64 = shapes()
+            .iter()
+            .map(|s| s.flops() * s.per_chunk as f64)
+            .sum();
         assert!((5.9e12..6.5e12).contains(&total), "{total:e}");
     }
 }

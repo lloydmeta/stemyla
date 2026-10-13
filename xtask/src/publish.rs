@@ -46,7 +46,11 @@ impl Options {
         };
         let mut it = args.iter();
         while let Some(a) = it.next() {
-            let mut value = |name: &str| it.next().cloned().with_context(|| format!("{name} needs a value"));
+            let mut value = |name: &str| {
+                it.next()
+                    .cloned()
+                    .with_context(|| format!("{name} needs a value"))
+            };
             match a.as_str() {
                 "--public-url" => o.public_url = value("--public-url")?,
                 "--remote" => o.remote = value("--remote")?,
@@ -76,7 +80,9 @@ fn run(dir: &Path, program: &str, args: &[&str], envs: &[(&str, &Path)]) -> Resu
     for (k, v) in envs {
         c.env(k, v);
     }
-    let out = c.output().with_context(|| format!("could not run {program} (is it installed?)"))?;
+    let out = c
+        .output()
+        .with_context(|| format!("could not run {program} (is it installed?)"))?;
     if !out.status.success() {
         bail!(
             "{program} {} failed: {}",
@@ -96,7 +102,9 @@ pub fn main(args: &[String]) -> Result<()> {
     let repo = PathBuf::from(git(Path::new("."), &["rev-parse", "--show-toplevel"])?);
     let dirty = git(&repo, &["status", "--porcelain", "--untracked-files=no"])?;
     if !dirty.is_empty() && !o.allow_dirty {
-        bail!("uncommitted changes; commit them first so the site matches a commit (or pass --allow-dirty):\n{dirty}");
+        bail!(
+            "uncommitted changes; commit them first so the site matches a commit (or pass --allow-dirty):\n{dirty}"
+        );
     }
     let source = git(&repo, &["rev-parse", "--short", "HEAD"])?;
 
@@ -108,17 +116,30 @@ pub fn main(args: &[String]) -> Result<()> {
     let dist_s = dist.to_string_lossy().to_string();
     // Trunk's own output is shown: the build takes a few minutes.
     let status = Command::new("trunk")
-        .args(["build", "--release", "--public-url", &o.public_url, "--dist", &dist_s])
+        .args([
+            "build",
+            "--release",
+            "--public-url",
+            &o.public_url,
+            "--dist",
+            &dist_s,
+        ])
         .current_dir(repo.join("app"))
         .status()
         .context("could not run trunk (install it with `cargo install --locked trunk`)")?;
     if !status.success() {
-        bail!("trunk build failed (the wasm target is added with `rustup target add wasm32-unknown-unknown`)");
+        bail!(
+            "trunk build failed (the wasm target is added with `rustup target add wasm32-unknown-unknown`)"
+        );
     }
     check_build(&dist, &o.public_url)?;
     std::fs::write(dist.join(".nojekyll"), b"")?;
 
-    let dirty_note = if dirty.is_empty() { "" } else { " plus uncommitted changes" };
+    let dirty_note = if dirty.is_empty() {
+        ""
+    } else {
+        " plus uncommitted changes"
+    };
     let message = format!("Publish {source}{dirty_note} at {}", o.public_url);
     deploy(&repo, &dist, &o, &message)?;
     Ok(())
@@ -130,7 +151,12 @@ pub fn main(args: &[String]) -> Result<()> {
 pub fn deploy(repo: &Path, dist: &Path, o: &Options, message: &str) -> Result<Option<String>> {
     // A branch published from another clone: start from it, not over it.
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", o.branch);
-    if git(repo, &["ls-remote", "--exit-code", "--heads", &o.remote, &o.branch]).is_ok() {
+    if git(
+        repo,
+        &["ls-remote", "--exit-code", "--heads", &o.remote, &o.branch],
+    )
+    .is_ok()
+    {
         git(repo, &["fetch", &o.remote, &refspec]).with_context(|| {
             format!("could not update the local {} from {} (has it diverged? compare with `git log {} {}/{}`)", o.branch, o.remote, o.branch, o.remote, o.branch)
         })?;
@@ -141,10 +167,20 @@ pub fn deploy(repo: &Path, dist: &Path, o: &Options, message: &str) -> Result<Op
         None => println!("{} already holds this build; nothing to commit", o.branch),
     }
     if o.push {
-        git(repo, &["push", &o.remote, &format!("refs/heads/{0}:refs/heads/{0}", o.branch)])?;
+        git(
+            repo,
+            &[
+                "push",
+                &o.remote,
+                &format!("refs/heads/{0}:refs/heads/{0}", o.branch),
+            ],
+        )?;
         println!("pushed {} to {}", o.branch, o.remote);
     } else {
-        println!("not pushed (--no-push); push later with: git push {} {}", o.remote, o.branch);
+        println!(
+            "not pushed (--no-push); push later with: git push {} {}",
+            o.remote, o.branch
+        );
     }
     Ok(commit)
 }
@@ -152,7 +188,14 @@ pub fn deploy(repo: &Path, dist: &Path, o: &Options, message: &str) -> Result<Op
 /// Checks a Trunk build before it is published: the files the page needs
 /// exist and the page loads them from under `public_url`.
 pub fn check_build(dist: &Path, public_url: &str) -> Result<()> {
-    let need = ["index.html", "app.js", "app_bg.wasm", "stem-worker.js", "stem-worker_bg.wasm", "stem-worker_loader.js"];
+    let need = [
+        "index.html",
+        "app.js",
+        "app_bg.wasm",
+        "stem-worker.js",
+        "stem-worker_bg.wasm",
+        "stem-worker_loader.js",
+    ];
     for f in need {
         let p = dist.join(f);
         let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -162,7 +205,9 @@ pub fn check_build(dist: &Path, public_url: &str) -> Result<()> {
     }
     let html = std::fs::read_to_string(dist.join("index.html"))?;
     if !html.contains(&format!("{public_url}app.js")) {
-        bail!("index.html does not load app.js from {public_url}; the page would not find its files on the site");
+        bail!(
+            "index.html does not load app.js from {public_url}; the page would not find its files on the site"
+        );
     }
     Ok(())
 }
@@ -177,8 +222,13 @@ pub fn commit_dir(repo: &Path, dir: &Path, branch: &str, message: &str) -> Resul
     let _ = std::fs::remove_file(&index);
     // A throwaway index over `dir` as the work tree; `--force` so that
     // ignore rules (global or .git/info/exclude) cannot drop built files.
-    let envs: [(&str, &Path); 3] = [("GIT_DIR", &git_dir), ("GIT_INDEX_FILE", &index), ("GIT_WORK_TREE", dir)];
-    let tree = run(dir, "git", &["add", "--all", "--force", "."], &envs).and_then(|_| run(dir, "git", &["write-tree"], &envs));
+    let envs: [(&str, &Path); 3] = [
+        ("GIT_DIR", &git_dir),
+        ("GIT_INDEX_FILE", &index),
+        ("GIT_WORK_TREE", dir),
+    ];
+    let tree = run(dir, "git", &["add", "--all", "--force", "."], &envs)
+        .and_then(|_| run(dir, "git", &["write-tree"], &envs));
     let _ = std::fs::remove_file(&index);
     let tree = tree?;
     let full_ref = format!("refs/heads/{branch}");

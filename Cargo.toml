@@ -17,6 +17,10 @@ debug = 1
 # Index loops over several parallel buffers read more clearly in DSP code.
 needless_range_loop = "allow"
 
+# Reading fixed-size byte groups with `chunks_exact(N)` is the idiomatic way to
+# parse little-endian values; `as_chunks` is newer and no clearer here.
+chunks_exact_to_as_chunks = "allow"
+
 # Web build without debug info, used by app/index.html.  Adding
 # `lto = "thin"` shrinks the bundle further where the wasm32 standard
 # library ships with bitcode (a rustup-installed target does).

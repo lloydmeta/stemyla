@@ -13,7 +13,11 @@ use safetensors::{Dtype, SafeTensors};
 pub enum WeightError {
     Parse(String),
     Missing(String),
-    Shape { name: String, expected: Vec<usize>, found: Vec<usize> },
+    Shape {
+        name: String,
+        expected: Vec<usize>,
+        found: Vec<usize>,
+    },
     Dtype(String),
     Unused(Vec<String>),
 }
@@ -23,12 +27,24 @@ impl fmt::Display for WeightError {
         match self {
             WeightError::Parse(e) => write!(f, "not a safetensors file: {e}"),
             WeightError::Missing(n) => write!(f, "missing tensor {n}"),
-            WeightError::Shape { name, expected, found } => {
-                write!(f, "tensor {name} has shape {found:?}, expected {expected:?}")
+            WeightError::Shape {
+                name,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "tensor {name} has shape {found:?}, expected {expected:?}"
+                )
             }
             WeightError::Dtype(d) => write!(f, "unsupported dtype {d}"),
             WeightError::Unused(n) => {
-                write!(f, "{} tensors not used by the model, e.g. {}", n.len(), n[0])
+                write!(
+                    f,
+                    "{} tensors not used by the model, e.g. {}",
+                    n.len(),
+                    n[0]
+                )
             }
         }
     }
@@ -46,12 +62,18 @@ pub struct Store<'a> {
 impl<'a> Store<'a> {
     pub fn new(bytes: &'a [u8]) -> Result<Self, WeightError> {
         let st = SafeTensors::deserialize(bytes).map_err(|e| WeightError::Parse(e.to_string()))?;
-        Ok(Self { st, used: Default::default() })
+        Ok(Self {
+            st,
+            used: Default::default(),
+        })
     }
 
     /// The tensor `name` as f32, checked against `shape`.
     pub fn get(&mut self, name: &str, shape: &[usize]) -> Result<Vec<f32>, WeightError> {
-        let view = self.st.tensor(name).map_err(|_| WeightError::Missing(name.to_string()))?;
+        let view = self
+            .st
+            .tensor(name)
+            .map_err(|_| WeightError::Missing(name.to_string()))?;
         if view.shape() != shape {
             return Err(WeightError::Shape {
                 name: name.to_string(),
@@ -61,13 +83,18 @@ impl<'a> Store<'a> {
         }
         let raw = view.data();
         let out = match view.dtype() {
-            Dtype::F32 => {
-                raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
-            }
-            Dtype::F16 => raw.chunks_exact(2).map(|c| f16::from_le_bytes([c[0], c[1]]).to_f32()).collect(),
-            Dtype::BF16 => {
-                raw.chunks_exact(2).map(|c| bf16::from_le_bytes([c[0], c[1]]).to_f32()).collect()
-            }
+            Dtype::F32 => raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            Dtype::F16 => raw
+                .chunks_exact(2)
+                .map(|c| f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+            Dtype::BF16 => raw
+                .chunks_exact(2)
+                .map(|c| bf16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
             other => return Err(WeightError::Dtype(format!("{other:?}"))),
         };
         self.used.insert(name.to_string());
@@ -76,8 +103,13 @@ impl<'a> Store<'a> {
 
     /// Fails if the file holds tensors the model never asked for.
     pub fn finish(self) -> Result<(), WeightError> {
-        let mut unused: Vec<String> =
-            self.st.names().into_iter().filter(|n| !self.used.contains(*n)).map(String::from).collect();
+        let mut unused: Vec<String> = self
+            .st
+            .names()
+            .into_iter()
+            .filter(|n| !self.used.contains(*n))
+            .map(String::from)
+            .collect();
         if unused.is_empty() {
             Ok(())
         } else {

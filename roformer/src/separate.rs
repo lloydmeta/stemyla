@@ -68,13 +68,20 @@ pub fn to_tensor<B: Backend>(features: Vec<f32>, device: &B::Device) -> Tensor<B
 #[cfg(feature = "burn")]
 /// Separates one chunk (both channels the same length).  Returns, per stem,
 /// both channels with `HOP * (frames - 1)` samples.
-pub fn separate_chunk<B: Backend>(model: &BsRoformer<B>, channels: &[Vec<f32>; CHANNELS]) -> Vec<[Vec<f32>; CHANNELS]> {
+pub fn separate_chunk<B: Backend>(
+    model: &BsRoformer<B>,
+    channels: &[Vec<f32>; CHANNELS],
+) -> Vec<[Vec<f32>; CHANNELS]> {
     let (spec, x) = analyse(channels);
     // One stem's mask at a time keeps every tensor under `Options::max_elems`.
     let hidden = model.hidden(to_tensor::<B>(x, model.device()));
     (0..crate::STEMS.len())
         .map(|s| {
-            let m: Vec<f32> = model.mask_one(s, hidden.clone()).into_data().to_vec().expect("f32 tensor");
+            let m: Vec<f32> = model
+                .mask_one(s, hidden.clone())
+                .into_data()
+                .to_vec()
+                .expect("f32 tensor");
             apply_masks(&spec, &m)
         })
         .collect()

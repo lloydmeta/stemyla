@@ -43,10 +43,14 @@ pub fn run(args: &[String]) -> Result<()> {
         i += 1;
     }
     if !root.join("index.html").is_file() {
-        bail!("{} has no index.html (build the app first: cd app && trunk build --release)", root.display());
+        bail!(
+            "{} has no index.html (build the app first: cd app && trunk build --release)",
+            root.display()
+        );
     }
     mounts.push(("/".to_string(), root.clone()));
-    let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("binding port {port}"))?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("binding port {port}"))?;
     let addr = listener.local_addr()?;
     // Scripts read this line to find the port when started with --port 0.
     println!("serving {} at http://{addr}/", root.display());
@@ -56,7 +60,11 @@ pub fn run(args: &[String]) -> Result<()> {
 
 fn normalise_prefix(p: &str) -> String {
     let p = p.trim_matches('/');
-    if p.is_empty() { "/".to_string() } else { format!("/{p}/") }
+    if p.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{p}/")
+    }
 }
 
 /// Accepts connections forever, one thread per connection.
@@ -113,9 +121,17 @@ fn percent_decode(s: &str) -> Option<String> {
 pub fn resolve(mounts: &[(String, PathBuf)], url_path: &str) -> Option<PathBuf> {
     let path = url_path.split(['?', '#']).next().unwrap_or("/");
     let path = percent_decode(path)?;
-    let path = if path.ends_with('/') { format!("{path}index.html") } else { path };
+    let path = if path.ends_with('/') {
+        format!("{path}index.html")
+    } else {
+        path
+    };
     for (prefix, dir) in mounts {
-        let rest = if prefix == "/" { path.strip_prefix('/') } else { path.strip_prefix(prefix.as_str()) };
+        let rest = if prefix == "/" {
+            path.strip_prefix('/')
+        } else {
+            path.strip_prefix(prefix.as_str())
+        };
         let Some(rest) = rest else { continue };
         let rel = Path::new(rest);
         // Only plain names: no "..", no absolute parts, no drive prefixes.

@@ -22,7 +22,10 @@ fn read(name: &str) -> Option<Vec<u8>> {
     match std::fs::read(&p) {
         Ok(b) => Some(b),
         Err(_) => {
-            eprintln!("skipping: {} not found (run tools/roformer_export.py)", p.display());
+            eprintln!(
+                "skipping: {} not found (run tools/roformer_export.py)",
+                p.display()
+            );
             None
         }
     }
@@ -32,15 +35,25 @@ struct Fixture<'a>(SafeTensors<'a>);
 
 impl Fixture<'_> {
     fn f32(&self, name: &str) -> (Vec<usize>, Vec<f32>) {
-        let v = self.0.tensor(name).unwrap_or_else(|_| panic!("fixture lacks {name}"));
+        let v = self
+            .0
+            .tensor(name)
+            .unwrap_or_else(|_| panic!("fixture lacks {name}"));
         assert_eq!(v.dtype(), Dtype::F32);
-        let data = v.data().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let data = v
+            .data()
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         (v.shape().to_vec(), data)
     }
     fn i64(&self, name: &str) -> Vec<i64> {
         let v = self.0.tensor(name).unwrap();
         assert_eq!(v.dtype(), Dtype::I64);
-        v.data().chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()
+        v.data()
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect()
     }
 }
 
@@ -53,11 +66,18 @@ fn snr(got: &[f32], want: &[f32]) -> f64 {
         s += (*b as f64).powi(2);
         e += (*a as f64 - *b as f64).powi(2);
     }
-    if e == 0.0 { f64::INFINITY } else { 10.0 * (s / e).log10() }
+    if e == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (s / e).log10()
+    }
 }
 
 fn tensor3(shape: &[usize], data: Vec<f32>) -> Tensor<NdArray, 3> {
-    Tensor::from_data(TensorData::new(data, [shape[0], shape[1], shape[2]]), &Default::default())
+    Tensor::from_data(
+        TensorData::new(data, [shape[0], shape[1], shape[2]]),
+        &Default::default(),
+    )
 }
 
 fn vec3(t: Tensor<NdArray, 3>) -> Vec<f32> {
@@ -87,7 +107,9 @@ fn torch_features(spec_shape: &[usize], spec: &[f32]) -> Vec<f32> {
 
 #[test]
 fn stft_matches_torch() {
-    let Some(bytes) = read("stft.safetensors") else { return };
+    let Some(bytes) = read("stft.safetensors") else {
+        return;
+    };
     let fx = Fixture(SafeTensors::deserialize(&bytes).unwrap());
     let (ashape, audio) = fx.f32("audio");
     let n = ashape[1];
@@ -121,20 +143,33 @@ fn stft_matches_torch() {
 
 fn stand_in(part: &Stereo) -> Vec<Stereo> {
     (0..6)
-        .map(|k| part.clone().map(|ch| ch.iter().map(|x| (x * (k + 1) as f32 * 0.5).tanh() + 0.01 * k as f32).collect()))
+        .map(|k| {
+            part.clone().map(|ch| {
+                ch.iter()
+                    .map(|x| (x * (k + 1) as f32 * 0.5).tanh() + 0.01 * k as f32)
+                    .collect()
+            })
+        })
         .collect()
 }
 
 #[test]
 fn demix_matches_reference() {
-    let Some(bytes) = read("demix.safetensors") else { return };
+    let Some(bytes) = read("demix.safetensors") else {
+        return;
+    };
     let fx = Fixture(SafeTensors::deserialize(&bytes).unwrap());
     for case in ["a", "b", "c", "d"] {
         let p = fx.i64(&format!("{case}.params"));
         let (chunk, overlap, len) = (p[0] as usize, p[1] as usize, p[2] as usize);
         let (_, mix) = fx.f32(&format!("{case}.mix"));
         let (_, want) = fx.f32(&format!("{case}.out"));
-        let mut d = Demixer::new([mix[..len].to_vec(), mix[len..].to_vec()], chunk, overlap, 6);
+        let mut d = Demixer::new(
+            [mix[..len].to_vec(), mix[len..].to_vec()],
+            chunk,
+            overlap,
+            6,
+        );
         let chunks = d.num_chunks();
         let mut seen = 0;
         while let Some(x) = d.next_input() {
@@ -143,9 +178,19 @@ fn demix_matches_reference() {
             seen += 1;
         }
         assert_eq!(seen, chunks);
-        let got: Vec<f32> = d.finish().into_iter().flat_map(|s| s.into_iter().flatten()).collect();
-        let max = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
-        println!("demix case {case}: chunk {chunk} overlap {overlap} length {len}, {chunks} chunks, max error {max:e}");
+        let got: Vec<f32> = d
+            .finish()
+            .into_iter()
+            .flat_map(|s| s.into_iter().flatten())
+            .collect();
+        let max = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        println!(
+            "demix case {case}: chunk {chunk} overlap {overlap} length {len}, {chunks} chunks, max error {max:e}"
+        );
         assert_eq!(got.len(), want.len());
         assert!(max < 1e-5);
     }
@@ -153,9 +198,15 @@ fn demix_matches_reference() {
 
 #[test]
 fn forward_matches_pytorch() {
-    let Some(weights) = read("bs_roformer_sw.f32.safetensors") else { return };
-    let Some(bytes) = read("forward.safetensors") else { return };
-    let Some(sbytes) = read("stft.safetensors") else { return };
+    let Some(weights) = read("bs_roformer_sw.f32.safetensors") else {
+        return;
+    };
+    let Some(bytes) = read("forward.safetensors") else {
+        return;
+    };
+    let Some(sbytes) = read("stft.safetensors") else {
+        return;
+    };
     let fx = Fixture(SafeTensors::deserialize(&bytes).unwrap());
     let sx = Fixture(SafeTensors::deserialize(&sbytes).unwrap());
     let dev = Default::default();
@@ -181,7 +232,10 @@ fn forward_matches_pytorch() {
     println!("band split (torch STFT): {db:.1} dB");
     assert!(db > 120.0);
     let x = model.band_split(to_tensor(features, &dev));
-    println!("band split (our STFT): {:.1} dB", snr(&vec3(x.swap_dims(0, 1)), &want));
+    println!(
+        "band split (our STFT): {:.1} dB",
+        snr(&vec3(x.swap_dims(0, 1)), &want)
+    );
 
     // Each layer from the PyTorch input to that layer.
     let mut prev = tfd_to_ftd(&shape, want);
@@ -201,7 +255,11 @@ fn forward_matches_pytorch() {
 
     for s in 0..STEMS.len() {
         let (_, want) = fx.f32(&format!("mask{s}"));
-        let got: Vec<f32> = model.mask_one(s, normed.clone()).into_data().to_vec().unwrap();
+        let got: Vec<f32> = model
+            .mask_one(s, normed.clone())
+            .into_data()
+            .to_vec()
+            .unwrap();
         assert_eq!(got.len(), frames * FEATURES);
         let db = snr(&got, &want);
         println!("mask {} ({}): {db:.1} dB", s, STEMS[s]);
@@ -213,9 +271,16 @@ fn forward_matches_pytorch() {
     // this clip, so a tiny absolute error is a large fraction of it.
     let (oshape, want) = fx.f32("output"); // [6, 2, L]
     let len = oshape[2];
-    let mix_energy: f64 = input.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() * len as f64 / n as f64;
+    let mix_energy: f64 =
+        input.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() * len as f64 / n as f64;
     let mut secs = 0.0;
-    for (label, feats) in [("torch STFT", torch_features(&sshape, &sdata)), ("our STFT", analyse(&[input[..n].to_vec(), input[n..].to_vec()]).1)] {
+    for (label, feats) in [
+        ("torch STFT", torch_features(&sshape, &sdata)),
+        (
+            "our STFT",
+            analyse(&[input[..n].to_vec(), input[n..].to_vec()]).1,
+        ),
+    ] {
         let t0 = std::time::Instant::now();
         let masks = model.forward(to_tensor(feats, &dev));
         let mask_data: Vec<f32> = masks.into_data().to_vec().unwrap();
@@ -228,23 +293,35 @@ fn forward_matches_pytorch() {
             for c in 0..2 {
                 let w = &want[(s * 2 + c) * len..(s * 2 + c + 1) * len];
                 dbs.push(snr(&audio[c], w));
-                err += audio[c].iter().zip(w).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum::<f64>();
+                err += audio[c]
+                    .iter()
+                    .zip(w)
+                    .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+                    .sum::<f64>();
             }
             let vs_mix = 10.0 * (mix_energy / err).log10();
-            println!("output {} ({label}): {:.1} / {:.1} dB vs stem, {vs_mix:.1} dB vs mix", STEMS[s], dbs[0], dbs[1]);
+            println!(
+                "output {} ({label}): {:.1} / {:.1} dB vs stem, {vs_mix:.1} dB vs mix",
+                STEMS[s], dbs[0], dbs[1]
+            );
             assert!(vs_mix > 70.0, "{} {label}", STEMS[s]);
         }
     }
     println!("forward pass on {frames} frames: {secs:.1} s");
 }
 
-
 /// Half-precision weights (half the download) against the f32 reference.
 #[test]
 fn f16_weights_stay_close() {
-    let Some(weights) = read("bs_roformer_sw.f16.safetensors") else { return };
-    let Some(bytes) = read("forward.safetensors") else { return };
-    let Some(sbytes) = read("stft.safetensors") else { return };
+    let Some(weights) = read("bs_roformer_sw.f16.safetensors") else {
+        return;
+    };
+    let Some(bytes) = read("forward.safetensors") else {
+        return;
+    };
+    let Some(sbytes) = read("stft.safetensors") else {
+        return;
+    };
     let fx = Fixture(SafeTensors::deserialize(&bytes).unwrap());
     let sx = Fixture(SafeTensors::deserialize(&sbytes).unwrap());
     let dev = Default::default();
@@ -254,22 +331,37 @@ fn f16_weights_stay_close() {
     let n = ishape[1];
     let (spec, _) = analyse(&[input[..n].to_vec(), input[n..].to_vec()]);
     let frames = spec[0].frames;
-    let masks: Vec<f32> = model.forward(to_tensor(torch_features(&sshape, &sdata), &dev)).into_data().to_vec().unwrap();
+    let masks: Vec<f32> = model
+        .forward(to_tensor(torch_features(&sshape, &sdata), &dev))
+        .into_data()
+        .to_vec()
+        .unwrap();
     let (oshape, want) = fx.f32("output");
     let len = oshape[2];
-    let mix_energy: f64 = input.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() * len as f64 / n as f64;
+    let mix_energy: f64 =
+        input.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() * len as f64 / n as f64;
     for s in 0..STEMS.len() {
-        let audio = apply_masks(&spec, &masks[s * frames * FEATURES..(s + 1) * frames * FEATURES]);
+        let audio = apply_masks(
+            &spec,
+            &masks[s * frames * FEATURES..(s + 1) * frames * FEATURES],
+        );
         let mut err = 0.0f64;
         let mut energy = 0.0f64;
         for c in 0..2 {
             let w = &want[(s * 2 + c) * len..(s * 2 + c + 1) * len];
-            err += audio[c].iter().zip(w).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum::<f64>();
+            err += audio[c]
+                .iter()
+                .zip(w)
+                .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+                .sum::<f64>();
             energy += w.iter().map(|b| (*b as f64).powi(2)).sum::<f64>();
         }
         let vs_stem = 10.0 * (energy / err).log10();
         let vs_mix = 10.0 * (mix_energy / err).log10();
-        println!("f16 weights, {}: {vs_stem:.1} dB vs stem, {vs_mix:.1} dB vs mix", STEMS[s]);
+        println!(
+            "f16 weights, {}: {vs_stem:.1} dB vs stem, {vs_mix:.1} dB vs mix",
+            STEMS[s]
+        );
         assert!(vs_mix > 40.0);
     }
 }
@@ -279,12 +371,19 @@ fn f16_weights_stay_close() {
 #[test]
 fn layer_in_parts_matches_layer() {
     use roformer::model::Axis;
-    let Some(weights) = read("bs_roformer_sw.f16.safetensors") else { return };
-    let Some(bytes) = read("forward.safetensors") else { return };
+    let Some(weights) = read("bs_roformer_sw.f16.safetensors") else {
+        return;
+    };
+    let Some(bytes) = read("forward.safetensors") else {
+        return;
+    };
     let fx = Fixture(SafeTensors::deserialize(&bytes).unwrap());
     let dev = Default::default();
     // A small element cap forces several sub-batches on both axes.
-    let opts = Options { max_elems: 1 << 20, ..Options::default() };
+    let opts = Options {
+        max_elems: 1 << 20,
+        ..Options::default()
+    };
     let model = BsRoformer::<NdArray>::load(&weights, &dev, opts).unwrap();
     let (shape, x) = fx.f32("band_split");
     let x = tfd_to_ftd(&shape, x);
@@ -294,14 +393,22 @@ fn layer_in_parts_matches_layer() {
     assert!(step < bands);
     let mut parts = Vec::new();
     for k in (0..bands).step_by(step) {
-        parts.push(model.transformer_part(3, Axis::Time, x.clone().narrow(0, k, step.min(bands - k))));
+        parts.push(model.transformer_part(
+            3,
+            Axis::Time,
+            x.clone().narrow(0, k, step.min(bands - k)),
+        ));
     }
     let x = Tensor::cat(parts, 0).swap_dims(0, 1);
     let step = model.sub_batch(frames, bands);
     assert!(step < frames);
     let mut parts = Vec::new();
     for k in (0..frames).step_by(step) {
-        parts.push(model.transformer_part(3, Axis::Freq, x.clone().narrow(0, k, step.min(frames - k))));
+        parts.push(model.transformer_part(
+            3,
+            Axis::Freq,
+            x.clone().narrow(0, k, step.min(frames - k)),
+        ));
     }
     let pieces = vec3(Tensor::cat(parts, 0).swap_dims(0, 1));
     let db = snr(&pieces, &whole);
