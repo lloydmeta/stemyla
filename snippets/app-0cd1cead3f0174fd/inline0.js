@@ -1,0 +1,57 @@
+
+async function dir(path, create) {
+  let d = await navigator.storage.getDirectory();
+  for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
+  return d;
+}
+function split(path) {
+  const i = path.lastIndexOf("/");
+  return [path.slice(0, i), path.slice(i + 1)];
+}
+export async function st_write(path, bytes) {
+  try {
+    const [d, n] = split(path);
+    const fh = await (await dir(d, true)).getFileHandle(n, { create: true });
+    const w = await fh.createWritable();
+    await w.write(bytes);
+    await w.close();
+    return true;
+  } catch (e) { console.warn("storage write failed", path, e); return false; }
+}
+export async function st_read(path) {
+  try {
+    const [d, n] = split(path);
+    const f = await (await (await dir(d, false)).getFileHandle(n)).getFile();
+    return new Uint8Array(await f.arrayBuffer());
+  } catch (e) { return null; }
+}
+export async function st_remove(path) {
+  try {
+    const [d, n] = split(path);
+    await (await dir(d, false)).removeEntry(n, { recursive: true });
+    return true;
+  } catch (e) { return false; }
+}
+export async function st_list(path) {
+  try {
+    const out = [];
+    for await (const [name, h] of (await dir(path, false)).entries()) if (h.kind === "directory") out.push(name);
+    return out;
+  } catch (e) { return []; }
+}
+export async function st_usage() {
+  try {
+    const e = await navigator.storage.estimate();
+    return [e.usage || 0, e.quota || 0];
+  } catch (e) { return [0, 0]; }
+}
+export function save_file(name, bytes, mime) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
