@@ -159,9 +159,11 @@ What a change to the model would touch:
 * Another checkpoint of the same configuration: only the weights file.
 * More or fewer layers: `DEPTH`.
 * Other heads or width: the constants in `roformer/src/lib.rs`, and the fixed sizes in `elementwise.wgsl` and `rmsnorm.wgsl`.
-* Another band split: `FREQS_PER_BANDS` only.  Every valid split still sums to 1,025 bins, so `FEATURES` stays 4,100.
+* Another band split: `FREQS_PER_BANDS`, and the group and band counts asserted in its test.  Every valid split still sums to 1,025 bins, so `FEATURES` stays 4,100.
 * Another STFT size: `N_FFT`, a `FREQS_PER_BANDS` that sums to the new `BINS`, and the 4,100 in `glu`, which is `FEATURES = BINS * CHANNELS * 2`.
 * A new operation, such as SiLU in place of GELU: a branch in the matmul epilogue, a variant of `Act`, and CPU checks for it.
+
+Any change to the shapes also touches `roformer-gpu/src/bench.rs`, whose kernel calibration and benchmark hard-code this model's matrix sizes and step counts.
 
 ## Browser storage
 
@@ -192,7 +194,7 @@ Each term links to a fuller explanation.
 * [FFT](https://en.wikipedia.org/wiki/Fast_Fourier_transform) (fast Fourier transform): a fast way to express a block of samples as a sum of sine waves, one per frequency, each with an amplitude and a phase.  The inverse FFT turns those back into samples.
 * [STFT](https://en.wikipedia.org/wiki/Short-time_Fourier_transform) (short-time Fourier transform): slides a short window along the audio and takes an FFT at each position, giving a grid of time slices by frequency bins, often called a spectrogram.  The inverse STFT turns such a grid back into audio.  Here the window is 2,048 samples and moves 512 at a time, as in [`torch.stft`](https://docs.pytorch.org/docs/stable/generated/torch.stft.html).
 * [Frequency bin](https://source-separation.github.io/tutorial/basics/tf_and_masking.html): one frequency row of the STFT grid.  A 2,048-sample FFT of real audio has 1,025 distinct bins (2,048 / 2 + 1), 21.5 Hz apart at 44.1 kHz.
-* [Hann window](https://en.wikipedia.org/wiki/Hann_function): a bell-shaped weighting, zero at both ends, applied to each slice before its FFT so the hard cut at the slice's edges does not smear energy across frequencies (spectral leakage).
+* [Hann window](https://en.wikipedia.org/wiki/Hann_function): a bell-shaped weighting that tapers to zero at the edges (here the periodic form, as `torch.hann_window`), applied to each slice before its FFT so the hard cut at the slice's edges does not smear energy across frequencies (spectral leakage).
 * [Magnitude and phase](https://en.wikipedia.org/wiki/Complex_number#Polar_form): the two halves of a complex number in polar form.  In an STFT cell the magnitude is how loud that frequency is in that slice and the phase is where its wave is in its cycle.
 * [Overlap-add](https://ccrma.stanford.edu/~jos/sasp/Overlap_Add_OLA_STFT_Processing.html): rebuilding a long signal from overlapping pieces by adding them where they overlap, with window weights that sum to a constant or are divided out, so the joins do not show.  Used twice here: between STFT slices and between chunks.
 * [Reflect padding](https://numpy.org/doc/stable/reference/generated/numpy.pad.html): extending a signal by mirroring it at its edge without repeating the edge sample, so `[1, 2, 3, 4]` padded by 2 becomes `[3, 2, 1, 2, 3, 4, 3, 2]`.  It avoids a sudden jump to silence at the ends.
