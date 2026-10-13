@@ -1,0 +1,26 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+dsp = { version = "0.1.0", path = "../dsp" }
+engine = { version = "0.1.0", path = "../engine" }
+hound = "3.5.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+synth = { version = "0.1.0", path = "../synth" }
+roformer = { version = "0.1.0", path = "../roformer" }
+# Default features give burn-ndarray rayon threads for the roformer command.
+burn = { version = "0.20.1", features = ["ndarray"] }
+# Reads PyTorch checkpoints (zip + pickle) in Rust, for `roformer-convert`.
+burn-store = { version = "0.20.1", default-features = false, features = ["std", "pytorch"] }
+half = "2.7.1"
+safetensors = "0.7.0"
+
+[lints]
+workspace = true
+
+[features]
+cpal = ["engine/cpal"]

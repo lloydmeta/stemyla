@@ -1,0 +1,15 @@
+target/
+dist/
+pages/
+# Audio, stems and model files are never committed: songs are copyrighted,
+# and the model weights have no stated licence.
+audio/
+stems/
+third_party/
+*.mp3
+*.wav
+*.safetensors
+*.ckpt
+**/tests/snapshots/**/*.diff.png
+**/tests/snapshots/**/*.new.png
+**/tests/snapshots/**/*.old.png

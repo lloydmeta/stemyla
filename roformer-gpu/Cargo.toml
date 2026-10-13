@@ -1,0 +1,21 @@
+[package]
+name = "roformer-gpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "BS-RoFormer SW on WebGPU with hand-written WGSL kernels driven by wgpu"
+
+[dependencies]
+roformer = { path = "../roformer", default-features = false }
+# Same wgpu as eframe, so the workspace builds one copy.  No GL backend:
+# the kernels need compute shaders, and the browser path is WebGPU only.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "webgpu", "vulkan", "metal", "dx12"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+futures-channel = "0.3.34"
+
+[dev-dependencies]
+pollster = "1.0.1"
+safetensors = "0.7.0"
+
+[lints]
+workspace = true

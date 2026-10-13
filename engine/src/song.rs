@@ -1,0 +1,204 @@
+//! A song is a set of equally long stereo stems at one sample rate.
+
+use crate::decode::{Audio, decode_bytes, decode_path};
+use anyhow::{Result, anyhow};
+use std::path::Path;
+
+#[derive(Clone, Debug)]
+pub struct Stem {
+    pub name: String,
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Song {
+    pub sample_rate: u32,
+    pub frames: usize,
+    pub stems: Vec<Stem>,
+}
+
+/// Lane order used when stems are loaded from a folder.  Unknown names go
+/// last, alphabetically.
+const PREFERRED_ORDER: [&str; 10] = [
+    "drums",
+    "bass",
+    "guitar",
+    "piano",
+    "keys",
+    "vocals",
+    "lead",
+    "other",
+    "harmonic",
+    "percussive",
+];
+
+/// File names that are never stems: the original mix is recomputed from the
+/// stems so every lane stays aligned.
+const NOT_STEMS: [&str; 3] = ["mix", "original", "truth"];
+
+fn rank(name: &str) -> (usize, String) {
+    let pos = PREFERRED_ORDER
+        .iter()
+        .position(|p| *p == name)
+        .unwrap_or(PREFERRED_ORDER.len());
+    (pos, name.to_owned())
+}
+
+impl Song {
+    /// Builds a song from decoded files.  Mono becomes stereo, extra channels
+    /// are dropped, every stem is resampled to the first stem's rate, and
+    /// shorter stems are padded with silence to the longest.
+    pub fn from_audio(mut items: Vec<(String, Audio)>) -> Result<Song> {
+        if items.is_empty() {
+            return Err(anyhow!("no stems to load"));
+        }
+        items.sort_by_key(|(n, _)| rank(n));
+        let sample_rate = items[0].1.sample_rate;
+        let mut stems = Vec::with_capacity(items.len());
+        for (name, audio) in items {
+            let (mut left, mut right) = match audio.channels.len() {
+                0 => return Err(anyhow!("stem {name} has no channels")),
+                1 => (audio.channels[0].clone(), audio.channels[0].clone()),
+                _ => (audio.channels[0].clone(), audio.channels[1].clone()),
+            };
+            if audio.sample_rate != sample_rate {
+                left = resample_linear(&left, audio.sample_rate, sample_rate);
+                right = resample_linear(&right, audio.sample_rate, sample_rate);
+            }
+            stems.push(Stem { name, left, right });
+        }
+        let frames = stems.iter().map(|s| s.left.len()).max().unwrap_or(0);
+        for s in &mut stems {
+            s.left.resize(frames, 0.0);
+            s.right.resize(frames, 0.0);
+        }
+        Ok(Song {
+            sample_rate,
+            frames,
+            stems,
+        })
+    }
+
+    /// Loads every WAV/MP3 in a folder as a stem (skipping `mix.*`).
+    pub fn load_folder(dir: &Path) -> Result<Song> {
+        let mut items = Vec::new();
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.path());
+        for e in entries {
+            let path = e.path();
+            let ext = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(str::to_ascii_lowercase);
+            if !matches!(ext.as_deref(), Some("wav" | "mp3")) {
+                continue;
+            }
+            let name = stem_name(&path.to_string_lossy());
+            if NOT_STEMS.contains(&name.as_str()) {
+                continue;
+            }
+            items.push((name, decode_path(&path)?));
+        }
+        Song::from_audio(items)
+    }
+
+    /// Loads in-memory files, as from a multi-file drop: `(file name, bytes)`.
+    pub fn load_files(files: Vec<(String, Vec<u8>)>) -> Result<Song> {
+        let mut items = Vec::new();
+        for (file_name, bytes) in files {
+            let name = stem_name(&file_name);
+            if NOT_STEMS.contains(&name.as_str()) {
+                continue;
+            }
+            let ext = file_name.rsplit('.').next().map(str::to_ascii_lowercase);
+            items.push((name, decode_bytes(bytes, ext.as_deref())?));
+        }
+        Song::from_audio(items)
+    }
+
+    pub fn duration_s(&self) -> f64 {
+        self.frames as f64 / self.sample_rate as f64
+    }
+
+    pub fn stem_index(&self, name: &str) -> Option<usize> {
+        self.stems.iter().position(|s| s.name == name)
+    }
+
+    /// The mix lane: every stem at full volume, summed with `dsp::mix`.
+    pub fn mix_lane(&self) -> (Vec<f32>, Vec<f32>) {
+        let volumes = vec![1.0; self.stems.len()];
+        let lefts: Vec<Vec<f32>> = self.stems.iter().map(|s| s.left.clone()).collect();
+        let rights: Vec<Vec<f32>> = self.stems.iter().map(|s| s.right.clone()).collect();
+        (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
+    }
+}
+
+/// `"path/to/Drums.wav"` becomes `"drums"`.
+pub fn stem_name(file_name: &str) -> String {
+    let base = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+    let base = base.rsplit_once('.').map_or(base, |(b, _)| b);
+    base.to_ascii_lowercase()
+}
+
+/// Linear-interpolation resampler.  Good enough for aligning a stray stem
+/// to the song rate; not used on the playback path.
+pub fn resample_linear(x: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to || x.is_empty() {
+        return x.to_vec();
+    }
+    let ratio = from as f64 / to as f64;
+    let n = ((x.len() as f64) / ratio).floor() as usize;
+    (0..n)
+        .map(|i| {
+            let p = i as f64 * ratio;
+            let j = p.floor() as usize;
+            let f = (p - j as f64) as f32;
+            let a = x[j];
+            let b = if j + 1 < x.len() { x[j + 1] } else { a };
+            a + (b - a) * f
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn audio(rate: u32, chans: Vec<Vec<f32>>) -> Audio {
+        Audio {
+            sample_rate: rate,
+            channels: chans,
+        }
+    }
+
+    #[test]
+    fn names_and_order() {
+        assert_eq!(stem_name("a/b/Drums.WAV"), "drums");
+        let s = Song::from_audio(vec![
+            ("zeta".into(), audio(10, vec![vec![0.0; 3]])),
+            ("bass".into(), audio(10, vec![vec![0.0; 3]])),
+            ("drums".into(), audio(10, vec![vec![0.0; 3]])),
+        ])
+        .unwrap();
+        let names: Vec<_> = s.stems.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["drums", "bass", "zeta"]);
+    }
+
+    #[test]
+    fn mono_padding_and_resampling() {
+        let s = Song::from_audio(vec![
+            (
+                "drums".into(),
+                audio(100, vec![vec![1.0; 10], vec![0.5; 10]]),
+            ),
+            ("bass".into(), audio(50, vec![vec![0.25; 4]])),
+        ])
+        .unwrap();
+        assert_eq!(s.frames, 10);
+        assert_eq!(s.stems[1].left.len(), 10);
+        assert_eq!(s.stems[1].left[..8], [0.25; 8]);
+        assert_eq!(s.stems[1].right[9], 0.0);
+        assert_eq!(s.stems[0].right[0], 0.5);
+    }
+}

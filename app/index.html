@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>[stemyla] Stem explorer</title>
+  <link rel="icon" href="data:,">
+  <link data-trunk rel="rust" data-bin="app" data-wasm-opt="z" data-cargo-profile="web-release" data-integrity="none" />
+  <!-- Stem separation worker: BS-RoFormer SW on WebGPU (worker/, roformer-gpu/). -->
+  <link data-trunk rel="rust" href="../worker/Cargo.toml" data-bin="stem-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-integrity="none" data-wasm-opt="z" data-cargo-profile="web-release" />
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1b1b1b; }
+    canvas { width: 100%; height: 100%; display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="stem_explorer"></canvas>
+</body>
+</html>

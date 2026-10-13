@@ -1,0 +1,27 @@
+[package]
+name = "roformer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "BS-RoFormer SW (6-stem music source separation): STFT, demixer, weights, and the network on Burn"
+
+[dependencies]
+# Optional: the STFT, demixer, weights reader and constants build without
+# it (the browser worker uses those with its own WebGPU kernels).  With
+# it, `model` runs the network on a Burn backend (the CPU reference).
+burn = { version = "0.20.1", default-features = false, features = ["std"], optional = true }
+half = "2.7.1"
+realfft = "3.5.0"
+safetensors = "0.7.0"
+
+[features]
+default = ["ndarray"]
+burn = ["dep:burn"]
+ndarray = ["burn", "burn/ndarray", "burn/simd"]
+
+[dev-dependencies]
+# Default burn features give burn-ndarray its rayon multi-threading in tests.
+burn = { version = "0.20.1", features = ["ndarray"] }
+
+[lints]
+workspace = true
