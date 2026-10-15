@@ -449,3 +449,61 @@ fn check_kernels_accepts_all() {
     assert!(problems.is_empty(), "{problems:?}");
     assert!(g.usable.get().iter().all(|&u| u));
 }
+
+/// A device opened for profiling records GPU time per dispatch under
+/// labels naming the kernel (and, for matmuls, the shape and tile).  Skips
+/// when the adapter has no `timestamp-query`.
+#[test]
+fn profile_labels_dispatches() {
+    let Ok(g) = pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
+    else {
+        eprintln!("skipping: no adapter");
+        return;
+    };
+    if !g.profiling() {
+        eprintln!("skipping: adapter without timestamp-query");
+        return;
+    }
+    let (m, n, k) = (70, 90, 33);
+    let a = g.upload("a", &rand(m * k, 1));
+    let b = g.upload("b", &rand(k * n, 2));
+    let c = g.buffer("c", m * n);
+    for _ in 0..2 {
+        let mut r = g.rec();
+        r.matmul(&MatMul::new(
+            (&a, View::rows(0, k)),
+            (&b, View::rows(0, n)),
+            (&c, View::rows(0, n)),
+            m,
+            n,
+            k,
+        ));
+        r.softmax(&c, m, n);
+        r.submit();
+    }
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert!(g.take_errors().is_empty());
+    let totals = g.take_profile();
+    let mm = format!(
+        "matmul 70x90x33 x1 {}",
+        TILES[g.policy.get().pick(m, n)].name
+    );
+    assert_eq!(totals.get(&mm).map(|v| v.0), Some(2), "{totals:?}");
+    assert_eq!(totals.get("softmax").map(|v| v.0), Some(2), "{totals:?}");
+    assert!(
+        totals.values().all(|v| v.1 >= 0.0 && v.1 < 10.0),
+        "{totals:?}"
+    );
+    assert!(g.take_profile().is_empty(), "totals are cleared");
+    let lines = roformer_gpu::profile_report(&totals);
+    assert!(lines.last().unwrap().starts_with("profile: total GPU time"));
+}
+
+/// The usual device never asks for optional features.
+#[test]
+fn plain_device_does_not_profile() {
+    let Some(g) = gpu() else { return };
+    assert!(!g.profiling());
+    assert!(g.device.features().is_empty());
+}

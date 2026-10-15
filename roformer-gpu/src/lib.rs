@@ -18,6 +18,8 @@
 pub mod bench;
 pub mod net;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
@@ -215,6 +217,26 @@ pub struct Gpu {
     dummy: wgpu::Buffer,
     uniforms: wgpu::Buffer,
     errors: Arc<Mutex<Vec<String>>>,
+    /// GPU timestamps per dispatch, on a device opened for profiling.
+    prof: Option<Prof>,
+}
+
+/// Timestamp queries around every dispatch of a profiled [`Gpu`].  Each
+/// profiled submission runs one compute pass per dispatch with a timestamp
+/// at either end, resolves them, and copies them to its own readback
+/// buffer; [`Gpu::collect_profile`] adds the finished ones to the totals.
+/// Splitting a step into one pass per dispatch costs a little speed, so
+/// only `?profile` runs open a device this way.
+struct Prof {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    /// Nanoseconds per timestamp tick.
+    period: f64,
+    /// Readback buffers of submissions not yet collected, with the label
+    /// of each dispatch in them.
+    pending: RefCell<Vec<(Vec<String>, wgpu::Buffer)>>,
+    /// Dispatch count and GPU seconds per label.
+    totals: RefCell<BTreeMap<String, (usize, f64)>>,
 }
 
 struct Kernels {
@@ -325,6 +347,17 @@ impl Gpu {
     /// `WGPU_ADAPTER_NAME` select an adapter natively (tests use
     /// SwiftShader's Vulkan driver this way).
     pub async fn new(power: wgpu::PowerPreference) -> Result<Self, String> {
+        Self::open(power, false).await
+    }
+
+    /// Like [`Gpu::new`], but also asks for `timestamp-query` when the
+    /// adapter offers it, so that [`Gpu::profiling`] is true.  The limits
+    /// are the same defaults; only the optional feature differs.
+    pub async fn new_profiling(power: wgpu::PowerPreference) -> Result<Self, String> {
+        Self::open(power, true).await
+    }
+
+    async fn open(power: wgpu::PowerPreference, profile: bool) -> Result<Self, String> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::PRIMARY | wgpu::Backends::BROWSER_WEBGPU;
         let instance = wgpu::Instance::new(desc.with_env());
@@ -337,9 +370,15 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("no GPU adapter: {e}"))?;
+        let features = if profile {
+            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("roformer"),
+                required_features: features,
                 required_limits: wgpu::Limits::defaults(),
                 ..Default::default()
             })
@@ -369,6 +408,25 @@ impl Gpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let prof = device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| Prof {
+                set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("profile"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: (2 * MAX_DISPATCHES) as u32,
+                }),
+                resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("profile resolve"),
+                    size: 16 * MAX_DISPATCHES,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                period: f64::from(queue.get_timestamp_period()),
+                pending: RefCell::new(Vec::new()),
+                totals: RefCell::new(BTreeMap::new()),
+            });
         Self {
             device,
             queue,
@@ -379,7 +437,57 @@ impl Gpu {
             dummy,
             uniforms,
             errors,
+            prof,
         }
+    }
+
+    /// True when this device records GPU time per dispatch.
+    pub fn profiling(&self) -> bool {
+        self.prof.is_some()
+    }
+
+    /// Reads the timestamps of every profiled submission so far into the
+    /// totals.  Call after [`Gpu::done`]; does nothing on a device that is
+    /// not profiling.
+    pub async fn collect_profile(&self) -> Result<(), String> {
+        let Some(prof) = &self.prof else {
+            return Ok(());
+        };
+        let pending = std::mem::take(&mut *prof.pending.borrow_mut());
+        for (labels, staging) in pending {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            staging.map_async(wgpu::MapMode::Read, .., move |r| {
+                let _ = tx.send(r);
+            });
+            self.poll();
+            rx.await
+                .map_err(|_| "profile readback cancelled".to_string())?
+                .map_err(|e| format!("profile readback: {e}"))?;
+            let view = staging
+                .get_mapped_range(..)
+                .map_err(|e| format!("profile readback: {e}"))?;
+            let ticks: &[u64] = bytemuck::cast_slice(&view);
+            let mut totals = prof.totals.borrow_mut();
+            for (i, label) in labels.into_iter().enumerate() {
+                let (start, end) = (ticks[2 * i], ticks[2 * i + 1]);
+                let secs = end.saturating_sub(start) as f64 * prof.period * 1e-9;
+                let e = totals.entry(label).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 += secs;
+            }
+            drop(view);
+            staging.unmap();
+        }
+        Ok(())
+    }
+
+    /// GPU seconds per dispatch label since the last call, and clears them.
+    /// Labels name the kernel, and for matmuls the shape and tile.
+    pub fn take_profile(&self) -> BTreeMap<String, (usize, f64)> {
+        self.prof
+            .as_ref()
+            .map(|p| std::mem::take(&mut *p.totals.borrow_mut()))
+            .unwrap_or_default()
     }
 
     /// WebGPU errors reported since the last call (validation, out of
@@ -576,8 +684,28 @@ impl Gpu {
             gpu: self,
             params: Vec::new(),
             cmds: Vec::new(),
+            labels: Vec::new(),
         }
     }
+}
+
+/// Report lines for [`Gpu::take_profile`] totals: GPU time per label,
+/// largest first, with its share of the total, then the total itself.
+pub fn profile_report(totals: &BTreeMap<String, (usize, f64)>) -> Vec<String> {
+    let all: f64 = totals.values().map(|v| v.1).sum();
+    let mut rows: Vec<_> = totals.iter().collect();
+    rows.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|(label, (n, secs))| {
+            format!(
+                "profile: {label}: {secs:.3} s GPU in {n} dispatches ({:.1}%)",
+                100.0 * secs / all.max(1e-12)
+            )
+        })
+        .collect();
+    out.push(format!("profile: total GPU time {all:.3} s"));
+    out
 }
 
 /// One strided operand of a [`MatMul`]: element `(r, c)` of batch item
@@ -724,10 +852,24 @@ pub struct Rec<'g> {
     gpu: &'g Gpu,
     params: Vec<u8>,
     cmds: Vec<(Kernel, wgpu::BindGroup, [u32; 3])>,
+    /// One label per dispatch, kept only when the device is profiling.
+    labels: Vec<String>,
 }
 
 impl Rec<'_> {
     fn push(&mut self, kernel: Kernel, bufs: &[&wgpu::Buffer], params: &[u8], groups: [u32; 3]) {
+        if self.gpu.prof.is_some() {
+            let label = match &kernel {
+                Kernel::MatMul(t) => format!("matmul {}", TILES[*t].name),
+                Kernel::Softmax => "softmax".into(),
+                Kernel::RmsNorm => "rmsnorm".into(),
+                Kernel::Rope => "rope".into(),
+                Kernel::Gate => "gate".into(),
+                Kernel::Transpose => "transpose".into(),
+                Kernel::Glu => "glu".into(),
+            };
+            self.labels.push(label);
+        }
         let offset = self.params.len() as u64;
         assert!(
             offset < PARAM_STRIDE * MAX_DISPATCHES,
@@ -785,20 +927,46 @@ impl Rec<'_> {
         let gpu = self.gpu;
         gpu.queue.write_buffer(&gpu.uniforms, 0, &self.params);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        {
+        let k = &gpu.kernels;
+        let pipeline = |kernel: &Kernel| match kernel {
+            Kernel::MatMul(t) => &k.matmul.0[*t],
+            Kernel::Softmax => &k.softmax.0,
+            Kernel::RmsNorm => &k.rmsnorm.0,
+            Kernel::Rope => &k.rope,
+            Kernel::Gate => &k.gate,
+            Kernel::Transpose => &k.transpose,
+            Kernel::Glu => &k.glu,
+        };
+        if let Some(prof) = &gpu.prof {
+            // One pass per dispatch, timestamped at both ends.
+            for (i, (kernel, bg, [x, y, z])) in self.cmds.iter().enumerate() {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &prof.set,
+                        beginning_of_pass_write_index: Some(2 * i as u32),
+                        end_of_pass_write_index: Some(2 * i as u32 + 1),
+                    }),
+                });
+                pass.set_pipeline(pipeline(kernel));
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*x, *y, *z);
+            }
+            let n = 2 * self.cmds.len() as u32;
+            let bytes = 8 * u64::from(n);
+            let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("profile readback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            enc.resolve_query_set(&prof.set, 0..n, &prof.resolve, 0);
+            enc.copy_buffer_to_buffer(&prof.resolve, 0, &staging, 0, bytes);
+            prof.pending.borrow_mut().push((self.labels, staging));
+        } else {
             let mut pass = enc.begin_compute_pass(&Default::default());
-            let k = &gpu.kernels;
             for (kernel, bg, [x, y, z]) in &self.cmds {
-                let p = match kernel {
-                    Kernel::MatMul(t) => &k.matmul.0[*t],
-                    Kernel::Softmax => &k.softmax.0,
-                    Kernel::RmsNorm => &k.rmsnorm.0,
-                    Kernel::Rope => &k.rope,
-                    Kernel::Gate => &k.gate,
-                    Kernel::Transpose => &k.transpose,
-                    Kernel::Glu => &k.glu,
-                };
-                pass.set_pipeline(p);
+                pass.set_pipeline(pipeline(kernel));
                 pass.set_bind_group(0, bg, &[]);
                 pass.dispatch_workgroups(*x, *y, *z);
             }
@@ -859,6 +1027,16 @@ impl Rec<'_> {
             bytemuck::bytes_of(&p),
             groups,
         );
+        if let Some(label) = self.labels.last_mut() {
+            *label = format!(
+                "matmul {}x{}x{} x{} {}",
+                mm.m,
+                mm.n,
+                mm.k,
+                mm.outer * mm.inner,
+                tile.name
+            );
+        }
     }
 
     /// In-place softmax over `rows` contiguous rows of `len`.

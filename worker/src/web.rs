@@ -92,8 +92,12 @@ export async function fetch_bytes(url) {
     return new Uint8Array(await r.arrayBuffer());
   } catch (e) { return null; }
 }
+export function perf_now() { return performance.now(); }
 "#)]
 extern "C" {
+    /// `performance.now()`: milliseconds at 100 µs resolution (5 µs when
+    /// cross-origin isolated), against `Date.now()`'s whole milliseconds.
+    fn perf_now() -> f64;
     async fn cache_get(name: &str) -> JsValue;
     async fn cache_put(name: &str, bytes: &Uint8Array) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
@@ -126,7 +130,7 @@ fn scope() -> DedicatedWorkerGlobalScope {
 }
 
 fn now_s() -> f64 {
-    js_sys::Date::now() / 1000.0
+    perf_now() / 1000.0
 }
 
 fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
@@ -200,7 +204,17 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     } else {
         wgpu::PowerPreference::HighPerformance
     };
-    let g = Rc::new(Gpu::new(power).await?);
+    // `?profile=1` opens the device with `timestamp-query` (when offered)
+    // so every step reports GPU time per kernel; otherwise no features.
+    let g = Rc::new(if get(msg, "profile").is_truthy() {
+        let g = Gpu::new_profiling(power).await?;
+        if !g.profiling() {
+            log("profile: this adapter has no timestamp-query; no GPU times");
+        }
+        g
+    } else {
+        Gpu::new(power).await?
+    });
     // Every matmul kernel against the CPU on small products; one that
     // fails on this GPU is never used (the original one failing is fatal).
     for p in g.check_kernels().await? {
@@ -351,6 +365,8 @@ struct Pace {
     /// kind (which include compiling), for a throughput figure.
     flops: f64,
     secs: f64,
+    /// Wall time of every step, the first of each kind included.
+    wall: f64,
 }
 
 impl Pace {
@@ -364,6 +380,7 @@ impl Pace {
             steps: 0,
             flops: 0.0,
             secs: 0.0,
+            wall: 0.0,
         }
     }
 
@@ -373,8 +390,10 @@ impl Pace {
         job.run(step);
         gpu.done().await;
         let dt = now_s() - t0;
+        gpu.collect_profile().await?;
         let first = self.seen.insert(step.kind());
         self.steps += 1;
+        self.wall += dt;
         if !first {
             self.flops += step.flops(job.frames);
             self.secs += dt;
@@ -503,6 +522,7 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
         );
     }
     log(&format!("separation: {}", pace.summary()));
+    log_profile(gpu, &pace);
     post(
         &[("type", "done".into()), ("secs", (now_s() - t0).into())],
         &[],
@@ -653,6 +673,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
             let (_, want) = tensor_f32(&ct, "stems")?;
             let n = ashape[1];
             let t0 = now_s();
+            gpu.take_profile();
             let (spec, feats) = analyse(&[audio[..n].to_vec(), audio[n..].to_vec()]);
             let job = Job::new(&gpu, &net, feats.len() / FEATURES);
             let mut pace = Pace::new(msg);
@@ -688,6 +709,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
                 now_s() - t0,
                 pace.summary()
             ));
+            log_profile(&gpu, &pace);
         }
     } else {
         log("selftest: skipping the full chunk (stages failed)");
@@ -708,6 +730,24 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         &[],
     );
     Ok(())
+}
+
+/// With `?profile=1`: GPU time per kernel since the last report, and how
+/// much of the paced steps' wall time the GPU spent busy.
+fn log_profile(gpu: &Gpu, pace: &Pace) {
+    if !gpu.profiling() {
+        return;
+    }
+    let totals = gpu.take_profile();
+    let busy: f64 = totals.values().map(|v| v.1).sum();
+    for l in roformer_gpu::profile_report(&totals) {
+        log(&l);
+    }
+    log(&format!(
+        "profile: GPU busy {busy:.2} s of {:.2} s of step wall time ({:.0}% waiting, submitting or between dispatches); one pass per dispatch while profiling",
+        pace.wall,
+        100.0 * (1.0 - busy / pace.wall.max(1e-9))
+    ));
 }
 
 fn report(worst: &mut f64, name: &str, db: f64) {
@@ -752,7 +792,15 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
     } else {
         (0.3, 0.2)
     };
-    let table = roformer_gpu::bench::measure(&g, warm, round, now_s, |l| log(&l)).await;
+    let rounds = get(msg, "bench_rounds")
+        .as_f64()
+        .map_or(3, |r| r.max(1.0) as usize);
+    let only = get(msg, "bench")
+        .as_string()
+        .and_then(|s| roformer_gpu::bench::parse_kernels(&s));
+    let table =
+        roformer_gpu::bench::measure(&g, warm, round, rounds, only.as_deref(), now_s, |l| log(&l))
+            .await;
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
     }

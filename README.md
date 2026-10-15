@@ -17,7 +17,7 @@ Open the published page (for example `https://beachape.com/stemyla/`) in a brows
 
 Each song you drop, and its stems once separated, stays in the browser, so a reload brings it back.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **About** links to the model, its code and its paper.
 
-Page options, added to the address: `?selftest` checks the GPU against reference results (when served with the reference files, see below); `?bench` times the GPU kernels; `?gpu=integrated` asks for the low-power GPU.
+Page options, added to the address: `?selftest` checks the GPU against reference results (when served with the reference files, see below); `?bench` times the GPU kernels (`?bench=s64,v64` only those); `?profile=1` logs GPU time per kernel after the self-test or a separation; `?gpu=integrated` asks for the low-power GPU.
 
 ## The model
 

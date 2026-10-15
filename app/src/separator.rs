@@ -12,9 +12,12 @@
 //! run stops; default 5), `selftest` (once the model is loaded, compare
 //! the GPU with the CPU reference files served under /selftest/ and log the
 //! result; `selftest=stages` skips the full 13 s chunk, for slow software
-//! GPUs), `bench` (time every matmul kernel on the model's shapes; see
-//! `roformer_gpu::bench`) and `mm` (`auto` or a kernel name from
-//! `roformer_gpu::TILES`, to compare kernels end to end).
+//! GPUs), `bench` (time every matmul kernel on the model's shapes, or only
+//! those listed, as in `bench=s64,v64`; see `roformer_gpu::bench`),
+//! `bench_rounds` (interleaved rounds per kernel and shape; default 3),
+//! `profile=1` (GPU time per kernel from timestamp queries, logged after
+//! the self-test's full chunk and after a separation) and `mm` (`auto` or
+//! a kernel name from `roformer_gpu::TILES`, to compare kernels end to end).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -123,12 +126,12 @@ fn url_settings() -> Vec<(String, JsValue)> {
             continue;
         };
         match k {
-            "chunk" | "overlap" | "max_elems" | "step_limit" | "bench_quick" => {
+            "chunk" | "overlap" | "max_elems" | "step_limit" | "bench_quick" | "bench_rounds" => {
                 if let Ok(n) = v.parse::<f64>() {
                     out.push((k.to_string(), JsValue::from_f64(n)));
                 }
             }
-            "gpu" | "selftest" | "mm" | "model_url" => {
+            "gpu" | "selftest" | "mm" | "model_url" | "bench" | "profile" => {
                 out.push((k.to_string(), JsValue::from_str(v)))
             }
             _ => {}

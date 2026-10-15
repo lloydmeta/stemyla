@@ -226,9 +226,15 @@ fn buffers(gpu: &Gpu) -> Buffers {
 
 /// Seconds per dispatch of one shape with one kernel.  Runs for `warm`
 /// seconds first (pipeline compilation, and GPU clocks that rise only under
-/// load), then two rounds of at least `round` seconds, keeping the faster.
-/// Submissions hold at most 4 GFLOP, so no command buffer runs long even on
-/// a slow GPU.
+/// load), then one round of at least `round` seconds.  Submissions hold at
+/// most 4 GFLOP, so no command buffer runs long even on a slow GPU.
+///
+/// The round queues enough submissions before each wait for the GPU that
+/// one wait covers at least [`WAIT_SECS`].  Waiting after every submission
+/// made each one cost a whole number of milliseconds on Chrome, whatever
+/// the GPU did (rates fell on levels such as 905, 1,207 and 1,810 GFLOP/s
+/// for one shape), so the per-dispatch figure measured the wait as much as
+/// the kernel.
 async fn time_one(
     gpu: &Gpu,
     b: &Buffers,
@@ -240,69 +246,130 @@ async fn time_one(
 ) -> f64 {
     let mm = matmul(s, b, tile);
     let per_submit = ((4e9 / s.flops()) as usize).clamp(1, 32);
-    let submit = async || {
-        let mut r = gpu.rec();
-        for _ in 0..per_submit {
-            r.matmul(&mm);
+    let submit = |times: usize| {
+        for _ in 0..times {
+            let mut r = gpu.rec();
+            for _ in 0..per_submit {
+                r.matmul(&mm);
+            }
+            r.submit();
         }
-        r.submit();
-        gpu.done().await;
     };
     let t0 = now();
+    let mut one = f64::INFINITY;
     loop {
-        submit().await;
+        let t = now();
+        submit(1);
+        gpu.done().await;
+        one = one.min(now() - t);
         if now() - t0 >= warm {
             break;
         }
     }
-    let mut best = f64::INFINITY;
-    for _ in 0..2 {
-        let (t0, mut count) = (now(), 0);
-        while count == 0 || now() - t0 < round {
-            submit().await;
-            count += per_submit;
-        }
-        best = best.min((now() - t0) / count as f64);
+    let queued = ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64);
+    let (t0, mut count) = (now(), 0);
+    while count == 0 || now() - t0 < round {
+        submit(queued);
+        gpu.done().await;
+        count += queued * per_submit;
     }
-    best
+    (now() - t0) / count as f64
 }
 
-/// Seconds per dispatch of each shape with each kernel (`[shape][tile]`;
-/// infinite for kernels that failed [`Gpu::check_kernels`]).  `now` is a
-/// clock in seconds (the browser has no `std::time`).  With `warm` 0.3 and
-/// `round` 0.2 it takes a few minutes on a real GPU.
+/// Wall time each wait for the GPU should cover in a timed round.
+pub const WAIT_SECS: f64 = 0.05;
+
+/// One kernel's timings on one shape over the interleaved rounds.
+#[derive(Clone, Debug)]
+pub struct Timing {
+    /// Seconds per dispatch in each round; empty for a kernel that was not
+    /// run (failed [`Gpu::check_kernels`] or not selected).
+    pub rounds: Vec<f64>,
+}
+
+impl Timing {
+    /// Median seconds per dispatch, or infinity when not run.
+    pub fn median(&self) -> f64 {
+        if self.rounds.is_empty() {
+            return f64::INFINITY;
+        }
+        let mut v = self.rounds.clone();
+        v.sort_by(f64::total_cmp);
+        let n = v.len();
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            0.5 * (v[n / 2 - 1] + v[n / 2])
+        }
+    }
+
+    /// (max - min) / median over the rounds.
+    pub fn spread(&self) -> f64 {
+        let lo = self.rounds.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = self.rounds.iter().copied().fold(0.0, f64::max);
+        if self.rounds.len() < 2 {
+            0.0
+        } else {
+            (hi - lo) / self.median()
+        }
+    }
+}
+
+/// Seconds per dispatch of each shape with each kernel (`[shape][tile]`,
+/// the median of `rounds` rounds; infinite for kernels that failed
+/// [`Gpu::check_kernels`] or are not in `only`).  The kernels take turns
+/// within each round (A, B, A, B, ...), so a GPU that heats up and slows
+/// down over the run slows every kernel alike instead of whichever ran
+/// last.  `now` is a clock in seconds.  With `warm` 0.3, `round` 0.2 and
+/// 3 rounds it takes a few minutes on a real GPU.
 pub async fn measure(
     gpu: &Gpu,
     warm: f64,
     round: f64,
+    rounds: usize,
+    only: Option<&[usize]>,
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
-) -> Vec<Vec<f64>> {
+) -> Vec<Vec<Timing>> {
     let b = buffers(gpu);
+    let run: Vec<bool> = (0..TILES.len())
+        .map(|t| gpu.usable.get()[t] && only.is_none_or(|o| o.contains(&t)))
+        .collect();
     let mut table = Vec::new();
     for s in &shapes() {
-        let mut row = Vec::new();
+        let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
+        for r in 0..rounds.max(1) {
+            for (t, timing) in row.iter_mut().enumerate() {
+                if !run[t] {
+                    continue;
+                }
+                let w = if r == 0 { warm } else { 0.0 };
+                timing
+                    .rounds
+                    .push(time_one(gpu, &b, s, t, w, round, &now).await);
+            }
+        }
         for (t, tile) in TILES.iter().enumerate() {
             if !gpu.usable.get()[t] {
-                row.push(f64::INFINITY);
                 log(format!(
                     "bench: {} {}: skipped (failed the start-up check on this GPU)",
                     s.name, tile.name
                 ));
-                continue;
+            } else if run[t] {
+                let tm = &row[t];
+                log(format!(
+                    "bench: {} ({}x{}x{}, x{}) {}: {:.1} GFLOP/s (median of {}, spread {:.1}%)",
+                    s.name,
+                    s.m,
+                    s.n,
+                    s.k,
+                    s.outer * s.inner,
+                    tile.name,
+                    s.flops() / tm.median() / 1e9,
+                    tm.rounds.len(),
+                    100.0 * tm.spread()
+                ));
             }
-            let secs = time_one(gpu, &b, s, t, warm, round, &now).await;
-            row.push(secs);
-            log(format!(
-                "bench: {} ({}x{}x{}, x{}) {}: {:.1} GFLOP/s",
-                s.name,
-                s.m,
-                s.n,
-                s.k,
-                s.outer * s.inner,
-                tile.name,
-                s.flops() / secs / 1e9
-            ));
         }
         table.push(row);
     }
@@ -310,6 +377,23 @@ pub async fn measure(
         log(format!("bench: WebGPU error: {e}"));
     }
     table
+}
+
+/// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`
+/// for an empty list, a lone "1" or "true" (all kernels), or unknown names.
+pub fn parse_kernels(list: &str) -> Option<Vec<usize>> {
+    let names: Vec<&str> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() || names == ["1"] || names == ["true"] {
+        return None;
+    }
+    names
+        .iter()
+        .map(|n| TILES.iter().position(|t| t.name == *n))
+        .collect()
 }
 
 /// Chooses this GPU's matmul kernels, once per GPU: times every kernel
@@ -361,15 +445,19 @@ pub async fn calibrate(
 }
 
 /// Summary lines: estimated matmul seconds per chunk for each kernel alone
-/// and for the best kernel per shape.
-pub fn summary(table: &[Vec<f64>]) -> Vec<String> {
+/// and for the best kernel per shape, from the medians.
+pub fn summary(table: &[Vec<Timing>]) -> Vec<String> {
     let shapes = shapes();
     let flops: f64 = shapes.iter().map(|s| s.flops() * s.per_chunk as f64).sum();
+    let med: Vec<Vec<f64>> = table
+        .iter()
+        .map(|row| row.iter().map(Timing::median).collect())
+        .collect();
     let total = |pick: &dyn Fn(usize) -> usize| -> f64 {
         shapes
             .iter()
             .enumerate()
-            .map(|(i, s)| table[i][pick(i)] * s.per_chunk as f64)
+            .map(|(i, s)| med[i][pick(i)] * s.per_chunk as f64)
             .sum()
     };
     let mut out = Vec::new();
@@ -380,11 +468,14 @@ pub fn summary(table: &[Vec<f64>]) -> Vec<String> {
         )
     };
     for (t, tile) in TILES.iter().enumerate() {
-        out.push(line(&format!("all {}", tile.name), total(&|_| t)));
+        let secs = total(&|_| t);
+        if secs.is_finite() {
+            out.push(line(&format!("all {}", tile.name), secs));
+        }
     }
     let best = |i: usize| {
         (0..TILES.len())
-            .min_by(|&a, &b| table[i][a].total_cmp(&table[i][b]))
+            .min_by(|&a, &b| med[i][a].total_cmp(&med[i][b]))
             .unwrap_or(0)
     };
     out.push(line("best per shape", total(&best)));
@@ -404,6 +495,28 @@ mod tests {
 
     /// The listed shapes add up to the chunk's 6.1 TFLOP of matmuls within
     /// about 5% (full-size frequency steps and one mask width overcount it).
+    #[test]
+    fn timing_median_and_spread() {
+        let t = Timing {
+            rounds: vec![3.0, 1.0, 2.0],
+        };
+        assert_eq!(t.median(), 2.0);
+        assert!((t.spread() - 1.0).abs() < 1e-12);
+        let t = Timing {
+            rounds: vec![4.0, 2.0],
+        };
+        assert_eq!(t.median(), 3.0);
+        assert!(Timing { rounds: vec![] }.median().is_infinite());
+    }
+
+    #[test]
+    fn kernel_lists() {
+        assert_eq!(parse_kernels("1"), None);
+        assert_eq!(parse_kernels(""), None);
+        assert_eq!(parse_kernels("s64,v64"), Some(vec![0, 1]));
+        assert_eq!(parse_kernels("s64,nope"), None);
+    }
+
     #[test]
     fn shapes_cover_a_chunk() {
         let total: f64 = shapes()
