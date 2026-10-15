@@ -379,6 +379,195 @@ pub async fn measure(
     table
 }
 
+/// Seconds per call of `record` (which adds dispatches to one submission),
+/// timed like [`time_one`]: `warm` seconds first, then one round of at
+/// least `round` seconds with enough submissions per wait to cover
+/// [`WAIT_SECS`].
+async fn time_rec(
+    gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    now: &impl Fn() -> f64,
+    record: &impl Fn(&mut crate::Rec),
+) -> f64 {
+    let submit = |times: usize| {
+        for _ in 0..times {
+            let mut r = gpu.rec();
+            record(&mut r);
+            r.submit();
+        }
+    };
+    let t0 = now();
+    let mut one = f64::INFINITY;
+    loop {
+        let t = now();
+        submit(1);
+        gpu.done().await;
+        one = one.min(now() - t);
+        if now() - t0 >= warm {
+            break;
+        }
+    }
+    let queued = ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64);
+    let (t0, mut count) = (now(), 0);
+    while count == 0 || now() - t0 < round {
+        submit(queued);
+        gpu.done().await;
+        count += queued;
+    }
+    (now() - t0) / count as f64
+}
+
+/// Attention per chunk with the separate dispatches (scores matmul with
+/// this GPU's matmul policy, softmax, p.v matmul, gate) against each fused
+/// kernel that passed [`Gpu::check_attention`]: the time axis (one band
+/// of 1,151 frames per step, 744 steps) and the frequency axis (88 frames
+/// of 62 bands per step, 168 steps).  Kernels take turns over `rounds`
+/// rounds; medians are reported.  Returns (name, seconds per chunk) for
+/// "split" and each usable fused kernel.
+pub async fn measure_attention(
+    gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    rounds: usize,
+    now: impl Fn() -> f64,
+    mut log: impl FnMut(String),
+) -> Vec<(String, f64)> {
+    let cases = [("time", T, 1usize, 744usize), ("freq", 62, 88, 168)];
+    let row = 1536;
+    let max_tokens = cases.iter().map(|c| c.1 * c.2).max().unwrap_or(1);
+    let max_scores = cases.iter().map(|c| 8 * c.1 * c.1 * c.2).max().unwrap_or(1);
+    let qkv = gpu.buffer("bench qkv", max_tokens * row);
+    let gates = gpu.buffer("bench gates", max_tokens * 8);
+    let scores = gpu.buffer("bench scores", max_scores);
+    let o = gpu.buffer("bench o", max_tokens * 512);
+    let alpha = 0.125f32;
+    let usable = gpu.attention_usable.get();
+    let mut names = vec!["split".to_string()];
+    for (a, at) in crate::ATTENTIONS.iter().enumerate() {
+        if usable[a] {
+            names.push(at.name.to_string());
+        }
+    }
+    let mut per_chunk = vec![0.0; names.len()];
+    for (case, seq, nseq, steps) in cases {
+        let split = |r: &mut crate::Rec| {
+            let mut sc = MatMul::new(
+                (
+                    &qkv,
+                    View {
+                        off: 0,
+                        rs: row,
+                        cs: 1,
+                        bo: seq * row,
+                        bi: 64,
+                    },
+                ),
+                (
+                    &qkv,
+                    View {
+                        off: 512,
+                        rs: 1,
+                        cs: row,
+                        bo: seq * row,
+                        bi: 64,
+                    },
+                ),
+                (
+                    &scores,
+                    View {
+                        off: 0,
+                        rs: seq,
+                        cs: 1,
+                        bo: 8 * seq * seq,
+                        bi: seq * seq,
+                    },
+                ),
+                seq,
+                seq,
+                64,
+            );
+            sc.outer = nseq;
+            sc.inner = 8;
+            sc.alpha = alpha;
+            r.matmul(&sc);
+            r.softmax(&scores, nseq * 8 * seq, seq);
+            let mut pv = MatMul::new(
+                (
+                    &scores,
+                    View {
+                        off: 0,
+                        rs: seq,
+                        cs: 1,
+                        bo: 8 * seq * seq,
+                        bi: seq * seq,
+                    },
+                ),
+                (
+                    &qkv,
+                    View {
+                        off: 1024,
+                        rs: row,
+                        cs: 1,
+                        bo: seq * row,
+                        bi: 64,
+                    },
+                ),
+                (
+                    &o,
+                    View {
+                        off: 0,
+                        rs: 512,
+                        cs: 1,
+                        bo: seq * 512,
+                        bi: 64,
+                    },
+                ),
+                seq,
+                64,
+                seq,
+            );
+            pv.outer = nseq;
+            pv.inner = 8;
+            r.matmul(&pv);
+            r.gate(&o, &gates, seq * nseq);
+        };
+        let mut times: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+        for rd in 0..rounds.max(1) {
+            let w = if rd == 0 { warm } else { 0.0 };
+            times[0].push(time_rec(gpu, w, round, &now, &split).await);
+            let mut k = 1;
+            for (a, _) in crate::ATTENTIONS.iter().enumerate() {
+                if !usable[a] {
+                    continue;
+                }
+                let fused = |r: &mut crate::Rec| {
+                    r.attention(a, &qkv, Some(&gates), &o, seq, nseq, alpha);
+                };
+                times[k].push(time_rec(gpu, w, round, &now, &fused).await);
+                k += 1;
+            }
+        }
+        for (k, name) in names.iter().enumerate() {
+            let t = Timing {
+                rounds: times[k].clone(),
+            };
+            per_chunk[k] += t.median() * steps as f64;
+            log(format!(
+                "bench: attention {case} (seq {seq}, x{nseq}) {name}: {:.2} ms per step, {:.2} s per chunk (median of {}, spread {:.1}%)",
+                1e3 * t.median(),
+                t.median() * steps as f64,
+                t.rounds.len(),
+                100.0 * t.spread()
+            ));
+        }
+    }
+    for (name, secs) in names.iter().zip(&per_chunk) {
+        log(format!("bench: attention {name}: {secs:.2} s per chunk"));
+    }
+    names.into_iter().zip(per_chunk).collect()
+}
+
 /// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`
 /// for an empty list, a lone "1" or "true" (all kernels), or unknown names.
 pub fn parse_kernels(list: &str) -> Option<Vec<usize>> {

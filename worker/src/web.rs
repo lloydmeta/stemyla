@@ -183,12 +183,27 @@ async fn gpu_text(gpu: &Gpu) -> String {
         .map(|(t, _)| t.name)
         .collect();
     let policy = gpu.policy.get().name();
+    let attn_ok: Vec<&str> = roformer_gpu::ATTENTIONS
+        .iter()
+        .zip(gpu.attention_usable.get())
+        .filter(|(_, u)| *u)
+        .map(|(a, _)| a.name)
+        .collect();
+    let attn = gpu
+        .attention
+        .get()
+        .map_or("split", |a| roformer_gpu::ATTENTIONS[a].name);
     format!(
-        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}",
+        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused checked OK: {}",
         l.max_compute_invocations_per_workgroup,
         l.max_compute_workgroup_storage_size / 1024,
         l.max_storage_buffer_binding_size >> 20,
         usable.join(" "),
+        if attn_ok.is_empty() {
+            "none".to_string()
+        } else {
+            attn_ok.join(" ")
+        },
     )
 }
 
@@ -220,6 +235,12 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     for p in g.check_kernels().await? {
         log(&p);
     }
+    // Fused attention kernels against the CPU; one that fails is never
+    // used.  They stay off unless `?attn=` names one.
+    for p in g.check_attention().await {
+        log(&p);
+    }
+    apply_attention(&g, msg);
     if get(msg, "mm").is_string() {
         apply_policy(&g, msg);
     } else {
@@ -246,6 +267,7 @@ async fn handle(msg: JsValue) {
     let kind = get(&msg, "type").as_string().unwrap_or_default();
     if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
         apply_policy(&g, &msg);
+        apply_attention(&g, &msg);
     }
     let result = match kind.as_str() {
         "init" => init(&msg).await,
@@ -782,6 +804,28 @@ fn apply_policy(gpu: &Gpu, msg: &JsValue) {
     }
 }
 
+/// `?attn=` in the page URL: `split` for separate dispatches, or a fused
+/// attention kernel's name from `roformer_gpu::ATTENTIONS` (used only if
+/// it passed the start-up check on this GPU).
+fn apply_attention(gpu: &Gpu, msg: &JsValue) {
+    let Some(name) = get(msg, "attn").as_string() else {
+        return;
+    };
+    if name == "split" {
+        gpu.attention.set(None);
+        return;
+    }
+    match roformer_gpu::ATTENTIONS.iter().position(|a| a.name == name) {
+        Some(a) if gpu.attention_usable.get()[a] => gpu.attention.set(Some(a)),
+        Some(_) => log(&format!(
+            "attention kernel {name} failed the start-up check on this GPU; using split attention"
+        )),
+        None => log(&format!(
+            "unknown attention kernel {name}; using split attention"
+        )),
+    }
+}
+
 /// Times every matmul kernel on the shapes of a full chunk (`?bench`).
 async fn bench(msg: &JsValue) -> Result<(), String> {
     let g = gpu(msg).await?;
@@ -804,6 +848,7 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
     }
+    roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
         "bench finished in {:.0} s; results in the browser console",
         now_s() - t0

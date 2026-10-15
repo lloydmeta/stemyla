@@ -578,6 +578,53 @@ impl<'a> Job<'a> {
         g.bias = Some((&b.gates_b, 0, 0));
         r.matmul(&g);
 
+        let alpha = (DIM_HEAD as f32).powf(-0.5);
+        if let Some(fused) = self.gpu.attention.get() {
+            // Scores, softmax, p.v and gate in one dispatch; the scores
+            // never reach memory.
+            r.attention(fused, &self.qkv, Some(&self.gates), &self.o, seq, nb, alpha);
+        } else {
+            self.split_attention(r, seq, nb, alpha);
+        }
+        let mut out = MatMul::new(
+            (&self.o, View::rows(0, INNER)),
+            (&b.out, View::t(0, INNER)),
+            (buf, View::rows(x_off, DIM)),
+            ntok,
+            DIM,
+            INNER,
+        );
+        out.accumulate = true;
+        r.matmul(&out);
+
+        r.rmsnorm(buf, x_off, &b.ff_norm, &self.xn, 0, ntok);
+        let mut h = MatMul::new(
+            (&self.xn, View::rows(0, DIM)),
+            (&b.w1, View::t(0, DIM)),
+            (&self.h, View::rows(0, HIDDEN)),
+            ntok,
+            HIDDEN,
+            DIM,
+        );
+        h.bias = Some((&b.b1, 0, 0));
+        h.act = Act::Gelu;
+        r.matmul(&h);
+        let mut y = MatMul::new(
+            (&self.h, View::rows(0, HIDDEN)),
+            (&b.w2, View::t(0, HIDDEN)),
+            (buf, View::rows(x_off, DIM)),
+            ntok,
+            DIM,
+            HIDDEN,
+        );
+        y.bias = Some((&b.b2, 0, 0));
+        y.accumulate = true;
+        r.matmul(&y);
+    }
+
+    /// Attention as separate dispatches: scores matmul into `self.scores`,
+    /// softmax, p.v matmul, gate.  The fused kernel computes the same.
+    fn split_attention(&self, r: &mut Rec, seq: usize, nb: usize, alpha: f32) {
         // scores[s, h, i, j] = q[s, i, h] . k[s, j, h] / 8
         let row = 3 * INNER;
         let mut sc = MatMul::new(
@@ -617,7 +664,7 @@ impl<'a> Job<'a> {
         );
         sc.outer = nb;
         sc.inner = HEADS;
-        sc.alpha = (DIM_HEAD as f32).powf(-0.5);
+        sc.alpha = alpha;
         r.matmul(&sc);
         r.softmax(&self.scores, nb * HEADS * seq, seq);
         // o[s, i, h*64 + d] = sum_j p[s, h, i, j] v[s, j, h, d]
@@ -659,41 +706,7 @@ impl<'a> Job<'a> {
         pv.outer = nb;
         pv.inner = HEADS;
         r.matmul(&pv);
-        r.gate(&self.o, &self.gates, ntok);
-        let mut out = MatMul::new(
-            (&self.o, View::rows(0, INNER)),
-            (&b.out, View::t(0, INNER)),
-            (buf, View::rows(x_off, DIM)),
-            ntok,
-            DIM,
-            INNER,
-        );
-        out.accumulate = true;
-        r.matmul(&out);
-
-        r.rmsnorm(buf, x_off, &b.ff_norm, &self.xn, 0, ntok);
-        let mut h = MatMul::new(
-            (&self.xn, View::rows(0, DIM)),
-            (&b.w1, View::t(0, DIM)),
-            (&self.h, View::rows(0, HIDDEN)),
-            ntok,
-            HIDDEN,
-            DIM,
-        );
-        h.bias = Some((&b.b1, 0, 0));
-        h.act = Act::Gelu;
-        r.matmul(&h);
-        let mut y = MatMul::new(
-            (&self.h, View::rows(0, HIDDEN)),
-            (&b.w2, View::t(0, HIDDEN)),
-            (buf, View::rows(x_off, DIM)),
-            ntok,
-            DIM,
-            HIDDEN,
-        );
-        y.bias = Some((&b.b2, 0, 0));
-        y.accumulate = true;
-        r.matmul(&y);
+        r.gate(&self.o, &self.gates, nb * seq);
     }
 
     fn mask_part(&self, r: &mut Rec, mg: &MaskGroup, k: usize, n: usize) {

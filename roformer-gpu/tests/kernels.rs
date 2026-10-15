@@ -546,3 +546,158 @@ fn compile_each() {
         eprintln!("{}: {:.1} s, {rss}", tile.name, t0.elapsed().as_secs_f64());
     }
 }
+
+/// Every fused attention kernel against `attention_cpu` on the network's
+/// sequence lengths (1,151 frames on the time axis, 62 bands on the
+/// frequency axis) and a ragged one, with and without the gate.
+#[test]
+fn attention_matches_cpu() {
+    let Some(g) = gpu() else { return };
+    for (seq, nseq, gated) in [
+        (133, 2, true),
+        (62, 3, true),
+        (62, 1, false),
+        (1151, 1, true),
+    ] {
+        let tokens = seq * nseq;
+        let qkv = rand(tokens * 1536, 7);
+        let gates = rand(tokens * 8, 8);
+        let alpha = 0.125;
+        let want = roformer_gpu::attention_cpu(&qkv, gated.then_some(&gates[..]), seq, nseq, alpha);
+        let (qb, gb) = (g.upload("qkv", &qkv), g.upload("gates", &gates));
+        for (a, at) in roformer_gpu::ATTENTIONS.iter().enumerate() {
+            let ob = g.buffer("o", tokens * 512);
+            let mut r = g.rec();
+            r.attention(a, &qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
+            r.submit();
+            let got = read(&g, &ob, tokens * 512);
+            let errors = g.take_errors();
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_close(
+                &got,
+                &want,
+                2e-5,
+                &format!("attention {} seq {seq} x{nseq}", at.name),
+            );
+        }
+    }
+}
+
+/// The fused kernels give what the separate path in net.rs gives (scores
+/// matmul, softmax, p.v matmul, gate), with net.rs's own strides.
+#[test]
+fn attention_matches_split_path() {
+    let Some(g) = gpu() else { return };
+    let (seq, nseq) = (133, 2);
+    let tokens = seq * nseq;
+    let row = 1536;
+    let qkv = g.upload("qkv", &rand(tokens * row, 9));
+    let gates = g.upload("gates", &rand(tokens * 8, 10));
+    let scores = g.buffer("scores", nseq * 8 * seq * seq);
+    let split = g.buffer("o split", tokens * 512);
+    let alpha = 0.125f32;
+    let mut r = g.rec();
+    let mut sc = MatMul::new(
+        (
+            &qkv,
+            View {
+                off: 0,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &qkv,
+            View {
+                off: 512,
+                rs: 1,
+                cs: row,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        seq,
+        seq,
+        64,
+    );
+    sc.outer = nseq;
+    sc.inner = 8;
+    sc.alpha = alpha;
+    r.matmul(&sc);
+    r.softmax(&scores, nseq * 8 * seq, seq);
+    let mut pv = MatMul::new(
+        (
+            &scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        (
+            &qkv,
+            View {
+                off: 1024,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &split,
+            View {
+                off: 0,
+                rs: 512,
+                cs: 1,
+                bo: seq * 512,
+                bi: 64,
+            },
+        ),
+        seq,
+        64,
+        seq,
+    );
+    pv.outer = nseq;
+    pv.inner = 8;
+    r.matmul(&pv);
+    r.gate(&split, &gates, tokens);
+    r.submit();
+    let want = read(&g, &split, tokens * 512);
+    for (a, at) in roformer_gpu::ATTENTIONS.iter().enumerate() {
+        let fused = g.buffer("o fused", tokens * 512);
+        let mut r = g.rec();
+        r.attention(a, &qkv, Some(&gates), &fused, seq, nseq, alpha);
+        r.submit();
+        let got = read(&g, &fused, tokens * 512);
+        assert!(g.take_errors().is_empty());
+        assert_close(
+            &got,
+            &want,
+            2e-5,
+            &format!("attention {} vs split path", at.name),
+        );
+    }
+}
+
+#[test]
+fn check_attention_accepts_all() {
+    let Some(g) = gpu() else { return };
+    let problems = pollster::block_on(g.check_attention());
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(g.attention_usable.get().iter().all(|u| *u));
+}

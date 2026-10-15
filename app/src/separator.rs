@@ -17,7 +17,9 @@
 //! `bench_rounds` (interleaved rounds per kernel and shape; default 3),
 //! `profile=1` (GPU time per kernel from timestamp queries, logged after
 //! the self-test's full chunk and after a separation) and `mm` (`auto` or
-//! a kernel name from `roformer_gpu::TILES`, to compare kernels end to end).
+//! a kernel name from `roformer_gpu::TILES`, to compare kernels end to end)
+//! and `attn` (`split`, or a fused attention kernel from
+//! `roformer_gpu::ATTENTIONS` such as `a4`; split by default).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -131,7 +133,7 @@ fn url_settings() -> Vec<(String, JsValue)> {
                     out.push((k.to_string(), JsValue::from_f64(n)));
                 }
             }
-            "gpu" | "selftest" | "mm" | "model_url" | "bench" | "profile" => {
+            "gpu" | "selftest" | "mm" | "model_url" | "bench" | "profile" | "attn" => {
                 out.push((k.to_string(), JsValue::from_str(v)))
             }
             _ => {}

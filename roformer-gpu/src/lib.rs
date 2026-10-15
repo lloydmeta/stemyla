@@ -319,6 +319,109 @@ pub const TILES: [Tile; 10] = [
     },
 ];
 
+/// A fused attention kernel (`attention.wgsl`): `lanes` threads per query,
+/// key tiles of `bkv`.  Replaces the scores matmul, softmax, p.v matmul
+/// and gate of one attention block when [`Gpu::attention`] names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attention {
+    pub name: &'static str,
+    pub lanes: usize,
+    pub bkv: usize,
+}
+
+/// Every fused attention kernel; [`Gpu::check_attention`] checks each.
+pub const ATTENTIONS: [Attention; 2] = [
+    Attention {
+        name: "a4",
+        lanes: 4,
+        bkv: 16,
+    },
+    Attention {
+        name: "a8",
+        lanes: 8,
+        bkv: 16,
+    },
+];
+
+impl Attention {
+    fn source(&self) -> String {
+        const D: usize = 64;
+        let (l, b) = (self.lanes, self.bkv);
+        assert!(
+            256usize.is_multiple_of(l) && b.is_multiple_of(l) && D.is_multiple_of(l),
+            "{self:?}"
+        );
+        let (kpl, dpl) = (b / l, D / l);
+        let mut q_load = String::new();
+        for d in 0..D {
+            q_load += &format!("  let q{d} = qkv[qbase + {d}u];\n");
+        }
+        let mut o_decls = String::new();
+        let mut store = String::new();
+        for n in 0..dpl {
+            o_decls += &format!("  var o{n} = 0.0;\n");
+            store += &format!("    o[ob + {}u] = o{n} * f;\n", l * n);
+        }
+        let mut scores = String::new();
+        for k in 0..kpl {
+            scores += &format!("    let kj{k} = lane + {}u;\n    var s{k} = 0.0;\n", l * k);
+            for d in 0..D {
+                scores += &format!("    s{k} = fma(q{d}, kv[kj{k} * SK + {d}u], s{k});\n");
+            }
+            scores += &format!("    s{k} = select(NEG, s{k} * p.alpha, j0 + kj{k} < p.seq);\n");
+        }
+        let mut mx = "s0".to_string();
+        for k in 1..kpl {
+            mx = format!("max({mx}, s{k})");
+        }
+        scores += &format!("    let mx = {mx};\n");
+        let mut probs = String::new();
+        let mut sum = "l * sc".to_string();
+        for k in 0..kpl {
+            probs += &format!("    let p{k} = exp(s{k} - mn);\n    ps[r * SP + kj{k}] = p{k};\n");
+            sum += &format!(" + p{k}");
+        }
+        probs += &format!("    l = {sum};\n");
+        for n in 0..dpl {
+            probs += &format!("    o{n} = o{n} * sc;\n");
+        }
+        let mut pv = String::new();
+        for j in 0..b {
+            pv += &format!("    let pj{j} = ps[r * SP + {j}u];\n");
+            for n in 0..dpl {
+                pv += &format!(
+                    "    o{n} = fma(pj{j}, kv[{j}u * SK + lane + {}u], o{n});\n",
+                    l * n
+                );
+            }
+        }
+        include_str!("shaders/attention.wgsl")
+            .replace("{LANES}", &l.to_string())
+            .replace("{BKV}", &b.to_string())
+            .replace("{KV_LEN}", &(b * (D + 1)).to_string())
+            .replace("{PS_LEN}", &((256 / l) * (b + 1)).to_string())
+            .replace("{Q_LOAD}", q_load.trim_end())
+            .replace("{O_DECLS}", o_decls.trim_end())
+            .replace("{SCORES}", scores.trim_end())
+            .replace("{PROBS}", probs.trim_end())
+            .replace("{PV}", pv.trim_end())
+            .replace("{STORE}", store.trim_end())
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AttentionParams {
+    seq: u32,
+    row: u32,
+    k_off: u32,
+    v_off: u32,
+    o_row: u32,
+    gate_row: u32,
+    flags: u32,
+    alpha: f32,
+}
+
 /// Which matmul kernel to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatMulPolicy {
@@ -377,6 +480,14 @@ pub struct Gpu {
     /// Kernels of [`TILES`] that passed [`Gpu::check_kernels`] on this GPU
     /// (all, until it runs).  The policy never picks one that failed.
     pub usable: std::cell::Cell<[bool; TILES.len()]>,
+    /// The fused attention kernel (index into [`ATTENTIONS`]) that
+    /// [`net::Job`] uses, or `None` for the separate scores matmul,
+    /// softmax, p.v matmul and gate.  Set it only to a kernel that
+    /// [`Gpu::check_attention`] passed on this GPU.
+    pub attention: std::cell::Cell<Option<usize>>,
+    /// Fused attention kernels that passed [`Gpu::check_attention`] (none,
+    /// until it runs).
+    pub attention_usable: std::cell::Cell<[bool; ATTENTIONS.len()]>,
     kernels: Kernels,
     /// Bound where a kernel has an input it does not use for this dispatch.
     dummy: wgpu::Buffer,
@@ -417,6 +528,9 @@ struct Kernels {
     transpose: wgpu::ComputePipeline,
     glu: wgpu::ComputePipeline,
     elementwise: wgpu::BindGroupLayout,
+    /// One per entry of [`ATTENTIONS`], compiled on first use; bound like
+    /// the element-wise kernels (read, read, read-write, uniform).
+    attention: Vec<std::cell::OnceCell<wgpu::ComputePipeline>>,
 }
 
 #[derive(Clone, Copy)]
@@ -504,7 +618,23 @@ impl Kernels {
             transpose: pipeline(device, &e, "transpose3", &ew),
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
+            attention: ATTENTIONS
+                .iter()
+                .map(|_| std::cell::OnceCell::new())
+                .collect(),
         }
+    }
+
+    fn attention_pipeline(&self, device: &wgpu::Device, a: usize) -> &wgpu::ComputePipeline {
+        self.attention[a].get_or_init(|| {
+            let at = &ATTENTIONS[a];
+            pipeline(
+                device,
+                &shader(device, at.name, &at.source()),
+                "main",
+                &self.elementwise,
+            )
+        })
     }
 
     /// The pipeline of matmul kernel `t`, compiled the first time it is
@@ -616,6 +746,8 @@ impl Gpu {
             info,
             policy: std::cell::Cell::new(MatMulPolicy::Fixed(0)),
             usable: std::cell::Cell::new([true; TILES.len()]),
+            attention: std::cell::Cell::new(None),
+            attention_usable: std::cell::Cell::new([false; ATTENTIONS.len()]),
             kernels,
             dummy,
             uniforms,
@@ -862,6 +994,75 @@ impl Gpu {
         Ok(problems)
     }
 
+    /// Runs every fused attention kernel on a small ragged case (two
+    /// sequences of 37 tokens, with gates) and compares it with
+    /// [`attention_cpu`].  A kernel that disagrees, or that the browser
+    /// rejects, is marked unusable on this GPU; returns one line per
+    /// failure.  Sets [`Gpu::attention_usable`].
+    pub async fn check_attention(&self) -> Vec<String> {
+        let (seq, nseq) = (37, 2);
+        let tokens = seq * nseq;
+        let mut st = 0x9e37_79b9u32;
+        let mut rand = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    st ^= st << 13;
+                    st ^= st >> 17;
+                    st ^= st << 5;
+                    (st % 2001) as f32 / 1000.0 - 1.0
+                })
+                .collect()
+        };
+        let (qkv, gates) = (rand(tokens * 1536), rand(tokens * 8));
+        let alpha = 0.125;
+        let want = attention_cpu(&qkv, Some(&gates), seq, nseq, alpha);
+        let (qb, gb) = (
+            self.upload("check qkv", &qkv),
+            self.upload("check gates", &gates),
+        );
+        let mut usable = [false; ATTENTIONS.len()];
+        let mut problems = Vec::new();
+        for (a, at) in ATTENTIONS.iter().enumerate() {
+            let ob = self.buffer("check o", tokens * 512);
+            let mut r = self.rec();
+            r.attention(a, &qb, Some(&gb), &ob, seq, nseq, alpha);
+            r.submit();
+            let got = match self.read(&ob, 0, tokens * 512).await {
+                Ok(v) => v,
+                Err(e) => {
+                    problems.push(format!("attention kernel {}: {e}; not used", at.name));
+                    continue;
+                }
+            };
+            let worst = got
+                .iter()
+                .zip(&want)
+                .map(|(g, w)| {
+                    if g.is_finite() {
+                        (g - w).abs() / (1.0 + w.abs())
+                    } else {
+                        f32::INFINITY
+                    }
+                })
+                .fold(0.0f32, f32::max);
+            let errors = self.take_errors();
+            if worst > 1e-4 || !errors.is_empty() {
+                let why = errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| format!("relative error {worst:.1e}"));
+                problems.push(format!(
+                    "attention kernel {} gives wrong results on this GPU ({why}); not used",
+                    at.name
+                ));
+            } else {
+                usable[a] = true;
+            }
+        }
+        self.attention_usable.set(usable);
+        problems
+    }
+
     pub fn rec(&self) -> Rec<'_> {
         Rec {
             gpu: self,
@@ -870,6 +1071,53 @@ impl Gpu {
             labels: Vec::new(),
         }
     }
+}
+
+/// Attention as [`Rec::attention`] computes it, on the CPU in f64: `qkv`
+/// is `[nseq * seq, 1536]`, the result `[nseq * seq, 512]`.  The reference
+/// for the kernel checks.
+pub fn attention_cpu(
+    qkv: &[f32],
+    gates: Option<&[f32]>,
+    seq: usize,
+    nseq: usize,
+    alpha: f32,
+) -> Vec<f32> {
+    let mut o = vec![0.0f32; nseq * seq * 512];
+    let mut sc = vec![0.0f64; seq];
+    for s in 0..nseq {
+        for h in 0..8 {
+            for i in 0..seq {
+                let qi = (s * seq + i) * 1536 + h * 64;
+                let mut mx = f64::NEG_INFINITY;
+                for (j, v) in sc.iter_mut().enumerate() {
+                    let kj = (s * seq + j) * 1536 + 512 + h * 64;
+                    let mut d = 0.0f64;
+                    for c in 0..64 {
+                        d += f64::from(qkv[qi + c]) * f64::from(qkv[kj + c]);
+                    }
+                    *v = d * f64::from(alpha);
+                    mx = mx.max(*v);
+                }
+                let mut sum = 0.0;
+                for v in sc.iter_mut() {
+                    *v = (*v - mx).exp();
+                    sum += *v;
+                }
+                let g = gates.map_or(1.0, |g| {
+                    1.0 / (1.0 + (-f64::from(g[(s * seq + i) * 8 + h])).exp())
+                });
+                for c in 0..64 {
+                    let mut acc = 0.0f64;
+                    for (j, v) in sc.iter().enumerate() {
+                        acc += v * f64::from(qkv[(s * seq + j) * 1536 + 1024 + h * 64 + c]);
+                    }
+                    o[(s * seq + i) * 512 + h * 64 + c] = (g * acc / sum) as f32;
+                }
+            }
+        }
+    }
+    o
 }
 
 /// Report lines for [`Gpu::take_profile`] totals: GPU time per label,
@@ -1022,6 +1270,7 @@ fn grid(groups: usize) -> (u32, u32) {
 
 enum Kernel {
     MatMul(usize),
+    Attention(usize),
     Softmax,
     RmsNorm,
     Rope,
@@ -1044,6 +1293,7 @@ impl Rec<'_> {
         if self.gpu.prof.is_some() {
             let label = match &kernel {
                 Kernel::MatMul(t) => format!("matmul {}", TILES[*t].name),
+                Kernel::Attention(a) => format!("attention {}", ATTENTIONS[*a].name),
                 Kernel::Softmax => "softmax".into(),
                 Kernel::RmsNorm => "rmsnorm".into(),
                 Kernel::Rope => "rope".into(),
@@ -1113,6 +1363,7 @@ impl Rec<'_> {
         let k = &gpu.kernels;
         let pipeline = |kernel: &Kernel| match kernel {
             Kernel::MatMul(t) => k.matmul_pipeline(&gpu.device, *t),
+            Kernel::Attention(a) => k.attention_pipeline(&gpu.device, *a),
             Kernel::Softmax => &k.softmax.0,
             Kernel::RmsNorm => &k.rmsnorm.0,
             Kernel::Rope => &k.rope,
@@ -1270,6 +1521,45 @@ impl Rec<'_> {
     }
 
     /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
+    /// Fused attention for `nseq` sequences of `seq` tokens with kernel
+    /// `a` of [`ATTENTIONS`]: `o[t, h*64 + d] = sigmoid(gates[t, h]) *
+    /// sum_j softmax_j(alpha * q_t . k_j) v[j, h*64 + d]` per head, with
+    /// q, k and v in a `[tokens, 1536]` qkv buffer at column offsets 0,
+    /// 512 and 1024, `o` `[tokens, 512]` and `gates` `[tokens, 8]` (no
+    /// gate when `None`).  The same result as the scores matmul, softmax,
+    /// p.v matmul and gate in [`net::Job`], in one dispatch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention(
+        &mut self,
+        a: usize,
+        qkv: &wgpu::Buffer,
+        gates: Option<&wgpu::Buffer>,
+        o: &wgpu::Buffer,
+        seq: usize,
+        nseq: usize,
+        alpha: f32,
+    ) {
+        let at = ATTENTIONS[a];
+        let p = AttentionParams {
+            seq: u(seq),
+            row: 1536,
+            k_off: 512,
+            v_off: 1024,
+            o_row: 512,
+            gate_row: 8,
+            flags: u32::from(gates.is_some()),
+            alpha,
+        };
+        let groups = [u(seq.div_ceil(256 / at.lanes)), 8, u(nseq)];
+        let g = gates.unwrap_or(&self.gpu.dummy);
+        self.push(
+            Kernel::Attention(a),
+            &[qkv, g, o],
+            bytemuck::bytes_of(&p),
+            groups,
+        );
+    }
+
     pub fn gate(&mut self, o: &wgpu::Buffer, gates: &wgpu::Buffer, tokens: usize) {
         let dummy = &self.gpu.dummy;
         self.elementwise(Kernel::Gate, [dummy, gates, o], tokens * 512, [0, 0, 0]);
