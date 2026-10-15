@@ -32,11 +32,26 @@ const PARAM_STRIDE: u64 = 256;
 /// Dispatches one [`Rec`] may hold.
 const MAX_DISPATCHES: u64 = 64;
 
+/// How a matmul kernel's threads share out the output tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// The original hand-written kernel, `matmul.wgsl` (64 x 64, each
+    /// thread every 16th row and column, loop-indexed accumulators).
+    Original,
+    /// `matmul_tiled.wgsl`: each thread a `tm` x `tn` block, accumulators
+    /// in named `vec4`s.
+    Blocked,
+    /// `matmul_interleaved.wgsl`: each thread every `bm / tm`-th row and
+    /// `bn / tn`-th column, accumulators in named scalars; rows of the
+    /// workgroup tiles padded by `pad` floats.
+    Interleaved { pad: usize, prefetch: bool },
+}
+
 /// A matmul kernel's tile shape: a workgroup of 256 threads computes a
 /// `bm` x `bn` block of the output, each thread `tm` x `tn` of it, stepping
 /// through K `bk` at a time.  The first entry of [`TILES`] is the original
-/// hand-written kernel (`matmul.wgsl`); the others are `matmul_tiled.wgsl`
-/// with these numbers filled in.
+/// hand-written kernel (`matmul.wgsl`); the others fill these numbers into
+/// a template chosen by `layout`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub name: &'static str,
@@ -45,13 +60,98 @@ pub struct Tile {
     pub bk: usize,
     pub tm: usize,
     pub tn: usize,
+    pub layout: Layout,
 }
 
 impl Tile {
     fn source(&self) -> String {
-        if self.name == TILES[0].name {
-            return include_str!("shaders/matmul.wgsl").to_string();
+        match self.layout {
+            Layout::Original => include_str!("shaders/matmul.wgsl").to_string(),
+            Layout::Blocked => self.blocked_source(),
+            Layout::Interleaved { pad, prefetch } => self.interleaved_source(pad, prefetch),
         }
+    }
+
+    fn interleaved_source(&self, pad: usize, prefetch: bool) -> String {
+        let (tx, ty) = (self.bn / self.tn, self.bm / self.tm);
+        assert_eq!(tx * ty, 256, "{self:?}");
+        assert!(
+            (self.bm * self.bk).is_multiple_of(256) && (self.bn * self.bk).is_multiple_of(256),
+            "{self:?}"
+        );
+        let (la, lb) = (self.bm * self.bk / 256, self.bn * self.bk / 256);
+        let mut decls = String::new();
+        let mut compute = String::new();
+        let mut epilogue = String::new();
+        for i in 0..self.tm {
+            for j in 0..self.tn {
+                decls += &format!("  var acc_{i}_{j} = 0.0;\n");
+                epilogue += &format!(
+                    "  store(r0 + {}u, c0 + {}u, ob, bias_base, acc_{i}_{j});\n",
+                    ty * i,
+                    tx * j
+                );
+            }
+        }
+        for i in 0..self.tm {
+            compute += &format!("      let a{i} = as_[ab + {}u];\n", ty * i);
+        }
+        for j in 0..self.tn {
+            compute += &format!("      let b{j} = bs_[bb + {}u];\n", tx * j);
+        }
+        for i in 0..self.tm {
+            for j in 0..self.tn {
+                compute += &format!("      acc_{i}_{j} = fma(a{i}, b{j}, acc_{i}_{j});\n");
+            }
+        }
+        // Moving one K tile into workgroup memory: element tid + 256 l of
+        // each tile, straight from global memory or via registers.
+        let (mut first, mut stage, mut next) = (String::new(), String::new(), String::new());
+        for l in 0..la {
+            let e = format!("tid + {}u", 256 * l);
+            if prefetch {
+                first += &format!("  var pa{l} = a_get({e}, 0u, row0, a_base);\n");
+                stage += &format!("    as_[a_slot({e})] = pa{l};\n");
+                next += &format!("    pa{l} = a_get({e}, k0 + BK, row0, a_base);\n");
+            }
+        }
+        if !prefetch {
+            // A loop rather than unrolled copies: nothing here needs a
+            // constant index, and SwiftShader compiled the unrolled form
+            // for minutes, with gigabytes of memory.
+            stage += &format!(
+                "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[a_slot(e)] = a_get(e, k0, row0, a_base); }}\n"
+            );
+            stage += &format!(
+                "    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[b_slot(e)] = b_get(e, k0, col0, b_base); }}\n"
+            );
+        }
+        for l in 0..lb {
+            let e = format!("tid + {}u", 256 * l);
+            if prefetch {
+                first += &format!("  var pb{l} = b_get({e}, 0u, col0, b_base);\n");
+                stage += &format!("    bs_[b_slot({e})] = pb{l};\n");
+                next += &format!("    pb{l} = b_get({e}, k0 + BK, col0, b_base);\n");
+            }
+        }
+        include_str!("shaders/matmul_interleaved.wgsl")
+            .replace("{BM}", &self.bm.to_string())
+            .replace("{BN}", &self.bn.to_string())
+            .replace("{BK}", &self.bk.to_string())
+            .replace("{TX}", &tx.to_string())
+            .replace("{TY}", &ty.to_string())
+            .replace("{PAD}", &pad.to_string())
+            .replace("{SA_LEN}", &(self.bk * (self.bm + pad)).to_string())
+            .replace("{SB_LEN}", &(self.bk * (self.bn + pad)).to_string())
+            .replace("{ACC_DECLS}", decls.trim_end())
+            .replace("{PREFETCH_FIRST}", first.trim_end())
+            .replace("{STAGE}", stage.trim_end())
+            .replace("{PREFETCH_NEXT}", next.trim_end())
+            .replace("{COMPUTE}", compute.trim_end())
+            .replace("{EPILOGUE}", epilogue.trim_end())
+    }
+
+    fn blocked_source(&self) -> String {
         assert_eq!((self.bm / self.tm) * (self.bn / self.tn), 256, "{self:?}");
         assert!(
             self.tm.is_multiple_of(4)
@@ -111,7 +211,7 @@ impl Tile {
 
 /// Every matmul kernel the GPU compiles.  [`MatMulPolicy`] chooses
 /// among them by the shape of the product.
-pub const TILES: [Tile; 5] = [
+pub const TILES: [Tile; 10] = [
     Tile {
         name: "s64",
         bm: 64,
@@ -119,6 +219,7 @@ pub const TILES: [Tile; 5] = [
         bk: 16,
         tm: 4,
         tn: 4,
+        layout: Layout::Original,
     },
     Tile {
         name: "v64",
@@ -127,6 +228,7 @@ pub const TILES: [Tile; 5] = [
         bk: 16,
         tm: 4,
         tn: 4,
+        layout: Layout::Blocked,
     },
     Tile {
         name: "v128",
@@ -135,6 +237,7 @@ pub const TILES: [Tile; 5] = [
         bk: 8,
         tm: 8,
         tn: 8,
+        layout: Layout::Blocked,
     },
     Tile {
         name: "v128x64",
@@ -143,6 +246,7 @@ pub const TILES: [Tile; 5] = [
         bk: 8,
         tm: 8,
         tn: 4,
+        layout: Layout::Blocked,
     },
     Tile {
         name: "v64x128",
@@ -151,6 +255,67 @@ pub const TILES: [Tile; 5] = [
         bk: 8,
         tm: 4,
         tn: 8,
+        layout: Layout::Blocked,
+    },
+    Tile {
+        name: "i64",
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        tm: 4,
+        tn: 4,
+        layout: Layout::Interleaved {
+            pad: 2,
+            prefetch: false,
+        },
+    },
+    Tile {
+        name: "i64p",
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        tm: 4,
+        tn: 4,
+        layout: Layout::Interleaved {
+            pad: 2,
+            prefetch: true,
+        },
+    },
+    Tile {
+        name: "i128x64",
+        bm: 128,
+        bn: 64,
+        bk: 8,
+        tm: 8,
+        tn: 4,
+        layout: Layout::Interleaved {
+            pad: 4,
+            prefetch: false,
+        },
+    },
+    Tile {
+        name: "i128x64p",
+        bm: 128,
+        bn: 64,
+        bk: 8,
+        tm: 8,
+        tn: 4,
+        layout: Layout::Interleaved {
+            pad: 4,
+            prefetch: true,
+        },
+    },
+    Tile {
+        name: "i128",
+        bm: 128,
+        bn: 128,
+        bk: 8,
+        tm: 8,
+        tn: 8,
+        layout: Layout::Interleaved {
+            pad: 4,
+            prefetch: false,
+        },
     },
 ];
 
@@ -241,7 +406,10 @@ struct Prof {
 
 struct Kernels {
     /// One pipeline per entry of [`TILES`].
-    matmul: (Vec<wgpu::ComputePipeline>, wgpu::BindGroupLayout),
+    matmul: (
+        Vec<std::cell::OnceCell<wgpu::ComputePipeline>>,
+        wgpu::BindGroupLayout,
+    ),
     softmax: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     rmsnorm: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     rope: wgpu::ComputePipeline,
@@ -318,10 +486,8 @@ impl Kernels {
         let sm = bind_layout(device, "softmax", &[ReadWrite, Uniform]);
         let rn = bind_layout(device, "rmsnorm", &[Read, Read, ReadWrite, Uniform]);
         let ew = bind_layout(device, "elementwise", &[Read, Read, ReadWrite, Uniform]);
-        let matmul = TILES
-            .iter()
-            .map(|t| pipeline(device, &shader(device, t.name, &t.source()), "main", &mm))
-            .collect();
+        // Matmul pipelines compile on first use (see `matmul_pipeline`).
+        let matmul = TILES.iter().map(|_| std::cell::OnceCell::new()).collect();
         let s = shader(device, "softmax", include_str!("shaders/softmax.wgsl"));
         let r = shader(device, "rmsnorm", include_str!("shaders/rmsnorm.wgsl"));
         let e = shader(
@@ -339,6 +505,23 @@ impl Kernels {
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
         }
+    }
+
+    /// The pipeline of matmul kernel `t`, compiled the first time it is
+    /// needed: a device compiles only the kernels it runs (all of them once
+    /// in [`Gpu::check_kernels`], where a kernel the compiler rejects is
+    /// reported and never used again).  Compiling every kernel up front
+    /// took SwiftShader over 4 GB per device.
+    fn matmul_pipeline(&self, device: &wgpu::Device, t: usize) -> &wgpu::ComputePipeline {
+        self.matmul.0[t].get_or_init(|| {
+            let tile = &TILES[t];
+            pipeline(
+                device,
+                &shader(device, tile.name, &tile.source()),
+                "main",
+                &self.matmul.1,
+            )
+        })
     }
 }
 
@@ -929,7 +1112,7 @@ impl Rec<'_> {
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         let k = &gpu.kernels;
         let pipeline = |kernel: &Kernel| match kernel {
-            Kernel::MatMul(t) => &k.matmul.0[*t],
+            Kernel::MatMul(t) => k.matmul_pipeline(&gpu.device, *t),
             Kernel::Softmax => &k.softmax.0,
             Kernel::RmsNorm => &k.rmsnorm.0,
             Kernel::Rope => &k.rope,
@@ -1130,4 +1313,125 @@ pub fn kernels_id() -> u64 {
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Worst number of distinct addresses one bank serves in a single
+    /// 32-lane access to workgroup memory, in RDNA's model of the LDS (32
+    /// banks of 4 bytes; lanes reading the same address share one read).
+    /// 1 means no bank conflict.  A model of the Radeon only: Intel's
+    /// shared local memory is banked differently.
+    fn degree(addrs: impl Iterator<Item = usize>) -> usize {
+        let mut banks: Vec<Vec<usize>> = vec![Vec::new(); 32];
+        for a in addrs {
+            let b = &mut banks[a % 32];
+            if !b.contains(&a) {
+                b.push(a);
+            }
+        }
+        banks.iter().map(Vec::len).max().unwrap_or(0)
+    }
+
+    /// Worst degree over the 8 waves of a workgroup and the `n` accesses
+    /// of one kind, given each lane's address for access `q`.
+    fn worst(n: usize, addr: impl Fn(usize, usize) -> usize) -> usize {
+        let mut w = 1;
+        for wave in 0..8 {
+            for q in 0..n {
+                w = w.max(degree((32 * wave..32 * wave + 32).map(|t| addr(t, q))));
+            }
+        }
+        w
+    }
+
+    /// Bank conflict degrees of one kernel: stores of the A and B tiles
+    /// when K is the contiguous axis (every nn.Linear) and when it is not,
+    /// then the inner loop's reads of A and B.
+    fn conflicts(t: &Tile) -> [usize; 6] {
+        let pad = match t.layout {
+            Layout::Original => 1,
+            Layout::Blocked => 4,
+            Layout::Interleaved { pad, .. } => pad,
+        };
+        let (sa, sb, bk, bm, bn) = (t.bm + pad, t.bn + pad, t.bk, t.bm, t.bn);
+        let (tx, ty) = (t.bn / t.tn, t.bm / t.tm);
+        let store_a_fast = worst(1, |e, _| (e % bk) * sa + e / bk);
+        let store_a_slow = worst(1, |e, _| (e / bm) * sa + e % bm);
+        let store_b_fast = worst(1, |e, _| (e % bk) * sb + e / bk);
+        let store_b_slow = worst(1, |e, _| (e / bn) * sb + e % bn);
+        let (read_a, read_b) = match t.layout {
+            Layout::Blocked => (
+                worst(t.tm, |id, q| (id / tx) * t.tm + q),
+                worst(t.tn, |id, q| (id % tx) * t.tn + q),
+            ),
+            _ => (
+                worst(t.tm, |id, q| id / tx + ty * q),
+                worst(t.tn, |id, q| id % tx + tx * q),
+            ),
+        };
+        [
+            store_a_fast,
+            store_a_slow,
+            store_b_fast,
+            store_b_slow,
+            read_a,
+            read_b,
+        ]
+    }
+
+    /// The model reproduces the Radeon ranking of the older kernels (B
+    /// reads: s64 none, stride-4 kernels 2-way, stride-8 kernels 4-way)
+    /// and finds 2-way conflicts on s64's and v64's k-contiguous stores.
+    /// Every interleaved kernel is conflict-free throughout.
+    #[test]
+    fn bank_conflicts() {
+        let by_name = |n: &str| TILES.iter().find(|t| t.name == n).expect(n);
+        assert_eq!(conflicts(by_name("s64")), [2, 1, 2, 1, 1, 1]);
+        assert_eq!(conflicts(by_name("v64")), [2, 1, 2, 1, 1, 2]);
+        assert_eq!(conflicts(by_name("v128x64")), [1, 1, 1, 1, 1, 2]);
+        assert_eq!(conflicts(by_name("v64x128")), [1, 1, 1, 1, 1, 4]);
+        assert_eq!(conflicts(by_name("v128")), [1, 1, 1, 1, 1, 4]);
+        for t in TILES
+            .iter()
+            .filter(|t| matches!(t.layout, Layout::Interleaved { .. }))
+        {
+            assert_eq!(conflicts(t), [1; 6], "{}", t.name);
+        }
+    }
+
+    /// Every kernel fits WebGPU's default 16 KiB of workgroup memory.
+    #[test]
+    fn workgroup_memory_within_defaults() {
+        for t in &TILES {
+            let pad = match t.layout {
+                Layout::Original => 1,
+                Layout::Blocked => 4,
+                Layout::Interleaved { pad, .. } => pad,
+            };
+            let bytes = 4 * t.bk * (t.bm + t.bn + 2 * pad);
+            assert!(bytes <= 16 * 1024, "{}: {bytes} bytes", t.name);
+        }
+    }
+
+    /// The generated interleaved source has every placeholder filled.
+    #[test]
+    fn interleaved_source_is_complete() {
+        for t in &TILES {
+            let src = t.source();
+            assert!(!src.contains('{') || !src.contains("{BM}"), "{}", t.name);
+            for p in [
+                "{ACC_DECLS}",
+                "{STAGE}",
+                "{COMPUTE}",
+                "{EPILOGUE}",
+                "{PAD}",
+                "{TX}",
+            ] {
+                assert!(!src.contains(p), "{}: {p}", t.name);
+            }
+        }
+    }
 }

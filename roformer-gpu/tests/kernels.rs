@@ -507,3 +507,42 @@ fn plain_device_does_not_profile() {
     assert!(!g.profiling());
     assert!(g.device.features().is_empty());
 }
+
+/// Compile time and resident memory after each matmul kernel's first use
+/// (SwiftShader diagnostics; `--ignored --nocapture`).
+#[test]
+#[ignore]
+fn compile_each() {
+    let Some(g) = gpu() else { return };
+    let only: Option<usize> = std::env::var("TILE").ok().and_then(|v| v.parse().ok());
+    let (m, n, k) = (70, 90, 33);
+    let a = g.upload("a", &rand(m * k, 1));
+    let b = g.upload("b", &rand(k * n, 2));
+    let c = g.buffer("c", m * n);
+    for (t, tile) in TILES.iter().enumerate() {
+        if only.is_some_and(|o| o != t) {
+            continue;
+        }
+        let t0 = std::time::Instant::now();
+        let mut mm = MatMul::new(
+            (&a, View::rows(0, k)),
+            (&b, View::rows(0, n)),
+            (&c, View::rows(0, n)),
+            m,
+            n,
+            k,
+        );
+        mm.tile = Some(t);
+        let mut r = g.rec();
+        r.matmul(&mm);
+        r.submit();
+        pollster::block_on(g.done());
+        let rss = std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with("VmRSS"))
+            .unwrap_or("")
+            .to_string();
+        eprintln!("{}: {:.1} s, {rss}", tile.name, t0.elapsed().as_secs_f64());
+    }
+}

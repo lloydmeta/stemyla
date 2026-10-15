@@ -92,12 +92,12 @@ The cause is reuse.  Each transformer weight is applied to every token of a chun
 
 ## Running it on the GPU
 
-`roformer-gpu` has five WGSL files: two matrix multiplies, the original and a template for its register-tiled variants (strided, batched, with bias, GELU or tanh, and accumulate), row softmax, RMS normalisation, and small element-wise kernels (rotary position embedding, attention gates, transpose, gated linear unit).  The design rules:
+`roformer-gpu` has six WGSL files: three matrix multiplies, the original and two templates for its register-tiled variants (blocks of outputs per thread, or every 16th row and column per thread) (strided, batched, with bias, GELU or tanh, and accumulate), row softmax, RMS normalisation, and small element-wise kernels (rotary position embedding, attention gates, transpose, gated linear unit).  The design rules:
 
 * **Portable limits.**  Every kernel fits WebGPU's default limits (256 threads per workgroup, 16 KiB of workgroup memory, 128 MiB per buffer binding), and the device is requested with exactly those, so nothing depends on what one GPU offers beyond them.
 * **Short steps.**  A chunk is split into about 1,000 steps, each one short command buffer (for example one band of one time transformer, about 5 GFLOP).  The worker waits for the GPU after every step, so the display never waits long, and stops the run if a step takes over 5 s.  The operating system's GPU watchdog is never approached.
 * **Kernels checked on every GPU.**  When the GPU opens, every matrix-multiply kernel runs two small products and is compared with the CPU.  A kernel that disagrees is not used on that GPU.
-* **Kernels chosen per GPU.**  There are five matrix-multiply kernels with different tile shapes.  The fastest differs by GPU (the original kernel is the fastest on a Radeon Pro 5500M and the slowest, by a factor of 5, on an Intel UHD 630), so each GPU times the checked kernels once, for a few seconds, and the choice is kept in browser storage.
+* **Kernels chosen per GPU.**  There are ten matrix-multiply kernels with different tile shapes and thread layouts, each compiled the first time it runs.  The fastest differs by GPU (the original kernel is the fastest on a Radeon Pro 5500M and the slowest, by a factor of 5, on an Intel UHD 630), so each GPU times the checked kernels once, for a few seconds, and the choice is kept in browser storage.
 * **Self-test.**  `?selftest` compares each stage of the network, and one full chunk, with reference files made by the CPU version (`xtask roformer-selftest`).
 
 ### How `net.rs` drives the kernels
@@ -232,6 +232,6 @@ Each term links to a fuller explanation.
 * [Pipeline and bind group](https://webgpufundamentals.org/webgpu/lessons/webgpu-fundamentals.html): a pipeline is a compiled kernel ready to run.  A bind group is the set of buffers it reads and writes in one dispatch.
 * [Uniform and storage buffers](https://webgpufundamentals.org/webgpu/lessons/webgpu-uniforms.html): a uniform buffer holds small read-only settings that are the same for every thread (here shapes, strides and flags).  Storage buffers hold the large arrays (weights and activations).
 * [Default limits](https://www.w3.org/TR/webgpu/#limits): the resource limits every WebGPU device must support, such as 256 threads per workgroup, 16 KiB of workgroup memory and 128 MiB per storage buffer binding.  A page can ask for more, but only on GPUs that have it.
-* [Tiled matrix multiply](https://siboehm.com/articles/22/CUDA-MMM): each workgroup loads blocks of both inputs into workgroup memory, and each thread keeps a small block of the output in registers, so every number loaded is reused many times.  The five matmul kernels differ in these block sizes.
+* [Tiled matrix multiply](https://siboehm.com/articles/22/CUDA-MMM): each workgroup loads blocks of both inputs into workgroup memory, and each thread keeps a small block of the output in registers, so every number loaded is reused many times.  The matmul kernels differ in these block sizes and in which outputs each thread owns.
 * [GPU watchdog](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/timeout-detection-and-recovery): the operating system resets a GPU that does not finish its current work in time, two seconds by default on Windows (TDR).
 * [SwiftShader](https://github.com/google/swiftshader): a CPU implementation of Vulkan, used to run the GPU tests on a machine without a GPU.
