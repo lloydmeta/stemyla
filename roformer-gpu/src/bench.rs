@@ -420,11 +420,15 @@ async fn time_rec(
 
 /// Attention per chunk with the separate dispatches (scores matmul with
 /// this GPU's matmul policy, softmax, p.v matmul, gate) against each fused
-/// kernel that passed [`Gpu::check_attention`]: the time axis (one band
-/// of 1,151 frames per step, 744 steps) and the frequency axis (88 frames
-/// of 62 bands per step, 168 steps).  Kernels take turns over `rounds`
-/// rounds; medians are reported.  Returns (name, seconds per chunk) for
-/// "split" and each usable fused kernel.
+/// kernel that passed [`Gpu::check_attention`], step by step as a chunk
+/// runs them at the default budget: split attention takes one band of
+/// 1,151 frames per time step (744 steps), fused attention four (186
+/// steps, since it needs no scores buffer); the frequency axis takes 88
+/// frames of 62 bands per step either way (168 steps).  Fused kernels are
+/// also timed at one band per step, which shows how much the larger
+/// dispatch helps.  Kernels take turns over `rounds` rounds; medians are
+/// reported.  Returns (name, seconds per chunk) for "split" and each
+/// usable fused kernel.
 pub async fn measure_attention(
     gpu: &Gpu,
     warm: f64,
@@ -433,24 +437,33 @@ pub async fn measure_attention(
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
 ) -> Vec<(String, f64)> {
-    let cases = [("time", T, 1usize, 744usize), ("freq", 62, 88, 168)];
+    // (label, sequence length, sequences per step, steps per chunk,
+    // counts for split, counts for fused)
+    let cases = [
+        ("time, 1 band per step", T, 1usize, 744usize, true, false),
+        ("time, 4 bands per step", T, 4, 186, false, true),
+        ("freq", 62, 88, 168, true, true),
+    ];
     let row = 1536;
     let max_tokens = cases.iter().map(|c| c.1 * c.2).max().unwrap_or(1);
-    let max_scores = cases.iter().map(|c| 8 * c.1 * c.1 * c.2).max().unwrap_or(1);
+    let max_scores = cases
+        .iter()
+        .filter(|c| c.4)
+        .map(|c| 8 * c.1 * c.1 * c.2)
+        .max()
+        .unwrap_or(1);
     let qkv = gpu.buffer("bench qkv", max_tokens * row);
     let gates = gpu.buffer("bench gates", max_tokens * 8);
     let scores = gpu.buffer("bench scores", max_scores);
     let o = gpu.buffer("bench o", max_tokens * 512);
     let alpha = 0.125f32;
     let usable = gpu.attention_usable.get();
-    let mut names = vec!["split".to_string()];
-    for (a, at) in crate::ATTENTIONS.iter().enumerate() {
-        if usable[a] {
-            names.push(at.name.to_string());
-        }
-    }
-    let mut per_chunk = vec![0.0; names.len()];
-    for (case, seq, nseq, steps) in cases {
+    let fused: Vec<usize> = (0..crate::ATTENTIONS.len())
+        .filter(|&a| usable[a])
+        .collect();
+    let mut split_total = 0.0;
+    let mut fused_total = vec![0.0; fused.len()];
+    for (case, seq, nseq, steps, for_split, for_fused) in cases {
         let split = |r: &mut crate::Rec| {
             let mut sc = MatMul::new(
                 (
@@ -532,19 +545,29 @@ pub async fn measure_attention(
             r.matmul(&pv);
             r.gate(&o, &gates, seq * nseq);
         };
-        let mut times: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+        // Split only where its scores fit one binding; fused everywhere.
+        let mut names = Vec::new();
+        let mut times: Vec<Vec<f64>> = Vec::new();
+        if for_split {
+            names.push("split".to_string());
+            times.push(Vec::new());
+        }
+        for &a in &fused {
+            names.push(crate::ATTENTIONS[a].name.to_string());
+            times.push(Vec::new());
+        }
         for rd in 0..rounds.max(1) {
             let w = if rd == 0 { warm } else { 0.0 };
-            times[0].push(time_rec(gpu, w, round, &now, &split).await);
-            let mut k = 1;
-            for (a, _) in crate::ATTENTIONS.iter().enumerate() {
-                if !usable[a] {
-                    continue;
-                }
-                let fused = |r: &mut crate::Rec| {
+            let mut k = 0;
+            if for_split {
+                times[k].push(time_rec(gpu, w, round, &now, &split).await);
+                k += 1;
+            }
+            for &a in &fused {
+                let run = |r: &mut crate::Rec| {
                     r.attention(a, &qkv, Some(&gates), &o, seq, nseq, alpha);
                 };
-                times[k].push(time_rec(gpu, w, round, &now, &fused).await);
+                times[k].push(time_rec(gpu, w, round, &now, &run).await);
                 k += 1;
             }
         }
@@ -552,20 +575,41 @@ pub async fn measure_attention(
             let t = Timing {
                 rounds: times[k].clone(),
             };
-            per_chunk[k] += t.median() * steps as f64;
+            let per_chunk = t.median() * steps as f64;
+            let used = if name == "split" {
+                for_split
+            } else {
+                for_fused
+            };
+            if name == "split" {
+                split_total += per_chunk;
+            } else if used {
+                let i = k - usize::from(for_split);
+                fused_total[i] += per_chunk;
+            }
             log(format!(
-                "bench: attention {case} (seq {seq}, x{nseq}) {name}: {:.2} ms per step, {:.2} s per chunk (median of {}, spread {:.1}%)",
+                "bench: attention {case} (seq {seq}, x{nseq}) {name}: {:.2} ms per step, {:.2} s per chunk{} (median of {}, spread {:.1}%)",
                 1e3 * t.median(),
-                t.median() * steps as f64,
+                per_chunk,
+                if used { "" } else { " if run this way" },
                 t.rounds.len(),
                 100.0 * t.spread()
             ));
         }
     }
-    for (name, secs) in names.iter().zip(&per_chunk) {
-        log(format!("bench: attention {name}: {secs:.2} s per chunk"));
+    let mut out = vec![("split".to_string(), split_total)];
+    log(format!(
+        "bench: attention split: {split_total:.2} s per chunk"
+    ));
+    for (i, &a) in fused.iter().enumerate() {
+        let name = crate::ATTENTIONS[a].name;
+        log(format!(
+            "bench: attention {name}: {:.2} s per chunk (4 bands per time step)",
+            fused_total[i]
+        ));
+        out.push((name.to_string(), fused_total[i]));
     }
-    names.into_iter().zip(per_chunk).collect()
+    out
 }
 
 /// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`

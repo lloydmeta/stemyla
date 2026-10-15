@@ -123,9 +123,13 @@ impl Block {
 }
 
 /// Elements one sequence of `seq` tokens needs in the largest per-step
-/// buffer of a transformer step.
-fn per_seq(seq: usize) -> usize {
-    (seq * 3 * INNER).max(HEADS * seq * seq).max(seq * HIDDEN)
+/// buffer of a transformer step.  Fused attention never writes the
+/// `[HEADS, seq, seq]` scores, so a step can then take more sequences
+/// (4 bands of 1,151 frames instead of 1 at the default budget): more
+/// workgroups per dispatch and fewer steps.
+fn per_seq(seq: usize, fused: bool) -> usize {
+    let scores = if fused { 0 } else { HEADS * seq * seq };
+    (seq * 3 * INNER).max(scores).max(seq * HIDDEN)
 }
 
 impl Net {
@@ -186,9 +190,10 @@ impl Net {
         })
     }
 
-    /// Sequences per transformer step for sequences of `seq` tokens.
-    pub fn sub_batch(&self, batch: usize, seq: usize) -> usize {
-        (self.budget / per_seq(seq)).clamp(1, batch)
+    /// Sequences per transformer step for sequences of `seq` tokens, with
+    /// fused attention or without.
+    pub fn sub_batch(&self, batch: usize, seq: usize, fused: bool) -> usize {
+        (self.budget / per_seq(seq, fused)).clamp(1, batch)
     }
 
     /// Bands per mask step for a band group of width `w`.
@@ -319,6 +324,10 @@ fn rope_table(seq: usize) -> Vec<f32> {
 pub struct Job<'a> {
     gpu: &'a Gpu,
     net: &'a Net,
+    /// The fused attention kernel this job uses ([`Gpu::attention`] when
+    /// the job was made), or `None` for split attention.  Fixed per job:
+    /// the step sizes and the scores buffer depend on it.
+    attention: Option<usize>,
     pub frames: usize,
     /// Band-normalised input, per group `[count, T, width]`.
     split_in: wgpu::Buffer,
@@ -343,10 +352,16 @@ impl<'a> Job<'a> {
     /// Allocates the buffers for `frames` frames.
     pub fn new(gpu: &'a Gpu, net: &'a Net, frames: usize) -> Self {
         let (t, f) = (frames, BANDS);
-        let nt = net.sub_batch(f, t);
-        let nf = net.sub_batch(t, f);
+        let attention = gpu.attention.get();
+        let fused = attention.is_some();
+        let nt = net.sub_batch(f, t, fused);
+        let nf = net.sub_batch(t, f, fused);
         let tokens = (nt * t).max(nf * f);
-        let scores = (nt * HEADS * t * t).max(nf * HEADS * f * f);
+        let scores = if fused {
+            0
+        } else {
+            (nt * HEADS * t * t).max(nf * HEADS * f * f)
+        };
         let (mut mask_h, mut mask_y) = (0, 0);
         for g in band_groups() {
             let n = net.mask_batch(&g, t);
@@ -356,6 +371,7 @@ impl<'a> Job<'a> {
         Self {
             gpu,
             net,
+            attention,
             frames,
             split_in: gpu.buffer("split_in", t * FEATURES),
             x: gpu.buffer("x", f * t * DIM),
@@ -426,7 +442,8 @@ impl<'a> Job<'a> {
     pub fn layer_steps(&self, layer: usize) -> Vec<Step> {
         let (t, f) = (self.frames, BANDS);
         let mut out = Vec::new();
-        let n = self.net.sub_batch(f, t);
+        let fused = self.attention.is_some();
+        let n = self.net.sub_batch(f, t, fused);
         let mut first = 0;
         while first < f {
             out.push(Step::Time {
@@ -437,7 +454,7 @@ impl<'a> Job<'a> {
             first += n;
         }
         out.push(Step::ToFreq);
-        let n = self.net.sub_batch(t, f);
+        let n = self.net.sub_batch(t, f, fused);
         let mut first = 0;
         while first < t {
             out.push(Step::Freq {
@@ -579,7 +596,7 @@ impl<'a> Job<'a> {
         r.matmul(&g);
 
         let alpha = (DIM_HEAD as f32).powf(-0.5);
-        if let Some(fused) = self.gpu.attention.get() {
+        if let Some(fused) = self.attention {
             // Scores, softmax, p.v and gate in one dispatch; the scores
             // never reach memory.
             r.attention(fused, &self.qkv, Some(&self.gates), &self.o, seq, nb, alpha);
@@ -770,6 +787,18 @@ impl<'a> Job<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without the scores buffer, a time-axis step takes 4 bands of a full
+    /// chunk instead of 1 at the default budget.
+    #[test]
+    fn fused_attention_fits_more_bands_per_step() {
+        let budget = 8 << 20; // the worker's default
+        let frames = roformer::CHUNK / roformer::HOP + 1;
+        assert_eq!((budget / per_seq(frames, false)).clamp(1, BANDS), 1);
+        assert_eq!((budget / per_seq(frames, true)).clamp(1, BANDS), 4);
+        // The frequency axis is bounded by q/k/v either way.
+        assert_eq!(per_seq(BANDS, false), per_seq(BANDS, true));
+    }
 
     /// One full chunk (1,151 frames) is about 6.1 TFLOP of matmuls, the
     /// figure the timing estimates work from; the step split does not change it.
