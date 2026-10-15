@@ -327,24 +327,143 @@ pub struct Attention {
     pub name: &'static str,
     pub lanes: usize,
     pub bkv: usize,
+    /// `attention_tiled.wgsl` instead: 64 queries per workgroup, each
+    /// thread a 4 x 4 block of scores and of outputs (`lanes` and `bkv`
+    /// unused).
+    pub tiled: bool,
 }
 
 /// Every fused attention kernel; [`Gpu::check_attention`] checks each.
-pub const ATTENTIONS: [Attention; 2] = [
+pub const ATTENTIONS: [Attention; 3] = [
     Attention {
         name: "a4",
         lanes: 4,
         bkv: 16,
+        tiled: false,
     },
     Attention {
         name: "a8",
         lanes: 8,
         bkv: 16,
+        tiled: false,
+    },
+    Attention {
+        name: "t64",
+        lanes: 0,
+        bkv: 64,
+        tiled: true,
     },
 ];
 
 impl Attention {
+    /// Queries per workgroup.
+    fn rows(&self) -> usize {
+        if self.tiled { 64 } else { 256 / self.lanes }
+    }
+
+    fn tiled_source(&self) -> String {
+        let (r4, c4) = (0..4, 0..4);
+        let mut decls = String::new();
+        let mut s_zero = String::new();
+        let mut s_step = String::new();
+        let mut soft1 = String::new();
+        let mut soft2 = String::new();
+        let mut values = String::new();
+        let mut finish = String::new();
+        for i in r4.clone() {
+            decls += &format!("  var m{i} = NEG;\n  var l{i} = 0.0;\n");
+            for j in c4.clone() {
+                decls += &format!("  var o{i}_{j} = 0.0;\n  var s{i}_{j} = 0.0;\n");
+                s_zero += &format!("    s{i}_{j} = 0.0;\n");
+            }
+        }
+        for i in r4.clone() {
+            s_step += &format!("        let a{i} = buf[ab + {}u];\n", 16 * i);
+        }
+        for j in c4.clone() {
+            s_step += &format!("        let b{j} = buf[bb + {}u];\n", 16 * j);
+        }
+        for i in r4.clone() {
+            for j in c4.clone() {
+                s_step += &format!("        s{i}_{j} = fma(a{i}, b{j}, s{i}_{j});\n");
+            }
+        }
+        for i in r4.clone() {
+            for j in c4.clone() {
+                soft1 += &format!(
+                    "    s{i}_{j} = select(NEG, s{i}_{j} * p.alpha, j0 + tx + {}u < p.seq);\n",
+                    16 * j
+                );
+            }
+            soft1 += &format!(
+                "    red[(ty + {}u) * 16u + tx] = max(max(s{i}_0, s{i}_1), max(s{i}_2, s{i}_3));\n",
+                16 * i
+            );
+        }
+        for i in r4.clone() {
+            soft2 += &format!(
+                "    var tm{i} = red[(ty + {r}u) * 16u];\n    for (var k = 1u; k < 16u; k++) {{ tm{i} = max(tm{i}, red[(ty + {r}u) * 16u + k]); }}\n    let mn{i} = max(m{i}, tm{i});\n    let sc{i} = exp(m{i} - mn{i});\n    m{i} = mn{i};\n",
+                r = 16 * i
+            );
+            for j in c4.clone() {
+                soft2 += &format!(
+                    "    s{i}_{j} = exp(s{i}_{j} - mn{i});\n    o{i}_{j} = o{i}_{j} * sc{i};\n"
+                );
+            }
+            soft2 += &format!("    l{i} = l{i} * sc{i} + s{i}_0 + s{i}_1 + s{i}_2 + s{i}_3;\n");
+        }
+        for c in c4.clone() {
+            if c > 0 {
+                values += "    workgroupBarrier();\n";
+            }
+            for i in r4.clone() {
+                values += &format!("    buf[tx * S + ty + {}u] = s{i}_{c};\n", 16 * i);
+            }
+            values += &format!(
+                "    for (var l = 0u; l < 4u; l++) {{ stage_v(t + l * 256u, tok0, j0 + {}u, vc); }}\n    workgroupBarrier();\n    for (var kk = 0u; kk < 16u; kk++) {{\n      let pb = kk * S + ty;\n      let vb = B2 + kk * D + tx;\n",
+                16 * c
+            );
+            for i in r4.clone() {
+                values += &format!("      let pk{i} = buf[pb + {}u];\n", 16 * i);
+            }
+            for j in c4.clone() {
+                values += &format!("      let v{j} = buf[vb + {}u];\n", 16 * j);
+            }
+            for i in r4.clone() {
+                for j in c4.clone() {
+                    values += &format!("      o{i}_{j} = fma(pk{i}, v{j}, o{i}_{j});\n");
+                }
+            }
+            values += "    }\n";
+        }
+        for i in r4.clone() {
+            finish += &format!("  red[(ty + {}u) * 16u + tx] = l{i};\n", 16 * i);
+        }
+        finish += "  workgroupBarrier();\n";
+        for i in r4 {
+            finish += &format!(
+                "  var lt{i} = 0.0;\n  for (var k = 0u; k < 16u; k++) {{ lt{i} += red[(ty + {r}u) * 16u + k]; }}\n  let qi{i} = q0 + ty + {r}u;\n  if (qi{i} < p.seq) {{\n    let tok = tok0 + qi{i};\n    var g = 1.0;\n    if ((p.flags & 1u) != 0u) {{ g = 1.0 / (1.0 + exp(-gates[tok * p.gate_row + h])); }}\n    let f = g / lt{i};\n    let ob = tok * p.o_row + h * D + tx;\n",
+                r = 16 * i
+            );
+            for j in c4.clone() {
+                finish += &format!("    o[ob + {}u] = o{i}_{j} * f;\n", 16 * j);
+            }
+            finish += "  }\n";
+        }
+        include_str!("shaders/attention_tiled.wgsl")
+            .replace("{DECLS}", decls.trim_end())
+            .replace("{S_ZERO}", s_zero.trim_end())
+            .replace("{S_STEP}", s_step.trim_end())
+            .replace("{SOFTMAX_1}", soft1.trim_end())
+            .replace("{SOFTMAX_2}", soft2.trim_end())
+            .replace("{VALUES}", values.trim_end())
+            .replace("{FINISH}", finish.trim_end())
+    }
+
     fn source(&self) -> String {
+        if self.tiled {
+            return self.tiled_source();
+        }
         const D: usize = 64;
         let (l, b) = (self.lanes, self.bkv);
         assert!(
@@ -1550,7 +1669,7 @@ impl Rec<'_> {
             flags: u32::from(gates.is_some()),
             alpha,
         };
-        let groups = [u(seq.div_ceil(256 / at.lanes)), 8, u(nseq)];
+        let groups = [u(seq.div_ceil(at.rows())), 8, u(nseq)];
         let g = gates.unwrap_or(&self.gpu.dummy);
         self.push(
             Kernel::Attention(a),

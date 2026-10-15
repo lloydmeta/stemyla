@@ -92,7 +92,7 @@ The cause is reuse.  Each transformer weight is applied to every token of a chun
 
 ## Running it on the GPU
 
-`roformer-gpu` has seven WGSL files: fused attention (scores, softmax, values and gate in one dispatch, off unless `?attn=` names it), three matrix multiplies, the original and two templates for its register-tiled variants (blocks of outputs per thread, or every 16th row and column per thread) (strided, batched, with bias, GELU or tanh, and accumulate), row softmax, RMS normalisation, and small element-wise kernels (rotary position embedding, attention gates, transpose, gated linear unit).  The design rules:
+`roformer-gpu` has eight WGSL files: two fused attention kernels (scores, softmax, values and gate in one dispatch, off unless `?attn=` names one), three matrix multiplies, the original and two templates for its register-tiled variants (blocks of outputs per thread, or every 16th row and column per thread) (strided, batched, with bias, GELU or tanh, and accumulate), row softmax, RMS normalisation, and small element-wise kernels (rotary position embedding, attention gates, transpose, gated linear unit).  The design rules:
 
 * **Portable limits.**  Every kernel fits WebGPU's default limits (256 threads per workgroup, 16 KiB of workgroup memory, 128 MiB per buffer binding), and the device is requested with exactly those, so nothing depends on what one GPU offers beyond them.
 * **Short steps.**  A chunk is split into about 1,000 steps, each one short command buffer (for example one band of one time transformer, about 5 GFLOP).  The worker waits for the GPU after every step, so the display never waits long, and stops the run if a step takes over 5 s.  The operating system's GPU watchdog is never approached.
