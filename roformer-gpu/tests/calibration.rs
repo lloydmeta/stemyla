@@ -24,7 +24,7 @@ fn time_axis_attention_choice_on_a_cold_gpu() {
         eprintln!("open {open}: {} ({:?})", g.info.name, g.info.backend);
         for (name, warm, round, rounds) in settings {
             let ((split, fused), _) =
-                pollster::block_on(attention_per_chunk(&g, warm, round, rounds, &now));
+                pollster::block_on(attention_per_chunk(&g, warm, round, rounds, false, &now));
             eprintln!(
                 "  {name:8}: split {:6.2} s (spread {:5.1}%), fused {:6.2} s (spread {:5.1}%) -> {}",
                 split.median(),

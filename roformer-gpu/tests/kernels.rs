@@ -961,3 +961,35 @@ fn profile_recording_and_reset() {
     assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(1));
     assert!(g.take_errors().is_empty());
 }
+
+/// `?bench=v64` alone: on shapes v64 hands to the fallback (both p.v
+/// products), the fallback is timed on its behalf and its timing stands
+/// for v64, while the fallback itself stays out of the table.
+#[test]
+fn bench_vec4_alone_times_its_fallback() {
+    let Some(g) = gpu() else { return };
+    pollster::block_on(g.check_kernels()).unwrap();
+    let v = TILES.iter().position(|t| t.vec4).expect("a vec4 kernel");
+    let t0 = std::time::Instant::now();
+    let mut lines = Vec::new();
+    let table = pollster::block_on(roformer_gpu::bench::measure(
+        &g,
+        0.0,
+        0.0,
+        1,
+        Some(&[v]),
+        || t0.elapsed().as_secs_f64(),
+        |l| lines.push(l),
+    ));
+    let shapes = roformer_gpu::bench::shapes();
+    for (s, row) in shapes.iter().zip(&table) {
+        assert!(row[v].median().is_finite(), "{}: v64 not timed", s.name);
+        for (t, timing) in row.iter().enumerate() {
+            if t != v {
+                assert!(timing.rounds.is_empty(), "{}: {}", s.name, TILES[t].name);
+            }
+        }
+    }
+    let fallback = lines.iter().filter(|l| l.contains(": runs i64, ")).count();
+    assert_eq!(fallback, 2, "{lines:#?}");
+}

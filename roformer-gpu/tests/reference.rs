@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use roformer::separate::{analyse, apply_masks};
 use roformer::{BINS, DEPTH, FEATURES, STEMS};
-use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use roformer_gpu::{Gpu, MatMulPolicy};
 use safetensors::{Dtype, SafeTensors};
 
 fn read(name: &str) -> Option<Vec<u8>> {
@@ -108,6 +108,14 @@ fn forward_matches_pytorch() {
         Err(e) => return eprintln!("skipping: {e}"),
     };
     eprintln!("adapter: {} ({:?})", gpu.info.name, gpu.info.backend);
+    // ROFORMER_GPU_MM=v64 (or any `MatMulPolicy` name, "v64,i64" too) runs
+    // the network with those matmul kernels instead of the fallback.
+    if let Ok(name) = std::env::var("ROFORMER_GPU_MM") {
+        let policy = MatMulPolicy::parse(&name).unwrap_or_else(|| panic!("unknown kernel {name}"));
+        pollster::block_on(gpu.check_kernels()).unwrap();
+        gpu.policy.set(policy);
+    }
+    eprintln!("matmul {}", gpu.policy.get().name());
     let fx = SafeTensors::deserialize(&fbytes).unwrap();
     let sx = SafeTensors::deserialize(&sbytes).unwrap();
     // A small budget, so every transformer and mask group runs in several

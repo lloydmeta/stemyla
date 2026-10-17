@@ -339,15 +339,19 @@ pub async fn measure(
     let mut table = Vec::new();
     for s in &shapes() {
         // What runs when each kernel is asked for: a vec4 kernel hands
-        // products it cannot read as vec4s to the fallback.  Those are not
-        // timed again; the fallback's timings stand for them.
+        // products it cannot read as vec4s to the fallback.  The fallback is
+        // timed once for both (also when it was not asked for itself) and
+        // its timings stand for the vec4 kernel.
         let ran: Vec<usize> = (0..TILES.len())
             .map(|t| matmul(s, &b, t).kernel(t))
+            .collect();
+        let timed: Vec<bool> = (0..TILES.len())
+            .map(|u| (0..TILES.len()).any(|t| run[t] && ran[t] == u))
             .collect();
         let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
         for r in 0..rounds.max(1) {
             for (t, timing) in row.iter_mut().enumerate() {
-                if !run[t] || ran[t] != t {
+                if !timed[t] {
                     continue;
                 }
                 let w = if r == 0 { warm } else { 0.0 };
@@ -365,8 +369,11 @@ pub async fn measure(
             } else if run[t] && ran[t] != t {
                 row[t] = row[ran[t]].clone();
                 log(format!(
-                    "bench: {} {}: runs {} (K, a stride or an offset is not a multiple of 4)",
-                    s.name, tile.name, TILES[ran[t]].name
+                    "bench: {} {}: runs {}, {:.1} GFLOP/s (not vec4-aligned: an operand not K-contiguous, or K, a stride or an offset not a multiple of 4)",
+                    s.name,
+                    tile.name,
+                    TILES[ran[t]].name,
+                    s.flops() / row[t].median() / 1e9
                 ));
             } else if run[t] {
                 let tm = &row[t];
@@ -382,6 +389,13 @@ pub async fn measure(
                     tm.rounds.len(),
                     100.0 * tm.spread()
                 ));
+            }
+        }
+        // A fallback timed only on behalf of a vec4 kernel stays out of
+        // the table, as a kernel that was not asked for.
+        for (t, timing) in row.iter_mut().enumerate() {
+            if !run[t] {
+                timing.rounds.clear();
             }
         }
         table.push(row);
@@ -547,11 +561,14 @@ fn fused_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
 /// frames of 62 bands per step (168 steps).  The two take turns over
 /// `rounds` rounds; medians.  Returns ((split, fused) time axis, (split,
 /// fused) frequency axis); fused is infinite when it failed its check.
+/// Without `freq` the frequency axis is not timed (its timings are empty):
+/// calibration uses fused attention there whenever it works.
 pub async fn attention_per_chunk(
     gpu: &Gpu,
     warm: f64,
     round: f64,
     rounds: usize,
+    freq: bool,
     now: &impl Fn() -> f64,
 ) -> ((Timing, Timing), (Timing, Timing)) {
     let recording = gpu.set_recording(false);
@@ -567,13 +584,15 @@ pub async fn attention_per_chunk(
             .await
                 * 744.0,
         );
-        fs.rounds.push(
-            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                split_attention(r, &b, 62, 88)
-            })
-            .await
-                * 168.0,
-        );
+        if freq {
+            fs.rounds.push(
+                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                    split_attention(r, &b, 62, 88)
+                })
+                .await
+                    * 168.0,
+            );
+        }
         if gpu.fused_ok.get() {
             tf.rounds.push(
                 time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
@@ -582,13 +601,15 @@ pub async fn attention_per_chunk(
                 .await
                     * 186.0,
             );
-            ff.rounds.push(
-                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                    fused_attention(r, &b, 62, 88)
-                })
-                .await
-                    * 168.0,
-            );
+            if freq {
+                ff.rounds.push(
+                    time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                        fused_attention(r, &b, 62, 88)
+                    })
+                    .await
+                        * 168.0,
+                );
+            }
         }
     }
     gpu.set_recording(recording);
@@ -604,7 +625,7 @@ pub async fn measure_attention(
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
 ) -> ((f64, f64), (f64, f64)) {
-    let ((ts, tf), (fs, ff)) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    let ((ts, tf), (fs, ff)) = attention_per_chunk(gpu, warm, round, rounds, true, &now).await;
     for (axis, split, fused) in [("time", &ts, &tf), ("freq", &fs, &ff)] {
         log(format!(
             "bench: attention {axis} axis: split {:.2} s per chunk (spread {:.1}%), fused {:.2} s per chunk (spread {:.1}%)",
@@ -793,7 +814,7 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
     let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
     gpu.policy.set(matmul);
     let ((ts, tf), _) =
-        attention_per_chunk(gpu, ATTENTION_WARM, ATTENTION_ROUND, rounds, &now).await;
+        attention_per_chunk(gpu, ATTENTION_WARM, ATTENTION_ROUND, rounds, false, &now).await;
     let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
     gpu.set_recording(recording);
     let fmt = |v: &[f64], t: &[Timing]| {

@@ -931,14 +931,15 @@ impl Gpu {
         Ok(out)
     }
 
-    /// Runs every matmul kernel on two small products (both operand
+    /// Runs every matmul kernel on three small products (both operand
     /// layouts, bias, accumulate, ragged edges) and compares each with the
     /// CPU.  A kernel that disagrees is marked unusable on this GPU, so a
     /// compiler or driver bug in one kernel costs speed, not correctness.
     /// Returns one line per kernel that failed; the fallback kernel
     /// (`TILES[0]`, `i64`) failing is an error.  K is a multiple of 4 but
-    /// not of any tile's `bk`, so case 1 (both operands K-contiguous) runs
-    /// the vec4 kernel with a ragged last K tile; case 2 is not vec4-shaped
+    /// not of any tile's `bk`, so cases 1 and 3 (both operands
+    /// K-contiguous) run the vec4 kernel with a ragged last K tile, with
+    /// bias and with an offset and accumulate; case 2 is not vec4-shaped
     /// and checks the fallback the vec4 kernel hands it to.
     pub async fn check_kernels(&self) -> Result<Vec<String>, String> {
         let (m, n, k) = (133, 141, 44);
@@ -953,12 +954,20 @@ impl Gpu {
                 })
                 .collect()
         };
-        let (a, b, c0, bias) = (rand(m * k, 1), rand(k * n, 2), rand(m * n, 3), rand(n, 4));
+        let (a, b, c0, bias) = (
+            rand(m * k + 4, 1),
+            rand(k * n, 2),
+            rand(m * n, 3),
+            rand(n, 4),
+        );
         // Case 1: A row-major, B a torch-layout weight, bias.  Case 2: A
-        // column-major, B row-major, accumulate into C.
+        // column-major, B row-major, accumulate into C.  Case 3: case 1's
+        // layout with A 4 floats in, accumulating (the transformer's
+        // residual products).
         let views = [
             (View::rows(0, k), View::t(0, k), false),
             (View::t(0, m), View::rows(0, n), true),
+            (View::rows(4, k), View::t(0, k), true),
         ];
         let mut want = Vec::new();
         for (va, vb, acc) in views {
@@ -1274,7 +1283,10 @@ impl<'a> MatMul<'a> {
     /// the contiguous axis, K and every other offset and stride of A and B
     /// are multiples of 4 (so each vec4 is aligned and lies wholly inside
     /// or wholly outside the matrix), and both buffers hold a whole number
-    /// of vec4s (a partial last vec4 would be out of bounds).
+    /// of vec4s.  With the other rules each vec4 read ends on an element of
+    /// the matrix, so none runs past the end of its buffer; the size rule is
+    /// a cheap second guard (out of bounds, robust access would clamp the
+    /// read to other data rather than return zero).
     pub fn vec4_ok(&self) -> bool {
         let (a, b) = (self.a.1, self.b.1);
         a.cs == 1
