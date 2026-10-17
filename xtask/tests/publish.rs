@@ -6,7 +6,8 @@ use std::process::Command;
 
 use xtask::publish::{
     CopiedBuild, KEPT_BUILDS, Options, Prepared, build_id, check_build, check_id,
-    check_kept_builds, commit_dir, deploy, kept_ids, moved_on, parse_versions, prepare_site,
+    check_kept_builds, commit_dir, deploy, kept_ids, parse_versions, prepare_site, remote_head,
+    skip_reason,
 };
 
 /// A committer identity, and no user or system git config (which may sign
@@ -130,10 +131,20 @@ fn ls(r: &Path, rev: &str, path: &str) -> Vec<String> {
     names
 }
 
-fn no_push() -> Options {
-    // No remote named origin exists in these repositories, so `deploy`
-    // fetches nothing.
-    Options::parse(&["--no-push".into()]).unwrap()
+/// Options for a local publish against an empty remote, so `deploy` fetches
+/// nothing and pushes nothing.
+fn no_push(root: &Path) -> Options {
+    let empty = root.join("empty.git");
+    if !empty.exists() {
+        std::fs::create_dir_all(&empty).unwrap();
+        git(&empty, &["init", "-q", "--bare"]);
+    }
+    Options::parse(&[
+        "--no-push".into(),
+        "--remote".into(),
+        empty.to_str().unwrap().into(),
+    ])
+    .unwrap()
 }
 
 #[test]
@@ -244,7 +255,8 @@ fn deploys_to_a_remote_and_builds_on_its_branch() {
 
     // --no-push commits locally only.
     let s3 = versioned_site(&root, "aaaaaaaaaaa3", "v3");
-    let c3 = deploy(&r, &s3, &no_push(), "aaaaaaaaaaa3", "Publish 3")
+    let o3 = Options::parse(&["--no-push".into()]).unwrap();
+    let c3 = deploy(&r, &s3, &o3, "aaaaaaaaaaa3", "Publish 3")
         .unwrap()
         .unwrap();
     assert_eq!(git(&remote, &["rev-parse", "gh-pages"]), c2);
@@ -285,7 +297,7 @@ fn keeps_the_newest_three_builds() {
     for (n, id) in ids.iter().enumerate() {
         let site = versioned_site(&root, id, "v1");
         let fresh_page = std::fs::read(site.join("v").join(id).join("index.html")).unwrap();
-        let c = deploy(&r, &site, &no_push(), id, &format!("Publish {id}"))
+        let c = deploy(&r, &site, &no_push(&root), id, &format!("Publish {id}"))
             .unwrap()
             .unwrap();
         assert_eq!(git(&r, &["rev-parse", &format!("{c}^")]), parent);
@@ -362,9 +374,15 @@ fn a_pruned_build_is_restored_not_rebuilt() {
     .unwrap();
     let mut first_tree = String::new();
     for id in ids {
-        deploy(&r, &versioned_site(&root, id, "v1"), &no_push(), id, id)
-            .unwrap()
-            .unwrap();
+        deploy(
+            &r,
+            &versioned_site(&root, id, "v1"),
+            &no_push(&root),
+            id,
+            id,
+        )
+        .unwrap()
+        .unwrap();
         if id == ids[0] {
             first_tree = git(&r, &["rev-parse", &format!("gh-pages:v/{id}")]);
         }
@@ -378,7 +396,7 @@ fn a_pruned_build_is_restored_not_rebuilt() {
     deploy(
         &r,
         &versioned_site(&root, ids[0], "rebuilt"),
-        &no_push(),
+        &no_push(&root),
         ids[0],
         "again",
     )
@@ -404,15 +422,26 @@ fn a_reused_build_must_suit_the_public_url() {
     identity();
     let r = repo(&root);
     let id = "aaaaaaaaaaaa";
-    deploy(&r, &versioned_site(&root, id, "v1"), &no_push(), id, "p")
-        .unwrap()
-        .unwrap();
+    deploy(
+        &r,
+        &versioned_site(&root, id, "v1"),
+        &no_push(&root),
+        id,
+        "p",
+    )
+    .unwrap()
+    .unwrap();
     let before = git(&r, &["rev-parse", "gh-pages"]);
-    let other =
-        Options::parse(&["--no-push".into(), "--public-url".into(), "/other/".into()]).unwrap();
+    let other = Options {
+        public_url: "/other/".into(),
+        ..no_push(&root)
+    };
     let fresh = versioned_site_for(&root, "/other/", id, "v2");
     let err = deploy(&r, &fresh, &other, id, "p").unwrap_err();
-    assert!(err.to_string().contains("<base href=\"/other/v/"), "{err}");
+    assert!(
+        format!("{err:#}").contains("<base href=\"/other/v/"),
+        "{err:#}"
+    );
     assert_eq!(git(&r, &["rev-parse", "gh-pages"]), before);
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -425,13 +454,13 @@ fn deploy_refuses_to_change_a_kept_build() {
     identity();
     let r = repo(&root);
     let (a, b) = ("aaaaaaaaaaaa", "bbbbbbbbbbbb");
-    deploy(&r, &versioned_site(&root, a, "v1"), &no_push(), a, "a")
+    deploy(&r, &versioned_site(&root, a, "v1"), &no_push(&root), a, "a")
         .unwrap()
         .unwrap();
     let before = git(&r, &["rev-parse", "gh-pages"]);
     std::fs::write(r.join(".git/info/attributes"), "*.js filter=tamper\n").unwrap();
     git(&r, &["config", "filter.tamper.smudge", "tr a z"]);
-    let err = deploy(&r, &versioned_site(&root, b, "v1"), &no_push(), b, "b").unwrap_err();
+    let err = deploy(&r, &versioned_site(&root, b, "v1"), &no_push(&root), b, "b").unwrap_err();
     assert!(
         err.to_string()
             .contains("would change the published build v/aaaaaaaaaaaa/"),
@@ -445,40 +474,128 @@ fn deploy_refuses_to_change_a_kept_build() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `--skip-if-behind` compares HEAD with the branch's exact ref on the
-/// remote, not another ref whose name ends the same way.
+/// `remote_head` reads the branch's exact ref on the remote, not another
+/// ref whose name ends the same way.
 #[test]
-fn tells_whether_the_source_branch_moved_on() {
-    let root = scratch("moved");
+fn reads_a_remote_branch_exactly() {
+    let root = scratch("head");
     identity();
     let remote = root.join("remote.git");
     std::fs::create_dir_all(&remote).unwrap();
     git(&remote, &["init", "-q", "--bare"]);
     let r = repo(&root);
     git(&r, &["remote", "add", "origin", remote.to_str().unwrap()]);
-    git(&r, &["push", "-q", "origin", "main"]);
     let head = git(&r, &["rev-parse", "HEAD"]);
-    assert_eq!(moved_on(&r, "origin", "main", &head).unwrap(), None);
-
-    git(&r, &["commit", "-q", "-m", "newer"]);
-    let newer = git(&r, &["rev-parse", "HEAD"]);
     // Sorts before refs/heads/main and ends in it.
     git(
         &r,
         &["push", "-q", "origin", "main:refs/heads/a/refs/heads/main"],
     );
-    assert_eq!(moved_on(&r, "origin", "main", &head).unwrap(), None);
+    assert_eq!(remote_head(&r, "origin", "main").unwrap(), None);
     git(&r, &["push", "-q", "origin", "main"]);
-    assert_eq!(
-        moved_on(&r, "origin", "main", &head).unwrap(),
-        Some(newer.clone())
-    );
-    assert_eq!(moved_on(&r, "origin", "main", &newer).unwrap(), None);
-    assert!(moved_on(&r, "origin", "missing", &head).is_err());
+    assert_eq!(remote_head(&r, "origin", "main").unwrap(), Some(head));
+    assert!(remote_head(&r, "nowhere", "main").is_err());
 
     let o = Options::parse(&["--skip-if-behind".into(), "main".into()]).unwrap();
     assert_eq!(o.skip_if_behind.as_deref(), Some("main"));
     assert_eq!(Options::parse(&[]).unwrap().skip_if_behind, None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `--skip-if-behind main` as CI uses it: the tip is always published; an
+/// older commit of main only if the site has nothing newer; a commit that
+/// left main never.
+#[test]
+fn ci_publishes_only_what_moves_the_site_forward() {
+    let root = scratch("skip");
+    identity();
+    let remote = root.join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    let r = repo(&root);
+    git(&r, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    let o = Options::parse(&["--skip-if-behind".into(), "main".into()]).unwrap();
+    let commit = |m: &str| {
+        git(&r, &["commit", "-q", "--allow-empty", "-m", m]);
+        git(&r, &["rev-parse", "HEAD"])
+    };
+    let publish = |c: &str| {
+        let id = &c[..12];
+        deploy(&r, &versioned_site(&root, id, "v1"), &o, id, "p").unwrap();
+    };
+    let skip = |c: &str| skip_reason(&r, &o, "main", c).unwrap();
+
+    let c0 = git(&r, &["rev-parse", "HEAD"]);
+    git(&r, &["push", "-q", "origin", "main"]);
+    assert_eq!(skip(&c0), None, "the tip, before anything is published");
+    publish(&c0);
+
+    let c1 = commit("c1");
+    let c2 = commit("c2");
+    git(&r, &["push", "-q", "origin", "main"]);
+    assert_eq!(skip(&c2), None, "the tip");
+    assert_eq!(
+        skip(&c1),
+        None,
+        "newer than the site, though c2 (red, or [skip ci]) moved main on"
+    );
+    publish(&c1);
+    let old = skip(&c0).expect("an old re-run would roll the site back");
+    assert!(old.contains("a newer commit of main"), "{old}");
+    assert_eq!(
+        skip(&c1),
+        None,
+        "already published: republishing is a no-op"
+    );
+
+    let side = git(
+        &r,
+        &[
+            "commit-tree",
+            &format!("{c0}^{{tree}}"),
+            "-p",
+            &c0,
+            "-m",
+            "side",
+        ],
+    );
+    let off = skip(&side).expect("not on main");
+    assert!(off.contains("not on main"), "{off}");
+
+    // A deliberate rollback: main force-pushed back to c0.
+    git(
+        &r,
+        &[
+            "push",
+            "-q",
+            "-f",
+            "origin",
+            &format!("{c0}:refs/heads/main"),
+        ],
+    );
+    assert_eq!(skip(&c0), None, "the tip again");
+
+    // A shallow clone cannot see earlier publishes.
+    let shallow = root.join("shallow");
+    git(
+        &root,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            "--branch",
+            "main",
+            &format!("file://{}", remote.display()),
+            shallow.to_str().unwrap(),
+        ],
+    );
+    let err = skip_reason(&shallow, &o, "main", &c0).unwrap_err();
+    assert!(err.to_string().contains("shallow"), "{err}");
+    git(&shallow, &["fetch", "-q", "origin", "gh-pages:gh-pages"]);
+    let id = &c2[..12];
+    let err = prepare_site(&shallow, &versioned_site(&root, id, "v1"), "gh-pages", id).unwrap_err();
+    assert!(err.to_string().contains("shallow"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -492,7 +609,7 @@ fn a_published_build_is_never_rewritten() {
     let (a, b) = ("aaaaaaaaaaaa", "bbbbbbbbbbbb");
     let a1 = versioned_site(&root, a, "first");
     let a_page = std::fs::read_to_string(a1.join("v").join(a).join("index.html")).unwrap();
-    deploy(&r, &a1, &no_push(), a, "Publish a")
+    deploy(&r, &a1, &no_push(&root), a, "Publish a")
         .unwrap()
         .unwrap();
     let a_tree = git(&r, &["rev-parse", &format!("gh-pages:v/{a}")]);
@@ -500,7 +617,7 @@ fn a_published_build_is_never_rewritten() {
     // The same id again, straight away: nothing changes.
     let a2 = versioned_site(&root, a, "second");
     assert_eq!(
-        deploy(&r, &a2, &no_push(), a, "Publish a again").unwrap(),
+        deploy(&r, &a2, &no_push(&root), a, "Publish a again").unwrap(),
         None
     );
 
@@ -508,14 +625,14 @@ fn a_published_build_is_never_rewritten() {
     deploy(
         &r,
         &versioned_site(&root, b, "first"),
-        &no_push(),
+        &no_push(&root),
         b,
         "Publish b",
     )
     .unwrap()
     .unwrap();
     let a3 = versioned_site(&root, a, "third");
-    deploy(&r, &a3, &no_push(), a, "Publish a once more")
+    deploy(&r, &a3, &no_push(&root), a, "Publish a once more")
         .unwrap()
         .unwrap();
     assert_eq!(git(&r, &["rev-parse", &format!("gh-pages:v/{a}")]), a_tree);
@@ -572,9 +689,15 @@ fn notices_a_changed_kept_build() {
     identity();
     let r = repo(&root);
     let id = "aaaaaaaaaaaa";
-    let c = deploy(&r, &versioned_site(&root, id, "v1"), &no_push(), id, "p")
-        .unwrap()
-        .unwrap();
+    let c = deploy(
+        &r,
+        &versioned_site(&root, id, "v1"),
+        &no_push(&root),
+        id,
+        "p",
+    )
+    .unwrap()
+    .unwrap();
     let tampered = versioned_site(&root, id, "v1");
     std::fs::write(tampered.join("v").join(id).join("app.js"), "changed").unwrap();
     commit_dir(&r, &tampered, "tampered", "t").unwrap().unwrap();

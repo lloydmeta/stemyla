@@ -27,9 +27,10 @@
 //! 1. Refuses to run with uncommitted changes (`--allow-dirty` overrides),
 //!    so every published site maps to a commit.  The build id is the
 //!    commit's 12-character hash, plus `-dirty-<unix seconds>` for a dirty
-//!    tree.  With `--skip-if-behind <branch>` (used by CI), publishes
-//!    nothing unless HEAD is still that branch's tip on the remote, so a
-//!    re-run of an old CI run cannot roll the site back.
+//!    tree.  With `--skip-if-behind <branch>` (used by CI), publishes HEAD
+//!    only if it is that branch's tip on the remote, or a commit of the
+//!    branch newer than the published build, so a re-run of an old CI run
+//!    cannot roll the site back (see [`skip_reason`]).
 //! 2. `trunk build --release --public-url <url>v/<id>/` into
 //!    `target/pages/v/<id>`, and checks the result: the page, both wasm
 //!    modules, the worker loader, and the base and asset paths under the
@@ -37,10 +38,11 @@
 //! 3. Fetches the branch from the remote if it exists there.  Then adds the
 //!    newest [`KEPT_BUILDS`] builds: the new one, and the older ones from
 //!    the branch, byte for byte.  A build id the branch has ever published
-//!    keeps its published copy, even if it was pruned since.  Older builds
-//!    are dropped.  Writes the root `index.html`, `v/VERSIONS` and
-//!    `.nojekyll`, and checks the new id's build again (it may be the
-//!    published copy).
+//!    keeps its published copy, even if it was pruned since (so the clone
+//!    must not be shallow, and the branch's history must never be
+//!    rewritten).  Older builds are dropped.  Writes the root
+//!    `index.html`, `v/VERSIONS` and `.nojekyll`, and checks the new id's
+//!    build again (it may be the published copy).
 //! 4. Commits the result as the branch's whole content, with the previous
 //!    publish as parent.  This uses git's plumbing (temporary indexes,
 //!    `read-tree`, `checkout-index`, `write-tree`, `commit-tree`,
@@ -147,12 +149,9 @@ pub fn main(args: &[String]) -> Result<()> {
     }
     let head = git(&repo, &["rev-parse", "HEAD"])?;
     if let Some(source) = &o.skip_if_behind
-        && let Some(tip) = moved_on(&repo, &o.remote, source, &head)?
+        && let Some(why) = skip_reason(&repo, &o, source, &head)?
     {
-        println!(
-            "not publishing {head}: {source} on {} is at {tip}, and only its tip is published (so re-running an old run cannot roll the site back)",
-            o.remote
-        );
+        println!("not publishing {head}: {why}");
         return Ok(());
     }
     let dirty_at = if dirty.is_empty() {
@@ -195,23 +194,115 @@ pub fn main(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The commit `branch` points at on `remote`, if that is not `head`.  A CI
-/// run re-run after newer pushes builds its original commit, which this
-/// tells apart from the branch's current tip.
-pub fn moved_on(repo: &Path, remote: &str, branch: &str, head: &str) -> Result<Option<String>> {
+/// The commit `refs/heads/<branch>` points at on `remote`, or `None` if
+/// the remote has no such branch.  Fails if the remote cannot be asked.
+pub fn remote_head(repo: &Path, remote: &str, branch: &str) -> Result<Option<String>> {
     let full_ref = format!("refs/heads/{branch}");
-    let listed = git(repo, &["ls-remote", "--exit-code", remote, &full_ref])
-        .with_context(|| format!("could not find {branch} on {remote}"))?;
+    let listed = git(repo, &["ls-remote", remote, &full_ref])?;
     // "<object> TAB <ref>" per line; the pattern also matches longer refs
-    // that end in it.
-    let Some(tip) = listed
+    // that end in it, such as refs/heads/old/<branch>.
+    Ok(listed
         .lines()
         .find_map(|l| l.split_once('\t').filter(|(_, r)| *r == full_ref))
-        .map(|(tip, _)| tip)
-    else {
-        bail!("{remote} has no {full_ref}");
+        .map(|(tip, _)| tip.to_string()))
+}
+
+/// Updates the local publish branch from the remote, if the remote has it,
+/// so a branch published from another clone is built on, not over.
+fn fetch_published(repo: &Path, o: &Options) -> Result<()> {
+    if remote_head(repo, &o.remote, &o.branch)?.is_none() {
+        return Ok(());
+    }
+    let refspec = format!("refs/heads/{0}:refs/heads/{0}", o.branch);
+    git(repo, &["fetch", &o.remote, &refspec]).with_context(|| {
+        format!("could not update the local {} from {} (has it diverged? compare with `git log {} {}/{}`)", o.branch, o.remote, o.branch, o.remote, o.branch)
+    })?;
+    Ok(())
+}
+
+/// Why `head` should not be published from CI, or `None` if it should.
+/// A re-run of an old CI run builds its original commit, so `head` is not
+/// always `source`'s newest.  It is published when it is `source`'s tip on
+/// the remote (even after a force-push back to it), or when it is on
+/// `source` and the site does not already have a newer commit of it.  So
+/// an old re-run cannot roll the site back, and a commit is still
+/// published when the next one never is (its run failed, or it skipped
+/// CI).  Needs the full history of both branches.
+pub fn skip_reason(repo: &Path, o: &Options, source: &str, head: &str) -> Result<Option<String>> {
+    require_full_history(repo)?;
+    let Some(tip) = remote_head(repo, &o.remote, source)? else {
+        bail!("{} has no branch {source}", o.remote);
     };
-    Ok((tip != head).then(|| tip.to_string()))
+    if tip == head {
+        return Ok(None);
+    }
+    // The tip may be newer than this clone; FETCH_HEAD only, no branch moves.
+    git(
+        repo,
+        &[
+            "fetch",
+            "--quiet",
+            &o.remote,
+            &format!("refs/heads/{source}"),
+        ],
+    )?;
+    if !is_ancestor(repo, head, &tip)? {
+        return Ok(Some(format!("it is not on {source} (now at {tip})")));
+    }
+    fetch_published(repo, o)?;
+    let published = match branch_commit(repo, &o.branch) {
+        Some(p) if object_type(repo, &p, "v/VERSIONS")?.as_deref() == Some("blob") => {
+            let versions = parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?;
+            versions.first().and_then(|id| published_commit(repo, id))
+        }
+        _ => None,
+    };
+    match published {
+        Some(p) if p != head && is_ancestor(repo, head, &p)? => Ok(Some(format!(
+            "the site already has {p}, a newer commit of {source}"
+        ))),
+        _ => Ok(None),
+    }
+}
+
+/// The commit a build id was built from, if this clone has it.
+fn published_commit(repo: &Path, id: &str) -> Option<String> {
+    let short = id.get(..12)?;
+    git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{short}^{{commit}}"),
+        ],
+    )
+    .ok()
+}
+
+/// Whether `a` is `b` or one of its ancestors.
+fn is_ancestor(repo: &Path, a: &str, b: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["merge-base", "--is-ancestor", a, b])
+        .current_dir(repo)
+        .status()
+        .context("could not run git")?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git merge-base --is-ancestor {a} {b} failed"),
+    }
+}
+
+/// Fails in a shallow clone: write-once and the CI skip both look through
+/// history that a shallow clone does not have.
+fn require_full_history(repo: &Path) -> Result<()> {
+    if git(repo, &["rev-parse", "--is-shallow-repository"])? == "true" {
+        bail!(
+            "this clone is shallow, so earlier publishes cannot be found in its history; fetch it in full (`git fetch --unshallow`, or `fetch-depth: 0` in actions/checkout)"
+        );
+    }
+    Ok(())
 }
 
 /// Checks that `id` can name a folder under `v/`: non-empty, and only
@@ -311,6 +402,7 @@ pub fn prepare_site(repo: &Path, site: &Path, branch: &str, id: &str) -> Result<
     let Some(p) = &parent else {
         return finish_site(site, id, None, vec![id.to_string()], Vec::new(), false);
     };
+    require_full_history(repo)?;
     let published = match object_type(repo, p, "v/VERSIONS")?.as_deref() {
         None => Vec::new(),
         Some("blob") => parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?,
@@ -481,22 +573,16 @@ pub fn deploy(
     id: &str,
     message: &str,
 ) -> Result<Option<String>> {
-    // A branch published from another clone: start from it, not over it.
-    let refspec = format!("refs/heads/{0}:refs/heads/{0}", o.branch);
-    if git(
-        repo,
-        &["ls-remote", "--exit-code", "--heads", &o.remote, &o.branch],
-    )
-    .is_ok()
-    {
-        git(repo, &["fetch", &o.remote, &refspec]).with_context(|| {
-            format!("could not update the local {} from {} (has it diverged? compare with `git log {} {}/{}`)", o.branch, o.remote, o.branch, o.remote, o.branch)
-        })?;
-    }
+    fetch_published(repo, o)?;
     let prepared = prepare_site(repo, site, &o.branch, id)?;
-    if prepared.reused {
+    let reused_from = prepared
+        .copied
+        .iter()
+        .find(|b| b.id == id)
+        .map(|b| b.from.clone());
+    if let Some(from) = &reused_from {
         println!(
-            "{} published v/{id}/ before; keeping that copy, not this build",
+            "{} published v/{id}/ in {from}; keeping that copy, not this build",
             o.branch
         );
     }
@@ -504,7 +590,11 @@ pub fn deploy(
     check_build(
         &site.join("v").join(id),
         &format!("{}v/{id}/", o.public_url),
-    )?;
+    )
+    .with_context(|| match &reused_from {
+        Some(from) => format!("checking v/{id}/ as {} published it in {from}", o.branch),
+        None => format!("checking v/{id}/"),
+    })?;
     println!("builds in v/: {}", prepared.kept.join(", "));
     let tree = write_tree(repo, site)?;
     check_kept_builds(repo, &tree, &prepared)?;

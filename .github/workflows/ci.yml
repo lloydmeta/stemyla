@@ -115,6 +115,9 @@ jobs:
           # Keep the GITHUB_TOKEN wired into the origin remote so xtask can
           # fetch and push the gh-pages branch.
           persist-credentials: true
+          # Full history: --skip-if-behind compares commits of main, and
+          # write-once looks for earlier publishes in gh-pages' history.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -131,6 +134,7 @@ jobs:
       # xtask publish builds the app for /stemyla/ with trunk, verifies the
       # output, commits it as the whole gh-pages tree and pushes.  Built in
       # debug: it only orchestrates git and trunk, so optimising it is waste.
-      # --skip-if-behind: a re-run of an older run publishes nothing rather
-      # than roll the site back to its commit.
+      # --skip-if-behind main: publishes the tip of main, or an older commit
+      # of main only while the site has nothing newer, so re-running an old
+      # run cannot roll the site back.
       - run: cargo run --locked -p xtask -- publish --skip-if-behind main
