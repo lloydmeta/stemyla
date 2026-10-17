@@ -75,6 +75,20 @@ pub struct Inbox {
     name: Option<String>,
     /// Songs kept in browser storage.
     sessions: Option<Vec<(String, store_meta::Meta)>>,
+    /// Why a reset stopped short of reloading the page.
+    reset_failed: Option<String>,
+}
+
+/// Where the Reset dialog is.  Web only.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default, PartialEq)]
+enum ResetStage {
+    #[default]
+    Closed,
+    Asking,
+    /// A choice was made; the page reloads when it is done.
+    Running,
+    Failed(String),
 }
 
 /// Asks the browser for the storage used and the stored songs, for the
@@ -232,9 +246,8 @@ pub struct StemApp {
     /// The stem separation worker (web only).
     #[cfg(target_arch = "wasm32")]
     separator: Option<separator::Separator>,
-    /// The Reset dialog is showing.
     #[cfg(target_arch = "wasm32")]
-    reset_open: bool,
+    reset: ResetStage,
 }
 
 impl Default for StemApp {
@@ -270,7 +283,7 @@ impl Default for StemApp {
             #[cfg(target_arch = "wasm32")]
             separator: None,
             #[cfg(target_arch = "wasm32")]
-            reset_open: false,
+            reset: ResetStage::Closed,
         }
     }
 }
@@ -612,6 +625,11 @@ impl StemApp {
         if dropped.is_empty() {
             return;
         }
+        // Nothing new is opened or stored while a reset runs.
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.reset, ResetStage::Running | ResetStage::Failed(_)) {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             // A single dropped folder loads every stem in it.
@@ -688,16 +706,22 @@ impl StemApp {
             ctx.request_repaint();
             wasm_bindgen_futures::spawn_local(async move {
                 let mut files = Vec::new();
+                // The "Reading…" text may still be queued; the result,
+                // applied before the queued status, must not be hidden by it.
                 for f in &chosen {
                     match picker::read(f).await {
                         Ok(b) => files.push((f.name(), b)),
                         Err(e) => {
-                            pending.borrow_mut().song = Some(Err(anyhow::anyhow!(e)));
+                            let mut inbox = pending.borrow_mut();
+                            inbox.status = None;
+                            inbox.song = Some(Err(anyhow::anyhow!(e)));
+                            drop(inbox);
                             ctx.request_repaint();
                             return;
                         }
                     }
                 }
+                pending.borrow_mut().status = None;
                 load_and_keep(files, pending, ctx).await;
             });
         });
@@ -784,7 +808,7 @@ impl StemApp {
                 .on_hover_text("For when reloading the page does not bring separation back")
                 .clicked()
             {
-                self.reset_open = true;
+                self.reset = ResetStage::Asking;
             }
             return;
         }
@@ -918,7 +942,7 @@ impl StemApp {
                 .on_hover_text("Fetch this app's files again, or delete everything it keeps, then reload")
                 .clicked()
             {
-                self.reset_open = true;
+                self.reset = ResetStage::Asking;
                 ui.close();
             }
         });
@@ -957,28 +981,51 @@ impl StemApp {
         }
     }
 
-    /// The Reset dialog, while open; a choice stops the worker, does the
-    /// reset and reloads the page.
+    /// The Reset dialog, then its progress until the page reloads, or what
+    /// could not be deleted.
     #[cfg(target_arch = "wasm32")]
     fn reset_dialog(&mut self, ctx: &egui::Context) {
-        if !self.reset_open {
-            return;
-        }
-        let reason = self.separator.as_ref().and_then(|s| s.stopped.clone());
-        let stored_mb = self.usage.0 / 1e6;
-        match reset::dialog(ctx, reason.as_deref(), self.sessions.len(), stored_mb) {
-            reset::DialogOutcome::Open => {}
-            reset::DialogOutcome::Cancelled => self.reset_open = false,
-            reset::DialogOutcome::Chosen(choice) => {
-                self.reset_open = false;
-                self.output = None;
-                if let Some(sep) = &mut self.separator {
-                    sep.stop();
+        match &self.reset {
+            ResetStage::Closed => {}
+            ResetStage::Asking => {
+                let reason = self.separator.as_ref().and_then(|s| s.stopped.clone());
+                let stored_mb = self.usage.0 / 1e6;
+                match reset::dialog(ctx, reason.as_deref(), self.sessions.len(), stored_mb) {
+                    reset::DialogOutcome::Open => {}
+                    reset::DialogOutcome::Cancelled => self.reset = ResetStage::Closed,
+                    reset::DialogOutcome::Chosen(choice) => self.start_reset(ctx, choice),
                 }
-                self.status = "Resetting, then reloading the page…".into();
-                wasm_bindgen_futures::spawn_local(reset::run(choice));
             }
+            ResetStage::Running => {
+                reset::progress(ctx, None);
+            }
+            ResetStage::Failed(failure) => match reset::progress(ctx, Some(failure)) {
+                reset::ProgressOutcome::Waiting => {}
+                reset::ProgressOutcome::TryAgain => {
+                    self.start_reset(ctx, reset::Reset::DeleteStored)
+                }
+                reset::ProgressOutcome::Reload => reset::reload(),
+            },
         }
+    }
+
+    /// Stops playback and the worker, then runs the reset; the page reloads
+    /// when it succeeds.
+    #[cfg(target_arch = "wasm32")]
+    fn start_reset(&mut self, ctx: &egui::Context, choice: reset::Reset) {
+        self.reset = ResetStage::Running;
+        self.output = None;
+        if let Some(sep) = &mut self.separator {
+            sep.stop();
+        }
+        let (pending, ctx) = (self.pending.clone(), ctx.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(failure) = reset::run(choice).await {
+                log::warn!("reset: {failure}");
+                pending.borrow_mut().reset_failed = Some(failure);
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// Applies messages from the separation worker.
@@ -1346,6 +1393,9 @@ impl eframe::App for StemApp {
             }
             if let Some(n) = inbox.name {
                 self.song_name = Some(n);
+            }
+            if let Some(e) = inbox.reset_failed {
+                self.reset = ResetStage::Failed(e);
             }
         }
         let dt = ctx.input(|i| i.stable_dt);

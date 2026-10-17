@@ -1,6 +1,6 @@
 //! The Reset dialog: what it says, and which choice each button makes.
 
-use app::reset::{DialogOutcome, Reset, dialog};
+use app::reset::{DialogOutcome, ProgressOutcome, Reset, dialog, not_deleted, progress};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
@@ -66,4 +66,53 @@ fn cancel_and_escape_close_without_a_reset() {
     h.key_press(eframe::egui::Key::Escape);
     h.run();
     assert_eq!(*h.state(), DialogOutcome::Cancelled);
+}
+
+/// The progress dialog's outcome after the last frame.
+fn progress_harness(failure: Option<&'static str>) -> Harness<'static, ProgressOutcome> {
+    let mut h = Harness::builder().with_size([800.0, 600.0]).build_ui_state(
+        move |ui, outcome: &mut ProgressOutcome| {
+            if *outcome == ProgressOutcome::Waiting {
+                *outcome = progress(ui.ctx(), failure);
+            }
+        },
+        ProgressOutcome::Waiting,
+    );
+    h.run_steps(2);
+    h
+}
+
+#[test]
+fn while_running_there_is_nothing_to_press() {
+    let mut h = progress_harness(None);
+    assert!(
+        h.query_by_label_contains("Resetting, then reloading")
+            .is_some()
+    );
+    assert!(h.query_by_label("Try again").is_none());
+    assert!(h.query_by_label("Reload").is_none());
+    h.key_press(eframe::egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(*h.state(), ProgressOutcome::Waiting);
+}
+
+#[test]
+fn a_failed_deletion_is_shown_and_waits_for_the_user() {
+    let failure = not_deleted(&["sessions".to_string(), "download.part".to_string()]);
+    assert_eq!(
+        failure,
+        "Could not delete from browser storage: sessions, download.part."
+    );
+    let failure: &'static str = Box::leak(failure.into_boxed_str());
+    let mut h = progress_harness(Some(failure));
+    assert!(h.query_by_label(failure).is_some());
+    assert!(h.query_by_label_contains("Another tab").is_some());
+    h.get_by_label("Try again").click();
+    h.run_steps(2);
+    assert_eq!(*h.state(), ProgressOutcome::TryAgain);
+
+    let mut h = progress_harness(Some(failure));
+    h.get_by_label("Reload").click();
+    h.run_steps(2);
+    assert_eq!(*h.state(), ProgressOutcome::Reload);
 }

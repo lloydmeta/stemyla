@@ -17,6 +17,7 @@ use crate::store_meta::Meta;
 use anyhow::{Result, anyhow};
 use engine::{Song, Stem};
 use js_sys::{Array, Uint8Array};
+use std::cell::Cell;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
@@ -76,6 +77,7 @@ export function save_file(name, bytes, mime) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
     async fn st_write(path: &str, bytes: &Uint8Array) -> JsValue;
@@ -84,12 +86,36 @@ extern "C" {
     async fn st_usage() -> JsValue;
     async fn st_list(path: &str) -> JsValue;
     fn save_file(name: &str, bytes: &Uint8Array, mime: &str);
+    async fn st_sleep(ms: u32) -> JsValue;
 }
 
 const ROOT: &str = "sessions";
 
+thread_local! {
+    /// Writes in progress, each with a file open for writing.
+    static WRITES: Cell<usize> = const { Cell::new(0) };
+    /// Set by [`close`]: every later write is refused.
+    static CLOSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Refuses every later write and waits for those in progress, so a reset
+/// can delete the stored files without a writer holding one open or a
+/// save recreating one.  Storage stays closed until the page reloads.
+pub async fn close() {
+    CLOSED.set(true);
+    while WRITES.get() > 0 {
+        st_sleep(50).await;
+    }
+}
+
 async fn write(path: &str, bytes: &[u8]) -> Result<()> {
-    if st_write(path, &Uint8Array::from(bytes)).await.as_bool() == Some(true) {
+    if CLOSED.get() {
+        return Err(anyhow!("browser storage is being reset"));
+    }
+    WRITES.set(WRITES.get() + 1);
+    let written = st_write(path, &Uint8Array::from(bytes)).await.as_bool() == Some(true);
+    WRITES.set(WRITES.get() - 1);
+    if written {
         Ok(())
     } else {
         Err(anyhow!(

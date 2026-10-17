@@ -99,9 +99,56 @@ pub fn dialog(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressOutcome {
+    Waiting,
+    TryAgain,
+    Reload,
+}
+
+/// Shown from the choice until the page reloads, so nothing new is opened
+/// or saved meanwhile.  `failure` says what could not be deleted; the
+/// reset then waits for the user instead of reloading.
+pub fn progress(ctx: &egui::Context, failure: Option<&str>) -> ProgressOutcome {
+    let mut outcome = ProgressOutcome::Waiting;
+    egui::Modal::new(egui::Id::new("reset_progress")).show(ctx, |ui| {
+        ui.set_max_width(440.0);
+        let Some(failure) = failure else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Resetting, then reloading the page…");
+            });
+            return;
+        };
+        ui.heading("Reset incomplete");
+        ui.colored_label(ui.visuals().error_fg_color, failure);
+        ui.label(
+            "Another tab of this page may be using them: close it and try again, or clear this \
+             site's data in the browser's settings.",
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Try again").clicked() {
+                outcome = ProgressOutcome::TryAgain;
+            }
+            if ui.button("Reload").clicked() {
+                outcome = ProgressOutcome::Reload;
+            }
+        });
+    });
+    outcome
+}
+
+/// What a failed deletion tells the user.
+pub fn not_deleted(names: &[String]) -> String {
+    format!(
+        "Could not delete from browser storage: {}.",
+        names.join(", ")
+    )
+}
+
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use super::{Reset, WORKER_FILES, urls_to_refresh};
+    use super::{Reset, WORKER_FILES, not_deleted, urls_to_refresh};
     use js_sys::Array;
     use wasm_bindgen::prelude::*;
 
@@ -120,17 +167,24 @@ export async function refetch(urls) {
   );
   return results.filter((r) => r.status === "rejected").length;
 }
+// A terminated worker's open files may take a moment to be released, so
+// entries that could not be deleted are tried twice more.
 export async function wipe_opfs() {
   const root = await navigator.storage.getDirectory();
-  const names = [];
-  for await (const name of root.keys()) names.push(name);
-  let failed = 0;
-  for (const name of names) {
-    try { await root.removeEntry(name, { recursive: true }); } catch (e) { console.warn("reset: could not delete", name, e); failed++; }
+  let failed = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 300));
+    const names = [];
+    for await (const name of root.keys()) names.push(name);
+    failed = [];
+    for (const name of names) {
+      try { await root.removeEntry(name, { recursive: true }); }
+      catch (e) { if (e.name !== "NotFoundError") { console.warn("reset: could not delete", name, e); failed.push(name); } }
+    }
+    if (failed.length === 0) break;
   }
   return failed;
 }
-export function reload() { location.reload(); }
 "#)]
     extern "C" {
         fn page_url() -> String;
@@ -139,33 +193,46 @@ export function reload() { location.reload(); }
         async fn refetch(urls: Array) -> JsValue;
         #[wasm_bindgen(catch)]
         async fn wipe_opfs() -> Result<JsValue, JsValue>;
-        fn reload();
     }
 
     /// Does the reset, then reloads the page.  The caller stops the worker
-    /// first, so nothing holds a stored file open.
-    pub async fn run(reset: Reset) {
+    /// first.  Deleting closes the page's own storage and waits for writes
+    /// in progress; if anything is left, it returns what instead of
+    /// reloading.
+    pub async fn run(reset: Reset) -> Result<(), String> {
+        if reset == Reset::DeleteStored {
+            crate::store::close().await;
+            let left: Vec<String> = match wipe_opfs().await {
+                Ok(names) => Array::from(&names)
+                    .iter()
+                    .filter_map(|v| v.as_string())
+                    .collect(),
+                Err(e) => return Err(format!("Could not open browser storage: {e:?}")),
+            };
+            if !left.is_empty() {
+                return Err(not_deleted(&left));
+            }
+            log::info!("reset: browser storage cleared");
+        }
         let worker: Vec<String> = WORKER_FILES.iter().map(|f| absolute(f)).collect();
         let preloaded: Vec<String> = preloaded().iter().filter_map(|v| v.as_string()).collect();
         let urls = urls_to_refresh(&page_url(), &preloaded, &worker);
         let list: Array = urls.iter().map(|u| JsValue::from_str(u)).collect();
         let failed = refetch(list).await.as_f64().unwrap_or(0.0);
         log::info!("reset: fetched {} files again, {failed} failed", urls.len());
-        if reset == Reset::DeleteStored {
-            match wipe_opfs().await {
-                Ok(n) => log::info!(
-                    "reset: browser storage cleared, {} entries not deleted",
-                    n.as_f64().unwrap_or(0.0)
-                ),
-                Err(e) => log::warn!("reset: could not open browser storage: {e:?}"),
-            }
-        }
         reload();
+        Ok(())
+    }
+
+    pub fn reload() {
+        if let Some(w) = web_sys::window() {
+            let _ = w.location().reload();
+        }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use web::run;
+pub use web::{reload, run};
 
 #[cfg(test)]
 mod tests {
