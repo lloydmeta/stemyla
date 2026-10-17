@@ -109,10 +109,17 @@ fn forward_matches_pytorch() {
     };
     eprintln!("adapter: {} ({:?})", gpu.info.name, gpu.info.backend);
     // ROFORMER_GPU_MM=v64 (or any `MatMulPolicy` name, "v64,i64" too) runs
-    // the network with those matmul kernels instead of the fallback.
+    // the network with those matmul kernels instead of the fallback.  A
+    // named kernel that fails the start-up check fails the test: the driver
+    // would quietly run the fallback in its place.
     if let Ok(name) = std::env::var("ROFORMER_GPU_MM") {
         let policy = MatMulPolicy::parse(&name).unwrap_or_else(|| panic!("unknown kernel {name}"));
-        pollster::block_on(gpu.check_kernels()).unwrap();
+        let problems = pollster::block_on(gpu.check_kernels()).unwrap();
+        let usable = gpu.usable.get();
+        assert!(
+            usable[policy.pick(1000, 1000)] && usable[policy.pick(10, 10)],
+            "{name} failed the start-up check: {problems:?}"
+        );
         gpu.policy.set(policy);
     }
     eprintln!("matmul {}", gpu.policy.get().name());

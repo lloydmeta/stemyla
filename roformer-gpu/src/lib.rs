@@ -205,9 +205,10 @@ impl Tile {
 /// scalar kernels is one f32; on an iPad's GPU they ran at 8 to 11% of
 /// peak with little DRAM traffic, which looks issue-bound rather than
 /// memory-bound.  It runs only products whose vec4s are whole and aligned
-/// ([`MatMul::vec4_ok`]: the transformer's nn.Linear products and the
-/// attention scores); asked for any other product (K = 62 or 1,151 in the
-/// p.v product, band-split widths), the fallback `i64` runs it instead.
+/// ([`MatMul::vec4_ok`]: every nn.Linear product, band split and mask
+/// estimators included, and the attention scores); asked for any other
+/// product (the p.v product: K = 62 or 1,151, B not K-contiguous), the
+/// fallback `i64` runs it instead.
 ///
 /// The first entry is the fallback: a GPU on which it fails is not used.
 /// Rows are padded by 32 / `bk` floats (`s64`: 1; `v64`: one vec4, so

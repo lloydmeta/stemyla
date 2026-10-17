@@ -724,6 +724,40 @@ pub const ATTENTION_ROUND: f64 = 0.3;
 /// on memory-limited devices than a close timing does.
 pub const FUSED_MARGIN: f64 = 1.1;
 
+/// The stored kernel choices (`"<key>\t<choice>"` lines, keys
+/// `"<adapter>|..."`) with `key`'s choice set to `value`.  Lines for other
+/// adapters (the other GPU of a two-GPU laptop) stay.  This adapter keeps
+/// its newest `keep_per_gpu - 1` lines for other keys (other kernel sets or
+/// calibration versions, from builds published side by side on one
+/// origin) before the new line, which goes last; older ones and any
+/// earlier line for `key` are dropped.  Lines without a tab are dropped.
+pub fn store_choice(
+    text: &str,
+    adapter: &str,
+    key: &str,
+    value: &str,
+    keep_per_gpu: usize,
+) -> String {
+    let prefix = format!("{adapter}|");
+    let lines: Vec<(&str, &str)> = text
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|(k, _)| (k, l)))
+        .filter(|(k, _)| *k != key)
+        .collect();
+    let mine = lines.iter().filter(|(k, _)| k.starts_with(&prefix)).count();
+    let mut skip = mine.saturating_sub(keep_per_gpu.saturating_sub(1));
+    let mut out = String::new();
+    for (k, l) in lines {
+        if k.starts_with(&prefix) && skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        out += l;
+        out += "\n";
+    }
+    out + &format!("{key}\t{value}\n")
+}
+
 /// The choice from measured seconds: for each kind of product, the kernel
 /// with the least total over its shapes (`large[t]`, `small[t]`; infinite
 /// for kernels that failed their check); fused attention on the frequency
@@ -984,6 +1018,35 @@ mod tests {
         assert_eq!(m, vec![1.8, f64::INFINITY]);
         let c = decide(&m, &m, 1.0, 2.0, true);
         assert_eq!(c.matmul, MatMulPolicy::Split { large: 0, small: 0 });
+    }
+
+    /// Other GPUs' lines stay; this GPU keeps its two newest other lines
+    /// and the new one, last; a line for the same key is replaced.
+    #[test]
+    fn stored_choices() {
+        let text = "amd|a|2\ti64;split\nintel|a|2\ti128x64;split\namd|b|2\ts64;fused\namd|c|1\ti64;freq\nno tab\n";
+        assert_eq!(
+            store_choice(text, "amd", "amd|d|2", "v64;fused", 3),
+            "intel|a|2\ti128x64;split\namd|b|2\ts64;fused\namd|c|1\ti64;freq\namd|d|2\tv64;fused\n"
+        );
+        assert_eq!(
+            store_choice(text, "amd", "amd|b|2", "v64;fused", 3),
+            "amd|a|2\ti64;split\nintel|a|2\ti128x64;split\namd|c|1\ti64;freq\namd|b|2\tv64;fused\n"
+        );
+        assert_eq!(
+            store_choice(text, "amd", "amd|d|2", "v64;fused", 1),
+            "intel|a|2\ti128x64;split\namd|d|2\tv64;fused\n"
+        );
+        assert_eq!(
+            store_choice("", "amd", "amd|d|2", "v64;freq", 3),
+            "amd|d|2\tv64;freq\n"
+        );
+        // An adapter whose name is a prefix of another's keeps its lines
+        // apart ("amd" against "amd rdna").
+        assert_eq!(
+            store_choice("amd rdna|a|2\ti64;split\n", "amd", "amd|d|2", "v64;freq", 1),
+            "amd rdna|a|2\ti64;split\namd|d|2\tv64;freq\n"
+        );
     }
 
     #[test]

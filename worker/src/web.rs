@@ -996,10 +996,14 @@ async fn mp3(msg: &JsValue) -> Result<(), String> {
 }
 
 const KERNEL_CHOICE: &str = "matmul_kernels";
+/// Stored kernel choices kept per GPU, one per kernel set and calibration
+/// version (the newest), as many as the builds kept side by side.
+const KEEP_PER_GPU: usize = 3;
 
 /// Sets this GPU's matmul kernels and attention path: the choice kept in
 /// browser storage for this adapter and these kernels, or else several
-/// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept.
+/// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept
+/// (see `roformer_gpu::bench::store_choice` for which lines stay).
 async fn choose_kernels(gpu: &Gpu) {
     let pref = STATE.with_borrow(|s| s.power);
     let adapter = gpu_info(pref).await.as_string().unwrap_or_default();
@@ -1008,40 +1012,40 @@ async fn choose_kernels(gpu: &Gpu) {
         roformer_gpu::kernels_id(),
         roformer_gpu::bench::CALIBRATION
     );
-    // One line per GPU; lines for other GPUs (the other adapter of a
-    // two-GPU laptop) are kept, and this GPU's lines for other kernels or
-    // another calibration version are dropped.
-    let mut others = Vec::new();
     let stored = cache_get(KERNEL_CHOICE).await;
-    if !stored.is_null() {
-        let text =
-            String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string();
-        for line in text.lines() {
-            let Some((k, v)) = line.split_once('\t') else {
-                continue;
-            };
-            if k != key {
-                if !k.starts_with(&format!("{adapter}|")) {
-                    others.push(line.to_string());
-                }
-                continue;
-            }
-            if let Some(c) = roformer_gpu::bench::Choice::parse(v)
-                && gpu.usable.get()[c.matmul.pick(1000, 1000)]
-                && gpu.usable.get()[c.matmul.pick(10, 10)]
-                && (c.attention == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get())
-            {
-                gpu.policy.set(c.matmul);
-                gpu.attention.set(c.attention);
-                return;
-            }
+    let text = if stored.is_null() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string()
+    };
+    for v in text
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .filter_map(|(k, v)| (k == key).then_some(v))
+    {
+        if let Some(c) = roformer_gpu::bench::Choice::parse(v)
+            && gpu.usable.get()[c.matmul.pick(1000, 1000)]
+            && gpu.usable.get()[c.matmul.pick(10, 10)]
+            && (c.attention == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get())
+        {
+            gpu.policy.set(c.matmul);
+            gpu.attention.set(c.attention);
+            return;
         }
     }
     log("choosing kernels for this GPU (several seconds, once)…");
     let c = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
     gpu.policy.set(c.matmul);
     gpu.attention.set(c.attention);
-    others.push(format!("{key}\t{}", c.name()));
-    let text = others.join("\n") + "\n";
+    // A WebGPU error while timing (out of memory with the weights
+    // resident, say) makes the timings meaningless: use the choice for
+    // now, keep nothing, and report it here rather than at the next step.
+    if let Some(e) = gpu.take_errors().into_iter().next() {
+        log(&format!(
+            "kernel calibration hit a WebGPU error ({e}); this choice is not kept"
+        ));
+        return;
+    }
+    let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);
     cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
 }
