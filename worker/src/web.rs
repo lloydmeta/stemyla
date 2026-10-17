@@ -210,6 +210,16 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     } else {
         wgpu::PowerPreference::HighPerformance
     };
+    // Recorded before anything names the adapter by it: `choose_kernels`
+    // keys this GPU's stored choice on it, and with the default still in
+    // place an integrated GPU took the discrete GPU's choice.
+    STATE.with_borrow_mut(|s| {
+        s.power = if integrated {
+            "low-power"
+        } else {
+            "high-performance"
+        };
+    });
     // `?profile=1` opens the device with `timestamp-query` (when offered)
     // so every step reports GPU time per kernel; otherwise no features.
     let g = Rc::new(if get(msg, "profile").is_truthy() {
@@ -239,14 +249,7 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     }
     apply_policy(&g, msg);
     apply_attention(&g, msg);
-    STATE.with_borrow_mut(|s| {
-        s.power = if integrated {
-            "low-power"
-        } else {
-            "high-performance"
-        };
-        s.gpu = Some(g.clone());
-    });
+    STATE.with_borrow_mut(|s| s.gpu = Some(g.clone()));
     Ok(g)
 }
 
