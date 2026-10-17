@@ -449,3 +449,279 @@ fn check_kernels_accepts_all() {
     assert!(problems.is_empty(), "{problems:?}");
     assert!(g.usable.get().iter().all(|&u| u));
 }
+
+/// A device opened for profiling records GPU time per dispatch under
+/// labels naming the kernel (and, for matmuls, the shape and tile).  Skips
+/// when the adapter has no `timestamp-query`.
+#[test]
+fn profile_labels_dispatches() {
+    let Ok(g) = pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
+    else {
+        eprintln!("skipping: no adapter");
+        return;
+    };
+    if !g.profiling() {
+        eprintln!("skipping: adapter without timestamp-query");
+        return;
+    }
+    let (m, n, k) = (70, 90, 33);
+    let a = g.upload("a", &rand(m * k, 1));
+    let b = g.upload("b", &rand(k * n, 2));
+    let c = g.buffer("c", m * n);
+    for _ in 0..2 {
+        let mut r = g.rec();
+        r.matmul(&MatMul::new(
+            (&a, View::rows(0, k)),
+            (&b, View::rows(0, n)),
+            (&c, View::rows(0, n)),
+            m,
+            n,
+            k,
+        ));
+        r.softmax(&c, m, n);
+        r.submit();
+    }
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert!(g.take_errors().is_empty());
+    let totals = g.take_profile();
+    let mm = format!(
+        "matmul 70x90x33 x1 {}",
+        TILES[g.policy.get().pick(m, n)].name
+    );
+    assert_eq!(totals.get(&mm).map(|v| v.0), Some(2), "{totals:?}");
+    assert_eq!(totals.get("softmax").map(|v| v.0), Some(2), "{totals:?}");
+    assert!(
+        totals.values().all(|v| v.1 >= 0.0 && v.1 < 10.0),
+        "{totals:?}"
+    );
+    assert!(g.take_profile().is_empty(), "totals are cleared");
+    let lines = roformer_gpu::profile_report(&totals);
+    assert!(lines.last().unwrap().starts_with("profile: total GPU time"));
+}
+
+/// The usual device never asks for optional features.
+#[test]
+fn plain_device_does_not_profile() {
+    let Some(g) = gpu() else { return };
+    assert!(!g.profiling());
+    assert!(g.device.features().is_empty());
+}
+
+/// Compile time and resident memory after each matmul kernel's first use
+/// (SwiftShader diagnostics; `--ignored --nocapture`).
+#[test]
+#[ignore]
+fn compile_each() {
+    let Some(g) = gpu() else { return };
+    let only: Option<usize> = std::env::var("TILE").ok().and_then(|v| v.parse().ok());
+    let (m, n, k) = (70, 90, 33);
+    let a = g.upload("a", &rand(m * k, 1));
+    let b = g.upload("b", &rand(k * n, 2));
+    let c = g.buffer("c", m * n);
+    for (t, tile) in TILES.iter().enumerate() {
+        if only.is_some_and(|o| o != t) {
+            continue;
+        }
+        let t0 = std::time::Instant::now();
+        let mut mm = MatMul::new(
+            (&a, View::rows(0, k)),
+            (&b, View::rows(0, n)),
+            (&c, View::rows(0, n)),
+            m,
+            n,
+            k,
+        );
+        mm.tile = Some(t);
+        let mut r = g.rec();
+        r.matmul(&mm);
+        r.submit();
+        pollster::block_on(g.done());
+        let rss = std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with("VmRSS"))
+            .unwrap_or("")
+            .to_string();
+        eprintln!("{}: {:.1} s, {rss}", tile.name, t0.elapsed().as_secs_f64());
+    }
+}
+
+/// The fused attention kernel against `attention_cpu` on the network's
+/// sequence lengths (1,151 frames on the time axis, 62 bands on the
+/// frequency axis) and a ragged one, with and without the gate.
+#[test]
+fn attention_matches_cpu() {
+    let Some(g) = gpu() else { return };
+    for (seq, nseq, gated) in [
+        (133, 2, true),
+        (62, 3, true),
+        (62, 1, false),
+        (1151, 1, true),
+    ] {
+        let tokens = seq * nseq;
+        let qkv = rand(tokens * 1536, 7);
+        let gates = rand(tokens * 8, 8);
+        let alpha = 0.125;
+        let want = roformer_gpu::attention_cpu(&qkv, gated.then_some(&gates[..]), seq, nseq, alpha);
+        let (qb, gb) = (g.upload("qkv", &qkv), g.upload("gates", &gates));
+        let ob = g.buffer("o", tokens * 512);
+        let mut r = g.rec();
+        r.attention(&qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
+        r.submit();
+        let got = read(&g, &ob, tokens * 512);
+        let errors = g.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_close(&got, &want, 2e-5, &format!("attention seq {seq} x{nseq}"));
+    }
+}
+
+/// The fused kernel gives what the separate path in net.rs gives (scores
+/// matmul, softmax, p.v matmul, gate), with net.rs's own strides.
+#[test]
+fn attention_matches_split_path() {
+    let Some(g) = gpu() else { return };
+    let (seq, nseq) = (133, 2);
+    let tokens = seq * nseq;
+    let row = 1536;
+    let qkv = g.upload("qkv", &rand(tokens * row, 9));
+    let gates = g.upload("gates", &rand(tokens * 8, 10));
+    let scores = g.buffer("scores", nseq * 8 * seq * seq);
+    let split = g.buffer("o split", tokens * 512);
+    let alpha = 0.125f32;
+    let mut r = g.rec();
+    let mut sc = MatMul::new(
+        (
+            &qkv,
+            View {
+                off: 0,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &qkv,
+            View {
+                off: 512,
+                rs: 1,
+                cs: row,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        seq,
+        seq,
+        64,
+    );
+    sc.outer = nseq;
+    sc.inner = 8;
+    sc.alpha = alpha;
+    r.matmul(&sc);
+    r.softmax(&scores, nseq * 8 * seq, seq);
+    let mut pv = MatMul::new(
+        (
+            &scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        (
+            &qkv,
+            View {
+                off: 1024,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &split,
+            View {
+                off: 0,
+                rs: 512,
+                cs: 1,
+                bo: seq * 512,
+                bi: 64,
+            },
+        ),
+        seq,
+        64,
+        seq,
+    );
+    pv.outer = nseq;
+    pv.inner = 8;
+    r.matmul(&pv);
+    r.gate(&split, &gates, tokens);
+    r.submit();
+    let want = read(&g, &split, tokens * 512);
+    let fused = g.buffer("o fused", tokens * 512);
+    let mut r = g.rec();
+    r.attention(&qkv, Some(&gates), &fused, seq, nseq, alpha);
+    r.submit();
+    let got = read(&g, &fused, tokens * 512);
+    assert!(g.take_errors().is_empty());
+    assert_close(&got, &want, 2e-5, "fused attention against the split path");
+}
+
+#[test]
+fn check_attention_accepts_all() {
+    let Some(g) = gpu() else { return };
+    let problem = pollster::block_on(g.check_attention());
+    assert_eq!(problem, None);
+    assert!(g.fused_ok.get());
+}
+
+/// With recording off (benchmarks, calibration) a profiling device keeps
+/// no timestamps, and `reset_profile` drops whatever was recorded before,
+/// collected or not, so a report covers only what follows.
+#[test]
+fn profile_recording_and_reset() {
+    let Ok(g) = pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
+    else {
+        eprintln!("skipping: no adapter");
+        return;
+    };
+    if !g.profiling() {
+        eprintln!("skipping: adapter without timestamp-query");
+        return;
+    }
+    let x = g.upload("x", &rand(64 * 64, 3));
+    let softmax = |g: &Gpu| {
+        let mut r = g.rec();
+        r.softmax(&x, 64, 64);
+        r.submit();
+    };
+    assert!(g.set_recording(false));
+    softmax(&g);
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert!(g.take_profile().is_empty(), "nothing recorded while off");
+    assert!(!g.set_recording(true));
+    // Recorded but never collected: reset reads it back and drops it.
+    softmax(&g);
+    pollster::block_on(g.reset_profile()).unwrap();
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert!(g.take_profile().is_empty(), "reset leaves nothing behind");
+    softmax(&g);
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(1));
+    assert!(g.take_errors().is_empty());
+}

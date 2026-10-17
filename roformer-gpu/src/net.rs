@@ -16,7 +16,7 @@ use roformer::{
     BandGroup, DEPTH, DIM, DIM_HEAD, FEATURES, FREQS_PER_BANDS, HEADS, HIDDEN, STEMS, band_groups,
 };
 
-use crate::{Act, Gpu, MatMul, Rec, View};
+use crate::{Act, AttentionPolicy, Gpu, MatMul, Rec, View};
 
 const INNER: usize = HEADS * DIM_HEAD;
 const BANDS: usize = FREQS_PER_BANDS.len();
@@ -123,9 +123,13 @@ impl Block {
 }
 
 /// Elements one sequence of `seq` tokens needs in the largest per-step
-/// buffer of a transformer step.
-fn per_seq(seq: usize) -> usize {
-    (seq * 3 * INNER).max(HEADS * seq * seq).max(seq * HIDDEN)
+/// buffer of a transformer step.  Fused attention never writes the
+/// `[HEADS, seq, seq]` scores, so a step can then take more sequences
+/// (4 bands of 1,151 frames instead of 1 at the default budget): more
+/// workgroups per dispatch and fewer steps.
+fn per_seq(seq: usize, fused: bool) -> usize {
+    let scores = if fused { 0 } else { HEADS * seq * seq };
+    (seq * 3 * INNER).max(scores).max(seq * HIDDEN)
 }
 
 impl Net {
@@ -186,9 +190,10 @@ impl Net {
         })
     }
 
-    /// Sequences per transformer step for sequences of `seq` tokens.
-    pub fn sub_batch(&self, batch: usize, seq: usize) -> usize {
-        (self.budget / per_seq(seq)).clamp(1, batch)
+    /// Sequences per transformer step for sequences of `seq` tokens, with
+    /// fused attention or without.
+    pub fn sub_batch(&self, batch: usize, seq: usize, fused: bool) -> usize {
+        (self.budget / per_seq(seq, fused)).clamp(1, batch)
     }
 
     /// Bands per mask step for a band group of width `w`.
@@ -319,6 +324,10 @@ fn rope_table(seq: usize) -> Vec<f32> {
 pub struct Job<'a> {
     gpu: &'a Gpu,
     net: &'a Net,
+    /// Where this job uses fused attention ([`Gpu::attention`] when the
+    /// job was made).  Fixed per job: the step sizes and the scores buffer
+    /// depend on it.
+    attention: AttentionPolicy,
     pub frames: usize,
     /// Band-normalised input, per group `[count, T, width]`.
     split_in: wgpu::Buffer,
@@ -343,10 +352,22 @@ impl<'a> Job<'a> {
     /// Allocates the buffers for `frames` frames.
     pub fn new(gpu: &'a Gpu, net: &'a Net, frames: usize) -> Self {
         let (t, f) = (frames, BANDS);
-        let nt = net.sub_batch(f, t);
-        let nf = net.sub_batch(t, f);
+        let attention = gpu.attention.get();
+        let nt = net.sub_batch(f, t, attention.time);
+        let nf = net.sub_batch(t, f, attention.freq);
         let tokens = (nt * t).max(nf * f);
-        let scores = (nt * HEADS * t * t).max(nf * HEADS * f * f);
+        // Scores only for an axis that runs split attention.
+        let scores_t = if attention.time {
+            0
+        } else {
+            nt * HEADS * t * t
+        };
+        let scores_f = if attention.freq {
+            0
+        } else {
+            nf * HEADS * f * f
+        };
+        let scores = scores_t.max(scores_f);
         let (mut mask_h, mut mask_y) = (0, 0);
         for g in band_groups() {
             let n = net.mask_batch(&g, t);
@@ -356,6 +377,7 @@ impl<'a> Job<'a> {
         Self {
             gpu,
             net,
+            attention,
             frames,
             split_in: gpu.buffer("split_in", t * FEATURES),
             x: gpu.buffer("x", f * t * DIM),
@@ -426,7 +448,7 @@ impl<'a> Job<'a> {
     pub fn layer_steps(&self, layer: usize) -> Vec<Step> {
         let (t, f) = (self.frames, BANDS);
         let mut out = Vec::new();
-        let n = self.net.sub_batch(f, t);
+        let n = self.net.sub_batch(f, t, self.attention.time);
         let mut first = 0;
         while first < f {
             out.push(Step::Time {
@@ -437,7 +459,7 @@ impl<'a> Job<'a> {
             first += n;
         }
         out.push(Step::ToFreq);
-        let n = self.net.sub_batch(t, f);
+        let n = self.net.sub_batch(t, f, self.attention.freq);
         let mut first = 0;
         while first < t {
             out.push(Step::Freq {
@@ -500,6 +522,7 @@ impl<'a> Job<'a> {
                 first,
                 n,
                 &self.rope_time,
+                self.attention.time,
             ),
             Step::ToFreq => r.transpose(&self.x, &self.xt, f, t),
             Step::Freq { layer, first, n } => self.transformer(
@@ -510,6 +533,7 @@ impl<'a> Job<'a> {
                 first,
                 n,
                 &self.rope_freq,
+                self.attention.freq,
             ),
             Step::ToTime => r.transpose(&self.xt, &self.x, t, f),
             Step::FinalNorm => r.rmsnorm(&self.x, 0, &self.net.final_norm, &self.xt, 0, f * t),
@@ -553,6 +577,7 @@ impl<'a> Job<'a> {
         first: usize,
         nb: usize,
         rope: &wgpu::Buffer,
+        fused: bool,
     ) {
         let tok0 = first * seq;
         let ntok = nb * seq;
@@ -578,6 +603,53 @@ impl<'a> Job<'a> {
         g.bias = Some((&b.gates_b, 0, 0));
         r.matmul(&g);
 
+        let alpha = (DIM_HEAD as f32).powf(-0.5);
+        if fused {
+            // Scores, softmax, p.v and gate in one dispatch; the scores
+            // never reach memory.
+            r.attention(&self.qkv, Some(&self.gates), &self.o, seq, nb, alpha);
+        } else {
+            self.split_attention(r, seq, nb, alpha);
+        }
+        let mut out = MatMul::new(
+            (&self.o, View::rows(0, INNER)),
+            (&b.out, View::t(0, INNER)),
+            (buf, View::rows(x_off, DIM)),
+            ntok,
+            DIM,
+            INNER,
+        );
+        out.accumulate = true;
+        r.matmul(&out);
+
+        r.rmsnorm(buf, x_off, &b.ff_norm, &self.xn, 0, ntok);
+        let mut h = MatMul::new(
+            (&self.xn, View::rows(0, DIM)),
+            (&b.w1, View::t(0, DIM)),
+            (&self.h, View::rows(0, HIDDEN)),
+            ntok,
+            HIDDEN,
+            DIM,
+        );
+        h.bias = Some((&b.b1, 0, 0));
+        h.act = Act::Gelu;
+        r.matmul(&h);
+        let mut y = MatMul::new(
+            (&self.h, View::rows(0, HIDDEN)),
+            (&b.w2, View::t(0, HIDDEN)),
+            (buf, View::rows(x_off, DIM)),
+            ntok,
+            DIM,
+            HIDDEN,
+        );
+        y.bias = Some((&b.b2, 0, 0));
+        y.accumulate = true;
+        r.matmul(&y);
+    }
+
+    /// Attention as separate dispatches: scores matmul into `self.scores`,
+    /// softmax, p.v matmul, gate.  The fused kernel computes the same.
+    fn split_attention(&self, r: &mut Rec, seq: usize, nb: usize, alpha: f32) {
         // scores[s, h, i, j] = q[s, i, h] . k[s, j, h] / 8
         let row = 3 * INNER;
         let mut sc = MatMul::new(
@@ -617,7 +689,7 @@ impl<'a> Job<'a> {
         );
         sc.outer = nb;
         sc.inner = HEADS;
-        sc.alpha = (DIM_HEAD as f32).powf(-0.5);
+        sc.alpha = alpha;
         r.matmul(&sc);
         r.softmax(&self.scores, nb * HEADS * seq, seq);
         // o[s, i, h*64 + d] = sum_j p[s, h, i, j] v[s, j, h, d]
@@ -659,41 +731,7 @@ impl<'a> Job<'a> {
         pv.outer = nb;
         pv.inner = HEADS;
         r.matmul(&pv);
-        r.gate(&self.o, &self.gates, ntok);
-        let mut out = MatMul::new(
-            (&self.o, View::rows(0, INNER)),
-            (&b.out, View::t(0, INNER)),
-            (buf, View::rows(x_off, DIM)),
-            ntok,
-            DIM,
-            INNER,
-        );
-        out.accumulate = true;
-        r.matmul(&out);
-
-        r.rmsnorm(buf, x_off, &b.ff_norm, &self.xn, 0, ntok);
-        let mut h = MatMul::new(
-            (&self.xn, View::rows(0, DIM)),
-            (&b.w1, View::t(0, DIM)),
-            (&self.h, View::rows(0, HIDDEN)),
-            ntok,
-            HIDDEN,
-            DIM,
-        );
-        h.bias = Some((&b.b1, 0, 0));
-        h.act = Act::Gelu;
-        r.matmul(&h);
-        let mut y = MatMul::new(
-            (&self.h, View::rows(0, HIDDEN)),
-            (&b.w2, View::t(0, HIDDEN)),
-            (buf, View::rows(x_off, DIM)),
-            ntok,
-            DIM,
-            HIDDEN,
-        );
-        y.bias = Some((&b.b2, 0, 0));
-        y.accumulate = true;
-        r.matmul(&y);
+        r.gate(&self.o, &self.gates, nb * seq);
     }
 
     fn mask_part(&self, r: &mut Rec, mg: &MaskGroup, k: usize, n: usize) {
@@ -757,6 +795,18 @@ impl<'a> Job<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without the scores buffer, a time-axis step takes 4 bands of a full
+    /// chunk instead of 1 at the default budget.
+    #[test]
+    fn fused_attention_fits_more_bands_per_step() {
+        let budget = 8 << 20; // the worker's default
+        let frames = roformer::CHUNK / roformer::HOP + 1;
+        assert_eq!((budget / per_seq(frames, false)).clamp(1, BANDS), 1);
+        assert_eq!((budget / per_seq(frames, true)).clamp(1, BANDS), 4);
+        // The frequency axis is bounded by q/k/v either way.
+        assert_eq!(per_seq(BANDS, false), per_seq(BANDS, true));
+    }
 
     /// One full chunk (1,151 frames) is about 6.1 TFLOP of matmuls, the
     /// figure the timing estimates work from; the step split does not change it.

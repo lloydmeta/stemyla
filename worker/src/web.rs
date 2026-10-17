@@ -92,8 +92,12 @@ export async function fetch_bytes(url) {
     return new Uint8Array(await r.arrayBuffer());
   } catch (e) { return null; }
 }
+export function perf_now() { return performance.now(); }
 "#)]
 extern "C" {
+    /// `performance.now()`: milliseconds at 100 µs resolution (5 µs when
+    /// cross-origin isolated), against `Date.now()`'s whole milliseconds.
+    fn perf_now() -> f64;
     async fn cache_get(name: &str) -> JsValue;
     async fn cache_put(name: &str, bytes: &Uint8Array) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
@@ -126,7 +130,7 @@ fn scope() -> DedicatedWorkerGlobalScope {
 }
 
 fn now_s() -> f64 {
-    js_sys::Date::now() / 1000.0
+    perf_now() / 1000.0
 }
 
 fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
@@ -179,8 +183,14 @@ async fn gpu_text(gpu: &Gpu) -> String {
         .map(|(t, _)| t.name)
         .collect();
     let policy = gpu.policy.get().name();
+    let attn = gpu.attention.get().name();
+    let fused = if gpu.fused_ok.get() {
+        "checked OK"
+    } else {
+        "not used"
+    };
     format!(
-        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}",
+        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}",
         l.max_compute_invocations_per_workgroup,
         l.max_compute_workgroup_storage_size / 1024,
         l.max_storage_buffer_binding_size >> 20,
@@ -200,25 +210,46 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     } else {
         wgpu::PowerPreference::HighPerformance
     };
-    let g = Rc::new(Gpu::new(power).await?);
-    // Every matmul kernel against the CPU on small products; one that
-    // fails on this GPU is never used (the original one failing is fatal).
-    for p in g.check_kernels().await? {
-        log(&p);
-    }
-    if get(msg, "mm").is_string() {
-        apply_policy(&g, msg);
-    } else {
-        choose_kernels(&g).await;
-    }
+    // Recorded before anything names the adapter by it: `choose_kernels`
+    // keys this GPU's stored choice on it, and with the default still in
+    // place an integrated GPU took the discrete GPU's choice.
     STATE.with_borrow_mut(|s| {
         s.power = if integrated {
             "low-power"
         } else {
             "high-performance"
         };
-        s.gpu = Some(g.clone());
     });
+    // `?profile=1` opens the device with `timestamp-query` (when offered)
+    // so every step reports GPU time per kernel; otherwise no features.
+    let g = Rc::new(if get(msg, "profile").is_truthy() {
+        let g = Gpu::new_profiling(power).await?;
+        if !g.profiling() {
+            log("profile: this adapter has no timestamp-query; no GPU times");
+        }
+        g
+    } else {
+        Gpu::new(power).await?
+    });
+    // Every matmul kernel against the CPU on small products; one that
+    // fails on this GPU is never used (the fallback failing is fatal).
+    for p in g.check_kernels().await? {
+        log(&p);
+    }
+    // The fused attention kernel against the CPU; if it fails, attention
+    // runs split everywhere.
+    if let Some(p) = g.check_attention().await {
+        log(&p);
+    }
+    // This GPU's kernel choice (kept per GPU, or measured once), unless
+    // the page URL sets both parts; then any override from the URL.
+    let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
+    if !(set("mm") && set("attn")) {
+        choose_kernels(&g).await;
+    }
+    apply_policy(&g, msg);
+    apply_attention(&g, msg);
+    STATE.with_borrow_mut(|s| s.gpu = Some(g.clone()));
     Ok(g)
 }
 
@@ -232,6 +263,7 @@ async fn handle(msg: JsValue) {
     let kind = get(&msg, "type").as_string().unwrap_or_default();
     if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
         apply_policy(&g, &msg);
+        apply_attention(&g, &msg);
     }
     let result = match kind.as_str() {
         "init" => init(&msg).await,
@@ -351,6 +383,8 @@ struct Pace {
     /// kind (which include compiling), for a throughput figure.
     flops: f64,
     secs: f64,
+    /// Wall time of every step, the first of each kind included.
+    wall: f64,
 }
 
 impl Pace {
@@ -364,6 +398,7 @@ impl Pace {
             steps: 0,
             flops: 0.0,
             secs: 0.0,
+            wall: 0.0,
         }
     }
 
@@ -373,8 +408,10 @@ impl Pace {
         job.run(step);
         gpu.done().await;
         let dt = now_s() - t0;
+        gpu.collect_profile().await?;
         let first = self.seen.insert(step.kind());
         self.steps += 1;
+        self.wall += dt;
         if !first {
             self.flops += step.flops(job.frames);
             self.secs += dt;
@@ -431,6 +468,8 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
     let overlap = get(msg, "overlap").as_f64().map_or(OVERLAP, |v| v as usize);
     let t0 = now_s();
     let mut d = Demixer::new([left.to_vec(), right.to_vec()], chunk, overlap, STEMS.len());
+    // The report after the song covers this separation only.
+    gpu.reset_profile().await?;
     let mut pace = Pace::new(msg);
     let total = d.num_chunks();
     post(
@@ -503,6 +542,7 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
         );
     }
     log(&format!("separation: {}", pace.summary()));
+    log_profile(gpu, &pace);
     post(
         &[("type", "done".into()), ("secs", (now_s() - t0).into())],
         &[],
@@ -653,6 +693,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
             let (_, want) = tensor_f32(&ct, "stems")?;
             let n = ashape[1];
             let t0 = now_s();
+            gpu.reset_profile().await?;
             let (spec, feats) = analyse(&[audio[..n].to_vec(), audio[n..].to_vec()]);
             let job = Job::new(&gpu, &net, feats.len() / FEATURES);
             let mut pace = Pace::new(msg);
@@ -688,6 +729,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
                 now_s() - t0,
                 pace.summary()
             ));
+            log_profile(&gpu, &pace);
         }
     } else {
         log("selftest: skipping the full chunk (stages failed)");
@@ -708,6 +750,24 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         &[],
     );
     Ok(())
+}
+
+/// With `?profile=1`: GPU time per kernel since the last report, and how
+/// much of the paced steps' wall time the GPU spent busy.
+fn log_profile(gpu: &Gpu, pace: &Pace) {
+    if !gpu.profiling() {
+        return;
+    }
+    let totals = gpu.take_profile();
+    let busy: f64 = totals.values().map(|v| v.1).sum();
+    for l in roformer_gpu::profile_report(&totals) {
+        log(&l);
+    }
+    log(&format!(
+        "profile: GPU busy {busy:.2} s of {:.2} s of step wall time ({:.0}% waiting, submitting or between dispatches); one pass per dispatch while profiling",
+        pace.wall,
+        100.0 * (1.0 - busy / pace.wall.max(1e-9))
+    ));
 }
 
 fn report(worst: &mut f64, name: &str, db: f64) {
@@ -742,6 +802,29 @@ fn apply_policy(gpu: &Gpu, msg: &JsValue) {
     }
 }
 
+/// `?attn=` in the page URL: `auto` (this GPU's choice), `split`,
+/// `fused`, or `time` / `freq` for fused attention on that axis only.
+/// Fused attention is used only if it passed the start-up check.
+fn apply_attention(gpu: &Gpu, msg: &JsValue) {
+    let Some(name) = get(msg, "attn").as_string() else {
+        return;
+    };
+    if name == "auto" {
+        return;
+    }
+    match roformer_gpu::AttentionPolicy::parse(&name) {
+        Some(p) if p == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get() => {
+            gpu.attention.set(p)
+        }
+        Some(_) => {
+            log("fused attention failed the start-up check on this GPU; using split attention")
+        }
+        None => log(&format!(
+            "unknown attention setting {name} (auto, split, fused, time or freq)"
+        )),
+    }
+}
+
 /// Times every matmul kernel on the shapes of a full chunk (`?bench`).
 async fn bench(msg: &JsValue) -> Result<(), String> {
     let g = gpu(msg).await?;
@@ -752,10 +835,19 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
     } else {
         (0.3, 0.2)
     };
-    let table = roformer_gpu::bench::measure(&g, warm, round, now_s, |l| log(&l)).await;
+    let rounds = get(msg, "bench_rounds")
+        .as_f64()
+        .map_or(3, |r| r.max(1.0) as usize);
+    let only = get(msg, "bench")
+        .as_string()
+        .and_then(|s| roformer_gpu::bench::parse_kernels(&s));
+    let table =
+        roformer_gpu::bench::measure(&g, warm, round, rounds, only.as_deref(), now_s, |l| log(&l))
+            .await;
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
     }
+    roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
         "bench finished in {:.0} s; results in the browser console",
         now_s() - t0
@@ -887,9 +979,9 @@ async fn mp3(msg: &JsValue) -> Result<(), String> {
 
 const KERNEL_CHOICE: &str = "matmul_kernels";
 
-/// Sets this GPU's matmul kernels: the choice kept in browser storage for
-/// this adapter and these kernels, or else a few seconds of
-/// `roformer_gpu::bench::calibrate`, whose result is then kept.
+/// Sets this GPU's matmul kernels and attention path: the choice kept in
+/// browser storage for this adapter and these kernels, or else several
+/// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept.
 async fn choose_kernels(gpu: &Gpu) {
     let pref = STATE.with_borrow(|s| s.power);
     let key = format!(
@@ -897,25 +989,37 @@ async fn choose_kernels(gpu: &Gpu) {
         gpu_info(pref).await.as_string().unwrap_or_default(),
         roformer_gpu::kernels_id()
     );
+    // One line per GPU; lines for other GPUs (the other adapter of a
+    // two-GPU laptop) are kept.
+    let mut others = Vec::new();
     let stored = cache_get(KERNEL_CHOICE).await;
     if !stored.is_null() {
         let text =
             String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string();
         for line in text.lines() {
-            if let Some((k, v)) = line.split_once('\t')
-                && k == key
-                && let Some(p) = roformer_gpu::MatMulPolicy::parse(v)
-                && gpu.usable.get()[p.pick(1000, 1000)]
-                && gpu.usable.get()[p.pick(10, 10)]
+            let Some((k, v)) = line.split_once('\t') else {
+                continue;
+            };
+            if k != key {
+                others.push(line.to_string());
+                continue;
+            }
+            if let Some(c) = roformer_gpu::bench::Choice::parse(v)
+                && gpu.usable.get()[c.matmul.pick(1000, 1000)]
+                && gpu.usable.get()[c.matmul.pick(10, 10)]
+                && (c.attention == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get())
             {
-                gpu.policy.set(p);
+                gpu.policy.set(c.matmul);
+                gpu.attention.set(c.attention);
                 return;
             }
         }
     }
-    log("choosing matmul kernels for this GPU (a few seconds, once)…");
-    let p = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
-    gpu.policy.set(p);
-    let line = format!("{key}\t{}\n", p.name());
-    cache_put(KERNEL_CHOICE, &Uint8Array::from(line.as_bytes())).await;
+    log("choosing kernels for this GPU (several seconds, once)…");
+    let c = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
+    gpu.policy.set(c.matmul);
+    gpu.attention.set(c.attention);
+    others.push(format!("{key}\t{}", c.name()));
+    let text = others.join("\n") + "\n";
+    cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
 }

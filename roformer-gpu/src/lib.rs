@@ -18,6 +18,8 @@
 pub mod bench;
 pub mod net;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
@@ -30,11 +32,12 @@ const PARAM_STRIDE: u64 = 256;
 /// Dispatches one [`Rec`] may hold.
 const MAX_DISPATCHES: u64 = 64;
 
-/// A matmul kernel's tile shape: a workgroup of 256 threads computes a
-/// `bm` x `bn` block of the output, each thread `tm` x `tn` of it, stepping
-/// through K `bk` at a time.  The first entry of [`TILES`] is the original
-/// hand-written kernel (`matmul.wgsl`); the others are `matmul_tiled.wgsl`
-/// with these numbers filled in.
+/// A matmul kernel: `matmul_interleaved.wgsl` with these numbers filled
+/// in (or, with `hand_written`, `matmul.wgsl` as it stands, which has the
+/// same numbers).  A workgroup of 256 threads computes a `bm` x `bn` block
+/// of the output, each thread `tm` x `tn` of it (every `bm / tm`-th row
+/// and every `bn / tn`-th column), stepping through K `bk` at a time; rows
+/// of the workgroup tiles are padded by `pad` floats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub name: &'static str,
@@ -43,73 +46,115 @@ pub struct Tile {
     pub bk: usize,
     pub tm: usize,
     pub tn: usize,
+    pub pad: usize,
+    pub hand_written: bool,
 }
 
 impl Tile {
     fn source(&self) -> String {
-        if self.name == TILES[0].name {
+        if self.hand_written {
             return include_str!("shaders/matmul.wgsl").to_string();
         }
-        assert_eq!((self.bm / self.tm) * (self.bn / self.tn), 256, "{self:?}");
+        let (tx, ty) = (self.bn / self.tn, self.bm / self.tm);
+        assert_eq!(tx * ty, 256, "{self:?}");
         assert!(
-            self.tm.is_multiple_of(4)
-                && self.tn.is_multiple_of(4)
-                && (self.bm * self.bk).is_multiple_of(256)
-                && (self.bn * self.bk).is_multiple_of(256)
+            (self.bm * self.bk).is_multiple_of(256) && (self.bn * self.bk).is_multiple_of(256),
+            "{self:?}"
         );
-        // Register code, unrolled here so that every index is a constant.
-        const LANE: [&str; 4] = ["x", "y", "z", "w"];
-        let (tm, tn4) = (self.tm, self.tn / 4);
+        let (la, lb) = (self.bm * self.bk / 256, self.bn * self.bk / 256);
         let mut decls = String::new();
         let mut compute = String::new();
         let mut epilogue = String::new();
-        for i in 0..tm {
-            for j in 0..tn4 {
-                decls += &format!("  var acc_{i}_{j} = vec4<f32>(0.0);\n");
-            }
-        }
-        for i in 0..tm / 4 {
-            compute += &format!("      let a{i} = a4(ab + {}u);\n", 4 * i);
-        }
-        for j in 0..tn4 {
-            compute += &format!("      let b{j} = b4(bb + {}u);\n", 4 * j);
-        }
-        for i in 0..tm {
-            for j in 0..tn4 {
-                compute += &format!(
-                    "      acc_{i}_{j} = fma(vec4<f32>(a{}.{}), b{j}, acc_{i}_{j});\n",
-                    i / 4,
-                    LANE[i % 4]
+        for i in 0..self.tm {
+            for j in 0..self.tn {
+                decls += &format!("  var acc_{i}_{j} = 0.0;\n");
+                epilogue += &format!(
+                    "  store(r0 + {}u, c0 + {}u, ob, bias_base, acc_{i}_{j});\n",
+                    ty * i,
+                    tx * j
                 );
             }
         }
-        for i in 0..tm {
-            for j in 0..tn4 {
-                for (c, lane) in LANE.iter().enumerate() {
-                    epilogue += &format!(
-                        "  store(r0 + {i}u, c0 + {}u, ob, bias_base, acc_{i}_{j}.{lane});\n",
-                        4 * j + c
-                    );
-                }
+        for i in 0..self.tm {
+            compute += &format!("      let a{i} = as_[ab + {}u];\n", ty * i);
+        }
+        for j in 0..self.tn {
+            compute += &format!("      let b{j} = bs_[bb + {}u];\n", tx * j);
+        }
+        for i in 0..self.tm {
+            for j in 0..self.tn {
+                compute += &format!("      acc_{i}_{j} = fma(a{i}, b{j}, acc_{i}_{j});\n");
             }
         }
-        include_str!("shaders/matmul_tiled.wgsl")
+        // One K tile into workgroup memory, element tid + 256 l of each
+        // tile.  A loop rather than unrolled copies: nothing here needs a
+        // constant index, and SwiftShader compiled unrolled branchy loads
+        // for minutes, with gigabytes of memory.
+        let stage = format!(
+            "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[a_slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[b_slot(e)] = b_get(e, k0, col0, b_base); }}"
+        );
+        include_str!("shaders/matmul_interleaved.wgsl")
             .replace("{BM}", &self.bm.to_string())
             .replace("{BN}", &self.bn.to_string())
             .replace("{BK}", &self.bk.to_string())
-            .replace("{TM}", &self.tm.to_string())
-            .replace("{TN}", &self.tn.to_string())
-            .replace("{SA_LEN}", &(self.bk * (self.bm + 4)).to_string())
-            .replace("{SB_LEN}", &(self.bk * (self.bn + 4)).to_string())
+            .replace("{TX}", &tx.to_string())
+            .replace("{TY}", &ty.to_string())
+            .replace("{PAD}", &self.pad.to_string())
+            .replace("{SA_LEN}", &(self.bk * (self.bm + self.pad)).to_string())
+            .replace("{SB_LEN}", &(self.bk * (self.bn + self.pad)).to_string())
             .replace("{ACC_DECLS}", decls.trim_end())
+            .replace("{STAGE}", &stage)
             .replace("{COMPUTE}", compute.trim_end())
             .replace("{EPILOGUE}", epilogue.trim_end())
     }
 }
 
-/// Every matmul kernel the GPU compiles.  [`MatMulPolicy`] chooses
-/// among them by the shape of the product.
-pub const TILES: [Tile; 5] = [
+/// The matmul kernels, among which [`bench::calibrate`] measures once per
+/// GPU.  `i64` and `i128x64` follow the same rules (accumulators in named
+/// registers, neighbouring threads on neighbouring floats, conflict-free
+/// workgroup memory, WebGPU's default limits) and differ only in the
+/// block each thread keeps in registers: 4 x 4 or 8 x 4.  The larger block
+/// gets more use from each workgroup-memory read (2.67 multiply-adds per
+/// read against 2) but needs twice the accumulators, so fewer threads fit
+/// at once to hide memory latency.  Which wins depends on the GPU's
+/// register file and scheduler, which WebGPU does not report.  Against the
+/// best kernel per shape, `i64` was 11% slower on a Radeon Pro 5500M, 22%
+/// on an Intel UHD 630 and 3% on an iPad's GPU; `i128x64` 22%, 2% and 5%.
+///
+/// `s64`, the original hand-written kernel, has `i64`'s layout but keeps
+/// its accumulators in a loop-indexed array.  It depends on the compiler
+/// unrolling that loop into registers: AMD's does, and there it was the
+/// fastest of the three (6% ahead of `i64` in `?bench`, 15% on the
+/// matmuls of a profiled self-test); Intel's and Apple's do not, and there
+/// it was 5 to 6 times slower, so calibration stops timing it after its
+/// first round on such GPUs.
+///
+/// The first entry is the fallback: a GPU on which it fails is not used.
+/// Rows are padded by 32 / `bk` floats (`s64`: 1): when K is the
+/// contiguous axis (every nn.Linear operand), 32 consecutive threads store
+/// 32 / `bk` rows of `bk` values, and this padding spreads them over all
+/// 32 banks.
+pub const TILES: [Tile; 3] = [
+    Tile {
+        name: "i64",
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        tm: 4,
+        tn: 4,
+        pad: 2,
+        hand_written: false,
+    },
+    Tile {
+        name: "i128x64",
+        bm: 128,
+        bn: 64,
+        bk: 8,
+        tm: 8,
+        tn: 4,
+        pad: 4,
+        hand_written: false,
+    },
     Tile {
         name: "s64",
         bm: 64,
@@ -117,40 +162,176 @@ pub const TILES: [Tile; 5] = [
         bk: 16,
         tm: 4,
         tn: 4,
-    },
-    Tile {
-        name: "v64",
-        bm: 64,
-        bn: 64,
-        bk: 16,
-        tm: 4,
-        tn: 4,
-    },
-    Tile {
-        name: "v128",
-        bm: 128,
-        bn: 128,
-        bk: 8,
-        tm: 8,
-        tn: 8,
-    },
-    Tile {
-        name: "v128x64",
-        bm: 128,
-        bn: 64,
-        bk: 8,
-        tm: 8,
-        tn: 4,
-    },
-    Tile {
-        name: "v64x128",
-        bm: 64,
-        bn: 128,
-        bk: 8,
-        tm: 4,
-        tn: 8,
+        pad: 1,
+        hand_written: true,
     },
 ];
+
+/// Where [`net::Job`] runs fused attention (`attention_tiled.wgsl`:
+/// scores, softmax, values and gate in one dispatch, the scores never in
+/// memory) instead of the scores matmul, softmax, p.v matmul and gate.
+/// The frequency axis (sequences of 62 bands) gains on every GPU measured,
+/// 2.2 to 3.6 times; the time axis (1,151 frames) gained 11 to 22% on
+/// Apple GPUs and lost 20% on an Intel UHD 630, so [`bench::calibrate`]
+/// decides it per GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttentionPolicy {
+    pub time: bool,
+    pub freq: bool,
+}
+
+impl AttentionPolicy {
+    pub const SPLIT: Self = Self {
+        time: false,
+        freq: false,
+    };
+    pub const FUSED: Self = Self {
+        time: true,
+        freq: true,
+    };
+
+    /// `split`, `fused`, or `time` / `freq` for fused on that axis only.
+    pub fn name(self) -> &'static str {
+        match (self.time, self.freq) {
+            (false, false) => "split",
+            (true, true) => "fused",
+            (true, false) => "time",
+            (false, true) => "freq",
+        }
+    }
+
+    /// The inverse of [`AttentionPolicy::name`].
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            Self::SPLIT,
+            Self::FUSED,
+            Self {
+                time: true,
+                freq: false,
+            },
+            Self {
+                time: false,
+                freq: true,
+            },
+        ]
+        .into_iter()
+        .find(|p| p.name() == s)
+    }
+}
+
+/// The fused attention kernel's WGSL: per-thread code with constant
+/// indices, generated into `attention_tiled.wgsl`.
+fn attention_source() -> String {
+    let (r4, c4) = (0..4, 0..4);
+    let mut decls = String::new();
+    let mut s_zero = String::new();
+    let mut s_step = String::new();
+    let mut soft1 = String::new();
+    let mut soft2 = String::new();
+    let mut values = String::new();
+    let mut finish = String::new();
+    for i in r4.clone() {
+        decls += &format!("  var m{i} = NEG;\n  var l{i} = 0.0;\n");
+        for j in c4.clone() {
+            decls += &format!("  var o{i}_{j} = 0.0;\n  var s{i}_{j} = 0.0;\n");
+            s_zero += &format!("    s{i}_{j} = 0.0;\n");
+        }
+    }
+    for i in r4.clone() {
+        s_step += &format!("        let a{i} = buf[ab + {}u];\n", 16 * i);
+    }
+    for j in c4.clone() {
+        s_step += &format!("        let b{j} = buf[bb + {}u];\n", 16 * j);
+    }
+    for i in r4.clone() {
+        for j in c4.clone() {
+            s_step += &format!("        s{i}_{j} = fma(a{i}, b{j}, s{i}_{j});\n");
+        }
+    }
+    for i in r4.clone() {
+        for j in c4.clone() {
+            soft1 += &format!(
+                "    s{i}_{j} = select(NEG, s{i}_{j} * p.alpha, j0 + tx + {}u < p.seq);\n",
+                16 * j
+            );
+        }
+        soft1 += &format!(
+            "    red[(ty + {}u) * 16u + tx] = max(max(s{i}_0, s{i}_1), max(s{i}_2, s{i}_3));\n",
+            16 * i
+        );
+    }
+    for i in r4.clone() {
+        soft2 += &format!(
+            "    var tm{i} = red[(ty + {r}u) * 16u];\n    for (var k = 1u; k < 16u; k++) {{ tm{i} = max(tm{i}, red[(ty + {r}u) * 16u + k]); }}\n    let mn{i} = max(m{i}, tm{i});\n    let sc{i} = exp(m{i} - mn{i});\n    m{i} = mn{i};\n",
+            r = 16 * i
+        );
+        for j in c4.clone() {
+            soft2 += &format!(
+                "    s{i}_{j} = exp(s{i}_{j} - mn{i});\n    o{i}_{j} = o{i}_{j} * sc{i};\n"
+            );
+        }
+        soft2 += &format!("    l{i} = l{i} * sc{i} + s{i}_0 + s{i}_1 + s{i}_2 + s{i}_3;\n");
+    }
+    for c in c4.clone() {
+        if c > 0 {
+            values += "    workgroupBarrier();\n";
+        }
+        for i in r4.clone() {
+            values += &format!("    buf[tx * S + ty + {}u] = s{i}_{c};\n", 16 * i);
+        }
+        values += &format!(
+            "    for (var l = 0u; l < 4u; l++) {{ stage_v(t + l * 256u, tok0, j0 + {}u, vc); }}\n    workgroupBarrier();\n    for (var kk = 0u; kk < 16u; kk++) {{\n      let pb = kk * S + ty;\n      let vb = B2 + kk * D + tx;\n",
+            16 * c
+        );
+        for i in r4.clone() {
+            values += &format!("      let pk{i} = buf[pb + {}u];\n", 16 * i);
+        }
+        for j in c4.clone() {
+            values += &format!("      let v{j} = buf[vb + {}u];\n", 16 * j);
+        }
+        for i in r4.clone() {
+            for j in c4.clone() {
+                values += &format!("      o{i}_{j} = fma(pk{i}, v{j}, o{i}_{j});\n");
+            }
+        }
+        values += "    }\n";
+    }
+    for i in r4.clone() {
+        finish += &format!("  red[(ty + {}u) * 16u + tx] = l{i};\n", 16 * i);
+    }
+    finish += "  workgroupBarrier();\n";
+    for i in r4 {
+        finish += &format!(
+            "  var lt{i} = 0.0;\n  for (var k = 0u; k < 16u; k++) {{ lt{i} += red[(ty + {r}u) * 16u + k]; }}\n  let qi{i} = q0 + ty + {r}u;\n  if (qi{i} < p.seq) {{\n    let tok = tok0 + qi{i};\n    var g = 1.0;\n    if ((p.flags & 1u) != 0u) {{ g = 1.0 / (1.0 + exp(-gates[tok * p.gate_row + h])); }}\n    let f = g / lt{i};\n    let ob = tok * p.o_row + h * D + tx;\n",
+            r = 16 * i
+        );
+        for j in c4.clone() {
+            finish += &format!("    o[ob + {}u] = o{i}_{j} * f;\n", 16 * j);
+        }
+        finish += "  }\n";
+    }
+    include_str!("shaders/attention_tiled.wgsl")
+        .replace("{DECLS}", decls.trim_end())
+        .replace("{S_ZERO}", s_zero.trim_end())
+        .replace("{S_STEP}", s_step.trim_end())
+        .replace("{SOFTMAX_1}", soft1.trim_end())
+        .replace("{SOFTMAX_2}", soft2.trim_end())
+        .replace("{VALUES}", values.trim_end())
+        .replace("{FINISH}", finish.trim_end())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AttentionParams {
+    seq: u32,
+    row: u32,
+    k_off: u32,
+    v_off: u32,
+    o_row: u32,
+    gate_row: u32,
+    flags: u32,
+    alpha: f32,
+}
 
 /// Which matmul kernel to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,16 +391,48 @@ pub struct Gpu {
     /// Kernels of [`TILES`] that passed [`Gpu::check_kernels`] on this GPU
     /// (all, until it runs).  The policy never picks one that failed.
     pub usable: std::cell::Cell<[bool; TILES.len()]>,
+    /// Where [`net::Job`] runs fused attention; split until set.  Set it
+    /// to anything but split only when [`Gpu::fused_ok`] is true.
+    pub attention: std::cell::Cell<AttentionPolicy>,
+    /// Whether the fused attention kernel passed [`Gpu::check_attention`]
+    /// (false until it runs).
+    pub fused_ok: std::cell::Cell<bool>,
     kernels: Kernels,
     /// Bound where a kernel has an input it does not use for this dispatch.
     dummy: wgpu::Buffer,
     uniforms: wgpu::Buffer,
     errors: Arc<Mutex<Vec<String>>>,
+    /// GPU timestamps per dispatch, on a device opened for profiling.
+    prof: Option<Prof>,
+    /// Whether profiled submissions record timestamps now; benchmarks
+    /// and calibration turn it off (see [`Gpu::set_recording`]).
+    recording: std::cell::Cell<bool>,
+}
+
+/// Timestamp queries around every dispatch of a profiled [`Gpu`].  Each
+/// profiled submission runs one compute pass per dispatch with a timestamp
+/// at either end, resolves them, and copies them to its own readback
+/// buffer; [`Gpu::collect_profile`] adds the finished ones to the totals.
+/// Splitting a step into one pass per dispatch costs a little speed, so
+/// only `?profile` runs open a device this way.
+struct Prof {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    /// Nanoseconds per timestamp tick.
+    period: f64,
+    /// Readback buffers of submissions not yet collected, with the label
+    /// of each dispatch in them.
+    pending: RefCell<Vec<(Vec<String>, wgpu::Buffer)>>,
+    /// Dispatch count and GPU seconds per label.
+    totals: RefCell<BTreeMap<String, (usize, f64)>>,
 }
 
 struct Kernels {
     /// One pipeline per entry of [`TILES`].
-    matmul: (Vec<wgpu::ComputePipeline>, wgpu::BindGroupLayout),
+    matmul: (
+        Vec<std::cell::OnceCell<wgpu::ComputePipeline>>,
+        wgpu::BindGroupLayout,
+    ),
     softmax: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     rmsnorm: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     rope: wgpu::ComputePipeline,
@@ -227,6 +440,9 @@ struct Kernels {
     transpose: wgpu::ComputePipeline,
     glu: wgpu::ComputePipeline,
     elementwise: wgpu::BindGroupLayout,
+    /// The fused attention kernel, compiled on first use; bound like the
+    /// element-wise kernels (read, read, read-write, uniform).
+    attention: std::cell::OnceCell<wgpu::ComputePipeline>,
 }
 
 #[derive(Clone, Copy)]
@@ -296,10 +512,8 @@ impl Kernels {
         let sm = bind_layout(device, "softmax", &[ReadWrite, Uniform]);
         let rn = bind_layout(device, "rmsnorm", &[Read, Read, ReadWrite, Uniform]);
         let ew = bind_layout(device, "elementwise", &[Read, Read, ReadWrite, Uniform]);
-        let matmul = TILES
-            .iter()
-            .map(|t| pipeline(device, &shader(device, t.name, &t.source()), "main", &mm))
-            .collect();
+        // Matmul pipelines compile on first use (see `matmul_pipeline`).
+        let matmul = TILES.iter().map(|_| std::cell::OnceCell::new()).collect();
         let s = shader(device, "softmax", include_str!("shaders/softmax.wgsl"));
         let r = shader(device, "rmsnorm", include_str!("shaders/rmsnorm.wgsl"));
         let e = shader(
@@ -316,7 +530,36 @@ impl Kernels {
             transpose: pipeline(device, &e, "transpose3", &ew),
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
+            attention: std::cell::OnceCell::new(),
         }
+    }
+
+    fn attention_pipeline(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
+        self.attention.get_or_init(|| {
+            pipeline(
+                device,
+                &shader(device, "attention", &attention_source()),
+                "main",
+                &self.elementwise,
+            )
+        })
+    }
+
+    /// The pipeline of matmul kernel `t`, compiled the first time it is
+    /// needed: a device compiles only the kernels it runs (all of them once
+    /// in [`Gpu::check_kernels`], where a kernel the compiler rejects is
+    /// reported and never used again).  Compiling every kernel up front
+    /// took SwiftShader over 4 GB per device.
+    fn matmul_pipeline(&self, device: &wgpu::Device, t: usize) -> &wgpu::ComputePipeline {
+        self.matmul.0[t].get_or_init(|| {
+            let tile = &TILES[t];
+            pipeline(
+                device,
+                &shader(device, tile.name, &tile.source()),
+                "main",
+                &self.matmul.1,
+            )
+        })
     }
 }
 
@@ -325,6 +568,17 @@ impl Gpu {
     /// `WGPU_ADAPTER_NAME` select an adapter natively (tests use
     /// SwiftShader's Vulkan driver this way).
     pub async fn new(power: wgpu::PowerPreference) -> Result<Self, String> {
+        Self::open(power, false).await
+    }
+
+    /// Like [`Gpu::new`], but also asks for `timestamp-query` when the
+    /// adapter offers it, so that [`Gpu::profiling`] is true.  The limits
+    /// are the same defaults; only the optional feature differs.
+    pub async fn new_profiling(power: wgpu::PowerPreference) -> Result<Self, String> {
+        Self::open(power, true).await
+    }
+
+    async fn open(power: wgpu::PowerPreference, profile: bool) -> Result<Self, String> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::PRIMARY | wgpu::Backends::BROWSER_WEBGPU;
         let instance = wgpu::Instance::new(desc.with_env());
@@ -337,9 +591,15 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("no GPU adapter: {e}"))?;
+        let features = if profile {
+            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("roformer"),
+                required_features: features,
                 required_limits: wgpu::Limits::defaults(),
                 ..Default::default()
             })
@@ -369,17 +629,112 @@ impl Gpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let prof = device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| Prof {
+                set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("profile"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: (2 * MAX_DISPATCHES) as u32,
+                }),
+                resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("profile resolve"),
+                    size: 16 * MAX_DISPATCHES,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                period: f64::from(queue.get_timestamp_period()),
+                pending: RefCell::new(Vec::new()),
+                totals: RefCell::new(BTreeMap::new()),
+            });
         Self {
             device,
             queue,
             info,
             policy: std::cell::Cell::new(MatMulPolicy::Fixed(0)),
             usable: std::cell::Cell::new([true; TILES.len()]),
+            attention: std::cell::Cell::new(AttentionPolicy::SPLIT),
+            fused_ok: std::cell::Cell::new(false),
             kernels,
             dummy,
             uniforms,
             errors,
+            prof,
+            recording: std::cell::Cell::new(true),
         }
+    }
+
+    /// True when this device records GPU time per dispatch.
+    pub fn profiling(&self) -> bool {
+        self.prof.is_some()
+    }
+
+    /// Reads the timestamps of every profiled submission so far into the
+    /// totals.  Call after [`Gpu::done`]; does nothing on a device that is
+    /// not profiling.
+    pub async fn collect_profile(&self) -> Result<(), String> {
+        let Some(prof) = &self.prof else {
+            return Ok(());
+        };
+        let pending = std::mem::take(&mut *prof.pending.borrow_mut());
+        for (labels, staging) in pending {
+            let (tx, rx) = futures_channel::oneshot::channel();
+            staging.map_async(wgpu::MapMode::Read, .., move |r| {
+                let _ = tx.send(r);
+            });
+            self.poll();
+            rx.await
+                .map_err(|_| "profile readback cancelled".to_string())?
+                .map_err(|e| format!("profile readback: {e}"))?;
+            let view = staging
+                .get_mapped_range(..)
+                .map_err(|e| format!("profile readback: {e}"))?;
+            let ticks: &[u64] = bytemuck::cast_slice(&view);
+            let mut totals = prof.totals.borrow_mut();
+            for (i, label) in labels.into_iter().enumerate() {
+                let (start, end) = (ticks[2 * i], ticks[2 * i + 1]);
+                let secs = end.saturating_sub(start) as f64 * prof.period * 1e-9;
+                let e = totals.entry(label).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 += secs;
+            }
+            drop(view);
+            staging.unmap();
+        }
+        Ok(())
+    }
+
+    /// Turns timestamp recording on a profiling device on or off and
+    /// returns the previous setting.  Benchmarks and calibration turn it
+    /// off: they submit many command buffers without collecting their
+    /// timestamps, which would otherwise pile up as readback buffers and
+    /// land in the next run's report.
+    pub fn set_recording(&self, on: bool) -> bool {
+        self.recording.replace(on)
+    }
+
+    /// Starts a fresh profile: waits for submitted work, reads back any
+    /// timestamps not yet collected (start-up checks, earlier runs) and
+    /// discards the totals, so a report covers only what follows.  Does
+    /// nothing on a device that is not profiling.
+    pub async fn reset_profile(&self) -> Result<(), String> {
+        if self.prof.is_none() {
+            return Ok(());
+        }
+        self.done().await;
+        self.collect_profile().await?;
+        self.take_profile();
+        Ok(())
+    }
+
+    /// GPU seconds per dispatch label since the last call, and clears them.
+    /// Labels name the kernel, and for matmuls the shape and tile.
+    pub fn take_profile(&self) -> BTreeMap<String, (usize, f64)> {
+        self.prof
+            .as_ref()
+            .map(|p| std::mem::take(&mut *p.totals.borrow_mut()))
+            .unwrap_or_default()
     }
 
     /// WebGPU errors reported since the last call (validation, out of
@@ -477,8 +832,8 @@ impl Gpu {
     /// layouts, bias, accumulate, ragged edges) and compares each with the
     /// CPU.  A kernel that disagrees is marked unusable on this GPU, so a
     /// compiler or driver bug in one kernel costs speed, not correctness.
-    /// Returns one line per kernel that failed; the original kernel
-    /// (`s64`) failing is an error.
+    /// Returns one line per kernel that failed; the fallback kernel
+    /// (`TILES[0]`, `i64`) failing is an error.
     pub async fn check_kernels(&self) -> Result<Vec<String>, String> {
         let (m, n, k) = (133, 141, 45);
         let rand = |len: usize, seed: u32| -> Vec<f32> {
@@ -571,13 +926,144 @@ impl Gpu {
         Ok(problems)
     }
 
+    /// Runs the fused attention kernel on a small ragged case (two
+    /// sequences of 37 tokens, with gates) and compares it with
+    /// [`attention_cpu`].  Sets [`Gpu::fused_ok`]; returns why it failed,
+    /// if it did, and then the split path is the only one used.
+    pub async fn check_attention(&self) -> Option<String> {
+        let (seq, nseq) = (37, 2);
+        let tokens = seq * nseq;
+        let mut st = 0x9e37_79b9u32;
+        let mut rand = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    st ^= st << 13;
+                    st ^= st >> 17;
+                    st ^= st << 5;
+                    (st % 2001) as f32 / 1000.0 - 1.0
+                })
+                .collect()
+        };
+        let (qkv, gates) = (rand(tokens * 1536), rand(tokens * 8));
+        let alpha = 0.125;
+        let want = attention_cpu(&qkv, Some(&gates), seq, nseq, alpha);
+        let (qb, gb) = (
+            self.upload("check qkv", &qkv),
+            self.upload("check gates", &gates),
+        );
+        let ob = self.buffer("check o", tokens * 512);
+        let mut r = self.rec();
+        r.attention(&qb, Some(&gb), &ob, seq, nseq, alpha);
+        r.submit();
+        let problem = match self.read(&ob, 0, tokens * 512).await {
+            Err(e) => Some(format!("fused attention: {e}; using split attention")),
+            Ok(got) => {
+                let worst = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(g, w)| {
+                        if g.is_finite() {
+                            (g - w).abs() / (1.0 + w.abs())
+                        } else {
+                            f32::INFINITY
+                        }
+                    })
+                    .fold(0.0f32, f32::max);
+                let errors = self.take_errors();
+                if worst > 1e-4 || !errors.is_empty() {
+                    let why = errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("relative error {worst:.1e}"));
+                    Some(format!(
+                        "fused attention gives wrong results on this GPU ({why}); using split attention"
+                    ))
+                } else {
+                    None
+                }
+            }
+        };
+        self.fused_ok.set(problem.is_none());
+        if problem.is_some() {
+            self.attention.set(AttentionPolicy::SPLIT);
+        }
+        problem
+    }
+
     pub fn rec(&self) -> Rec<'_> {
         Rec {
             gpu: self,
             params: Vec::new(),
             cmds: Vec::new(),
+            labels: Vec::new(),
         }
     }
+}
+
+/// Attention as [`Rec::attention`] computes it, on the CPU in f64: `qkv`
+/// is `[nseq * seq, 1536]`, the result `[nseq * seq, 512]`.  The reference
+/// for the kernel checks.
+pub fn attention_cpu(
+    qkv: &[f32],
+    gates: Option<&[f32]>,
+    seq: usize,
+    nseq: usize,
+    alpha: f32,
+) -> Vec<f32> {
+    let mut o = vec![0.0f32; nseq * seq * 512];
+    let mut sc = vec![0.0f64; seq];
+    for s in 0..nseq {
+        for h in 0..8 {
+            for i in 0..seq {
+                let qi = (s * seq + i) * 1536 + h * 64;
+                let mut mx = f64::NEG_INFINITY;
+                for (j, v) in sc.iter_mut().enumerate() {
+                    let kj = (s * seq + j) * 1536 + 512 + h * 64;
+                    let mut d = 0.0f64;
+                    for c in 0..64 {
+                        d += f64::from(qkv[qi + c]) * f64::from(qkv[kj + c]);
+                    }
+                    *v = d * f64::from(alpha);
+                    mx = mx.max(*v);
+                }
+                let mut sum = 0.0;
+                for v in sc.iter_mut() {
+                    *v = (*v - mx).exp();
+                    sum += *v;
+                }
+                let g = gates.map_or(1.0, |g| {
+                    1.0 / (1.0 + (-f64::from(g[(s * seq + i) * 8 + h])).exp())
+                });
+                for c in 0..64 {
+                    let mut acc = 0.0f64;
+                    for (j, v) in sc.iter().enumerate() {
+                        acc += v * f64::from(qkv[(s * seq + j) * 1536 + 1024 + h * 64 + c]);
+                    }
+                    o[(s * seq + i) * 512 + h * 64 + c] = (g * acc / sum) as f32;
+                }
+            }
+        }
+    }
+    o
+}
+
+/// Report lines for [`Gpu::take_profile`] totals: GPU time per label,
+/// largest first, with its share of the total, then the total itself.
+pub fn profile_report(totals: &BTreeMap<String, (usize, f64)>) -> Vec<String> {
+    let all: f64 = totals.values().map(|v| v.1).sum();
+    let mut rows: Vec<_> = totals.iter().collect();
+    rows.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|(label, (n, secs))| {
+            format!(
+                "profile: {label}: {secs:.3} s GPU in {n} dispatches ({:.1}%)",
+                100.0 * secs / all.max(1e-12)
+            )
+        })
+        .collect();
+    out.push(format!("profile: total GPU time {all:.3} s"));
+    out
 }
 
 /// One strided operand of a [`MatMul`]: element `(r, c)` of batch item
@@ -711,6 +1197,7 @@ fn grid(groups: usize) -> (u32, u32) {
 
 enum Kernel {
     MatMul(usize),
+    Attention,
     Softmax,
     RmsNorm,
     Rope,
@@ -724,10 +1211,25 @@ pub struct Rec<'g> {
     gpu: &'g Gpu,
     params: Vec<u8>,
     cmds: Vec<(Kernel, wgpu::BindGroup, [u32; 3])>,
+    /// One label per dispatch, kept only when the device is profiling.
+    labels: Vec<String>,
 }
 
 impl Rec<'_> {
     fn push(&mut self, kernel: Kernel, bufs: &[&wgpu::Buffer], params: &[u8], groups: [u32; 3]) {
+        if self.gpu.prof.is_some() {
+            let label = match &kernel {
+                Kernel::MatMul(t) => format!("matmul {}", TILES[*t].name),
+                Kernel::Attention => "attention".into(),
+                Kernel::Softmax => "softmax".into(),
+                Kernel::RmsNorm => "rmsnorm".into(),
+                Kernel::Rope => "rope".into(),
+                Kernel::Gate => "gate".into(),
+                Kernel::Transpose => "transpose".into(),
+                Kernel::Glu => "glu".into(),
+            };
+            self.labels.push(label);
+        }
         let offset = self.params.len() as u64;
         assert!(
             offset < PARAM_STRIDE * MAX_DISPATCHES,
@@ -785,20 +1287,47 @@ impl Rec<'_> {
         let gpu = self.gpu;
         gpu.queue.write_buffer(&gpu.uniforms, 0, &self.params);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
-        {
+        let k = &gpu.kernels;
+        let pipeline = |kernel: &Kernel| match kernel {
+            Kernel::MatMul(t) => k.matmul_pipeline(&gpu.device, *t),
+            Kernel::Attention => k.attention_pipeline(&gpu.device),
+            Kernel::Softmax => &k.softmax.0,
+            Kernel::RmsNorm => &k.rmsnorm.0,
+            Kernel::Rope => &k.rope,
+            Kernel::Gate => &k.gate,
+            Kernel::Transpose => &k.transpose,
+            Kernel::Glu => &k.glu,
+        };
+        if let Some(prof) = gpu.prof.as_ref().filter(|_| gpu.recording.get()) {
+            // One pass per dispatch, timestamped at both ends.
+            for (i, (kernel, bg, [x, y, z])) in self.cmds.iter().enumerate() {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &prof.set,
+                        beginning_of_pass_write_index: Some(2 * i as u32),
+                        end_of_pass_write_index: Some(2 * i as u32 + 1),
+                    }),
+                });
+                pass.set_pipeline(pipeline(kernel));
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*x, *y, *z);
+            }
+            let n = 2 * self.cmds.len() as u32;
+            let bytes = 8 * u64::from(n);
+            let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("profile readback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            enc.resolve_query_set(&prof.set, 0..n, &prof.resolve, 0);
+            enc.copy_buffer_to_buffer(&prof.resolve, 0, &staging, 0, bytes);
+            prof.pending.borrow_mut().push((self.labels, staging));
+        } else {
             let mut pass = enc.begin_compute_pass(&Default::default());
-            let k = &gpu.kernels;
             for (kernel, bg, [x, y, z]) in &self.cmds {
-                let p = match kernel {
-                    Kernel::MatMul(t) => &k.matmul.0[*t],
-                    Kernel::Softmax => &k.softmax.0,
-                    Kernel::RmsNorm => &k.rmsnorm.0,
-                    Kernel::Rope => &k.rope,
-                    Kernel::Gate => &k.gate,
-                    Kernel::Transpose => &k.transpose,
-                    Kernel::Glu => &k.glu,
-                };
-                pass.set_pipeline(p);
+                pass.set_pipeline(pipeline(kernel));
                 pass.set_bind_group(0, bg, &[]);
                 pass.dispatch_workgroups(*x, *y, *z);
             }
@@ -859,6 +1388,16 @@ impl Rec<'_> {
             bytemuck::bytes_of(&p),
             groups,
         );
+        if let Some(label) = self.labels.last_mut() {
+            *label = format!(
+                "matmul {}x{}x{} x{} {}",
+                mm.m,
+                mm.n,
+                mm.k,
+                mm.outer * mm.inner,
+                tile.name
+            );
+        }
     }
 
     /// In-place softmax over `rows` contiguous rows of `len`.
@@ -908,6 +1447,42 @@ impl Rec<'_> {
         self.elementwise(Kernel::Rope, [dummy, table, qkv], tokens * 512, [seq, 0, 0]);
     }
 
+    /// Fused attention for `nseq` sequences of `seq` tokens:
+    /// `o[t, h*64 + d] = sigmoid(gates[t, h]) * sum_j softmax_j(alpha *
+    /// q_t . k_j) v[j, h*64 + d]` per head, with q, k and v in a
+    /// `[tokens, 1536]` qkv buffer at column offsets 0, 512 and 1024, `o`
+    /// `[tokens, 512]` and `gates` `[tokens, 8]` (no gate when `None`).
+    /// The same result as the scores matmul, softmax, p.v matmul and gate
+    /// in [`net::Job`], in one dispatch.
+    pub fn attention(
+        &mut self,
+        qkv: &wgpu::Buffer,
+        gates: Option<&wgpu::Buffer>,
+        o: &wgpu::Buffer,
+        seq: usize,
+        nseq: usize,
+        alpha: f32,
+    ) {
+        let p = AttentionParams {
+            seq: u(seq),
+            row: 1536,
+            k_off: 512,
+            v_off: 1024,
+            o_row: 512,
+            gate_row: 8,
+            flags: u32::from(gates.is_some()),
+            alpha,
+        };
+        let groups = [u(seq.div_ceil(64)), 8, u(nseq)];
+        let g = gates.unwrap_or(&self.gpu.dummy);
+        self.push(
+            Kernel::Attention,
+            &[qkv, g, o],
+            bytemuck::bytes_of(&p),
+            groups,
+        );
+    }
+
     /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
     pub fn gate(&mut self, o: &wgpu::Buffer, gates: &wgpu::Buffer, tokens: usize) {
         let dummy = &self.gpu.dummy;
@@ -941,15 +1516,155 @@ impl Rec<'_> {
     }
 }
 
-/// Identifies the compiled matmul kernels (FNV-1a over their WGSL), so a
-/// per-GPU kernel choice is redone whenever the kernels change.
+/// Identifies the compiled kernels that calibration chooses between
+/// (FNV-1a over the matmul and attention WGSL), so a per-GPU choice is
+/// redone whenever they change.
 pub fn kernels_id() -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for t in &TILES {
-        for b in t.source().bytes() {
+    let sources = TILES
+        .iter()
+        .map(Tile::source)
+        .chain(std::iter::once(attention_source()));
+    for src in sources {
+        for b in src.bytes() {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Worst number of distinct addresses one bank serves in a single
+    /// 32-lane access to workgroup memory, in RDNA's model of the LDS (32
+    /// banks of 4 bytes; lanes reading the same address share one read).
+    /// 1 means no bank conflict.  A model of the Radeon only: other GPUs
+    /// bank their shared memory in their own ways, but neighbouring
+    /// threads on neighbouring 4-byte words is conflict-free on any of
+    /// them.
+    fn degree(addrs: impl Iterator<Item = usize>) -> usize {
+        let mut banks: Vec<Vec<usize>> = vec![Vec::new(); 32];
+        for a in addrs {
+            let b = &mut banks[a % 32];
+            if !b.contains(&a) {
+                b.push(a);
+            }
+        }
+        banks.iter().map(Vec::len).max().unwrap_or(0)
+    }
+
+    /// Worst degree over the 8 waves of a workgroup and the `n` accesses
+    /// of one kind, given each lane's address for access `q`.
+    fn worst(n: usize, addr: impl Fn(usize, usize) -> usize) -> usize {
+        let mut w = 1;
+        for wave in 0..8 {
+            for q in 0..n {
+                w = w.max(degree((32 * wave..32 * wave + 32).map(|t| addr(t, q))));
+            }
+        }
+        w
+    }
+
+    /// Bank conflict degrees of one kernel: stores of the A and B tiles
+    /// when K is the contiguous axis (every nn.Linear) and when it is not,
+    /// then the inner loop's reads of A and B.
+    fn conflicts(t: &Tile) -> [usize; 6] {
+        let (sa, sb, bk, bm, bn) = (t.bm + t.pad, t.bn + t.pad, t.bk, t.bm, t.bn);
+        let (tx, ty) = (t.bn / t.tn, t.bm / t.tm);
+        [
+            worst(1, |e, _| (e % bk) * sa + e / bk),
+            worst(1, |e, _| (e / bm) * sa + e % bm),
+            worst(1, |e, _| (e % bk) * sb + e / bk),
+            worst(1, |e, _| (e / bn) * sb + e % bn),
+            worst(t.tm, |id, q| id / tx + ty * q),
+            worst(t.tn, |id, q| id % tx + tx * q),
+        ]
+    }
+
+    /// The generated kernels are conflict-free in both load layouts and
+    /// the inner loop; `s64`'s stores conflict 2-way when K is contiguous
+    /// (rows padded by 1 float rather than 32 / bk).  The same model
+    /// reproduced the Radeon ranking of the earlier blocked kernels (B
+    /// reads 2-way at a thread stride of 4, 4-way at 8).
+    #[test]
+    fn bank_conflicts() {
+        for t in &TILES {
+            let want = if t.hand_written {
+                [2, 1, 2, 1, 1, 1]
+            } else {
+                [1; 6]
+            };
+            assert_eq!(conflicts(t), want, "{}", t.name);
+        }
+    }
+
+    /// Bytes of workgroup memory a WGSL source declares
+    /// (`var<workgroup> name: array<f32, N>;` lines).
+    fn workgroup_bytes(src: &str) -> usize {
+        src.lines()
+            .filter(|l| l.starts_with("var<workgroup>"))
+            .map(|l| {
+                let n = l.split("array<f32, ").nth(1).expect("f32 array");
+                4 * n[..n.find('>').expect(">")]
+                    .parse::<usize>()
+                    .expect("length")
+            })
+            .sum()
+    }
+
+    /// Every generated kernel fits WebGPU's default 16 KiB of workgroup
+    /// memory.
+    #[test]
+    fn workgroup_memory_within_defaults() {
+        for t in &TILES {
+            let bytes = workgroup_bytes(&t.source());
+            assert_eq!(bytes, 4 * t.bk * (t.bm + t.bn + 2 * t.pad), "{}", t.name);
+            assert!(bytes <= 16 * 1024, "{}: {bytes} bytes", t.name);
+        }
+        let attention = workgroup_bytes(&attention_source());
+        assert!((12 * 1024..=16 * 1024).contains(&attention), "{attention}");
+    }
+
+    /// The generated sources have every placeholder filled.
+    #[test]
+    fn sources_are_complete() {
+        let all = TILES
+            .iter()
+            .map(|t| (t.name, t.source()))
+            .chain(std::iter::once(("attention", attention_source())));
+        for (name, src) in all {
+            for p in [
+                "{ACC_DECLS}",
+                "{STAGE}",
+                "{COMPUTE}",
+                "{EPILOGUE}",
+                "{PAD}",
+                "{TX}",
+                "{DECLS}",
+                "{S_STEP}",
+                "{VALUES}",
+                "{FINISH}",
+            ] {
+                assert!(!src.contains(p), "{name}: {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn attention_policy_names() {
+        for p in [
+            AttentionPolicy::SPLIT,
+            AttentionPolicy::FUSED,
+            AttentionPolicy {
+                time: false,
+                freq: true,
+            },
+        ] {
+            assert_eq!(AttentionPolicy::parse(p.name()), Some(p));
+        }
+        assert_eq!(AttentionPolicy::parse("a4"), None);
+    }
 }

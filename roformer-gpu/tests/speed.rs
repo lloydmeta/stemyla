@@ -81,6 +81,8 @@ fn bench_runs() {
         &g,
         0.0,
         0.0,
+        2,
+        Some(&[0, 1]),
         || t0.elapsed().as_secs_f64(),
         |l| eprintln!("{l}"),
     ));

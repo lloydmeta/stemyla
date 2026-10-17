@@ -1,6 +1,13 @@
 // C = act(alpha * A·B + bias) (+ C when accumulating), for a batch of
 // strided matrices.  64x64 output tile per workgroup, 16x16 threads, each
 // computing 4x4 outputs; 16-deep K tiles in workgroup memory (8.1 KiB).
+//
+// The original kernel, kept as a calibration candidate ("s64" in lib.rs):
+// the same layout as matmul_interleaved.wgsl's 64 x 64 tile, but the 16
+// accumulators are an array indexed inside loops, so its speed depends on
+// the compiler unrolling them into registers.  AMD's compiler does (there
+// it was the fastest kernel); Intel's and Apple's do not (5 to 6 times
+// slower).
 // Stays within WebGPU's default limits (256 invocations, 16 KiB).
 //
 // Element addressing (all strides in f32 elements):
@@ -29,7 +36,7 @@ const HAS_BIAS: u32 = 1u;
 const ACCUMULATE: u32 = 2u;
 const ACT_SHIFT: u32 = 2u; // 0 none, 1 gelu, 2 tanh
 
-var<workgroup> as_: array<f32, 1040>; // [kk * 65 + row]; 65 avoids bank conflicts
+var<workgroup> as_: array<f32, 1040>; // [kk * 65 + row]; k-contiguous stores still conflict 2-way
 var<workgroup> bs_: array<f32, 1040>; // [kk * 65 + col]
 
 // erf by Abramowitz and Stegun 7.1.26 (absolute error below 1.5e-7).

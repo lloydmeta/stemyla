@@ -4,7 +4,7 @@
 //! before its first separation, to choose its kernels; nothing is tuned
 //! while a song is being separated.
 
-use crate::{Act, Gpu, MatMul, MatMulPolicy, TILES, View};
+use crate::{Act, AttentionPolicy, Gpu, MatMul, MatMulPolicy, TILES, View};
 
 /// One matmul shape of the network and how often a chunk runs it.
 #[derive(Clone, Copy, Debug)]
@@ -226,9 +226,15 @@ fn buffers(gpu: &Gpu) -> Buffers {
 
 /// Seconds per dispatch of one shape with one kernel.  Runs for `warm`
 /// seconds first (pipeline compilation, and GPU clocks that rise only under
-/// load), then two rounds of at least `round` seconds, keeping the faster.
-/// Submissions hold at most 4 GFLOP, so no command buffer runs long even on
-/// a slow GPU.
+/// load), then one round of at least `round` seconds.  Submissions hold at
+/// most 4 GFLOP, so no command buffer runs long even on a slow GPU.
+///
+/// The round queues enough submissions before each wait for the GPU that
+/// one wait covers at least [`WAIT_SECS`].  Waiting after every submission
+/// made each one cost a whole number of milliseconds on Chrome, whatever
+/// the GPU did (rates fell on levels such as 905, 1,207 and 1,810 GFLOP/s
+/// for one shape), so the per-dispatch figure measured the wait as much as
+/// the kernel.
 async fn time_one(
     gpu: &Gpu,
     b: &Buffers,
@@ -240,136 +246,564 @@ async fn time_one(
 ) -> f64 {
     let mm = matmul(s, b, tile);
     let per_submit = ((4e9 / s.flops()) as usize).clamp(1, 32);
-    let submit = async || {
-        let mut r = gpu.rec();
-        for _ in 0..per_submit {
-            r.matmul(&mm);
+    let submit = |times: usize| {
+        for _ in 0..times {
+            let mut r = gpu.rec();
+            for _ in 0..per_submit {
+                r.matmul(&mm);
+            }
+            r.submit();
         }
-        r.submit();
-        gpu.done().await;
     };
     let t0 = now();
+    let mut one = f64::INFINITY;
     loop {
-        submit().await;
+        let t = now();
+        submit(1);
+        gpu.done().await;
+        one = one.min(now() - t);
         if now() - t0 >= warm {
             break;
         }
     }
-    let mut best = f64::INFINITY;
-    for _ in 0..2 {
-        let (t0, mut count) = (now(), 0);
-        while count == 0 || now() - t0 < round {
-            submit().await;
-            count += per_submit;
-        }
-        best = best.min((now() - t0) / count as f64);
+    let queued = ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64);
+    let (t0, mut count) = (now(), 0);
+    while count == 0 || now() - t0 < round {
+        submit(queued);
+        gpu.done().await;
+        count += queued * per_submit;
     }
-    best
+    (now() - t0) / count as f64
 }
 
-/// Seconds per dispatch of each shape with each kernel (`[shape][tile]`;
-/// infinite for kernels that failed [`Gpu::check_kernels`]).  `now` is a
-/// clock in seconds (the browser has no `std::time`).  With `warm` 0.3 and
-/// `round` 0.2 it takes a few minutes on a real GPU.
+/// Wall time each wait for the GPU should cover in a timed round.
+pub const WAIT_SECS: f64 = 0.05;
+
+/// One kernel's timings on one shape over the interleaved rounds.
+#[derive(Clone, Debug)]
+pub struct Timing {
+    /// Seconds per dispatch in each round; empty for a kernel that was not
+    /// run (failed [`Gpu::check_kernels`] or not selected).
+    pub rounds: Vec<f64>,
+}
+
+impl Timing {
+    /// Median seconds per dispatch, or infinity when not run.
+    pub fn median(&self) -> f64 {
+        if self.rounds.is_empty() {
+            return f64::INFINITY;
+        }
+        let mut v = self.rounds.clone();
+        v.sort_by(f64::total_cmp);
+        let n = v.len();
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            0.5 * (v[n / 2 - 1] + v[n / 2])
+        }
+    }
+
+    /// (max - min) / median over the rounds.
+    pub fn spread(&self) -> f64 {
+        let lo = self.rounds.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = self.rounds.iter().copied().fold(0.0, f64::max);
+        if self.rounds.len() < 2 {
+            0.0
+        } else {
+            (hi - lo) / self.median()
+        }
+    }
+}
+
+/// Seconds per dispatch of each shape with each kernel (`[shape][tile]`,
+/// the median of `rounds` rounds; infinite for kernels that failed
+/// [`Gpu::check_kernels`] or are not in `only`).  The kernels take turns
+/// within each round (A, B, A, B, ...), so a GPU that heats up and slows
+/// down over the run slows every kernel alike instead of whichever ran
+/// last.  `now` is a clock in seconds.  With `warm` 0.3, `round` 0.2 and
+/// 3 rounds it takes a few minutes on a real GPU.
 pub async fn measure(
     gpu: &Gpu,
     warm: f64,
     round: f64,
+    rounds: usize,
+    only: Option<&[usize]>,
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
-) -> Vec<Vec<f64>> {
+) -> Vec<Vec<Timing>> {
+    let recording = gpu.set_recording(false);
     let b = buffers(gpu);
+    let run: Vec<bool> = (0..TILES.len())
+        .map(|t| gpu.usable.get()[t] && only.is_none_or(|o| o.contains(&t)))
+        .collect();
     let mut table = Vec::new();
     for s in &shapes() {
-        let mut row = Vec::new();
+        let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
+        for r in 0..rounds.max(1) {
+            for (t, timing) in row.iter_mut().enumerate() {
+                if !run[t] {
+                    continue;
+                }
+                let w = if r == 0 { warm } else { 0.0 };
+                timing
+                    .rounds
+                    .push(time_one(gpu, &b, s, t, w, round, &now).await);
+            }
+        }
         for (t, tile) in TILES.iter().enumerate() {
             if !gpu.usable.get()[t] {
-                row.push(f64::INFINITY);
                 log(format!(
                     "bench: {} {}: skipped (failed the start-up check on this GPU)",
                     s.name, tile.name
                 ));
-                continue;
+            } else if run[t] {
+                let tm = &row[t];
+                log(format!(
+                    "bench: {} ({}x{}x{}, x{}) {}: {:.1} GFLOP/s (median of {}, spread {:.1}%)",
+                    s.name,
+                    s.m,
+                    s.n,
+                    s.k,
+                    s.outer * s.inner,
+                    tile.name,
+                    s.flops() / tm.median() / 1e9,
+                    tm.rounds.len(),
+                    100.0 * tm.spread()
+                ));
             }
-            let secs = time_one(gpu, &b, s, t, warm, round, &now).await;
-            row.push(secs);
-            log(format!(
-                "bench: {} ({}x{}x{}, x{}) {}: {:.1} GFLOP/s",
-                s.name,
-                s.m,
-                s.n,
-                s.k,
-                s.outer * s.inner,
-                tile.name,
-                s.flops() / secs / 1e9
-            ));
         }
         table.push(row);
     }
     if let Some(e) = gpu.take_errors().into_iter().next() {
         log(format!("bench: WebGPU error: {e}"));
     }
+    gpu.set_recording(recording);
     table
 }
 
-/// Chooses this GPU's matmul kernels, once per GPU: times every kernel
-/// that passed [`Gpu::check_kernels`] on two large products (a full-chunk
-/// q/k/v projection and the time-axis attention scores) and two small ones
-/// (frequency-axis attention), and returns the fastest for each kind.  The
-/// best kernel differs by GPU: on a Radeon Pro 5500M the original kernel
-/// won every shape, on an Intel UHD 630 it was the slowest by 5x.
-/// Takes a few seconds; the caller keeps the result per GPU.
-pub async fn calibrate(
+/// Seconds per call of `record` (which adds dispatches to one submission),
+/// timed like [`time_one`]: `warm` seconds first, then one round of at
+/// least `round` seconds with enough submissions per wait to cover
+/// [`WAIT_SECS`].
+async fn time_rec(
     gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    now: &impl Fn() -> f64,
+    record: &impl Fn(&mut crate::Rec),
+) -> f64 {
+    let submit = |times: usize| {
+        for _ in 0..times {
+            let mut r = gpu.rec();
+            record(&mut r);
+            r.submit();
+        }
+    };
+    let t0 = now();
+    let mut one = f64::INFINITY;
+    loop {
+        let t = now();
+        submit(1);
+        gpu.done().await;
+        one = one.min(now() - t);
+        if now() - t0 >= warm {
+            break;
+        }
+    }
+    let queued = ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64);
+    let (t0, mut count) = (now(), 0);
+    while count == 0 || now() - t0 < round {
+        submit(queued);
+        gpu.done().await;
+        count += queued;
+    }
+    (now() - t0) / count as f64
+}
+
+/// Buffers for attention timings: q/k/v, gates, scores and output for up
+/// to four bands of a full chunk (the scores for one).
+struct AttnBufs {
+    qkv: wgpu::Buffer,
+    gates: wgpu::Buffer,
+    scores: wgpu::Buffer,
+    o: wgpu::Buffer,
+}
+
+fn attn_bufs(gpu: &Gpu) -> AttnBufs {
+    let tokens = (4 * T).max(FREQ_TOKENS);
+    AttnBufs {
+        qkv: gpu.buffer("bench qkv", tokens * 1536),
+        gates: gpu.buffer("bench gates", tokens * 8),
+        scores: gpu.buffer("bench scores", (8 * T * T).max(8 * 62 * 62 * 88)),
+        o: gpu.buffer("bench o", tokens * 512),
+    }
+}
+
+/// One attention step done the split way, as net.rs does it: scores
+/// matmul (this GPU's matmul policy), softmax, p.v matmul, gate.
+fn split_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
+    let row = 1536;
+    let mut sc = MatMul::new(
+        (
+            &b.qkv,
+            View {
+                off: 0,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &b.qkv,
+            View {
+                off: 512,
+                rs: 1,
+                cs: row,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &b.scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        seq,
+        seq,
+        64,
+    );
+    sc.outer = nseq;
+    sc.inner = 8;
+    sc.alpha = 0.125;
+    r.matmul(&sc);
+    r.softmax(&b.scores, nseq * 8 * seq, seq);
+    let mut pv = MatMul::new(
+        (
+            &b.scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        (
+            &b.qkv,
+            View {
+                off: 1024,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &b.o,
+            View {
+                off: 0,
+                rs: 512,
+                cs: 1,
+                bo: seq * 512,
+                bi: 64,
+            },
+        ),
+        seq,
+        64,
+        seq,
+    );
+    pv.outer = nseq;
+    pv.inner = 8;
+    r.matmul(&pv);
+    r.gate(&b.o, &b.gates, seq * nseq);
+}
+
+fn fused_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
+    r.attention(&b.qkv, Some(&b.gates), &b.o, seq, nseq, 0.125);
+}
+
+/// Seconds per chunk of split and fused attention on each axis, the way
+/// a chunk runs them at the default budget: on the time axis split takes
+/// one band of 1,151 frames per step (744 steps) and fused four (186
+/// steps; it needs no scores buffer); on the frequency axis both take 88
+/// frames of 62 bands per step (168 steps).  The two take turns over
+/// `rounds` rounds; medians.  Returns ((split, fused) time axis, (split,
+/// fused) frequency axis); fused is infinite when it failed its check.
+pub async fn attention_per_chunk(
+    gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    rounds: usize,
+    now: &impl Fn() -> f64,
+) -> ((Timing, Timing), (Timing, Timing)) {
+    let recording = gpu.set_recording(false);
+    let b = attn_bufs(gpu);
+    let empty = || Timing { rounds: Vec::new() };
+    let (mut ts, mut tf, mut fs, mut ff) = (empty(), empty(), empty(), empty());
+    for rd in 0..rounds.max(1) {
+        let w = if rd == 0 { warm } else { 0.0 };
+        ts.rounds.push(
+            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                split_attention(r, &b, T, 1)
+            })
+            .await
+                * 744.0,
+        );
+        fs.rounds.push(
+            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                split_attention(r, &b, 62, 88)
+            })
+            .await
+                * 168.0,
+        );
+        if gpu.fused_ok.get() {
+            tf.rounds.push(
+                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                    fused_attention(r, &b, T, 4)
+                })
+                .await
+                    * 186.0,
+            );
+            ff.rounds.push(
+                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                    fused_attention(r, &b, 62, 88)
+                })
+                .await
+                    * 168.0,
+            );
+        }
+    }
+    gpu.set_recording(recording);
+    ((ts, tf), (fs, ff))
+}
+
+/// Logs [`attention_per_chunk`] and returns its medians.
+pub async fn measure_attention(
+    gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    rounds: usize,
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
-) -> MatMulPolicy {
+) -> ((f64, f64), (f64, f64)) {
+    let ((ts, tf), (fs, ff)) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    for (axis, split, fused) in [("time", &ts, &tf), ("freq", &fs, &ff)] {
+        log(format!(
+            "bench: attention {axis} axis: split {:.2} s per chunk (spread {:.1}%), fused {:.2} s per chunk (spread {:.1}%)",
+            split.median(),
+            100.0 * split.spread(),
+            fused.median(),
+            100.0 * fused.spread()
+        ));
+    }
+    log(format!(
+        "bench: attention split {:.2} s per chunk, fused {:.2} s per chunk",
+        ts.median() + fs.median(),
+        tf.median() + ff.median()
+    ));
+    ((ts.median(), tf.median()), (fs.median(), ff.median()))
+}
+
+/// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`
+/// for an empty list, a lone "1" or "true" (all kernels), or unknown names.
+pub fn parse_kernels(list: &str) -> Option<Vec<usize>> {
+    let names: Vec<&str> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() || names == ["1"] || names == ["true"] {
+        return None;
+    }
+    names
+        .iter()
+        .map(|n| TILES.iter().position(|t| t.name == *n))
+        .collect()
+}
+
+/// Which candidates stay in after the first round of [`calibrate`]: those
+/// within 1.5 times the fastest.  A kernel several times slower on this
+/// GPU (`s64` without loop unrolling) costs no more measuring time, and
+/// [`masked_medians`] keeps it from being chosen.
+pub fn still_in(first: &[f64]) -> Vec<bool> {
+    let best = first.iter().copied().fold(f64::INFINITY, f64::min);
+    first
+        .iter()
+        .map(|&x| x.is_finite() && x <= 1.5 * best)
+        .collect()
+}
+
+/// Medians to choose from: infinite for a kernel dropped after the first
+/// round (or never timed), so only kernels timed every round can win.  A
+/// dropped kernel's single early time must not beat a survivor whose
+/// later rounds ran slower, as a GPU warming up does.
+pub fn masked_medians(t: &[Timing], alive: &[bool]) -> Vec<f64> {
+    t.iter()
+        .zip(alive)
+        .map(|(t, &a)| if a { t.median() } else { f64::INFINITY })
+        .collect()
+}
+
+/// What [`calibrate`] chooses for one GPU, as kept in browser storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub matmul: MatMulPolicy,
+    pub attention: AttentionPolicy,
+}
+
+impl Choice {
+    /// `"<matmul policy>;<attention policy>"`, e.g. `"i128x64,i64;freq"`.
+    pub fn name(self) -> String {
+        format!("{};{}", self.matmul.name(), self.attention.name())
+    }
+
+    /// The inverse of [`Choice::name`].
+    pub fn parse(s: &str) -> Option<Self> {
+        let (m, a) = s.split_once(';')?;
+        Some(Self {
+            matmul: MatMulPolicy::parse(m)?,
+            attention: AttentionPolicy::parse(a)?,
+        })
+    }
+}
+
+/// The choice from measured seconds: for each kind of product, the kernel
+/// with the least total over its shapes (`large[t]`, `small[t]`; infinite
+/// for kernels that failed their check); fused attention on the frequency
+/// axis whenever it works (it was 2.2 to 3.6 times faster on every GPU
+/// measured), and on the time axis when it measured faster than split.
+pub fn decide(
+    large: &[f64],
+    small: &[f64],
+    time_split: f64,
+    time_fused: f64,
+    fused_ok: bool,
+) -> Choice {
+    let best = |v: &[f64]| {
+        (0..v.len())
+            .min_by(|&a, &b| v[a].total_cmp(&v[b]))
+            .unwrap_or(0)
+    };
+    Choice {
+        matmul: MatMulPolicy::Split {
+            large: best(large),
+            small: best(small),
+        },
+        attention: AttentionPolicy {
+            time: fused_ok && time_fused < time_split,
+            freq: fused_ok,
+        },
+    }
+}
+
+/// Chooses this GPU's kernels, once per GPU (the caller keeps the result):
+/// the matmul kernel for large products (q/k/v and feed-forward shapes)
+/// and for small ones (attention gates, the p.v product of split
+/// attention), then whether fused attention beats split attention on the
+/// time axis with that matmul choice.  Everything measured takes turns
+/// over three rounds, medians compared; a matmul kernel more than 1.5
+/// times slower than the best after the first round is not timed again
+/// ([`still_in`]).  What is measured is only what varies between GPUs and
+/// cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4 register
+/// block wins (register file and scheduling), whether the compiler keeps
+/// `s64`'s loop-indexed accumulators in registers, and whether fused
+/// attention wins on long sequences.  Takes several seconds.
+pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
     let all = shapes();
     let by_name = |n: &str| all.iter().find(|s| s.name == n).copied().expect("shape");
-    let large = [by_name("time qkv"), by_name("time scores")];
-    let small = [by_name("freq scores"), by_name("freq p·v")];
+    let large = [
+        by_name("time qkv"),
+        by_name("time ff down"),
+        by_name("freq ff up"),
+    ];
+    let small = [by_name("time gates"), by_name("time p·v")];
     let b = buffers(gpu);
-    let best = |kind: &[Shape]| {
-        let kind = kind.to_vec();
+    let (warm, round, rounds) = (0.1, 0.1, 3);
+    let secs = |kind: Vec<Shape>| {
         let b = &b;
         let now = &now;
         async move {
-            let mut out = (0, f64::INFINITY);
-            for t in 0..TILES.len() {
-                if !gpu.usable.get()[t] {
-                    continue;
+            let mut t = vec![Timing { rounds: Vec::new() }; TILES.len()];
+            let mut alive = gpu.usable.get().to_vec();
+            for rd in 0..rounds {
+                if rd == 1 {
+                    let first: Vec<f64> = t.iter().map(Timing::median).collect();
+                    alive = still_in(&first);
                 }
-                let mut secs = 0.0;
-                for s in &kind {
-                    secs += time_one(gpu, b, s, t, 0.1, 0.1, now).await * s.per_chunk as f64;
-                }
-                if secs < out.1 {
-                    out = (t, secs);
+                for (k, timing) in t.iter_mut().enumerate() {
+                    if !alive[k] {
+                        continue;
+                    }
+                    let mut total = 0.0;
+                    for s in &kind {
+                        let w = if rd == 0 { warm } else { 0.0 };
+                        total += time_one(gpu, b, s, k, w, round, now).await * s.per_chunk as f64;
+                    }
+                    timing.rounds.push(total);
                 }
             }
-            out
+            (masked_medians(&t, &alive), t)
         }
     };
-    let (l, ls) = best(&large).await;
-    let (s, ss) = best(&small).await;
-    let policy = MatMulPolicy::Split { large: l, small: s };
+    let recording = gpu.set_recording(false);
+    let (l, lt) = secs(large.to_vec()).await;
+    let (s, st) = secs(small.to_vec()).await;
+    let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
+    gpu.policy.set(matmul);
+    let ((ts, tf), _) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
+    gpu.set_recording(recording);
+    let fmt = |v: &[f64], t: &[Timing]| {
+        TILES
+            .iter()
+            .zip(v.iter().zip(t))
+            .map(|(tile, (x, tm))| {
+                if x.is_finite() {
+                    format!("{} {x:.2} s", tile.name)
+                } else if tm.rounds.is_empty() {
+                    format!("{} not used", tile.name)
+                } else {
+                    format!(
+                        "{} {:.2} s, dropped after one round",
+                        tile.name, tm.rounds[0]
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     log(format!(
-        "matmul kernels for this GPU: {} for large products ({ls:.1} s per chunk on the timed shapes), {} for small ones ({ss:.1} s)",
-        TILES[l].name, TILES[s].name
+        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s, fused {:.2} s per chunk)",
+        choice.matmul.name(),
+        fmt(&l, &lt),
+        fmt(&s, &st),
+        choice.attention.name(),
+        ts.median(),
+        tf.median()
     ));
-    policy
+    choice
 }
 
 /// Summary lines: estimated matmul seconds per chunk for each kernel alone
-/// and for the best kernel per shape.
-pub fn summary(table: &[Vec<f64>]) -> Vec<String> {
+/// and for the best kernel per shape, from the medians.
+pub fn summary(table: &[Vec<Timing>]) -> Vec<String> {
     let shapes = shapes();
     let flops: f64 = shapes.iter().map(|s| s.flops() * s.per_chunk as f64).sum();
+    let med: Vec<Vec<f64>> = table
+        .iter()
+        .map(|row| row.iter().map(Timing::median).collect())
+        .collect();
     let total = |pick: &dyn Fn(usize) -> usize| -> f64 {
         shapes
             .iter()
             .enumerate()
-            .map(|(i, s)| table[i][pick(i)] * s.per_chunk as f64)
+            .map(|(i, s)| med[i][pick(i)] * s.per_chunk as f64)
             .sum()
     };
     let mut out = Vec::new();
@@ -380,11 +814,14 @@ pub fn summary(table: &[Vec<f64>]) -> Vec<String> {
         )
     };
     for (t, tile) in TILES.iter().enumerate() {
-        out.push(line(&format!("all {}", tile.name), total(&|_| t)));
+        let secs = total(&|_| t);
+        if secs.is_finite() {
+            out.push(line(&format!("all {}", tile.name), secs));
+        }
     }
     let best = |i: usize| {
         (0..TILES.len())
-            .min_by(|&a, &b| table[i][a].total_cmp(&table[i][b]))
+            .min_by(|&a, &b| med[i][a].total_cmp(&med[i][b]))
             .unwrap_or(0)
     };
     out.push(line("best per shape", total(&best)));
@@ -404,6 +841,80 @@ mod tests {
 
     /// The listed shapes add up to the chunk's 6.1 TFLOP of matmuls within
     /// about 5% (full-size frequency steps and one mask width overcount it).
+    #[test]
+    fn timing_median_and_spread() {
+        let t = Timing {
+            rounds: vec![3.0, 1.0, 2.0],
+        };
+        assert_eq!(t.median(), 2.0);
+        assert!((t.spread() - 1.0).abs() < 1e-12);
+        let t = Timing {
+            rounds: vec![4.0, 2.0],
+        };
+        assert_eq!(t.median(), 3.0);
+        assert!(Timing { rounds: vec![] }.median().is_infinite());
+    }
+
+    #[test]
+    fn kernel_lists() {
+        assert_eq!(parse_kernels("1"), None);
+        assert_eq!(parse_kernels(""), None);
+        assert_eq!(parse_kernels("i64,i128x64,s64"), Some(vec![0, 1, 2]));
+        assert_eq!(parse_kernels("i64,v64"), None);
+    }
+
+    /// Least total per kind; fused attention on the frequency axis when it
+    /// works, on the time axis only when faster; nothing fused when the
+    /// fused kernel failed its check.
+    #[test]
+    fn decisions() {
+        let inf = f64::INFINITY;
+        let c = decide(&[2.0, 1.0], &[1.0, 3.0], 5.0, 4.0, true);
+        assert_eq!(c.matmul, MatMulPolicy::Split { large: 1, small: 0 });
+        assert_eq!(c.attention, AttentionPolicy::FUSED);
+        let c = decide(&[inf, 1.0], &[inf, 3.0], 4.0, 5.0, true);
+        assert_eq!(c.matmul, MatMulPolicy::Split { large: 1, small: 1 });
+        assert_eq!(
+            c.attention,
+            AttentionPolicy {
+                time: false,
+                freq: true
+            }
+        );
+        let c = decide(&[1.0, 2.0], &[1.0, 2.0], 5.0, 1.0, false);
+        assert_eq!(c.attention, AttentionPolicy::SPLIT);
+        assert_eq!(Choice::parse(&c.name()), Some(c));
+        assert_eq!(
+            Choice::parse("i128x64,i64;freq").map(|c| c.name()),
+            Some("i128x64,i64;freq".to_string())
+        );
+        assert_eq!(Choice::parse("v64;split"), None);
+    }
+
+    /// First rounds 1.0 and 1.6 drop the second kernel; the survivor's
+    /// later rounds slow to 1.8, yet the dropped kernel cannot win.
+    #[test]
+    fn dropped_kernels_cannot_win() {
+        let t = [
+            Timing {
+                rounds: vec![1.0, 1.8, 1.8],
+            },
+            Timing { rounds: vec![1.6] },
+        ];
+        let alive = still_in(&[1.0, 1.6]);
+        let m = masked_medians(&t, &alive);
+        assert_eq!(m, vec![1.8, f64::INFINITY]);
+        let c = decide(&m, &m, 1.0, 2.0, true);
+        assert_eq!(c.matmul, MatMulPolicy::Split { large: 0, small: 0 });
+    }
+
+    #[test]
+    fn elimination() {
+        let inf = f64::INFINITY;
+        assert_eq!(still_in(&[1.0, 1.4, 6.0]), vec![true, true, false]);
+        assert_eq!(still_in(&[inf, 2.0, 2.9]), vec![false, true, true]);
+    }
+
     #[test]
     fn shapes_cover_a_chunk() {
         let total: f64 = shapes()
