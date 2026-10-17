@@ -6,26 +6,56 @@
 //!                                         [--branch gh-pages] [--no-push] [--allow-dirty]
 //! ```
 //!
+//! Every build lives in its own folder, `v/<id>/`, which is written once
+//! and never changed.  The CDN in front of the site may let browsers keep
+//! `.js` files for a month but `.wasm` files for ten minutes, so a file
+//! name reused across builds can pair one build's wasm-bindgen glue with
+//! another's wasm.  Only the root `index.html` changes in place: it is the
+//! newest build's page, and its `<base href>` points into that build's
+//! folder.
+//!
+//! ```text
+//! .nojekyll
+//! index.html          the newest build's page
+//! v/VERSIONS          the kept build ids, newest first
+//! v/<id>/index.html   that build's page
+//! v/<id>/app.js, app_bg.wasm, stem-worker*.{js,wasm}, snippets/…
+//! ```
+//!
 //! Steps:
 //! 1. Refuses to run with uncommitted changes (`--allow-dirty` overrides),
-//!    so every published site maps to a commit, named in the publish
-//!    commit's message.
-//! 2. `trunk build --release --public-url <url>` into `target/pages`, and
-//!    checks the result: the page, both wasm modules, the worker loader, and
-//!    asset paths under the public URL.  Adds `.nojekyll`.
-//! 3. Fetches the branch from the remote if it exists there, then commits
-//!    the build as the branch's whole content, with the previous publish as
-//!    parent.  This uses git's plumbing (a temporary index, `write-tree`,
-//!    `commit-tree`, `update-ref`), so the working tree, the index and the
-//!    checked-out branch are never touched.  Nothing is committed when the
-//!    build is identical to what is already published.
-//! 4. `git push <remote> <branch>` unless `--no-push`.
+//!    so every published site maps to a commit.  The build id is the
+//!    commit's 12-character hash, plus `-dirty-<unix seconds>` for a dirty
+//!    tree.
+//! 2. `trunk build --release --public-url <url>v/<id>/` into
+//!    `target/pages/v/<id>`, and checks the result: the page, both wasm
+//!    modules, the worker loader, and the base and asset paths under the
+//!    build's URL.
+//! 3. Fetches the branch from the remote if it exists there.  Then adds the
+//!    newest [`KEPT_BUILDS`] builds: the new one, and the older ones from
+//!    the branch, byte for byte.  A build id the branch already has keeps
+//!    its published copy.  Older builds are dropped.  Writes the root
+//!    `index.html`, `v/VERSIONS` and `.nojekyll`.
+//! 4. Commits the result as the branch's whole content, with the previous
+//!    publish as parent.  This uses git's plumbing (temporary indexes,
+//!    `read-tree`, `checkout-index`, `write-tree`, `commit-tree`,
+//!    `update-ref`), so the working tree, the index and the checked-out
+//!    branch are never touched and no hooks run.  Nothing is committed when
+//!    the result is identical to what is already published.
+//! 5. `git push <remote> <branch>` unless `--no-push`.
 //!
 //! Only Cargo, Trunk and git are involved: no non-Rust build steps.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// How many builds `v/` keeps, the new one included.  The root page may be
+/// cached for 600 s, so a browser can ask for the previous build's files
+/// for ten minutes after a publish; three leaves room for two publishes
+/// close together.
+pub const KEPT_BUILDS: usize = 3;
 
 pub struct Options {
     pub public_url: String,
@@ -106,23 +136,31 @@ pub fn main(args: &[String]) -> Result<()> {
             "uncommitted changes; commit them first so the site matches a commit (or pass --allow-dirty):\n{dirty}"
         );
     }
-    let source = git(&repo, &["rev-parse", "--short", "HEAD"])?;
+    let head = git(&repo, &["rev-parse", "HEAD"])?;
+    let dirty_at = if dirty.is_empty() {
+        None
+    } else {
+        Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+    };
+    let id = build_id(&head, dirty_at)?;
+    let build_url = format!("{}v/{id}/", o.public_url);
 
-    let dist = repo.join("target/pages");
-    if dist.exists() {
-        std::fs::remove_dir_all(&dist).with_context(|| format!("removing {}", dist.display()))?;
+    let site = repo.join("target/pages");
+    if site.exists() {
+        std::fs::remove_dir_all(&site).with_context(|| format!("removing {}", site.display()))?;
     }
-    println!("building the web app for {} …", o.public_url);
-    let dist_s = dist.to_string_lossy().to_string();
+    let build = site.join("v").join(&id);
+    println!("building the web app for {build_url} …");
+    let build_s = build.to_string_lossy().to_string();
     // Trunk's own output is shown: the build takes a few minutes.
     let status = Command::new("trunk")
         .args([
             "build",
             "--release",
             "--public-url",
-            &o.public_url,
+            &build_url,
             "--dist",
-            &dist_s,
+            &build_s,
         ])
         .current_dir(repo.join("app"))
         .status()
@@ -132,23 +170,242 @@ pub fn main(args: &[String]) -> Result<()> {
             "trunk build failed (the wasm target is added with `rustup target add wasm32-unknown-unknown`)"
         );
     }
-    check_build(&dist, &o.public_url)?;
-    std::fs::write(dist.join(".nojekyll"), b"")?;
+    check_build(&build, &build_url)?;
 
-    let dirty_note = if dirty.is_empty() {
-        ""
-    } else {
-        " plus uncommitted changes"
-    };
-    let message = format!("Publish {source}{dirty_note} at {}", o.public_url);
-    deploy(&repo, &dist, &o, &message)?;
+    let message = format!("Publish {id} at {}", o.public_url);
+    deploy(&repo, &site, &o, &id, &message)?;
     Ok(())
 }
 
-/// Commits `dist` to the branch (after fetching it from the remote, if it
-/// is there) and pushes it unless `o.push` is off.  Returns the new commit,
-/// or `None` when the branch already held this content.
-pub fn deploy(repo: &Path, dist: &Path, o: &Options, message: &str) -> Result<Option<String>> {
+/// Checks that `id` can name a folder under `v/`: non-empty, and only
+/// lower-case letters, digits and `-`, so it can never be `..` or hold a
+/// `/`.
+pub fn check_id(id: &str) -> Result<()> {
+    let allowed = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
+    if id.is_empty() || !id.bytes().all(allowed) {
+        bail!("{id:?} is not a build id (lower-case letters, digits and -)");
+    }
+    Ok(())
+}
+
+/// The id of a build of the commit `head` (a full hash): its first 12
+/// characters, so that every clone, shallow or not, names a commit the same
+/// way.  A build with uncommitted changes adds `-dirty-<unix seconds>`, so
+/// two of them never share a folder.
+pub fn build_id(head: &str, dirty_at: Option<u64>) -> Result<String> {
+    let Some(short) = head.get(..12) else {
+        bail!("{head:?} is not a commit hash");
+    };
+    let id = match dirty_at {
+        None => short.to_string(),
+        Some(secs) => format!("{short}-dirty-{secs}"),
+    };
+    check_id(&id)?;
+    Ok(id)
+}
+
+/// The build ids in a `v/VERSIONS` file, newest first.  A line that is not
+/// a build id is an error, never a path.
+pub fn parse_versions(text: &str) -> Result<Vec<String>> {
+    text.lines()
+        .map(|line| {
+            check_id(line).context("v/VERSIONS has a bad line")?;
+            Ok(line.to_string())
+        })
+        .collect()
+}
+
+/// The builds to keep after publishing `new`: `new` first, then the
+/// published ones in order, each once, at most [`KEPT_BUILDS`] in all.
+pub fn kept_ids(new: &str, published: &[String]) -> Vec<String> {
+    let mut kept = vec![new.to_string()];
+    for id in published {
+        if kept.len() == KEPT_BUILDS {
+            break;
+        }
+        if !kept.contains(id) {
+            kept.push(id.clone());
+        }
+    }
+    kept
+}
+
+/// What [`prepare_site`] found on the branch and did to the site.
+#[derive(Debug)]
+pub struct Prepared {
+    /// The branch's commit the site builds on, if the branch exists.  The
+    /// publish commit must have exactly this parent.
+    pub parent: Option<String>,
+    /// The builds now in `v/`, newest first, as written to `v/VERSIONS`.
+    pub kept: Vec<String>,
+    /// The builds copied from `parent`, which must stay byte for byte.
+    pub from_branch: Vec<String>,
+    /// Whether the new id was already published, so its published copy
+    /// replaced the fresh build.
+    pub reused: bool,
+}
+
+/// Turns `site`, which holds only the fresh build in `v/<id>/`, into the
+/// branch's next tree: adds the kept older builds from the branch's current
+/// commit, the root `index.html` (a copy of the newest build's),
+/// `v/VERSIONS` and `.nojekyll`.
+///
+/// A published `v/<id>/` is never changed, because browsers may hold its
+/// files for a month: if the branch already has `v/<id>/`, for example
+/// when CI publishes the same commit again, its copy replaces the fresh
+/// build.
+pub fn prepare_site(repo: &Path, site: &Path, branch: &str, id: &str) -> Result<Prepared> {
+    check_id(id)?;
+    if dir_names(site)? != ["v"] || dir_names(&site.join("v"))? != [id] {
+        bail!(
+            "{} should hold only the new build, in v/{id}/",
+            site.display()
+        );
+    }
+    let parent = branch_commit(repo, branch);
+    let published = match &parent {
+        None => Vec::new(),
+        Some(p) => match object_type(repo, p, "v/VERSIONS")?.as_deref() {
+            None => Vec::new(),
+            Some("blob") => parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?,
+            Some(other) => bail!("{branch}:v/VERSIONS is a {other}, not a file"),
+        },
+    };
+    let reused = match &parent {
+        None => false,
+        Some(p) => object_type(repo, p, &format!("v/{id}"))?.is_some(),
+    };
+    let kept = kept_ids(id, &published);
+    let from_branch: Vec<String> = kept
+        .iter()
+        .filter(|k| reused || k.as_str() != id)
+        .cloned()
+        .collect();
+
+    if let Some(p) = &parent
+        && !from_branch.is_empty()
+    {
+        for k in &from_branch {
+            if object_type(repo, p, &format!("v/{k}"))?.as_deref() != Some("tree") {
+                bail!("{branch} lists build {k} in v/VERSIONS but has no folder v/{k}/");
+            }
+        }
+        if reused {
+            let fresh = site.join("v").join(id);
+            std::fs::remove_dir_all(&fresh)
+                .with_context(|| format!("removing {}", fresh.display()))?;
+        }
+        check_out_builds(repo, site, p, &from_branch)?;
+    }
+
+    std::fs::copy(
+        site.join("v").join(id).join("index.html"),
+        site.join("index.html"),
+    )
+    .context("copying the newest build's index.html to the root")?;
+    std::fs::write(site.join("v/VERSIONS"), format!("{}\n", kept.join("\n")))?;
+    std::fs::write(site.join(".nojekyll"), b"")?;
+    Ok(Prepared {
+        parent,
+        kept,
+        from_branch,
+        reused,
+    })
+}
+
+/// Writes `v/<id>/` of `commit` into `site` for each id, through a
+/// temporary index, so neither the checkout nor its index changes and no
+/// hooks run.
+fn check_out_builds(repo: &Path, site: &Path, commit: &str, ids: &[String]) -> Result<()> {
+    with_temp_index(repo, "publish-kept-index", |_, index| {
+        let envs: [(&str, &Path); 1] = [("GIT_INDEX_FILE", index)];
+        for k in ids {
+            run(
+                repo,
+                "git",
+                &[
+                    "read-tree",
+                    &format!("--prefix=v/{k}/"),
+                    &format!("{commit}:v/{k}"),
+                ],
+                &envs,
+            )?;
+        }
+        let prefix = format!("--prefix={}/", site.display());
+        run(repo, "git", &["checkout-index", "-a", "-f", &prefix], &envs)?;
+        Ok(())
+    })
+}
+
+/// Fails unless each build copied from the branch has the same tree in
+/// `tree` as in the branch's commit: proof that publishing left it as it
+/// was.
+pub fn check_kept_builds(repo: &Path, tree: &str, prepared: &Prepared) -> Result<()> {
+    let Some(parent) = &prepared.parent else {
+        return Ok(());
+    };
+    for k in &prepared.from_branch {
+        let before = git(repo, &["rev-parse", &format!("{parent}:v/{k}")])?;
+        let after = git(repo, &["rev-parse", &format!("{tree}:v/{k}")])?;
+        if before != after {
+            bail!("publishing would change the published build v/{k}/ ({before} -> {after})");
+        }
+    }
+    Ok(())
+}
+
+/// The names in `dir`, sorted.
+fn dir_names(dir: &Path) -> Result<Vec<String>> {
+    let mut names = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>>>()?;
+    names.sort();
+    Ok(names)
+}
+
+/// The commit `branch` points at, if the branch exists.
+fn branch_commit(repo: &Path, branch: &str) -> Option<String> {
+    let full_ref = format!("refs/heads/{branch}");
+    git(repo, &["rev-parse", "--verify", "--quiet", &full_ref]).ok()
+}
+
+/// The type (`blob`, `tree`) of `path` in `commit`, or `None` if it is not
+/// there.  `ls-tree` prints nothing for a missing path and fails for a bad
+/// commit, which `git show` would not tell apart.
+fn object_type(repo: &Path, commit: &str, path: &str) -> Result<Option<String>> {
+    // "<mode> SP <type> SP <object> TAB <path>"
+    let line = git(repo, &["ls-tree", "--full-tree", commit, path])?;
+    Ok(line.split_whitespace().nth(1).map(str::to_string))
+}
+
+/// Runs `f` with the git directory and a temporary index file in it, and
+/// removes the index afterwards.
+fn with_temp_index<T>(
+    repo: &Path,
+    name: &str,
+    f: impl FnOnce(&Path, &Path) -> Result<T>,
+) -> Result<T> {
+    let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?);
+    let index = git_dir.join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let result = f(&git_dir, &index);
+    let _ = std::fs::remove_file(&index);
+    result
+}
+
+/// Commits `site` (holding the fresh build in `v/<id>/`) to the branch,
+/// after fetching it from the remote if it is there and adding the kept
+/// builds ([`prepare_site`]), and pushes it unless `o.push` is off.
+/// Returns the new commit, or `None` when the branch already held this
+/// content.
+pub fn deploy(
+    repo: &Path,
+    site: &Path,
+    o: &Options,
+    id: &str,
+    message: &str,
+) -> Result<Option<String>> {
     // A branch published from another clone: start from it, not over it.
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", o.branch);
     if git(
@@ -161,7 +418,17 @@ pub fn deploy(repo: &Path, dist: &Path, o: &Options, message: &str) -> Result<Op
             format!("could not update the local {} from {} (has it diverged? compare with `git log {} {}/{}`)", o.branch, o.remote, o.branch, o.remote, o.branch)
         })?;
     }
-    let commit = commit_dir(repo, dist, &o.branch, message)?;
+    let prepared = prepare_site(repo, site, &o.branch, id)?;
+    if prepared.reused {
+        println!(
+            "{} already has v/{id}/; keeping its published copy, not this build",
+            o.branch
+        );
+    }
+    println!("builds in v/: {}", prepared.kept.join(", "));
+    let tree = write_tree(repo, site)?;
+    check_kept_builds(repo, &tree, &prepared)?;
+    let commit = commit_tree(repo, &tree, &o.branch, message, prepared.parent.as_deref())?;
     match &commit {
         Some(c) => println!("committed {c} to {}: {message}", o.branch),
         None => println!("{} already holds this build; nothing to commit", o.branch),
@@ -185,9 +452,12 @@ pub fn deploy(repo: &Path, dist: &Path, o: &Options, message: &str) -> Result<Op
     Ok(commit)
 }
 
-/// Checks a Trunk build before it is published: the files the page needs
-/// exist and the page loads them from under `public_url`.
-pub fn check_build(dist: &Path, public_url: &str) -> Result<()> {
+/// Checks one Trunk build, in `dir`, before it is published: the files the
+/// page needs exist, and the page's base and assets are under `url`, the
+/// build's own folder on the site.  The base matters as much as the
+/// assets: the app starts the worker from a relative URL, which resolves
+/// against it.
+pub fn check_build(dir: &Path, url: &str) -> Result<()> {
     let need = [
         "index.html",
         "app.js",
@@ -197,16 +467,21 @@ pub fn check_build(dist: &Path, public_url: &str) -> Result<()> {
         "stem-worker_loader.js",
     ];
     for f in need {
-        let p = dist.join(f);
+        let p = dir.join(f);
         let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         if len == 0 {
             bail!("the build is missing {} (or it is empty)", p.display());
         }
     }
-    let html = std::fs::read_to_string(dist.join("index.html"))?;
-    if !html.contains(&format!("{public_url}app.js")) {
+    let html = std::fs::read_to_string(dir.join("index.html"))?;
+    if !html.contains(&format!("<base href=\"{url}\"")) {
         bail!(
-            "index.html does not load app.js from {public_url}; the page would not find its files on the site"
+            "index.html has no <base href=\"{url}\">; the page would start the worker from the wrong folder"
+        );
+    }
+    if !html.contains(&format!("{url}app.js")) {
+        bail!(
+            "index.html does not load app.js from {url}; the page would not find its files on the site"
         );
     }
     Ok(())
@@ -217,34 +492,50 @@ pub fn check_build(dist: &Path, public_url: &str) -> Result<()> {
 /// commit, or `None` when the tree is unchanged.  Leaves the working tree,
 /// the index and HEAD alone.
 pub fn commit_dir(repo: &Path, dir: &Path, branch: &str, message: &str) -> Result<Option<String>> {
-    let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?);
-    let index = git_dir.join(format!("publish-index-{}", std::process::id()));
-    let _ = std::fs::remove_file(&index);
-    // A throwaway index over `dir` as the work tree; `--force` so that
-    // ignore rules (global or .git/info/exclude) cannot drop built files.
-    let envs: [(&str, &Path); 3] = [
-        ("GIT_DIR", &git_dir),
-        ("GIT_INDEX_FILE", &index),
-        ("GIT_WORK_TREE", dir),
-    ];
-    let tree = run(dir, "git", &["add", "--all", "--force", "."], &envs)
-        .and_then(|_| run(dir, "git", &["write-tree"], &envs));
-    let _ = std::fs::remove_file(&index);
-    let tree = tree?;
-    let full_ref = format!("refs/heads/{branch}");
-    let parent = git(repo, &["rev-parse", "--verify", "--quiet", &full_ref]).ok();
-    if let Some(p) = &parent
+    let tree = write_tree(repo, dir)?;
+    let parent = branch_commit(repo, branch);
+    commit_tree(repo, &tree, branch, message, parent.as_deref())
+}
+
+/// Writes the contents of `dir` to git's object store as a tree, through
+/// a temporary index, and returns the tree.
+fn write_tree(repo: &Path, dir: &Path) -> Result<String> {
+    with_temp_index(repo, "publish-index", |git_dir, index| {
+        // A throwaway index over `dir` as the work tree; `--force` so that
+        // ignore rules (global or .git/info/exclude) cannot drop built files.
+        let envs: [(&str, &Path); 3] = [
+            ("GIT_DIR", git_dir),
+            ("GIT_INDEX_FILE", index),
+            ("GIT_WORK_TREE", dir),
+        ];
+        run(dir, "git", &["add", "--all", "--force", "."], &envs)?;
+        run(dir, "git", &["write-tree"], &envs)
+    })
+}
+
+/// Commits `tree` to `branch` with `parent` as the only parent (none for a
+/// new branch).  Returns `None`, committing nothing, when `parent` already
+/// has this tree.  Fails if the branch is no longer at `parent`.
+fn commit_tree(
+    repo: &Path,
+    tree: &str,
+    branch: &str,
+    message: &str,
+    parent: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(p) = parent
         && git(repo, &["rev-parse", &format!("{p}^{{tree}}")])? == tree
     {
         return Ok(None);
     }
-    let mut args = vec!["commit-tree", tree.as_str(), "-m", message];
-    if let Some(p) = &parent {
-        args.extend(["-p", p.as_str()]);
+    let mut args = vec!["commit-tree", tree, "-m", message];
+    if let Some(p) = parent {
+        args.extend(["-p", p]);
     }
     let commit = git(repo, &args)?;
-    // Only moves the branch if it is still where we read it.
-    let old = parent.clone().unwrap_or_default(); // empty: must not exist yet
-    git(repo, &["update-ref", &full_ref, &commit, &old])?;
+    // Only moves the branch if it is still where it was read.
+    let full_ref = format!("refs/heads/{branch}");
+    let old = parent.unwrap_or_default(); // empty: must not exist yet
+    git(repo, &["update-ref", &full_ref, &commit, old])?;
     Ok(Some(commit))
 }
