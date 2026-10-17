@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use roformer::separate::{analyse, apply_masks};
 use roformer::{BINS, DEPTH, FEATURES, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
-use roformer_gpu::{Gpu, MatMulPolicy};
+use roformer_gpu::{Gpu, MatMulPolicy, TILES};
 use safetensors::{Dtype, SafeTensors};
 
 fn read(name: &str) -> Option<Vec<u8>> {
@@ -103,23 +103,31 @@ fn forward_matches_pytorch() {
     let Some(sbytes) = read("stft.safetensors") else {
         return;
     };
-    let gpu = match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
+    // ROFORMER_GPU_MM=v64 (or any `MatMulPolicy` name, "v64,i64" too) runs
+    // the network with those matmul kernels instead of the fallback, on a
+    // profiling device so the test can see they ran.  A named kernel that
+    // fails the start-up check, or that no product runs (the driver hands
+    // products a vec4 kernel cannot read to the fallback), fails the test.
+    let mm = std::env::var("ROFORMER_GPU_MM").ok();
+    let opened = if mm.is_some() {
+        pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
+    } else {
+        pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance))
+    };
+    let gpu = match opened {
         Ok(g) => g,
         Err(e) => return eprintln!("skipping: {e}"),
     };
     eprintln!("adapter: {} ({:?})", gpu.info.name, gpu.info.backend);
-    // ROFORMER_GPU_MM=v64 (or any `MatMulPolicy` name, "v64,i64" too) runs
-    // the network with those matmul kernels instead of the fallback.  A
-    // named kernel that fails the start-up check fails the test: the driver
-    // would quietly run the fallback in its place.
-    if let Ok(name) = std::env::var("ROFORMER_GPU_MM") {
-        let policy = MatMulPolicy::parse(&name).unwrap_or_else(|| panic!("unknown kernel {name}"));
+    if let Some(name) = &mm {
+        let policy = MatMulPolicy::parse(name).unwrap_or_else(|| panic!("unknown kernel {name}"));
         let problems = pollster::block_on(gpu.check_kernels()).unwrap();
         let usable = gpu.usable.get();
         assert!(
             usable[policy.pick(1000, 1000)] && usable[policy.pick(10, 10)],
             "{name} failed the start-up check: {problems:?}"
         );
+        pollster::block_on(gpu.reset_profile()).unwrap();
         gpu.policy.set(policy);
     }
     eprintln!("matmul {}", gpu.policy.get().name());
@@ -194,6 +202,23 @@ fn forward_matches_pytorch() {
         let db = snr(&got, &want);
         eprintln!("mask {s} ({}): {db:.1} dB", STEMS[s]);
         assert!(db > 80.0);
+    }
+
+    if mm.is_some() {
+        if gpu.profiling() {
+            pollster::block_on(gpu.collect_profile()).unwrap();
+            let labels: Vec<String> = gpu.take_profile().into_keys().collect();
+            let policy = gpu.policy.get();
+            for t in [policy.pick(1000, 1000), policy.pick(10, 10)] {
+                let name = TILES[t].name;
+                assert!(
+                    labels.iter().any(|l| l.ends_with(&format!(" {name}"))),
+                    "no product ran {name}: {labels:#?}"
+                );
+            }
+        } else {
+            eprintln!("adapter without timestamp-query: kernels that ran not checked");
+        }
     }
 
     if !full {

@@ -253,11 +253,15 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
 
 /// This GPU's kernel choice (kept per GPU, or measured once) unless the
 /// page URL sets both parts, then any override from the URL; once per
-/// worker.  Called after the model upload rather than when the device
-/// opens, so calibration neither shares the GPU with the upload nor times
-/// a GPU that has only just woken.
+/// worker.  Called once the GPU has done real work (after the model
+/// upload, or for `?bench` without a model after its matmul timings)
+/// rather than when the device opens, so calibration neither shares the
+/// GPU with the upload nor times a GPU that has only just woken.  Claimed
+/// before it starts: a message handled meanwhile (a model dropped during
+/// the start-up calibration) runs with the kernels in place until then
+/// instead of calibrating a second time on the same GPU.
 async fn ensure_kernels(g: &Gpu, msg: &JsValue) {
-    if STATE.with_borrow(|s| s.kernels_chosen) {
+    if STATE.with_borrow_mut(|s| std::mem::replace(&mut s.kernels_chosen, true)) {
         return;
     }
     let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
@@ -266,7 +270,6 @@ async fn ensure_kernels(g: &Gpu, msg: &JsValue) {
     }
     apply_policy(g, msg);
     apply_attention(g, msg);
-    STATE.with_borrow_mut(|s| s.kernels_chosen = true);
 }
 
 fn budget(msg: &JsValue) -> usize {
@@ -845,7 +848,13 @@ fn apply_attention(gpu: &Gpu, msg: &JsValue) {
 /// Times every matmul kernel on the shapes of a full chunk (`?bench`).
 async fn bench(msg: &JsValue) -> Result<(), String> {
     let g = gpu(msg).await?;
-    ensure_kernels(&g, msg).await;
+    // Without a model the GPU has done nothing yet: choose its kernels
+    // after the matmul timings below (which do not depend on the choice)
+    // rather than on a GPU that has only just woken.
+    let loaded = STATE.with_borrow(|s| s.net.is_some());
+    if loaded {
+        ensure_kernels(&g, msg).await;
+    }
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
     let (warm, round) = if get(msg, "bench_quick").is_truthy() {
@@ -864,6 +873,9 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
             .await;
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
+    }
+    if !loaded {
+        ensure_kernels(&g, msg).await;
     }
     roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
@@ -1006,7 +1018,13 @@ const KEEP_PER_GPU: usize = 3;
 /// (see `roformer_gpu::bench::store_choice` for which lines stay).
 async fn choose_kernels(gpu: &Gpu) {
     let pref = STATE.with_borrow(|s| s.power);
-    let adapter = gpu_info(pref).await.as_string().unwrap_or_default();
+    // The key's separators (tab, newline, `|`) must not occur in the name,
+    // or its stored line would never match and would pile up.
+    let adapter = gpu_info(pref)
+        .await
+        .as_string()
+        .unwrap_or_default()
+        .replace(['\t', '\n', '\r', '|'], " ");
     let key = format!(
         "{adapter}|{:016x}|{}",
         roformer_gpu::kernels_id(),
