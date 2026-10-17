@@ -673,11 +673,30 @@ impl Choice {
     }
 }
 
+/// Version of the [`calibrate`] procedure.  A per-GPU choice stored by
+/// another version is measured again: version 1 timed attention for 0.1 s
+/// on a GPU opened moments before, and chose split attention on a Radeon
+/// Pro 5500M where a longer bench measured fused 2.5 times faster.
+pub const CALIBRATION: u32 = 2;
+
+/// Warm-up before the first timed round of each attention candidate in
+/// [`calibrate`], and the length of every timed round: a time-axis step
+/// takes tens of milliseconds, so 0.1 s held only a few of them.
+pub const ATTENTION_WARM: f64 = 0.5;
+pub const ATTENTION_ROUND: f64 = 0.3;
+
+/// Fused attention stays on the time axis unless split attention measured
+/// more than this factor faster.  Fused needs no scores buffer (about
+/// 42 MB per band) and so runs four bands per step, which matters more
+/// on memory-limited devices than a close timing does.
+pub const FUSED_MARGIN: f64 = 1.1;
+
 /// The choice from measured seconds: for each kind of product, the kernel
 /// with the least total over its shapes (`large[t]`, `small[t]`; infinite
 /// for kernels that failed their check); fused attention on the frequency
 /// axis whenever it works (it was 2.2 to 3.6 times faster on every GPU
-/// measured), and on the time axis when it measured faster than split.
+/// measured), and on the time axis unless split measured faster by more
+/// than [`FUSED_MARGIN`].
 pub fn decide(
     large: &[f64],
     small: &[f64],
@@ -696,7 +715,7 @@ pub fn decide(
             small: best(small),
         },
         attention: AttentionPolicy {
-            time: fused_ok && time_fused < time_split,
+            time: fused_ok && time_fused <= FUSED_MARGIN * time_split,
             freq: fused_ok,
         },
     }
@@ -713,7 +732,9 @@ pub fn decide(
 /// cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4 register
 /// block wins (register file and scheduling), whether the compiler keeps
 /// `s64`'s loop-indexed accumulators in registers, and whether fused
-/// attention wins on long sequences.  Takes several seconds.
+/// attention wins on long sequences.  Attention gets longer windows
+/// ([`ATTENTION_WARM`], [`ATTENTION_ROUND`]) than the matmul products.
+/// Takes several seconds.
 pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
     let all = shapes();
     let by_name = |n: &str| all.iter().find(|s| s.name == n).copied().expect("shape");
@@ -756,7 +777,8 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
     let (s, st) = secs(small.to_vec()).await;
     let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
     gpu.policy.set(matmul);
-    let ((ts, tf), _) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    let ((ts, tf), _) =
+        attention_per_chunk(gpu, ATTENTION_WARM, ATTENTION_ROUND, rounds, &now).await;
     let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
     gpu.set_recording(recording);
     let fmt = |v: &[f64], t: &[Timing]| {
@@ -779,13 +801,15 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
             .join(", ")
     };
     log(format!(
-        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s, fused {:.2} s per chunk)",
+        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%) per chunk)",
         choice.matmul.name(),
         fmt(&l, &lt),
         fmt(&s, &st),
         choice.attention.name(),
         ts.median(),
-        tf.median()
+        100.0 * ts.spread(),
+        tf.median(),
+        100.0 * tf.spread()
     ));
     choice
 }
@@ -864,8 +888,8 @@ mod tests {
     }
 
     /// Least total per kind; fused attention on the frequency axis when it
-    /// works, on the time axis only when faster; nothing fused when the
-    /// fused kernel failed its check.
+    /// works, on the time axis unless clearly slower; nothing fused when
+    /// the fused kernel failed its check.
     #[test]
     fn decisions() {
         let inf = f64::INFINITY;
@@ -889,6 +913,24 @@ mod tests {
             Some("i128x64,i64;freq".to_string())
         );
         assert_eq!(Choice::parse("v64;split"), None);
+    }
+
+    /// Fused attention keeps the time axis when split is faster by
+    /// [`FUSED_MARGIN`] or less, and loses it beyond that.
+    #[test]
+    fn fused_attention_margin() {
+        let time =
+            |split: f64, fused: f64| decide(&[1.0], &[1.0], split, fused, true).attention.time;
+        assert!(time(1.0, 1.0));
+        assert!(time(1.0, 1.09));
+        assert!(time(1.0, FUSED_MARGIN));
+        assert!(!time(1.0, 1.11));
+        assert!(!time(4.0, 5.0));
+        // The margin alone does not rescue the Radeon Pro 5500M's
+        // version-1 measurement; the longer windows have to.
+        assert!(!time(8.26, 9.51));
+        // Its bench a minute later: fused.
+        assert!(time(11.46, 4.52));
     }
 
     /// First rounds 1.0 and 1.6 drop the second kernel; the survivor's

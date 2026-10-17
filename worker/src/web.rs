@@ -119,10 +119,12 @@ struct State {
     power: &'static str,
     net: Option<Rc<Net>>,
     busy: bool,
+    /// Whether `ensure_kernels` has set this GPU's kernels.
+    kernels_chosen: bool,
 }
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, busy: false }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, busy: false, kernels_chosen: false }) };
 }
 
 fn scope() -> DedicatedWorkerGlobalScope {
@@ -241,16 +243,30 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     if let Some(p) = g.check_attention().await {
         log(&p);
     }
-    // This GPU's kernel choice (kept per GPU, or measured once), unless
-    // the page URL sets both parts; then any override from the URL.
-    let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
-    if !(set("mm") && set("attn")) {
-        choose_kernels(&g).await;
-    }
+    // Overrides from the URL; this GPU's own choice comes later, in
+    // `ensure_kernels`.
     apply_policy(&g, msg);
     apply_attention(&g, msg);
     STATE.with_borrow_mut(|s| s.gpu = Some(g.clone()));
     Ok(g)
+}
+
+/// This GPU's kernel choice (kept per GPU, or measured once) unless the
+/// page URL sets both parts, then any override from the URL; once per
+/// worker.  Called after the model upload rather than when the device
+/// opens, so calibration neither shares the GPU with the upload nor times
+/// a GPU that has only just woken.
+async fn ensure_kernels(g: &Gpu, msg: &JsValue) {
+    if STATE.with_borrow(|s| s.kernels_chosen) {
+        return;
+    }
+    let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
+    if !(set("mm") && set("attn")) {
+        choose_kernels(g).await;
+    }
+    apply_policy(g, msg);
+    apply_attention(g, msg);
+    STATE.with_borrow_mut(|s| s.kernels_chosen = true);
 }
 
 fn budget(msg: &JsValue) -> usize {
@@ -296,6 +312,7 @@ async fn build(bytes: &[u8], msg: &JsValue) -> Result<(f64, String), String> {
     if let Some(e) = g.take_errors().into_iter().next() {
         return Err(format!("the GPU rejected the model upload: {e}"));
     }
+    ensure_kernels(&g, msg).await;
     STATE.with_borrow_mut(|s| s.net = Some(Rc::new(net)));
     Ok((now_s() - t0, gpu_text(&g).await))
 }
@@ -828,6 +845,7 @@ fn apply_attention(gpu: &Gpu, msg: &JsValue) {
 /// Times every matmul kernel on the shapes of a full chunk (`?bench`).
 async fn bench(msg: &JsValue) -> Result<(), String> {
     let g = gpu(msg).await?;
+    ensure_kernels(&g, msg).await;
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
     let (warm, round) = if get(msg, "bench_quick").is_truthy() {
@@ -984,13 +1002,15 @@ const KERNEL_CHOICE: &str = "matmul_kernels";
 /// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept.
 async fn choose_kernels(gpu: &Gpu) {
     let pref = STATE.with_borrow(|s| s.power);
+    let adapter = gpu_info(pref).await.as_string().unwrap_or_default();
     let key = format!(
-        "{}|{:016x}",
-        gpu_info(pref).await.as_string().unwrap_or_default(),
-        roformer_gpu::kernels_id()
+        "{adapter}|{:016x}|{}",
+        roformer_gpu::kernels_id(),
+        roformer_gpu::bench::CALIBRATION
     );
     // One line per GPU; lines for other GPUs (the other adapter of a
-    // two-GPU laptop) are kept.
+    // two-GPU laptop) are kept, and this GPU's lines for other kernels or
+    // another calibration version are dropped.
     let mut others = Vec::new();
     let stored = cache_get(KERNEL_CHOICE).await;
     if !stored.is_null() {
@@ -1001,7 +1021,9 @@ async fn choose_kernels(gpu: &Gpu) {
                 continue;
             };
             if k != key {
-                others.push(line.to_string());
+                if !k.starts_with(&format!("{adapter}|")) {
+                    others.push(line.to_string());
+                }
                 continue;
             }
             if let Some(c) = roformer_gpu::bench::Choice::parse(v)
