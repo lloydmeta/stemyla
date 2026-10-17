@@ -55,3 +55,4 @@ export function save_file(name, bytes, mime) {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
