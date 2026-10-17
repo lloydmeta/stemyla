@@ -61,3 +61,4 @@ export async function fetch_bytes(url) {
     return new Uint8Array(await r.arrayBuffer());
   } catch (e) { return null; }
 }
+export function perf_now() { return performance.now(); }
