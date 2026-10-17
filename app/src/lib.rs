@@ -75,8 +75,8 @@ pub struct Inbox {
     name: Option<String>,
     /// Songs kept in browser storage.
     sessions: Option<Vec<(String, store_meta::Meta)>>,
-    /// Why a reset stopped short of reloading the page.
-    reset_failed: Option<String>,
+    /// A reset that stopped short of reloading the page: its mode and why.
+    reset_failed: Option<(reset::Reset, String)>,
 }
 
 /// Where the Reset dialog is.  Web only.
@@ -88,7 +88,8 @@ enum ResetStage {
     Asking,
     /// A choice was made; the page reloads when it is done.
     Running,
-    Failed(String),
+    /// The mode chosen, kept so Try again repeats it, and why it stopped.
+    Failed(reset::Reset, String),
 }
 
 /// Asks the browser for the storage used and the stored songs, for the
@@ -627,7 +628,7 @@ impl StemApp {
         }
         // Nothing new is opened or stored while a reset runs.
         #[cfg(target_arch = "wasm32")]
-        if matches!(self.reset, ResetStage::Running | ResetStage::Failed(_)) {
+        if matches!(self.reset, ResetStage::Running | ResetStage::Failed(..)) {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -999,11 +1000,9 @@ impl StemApp {
             ResetStage::Running => {
                 reset::progress(ctx, None);
             }
-            ResetStage::Failed(failure) => match reset::progress(ctx, Some(failure)) {
+            ResetStage::Failed(choice, failure) => match reset::progress(ctx, Some(failure)) {
                 reset::ProgressOutcome::Waiting => {}
-                reset::ProgressOutcome::TryAgain => {
-                    self.start_reset(ctx, reset::Reset::DeleteStored)
-                }
+                reset::ProgressOutcome::TryAgain => self.start_reset(ctx, *choice),
                 reset::ProgressOutcome::Reload => reset::reload(),
             },
         }
@@ -1022,7 +1021,7 @@ impl StemApp {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(failure) = reset::run(choice).await {
                 log::warn!("reset: {failure}");
-                pending.borrow_mut().reset_failed = Some(failure);
+                pending.borrow_mut().reset_failed = Some((choice, failure));
                 ctx.request_repaint();
             }
         });
@@ -1394,8 +1393,8 @@ impl eframe::App for StemApp {
             if let Some(n) = inbox.name {
                 self.song_name = Some(n);
             }
-            if let Some(e) = inbox.reset_failed {
-                self.reset = ResetStage::Failed(e);
+            if let Some((choice, failure)) = inbox.reset_failed {
+                self.reset = ResetStage::Failed(choice, failure);
             }
         }
         let dt = ctx.input(|i| i.stable_dt);

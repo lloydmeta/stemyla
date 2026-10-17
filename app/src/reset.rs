@@ -107,8 +107,8 @@ pub enum ProgressOutcome {
 }
 
 /// Shown from the choice until the page reloads, so nothing new is opened
-/// or saved meanwhile.  `failure` says what could not be deleted; the
-/// reset then waits for the user instead of reloading.
+/// or saved meanwhile.  `failure` says what could not be deleted or
+/// fetched again; the reset then waits for the user instead of reloading.
 pub fn progress(ctx: &egui::Context, failure: Option<&str>) -> ProgressOutcome {
     let mut outcome = ProgressOutcome::Waiting;
     egui::Modal::new(egui::Id::new("reset_progress")).show(ctx, |ui| {
@@ -122,10 +122,6 @@ pub fn progress(ctx: &egui::Context, failure: Option<&str>) -> ProgressOutcome {
         };
         ui.heading("Reset incomplete");
         ui.colored_label(ui.visuals().error_fg_color, failure);
-        ui.label(
-            "Another tab of this page may be using them: close it and try again, or clear this \
-             site's data in the browser's settings.",
-        );
         ui.horizontal(|ui| {
             if ui.button("Try again").clicked() {
                 outcome = ProgressOutcome::TryAgain;
@@ -141,14 +137,35 @@ pub fn progress(ctx: &egui::Context, failure: Option<&str>) -> ProgressOutcome {
 /// What a failed deletion tells the user.
 pub fn not_deleted(names: &[String]) -> String {
     format!(
-        "Could not delete from browser storage: {}.",
+        "Could not delete from browser storage: {}.  Another tab of this page may be using \
+         them: close it and try again, or clear this site's data in the browser's settings.",
         names.join(", ")
     )
 }
 
+/// What a failed refetch tells the user.  A reload now could keep the
+/// outdated copies, so it asks for a retry first.
+pub fn not_refreshed(urls: &[String]) -> String {
+    let names: Vec<&str> = urls.iter().map(|u| file_name(u)).collect();
+    format!(
+        "Could not fetch again: {}.  Check the connection and try again; reloading now may \
+         keep the outdated copies.",
+        names.join(", ")
+    )
+}
+
+/// The last part of a URL's path, or "the page" for the page itself.
+fn file_name(url: &str) -> &str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    match path.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name,
+        _ => "the page",
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use super::{Reset, WORKER_FILES, not_deleted, urls_to_refresh};
+    use super::{Reset, WORKER_FILES, not_deleted, not_refreshed, urls_to_refresh};
     use js_sys::Array;
     use wasm_bindgen::prelude::*;
 
@@ -165,7 +182,7 @@ export async function refetch(urls) {
       return r.arrayBuffer();
     }))
   );
-  return results.filter((r) => r.status === "rejected").length;
+  return urls.filter((u, i) => results[i].status === "rejected");
 }
 // A terminated worker's open files may take a moment to be released, so
 // entries that could not be deleted are tried twice more.
@@ -197,8 +214,8 @@ export async function wipe_opfs() {
 
     /// Does the reset, then reloads the page.  The caller stops the worker
     /// first.  Deleting closes the page's own storage and waits for writes
-    /// in progress; if anything is left, it returns what instead of
-    /// reloading.
+    /// in progress.  If anything is left undeleted, or a file could not be
+    /// fetched again, it returns what instead of reloading.
     pub async fn run(reset: Reset) -> Result<(), String> {
         if reset == Reset::DeleteStored {
             crate::store::close().await;
@@ -218,8 +235,14 @@ export async function wipe_opfs() {
         let preloaded: Vec<String> = preloaded().iter().filter_map(|v| v.as_string()).collect();
         let urls = urls_to_refresh(&page_url(), &preloaded, &worker);
         let list: Array = urls.iter().map(|u| JsValue::from_str(u)).collect();
-        let failed = refetch(list).await.as_f64().unwrap_or(0.0);
-        log::info!("reset: fetched {} files again, {failed} failed", urls.len());
+        let failed: Vec<String> = Array::from(&refetch(list).await)
+            .iter()
+            .filter_map(|v| v.as_string())
+            .collect();
+        if !failed.is_empty() {
+            return Err(not_refreshed(&failed));
+        }
+        log::info!("reset: fetched {} files again", urls.len());
         reload();
         Ok(())
     }

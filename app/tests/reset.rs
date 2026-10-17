@@ -1,6 +1,8 @@
 //! The Reset dialog: what it says, and which choice each button makes.
 
-use app::reset::{DialogOutcome, ProgressOutcome, Reset, dialog, not_deleted, progress};
+use app::reset::{
+    DialogOutcome, ProgressOutcome, Reset, dialog, not_deleted, not_refreshed, progress,
+};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
@@ -99,14 +101,11 @@ fn while_running_there_is_nothing_to_press() {
 #[test]
 fn a_failed_deletion_is_shown_and_waits_for_the_user() {
     let failure = not_deleted(&["sessions".to_string(), "download.part".to_string()]);
-    assert_eq!(
-        failure,
-        "Could not delete from browser storage: sessions, download.part."
-    );
+    assert!(failure.starts_with("Could not delete from browser storage: sessions, download.part."));
+    assert!(failure.contains("Another tab"));
     let failure: &'static str = Box::leak(failure.into_boxed_str());
     let mut h = progress_harness(Some(failure));
     assert!(h.query_by_label(failure).is_some());
-    assert!(h.query_by_label_contains("Another tab").is_some());
     h.get_by_label("Try again").click();
     h.run_steps(2);
     assert_eq!(*h.state(), ProgressOutcome::TryAgain);
@@ -115,4 +114,26 @@ fn a_failed_deletion_is_shown_and_waits_for_the_user() {
     h.get_by_label("Reload").click();
     h.run_steps(2);
     assert_eq!(*h.state(), ProgressOutcome::Reload);
+}
+
+/// A file that could not be fetched again is named, and the user is asked
+/// to retry rather than reload into the outdated copies.
+#[test]
+fn a_failed_refetch_names_the_files_and_asks_for_a_retry() {
+    let failure = not_refreshed(&[
+        "https://beachape.com/stemyla/?selftest".to_string(),
+        "https://beachape.com/stemyla/stem-worker.js".to_string(),
+        "https://beachape.com/stemyla/snippets/app-0cd1cead3f0174fd/inline1.js#x".to_string(),
+    ]);
+    assert!(
+        failure.starts_with("Could not fetch again: the page, stem-worker.js, inline1.js."),
+        "{failure}"
+    );
+    assert!(failure.contains("try again"));
+    let failure: &'static str = Box::leak(failure.into_boxed_str());
+    let mut h = progress_harness(Some(failure));
+    assert!(h.query_by_label(failure).is_some());
+    h.get_by_label("Try again").click();
+    h.run_steps(2);
+    assert_eq!(*h.state(), ProgressOutcome::TryAgain);
 }
