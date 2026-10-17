@@ -34,10 +34,11 @@ const MAX_DISPATCHES: u64 = 64;
 
 /// A matmul kernel: `matmul_interleaved.wgsl` with these numbers filled
 /// in (or, with `hand_written`, `matmul.wgsl` as it stands, which has the
-/// same numbers).  A workgroup of 256 threads computes a `bm` x `bn` block
-/// of the output, each thread `tm` x `tn` of it (every `bm / tm`-th row
-/// and every `bn / tn`-th column), stepping through K `bk` at a time; rows
-/// of the workgroup tiles are padded by `pad` floats.
+/// same numbers; with `vec4`, `matmul_vec4.wgsl`).  A workgroup of 256
+/// threads computes a `bm` x `bn` block of the output, each thread `tm` x
+/// `tn` of it (every `bm / tm`-th row and every `bn / tn`-th column),
+/// stepping through K `bk` at a time; rows of the workgroup tiles are
+/// padded by `pad` floats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub name: &'static str,
@@ -48,12 +49,18 @@ pub struct Tile {
     pub tn: usize,
     pub pad: usize,
     pub hand_written: bool,
+    /// Reads A and B as vec4s along K; runs only products that pass
+    /// [`MatMul::vec4_ok`], and [`TILES`]`[0]` runs the rest.
+    pub vec4: bool,
 }
 
 impl Tile {
     fn source(&self) -> String {
         if self.hand_written {
             return include_str!("shaders/matmul.wgsl").to_string();
+        }
+        if self.vec4 {
+            return self.vec4_source();
         }
         let (tx, ty) = (self.bn / self.tn, self.bm / self.tm);
         assert_eq!(tx * ty, 256, "{self:?}");
@@ -107,6 +114,68 @@ impl Tile {
             .replace("{COMPUTE}", compute.trim_end())
             .replace("{EPILOGUE}", epilogue.trim_end())
     }
+
+    /// `matmul_vec4.wgsl` for this tile: tiles stored `[row][k / 4]`, so
+    /// one step of the inner loop covers 4 values of K.  The products are
+    /// added in K order, component by component, as the scalar kernel adds
+    /// them.
+    fn vec4_source(&self) -> String {
+        let (tx, ty) = (self.bn / self.tn, self.bm / self.tm);
+        assert_eq!(tx * ty, 256, "{self:?}");
+        assert!(
+            self.bk.is_multiple_of(4) && self.pad.is_multiple_of(4),
+            "{self:?}"
+        );
+        let (kv, sv) = (self.bk / 4, (self.bk + self.pad) / 4);
+        assert!(
+            (self.bm * kv).is_multiple_of(256) && (self.bn * kv).is_multiple_of(256),
+            "{self:?}"
+        );
+        let (la, lb) = (self.bm * kv / 256, self.bn * kv / 256);
+        let mut decls = String::new();
+        let mut compute = String::new();
+        let mut epilogue = String::new();
+        for i in 0..self.tm {
+            for j in 0..self.tn {
+                decls += &format!("  var acc_{i}_{j} = 0.0;\n");
+                epilogue += &format!(
+                    "  store(r0 + {}u, c0 + {}u, ob, bias_base, acc_{i}_{j});\n",
+                    ty * i,
+                    tx * j
+                );
+            }
+        }
+        for i in 0..self.tm {
+            compute += &format!("      let a{i} = as_[ab + {}u];\n", ty * i * sv);
+        }
+        for j in 0..self.tn {
+            compute += &format!("      let b{j} = bs_[bb + {}u];\n", tx * j * sv);
+        }
+        for c in ["x", "y", "z", "w"] {
+            for i in 0..self.tm {
+                for j in 0..self.tn {
+                    compute +=
+                        &format!("      acc_{i}_{j} = fma(a{i}.{c}, b{j}.{c}, acc_{i}_{j});\n");
+                }
+            }
+        }
+        let stage = format!(
+            "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[slot(e)] = b_get(e, k0, col0, b_base); }}"
+        );
+        include_str!("shaders/matmul_vec4.wgsl")
+            .replace("{BM}", &self.bm.to_string())
+            .replace("{BN}", &self.bn.to_string())
+            .replace("{BK}", &self.bk.to_string())
+            .replace("{TX}", &tx.to_string())
+            .replace("{TY}", &ty.to_string())
+            .replace("{PADV}", &(self.pad / 4).to_string())
+            .replace("{SA_LEN}", &(self.bm * sv).to_string())
+            .replace("{SB_LEN}", &(self.bn * sv).to_string())
+            .replace("{ACC_DECLS}", decls.trim_end())
+            .replace("{STAGE}", &stage)
+            .replace("{COMPUTE}", compute.trim_end())
+            .replace("{EPILOGUE}", epilogue.trim_end())
+    }
 }
 
 /// The matmul kernels, among which [`bench::calibrate`] measures once per
@@ -129,12 +198,24 @@ impl Tile {
 /// it was 5 to 6 times slower, so calibration stops timing it after its
 /// first round on such GPUs.
 ///
+/// `v64` is `i64` with vector memory traffic: A and B come from storage
+/// and from workgroup memory as vec4s along K, so the inner loop issues a
+/// quarter of `i64`'s workgroup-memory reads for the same multiply-adds
+/// (8 vec4 reads per 64, against 8 floats per 16).  Every load in the
+/// scalar kernels is one f32; on an iPad's GPU they ran at 8 to 11% of
+/// peak with little DRAM traffic, which looks issue-bound rather than
+/// memory-bound.  It runs only products whose vec4s are whole and aligned
+/// ([`MatMul::vec4_ok`]: the transformer's nn.Linear products and the
+/// attention scores); asked for any other product (K = 62 or 1,151 in the
+/// p.v product, band-split widths), the fallback `i64` runs it instead.
+///
 /// The first entry is the fallback: a GPU on which it fails is not used.
-/// Rows are padded by 32 / `bk` floats (`s64`: 1): when K is the
-/// contiguous axis (every nn.Linear operand), 32 consecutive threads store
-/// 32 / `bk` rows of `bk` values, and this padding spreads them over all
-/// 32 banks.
-pub const TILES: [Tile; 3] = [
+/// Rows are padded by 32 / `bk` floats (`s64`: 1; `v64`: one vec4, so
+/// neighbouring threads' vec4 reads of the B tile fall in different
+/// banks): when K is the contiguous axis (every nn.Linear operand), 32
+/// consecutive threads store 32 / `bk` rows of `bk` values, and this
+/// padding spreads them over all 32 banks.
+pub const TILES: [Tile; 4] = [
     Tile {
         name: "i64",
         bm: 64,
@@ -144,6 +225,7 @@ pub const TILES: [Tile; 3] = [
         tn: 4,
         pad: 2,
         hand_written: false,
+        vec4: false,
     },
     Tile {
         name: "i128x64",
@@ -154,6 +236,7 @@ pub const TILES: [Tile; 3] = [
         tn: 4,
         pad: 4,
         hand_written: false,
+        vec4: false,
     },
     Tile {
         name: "s64",
@@ -164,6 +247,18 @@ pub const TILES: [Tile; 3] = [
         tn: 4,
         pad: 1,
         hand_written: true,
+        vec4: false,
+    },
+    Tile {
+        name: "v64",
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        tm: 4,
+        tn: 4,
+        pad: 4,
+        hand_written: false,
+        vec4: true,
     },
 ];
 
@@ -746,11 +841,13 @@ impl Gpu {
             .unwrap_or_default()
     }
 
-    /// A storage buffer of `len` f32s, zeroed.
+    /// A storage buffer of `len` f32s, zeroed, rounded up to whole vec4s
+    /// (16 bytes) so the vec4 kernels can read it (see
+    /// [`MatMul::vec4_ok`]).
     pub fn buffer(&self, label: &str, len: usize) -> wgpu::Buffer {
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            size: (len.max(4) * 4) as u64,
+            size: (len.max(4).next_multiple_of(4) * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -758,10 +855,16 @@ impl Gpu {
         })
     }
 
-    /// A storage buffer holding `data`.
+    /// A storage buffer holding `data`, rounded up to whole vec4s like
+    /// [`Gpu::buffer`] (the extra floats zero).
     pub fn upload(&self, label: &str, data: &[f32]) -> wgpu::Buffer {
         if data.is_empty() {
             return self.buffer(label, 0);
+        }
+        if !data.len().is_multiple_of(4) {
+            let buf = self.buffer(label, data.len());
+            self.write(&buf, 0, data);
+            return buf;
         }
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -833,9 +936,12 @@ impl Gpu {
     /// CPU.  A kernel that disagrees is marked unusable on this GPU, so a
     /// compiler or driver bug in one kernel costs speed, not correctness.
     /// Returns one line per kernel that failed; the fallback kernel
-    /// (`TILES[0]`, `i64`) failing is an error.
+    /// (`TILES[0]`, `i64`) failing is an error.  K is a multiple of 4 but
+    /// not of any tile's `bk`, so case 1 (both operands K-contiguous) runs
+    /// the vec4 kernel with a ragged last K tile; case 2 is not vec4-shaped
+    /// and checks the fallback the vec4 kernel hands it to.
     pub async fn check_kernels(&self) -> Result<Vec<String>, String> {
-        let (m, n, k) = (133, 141, 45);
+        let (m, n, k) = (133, 141, 44);
         let rand = |len: usize, seed: u32| -> Vec<f32> {
             let mut s = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
             (0..len)
@@ -881,10 +987,12 @@ impl Gpu {
         let mut usable = [true; TILES.len()];
         let mut problems = Vec::new();
         for (t, tile) in TILES.iter().enumerate() {
+            let mut ran_itself = false;
             for (case, (va, vb, acc)) in views.iter().enumerate() {
                 let cb = self.upload("check c", &c0);
                 let mut mm = MatMul::new((&ab, *va), (&bb, *vb), (&cb, View::rows(0, n)), m, n, k);
                 mm.tile = Some(t);
+                ran_itself |= mm.kernel(t) == t;
                 mm.accumulate = *acc;
                 if !*acc {
                     mm.bias = Some((&biasb, 0, 0));
@@ -914,6 +1022,13 @@ impl Gpu {
                     problems.push(format!("matmul kernel {} gives wrong results on this GPU (case {}: {why}); not used", tile.name, case + 1));
                     break;
                 }
+            }
+            if usable[t] && !ran_itself {
+                usable[t] = false;
+                problems.push(format!(
+                    "matmul kernel {} was not exercised by the start-up check; not used",
+                    tile.name
+                ));
             }
         }
         self.usable.set(usable);
@@ -1154,6 +1269,33 @@ impl<'a> MatMul<'a> {
             tile: None,
         }
     }
+
+    /// Whether a vec4 kernel can run this product: A and B both have K as
+    /// the contiguous axis, K and every other offset and stride of A and B
+    /// are multiples of 4 (so each vec4 is aligned and lies wholly inside
+    /// or wholly outside the matrix), and both buffers hold a whole number
+    /// of vec4s (a partial last vec4 would be out of bounds).
+    pub fn vec4_ok(&self) -> bool {
+        let (a, b) = (self.a.1, self.b.1);
+        a.cs == 1
+            && b.rs == 1
+            && [self.k, a.off, a.rs, a.bo, a.bi, b.off, b.cs, b.bo, b.bi]
+                .iter()
+                .all(|x| x.is_multiple_of(4))
+            && self.a.0.size().is_multiple_of(16)
+            && self.b.0.size().is_multiple_of(16)
+    }
+
+    /// The entry of [`TILES`] that runs this product when `t` is asked
+    /// for: `t`, or the fallback `TILES[0]` when `t` is a vec4 kernel and
+    /// the product fails [`MatMul::vec4_ok`].
+    pub fn kernel(&self, t: usize) -> usize {
+        if TILES[t].vec4 && !self.vec4_ok() {
+            0
+        } else {
+            t
+        }
+    }
 }
 
 #[repr(C)]
@@ -1372,10 +1514,10 @@ impl Rec<'_> {
             alpha: mm.alpha,
             pad: 0,
         };
-        let t = mm.tile.unwrap_or_else(|| {
+        let t = mm.kernel(mm.tile.unwrap_or_else(|| {
             let t = self.gpu.policy.get().pick(mm.m, mm.n);
             if self.gpu.usable.get()[t] { t } else { 0 }
-        });
+        }));
         let tile = TILES[t];
         let groups = [
             u(mm.n.div_ceil(tile.bn)),
@@ -1584,14 +1726,46 @@ mod tests {
         ]
     }
 
+    /// Bank conflict degrees of a vec4 kernel, in vec4 slots: its stores
+    /// of the A and B tiles (one layout: K contiguous), then the inner
+    /// loop's reads of A and B.  A 16-byte access is served 8 lanes at a
+    /// time (128 bytes, one word from each bank), so each group of 8 lanes
+    /// is one access of 4 words per lane.
+    fn conflicts_vec4(t: &Tile) -> [usize; 4] {
+        let (kv, sv) = (t.bk / 4, (t.bk + t.pad) / 4);
+        let (tx, ty) = (t.bn / t.tn, t.bm / t.tm);
+        let worst8 = |n: usize, slot: &dyn Fn(usize, usize) -> usize| {
+            let mut w = 1;
+            for group in 0..32 {
+                for q in 0..n {
+                    let words = (8 * group..8 * group + 8)
+                        .flat_map(|id| (0..4).map(move |c| (id, c)))
+                        .map(|(id, c)| 4 * slot(id, q) + c);
+                    w = w.max(degree(words));
+                }
+            }
+            w
+        };
+        let store = |e: usize, _: usize| (e / kv) * sv + e % kv;
+        [
+            worst8(1, &store),
+            worst8(1, &store),
+            worst8(t.tm, &|id, q| (id / tx + ty * q) * sv),
+            worst8(t.tn, &|id, q| (id % tx + tx * q) * sv),
+        ]
+    }
+
     /// The generated kernels are conflict-free in both load layouts and
     /// the inner loop; `s64`'s stores conflict 2-way when K is contiguous
     /// (rows padded by 1 float rather than 32 / bk).  The same model
     /// reproduced the Radeon ranking of the earlier blocked kernels (B
-    /// reads 2-way at a thread stride of 4, 4-way at 8).
+    /// reads 2-way at a thread stride of 4, 4-way at 8).  `v64` reads
+    /// conflict-free; its stores, once per K tile against 32 reads, conflict
+    /// 2-way, the price of the padding that keeps the reads free (unpadded,
+    /// its B reads conflict 4-way).
     #[test]
     fn bank_conflicts() {
-        for t in &TILES {
+        for t in TILES.iter().filter(|t| !t.vec4) {
             let want = if t.hand_written {
                 [2, 1, 2, 1, 1, 1]
             } else {
@@ -1599,16 +1773,25 @@ mod tests {
             };
             assert_eq!(conflicts(t), want, "{}", t.name);
         }
+        for t in TILES.iter().filter(|t| t.vec4) {
+            assert_eq!(conflicts_vec4(t), [2, 2, 1, 1], "{}", t.name);
+            let unpadded = Tile { pad: 0, ..*t };
+            assert_eq!(conflicts_vec4(&unpadded), [1, 1, 1, 4], "{}", t.name);
+        }
     }
 
     /// Bytes of workgroup memory a WGSL source declares
-    /// (`var<workgroup> name: array<f32, N>;` lines).
+    /// (`var<workgroup> name: array<f32, N>;` or `array<vec4<f32>, N>`
+    /// lines).
     fn workgroup_bytes(src: &str) -> usize {
         src.lines()
             .filter(|l| l.starts_with("var<workgroup>"))
             .map(|l| {
-                let n = l.split("array<f32, ").nth(1).expect("f32 array");
-                4 * n[..n.find('>').expect(">")]
+                let (size, n) = match l.split_once("array<vec4<f32>, ") {
+                    Some((_, n)) => (16, n),
+                    None => (4, l.split("array<f32, ").nth(1).expect("f32 array")),
+                };
+                size * n[..n.find('>').expect(">")]
                     .parse::<usize>()
                     .expect("length")
             })
@@ -1621,7 +1804,12 @@ mod tests {
     fn workgroup_memory_within_defaults() {
         for t in &TILES {
             let bytes = workgroup_bytes(&t.source());
-            assert_eq!(bytes, 4 * t.bk * (t.bm + t.bn + 2 * t.pad), "{}", t.name);
+            let want = if t.vec4 {
+                4 * (t.bm + t.bn) * (t.bk + t.pad)
+            } else {
+                4 * t.bk * (t.bm + t.bn + 2 * t.pad)
+            };
+            assert_eq!(bytes, want, "{}", t.name);
             assert!(bytes <= 16 * 1024, "{}: {bytes} bytes", t.name);
         }
         let attention = workgroup_bytes(&attention_source());
@@ -1642,6 +1830,8 @@ mod tests {
                 "{COMPUTE}",
                 "{EPILOGUE}",
                 "{PAD}",
+                "{PADV}",
+                "{SA_LEN}",
                 "{TX}",
                 "{DECLS}",
                 "{S_STEP}",

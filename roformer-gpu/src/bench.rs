@@ -338,10 +338,16 @@ pub async fn measure(
         .collect();
     let mut table = Vec::new();
     for s in &shapes() {
+        // What runs when each kernel is asked for: a vec4 kernel hands
+        // products it cannot read as vec4s to the fallback.  Those are not
+        // timed again; the fallback's timings stand for them.
+        let ran: Vec<usize> = (0..TILES.len())
+            .map(|t| matmul(s, &b, t).kernel(t))
+            .collect();
         let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
         for r in 0..rounds.max(1) {
             for (t, timing) in row.iter_mut().enumerate() {
-                if !run[t] {
+                if !run[t] || ran[t] != t {
                     continue;
                 }
                 let w = if r == 0 { warm } else { 0.0 };
@@ -355,6 +361,12 @@ pub async fn measure(
                 log(format!(
                     "bench: {} {}: skipped (failed the start-up check on this GPU)",
                     s.name, tile.name
+                ));
+            } else if run[t] && ran[t] != t {
+                row[t] = row[ran[t]].clone();
+                log(format!(
+                    "bench: {} {}: runs {} (K, a stride or an offset is not a multiple of 4)",
+                    s.name, tile.name, TILES[ran[t]].name
                 ));
             } else if run[t] {
                 let tm = &row[t];
@@ -731,8 +743,11 @@ pub fn decide(
 /// ([`still_in`]).  What is measured is only what varies between GPUs and
 /// cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4 register
 /// block wins (register file and scheduling), whether the compiler keeps
-/// `s64`'s loop-indexed accumulators in registers, and whether fused
-/// attention wins on long sequences.  Attention gets longer windows
+/// `s64`'s loop-indexed accumulators in registers, whether vec4 loads
+/// (`v64`) issue faster than scalar ones, and whether fused attention wins
+/// on long sequences.  A product `v64` cannot read as vec4s (the p.v
+/// product) runs and is timed as `i64` under `v64`'s name, as it would
+/// run in a separation.  Attention gets longer windows
 /// ([`ATTENTION_WARM`], [`ATTENTION_ROUND`]) than the matmul products.
 /// Takes several seconds.
 pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
@@ -883,8 +898,8 @@ mod tests {
     fn kernel_lists() {
         assert_eq!(parse_kernels("1"), None);
         assert_eq!(parse_kernels(""), None);
-        assert_eq!(parse_kernels("i64,i128x64,s64"), Some(vec![0, 1, 2]));
-        assert_eq!(parse_kernels("i64,v64"), None);
+        assert_eq!(parse_kernels("i64,i128x64,s64,v64"), Some(vec![0, 1, 2, 3]));
+        assert_eq!(parse_kernels("i64,x64"), None);
     }
 
     /// Least total per kind; fused attention on the frequency axis when it
@@ -912,7 +927,7 @@ mod tests {
             Choice::parse("i128x64,i64;freq").map(|c| c.name()),
             Some("i128x64,i64;freq".to_string())
         );
-        assert_eq!(Choice::parse("v64;split"), None);
+        assert_eq!(Choice::parse("x64;split"), None);
     }
 
     /// Fused attention keeps the time axis when split is faster by
