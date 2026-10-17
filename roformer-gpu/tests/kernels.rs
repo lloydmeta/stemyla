@@ -547,7 +547,7 @@ fn compile_each() {
     }
 }
 
-/// Every fused attention kernel against `attention_cpu` on the network's
+/// The fused attention kernel against `attention_cpu` on the network's
 /// sequence lengths (1,151 frames on the time axis, 62 bands on the
 /// frequency axis) and a ragged one, with and without the gate.
 #[test]
@@ -565,25 +565,18 @@ fn attention_matches_cpu() {
         let alpha = 0.125;
         let want = roformer_gpu::attention_cpu(&qkv, gated.then_some(&gates[..]), seq, nseq, alpha);
         let (qb, gb) = (g.upload("qkv", &qkv), g.upload("gates", &gates));
-        for (a, at) in roformer_gpu::ATTENTIONS.iter().enumerate() {
-            let ob = g.buffer("o", tokens * 512);
-            let mut r = g.rec();
-            r.attention(a, &qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
-            r.submit();
-            let got = read(&g, &ob, tokens * 512);
-            let errors = g.take_errors();
-            assert!(errors.is_empty(), "{errors:?}");
-            assert_close(
-                &got,
-                &want,
-                2e-5,
-                &format!("attention {} seq {seq} x{nseq}", at.name),
-            );
-        }
+        let ob = g.buffer("o", tokens * 512);
+        let mut r = g.rec();
+        r.attention(&qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
+        r.submit();
+        let got = read(&g, &ob, tokens * 512);
+        let errors = g.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_close(&got, &want, 2e-5, &format!("attention seq {seq} x{nseq}"));
     }
 }
 
-/// The fused kernels give what the separate path in net.rs gives (scores
+/// The fused kernel gives what the separate path in net.rs gives (scores
 /// matmul, softmax, p.v matmul, gate), with net.rs's own strides.
 #[test]
 fn attention_matches_split_path() {
@@ -678,26 +671,19 @@ fn attention_matches_split_path() {
     r.gate(&split, &gates, tokens);
     r.submit();
     let want = read(&g, &split, tokens * 512);
-    for (a, at) in roformer_gpu::ATTENTIONS.iter().enumerate() {
-        let fused = g.buffer("o fused", tokens * 512);
-        let mut r = g.rec();
-        r.attention(a, &qkv, Some(&gates), &fused, seq, nseq, alpha);
-        r.submit();
-        let got = read(&g, &fused, tokens * 512);
-        assert!(g.take_errors().is_empty());
-        assert_close(
-            &got,
-            &want,
-            2e-5,
-            &format!("attention {} vs split path", at.name),
-        );
-    }
+    let fused = g.buffer("o fused", tokens * 512);
+    let mut r = g.rec();
+    r.attention(&qkv, Some(&gates), &fused, seq, nseq, alpha);
+    r.submit();
+    let got = read(&g, &fused, tokens * 512);
+    assert!(g.take_errors().is_empty());
+    assert_close(&got, &want, 2e-5, "fused attention against the split path");
 }
 
 #[test]
 fn check_attention_accepts_all() {
     let Some(g) = gpu() else { return };
-    let problems = pollster::block_on(g.check_attention());
-    assert!(problems.is_empty(), "{problems:?}");
-    assert!(g.attention_usable.get().iter().all(|u| *u));
+    let problem = pollster::block_on(g.check_attention());
+    assert_eq!(problem, None);
+    assert!(g.fused_ok.get());
 }

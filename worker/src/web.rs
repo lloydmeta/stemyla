@@ -183,27 +183,18 @@ async fn gpu_text(gpu: &Gpu) -> String {
         .map(|(t, _)| t.name)
         .collect();
     let policy = gpu.policy.get().name();
-    let attn_ok: Vec<&str> = roformer_gpu::ATTENTIONS
-        .iter()
-        .zip(gpu.attention_usable.get())
-        .filter(|(_, u)| *u)
-        .map(|(a, _)| a.name)
-        .collect();
-    let attn = gpu
-        .attention
-        .get()
-        .map_or("split", |a| roformer_gpu::ATTENTIONS[a].name);
+    let attn = gpu.attention.get().name();
+    let fused = if gpu.fused_ok.get() {
+        "checked OK"
+    } else {
+        "not used"
+    };
     format!(
-        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused checked OK: {}",
+        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}",
         l.max_compute_invocations_per_workgroup,
         l.max_compute_workgroup_storage_size / 1024,
         l.max_storage_buffer_binding_size >> 20,
         usable.join(" "),
-        if attn_ok.is_empty() {
-            "none".to_string()
-        } else {
-            attn_ok.join(" ")
-        },
     )
 }
 
@@ -231,21 +222,23 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
         Gpu::new(power).await?
     });
     // Every matmul kernel against the CPU on small products; one that
-    // fails on this GPU is never used (the original one failing is fatal).
+    // fails on this GPU is never used (the fallback failing is fatal).
     for p in g.check_kernels().await? {
         log(&p);
     }
-    // Fused attention kernels against the CPU; one that fails is never
-    // used.  They stay off unless `?attn=` names one.
-    for p in g.check_attention().await {
+    // The fused attention kernel against the CPU; if it fails, attention
+    // runs split everywhere.
+    if let Some(p) = g.check_attention().await {
         log(&p);
     }
-    apply_attention(&g, msg);
-    if get(msg, "mm").is_string() {
-        apply_policy(&g, msg);
-    } else {
+    // This GPU's kernel choice (kept per GPU, or measured once), unless
+    // the page URL sets both parts; then any override from the URL.
+    let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
+    if !(set("mm") && set("attn")) {
         choose_kernels(&g).await;
     }
+    apply_policy(&g, msg);
+    apply_attention(&g, msg);
     STATE.with_borrow_mut(|s| {
         s.power = if integrated {
             "low-power"
@@ -804,24 +797,25 @@ fn apply_policy(gpu: &Gpu, msg: &JsValue) {
     }
 }
 
-/// `?attn=` in the page URL: `split` for separate dispatches, or a fused
-/// attention kernel's name from `roformer_gpu::ATTENTIONS` (used only if
-/// it passed the start-up check on this GPU).
+/// `?attn=` in the page URL: `auto` (this GPU's choice), `split`,
+/// `fused`, or `time` / `freq` for fused attention on that axis only.
+/// Fused attention is used only if it passed the start-up check.
 fn apply_attention(gpu: &Gpu, msg: &JsValue) {
     let Some(name) = get(msg, "attn").as_string() else {
         return;
     };
-    if name == "split" {
-        gpu.attention.set(None);
+    if name == "auto" {
         return;
     }
-    match roformer_gpu::ATTENTIONS.iter().position(|a| a.name == name) {
-        Some(a) if gpu.attention_usable.get()[a] => gpu.attention.set(Some(a)),
-        Some(_) => log(&format!(
-            "attention kernel {name} failed the start-up check on this GPU; using split attention"
-        )),
+    match roformer_gpu::AttentionPolicy::parse(&name) {
+        Some(p) if p == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get() => {
+            gpu.attention.set(p)
+        }
+        Some(_) => {
+            log("fused attention failed the start-up check on this GPU; using split attention")
+        }
         None => log(&format!(
-            "unknown attention kernel {name}; using split attention"
+            "unknown attention setting {name} (auto, split, fused, time or freq)"
         )),
     }
 }
@@ -980,9 +974,9 @@ async fn mp3(msg: &JsValue) -> Result<(), String> {
 
 const KERNEL_CHOICE: &str = "matmul_kernels";
 
-/// Sets this GPU's matmul kernels: the choice kept in browser storage for
-/// this adapter and these kernels, or else a few seconds of
-/// `roformer_gpu::bench::calibrate`, whose result is then kept.
+/// Sets this GPU's matmul kernels and attention path: the choice kept in
+/// browser storage for this adapter and these kernels, or else several
+/// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept.
 async fn choose_kernels(gpu: &Gpu) {
     let pref = STATE.with_borrow(|s| s.power);
     let key = format!(
@@ -990,25 +984,37 @@ async fn choose_kernels(gpu: &Gpu) {
         gpu_info(pref).await.as_string().unwrap_or_default(),
         roformer_gpu::kernels_id()
     );
+    // One line per GPU; lines for other GPUs (the other adapter of a
+    // two-GPU laptop) are kept.
+    let mut others = Vec::new();
     let stored = cache_get(KERNEL_CHOICE).await;
     if !stored.is_null() {
         let text =
             String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string();
         for line in text.lines() {
-            if let Some((k, v)) = line.split_once('\t')
-                && k == key
-                && let Some(p) = roformer_gpu::MatMulPolicy::parse(v)
-                && gpu.usable.get()[p.pick(1000, 1000)]
-                && gpu.usable.get()[p.pick(10, 10)]
+            let Some((k, v)) = line.split_once('\t') else {
+                continue;
+            };
+            if k != key {
+                others.push(line.to_string());
+                continue;
+            }
+            if let Some(c) = roformer_gpu::bench::Choice::parse(v)
+                && gpu.usable.get()[c.matmul.pick(1000, 1000)]
+                && gpu.usable.get()[c.matmul.pick(10, 10)]
+                && (c.attention == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get())
             {
-                gpu.policy.set(p);
+                gpu.policy.set(c.matmul);
+                gpu.attention.set(c.attention);
                 return;
             }
         }
     }
-    log("choosing matmul kernels for this GPU (a few seconds, once)…");
-    let p = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
-    gpu.policy.set(p);
-    let line = format!("{key}\t{}\n", p.name());
-    cache_put(KERNEL_CHOICE, &Uint8Array::from(line.as_bytes())).await;
+    log("choosing kernels for this GPU (several seconds, once)…");
+    let c = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
+    gpu.policy.set(c.matmul);
+    gpu.attention.set(c.attention);
+    others.push(format!("{key}\t{}", c.name()));
+    let text = others.join("\n") + "\n";
+    cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
 }

@@ -16,7 +16,7 @@ use roformer::{
     BandGroup, DEPTH, DIM, DIM_HEAD, FEATURES, FREQS_PER_BANDS, HEADS, HIDDEN, STEMS, band_groups,
 };
 
-use crate::{Act, Gpu, MatMul, Rec, View};
+use crate::{Act, AttentionPolicy, Gpu, MatMul, Rec, View};
 
 const INNER: usize = HEADS * DIM_HEAD;
 const BANDS: usize = FREQS_PER_BANDS.len();
@@ -324,10 +324,10 @@ fn rope_table(seq: usize) -> Vec<f32> {
 pub struct Job<'a> {
     gpu: &'a Gpu,
     net: &'a Net,
-    /// The fused attention kernel this job uses ([`Gpu::attention`] when
-    /// the job was made), or `None` for split attention.  Fixed per job:
-    /// the step sizes and the scores buffer depend on it.
-    attention: Option<usize>,
+    /// Where this job uses fused attention ([`Gpu::attention`] when the
+    /// job was made).  Fixed per job: the step sizes and the scores buffer
+    /// depend on it.
+    attention: AttentionPolicy,
     pub frames: usize,
     /// Band-normalised input, per group `[count, T, width]`.
     split_in: wgpu::Buffer,
@@ -353,15 +353,21 @@ impl<'a> Job<'a> {
     pub fn new(gpu: &'a Gpu, net: &'a Net, frames: usize) -> Self {
         let (t, f) = (frames, BANDS);
         let attention = gpu.attention.get();
-        let fused = attention.is_some();
-        let nt = net.sub_batch(f, t, fused);
-        let nf = net.sub_batch(t, f, fused);
+        let nt = net.sub_batch(f, t, attention.time);
+        let nf = net.sub_batch(t, f, attention.freq);
         let tokens = (nt * t).max(nf * f);
-        let scores = if fused {
+        // Scores only for an axis that runs split attention.
+        let scores_t = if attention.time {
             0
         } else {
-            (nt * HEADS * t * t).max(nf * HEADS * f * f)
+            nt * HEADS * t * t
         };
+        let scores_f = if attention.freq {
+            0
+        } else {
+            nf * HEADS * f * f
+        };
+        let scores = scores_t.max(scores_f);
         let (mut mask_h, mut mask_y) = (0, 0);
         for g in band_groups() {
             let n = net.mask_batch(&g, t);
@@ -442,8 +448,7 @@ impl<'a> Job<'a> {
     pub fn layer_steps(&self, layer: usize) -> Vec<Step> {
         let (t, f) = (self.frames, BANDS);
         let mut out = Vec::new();
-        let fused = self.attention.is_some();
-        let n = self.net.sub_batch(f, t, fused);
+        let n = self.net.sub_batch(f, t, self.attention.time);
         let mut first = 0;
         while first < f {
             out.push(Step::Time {
@@ -454,7 +459,7 @@ impl<'a> Job<'a> {
             first += n;
         }
         out.push(Step::ToFreq);
-        let n = self.net.sub_batch(t, f, fused);
+        let n = self.net.sub_batch(t, f, self.attention.freq);
         let mut first = 0;
         while first < t {
             out.push(Step::Freq {
@@ -517,6 +522,7 @@ impl<'a> Job<'a> {
                 first,
                 n,
                 &self.rope_time,
+                self.attention.time,
             ),
             Step::ToFreq => r.transpose(&self.x, &self.xt, f, t),
             Step::Freq { layer, first, n } => self.transformer(
@@ -527,6 +533,7 @@ impl<'a> Job<'a> {
                 first,
                 n,
                 &self.rope_freq,
+                self.attention.freq,
             ),
             Step::ToTime => r.transpose(&self.xt, &self.x, t, f),
             Step::FinalNorm => r.rmsnorm(&self.x, 0, &self.net.final_norm, &self.xt, 0, f * t),
@@ -570,6 +577,7 @@ impl<'a> Job<'a> {
         first: usize,
         nb: usize,
         rope: &wgpu::Buffer,
+        fused: bool,
     ) {
         let tok0 = first * seq;
         let ntok = nb * seq;
@@ -596,10 +604,10 @@ impl<'a> Job<'a> {
         r.matmul(&g);
 
         let alpha = (DIM_HEAD as f32).powf(-0.5);
-        if let Some(fused) = self.attention {
+        if fused {
             // Scores, softmax, p.v and gate in one dispatch; the scores
             // never reach memory.
-            r.attention(fused, &self.qkv, Some(&self.gates), &self.o, seq, nb, alpha);
+            r.attention(&self.qkv, Some(&self.gates), &self.o, seq, nb, alpha);
         } else {
             self.split_attention(r, seq, nb, alpha);
         }

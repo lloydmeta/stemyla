@@ -32,26 +32,11 @@ const PARAM_STRIDE: u64 = 256;
 /// Dispatches one [`Rec`] may hold.
 const MAX_DISPATCHES: u64 = 64;
 
-/// How a matmul kernel's threads share out the output tile.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Layout {
-    /// The original hand-written kernel, `matmul.wgsl` (64 x 64, each
-    /// thread every 16th row and column, loop-indexed accumulators).
-    Original,
-    /// `matmul_tiled.wgsl`: each thread a `tm` x `tn` block, accumulators
-    /// in named `vec4`s.
-    Blocked,
-    /// `matmul_interleaved.wgsl`: each thread every `bm / tm`-th row and
-    /// `bn / tn`-th column, accumulators in named scalars; rows of the
-    /// workgroup tiles padded by `pad` floats.
-    Interleaved { pad: usize, prefetch: bool },
-}
-
-/// A matmul kernel's tile shape: a workgroup of 256 threads computes a
-/// `bm` x `bn` block of the output, each thread `tm` x `tn` of it, stepping
-/// through K `bk` at a time.  The first entry of [`TILES`] is the original
-/// hand-written kernel (`matmul.wgsl`); the others fill these numbers into
-/// a template chosen by `layout`.
+/// A matmul kernel: `matmul_interleaved.wgsl` with these numbers filled
+/// in.  A workgroup of 256 threads computes a `bm` x `bn` block of the
+/// output, each thread `tm` x `tn` of it (every `bm / tm`-th row and every
+/// `bn / tn`-th column), stepping through K `bk` at a time; rows of the
+/// workgroup tiles are padded by `pad` floats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub name: &'static str,
@@ -60,19 +45,11 @@ pub struct Tile {
     pub bk: usize,
     pub tm: usize,
     pub tn: usize,
-    pub layout: Layout,
+    pub pad: usize,
 }
 
 impl Tile {
     fn source(&self) -> String {
-        match self.layout {
-            Layout::Original => include_str!("shaders/matmul.wgsl").to_string(),
-            Layout::Blocked => self.blocked_source(),
-            Layout::Interleaved { pad, prefetch } => self.interleaved_source(pad, prefetch),
-        }
-    }
-
-    fn interleaved_source(&self, pad: usize, prefetch: bool) -> String {
         let (tx, ty) = (self.bn / self.tn, self.bm / self.tm);
         assert_eq!(tx * ty, 256, "{self:?}");
         assert!(
@@ -104,159 +81,46 @@ impl Tile {
                 compute += &format!("      acc_{i}_{j} = fma(a{i}, b{j}, acc_{i}_{j});\n");
             }
         }
-        // Moving one K tile into workgroup memory: element tid + 256 l of
-        // each tile, straight from global memory or via registers.
-        let (mut first, mut stage, mut next) = (String::new(), String::new(), String::new());
-        for l in 0..la {
-            let e = format!("tid + {}u", 256 * l);
-            if prefetch {
-                first += &format!("  var pa{l} = a_get({e}, 0u, row0, a_base);\n");
-                stage += &format!("    as_[a_slot({e})] = pa{l};\n");
-                next += &format!("    pa{l} = a_get({e}, k0 + BK, row0, a_base);\n");
-            }
-        }
-        if !prefetch {
-            // A loop rather than unrolled copies: nothing here needs a
-            // constant index, and SwiftShader compiled the unrolled form
-            // for minutes, with gigabytes of memory.
-            stage += &format!(
-                "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[a_slot(e)] = a_get(e, k0, row0, a_base); }}\n"
-            );
-            stage += &format!(
-                "    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[b_slot(e)] = b_get(e, k0, col0, b_base); }}\n"
-            );
-        }
-        for l in 0..lb {
-            let e = format!("tid + {}u", 256 * l);
-            if prefetch {
-                first += &format!("  var pb{l} = b_get({e}, 0u, col0, b_base);\n");
-                stage += &format!("    bs_[b_slot({e})] = pb{l};\n");
-                next += &format!("    pb{l} = b_get({e}, k0 + BK, col0, b_base);\n");
-            }
-        }
+        // One K tile into workgroup memory, element tid + 256 l of each
+        // tile.  A loop rather than unrolled copies: nothing here needs a
+        // constant index, and SwiftShader compiled unrolled branchy loads
+        // for minutes, with gigabytes of memory.
+        let stage = format!(
+            "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[a_slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[b_slot(e)] = b_get(e, k0, col0, b_base); }}"
+        );
         include_str!("shaders/matmul_interleaved.wgsl")
             .replace("{BM}", &self.bm.to_string())
             .replace("{BN}", &self.bn.to_string())
             .replace("{BK}", &self.bk.to_string())
             .replace("{TX}", &tx.to_string())
             .replace("{TY}", &ty.to_string())
-            .replace("{PAD}", &pad.to_string())
-            .replace("{SA_LEN}", &(self.bk * (self.bm + pad)).to_string())
-            .replace("{SB_LEN}", &(self.bk * (self.bn + pad)).to_string())
+            .replace("{PAD}", &self.pad.to_string())
+            .replace("{SA_LEN}", &(self.bk * (self.bm + self.pad)).to_string())
+            .replace("{SB_LEN}", &(self.bk * (self.bn + self.pad)).to_string())
             .replace("{ACC_DECLS}", decls.trim_end())
-            .replace("{PREFETCH_FIRST}", first.trim_end())
-            .replace("{STAGE}", stage.trim_end())
-            .replace("{PREFETCH_NEXT}", next.trim_end())
-            .replace("{COMPUTE}", compute.trim_end())
-            .replace("{EPILOGUE}", epilogue.trim_end())
-    }
-
-    fn blocked_source(&self) -> String {
-        assert_eq!((self.bm / self.tm) * (self.bn / self.tn), 256, "{self:?}");
-        assert!(
-            self.tm.is_multiple_of(4)
-                && self.tn.is_multiple_of(4)
-                && (self.bm * self.bk).is_multiple_of(256)
-                && (self.bn * self.bk).is_multiple_of(256)
-        );
-        // Register code, unrolled here so that every index is a constant.
-        const LANE: [&str; 4] = ["x", "y", "z", "w"];
-        let (tm, tn4) = (self.tm, self.tn / 4);
-        let mut decls = String::new();
-        let mut compute = String::new();
-        let mut epilogue = String::new();
-        for i in 0..tm {
-            for j in 0..tn4 {
-                decls += &format!("  var acc_{i}_{j} = vec4<f32>(0.0);\n");
-            }
-        }
-        for i in 0..tm / 4 {
-            compute += &format!("      let a{i} = a4(ab + {}u);\n", 4 * i);
-        }
-        for j in 0..tn4 {
-            compute += &format!("      let b{j} = b4(bb + {}u);\n", 4 * j);
-        }
-        for i in 0..tm {
-            for j in 0..tn4 {
-                compute += &format!(
-                    "      acc_{i}_{j} = fma(vec4<f32>(a{}.{}), b{j}, acc_{i}_{j});\n",
-                    i / 4,
-                    LANE[i % 4]
-                );
-            }
-        }
-        for i in 0..tm {
-            for j in 0..tn4 {
-                for (c, lane) in LANE.iter().enumerate() {
-                    epilogue += &format!(
-                        "  store(r0 + {i}u, c0 + {}u, ob, bias_base, acc_{i}_{j}.{lane});\n",
-                        4 * j + c
-                    );
-                }
-            }
-        }
-        include_str!("shaders/matmul_tiled.wgsl")
-            .replace("{BM}", &self.bm.to_string())
-            .replace("{BN}", &self.bn.to_string())
-            .replace("{BK}", &self.bk.to_string())
-            .replace("{TM}", &self.tm.to_string())
-            .replace("{TN}", &self.tn.to_string())
-            .replace("{SA_LEN}", &(self.bk * (self.bm + 4)).to_string())
-            .replace("{SB_LEN}", &(self.bk * (self.bn + 4)).to_string())
-            .replace("{ACC_DECLS}", decls.trim_end())
+            .replace("{STAGE}", &stage)
             .replace("{COMPUTE}", compute.trim_end())
             .replace("{EPILOGUE}", epilogue.trim_end())
     }
 }
 
-/// Every matmul kernel the GPU compiles.  [`MatMulPolicy`] chooses
-/// among them by the shape of the product.
-pub const TILES: [Tile; 10] = [
-    Tile {
-        name: "s64",
-        bm: 64,
-        bn: 64,
-        bk: 16,
-        tm: 4,
-        tn: 4,
-        layout: Layout::Original,
-    },
-    Tile {
-        name: "v64",
-        bm: 64,
-        bn: 64,
-        bk: 16,
-        tm: 4,
-        tn: 4,
-        layout: Layout::Blocked,
-    },
-    Tile {
-        name: "v128",
-        bm: 128,
-        bn: 128,
-        bk: 8,
-        tm: 8,
-        tn: 8,
-        layout: Layout::Blocked,
-    },
-    Tile {
-        name: "v128x64",
-        bm: 128,
-        bn: 64,
-        bk: 8,
-        tm: 8,
-        tn: 4,
-        layout: Layout::Blocked,
-    },
-    Tile {
-        name: "v64x128",
-        bm: 64,
-        bn: 128,
-        bk: 8,
-        tm: 4,
-        tn: 8,
-        layout: Layout::Blocked,
-    },
+/// The matmul kernels.  Both follow the same rules (accumulators in named
+/// registers, neighbouring threads on neighbouring floats, conflict-free
+/// workgroup memory, WebGPU's default limits) and differ only in the
+/// block each thread keeps in registers: 4 x 4 or 8 x 4.  The larger block
+/// gets more use from each workgroup-memory read (2.67 multiply-adds per
+/// read against 2) but needs twice the accumulators, so fewer threads fit
+/// at once to hide memory latency.  Which wins depends on the GPU's
+/// register file and scheduler, which WebGPU does not report, so
+/// [`bench::calibrate`] measures it once per GPU.  Against the best kernel
+/// per shape, `i64` was 11% slower on a Radeon Pro 5500M, 22% on an Intel
+/// UHD 630 and 3% on an iPad's GPU; `i128x64` 22%, 2% and 5%.  The first
+/// entry is the fallback: a GPU on which it fails is not used.
+///
+/// Rows are padded by 32 / `bk` floats: when K is the contiguous axis
+/// (every nn.Linear operand), 32 consecutive threads store 32 / `bk` rows
+/// of `bk` values, and this padding spreads them over all 32 banks.
+pub const TILES: [Tile; 2] = [
     Tile {
         name: "i64",
         bm: 64,
@@ -264,22 +128,7 @@ pub const TILES: [Tile; 10] = [
         bk: 16,
         tm: 4,
         tn: 4,
-        layout: Layout::Interleaved {
-            pad: 2,
-            prefetch: false,
-        },
-    },
-    Tile {
-        name: "i64p",
-        bm: 64,
-        bn: 64,
-        bk: 16,
-        tm: 4,
-        tn: 4,
-        layout: Layout::Interleaved {
-            pad: 2,
-            prefetch: true,
-        },
+        pad: 2,
     },
     Tile {
         name: "i128x64",
@@ -288,244 +137,161 @@ pub const TILES: [Tile; 10] = [
         bk: 8,
         tm: 8,
         tn: 4,
-        layout: Layout::Interleaved {
-            pad: 4,
-            prefetch: false,
-        },
-    },
-    Tile {
-        name: "i128x64p",
-        bm: 128,
-        bn: 64,
-        bk: 8,
-        tm: 8,
-        tn: 4,
-        layout: Layout::Interleaved {
-            pad: 4,
-            prefetch: true,
-        },
-    },
-    Tile {
-        name: "i128",
-        bm: 128,
-        bn: 128,
-        bk: 8,
-        tm: 8,
-        tn: 8,
-        layout: Layout::Interleaved {
-            pad: 4,
-            prefetch: false,
-        },
+        pad: 4,
     },
 ];
 
-/// A fused attention kernel (`attention.wgsl`): `lanes` threads per query,
-/// key tiles of `bkv`.  Replaces the scores matmul, softmax, p.v matmul
-/// and gate of one attention block when [`Gpu::attention`] names it.
+/// Where [`net::Job`] runs fused attention (`attention_tiled.wgsl`:
+/// scores, softmax, values and gate in one dispatch, the scores never in
+/// memory) instead of the scores matmul, softmax, p.v matmul and gate.
+/// The frequency axis (sequences of 62 bands) gains on every GPU measured,
+/// 2.2 to 3.6 times; the time axis (1,151 frames) gained 11 to 22% on
+/// Apple GPUs and lost 20% on an Intel UHD 630, so [`bench::calibrate`]
+/// decides it per GPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Attention {
-    pub name: &'static str,
-    pub lanes: usize,
-    pub bkv: usize,
-    /// `attention_tiled.wgsl` instead: 64 queries per workgroup, each
-    /// thread a 4 x 4 block of scores and of outputs (`lanes` and `bkv`
-    /// unused).
-    pub tiled: bool,
+pub struct AttentionPolicy {
+    pub time: bool,
+    pub freq: bool,
 }
 
-/// Every fused attention kernel; [`Gpu::check_attention`] checks each.
-pub const ATTENTIONS: [Attention; 3] = [
-    Attention {
-        name: "a4",
-        lanes: 4,
-        bkv: 16,
-        tiled: false,
-    },
-    Attention {
-        name: "a8",
-        lanes: 8,
-        bkv: 16,
-        tiled: false,
-    },
-    Attention {
-        name: "t64",
-        lanes: 0,
-        bkv: 64,
-        tiled: true,
-    },
-];
+impl AttentionPolicy {
+    pub const SPLIT: Self = Self {
+        time: false,
+        freq: false,
+    };
+    pub const FUSED: Self = Self {
+        time: true,
+        freq: true,
+    };
 
-impl Attention {
-    /// Queries per workgroup.
-    fn rows(&self) -> usize {
-        if self.tiled { 64 } else { 256 / self.lanes }
+    /// `split`, `fused`, or `time` / `freq` for fused on that axis only.
+    pub fn name(self) -> &'static str {
+        match (self.time, self.freq) {
+            (false, false) => "split",
+            (true, true) => "fused",
+            (true, false) => "time",
+            (false, true) => "freq",
+        }
     }
 
-    fn tiled_source(&self) -> String {
-        let (r4, c4) = (0..4, 0..4);
-        let mut decls = String::new();
-        let mut s_zero = String::new();
-        let mut s_step = String::new();
-        let mut soft1 = String::new();
-        let mut soft2 = String::new();
-        let mut values = String::new();
-        let mut finish = String::new();
-        for i in r4.clone() {
-            decls += &format!("  var m{i} = NEG;\n  var l{i} = 0.0;\n");
-            for j in c4.clone() {
-                decls += &format!("  var o{i}_{j} = 0.0;\n  var s{i}_{j} = 0.0;\n");
-                s_zero += &format!("    s{i}_{j} = 0.0;\n");
-            }
+    /// The inverse of [`AttentionPolicy::name`].
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            Self::SPLIT,
+            Self::FUSED,
+            Self {
+                time: true,
+                freq: false,
+            },
+            Self {
+                time: false,
+                freq: true,
+            },
+        ]
+        .into_iter()
+        .find(|p| p.name() == s)
+    }
+}
+
+/// The fused attention kernel's WGSL: per-thread code with constant
+/// indices, generated into `attention_tiled.wgsl`.
+fn attention_source() -> String {
+    let (r4, c4) = (0..4, 0..4);
+    let mut decls = String::new();
+    let mut s_zero = String::new();
+    let mut s_step = String::new();
+    let mut soft1 = String::new();
+    let mut soft2 = String::new();
+    let mut values = String::new();
+    let mut finish = String::new();
+    for i in r4.clone() {
+        decls += &format!("  var m{i} = NEG;\n  var l{i} = 0.0;\n");
+        for j in c4.clone() {
+            decls += &format!("  var o{i}_{j} = 0.0;\n  var s{i}_{j} = 0.0;\n");
+            s_zero += &format!("    s{i}_{j} = 0.0;\n");
+        }
+    }
+    for i in r4.clone() {
+        s_step += &format!("        let a{i} = buf[ab + {}u];\n", 16 * i);
+    }
+    for j in c4.clone() {
+        s_step += &format!("        let b{j} = buf[bb + {}u];\n", 16 * j);
+    }
+    for i in r4.clone() {
+        for j in c4.clone() {
+            s_step += &format!("        s{i}_{j} = fma(a{i}, b{j}, s{i}_{j});\n");
+        }
+    }
+    for i in r4.clone() {
+        for j in c4.clone() {
+            soft1 += &format!(
+                "    s{i}_{j} = select(NEG, s{i}_{j} * p.alpha, j0 + tx + {}u < p.seq);\n",
+                16 * j
+            );
+        }
+        soft1 += &format!(
+            "    red[(ty + {}u) * 16u + tx] = max(max(s{i}_0, s{i}_1), max(s{i}_2, s{i}_3));\n",
+            16 * i
+        );
+    }
+    for i in r4.clone() {
+        soft2 += &format!(
+            "    var tm{i} = red[(ty + {r}u) * 16u];\n    for (var k = 1u; k < 16u; k++) {{ tm{i} = max(tm{i}, red[(ty + {r}u) * 16u + k]); }}\n    let mn{i} = max(m{i}, tm{i});\n    let sc{i} = exp(m{i} - mn{i});\n    m{i} = mn{i};\n",
+            r = 16 * i
+        );
+        for j in c4.clone() {
+            soft2 += &format!(
+                "    s{i}_{j} = exp(s{i}_{j} - mn{i});\n    o{i}_{j} = o{i}_{j} * sc{i};\n"
+            );
+        }
+        soft2 += &format!("    l{i} = l{i} * sc{i} + s{i}_0 + s{i}_1 + s{i}_2 + s{i}_3;\n");
+    }
+    for c in c4.clone() {
+        if c > 0 {
+            values += "    workgroupBarrier();\n";
         }
         for i in r4.clone() {
-            s_step += &format!("        let a{i} = buf[ab + {}u];\n", 16 * i);
+            values += &format!("    buf[tx * S + ty + {}u] = s{i}_{c};\n", 16 * i);
+        }
+        values += &format!(
+            "    for (var l = 0u; l < 4u; l++) {{ stage_v(t + l * 256u, tok0, j0 + {}u, vc); }}\n    workgroupBarrier();\n    for (var kk = 0u; kk < 16u; kk++) {{\n      let pb = kk * S + ty;\n      let vb = B2 + kk * D + tx;\n",
+            16 * c
+        );
+        for i in r4.clone() {
+            values += &format!("      let pk{i} = buf[pb + {}u];\n", 16 * i);
         }
         for j in c4.clone() {
-            s_step += &format!("        let b{j} = buf[bb + {}u];\n", 16 * j);
+            values += &format!("      let v{j} = buf[vb + {}u];\n", 16 * j);
         }
         for i in r4.clone() {
             for j in c4.clone() {
-                s_step += &format!("        s{i}_{j} = fma(a{i}, b{j}, s{i}_{j});\n");
+                values += &format!("      o{i}_{j} = fma(pk{i}, v{j}, o{i}_{j});\n");
             }
         }
-        for i in r4.clone() {
-            for j in c4.clone() {
-                soft1 += &format!(
-                    "    s{i}_{j} = select(NEG, s{i}_{j} * p.alpha, j0 + tx + {}u < p.seq);\n",
-                    16 * j
-                );
-            }
-            soft1 += &format!(
-                "    red[(ty + {}u) * 16u + tx] = max(max(s{i}_0, s{i}_1), max(s{i}_2, s{i}_3));\n",
-                16 * i
-            );
-        }
-        for i in r4.clone() {
-            soft2 += &format!(
-                "    var tm{i} = red[(ty + {r}u) * 16u];\n    for (var k = 1u; k < 16u; k++) {{ tm{i} = max(tm{i}, red[(ty + {r}u) * 16u + k]); }}\n    let mn{i} = max(m{i}, tm{i});\n    let sc{i} = exp(m{i} - mn{i});\n    m{i} = mn{i};\n",
-                r = 16 * i
-            );
-            for j in c4.clone() {
-                soft2 += &format!(
-                    "    s{i}_{j} = exp(s{i}_{j} - mn{i});\n    o{i}_{j} = o{i}_{j} * sc{i};\n"
-                );
-            }
-            soft2 += &format!("    l{i} = l{i} * sc{i} + s{i}_0 + s{i}_1 + s{i}_2 + s{i}_3;\n");
-        }
-        for c in c4.clone() {
-            if c > 0 {
-                values += "    workgroupBarrier();\n";
-            }
-            for i in r4.clone() {
-                values += &format!("    buf[tx * S + ty + {}u] = s{i}_{c};\n", 16 * i);
-            }
-            values += &format!(
-                "    for (var l = 0u; l < 4u; l++) {{ stage_v(t + l * 256u, tok0, j0 + {}u, vc); }}\n    workgroupBarrier();\n    for (var kk = 0u; kk < 16u; kk++) {{\n      let pb = kk * S + ty;\n      let vb = B2 + kk * D + tx;\n",
-                16 * c
-            );
-            for i in r4.clone() {
-                values += &format!("      let pk{i} = buf[pb + {}u];\n", 16 * i);
-            }
-            for j in c4.clone() {
-                values += &format!("      let v{j} = buf[vb + {}u];\n", 16 * j);
-            }
-            for i in r4.clone() {
-                for j in c4.clone() {
-                    values += &format!("      o{i}_{j} = fma(pk{i}, v{j}, o{i}_{j});\n");
-                }
-            }
-            values += "    }\n";
-        }
-        for i in r4.clone() {
-            finish += &format!("  red[(ty + {}u) * 16u + tx] = l{i};\n", 16 * i);
-        }
-        finish += "  workgroupBarrier();\n";
-        for i in r4 {
-            finish += &format!(
-                "  var lt{i} = 0.0;\n  for (var k = 0u; k < 16u; k++) {{ lt{i} += red[(ty + {r}u) * 16u + k]; }}\n  let qi{i} = q0 + ty + {r}u;\n  if (qi{i} < p.seq) {{\n    let tok = tok0 + qi{i};\n    var g = 1.0;\n    if ((p.flags & 1u) != 0u) {{ g = 1.0 / (1.0 + exp(-gates[tok * p.gate_row + h])); }}\n    let f = g / lt{i};\n    let ob = tok * p.o_row + h * D + tx;\n",
-                r = 16 * i
-            );
-            for j in c4.clone() {
-                finish += &format!("    o[ob + {}u] = o{i}_{j} * f;\n", 16 * j);
-            }
-            finish += "  }\n";
-        }
-        include_str!("shaders/attention_tiled.wgsl")
-            .replace("{DECLS}", decls.trim_end())
-            .replace("{S_ZERO}", s_zero.trim_end())
-            .replace("{S_STEP}", s_step.trim_end())
-            .replace("{SOFTMAX_1}", soft1.trim_end())
-            .replace("{SOFTMAX_2}", soft2.trim_end())
-            .replace("{VALUES}", values.trim_end())
-            .replace("{FINISH}", finish.trim_end())
+        values += "    }\n";
     }
-
-    fn source(&self) -> String {
-        if self.tiled {
-            return self.tiled_source();
-        }
-        const D: usize = 64;
-        let (l, b) = (self.lanes, self.bkv);
-        assert!(
-            256usize.is_multiple_of(l) && b.is_multiple_of(l) && D.is_multiple_of(l),
-            "{self:?}"
+    for i in r4.clone() {
+        finish += &format!("  red[(ty + {}u) * 16u + tx] = l{i};\n", 16 * i);
+    }
+    finish += "  workgroupBarrier();\n";
+    for i in r4 {
+        finish += &format!(
+            "  var lt{i} = 0.0;\n  for (var k = 0u; k < 16u; k++) {{ lt{i} += red[(ty + {r}u) * 16u + k]; }}\n  let qi{i} = q0 + ty + {r}u;\n  if (qi{i} < p.seq) {{\n    let tok = tok0 + qi{i};\n    var g = 1.0;\n    if ((p.flags & 1u) != 0u) {{ g = 1.0 / (1.0 + exp(-gates[tok * p.gate_row + h])); }}\n    let f = g / lt{i};\n    let ob = tok * p.o_row + h * D + tx;\n",
+            r = 16 * i
         );
-        let (kpl, dpl) = (b / l, D / l);
-        let mut q_load = String::new();
-        for d in 0..D {
-            q_load += &format!("  let q{d} = qkv[qbase + {d}u];\n");
+        for j in c4.clone() {
+            finish += &format!("    o[ob + {}u] = o{i}_{j} * f;\n", 16 * j);
         }
-        let mut o_decls = String::new();
-        let mut store = String::new();
-        for n in 0..dpl {
-            o_decls += &format!("  var o{n} = 0.0;\n");
-            store += &format!("    o[ob + {}u] = o{n} * f;\n", l * n);
-        }
-        let mut scores = String::new();
-        for k in 0..kpl {
-            scores += &format!("    let kj{k} = lane + {}u;\n    var s{k} = 0.0;\n", l * k);
-            for d in 0..D {
-                scores += &format!("    s{k} = fma(q{d}, kv[kj{k} * SK + {d}u], s{k});\n");
-            }
-            scores += &format!("    s{k} = select(NEG, s{k} * p.alpha, j0 + kj{k} < p.seq);\n");
-        }
-        let mut mx = "s0".to_string();
-        for k in 1..kpl {
-            mx = format!("max({mx}, s{k})");
-        }
-        scores += &format!("    let mx = {mx};\n");
-        let mut probs = String::new();
-        let mut sum = "l * sc".to_string();
-        for k in 0..kpl {
-            probs += &format!("    let p{k} = exp(s{k} - mn);\n    ps[r * SP + kj{k}] = p{k};\n");
-            sum += &format!(" + p{k}");
-        }
-        probs += &format!("    l = {sum};\n");
-        for n in 0..dpl {
-            probs += &format!("    o{n} = o{n} * sc;\n");
-        }
-        let mut pv = String::new();
-        for j in 0..b {
-            pv += &format!("    let pj{j} = ps[r * SP + {j}u];\n");
-            for n in 0..dpl {
-                pv += &format!(
-                    "    o{n} = fma(pj{j}, kv[{j}u * SK + lane + {}u], o{n});\n",
-                    l * n
-                );
-            }
-        }
-        include_str!("shaders/attention.wgsl")
-            .replace("{LANES}", &l.to_string())
-            .replace("{BKV}", &b.to_string())
-            .replace("{KV_LEN}", &(b * (D + 1)).to_string())
-            .replace("{PS_LEN}", &((256 / l) * (b + 1)).to_string())
-            .replace("{Q_LOAD}", q_load.trim_end())
-            .replace("{O_DECLS}", o_decls.trim_end())
-            .replace("{SCORES}", scores.trim_end())
-            .replace("{PROBS}", probs.trim_end())
-            .replace("{PV}", pv.trim_end())
-            .replace("{STORE}", store.trim_end())
+        finish += "  }\n";
     }
+    include_str!("shaders/attention_tiled.wgsl")
+        .replace("{DECLS}", decls.trim_end())
+        .replace("{S_ZERO}", s_zero.trim_end())
+        .replace("{S_STEP}", s_step.trim_end())
+        .replace("{SOFTMAX_1}", soft1.trim_end())
+        .replace("{SOFTMAX_2}", soft2.trim_end())
+        .replace("{VALUES}", values.trim_end())
+        .replace("{FINISH}", finish.trim_end())
 }
 
 #[repr(C)]
@@ -599,14 +365,12 @@ pub struct Gpu {
     /// Kernels of [`TILES`] that passed [`Gpu::check_kernels`] on this GPU
     /// (all, until it runs).  The policy never picks one that failed.
     pub usable: std::cell::Cell<[bool; TILES.len()]>,
-    /// The fused attention kernel (index into [`ATTENTIONS`]) that
-    /// [`net::Job`] uses, or `None` for the separate scores matmul,
-    /// softmax, p.v matmul and gate.  Set it only to a kernel that
-    /// [`Gpu::check_attention`] passed on this GPU.
-    pub attention: std::cell::Cell<Option<usize>>,
-    /// Fused attention kernels that passed [`Gpu::check_attention`] (none,
-    /// until it runs).
-    pub attention_usable: std::cell::Cell<[bool; ATTENTIONS.len()]>,
+    /// Where [`net::Job`] runs fused attention; split until set.  Set it
+    /// to anything but split only when [`Gpu::fused_ok`] is true.
+    pub attention: std::cell::Cell<AttentionPolicy>,
+    /// Whether the fused attention kernel passed [`Gpu::check_attention`]
+    /// (false until it runs).
+    pub fused_ok: std::cell::Cell<bool>,
     kernels: Kernels,
     /// Bound where a kernel has an input it does not use for this dispatch.
     dummy: wgpu::Buffer,
@@ -647,9 +411,9 @@ struct Kernels {
     transpose: wgpu::ComputePipeline,
     glu: wgpu::ComputePipeline,
     elementwise: wgpu::BindGroupLayout,
-    /// One per entry of [`ATTENTIONS`], compiled on first use; bound like
-    /// the element-wise kernels (read, read, read-write, uniform).
-    attention: Vec<std::cell::OnceCell<wgpu::ComputePipeline>>,
+    /// The fused attention kernel, compiled on first use; bound like the
+    /// element-wise kernels (read, read, read-write, uniform).
+    attention: std::cell::OnceCell<wgpu::ComputePipeline>,
 }
 
 #[derive(Clone, Copy)]
@@ -737,19 +501,15 @@ impl Kernels {
             transpose: pipeline(device, &e, "transpose3", &ew),
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
-            attention: ATTENTIONS
-                .iter()
-                .map(|_| std::cell::OnceCell::new())
-                .collect(),
+            attention: std::cell::OnceCell::new(),
         }
     }
 
-    fn attention_pipeline(&self, device: &wgpu::Device, a: usize) -> &wgpu::ComputePipeline {
-        self.attention[a].get_or_init(|| {
-            let at = &ATTENTIONS[a];
+    fn attention_pipeline(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
+        self.attention.get_or_init(|| {
             pipeline(
                 device,
-                &shader(device, at.name, &at.source()),
+                &shader(device, "attention", &attention_source()),
                 "main",
                 &self.elementwise,
             )
@@ -865,8 +625,8 @@ impl Gpu {
             info,
             policy: std::cell::Cell::new(MatMulPolicy::Fixed(0)),
             usable: std::cell::Cell::new([true; TILES.len()]),
-            attention: std::cell::Cell::new(None),
-            attention_usable: std::cell::Cell::new([false; ATTENTIONS.len()]),
+            attention: std::cell::Cell::new(AttentionPolicy::SPLIT),
+            fused_ok: std::cell::Cell::new(false),
             kernels,
             dummy,
             uniforms,
@@ -1019,8 +779,8 @@ impl Gpu {
     /// layouts, bias, accumulate, ragged edges) and compares each with the
     /// CPU.  A kernel that disagrees is marked unusable on this GPU, so a
     /// compiler or driver bug in one kernel costs speed, not correctness.
-    /// Returns one line per kernel that failed; the original kernel
-    /// (`s64`) failing is an error.
+    /// Returns one line per kernel that failed; the fallback kernel
+    /// (`TILES[0]`, `i64`) failing is an error.
     pub async fn check_kernels(&self) -> Result<Vec<String>, String> {
         let (m, n, k) = (133, 141, 45);
         let rand = |len: usize, seed: u32| -> Vec<f32> {
@@ -1113,12 +873,11 @@ impl Gpu {
         Ok(problems)
     }
 
-    /// Runs every fused attention kernel on a small ragged case (two
+    /// Runs the fused attention kernel on a small ragged case (two
     /// sequences of 37 tokens, with gates) and compares it with
-    /// [`attention_cpu`].  A kernel that disagrees, or that the browser
-    /// rejects, is marked unusable on this GPU; returns one line per
-    /// failure.  Sets [`Gpu::attention_usable`].
-    pub async fn check_attention(&self) -> Vec<String> {
+    /// [`attention_cpu`].  Sets [`Gpu::fused_ok`]; returns why it failed,
+    /// if it did, and then the split path is the only one used.
+    pub async fn check_attention(&self) -> Option<String> {
         let (seq, nseq) = (37, 2);
         let tokens = seq * nseq;
         let mut st = 0x9e37_79b9u32;
@@ -1139,47 +898,43 @@ impl Gpu {
             self.upload("check qkv", &qkv),
             self.upload("check gates", &gates),
         );
-        let mut usable = [false; ATTENTIONS.len()];
-        let mut problems = Vec::new();
-        for (a, at) in ATTENTIONS.iter().enumerate() {
-            let ob = self.buffer("check o", tokens * 512);
-            let mut r = self.rec();
-            r.attention(a, &qb, Some(&gb), &ob, seq, nseq, alpha);
-            r.submit();
-            let got = match self.read(&ob, 0, tokens * 512).await {
-                Ok(v) => v,
-                Err(e) => {
-                    problems.push(format!("attention kernel {}: {e}; not used", at.name));
-                    continue;
+        let ob = self.buffer("check o", tokens * 512);
+        let mut r = self.rec();
+        r.attention(&qb, Some(&gb), &ob, seq, nseq, alpha);
+        r.submit();
+        let problem = match self.read(&ob, 0, tokens * 512).await {
+            Err(e) => Some(format!("fused attention: {e}; using split attention")),
+            Ok(got) => {
+                let worst = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(g, w)| {
+                        if g.is_finite() {
+                            (g - w).abs() / (1.0 + w.abs())
+                        } else {
+                            f32::INFINITY
+                        }
+                    })
+                    .fold(0.0f32, f32::max);
+                let errors = self.take_errors();
+                if worst > 1e-4 || !errors.is_empty() {
+                    let why = errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("relative error {worst:.1e}"));
+                    Some(format!(
+                        "fused attention gives wrong results on this GPU ({why}); using split attention"
+                    ))
+                } else {
+                    None
                 }
-            };
-            let worst = got
-                .iter()
-                .zip(&want)
-                .map(|(g, w)| {
-                    if g.is_finite() {
-                        (g - w).abs() / (1.0 + w.abs())
-                    } else {
-                        f32::INFINITY
-                    }
-                })
-                .fold(0.0f32, f32::max);
-            let errors = self.take_errors();
-            if worst > 1e-4 || !errors.is_empty() {
-                let why = errors
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| format!("relative error {worst:.1e}"));
-                problems.push(format!(
-                    "attention kernel {} gives wrong results on this GPU ({why}); not used",
-                    at.name
-                ));
-            } else {
-                usable[a] = true;
             }
+        };
+        self.fused_ok.set(problem.is_none());
+        if problem.is_some() {
+            self.attention.set(AttentionPolicy::SPLIT);
         }
-        self.attention_usable.set(usable);
-        problems
+        problem
     }
 
     pub fn rec(&self) -> Rec<'_> {
@@ -1389,7 +1144,7 @@ fn grid(groups: usize) -> (u32, u32) {
 
 enum Kernel {
     MatMul(usize),
-    Attention(usize),
+    Attention,
     Softmax,
     RmsNorm,
     Rope,
@@ -1412,7 +1167,7 @@ impl Rec<'_> {
         if self.gpu.prof.is_some() {
             let label = match &kernel {
                 Kernel::MatMul(t) => format!("matmul {}", TILES[*t].name),
-                Kernel::Attention(a) => format!("attention {}", ATTENTIONS[*a].name),
+                Kernel::Attention => "attention".into(),
                 Kernel::Softmax => "softmax".into(),
                 Kernel::RmsNorm => "rmsnorm".into(),
                 Kernel::Rope => "rope".into(),
@@ -1482,7 +1237,7 @@ impl Rec<'_> {
         let k = &gpu.kernels;
         let pipeline = |kernel: &Kernel| match kernel {
             Kernel::MatMul(t) => k.matmul_pipeline(&gpu.device, *t),
-            Kernel::Attention(a) => k.attention_pipeline(&gpu.device, *a),
+            Kernel::Attention => k.attention_pipeline(&gpu.device),
             Kernel::Softmax => &k.softmax.0,
             Kernel::RmsNorm => &k.rmsnorm.0,
             Kernel::Rope => &k.rope,
@@ -1639,18 +1394,15 @@ impl Rec<'_> {
         self.elementwise(Kernel::Rope, [dummy, table, qkv], tokens * 512, [seq, 0, 0]);
     }
 
-    /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
-    /// Fused attention for `nseq` sequences of `seq` tokens with kernel
-    /// `a` of [`ATTENTIONS`]: `o[t, h*64 + d] = sigmoid(gates[t, h]) *
-    /// sum_j softmax_j(alpha * q_t . k_j) v[j, h*64 + d]` per head, with
-    /// q, k and v in a `[tokens, 1536]` qkv buffer at column offsets 0,
-    /// 512 and 1024, `o` `[tokens, 512]` and `gates` `[tokens, 8]` (no
-    /// gate when `None`).  The same result as the scores matmul, softmax,
-    /// p.v matmul and gate in [`net::Job`], in one dispatch.
-    #[allow(clippy::too_many_arguments)]
+    /// Fused attention for `nseq` sequences of `seq` tokens:
+    /// `o[t, h*64 + d] = sigmoid(gates[t, h]) * sum_j softmax_j(alpha *
+    /// q_t . k_j) v[j, h*64 + d]` per head, with q, k and v in a
+    /// `[tokens, 1536]` qkv buffer at column offsets 0, 512 and 1024, `o`
+    /// `[tokens, 512]` and `gates` `[tokens, 8]` (no gate when `None`).
+    /// The same result as the scores matmul, softmax, p.v matmul and gate
+    /// in [`net::Job`], in one dispatch.
     pub fn attention(
         &mut self,
-        a: usize,
         qkv: &wgpu::Buffer,
         gates: Option<&wgpu::Buffer>,
         o: &wgpu::Buffer,
@@ -1658,7 +1410,6 @@ impl Rec<'_> {
         nseq: usize,
         alpha: f32,
     ) {
-        let at = ATTENTIONS[a];
         let p = AttentionParams {
             seq: u(seq),
             row: 1536,
@@ -1669,16 +1420,17 @@ impl Rec<'_> {
             flags: u32::from(gates.is_some()),
             alpha,
         };
-        let groups = [u(seq.div_ceil(at.rows())), 8, u(nseq)];
+        let groups = [u(seq.div_ceil(64)), 8, u(nseq)];
         let g = gates.unwrap_or(&self.gpu.dummy);
         self.push(
-            Kernel::Attention(a),
+            Kernel::Attention,
             &[qkv, g, o],
             bytemuck::bytes_of(&p),
             groups,
         );
     }
 
+    /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
     pub fn gate(&mut self, o: &wgpu::Buffer, gates: &wgpu::Buffer, tokens: usize) {
         let dummy = &self.gpu.dummy;
         self.elementwise(Kernel::Gate, [dummy, gates, o], tokens * 512, [0, 0, 0]);
@@ -1711,12 +1463,17 @@ impl Rec<'_> {
     }
 }
 
-/// Identifies the compiled matmul kernels (FNV-1a over their WGSL), so a
-/// per-GPU kernel choice is redone whenever the kernels change.
+/// Identifies the compiled kernels that calibration chooses between
+/// (FNV-1a over the matmul and attention WGSL), so a per-GPU choice is
+/// redone whenever they change.
 pub fn kernels_id() -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for t in &TILES {
-        for b in t.source().bytes() {
+    let sources = TILES
+        .iter()
+        .map(Tile::source)
+        .chain(std::iter::once(attention_source()));
+    for src in sources {
+        for b in src.bytes() {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
@@ -1731,8 +1488,10 @@ mod tests {
     /// Worst number of distinct addresses one bank serves in a single
     /// 32-lane access to workgroup memory, in RDNA's model of the LDS (32
     /// banks of 4 bytes; lanes reading the same address share one read).
-    /// 1 means no bank conflict.  A model of the Radeon only: Intel's
-    /// shared local memory is banked differently.
+    /// 1 means no bank conflict.  A model of the Radeon only: other GPUs
+    /// bank their shared memory in their own ways, but neighbouring
+    /// threads on neighbouring 4-byte words is conflict-free on any of
+    /// them.
     fn degree(addrs: impl Iterator<Item = usize>) -> usize {
         let mut banks: Vec<Vec<usize>> = vec![Vec::new(); 32];
         for a in addrs {
@@ -1760,77 +1519,68 @@ mod tests {
     /// when K is the contiguous axis (every nn.Linear) and when it is not,
     /// then the inner loop's reads of A and B.
     fn conflicts(t: &Tile) -> [usize; 6] {
-        let pad = match t.layout {
-            Layout::Original => 1,
-            Layout::Blocked => 4,
-            Layout::Interleaved { pad, .. } => pad,
-        };
-        let (sa, sb, bk, bm, bn) = (t.bm + pad, t.bn + pad, t.bk, t.bm, t.bn);
+        let (sa, sb, bk, bm, bn) = (t.bm + t.pad, t.bn + t.pad, t.bk, t.bm, t.bn);
         let (tx, ty) = (t.bn / t.tn, t.bm / t.tm);
-        let store_a_fast = worst(1, |e, _| (e % bk) * sa + e / bk);
-        let store_a_slow = worst(1, |e, _| (e / bm) * sa + e % bm);
-        let store_b_fast = worst(1, |e, _| (e % bk) * sb + e / bk);
-        let store_b_slow = worst(1, |e, _| (e / bn) * sb + e % bn);
-        let (read_a, read_b) = match t.layout {
-            Layout::Blocked => (
-                worst(t.tm, |id, q| (id / tx) * t.tm + q),
-                worst(t.tn, |id, q| (id % tx) * t.tn + q),
-            ),
-            _ => (
-                worst(t.tm, |id, q| id / tx + ty * q),
-                worst(t.tn, |id, q| id % tx + tx * q),
-            ),
-        };
         [
-            store_a_fast,
-            store_a_slow,
-            store_b_fast,
-            store_b_slow,
-            read_a,
-            read_b,
+            worst(1, |e, _| (e % bk) * sa + e / bk),
+            worst(1, |e, _| (e / bm) * sa + e % bm),
+            worst(1, |e, _| (e % bk) * sb + e / bk),
+            worst(1, |e, _| (e / bn) * sb + e % bn),
+            worst(t.tm, |id, q| id / tx + ty * q),
+            worst(t.tn, |id, q| id % tx + tx * q),
         ]
     }
 
-    /// The model reproduces the Radeon ranking of the older kernels (B
-    /// reads: s64 none, stride-4 kernels 2-way, stride-8 kernels 4-way)
-    /// and finds 2-way conflicts on s64's and v64's k-contiguous stores.
-    /// Every interleaved kernel is conflict-free throughout.
+    /// Every kernel is conflict-free in both load layouts and the inner
+    /// loop.  The same model reproduced the Radeon ranking of the earlier
+    /// blocked kernels (B reads 2-way at a thread stride of 4, 4-way at 8)
+    /// and found 2-way conflicts on the original kernel's stores (rows
+    /// padded by 1 float).
     #[test]
     fn bank_conflicts() {
-        let by_name = |n: &str| TILES.iter().find(|t| t.name == n).expect(n);
-        assert_eq!(conflicts(by_name("s64")), [2, 1, 2, 1, 1, 1]);
-        assert_eq!(conflicts(by_name("v64")), [2, 1, 2, 1, 1, 2]);
-        assert_eq!(conflicts(by_name("v128x64")), [1, 1, 1, 1, 1, 2]);
-        assert_eq!(conflicts(by_name("v64x128")), [1, 1, 1, 1, 1, 4]);
-        assert_eq!(conflicts(by_name("v128")), [1, 1, 1, 1, 1, 4]);
-        for t in TILES
-            .iter()
-            .filter(|t| matches!(t.layout, Layout::Interleaved { .. }))
-        {
+        for t in &TILES {
             assert_eq!(conflicts(t), [1; 6], "{}", t.name);
         }
+        // Padding by 1 instead of 32 / bk: the original kernel's stores.
+        let padded_by_one = Tile { pad: 1, ..TILES[0] };
+        assert_eq!(conflicts(&padded_by_one)[0], 2);
     }
 
-    /// Every kernel fits WebGPU's default 16 KiB of workgroup memory.
+    /// Bytes of workgroup memory a WGSL source declares
+    /// (`var<workgroup> name: array<f32, N>;` lines).
+    fn workgroup_bytes(src: &str) -> usize {
+        src.lines()
+            .filter(|l| l.starts_with("var<workgroup>"))
+            .map(|l| {
+                let n = l.split("array<f32, ").nth(1).expect("f32 array");
+                4 * n[..n.find('>').expect(">")]
+                    .parse::<usize>()
+                    .expect("length")
+            })
+            .sum()
+    }
+
+    /// Every generated kernel fits WebGPU's default 16 KiB of workgroup
+    /// memory.
     #[test]
     fn workgroup_memory_within_defaults() {
         for t in &TILES {
-            let pad = match t.layout {
-                Layout::Original => 1,
-                Layout::Blocked => 4,
-                Layout::Interleaved { pad, .. } => pad,
-            };
-            let bytes = 4 * t.bk * (t.bm + t.bn + 2 * pad);
+            let bytes = workgroup_bytes(&t.source());
+            assert_eq!(bytes, 4 * t.bk * (t.bm + t.bn + 2 * t.pad), "{}", t.name);
             assert!(bytes <= 16 * 1024, "{}: {bytes} bytes", t.name);
         }
+        let attention = workgroup_bytes(&attention_source());
+        assert!((12 * 1024..=16 * 1024).contains(&attention), "{attention}");
     }
 
-    /// The generated interleaved source has every placeholder filled.
+    /// The generated sources have every placeholder filled.
     #[test]
-    fn interleaved_source_is_complete() {
-        for t in &TILES {
-            let src = t.source();
-            assert!(!src.contains('{') || !src.contains("{BM}"), "{}", t.name);
+    fn sources_are_complete() {
+        let all = TILES
+            .iter()
+            .map(|t| (t.name, t.source()))
+            .chain(std::iter::once(("attention", attention_source())));
+        for (name, src) in all {
             for p in [
                 "{ACC_DECLS}",
                 "{STAGE}",
@@ -1838,9 +1588,28 @@ mod tests {
                 "{EPILOGUE}",
                 "{PAD}",
                 "{TX}",
+                "{DECLS}",
+                "{S_STEP}",
+                "{VALUES}",
+                "{FINISH}",
             ] {
-                assert!(!src.contains(p), "{}: {p}", t.name);
+                assert!(!src.contains(p), "{name}: {p}");
             }
         }
+    }
+
+    #[test]
+    fn attention_policy_names() {
+        for p in [
+            AttentionPolicy::SPLIT,
+            AttentionPolicy::FUSED,
+            AttentionPolicy {
+                time: false,
+                freq: true,
+            },
+        ] {
+            assert_eq!(AttentionPolicy::parse(p.name()), Some(p));
+        }
+        assert_eq!(AttentionPolicy::parse("a4"), None);
     }
 }

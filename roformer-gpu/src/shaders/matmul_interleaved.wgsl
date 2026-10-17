@@ -1,24 +1,28 @@
-// Register-tiled matmul with interleaved ownership: the same operation,
-// addressing and parameters as matmul.wgsl, with the tile shape filled in
-// by the driver (`{BM}` and so on are replaced before compiling; see
-// `Tile` in lib.rs).
+// Register-tiled matmul, the only matmul in the network:
+// C = act(alpha * A.B + bias) (+ C when accumulating) for a batch of
+// strided matrices, the tile shape filled in by the driver (`{BM}` and so
+// on are replaced before compiling; see `Tile` in lib.rs).
+//
+// Element addressing (all strides in f32 elements):
+//   A(i, k) = a[a_off + bo*a_bo + bi*a_bi + i*a_si + k*a_sk]
+//   B(k, j) = b[b_off + bo*b_bo + bi*b_bi + k*b_sk + j*b_sj]
+//   C(i, j) = c[c_off + bo*c_bo + bi*c_bi + i*c_si + j*c_sj]
+//   bias(j) = bias[bias_off + bo*bias_bo + j]
+// where the batch index z = bo*inner + bi.
 //
 // A workgroup of 256 threads computes a BM x BN tile of C.  Thread
 // (tx, ty) owns rows ty + TY*i and columns tx + TX*j (TX = BN / TN,
-// TY = BM / TM), as in matmul.wgsl, rather than a TM x TN block as in
-// matmul_tiled.wgsl.  So in the inner loop neighbouring threads read
-// neighbouring floats of the B tile (no shared-memory bank conflicts), and
-// in the epilogue they write neighbouring columns of C.  The accumulators
-// are named scalars with constant indices (generated), as in
-// matmul_tiled.wgsl, so every backend can keep them in registers.
+// TY = BM / TM): interleaved, not a TM x TN block, so in the inner loop
+// neighbouring threads read neighbouring floats of the B tile (no
+// shared-memory bank conflicts), and in the epilogue they write
+// neighbouring columns of C.  The accumulators are named scalars with
+// constant indices (generated), so every backend can keep them in
+// registers; a loop-indexed accumulator array ran 5 to 6 times slower on
+// Intel and Apple GPUs, whose compilers kept it out of registers.
 //
 // Tiles are scalar f32 arrays, rows padded by PAD floats.  When K is the
 // contiguous axis (every nn.Linear operand), 32 consecutive threads store
 // 32 / BK rows of BK values; PAD = 32 / BK spreads those over all 32 banks.
-//
-// With PREFETCH, each thread holds its share of the next K tile in
-// registers while the current one is used, so global-memory latency
-// overlaps arithmetic without a second tile in workgroup memory.
 //
 // Shapes in use stay within WebGPU's defaults: 256 invocations and
 // BK * (BM + BN + 2 * PAD) * 4 bytes of workgroup memory (at most 8.3 KiB).
@@ -55,10 +59,8 @@ var<workgroup> bs_: array<f32, {SB_LEN}>; // BK * SB, [kk][col]
 
 // Element e (0 .. BM*BK) of the A tile at K offset k0: its value from
 // global memory (zero outside the matrix) and its slot in as_.  Loads run
-// along whichever axis is contiguous in memory.  Branch-free (select), so
-// the unrolled copies in the prefetch variants stay straight-line code:
-// with if/else here, SwiftShader took minutes and gigabytes to compile
-// them.  Out of range, the load reads element 0 and discards it.
+// along whichever axis is contiguous in memory.  Branch-free (select):
+// out of range, the load reads element 0 and discards it.
 fn a_get(e: u32, k0: u32, row0: u32, base: u32) -> f32 {
   let fast = p.a_sk == 1u;
   let gi = row0 + select(e % BM, e / BK, fast);
@@ -111,12 +113,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t
   let b_base = p.b_off + bo * p.b_bo + bi * p.b_bi;
 
 {ACC_DECLS}
-{PREFETCH_FIRST}
 
   for (var k0 = 0u; k0 < p.k; k0 += BK) {
 {STAGE}
     workgroupBarrier();
-{PREFETCH_NEXT}
     for (var kk = 0u; kk < BK; kk++) {
       let ab = kk * SA + ty;
       let bb = kk * SB + tx;

@@ -13,13 +13,13 @@
 //! the GPU with the CPU reference files served under /selftest/ and log the
 //! result; `selftest=stages` skips the full 13 s chunk, for slow software
 //! GPUs), `bench` (time every matmul kernel on the model's shapes, or only
-//! those listed, as in `bench=s64,v64`; see `roformer_gpu::bench`),
+//! those listed, as in `bench=i64`; see `roformer_gpu::bench`),
 //! `bench_rounds` (interleaved rounds per kernel and shape; default 3),
 //! `profile=1` (GPU time per kernel from timestamp queries, logged after
 //! the self-test's full chunk and after a separation) and `mm` (`auto` or
 //! a kernel name from `roformer_gpu::TILES`, to compare kernels end to end)
-//! and `attn` (`split`, or a fused attention kernel from
-//! `roformer_gpu::ATTENTIONS` such as `a4`; split by default).
+//! and `attn` (`auto`, `split`, `fused`, or `time` / `freq` for fused
+//! attention on that axis only; by default each GPU's measured choice).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

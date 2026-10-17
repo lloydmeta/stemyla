@@ -4,7 +4,7 @@
 //! before its first separation, to choose its kernels; nothing is tuned
 //! while a song is being separated.
 
-use crate::{Act, Gpu, MatMul, MatMulPolicy, TILES, View};
+use crate::{Act, AttentionPolicy, Gpu, MatMul, MatMulPolicy, TILES, View};
 
 /// One matmul shape of the network and how often a chunk runs it.
 #[derive(Clone, Copy, Debug)]
@@ -418,17 +418,168 @@ async fn time_rec(
     (now() - t0) / count as f64
 }
 
-/// Attention per chunk with the separate dispatches (scores matmul with
-/// this GPU's matmul policy, softmax, p.v matmul, gate) against each fused
-/// kernel that passed [`Gpu::check_attention`], step by step as a chunk
-/// runs them at the default budget: split attention takes one band of
-/// 1,151 frames per time step (744 steps), fused attention four (186
-/// steps, since it needs no scores buffer); the frequency axis takes 88
-/// frames of 62 bands per step either way (168 steps).  Fused kernels are
-/// also timed at one band per step, which shows how much the larger
-/// dispatch helps.  Kernels take turns over `rounds` rounds; medians are
-/// reported.  Returns (name, seconds per chunk) for "split" and each
-/// usable fused kernel.
+/// Buffers for attention timings: q/k/v, gates, scores and output for up
+/// to four bands of a full chunk (the scores for one).
+struct AttnBufs {
+    qkv: wgpu::Buffer,
+    gates: wgpu::Buffer,
+    scores: wgpu::Buffer,
+    o: wgpu::Buffer,
+}
+
+fn attn_bufs(gpu: &Gpu) -> AttnBufs {
+    let tokens = (4 * T).max(FREQ_TOKENS);
+    AttnBufs {
+        qkv: gpu.buffer("bench qkv", tokens * 1536),
+        gates: gpu.buffer("bench gates", tokens * 8),
+        scores: gpu.buffer("bench scores", (8 * T * T).max(8 * 62 * 62 * 88)),
+        o: gpu.buffer("bench o", tokens * 512),
+    }
+}
+
+/// One attention step done the split way, as net.rs does it: scores
+/// matmul (this GPU's matmul policy), softmax, p.v matmul, gate.
+fn split_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
+    let row = 1536;
+    let mut sc = MatMul::new(
+        (
+            &b.qkv,
+            View {
+                off: 0,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &b.qkv,
+            View {
+                off: 512,
+                rs: 1,
+                cs: row,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &b.scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        seq,
+        seq,
+        64,
+    );
+    sc.outer = nseq;
+    sc.inner = 8;
+    sc.alpha = 0.125;
+    r.matmul(&sc);
+    r.softmax(&b.scores, nseq * 8 * seq, seq);
+    let mut pv = MatMul::new(
+        (
+            &b.scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: 8 * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        (
+            &b.qkv,
+            View {
+                off: 1024,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: 64,
+            },
+        ),
+        (
+            &b.o,
+            View {
+                off: 0,
+                rs: 512,
+                cs: 1,
+                bo: seq * 512,
+                bi: 64,
+            },
+        ),
+        seq,
+        64,
+        seq,
+    );
+    pv.outer = nseq;
+    pv.inner = 8;
+    r.matmul(&pv);
+    r.gate(&b.o, &b.gates, seq * nseq);
+}
+
+fn fused_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
+    r.attention(&b.qkv, Some(&b.gates), &b.o, seq, nseq, 0.125);
+}
+
+/// Seconds per chunk of split and fused attention on each axis, the way
+/// a chunk runs them at the default budget: on the time axis split takes
+/// one band of 1,151 frames per step (744 steps) and fused four (186
+/// steps; it needs no scores buffer); on the frequency axis both take 88
+/// frames of 62 bands per step (168 steps).  The two take turns over
+/// `rounds` rounds; medians.  Returns ((split, fused) time axis, (split,
+/// fused) frequency axis); fused is infinite when it failed its check.
+pub async fn attention_per_chunk(
+    gpu: &Gpu,
+    warm: f64,
+    round: f64,
+    rounds: usize,
+    now: &impl Fn() -> f64,
+) -> ((Timing, Timing), (Timing, Timing)) {
+    let b = attn_bufs(gpu);
+    let empty = || Timing { rounds: Vec::new() };
+    let (mut ts, mut tf, mut fs, mut ff) = (empty(), empty(), empty(), empty());
+    for rd in 0..rounds.max(1) {
+        let w = if rd == 0 { warm } else { 0.0 };
+        ts.rounds.push(
+            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                split_attention(r, &b, T, 1)
+            })
+            .await
+                * 744.0,
+        );
+        fs.rounds.push(
+            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                split_attention(r, &b, 62, 88)
+            })
+            .await
+                * 168.0,
+        );
+        if gpu.fused_ok.get() {
+            tf.rounds.push(
+                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                    fused_attention(r, &b, T, 4)
+                })
+                .await
+                    * 186.0,
+            );
+            ff.rounds.push(
+                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                    fused_attention(r, &b, 62, 88)
+                })
+                .await
+                    * 168.0,
+            );
+        }
+    }
+    ((ts, tf), (fs, ff))
+}
+
+/// Logs [`attention_per_chunk`] and returns its medians.
 pub async fn measure_attention(
     gpu: &Gpu,
     warm: f64,
@@ -436,180 +587,23 @@ pub async fn measure_attention(
     rounds: usize,
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
-) -> Vec<(String, f64)> {
-    // (label, sequence length, sequences per step, steps per chunk,
-    // counts for split, counts for fused)
-    let cases = [
-        ("time, 1 band per step", T, 1usize, 744usize, true, false),
-        ("time, 4 bands per step", T, 4, 186, false, true),
-        ("freq", 62, 88, 168, true, true),
-    ];
-    let row = 1536;
-    let max_tokens = cases.iter().map(|c| c.1 * c.2).max().unwrap_or(1);
-    let max_scores = cases
-        .iter()
-        .filter(|c| c.4)
-        .map(|c| 8 * c.1 * c.1 * c.2)
-        .max()
-        .unwrap_or(1);
-    let qkv = gpu.buffer("bench qkv", max_tokens * row);
-    let gates = gpu.buffer("bench gates", max_tokens * 8);
-    let scores = gpu.buffer("bench scores", max_scores);
-    let o = gpu.buffer("bench o", max_tokens * 512);
-    let alpha = 0.125f32;
-    let usable = gpu.attention_usable.get();
-    let fused: Vec<usize> = (0..crate::ATTENTIONS.len())
-        .filter(|&a| usable[a])
-        .collect();
-    let mut split_total = 0.0;
-    let mut fused_total = vec![0.0; fused.len()];
-    for (case, seq, nseq, steps, for_split, for_fused) in cases {
-        let split = |r: &mut crate::Rec| {
-            let mut sc = MatMul::new(
-                (
-                    &qkv,
-                    View {
-                        off: 0,
-                        rs: row,
-                        cs: 1,
-                        bo: seq * row,
-                        bi: 64,
-                    },
-                ),
-                (
-                    &qkv,
-                    View {
-                        off: 512,
-                        rs: 1,
-                        cs: row,
-                        bo: seq * row,
-                        bi: 64,
-                    },
-                ),
-                (
-                    &scores,
-                    View {
-                        off: 0,
-                        rs: seq,
-                        cs: 1,
-                        bo: 8 * seq * seq,
-                        bi: seq * seq,
-                    },
-                ),
-                seq,
-                seq,
-                64,
-            );
-            sc.outer = nseq;
-            sc.inner = 8;
-            sc.alpha = alpha;
-            r.matmul(&sc);
-            r.softmax(&scores, nseq * 8 * seq, seq);
-            let mut pv = MatMul::new(
-                (
-                    &scores,
-                    View {
-                        off: 0,
-                        rs: seq,
-                        cs: 1,
-                        bo: 8 * seq * seq,
-                        bi: seq * seq,
-                    },
-                ),
-                (
-                    &qkv,
-                    View {
-                        off: 1024,
-                        rs: row,
-                        cs: 1,
-                        bo: seq * row,
-                        bi: 64,
-                    },
-                ),
-                (
-                    &o,
-                    View {
-                        off: 0,
-                        rs: 512,
-                        cs: 1,
-                        bo: seq * 512,
-                        bi: 64,
-                    },
-                ),
-                seq,
-                64,
-                seq,
-            );
-            pv.outer = nseq;
-            pv.inner = 8;
-            r.matmul(&pv);
-            r.gate(&o, &gates, seq * nseq);
-        };
-        // Split only where its scores fit one binding; fused everywhere.
-        let mut names = Vec::new();
-        let mut times: Vec<Vec<f64>> = Vec::new();
-        if for_split {
-            names.push("split".to_string());
-            times.push(Vec::new());
-        }
-        for &a in &fused {
-            names.push(crate::ATTENTIONS[a].name.to_string());
-            times.push(Vec::new());
-        }
-        for rd in 0..rounds.max(1) {
-            let w = if rd == 0 { warm } else { 0.0 };
-            let mut k = 0;
-            if for_split {
-                times[k].push(time_rec(gpu, w, round, &now, &split).await);
-                k += 1;
-            }
-            for &a in &fused {
-                let run = |r: &mut crate::Rec| {
-                    r.attention(a, &qkv, Some(&gates), &o, seq, nseq, alpha);
-                };
-                times[k].push(time_rec(gpu, w, round, &now, &run).await);
-                k += 1;
-            }
-        }
-        for (k, name) in names.iter().enumerate() {
-            let t = Timing {
-                rounds: times[k].clone(),
-            };
-            let per_chunk = t.median() * steps as f64;
-            let used = if name == "split" {
-                for_split
-            } else {
-                for_fused
-            };
-            if name == "split" {
-                split_total += per_chunk;
-            } else if used {
-                let i = k - usize::from(for_split);
-                fused_total[i] += per_chunk;
-            }
-            log(format!(
-                "bench: attention {case} (seq {seq}, x{nseq}) {name}: {:.2} ms per step, {:.2} s per chunk{} (median of {}, spread {:.1}%)",
-                1e3 * t.median(),
-                per_chunk,
-                if used { "" } else { " if run this way" },
-                t.rounds.len(),
-                100.0 * t.spread()
-            ));
-        }
-    }
-    let mut out = vec![("split".to_string(), split_total)];
-    log(format!(
-        "bench: attention split: {split_total:.2} s per chunk"
-    ));
-    for (i, &a) in fused.iter().enumerate() {
-        let name = crate::ATTENTIONS[a].name;
+) -> ((f64, f64), (f64, f64)) {
+    let ((ts, tf), (fs, ff)) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    for (axis, split, fused) in [("time", &ts, &tf), ("freq", &fs, &ff)] {
         log(format!(
-            "bench: attention {name}: {:.2} s per chunk (4 bands per time step)",
-            fused_total[i]
+            "bench: attention {axis} axis: split {:.2} s per chunk (spread {:.1}%), fused {:.2} s per chunk (spread {:.1}%)",
+            split.median(),
+            100.0 * split.spread(),
+            fused.median(),
+            100.0 * fused.spread()
         ));
-        out.push((name.to_string(), fused_total[i]));
     }
-    out
+    log(format!(
+        "bench: attention split {:.2} s per chunk, fused {:.2} s per chunk",
+        ts.median() + fs.median(),
+        tf.median() + ff.median()
+    ));
+    ((ts.median(), tf.median()), (fs.median(), ff.median()))
 }
 
 /// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`
@@ -629,52 +623,124 @@ pub fn parse_kernels(list: &str) -> Option<Vec<usize>> {
         .collect()
 }
 
-/// Chooses this GPU's matmul kernels, once per GPU: times every kernel
-/// that passed [`Gpu::check_kernels`] on two large products (a full-chunk
-/// q/k/v projection and the time-axis attention scores) and two small ones
-/// (frequency-axis attention), and returns the fastest for each kind.  The
-/// best kernel differs by GPU: on a Radeon Pro 5500M the original kernel
-/// won every shape, on an Intel UHD 630 it was the slowest by 5x.
-/// Takes a few seconds; the caller keeps the result per GPU.
-pub async fn calibrate(
-    gpu: &Gpu,
-    now: impl Fn() -> f64,
-    mut log: impl FnMut(String),
-) -> MatMulPolicy {
+/// What [`calibrate`] chooses for one GPU, as kept in browser storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub matmul: MatMulPolicy,
+    pub attention: AttentionPolicy,
+}
+
+impl Choice {
+    /// `"<matmul policy>;<attention policy>"`, e.g. `"i128x64,i64;freq"`.
+    pub fn name(self) -> String {
+        format!("{};{}", self.matmul.name(), self.attention.name())
+    }
+
+    /// The inverse of [`Choice::name`].
+    pub fn parse(s: &str) -> Option<Self> {
+        let (m, a) = s.split_once(';')?;
+        Some(Self {
+            matmul: MatMulPolicy::parse(m)?,
+            attention: AttentionPolicy::parse(a)?,
+        })
+    }
+}
+
+/// The choice from measured seconds: for each kind of product, the kernel
+/// with the least total over its shapes (`large[t]`, `small[t]`; infinite
+/// for kernels that failed their check); fused attention on the frequency
+/// axis whenever it works (it was 2.2 to 3.6 times faster on every GPU
+/// measured), and on the time axis when it measured faster than split.
+pub fn decide(
+    large: &[f64],
+    small: &[f64],
+    time_split: f64,
+    time_fused: f64,
+    fused_ok: bool,
+) -> Choice {
+    let best = |v: &[f64]| {
+        (0..v.len())
+            .min_by(|&a, &b| v[a].total_cmp(&v[b]))
+            .unwrap_or(0)
+    };
+    Choice {
+        matmul: MatMulPolicy::Split {
+            large: best(large),
+            small: best(small),
+        },
+        attention: AttentionPolicy {
+            time: fused_ok && time_fused < time_split,
+            freq: fused_ok,
+        },
+    }
+}
+
+/// Chooses this GPU's kernels, once per GPU (the caller keeps the result):
+/// the matmul kernel for large products (q/k/v and feed-forward shapes)
+/// and for small ones (attention gates, the p.v product of split
+/// attention), then whether fused attention beats split attention on the
+/// time axis with that matmul choice.  Everything measured takes turns
+/// over three rounds, medians compared.  The candidates were all designed
+/// to do well on any GPU; what is measured is only what varies between
+/// GPUs and cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4
+/// register block wins (register file and scheduling), and whether fused
+/// attention wins on long sequences.  Takes several seconds.
+pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
     let all = shapes();
     let by_name = |n: &str| all.iter().find(|s| s.name == n).copied().expect("shape");
-    let large = [by_name("time qkv"), by_name("time scores")];
-    let small = [by_name("freq scores"), by_name("freq p·v")];
+    let large = [
+        by_name("time qkv"),
+        by_name("time ff down"),
+        by_name("freq ff up"),
+    ];
+    let small = [by_name("time gates"), by_name("time p·v")];
     let b = buffers(gpu);
-    let best = |kind: &[Shape]| {
-        let kind = kind.to_vec();
+    let (warm, round, rounds) = (0.1, 0.1, 3);
+    let secs = |kind: Vec<Shape>| {
         let b = &b;
         let now = &now;
         async move {
-            let mut out = (0, f64::INFINITY);
-            for t in 0..TILES.len() {
-                if !gpu.usable.get()[t] {
-                    continue;
-                }
-                let mut secs = 0.0;
-                for s in &kind {
-                    secs += time_one(gpu, b, s, t, 0.1, 0.1, now).await * s.per_chunk as f64;
-                }
-                if secs < out.1 {
-                    out = (t, secs);
+            let mut t = vec![Timing { rounds: Vec::new() }; TILES.len()];
+            for rd in 0..rounds {
+                for (k, timing) in t.iter_mut().enumerate() {
+                    if !gpu.usable.get()[k] {
+                        continue;
+                    }
+                    let mut total = 0.0;
+                    for s in &kind {
+                        let w = if rd == 0 { warm } else { 0.0 };
+                        total += time_one(gpu, b, s, k, w, round, now).await * s.per_chunk as f64;
+                    }
+                    timing.rounds.push(total);
                 }
             }
-            out
+            t.iter().map(Timing::median).collect::<Vec<f64>>()
         }
     };
-    let (l, ls) = best(&large).await;
-    let (s, ss) = best(&small).await;
-    let policy = MatMulPolicy::Split { large: l, small: s };
+    let l = secs(large.to_vec()).await;
+    let s = secs(small.to_vec()).await;
+    let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
+    gpu.policy.set(matmul);
+    let ((ts, tf), _) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
+    let fmt = |v: &[f64]| {
+        TILES
+            .iter()
+            .zip(v)
+            .map(|(t, x)| format!("{} {x:.2} s", t.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     log(format!(
-        "matmul kernels for this GPU: {} for large products ({ls:.1} s per chunk on the timed shapes), {} for small ones ({ss:.1} s)",
-        TILES[l].name, TILES[s].name
+        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s, fused {:.2} s per chunk)",
+        choice.matmul.name(),
+        fmt(&l),
+        fmt(&s),
+        choice.attention.name(),
+        ts.median(),
+        tf.median()
     ));
-    policy
+    choice
 }
 
 /// Summary lines: estimated matmul seconds per chunk for each kernel alone
@@ -746,8 +812,36 @@ mod tests {
     fn kernel_lists() {
         assert_eq!(parse_kernels("1"), None);
         assert_eq!(parse_kernels(""), None);
-        assert_eq!(parse_kernels("s64,v64"), Some(vec![0, 1]));
-        assert_eq!(parse_kernels("s64,nope"), None);
+        assert_eq!(parse_kernels("i64,i128x64"), Some(vec![0, 1]));
+        assert_eq!(parse_kernels("i64,s64"), None);
+    }
+
+    /// Least total per kind; fused attention on the frequency axis when it
+    /// works, on the time axis only when faster; nothing fused when the
+    /// fused kernel failed its check.
+    #[test]
+    fn decisions() {
+        let inf = f64::INFINITY;
+        let c = decide(&[2.0, 1.0], &[1.0, 3.0], 5.0, 4.0, true);
+        assert_eq!(c.matmul, MatMulPolicy::Split { large: 1, small: 0 });
+        assert_eq!(c.attention, AttentionPolicy::FUSED);
+        let c = decide(&[inf, 1.0], &[inf, 3.0], 4.0, 5.0, true);
+        assert_eq!(c.matmul, MatMulPolicy::Split { large: 1, small: 1 });
+        assert_eq!(
+            c.attention,
+            AttentionPolicy {
+                time: false,
+                freq: true
+            }
+        );
+        let c = decide(&[1.0, 2.0], &[1.0, 2.0], 5.0, 1.0, false);
+        assert_eq!(c.attention, AttentionPolicy::SPLIT);
+        assert_eq!(Choice::parse(&c.name()), Some(c));
+        assert_eq!(
+            Choice::parse("i128x64,i64;freq").map(|c| c.name()),
+            Some("i128x64,i64;freq".to_string())
+        );
+        assert_eq!(Choice::parse("s64;split"), None);
     }
 
     #[test]
