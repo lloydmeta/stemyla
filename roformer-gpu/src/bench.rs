@@ -338,10 +338,20 @@ pub async fn measure(
         .collect();
     let mut table = Vec::new();
     for s in &shapes() {
+        // What runs when each kernel is asked for: a vec4 kernel hands
+        // products it cannot read as vec4s to the fallback.  The fallback is
+        // timed once for both (also when it was not asked for itself) and
+        // its timings stand for the vec4 kernel.
+        let ran: Vec<usize> = (0..TILES.len())
+            .map(|t| matmul(s, &b, t).kernel(t))
+            .collect();
+        let timed: Vec<bool> = (0..TILES.len())
+            .map(|u| (0..TILES.len()).any(|t| run[t] && ran[t] == u))
+            .collect();
         let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
         for r in 0..rounds.max(1) {
             for (t, timing) in row.iter_mut().enumerate() {
-                if !run[t] {
+                if !timed[t] {
                     continue;
                 }
                 let w = if r == 0 { warm } else { 0.0 };
@@ -355,6 +365,15 @@ pub async fn measure(
                 log(format!(
                     "bench: {} {}: skipped (failed the start-up check on this GPU)",
                     s.name, tile.name
+                ));
+            } else if run[t] && ran[t] != t {
+                row[t] = row[ran[t]].clone();
+                log(format!(
+                    "bench: {} {}: runs {}, {:.1} GFLOP/s (not vec4-aligned: an operand not K-contiguous, or K, a stride or an offset not a multiple of 4)",
+                    s.name,
+                    tile.name,
+                    TILES[ran[t]].name,
+                    s.flops() / row[t].median() / 1e9
                 ));
             } else if run[t] {
                 let tm = &row[t];
@@ -370,6 +389,13 @@ pub async fn measure(
                     tm.rounds.len(),
                     100.0 * tm.spread()
                 ));
+            }
+        }
+        // A fallback timed only on behalf of a vec4 kernel stays out of
+        // the table, as a kernel that was not asked for.
+        for (t, timing) in row.iter_mut().enumerate() {
+            if !run[t] {
+                timing.rounds.clear();
             }
         }
         table.push(row);
@@ -535,11 +561,14 @@ fn fused_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
 /// frames of 62 bands per step (168 steps).  The two take turns over
 /// `rounds` rounds; medians.  Returns ((split, fused) time axis, (split,
 /// fused) frequency axis); fused is infinite when it failed its check.
+/// Without `freq` the frequency axis is not timed (its timings are empty):
+/// calibration uses fused attention there whenever it works.
 pub async fn attention_per_chunk(
     gpu: &Gpu,
     warm: f64,
     round: f64,
     rounds: usize,
+    freq: bool,
     now: &impl Fn() -> f64,
 ) -> ((Timing, Timing), (Timing, Timing)) {
     let recording = gpu.set_recording(false);
@@ -555,13 +584,15 @@ pub async fn attention_per_chunk(
             .await
                 * 744.0,
         );
-        fs.rounds.push(
-            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                split_attention(r, &b, 62, 88)
-            })
-            .await
-                * 168.0,
-        );
+        if freq {
+            fs.rounds.push(
+                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                    split_attention(r, &b, 62, 88)
+                })
+                .await
+                    * 168.0,
+            );
+        }
         if gpu.fused_ok.get() {
             tf.rounds.push(
                 time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
@@ -570,13 +601,15 @@ pub async fn attention_per_chunk(
                 .await
                     * 186.0,
             );
-            ff.rounds.push(
-                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                    fused_attention(r, &b, 62, 88)
-                })
-                .await
-                    * 168.0,
-            );
+            if freq {
+                ff.rounds.push(
+                    time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
+                        fused_attention(r, &b, 62, 88)
+                    })
+                    .await
+                        * 168.0,
+                );
+            }
         }
     }
     gpu.set_recording(recording);
@@ -592,7 +625,7 @@ pub async fn measure_attention(
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
 ) -> ((f64, f64), (f64, f64)) {
-    let ((ts, tf), (fs, ff)) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    let ((ts, tf), (fs, ff)) = attention_per_chunk(gpu, warm, round, rounds, true, &now).await;
     for (axis, split, fused) in [("time", &ts, &tf), ("freq", &fs, &ff)] {
         log(format!(
             "bench: attention {axis} axis: split {:.2} s per chunk (spread {:.1}%), fused {:.2} s per chunk (spread {:.1}%)",
@@ -673,11 +706,64 @@ impl Choice {
     }
 }
 
+/// Version of the [`calibrate`] procedure.  A per-GPU choice stored by
+/// another version is measured again: version 1 timed attention for 0.1 s
+/// on a GPU opened moments before, and chose split attention on a Radeon
+/// Pro 5500M where a longer bench measured fused 2.5 times faster.
+pub const CALIBRATION: u32 = 2;
+
+/// Warm-up before the first timed round of each attention candidate in
+/// [`calibrate`], and the length of every timed round: a time-axis step
+/// takes tens of milliseconds, so 0.1 s held only a few of them.
+pub const ATTENTION_WARM: f64 = 0.5;
+pub const ATTENTION_ROUND: f64 = 0.3;
+
+/// Fused attention stays on the time axis unless split attention measured
+/// more than this factor faster.  Fused needs no scores buffer (about
+/// 42 MB per band) and so runs four bands per step, which matters more
+/// on memory-limited devices than a close timing does.
+pub const FUSED_MARGIN: f64 = 1.1;
+
+/// The stored kernel choices (`"<key>\t<choice>"` lines, keys
+/// `"<adapter>|..."`) with `key`'s choice set to `value`.  Lines for other
+/// adapters (the other GPU of a two-GPU laptop) stay.  This adapter keeps
+/// its newest `keep_per_gpu - 1` lines for other keys (other kernel sets or
+/// calibration versions, from builds published side by side on one
+/// origin) before the new line, which goes last; older ones and any
+/// earlier line for `key` are dropped.  Lines without a tab are dropped.
+pub fn store_choice(
+    text: &str,
+    adapter: &str,
+    key: &str,
+    value: &str,
+    keep_per_gpu: usize,
+) -> String {
+    let prefix = format!("{adapter}|");
+    let lines: Vec<(&str, &str)> = text
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|(k, _)| (k, l)))
+        .filter(|(k, _)| *k != key)
+        .collect();
+    let mine = lines.iter().filter(|(k, _)| k.starts_with(&prefix)).count();
+    let mut skip = mine.saturating_sub(keep_per_gpu.saturating_sub(1));
+    let mut out = String::new();
+    for (k, l) in lines {
+        if k.starts_with(&prefix) && skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        out += l;
+        out += "\n";
+    }
+    out + &format!("{key}\t{value}\n")
+}
+
 /// The choice from measured seconds: for each kind of product, the kernel
 /// with the least total over its shapes (`large[t]`, `small[t]`; infinite
 /// for kernels that failed their check); fused attention on the frequency
 /// axis whenever it works (it was 2.2 to 3.6 times faster on every GPU
-/// measured), and on the time axis when it measured faster than split.
+/// measured), and on the time axis unless split measured faster by more
+/// than [`FUSED_MARGIN`].
 pub fn decide(
     large: &[f64],
     small: &[f64],
@@ -696,7 +782,7 @@ pub fn decide(
             small: best(small),
         },
         attention: AttentionPolicy {
-            time: fused_ok && time_fused < time_split,
+            time: fused_ok && time_fused <= FUSED_MARGIN * time_split,
             freq: fused_ok,
         },
     }
@@ -712,8 +798,13 @@ pub fn decide(
 /// ([`still_in`]).  What is measured is only what varies between GPUs and
 /// cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4 register
 /// block wins (register file and scheduling), whether the compiler keeps
-/// `s64`'s loop-indexed accumulators in registers, and whether fused
-/// attention wins on long sequences.  Takes several seconds.
+/// `s64`'s loop-indexed accumulators in registers, whether vec4 loads
+/// (`v64`) issue faster than scalar ones, and whether fused attention wins
+/// on long sequences.  A product `v64` cannot read as vec4s (the p.v
+/// product) runs and is timed as `i64` under `v64`'s name, as it would
+/// run in a separation.  Attention gets longer windows
+/// ([`ATTENTION_WARM`], [`ATTENTION_ROUND`]) than the matmul products.
+/// Takes several seconds.
 pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
     let all = shapes();
     let by_name = |n: &str| all.iter().find(|s| s.name == n).copied().expect("shape");
@@ -756,7 +847,8 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
     let (s, st) = secs(small.to_vec()).await;
     let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
     gpu.policy.set(matmul);
-    let ((ts, tf), _) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
+    let ((ts, tf), _) =
+        attention_per_chunk(gpu, ATTENTION_WARM, ATTENTION_ROUND, rounds, false, &now).await;
     let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
     gpu.set_recording(recording);
     let fmt = |v: &[f64], t: &[Timing]| {
@@ -779,13 +871,15 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
             .join(", ")
     };
     log(format!(
-        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s, fused {:.2} s per chunk)",
+        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%) per chunk)",
         choice.matmul.name(),
         fmt(&l, &lt),
         fmt(&s, &st),
         choice.attention.name(),
         ts.median(),
-        tf.median()
+        100.0 * ts.spread(),
+        tf.median(),
+        100.0 * tf.spread()
     ));
     choice
 }
@@ -859,13 +953,13 @@ mod tests {
     fn kernel_lists() {
         assert_eq!(parse_kernels("1"), None);
         assert_eq!(parse_kernels(""), None);
-        assert_eq!(parse_kernels("i64,i128x64,s64"), Some(vec![0, 1, 2]));
-        assert_eq!(parse_kernels("i64,v64"), None);
+        assert_eq!(parse_kernels("i64,i128x64,s64,v64"), Some(vec![0, 1, 2, 3]));
+        assert_eq!(parse_kernels("i64,x64"), None);
     }
 
     /// Least total per kind; fused attention on the frequency axis when it
-    /// works, on the time axis only when faster; nothing fused when the
-    /// fused kernel failed its check.
+    /// works, on the time axis unless clearly slower; nothing fused when
+    /// the fused kernel failed its check.
     #[test]
     fn decisions() {
         let inf = f64::INFINITY;
@@ -888,7 +982,25 @@ mod tests {
             Choice::parse("i128x64,i64;freq").map(|c| c.name()),
             Some("i128x64,i64;freq".to_string())
         );
-        assert_eq!(Choice::parse("v64;split"), None);
+        assert_eq!(Choice::parse("x64;split"), None);
+    }
+
+    /// Fused attention keeps the time axis when split is faster by
+    /// [`FUSED_MARGIN`] or less, and loses it beyond that.
+    #[test]
+    fn fused_attention_margin() {
+        let time =
+            |split: f64, fused: f64| decide(&[1.0], &[1.0], split, fused, true).attention.time;
+        assert!(time(1.0, 1.0));
+        assert!(time(1.0, 1.09));
+        assert!(time(1.0, FUSED_MARGIN));
+        assert!(!time(1.0, 1.11));
+        assert!(!time(4.0, 5.0));
+        // The margin alone does not rescue the Radeon Pro 5500M's
+        // version-1 measurement; the longer windows have to.
+        assert!(!time(8.26, 9.51));
+        // Its bench a minute later: fused.
+        assert!(time(11.46, 4.52));
     }
 
     /// First rounds 1.0 and 1.6 drop the second kernel; the survivor's
@@ -906,6 +1018,35 @@ mod tests {
         assert_eq!(m, vec![1.8, f64::INFINITY]);
         let c = decide(&m, &m, 1.0, 2.0, true);
         assert_eq!(c.matmul, MatMulPolicy::Split { large: 0, small: 0 });
+    }
+
+    /// Other GPUs' lines stay; this GPU keeps its two newest other lines
+    /// and the new one, last; a line for the same key is replaced.
+    #[test]
+    fn stored_choices() {
+        let text = "amd|a|2\ti64;split\nintel|a|2\ti128x64;split\namd|b|2\ts64;fused\namd|c|1\ti64;freq\nno tab\n";
+        assert_eq!(
+            store_choice(text, "amd", "amd|d|2", "v64;fused", 3),
+            "intel|a|2\ti128x64;split\namd|b|2\ts64;fused\namd|c|1\ti64;freq\namd|d|2\tv64;fused\n"
+        );
+        assert_eq!(
+            store_choice(text, "amd", "amd|b|2", "v64;fused", 3),
+            "amd|a|2\ti64;split\nintel|a|2\ti128x64;split\namd|c|1\ti64;freq\namd|b|2\tv64;fused\n"
+        );
+        assert_eq!(
+            store_choice(text, "amd", "amd|d|2", "v64;fused", 1),
+            "intel|a|2\ti128x64;split\namd|d|2\tv64;fused\n"
+        );
+        assert_eq!(
+            store_choice("", "amd", "amd|d|2", "v64;freq", 3),
+            "amd|d|2\tv64;freq\n"
+        );
+        // An adapter whose name is a prefix of another's keeps its lines
+        // apart ("amd" against "amd rdna").
+        assert_eq!(
+            store_choice("amd rdna|a|2\ti64;split\n", "amd", "amd|d|2", "v64;freq", 1),
+            "amd rdna|a|2\ti64;split\namd|d|2\tv64;freq\n"
+        );
     }
 
     #[test]

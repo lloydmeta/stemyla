@@ -118,12 +118,14 @@ fn cpu_matmul(s: &Spec, a: &[f32], b: &[f32], c: &mut [f32], bias: &[f32]) {
 }
 
 /// Runs the product with every kernel in `TILES` and compares each with
-/// the CPU.
-fn check_matmul(g: &Gpu, s: Spec, sizes: [usize; 4], what: &str) {
+/// the CPU.  Returns whether the vec4 kernels ran it themselves (rather
+/// than handing it to the fallback).
+fn check_matmul(g: &Gpu, s: Spec, sizes: [usize; 4], what: &str) -> bool {
     let (a, b, bias) = (rand(sizes[0], 1), rand(sizes[1], 2), rand(sizes[3], 4));
     let c0 = rand(sizes[2], 3);
     let mut want = c0.clone();
     cpu_matmul(&s, &a, &b, &mut want, &bias);
+    let mut vec4_ran = Vec::new();
     for (t, tile) in TILES.iter().enumerate() {
         let (ab, bb, cb, biasb) = (
             g.upload("a", &a),
@@ -139,14 +141,248 @@ fn check_matmul(g: &Gpu, s: Spec, sizes: [usize; 4], what: &str) {
         mm.accumulate = s.accumulate;
         mm.bias = s.bias.map(|(off, bo)| (&biasb, off, bo));
         mm.tile = Some(t);
+        let ran = TILES[mm.kernel(t)].name;
+        if tile.vec4 {
+            vec4_ran.push(ran == tile.name);
+        }
         let mut r = g.rec();
         r.matmul(&mm);
         r.submit();
         let got = read(g, &cb, sizes[2]);
         let errors = g.take_errors();
         assert!(errors.is_empty(), "{errors:?}");
-        assert_close(&got, &want, 2e-5, &format!("{what} [{}]", tile.name));
+        assert_close(
+            &got,
+            &want,
+            2e-5,
+            &format!("{what} [{} ran {ran}]", tile.name),
+        );
     }
+    assert!(!vec4_ran.is_empty(), "no vec4 kernel in TILES");
+    vec4_ran.iter().all(|&r| r)
+}
+
+/// Products the vec4 kernel runs itself (K-contiguous operands, K and
+/// every A and B offset and stride a multiple of 4), with ragged M, N and
+/// K tiles and every epilogue: bias, GELU, tanh, alpha, accumulate,
+/// per-outer bias and batched heads.
+#[test]
+fn matmul_vec4_variants() {
+    let Some(g) = gpu() else { return };
+    // K 300 = 18 full K tiles of 16 and a ragged one of 12.
+    let (m, n, k) = (129, 65, 300);
+    assert!(check_matmul(
+        &g,
+        Spec {
+            m,
+            n,
+            k,
+            outer: 1,
+            inner: 1,
+            a: View::rows(8, k),
+            b: View::t(4, k),
+            c: View::rows(3, n),
+            bias: Some((5, 0)),
+            alpha: 1.0,
+            act: Act::Gelu,
+            accumulate: false,
+        },
+        [8 + m * k, 4 + n * k, 3 + m * n, n + 5],
+        "vec4: offsets, bias, gelu",
+    ));
+    let (m, n, k) = (70, 130, 4);
+    assert!(check_matmul(
+        &g,
+        Spec {
+            m,
+            n,
+            k,
+            outer: 1,
+            inner: 1,
+            a: View::rows(0, k),
+            b: View::t(0, k),
+            c: View::rows(0, n),
+            bias: None,
+            alpha: 0.3,
+            act: Act::Tanh,
+            accumulate: true,
+        },
+        [m * k, n * k, m * n, 1],
+        "vec4: K = 4, alpha, tanh, accumulate",
+    ));
+    // Mask-estimator shape: batched weights with per-outer bias.
+    let (cnt, t, w, out) = (3, 33, 256, 24);
+    assert!(check_matmul(
+        &g,
+        Spec {
+            m: t,
+            n: out,
+            k: w,
+            outer: cnt,
+            inner: 1,
+            a: View::rows(4, w).batch(t * w, 0),
+            b: View::t(0, w).batch(out * w, 0),
+            c: View::rows(0, out).batch(t * out, 0),
+            bias: Some((0, out)),
+            alpha: 1.0,
+            act: Act::Tanh,
+            accumulate: false,
+        },
+        [4 + cnt * t * w, cnt * out * w, cnt * t * out, cnt * out],
+        "vec4: batched, per-outer bias",
+    ));
+    // Attention scores from a qkv buffer: heads interleaved, K = 64.
+    let (nb, heads, seq, d) = (2, 8, 70, 64);
+    let row = 3 * heads * d;
+    assert!(check_matmul(
+        &g,
+        Spec {
+            m: seq,
+            n: seq,
+            k: d,
+            outer: nb,
+            inner: heads,
+            a: View {
+                off: 0,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: d,
+            },
+            b: View {
+                off: heads * d,
+                rs: 1,
+                cs: row,
+                bo: seq * row,
+                bi: d,
+            },
+            c: View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: heads * seq * seq,
+                bi: seq * seq,
+            },
+            bias: None,
+            alpha: 0.125,
+            act: Act::None,
+            accumulate: false,
+        },
+        [nb * seq * row, nb * seq * row, nb * heads * seq * seq, 1],
+        "vec4: attention scores",
+    ));
+}
+
+/// Products the vec4 kernel cannot read as vec4s go to the fallback and
+/// still match the CPU: K = 62 (the frequency p.v product, its scores rows
+/// 62 floats apart), K = 62 with every stride aligned, an offset of 2, and
+/// B with N rather than K contiguous.
+#[test]
+fn matmul_vec4_falls_back() {
+    let Some(g) = gpu() else { return };
+    let (nb, heads, seq, d) = (3, 8, 62, 64);
+    let row = 3 * heads * d;
+    assert!(!check_matmul(
+        &g,
+        Spec {
+            m: seq,
+            n: d,
+            k: seq,
+            outer: nb,
+            inner: heads,
+            a: View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: heads * seq * seq,
+                bi: seq * seq,
+            },
+            b: View {
+                off: 2 * heads * d,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: d,
+            },
+            c: View {
+                off: 0,
+                rs: heads * d,
+                cs: 1,
+                bo: seq * heads * d,
+                bi: d,
+            },
+            bias: None,
+            alpha: 1.0,
+            act: Act::None,
+            accumulate: false,
+        },
+        [
+            nb * heads * seq * seq,
+            nb * seq * row,
+            nb * seq * heads * d,
+            1
+        ],
+        "vec4 fallback: frequency p.v, K = 62",
+    ));
+    let (m, n, k) = (70, 66, 62);
+    assert!(!check_matmul(
+        &g,
+        Spec {
+            m,
+            n,
+            k,
+            outer: 1,
+            inner: 1,
+            a: View::rows(0, 64),
+            b: View::t(0, 64),
+            c: View::rows(0, n),
+            bias: Some((0, 0)),
+            alpha: 1.0,
+            act: Act::Gelu,
+            accumulate: false,
+        },
+        [m * 64, n * 64, m * n, n],
+        "vec4 fallback: K = 62, strides aligned",
+    ));
+    let (m, n, k) = (70, 66, 64);
+    assert!(!check_matmul(
+        &g,
+        Spec {
+            m,
+            n,
+            k,
+            outer: 1,
+            inner: 1,
+            a: View::rows(2, k),
+            b: View::t(0, k),
+            c: View::rows(0, n),
+            bias: None,
+            alpha: 1.0,
+            act: Act::None,
+            accumulate: true,
+        },
+        [2 + m * k, n * k, m * n, 1],
+        "vec4 fallback: A offset 2",
+    ));
+    assert!(!check_matmul(
+        &g,
+        Spec {
+            m,
+            n,
+            k,
+            outer: 1,
+            inner: 1,
+            a: View::rows(0, k),
+            b: View::rows(0, n),
+            c: View::rows(0, n),
+            bias: None,
+            alpha: 1.0,
+            act: Act::None,
+            accumulate: false,
+        },
+        [m * k, k * n, m * n, 1],
+        "vec4 fallback: B N-contiguous",
+    ));
 }
 
 #[test]
@@ -724,4 +960,36 @@ fn profile_recording_and_reset() {
     pollster::block_on(g.collect_profile()).unwrap();
     assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(1));
     assert!(g.take_errors().is_empty());
+}
+
+/// `?bench=v64` alone: on shapes v64 hands to the fallback (both p.v
+/// products), the fallback is timed on its behalf and its timing stands
+/// for v64, while the fallback itself stays out of the table.
+#[test]
+fn bench_vec4_alone_times_its_fallback() {
+    let Some(g) = gpu() else { return };
+    pollster::block_on(g.check_kernels()).unwrap();
+    let v = TILES.iter().position(|t| t.vec4).expect("a vec4 kernel");
+    let t0 = std::time::Instant::now();
+    let mut lines = Vec::new();
+    let table = pollster::block_on(roformer_gpu::bench::measure(
+        &g,
+        0.0,
+        0.0,
+        1,
+        Some(&[v]),
+        || t0.elapsed().as_secs_f64(),
+        |l| lines.push(l),
+    ));
+    let shapes = roformer_gpu::bench::shapes();
+    for (s, row) in shapes.iter().zip(&table) {
+        assert!(row[v].median().is_finite(), "{}: v64 not timed", s.name);
+        for (t, timing) in row.iter().enumerate() {
+            if t != v {
+                assert!(timing.rounds.is_empty(), "{}: {}", s.name, TILES[t].name);
+            }
+        }
+    }
+    let fallback = lines.iter().filter(|l| l.contains(": runs i64, ")).count();
+    assert_eq!(fallback, 2, "{lines:#?}");
 }
