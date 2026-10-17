@@ -31,13 +31,16 @@ pub enum DialogOutcome {
     Chosen(Reset),
 }
 
-/// The URLs to fetch again: the page, the files it preloads (the app's
-/// glue, wasm and snippets, as Trunk lists them) and the worker's files,
-/// each once and without a fragment.  All are absolute.
-pub fn urls_to_refresh(page: &str, preloaded: &[String], worker: &[String]) -> Vec<String> {
+/// The URLs to fetch again after the page itself: the files the freshly
+/// fetched page preloads (the app's glue, wasm and snippets, as Trunk lists
+/// them) and the worker's files, each once and without a fragment.  All are
+/// absolute.  They come from the new page, not the open one, so a file a
+/// later build dropped is never asked for.
+pub fn urls_to_refresh(preloaded: &[String], worker: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let candidates = std::iter::once(page)
-        .chain(preloaded.iter().map(String::as_str))
+    let candidates = preloaded
+        .iter()
+        .map(String::as_str)
         .chain(worker.iter().map(String::as_str));
     for url in candidates {
         let url = url.split('#').next().unwrap_or(url);
@@ -166,15 +169,27 @@ fn file_name(url: &str) -> &str {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::{Reset, WORKER_FILES, not_deleted, not_refreshed, urls_to_refresh};
-    use js_sys::Array;
+    use js_sys::{Array, Reflect};
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen(inline_js = r#"
 export function page_url() { return location.href; }
-export function preloaded() {
-  return Array.from(document.querySelectorAll('link[rel="modulepreload"], link[rel="preload"]'), (l) => l.href);
+// The open document may be an older build than the server's, so the files
+// to refresh come from the page as fetched now: its `<base href>` (if any)
+// and its preloads, resolved against that page, not this one.
+export async function fresh_page(page) {
+  const r = await fetch(page, { cache: "reload" });
+  if (!r.ok) throw new Error(`HTTP ${r.status} from ${page}`);
+  const doc = new DOMParser().parseFromString(await r.text(), "text/html");
+  const href = doc.querySelector("base[href]")?.getAttribute("href");
+  const base = href ? new URL(href, page).href : page;
+  const preloads = Array.from(
+    doc.querySelectorAll('link[rel="modulepreload"][href], link[rel="preload"][href]'),
+    (l) => new URL(l.getAttribute("href"), base).href
+  );
+  return { base, preloads };
 }
-export function absolute(path) { return new URL(path, document.baseURI).href; }
+export function absolute(path, base) { return new URL(path, base).href; }
 export async function refetch(urls) {
   const results = await Promise.allSettled(
     urls.map((u) => fetch(u, { cache: "reload" }).then((r) => {
@@ -205,8 +220,9 @@ export async function wipe_opfs() {
 "#)]
     extern "C" {
         fn page_url() -> String;
-        fn preloaded() -> Array;
-        fn absolute(path: &str) -> String;
+        #[wasm_bindgen(catch)]
+        async fn fresh_page(page: &str) -> Result<JsValue, JsValue>;
+        fn absolute(path: &str, base: &str) -> String;
         async fn refetch(urls: Array) -> JsValue;
         #[wasm_bindgen(catch)]
         async fn wipe_opfs() -> Result<JsValue, JsValue>;
@@ -231,9 +247,20 @@ export async function wipe_opfs() {
             }
             log::info!("reset: browser storage cleared");
         }
-        let worker: Vec<String> = WORKER_FILES.iter().map(|f| absolute(f)).collect();
-        let preloaded: Vec<String> = preloaded().iter().filter_map(|v| v.as_string()).collect();
-        let urls = urls_to_refresh(&page_url(), &preloaded, &worker);
+        let page = page_url();
+        let fresh = fresh_page(&page).await.map_err(|e| {
+            log::warn!("reset: could not fetch the page again: {e:?}");
+            not_refreshed(std::slice::from_ref(&page))
+        })?;
+        let field =
+            |k: &str| Reflect::get(&fresh, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED);
+        let base = field("base").as_string().unwrap_or_else(|| page.clone());
+        let preloaded: Vec<String> = Array::from(&field("preloads"))
+            .iter()
+            .filter_map(|v| v.as_string())
+            .collect();
+        let worker: Vec<String> = WORKER_FILES.iter().map(|f| absolute(f, &base)).collect();
+        let urls = urls_to_refresh(&preloaded, &worker);
         let list: Array = urls.iter().map(|u| JsValue::from_str(u)).collect();
         let failed: Vec<String> = Array::from(&refetch(list).await)
             .iter()
@@ -242,7 +269,7 @@ export async function wipe_opfs() {
         if !failed.is_empty() {
             return Err(not_refreshed(&failed));
         }
-        log::info!("reset: fetched {} files again", urls.len());
+        log::info!("reset: fetched the page and {} files again", urls.len());
         reload();
         Ok(())
     }
@@ -262,8 +289,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refresh_list_has_page_preloads_and_worker_once_each() {
-        let page = "https://beachape.com/stemyla/?selftest#top";
+    fn refresh_list_has_preloads_and_worker_once_each() {
         let preloaded = vec![
             "https://beachape.com/stemyla/app.js".to_string(),
             "https://beachape.com/stemyla/app_bg.wasm".to_string(),
@@ -275,9 +301,8 @@ mod tests {
             "https://beachape.com/stemyla/stem-worker_bg.wasm".to_string(),
         ];
         assert_eq!(
-            urls_to_refresh(page, &preloaded, &worker),
+            urls_to_refresh(&preloaded, &worker),
             [
-                "https://beachape.com/stemyla/?selftest",
                 "https://beachape.com/stemyla/app.js",
                 "https://beachape.com/stemyla/app_bg.wasm",
                 "https://beachape.com/stemyla/stem-worker_loader.js",
