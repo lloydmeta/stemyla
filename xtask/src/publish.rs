@@ -70,7 +70,8 @@ pub struct Options {
     pub branch: String,
     pub push: bool,
     pub allow_dirty: bool,
-    /// Publish nothing unless HEAD is still this branch's tip on the remote.
+    /// Publish HEAD only if it is this branch's tip on the remote, or on it
+    /// and newer than the published build (see [`skip_reason`]).
     pub skip_if_behind: Option<String>,
 }
 
@@ -148,6 +149,9 @@ pub fn main(args: &[String]) -> Result<()> {
         );
     }
     let head = git(&repo, &["rev-parse", "HEAD"])?;
+    // Before the build, so an unreachable remote fails in seconds, not
+    // minutes; `deploy` fetches again, in case another clone published since.
+    fetch_published(&repo, &o)?;
     if let Some(source) = &o.skip_if_behind
         && let Some(why) = skip_reason(&repo, &o, source, &head)?
     {
@@ -210,7 +214,13 @@ pub fn remote_head(repo: &Path, remote: &str, branch: &str) -> Result<Option<Str
 /// Updates the local publish branch from the remote, if the remote has it,
 /// so a branch published from another clone is built on, not over.
 fn fetch_published(repo: &Path, o: &Options) -> Result<()> {
-    if remote_head(repo, &o.remote, &o.branch)?.is_none() {
+    let published = remote_head(repo, &o.remote, &o.branch).with_context(|| {
+        format!(
+            "could not reach {} (for an offline local publish, pass --remote . with --no-push)",
+            o.remote
+        )
+    })?;
+    if published.is_none() {
         return Ok(());
     }
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", o.branch);
@@ -224,40 +234,51 @@ fn fetch_published(repo: &Path, o: &Options) -> Result<()> {
 /// A re-run of an old CI run builds its original commit, so `head` is not
 /// always `source`'s newest.  It is published when it is `source`'s tip on
 /// the remote (even after a force-push back to it), or when it is on
-/// `source` and the site does not already have a newer commit of it.  So
-/// an old re-run cannot roll the site back, and a commit is still
-/// published when the next one never is (its run failed, or it skipped
-/// CI).  Needs the full history of both branches.
+/// `source` and no published build is a newer commit of `source`.  Builds
+/// of commits that are not on `source` (a preview published by hand) or
+/// that this clone does not have are not counted.  So an old re-run cannot
+/// roll the site back, and a commit is still published when the next one
+/// never is (its run failed, or it skipped CI).  Needs the full history of
+/// both branches.
 pub fn skip_reason(repo: &Path, o: &Options, source: &str, head: &str) -> Result<Option<String>> {
     require_full_history(repo)?;
-    let Some(tip) = remote_head(repo, &o.remote, source)? else {
-        bail!("{} has no branch {source}", o.remote);
-    };
-    if tip == head {
-        return Ok(None);
-    }
-    // The tip may be newer than this clone; FETCH_HEAD only, no branch moves.
+    // One snapshot of the tip, which may be newer than this clone.  An empty
+    // --refmap leaves remote-tracking branches alone: only FETCH_HEAD moves.
     git(
         repo,
         &[
             "fetch",
             "--quiet",
+            "--refmap=",
             &o.remote,
             &format!("refs/heads/{source}"),
         ],
-    )?;
+    )
+    .with_context(|| format!("could not fetch {source} from {}", o.remote))?;
+    let tip = git(repo, &["rev-parse", "FETCH_HEAD^{commit}"])?;
+    if tip == head {
+        return Ok(None);
+    }
     if !is_ancestor(repo, head, &tip)? {
         return Ok(Some(format!("it is not on {source} (now at {tip})")));
     }
     fetch_published(repo, o)?;
-    let published = match branch_commit(repo, &o.branch) {
+    let versions = match branch_commit(repo, &o.branch) {
         Some(p) if object_type(repo, &p, "v/VERSIONS")?.as_deref() == Some("blob") => {
-            let versions = parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?;
-            versions.first().and_then(|id| published_commit(repo, id))
+            parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?
         }
-        _ => None,
+        _ => Vec::new(),
     };
-    match published {
+    let mut newest_on_source = None;
+    for id in &versions {
+        if let Some(c) = published_commit(repo, id)
+            && is_ancestor(repo, &c, &tip)?
+        {
+            newest_on_source = Some(c);
+            break;
+        }
+    }
+    match newest_on_source {
         Some(p) if p != head && is_ancestor(repo, head, &p)? => Ok(Some(format!(
             "the site already has {p}, a newer commit of {source}"
         ))),

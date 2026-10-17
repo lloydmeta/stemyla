@@ -574,6 +574,39 @@ fn ci_publishes_only_what_moves_the_site_forward() {
         ],
     );
     assert_eq!(skip(&c0), None, "the tip again");
+    git(
+        &r,
+        &[
+            "push",
+            "-q",
+            "-f",
+            "origin",
+            &format!("{c2}:refs/heads/main"),
+        ],
+    );
+
+    // Builds that are not of main do not count: a preview published by hand
+    // from a commit off main, and an id this clone cannot resolve.
+    let preview = git(
+        &r,
+        &[
+            "commit-tree",
+            &format!("{c1}^{{tree}}"),
+            "-p",
+            &c1,
+            "-m",
+            "preview",
+        ],
+    );
+    publish(&preview);
+    publish("ffffffffffff");
+    assert_eq!(
+        git(&r, &["show", "gh-pages:v/VERSIONS"]),
+        format!("ffffffffffff\n{}\n{}", &preview[..12], &c1[..12])
+    );
+    assert_eq!(skip(&c1), None, "c1 is the newest build of main");
+    let old = skip(&c0).expect("c1 is published, so c0 is older");
+    assert!(old.contains(&c1), "{old}");
 
     // A shallow clone cannot see earlier publishes.
     let shallow = root.join("shallow");
@@ -792,4 +825,41 @@ fn checks_the_build() {
         ("/pages/", "up", true)
     );
     assert!(Options::parse(&["--bogus".into()]).is_err());
+}
+
+/// An unreachable remote fails with a hint, and `--remote .` publishes
+/// locally without a network, building on the previous local publish.
+#[test]
+fn publishes_offline_with_the_repository_as_remote() {
+    let root = scratch("offline");
+    identity();
+    let r = repo(&root);
+    let away = Options::parse(&[
+        "--no-push".into(),
+        "--remote".into(),
+        root.join("nowhere.git").to_str().unwrap().into(),
+    ])
+    .unwrap();
+    let id = "aaaaaaaaaaa1";
+    let err = deploy(&r, &versioned_site(&root, id, "v1"), &away, id, "p").unwrap_err();
+    assert!(format!("{err:#}").contains("pass --remote ."), "{err:#}");
+
+    let local = Options::parse(&[
+        "--no-push".into(),
+        "--remote".into(),
+        ".".into(),
+        "--branch".into(),
+        "gh-pages-local".into(),
+    ])
+    .unwrap();
+    for id in ["aaaaaaaaaaa1", "aaaaaaaaaaa2"] {
+        deploy(&r, &versioned_site(&root, id, "v1"), &local, id, id)
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(
+        git(&r, &["show", "gh-pages-local:v/VERSIONS"]),
+        "aaaaaaaaaaa2\naaaaaaaaaaa1"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
