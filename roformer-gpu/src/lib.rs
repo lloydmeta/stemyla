@@ -33,10 +33,11 @@ const PARAM_STRIDE: u64 = 256;
 const MAX_DISPATCHES: u64 = 64;
 
 /// A matmul kernel: `matmul_interleaved.wgsl` with these numbers filled
-/// in.  A workgroup of 256 threads computes a `bm` x `bn` block of the
-/// output, each thread `tm` x `tn` of it (every `bm / tm`-th row and every
-/// `bn / tn`-th column), stepping through K `bk` at a time; rows of the
-/// workgroup tiles are padded by `pad` floats.
+/// in (or, with `hand_written`, `matmul.wgsl` as it stands, which has the
+/// same numbers).  A workgroup of 256 threads computes a `bm` x `bn` block
+/// of the output, each thread `tm` x `tn` of it (every `bm / tm`-th row
+/// and every `bn / tn`-th column), stepping through K `bk` at a time; rows
+/// of the workgroup tiles are padded by `pad` floats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub name: &'static str,
@@ -46,10 +47,14 @@ pub struct Tile {
     pub tm: usize,
     pub tn: usize,
     pub pad: usize,
+    pub hand_written: bool,
 }
 
 impl Tile {
     fn source(&self) -> String {
+        if self.hand_written {
+            return include_str!("shaders/matmul.wgsl").to_string();
+        }
         let (tx, ty) = (self.bn / self.tn, self.bm / self.tm);
         assert_eq!(tx * ty, 256, "{self:?}");
         assert!(
@@ -104,23 +109,32 @@ impl Tile {
     }
 }
 
-/// The matmul kernels.  Both follow the same rules (accumulators in named
+/// The matmul kernels, among which [`bench::calibrate`] measures once per
+/// GPU.  `i64` and `i128x64` follow the same rules (accumulators in named
 /// registers, neighbouring threads on neighbouring floats, conflict-free
 /// workgroup memory, WebGPU's default limits) and differ only in the
 /// block each thread keeps in registers: 4 x 4 or 8 x 4.  The larger block
 /// gets more use from each workgroup-memory read (2.67 multiply-adds per
 /// read against 2) but needs twice the accumulators, so fewer threads fit
 /// at once to hide memory latency.  Which wins depends on the GPU's
-/// register file and scheduler, which WebGPU does not report, so
-/// [`bench::calibrate`] measures it once per GPU.  Against the best kernel
-/// per shape, `i64` was 11% slower on a Radeon Pro 5500M, 22% on an Intel
-/// UHD 630 and 3% on an iPad's GPU; `i128x64` 22%, 2% and 5%.  The first
-/// entry is the fallback: a GPU on which it fails is not used.
+/// register file and scheduler, which WebGPU does not report.  Against the
+/// best kernel per shape, `i64` was 11% slower on a Radeon Pro 5500M, 22%
+/// on an Intel UHD 630 and 3% on an iPad's GPU; `i128x64` 22%, 2% and 5%.
 ///
-/// Rows are padded by 32 / `bk` floats: when K is the contiguous axis
-/// (every nn.Linear operand), 32 consecutive threads store 32 / `bk` rows
-/// of `bk` values, and this padding spreads them over all 32 banks.
-pub const TILES: [Tile; 2] = [
+/// `s64`, the original hand-written kernel, has `i64`'s layout but keeps
+/// its accumulators in a loop-indexed array.  It depends on the compiler
+/// unrolling that loop into registers: AMD's does, and there it was the
+/// fastest of the three (6% ahead of `i64` in `?bench`, 15% on the
+/// matmuls of a profiled self-test); Intel's and Apple's do not, and there
+/// it was 5 to 6 times slower, so calibration stops timing it after its
+/// first round on such GPUs.
+///
+/// The first entry is the fallback: a GPU on which it fails is not used.
+/// Rows are padded by 32 / `bk` floats (`s64`: 1): when K is the
+/// contiguous axis (every nn.Linear operand), 32 consecutive threads store
+/// 32 / `bk` rows of `bk` values, and this padding spreads them over all
+/// 32 banks.
+pub const TILES: [Tile; 3] = [
     Tile {
         name: "i64",
         bm: 64,
@@ -129,6 +143,7 @@ pub const TILES: [Tile; 2] = [
         tm: 4,
         tn: 4,
         pad: 2,
+        hand_written: false,
     },
     Tile {
         name: "i128x64",
@@ -138,6 +153,17 @@ pub const TILES: [Tile; 2] = [
         tm: 8,
         tn: 4,
         pad: 4,
+        hand_written: false,
+    },
+    Tile {
+        name: "s64",
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        tm: 4,
+        tn: 4,
+        pad: 1,
+        hand_written: true,
     },
 ];
 
@@ -1531,19 +1557,21 @@ mod tests {
         ]
     }
 
-    /// Every kernel is conflict-free in both load layouts and the inner
-    /// loop.  The same model reproduced the Radeon ranking of the earlier
-    /// blocked kernels (B reads 2-way at a thread stride of 4, 4-way at 8)
-    /// and found 2-way conflicts on the original kernel's stores (rows
-    /// padded by 1 float).
+    /// The generated kernels are conflict-free in both load layouts and
+    /// the inner loop; `s64`'s stores conflict 2-way when K is contiguous
+    /// (rows padded by 1 float rather than 32 / bk).  The same model
+    /// reproduced the Radeon ranking of the earlier blocked kernels (B
+    /// reads 2-way at a thread stride of 4, 4-way at 8).
     #[test]
     fn bank_conflicts() {
         for t in &TILES {
-            assert_eq!(conflicts(t), [1; 6], "{}", t.name);
+            let want = if t.hand_written {
+                [2, 1, 2, 1, 1, 1]
+            } else {
+                [1; 6]
+            };
+            assert_eq!(conflicts(t), want, "{}", t.name);
         }
-        // Padding by 1 instead of 32 / bk: the original kernel's stores.
-        let padded_by_one = Tile { pad: 1, ..TILES[0] };
-        assert_eq!(conflicts(&padded_by_one)[0], 2);
     }
 
     /// Bytes of workgroup memory a WGSL source declares

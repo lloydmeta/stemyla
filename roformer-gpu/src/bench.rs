@@ -623,6 +623,18 @@ pub fn parse_kernels(list: &str) -> Option<Vec<usize>> {
         .collect()
 }
 
+/// Which candidates stay in after the first round of [`calibrate`]: those
+/// within 1.5 times the fastest.  A kernel several times slower on this
+/// GPU (`s64` without loop unrolling) costs no more measuring time, and
+/// keeps its one-round time, so it is never chosen.
+pub fn still_in(first: &[f64]) -> Vec<bool> {
+    let best = first.iter().copied().fold(f64::INFINITY, f64::min);
+    first
+        .iter()
+        .map(|&x| x.is_finite() && x <= 1.5 * best)
+        .collect()
+}
+
 /// What [`calibrate`] chooses for one GPU, as kept in browser storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Choice {
@@ -680,10 +692,12 @@ pub fn decide(
 /// and for small ones (attention gates, the p.v product of split
 /// attention), then whether fused attention beats split attention on the
 /// time axis with that matmul choice.  Everything measured takes turns
-/// over three rounds, medians compared.  The candidates were all designed
-/// to do well on any GPU; what is measured is only what varies between
-/// GPUs and cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4
-/// register block wins (register file and scheduling), and whether fused
+/// over three rounds, medians compared; a matmul kernel more than 1.5
+/// times slower than the best after the first round is not timed again
+/// ([`still_in`]).  What is measured is only what varies between GPUs and
+/// cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4 register
+/// block wins (register file and scheduling), whether the compiler keeps
+/// `s64`'s loop-indexed accumulators in registers, and whether fused
 /// attention wins on long sequences.  Takes several seconds.
 pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
     let all = shapes();
@@ -701,9 +715,14 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
         let now = &now;
         async move {
             let mut t = vec![Timing { rounds: Vec::new() }; TILES.len()];
+            let mut alive = gpu.usable.get().to_vec();
             for rd in 0..rounds {
+                if rd == 1 {
+                    let first: Vec<f64> = t.iter().map(Timing::median).collect();
+                    alive = still_in(&first);
+                }
                 for (k, timing) in t.iter_mut().enumerate() {
-                    if !gpu.usable.get()[k] {
+                    if !alive[k] {
                         continue;
                     }
                     let mut total = 0.0;
@@ -812,8 +831,8 @@ mod tests {
     fn kernel_lists() {
         assert_eq!(parse_kernels("1"), None);
         assert_eq!(parse_kernels(""), None);
-        assert_eq!(parse_kernels("i64,i128x64"), Some(vec![0, 1]));
-        assert_eq!(parse_kernels("i64,s64"), None);
+        assert_eq!(parse_kernels("i64,i128x64,s64"), Some(vec![0, 1, 2]));
+        assert_eq!(parse_kernels("i64,v64"), None);
     }
 
     /// Least total per kind; fused attention on the frequency axis when it
@@ -841,7 +860,14 @@ mod tests {
             Choice::parse("i128x64,i64;freq").map(|c| c.name()),
             Some("i128x64,i64;freq".to_string())
         );
-        assert_eq!(Choice::parse("s64;split"), None);
+        assert_eq!(Choice::parse("v64;split"), None);
+    }
+
+    #[test]
+    fn elimination() {
+        let inf = f64::INFINITY;
+        assert_eq!(still_in(&[1.0, 1.4, 6.0]), vec![true, true, false]);
+        assert_eq!(still_in(&[inf, 2.0, 2.9]), vec![false, true, true]);
     }
 
     #[test]
