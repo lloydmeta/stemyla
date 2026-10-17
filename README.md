@@ -11,11 +11,11 @@ It is written in Rust and compiled to WebAssembly, including the GPU code: the s
 Open the published page (for example `https://beachape.com/stemyla/`) in a browser with WebGPU: Chrome or Edge on macOS, Windows or ChromeOS, Safari 26, or Firefox 141 and later on Windows ([status by platform](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)).  It has been tested in Chrome on macOS (a Radeon Pro 5500M and an Intel UHD 630); other browsers should work but are untested.
 
 1. Press **Download model (350 MB)** once.  The page keeps the model in the browser's own storage.
-2. Drop a song (44.1 kHz) on the page, or press **Demo song**.
+2. Press **Open song…** and choose a song (44.1 kHz MP3 or WAV), drop one on the page, or press **Demo song**.  On a phone or tablet, **Open song…** is the way in.
 3. Press **Separate 6 stems**.  On a laptop GPU a 3.5-minute song takes about 7 minutes.
 4. Use **Mute** and **Solo** per lane, the tempo slider, and drag across the bar above the lanes to loop a section.  **Save** on a lane downloads it as WAV or MP3.
 
-Each song you drop, and its stems once separated, stays in the browser, so a reload brings it back.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **About** links to the model, its code and its paper.
+Each song you open, and its stems once separated, stays in the browser, so a reload brings it back.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **Reset…** (also offered when the separation worker stops) fetches the app's files again, bypassing the browser cache, or also deletes everything the page keeps, then reloads: use it when a reload does not help.  **About** links to the model, its code and its paper.
 
 Page options, added to the address: `?selftest` checks the GPU against reference results (when served with the reference files, see below); `?bench` times the GPU kernels (`?bench=i64` only those listed); `?profile=1` logs GPU time per kernel after the self-test or a separation; `?mm=i64` and `?attn=split` (or `fused`, `time`, `freq`) override this GPU's measured kernel choice; `?gpu=integrated` asks for the low-power GPU.
 

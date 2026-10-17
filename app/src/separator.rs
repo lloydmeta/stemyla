@@ -28,11 +28,11 @@ use std::rc::Rc;
 use eframe::egui;
 use js_sys::{Array, Float32Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
-use web_sys::{HtmlInputElement, MessageEvent, Worker, WorkerOptions, WorkerType};
+use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
 /// Written by Trunk's loader shim (`data-loader-shim`, file hashing off).
 /// The worker runs the network with the WGSL kernels of `roformer-gpu`.
-const WORKER_URL: &str = "./stem-worker_loader.js";
+const WORKER_URL: &str = crate::reset::WORKER_LOADER;
 
 pub enum Event {
     ModelLoading,
@@ -54,6 +54,8 @@ pub enum Event {
         secs: f64,
     },
     Error(String),
+    /// The worker died or its script did not load; it never answers again.
+    Stopped(String),
     Log(String),
     Selftest {
         ok: bool,
@@ -74,13 +76,14 @@ pub struct Separator {
     worker: Worker,
     events: Rc<RefCell<VecDeque<Event>>>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
-    _onchange: Option<Closure<dyn FnMut(web_sys::Event)>>,
-    _onerror: Closure<dyn FnMut(web_sys::ErrorEvent)>,
+    _onerror: Closure<dyn FnMut(web_sys::Event)>,
     /// Extra fields sent with every model and separate message.
     settings: Vec<(String, JsValue)>,
     pub model_ready: bool,
     pub model_loading: bool,
     pub running: bool,
+    /// Why the worker stopped, once it has.
+    pub stopped: Option<String>,
     /// (chunks done, chunks total, seconds so far)
     pub progress: (u32, u32, f64),
     pub stems: Vec<(String, Vec<f32>, Vec<f32>)>,
@@ -154,10 +157,11 @@ impl Separator {
         let worker = Worker::new_with_options(WORKER_URL, &opts).map_err(|e| format!("{e:?}"))?;
         let events: Rc<RefCell<VecDeque<Event>>> = Default::default();
         let settings = url_settings();
-        let (ev, w, init) = (
+        let (ev, w, init, repaint) = (
             events.clone(),
             worker.clone(),
             object(&[("type", "init".into())], &settings),
+            ctx.clone(),
         );
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
             let d = e.data();
@@ -220,26 +224,28 @@ impl Separator {
         worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         // A panic inside the worker (for example after the GPU driver
         // aborted a command buffer) ends the worker; tell the user instead
-        // of leaving the progress bar running.
+        // of leaving the progress bar running.  A worker whose script did
+        // not load gets a plain `Event` with no message, not an `ErrorEvent`.
         let ev = events.clone();
-        let onerror =
-            Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |e: web_sys::ErrorEvent| {
-                ev.borrow_mut().push_back(Event::Error(format!(
-                    "the separation worker stopped ({}); reload the page to start a new one",
-                    e.message()
-                )));
-            });
+        let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            let reason = get(&e, "message")
+                .as_string()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "its script did not load".into());
+            ev.borrow_mut().push_back(Event::Stopped(reason));
+            repaint.request_repaint();
+        });
         worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         Ok(Self {
             worker,
             events,
             _onmessage: onmessage,
-            _onchange: None,
             _onerror: onerror,
             settings,
             model_ready: false,
             model_loading: false,
             running: false,
+            stopped: None,
             progress: (0, 0, 0.0),
             stems: Vec::new(),
             selftest_pending: has_param("selftest"),
@@ -266,25 +272,13 @@ impl Separator {
     /// Opens the browser's file picker; the chosen file goes straight to the
     /// worker as a `File`, unread on this thread.
     pub fn pick_model_file(&mut self) {
-        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
-            return;
-        };
-        let Ok(input) = doc
-            .create_element("input")
-            .map(|e| e.unchecked_into::<HtmlInputElement>())
-        else {
-            return;
-        };
-        input.set_type("file");
-        input.set_accept(".safetensors");
         let (worker, settings, events) = (
             self.worker.clone(),
             self.settings.clone(),
             self.events.clone(),
         );
-        let picked = input.clone();
-        let onchange = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-            if let Some(file) = picked.files().and_then(|f| f.get(0)) {
+        crate::picker::pick_files(".safetensors", false, move |files| {
+            if let Some(file) = files.into_iter().next() {
                 let msg = object(
                     &[("type", "model".into()), ("file", file.into())],
                     &settings,
@@ -294,9 +288,16 @@ impl Separator {
                 }
             }
         });
-        input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
-        self._onchange = Some(onchange);
-        input.click();
+    }
+
+    /// Ends the worker at once, for example before its stored files are
+    /// deleted.
+    pub fn stop(&mut self) {
+        self.worker.terminate();
+        self.running = false;
+        self.model_loading = false;
+        self.stopped
+            .get_or_insert_with(|| "stopped for a reset".into());
     }
 
     /// Asks the worker to download the model (from Hugging Face unless
