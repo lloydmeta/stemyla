@@ -2,9 +2,12 @@
 //!
 //! Trunk writes fixed file names (`filehash = false` in `Trunk.toml`), and
 //! the site's CDN may let the browser keep `.js` files much longer than
-//! `.wasm` files.  After a new version is published, a browser can then hold
-//! the old wasm-bindgen glue next to the new wasm, which fails to start on
-//! every reload.  Refreshing the files fetches each one again with
+//! `.wasm` files.  `xtask publish` therefore puts every build in its own
+//! folder, so one build's glue never meets another's wasm.  A browser can
+//! still be left with a broken page: corrupt stored data, a page held too
+//! long if the CDN setup changes, or files from a build pruned while its
+//! tab was open (the files then fail to fetch, and a reload loads the new
+//! page).  Refreshing the files fetches each one again with
 //! `cache: "reload"`, which bypasses the HTTP cache and stores the fresh
 //! copy.  Deleting stored data also clears this site's private file system
 //! (OPFS): the model, the kernel choice and the kept songs.
@@ -334,5 +337,27 @@ mod tests {
                 "./stem-worker_bg.wasm"
             ]
         );
+    }
+
+    /// `WORKER_FILES` are relative, so the page must carry Trunk's base tag:
+    /// a published build then starts the worker from its own folder,
+    /// `v/<id>/`, even when it is served as the site's root page.  The tag
+    /// must come before anything that resolves a URL.
+    #[test]
+    fn index_html_sets_the_base_to_the_public_url() {
+        let lines: Vec<&str> = include_str!("../index.html")
+            .lines()
+            .map(str::trim)
+            .collect();
+        // A line of its own, so not inside a comment.
+        let base = lines
+            .iter()
+            .position(|l| *l == "<base data-trunk-public-url />")
+            .expect("<base data-trunk-public-url /> on a line of its own in index.html");
+        let first_url = lines
+            .iter()
+            .position(|l| l.starts_with("<link") || l.starts_with("<script"))
+            .expect("links in index.html");
+        assert!(base < first_url, "the base tag must precede every link");
     }
 }
