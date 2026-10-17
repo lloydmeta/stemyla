@@ -7,6 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 #[cfg(target_arch = "wasm32")]
+pub mod picker;
+pub mod reset;
+#[cfg(target_arch = "wasm32")]
 pub mod separator;
 pub mod spectrogram;
 #[cfg(target_arch = "wasm32")]
@@ -121,6 +124,45 @@ pub fn about_menu(ui: &mut egui::Ui) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3 files), or press Demo song.";
+#[cfg(target_arch = "wasm32")]
+const WELCOME: &str =
+    "Press Open song… (or drop a song, or several WAV/MP3 stems, on the page), or press Demo song.";
+
+/// What the song picker offers: the formats `engine` decodes, as
+/// extensions, since iOS Safari treats `audio/*` as video (WebKit bug
+/// 242110).
+#[cfg(target_arch = "wasm32")]
+const SONG_FILES: &str = ".mp3,.wav";
+
+/// Decodes files the user chose and keeps them in browser storage, so a
+/// reload brings the song back.  The result arrives through the inbox.
+#[cfg(target_arch = "wasm32")]
+async fn load_and_keep(
+    files: Vec<(String, Vec<u8>)>,
+    pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
+    ctx: egui::Context,
+) {
+    let song = Song::load_files(files.clone());
+    if let Ok(s) = &song {
+        let session = match store::save_sources(&files, s.sample_rate).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                log::warn!("song not kept in browser storage: {e:#}");
+                None
+            }
+        };
+        if let Some(id) = &session {
+            log::info!("song kept in browser storage as session {id}");
+        }
+        pending.borrow_mut().session = Some(session);
+    }
+    pending.borrow_mut().song = Some(song);
+    ctx.request_repaint();
+    refresh_storage(&pending).await;
+}
+
 /// Columns of peak data kept per lane; drawing re-aggregates to pixels.
 const COLUMNS: usize = 4096;
 const LANE_HEIGHT: f32 = 64.0;
@@ -190,6 +232,9 @@ pub struct StemApp {
     /// The stem separation worker (web only).
     #[cfg(target_arch = "wasm32")]
     separator: Option<separator::Separator>,
+    /// The Reset dialog is showing.
+    #[cfg(target_arch = "wasm32")]
+    reset_open: bool,
 }
 
 impl Default for StemApp {
@@ -200,7 +245,7 @@ impl Default for StemApp {
             lanes: Vec::new(),
             lane_rects: Vec::new(),
             loop_bar_rect: None,
-            status: "Drop a folder of stems (or several WAV/MP3 files), or press Demo song.".into(),
+            status: WELCOME.into(),
             output: None,
             tempo_pct: 100.0,
             show_spectrograms: false,
@@ -224,6 +269,8 @@ impl Default for StemApp {
             sessions: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             separator: None,
+            #[cfg(target_arch = "wasm32")]
+            reset_open: false,
         }
     }
 }
@@ -618,30 +665,55 @@ impl StemApp {
                         }
                     }
                 }
-                let song = Song::load_files(files.clone());
-                if let Ok(s) = &song {
-                    // Keep the song in browser storage, so a reload brings it back.
-                    let session = match store::save_sources(&files, s.sample_rate).await {
-                        Ok(id) => Some(id),
-                        Err(e) => {
-                            log::warn!("song not kept in browser storage: {e:#}");
-                            None
-                        }
-                    };
-                    if let Some(id) = &session {
-                        log::info!("song kept in browser storage as session {id}");
-                    }
-                    pending.borrow_mut().session = Some(session);
-                }
-                pending.borrow_mut().song = Some(song);
-                ctx.request_repaint();
-                refresh_storage(&pending).await;
+                load_and_keep(files, pending, ctx).await;
             });
         }
     }
 
+    /// "Open song…": the browser's file picker, the way to load a song on
+    /// a phone or tablet.  Several files load as stems of one song, as a
+    /// multi-file drop does.
+    #[cfg(target_arch = "wasm32")]
+    fn pick_song(&mut self, ctx: &egui::Context) {
+        let (pending, ctx) = (self.pending.clone(), ctx.clone());
+        picker::pick_files(SONG_FILES, true, move |chosen| {
+            if chosen.is_empty() {
+                return;
+            }
+            {
+                let mut inbox = pending.borrow_mut();
+                inbox.status = Some(format!("Reading {} files…", chosen.len()));
+                inbox.name = chosen.first().map(|f| store_meta::file_title(&f.name()));
+            }
+            ctx.request_repaint();
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut files = Vec::new();
+                for f in &chosen {
+                    match picker::read(f).await {
+                        Ok(b) => files.push((f.name(), b)),
+                        Err(e) => {
+                            pending.borrow_mut().song = Some(Err(anyhow::anyhow!(e)));
+                            ctx.request_repaint();
+                            return;
+                        }
+                    }
+                }
+                load_and_keep(files, pending, ctx).await;
+            });
+        });
+    }
+
     fn transport(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
+            #[cfg(target_arch = "wasm32")]
+            if ui
+                .button("Open song…")
+                .on_hover_text("Choose an MP3 or WAV file, or several stems of one song")
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                self.pick_song(&ctx);
+            }
             if ui.button("Demo song").clicked() {
                 self.load_demo();
             }
@@ -705,6 +777,17 @@ impl StemApp {
         let Some(sep) = &mut self.separator else {
             return;
         };
+        if sep.stopped.is_some() {
+            ui.colored_label(ui.visuals().error_fg_color, "Separation stopped");
+            if ui
+                .button("Reset…")
+                .on_hover_text("For when reloading the page does not bring separation back")
+                .clicked()
+            {
+                self.reset_open = true;
+            }
+            return;
+        }
         if sep.running {
             let (done, total, secs) = sep.progress;
             let frac = if total > 0 {
@@ -800,7 +883,7 @@ impl StemApp {
             ));
             ui.separator();
             if self.sessions.is_empty() {
-                ui.label("No songs kept yet: drop one on the page.");
+                ui.label("No songs kept yet: open or drop one.");
             }
             for (id, meta) in &self.sessions {
                 ui.horizontal(|ui| {
@@ -828,6 +911,14 @@ impl StemApp {
                 if let Some(sep) = &mut self.separator {
                     sep.forget_model();
                 }
+                ui.close();
+            }
+            if ui
+                .button("Reset…")
+                .on_hover_text("Fetch this app's files again, or delete everything it keeps, then reload")
+                .clicked()
+            {
+                self.reset_open = true;
                 ui.close();
             }
         });
@@ -863,6 +954,30 @@ impl StemApp {
                 );
                 refresh_storage(&pending).await;
             });
+        }
+    }
+
+    /// The Reset dialog, while open; a choice stops the worker, does the
+    /// reset and reloads the page.
+    #[cfg(target_arch = "wasm32")]
+    fn reset_dialog(&mut self, ctx: &egui::Context) {
+        if !self.reset_open {
+            return;
+        }
+        let reason = self.separator.as_ref().and_then(|s| s.stopped.clone());
+        let stored_mb = self.usage.0 / 1e6;
+        match reset::dialog(ctx, reason.as_deref(), self.sessions.len(), stored_mb) {
+            reset::DialogOutcome::Open => {}
+            reset::DialogOutcome::Cancelled => self.reset_open = false,
+            reset::DialogOutcome::Chosen(choice) => {
+                self.reset_open = false;
+                self.output = None;
+                if let Some(sep) = &mut self.separator {
+                    sep.stop();
+                }
+                self.status = "Resetting, then reloading the page…".into();
+                wasm_bindgen_futures::spawn_local(reset::run(choice));
+            }
         }
     }
 
@@ -932,6 +1047,16 @@ impl StemApp {
                     sep.model_loading = false;
                     log::error!("separator: {text}");
                     self.status = format!("Separation failed: {text}");
+                }
+                Event::Stopped(reason) => {
+                    sep.running = false;
+                    sep.model_loading = false;
+                    sep.download = None;
+                    log::error!("separator: the worker stopped: {reason}");
+                    self.status = format!(
+                        "The separation worker stopped ({reason}).  Reload the page; if that does not help, press Reset…"
+                    );
+                    sep.stopped = Some(reason);
                 }
             }
         }
@@ -1236,6 +1361,8 @@ impl eframe::App for StemApp {
             ui.add_space(4.0);
         });
         egui::CentralPanel::default().show(ui, |ui| self.lanes_view(ui));
+        #[cfg(target_arch = "wasm32")]
+        self.reset_dialog(&ctx);
         if self.is_playing() {
             ctx.request_repaint();
         }
