@@ -331,6 +331,7 @@ pub async fn measure(
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
 ) -> Vec<Vec<Timing>> {
+    let recording = gpu.set_recording(false);
     let b = buffers(gpu);
     let run: Vec<bool> = (0..TILES.len())
         .map(|t| gpu.usable.get()[t] && only.is_none_or(|o| o.contains(&t)))
@@ -376,6 +377,7 @@ pub async fn measure(
     if let Some(e) = gpu.take_errors().into_iter().next() {
         log(format!("bench: WebGPU error: {e}"));
     }
+    gpu.set_recording(recording);
     table
 }
 
@@ -540,6 +542,7 @@ pub async fn attention_per_chunk(
     rounds: usize,
     now: &impl Fn() -> f64,
 ) -> ((Timing, Timing), (Timing, Timing)) {
+    let recording = gpu.set_recording(false);
     let b = attn_bufs(gpu);
     let empty = || Timing { rounds: Vec::new() };
     let (mut ts, mut tf, mut fs, mut ff) = (empty(), empty(), empty(), empty());
@@ -576,6 +579,7 @@ pub async fn attention_per_chunk(
             );
         }
     }
+    gpu.set_recording(recording);
     ((ts, tf), (fs, ff))
 }
 
@@ -626,12 +630,23 @@ pub fn parse_kernels(list: &str) -> Option<Vec<usize>> {
 /// Which candidates stay in after the first round of [`calibrate`]: those
 /// within 1.5 times the fastest.  A kernel several times slower on this
 /// GPU (`s64` without loop unrolling) costs no more measuring time, and
-/// keeps its one-round time, so it is never chosen.
+/// [`masked_medians`] keeps it from being chosen.
 pub fn still_in(first: &[f64]) -> Vec<bool> {
     let best = first.iter().copied().fold(f64::INFINITY, f64::min);
     first
         .iter()
         .map(|&x| x.is_finite() && x <= 1.5 * best)
+        .collect()
+}
+
+/// Medians to choose from: infinite for a kernel dropped after the first
+/// round (or never timed), so only kernels timed every round can win.  A
+/// dropped kernel's single early time must not beat a survivor whose
+/// later rounds ran slower, as a GPU warming up does.
+pub fn masked_medians(t: &[Timing], alive: &[bool]) -> Vec<f64> {
+    t.iter()
+        .zip(alive)
+        .map(|(t, &a)| if a { t.median() } else { f64::INFINITY })
         .collect()
 }
 
@@ -733,28 +748,41 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
                     timing.rounds.push(total);
                 }
             }
-            t.iter().map(Timing::median).collect::<Vec<f64>>()
+            (masked_medians(&t, &alive), t)
         }
     };
-    let l = secs(large.to_vec()).await;
-    let s = secs(small.to_vec()).await;
+    let recording = gpu.set_recording(false);
+    let (l, lt) = secs(large.to_vec()).await;
+    let (s, st) = secs(small.to_vec()).await;
     let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
     gpu.policy.set(matmul);
     let ((ts, tf), _) = attention_per_chunk(gpu, warm, round, rounds, &now).await;
     let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
-    let fmt = |v: &[f64]| {
+    gpu.set_recording(recording);
+    let fmt = |v: &[f64], t: &[Timing]| {
         TILES
             .iter()
-            .zip(v)
-            .map(|(t, x)| format!("{} {x:.2} s", t.name))
+            .zip(v.iter().zip(t))
+            .map(|(tile, (x, tm))| {
+                if x.is_finite() {
+                    format!("{} {x:.2} s", tile.name)
+                } else if tm.rounds.is_empty() {
+                    format!("{} not used", tile.name)
+                } else {
+                    format!(
+                        "{} {:.2} s, dropped after one round",
+                        tile.name, tm.rounds[0]
+                    )
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
     log(format!(
         "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s, fused {:.2} s per chunk)",
         choice.matmul.name(),
-        fmt(&l),
-        fmt(&s),
+        fmt(&l, &lt),
+        fmt(&s, &st),
         choice.attention.name(),
         ts.median(),
         tf.median()
@@ -861,6 +889,23 @@ mod tests {
             Some("i128x64,i64;freq".to_string())
         );
         assert_eq!(Choice::parse("v64;split"), None);
+    }
+
+    /// First rounds 1.0 and 1.6 drop the second kernel; the survivor's
+    /// later rounds slow to 1.8, yet the dropped kernel cannot win.
+    #[test]
+    fn dropped_kernels_cannot_win() {
+        let t = [
+            Timing {
+                rounds: vec![1.0, 1.8, 1.8],
+            },
+            Timing { rounds: vec![1.6] },
+        ];
+        let alive = still_in(&[1.0, 1.6]);
+        let m = masked_medians(&t, &alive);
+        assert_eq!(m, vec![1.8, f64::INFINITY]);
+        let c = decide(&m, &m, 1.0, 2.0, true);
+        assert_eq!(c.matmul, MatMulPolicy::Split { large: 0, small: 0 });
     }
 
     #[test]

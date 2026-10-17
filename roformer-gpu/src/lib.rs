@@ -404,6 +404,9 @@ pub struct Gpu {
     errors: Arc<Mutex<Vec<String>>>,
     /// GPU timestamps per dispatch, on a device opened for profiling.
     prof: Option<Prof>,
+    /// Whether profiled submissions record timestamps now; benchmarks
+    /// and calibration turn it off (see [`Gpu::set_recording`]).
+    recording: std::cell::Cell<bool>,
 }
 
 /// Timestamp queries around every dispatch of a profiled [`Gpu`].  Each
@@ -658,6 +661,7 @@ impl Gpu {
             uniforms,
             errors,
             prof,
+            recording: std::cell::Cell::new(true),
         }
     }
 
@@ -698,6 +702,29 @@ impl Gpu {
             drop(view);
             staging.unmap();
         }
+        Ok(())
+    }
+
+    /// Turns timestamp recording on a profiling device on or off and
+    /// returns the previous setting.  Benchmarks and calibration turn it
+    /// off: they submit many command buffers without collecting their
+    /// timestamps, which would otherwise pile up as readback buffers and
+    /// land in the next run's report.
+    pub fn set_recording(&self, on: bool) -> bool {
+        self.recording.replace(on)
+    }
+
+    /// Starts a fresh profile: waits for submitted work, reads back any
+    /// timestamps not yet collected (start-up checks, earlier runs) and
+    /// discards the totals, so a report covers only what follows.  Does
+    /// nothing on a device that is not profiling.
+    pub async fn reset_profile(&self) -> Result<(), String> {
+        if self.prof.is_none() {
+            return Ok(());
+        }
+        self.done().await;
+        self.collect_profile().await?;
+        self.take_profile();
         Ok(())
     }
 
@@ -1271,7 +1298,7 @@ impl Rec<'_> {
             Kernel::Transpose => &k.transpose,
             Kernel::Glu => &k.glu,
         };
-        if let Some(prof) = &gpu.prof {
+        if let Some(prof) = gpu.prof.as_ref().filter(|_| gpu.recording.get()) {
             // One pass per dispatch, timestamped at both ends.
             for (i, (kernel, bg, [x, y, z])) in self.cmds.iter().enumerate() {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {

@@ -468,6 +468,8 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
     let overlap = get(msg, "overlap").as_f64().map_or(OVERLAP, |v| v as usize);
     let t0 = now_s();
     let mut d = Demixer::new([left.to_vec(), right.to_vec()], chunk, overlap, STEMS.len());
+    // The report after the song covers this separation only.
+    gpu.reset_profile().await?;
     let mut pace = Pace::new(msg);
     let total = d.num_chunks();
     post(
@@ -691,7 +693,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
             let (_, want) = tensor_f32(&ct, "stems")?;
             let n = ashape[1];
             let t0 = now_s();
-            gpu.take_profile();
+            gpu.reset_profile().await?;
             let (spec, feats) = analyse(&[audio[..n].to_vec(), audio[n..].to_vec()]);
             let job = Job::new(&gpu, &net, feats.len() / FEATURES);
             let mut pace = Pace::new(msg);

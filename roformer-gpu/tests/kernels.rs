@@ -687,3 +687,41 @@ fn check_attention_accepts_all() {
     assert_eq!(problem, None);
     assert!(g.fused_ok.get());
 }
+
+/// With recording off (benchmarks, calibration) a profiling device keeps
+/// no timestamps, and `reset_profile` drops whatever was recorded before,
+/// collected or not, so a report covers only what follows.
+#[test]
+fn profile_recording_and_reset() {
+    let Ok(g) = pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
+    else {
+        eprintln!("skipping: no adapter");
+        return;
+    };
+    if !g.profiling() {
+        eprintln!("skipping: adapter without timestamp-query");
+        return;
+    }
+    let x = g.upload("x", &rand(64 * 64, 3));
+    let softmax = |g: &Gpu| {
+        let mut r = g.rec();
+        r.softmax(&x, 64, 64);
+        r.submit();
+    };
+    assert!(g.set_recording(false));
+    softmax(&g);
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert!(g.take_profile().is_empty(), "nothing recorded while off");
+    assert!(!g.set_recording(true));
+    // Recorded but never collected: reset reads it back and drops it.
+    softmax(&g);
+    pollster::block_on(g.reset_profile()).unwrap();
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert!(g.take_profile().is_empty(), "reset leaves nothing behind");
+    softmax(&g);
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(1));
+    assert!(g.take_errors().is_empty());
+}
