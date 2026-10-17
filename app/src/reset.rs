@@ -345,14 +345,18 @@ mod tests {
     /// must come before anything that resolves a URL.
     #[test]
     fn index_html_sets_the_base_to_the_public_url() {
-        let index = include_str!("../index.html");
-        let base = index
-            .find("<base data-trunk-public-url")
-            .expect("<base data-trunk-public-url /> in index.html");
-        let first_url = ["<link", "<script"]
+        let lines: Vec<&str> = include_str!("../index.html")
+            .lines()
+            .map(str::trim)
+            .collect();
+        // A line of its own, so not inside a comment.
+        let base = lines
             .iter()
-            .filter_map(|tag| index.find(tag))
-            .min()
+            .position(|l| *l == "<base data-trunk-public-url />")
+            .expect("<base data-trunk-public-url /> on a line of its own in index.html");
+        let first_url = lines
+            .iter()
+            .position(|l| l.starts_with("<link") || l.starts_with("<script"))
             .expect("links in index.html");
         assert!(base < first_url, "the base tag must precede every link");
     }

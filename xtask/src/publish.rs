@@ -4,6 +4,7 @@
 //! ```text
 //! cargo run -p xtask --release -- publish [--public-url /stemyla/] [--remote origin]
 //!                                         [--branch gh-pages] [--no-push] [--allow-dirty]
+//!                                         [--skip-if-behind main]
 //! ```
 //!
 //! Every build lives in its own folder, `v/<id>/`, which is written once
@@ -26,16 +27,20 @@
 //! 1. Refuses to run with uncommitted changes (`--allow-dirty` overrides),
 //!    so every published site maps to a commit.  The build id is the
 //!    commit's 12-character hash, plus `-dirty-<unix seconds>` for a dirty
-//!    tree.
+//!    tree.  With `--skip-if-behind <branch>` (used by CI), publishes
+//!    nothing unless HEAD is still that branch's tip on the remote, so a
+//!    re-run of an old CI run cannot roll the site back.
 //! 2. `trunk build --release --public-url <url>v/<id>/` into
 //!    `target/pages/v/<id>`, and checks the result: the page, both wasm
 //!    modules, the worker loader, and the base and asset paths under the
 //!    build's URL.
 //! 3. Fetches the branch from the remote if it exists there.  Then adds the
 //!    newest [`KEPT_BUILDS`] builds: the new one, and the older ones from
-//!    the branch, byte for byte.  A build id the branch already has keeps
-//!    its published copy.  Older builds are dropped.  Writes the root
-//!    `index.html`, `v/VERSIONS` and `.nojekyll`.
+//!    the branch, byte for byte.  A build id the branch has ever published
+//!    keeps its published copy, even if it was pruned since.  Older builds
+//!    are dropped.  Writes the root `index.html`, `v/VERSIONS` and
+//!    `.nojekyll`, and checks the new id's build again (it may be the
+//!    published copy).
 //! 4. Commits the result as the branch's whole content, with the previous
 //!    publish as parent.  This uses git's plumbing (temporary indexes,
 //!    `read-tree`, `checkout-index`, `write-tree`, `commit-tree`,
@@ -63,6 +68,8 @@ pub struct Options {
     pub branch: String,
     pub push: bool,
     pub allow_dirty: bool,
+    /// Publish nothing unless HEAD is still this branch's tip on the remote.
+    pub skip_if_behind: Option<String>,
 }
 
 impl Options {
@@ -73,6 +80,7 @@ impl Options {
             branch: "gh-pages".into(),
             push: true,
             allow_dirty: false,
+            skip_if_behind: None,
         };
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -87,8 +95,9 @@ impl Options {
                 "--branch" => o.branch = value("--branch")?,
                 "--no-push" => o.push = false,
                 "--allow-dirty" => o.allow_dirty = true,
+                "--skip-if-behind" => o.skip_if_behind = Some(value("--skip-if-behind")?),
                 other => bail!(
-                    "unknown option {other}; usage: xtask publish [--public-url /stemyla/] [--remote origin] [--branch gh-pages] [--no-push] [--allow-dirty]"
+                    "unknown option {other}; usage: xtask publish [--public-url /stemyla/] [--remote origin] [--branch gh-pages] [--no-push] [--allow-dirty] [--skip-if-behind main]"
                 ),
             }
         }
@@ -137,6 +146,15 @@ pub fn main(args: &[String]) -> Result<()> {
         );
     }
     let head = git(&repo, &["rev-parse", "HEAD"])?;
+    if let Some(source) = &o.skip_if_behind
+        && let Some(tip) = moved_on(&repo, &o.remote, source, &head)?
+    {
+        println!(
+            "not publishing {head}: {source} on {} is at {tip}, and only its tip is published (so re-running an old run cannot roll the site back)",
+            o.remote
+        );
+        return Ok(());
+    }
     let dirty_at = if dirty.is_empty() {
         None
     } else {
@@ -175,6 +193,25 @@ pub fn main(args: &[String]) -> Result<()> {
     let message = format!("Publish {id} at {}", o.public_url);
     deploy(&repo, &site, &o, &id, &message)?;
     Ok(())
+}
+
+/// The commit `branch` points at on `remote`, if that is not `head`.  A CI
+/// run re-run after newer pushes builds its original commit, which this
+/// tells apart from the branch's current tip.
+pub fn moved_on(repo: &Path, remote: &str, branch: &str, head: &str) -> Result<Option<String>> {
+    let full_ref = format!("refs/heads/{branch}");
+    let listed = git(repo, &["ls-remote", "--exit-code", remote, &full_ref])
+        .with_context(|| format!("could not find {branch} on {remote}"))?;
+    // "<object> TAB <ref>" per line; the pattern also matches longer refs
+    // that end in it.
+    let Some(tip) = listed
+        .lines()
+        .find_map(|l| l.split_once('\t').filter(|(_, r)| *r == full_ref))
+        .map(|(tip, _)| tip)
+    else {
+        bail!("{remote} has no {full_ref}");
+    };
+    Ok((tip != head).then(|| tip.to_string()))
 }
 
 /// Checks that `id` can name a folder under `v/`: non-empty, and only
@@ -230,6 +267,14 @@ pub fn kept_ids(new: &str, published: &[String]) -> Vec<String> {
     kept
 }
 
+/// A build copied from the branch's history into the site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopiedBuild {
+    pub id: String,
+    /// A commit of the branch that holds `v/<id>/` as it was published.
+    pub from: String,
+}
+
 /// What [`prepare_site`] found on the branch and did to the site.
 #[derive(Debug)]
 pub struct Prepared {
@@ -238,10 +283,10 @@ pub struct Prepared {
     pub parent: Option<String>,
     /// The builds now in `v/`, newest first, as written to `v/VERSIONS`.
     pub kept: Vec<String>,
-    /// The builds copied from `parent`, which must stay byte for byte.
-    pub from_branch: Vec<String>,
-    /// Whether the new id was already published, so its published copy
-    /// replaced the fresh build.
+    /// The builds copied from the branch, which must stay byte for byte.
+    pub copied: Vec<CopiedBuild>,
+    /// Whether the new id was published before (even if since pruned), so
+    /// its published copy replaced the fresh build.
     pub reused: bool,
 }
 
@@ -251,9 +296,9 @@ pub struct Prepared {
 /// `v/VERSIONS` and `.nojekyll`.
 ///
 /// A published `v/<id>/` is never changed, because browsers may hold its
-/// files for a month: if the branch already has `v/<id>/`, for example
-/// when CI publishes the same commit again, its copy replaces the fresh
-/// build.
+/// files for a month: if the branch's history has ever had `v/<id>/`, for
+/// example when CI publishes the same commit again, that copy replaces the
+/// fresh build, even if it was pruned since.
 pub fn prepare_site(repo: &Path, site: &Path, branch: &str, id: &str) -> Result<Prepared> {
     check_id(id)?;
     if dir_names(site)? != ["v"] || dir_names(&site.join("v"))? != [id] {
@@ -263,41 +308,53 @@ pub fn prepare_site(repo: &Path, site: &Path, branch: &str, id: &str) -> Result<
         );
     }
     let parent = branch_commit(repo, branch);
-    let published = match &parent {
+    let Some(p) = &parent else {
+        return finish_site(site, id, None, vec![id.to_string()], Vec::new(), false);
+    };
+    let published = match object_type(repo, p, "v/VERSIONS")?.as_deref() {
         None => Vec::new(),
-        Some(p) => match object_type(repo, p, "v/VERSIONS")?.as_deref() {
-            None => Vec::new(),
-            Some("blob") => parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?,
-            Some(other) => bail!("{branch}:v/VERSIONS is a {other}, not a file"),
-        },
+        Some("blob") => parse_versions(&git(repo, &["show", &format!("{p}:v/VERSIONS")])?)?,
+        Some(other) => bail!("{branch}:v/VERSIONS is a {other}, not a file"),
     };
-    let reused = match &parent {
-        None => false,
-        Some(p) => object_type(repo, p, &format!("v/{id}"))?.is_some(),
-    };
+    let earlier = published_in_history(repo, p, id)?;
     let kept = kept_ids(id, &published);
-    let from_branch: Vec<String> = kept
-        .iter()
-        .filter(|k| reused || k.as_str() != id)
-        .cloned()
-        .collect();
-
-    if let Some(p) = &parent
-        && !from_branch.is_empty()
-    {
-        for k in &from_branch {
-            if object_type(repo, p, &format!("v/{k}"))?.as_deref() != Some("tree") {
-                bail!("{branch} lists build {k} in v/VERSIONS but has no folder v/{k}/");
+    let mut copied = Vec::new();
+    for k in &kept {
+        if k == id {
+            if let Some(from) = &earlier {
+                copied.push(CopiedBuild {
+                    id: k.clone(),
+                    from: from.clone(),
+                });
             }
+        } else if object_type(repo, p, &format!("v/{k}"))?.as_deref() == Some("tree") {
+            copied.push(CopiedBuild {
+                id: k.clone(),
+                from: p.clone(),
+            });
+        } else {
+            bail!("{branch} lists build {k} in v/VERSIONS but has no folder v/{k}/");
         }
-        if reused {
-            let fresh = site.join("v").join(id);
-            std::fs::remove_dir_all(&fresh)
-                .with_context(|| format!("removing {}", fresh.display()))?;
-        }
-        check_out_builds(repo, site, p, &from_branch)?;
     }
+    let reused = earlier.is_some();
+    if reused {
+        let fresh = site.join("v").join(id);
+        std::fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))?;
+    }
+    check_out_builds(repo, site, &copied)?;
+    finish_site(site, id, parent, kept, copied, reused)
+}
 
+/// Writes the root `index.html`, `v/VERSIONS` and `.nojekyll` once `v/`
+/// holds every kept build.
+fn finish_site(
+    site: &Path,
+    id: &str,
+    parent: Option<String>,
+    kept: Vec<String>,
+    copied: Vec<CopiedBuild>,
+    reused: bool,
+) -> Result<Prepared> {
     std::fs::copy(
         site.join("v").join(id).join("index.html"),
         site.join("index.html"),
@@ -308,25 +365,43 @@ pub fn prepare_site(repo: &Path, site: &Path, branch: &str, id: &str) -> Result<
     Ok(Prepared {
         parent,
         kept,
-        from_branch,
+        copied,
         reused,
     })
 }
 
-/// Writes `v/<id>/` of `commit` into `site` for each id, through a
+/// The newest commit in `commit`'s history that holds `v/<id>/`, if any.
+/// A folder is only ever added whole and later removed whole, so the
+/// commits that touch it alternate between having it and not; the first
+/// one that has it is its published state.
+fn published_in_history(repo: &Path, commit: &str, id: &str) -> Result<Option<String>> {
+    let path = format!("v/{id}");
+    let touching = git(repo, &["rev-list", commit, "--", &path])?;
+    for c in touching.lines() {
+        if object_type(repo, c, &path)?.as_deref() == Some("tree") {
+            return Ok(Some(c.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Writes each build's `v/<id>/` from its commit into `site`, through a
 /// temporary index, so neither the checkout nor its index changes and no
 /// hooks run.
-fn check_out_builds(repo: &Path, site: &Path, commit: &str, ids: &[String]) -> Result<()> {
+fn check_out_builds(repo: &Path, site: &Path, builds: &[CopiedBuild]) -> Result<()> {
+    if builds.is_empty() {
+        return Ok(());
+    }
     with_temp_index(repo, "publish-kept-index", |_, index| {
         let envs: [(&str, &Path); 1] = [("GIT_INDEX_FILE", index)];
-        for k in ids {
+        for b in builds {
             run(
                 repo,
                 "git",
                 &[
                     "read-tree",
-                    &format!("--prefix=v/{k}/"),
-                    &format!("{commit}:v/{k}"),
+                    &format!("--prefix=v/{}/", b.id),
+                    &format!("{}:v/{}", b.from, b.id),
                 ],
                 &envs,
             )?;
@@ -338,17 +413,17 @@ fn check_out_builds(repo: &Path, site: &Path, commit: &str, ids: &[String]) -> R
 }
 
 /// Fails unless each build copied from the branch has the same tree in
-/// `tree` as in the branch's commit: proof that publishing left it as it
-/// was.
+/// `tree` as where it was copied from: proof that publishing left it as it
+/// was published.
 pub fn check_kept_builds(repo: &Path, tree: &str, prepared: &Prepared) -> Result<()> {
-    let Some(parent) = &prepared.parent else {
-        return Ok(());
-    };
-    for k in &prepared.from_branch {
-        let before = git(repo, &["rev-parse", &format!("{parent}:v/{k}")])?;
-        let after = git(repo, &["rev-parse", &format!("{tree}:v/{k}")])?;
+    for b in &prepared.copied {
+        let before = git(repo, &["rev-parse", &format!("{}:v/{}", b.from, b.id)])?;
+        let after = git(repo, &["rev-parse", &format!("{tree}:v/{}", b.id)])?;
         if before != after {
-            bail!("publishing would change the published build v/{k}/ ({before} -> {after})");
+            bail!(
+                "publishing would change the published build v/{}/ ({before} -> {after})",
+                b.id
+            );
         }
     }
     Ok(())
@@ -421,10 +496,15 @@ pub fn deploy(
     let prepared = prepare_site(repo, site, &o.branch, id)?;
     if prepared.reused {
         println!(
-            "{} already has v/{id}/; keeping its published copy, not this build",
+            "{} published v/{id}/ before; keeping that copy, not this build",
             o.branch
         );
     }
+    // Also covers a reused copy, which may have been built for another URL.
+    check_build(
+        &site.join("v").join(id),
+        &format!("{}v/{id}/", o.public_url),
+    )?;
     println!("builds in v/: {}", prepared.kept.join(", "));
     let tree = write_tree(repo, site)?;
     check_kept_builds(repo, &tree, &prepared)?;

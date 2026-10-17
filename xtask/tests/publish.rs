@@ -5,18 +5,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::publish::{
-    KEPT_BUILDS, Options, Prepared, build_id, check_build, check_id, check_kept_builds, commit_dir,
-    deploy, kept_ids, parse_versions, prepare_site,
+    CopiedBuild, KEPT_BUILDS, Options, Prepared, build_id, check_build, check_id,
+    check_kept_builds, commit_dir, deploy, kept_ids, moved_on, parse_versions, prepare_site,
 };
+
+/// A committer identity, and no user or system git config (which may sign
+/// commits with gpg or set filters), for every git command the tests run.
+const GIT_ENV: [(&str, &str); 6] = [
+    ("GIT_AUTHOR_NAME", "t"),
+    ("GIT_AUTHOR_EMAIL", "t@example.com"),
+    ("GIT_COMMITTER_NAME", "t"),
+    ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+];
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@example.com")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .envs(GIT_ENV)
         .output()
         .unwrap();
     assert!(
@@ -27,15 +35,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// A committer identity for the git commands `xtask::publish` runs (every
-/// test sets the same values, so running them in parallel is harmless).
+/// [`GIT_ENV`] for the git commands `xtask::publish` runs (every test sets
+/// the same values, so running them in parallel is harmless).
 fn identity() {
-    for (k, v) in [
-        ("GIT_AUTHOR_NAME", "t"),
-        ("GIT_AUTHOR_EMAIL", "t@example.com"),
-        ("GIT_COMMITTER_NAME", "t"),
-        ("GIT_COMMITTER_EMAIL", "t@example.com"),
-    ] {
+    for (k, v) in GIT_ENV {
         // SAFETY: tests only read these through child processes.
         unsafe { std::env::set_var(k, v) };
     }
@@ -89,6 +92,11 @@ fn site(dir: &Path, version: &str) {
 /// A fresh site directory as `xtask publish` hands it to `deploy`: only
 /// one Trunk build, in `v/<id>/`, built for `/stemyla/v/<id>/`.
 fn versioned_site(root: &Path, id: &str, version: &str) -> PathBuf {
+    versioned_site_for(root, "/stemyla/", id, version)
+}
+
+/// The same, built for `<public_url>v/<id>/`.
+fn versioned_site_for(root: &Path, public_url: &str, id: &str, version: &str) -> PathBuf {
     let site = root.join(format!("site-{id}-{version}"));
     let _ = std::fs::remove_dir_all(&site);
     let build = site.join("v").join(id);
@@ -96,7 +104,7 @@ fn versioned_site(root: &Path, id: &str, version: &str) -> PathBuf {
     std::fs::write(
         build.join("index.html"),
         format!(
-            "<base href=\"/stemyla/v/{id}/\" /><script src=\"/stemyla/v/{id}/app.js\"></script>{version}"
+            "<base href=\"{public_url}v/{id}/\" /><script src=\"{public_url}v/{id}/app.js\"></script>{version}"
         ),
     )
     .unwrap();
@@ -260,6 +268,14 @@ fn keeps_the_newest_three_builds() {
     let mut parent = commit_dir(&r, &flat, "gh-pages", "Publish flat")
         .unwrap()
         .unwrap();
+    let checkout = |r: &Path| {
+        (
+            git(r, &["status", "--porcelain"]),
+            git(r, &["rev-parse", "HEAD"]),
+            git(r, &["symbolic-ref", "HEAD"]),
+        )
+    };
+    let before = checkout(&r);
     let ids = [
         "0123456789ab",
         "bbbbbbbbbbbb",
@@ -316,6 +332,153 @@ fn keeps_the_newest_three_builds() {
         }
         parent = c;
     }
+    assert_eq!(
+        checkout(&r),
+        before,
+        "publishing changed the working tree, index or HEAD"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An id published again after it was pruned gets its first copy back,
+/// not the new bytes: browsers may still hold the old files.
+#[test]
+fn a_pruned_build_is_restored_not_rebuilt() {
+    let root = scratch("pruned");
+    identity();
+    let r = repo(&root);
+    let ids = [
+        "aaaaaaaaaaa1",
+        "aaaaaaaaaaa2",
+        "aaaaaaaaaaa3",
+        "aaaaaaaaaaa4",
+    ];
+    let first_page = std::fs::read_to_string(
+        versioned_site(&root, ids[0], "v1")
+            .join("v")
+            .join(ids[0])
+            .join("index.html"),
+    )
+    .unwrap();
+    let mut first_tree = String::new();
+    for id in ids {
+        deploy(&r, &versioned_site(&root, id, "v1"), &no_push(), id, id)
+            .unwrap()
+            .unwrap();
+        if id == ids[0] {
+            first_tree = git(&r, &["rev-parse", &format!("gh-pages:v/{id}")]);
+        }
+    }
+    assert!(
+        ls(&r, "gh-pages", "v/")
+            .iter()
+            .all(|f| f != "v/aaaaaaaaaaa1"),
+        "pruned"
+    );
+    deploy(
+        &r,
+        &versioned_site(&root, ids[0], "rebuilt"),
+        &no_push(),
+        ids[0],
+        "again",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        git(&r, &["rev-parse", &format!("gh-pages:v/{}", ids[0])]),
+        first_tree
+    );
+    assert_eq!(git(&r, &["show", "gh-pages:index.html"]), first_page);
+    assert_eq!(
+        git(&r, &["show", "gh-pages:v/VERSIONS"]),
+        "aaaaaaaaaaa1\naaaaaaaaaaa4\naaaaaaaaaaa3"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A reused copy is checked against the URL being published, since it
+/// may have been built for another.
+#[test]
+fn a_reused_build_must_suit_the_public_url() {
+    let root = scratch("url");
+    identity();
+    let r = repo(&root);
+    let id = "aaaaaaaaaaaa";
+    deploy(&r, &versioned_site(&root, id, "v1"), &no_push(), id, "p")
+        .unwrap()
+        .unwrap();
+    let before = git(&r, &["rev-parse", "gh-pages"]);
+    let other =
+        Options::parse(&["--no-push".into(), "--public-url".into(), "/other/".into()]).unwrap();
+    let fresh = versioned_site_for(&root, "/other/", id, "v2");
+    let err = deploy(&r, &fresh, &other, id, "p").unwrap_err();
+    assert!(err.to_string().contains("<base href=\"/other/v/"), "{err}");
+    assert_eq!(git(&r, &["rev-parse", "gh-pages"]), before);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A git filter that rewrites files on checkout would change a kept build
+/// as it is copied; `deploy` must refuse to commit that.
+#[test]
+fn deploy_refuses_to_change_a_kept_build() {
+    let root = scratch("filter");
+    identity();
+    let r = repo(&root);
+    let (a, b) = ("aaaaaaaaaaaa", "bbbbbbbbbbbb");
+    deploy(&r, &versioned_site(&root, a, "v1"), &no_push(), a, "a")
+        .unwrap()
+        .unwrap();
+    let before = git(&r, &["rev-parse", "gh-pages"]);
+    std::fs::write(r.join(".git/info/attributes"), "*.js filter=tamper\n").unwrap();
+    git(&r, &["config", "filter.tamper.smudge", "tr a z"]);
+    let err = deploy(&r, &versioned_site(&root, b, "v1"), &no_push(), b, "b").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("would change the published build v/aaaaaaaaaaaa/"),
+        "{err}"
+    );
+    assert_eq!(
+        git(&r, &["rev-parse", "gh-pages"]),
+        before,
+        "nothing committed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `--skip-if-behind` compares HEAD with the branch's exact ref on the
+/// remote, not another ref whose name ends the same way.
+#[test]
+fn tells_whether_the_source_branch_moved_on() {
+    let root = scratch("moved");
+    identity();
+    let remote = root.join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    let r = repo(&root);
+    git(&r, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&r, &["push", "-q", "origin", "main"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    assert_eq!(moved_on(&r, "origin", "main", &head).unwrap(), None);
+
+    git(&r, &["commit", "-q", "-m", "newer"]);
+    let newer = git(&r, &["rev-parse", "HEAD"]);
+    // Sorts before refs/heads/main and ends in it.
+    git(
+        &r,
+        &["push", "-q", "origin", "main:refs/heads/a/refs/heads/main"],
+    );
+    assert_eq!(moved_on(&r, "origin", "main", &head).unwrap(), None);
+    git(&r, &["push", "-q", "origin", "main"]);
+    assert_eq!(
+        moved_on(&r, "origin", "main", &head).unwrap(),
+        Some(newer.clone())
+    );
+    assert_eq!(moved_on(&r, "origin", "main", &newer).unwrap(), None);
+    assert!(moved_on(&r, "origin", "missing", &head).is_err());
+
+    let o = Options::parse(&["--skip-if-behind".into(), "main".into()]).unwrap();
+    assert_eq!(o.skip_if_behind.as_deref(), Some("main"));
+    assert_eq!(Options::parse(&[]).unwrap().skip_if_behind, None);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -419,7 +582,10 @@ fn notices_a_changed_kept_build() {
     let prepared = Prepared {
         parent: Some(c.clone()),
         kept: vec![id.into()],
-        from_branch: vec![id.into()],
+        copied: vec![CopiedBuild {
+            id: id.into(),
+            from: c.clone(),
+        }],
         reused: true,
     };
     let err = check_kept_builds(&r, &tree, &prepared).unwrap_err();
