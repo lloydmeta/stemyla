@@ -32,12 +32,27 @@ const BUDGET: usize = 8 << 20;
 
 #[wasm_bindgen(inline_js = r#"
 export async function cache_get(name) {
-  try {
-    const root = await navigator.storage.getDirectory();
-    const fh = await root.getFileHandle(name);
-    const f = await fh.getFile();
-    return new Uint8Array(await f.arrayBuffer());
-  } catch (e) { return null; }
+  const root = await navigator.storage.getDirectory();
+  let fh;
+  try { fh = await root.getFileHandle(name); }
+  catch (e) { if (e.name === "NotFoundError") return null; throw e; }
+  const f = await fh.getFile();
+  return new Uint8Array(await f.arrayBuffer());
+}
+let queue_tail = Promise.resolve();
+export function queue_turn() {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const turn = queue_tail.then(() => release);
+  queue_tail = turn.then(() => held);
+  return turn;
+}
+export function storage_lock() {
+  return new Promise((granted, failed) => {
+    navigator.locks
+      .request("stemyla-model-storage", () => new Promise((release) => granted(release)))
+      .catch(failed);
+  });
 }
 async function write_file(fh, body) {
   const w = await fh.createWritable();
@@ -86,20 +101,26 @@ export async function download_to_opfs(url, name, progress) {
   const fh = await root.getFileHandle(name, { create: true });
   const reader = r.body.getReader();
   let done = 0, last = 0;
-  await write_file(fh, async (w) => {
-    for (;;) {
-      const { value, done: end } = await reader.read();
-      if (end) break;
-      await w.write(value);
-      done += value.length;
-      if (done - last >= 4e6) { progress(done, total); last = done; }
-    }
-  });
+  try {
+    await write_file(fh, async (w) => {
+      for (;;) {
+        const { value, done: end } = await reader.read();
+        if (end) break;
+        await w.write(value);
+        done += value.length;
+        if (done - last >= 4e6) { progress(done, total); last = done; }
+      }
+    });
+  } catch (e) {
+    reader.cancel().catch(() => {});
+    throw e;
+  }
   progress(done, total);
   return done;
 }
 export async function opfs_remove(name) {
-  try { const root = await navigator.storage.getDirectory(); await root.removeEntry(name); return true; } catch (e) { return false; }
+  try { const root = await navigator.storage.getDirectory(); await root.removeEntry(name); return true; }
+  catch (e) { return e.name === "NotFoundError"; }
 }
 export async function sha256_hex(bytes) {
   const d = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
@@ -118,10 +139,19 @@ extern "C" {
     /// `performance.now()`: milliseconds at 100 µs resolution (5 µs when
     /// cross-origin isolated), against `Date.now()`'s whole milliseconds.
     fn perf_now() -> f64;
-    async fn cache_get(name: &str) -> JsValue;
+    /// The file's bytes, or null if there is no such file.
+    #[wasm_bindgen(catch)]
+    async fn cache_get(name: &str) -> Result<JsValue, JsValue>;
+    /// Resolves, in the order asked, with a function that ends this turn.
+    async fn queue_turn() -> JsValue;
+    /// Resolves with a function that releases the lock, once no other tab
+    /// of this site holds it.
+    #[wasm_bindgen(catch)]
+    async fn storage_lock() -> Result<JsValue, JsValue>;
     async fn cache_put(name: &str, bytes: &Uint8Array) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
-    async fn blob_bytes(blob: &JsValue) -> JsValue;
+    #[wasm_bindgen(catch)]
+    async fn blob_bytes(blob: &JsValue) -> Result<JsValue, JsValue>;
     async fn fetch_bytes(url: &str) -> JsValue;
     #[wasm_bindgen(catch)]
     async fn download_to_opfs(
@@ -129,9 +159,11 @@ extern "C" {
         name: &str,
         progress: &js_sys::Function,
     ) -> Result<JsValue, JsValue>;
+    /// Whether the file is gone (removed, or never there).
     async fn opfs_remove(name: &str) -> JsValue;
     async fn opfs_commit(from: &str, to: &str) -> JsValue;
-    async fn sha256_hex(bytes: &Uint8Array) -> JsValue;
+    #[wasm_bindgen(catch)]
+    async fn sha256_hex(bytes: &Uint8Array) -> Result<JsValue, JsValue>;
 }
 
 struct State {
@@ -142,13 +174,10 @@ struct State {
     busy: bool,
     /// Whether `ensure_kernels` has set this GPU's kernels.
     kernels_chosen: bool,
-    /// Whether the model is being loaded, downloaded or removed; see
-    /// [`ModelTask`].
-    model_task: bool,
 }
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, busy: false, kernels_chosen: false, model_task: false }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, busy: false, kernels_chosen: false }) };
 }
 
 fn scope() -> DedicatedWorkerGlobalScope {
@@ -181,6 +210,14 @@ fn post_model(ok: bool, text: &str) {
 
 fn log(text: &str) {
     post(&[("type", "log".into()), ("text", text.into())], &[]);
+}
+
+/// A thrown JS value as text: "NotReadableError: ..." for an exception.
+fn js_text(e: &JsValue) -> String {
+    match e.dyn_ref::<js_sys::Error>() {
+        Some(err) => format!("{}: {}", err.name(), err.message()),
+        None => e.as_string().unwrap_or_else(|| format!("{e:?}")),
+    }
 }
 
 fn get(o: &JsValue, k: &str) -> JsValue {
@@ -309,10 +346,18 @@ async fn handle(msg: JsValue) {
         apply_attention(&g, &msg);
     }
     let result = match kind.as_str() {
-        "init" | "model" | "download" | "forget_model" => model_task(&kind, &msg).await,
-        "separate" => separate(&msg).await,
-        "selftest" => selftest(&msg).await,
-        "bench" => bench(&msg).await,
+        "init" | "model" | "download" | "forget_model" => {
+            let _turn = Held::turn().await;
+            model_task(&kind, &msg).await
+        }
+        "separate" | "selftest" | "bench" => {
+            let _turn = Held::turn().await;
+            match kind.as_str() {
+                "separate" => separate(&msg).await,
+                "selftest" => selftest(&msg).await,
+                _ => bench(&msg).await,
+            }
+        }
         "mp3" => mp3(&msg).await,
         other => Err(format!("unknown message {other}")),
     };
@@ -321,34 +366,44 @@ async fn handle(msg: JsValue) {
     }
 }
 
-/// Claim on the stored model.  Messages run concurrently (each message's
-/// handler interleaves with the others at every await), and two of these
-/// at once would share `download.part`, hold two 350 MB copies, or save a
-/// model the user has just removed.  The page sends one at a time; one that
-/// arrives while another runs is dropped, and the running one's reply
-/// settles the page's state.
-struct ModelTask;
+/// A turn or lock, given back when dropped.
+///
+/// Messages run concurrently: each message's handler interleaves with the
+/// others at every await.  Two model tasks at once would share
+/// `download.part`, hold two 350 MB copies or save a model the user has
+/// just removed, and a model upload during a separation would share the
+/// GPU's error sink with it.  So every message that touches the model or
+/// the GPU waits for its turn, in the order the page sent them.
+struct Held(js_sys::Function);
 
-impl ModelTask {
-    fn claim() -> Option<Self> {
-        let taken = STATE.with_borrow_mut(|s| std::mem::replace(&mut s.model_task, true));
-        (!taken).then_some(Self)
+impl Held {
+    async fn turn() -> Self {
+        Self(queue_turn().await.unchecked_into())
+    }
+
+    /// The stored files are shared by every tab of this site.
+    async fn storage() -> Option<Self> {
+        match storage_lock().await {
+            Ok(release) => Some(Self(release.unchecked_into())),
+            Err(e) => {
+                log(&format!(
+                    "no lock on browser storage ({}); other tabs may interfere",
+                    js_text(&e)
+                ));
+                None
+            }
+        }
     }
 }
 
-impl Drop for ModelTask {
+impl Drop for Held {
     fn drop(&mut self) {
-        STATE.with_borrow_mut(|s| s.model_task = false);
+        let _ = self.0.call0(&JsValue::NULL);
     }
 }
 
 async fn model_task(kind: &str, msg: &JsValue) -> Result<(), String> {
-    let Some(_task) = ModelTask::claim() else {
-        log(&format!(
-            "ignored {kind}: the model is already being loaded or removed"
-        ));
-        return Ok(());
-    };
+    let _storage = Held::storage().await;
     match kind {
         "init" => init(msg).await,
         "model" => load_model(msg).await,
@@ -362,15 +417,24 @@ async fn model_task(kind: &str, msg: &JsValue) -> Result<(), String> {
 
 async fn forget_model() {
     STATE.with_borrow_mut(|s| s.net = None);
-    opfs_remove(CACHE_NAME).await;
-    for leftover in [
-        DOWNLOAD_NAME.to_string(),
-        format!("{CACHE_NAME}.part"),
-        format!("{KERNEL_CHOICE}.part"),
-    ] {
-        opfs_remove(&leftover).await;
-    }
-    post_model(false, "model removed from this browser");
+    let removed = opfs_remove(CACHE_NAME).await.as_bool().unwrap_or(false);
+    remove_leftovers().await;
+    opfs_remove(&format!("{KERNEL_CHOICE}.part")).await;
+    post_model(
+        false,
+        if removed {
+            "model removed from this browser"
+        } else {
+            "the model could not be removed from browser storage; use Reset"
+        },
+    );
+}
+
+/// Partial files from a download or save that never finished (a phone
+/// may kill the tab during the upload that comes before the commit).
+async fn remove_leftovers() {
+    opfs_remove(DOWNLOAD_NAME).await;
+    opfs_remove(&format!("{CACHE_NAME}.part")).await;
 }
 
 /// Why the weights could not be put on the GPU: the file itself, or the GPU.
@@ -412,7 +476,20 @@ async fn build(bytes: &[u8], msg: &JsValue) -> Result<(f64, String), LoadError> 
 }
 
 async fn init(msg: &JsValue) -> Result<(), String> {
-    let cached = cache_get(CACHE_NAME).await;
+    remove_leftovers().await;
+    let cached = match cache_get(CACHE_NAME).await {
+        Ok(cached) => cached,
+        Err(e) => {
+            post_model(
+                false,
+                &format!(
+                    "could not read the model in browser storage ({}); it was kept, reload the page to try again",
+                    js_text(&e)
+                ),
+            );
+            return Ok(());
+        }
+    };
     if cached.is_null() {
         post_model(false, "no model cached in this browser");
         return Ok(());
@@ -436,14 +513,14 @@ async fn init(msg: &JsValue) -> Result<(), String> {
             post_model(
                 false,
                 &format!(
-                    "the model in browser storage is damaged ({} bytes, {e}) and {fate}",
+                    "the model in browser storage is unusable ({} bytes, {e}) and {fate}",
                     bytes.len()
                 ),
             );
         }
         Err(e @ LoadError::Gpu(_)) => post_model(
             false,
-            &format!("the model in browser storage could not be loaded: {e}"),
+            &format!("the model in browser storage could not be loaded, and was kept: {e}"),
         ),
     }
     Ok(())
@@ -451,12 +528,20 @@ async fn init(msg: &JsValue) -> Result<(), String> {
 
 async fn load_model(msg: &JsValue) -> Result<(), String> {
     let file = get(msg, "file");
-    let arr: Uint8Array = if !file.is_undefined() {
-        blob_bytes(&file).await.unchecked_into()
+    let read = if !file.is_undefined() {
+        blob_bytes(&file).await.map_err(|e| js_text(&e))
     } else {
-        get(msg, "bytes")
-            .dyn_into()
-            .map_err(|_| "model message without file or bytes".to_string())?
+        Ok(get(msg, "bytes"))
+    };
+    let arr: Uint8Array = match read.and_then(|v| {
+        v.dyn_into()
+            .map_err(|_| "model message without file or bytes".to_string())
+    }) {
+        Ok(arr) => arr,
+        Err(e) => {
+            post_model(false, &format!("could not read the model file: {e}"));
+            return Ok(());
+        }
     };
     let bytes = arr.to_vec();
     match build(&bytes, msg).await {
@@ -1026,38 +1111,17 @@ async fn download(msg: &JsValue) -> Result<(), String> {
     drop(progress);
     if let Err(e) = fetched {
         opfs_remove(DOWNLOAD_NAME).await;
-        post_model(
-            false,
-            &format!(
-                "model download failed: {}",
-                e.as_string().unwrap_or_else(|| format!("{e:?}"))
-            ),
-        );
+        post_model(false, &format!("model download failed: {}", js_text(&e)));
         return Ok(());
     }
-    let part = cache_get(DOWNLOAD_NAME).await;
-    if part.is_null() {
-        opfs_remove(DOWNLOAD_NAME).await;
-        post_model(
-            false,
-            "model download failed: the browser did not keep the file",
-        );
-        return Ok(());
-    }
-    let arr: Uint8Array = part.unchecked_into();
-    if url == MODEL_URL {
-        let hash = sha256_hex(&arr).await.as_string().unwrap_or_default();
-        if hash != MODEL_SHA256 {
+    let arr = match verified_download(&url).await {
+        Ok(arr) => arr,
+        Err(e) => {
             opfs_remove(DOWNLOAD_NAME).await;
-            post_model(
-                false,
-                &format!(
-                    "the downloaded model is not the expected file (SHA-256 {hash}); not used"
-                ),
-            );
+            post_model(false, &e);
             return Ok(());
         }
-    }
+    };
     let secs = now_s() - t0;
     // The worker's JS copy of the file (350 MB) is released before the
     // upload, so the browser can reclaim it during the GPU upload and
@@ -1097,6 +1161,34 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The downloaded file, checked against the published hash when it came
+/// from [`MODEL_URL`].
+async fn verified_download(url: &str) -> Result<Uint8Array, String> {
+    let part = cache_get(DOWNLOAD_NAME).await.map_err(|e| {
+        format!(
+            "model download failed: could not read the file ({})",
+            js_text(&e)
+        )
+    })?;
+    if part.is_null() {
+        return Err("model download failed: the browser did not keep the file".into());
+    }
+    let arr: Uint8Array = part.unchecked_into();
+    if url == MODEL_URL {
+        let hash = sha256_hex(&arr)
+            .await
+            .map_err(|e| format!("could not check the downloaded model ({})", js_text(&e)))?
+            .as_string()
+            .unwrap_or_default();
+        if hash != MODEL_SHA256 {
+            return Err(format!(
+                "the downloaded model is not the expected file (SHA-256 {hash}); not used"
+            ));
+        }
+    }
+    Ok(arr)
 }
 
 /// Encodes one stem as a 192 kbps MP3 (`{type: "mp3", name, left, right,
@@ -1166,7 +1258,7 @@ async fn choose_kernels(gpu: &Gpu) {
         roformer_gpu::kernels_id(),
         roformer_gpu::bench::CALIBRATION
     );
-    let stored = cache_get(KERNEL_CHOICE).await;
+    let stored = cache_get(KERNEL_CHOICE).await.unwrap_or(JsValue::NULL);
     let text = if stored.is_null() {
         String::new()
     } else {

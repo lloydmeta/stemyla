@@ -259,15 +259,19 @@ impl Separator {
         self.events.borrow_mut().drain(..).collect()
     }
 
-    /// Hands a dropped model file to the worker, which reads it.
-    pub fn send_model_file(&mut self, file: &web_sys::File) {
+    /// Hands a dropped model file to the worker, which reads it; false if
+    /// the worker is busy with the model or a separation.
+    pub fn send_model_file(&mut self, file: &web_sys::File) -> bool {
+        if self.model_loading || self.running {
+            return false;
+        }
         let msg = object(
             &[("type", "model".into()), ("file", file.into())],
             &self.settings,
         );
-        if self.worker.post_message(&msg).is_ok() {
-            self.model_loading = true;
-        }
+        let sent = self.worker.post_message(&msg).is_ok();
+        self.model_loading |= sent;
+        sent
     }
 
     /// Opens the browser's file picker; the chosen file goes straight to the
@@ -336,6 +340,7 @@ impl Separator {
         let msg = object(&[("type", "forget_model".into())], &self.settings);
         if self.worker.post_message(&msg).is_ok() {
             self.model_ready = false;
+            self.model_loading = true;
         }
     }
 

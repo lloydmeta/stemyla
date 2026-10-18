@@ -659,8 +659,12 @@ impl StemApp {
             let (models, dropped): (Vec<_>, Vec<_>) = dropped.into_iter().partition(is_model);
             for m in models {
                 if let (Some(sep), Some(file)) = (&mut self.separator, m.web_file()) {
-                    sep.send_model_file(file);
-                    self.status = format!("Loading model {}…", m.path().display());
+                    self.status = if sep.send_model_file(file) {
+                        format!("Loading model {}…", m.path().display())
+                    } else {
+                        "Wait for the model or the separation to finish, then drop the model again"
+                            .into()
+                    };
                 }
             }
             if dropped.is_empty() {
@@ -870,6 +874,10 @@ impl StemApp {
             }
             return;
         }
+        if sep.model_loading {
+            ui.add_enabled(false, egui::Button::new("Loading model…"));
+            return;
+        }
         let Some(song) = self.song.clone() else {
             return;
         };
@@ -931,7 +939,10 @@ impl StemApp {
                 });
             }
             ui.separator();
-            let model = self.separator.as_ref().is_some_and(|s| s.model_ready);
+            let model = self
+                .separator
+                .as_ref()
+                .is_some_and(|s| s.model_ready && !s.model_loading && !s.running);
             if ui.add_enabled(model, egui::Button::new("Remove the model from this browser")).clicked() {
                 if let Some(sep) = &mut self.separator {
                     sep.forget_model();
