@@ -47,12 +47,22 @@ export function queue_turn() {
   queue_tail = turn.then(() => held);
   return turn;
 }
-export function storage_lock() {
+export function storage_lock(waiting) {
+  const name = "stemyla-model-storage";
   return new Promise((granted, failed) => {
+    const hold = () => new Promise((release) => granted(release));
     navigator.locks
-      .request("stemyla-model-storage", () => new Promise((release) => granted(release)))
+      .request(name, { ifAvailable: true }, (lock) => {
+        if (lock) return hold();
+        waiting();
+        navigator.locks.request(name, hold).catch(failed);
+      })
       .catch(failed);
   });
+}
+export async function opfs_has(name) {
+  try { const root = await navigator.storage.getDirectory(); await root.getFileHandle(name); return true; }
+  catch (e) { return e.name !== "NotFoundError"; }
 }
 async function write_file(fh, body) {
   const w = await fh.createWritable();
@@ -94,7 +104,18 @@ export async function blob_bytes(blob) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 export async function download_to_opfs(url, name, progress) {
-  const r = await fetch(url);
+  const ctl = new AbortController();
+  let idle;
+  const arm = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => ctl.abort(new Error("no data from the server for 60 s")), 60000);
+  };
+  arm();
+  try { return await download_with(url, name, progress, ctl.signal, arm); }
+  finally { clearTimeout(idle); }
+}
+async function download_with(url, name, progress, signal, arm) {
+  const r = await fetch(url, { signal });
   if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`);
   const total = Number(r.headers.get("content-length")) || 0;
   const root = await navigator.storage.getDirectory();
@@ -106,6 +127,7 @@ export async function download_to_opfs(url, name, progress) {
       for (;;) {
         const { value, done: end } = await reader.read();
         if (end) break;
+        arm();
         await w.write(value);
         done += value.length;
         if (done - last >= 4e6) { progress(done, total); last = done; }
@@ -147,7 +169,9 @@ extern "C" {
     /// Resolves with a function that releases the lock, once no other tab
     /// of this site holds it.
     #[wasm_bindgen(catch)]
-    async fn storage_lock() -> Result<JsValue, JsValue>;
+    async fn storage_lock(waiting: &js_sys::Function) -> Result<JsValue, JsValue>;
+    /// Whether the file exists (or cannot be told apart from existing).
+    async fn opfs_has(name: &str) -> JsValue;
     async fn cache_put(name: &str, bytes: &Uint8Array) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
     #[wasm_bindgen(catch)]
@@ -171,13 +195,12 @@ struct State {
     /// "high-performance" or "low-power" (`?gpu=integrated`).
     power: &'static str,
     net: Option<Rc<Net>>,
-    busy: bool,
     /// Whether `ensure_kernels` has set this GPU's kernels.
     kernels_chosen: bool,
 }
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, busy: false, kernels_chosen: false }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, kernels_chosen: false }) };
 }
 
 fn scope() -> DedicatedWorkerGlobalScope {
@@ -197,11 +220,19 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
     let _ = scope().post_message_with_transfer(&o, &t);
 }
 
-fn post_model(ok: bool, text: &str) {
+/// `ok`: whether the request succeeded.  `loaded` and `stored` say what
+/// the worker holds afterwards, which a failed request leaves as it was
+/// (a model loaded earlier stays loaded; a stored file kept after a GPU
+/// failure can still be removed).
+async fn post_model(ok: bool, text: &str) {
+    let loaded = STATE.with_borrow(|s| s.net.is_some());
+    let stored = opfs_has(CACHE_NAME).await.as_bool().unwrap_or(false);
     post(
         &[
             ("type", "model".into()),
             ("ok", ok.into()),
+            ("loaded", loaded.into()),
+            ("stored", stored.into()),
             ("text", text.into()),
         ],
         &[],
@@ -317,10 +348,7 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
 /// worker.  Called once the GPU has done real work (after the model
 /// upload, or for `?bench` without a model after its matmul timings)
 /// rather than when the device opens, so calibration neither shares the
-/// GPU with the upload nor times a GPU that has only just woken.  Claimed
-/// before it starts: a message handled meanwhile (a model dropped during
-/// the start-up calibration) runs with the kernels in place until then
-/// instead of calibrating a second time on the same GPU.
+/// GPU with the upload nor times a GPU that has only just woken.
 async fn ensure_kernels(g: &Gpu, msg: &JsValue) {
     if STATE.with_borrow_mut(|s| std::mem::replace(&mut s.kernels_chosen, true)) {
         return;
@@ -341,17 +369,15 @@ fn budget(msg: &JsValue) -> usize {
 
 async fn handle(msg: JsValue) {
     let kind = get(&msg, "type").as_string().unwrap_or_default();
-    if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
-        apply_policy(&g, &msg);
-        apply_attention(&g, &msg);
-    }
     let result = match kind.as_str() {
         "init" | "model" | "download" | "forget_model" => {
             let _turn = Held::turn().await;
+            apply_overrides(&msg);
             model_task(&kind, &msg).await
         }
         "separate" | "selftest" | "bench" => {
             let _turn = Held::turn().await;
+            apply_overrides(&msg);
             match kind.as_str() {
                 "separate" => separate(&msg).await,
                 "selftest" => selftest(&msg).await,
@@ -362,7 +388,22 @@ async fn handle(msg: JsValue) {
         other => Err(format!("unknown message {other}")),
     };
     if let Err(text) = result {
-        post(&[("type", "error".into()), ("text", text.into())], &[]);
+        post(
+            &[
+                ("type", "error".into()),
+                ("of", kind.into()),
+                ("text", text.into()),
+            ],
+            &[],
+        );
+    }
+}
+
+/// Kernel overrides from the page URL, for a GPU opened earlier.
+fn apply_overrides(msg: &JsValue) {
+    if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
+        apply_policy(&g, msg);
+        apply_attention(&g, msg);
     }
 }
 
@@ -383,7 +424,21 @@ impl Held {
 
     /// The stored files are shared by every tab of this site.
     async fn storage() -> Option<Self> {
-        match storage_lock().await {
+        let waiting = Closure::<dyn FnMut()>::new(|| {
+            post(
+                &[
+                    ("type", "status".into()),
+                    (
+                        "text",
+                        "Waiting for another tab of this site to finish with the model…".into(),
+                    ),
+                ],
+                &[],
+            );
+        });
+        let lock = storage_lock(waiting.as_ref().unchecked_ref()).await;
+        drop(waiting);
+        match lock {
             Ok(release) => Some(Self(release.unchecked_into())),
             Err(e) => {
                 log(&format!(
@@ -427,7 +482,8 @@ async fn forget_model() {
         } else {
             "the model could not be removed from browser storage; use Reset"
         },
-    );
+    )
+    .await;
 }
 
 /// Partial files from a download or save that never finished (a phone
@@ -483,23 +539,26 @@ async fn init(msg: &JsValue) -> Result<(), String> {
             post_model(
                 false,
                 &format!(
-                    "could not read the model in browser storage ({}); it was kept, reload the page to try again",
+                    "could not read the model in browser storage ({}); it was kept: reload the page to try again, or remove it",
                     js_text(&e)
                 ),
-            );
+            ).await;
             return Ok(());
         }
     };
     if cached.is_null() {
-        post_model(false, "no model cached in this browser");
+        post_model(false, "no model cached in this browser").await;
         return Ok(());
     }
     let bytes = cached.unchecked_into::<Uint8Array>().to_vec();
     match build(&bytes, msg).await {
-        Ok((secs, gpu)) => post_model(
-            true,
-            &format!("model loaded from browser storage in {secs:.1} s ({gpu})"),
-        ),
+        Ok((secs, gpu)) => {
+            post_model(
+                true,
+                &format!("model loaded from browser storage in {secs:.1} s ({gpu})"),
+            )
+            .await
+        }
         // A copy that was never fully written (left by an older version of
         // this page, or by the browser stopping mid-write) would otherwise
         // fail every start until the browser storage is cleared by hand.
@@ -516,12 +575,16 @@ async fn init(msg: &JsValue) -> Result<(), String> {
                     "the model in browser storage is unusable ({} bytes, {e}) and {fate}",
                     bytes.len()
                 ),
-            );
+            )
+            .await;
         }
-        Err(e @ LoadError::Gpu(_)) => post_model(
-            false,
-            &format!("the model in browser storage could not be loaded, and was kept: {e}"),
-        ),
+        Err(e @ LoadError::Gpu(_)) => {
+            post_model(
+                false,
+                &format!("the model in browser storage could not be loaded, and was kept: {e}"),
+            )
+            .await
+        }
     }
     Ok(())
 }
@@ -539,7 +602,7 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
     }) {
         Ok(arr) => arr,
         Err(e) => {
-            post_model(false, &format!("could not read the model file: {e}"));
+            post_model(false, &format!("could not read the model file: {e}")).await;
             return Ok(());
         }
     };
@@ -555,15 +618,16 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
             post_model(
                 true,
                 &format!("model loaded in {secs:.1} s, {note} ({gpu})"),
-            );
+            )
+            .await;
             Ok(())
         }
         Err(e @ LoadError::Weights(_)) => {
-            post_model(false, &format!("not a BS-RoFormer SW model: {e}"));
+            post_model(false, &format!("not a BS-RoFormer SW model: {e}")).await;
             Ok(())
         }
         Err(e @ LoadError::Gpu(_)) => {
-            post_model(false, &format!("the model could not be loaded: {e}"));
+            post_model(false, &format!("the model could not be loaded: {e}")).await;
             Ok(())
         }
     }
@@ -578,13 +642,7 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
 
 async fn separate(msg: &JsValue) -> Result<(), String> {
     let (gpu, net) = loaded()?;
-    if STATE.with_borrow(|s| s.busy) {
-        return Err("a separation is already running".into());
-    }
-    STATE.with_borrow_mut(|s| s.busy = true);
-    let r = run(&gpu, &net, msg).await;
-    STATE.with_borrow_mut(|s| s.busy = false);
-    r
+    run(&gpu, &net, msg).await
 }
 
 /// Keeps the GPU from being monopolised.  Every step is one short command
@@ -1111,14 +1169,14 @@ async fn download(msg: &JsValue) -> Result<(), String> {
     drop(progress);
     if let Err(e) = fetched {
         opfs_remove(DOWNLOAD_NAME).await;
-        post_model(false, &format!("model download failed: {}", js_text(&e)));
+        post_model(false, &format!("model download failed: {}", js_text(&e))).await;
         return Ok(());
     }
     let arr = match verified_download(&url).await {
         Ok(arr) => arr,
         Err(e) => {
             opfs_remove(DOWNLOAD_NAME).await;
-            post_model(false, &e);
+            post_model(false, &e).await;
             return Ok(());
         }
     };
@@ -1149,7 +1207,8 @@ async fn download(msg: &JsValue) -> Result<(), String> {
                 &format!(
                     "model downloaded in {secs:.0} s and loaded in {load:.1} s, {note} ({gpu})"
                 ),
-            );
+            )
+            .await;
         }
         Err(e) => {
             opfs_remove(DOWNLOAD_NAME).await;
@@ -1157,7 +1216,7 @@ async fn download(msg: &JsValue) -> Result<(), String> {
                 LoadError::Weights(_) => "the downloaded file is not a usable BS-RoFormer SW model",
                 LoadError::Gpu(_) => "the downloaded model could not be loaded",
             };
-            post_model(false, &format!("{what}: {e}"));
+            post_model(false, &format!("{what}: {e}")).await;
         }
     }
     Ok(())

@@ -36,8 +36,12 @@ const WORKER_URL: &str = crate::reset::WORKER_LOADER;
 
 pub enum Event {
     ModelLoading,
+    /// The reply to a model request.  `ok`: whether it succeeded; `loaded`
+    /// and `stored`: what the worker holds afterwards.
     Model {
         ok: bool,
+        loaded: bool,
+        stored: bool,
         text: String,
     },
     Progress {
@@ -53,7 +57,13 @@ pub enum Event {
     Done {
         secs: f64,
     },
-    Error(String),
+    /// A request failed; `of` is its message type ("separate", "mp3", ...).
+    Error {
+        of: String,
+        text: String,
+    },
+    /// Something for the status line, such as a wait for another tab.
+    Status(String),
     /// The worker died or its script did not load; it never answers again.
     Stopped(String),
     Log(String),
@@ -80,6 +90,8 @@ pub struct Separator {
     /// Extra fields sent with every model and separate message.
     settings: Vec<(String, JsValue)>,
     pub model_ready: bool,
+    /// Whether browser storage holds a model file, usable or not.
+    pub model_stored: bool,
     pub model_loading: bool,
     pub running: bool,
     /// Why the worker stopped, once it has.
@@ -175,6 +187,8 @@ impl Separator {
                 }
                 Some("model") => Some(Event::Model {
                     ok: get(&d, "ok").is_truthy(),
+                    loaded: get(&d, "loaded").is_truthy(),
+                    stored: get(&d, "stored").is_truthy(),
                     text: text(),
                 }),
                 Some("progress") => Some(Event::Progress {
@@ -196,7 +210,11 @@ impl Separator {
                     })
                 }
                 Some("done") => Some(Event::Done { secs: num("secs") }),
-                Some("error") => Some(Event::Error(text())),
+                Some("error") => Some(Event::Error {
+                    of: get(&d, "of").as_string().unwrap_or_default(),
+                    text: text(),
+                }),
+                Some("status") => Some(Event::Status(text())),
                 Some("log") => Some(Event::Log(text())),
                 Some("selftest") => Some(Event::Selftest {
                     ok: get(&d, "ok").is_truthy(),
@@ -226,8 +244,12 @@ impl Separator {
         // aborted a command buffer) ends the worker; tell the user instead
         // of leaving the progress bar running.  A worker whose script did
         // not load gets a plain `Event` with no message, not an `ErrorEvent`.
-        let ev = events.clone();
+        // An uncaught error does not end the worker by itself, and one that
+        // trapped while holding the storage lock would keep every other tab
+        // waiting; terminating it releases the lock.
+        let (ev, dead) = (events.clone(), worker.clone());
         let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            dead.terminate();
             let reason = get(&e, "message")
                 .as_string()
                 .filter(|m| !m.is_empty())
@@ -243,6 +265,7 @@ impl Separator {
             _onerror: onerror,
             settings,
             model_ready: false,
+            model_stored: false,
             // The worker is asked for its stored model as soon as it starts.
             model_loading: true,
             running: false,
@@ -277,6 +300,9 @@ impl Separator {
     /// Opens the browser's file picker; the chosen file goes straight to the
     /// worker as a `File`, unread on this thread.
     pub fn pick_model_file(&mut self) {
+        if self.model_loading || self.running {
+            return;
+        }
         let (worker, settings, events) = (
             self.worker.clone(),
             self.settings.clone(),

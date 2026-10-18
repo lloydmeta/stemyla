@@ -942,7 +942,7 @@ impl StemApp {
             let model = self
                 .separator
                 .as_ref()
-                .is_some_and(|s| s.model_ready && !s.model_loading && !s.running);
+                .is_some_and(|s| (s.model_ready || s.model_stored) && !s.model_loading && !s.running);
             if ui.add_enabled(model, egui::Button::new("Remove the model from this browser")).clicked() {
                 if let Some(sep) = &mut self.separator {
                     sep.forget_model();
@@ -1055,8 +1055,14 @@ impl StemApp {
                 Event::Download { done, total } => {
                     sep.download = Some((done, total));
                 }
-                Event::Model { ok, text } => {
-                    sep.model_ready = ok;
+                Event::Model {
+                    ok,
+                    loaded,
+                    stored,
+                    text,
+                } => {
+                    sep.model_ready = loaded;
+                    sep.model_stored = stored;
                     sep.model_loading = false;
                     sep.download = None;
                     let pending = self.pending.clone();
@@ -1099,12 +1105,21 @@ impl StemApp {
                     sep.running = false;
                     finished = Some((std::mem::take(&mut sep.stems), secs));
                 }
-                Event::Error(text) => {
-                    sep.running = false;
-                    sep.model_loading = false;
-                    log::error!("separator: {text}");
-                    self.status = format!("Separation failed: {text}");
+                Event::Error { of, text } => {
+                    log::error!("separator: {of}: {text}");
+                    let what = match of.as_str() {
+                        "separate" => {
+                            sep.running = false;
+                            "Separation"
+                        }
+                        "mp3" => "MP3 encoding",
+                        "selftest" => "Self-test",
+                        "bench" => "Benchmark",
+                        _ => "Worker request",
+                    };
+                    self.status = format!("{what} failed: {text}");
                 }
+                Event::Status(text) => self.status = text,
                 Event::Stopped(reason) => {
                     sep.running = false;
                     sep.model_loading = false;
