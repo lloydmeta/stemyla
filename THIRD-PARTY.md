@@ -146,3 +146,24 @@ cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal --pre
 | zerocopy | 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zerocopy-derive | 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
+
+## Browser tests only
+
+These build only the browser tests (`cargo run -p xtask -- web-test`) and are not part of the published app.  `wasm-bindgen-test-runner` comes from `wasm-bindgen-cli` (MIT OR Apache-2.0, https://github.com/wasm-bindgen/wasm-bindgen), installed separately at the `wasm-bindgen` version in `Cargo.lock`.
+
+Regenerate the table with (the rows not in the table above):
+
+```bash
+cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f "{p}|{l}|{r}"
+```
+
+| Crate | Version | Licence | Source |
+| - | - | - | - |
+| async-trait | 0.1.92 | MIT OR Apache-2.0 | https://github.com/dtolnay/async-trait |
+| cast | 0.3.0 | MIT OR Apache-2.0 | https://github.com/japaric/cast.rs |
+| libm | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
+| nu-ansi-term | 0.50.3 | MIT | https://github.com/nushell/nu-ansi-term |
+| oorandom | 11.1.5 | MIT | https://hg.sr.ht/~icefox/oorandom |
+| wasm-bindgen-test | 0.3.79 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
+| wasm-bindgen-test-macro | 0.3.79 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
+| wasm-bindgen-test-shared | 0.2.129 | MIT OR Apache-2.0 | https://github.com/rustwasm/wasm-bindgen/tree/master/crates/test-shared |
