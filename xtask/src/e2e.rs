@@ -1179,10 +1179,7 @@ mod tests {
         assert!(o.download);
         let d = Opts::parse(&args("bench")).unwrap();
         assert_eq!(d.out, crate::workspace_root().join("target/e2e/bench"));
-        assert!(
-            d.dist.join("..").join("Cargo.toml").is_file(),
-            "app/dist under the workspace"
-        );
+        assert_eq!(d.dist, crate::workspace_root().join("app/dist"));
         assert!(Opts::parse(&args("--browser chrome")).is_err());
         assert!(Opts::parse(&args("smoke --play-x")).is_err());
         assert!(Opts::parse(&args("smoke --frobnicate")).is_err());
