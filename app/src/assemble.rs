@@ -48,7 +48,9 @@ impl Assembly {
             self.clear();
             return None;
         }
-        Some(self.take())
+        // A short separation's partial stems would otherwise stay until the
+        // next one starts: six song-length stems, hundreds of MB.
+        Some(self.take().inspect_err(|_| self.clear()))
     }
 
     /// The worker's separation failed: drops the partial stems.  False if
@@ -103,9 +105,17 @@ impl Assembly {
         Ok(())
     }
 
-    /// Marks samples up to `end` as filled once every stem has its segment.
-    pub fn advance(&mut self, end: usize) {
+    /// Marks samples up to `end` as filled once all `count` stems have
+    /// their segment, which must be every stem.
+    pub fn advance(&mut self, count: usize, end: usize) -> Result<(), String> {
+        if count != self.stems.len() {
+            return Err(format!(
+                "a segment with {count} stems, not {}",
+                self.stems.len()
+            ));
+        }
         self.filled = end;
+        Ok(())
     }
 
     /// The finished stems, if every sample has arrived.
@@ -156,8 +166,7 @@ mod tests {
                 n,
             )?;
         }
-        a.advance(start + n);
-        Ok(())
+        a.advance(seg.len(), start + n)
     }
 
     #[test]
@@ -265,5 +274,22 @@ mod tests {
         assert!(a.abandon());
         assert!(a.stems.is_empty());
         assert!(a.done().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_separation_that_ends_short_frees_its_partial_stems() {
+        let mut a = Assembly::default();
+        feed(&mut a, 0, 1000, &[("bass", vec![1.0; 400])]).unwrap();
+        assert!(a.done().unwrap().is_err(), "400 of 1000 samples");
+        assert!(a.stems.is_empty());
+    }
+
+    #[test]
+    fn a_segment_missing_a_stem_is_an_error() {
+        let mut a = Assembly::default();
+        let both = [("bass", vec![1.0]), ("drums", vec![2.0])];
+        feed(&mut a, 0, 3, &both).unwrap();
+        assert!(feed(&mut a, 1, 3, &both[..1]).is_err());
+        assert!(a.stems.is_empty(), "the failed separation is dropped");
     }
 }

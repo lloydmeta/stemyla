@@ -524,15 +524,16 @@ async fn remove_leftovers() {
 /// it, or the GPU.
 enum LoadError {
     Weights(WeightError),
-    Read(WeightError),
+    /// Why the browser could not read the file.
+    Read(String),
     Gpu(String),
 }
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Weights(e) | Self::Read(e) => write!(f, "{e}"),
-            Self::Gpu(e) => write!(f, "{e}"),
+            Self::Weights(e) => write!(f, "{e}"),
+            Self::Read(e) | Self::Gpu(e) => write!(f, "{e}"),
         }
     }
 }
@@ -546,7 +547,7 @@ impl From<String> for LoadError {
 impl From<WeightError> for LoadError {
     fn from(e: WeightError) -> Self {
         match e {
-            WeightError::Read(_) => Self::Read(e),
+            WeightError::Read(why) => Self::Read(why),
             _ => Self::Weights(e),
         }
     }
@@ -711,7 +712,7 @@ async fn init(msg: &JsValue) -> Result<(), String> {
             )
             .await;
         }
-        Err(LoadError::Read(e)) => post_model(false, &unreadable(&e.to_string())).await,
+        Err(LoadError::Read(e)) => post_model(false, &unreadable(&e)).await,
         Err(e @ LoadError::Gpu(_)) => {
             post_model(
                 false,

@@ -175,7 +175,7 @@ fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), Stri
     let stems: Array = get(d, "stems")
         .dyn_into()
         .map_err(|_| "segment without stems")?;
-    let mut end = start;
+    let mut end = None;
     for (i, entry) in stems.iter().enumerate() {
         let entry: Array = entry.dyn_into().map_err(|_| "malformed segment")?;
         let name = entry.get(0).as_string().unwrap_or_default();
@@ -184,6 +184,9 @@ fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), Stri
         let n = l.length() as usize;
         if r.length() as usize != n {
             return Err(format!("segment of {name}: channels differ in length"));
+        }
+        if *end.get_or_insert(start + n) != start + n {
+            return Err(format!("segment of {name}: stems differ in length"));
         }
         asm.place(
             i,
@@ -196,10 +199,8 @@ fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), Stri
             },
             n,
         )?;
-        end = start + n;
     }
-    asm.advance(end);
-    Ok(())
+    asm.advance(stems.length() as usize, end.unwrap_or(start))
 }
 
 impl Separator {
@@ -315,6 +316,7 @@ impl Separator {
         let (ev, dead) = (events.clone(), worker.clone());
         let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
             dead.terminate();
+            assembly.borrow_mut().clear();
             let reason = get(&e, "message")
                 .as_string()
                 .filter(|m| !m.is_empty())
