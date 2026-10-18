@@ -1,6 +1,7 @@
 name: CI
 
-# Pull requests are gated on formatting, clippy, tests and the web build.
+# Pull requests are gated on formatting, clippy, tests, the web build and
+# the browser tests.
 # A push to main re-runs those gates and, only if they all pass, publishes
 # the site to the gh-pages branch with `xtask publish`.
 on:
@@ -156,7 +157,7 @@ jobs:
 
   publish:
     name: publish to gh-pages
-    needs: [fmt, clippy, test, wasm-build]
+    needs: [fmt, clippy, test, wasm-build, browser-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
