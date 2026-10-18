@@ -39,11 +39,37 @@ pub fn mix_of_sources(song: &Song) -> (Vec<f32>, Vec<f32>) {
     (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
 }
 
-/// A separated song: the separated stems, then the source's mix as an
-/// "original" lane (the source's own "original" lane when it has one).
+/// The lane that already holds a song's original recording: its "original"
+/// lane, else its only source stem (an opened song file is one stem).
+/// `None` when the original is a mix of several source stems.
+///
+/// A lone stem is taken as it is, not through `dsp::mix`, so it is not
+/// clamped to +-1 and not copied: a copy of a song-sized buffer would stay in
+/// the web page's memory for good.
+fn original_lane(song: &Song) -> Option<&Stem> {
+    if let Some(i) = song.stem_index("original") {
+        return Some(&song.stems[i]);
+    }
+    let mut sources = song
+        .stems
+        .iter()
+        .filter(|s| !DERIVED.contains(&s.name.as_str()));
+    match (sources.next(), sources.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+/// A separated song: the separated stems, then the source's original
+/// recording as an "original" lane, shared with the source when it has one
+/// lane holding it (see `original_lane`) and mixed from its stems otherwise.
 pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
-    let original = match source.stem_index("original") {
-        Some(i) => source.stems[i].clone(),
+    let original = match original_lane(source) {
+        Some(lane) => Stem {
+            name: "original".into(),
+            left: lane.left.clone(),
+            right: lane.right.clone(),
+        },
         None => {
             let (left, right) = mix_of_sources(source);
             Stem {
@@ -1108,10 +1134,11 @@ impl StemApp {
                 return;
             }
             // Borrowed, not cloned: the worker gets its own copy anyway, and
-            // this thread's WebAssembly memory never shrinks once grown.
+            // this thread's WebAssembly memory never shrinks once grown.  The
+            // same samples become the "original" lane (see `with_original`).
             let mixed;
-            let (l, r): (&[f32], &[f32]) = match song.stem_index("original") {
-                Some(i) => (&song.stems[i].left, &song.stems[i].right),
+            let (l, r): (&[f32], &[f32]) = match original_lane(&song) {
+                Some(lane) => (&lane.left, &lane.right),
                 None => {
                     mixed = mix_of_sources(&song);
                     (&mixed.0, &mixed.1)
@@ -1770,6 +1797,62 @@ mod tests {
             song.stems[2].left.shares(&source.stems[0].left),
             "the original"
         );
+
+        // An opened song file is one stem: it is the original, not copied.
+        let one_stem = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("song", 0.5)],
+        };
+        let song = with_original(&one_stem, stems.clone());
+        let original = &song.stems[2];
+        assert_eq!(original.name, "original");
+        assert!(
+            original.left.shares(&one_stem.stems[0].left)
+                && original.right.shares(&one_stem.stems[0].right),
+            "a one-stem source's original"
+        );
+    }
+
+    #[test]
+    fn a_lone_stem_is_the_original_unclamped_beside_derived_lanes() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("song", 1.5), stem("classic drums", 0.25)],
+        };
+        let lane = original_lane(&source).unwrap();
+        assert!(lane.left.shares(&source.stems[0].left));
+        let song = with_original(&source, vec![stem("bass", 0.1)]);
+        assert_eq!(song.stems[1].left, vec![1.5; 4]);
+        assert_eq!(song.stems[1].right, vec![-1.5; 4]);
+    }
+
+    #[test]
+    fn several_source_stems_are_mixed_into_the_original() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("bass", 0.25), stem("drums", 0.5)],
+        };
+        assert!(original_lane(&source).is_none());
+        let song = with_original(&source, vec![stem("vocals", 0.1)]);
+        let original = &song.stems[1];
+        assert_eq!(original.name, "original");
+        assert_eq!(original.left, vec![0.75; 4]);
+        assert_eq!(original.right, vec![-0.75; 4]);
+        assert!(!original.left.shares(&source.stems[0].left));
+    }
+
+    #[test]
+    fn an_original_lane_is_the_original_even_beside_one_stem() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("bass", 0.25), stem("original", 0.5)],
+        };
+        let lane = original_lane(&source).unwrap();
+        assert!(lane.left.shares(&source.stems[1].left));
     }
 
     #[test]

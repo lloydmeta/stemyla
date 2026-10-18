@@ -32,9 +32,12 @@ impl Deref for Samples {
     }
 }
 
-/// Takes the vector as it is: no copy.
+/// Takes the vector's buffer: no copy when it has no spare capacity.  Spare
+/// capacity is released first, since samples never grow and would hold it
+/// for good, and releasing it may reallocate the buffer once.
 impl From<Vec<f32>> for Samples {
-    fn from(v: Vec<f32>) -> Self {
+    fn from(mut v: Vec<f32>) -> Self {
+        v.shrink_to_fit();
         Self(Arc::new(v))
     }
 }
@@ -111,10 +114,7 @@ impl Song {
             decoded.push((name, left, channels.next()));
         }
         let frames = decoded.iter().map(|(_, l, _)| l.len()).max().unwrap_or(0);
-        let padded = |mut c: Vec<f32>| -> Samples {
-            c.resize(frames, 0.0);
-            c.into()
-        };
+        let padded = |c: Vec<f32>| -> Samples { padded_to(c, frames).into() };
         let stems = decoded
             .into_iter()
             .map(|(name, left, right)| {
@@ -183,6 +183,15 @@ impl Song {
         let rights: Vec<&[f32]> = self.stems.iter().map(|s| s.right.as_slice()).collect();
         (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
     }
+}
+
+/// `c` padded with silence (or cut) to `frames`, growing by exactly what it
+/// needs: `resize` alone would double a full buffer, briefly holding three
+/// times the channel.
+fn padded_to(mut c: Vec<f32>, frames: usize) -> Vec<f32> {
+    c.reserve_exact(frames.saturating_sub(c.len()));
+    c.resize(frames, 0.0);
+    c
 }
 
 /// `"path/to/Drums.wav"` becomes `"drums"`.
@@ -276,5 +285,40 @@ mod tests {
         let s = Samples::from(v);
         assert_eq!(s.as_slice().as_ptr(), at);
         assert_eq!(s, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn samples_from_a_vector_with_spare_capacity_keep_none_of_it() {
+        let mut v = Vec::with_capacity(1024);
+        v.extend_from_slice(&[0.5; 1003]);
+        let s = Samples::from(v);
+        assert_eq!(s.0.capacity(), 1003);
+        assert_eq!(s, vec![0.5; 1003]);
+    }
+
+    #[test]
+    fn padding_grows_a_full_buffer_by_exactly_the_padding() {
+        let padded = padded_to(vec![0.25; 600], 1003);
+        assert_eq!(padded.capacity(), 1003);
+        assert_eq!(padded[..600], [0.25; 600]);
+        assert_eq!(padded[600..], [0.0; 403]);
+        assert_eq!(padded_to(vec![0.25; 600], 4), vec![0.25; 4]);
+    }
+
+    #[test]
+    fn padded_stems_keep_no_spare_capacity() {
+        let s = Song::from_audio(vec![
+            // Padded from 600 samples to 1,003.
+            (
+                "bass".into(),
+                audio(10, vec![vec![0.25; 600], vec![0.5; 600]]),
+            ),
+            ("drums".into(), audio(10, vec![vec![1.0; 1003]])),
+        ])
+        .unwrap();
+        for stem in &s.stems {
+            assert_eq!(stem.left.0.capacity(), 1003, "{}", stem.name);
+            assert_eq!(stem.right.0.capacity(), 1003, "{}", stem.name);
+        }
     }
 }
