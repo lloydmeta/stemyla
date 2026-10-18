@@ -21,8 +21,8 @@ use std::cell::Cell;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-async function dir(path, create) {
-  let d = await navigator.storage.getDirectory();
+async function dir(path, create, from) {
+  let d = from || await navigator.storage.getDirectory();
   for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
   return d;
 }
@@ -30,10 +30,13 @@ function split(path) {
   const i = path.lastIndexOf("/");
   return [path.slice(0, i), path.slice(i + 1)];
 }
-export async function st_write(path, bytes) {
+export async function st_write(path, bytes, within) {
+  let base;
+  try { base = await dir(within, false); }
+  catch (e) { return "gone"; }
   try {
-    const [d, n] = split(path);
-    const fh = await (await dir(d, true)).getFileHandle(n, { create: true });
+    const [d, n] = split(path.slice(within.length));
+    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
     const w = await fh.createWritable();
     await w.write(bytes);
     await w.close();
@@ -80,7 +83,9 @@ export function save_file(name, bytes, mime) {
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
-    async fn st_write(path: &str, bytes: &Uint8Array) -> JsValue;
+    /// Writes `path`, creating its folders below `within`, which must exist
+    /// already: true, false, or "gone" when `within` does not exist.
+    async fn st_write(path: &str, bytes: &Uint8Array, within: &str) -> JsValue;
     async fn st_read(path: &str) -> JsValue;
     async fn st_remove(path: &str) -> JsValue;
     async fn st_usage() -> JsValue;
@@ -109,18 +114,24 @@ pub async fn close() {
 }
 
 async fn write(path: &str, bytes: &[u8]) -> Result<()> {
+    write_within("", path, bytes).await
+}
+
+/// Writes `path` only if the folder `within` (a prefix of it) still exists,
+/// so a save into a session forgotten meanwhile cannot bring it back.
+async fn write_within(within: &str, path: &str, bytes: &[u8]) -> Result<()> {
     if CLOSED.get() {
         return Err(anyhow!("browser storage is being reset"));
     }
     WRITES.set(WRITES.get() + 1);
-    let written = st_write(path, &Uint8Array::from(bytes)).await.as_bool() == Some(true);
+    let written = st_write(path, &Uint8Array::from(bytes), within).await;
     WRITES.set(WRITES.get() - 1);
-    if written {
-        Ok(())
-    } else {
-        Err(anyhow!(
+    match (written.as_bool(), written.as_string().as_deref()) {
+        (Some(true), _) => Ok(()),
+        (_, Some("gone")) => Err(anyhow!("{within} is gone (forgotten?)")),
+        _ => Err(anyhow!(
             "browser storage refused {path} (full, or not available)"
-        ))
+        )),
     }
 }
 
@@ -185,14 +196,15 @@ pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     ));
     meta.stems.clear();
     for s in stems {
-        write(
+        write_within(
+            &base,
             &format!("{base}/stems/{}.wav", file_stem(&s.name)),
             &engine::wav::encode_pcm16(&s.left, &s.right, rate),
         )
         .await?;
         meta.stems.push(s.name.clone());
     }
-    write(&format!("{base}/meta"), meta.to_text().as_bytes()).await
+    write_within(&base, &format!("{base}/meta"), meta.to_text().as_bytes()).await
 }
 
 pub async fn current() -> Option<String> {

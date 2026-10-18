@@ -385,7 +385,8 @@ impl Separator {
     }
 
     /// Starts separating a 44.1 kHz stereo mix.
-    pub fn separate(&mut self, left: &[f32], right: &[f32]) {
+    /// Sends one song to the worker; false if it could not be sent.
+    pub fn separate(&mut self, left: &[f32], right: &[f32]) -> bool {
         let (l, r) = (Float32Array::from(left), Float32Array::from(right));
         let msg = object(
             &[
@@ -407,5 +408,6 @@ impl Separator {
             self.progress = (0, 0, 0.0);
             self.stems.clear();
         }
+        self.running
     }
 }

@@ -65,18 +65,25 @@ pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 pub struct Inbox {
-    song: Option<anyhow::Result<Song>>,
+    song: Option<anyhow::Result<Opened>>,
     status: Option<String>,
-    /// The browser-storage session the shown song belongs to.
-    session: Option<Option<String>>,
     /// Bytes used and available in browser storage.
     usage: Option<(f64, f64)>,
-    /// The song's name, for downloads.
-    name: Option<String>,
     /// Songs kept in browser storage.
     sessions: Option<Vec<(String, store_meta::Meta)>>,
     /// A reset that stopped short of reloading the page: its mode and why.
     reset_failed: Option<(reset::Reset, String)>,
+}
+
+/// A song to show, with what belongs to it, applied together so the shown
+/// song never takes another song's session or name.  Web only.
+#[cfg(target_arch = "wasm32")]
+struct Opened {
+    song: Song,
+    /// The browser-storage session it is kept in.
+    session: Option<String>,
+    /// Its name, for downloads and messages.
+    name: Option<String>,
 }
 
 /// Where the Reset dialog is.  Web only.
@@ -159,21 +166,28 @@ async fn load_and_keep(
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: egui::Context,
 ) {
-    let song = Song::load_files(files.clone());
-    if let Ok(s) = &song {
-        let session = match store::save_sources(&files, s.sample_rate).await {
-            Ok(id) => Some(id),
-            Err(e) => {
-                log::warn!("song not kept in browser storage: {e:#}");
-                None
+    let name = files.first().map(|(n, _)| store_meta::file_title(n));
+    let opened = match Song::load_files(files.clone()) {
+        Ok(song) => {
+            let session = match store::save_sources(&files, song.sample_rate).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    log::warn!("song not kept in browser storage: {e:#}");
+                    None
+                }
+            };
+            if let Some(id) = &session {
+                log::info!("song kept in browser storage as session {id}");
             }
-        };
-        if let Some(id) = &session {
-            log::info!("song kept in browser storage as session {id}");
+            Ok(Opened {
+                song,
+                session,
+                name,
+            })
         }
-        pending.borrow_mut().session = Some(session);
-    }
-    pending.borrow_mut().song = Some(song);
+        Err(e) => Err(e),
+    };
+    pending.borrow_mut().song = Some(opened);
     ctx.request_repaint();
     refresh_storage(&pending).await;
 }
@@ -269,6 +283,32 @@ pub struct SeparationJob {
     /// The song's browser-storage session, where its stems are kept.
     session: Option<String>,
     name: Option<String>,
+}
+
+/// Where a finished separation's stems go.
+#[derive(Debug, PartialEq)]
+pub enum StemsGo {
+    /// Onto the shown song, which is the one separated.
+    Show,
+    /// Only into the separated song's browser storage.
+    Kept,
+    /// Nowhere: the song is neither shown nor kept.
+    Discarded,
+}
+
+impl SeparationJob {
+    /// The job's song is shown if it has stayed open since Separate, or
+    /// has been opened again from its stored session.
+    pub fn destination(&self, shown_serial: u64, shown_session: Option<&str>) -> StemsGo {
+        let reopened = self.session.is_some() && self.session.as_deref() == shown_session;
+        if self.serial == shown_serial || reopened {
+            StemsGo::Show
+        } else if self.session.is_some() {
+            StemsGo::Kept
+        } else {
+            StemsGo::Discarded
+        }
+    }
 }
 
 /// The only sample rate the separation model takes, and so its stems' rate.
@@ -378,9 +418,11 @@ impl StemApp {
                                 format!("Restored \"{}\"{what} from this browser.", meta.name);
                             log::info!("{text}");
                             inbox.status = Some(text);
-                            inbox.session = Some(Some(id));
-                            inbox.name = Some(meta.name.clone());
-                            inbox.song = Some(Ok(song));
+                            inbox.song = Some(Ok(Opened {
+                                song,
+                                session: Some(id),
+                                name: Some(meta.name.clone()),
+                            }));
                         }
                         Err(e) => {
                             log::warn!("could not restore the stored song: {e:#}");
@@ -436,19 +478,28 @@ impl StemApp {
                 refresh_storage(&pending).await;
             });
         }
-        let shown = self.song.clone().filter(|_| job.serial == self.song_serial);
-        let Some(song) = shown else {
-            let name = job.name.as_deref().unwrap_or("the separated song");
-            self.status = if job.session.is_some() {
-                format!(
+        #[cfg(target_arch = "wasm32")]
+        let shown_session = self.session.as_deref();
+        #[cfg(not(target_arch = "wasm32"))]
+        let shown_session = None;
+        let name = job.name.as_deref().unwrap_or("the separated song");
+        let song = match (
+            job.destination(self.song_serial, shown_session),
+            self.song.clone(),
+        ) {
+            (StemsGo::Show, Some(song)) => song,
+            (StemsGo::Kept, _) => {
+                self.status = format!(
                     "Separated \"{name}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them."
-                )
-            } else {
-                format!(
+                );
+                return;
+            }
+            _ => {
+                self.status = format!(
                     "Separated \"{name}\" into {n} stems, but discarded them: that song is no longer open and is not kept in this browser."
-                )
-            };
-            return;
+                );
+                return;
+            }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
         self.load_song(with_original(&song, stems));
@@ -559,6 +610,7 @@ impl StemApp {
         #[cfg(target_arch = "wasm32")]
         {
             self.session = None;
+            self.song_name = None;
         }
         let s = synth::generate();
         let song = Song {
@@ -768,9 +820,6 @@ impl StemApp {
             let pending = self.pending.clone();
             let ctx = ctx.clone();
             self.status = format!("Reading {} files…", dropped.len());
-            self.song_name = dropped
-                .first()
-                .map(|f| store_meta::file_title(&f.path().to_string_lossy()));
             wasm_bindgen_futures::spawn_local(async move {
                 let mut files = Vec::new();
                 for f in &dropped {
@@ -801,7 +850,6 @@ impl StemApp {
             {
                 let mut inbox = pending.borrow_mut();
                 inbox.status = Some(format!("Reading {} files…", chosen.len()));
-                inbox.name = chosen.first().map(|f| store_meta::file_title(&f.name()));
             }
             ctx.request_repaint();
             wasm_bindgen_futures::spawn_local(async move {
@@ -992,9 +1040,12 @@ impl StemApp {
                 Some(i) => (song.stems[i].left.clone(), song.stems[i].right.clone()),
                 None => mix_of_sources(&song),
             };
-            sep.separate(&l, &r);
-            self.separating = self.separation_job();
-            self.status = "Separating…".into();
+            if sep.separate(&l, &r) {
+                self.separating = self.separation_job();
+                self.status = "Separating…".into();
+            } else {
+                self.status = "Could not reach the separation worker".into();
+            }
         }
     }
 
@@ -1064,9 +1115,11 @@ impl StemApp {
                         Ok((id, song, meta)) => {
                             inbox.status =
                                 Some(format!("Opened \"{}\" from this browser.", meta.name));
-                            inbox.session = Some(Some(id));
-                            inbox.name = Some(meta.name);
-                            inbox.song = Some(Ok(song));
+                            inbox.song = Some(Ok(Opened {
+                                song,
+                                session: Some(id),
+                                name: Some(meta.name),
+                            }));
                         }
                         Err(e) => {
                             inbox.status = Some(format!("Could not open the stored song: {e:#}"))
@@ -1485,12 +1538,13 @@ impl eframe::App for StemApp {
         #[cfg(target_arch = "wasm32")]
         {
             let inbox = std::mem::take(&mut *self.pending.borrow_mut());
-            if let Some(session) = inbox.session {
-                self.session = session;
-            }
             if let Some(r) = inbox.song {
                 match r {
-                    Ok(s) => self.open_song(s),
+                    Ok(opened) => {
+                        self.session = opened.session;
+                        self.song_name = opened.name;
+                        self.open_song(opened.song);
+                    }
                     Err(e) => self.status = format!("Could not load: {e:#}"),
                 }
             }
@@ -1502,9 +1556,6 @@ impl eframe::App for StemApp {
             }
             if let Some(s) = inbox.sessions {
                 self.sessions = s;
-            }
-            if let Some(n) = inbox.name {
-                self.song_name = Some(n);
             }
             if let Some((choice, failure)) = inbox.reset_failed {
                 self.reset = ResetStage::Failed(choice, failure);
@@ -1555,4 +1606,40 @@ pub fn start_web() {
             log::error!("failed to start eframe: {e:?}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(serial: u64, session: Option<&str>) -> SeparationJob {
+        SeparationJob {
+            serial,
+            session: session.map(String::from),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn stems_show_on_the_song_still_open() {
+        assert_eq!(job(3, Some("a")).destination(3, Some("a")), StemsGo::Show);
+        assert_eq!(job(3, None).destination(3, None), StemsGo::Show);
+    }
+
+    #[test]
+    fn stems_show_on_the_song_opened_again_from_storage() {
+        assert_eq!(job(3, Some("a")).destination(5, Some("a")), StemsGo::Show);
+    }
+
+    #[test]
+    fn stems_are_only_kept_when_another_song_is_open() {
+        assert_eq!(job(3, Some("a")).destination(4, Some("b")), StemsGo::Kept);
+        assert_eq!(job(3, Some("a")).destination(4, None), StemsGo::Kept);
+    }
+
+    #[test]
+    fn stems_of_an_unkept_song_no_longer_open_are_discarded() {
+        assert_eq!(job(3, None).destination(4, None), StemsGo::Discarded);
+        assert_eq!(job(3, None).destination(4, Some("b")), StemsGo::Discarded);
+    }
 }
