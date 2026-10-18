@@ -318,13 +318,9 @@ fn separated_stems_join_their_song_after_a_lane_is_added() {
         .add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
     h.state_mut().apply_separated(job, stems, 1.0);
     h.run();
-    let names = lane_names(&h);
-    assert!(
-        ["bass", "vocals"]
-            .iter()
-            .all(|n| names.iter().any(|l| l == n)),
-        "lanes: {names:?}"
-    );
+    // Separated stems replace every stem lane, an added one included, as
+    // they always have; what matters is that they arrived.
+    assert_eq!(lane_names(&h), ["mix", "bass", "vocals", "original"]);
 }
 
 #[test]

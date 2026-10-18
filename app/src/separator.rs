@@ -399,15 +399,15 @@ impl Separator {
         let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())]
             .into_iter()
             .collect();
-        if self
+        let sent = self
             .worker
             .post_message_with_transfer(&msg, &transfer)
-            .is_ok()
-        {
+            .is_ok();
+        if sent {
             self.running = true;
             self.progress = (0, 0, 0.0);
             self.stems.clear();
         }
-        self.running
+        sent
     }
 }

@@ -267,6 +267,13 @@ pub struct StemApp {
     /// The song the running separation was started on.
     #[cfg(target_arch = "wasm32")]
     separating: Option<SeparationJob>,
+    /// The stored session being opened from the Storage menu.
+    #[cfg(target_arch = "wasm32")]
+    opening: Option<String>,
+    /// Stems that arrived while their song was being opened (and so may be
+    /// missing from what the open read), for that session.
+    #[cfg(target_arch = "wasm32")]
+    stems_for_opening: Option<(String, Vec<Stem>)>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
 }
@@ -350,6 +357,10 @@ impl Default for StemApp {
             separator: None,
             #[cfg(target_arch = "wasm32")]
             separating: None,
+            #[cfg(target_arch = "wasm32")]
+            opening: None,
+            #[cfg(target_arch = "wasm32")]
+            stems_for_opening: None,
             #[cfg(target_arch = "wasm32")]
             reset: ResetStage::Closed,
         }
@@ -468,33 +479,51 @@ impl StemApp {
         let n = stems.len();
         log::info!("separator: {n} stems in {secs:.1} s");
         #[cfg(target_arch = "wasm32")]
+        let shown_session = self.session.as_deref();
+        #[cfg(not(target_arch = "wasm32"))]
+        let shown_session = None;
+        let destination = job.destination(self.song_serial, shown_session);
+        let name = job
+            .name
+            .clone()
+            .unwrap_or_else(|| "the separated song".into());
+        #[cfg(target_arch = "wasm32")]
         if let Some(id) = job.session.clone() {
+            let being_opened = self.opening.as_deref() == Some(id.as_str());
+            if destination == StemsGo::Kept && being_opened {
+                self.stems_for_opening = Some((id.clone(), stems.clone()));
+            }
+            let kept = (destination == StemsGo::Kept && !being_opened).then(|| {
+                format!(
+                    "Separated \"{name}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them."
+                )
+            });
             let (to_save, pending) = (stems.clone(), self.pending.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = store::save_stems(&id, SEPARATION_RATE, &to_save).await {
-                    pending.borrow_mut().status =
-                        Some(format!("Stems not kept in browser storage: {e:#}"));
+                let status = match store::save_stems(&id, SEPARATION_RATE, &to_save).await {
+                    Ok(()) => kept,
+                    Err(e) => Some(format!("Stems not kept in browser storage: {e:#}")),
+                };
+                if let Some(status) = status {
+                    pending.borrow_mut().status = Some(status);
                 }
                 refresh_storage(&pending).await;
             });
         }
-        #[cfg(target_arch = "wasm32")]
-        let shown_session = self.session.as_deref();
-        #[cfg(not(target_arch = "wasm32"))]
-        let shown_session = None;
-        let name = job.name.as_deref().unwrap_or("the separated song");
-        let song = match (
-            job.destination(self.song_serial, shown_session),
-            self.song.clone(),
-        ) {
+        let song = match (destination, self.song.clone()) {
             (StemsGo::Show, Some(song)) => song,
             (StemsGo::Kept, _) => {
+                self.status =
+                    format!("Separated \"{name}\" into {n} stems; keeping them in this browser…");
+                return;
+            }
+            (StemsGo::Show, None) => {
                 self.status = format!(
-                    "Separated \"{name}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them."
+                    "Separated \"{name}\" into {n} stems, with no song open to show them on."
                 );
                 return;
             }
-            _ => {
+            (StemsGo::Discarded, _) => {
                 self.status = format!(
                     "Separated \"{name}\" into {n} stems, but discarded them: that song is no longer open and is not kept in this browser."
                 );
@@ -1108,8 +1137,16 @@ impl StemApp {
         let pending = self.pending.clone();
         if let Some(id) = open {
             self.status = "Opening the stored song…".into();
+            self.opening = Some(id.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                if let Some(r) = store::restore_id(&id).await {
+                let Some(r) = store::restore_id(&id).await else {
+                    pending.borrow_mut().song = Some(Err(anyhow::anyhow!(
+                        "that song is no longer in browser storage"
+                    )));
+                    refresh_storage(&pending).await;
+                    return;
+                };
+                {
                     let mut inbox = pending.borrow_mut();
                     match r {
                         Ok((id, song, meta)) => {
@@ -1122,7 +1159,7 @@ impl StemApp {
                             }));
                         }
                         Err(e) => {
-                            inbox.status = Some(format!("Could not open the stored song: {e:#}"))
+                            inbox.song = Some(Err(e.context("could not open the stored song")));
                         }
                     }
                 }
@@ -1137,11 +1174,14 @@ impl StemApp {
             {
                 job.session = None;
             }
+            self.status = "Forgetting the song…".into();
             wasm_bindgen_futures::spawn_local(async move {
-                store::forget(&id).await;
-                pending.borrow_mut().status = Some(
-                    "Song forgotten; if it is open, it stays open until another is loaded.".into(),
-                );
+                let text = if store::forget(&id).await {
+                    "Song forgotten; if it is open, it stays open until another is loaded."
+                } else {
+                    "The browser did not delete that song; try again, or use Reset"
+                };
+                pending.borrow_mut().status = Some(text.into());
                 refresh_storage(&pending).await;
             });
         }
@@ -1539,11 +1579,19 @@ impl eframe::App for StemApp {
         {
             let inbox = std::mem::take(&mut *self.pending.borrow_mut());
             if let Some(r) = inbox.song {
+                self.opening = None;
+                let held = self.stems_for_opening.take();
                 match r {
                     Ok(opened) => {
+                        let song = match held {
+                            Some((id, stems)) if opened.session.as_deref() == Some(id.as_str()) => {
+                                with_original(&opened.song, stems)
+                            }
+                            _ => opened.song,
+                        };
                         self.session = opened.session;
                         self.song_name = opened.name;
-                        self.open_song(opened.song);
+                        self.open_song(song);
                     }
                     Err(e) => self.status = format!("Could not load: {e:#}"),
                 }
