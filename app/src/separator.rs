@@ -161,9 +161,16 @@ fn url_settings() -> Vec<(String, JsValue)> {
 }
 
 /// Copies one "segment" message (every stem's next samples, as
-/// transferred `Float32Array`s) into the song-length stems.
+/// transferred `Float32Array`s) into the song-length stems (see
+/// [`Assembly::segment`]).
 fn place_segment(asm: &mut Assembly, d: &JsValue) -> Result<(), String> {
-    let start = get(d, "start").as_f64().ok_or("segment without start")? as usize;
+    let start = get(d, "start").as_f64().map(|s| s as usize);
+    asm.segment(start == Some(0), |asm| {
+        place_stems(asm, d, start.ok_or("segment without start")?)
+    })
+}
+
+fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), String> {
     let len = get(d, "len").as_f64().ok_or("segment without len")? as usize;
     let stems: Array = get(d, "stems")
         .dyn_into()
@@ -236,16 +243,13 @@ impl Separator {
                     total: num("total") as u32,
                     secs: num("secs"),
                 }),
-                Some("segment") => match place_segment(&mut asm.borrow_mut(), &d) {
-                    Ok(()) => None,
-                    Err(e) => {
-                        asm.borrow_mut().clear();
-                        Some(Event::Error {
-                            of: "separate".into(),
-                            text: e,
-                        })
-                    }
-                },
+                Some("segment") => {
+                    let placed = place_segment(&mut asm.borrow_mut(), &d);
+                    placed.err().map(|text| Event::Error {
+                        of: "separate".into(),
+                        text,
+                    })
+                }
                 Some("done") => {
                     let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
                     let bytes = mem
@@ -253,26 +257,27 @@ impl Separator {
                         .unchecked_into::<js_sys::ArrayBuffer>()
                         .byte_length();
                     log::info!("separator: memory: page wasm {:.0} MB", bytes as f64 / 1e6);
-                    let mut q = ev.borrow_mut();
-                    match asm.borrow_mut().take() {
-                        Ok(stems) => {
+                    let done = asm.borrow_mut().done();
+                    match done {
+                        None => None,
+                        Some(Ok(stems)) => {
+                            let mut q = ev.borrow_mut();
                             for (name, left, right) in stems {
                                 q.push_back(Event::Stem { name, left, right });
                             }
                             Some(Event::Done { secs: num("secs") })
                         }
-                        Err(e) => Some(Event::Error {
+                        Some(Err(text)) => Some(Event::Error {
                             of: "separate".into(),
-                            text: e,
+                            text,
                         }),
                     }
                 }
                 Some("error") => {
-                    asm.borrow_mut().clear();
-                    Some(Event::Error {
-                        of: get(&d, "of").as_string().unwrap_or_default(),
-                        text: text(),
-                    })
+                    let of = get(&d, "of").as_string().unwrap_or_default();
+                    // An MP3 or self-test error leaves a running separation be.
+                    let first = of != "separate" || asm.borrow_mut().abandon();
+                    first.then(|| Event::Error { of, text: text() })
                 }
                 Some("status") => Some(Event::Status(text())),
                 Some("log") => Some(Event::Log(text())),
