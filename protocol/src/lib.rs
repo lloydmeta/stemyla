@@ -166,8 +166,10 @@ impl Settings {
             return Self::default();
         };
         let s = Self::from_query(&page.search());
+        // Empty resolves to the page itself.
         let own_site = |url: &String| {
-            web_sys::Url::new_with_base(url, href).is_ok_and(|u| u.origin() == page.origin())
+            !url.is_empty()
+                && web_sys::Url::new_with_base(url, href).is_ok_and(|u| u.origin() == page.origin())
         };
         Self {
             model_url: s.model_url.filter(own_site),

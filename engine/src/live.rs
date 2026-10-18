@@ -26,8 +26,10 @@
 //!
 //! An output that cannot play the next song ([`Unusable`]) is replaced.  In
 //! the browser each one replaced still keeps its callback: an empty slot,
-//! 64 KiB of scratch and cpal's own buffers, but no song.  Separated songs
-//! are all at 44.1 kHz, so that happens rarely.
+//! 64 KiB of scratch and cpal's own buffers (about 100 KiB), but no song.
+//! Separated songs are all at 44.1 kHz, so a new rate is rare, but a slow
+//! phone can be busy for over 250 ms while it lays out a long song's lanes,
+//! so there an output may be replaced about once a song.
 
 use crate::player::Player;
 use crate::slot::{PlayerSlot, Scratch};
@@ -120,7 +122,10 @@ fn open(rate: u32) -> Result<LiveOutput> {
                 let latency = Duration::from_nanos(in_callback_latency.load(Relaxed));
                 let start = starts(info.timestamp(), latency);
                 in_callback_scheduled.store(nanos(start), Relaxed);
-                if cfg!(target_arch = "wasm32") && start < info.timestamp().callback {
+                let length =
+                    Duration::from_secs_f64((data.len() / channels) as f64 / f64::from(rate));
+                if cfg!(target_arch = "wasm32") && is_late(start, info.timestamp().callback, length)
+                {
                     data.fill(0.0);
                 } else {
                     in_callback.render_interleaved(data, channels, &mut scratch);
@@ -244,11 +249,6 @@ impl LiveOutput {
         self.stream.play().context("resuming the audio output")
     }
 
-    /// Reads the Web Audio context's latency for the callback: its fixed
-    /// `baseLatency` and its `outputLatency`, which changes with the device
-    /// (Bluetooth earphones add a few hundred milliseconds).  Read when the
-    /// output opens and again with each song and each resume.  Natively
-    /// the latency stays zero: there callbacks are not held up.
     /// The output's clock, which stands still while the platform holds the
     /// output back (see [`LiveOutput::resume`]).
     pub fn clock(&self) -> Duration {
@@ -257,7 +257,15 @@ impl LiveOutput {
             .saturating_duration_since(cpal::StreamInstant::ZERO)
     }
 
-    fn refresh_latency(&self) {
+    /// Reads the Web Audio context's latency for the callback: its fixed
+    /// `baseLatency` and its `outputLatency`, which changes with the device
+    /// (Bluetooth earphones add a few hundred milliseconds) and reads 0
+    /// until the context runs.  cpal reads it afresh for every buffer, but
+    /// the callback cannot reach the context, so the page calls this every
+    /// frame (and it runs when the output opens, with each song and each
+    /// resume).  Natively the latency stays zero: there callbacks are not
+    /// held up.
+    pub fn refresh_latency(&self) {
         let latency = self.web_latency().unwrap_or(Duration::ZERO);
         self.latency
             .store(latency.as_nanos().try_into().unwrap_or(0), Relaxed);
@@ -320,7 +328,8 @@ fn behind(now: cpal::StreamInstant, scheduled: u64) -> Duration {
 /// that start plus the output's `latency`, and its `callback` time is the
 /// clock with none.
 ///
-/// A buffer that starts before its callback ran is late.  cpal's Web Audio
+/// A buffer that starts well before its callback ran is late (see
+/// [`is_late`]).  cpal's Web Audio
 /// host schedules each buffer right after the previous one; when the main
 /// thread was blocked for longer than its two queued buffers (as while a
 /// song loads), the schedule falls behind the context's clock, every late
@@ -333,6 +342,16 @@ fn starts(timestamp: cpal::OutputStreamTimestamp, latency: Duration) -> cpal::St
         .playback
         .checked_sub(latency)
         .unwrap_or(cpal::StreamInstant::ZERO)
+}
+
+/// Whether a buffer `length` long, due to start at `start`, was due over a
+/// buffer's length before its callback ran at `callback`.  The margin
+/// covers a latency reading up to a frame old: cpal's own reading, in
+/// `playback`, is fresh, so one that dropped since (earphones unplugged)
+/// would otherwise make every buffer look late, and silent, until the next
+/// reading.
+fn is_late(start: cpal::StreamInstant, callback: cpal::StreamInstant, length: Duration) -> bool {
+    start.checked_add(length).is_some_and(|end| end < callback)
 }
 
 /// Whether a stream error means the stream no longer plays.  An overload
@@ -373,6 +392,25 @@ mod tests {
         ] {
             assert!(is_fatal(kind), "{kind:?} ends the stream");
         }
+    }
+
+    #[test]
+    fn a_buffer_is_late_only_when_due_over_its_length_before_its_callback() {
+        let at = cpal::StreamInstant::from_millis;
+        let length = Duration::from_millis(46);
+        assert!(!is_late(at(1_000), at(1_000), length), "on time");
+        assert!(
+            !is_late(at(960), at(1_000), length),
+            "a latency reading 40 ms too high (earphones just unplugged) still plays"
+        );
+        assert!(
+            is_late(at(900), at(1_000), length),
+            "a buffer and more behind"
+        );
+        assert!(
+            is_late(at(1_000), at(3_000), length),
+            "after a two-second block"
+        );
     }
 
     #[test]

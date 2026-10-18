@@ -411,6 +411,10 @@ async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
     assert_eq!(stored_bytes().await, [7]);
 }
 
+/// Chunks that are views of larger buffers, which Safari 27 would write
+/// whole (see `whole` in the worker).  Only Safari can fail this and
+/// `opfs_write_writes_more_than_one_slice` without that copy: Chrome
+/// writes just the view.
 #[wasm_bindgen_test]
 async fn a_download_holds_only_the_bytes_of_its_chunks() {
     fresh().await;

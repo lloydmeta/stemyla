@@ -291,6 +291,7 @@ fn a_model_url_is_taken_only_from_the_pages_own_site() {
         "//example.com/m.safetensors",
         "http://127.0.0.1:9090/m",
         "javascript:alert(1)",
+        "",
     ] {
         assert_eq!(url(other), None, "{other}");
     }

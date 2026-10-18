@@ -644,6 +644,11 @@ impl BlobFile {
                     if !blocks.is_empty() && blocks.len() >= self.keep {
                         blocks.remove(0);
                     }
+                    debug_assert!(
+                        blocks.len() < self.keep.max(1),
+                        "{} blocks held",
+                        blocks.len()
+                    );
                     let to = (from + self.block).min(self.blob.size() as usize);
                     blob_range(&self.blob, from as f64, to as f64).map_err(|e| js_text(&e))?
                 }
