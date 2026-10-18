@@ -81,16 +81,18 @@ impl Opts {
                 "usage: xtask e2e <smoke|audio-resume|storage|bench|selftest|separate|worker-check> [options]",
             )?
             .clone();
+        // Defaults are in the workspace, wherever this runs from.
+        let root = crate::workspace_root();
         let mut o = Self {
-            out: PathBuf::from("target/e2e").join(&scenario),
+            out: root.join("target/e2e").join(&scenario),
             scenario,
             browser: Browser::default_here(),
-            dist: PathBuf::from("app/dist"),
+            dist: root.join("app/dist"),
             headed: false,
             swiftshader: false,
             query: None,
             weights: None,
-            selftest_dir: PathBuf::from("third_party/roformer/selftest"),
+            selftest_dir: root.join("third_party/roformer/selftest"),
             reference: None,
             download: false,
             // Positions in the 1100-pixel top bar with no model loaded.
@@ -398,6 +400,14 @@ fn number_after(line: &str, key: &str) -> Option<f64> {
     rest[..end].parse().ok()
 }
 
+/// Whether `line` reports a playhead at least one second (44 100 frames)
+/// into the song.
+fn played_a_second(line: &str) -> bool {
+    audio_stats(&[line.to_string()], 0)
+        .first()
+        .is_some_and(|(_, head)| *head >= 44_100.0)
+}
+
 /// (tempo, playhead) of every "audio stats" line after `from`.
 fn audio_stats(log: &[String], from: usize) -> Vec<(f64, f64)> {
     log[from.min(log.len())..]
@@ -460,7 +470,8 @@ fn smoke(o: &Opts) -> Result<()> {
 
     let from = p.mark();
     p.click(o.play_x, "Play")?;
-    p.idle(5.0)?;
+    let played = p.wait_for(from, 60, played_a_second)?;
+    p.check(played.is_some(), "the playhead moves after Play");
     let contexts = p.session.execute(
         "return (window.__e2e_ctxs || []).map((c) => ({ state: c.state, time: c.currentTime }));",
         json!([]),
@@ -470,12 +481,7 @@ fn smoke(o: &Opts) -> Result<()> {
         cs.iter()
             .any(|c| c["state"] == "running" && c["time"].as_f64() > Some(0.5))
     });
-    p.check(running, "Play starts a running AudioContext");
-    let heads = audio_stats(&p.log, from);
-    p.check(
-        heads.last().is_some_and(|(_, head)| *head >= 44_100.0),
-        "the playhead moves after Play",
-    );
+    p.check(running, "Web Audio runs (an AudioContext is running)");
 
     let from = p.mark();
     p.click(o.tempo_x, "the tempo slider at 75%")?;
@@ -485,7 +491,7 @@ fn smoke(o: &Opts) -> Result<()> {
             .first()
             .is_some_and(|(t, _)| (0.70..=0.80).contains(t))
     };
-    let tempo = p.wait_for(from, 10, near_75)?;
+    let tempo = p.wait_for(from, 60, near_75)?;
     p.check(tempo.is_some(), "the tempo slider sets about 75%");
     p.idle(3.0)?;
     p.screenshot("smoke_playing")?;
@@ -545,10 +551,10 @@ fn audio_resume(o: &Opts) -> Result<()> {
 
     let from = p.mark();
     p.click(o.play_x, "Play")?;
-    p.idle(5.0)?;
-    let head = audio_stats(&p.log, from).last().map_or(0.0, |(_, h)| *h);
-    p.note(&format!("after the click: playhead {head}"));
-    p.check(head >= 44_100.0, "one click on Play starts playback");
+    // A busy machine plays slower than real time, so this waits for the
+    // playhead rather than for a fixed time.
+    let played = p.wait_for(from, 60, played_a_second)?;
+    p.check(played.is_some(), "one click on Play starts playback");
     p.screenshot("audio_resume")?;
 
     // Separated stems in the stored session (written as `store::save_stems`
@@ -1172,7 +1178,11 @@ mod tests {
         assert_eq!(o.out, PathBuf::from("/tmp/x"));
         assert!(o.download);
         let d = Opts::parse(&args("bench")).unwrap();
-        assert_eq!(d.out, PathBuf::from("target/e2e/bench"));
+        assert_eq!(d.out, crate::workspace_root().join("target/e2e/bench"));
+        assert!(
+            d.dist.join("..").join("Cargo.toml").is_file(),
+            "app/dist under the workspace"
+        );
         assert!(Opts::parse(&args("--browser chrome")).is_err());
         assert!(Opts::parse(&args("smoke --play-x")).is_err());
         assert!(Opts::parse(&args("smoke --frobnicate")).is_err());

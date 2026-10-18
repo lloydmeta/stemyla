@@ -35,12 +35,14 @@ Everything is built and served with Rust tools.  What each task needs, beyond a 
 
 | To | You need |
 | - | - |
+| Anything | A C compiler, since some dependencies build C code (zstd in xtask, ring in Trunk): Xcode Command Line Tools on macOS (`xcode-select --install`), `build-essential` on Debian or Ubuntu. |
 | Build and serve the web app | Rust stable, 1.99 or newer (CI pins 1.99.0), with the `wasm32-unknown-unknown` target; [Trunk](https://trunkrs.dev/) 0.21.14, the version CI uses.  On its first build Trunk downloads `wasm-bindgen` and `wasm-opt` into its own cache, so that build needs the network. |
 | Separate songs in it | A browser with WebGPU (see "Using it") and the model: **Download model** in the page, or a local `.safetensors` file (see "The model"). |
-| Build the native app, `cargo test`, `cargo clippy` | A C toolchain: Xcode Command Line Tools on macOS (`xcode-select --install`).  On Debian or Ubuntu, `build-essential pkg-config libasound2-dev` (the audio output links ALSA). |
+| Build the native app, `cargo test`, `cargo clippy` | Nothing more on macOS.  On Debian or Ubuntu, `pkg-config libasound2-dev` (the audio output links ALSA). |
 | The UI snapshot tests (`app/tests/ui.rs`) | A GPU, or a software Vulkan driver (`mesa-vulkan-drivers libvulkan1` on Debian or Ubuntu, with `WGPU_BACKEND=vulkan`).  The snapshot PNGs are made on macOS with Metal and may not match elsewhere pixel for pixel: there, run with `UPDATE_SNAPSHOTS=1` as CI does, so every check except the image comparison still runs, and discard the rewritten PNGs (`git checkout app/tests/snapshots`). |
 | The GPU kernel tests (`roformer-gpu`) | A Vulkan, Metal or DX12 GPU, or SwiftShader (see "Checks").  Kernel changes are judged on a real GPU, never SwiftShader alone. |
 | The browser tests | `wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock`, and a browser's WebDriver (see "Browser tests").  CI runs them anyway; locally they are optional. |
+| `?bench`, and the `bench` scenario | A browser with WebGPU; no model. |
 | `?selftest`, and the `selftest`, `separate` and `worker-check` scenarios | A GPU, the model file, and for `selftest` the reference files made from it (below). |
 | The comparisons with PyTorch (`roformer`, `roformer-gpu`, `worker-check --reference`) | Fixtures from `tools/roformer_export.py`: Python 3 with `torch`, `numpy`, `pyyaml`, `ml_collections`, `safetensors` and [bs-roformer-infer](https://github.com/openmirlab/bs-roformer-infer) (module `bs_roformer`), plus the PyTorch checkpoint.  Without them those tests skip.  This is the only Python in the project, and it never builds or serves the app. |
 | MP3 files from `xtask gen-song` | `ffmpeg` on `PATH` (optional; WAV files are always written). |
@@ -55,12 +57,15 @@ cargo install --locked trunk --version 0.21.14                 # --locked matter
 cargo run -p xtask --release -- serve app/dist --port 8080     # http://localhost:8080/
 ```
 
-Then the checks (on Linux, install the packages in the table first):
+Then the checks CI gates on:
 
 ```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo clippy --workspace --all-targets
 ```
+
+On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan UPDATE_SNAPSHOTS=1 cargo test --workspace --exclude roformer-gpu` (software Vulkan for the UI tests, no image comparison, and no GPU kernel tests, which are never judged on software alone), then `git checkout app/tests/snapshots`.
 
 Model files, test fixtures, audio and stems live outside git (`.gitignore` keeps `third_party/`, `*.safetensors`, `*.wav` and `*.mp3` out): the weights have no stated licence and songs are copyrighted.  The tests that compare with PyTorch read their fixtures from `third_party/roformer/`.
 

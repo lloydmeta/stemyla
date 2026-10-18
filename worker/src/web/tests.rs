@@ -78,6 +78,16 @@ async fn plant(name: &str, bytes: &[u8]) {
     plant_js(name, &Uint8Array::from(bytes)).await;
 }
 
+/// Waits until `done` holds, or 10 s (the assertions after it then fail).
+async fn until(done: impl Fn() -> bool) {
+    for _ in 0..1000 {
+        if done() {
+            return;
+        }
+        sleep(10).await;
+    }
+}
+
 async fn fresh() {
     wipe().await;
     SENT.with_borrow_mut(Vec::clear);
@@ -153,7 +163,7 @@ async fn turns_are_served_in_the_order_asked() {
         "nothing runs while turn 1 is held"
     );
     drop(first);
-    sleep(200).await;
+    until(|| order.borrow().len() == 4).await;
     assert_eq!(
         *order.borrow(),
         ["2 starts", "2 ends", "3 starts", "3 ends"],
@@ -173,7 +183,7 @@ async fn model_and_gpu_messages_wait_for_their_turn() {
         "nothing is answered while another message has the turn"
     );
     drop(held);
-    sleep(200).await;
+    until(|| !sent("model").is_empty() && !sent("error").is_empty()).await;
     assert_eq!(sent("model").len(), 1, "init answered");
     assert_eq!(sent("error").len(), 1, "separate answered");
     assert!(

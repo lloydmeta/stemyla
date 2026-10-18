@@ -285,24 +285,51 @@ impl Session {
         )
     }
 
-    /// A trusted mouse click at viewport coordinates, after a short hover
-    /// (egui acts on a click only once the pointer has been over the
-    /// widget for a frame).
+    /// A trusted mouse click at viewport coordinates.  egui acts on a
+    /// click only once it has drawn a frame with the pointer over the
+    /// widget, so the pointer moves first and the page draws two frames
+    /// (however long a busy page takes).  Press and release then go
+    /// together: egui takes them for a long press, not a click, when its
+    /// frames see them more than 0.8 s apart (`max_click_duration`).
     pub fn click(&self, x: f64, y: f64) -> Result<()> {
-        let actions = json!({ "actions": [{
-            "type": "pointer",
-            "id": "mouse",
-            "parameters": { "pointerType": "mouse" },
-            "actions": [
-                { "type": "pointerMove", "duration": 0, "origin": "viewport", "x": x.round() as i64, "y": y.round() as i64 },
-                { "type": "pause", "duration": 150 },
+        let pointer = |steps: Value| {
+            json!({ "actions": [{
+                "type": "pointer",
+                "id": "mouse",
+                "parameters": { "pointerType": "mouse" },
+                "actions": steps,
+            }]})
+        };
+        let (x, y) = (x.round() as i64, y.round() as i64);
+        self.call(
+            "POST",
+            "/actions",
+            Some(pointer(json!([
+                { "type": "pointerMove", "duration": 0, "origin": "viewport", "x": x, "y": y },
+            ]))),
+        )?;
+        self.frames(2)?;
+        self.call(
+            "POST",
+            "/actions",
+            Some(pointer(json!([
                 { "type": "pointerDown", "button": 0 },
-                { "type": "pause", "duration": 50 },
                 { "type": "pointerUp", "button": 0 },
-            ],
-        }]});
-        self.call("POST", "/actions", Some(actions))?;
+            ]))),
+        )?;
         self.call("DELETE", "/actions", None).map(drop)
+    }
+
+    /// Waits until the page has drawn `n` more frames.
+    fn frames(&self, n: u32) -> Result<()> {
+        self.execute_async(
+            "const [n, done] = arguments;
+            const next = (left) => (left === 0 ? done(true) : requestAnimationFrame(() => next(left - 1)));
+            next(n);",
+            json!([n]),
+            Duration::from_secs(60),
+        )
+        .map(drop)
     }
 
     /// Sizes the window so the page's viewport is `width` by `height` CSS
