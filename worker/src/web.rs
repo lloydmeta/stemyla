@@ -1,11 +1,12 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use js_sys::{Float32Array, Object, Reflect, Uint8Array};
-use roformer::demix::Demixer;
+use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+use roformer::demix::{Demixer, Segment};
 use roformer::separate::{analyse, apply_masks};
-use roformer::weights::{Store, WeightError};
+use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
@@ -523,16 +524,32 @@ impl From<String> for LoadError {
     }
 }
 
+/// The model file as the browser read it, outside WebAssembly memory:
+/// [`Store`] copies in the header and then one tensor at a time, so the
+/// worker's memory (which never shrinks) does not grow by the whole file.
+struct JsBytes<'a>(&'a Uint8Array);
+
+impl Source for JsBytes<'_> {
+    fn size(&self) -> usize {
+        self.0.length() as usize
+    }
+
+    fn read(&self, start: usize, end: usize) -> Cow<'_, [u8]> {
+        Cow::Owned(self.0.subarray(start as u32, end as u32).to_vec())
+    }
+}
+
 /// Uploads the weights; returns the seconds taken and a description of
 /// the GPU.
-async fn build(bytes: &[u8], msg: &JsValue) -> Result<(f64, String), LoadError> {
+async fn build(file: &Uint8Array, msg: &JsValue) -> Result<(f64, String), LoadError> {
     let t0 = now_s();
     // Parsed before the GPU opens: a file that is not safetensors at all is
     // then reported (and an unusable stored copy removed) even on a device
     // without WebGPU, instead of being kept behind a GPU error.
-    Store::new(bytes).map_err(LoadError::Weights)?;
+    Store::from_source(JsBytes(file)).map_err(LoadError::Weights)?;
     let g = gpu(msg).await?;
-    let net = Net::load(&g, bytes, budget(msg)).map_err(LoadError::Weights)?;
+    let store = Store::from_source(JsBytes(file)).map_err(LoadError::Weights)?;
+    let net = Net::load_store(&g, store, budget(msg)).map_err(LoadError::Weights)?;
     g.done().await;
     if let Some(e) = g.take_errors().into_iter().next() {
         return Err(LoadError::Gpu(format!(
@@ -540,6 +557,7 @@ async fn build(bytes: &[u8], msg: &JsValue) -> Result<(f64, String), LoadError> 
         )));
     }
     ensure_kernels(&g, msg).await;
+    log(&memory_text(&net, None));
     STATE.with_borrow_mut(|s| s.net = Some(Rc::new(net)));
     Ok((now_s() - t0, gpu_text(&g).await))
 }
@@ -563,7 +581,7 @@ async fn init(msg: &JsValue) -> Result<(), String> {
         post_model(false, "no model cached in this browser").await;
         return Ok(());
     }
-    let bytes = cached.unchecked_into::<Uint8Array>().to_vec();
+    let bytes = cached.unchecked_into::<Uint8Array>();
     match build(&bytes, msg).await {
         Ok((secs, gpu)) => {
             post_model(
@@ -586,7 +604,7 @@ async fn init(msg: &JsValue) -> Result<(), String> {
                 false,
                 &format!(
                     "the model in browser storage is unusable ({} bytes, {e}) and {fate}",
-                    bytes.len()
+                    bytes.length()
                 ),
             )
             .await;
@@ -619,8 +637,7 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
             return Ok(());
         }
     };
-    let bytes = arr.to_vec();
-    match build(&bytes, msg).await {
+    match build(&arr, msg).await {
         Ok((secs, gpu)) => {
             let cached = cache_put(CACHE_NAME, &arr).await.as_bool().unwrap_or(false);
             let note = if cached {
@@ -743,6 +760,30 @@ impl Pace {
     }
 }
 
+/// Megabytes of this worker's WebAssembly memory, which only ever grows.
+fn wasm_mb() -> f64 {
+    let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+    mem.buffer()
+        .unchecked_into::<js_sys::ArrayBuffer>()
+        .byte_length() as f64
+        / 1e6
+}
+
+/// Where the worker's memory is, for the console: on iOS the whole tab is
+/// stopped at a fixed limit (2 GB on an iPhone 17 Pro), and GPU buffers
+/// count towards it.
+fn memory_text(net: &Net, job: Option<&Job>) -> String {
+    let mb = |b: u64| b as f64 / 1e6;
+    let job = job.map_or(String::new(), |j| {
+        format!(", chunk buffers {:.0} MB", mb(j.bytes()))
+    });
+    format!(
+        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB{job}",
+        wasm_mb(),
+        mb(net.bytes)
+    )
+}
+
 /// Progress notes for debugging, sent when the message has `debug: true`.
 fn trace(on: bool, text: &str) {
     if on {
@@ -761,7 +802,14 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
     let chunk = get(msg, "chunk").as_f64().map_or(CHUNK, |v| v as usize);
     let overlap = get(msg, "overlap").as_f64().map_or(OVERLAP, |v| v as usize);
     let t0 = now_s();
-    let mut d = Demixer::new([left.to_vec(), right.to_vec()], chunk, overlap, STEMS.len());
+    let mix = [left.to_vec(), right.to_vec()];
+    // The page transferred these; drop the worker's references so the
+    // browser can free them while the song is separated.
+    drop((left, right));
+    let _ = Reflect::delete_property(msg.unchecked_ref::<Object>(), &"left".into());
+    let _ = Reflect::delete_property(msg.unchecked_ref::<Object>(), &"right".into());
+    let mut d = Demixer::new(mix, chunk, overlap, STEMS.len());
+    let song_len = d.output_len();
     // The report after the song covers this separation only.
     gpu.reset_profile().await?;
     let mut pace = Pace::new(msg);
@@ -786,6 +834,10 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
         );
         if job.as_ref().is_none_or(|j| j.frames != frames) {
             job = Some(Job::new(gpu, net, frames));
+            log(&format!(
+                "separating {total} chunks; {}",
+                memory_text(net, job.as_ref())
+            ));
         }
         let j = job.as_ref().expect("job");
         j.set_input(&feats);
@@ -806,11 +858,16 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             }
         }
         d.accept(&out);
+        drop(out);
+        if let Some(seg) = d.take_ready() {
+            post_segment(seg, song_len);
+        }
         let done = d.chunk_index().min(total) as u32;
         log(&format!(
-            "chunk {done}/{total}: {:.1} s; so far {}",
+            "chunk {done}/{total}: {:.1} s; so far {}; {}",
             now_s() - tc,
-            pace.summary()
+            pace.summary(),
+            memory_text(net, job.as_ref())
         ));
         post(
             &[
@@ -822,18 +879,8 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             &[],
         );
     }
-    for (name, stem) in STEMS.iter().zip(d.finish()) {
-        let l = Float32Array::from(stem[0].as_slice());
-        let r = Float32Array::from(stem[1].as_slice());
-        post(
-            &[
-                ("type", "stem".into()),
-                ("name", (*name).into()),
-                ("left", l.clone().into()),
-                ("right", r.clone().into()),
-            ],
-            &[l.buffer().into(), r.buffer().into()],
-        );
+    if let Some(seg) = d.take_ready() {
+        post_segment(seg, song_len);
     }
     log(&format!("separation: {}", pace.summary()));
     log_profile(gpu, &pace);
@@ -842,6 +889,30 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
         &[],
     );
     Ok(())
+}
+
+/// Sends finished samples of every stem to the page, which assembles the
+/// song-length stems; the worker keeps at most a chunk of running sums
+/// instead of six whole songs (see `Demixer::take_ready`).
+fn post_segment(seg: Segment, song_len: usize) {
+    let stems = Array::new();
+    let mut transfer = Vec::with_capacity(2 * seg.stems.len());
+    for (name, stem) in STEMS.iter().zip(&seg.stems) {
+        let l = Float32Array::from(stem[0].as_slice());
+        let r = Float32Array::from(stem[1].as_slice());
+        transfer.push(l.buffer().into());
+        transfer.push(r.buffer().into());
+        stems.push(&Array::of3(&(*name).into(), &l, &r));
+    }
+    post(
+        &[
+            ("type", "segment".into()),
+            ("start", (seg.start as f64).into()),
+            ("len", (song_len as f64).into()),
+            ("stems", stems.into()),
+        ],
+        &transfer,
+    );
 }
 
 /// Signal-to-error ratio in dB.
@@ -1194,13 +1265,11 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         }
     };
     let secs = now_s() - t0;
-    // The worker's JS copy of the file (350 MB) is released before the
-    // upload, so the browser can reclaim it during the GPU upload and
-    // calibration instead of after them; a phone's tab has little memory
-    // to spare.
-    let bytes = arr.to_vec();
+    // The file stays in its JS copy and is read one tensor at a time (see
+    // `JsBytes`), so it is never in WebAssembly memory, which never shrinks.
+    let built = build(&arr, msg).await;
     drop(arr);
-    match build(&bytes, msg).await {
+    match built {
         Ok((load, gpu)) => {
             // The verified download becomes the stored model by a rename:
             // no second 350 MB write, and no moment at which the stored

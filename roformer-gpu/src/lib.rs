@@ -503,6 +503,10 @@ pub struct Gpu {
     /// Whether profiled submissions record timestamps now; benchmarks
     /// and calibration turn it off (see [`Gpu::set_recording`]).
     recording: std::cell::Cell<bool>,
+    /// Bytes of storage buffers made by [`Gpu::buffer`] and
+    /// [`Gpu::upload`] so far, for memory reports (on iOS a page's GPU
+    /// buffers count towards its tab's memory limit).
+    created: std::cell::Cell<u64>,
 }
 
 /// Timestamp queries around every dispatch of a profiled [`Gpu`].  Each
@@ -758,6 +762,7 @@ impl Gpu {
             errors,
             prof,
             recording: std::cell::Cell::new(true),
+            created: std::cell::Cell::new(0),
         }
     }
 
@@ -846,9 +851,11 @@ impl Gpu {
     /// (16 bytes) so the vec4 kernels can read it (see
     /// [`MatMul::vec4_ok`]).
     pub fn buffer(&self, label: &str, len: usize) -> wgpu::Buffer {
+        let size = (len.max(4).next_multiple_of(4) * 4) as u64;
+        self.created.set(self.created.get() + size);
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            size: (len.max(4).next_multiple_of(4) * 4) as u64,
+            size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -867,6 +874,8 @@ impl Gpu {
             self.write(&buf, 0, data);
             return buf;
         }
+        self.created
+            .set(self.created.get() + std::mem::size_of_val(data) as u64);
         self.device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
@@ -875,6 +884,12 @@ impl Gpu {
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
             })
+    }
+
+    /// Bytes of storage buffers made by [`Gpu::buffer`] and
+    /// [`Gpu::upload`] since this GPU opened (freed ones included).
+    pub fn created_bytes(&self) -> u64 {
+        self.created.get()
     }
 
     pub fn write(&self, buf: &wgpu::Buffer, offset: usize, data: &[f32]) {

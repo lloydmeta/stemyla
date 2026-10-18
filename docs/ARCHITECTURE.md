@@ -44,7 +44,7 @@ A song is handled in chunks of 13.35 s (588,800 samples), and a new chunk starts
 2. The network, on the GPU, takes the whole grid in one run of about 1,000 GPU steps and returns six masks of the same size, one per stem.  It needs the whole grid at once because its time transformers compare all 1,151 slices of a band with each other.
 3. Back on the CPU, the mix's grid is multiplied cell by cell by each mask (a complex multiply, so both loudness and phase change), and the inverse STFT turns each masked grid back into 13.35 s of audio: an inverse FFT per slice, then an overlap-add of the slices.
 
-Each chunk's six stems are faded in and out over 1.34 s at their edges (no fade-in on the first chunk, no fade-out on the last), added into song-length buffers, and divided by the summed fade weights, which crossfades neighbouring chunks.  Trimming the padding leaves six stems as long as the song.  So there are overlaps at two scales, each undone by its own overlap-add: 75 % between slices within a chunk, and 50 % between chunks across the song.  `roformer::demix::Demixer` does the chunking and crossfading as `bs_roformer.utils.demix_track` in the reference Python does, and `roformer::stft` follows `torch.stft` and `torch.istft`.
+Each chunk's six stems are faded in and out over 1.34 s at their edges (no fade-in on the first chunk, no fade-out on the last), added into running sums, and divided by the summed fade weights, which crossfades neighbouring chunks.  Trimming the padding leaves six stems as long as the song.  A sample gets nothing more once the next chunk has started past it, so after each chunk the worker divides the finished 6.68 s of every stem and sends it to the page, which fills in the song-length stems.  The worker thus holds about one chunk of running sums (28 MB) instead of six songs, and the reflect padding is read through an index rather than copied.  So there are overlaps at two scales, each undone by its own overlap-add: 75 % between slices within a chunk, and 50 % between chunks across the song.  `roformer::demix::Demixer` does the chunking and crossfading as `bs_roformer.utils.demix_track` in the reference Python does, and `roformer::stft` follows `torch.stft` and `torch.istft`.
 
 ```mermaid
 flowchart TD
@@ -89,6 +89,10 @@ The parameters and the arithmetic are spread very unevenly:
 | total | 174.66 M (about 699 MB as f32) | 6,069 GFLOP |
 
 The cause is reuse.  Each transformer weight is applied to every token of a chunk, 1,151 slices times 62 bands, on top of the attention products, which use no weights at all.  Each mask estimator has its own MLP per band, and that MLP sees only its band's 1,151 slices.
+
+## Memory on phones
+
+iOS stops a browser tab whose memory passes a fixed limit, 2 GB on an iPhone 17 Pro however much memory is free, and counts the page's GPU buffers towards it.  An iPad allows more.  The parameters take about 700 MB as f32 on the GPU and one chunk's activations about 280 MB with fused attention, so the rest is kept small: the model file is read into the worker one tensor at a time from its JavaScript copy (`roformer::weights::Source`), never whole into WebAssembly memory, which never shrinks, and separated stems leave the worker chunk by chunk.  The worker logs its WebAssembly memory, the GPU parameters and the chunk buffers when the model loads and after every chunk (`memory: ...` in the console), and the page logs its own WebAssembly memory when a separation ends.
 
 ## Running it on the GPU
 

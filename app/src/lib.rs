@@ -6,6 +6,7 @@ use engine::{Player, PlayerConfig, SharedParams, Song, Stem, StretcherKind};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
+pub mod assemble;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;
 pub mod reset;
@@ -1104,11 +1105,17 @@ impl StemApp {
                 );
                 return;
             }
-            let (l, r) = match song.stem_index("original") {
-                Some(i) => (song.stems[i].left.clone(), song.stems[i].right.clone()),
-                None => mix_of_sources(&song),
+            // Borrowed, not cloned: the worker gets its own copy anyway, and
+            // this thread's WebAssembly memory never shrinks once grown.
+            let mixed;
+            let (l, r): (&[f32], &[f32]) = match song.stem_index("original") {
+                Some(i) => (&song.stems[i].left, &song.stems[i].right),
+                None => {
+                    mixed = mix_of_sources(&song);
+                    (&mixed.0, &mixed.1)
+                }
             };
-            if sep.separate(&l, &r) {
+            if sep.separate(l, r) {
                 self.separating = self.separation_job();
                 self.status = "Separating…".into();
             } else {

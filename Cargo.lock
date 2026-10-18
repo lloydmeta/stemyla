@@ -6675,6 +6675,7 @@ dependencies = [
  "half",
  "realfft",
  "safetensors 0.7.0",
+ "serde_json",
 ]
 
 [[package]]

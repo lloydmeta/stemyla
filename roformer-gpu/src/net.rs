@@ -59,6 +59,8 @@ pub struct Net {
     /// Upper bound on the elements of any per-step intermediate (attention
     /// scores, q/k/v, hidden layers); at least one sequence always fits.
     pub budget: usize,
+    /// Bytes of GPU buffers holding the parameters.
+    pub bytes: u64,
 }
 
 fn norm(gpu: &Gpu, s: &mut Store, name: &str, dim: usize) -> Result<wgpu::Buffer, WeightError> {
@@ -136,7 +138,13 @@ impl Net {
     /// Uploads the weights of an exported safetensors file (f32, f16 or
     /// bf16).  Every tensor must be used and have the expected shape.
     pub fn load(gpu: &Gpu, bytes: &[u8], budget: usize) -> Result<Self, WeightError> {
-        let mut store = Store::new(bytes)?;
+        Self::load_store(gpu, Store::new(bytes)?, budget)
+    }
+
+    /// [`Self::load`] from a store, which may read the file from outside
+    /// WebAssembly memory one tensor at a time.
+    pub fn load_store(gpu: &Gpu, mut store: Store, budget: usize) -> Result<Self, WeightError> {
+        let before = gpu.created_bytes();
         let s = &mut store;
         let groups = band_groups();
         let mut split = Vec::new();
@@ -187,6 +195,7 @@ impl Net {
             final_norm,
             masks,
             budget,
+            bytes: gpu.created_bytes() - before,
         })
     }
 
@@ -393,6 +402,28 @@ impl<'a> Job<'a> {
             rope_time: gpu.upload("rope_time", &rope_table(t)),
             rope_freq: gpu.upload("rope_freq", &rope_table(f)),
         }
+    }
+
+    /// Bytes of GPU buffers this job holds.
+    pub fn bytes(&self) -> u64 {
+        [
+            &self.split_in,
+            &self.x,
+            &self.xt,
+            &self.xn,
+            &self.qkv,
+            &self.scores,
+            &self.o,
+            &self.gates,
+            &self.h,
+            &self.y,
+            &self.mask,
+            &self.rope_time,
+            &self.rope_freq,
+        ]
+        .iter()
+        .map(|b| b.size())
+        .sum()
     }
 
     /// Uploads the network input `[T, FEATURES]`, applying the band-split

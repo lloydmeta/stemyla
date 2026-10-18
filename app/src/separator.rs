@@ -3,7 +3,8 @@
 //! The worker is the `stem-worker` crate, built by Trunk next to the app.
 //! It owns the model, so the 350 MB of weights never enter the UI thread's
 //! memory when the model is chosen through the file picker.  Results come
-//! back as transferred `Float32Array`s, one message per stem.
+//! back after each chunk as transferred `Float32Array`s holding every
+//! stem's finished samples, put together here (see [`crate::assemble`]).
 //!
 //! Page query parameters, for tests and slow machines: `chunk` (samples per
 //! model call), `overlap` (1 halves the work), `max_elems` (largest
@@ -29,6 +30,8 @@ use eframe::egui;
 use js_sys::{Array, Float32Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
+
+use crate::assemble::Assembly;
 
 /// Written by Trunk's loader shim (`data-loader-shim`, file hashing off).
 /// The worker runs the network with the WGSL kernels of `roformer-gpu`.
@@ -157,6 +160,41 @@ fn url_settings() -> Vec<(String, JsValue)> {
     out
 }
 
+/// Copies one "segment" message (every stem's next samples, as
+/// transferred `Float32Array`s) into the song-length stems.
+fn place_segment(asm: &mut Assembly, d: &JsValue) -> Result<(), String> {
+    let start = get(d, "start").as_f64().ok_or("segment without start")? as usize;
+    let len = get(d, "len").as_f64().ok_or("segment without len")? as usize;
+    let stems: Array = get(d, "stems")
+        .dyn_into()
+        .map_err(|_| "segment without stems")?;
+    let mut end = start;
+    for (i, entry) in stems.iter().enumerate() {
+        let entry: Array = entry.dyn_into().map_err(|_| "malformed segment")?;
+        let name = entry.get(0).as_string().unwrap_or_default();
+        let l: Float32Array = entry.get(1).dyn_into().map_err(|_| "malformed segment")?;
+        let r: Float32Array = entry.get(2).dyn_into().map_err(|_| "malformed segment")?;
+        let n = l.length() as usize;
+        if r.length() as usize != n {
+            return Err(format!("segment of {name}: channels differ in length"));
+        }
+        asm.place(
+            i,
+            &name,
+            start,
+            len,
+            |ld, rd| {
+                l.copy_to(ld);
+                r.copy_to(rd);
+            },
+            n,
+        )?;
+        end = start + n;
+    }
+    asm.advance(end);
+    Ok(())
+}
+
 impl Separator {
     pub fn new(ctx: egui::Context) -> Result<Self, String> {
         // Ask the browser not to evict the cached model under storage
@@ -169,6 +207,8 @@ impl Separator {
         let worker = Worker::new_with_options(WORKER_URL, &opts).map_err(|e| format!("{e:?}"))?;
         let events: Rc<RefCell<VecDeque<Event>>> = Default::default();
         let settings = url_settings();
+        let assembly: Rc<RefCell<Assembly>> = Default::default();
+        let asm = assembly.clone();
         let (ev, w, init, repaint) = (
             events.clone(),
             worker.clone(),
@@ -196,24 +236,44 @@ impl Separator {
                     total: num("total") as u32,
                     secs: num("secs"),
                 }),
-                Some("stem") => {
-                    let ch = |k: &str| {
-                        get(&d, k)
-                            .dyn_into::<Float32Array>()
-                            .map(|a| a.to_vec())
-                            .unwrap_or_default()
-                    };
-                    Some(Event::Stem {
-                        name: get(&d, "name").as_string().unwrap_or_default(),
-                        left: ch("left"),
-                        right: ch("right"),
+                Some("segment") => match place_segment(&mut asm.borrow_mut(), &d) {
+                    Ok(()) => None,
+                    Err(e) => {
+                        asm.borrow_mut().clear();
+                        Some(Event::Error {
+                            of: "separate".into(),
+                            text: e,
+                        })
+                    }
+                },
+                Some("done") => {
+                    let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+                    let bytes = mem
+                        .buffer()
+                        .unchecked_into::<js_sys::ArrayBuffer>()
+                        .byte_length();
+                    log::info!("separator: memory: page wasm {:.0} MB", bytes as f64 / 1e6);
+                    let mut q = ev.borrow_mut();
+                    match asm.borrow_mut().take() {
+                        Ok(stems) => {
+                            for (name, left, right) in stems {
+                                q.push_back(Event::Stem { name, left, right });
+                            }
+                            Some(Event::Done { secs: num("secs") })
+                        }
+                        Err(e) => Some(Event::Error {
+                            of: "separate".into(),
+                            text: e,
+                        }),
+                    }
+                }
+                Some("error") => {
+                    asm.borrow_mut().clear();
+                    Some(Event::Error {
+                        of: get(&d, "of").as_string().unwrap_or_default(),
+                        text: text(),
                     })
                 }
-                Some("done") => Some(Event::Done { secs: num("secs") }),
-                Some("error") => Some(Event::Error {
-                    of: get(&d, "of").as_string().unwrap_or_default(),
-                    text: text(),
-                }),
                 Some("status") => Some(Event::Status(text())),
                 Some("log") => Some(Event::Log(text())),
                 Some("selftest") => Some(Event::Selftest {
