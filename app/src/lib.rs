@@ -6,6 +6,7 @@ use engine::{Player, PlayerConfig, SharedParams, Song, Stem, StretcherKind};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
+pub mod assemble;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;
 pub mod reset;
@@ -33,22 +34,48 @@ pub fn mix_of_sources(song: &Song) -> (Vec<f32>, Vec<f32>) {
         return (vec![0.0; song.frames], vec![0.0; song.frames]);
     }
     let volumes = vec![1.0; src.len()];
-    let lefts: Vec<Vec<f32>> = src.iter().map(|s| s.left.clone()).collect();
-    let rights: Vec<Vec<f32>> = src.iter().map(|s| s.right.clone()).collect();
+    let lefts: Vec<&[f32]> = src.iter().map(|s| s.left.as_slice()).collect();
+    let rights: Vec<&[f32]> = src.iter().map(|s| s.right.as_slice()).collect();
     (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
 }
 
-/// A separated song: the separated stems, then the source's mix as an
-/// "original" lane (the source's own "original" lane when it has one).
+/// The lane that already holds a song's original recording: its "original"
+/// lane, else its only source stem (an opened song file is one stem).
+/// `None` when the original is a mix of several source stems.
+///
+/// A lone stem is taken as it is, not through `dsp::mix`, so it is not
+/// clamped to +-1 and not copied: a copy of a song-sized buffer would stay in
+/// the web page's memory for good.
+fn original_lane(song: &Song) -> Option<&Stem> {
+    if let Some(i) = song.stem_index("original") {
+        return Some(&song.stems[i]);
+    }
+    let mut sources = song
+        .stems
+        .iter()
+        .filter(|s| !DERIVED.contains(&s.name.as_str()));
+    match (sources.next(), sources.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+/// A separated song: the separated stems, then the source's original
+/// recording as an "original" lane, shared with the source when it has one
+/// lane holding it (see `original_lane`) and mixed from its stems otherwise.
 pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
-    let original = match source.stem_index("original") {
-        Some(i) => source.stems[i].clone(),
+    let original = match original_lane(source) {
+        Some(lane) => Stem {
+            name: "original".into(),
+            left: lane.left.clone(),
+            right: lane.right.clone(),
+        },
         None => {
             let (left, right) = mix_of_sources(source);
             Stem {
                 name: "original".into(),
-                left,
-                right,
+                left: left.into(),
+                right: right.into(),
             }
         }
     };
@@ -240,7 +267,8 @@ pub struct Lane {
 
 /// Where audio goes.
 pub enum Output {
-    /// A real device through cpal; the callback owns the player.
+    /// A real device through cpal, opened once and kept while songs come
+    /// and go at its sample rate; the player is in its slot.
     #[cfg(feature = "audio")]
     Live(engine::live::LiveOutput),
     /// No device: the UI renders the player silently so the playhead still
@@ -262,7 +290,8 @@ pub struct StemApp {
     pub output: Option<Output>,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
-    /// Ask for a real audio device when a song is loaded.
+    /// Ask for a real audio device when an output is opened: for the first
+    /// song, and for a later one the kept output cannot play.
     pub want_device: bool,
     stretcher: StretcherKind,
     loop_drag_anchor: Option<u64>,
@@ -305,7 +334,7 @@ pub struct StemApp {
     /// missing from what the open read): the session, the stems, and what
     /// to say if the open does not show them.
     #[cfg(target_arch = "wasm32")]
-    stems_for_opening: Option<(String, std::rc::Rc<Vec<Stem>>, String)>,
+    stems_for_opening: Option<(String, Vec<Stem>, String)>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
 }
@@ -521,9 +550,6 @@ impl StemApp {
             .name
             .clone()
             .unwrap_or_else(|| "the separated song".into());
-        // Shared by the save and the held copy rather than copied for each:
-        // six stems of a song run to hundreds of MB.
-        let stems = std::rc::Rc::new(stems);
         #[cfg(target_arch = "wasm32")]
         if let Some(id) = job.session.clone() {
             let kept_text = format!(
@@ -570,11 +596,16 @@ impl StemApp {
             }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
-        self.load_song(with_original(&song, std::rc::Rc::unwrap_or_clone(stems)));
+        self.load_song(with_original(&song, stems));
         if let (Some(h), Some(p)) = (head, &self.params) {
             p.request_seek(h);
         }
         self.status = format!("Separated into {n} stems in {secs:.0} s.  {}", self.status);
+        #[cfg(target_arch = "wasm32")]
+        log::info!(
+            "separator: memory: page wasm {:.0} MB with the stems shown",
+            separator::page_wasm_mb()
+        );
     }
 
     /// Loads a song: builds lanes, shared params and the output.
@@ -610,7 +641,7 @@ impl StemApp {
                 params.set_muted(i, true);
             }
         }
-        self.output = None; // stops any previous stream
+        self.stop_output();
         let player = Player::with_config(
             Arc::clone(&song),
             Arc::clone(&params),
@@ -625,14 +656,52 @@ impl StemApp {
         );
         self.song = Some(song);
         self.params = Some(params);
+        self.play_on_output(player);
+    }
+
+    /// Frees the playing player before the next one is built (the old song
+    /// goes when `self.song` is replaced).  A live output stays open,
+    /// silent, for the next song.
+    fn stop_output(&mut self) {
+        match &self.output {
+            #[cfg(feature = "audio")]
+            Some(Output::Live(live)) => drop(live.stop()),
+            _ => self.output = None,
+        }
+    }
+
+    /// Plays `player` on the live output if one is open and can play it
+    /// (`engine::live::Unusable`); otherwise opens an output for it.
+    fn play_on_output(&mut self, player: Player) {
+        #[cfg(feature = "audio")]
+        let player = match self.play_on_live(player) {
+            Ok(()) => return,
+            Err(player) => *player,
+        };
+        self.output = None;
         self.output = Some(self.open_output(player));
+    }
+
+    /// Swaps `player` into the open live output, freeing the one it
+    /// replaces, or hands it back when there is no output it can play on.
+    #[cfg(feature = "audio")]
+    fn play_on_live(&mut self, player: Player) -> Result<(), Box<Player>> {
+        let Some(Output::Live(live)) = &self.output else {
+            return Err(Box::new(player));
+        };
+        let previous = live.play(player).map_err(|(why, player)| {
+            log::info!("audio: opening a new output ({why:?})");
+            player
+        })?;
+        drop(previous);
+        self.status
+            .push_str(&format!(", playing on {}", live.device_name));
+        Ok(())
     }
 
     fn open_output(&mut self, player: Player) -> Output {
         #[cfg(feature = "audio")]
         if self.want_device {
-            // cpal's start() takes the player; on failure we never get it
-            // back, so probe first.
             match engine::live::probe_default_output() {
                 Ok(_) => match engine::live::start(player) {
                     Ok(out) => {
@@ -640,9 +709,9 @@ impl StemApp {
                             .push_str(&format!(", playing on {}", out.device_name));
                         return Output::Live(out);
                     }
-                    Err(e) => {
+                    Err((e, player)) => {
                         self.status.push_str(&format!(", audio failed: {e:#}"));
-                        return Output::Silent(Box::new(self.rebuild_player()));
+                        return Output::Silent(player);
                     }
                 },
                 Err(e) => self
@@ -651,19 +720,6 @@ impl StemApp {
             }
         }
         Output::Silent(Box::new(player))
-    }
-
-    /// Only used when a device fails after the player was handed over.
-    #[cfg(feature = "audio")]
-    fn rebuild_player(&self) -> Player {
-        let song = self.song.clone().expect("song loaded");
-        let params = self.params.clone().expect("params");
-        Player::with_config(
-            Arc::clone(&song),
-            params,
-            self.stretcher.build(song.sample_rate),
-            PlayerConfig::default(),
-        )
     }
 
     /// Loads stems from in-memory files (a multi-file drop).
@@ -689,8 +745,8 @@ impl StemApp {
                 .into_iter()
                 .map(|(name, st)| Stem {
                     name,
-                    left: st.left,
-                    right: st.right,
+                    left: st.left.into(),
+                    right: st.right.into(),
                 })
                 .collect(),
         };
@@ -704,8 +760,8 @@ impl StemApp {
             s.stems.retain(|st| st.name != name);
             s.stems.push(Stem {
                 name: name.into(),
-                left,
-                right,
+                left: left.into(),
+                right: right.into(),
             });
             self.load_song(s);
         }
@@ -1104,11 +1160,18 @@ impl StemApp {
                 );
                 return;
             }
-            let (l, r) = match song.stem_index("original") {
-                Some(i) => (song.stems[i].left.clone(), song.stems[i].right.clone()),
-                None => mix_of_sources(&song),
+            // Borrowed, not cloned: the worker gets its own copy anyway, and
+            // this thread's WebAssembly memory never shrinks once grown.  The
+            // same samples become the "original" lane (see `with_original`).
+            let mixed;
+            let (l, r): (&[f32], &[f32]) = match original_lane(&song) {
+                Some(lane) => (&lane.left, &lane.right),
+                None => {
+                    mixed = mix_of_sources(&song);
+                    (&mixed.0, &mixed.1)
+                }
             };
-            if sep.separate(&l, &r) {
+            if sep.separate(l, r) {
                 self.separating = self.separation_job();
                 self.status = "Separating…".into();
             } else {
@@ -1352,14 +1415,14 @@ impl StemApp {
                 Event::Error { of, text } => {
                     log::error!("separator: {of}: {text}");
                     let what = match of.as_str() {
-                        "separate" => {
+                        stem_protocol::kind::SEPARATE => {
                             sep.running = false;
                             self.separating = None;
                             "Separation"
                         }
-                        "mp3" => "MP3 encoding",
-                        "selftest" => "Self-test",
-                        "bench" => "Benchmark",
+                        stem_protocol::kind::MP3 => "MP3 encoding",
+                        stem_protocol::kind::SELFTEST => "Self-test",
+                        stem_protocol::kind::BENCH => "Benchmark",
                         _ => "Worker request",
                     };
                     self.status = format!("{what} failed: {text}");
@@ -1381,7 +1444,11 @@ impl StemApp {
         if let Some((stems, secs)) = finished {
             let stems = stems
                 .into_iter()
-                .map(|(name, left, right)| Stem { name, left, right })
+                .map(|(name, left, right)| Stem {
+                    name,
+                    left: left.into(),
+                    right: right.into(),
+                })
                 .collect();
             match self.separating.take() {
                 Some(job) => self.apply_separated(job, stems, secs),
@@ -1636,9 +1703,7 @@ impl eframe::App for StemApp {
                             .as_ref()
                             .is_some_and(|(id, ..)| opened.session.as_deref() == Some(id.as_str()));
                         let song = match self.stems_for_opening.take_if(|_| holds_these) {
-                            Some((_, stems, _)) => {
-                                with_original(&opened.song, std::rc::Rc::unwrap_or_clone(stems))
-                            }
+                            Some((_, stems, _)) => with_original(&opened.song, stems),
                             None => opened.song,
                         };
                         self.session = opened.session;
@@ -1728,6 +1793,93 @@ mod tests {
             session: session.map(String::from),
             name: None,
         }
+    }
+
+    fn stem(name: &str, v: f32) -> Stem {
+        Stem {
+            name: name.into(),
+            left: vec![v; 4].into(),
+            right: vec![-v; 4].into(),
+        }
+    }
+
+    #[test]
+    fn separated_stems_and_the_original_are_shared_not_copied() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("original", 0.5)],
+        };
+        let stems = vec![stem("bass", 0.1), stem("drums", 0.2)];
+        let song = with_original(&source, stems.clone());
+        assert_eq!(song.stems.len(), 3);
+        for (a, b) in stems.iter().zip(&song.stems) {
+            assert!(
+                a.left.shares(&b.left) && a.right.shares(&b.right),
+                "{}",
+                a.name
+            );
+        }
+        assert!(
+            song.stems[2].left.shares(&source.stems[0].left),
+            "the original"
+        );
+
+        // An opened song file is one stem: it is the original, not copied.
+        let one_stem = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("song", 0.5)],
+        };
+        let song = with_original(&one_stem, stems.clone());
+        let original = &song.stems[2];
+        assert_eq!(original.name, "original");
+        assert!(
+            original.left.shares(&one_stem.stems[0].left)
+                && original.right.shares(&one_stem.stems[0].right),
+            "a one-stem source's original"
+        );
+    }
+
+    #[test]
+    fn a_lone_stem_is_the_original_unclamped_beside_derived_lanes() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("song", 1.5), stem("classic drums", 0.25)],
+        };
+        let lane = original_lane(&source).unwrap();
+        assert!(lane.left.shares(&source.stems[0].left));
+        let song = with_original(&source, vec![stem("bass", 0.1)]);
+        assert_eq!(song.stems[1].left, vec![1.5; 4]);
+        assert_eq!(song.stems[1].right, vec![-1.5; 4]);
+    }
+
+    #[test]
+    fn several_source_stems_are_mixed_into_the_original() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("bass", 0.25), stem("drums", 0.5)],
+        };
+        assert!(original_lane(&source).is_none());
+        let song = with_original(&source, vec![stem("vocals", 0.1)]);
+        let original = &song.stems[1];
+        assert_eq!(original.name, "original");
+        assert_eq!(original.left, vec![0.75; 4]);
+        assert_eq!(original.right, vec![-0.75; 4]);
+        assert!(!original.left.shares(&source.stems[0].left));
+    }
+
+    #[test]
+    fn an_original_lane_is_the_original_even_beside_one_stem() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("bass", 0.25), stem("original", 0.5)],
+        };
+        let lane = original_lane(&source).unwrap();
+        assert!(lane.left.shares(&source.stems[1].left));
     }
 
     #[test]

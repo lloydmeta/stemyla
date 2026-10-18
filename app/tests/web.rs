@@ -57,8 +57,8 @@ fn stem(name: &str, frames: usize) -> Stem {
     let wave = vec![0.1; frames];
     Stem {
         name: name.into(),
-        left: wave.clone(),
-        right: wave,
+        left: wave.clone().into(),
+        right: wave.into(),
     }
 }
 

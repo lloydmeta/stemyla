@@ -68,7 +68,7 @@ fn live_smoke() -> Result<()> {
         params.clone(),
         StretcherKind::default_pitch_preserving(),
     );
-    let out = engine::live::start(player)?;
+    let out = engine::live::start(player).map_err(|(e, _)| e)?;
     std::thread::sleep(std::time::Duration::from_secs(2));
     let n = params.callbacks.load(Relaxed);
     let max_ns = params.max_callback_ns.load(Relaxed);

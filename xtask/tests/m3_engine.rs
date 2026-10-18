@@ -20,8 +20,8 @@ pub fn synth_song() -> (Arc<Song>, synth::Song) {
             .iter()
             .map(|(n, st)| Stem {
                 name: n.clone(),
-                left: st.left.clone(),
-                right: st.right.clone(),
+                left: st.left.clone().into(),
+                right: st.right.clone().into(),
             })
             .collect(),
     };

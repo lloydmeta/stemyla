@@ -425,8 +425,8 @@ mod tests {
                 .into_iter()
                 .map(|(n, v)| Stem {
                     name: n.into(),
-                    left: v.clone(),
-                    right: v,
+                    left: v.clone().into(),
+                    right: v.into(),
                 })
                 .collect(),
         })
@@ -469,7 +469,7 @@ mod tests {
         // Start from settled gains so no ramp is involved.
         p.gains = vec![0.5, 0.75];
         let [l, _] = p.render(9_000);
-        let reference = dsp::mix(&[a[..9_000].to_vec(), b[..9_000].to_vec()], &[0.5, 0.75]);
+        let reference = dsp::mix(&[&a[..9_000], &b[..9_000]], &[0.5, 0.75]);
         for i in 0..9_000 {
             assert!((l[i] - reference[i]).abs() < 1e-6, "frame {i}");
         }

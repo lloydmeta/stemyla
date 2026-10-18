@@ -65,8 +65,8 @@ async fn close_waits_for_the_write_in_progress_then_refuses_every_write() {
     let stems: Vec<Stem> = (0..6)
         .map(|i| Stem {
             name: format!("s{i}"),
-            left: vec![0.1; 1_000_000],
-            right: vec![0.1; 1_000_000],
+            left: vec![0.1; 1_000_000].into(),
+            right: vec![0.1; 1_000_000].into(),
         })
         .collect();
     let saved = Rc::new(RefCell::new(None));

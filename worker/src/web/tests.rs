@@ -6,6 +6,7 @@
 //! each starts from an empty one, and they run one at a time.
 
 use super::*;
+use js_sys::{Object, Reflect};
 use std::cell::RefCell;
 use wasm_bindgen_test::*;
 
@@ -33,7 +34,12 @@ export async function files() {
   for await (const [name, h] of root.entries()) if (h.kind === "file") out.push(name);
   return out.sort().join(" ");
 }
+export async function plant_dir(name) {
+  const root = await navigator.storage.getDirectory();
+  await root.getDirectoryHandle(name, { create: true });
+}
 export function blob_url(bytes) { return URL.createObjectURL(new Blob([bytes])); }
+export function blob(bytes) { return new Blob([bytes]); }
 export function revoke(url) { URL.revokeObjectURL(url); }
 // Makes WebGPU look absent (as on a device without it) until the
 // returned function is called.
@@ -46,7 +52,37 @@ export function hide_gpu() {
     else delete proto.gpu;
   };
 }
+// The next fetch answers with "lloyd" and "acme" as views into larger
+// buffers, as a stream's chunks may be.
+export function next_fetch_sends_views() {
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => {
+    globalThis.fetch = real;
+    const view = (text) => {
+      const b = new Uint8Array(64);
+      const t = new TextEncoder().encode(text);
+      b.set(t, 8);
+      return b.subarray(8, 8 + t.length);
+    };
+    const body = new ReadableStream({
+      start(c) { c.enqueue(view("lloyd")); c.enqueue(view("acme")); c.close(); },
+    });
+    return new Response(body);
+  };
+}
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// The next fetch answers with one byte, and keeps how it was asked to
+// treat redirects for `last_redirect`.
+let redirect = null;
+export function record_next_fetch() {
+  const real = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    globalThis.fetch = real;
+    redirect = init.redirect;
+    return new Response(new Uint8Array(1));
+  };
+}
+export function last_redirect() { return redirect; }
 // The next fetch answers with 10 of 1000 bytes, then the connection breaks.
 export function break_next_fetch() {
   const real = globalThis.fetch;
@@ -65,10 +101,18 @@ extern "C" {
     async fn plant_js(name: &str, bytes: &Uint8Array);
     /// Names of the files at the root, sorted, space-separated.
     async fn files() -> JsValue;
+    /// Makes a directory at the root, where a file of that name cannot be
+    /// written.
+    async fn plant_dir(name: &str);
     fn blob_url(bytes: &[u8]) -> String;
+    /// A `Blob` holding a copy of `bytes`, as a picked file is.
+    fn blob(bytes: &[u8]) -> Blob;
     fn revoke(url: &str);
     async fn sleep(ms: u32);
+    fn next_fetch_sends_views();
     fn break_next_fetch();
+    fn record_next_fetch();
+    fn last_redirect() -> Option<String>;
     fn hide_gpu() -> js_sys::Function;
 }
 
@@ -98,7 +142,7 @@ async fn listing() -> String {
 }
 
 fn field(o: &JsValue, k: &str) -> JsValue {
-    get(o, k)
+    Reflect::get(o, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED)
 }
 
 /// The messages of type `kind` posted since the last [`fresh`].
@@ -248,6 +292,260 @@ async fn cache_put_leaves_only_the_finished_file() {
 }
 
 #[wasm_bindgen_test]
+async fn cache_put_stores_a_blob() {
+    fresh().await;
+    assert_eq!(
+        cache_put(CACHE_NAME, &blob(&[4, 5, 6])).await.as_bool(),
+        Some(true)
+    );
+    assert_eq!(listing().await, CACHE_NAME);
+    assert_eq!(stored_bytes().await, [4, 5, 6]);
+}
+
+/// Every range of `body`, read through `file`, in an order that crosses
+/// block boundaries, comes back to blocks already evicted, and ends in the
+/// last, partial block.
+fn reads_back(file: &ModelFile, body: &[u8]) {
+    let n = body.len();
+    assert_eq!(file.size(), n);
+    for (s, e) in [
+        (0, 8),
+        (8, 8),
+        (13, n / 2 + 1),
+        (99, 101),
+        (250, 1000),
+        (0, 1),
+        (n - 1, n),
+        (40, n),
+    ] {
+        assert_eq!(file.read(s, e).expect("read")[..], body[s..e], "{s}..{e}");
+        if let ModelFile::Blob(f) = file {
+            assert!(f.held() <= f.keep, "{} blocks held of {}", f.held(), f.keep);
+        }
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_stored_file_is_read_in_blocks() {
+    fresh().await;
+    let body: Vec<u8> = (0..2_000u32).map(|i| (i * 7) as u8).collect();
+    plant(CACHE_NAME, &body).await;
+    assert!(cache_file("missing").await.expect("no error").is_null());
+    let stored = || async {
+        cache_file(CACHE_NAME)
+            .await
+            .expect("no error")
+            .unchecked_into()
+    };
+    reads_back(&ModelFile::blob(stored().await), &body);
+    reads_back(&ModelFile::blob_in_blocks(stored().await, 100, 2), &body);
+    reads_back(&ModelFile::blob_in_blocks(stored().await, 7, 1), &body);
+    reads_back(&ModelFile::Bytes(Uint8Array::from(&body[..])), &body);
+}
+
+/// Reset removing the file mid-load, say.  (A file rewritten after it was
+/// opened is a read error in Chrome, but Safari 27 reads the new bytes, so
+/// the hashed download is built from the bytes it hashed.)
+#[wasm_bindgen_test]
+async fn a_stored_file_removed_after_it_was_opened_is_a_read_error() {
+    fresh().await;
+    plant(CACHE_NAME, &TRUNCATED).await;
+    let file = ModelFile::blob(
+        cache_file(CACHE_NAME)
+            .await
+            .expect("no error")
+            .unchecked_into(),
+    );
+    opfs_remove(CACHE_NAME).await;
+    let got = Store::from_source(&file).err().expect("not readable");
+    assert!(
+        matches!(LoadError::from(got), LoadError::Read(_)),
+        "a read error, so a stored model is kept, not removed as unusable"
+    );
+}
+
+#[wasm_bindgen_test]
+/// Refused from its header, before it is copied into storage: a stale
+/// partial file is left as it was, not overwritten by a copy.
+async fn a_picked_file_that_is_not_a_model_is_refused_before_it_is_copied() {
+    fresh().await;
+    plant(CACHE_NAME, &[7]).await;
+    plant(DOWNLOAD_NAME, &[9]).await;
+    handle(message(&[
+        ("type", "model".into()),
+        ("file", blob(&TRUNCATED).into()),
+    ]))
+    .await;
+    let (ok, _, stored, text) = model_reply();
+    assert!(!ok && stored, "{text}");
+    assert!(no_gpu(), "told unusable before the GPU opened");
+    assert!(text.starts_with("not a BS-RoFormer SW model"), "{text}");
+    assert_eq!(stored_bytes().await, [7]);
+    let stale = cache_get(DOWNLOAD_NAME).await.expect("no error");
+    assert_eq!(
+        stale.unchecked_into::<Uint8Array>().to_vec(),
+        [9],
+        "not copied"
+    );
+}
+
+/// A well-formed safetensors file with no tensors: it gets as far as the
+/// GPU.
+const EMPTY_MODEL: [u8; 10] = [2, 0, 0, 0, 0, 0, 0, 0, b'{', b'}'];
+
+#[wasm_bindgen_test]
+async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
+    fresh().await;
+    plant(CACHE_NAME, &[7]).await;
+    let show_gpu = hide_gpu();
+    handle(message(&[
+        ("type", "model".into()),
+        ("file", blob(&EMPTY_MODEL).into()),
+    ]))
+    .await;
+    show_gpu.call0(&JsValue::NULL).expect("restored");
+    let (ok, loaded, stored, text) = model_reply();
+    assert!(!ok && !loaded && stored, "{text}");
+    assert!(text.starts_with("the model could not be loaded"), "{text}");
+    assert_eq!(listing().await, CACHE_NAME, "no partial file left");
+    assert_eq!(stored_bytes().await, [7]);
+}
+
+/// Chunks that are views of larger buffers, which Safari 27 would write
+/// whole (see `whole` in the worker).  Only Safari can fail this and
+/// `opfs_write_writes_more_than_one_slice` without that copy: Chrome
+/// writes just the view.
+#[wasm_bindgen_test]
+async fn a_download_holds_only_the_bytes_of_its_chunks() {
+    fresh().await;
+    next_fetch_sends_views();
+    let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
+    let got = download_to_opfs(
+        "/weights/m",
+        DOWNLOAD_NAME,
+        progress.as_ref().unchecked_ref(),
+        false,
+    )
+    .await;
+    assert_eq!(got.ok().and_then(|n| n.as_f64()), Some(9.0));
+    let stored = cache_get(DOWNLOAD_NAME).await.expect("no error");
+    assert_eq!(stored.unchecked_into::<Uint8Array>().to_vec(), b"lloydacme");
+}
+
+#[wasm_bindgen_test]
+async fn opfs_write_writes_more_than_one_slice() {
+    fresh().await;
+    let body: Vec<u8> = (0..(9u32 << 20)).map(|i| (i % 251) as u8).collect();
+    for (what, src) in [
+        ("a blob", blob(&body).into()),
+        ("bytes", JsValue::from(Uint8Array::from(&body[..]))),
+    ] {
+        assert_eq!(opfs_write("model", &src).await.as_bool(), Some(true));
+        let got = cache_get("model")
+            .await
+            .expect("no error")
+            .unchecked_into::<Uint8Array>()
+            .to_vec();
+        let first_wrong = got.iter().zip(&body).position(|(a, b)| a != b);
+        assert!(
+            got.len() == body.len() && first_wrong.is_none(),
+            "{what}: {} bytes of {}, first wrong at {first_wrong:?}",
+            got.len(),
+            body.len()
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_file_over_4_gb_is_refused() {
+    assert!(reachable(2_000.0).is_ok());
+    assert!(reachable(u32::MAX as f64).is_ok());
+    assert!(matches!(
+        reachable(5e9),
+        Err(WeightError::Parse(e)) if e.contains("over the 4 GB")
+    ));
+}
+
+async fn sha256(bytes: &[u8]) -> String {
+    sha256_hex(&Uint8Array::from(bytes))
+        .await
+        .expect("hashed")
+        .as_string()
+        .expect("hex")
+}
+
+#[wasm_bindgen_test]
+async fn a_download_is_used_only_if_its_hash_matches() {
+    fresh().await;
+    let body = b"the model".to_vec();
+    plant(DOWNLOAD_NAME, &body).await;
+    let hash = sha256(&body).await;
+    let checked = verified_download(Some(&hash)).await.expect("matches");
+    assert!(
+        matches!(checked, ModelFile::Bytes(_)),
+        "built from what was hashed"
+    );
+    // Rewritten after the check (Safari reads the new bytes through a
+    // `File` opened before): what was hashed is still what is read.
+    plant(DOWNLOAD_NAME, b"not the model").await;
+    assert_eq!((&checked).read(0, body.len()).expect("read")[..], body[..]);
+
+    let wrong = verified_download(Some(&sha256(b"another").await))
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        wrong.starts_with("the downloaded model is not the expected file"),
+        "{wrong}"
+    );
+    let unchecked = verified_download(None).await.expect("not checked");
+    assert!(matches!(unchecked, ModelFile::Blob(_)));
+}
+
+/// The same-site check on `?model_url=` covers the address asked for, so an
+/// unchecked download must not be redirected off the site.
+#[wasm_bindgen_test]
+async fn only_a_hash_checked_download_follows_redirects() {
+    for (expected, redirect) in [(Some("0".repeat(64)), "follow"), (None, "error")] {
+        fresh().await;
+        record_next_fetch();
+        download_from("/weights/m", expected.as_deref(), &Settings::default())
+            .await
+            .expect("answered");
+        assert_eq!(last_redirect().as_deref(), Some(redirect), "{expected:?}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_checked_download_the_gpu_failed_to_load_is_kept() {
+    for (checked, kept) in [(true, true), (false, false)] {
+        fresh().await;
+        let url = blob_url(&EMPTY_MODEL);
+        let hash = sha256(&EMPTY_MODEL).await;
+        let show_gpu = hide_gpu();
+        download_from(&url, checked.then_some(hash.as_str()), &Settings::default())
+            .await
+            .expect("answered");
+        show_gpu.call0(&JsValue::NULL).expect("restored");
+        revoke(&url);
+        let (ok, loaded, stored, text) = model_reply();
+        assert!(!ok && !loaded, "{text}");
+        assert!(
+            text.starts_with("the downloaded model could not be loaded"),
+            "{text}"
+        );
+        assert_eq!(stored, kept, "checked {checked}: {text}");
+        assert_eq!(
+            text.contains("it was saved in browser storage"),
+            kept,
+            "{text}"
+        );
+        let left = if kept { CACHE_NAME } else { "" };
+        assert_eq!(listing().await, left, "checked {checked}");
+    }
+}
+
+#[wasm_bindgen_test]
 async fn download_writes_the_whole_body_and_reports_progress() {
     fresh().await;
     let body: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
@@ -257,7 +555,7 @@ async fn download_writes_the_whole_body_and_reports_progress() {
     let progress = Closure::<dyn FnMut(f64, f64)>::new(move |done: f64, total: f64| {
         *seen.borrow_mut() = (done, total);
     });
-    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref(), true).await;
     revoke(&url);
     assert_eq!(got.expect("downloaded").as_f64(), Some(100_000.0));
     assert_eq!(*last.borrow(), (100_000.0, 100_000.0), "last progress");
@@ -271,7 +569,7 @@ async fn a_failed_fetch_creates_no_file() {
     let url = blob_url(&[1, 2, 3]);
     revoke(&url);
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
-    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref(), true).await;
     assert!(got.is_err(), "a revoked URL cannot be fetched");
     assert_eq!(listing().await, "");
 }
@@ -430,7 +728,13 @@ async fn errors_name_the_request_they_answer() {
         ("rate", 96_000.into()),
     ]))
     .await;
-    handle(of_type("separate")).await;
+    let mix = Float32Array::new_with_length(4);
+    handle(message(&[
+        ("type", "separate".into()),
+        ("left", mix.clone().into()),
+        ("right", mix.into()),
+    ]))
+    .await;
     let errors = sent("error");
     let of: Vec<String> = errors
         .iter()
@@ -446,8 +750,7 @@ async fn errors_name_the_request_they_answer() {
 #[wasm_bindgen_test]
 async fn init_keeps_a_stored_model_that_only_the_gpu_failed_to_load() {
     fresh().await;
-    // A well-formed safetensors file (no tensors): it gets as far as the GPU.
-    plant(CACHE_NAME, &[2, 0, 0, 0, 0, 0, 0, 0, b'{', b'}']).await;
+    plant(CACHE_NAME, &EMPTY_MODEL).await;
     let show_gpu = hide_gpu();
     handle(of_type("init")).await;
     show_gpu.call0(&JsValue::NULL).expect("restored");
@@ -458,4 +761,40 @@ async fn init_keeps_a_stored_model_that_only_the_gpu_failed_to_load() {
         "{text}"
     );
     assert_eq!(listing().await, CACHE_NAME);
+}
+
+#[wasm_bindgen_test]
+async fn a_picked_file_is_loaded_from_itself_when_storage_cannot_copy_it() {
+    fresh().await;
+    plant_dir(DOWNLOAD_NAME).await;
+    let show_gpu = hide_gpu();
+    handle(message(&[
+        ("type", "model".into()),
+        ("file", blob(&EMPTY_MODEL).into()),
+    ]))
+    .await;
+    show_gpu.call0(&JsValue::NULL).expect("restored");
+    let (ok, loaded, stored, text) = model_reply();
+    assert!(!ok && !loaded && !stored, "{text}");
+    assert!(
+        text.starts_with("the model could not be loaded"),
+        "built from the picked file, as far as the GPU: {text}"
+    );
+    assert_eq!(listing().await, "", "nothing stored");
+}
+
+#[wasm_bindgen_test]
+async fn a_failed_load_says_when_it_unloaded_the_model_before_it() {
+    fresh().await;
+    assert_eq!(unloaded_note(false).await, "", "there was none");
+    assert_eq!(
+        unloaded_note(true).await,
+        "; the model loaded before was unloaded to make room"
+    );
+    plant(CACHE_NAME, &[7]).await;
+    assert!(
+        unloaded_note(true)
+            .await
+            .ends_with("reload the page to load the stored one")
+    );
 }

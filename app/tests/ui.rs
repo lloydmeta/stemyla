@@ -294,8 +294,8 @@ fn separated(h: &Harness<'_, StemApp>) -> Vec<engine::Stem> {
     ["bass", "vocals"]
         .map(|name| engine::Stem {
             name: name.into(),
-            left: vec![0.1; frames],
-            right: vec![0.1; frames],
+            left: vec![0.1; frames].into(),
+            right: vec![0.1; frames].into(),
         })
         .into()
 }

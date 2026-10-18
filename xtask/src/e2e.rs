@@ -857,6 +857,10 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
     )?;
     p.check(
         r["replies"][0]["ok"] == json!(true)
+            && r["replies"][0]["stored"] == json!(true)
+            && r["replies"][0]["text"].as_str().is_some_and(|t| {
+                t.contains("saved in browser storage") && !t.contains("could not")
+            })
             && r["files"]
                 .as_object()
                 .is_some_and(|f| f.len() <= 2 && !f.contains_key("download.part")),
@@ -879,18 +883,62 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
         "the earlier model stays loaded and stored",
     );
 
-    p.note("case: a picked file is committed");
+    p.note("case: a download that is not safetensors at all keeps the model loaded");
     let r = in_page(
         p,
         "await e2e.wipe();
+        return e2e.ask([{ type: 'download', model_url: args[0], ...args[1] }, { type: 'download', model_url: '/__e2e/blank.html', ...args[1] }]);",
+        json!([model, opts]),
+        1200,
+    )?;
+    p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    p.check(
+        r["replies"][1]["ok"] == json!(false)
+            && r["replies"][1]["loaded"] == json!(true)
+            && r["replies"][1]["stored"] == json!(true),
+        "the file is refused before the model loaded before it is freed",
+    );
+
+    p.note("case: a safetensors file that is not the model unloads the one before it");
+    let r = in_page(
+        p,
+        "await e2e.wipe();
+        const empty = new Uint8Array([2, 0, 0, 0, 0, 0, 0, 0, 123, 125]);
+        return e2e.ask([{ type: 'download', model_url: args[0], ...args[1] }, { type: 'model', bytes: empty, ...args[1] }]);",
+        json!([model, opts]),
+        1200,
+    )?;
+    p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    p.check(
+        r["replies"][1]["ok"] == json!(false)
+            && r["replies"][1]["loaded"] == json!(false)
+            && r["replies"][1]["stored"] == json!(true)
+            && r["files"]
+                .as_object()
+                .is_some_and(|f| !f.contains_key("download.part")),
+        "two models are never on the GPU at once, and the stored one is kept",
+    );
+
+    p.note("case: a picked file is committed, over a stored model");
+    let r = in_page(
+        p,
+        "await e2e.plant('bs_roformer_sw.safetensors', [7]);
         const bytes = new Uint8Array(await (await fetch(args[0])).arrayBuffer());
         return e2e.ask([{ type: 'model', bytes, ...args[1] }]);",
         json!([model, opts]),
         1200,
     )?;
     p.check(
-        r["replies"][0]["ok"] == json!(true) && r["replies"][0]["stored"] == json!(true),
-        "the picked file loads and is stored",
+        r["replies"][0]["ok"] == json!(true)
+            && r["replies"][0]["stored"] == json!(true)
+            && r["replies"][0]["text"].as_str().is_some_and(|t| {
+                t.contains("saved in browser storage") && !t.contains("could not")
+            })
+            && r["files"].as_object().is_some_and(|f| {
+                !f.contains_key("download.part")
+                    && f["bs_roformer_sw.safetensors"].as_u64() > Some(1)
+            }),
+        "the picked file loads and replaces the stored one",
     );
     Ok(())
 }
@@ -1100,7 +1148,14 @@ fn worker_check(o: &Opts) -> Result<()> {
           const n = clip.length / 2;
           const stems = {};
           const sep = { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), chunk: 32 * 512, overlap: 2, step_limit: 600 };
-          const m = await e2e.ask([msg, sep], { stem: (d) => { stems[d.name] = [d.left, d.right]; } });
+          const place = (d) => {
+            for (const [name, l, r] of d.stems) {
+              stems[name] ??= [new Float32Array(d.len), new Float32Array(d.len)];
+              stems[name][0].set(l, d.start);
+              stems[name][1].set(r, d.start);
+            }
+          };
+          const m = await e2e.ask([msg, sep], { segment: place });
           r.model = m.replies[0]; r.end = m.replies[1]; r.ms = performance.now() - t;
           let mixE = 0;
           for (const v of clip) mixE += v * v;

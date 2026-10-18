@@ -115,7 +115,7 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked
 and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver --enable` and Develop > "Allow Remote Automation" in Safari; otherwise, or with `--browser chrome`, a ChromeDriver matching Chrome's major version ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)) in `CHROMEDRIVER` or on `PATH`.  Safari 27.0's safaridriver may fail with "timed out while connecting to a Safari instance"; use `--browser chrome` meanwhile.
 
 ```bash
-cargo run -p xtask -- web-test                  # browser storage and the worker (wasm-bindgen-test)
+cargo run -p xtask -- web-test                  # browser storage, audio output, the worker (wasm-bindgen-test)
 (cd app && trunk build --release)
 cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage
 cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors

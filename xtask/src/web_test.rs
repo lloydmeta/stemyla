@@ -41,9 +41,20 @@ pub fn run(args: &[String]) -> Result<()> {
     check_runner(&wanted)?;
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
-    let runs: [&[&str]; 2] = [
-        &["-p", "app", "--lib", "--test", "web", "--test", "web_close"],
+    let runs: [&[&str]; 3] = [
+        &[
+            "-p",
+            "app",
+            "--lib",
+            "--test",
+            "web",
+            "--test",
+            "web_close",
+            "--test",
+            "web_output",
+        ],
         &["-p", "stem-worker", "--lib"],
+        &["-p", "stem-protocol", "--test", "web"],
     ];
     for targets in runs {
         let mut cmd = Command::new(env!("CARGO"));
@@ -64,6 +75,12 @@ pub fn run(args: &[String]) -> Result<()> {
             Browser::Safari => "SAFARIDRIVER",
         };
         cmd.env(var, &driver);
+        if browser == Browser::Chrome {
+            cmd.env(
+                "WASM_BINDGEN_TEST_WEBDRIVER_JSON",
+                chrome_capabilities(&root)?,
+            );
+        }
         if let Some(f) = &filter {
             cmd.args(["--", f]);
         }
@@ -76,6 +93,20 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A `webdriver.json` for the runner that lets Chrome play audio without a
+/// click, so an audio context runs and its clock moves (`app/tests/
+/// web_output.rs`).  The runner adds its own arguments (headless) to these.
+fn chrome_capabilities(root: &std::path::Path) -> Result<std::path::PathBuf> {
+    let path = root.join("target/web-test-chrome.json");
+    std::fs::create_dir_all(root.join("target"))?;
+    std::fs::write(
+        &path,
+        r#"{"goog:chromeOptions": {"args": ["--autoplay-policy=no-user-gesture-required"]}}"#,
+    )
+    .context("writing the Chrome capabilities")?;
+    Ok(path)
 }
 
 /// The version of `name` in a `Cargo.lock` (the first, if several).
