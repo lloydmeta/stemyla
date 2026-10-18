@@ -157,6 +157,24 @@ impl Settings {
         s
     }
 
+    /// From the page's own address `href`, as [`Settings::from_query`],
+    /// except that `model_url` is kept only for a file on the page's own
+    /// site: it is not checked against a hash, so a link could otherwise
+    /// make the page fetch and store a file from anywhere.
+    pub fn from_page(href: &str) -> Self {
+        let Ok(page) = web_sys::Url::new(href) else {
+            return Self::default();
+        };
+        let s = Self::from_query(&page.search());
+        let own_site = |url: &String| {
+            web_sys::Url::new_with_base(url, href).is_ok_and(|u| u.origin() == page.origin())
+        };
+        Self {
+            model_url: s.model_url.filter(own_site),
+            ..s
+        }
+    }
+
     fn write(&self, o: &Object) {
         let count = |v: Option<usize>| v.map(|v| v as f64);
         for (k, v) in [

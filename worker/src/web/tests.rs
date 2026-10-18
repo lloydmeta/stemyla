@@ -279,6 +279,9 @@ fn reads_back(file: &ModelFile, body: &[u8]) {
         (40, n),
     ] {
         assert_eq!(file.read(s, e).expect("read")[..], body[s..e], "{s}..{e}");
+        if let ModelFile::Blob(f) = file {
+            assert!(f.held() <= f.keep, "{} blocks held of {}", f.held(), f.keep);
+        }
     }
 }
 
@@ -335,6 +338,118 @@ async fn a_picked_file_that_is_not_a_model_is_read_from_the_file() {
     assert!(no_gpu(), "told unusable before the GPU opened");
     assert!(text.starts_with("not a BS-RoFormer SW model"), "{text}");
     assert_eq!(stored_bytes().await, [7]);
+    assert_eq!(listing().await, CACHE_NAME, "no partial file left");
+}
+
+/// A well-formed safetensors file with no tensors: it gets as far as the
+/// GPU.
+const EMPTY_MODEL: [u8; 10] = [2, 0, 0, 0, 0, 0, 0, 0, b'{', b'}'];
+
+#[wasm_bindgen_test]
+async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
+    fresh().await;
+    plant(CACHE_NAME, &[7]).await;
+    let show_gpu = hide_gpu();
+    handle(message(&[
+        ("type", "model".into()),
+        ("file", blob(&EMPTY_MODEL).into()),
+    ]))
+    .await;
+    show_gpu.call0(&JsValue::NULL).expect("restored");
+    let (ok, loaded, stored, text) = model_reply();
+    assert!(!ok && !loaded && stored, "{text}");
+    assert!(text.starts_with("the model could not be loaded"), "{text}");
+    assert_eq!(listing().await, CACHE_NAME, "no partial file left");
+    assert_eq!(stored_bytes().await, [7]);
+}
+
+#[wasm_bindgen_test]
+async fn opfs_write_writes_more_than_one_slice() {
+    fresh().await;
+    let body: Vec<u8> = (0..(9u32 << 20)).map(|i| (i % 251) as u8).collect();
+    for src in [
+        blob(&body).into(),
+        JsValue::from(Uint8Array::from(&body[..])),
+    ] {
+        assert_eq!(opfs_write("model", &src).await.as_bool(), Some(true));
+        let got = cache_get("model").await.expect("no error");
+        assert!(got.unchecked_into::<Uint8Array>().to_vec() == body);
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_file_over_4_gb_is_refused() {
+    assert!(reachable(2_000.0).is_ok());
+    assert!(reachable(u32::MAX as f64).is_ok());
+    assert!(matches!(
+        reachable(5e9),
+        Err(WeightError::Parse(e)) if e.contains("over the 4 GB")
+    ));
+}
+
+async fn sha256(bytes: &[u8]) -> String {
+    sha256_hex(&Uint8Array::from(bytes))
+        .await
+        .expect("hashed")
+        .as_string()
+        .expect("hex")
+}
+
+#[wasm_bindgen_test]
+async fn a_download_is_used_only_if_its_hash_matches() {
+    fresh().await;
+    let body = b"the model".to_vec();
+    plant(DOWNLOAD_NAME, &body).await;
+    let hash = sha256(&body).await;
+    let checked = verified_download(Some(&hash)).await.expect("matches");
+    assert!(
+        matches!(checked, ModelFile::Bytes(_)),
+        "built from what was hashed"
+    );
+    // Rewritten after the check (Safari reads the new bytes through a
+    // `File` opened before): what was hashed is still what is read.
+    plant(DOWNLOAD_NAME, b"not the model").await;
+    assert_eq!((&checked).read(0, body.len()).expect("read")[..], body[..]);
+
+    let wrong = verified_download(Some(&sha256(b"another").await))
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        wrong.starts_with("the downloaded model is not the expected file"),
+        "{wrong}"
+    );
+    let unchecked = verified_download(None).await.expect("not checked");
+    assert!(matches!(unchecked, ModelFile::Blob(_)));
+}
+
+#[wasm_bindgen_test]
+async fn a_checked_download_the_gpu_failed_to_load_is_kept() {
+    for (checked, kept) in [(true, true), (false, false)] {
+        fresh().await;
+        let url = blob_url(&EMPTY_MODEL);
+        let hash = sha256(&EMPTY_MODEL).await;
+        let show_gpu = hide_gpu();
+        download_from(&url, checked.then_some(hash.as_str()), &Settings::default())
+            .await
+            .expect("answered");
+        show_gpu.call0(&JsValue::NULL).expect("restored");
+        revoke(&url);
+        let (ok, loaded, stored, text) = model_reply();
+        assert!(!ok && !loaded, "{text}");
+        assert!(
+            text.starts_with("the downloaded model could not be loaded"),
+            "{text}"
+        );
+        assert_eq!(stored, kept, "checked {checked}: {text}");
+        assert_eq!(
+            text.contains("it was saved in browser storage"),
+            kept,
+            "{text}"
+        );
+        let left = if kept { CACHE_NAME } else { "" };
+        assert_eq!(listing().await, left, "checked {checked}");
+    }
 }
 
 #[wasm_bindgen_test]
@@ -542,8 +657,7 @@ async fn errors_name_the_request_they_answer() {
 #[wasm_bindgen_test]
 async fn init_keeps_a_stored_model_that_only_the_gpu_failed_to_load() {
     fresh().await;
-    // A well-formed safetensors file (no tensors): it gets as far as the GPU.
-    plant(CACHE_NAME, &[2, 0, 0, 0, 0, 0, 0, 0, b'{', b'}']).await;
+    plant(CACHE_NAME, &EMPTY_MODEL).await;
     let show_gpu = hide_gpu();
     handle(of_type("init")).await;
     show_gpu.call0(&JsValue::NULL).expect("restored");

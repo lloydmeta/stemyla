@@ -879,6 +879,26 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
         "the earlier model stays loaded and stored",
     );
 
+    p.note("case: a safetensors file that is not the model unloads the one before it");
+    let r = in_page(
+        p,
+        "await e2e.wipe();
+        const empty = new Uint8Array([2, 0, 0, 0, 0, 0, 0, 0, 123, 125]);
+        return e2e.ask([{ type: 'download', model_url: args[0], ...args[1] }, { type: 'model', bytes: empty, ...args[1] }]);",
+        json!([model, opts]),
+        1200,
+    )?;
+    p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    p.check(
+        r["replies"][1]["ok"] == json!(false)
+            && r["replies"][1]["loaded"] == json!(false)
+            && r["replies"][1]["stored"] == json!(true)
+            && r["files"]
+                .as_object()
+                .is_some_and(|f| !f.contains_key("download.part")),
+        "two models are never on the GPU at once, and the stored one is kept",
+    );
+
     p.note("case: a picked file is committed");
     let r = in_page(
         p,
@@ -1100,7 +1120,14 @@ fn worker_check(o: &Opts) -> Result<()> {
           const n = clip.length / 2;
           const stems = {};
           const sep = { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), chunk: 32 * 512, overlap: 2, step_limit: 600 };
-          const m = await e2e.ask([msg, sep], { stem: (d) => { stems[d.name] = [d.left, d.right]; } });
+          const place = (d) => {
+            for (const [name, l, r] of d.stems) {
+              stems[name] ??= [new Float32Array(d.len), new Float32Array(d.len)];
+              stems[name][0].set(l, d.start);
+              stems[name][1].set(r, d.start);
+            }
+          };
+          const m = await e2e.ask([msg, sep], { segment: place });
           r.model = m.replies[0]; r.end = m.replies[1]; r.ms = performance.now() - t;
           let mixE = 0;
           for (const v of clip) mixE += v * v;

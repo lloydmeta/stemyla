@@ -86,14 +86,27 @@ async function write_file(fh, body) {
     throw e;
   }
 }
-export async function cache_put(name, bytes) {
-  const part = name + ".part";
+export async function opfs_write(name, src) {
   try {
     const root = await navigator.storage.getDirectory();
-    const fh = await root.getFileHandle(part, { create: true });
-    await write_file(fh, (w) => w.write(bytes));
-    if (await opfs_commit(part, name)) return true;
-  } catch (e) {}
+    const fh = await root.getFileHandle(name, { create: true });
+    const slice = 8 << 20;
+    const size = src instanceof Blob ? src.size : src.length;
+    await write_file(fh, async (w) => {
+      for (let at = 0; at < size; at += slice) {
+        const end = Math.min(at + slice, size);
+        await w.write(src instanceof Blob ? src.slice(at, end) : src.subarray(at, end));
+      }
+    });
+    return true;
+  } catch (e) {
+    await opfs_remove(name);
+    return false;
+  }
+}
+export async function cache_put(name, bytes) {
+  const part = name + ".part";
+  if (await opfs_write(part, bytes) && await opfs_commit(part, name)) return true;
   await opfs_remove(part);
   return false;
 }
@@ -192,7 +205,13 @@ extern "C" {
     async fn storage_lock(waiting: &js_sys::Function) -> Result<JsValue, JsValue>;
     /// Whether the file exists (or cannot be told apart from existing).
     async fn opfs_has(name: &str) -> JsValue;
-    /// Stores `bytes`, a `Uint8Array` or a `Blob`.
+    /// Writes `src`, a `Uint8Array` or a `Blob`, as the file `name`, 8 MB
+    /// at a time, so the browser need never hold more of a `Blob` than
+    /// that to write it; whether it was written.  A file not fully written
+    /// is removed.
+    async fn opfs_write(name: &str, src: &JsValue) -> JsValue;
+    /// Stores `bytes`, a `Uint8Array` or a `Blob`, under `name` only once
+    /// it is fully written.
     async fn cache_put(name: &str, bytes: &JsValue) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
     #[wasm_bindgen(catch)]
@@ -597,13 +616,6 @@ impl ModelFile {
             blocks: RefCell::new(Vec::new()),
         })
     }
-
-    fn as_js(&self) -> &JsValue {
-        match self {
-            Self::Bytes(b) => b,
-            Self::Blob(f) => &f.blob,
-        }
-    }
 }
 
 impl BlobFile {
@@ -615,6 +627,11 @@ impl BlobFile {
             let bytes = match blocks.iter().position(|(i, _)| *i == b) {
                 Some(p) => blocks.remove(p).1,
                 None => {
+                    // Evicted first, so no more than `keep` blocks are
+                    // ever held.
+                    if !blocks.is_empty() && blocks.len() >= self.keep {
+                        blocks.remove(0);
+                    }
                     let to = (from + self.block).min(self.blob.size() as usize);
                     blob_range(&self.blob, from as f64, to as f64).map_err(|e| js_text(&e))?
                 }
@@ -627,11 +644,13 @@ impl BlobFile {
             out.resize(n + part.length() as usize, 0);
             part.copy_to(&mut out[n..]);
             blocks.push((b, bytes));
-            if blocks.len() > self.keep {
-                blocks.remove(0);
-            }
         }
         Ok(out)
+    }
+
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.blocks.borrow().len()
     }
 }
 
@@ -651,15 +670,33 @@ impl Source for &ModelFile {
     }
 }
 
+/// Refuses a file of more bytes than this 32-bit worker can address (the
+/// model is 350 MB).
+fn reachable(bytes: f64) -> Result<(), WeightError> {
+    if bytes > usize::MAX as f64 {
+        return Err(WeightError::Parse(format!(
+            "{bytes} bytes is over the 4 GB this worker can read"
+        )));
+    }
+    Ok(())
+}
+
 /// Uploads the weights; returns the seconds taken and a description of
 /// the GPU.
 async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError> {
     let t0 = now_s();
+    if let ModelFile::Blob(f) = &file {
+        reachable(f.blob.size())?;
+    }
     // Parsed before the GPU opens: a file that is not safetensors at all is
     // then reported (and an unusable stored copy removed) even on a device
     // without WebGPU, instead of being kept behind a GPU error.
     Store::from_source(&file)?;
     let g = gpu(s).await?;
+    // Two models do not fit on a phone's GPU at once, so the one loaded
+    // before goes now: a safetensors file that then fails to load leaves
+    // no model loaded (the stored one, if any, is kept).
+    STATE.with_borrow_mut(|st| st.net = None);
     let net = Net::load_store(&g, Store::from_source(&file)?, budget(s))?;
     // Its cached blocks, or a checked download's bytes, are not needed for
     // the GPU checks and kernel timing that follow.
@@ -735,11 +772,33 @@ async fn init(s: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// The picked file or the bytes sent, written to [`DOWNLOAD_NAME`] and
+/// opened from there, so the model built is the one later stored, and
+/// the bytes sent can be freed before the upload; `None` if browser
+/// storage could not take it.
+async fn staged(source: &ModelSource) -> Option<ModelFile> {
+    let src: &JsValue = match source {
+        ModelSource::File(f) => f,
+        ModelSource::Bytes(b) => b,
+    };
+    if !opfs_write(DOWNLOAD_NAME, src)
+        .await
+        .as_bool()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    match cache_file(DOWNLOAD_NAME).await {
+        Ok(f) if !f.is_null() => Some(ModelFile::blob(f.unchecked_into())),
+        _ => {
+            opfs_remove(DOWNLOAD_NAME).await;
+            None
+        }
+    }
+}
+
 async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), String> {
-    let Some(file) = source.map(|source| match source {
-        ModelSource::File(f) => ModelFile::blob(f),
-        ModelSource::Bytes(b) => ModelFile::Bytes(b),
-    }) else {
+    let Some(source) = source else {
         post_model(
             false,
             "could not read the model file: model message without file or bytes",
@@ -747,14 +806,32 @@ async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), Str
         .await;
         return Ok(());
     };
-    // A handle, not a copy: the picked file, or the bytes sent.
-    let to_store = file.as_js().clone();
-    match build(file, s).await {
+    let (file, is_staged) = match staged(&source).await {
+        Some(file) => {
+            // Bytes sent are freed now, not after the upload.
+            drop(source);
+            (file, true)
+        }
+        None => (
+            match source {
+                ModelSource::File(f) => ModelFile::blob(f),
+                ModelSource::Bytes(b) => ModelFile::Bytes(b),
+            },
+            false,
+        ),
+    };
+    let built = build(file, s).await;
+    let cached = built.is_ok()
+        && is_staged
+        && opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
+            .await
+            .as_bool()
+            .unwrap_or(false);
+    if !cached {
+        opfs_remove(DOWNLOAD_NAME).await;
+    }
+    match built {
         Ok((secs, gpu)) => {
-            let cached = cache_put(CACHE_NAME, &to_store)
-                .await
-                .as_bool()
-                .unwrap_or(false);
             let note = if cached {
                 "saved in browser storage"
             } else {
@@ -941,6 +1018,9 @@ async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Resu
             &format!("chunk {}: stft {:.2} s", d.chunk_index(), now_s() - tc),
         );
         if job.as_ref().is_none_or(|j| j.frames != frames) {
+            // Freed before the next is made: two chunks' buffers (about
+            // 280 MB each) need not be on the GPU at once.
+            drop(job.take());
             job = Some(Job::new(gpu, net, frames));
             log(&format!(
                 "separating {total} chunks; {}",
@@ -1318,19 +1398,28 @@ async fn bench(s: &Settings) -> Result<(), String> {
 /// (`{type: "download", done, total}`), checks its hash, then loads it like
 /// a picked file.
 async fn download(s: &Settings) -> Result<(), String> {
-    let url = s.model_url.clone().unwrap_or_else(|| MODEL_URL.to_string());
+    let url = s.model_url.as_deref().unwrap_or(MODEL_URL);
+    // Any other file (`?model_url=`, for tests, which the page takes only
+    // from its own site) is not checked against a hash.
+    let expected = (url == MODEL_URL).then_some(MODEL_SHA256);
+    download_from(url, expected, s).await
+}
+
+/// Downloads `url` and loads it, checked against the SHA-256 `expected`
+/// if given, then stores it.
+async fn download_from(url: &str, expected: Option<&str>, s: &Settings) -> Result<(), String> {
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|done: f64, total: f64| {
         send(Reply::Download { done, total });
     });
     let t0 = now_s();
-    let fetched = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let fetched = download_to_opfs(url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
     drop(progress);
     if let Err(e) = fetched {
         opfs_remove(DOWNLOAD_NAME).await;
         post_model(false, &format!("model download failed: {}", js_text(&e))).await;
         return Ok(());
     }
-    let file = match verified_download(&url).await {
+    let file = match verified_download(expected).await {
         Ok(file) => file,
         Err(e) => {
             opfs_remove(DOWNLOAD_NAME).await;
@@ -1340,19 +1429,29 @@ async fn download(s: &Settings) -> Result<(), String> {
     };
     let secs = now_s() - t0;
     let built = build(file, s).await;
+    // A checked file that only the GPU failed to load is kept, as a
+    // stored one is at start, so it is not downloaded again.
+    let keep = match &built {
+        Ok(_) => true,
+        Err(LoadError::Gpu(_)) => expected.is_some(),
+        Err(_) => false,
+    };
+    // The download becomes the stored model by a rename: no second 350 MB
+    // write, and no moment at which the stored model exists but is not
+    // yet complete.
+    let cached = keep
+        && opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
+            .await
+            .as_bool()
+            .unwrap_or(false);
+    if !cached {
+        opfs_remove(DOWNLOAD_NAME).await;
+    }
     match built {
         Ok((load, gpu)) => {
-            // The verified download becomes the stored model by a rename:
-            // no second 350 MB write, and no moment at which the stored
-            // model exists but is not yet complete.
-            let cached = opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
-                .await
-                .as_bool()
-                .unwrap_or(false);
             let note = if cached {
                 "saved in browser storage"
             } else {
-                opfs_remove(DOWNLOAD_NAME).await;
                 "could not be saved in browser storage"
             };
             post_model(
@@ -1364,26 +1463,30 @@ async fn download(s: &Settings) -> Result<(), String> {
             .await;
         }
         Err(e) => {
-            opfs_remove(DOWNLOAD_NAME).await;
             let what = match e {
                 LoadError::Weights(_) => "the downloaded file is not a usable BS-RoFormer SW model",
                 LoadError::Read(_) | LoadError::Gpu(_) => {
                     "the downloaded model could not be loaded"
                 }
             };
-            post_model(false, &format!("{what}: {e}")).await;
+            let fate = if cached {
+                "; it was saved in browser storage: reload the page to try again"
+            } else {
+                ""
+            };
+            post_model(false, &format!("{what}: {e}{fate}")).await;
         }
     }
     Ok(())
 }
 
-/// The downloaded file, checked against the published hash when it came
-/// from [`MODEL_URL`].  WebCrypto hashes only whole buffers, so a checked
-/// file is read into JavaScript, and the model is built from those very
-/// bytes: Safari's `File` from storage reads whatever the file holds when
-/// it is read, not what was hashed.  An unchecked one is read from storage
-/// a tensor at a time.
-async fn verified_download(url: &str) -> Result<ModelFile, String> {
+/// The downloaded file, checked against the SHA-256 `expected` if given.
+/// WebCrypto hashes only whole buffers, so a checked file is read into
+/// JavaScript, and the model is built from those very bytes: Safari's
+/// `File` from storage reads whatever the file holds when it is read, not
+/// what was hashed.  An unchecked one is read from storage a tensor at a
+/// time.
+async fn verified_download(expected: Option<&str>) -> Result<ModelFile, String> {
     let unreadable = |e: JsValue| {
         format!(
             "model download failed: could not read the file ({})",
@@ -1395,9 +1498,9 @@ async fn verified_download(url: &str) -> Result<ModelFile, String> {
         return Err("model download failed: the browser did not keep the file".into());
     }
     let file: Blob = part.unchecked_into();
-    if url != MODEL_URL {
+    let Some(expected) = expected else {
         return Ok(ModelFile::blob(file));
-    }
+    };
     let bytes: Uint8Array = blob_bytes(&file)
         .await
         .map_err(unreadable)?
@@ -1407,7 +1510,7 @@ async fn verified_download(url: &str) -> Result<ModelFile, String> {
         .map_err(|e| format!("could not check the downloaded model ({})", js_text(&e)))?
         .as_string()
         .unwrap_or_default();
-    if hash != MODEL_SHA256 {
+    if hash != expected {
         return Err(format!(
             "the downloaded model is not the expected file (SHA-256 {hash}); not used"
         ));

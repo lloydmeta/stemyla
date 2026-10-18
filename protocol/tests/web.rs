@@ -274,3 +274,27 @@ fn a_malformed_segment_is_refused_with_its_type() {
     let _ = Reflect::set(&missing, &"type".into(), &"segment".into());
     assert!(Reply::from_js(&missing).is_err());
 }
+
+#[wasm_bindgen_test]
+fn a_model_url_is_taken_only_from_the_pages_own_site() {
+    let page = "http://127.0.0.1:8080/app/?mm=s64&model_url=";
+    let url = |model: &str| Settings::from_page(&format!("{page}{model}")).model_url;
+    assert_eq!(
+        url("/weights/m.safetensors").as_deref(),
+        Some("/weights/m.safetensors")
+    );
+    assert_eq!(url("m.safetensors").as_deref(), Some("m.safetensors"));
+    let own = "http://127.0.0.1:8080/weights/m";
+    assert_eq!(url(own).as_deref(), Some(own));
+    for other in [
+        "https://example.com/m.safetensors",
+        "//example.com/m.safetensors",
+        "http://127.0.0.1:9090/m",
+        "javascript:alert(1)",
+    ] {
+        assert_eq!(url(other), None, "{other}");
+    }
+    let s = Settings::from_page(&format!("{page}https://example.com/m"));
+    assert_eq!(s.mm.as_deref(), Some("s64"), "the other settings are kept");
+    assert_eq!(Settings::from_page("not a url"), Settings::default());
+}

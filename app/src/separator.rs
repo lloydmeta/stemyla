@@ -126,8 +126,8 @@ fn has_param(name: &str) -> bool {
 /// Worker settings from the page URL (see the module docs).
 fn url_settings() -> Settings {
     web_sys::window()
-        .and_then(|w| w.location().search().ok())
-        .map(|q| Settings::from_query(&q))
+        .and_then(|w| w.location().href().ok())
+        .map(|href| Settings::from_page(&href))
         .unwrap_or_default()
 }
 
