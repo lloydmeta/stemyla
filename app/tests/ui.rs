@@ -282,6 +282,88 @@ fn classic_drums_lane_and_spectrograms() {
     results.add(h.try_snapshot("spectrograms_classic_drums"));
 }
 
+fn lane_names(h: &Harness<'_, StemApp>) -> Vec<String> {
+    h.state().lanes.iter().map(|l| l.name.clone()).collect()
+}
+
+/// Two stems the length of the shown song, as a separation returns them.
+fn separated(h: &Harness<'_, StemApp>) -> Vec<engine::Stem> {
+    let frames = h.state().song.as_ref().unwrap().frames;
+    ["bass", "vocals"]
+        .map(|name| engine::Stem {
+            name: name.into(),
+            left: vec![0.1; frames],
+            right: vec![0.1; frames],
+        })
+        .into()
+}
+
+#[test]
+fn separated_stems_join_the_song_they_came_from() {
+    let mut h = harness(true);
+    let job = h.state().separation_job().unwrap();
+    let stems = separated(&h);
+    h.state_mut().apply_separated(job, stems, 1.0);
+    h.run();
+    assert_eq!(lane_names(&h), ["mix", "bass", "vocals", "original"]);
+}
+
+#[test]
+fn separated_stems_join_their_song_after_a_lane_is_added() {
+    let mut h = harness(true);
+    let job = h.state().separation_job().unwrap();
+    let stems = separated(&h);
+    let frames = stems[0].left.len();
+    h.state_mut()
+        .add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
+    h.state_mut().apply_separated(job, stems, 1.0);
+    h.run();
+    assert_eq!(lane_names(&h), ["mix", "bass", "vocals", "original"]);
+}
+
+#[test]
+fn separated_stems_never_join_another_song() {
+    let mut h = harness(true);
+    let job = h.state().separation_job().unwrap();
+    let stems = separated(&h);
+    h.state_mut().load_demo();
+    h.run();
+    let before = lane_names(&h);
+    h.state_mut().apply_separated(job, stems, 1.0);
+    h.run();
+    assert_eq!(lane_names(&h), before);
+    assert!(
+        h.state().status.contains("discarded"),
+        "status: {}",
+        h.state().status
+    );
+}
+
+#[test]
+fn classic_drums_never_join_another_song() {
+    let mut h = harness(true);
+    h.get_by_label("Classic drums").click();
+    h.step();
+    assert!(h.state().classic_running());
+    h.state_mut().load_demo();
+    let start = std::time::Instant::now();
+    while h.state().classic_running() {
+        assert!(
+            start.elapsed().as_secs() < 120,
+            "classic drums never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.step();
+    }
+    h.run();
+    assert!(!lane_names(&h).contains(&"classic drums".to_string()));
+    assert!(
+        h.state().status.contains("no longer open"),
+        "status: {}",
+        h.state().status
+    );
+}
+
 /// Not part of the suite: renders the app with a stems folder to a PNG, for
 /// the report.  `STEMS_DIR=stems/queen-classic OUT_PNG=docs/x.png cargo test
 /// -p app --release --test ui render_folder -- --ignored`

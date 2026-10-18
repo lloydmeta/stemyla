@@ -209,6 +209,9 @@ pub enum Output {
 
 pub struct StemApp {
     pub song: Option<Arc<Song>>,
+    /// Counts the songs opened (not lanes added to the shown one), so work
+    /// that finishes later can tell whether its song is still the one shown.
+    song_serial: u64,
     pub params: Option<Arc<SharedParams>>,
     pub lanes: Vec<Lane>,
     /// Screen rectangles of the lanes drawn in the last frame (mix first).
@@ -229,7 +232,7 @@ pub struct StemApp {
     stats_prev: (u64, u64),
     /// A classic-drums job running on another thread (native only).
     #[cfg(not(target_arch = "wasm32"))]
-    classic_job: Option<std::sync::mpsc::Receiver<(Vec<f32>, Vec<f32>)>>,
+    classic_job: Option<ClassicJob>,
     #[cfg(target_arch = "wasm32")]
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     /// Browser-storage session of the shown song, if it is stored.
@@ -247,14 +250,36 @@ pub struct StemApp {
     /// The stem separation worker (web only).
     #[cfg(target_arch = "wasm32")]
     separator: Option<separator::Separator>,
+    /// The song the running separation was started on.
+    #[cfg(target_arch = "wasm32")]
+    separating: Option<SeparationJob>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
 }
+
+/// A classic-drums job: the serial of the song it started on, and where
+/// its lane arrives.
+#[cfg(not(target_arch = "wasm32"))]
+type ClassicJob = (u64, std::sync::mpsc::Receiver<(Vec<f32>, Vec<f32>)>);
+
+/// The song a separation was started on, so its stems go to that song even
+/// if another is opened while it runs.
+pub struct SeparationJob {
+    serial: u64,
+    /// The song's browser-storage session, where its stems are kept.
+    session: Option<String>,
+    name: Option<String>,
+}
+
+/// The only sample rate the separation model takes, and so its stems' rate.
+#[cfg(target_arch = "wasm32")]
+const SEPARATION_RATE: u32 = 44_100;
 
 impl Default for StemApp {
     fn default() -> Self {
         Self {
             song: None,
+            song_serial: 0,
             params: None,
             lanes: Vec::new(),
             lane_rects: Vec::new(),
@@ -283,6 +308,8 @@ impl Default for StemApp {
             sessions: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             separator: None,
+            #[cfg(target_arch = "wasm32")]
+            separating: None,
             #[cfg(target_arch = "wasm32")]
             reset: ResetStage::Closed,
         }
@@ -367,6 +394,68 @@ impl StemApp {
             });
         }
         app
+    }
+
+    /// Shows a different song.  [`Self::load_song`] alone is for the shown
+    /// song with lanes added or replaced.
+    pub fn open_song(&mut self, song: Song) {
+        self.song_serial += 1;
+        self.load_song(song);
+    }
+
+    /// The shown song, as the one a separation starting now belongs to.
+    pub fn separation_job(&self) -> Option<SeparationJob> {
+        self.song.as_ref()?;
+        Some(SeparationJob {
+            serial: self.song_serial,
+            #[cfg(target_arch = "wasm32")]
+            session: self.session.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            session: None,
+            #[cfg(target_arch = "wasm32")]
+            name: self.song_name.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            name: None,
+        })
+    }
+
+    /// Gives a finished separation's stems to the song it was started on:
+    /// kept in browser storage with that song, and shown if it is still the
+    /// open song.
+    pub fn apply_separated(&mut self, job: SeparationJob, stems: Vec<Stem>, secs: f64) {
+        let n = stems.len();
+        log::info!("separator: {n} stems in {secs:.1} s");
+        #[cfg(target_arch = "wasm32")]
+        if let Some(id) = job.session.clone() {
+            let (to_save, pending) = (stems.clone(), self.pending.clone());
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = store::save_stems(&id, SEPARATION_RATE, &to_save).await {
+                    pending.borrow_mut().status =
+                        Some(format!("Stems not kept in browser storage: {e:#}"));
+                }
+                refresh_storage(&pending).await;
+            });
+        }
+        let shown = self.song.clone().filter(|_| job.serial == self.song_serial);
+        let Some(song) = shown else {
+            let name = job.name.as_deref().unwrap_or("the separated song");
+            self.status = if job.session.is_some() {
+                format!(
+                    "Separated \"{name}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them."
+                )
+            } else {
+                format!(
+                    "Separated \"{name}\" into {n} stems, but discarded them: that song is no longer open and is not kept in this browser."
+                )
+            };
+            return;
+        };
+        let head = self.params.as_ref().map(|p| p.playhead());
+        self.load_song(with_original(&song, stems));
+        if let (Some(h), Some(p)) = (head, &self.params) {
+            p.request_seek(h);
+        }
+        self.status = format!("Separated into {n} stems in {secs:.0} s.  {}", self.status);
     }
 
     /// Loads a song: builds lanes, shared params and the output.
@@ -461,7 +550,7 @@ impl StemApp {
     /// Loads stems from in-memory files (a multi-file drop).
     pub fn load_files(&mut self, files: Vec<(String, Vec<u8>)>) {
         match Song::load_files(files) {
-            Ok(s) => self.load_song(s),
+            Ok(s) => self.open_song(s),
             Err(e) => self.status = format!("Could not load: {e:#}"),
         }
     }
@@ -485,7 +574,7 @@ impl StemApp {
                 })
                 .collect(),
         };
-        self.load_song(song);
+        self.open_song(song);
     }
 
     /// Adds an extra stem lane (for example "classic drums") and reloads.
@@ -517,7 +606,7 @@ impl StemApp {
             std::thread::spawn(move || {
                 let _ = tx.send(spectrogram::classic_drums(&song));
             });
-            self.classic_job = Some(rx);
+            self.classic_job = Some((self.song_serial, rx));
             self.status = "Separating classic drums…".into();
         }
         #[cfg(target_arch = "wasm32")]
@@ -541,8 +630,14 @@ impl StemApp {
 
     fn poll_jobs(&mut self, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(rx) = &self.classic_job {
+        if let Some((serial, rx)) = &self.classic_job {
             match rx.try_recv() {
+                Ok(_) if *serial != self.song_serial => {
+                    self.classic_job = None;
+                    self.status =
+                        "Classic drums finished for a song that is no longer open; discarded"
+                            .into();
+                }
                 Ok((l, r)) => {
                     self.classic_job = None;
                     // Keep the transport where it was.
@@ -636,7 +731,7 @@ impl StemApp {
             // A single dropped folder loads every stem in it.
             if dropped.len() == 1 && dropped[0].path().is_dir() {
                 match Song::load_folder(dropped[0].path()) {
-                    Ok(s) => self.load_song(s),
+                    Ok(s) => self.open_song(s),
                     Err(e) => self.status = format!("Could not load folder: {e:#}"),
                 }
                 return;
@@ -886,7 +981,7 @@ impl StemApp {
             .on_hover_text("BS-RoFormer SW on the GPU: bass, drums, other, vocals, guitar, piano")
             .clicked()
         {
-            if song.sample_rate != 44_100 {
+            if song.sample_rate != SEPARATION_RATE {
                 self.status = format!(
                     "Separation needs 44.1 kHz audio; this song is {} Hz",
                     song.sample_rate
@@ -898,6 +993,7 @@ impl StemApp {
                 None => mix_of_sources(&song),
             };
             sep.separate(&l, &r);
+            self.separating = self.separation_job();
             self.status = "Separating…".into();
         }
     }
@@ -982,6 +1078,11 @@ impl StemApp {
         } else if let Some(id) = forget {
             if self.session.as_deref() == Some(id.as_str()) {
                 self.session = None;
+            }
+            if let Some(job) = &mut self.separating
+                && job.session.as_deref() == Some(id.as_str())
+            {
+                job.session = None;
             }
             wasm_bindgen_futures::spawn_local(async move {
                 store::forget(&id).await;
@@ -1110,6 +1211,7 @@ impl StemApp {
                     let what = match of.as_str() {
                         "separate" => {
                             sep.running = false;
+                            self.separating = None;
                             "Separation"
                         }
                         "mp3" => "MP3 encoding",
@@ -1122,6 +1224,7 @@ impl StemApp {
                 Event::Status(text) => self.status = text,
                 Event::Stopped(reason) => {
                     sep.running = false;
+                    self.separating = None;
                     sep.model_loading = false;
                     sep.download = None;
                     log::error!("separator: the worker stopped: {reason}");
@@ -1132,31 +1235,15 @@ impl StemApp {
                 }
             }
         }
-        if let (Some((stems, secs)), Some(song)) = (finished, self.song.clone()) {
-            let new_stems: Vec<Stem> = stems
+        if let Some((stems, secs)) = finished {
+            let stems = stems
                 .into_iter()
                 .map(|(name, left, right)| Stem { name, left, right })
                 .collect();
-            let n = new_stems.len();
-            if let Some(id) = self.session.clone() {
-                // Keep the stems with the song in browser storage.
-                let (rate, to_save, pending) =
-                    (song.sample_rate, new_stems.clone(), self.pending.clone());
-                wasm_bindgen_futures::spawn_local(async move {
-                    if let Err(e) = store::save_stems(&id, rate, &to_save).await {
-                        pending.borrow_mut().status =
-                            Some(format!("Stems not kept in browser storage: {e:#}"));
-                    }
-                    refresh_storage(&pending).await;
-                });
+            match self.separating.take() {
+                Some(job) => self.apply_separated(job, stems, secs),
+                None => log::warn!("separator: stems arrived with no separation recorded"),
             }
-            let head = self.params.as_ref().map(|p| p.playhead());
-            self.load_song(with_original(&song, new_stems));
-            if let (Some(h), Some(p)) = (head, &self.params) {
-                p.request_seek(h);
-            }
-            log::info!("separator: {n} stems in {secs:.1} s");
-            self.status = format!("Separated into {n} stems in {secs:.0} s.  {}", self.status);
         }
     }
 
@@ -1403,7 +1490,7 @@ impl eframe::App for StemApp {
             }
             if let Some(r) = inbox.song {
                 match r {
-                    Ok(s) => self.load_song(s),
+                    Ok(s) => self.open_song(s),
                     Err(e) => self.status = format!("Could not load: {e:#}"),
                 }
             }
