@@ -18,7 +18,7 @@ use anyhow::{Result, anyhow};
 use engine::{Song, Stem};
 use js_sys::{Array, Uint8Array};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
@@ -56,7 +56,7 @@ export async function st_remove(path) {
     const [d, n] = split(path);
     await (await dir(d, false)).removeEntry(n, { recursive: true });
     return true;
-  } catch (e) { return false; }
+  } catch (e) { return e.name === "NotFoundError"; }
 }
 export async function st_list(path) {
   try {
@@ -88,6 +88,7 @@ extern "C" {
     /// exist already.  True, false, or "gone" when `within` does not exist.
     async fn st_write(within: &str, rel: &str, bytes: &Uint8Array) -> JsValue;
     async fn st_read(path: &str) -> JsValue;
+    /// Whether `path` is gone (removed, or never there).
     async fn st_remove(path: &str) -> JsValue;
     async fn st_usage() -> JsValue;
     async fn st_list(path: &str) -> JsValue;
@@ -105,11 +106,13 @@ thread_local! {
     /// Sessions with stems being saved, which [`restore_id`] and [`forget`]
     /// wait for: a restore would read the meta from before the stems, and
     /// a removal fails while a file in the session is open for writing.
-    static SAVING: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Saves in progress per session (a quick second separation can
+    /// overlap the first one's save).
+    static SAVING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
 }
 
 async fn settled(id: &str) {
-    while SAVING.with_borrow(|s| s.contains(id)) {
+    while SAVING.with_borrow(|s| s.contains_key(id)) {
         st_sleep(50).await;
     }
 }
@@ -141,7 +144,12 @@ async fn write_within(within: &str, rel: &str, bytes: &[u8]) -> Result<()> {
         (Some(true), _) => Ok(()),
         (_, Some("gone")) => Err(anyhow!("{within} is gone (forgotten?)")),
         _ => Err(anyhow!(
-            "browser storage refused {within}/{rel} (full, or not available)"
+            "browser storage refused {} (full, or not available)",
+            if within.is_empty() {
+                rel.to_string()
+            } else {
+                format!("{within}/{rel}")
+            }
         )),
     }
 }
@@ -199,9 +207,16 @@ pub async fn save_sources(files: &[(String, Vec<u8>)], rate: u32) -> Result<Stri
 
 /// Adds separated stems to session `id`.
 pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
-    SAVING.with_borrow_mut(|s| s.insert(id.to_string()));
+    SAVING.with_borrow_mut(|s| *s.entry(id.to_string()).or_default() += 1);
     let saved = save_stems_now(id, rate, stems).await;
-    SAVING.with_borrow_mut(|s| s.remove(id));
+    SAVING.with_borrow_mut(|s| {
+        if let Some(n) = s.get_mut(id) {
+            *n -= 1;
+            if *n == 0 {
+                s.remove(id);
+            }
+        }
+    });
     saved
 }
 
@@ -245,9 +260,8 @@ pub async fn list() -> Vec<(String, Meta)> {
     out
 }
 
-/// Deletes session `id` (song and stems).
-/// Deletes session `id` once any save into it has finished; false if the
-/// browser refused.
+/// Deletes session `id` (song and stems) once any save into it has
+/// finished; false if the browser refused.
 pub async fn forget(id: &str) -> bool {
     settled(id).await;
     let removed = st_remove(&format!("{ROOT}/{id}")).await.as_bool() == Some(true);

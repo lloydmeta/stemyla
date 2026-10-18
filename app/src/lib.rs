@@ -66,6 +66,8 @@ pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
 #[derive(Default)]
 pub struct Inbox {
     song: Option<anyhow::Result<Opened>>,
+    /// The token of a Storage open that has finished, with or without a song.
+    open_done: Option<u64>,
     status: Option<String>,
     /// Bytes used and available in browser storage.
     usage: Option<(f64, f64)>,
@@ -267,13 +269,18 @@ pub struct StemApp {
     /// The song the running separation was started on.
     #[cfg(target_arch = "wasm32")]
     separating: Option<SeparationJob>,
-    /// The stored session being opened from the Storage menu.
+    /// The Storage menu's open in progress (one at a time): its token and
+    /// the session it opens.
     #[cfg(target_arch = "wasm32")]
-    opening: Option<String>,
+    opening: Option<(u64, String)>,
+    /// Tokens handed to Storage opens so far.
+    #[cfg(target_arch = "wasm32")]
+    opens: u64,
     /// Stems that arrived while their song was being opened (and so may be
-    /// missing from what the open read), for that session.
+    /// missing from what the open read): the session, the stems, and what
+    /// to say if the open does not show them.
     #[cfg(target_arch = "wasm32")]
-    stems_for_opening: Option<(String, Vec<Stem>)>,
+    stems_for_opening: Option<(String, std::rc::Rc<Vec<Stem>>, String)>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
 }
@@ -359,6 +366,8 @@ impl Default for StemApp {
             separating: None,
             #[cfg(target_arch = "wasm32")]
             opening: None,
+            #[cfg(target_arch = "wasm32")]
+            opens: 0,
             #[cfg(target_arch = "wasm32")]
             stems_for_opening: None,
             #[cfg(target_arch = "wasm32")]
@@ -487,17 +496,22 @@ impl StemApp {
             .name
             .clone()
             .unwrap_or_else(|| "the separated song".into());
+        // Shared by the save and the held copy rather than copied for each:
+        // six stems of a song run to hundreds of MB.
+        let stems = std::rc::Rc::new(stems);
         #[cfg(target_arch = "wasm32")]
         if let Some(id) = job.session.clone() {
-            let being_opened = self.opening.as_deref() == Some(id.as_str());
+            let kept_text = format!(
+                "Separated \"{name}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them."
+            );
+            let being_opened = self
+                .opening
+                .as_ref()
+                .is_some_and(|(_, opening)| *opening == id);
+            let kept = (destination == StemsGo::Kept && !being_opened).then(|| kept_text.clone());
             if destination == StemsGo::Kept && being_opened {
-                self.stems_for_opening = Some((id.clone(), stems.clone()));
+                self.stems_for_opening = Some((id.clone(), stems.clone(), kept_text));
             }
-            let kept = (destination == StemsGo::Kept && !being_opened).then(|| {
-                format!(
-                    "Separated \"{name}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them."
-                )
-            });
             let (to_save, pending) = (stems.clone(), self.pending.clone());
             wasm_bindgen_futures::spawn_local(async move {
                 let status = match store::save_stems(&id, SEPARATION_RATE, &to_save).await {
@@ -531,7 +545,7 @@ impl StemApp {
             }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
-        self.load_song(with_original(&song, stems));
+        self.load_song(with_original(&song, std::rc::Rc::unwrap_or_clone(stems)));
         if let (Some(h), Some(p)) = (head, &self.params) {
             p.request_seek(h);
         }
@@ -1104,7 +1118,11 @@ impl StemApp {
                     } else {
                         ui.label(label);
                     }
-                    if !current && ui.small_button("Open").clicked() {
+                    if !current
+                        && ui
+                            .add_enabled(self.opening.is_none(), egui::Button::new("Open").small())
+                            .clicked()
+                    {
                         open = Some(id.clone());
                         ui.close();
                     }
@@ -1137,17 +1155,24 @@ impl StemApp {
         let pending = self.pending.clone();
         if let Some(id) = open {
             self.status = "Opening the stored song…".into();
-            self.opening = Some(id.clone());
+            self.opens += 1;
+            let token = self.opens;
+            self.opening = Some((token, id.clone()));
             wasm_bindgen_futures::spawn_local(async move {
                 let Some(r) = store::restore_id(&id).await else {
-                    pending.borrow_mut().song = Some(Err(anyhow::anyhow!(
-                        "that song is no longer in browser storage"
-                    )));
+                    {
+                        let mut inbox = pending.borrow_mut();
+                        inbox.song = Some(Err(anyhow::anyhow!(
+                            "that song is no longer in browser storage"
+                        )));
+                        inbox.open_done = Some(token);
+                    }
                     refresh_storage(&pending).await;
                     return;
                 };
                 {
                     let mut inbox = pending.borrow_mut();
+                    inbox.open_done = Some(token);
                     match r {
                         Ok((id, song, meta)) => {
                             inbox.status =
@@ -1579,15 +1604,17 @@ impl eframe::App for StemApp {
         {
             let inbox = std::mem::take(&mut *self.pending.borrow_mut());
             if let Some(r) = inbox.song {
-                self.opening = None;
-                let held = self.stems_for_opening.take();
                 match r {
                     Ok(opened) => {
-                        let song = match held {
-                            Some((id, stems)) if opened.session.as_deref() == Some(id.as_str()) => {
-                                with_original(&opened.song, stems)
+                        let holds_these = self
+                            .stems_for_opening
+                            .as_ref()
+                            .is_some_and(|(id, ..)| opened.session.as_deref() == Some(id.as_str()));
+                        let song = match self.stems_for_opening.take_if(|_| holds_these) {
+                            Some((_, stems, _)) => {
+                                with_original(&opened.song, std::rc::Rc::unwrap_or_clone(stems))
                             }
-                            _ => opened.song,
+                            None => opened.song,
                         };
                         self.session = opened.session;
                         self.song_name = opened.name;
@@ -1598,6 +1625,16 @@ impl eframe::App for StemApp {
             }
             if let Some(text) = inbox.status {
                 self.status = text;
+            }
+            if let Some(token) = inbox.open_done
+                && self.opening.as_ref().is_some_and(|(t, _)| *t == token)
+            {
+                self.opening = None;
+                // Held stems this open did not show (it failed) are kept in
+                // storage all the same.
+                if let Some((.., kept)) = self.stems_for_opening.take() {
+                    self.status = kept;
+                }
             }
             if let Some(u) = inbox.usage {
                 self.usage = u;
