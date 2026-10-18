@@ -17,12 +17,13 @@ use crate::store_meta::Meta;
 use anyhow::{Result, anyhow};
 use engine::{Song, Stem};
 use js_sys::{Array, Uint8Array};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
-async function dir(path, create) {
-  let d = await navigator.storage.getDirectory();
+async function dir(path, create, from) {
+  let d = from || await navigator.storage.getDirectory();
   for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
   return d;
 }
@@ -30,15 +31,18 @@ function split(path) {
   const i = path.lastIndexOf("/");
   return [path.slice(0, i), path.slice(i + 1)];
 }
-export async function st_write(path, bytes) {
+export async function st_write(within, rel, bytes) {
   try {
-    const [d, n] = split(path);
-    const fh = await (await dir(d, true)).getFileHandle(n, { create: true });
+    let base;
+    try { base = await dir(within, false); }
+    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
+    const [d, n] = split("/" + rel);
+    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
     const w = await fh.createWritable();
     await w.write(bytes);
     await w.close();
     return true;
-  } catch (e) { console.warn("storage write failed", path, e); return false; }
+  } catch (e) { console.warn("storage write failed", within, rel, e); return false; }
 }
 export async function st_read(path) {
   try {
@@ -52,7 +56,7 @@ export async function st_remove(path) {
     const [d, n] = split(path);
     await (await dir(d, false)).removeEntry(n, { recursive: true });
     return true;
-  } catch (e) { return false; }
+  } catch (e) { return e.name === "NotFoundError"; }
 }
 export async function st_list(path) {
   try {
@@ -80,8 +84,11 @@ export function save_file(name, bytes, mime) {
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
-    async fn st_write(path: &str, bytes: &Uint8Array) -> JsValue;
+    /// Writes `within/rel`, creating the folders in `rel`; `within` must
+    /// exist already.  True, false, or "gone" when `within` does not exist.
+    async fn st_write(within: &str, rel: &str, bytes: &Uint8Array) -> JsValue;
     async fn st_read(path: &str) -> JsValue;
+    /// Whether `path` is gone (removed, or never there).
     async fn st_remove(path: &str) -> JsValue;
     async fn st_usage() -> JsValue;
     async fn st_list(path: &str) -> JsValue;
@@ -96,6 +103,18 @@ thread_local! {
     static WRITES: Cell<usize> = const { Cell::new(0) };
     /// Set by [`close`]: every later write is refused.
     static CLOSED: Cell<bool> = const { Cell::new(false) };
+    /// Sessions with stems being saved, which [`restore_id`] and [`forget`]
+    /// wait for: a restore would read the meta from before the stems, and
+    /// a removal fails while a file in the session is open for writing.
+    /// Saves in progress per session (a quick second separation can
+    /// overlap the first one's save).
+    static SAVING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+}
+
+async fn settled(id: &str) {
+    while SAVING.with_borrow(|s| s.contains_key(id)) {
+        st_sleep(50).await;
+    }
 }
 
 /// Refuses every later write and waits for those in progress, so a reset
@@ -109,18 +128,29 @@ pub async fn close() {
 }
 
 async fn write(path: &str, bytes: &[u8]) -> Result<()> {
+    write_within("", path, bytes).await
+}
+
+/// Writes `within/rel` only if the folder `within` still exists, so a save
+/// into a session forgotten meanwhile cannot bring it back.
+async fn write_within(within: &str, rel: &str, bytes: &[u8]) -> Result<()> {
     if CLOSED.get() {
         return Err(anyhow!("browser storage is being reset"));
     }
     WRITES.set(WRITES.get() + 1);
-    let written = st_write(path, &Uint8Array::from(bytes)).await.as_bool() == Some(true);
+    let written = st_write(within, rel, &Uint8Array::from(bytes)).await;
     WRITES.set(WRITES.get() - 1);
-    if written {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "browser storage refused {path} (full, or not available)"
-        ))
+    match (written.as_bool(), written.as_string().as_deref()) {
+        (Some(true), _) => Ok(()),
+        (_, Some("gone")) => Err(anyhow!("{within} is gone (forgotten?)")),
+        _ => Err(anyhow!(
+            "browser storage refused {} (full, or not available)",
+            if within.is_empty() {
+                rel.to_string()
+            } else {
+                format!("{within}/{rel}")
+            }
+        )),
     }
 }
 
@@ -177,6 +207,20 @@ pub async fn save_sources(files: &[(String, Vec<u8>)], rate: u32) -> Result<Stri
 
 /// Adds separated stems to session `id`.
 pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
+    SAVING.with_borrow_mut(|s| *s.entry(id.to_string()).or_default() += 1);
+    let saved = save_stems_now(id, rate, stems).await;
+    SAVING.with_borrow_mut(|s| {
+        if let Some(n) = s.get_mut(id) {
+            *n -= 1;
+            if *n == 0 {
+                s.remove(id);
+            }
+        }
+    });
+    saved
+}
+
+async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     let base = format!("{ROOT}/{id}");
     let mut meta = Meta::parse(&String::from_utf8_lossy(
         &read(&format!("{base}/meta"))
@@ -185,14 +229,15 @@ pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     ));
     meta.stems.clear();
     for s in stems {
-        write(
-            &format!("{base}/stems/{}.wav", file_stem(&s.name)),
+        write_within(
+            &base,
+            &format!("stems/{}.wav", file_stem(&s.name)),
             &engine::wav::encode_pcm16(&s.left, &s.right, rate),
         )
         .await?;
         meta.stems.push(s.name.clone());
     }
-    write(&format!("{base}/meta"), meta.to_text().as_bytes()).await
+    write_within(&base, "meta", meta.to_text().as_bytes()).await
 }
 
 pub async fn current() -> Option<String> {
@@ -215,12 +260,15 @@ pub async fn list() -> Vec<(String, Meta)> {
     out
 }
 
-/// Deletes session `id` (song and stems).
-pub async fn forget(id: &str) {
-    st_remove(&format!("{ROOT}/{id}")).await;
+/// Deletes session `id` (song and stems) once any save into it has
+/// finished; false if the browser refused.
+pub async fn forget(id: &str) -> bool {
+    settled(id).await;
+    let removed = st_remove(&format!("{ROOT}/{id}")).await.as_bool() == Some(true);
     if current().await.as_deref() == Some(id) {
         st_remove(&format!("{ROOT}/current")).await;
     }
+    removed
 }
 
 /// The current session as a song: the dropped files, plus the separated
@@ -232,6 +280,7 @@ pub async fn restore() -> Option<Result<(String, Song, Meta)>> {
 
 /// Session `id` as a song, made current.
 pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
+    settled(id).await;
     let id = id.to_string();
     let base = format!("{ROOT}/{id}");
     let meta = Meta::parse(&String::from_utf8_lossy(
