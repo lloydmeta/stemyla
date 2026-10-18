@@ -32,9 +32,10 @@
 //!    branch newer than the published build, so a re-run of an old CI run
 //!    cannot roll the site back (see [`skip_reason`]).
 //! 2. `trunk build --release --public-url <url>v/<id>/` into
-//!    `target/pages/v/<id>`, and checks the result: the page, both wasm
-//!    modules, the worker loader, and the base and asset paths under the
-//!    build's URL.
+//!    `target/pages/v/<id>`, with `STEMYLA_BUILD_ID=<id>` so the About menu
+//!    shows the id and links to its commit, and checks the result: the
+//!    page, both wasm modules, the worker loader, the base and asset paths
+//!    under the build's URL, and the id in the app's wasm.
 //! 3. Fetches the branch from the remote if it exists there.  Then adds the
 //!    newest [`KEPT_BUILDS`] builds: the new one, and the older ones from
 //!    the branch, byte for byte.  A build id the branch has ever published
@@ -184,6 +185,7 @@ pub fn main(args: &[String]) -> Result<()> {
             &build_s,
         ])
         .current_dir(repo.join("app"))
+        .env("STEMYLA_BUILD_ID", &id)
         .status()
         .context("could not run trunk (install it with `cargo install --locked trunk`)")?;
     if !status.success() {
@@ -192,6 +194,7 @@ pub fn main(args: &[String]) -> Result<()> {
         );
     }
     check_build(&build, &build_url)?;
+    check_build_id(&build, &id)?;
 
     let message = format!("Publish {id} at {}", o.public_url);
     deploy(&repo, &site, &o, &id, &message)?;
@@ -673,6 +676,26 @@ pub fn check_build(dir: &Path, url: &str) -> Result<()> {
     if !html.contains(&format!("{url}app.js")) {
         bail!(
             "index.html does not load app.js from {url}; the page would not find its files on the site"
+        );
+    }
+    Ok(())
+}
+
+/// Checks that the app in the Trunk build in `dir` names its build `id`,
+/// which the About menu shows: Trunk passes `STEMYLA_BUILD_ID` on to
+/// Cargo, and Cargo rebuilds the app when it changes.  A clean id is a
+/// prefix of its commit's dirty ids, so a match followed by `-dirty-` is
+/// another build's.
+pub fn check_build_id(dir: &Path, id: &str) -> Result<()> {
+    check_id(id)?;
+    let path = dir.join("app_bg.wasm");
+    let wasm = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let names_id_at = |i: usize| {
+        wasm[i..].starts_with(id.as_bytes()) && !wasm[i + id.len()..].starts_with(b"-dirty-")
+    };
+    if !(0..wasm.len()).any(names_id_at) {
+        bail!(
+            "app_bg.wasm does not name its build {id}; the About menu would show the wrong version"
         );
     }
     Ok(())

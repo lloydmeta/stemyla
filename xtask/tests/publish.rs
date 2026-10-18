@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::publish::{
-    CopiedBuild, KEPT_BUILDS, Options, Prepared, build_id, check_build, check_id,
+    CopiedBuild, KEPT_BUILDS, Options, Prepared, build_id, check_build, check_build_id, check_id,
     check_kept_builds, commit_dir, deploy, kept_ids, parse_versions, prepare_site, remote_head,
     skip_reason,
 };
@@ -861,5 +861,38 @@ fn publishes_offline_with_the_repository_as_remote() {
         git(&r, &["show", "gh-pages-local:v/VERSIONS"]),
         "aaaaaaaaaaa2\naaaaaaaaaaa1"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn checks_the_build_names_its_id() {
+    let root = scratch("check-id");
+    let id = "aaaaaaaaaaaa";
+    let build = versioned_site(&root, id, "v1").join("v").join(id);
+    check_build_id(&build, id).unwrap();
+    let err = check_build_id(&build, "bbbbbbbbbbbb").unwrap_err();
+    assert!(err.to_string().contains("app_bg.wasm"), "{err}");
+    let dirty = "aaaaaaaaaaaa-dirty-1792195200";
+    assert!(
+        check_build_id(&build, dirty).is_err(),
+        "a dirty id is not its commit's"
+    );
+    assert!(check_build_id(&build, "").is_err(), "an empty id");
+    std::fs::write(build.join("app_bg.wasm"), format!("x{dirty}x")).unwrap();
+    assert!(
+        check_build_id(&build, id).is_err(),
+        "a dirty build is not its commit's clean build"
+    );
+    check_build_id(&build, dirty).unwrap();
+    std::fs::write(build.join("app_bg.wasm"), format!("x{dirty}x{id}")).unwrap();
+    check_build_id(&build, id).unwrap();
+
+    std::fs::write(build.join("app_bg.wasm"), "v1").unwrap();
+    assert!(
+        check_build_id(&build, id).is_err(),
+        "only the app's wasm counts, though the worker's names the id"
+    );
+    std::fs::remove_file(build.join("app_bg.wasm")).unwrap();
+    assert!(check_build_id(&build, id).is_err(), "no wasm");
     let _ = std::fs::remove_dir_all(&root);
 }
