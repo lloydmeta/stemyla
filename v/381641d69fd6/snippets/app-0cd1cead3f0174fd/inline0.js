@@ -1,6 +1,6 @@
 
-async function dir(path, create) {
-  let d = await navigator.storage.getDirectory();
+async function dir(path, create, from) {
+  let d = from || await navigator.storage.getDirectory();
   for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
   return d;
 }
@@ -8,15 +8,18 @@ function split(path) {
   const i = path.lastIndexOf("/");
   return [path.slice(0, i), path.slice(i + 1)];
 }
-export async function st_write(path, bytes) {
+export async function st_write(within, rel, bytes) {
   try {
-    const [d, n] = split(path);
-    const fh = await (await dir(d, true)).getFileHandle(n, { create: true });
+    let base;
+    try { base = await dir(within, false); }
+    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
+    const [d, n] = split("/" + rel);
+    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
     const w = await fh.createWritable();
     await w.write(bytes);
     await w.close();
     return true;
-  } catch (e) { console.warn("storage write failed", path, e); return false; }
+  } catch (e) { console.warn("storage write failed", within, rel, e); return false; }
 }
 export async function st_read(path) {
   try {
@@ -30,7 +33,7 @@ export async function st_remove(path) {
     const [d, n] = split(path);
     await (await dir(d, false)).removeEntry(n, { recursive: true });
     return true;
-  } catch (e) { return false; }
+  } catch (e) { return e.name === "NotFoundError"; }
 }
 export async function st_list(path) {
   try {
