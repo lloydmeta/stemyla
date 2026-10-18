@@ -6,7 +6,10 @@
 ///
 /// There must be at least one stem, one volume for every stem, and every stem
 /// must be the same length.
-pub fn mix(stems: &[Vec<f32>], volumes: &[f32]) -> Vec<f32> {
+///
+/// The result is made at its full length straight away, so it takes exactly
+/// as much memory as its samples need and no more.
+pub fn mix(stems: &[&[f32]], volumes: &[f32]) -> Vec<f32> {
     assert!(stems.len() > 0, "mix needs at least one stem");
     assert!(
         volumes.len() == stems.len(),
@@ -28,7 +31,7 @@ pub fn mix(stems: &[Vec<f32>], volumes: &[f32]) -> Vec<f32> {
         s = s + 1;
     }
 
-    let mut result = Vec::new();
+    let mut result = vec![0.0; length];
     let mut i = 0;
     while i < length {
         let mut total = 0.0;
@@ -44,7 +47,7 @@ pub fn mix(stems: &[Vec<f32>], volumes: &[f32]) -> Vec<f32> {
         if total < -1.0 {
             total = -1.0;
         }
-        result.push(total);
+        result[i] = total;
         i = i + 1;
     }
     result
@@ -57,28 +60,47 @@ mod tests {
     #[test]
     fn one_stem_at_full_volume_is_unchanged() {
         let stem = vec![0.1, -0.2, 0.3];
-        assert_eq!(mix(&[stem.clone()], &[1.0]), stem);
+        assert_eq!(mix(&[&stem], &[1.0]), stem);
     }
 
     #[test]
     fn all_volumes_at_zero_is_silence() {
         let a = vec![0.5, 0.25];
         let b = vec![0.25, 0.5];
-        assert_eq!(mix(&[a, b], &[0.0, 0.0]), vec![0.0, 0.0]);
+        assert_eq!(mix(&[&a, &b], &[0.0, 0.0]), vec![0.0, 0.0]);
     }
 
     #[test]
     fn adds_stems_together() {
         let a = vec![0.5, 0.25];
         let b = vec![0.25, 0.5];
-        assert_eq!(mix(&[a, b], &[1.0, 1.0]), vec![0.75, 0.75]);
+        assert_eq!(mix(&[&a, &b], &[1.0, 1.0]), vec![0.75, 0.75]);
     }
 
     #[test]
     fn clamps_to_one() {
         let a = vec![0.9, -0.9];
         let b = vec![0.9, -0.9];
-        assert_eq!(mix(&[a, b], &[1.0, 1.0]), vec![1.0, -1.0]);
+        assert_eq!(mix(&[&a, &b], &[1.0, 1.0]), vec![1.0, -1.0]);
+    }
+
+    #[test]
+    fn takes_exactly_the_memory_its_samples_need() {
+        // A list grown one sample at a time to 1,003 samples has room for
+        // 1,024, the next power of two.
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let mut i = 0;
+        while i < 1003 {
+            a.push(0.5);
+            b.push(0.25);
+            i = i + 1;
+        }
+        let mixed = mix(&[&a, &b], &[1.0, 1.0]);
+        assert_eq!(mixed.len(), 1003);
+        assert_eq!(mixed.capacity(), 1003);
+        assert_eq!(mixed[0], 0.75);
+        assert_eq!(mixed[1002], 0.75);
     }
 
     #[test]
@@ -86,13 +108,13 @@ mod tests {
     fn missing_volume_panics() {
         let a = vec![0.5];
         let b = vec![0.25];
-        mix(&[a, b], &[1.0]);
+        mix(&[&a, &b], &[1.0]);
     }
 
     #[test]
     #[should_panic(expected = "same length")]
     fn different_lengths_panic() {
-        mix(&[vec![0.5, 0.1], vec![0.25]], &[1.0, 1.0]);
+        mix(&[&[0.5, 0.1], &[0.25]], &[1.0, 1.0]);
     }
 
     #[test]

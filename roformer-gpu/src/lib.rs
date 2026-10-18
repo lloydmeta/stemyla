@@ -11,6 +11,7 @@
 //! [`Gpu`] owns the device, the compiled kernels and the small uniform
 //! buffer the kernels read their parameters from.  [`Rec`] records one
 //! step: a list of dispatches submitted together as one command buffer.
+//! Every buffer [`Gpu`] makes is a [`GpuBuffer`], destroyed when dropped.
 //! [`net::Net`] holds the weights on the GPU and [`net::Job`] runs one
 //! chunk as a list of [`net::Step`]s, so the caller can wait for the GPU
 //! after each step and keep every command buffer short.
@@ -21,6 +22,8 @@ pub mod net;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
+use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
@@ -478,6 +481,49 @@ impl MatMulPolicy {
     }
 }
 
+/// A buffer made by [`Gpu`], destroyed when dropped.  wgpu's web backend
+/// does nothing when a `wgpu::Buffer` is dropped, so its memory stays
+/// allocated until JavaScript collects the object, and Safari's collector
+/// is not told how much memory WebGPU objects hold (WebKit bug 283321), so
+/// it collects them late: on an iPhone, chunk buffers and models that were
+/// dropped but not destroyed piled up until the tab was killed.
+/// Destroying a buffer whose work was submitted is valid (the work
+/// completes first), and a pending mapping is cancelled.  [`Rec`] borrows
+/// its buffers until it is submitted, so none can be dropped while a
+/// recorded dispatch still needs it.  A clone of the inner `wgpu::Buffer`,
+/// or a buffer made with `Gpu::device` directly, escapes all this: make
+/// buffers with [`Gpu::buffer`] and [`Gpu::upload`] only.
+pub struct GpuBuffer {
+    buffer: wgpu::Buffer,
+    /// [`Gpu::live_bytes`], less this buffer's size once it is dropped.
+    live: Arc<AtomicU64>,
+}
+
+impl GpuBuffer {
+    fn new(buffer: wgpu::Buffer, live: &Arc<AtomicU64>) -> Self {
+        live.fetch_add(buffer.size(), Ordering::Relaxed);
+        Self {
+            buffer,
+            live: live.clone(),
+        }
+    }
+}
+
+impl Deref for GpuBuffer {
+    type Target = wgpu::Buffer;
+
+    fn deref(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+}
+
+impl Drop for GpuBuffer {
+    fn drop(&mut self) {
+        self.buffer.destroy();
+        self.live.fetch_sub(self.buffer.size(), Ordering::Relaxed);
+    }
+}
+
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -495,14 +541,20 @@ pub struct Gpu {
     pub fused_ok: std::cell::Cell<bool>,
     kernels: Kernels,
     /// Bound where a kernel has an input it does not use for this dispatch.
-    dummy: wgpu::Buffer,
-    uniforms: wgpu::Buffer,
+    dummy: GpuBuffer,
+    uniforms: GpuBuffer,
     errors: Arc<Mutex<Vec<String>>>,
     /// GPU timestamps per dispatch, on a device opened for profiling.
     prof: Option<Prof>,
     /// Whether profiled submissions record timestamps now; benchmarks
     /// and calibration turn it off (see [`Gpu::set_recording`]).
     recording: std::cell::Cell<bool>,
+    /// Bytes of storage buffers made by [`Gpu::buffer`] and
+    /// [`Gpu::upload`] so far, for memory reports (on iOS a page's GPU
+    /// buffers count towards its tab's memory limit).
+    created: std::cell::Cell<u64>,
+    /// Bytes of every [`GpuBuffer`] this GPU made that is not yet dropped.
+    live: Arc<AtomicU64>,
 }
 
 /// Timestamp queries around every dispatch of a profiled [`Gpu`].  Each
@@ -513,12 +565,12 @@ pub struct Gpu {
 /// only `?profile` runs open a device this way.
 struct Prof {
     set: wgpu::QuerySet,
-    resolve: wgpu::Buffer,
+    resolve: GpuBuffer,
     /// Nanoseconds per timestamp tick.
     period: f64,
     /// Readback buffers of submissions not yet collected, with the label
     /// of each dispatch in them.
-    pending: RefCell<Vec<(Vec<String>, wgpu::Buffer)>>,
+    pending: RefCell<Vec<(Vec<String>, GpuBuffer)>>,
     /// Dispatch count and GPU seconds per label.
     totals: RefCell<BTreeMap<String, (usize, f64)>>,
 }
@@ -713,13 +765,16 @@ impl Gpu {
             }
         }));
         let kernels = Kernels::new(&device);
-        let dummy = device.create_buffer(&wgpu::BufferDescriptor {
+        let live = Arc::new(AtomicU64::new(0));
+        let make =
+            |desc: &wgpu::BufferDescriptor| GpuBuffer::new(device.create_buffer(desc), &live);
+        let dummy = make(&wgpu::BufferDescriptor {
             label: Some("dummy"),
             size: 16,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+        let uniforms = make(&wgpu::BufferDescriptor {
             label: Some("params"),
             size: PARAM_STRIDE * MAX_DISPATCHES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -734,7 +789,7 @@ impl Gpu {
                     ty: wgpu::QueryType::Timestamp,
                     count: (2 * MAX_DISPATCHES) as u32,
                 }),
-                resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                resolve: make(&wgpu::BufferDescriptor {
                     label: Some("profile resolve"),
                     size: 16 * MAX_DISPATCHES,
                     usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
@@ -758,7 +813,14 @@ impl Gpu {
             errors,
             prof,
             recording: std::cell::Cell::new(true),
+            created: std::cell::Cell::new(0),
+            live,
         }
+    }
+
+    /// A buffer described by `desc`, counted in [`Gpu::live_bytes`].
+    fn create(&self, desc: &wgpu::BufferDescriptor) -> GpuBuffer {
+        GpuBuffer::new(self.device.create_buffer(desc), &self.live)
     }
 
     /// True when this device records GPU time per dispatch.
@@ -845,10 +907,12 @@ impl Gpu {
     /// A storage buffer of `len` f32s, zeroed, rounded up to whole vec4s
     /// (16 bytes) so the vec4 kernels can read it (see
     /// [`MatMul::vec4_ok`]).
-    pub fn buffer(&self, label: &str, len: usize) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+    pub fn buffer(&self, label: &str, len: usize) -> GpuBuffer {
+        let size = (len.max(4).next_multiple_of(4) * 4) as u64;
+        self.created.set(self.created.get() + size);
+        self.create(&wgpu::BufferDescriptor {
             label: Some(label),
-            size: (len.max(4).next_multiple_of(4) * 4) as u64,
+            size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -858,7 +922,7 @@ impl Gpu {
 
     /// A storage buffer holding `data`, rounded up to whole vec4s like
     /// [`Gpu::buffer`] (the extra floats zero).
-    pub fn upload(&self, label: &str, data: &[f32]) -> wgpu::Buffer {
+    pub fn upload(&self, label: &str, data: &[f32]) -> GpuBuffer {
         if data.is_empty() {
             return self.buffer(label, 0);
         }
@@ -867,14 +931,30 @@ impl Gpu {
             self.write(&buf, 0, data);
             return buf;
         }
-        self.device
+        self.created
+            .set(self.created.get() + std::mem::size_of_val(data) as u64);
+        let buf = self
+            .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents: bytemuck::cast_slice(data),
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
-            })
+            });
+        GpuBuffer::new(buf, &self.live)
+    }
+
+    /// Bytes of storage buffers made by [`Gpu::buffer`] and
+    /// [`Gpu::upload`] since this GPU opened (freed ones included).
+    pub fn created_bytes(&self) -> u64 {
+        self.created.get()
+    }
+
+    /// Bytes of every buffer this GPU made that is still allocated, each
+    /// freed as it is dropped.
+    pub fn live_bytes(&self) -> u64 {
+        self.live.load(Ordering::Relaxed)
     }
 
     pub fn write(&self, buf: &wgpu::Buffer, offset: usize, data: &[f32]) {
@@ -906,7 +986,9 @@ impl Gpu {
         len: usize,
     ) -> Result<Vec<f32>, String> {
         let size = (len * 4) as u64;
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+        // Destroyed on return, after `unmap` (or, on an error, with the
+        // mapping cancelled): the copy into it was submitted by then.
+        let staging = self.create(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -1361,7 +1443,30 @@ enum Kernel {
     Glu,
 }
 
-/// Dispatches recorded for one submission.
+/// Dispatches recorded for one submission.  Holds the borrows of the
+/// buffers it binds (`'g`) until [`Rec::submit`], so a [`GpuBuffer`]
+/// cannot be dropped, and destroyed, while a dispatch not yet submitted
+/// still binds it.
+///
+/// ```no_run
+/// fn step(gpu: &roformer_gpu::Gpu) {
+///     let x = gpu.buffer("x", 256);
+///     let mut r = gpu.rec();
+///     r.softmax(&x, 4, 64);
+///     r.submit();
+///     drop(x);
+/// }
+/// ```
+///
+/// ```compile_fail,E0505
+/// fn step(gpu: &roformer_gpu::Gpu) {
+///     let x = gpu.buffer("x", 256);
+///     let mut r = gpu.rec();
+///     r.softmax(&x, 4, 64);
+///     drop(x);
+///     r.submit();
+/// }
+/// ```
 pub struct Rec<'g> {
     gpu: &'g Gpu,
     params: Vec<u8>,
@@ -1370,8 +1475,8 @@ pub struct Rec<'g> {
     labels: Vec<String>,
 }
 
-impl Rec<'_> {
-    fn push(&mut self, kernel: Kernel, bufs: &[&wgpu::Buffer], params: &[u8], groups: [u32; 3]) {
+impl<'g> Rec<'g> {
+    fn push(&mut self, kernel: Kernel, bufs: &[&'g wgpu::Buffer], params: &[u8], groups: [u32; 3]) {
         if self.gpu.prof.is_some() {
             let label = match &kernel {
                 Kernel::MatMul(t) => format!("matmul {}", TILES[*t].name),
@@ -1470,7 +1575,7 @@ impl Rec<'_> {
             }
             let n = 2 * self.cmds.len() as u32;
             let bytes = 8 * u64::from(n);
-            let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            let staging = gpu.create(&wgpu::BufferDescriptor {
                 label: Some("profile readback"),
                 size: bytes,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -1490,11 +1595,11 @@ impl Rec<'_> {
         gpu.queue.submit([enc.finish()]);
     }
 
-    pub fn matmul(&mut self, mm: &MatMul) {
+    pub fn matmul(&mut self, mm: &MatMul<'g>) {
         let (a, b, c) = (mm.a.1, mm.b.1, mm.c.1);
         let (bias_buf, bias_off, bias_bo) = match mm.bias {
             Some((buf, off, bo)) => (buf, off, bo),
-            None => (&self.gpu.dummy, 0, 0),
+            None => (&*self.gpu.dummy, 0, 0),
         };
         let act = match mm.act {
             Act::None => 0,
@@ -1556,7 +1661,7 @@ impl Rec<'_> {
     }
 
     /// In-place softmax over `rows` contiguous rows of `len`.
-    pub fn softmax(&mut self, x: &wgpu::Buffer, rows: usize, len: usize) {
+    pub fn softmax(&mut self, x: &'g wgpu::Buffer, rows: usize, len: usize) {
         let (gx, gy) = grid(rows);
         let p = [u(rows), u(len), gx, 0];
         self.push(Kernel::Softmax, &[x], bytemuck::cast_slice(&p), [gx, gy, 1]);
@@ -1565,10 +1670,10 @@ impl Rec<'_> {
     /// RMSNorm of `rows` rows of 256: `y[y_off..] = x[x_off..] / |x| * g`.
     pub fn rmsnorm(
         &mut self,
-        x: &wgpu::Buffer,
+        x: &'g wgpu::Buffer,
         x_off: usize,
-        g: &wgpu::Buffer,
-        y: &wgpu::Buffer,
+        g: &'g wgpu::Buffer,
+        y: &'g wgpu::Buffer,
         y_off: usize,
         rows: usize,
     ) {
@@ -1585,7 +1690,7 @@ impl Rec<'_> {
     fn elementwise(
         &mut self,
         kernel: Kernel,
-        bufs: [&wgpu::Buffer; 3],
+        bufs: [&'g wgpu::Buffer; 3],
         count: usize,
         args: [usize; 3],
     ) {
@@ -1597,7 +1702,13 @@ impl Rec<'_> {
     /// Rotary embedding of q and k in a `[tokens, 1536]` qkv buffer whose
     /// tokens are sequences of `seq`; `table` is `[seq, 32]` cosines then
     /// `[seq, 32]` sines.
-    pub fn rope(&mut self, qkv: &wgpu::Buffer, table: &wgpu::Buffer, tokens: usize, seq: usize) {
+    pub fn rope(
+        &mut self,
+        qkv: &'g wgpu::Buffer,
+        table: &'g wgpu::Buffer,
+        tokens: usize,
+        seq: usize,
+    ) {
         let dummy = &self.gpu.dummy;
         self.elementwise(Kernel::Rope, [dummy, table, qkv], tokens * 512, [seq, 0, 0]);
     }
@@ -1611,9 +1722,9 @@ impl Rec<'_> {
     /// in [`net::Job`], in one dispatch.
     pub fn attention(
         &mut self,
-        qkv: &wgpu::Buffer,
-        gates: Option<&wgpu::Buffer>,
-        o: &wgpu::Buffer,
+        qkv: &'g wgpu::Buffer,
+        gates: Option<&'g wgpu::Buffer>,
+        o: &'g wgpu::Buffer,
         seq: usize,
         nseq: usize,
         alpha: f32,
@@ -1639,13 +1750,13 @@ impl Rec<'_> {
     }
 
     /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
-    pub fn gate(&mut self, o: &wgpu::Buffer, gates: &wgpu::Buffer, tokens: usize) {
+    pub fn gate(&mut self, o: &'g wgpu::Buffer, gates: &'g wgpu::Buffer, tokens: usize) {
         let dummy = &self.gpu.dummy;
         self.elementwise(Kernel::Gate, [dummy, gates, o], tokens * 512, [0, 0, 0]);
     }
 
     /// `[a, b, 256]` in `src` to `[b, a, 256]` in `dst`.
-    pub fn transpose(&mut self, src: &wgpu::Buffer, dst: &wgpu::Buffer, a: usize, b: usize) {
+    pub fn transpose(&mut self, src: &'g wgpu::Buffer, dst: &'g wgpu::Buffer, a: usize, b: usize) {
         let dummy = &self.gpu.dummy;
         self.elementwise(Kernel::Transpose, [src, dummy, dst], a * b * 256, [a, b, 0]);
     }
@@ -1654,8 +1765,8 @@ impl Rec<'_> {
     /// feature offset `off`: `mask[t, off + j*w + c] = y[j,t,c] * sigmoid(y[j,t,w+c])`.
     pub fn glu(
         &mut self,
-        y: &wgpu::Buffer,
-        mask: &wgpu::Buffer,
+        y: &'g wgpu::Buffer,
+        mask: &'g wgpu::Buffer,
         n: usize,
         frames: usize,
         w: usize,

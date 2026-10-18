@@ -42,7 +42,7 @@ window.e2e = {
         if (d.type === "status") out.statuses.push({ at, text: d.text });
         if (d.type === "log") out.logs.push(d.text);
         if (d.type === "progress" && opts.progress) opts.progress(d);
-        if (d.type === "stem" && opts.stem) opts.stem(d);
+        if (d.type === "segment" && opts.segment) opts.segment(d);
         if (["model", "error", "selftest", "done"].includes(d.type)) {
           const { type, of, ok, loaded, stored, text, secs } = d;
           out.replies.push({ at, type, of, ok, loaded, stored, text, secs });

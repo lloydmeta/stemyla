@@ -1,16 +1,20 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use js_sys::{Float32Array, Object, Reflect, Uint8Array};
-use roformer::demix::Demixer;
+use js_sys::{Float32Array, Uint8Array};
+use roformer::demix::{Demixer, Segment};
 use roformer::separate::{analyse, apply_masks};
-use roformer::weights::{Store, WeightError};
+use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use stem_protocol::{
+    self as protocol, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
+};
 use wasm_bindgen::prelude::*;
-use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
+use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
 const CACHE_NAME: &str = "bs_roformer_sw.safetensors";
 
@@ -39,6 +43,14 @@ export async function cache_get(name) {
   const f = await fh.getFile();
   return new Uint8Array(await f.arrayBuffer());
 }
+export async function cache_file(name) {
+  const root = await navigator.storage.getDirectory();
+  try { return await (await root.getFileHandle(name)).getFile(); }
+  catch (e) { if (e.name === "NotFoundError") return null; throw e; }
+}
+export function blob_range(blob, start, end) {
+  return new Uint8Array(new FileReaderSync().readAsArrayBuffer(blob.slice(start, end)));
+}
 let queue_tail = Promise.resolve();
 export function queue_turn() {
   let release;
@@ -64,6 +76,12 @@ export async function opfs_has(name) {
   try { const root = await navigator.storage.getDirectory(); await root.getFileHandle(name); return true; }
   catch (e) { return e.name !== "NotFoundError"; }
 }
+// Safari 27 writes a typed array view's whole buffer, not just the view
+// (`new Uint8Array(16).subarray(4, 8)` writes 16 bytes), so only whole
+// arrays are written: a view is copied out first.
+function whole(bytes) {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+}
 async function write_file(fh, body) {
   const w = await fh.createWritable();
   try {
@@ -74,14 +92,27 @@ async function write_file(fh, body) {
     throw e;
   }
 }
-export async function cache_put(name, bytes) {
-  const part = name + ".part";
+export async function opfs_write(name, src) {
   try {
     const root = await navigator.storage.getDirectory();
-    const fh = await root.getFileHandle(part, { create: true });
-    await write_file(fh, (w) => w.write(bytes));
-    if (await opfs_commit(part, name)) return true;
-  } catch (e) {}
+    const fh = await root.getFileHandle(name, { create: true });
+    const slice = 8 << 20;
+    const size = src instanceof Blob ? src.size : src.length;
+    await write_file(fh, async (w) => {
+      for (let at = 0; at < size; at += slice) {
+        const end = Math.min(at + slice, size);
+        await w.write(src instanceof Blob ? src.slice(at, end) : whole(src.subarray(at, end)));
+      }
+    });
+    return true;
+  } catch (e) {
+    await opfs_remove(name);
+    return false;
+  }
+}
+export async function cache_put(name, bytes) {
+  const part = name + ".part";
+  if (await opfs_write(part, bytes) && await opfs_commit(part, name)) return true;
   await opfs_remove(part);
   return false;
 }
@@ -103,7 +134,7 @@ export async function gpu_info(pref) {
 export async function blob_bytes(blob) {
   return new Uint8Array(await blob.arrayBuffer());
 }
-export async function download_to_opfs(url, name, progress) {
+export async function download_to_opfs(url, name, progress, follow) {
   const ctl = new AbortController();
   let idle;
   const arm = () => {
@@ -111,11 +142,11 @@ export async function download_to_opfs(url, name, progress) {
     idle = setTimeout(() => ctl.abort(new Error("no data from the server for 60 s")), 60000);
   };
   arm();
-  try { return await download_with(url, name, progress, ctl.signal, arm); }
+  try { return await download_with(url, name, progress, ctl.signal, arm, follow); }
   finally { clearTimeout(idle); }
 }
-async function download_with(url, name, progress, signal, arm) {
-  const r = await fetch(url, { signal });
+async function download_with(url, name, progress, signal, arm, follow) {
+  const r = await fetch(url, { signal, redirect: follow ? "follow" : "error" });
   if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`);
   const total = Number(r.headers.get("content-length")) || 0;
   const root = await navigator.storage.getDirectory();
@@ -128,7 +159,7 @@ async function download_with(url, name, progress, signal, arm) {
         const { value, done: end } = await reader.read();
         if (end) break;
         arm();
-        await w.write(value);
+        await w.write(whole(value));
         done += value.length;
         if (done - last >= 4e6) { progress(done, total); last = done; }
       }
@@ -164,6 +195,14 @@ extern "C" {
     /// The file's bytes, or null if there is no such file.
     #[wasm_bindgen(catch)]
     async fn cache_get(name: &str) -> Result<JsValue, JsValue>;
+    /// The file as a `File` (read from storage only when sliced and read),
+    /// or null if there is no such file.
+    #[wasm_bindgen(catch)]
+    async fn cache_file(name: &str) -> Result<JsValue, JsValue>;
+    /// Bytes `start..end` of a `Blob`, read synchronously (workers only),
+    /// so a tensor can be read while the model is built.
+    #[wasm_bindgen(catch)]
+    fn blob_range(blob: &Blob, start: f64, end: f64) -> Result<Uint8Array, JsValue>;
     /// Resolves, in the order asked, with a function that ends this turn.
     async fn queue_turn() -> JsValue;
     /// Resolves with a function that releases the lock, once no other tab
@@ -172,16 +211,28 @@ extern "C" {
     async fn storage_lock(waiting: &js_sys::Function) -> Result<JsValue, JsValue>;
     /// Whether the file exists (or cannot be told apart from existing).
     async fn opfs_has(name: &str) -> JsValue;
-    async fn cache_put(name: &str, bytes: &Uint8Array) -> JsValue;
+    /// Writes `src`, a `Uint8Array` or a `Blob`, as the file `name`, 8 MB
+    /// at a time, so the browser need never hold more of a `Blob` than
+    /// that to write it; whether it was written.  A file not fully written
+    /// is removed.
+    async fn opfs_write(name: &str, src: &JsValue) -> JsValue;
+    /// Stores `bytes`, a `Uint8Array` or a `Blob`, under `name` only once
+    /// it is fully written.
+    async fn cache_put(name: &str, bytes: &JsValue) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
     #[wasm_bindgen(catch)]
     async fn blob_bytes(blob: &JsValue) -> Result<JsValue, JsValue>;
     async fn fetch_bytes(url: &str) -> JsValue;
+    /// Fetches `url` into the file `name`.  `follow`: whether to follow
+    /// redirects, only for a file checked against its hash afterwards; any
+    /// other is taken only from the page's own site, which a redirect
+    /// could leave.
     #[wasm_bindgen(catch)]
     async fn download_to_opfs(
         url: &str,
         name: &str,
         progress: &js_sys::Function,
+        follow: bool,
     ) -> Result<JsValue, JsValue>;
     /// Whether the file is gone (removed, or never there).
     async fn opfs_remove(name: &str) -> JsValue;
@@ -211,11 +262,8 @@ fn now_s() -> f64 {
     perf_now() / 1000.0
 }
 
-fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
-    let o = Object::new();
-    for (k, v) in fields {
-        let _ = Reflect::set(&o, &JsValue::from_str(k), v);
-    }
+fn send(reply: Reply) {
+    let (o, transfer) = reply.to_js();
     // Under test the page is the test runner, so messages are kept instead.
     #[cfg(test)]
     {
@@ -224,32 +272,31 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
     }
     #[cfg(not(test))]
     {
-        let t: js_sys::Array = transfer.iter().collect();
-        let _ = scope().post_message_with_transfer(&o, &t);
+        // Not through `log`, which sends too.
+        if let Err(e) = scope().post_message_with_transfer(&o, &transfer) {
+            web_sys::console::error_2(&"stem-worker: a message to the page was lost:".into(), &e);
+        }
     }
 }
 
 /// `ok`: whether the request succeeded.  `loaded` and `stored` say what
-/// the worker holds afterwards, which a failed request leaves as it was
-/// (a model loaded earlier stays loaded; a stored file kept after a GPU
-/// failure can still be removed).
+/// the worker holds afterwards.  A failed request leaves them as they
+/// were, except that a new file that parses and reaches the GPU unloads
+/// the model before it (see `build` and `unloaded_note`); a stored file
+/// kept after a GPU failure can still be removed.
 async fn post_model(ok: bool, text: &str) {
     let loaded = STATE.with_borrow(|s| s.net.is_some());
     let stored = opfs_has(CACHE_NAME).await.as_bool().unwrap_or(false);
-    post(
-        &[
-            ("type", "model".into()),
-            ("ok", ok.into()),
-            ("loaded", loaded.into()),
-            ("stored", stored.into()),
-            ("text", text.into()),
-        ],
-        &[],
-    );
+    send(Reply::Model {
+        ok,
+        loaded,
+        stored,
+        text: text.into(),
+    });
 }
 
 fn log(text: &str) {
-    post(&[("type", "log".into()), ("text", text.into())], &[]);
+    send(Reply::Log(text.into()));
 }
 
 /// A thrown JS value as text: "NotReadableError: ..." for an exception.
@@ -260,10 +307,6 @@ fn js_text(e: &JsValue) -> String {
     }
 }
 
-fn get(o: &JsValue, k: &str) -> JsValue {
-    Reflect::get(o, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED)
-}
-
 pub fn start() {
     console_error_panic_hook::set_once();
     let handler = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| {
@@ -271,7 +314,7 @@ pub fn start() {
     });
     scope().set_onmessage(Some(handler.as_ref().unchecked_ref()));
     handler.forget();
-    post(&[("type", "alive".into())], &[]);
+    send(Reply::Alive);
 }
 
 /// Adapter description and the limits the kernels are written to.
@@ -303,11 +346,11 @@ async fn gpu_text(gpu: &Gpu) -> String {
 
 /// The WebGPU device, created on first use.  `{gpu: "integrated"}` in the
 /// first message asks the browser for the low-power (integrated) adapter.
-async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
+async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
         return Ok(g);
     }
-    let integrated = get(msg, "gpu").as_string().as_deref() == Some("integrated");
+    let integrated = s.gpu.as_deref() == Some("integrated");
     let power = if integrated {
         wgpu::PowerPreference::LowPower
     } else {
@@ -316,8 +359,8 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     // Recorded before anything names the adapter by it: `choose_kernels`
     // keys this GPU's stored choice on it, and with the default still in
     // place an integrated GPU took the discrete GPU's choice.
-    STATE.with_borrow_mut(|s| {
-        s.power = if integrated {
+    STATE.with_borrow_mut(|st| {
+        st.power = if integrated {
             "low-power"
         } else {
             "high-performance"
@@ -325,7 +368,7 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     });
     // `?profile=1` opens the device with `timestamp-query` (when offered)
     // so every step reports GPU time per kernel; otherwise no features.
-    let g = Rc::new(if get(msg, "profile").is_truthy() {
+    let g = Rc::new(if s.profile {
         let g = Gpu::new_profiling(power).await?;
         if !g.profiling() {
             log("profile: this adapter has no timestamp-query; no GPU times");
@@ -346,9 +389,9 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     }
     // Overrides from the URL; this GPU's own choice comes later, in
     // `ensure_kernels`.
-    apply_policy(&g, msg);
-    apply_attention(&g, msg);
-    STATE.with_borrow_mut(|s| s.gpu = Some(g.clone()));
+    apply_policy(&g, s);
+    apply_attention(&g, s);
+    STATE.with_borrow_mut(|st| st.gpu = Some(g.clone()));
     Ok(g)
 }
 
@@ -358,61 +401,85 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
 /// upload, or for `?bench` without a model after its matmul timings)
 /// rather than when the device opens, so calibration neither shares the
 /// GPU with the upload nor times a GPU that has only just woken.
-async fn ensure_kernels(g: &Gpu, msg: &JsValue) {
-    if STATE.with_borrow_mut(|s| std::mem::replace(&mut s.kernels_chosen, true)) {
+async fn ensure_kernels(g: &Gpu, s: &Settings) {
+    if STATE.with_borrow_mut(|st| std::mem::replace(&mut st.kernels_chosen, true)) {
         return;
     }
-    let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
-    if !(set("mm") && set("attn")) {
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|v| v != "auto");
+    if !(set(&s.mm) && set(&s.attn)) {
         choose_kernels(g).await;
     }
-    apply_policy(g, msg);
-    apply_attention(g, msg);
+    apply_policy(g, s);
+    apply_attention(g, s);
 }
 
-fn budget(msg: &JsValue) -> usize {
-    get(msg, "max_elems")
-        .as_f64()
-        .map_or(BUDGET, |v| v as usize)
+fn budget(s: &Settings) -> usize {
+    s.max_elems.unwrap_or(BUDGET)
 }
 
 async fn handle(msg: JsValue) {
-    let kind = get(&msg, "type").as_string().unwrap_or_default();
-    let result = match kind.as_str() {
-        "init" | "model" | "download" | "forget_model" => {
-            let _turn = Held::turn().await;
-            apply_overrides(&msg);
-            model_task(&kind, &msg).await
-        }
-        "separate" | "selftest" | "bench" => {
-            let _turn = Held::turn().await;
-            apply_overrides(&msg);
-            match kind.as_str() {
-                "separate" => separate(&msg).await,
-                "selftest" => selftest(&msg).await,
-                _ => bench(&msg).await,
+    let kind = protocol::kind_of(&msg);
+    // Model and GPU requests wait for their turn before they are read, so
+    // even a malformed one is answered in the order sent.
+    let queued = [
+        kind::INIT,
+        kind::MODEL,
+        kind::DOWNLOAD,
+        kind::FORGET_MODEL,
+        kind::SEPARATE,
+        kind::SELFTEST,
+        kind::BENCH,
+    ]
+    .contains(&kind.as_str());
+    let _turn = if queued {
+        Some(Held::turn().await)
+    } else {
+        None
+    };
+    let request = ToWorker::from_js(&msg);
+    // The request holds what it needs; a transferred mix is then held only
+    // by it, and freed once copied in.
+    drop(msg);
+    let result = match request {
+        Err(bad) => Err(bad.text),
+        Ok(ToWorker { request, settings }) => {
+            if queued {
+                apply_overrides(&settings);
             }
+            serve(request, &settings).await
         }
-        "mp3" => mp3(&msg).await,
-        other => Err(format!("unknown message {other}")),
     };
     if let Err(text) = result {
-        post(
-            &[
-                ("type", "error".into()),
-                ("of", kind.into()),
-                ("text", text.into()),
-            ],
-            &[],
-        );
+        send(Reply::Error { of: kind, text });
+    }
+}
+
+async fn serve(request: Request, s: &Settings) -> Result<(), String> {
+    match request {
+        Request::Init => with_storage(init(s)).await,
+        Request::Model(source) => with_storage(load_model(source, s)).await,
+        Request::Download => with_storage(download(s)).await,
+        Request::ForgetModel => with_storage(forget_model()).await,
+        Request::Separate { left, right } => {
+            let (gpu, net) = loaded()?;
+            run(&gpu, &net, [left, right], s).await
+        }
+        Request::Selftest { base } => selftest(base, s).await,
+        Request::Bench => bench(s).await,
+        Request::Mp3 {
+            name,
+            left,
+            right,
+            rate,
+        } => mp3(name, [left, right], rate).await,
     }
 }
 
 /// Kernel overrides from the page URL, for a GPU opened earlier.
-fn apply_overrides(msg: &JsValue) {
-    if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
-        apply_policy(&g, msg);
-        apply_attention(&g, msg);
+fn apply_overrides(s: &Settings) {
+    if let Some(g) = STATE.with_borrow(|st| st.gpu.clone()) {
+        apply_policy(&g, s);
+        apply_attention(&g, s);
     }
 }
 
@@ -434,16 +501,9 @@ impl Held {
     /// The stored files are shared by every tab of this site.
     async fn storage() -> Option<Self> {
         let waiting = Closure::<dyn FnMut()>::new(|| {
-            post(
-                &[
-                    ("type", "status".into()),
-                    (
-                        "text",
-                        "Waiting for another tab of this site to finish with the model…".into(),
-                    ),
-                ],
-                &[],
-            );
+            send(Reply::Status(
+                "Waiting for another tab of this site to finish with the model…".into(),
+            ));
         });
         let lock = storage_lock(waiting.as_ref().unchecked_ref()).await;
         drop(waiting);
@@ -466,20 +526,15 @@ impl Drop for Held {
     }
 }
 
-async fn model_task(kind: &str, msg: &JsValue) -> Result<(), String> {
+/// Runs a model task holding the storage lock, shared by every tab.
+async fn with_storage(
+    task: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
     let _storage = Held::storage().await;
-    match kind {
-        "init" => init(msg).await,
-        "model" => load_model(msg).await,
-        "download" => download(msg).await,
-        _ => {
-            forget_model().await;
-            Ok(())
-        }
-    }
+    task.await
 }
 
-async fn forget_model() {
+async fn forget_model() -> Result<(), String> {
     STATE.with_borrow_mut(|s| s.net = None);
     let removed = opfs_remove(CACHE_NAME).await.as_bool().unwrap_or(false);
     remove_leftovers().await;
@@ -493,6 +548,7 @@ async fn forget_model() {
         },
     )
     .await;
+    Ok(())
 }
 
 /// Partial files from a download or save that never finished (a phone
@@ -502,9 +558,12 @@ async fn remove_leftovers() {
     opfs_remove(&format!("{CACHE_NAME}.part")).await;
 }
 
-/// Why the weights could not be put on the GPU: the file itself, or the GPU.
+/// Why the weights could not be put on the GPU: the file itself, reading
+/// it, or the GPU.
 enum LoadError {
     Weights(WeightError),
+    /// Why the browser could not read the file.
+    Read(String),
     Gpu(String),
 }
 
@@ -512,7 +571,7 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Weights(e) => write!(f, "{e}"),
-            Self::Gpu(e) => write!(f, "{e}"),
+            Self::Read(e) | Self::Gpu(e) => write!(f, "{e}"),
         }
     }
 }
@@ -523,39 +582,165 @@ impl From<String> for LoadError {
     }
 }
 
+impl From<WeightError> for LoadError {
+    fn from(e: WeightError) -> Self {
+        match e {
+            WeightError::Read(why) => Self::Read(why),
+            _ => Self::Weights(e),
+        }
+    }
+}
+
+/// The model file, outside WebAssembly memory: [`Store`] copies in the
+/// header and then one tensor at a time, so the worker's memory (which
+/// never shrinks) does not grow by the whole file.  A `Blob` (the stored
+/// file, or the one the user picked) is read from disk in blocks, so not
+/// even the JavaScript heap holds the whole file.
+enum ModelFile {
+    Bytes(Uint8Array),
+    Blob(BlobFile),
+}
+
+/// A `Blob` read in aligned blocks of `block` bytes, keeping the `keep`
+/// most recently used.  Each read from storage costs about 2 ms in Safari,
+/// so one per tensor (1915 of them) added about 4 s to a load.  The model
+/// asks for tensors in a different order from the file's (bands and layers
+/// are interleaved in it, sorted as text), but within about 64 MB of it at
+/// a time: 8 blocks of 8 MB read each byte of the file once, in 42 reads.
+struct BlobFile {
+    blob: Blob,
+    block: usize,
+    keep: usize,
+    /// Block index and bytes, least recently used first.
+    blocks: RefCell<Vec<(usize, Uint8Array)>>,
+}
+
+impl ModelFile {
+    fn blob(blob: Blob) -> Self {
+        Self::blob_in_blocks(blob, 8 << 20, 8)
+    }
+
+    fn blob_in_blocks(blob: Blob, block: usize, keep: usize) -> Self {
+        Self::Blob(BlobFile {
+            blob,
+            block,
+            keep,
+            blocks: RefCell::new(Vec::new()),
+        })
+    }
+}
+
+impl BlobFile {
+    fn read(&self, start: usize, end: usize) -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(end - start);
+        let mut blocks = self.blocks.borrow_mut();
+        for b in start / self.block..end.div_ceil(self.block) {
+            let from = b * self.block;
+            let bytes = match blocks.iter().position(|(i, _)| *i == b) {
+                Some(p) => blocks.remove(p).1,
+                None => {
+                    // Evicted first, so no more than `keep` blocks are
+                    // ever held.
+                    if !blocks.is_empty() && blocks.len() >= self.keep {
+                        blocks.remove(0);
+                    }
+                    debug_assert!(
+                        blocks.len() < self.keep.max(1),
+                        "{} blocks held",
+                        blocks.len()
+                    );
+                    let to = (from + self.block).min(self.blob.size() as usize);
+                    blob_range(&self.blob, from as f64, to as f64).map_err(|e| js_text(&e))?
+                }
+            };
+            let part = bytes.subarray(
+                (start.max(from) - from) as u32,
+                (end.min(from + self.block) - from) as u32,
+            );
+            let n = out.len();
+            out.resize(n + part.length() as usize, 0);
+            part.copy_to(&mut out[n..]);
+            blocks.push((b, bytes));
+        }
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.blocks.borrow().len()
+    }
+}
+
+impl Source for &ModelFile {
+    fn size(&self) -> usize {
+        match self {
+            ModelFile::Bytes(b) => b.length() as usize,
+            ModelFile::Blob(f) => f.blob.size() as usize,
+        }
+    }
+
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String> {
+        match self {
+            ModelFile::Bytes(b) => Ok(Cow::Owned(b.subarray(start as u32, end as u32).to_vec())),
+            ModelFile::Blob(f) => f.read(start, end).map(Cow::Owned),
+        }
+    }
+}
+
+/// Refuses a file of more bytes than this 32-bit worker can address (the
+/// model is 350 MB).
+fn reachable(bytes: f64) -> Result<(), WeightError> {
+    if bytes > usize::MAX as f64 {
+        return Err(WeightError::Parse(format!(
+            "{bytes} bytes is over the 4 GB this worker can read"
+        )));
+    }
+    Ok(())
+}
+
 /// Uploads the weights; returns the seconds taken and a description of
 /// the GPU.
-async fn build(bytes: &[u8], msg: &JsValue) -> Result<(f64, String), LoadError> {
+async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError> {
     let t0 = now_s();
+    if let ModelFile::Blob(f) = &file {
+        reachable(f.blob.size())?;
+    }
     // Parsed before the GPU opens: a file that is not safetensors at all is
     // then reported (and an unusable stored copy removed) even on a device
     // without WebGPU, instead of being kept behind a GPU error.
-    Store::new(bytes).map_err(LoadError::Weights)?;
-    let g = gpu(msg).await?;
-    let net = Net::load(&g, bytes, budget(msg)).map_err(LoadError::Weights)?;
+    Store::from_source(&file)?;
+    let g = gpu(s).await?;
+    // Two models do not fit on a phone's GPU at once, so the one loaded
+    // before goes now: a safetensors file that then fails to load leaves
+    // no model loaded (the stored one, if any, is kept).
+    STATE.with_borrow_mut(|st| st.net = None);
+    let net = Net::load_store(&g, Store::from_source(&file)?, budget(s))?;
+    // Its cached blocks, or a checked download's bytes, are not needed for
+    // the GPU checks and kernel timing that follow.
+    drop(file);
     g.done().await;
     if let Some(e) = g.take_errors().into_iter().next() {
         return Err(LoadError::Gpu(format!(
             "the GPU rejected the model upload: {e}"
         )));
     }
-    ensure_kernels(&g, msg).await;
+    ensure_kernels(&g, s).await;
+    log(&memory_text(&net, None));
     STATE.with_borrow_mut(|s| s.net = Some(Rc::new(net)));
     Ok((now_s() - t0, gpu_text(&g).await))
 }
 
-async fn init(msg: &JsValue) -> Result<(), String> {
+async fn init(s: &Settings) -> Result<(), String> {
     remove_leftovers().await;
-    let cached = match cache_get(CACHE_NAME).await {
+    let unreadable = |e: &str| {
+        format!(
+            "could not read the model in browser storage ({e}); it was kept: reload the page to try again, or remove it"
+        )
+    };
+    let cached = match cache_file(CACHE_NAME).await {
         Ok(cached) => cached,
         Err(e) => {
-            post_model(
-                false,
-                &format!(
-                    "could not read the model in browser storage ({}); it was kept: reload the page to try again, or remove it",
-                    js_text(&e)
-                ),
-            ).await;
+            post_model(false, &unreadable(&js_text(&e))).await;
             return Ok(());
         }
     };
@@ -563,8 +748,9 @@ async fn init(msg: &JsValue) -> Result<(), String> {
         post_model(false, "no model cached in this browser").await;
         return Ok(());
     }
-    let bytes = cached.unchecked_into::<Uint8Array>().to_vec();
-    match build(&bytes, msg).await {
+    let file = ModelFile::blob(cached.unchecked_into());
+    let size = (&file).size();
+    match build(file, s).await {
         Ok((secs, gpu)) => {
             post_model(
                 true,
@@ -586,11 +772,12 @@ async fn init(msg: &JsValue) -> Result<(), String> {
                 false,
                 &format!(
                     "the model in browser storage is unusable ({} bytes, {e}) and {fate}",
-                    bytes.len()
+                    size
                 ),
             )
             .await;
         }
+        Err(LoadError::Read(e)) => post_model(false, &unreadable(&e)).await,
         Err(e @ LoadError::Gpu(_)) => {
             post_model(
                 false,
@@ -602,27 +789,105 @@ async fn init(msg: &JsValue) -> Result<(), String> {
     Ok(())
 }
 
-async fn load_model(msg: &JsValue) -> Result<(), String> {
-    let file = get(msg, "file");
-    let read = if !file.is_undefined() {
-        blob_bytes(&file).await.map_err(|e| js_text(&e))
-    } else {
-        Ok(get(msg, "bytes"))
+/// The picked file or the bytes sent, written to [`DOWNLOAD_NAME`] and
+/// opened from there, so the model built is the one later stored, and
+/// the bytes sent can be freed before the upload; `None` if browser
+/// storage could not take it.
+async fn staged(source: &ModelSource) -> Option<ModelFile> {
+    let src: &JsValue = match source {
+        ModelSource::File(f) => f,
+        ModelSource::Bytes(b) => b,
     };
-    let arr: Uint8Array = match read.and_then(|v| {
-        v.dyn_into()
-            .map_err(|_| "model message without file or bytes".to_string())
-    }) {
-        Ok(arr) => arr,
-        Err(e) => {
-            post_model(false, &format!("could not read the model file: {e}")).await;
-            return Ok(());
+    if !opfs_write(DOWNLOAD_NAME, src)
+        .await
+        .as_bool()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    match cache_file(DOWNLOAD_NAME).await {
+        Ok(f) if !f.is_null() => Some(ModelFile::blob(f.unchecked_into())),
+        _ => {
+            opfs_remove(DOWNLOAD_NAME).await;
+            None
         }
+    }
+}
+
+/// What a failed load of a picked file says, by why it failed.
+fn picked_failure(e: &LoadError) -> String {
+    match e {
+        LoadError::Weights(_) => format!("not a BS-RoFormer SW model: {e}"),
+        LoadError::Read(_) => format!("could not read the model file: {e}"),
+        LoadError::Gpu(_) => format!("the model could not be loaded: {e}"),
+    }
+}
+
+/// Added to a failed load's text when it unloaded the model loaded before
+/// it (`build` does once the new file parses and the GPU opens), so the
+/// page does not offer a 350 MB download for a model it still has.
+async fn unloaded_note(had_model: bool) -> &'static str {
+    if !had_model || STATE.with_borrow(|s| s.net.is_some()) {
+        ""
+    } else if opfs_has(CACHE_NAME).await.as_bool().unwrap_or(false) {
+        "; the model loaded before was unloaded to make room: reload the page to load the stored one"
+    } else {
+        "; the model loaded before was unloaded to make room"
+    }
+}
+
+fn source_file(source: &ModelSource) -> ModelFile {
+    match source {
+        ModelSource::File(f) => ModelFile::blob(f.clone()),
+        ModelSource::Bytes(b) => ModelFile::Bytes(b.clone()),
+    }
+}
+
+/// A file too large to read, or that is not safetensors at all.
+fn check_header(file: &ModelFile) -> Result<(), LoadError> {
+    if let ModelFile::Blob(f) = file {
+        reachable(f.blob.size())?;
+    }
+    Store::from_source(file)?;
+    Ok(())
+}
+
+async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), String> {
+    let Some(source) = source else {
+        post_model(
+            false,
+            "could not read the model file: model message without file or bytes",
+        )
+        .await;
+        return Ok(());
     };
-    let bytes = arr.to_vec();
-    match build(&bytes, msg).await {
+    // Read before the file is copied into storage, so one that is not the
+    // model (perhaps gigabytes of something else) is refused unwritten.
+    if let Err(e) = check_header(&source_file(&source)) {
+        post_model(false, &picked_failure(&e)).await;
+        return Ok(());
+    }
+    let (file, is_staged) = match staged(&source).await {
+        Some(file) => {
+            // Bytes sent are freed now, not after the upload.
+            drop(source);
+            (file, true)
+        }
+        None => (source_file(&source), false),
+    };
+    let had_model = STATE.with_borrow(|s| s.net.is_some());
+    let built = build(file, s).await;
+    let cached = built.is_ok()
+        && is_staged
+        && opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
+            .await
+            .as_bool()
+            .unwrap_or(false);
+    if !cached {
+        opfs_remove(DOWNLOAD_NAME).await;
+    }
+    match built {
         Ok((secs, gpu)) => {
-            let cached = cache_put(CACHE_NAME, &arr).await.as_bool().unwrap_or(false);
             let note = if cached {
                 "saved in browser storage"
             } else {
@@ -633,17 +898,13 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
                 &format!("model loaded in {secs:.1} s, {note} ({gpu})"),
             )
             .await;
-            Ok(())
         }
-        Err(e @ LoadError::Weights(_)) => {
-            post_model(false, &format!("not a BS-RoFormer SW model: {e}")).await;
-            Ok(())
-        }
-        Err(e @ LoadError::Gpu(_)) => {
-            post_model(false, &format!("the model could not be loaded: {e}")).await;
-            Ok(())
+        Err(e) => {
+            let unloaded = unloaded_note(had_model).await;
+            post_model(false, &format!("{}{unloaded}", picked_failure(&e))).await;
         }
     }
+    Ok(())
 }
 
 fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
@@ -651,11 +912,6 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
         (Some(g), Some(n)) => Ok((g.clone(), n.clone())),
         _ => Err("load the model first".to_string()),
     })
-}
-
-async fn separate(msg: &JsValue) -> Result<(), String> {
-    let (gpu, net) = loaded()?;
-    run(&gpu, &net, msg).await
 }
 
 /// Keeps the GPU from being monopolised.  Every step is one short command
@@ -682,8 +938,8 @@ struct Pace {
 }
 
 impl Pace {
-    fn new(msg: &JsValue) -> Self {
-        let limit = get(msg, "step_limit").as_f64().unwrap_or(5.0);
+    fn new(s: &Settings) -> Self {
+        let limit = s.step_limit.unwrap_or(5.0);
         Self {
             limit,
             seen: HashSet::new(),
@@ -743,6 +999,37 @@ impl Pace {
     }
 }
 
+/// Megabytes of this worker's WebAssembly memory, which only ever grows.
+fn wasm_mb() -> f64 {
+    let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+    mem.buffer()
+        .unchecked_into::<js_sys::ArrayBuffer>()
+        .byte_length() as f64
+        / 1e6
+}
+
+/// Where the worker's memory is, for the console: on iOS the whole tab is
+/// stopped at a fixed limit (2 GB on an iPhone 17 Pro), and GPU buffers
+/// count towards it.  The GPU's live bytes are every buffer not yet
+/// destroyed, so they stay flat from chunk to chunk of the same length
+/// unless one leaks.
+fn memory_text(net: &Net, job: Option<&Job>) -> String {
+    let mb = |b: u64| b as f64 / 1e6;
+    let job = job.map_or(String::new(), |j| {
+        format!(", chunk buffers {:.0} MB", mb(j.bytes()))
+    });
+    let live = STATE
+        .with_borrow(|s| s.gpu.as_ref().map(|g| g.live_bytes()))
+        .map_or(String::new(), |b| {
+            format!(", GPU buffers live {:.0} MB", mb(b))
+        });
+    format!(
+        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB{job}{live}",
+        wasm_mb(),
+        mb(net.bytes)
+    )
+}
+
 /// Progress notes for debugging, sent when the message has `debug: true`.
 fn trace(on: bool, text: &str) {
     if on {
@@ -750,31 +1037,25 @@ fn trace(on: bool, text: &str) {
     }
 }
 
-async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
-    let debug = get(msg, "debug").is_truthy();
-    let left: Float32Array = get(msg, "left")
-        .dyn_into()
-        .map_err(|_| "left must be a Float32Array")?;
-    let right: Float32Array = get(msg, "right")
-        .dyn_into()
-        .map_err(|_| "right must be a Float32Array")?;
-    let chunk = get(msg, "chunk").as_f64().map_or(CHUNK, |v| v as usize);
-    let overlap = get(msg, "overlap").as_f64().map_or(OVERLAP, |v| v as usize);
+async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Result<(), String> {
+    let debug = s.debug;
+    let chunk = s.chunk.unwrap_or(CHUNK);
+    let overlap = s.overlap.unwrap_or(OVERLAP);
     let t0 = now_s();
-    let mut d = Demixer::new([left.to_vec(), right.to_vec()], chunk, overlap, STEMS.len());
+    // The page transferred these and nothing else holds them: dropped once
+    // copied, so the browser can free them while the song is separated.
+    let mix = mix.map(|c| c.to_vec());
+    let mut d = Demixer::new(mix, chunk, overlap, STEMS.len());
+    let song_len = d.output_len();
     // The report after the song covers this separation only.
     gpu.reset_profile().await?;
-    let mut pace = Pace::new(msg);
+    let mut pace = Pace::new(s);
     let total = d.num_chunks();
-    post(
-        &[
-            ("type", "progress".into()),
-            ("done", 0.into()),
-            ("total", (total as u32).into()),
-            ("secs", 0.into()),
-        ],
-        &[],
-    );
+    send(Reply::Progress {
+        done: 0,
+        total: total as u32,
+        secs: 0.0,
+    });
     let mut job: Option<Job> = None;
     while let Some(x) = d.next_input() {
         let tc = now_s();
@@ -785,7 +1066,14 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             &format!("chunk {}: stft {:.2} s", d.chunk_index(), now_s() - tc),
         );
         if job.as_ref().is_none_or(|j| j.frames != frames) {
+            // Freed before the next is made: two chunks' buffers (about
+            // 280 MB each) need not be on the GPU at once.
+            drop(job.take());
             job = Some(Job::new(gpu, net, frames));
+            log(&format!(
+                "separating {total} chunks; {}",
+                memory_text(net, job.as_ref())
+            ));
         }
         let j = job.as_ref().expect("job");
         j.set_input(&feats);
@@ -806,42 +1094,50 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             }
         }
         d.accept(&out);
+        drop(out);
+        if let Some(seg) = d.take_ready() {
+            post_segment(seg, song_len);
+        }
         let done = d.chunk_index().min(total) as u32;
         log(&format!(
-            "chunk {done}/{total}: {:.1} s; so far {}",
+            "chunk {done}/{total}: {:.1} s; so far {}; {}",
             now_s() - tc,
-            pace.summary()
+            pace.summary(),
+            memory_text(net, job.as_ref())
         ));
-        post(
-            &[
-                ("type", "progress".into()),
-                ("done", done.into()),
-                ("total", (total as u32).into()),
-                ("secs", (now_s() - t0).into()),
-            ],
-            &[],
-        );
+        send(Reply::Progress {
+            done,
+            total: total as u32,
+            secs: now_s() - t0,
+        });
     }
-    for (name, stem) in STEMS.iter().zip(d.finish()) {
-        let l = Float32Array::from(stem[0].as_slice());
-        let r = Float32Array::from(stem[1].as_slice());
-        post(
-            &[
-                ("type", "stem".into()),
-                ("name", (*name).into()),
-                ("left", l.clone().into()),
-                ("right", r.clone().into()),
-            ],
-            &[l.buffer().into(), r.buffer().into()],
-        );
+    if let Some(seg) = d.take_ready() {
+        post_segment(seg, song_len);
     }
     log(&format!("separation: {}", pace.summary()));
     log_profile(gpu, &pace);
-    post(
-        &[("type", "done".into()), ("secs", (now_s() - t0).into())],
-        &[],
-    );
+    send(Reply::Done { secs: now_s() - t0 });
     Ok(())
+}
+
+/// Sends finished samples of every stem to the page, which assembles the
+/// song-length stems; the worker keeps at most a chunk of running sums
+/// instead of six whole songs (see `Demixer::take_ready`).
+fn post_segment(seg: Segment, song_len: usize) {
+    let stems = STEMS
+        .iter()
+        .zip(&seg.stems)
+        .map(|(name, [left, right])| SegmentStem {
+            name: (*name).into(),
+            left: Float32Array::from(left.as_slice()),
+            right: Float32Array::from(right.as_slice()),
+        })
+        .collect();
+    send(Reply::Segment {
+        start: seg.start,
+        len: song_len,
+        stems,
+    });
 }
 
 /// Signal-to-error ratio in dB.
@@ -887,11 +1183,9 @@ fn tensor_f32(st: &safetensors::SafeTensors, name: &str) -> Result<(Vec<usize>, 
 /// full chunk.  Each line reports agreement in dB (higher is better; the
 /// references are stored as f16, so about 60 dB is the ceiling and anything
 /// under 30 dB is wrong) and any WebGPU errors seen during that stage.
-async fn selftest(msg: &JsValue) -> Result<(), String> {
+async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     let (gpu, net) = loaded()?;
-    let base = get(msg, "base")
-        .as_string()
-        .unwrap_or_else(|| "/selftest/".into());
+    let base = base.unwrap_or_else(|| "/selftest/".into());
     log(&format!("selftest: GPU {}", gpu_text(&gpu).await));
     let before = gpu.take_errors();
     if !before.is_empty() {
@@ -914,7 +1208,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
     let (_, feats) = tensor_f32(&st, "features")?;
     let t0 = now_s();
     let job = Job::new(&gpu, &net, feats.len() / FEATURES);
-    let mut pace = Pace::new(msg);
+    let mut pace = Pace::new(s);
     job.set_input(&feats);
     pace.run(&gpu, &job, &Step::Split).await?;
     let (_, want) = tensor_f32(&st, "band_split")?;
@@ -973,7 +1267,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
 
     // One full 13.35 s chunk; every step is paced, so it stops early (with
     // an error) rather than holding the GPU if this GPU is too slow.
-    let stages_only = get(msg, "selftest").as_string().as_deref() == Some("stages");
+    let stages_only = s.selftest.as_deref() == Some("stages");
     if stages_only {
         log("selftest: skipping the full chunk (selftest=stages)");
     } else if worst > 30.0 {
@@ -990,7 +1284,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
             gpu.reset_profile().await?;
             let (spec, feats) = analyse(&[audio[..n].to_vec(), audio[n..].to_vec()]);
             let job = Job::new(&gpu, &net, feats.len() / FEATURES);
-            let mut pace = Pace::new(msg);
+            let mut pace = Pace::new(s);
             job.set_input(&feats);
             let mix_energy: f64 = audio.iter().map(|v| (*v as f64).powi(2)).sum();
             let mut s = 0;
@@ -1035,14 +1329,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         format!("selftest FAILED: worst stage {worst:.1} dB; see the lines above")
     };
     log(&text);
-    post(
-        &[
-            ("type", "selftest".into()),
-            ("ok", ok.into()),
-            ("text", text.into()),
-        ],
-        &[],
-    );
+    send(Reply::Selftest { ok, text });
     Ok(())
 }
 
@@ -1086,12 +1373,8 @@ impl Pace {
 
 /// `?mm=` in the page URL: which matmul kernel to use (`auto` or a name
 /// from `roformer_gpu::TILES`).
-fn apply_policy(gpu: &Gpu, msg: &JsValue) {
-    if let Some(p) = get(msg, "mm")
-        .as_string()
-        .as_deref()
-        .and_then(roformer_gpu::MatMulPolicy::parse)
-    {
+fn apply_policy(gpu: &Gpu, s: &Settings) {
+    if let Some(p) = s.mm.as_deref().and_then(roformer_gpu::MatMulPolicy::parse) {
         gpu.policy.set(p);
     }
 }
@@ -1099,14 +1382,14 @@ fn apply_policy(gpu: &Gpu, msg: &JsValue) {
 /// `?attn=` in the page URL: `auto` (this GPU's choice), `split`,
 /// `fused`, or `time` / `freq` for fused attention on that axis only.
 /// Fused attention is used only if it passed the start-up check.
-fn apply_attention(gpu: &Gpu, msg: &JsValue) {
-    let Some(name) = get(msg, "attn").as_string() else {
+fn apply_attention(gpu: &Gpu, s: &Settings) {
+    let Some(name) = s.attn.as_deref() else {
         return;
     };
     if name == "auto" {
         return;
     }
-    match roformer_gpu::AttentionPolicy::parse(&name) {
+    match roformer_gpu::AttentionPolicy::parse(name) {
         Some(p) if p == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get() => {
             gpu.attention.set(p)
         }
@@ -1120,28 +1403,27 @@ fn apply_attention(gpu: &Gpu, msg: &JsValue) {
 }
 
 /// Times every matmul kernel on the shapes of a full chunk (`?bench`).
-async fn bench(msg: &JsValue) -> Result<(), String> {
-    let g = gpu(msg).await?;
+async fn bench(s: &Settings) -> Result<(), String> {
+    let g = gpu(s).await?;
     // Without a model the GPU has done nothing yet: choose its kernels
     // after the matmul timings below (which do not depend on the choice)
     // rather than on a GPU that has only just woken.
-    let loaded = STATE.with_borrow(|s| s.net.is_some());
+    let loaded = STATE.with_borrow(|st| st.net.is_some());
     if loaded {
-        ensure_kernels(&g, msg).await;
+        ensure_kernels(&g, s).await;
     }
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
-    let (warm, round) = if get(msg, "bench_quick").is_truthy() {
+    let (warm, round) = if s.bench_quick {
         (0.0, 0.0)
     } else {
         (0.3, 0.2)
     };
-    let rounds = get(msg, "bench_rounds")
-        .as_f64()
-        .map_or(3, |r| r.max(1.0) as usize);
-    let only = get(msg, "bench")
-        .as_string()
-        .and_then(|s| roformer_gpu::bench::parse_kernels(&s));
+    let rounds = s.bench_rounds.map_or(3, |r| r.max(1.0) as usize);
+    let only = s
+        .bench
+        .as_deref()
+        .and_then(roformer_gpu::bench::parse_kernels);
     let table =
         roformer_gpu::bench::measure(&g, warm, round, rounds, only.as_deref(), now_s, |l| log(&l))
             .await;
@@ -1149,44 +1431,50 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
         log(&l);
     }
     if !loaded {
-        ensure_kernels(&g, msg).await;
+        ensure_kernels(&g, s).await;
     }
     roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
         "bench finished in {:.0} s; results in the browser console",
         now_s() - t0
     );
-    post(&[("type", "bench".into()), ("text", text.into())], &[]);
+    send(Reply::Bench(text));
     Ok(())
 }
 
 /// Downloads the model into browser storage with progress messages
 /// (`{type: "download", done, total}`), checks its hash, then loads it like
 /// a picked file.
-async fn download(msg: &JsValue) -> Result<(), String> {
-    let url = get(msg, "model_url")
-        .as_string()
-        .unwrap_or_else(|| MODEL_URL.to_string());
+async fn download(s: &Settings) -> Result<(), String> {
+    let url = s.model_url.as_deref().unwrap_or(MODEL_URL);
+    // Any other file (`?model_url=`, for tests, which the page takes only
+    // from its own site) is not checked against a hash.
+    let expected = (url == MODEL_URL).then_some(MODEL_SHA256);
+    download_from(url, expected, s).await
+}
+
+/// Downloads `url` and loads it, checked against the SHA-256 `expected`
+/// if given, then stores it.
+async fn download_from(url: &str, expected: Option<&str>, s: &Settings) -> Result<(), String> {
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|done: f64, total: f64| {
-        post(
-            &[
-                ("type", "download".into()),
-                ("done", done.into()),
-                ("total", total.into()),
-            ],
-            &[],
-        );
+        send(Reply::Download { done, total });
     });
     let t0 = now_s();
-    let fetched = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let fetched = download_to_opfs(
+        url,
+        DOWNLOAD_NAME,
+        progress.as_ref().unchecked_ref(),
+        expected.is_some(),
+    )
+    .await;
     drop(progress);
     if let Err(e) = fetched {
         opfs_remove(DOWNLOAD_NAME).await;
         post_model(false, &format!("model download failed: {}", js_text(&e))).await;
         return Ok(());
     }
-    let arr = match verified_download(&url).await {
-        Ok(arr) => arr,
+    let file = match verified_download(expected).await {
+        Ok(file) => file,
         Err(e) => {
             opfs_remove(DOWNLOAD_NAME).await;
             post_model(false, &e).await;
@@ -1194,25 +1482,31 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         }
     };
     let secs = now_s() - t0;
-    // The worker's JS copy of the file (350 MB) is released before the
-    // upload, so the browser can reclaim it during the GPU upload and
-    // calibration instead of after them; a phone's tab has little memory
-    // to spare.
-    let bytes = arr.to_vec();
-    drop(arr);
-    match build(&bytes, msg).await {
+    let had_model = STATE.with_borrow(|s| s.net.is_some());
+    let built = build(file, s).await;
+    // A checked file that only the GPU failed to load is kept, as a
+    // stored one is at start, so it is not downloaded again.
+    let keep = match &built {
+        Ok(_) => true,
+        Err(LoadError::Gpu(_)) => expected.is_some(),
+        Err(_) => false,
+    };
+    // The download becomes the stored model by a rename: no second 350 MB
+    // write, and no moment at which the stored model exists but is not
+    // yet complete.
+    let cached = keep
+        && opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
+            .await
+            .as_bool()
+            .unwrap_or(false);
+    if !cached {
+        opfs_remove(DOWNLOAD_NAME).await;
+    }
+    match built {
         Ok((load, gpu)) => {
-            // The verified download becomes the stored model by a rename:
-            // no second 350 MB write, and no moment at which the stored
-            // model exists but is not yet complete.
-            let cached = opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
-                .await
-                .as_bool()
-                .unwrap_or(false);
             let note = if cached {
                 "saved in browser storage"
             } else {
-                opfs_remove(DOWNLOAD_NAME).await;
                 "could not be saved in browser storage"
             };
             post_model(
@@ -1224,60 +1518,78 @@ async fn download(msg: &JsValue) -> Result<(), String> {
             .await;
         }
         Err(e) => {
-            opfs_remove(DOWNLOAD_NAME).await;
             let what = match e {
                 LoadError::Weights(_) => "the downloaded file is not a usable BS-RoFormer SW model",
-                LoadError::Gpu(_) => "the downloaded model could not be loaded",
+                LoadError::Read(_) | LoadError::Gpu(_) => {
+                    "the downloaded model could not be loaded"
+                }
             };
-            post_model(false, &format!("{what}: {e}")).await;
+            let fate = if cached {
+                "; it was saved in browser storage: reload the page to try again"
+            } else {
+                ""
+            };
+            // A kept download already says to reload, which loads it.
+            let unloaded = if cached {
+                ""
+            } else {
+                unloaded_note(had_model).await
+            };
+            post_model(false, &format!("{what}: {e}{fate}{unloaded}")).await;
         }
     }
     Ok(())
 }
 
-/// The downloaded file, checked against the published hash when it came
-/// from [`MODEL_URL`].
-async fn verified_download(url: &str) -> Result<Uint8Array, String> {
-    let part = cache_get(DOWNLOAD_NAME).await.map_err(|e| {
+/// The downloaded file, checked against the SHA-256 `expected` if given.
+/// WebCrypto hashes only whole buffers, so a checked file is read into
+/// JavaScript, and the model is built from those very bytes: Safari's
+/// `File` from storage reads whatever the file holds when it is read, not
+/// what was hashed.  An unchecked one is read from storage a tensor at a
+/// time.
+async fn verified_download(expected: Option<&str>) -> Result<ModelFile, String> {
+    let unreadable = |e: JsValue| {
         format!(
             "model download failed: could not read the file ({})",
             js_text(&e)
         )
-    })?;
+    };
+    let part = cache_file(DOWNLOAD_NAME).await.map_err(unreadable)?;
     if part.is_null() {
         return Err("model download failed: the browser did not keep the file".into());
     }
-    let arr: Uint8Array = part.unchecked_into();
-    if url == MODEL_URL {
-        let hash = sha256_hex(&arr)
-            .await
-            .map_err(|e| format!("could not check the downloaded model ({})", js_text(&e)))?
-            .as_string()
-            .unwrap_or_default();
-        if hash != MODEL_SHA256 {
-            return Err(format!(
-                "the downloaded model is not the expected file (SHA-256 {hash}); not used"
-            ));
-        }
+    let file: Blob = part.unchecked_into();
+    let Some(expected) = expected else {
+        return Ok(ModelFile::blob(file));
+    };
+    let bytes: Uint8Array = blob_bytes(&file)
+        .await
+        .map_err(unreadable)?
+        .unchecked_into();
+    let hash = sha256_hex(&bytes)
+        .await
+        .map_err(|e| format!("could not check the downloaded model ({})", js_text(&e)))?
+        .as_string()
+        .unwrap_or_default();
+    if hash != expected {
+        return Err(format!(
+            "the downloaded model is not the expected file (SHA-256 {hash}); not used"
+        ));
     }
-    Ok(arr)
+    Ok(ModelFile::Bytes(bytes))
 }
 
 /// Encodes one stem as a 192 kbps MP3 (`{type: "mp3", name, left, right,
 /// rate}`) and sends the file back as `{type: "mp3", name, bytes}`.  Runs
 /// here, not on the page, because the encoder does most of its work in one
 /// final call (seconds for a whole song).
-async fn mp3(msg: &JsValue) -> Result<(), String> {
-    let name = get(msg, "name")
-        .as_string()
-        .unwrap_or_else(|| "stem.mp3".into());
-    let left: Float32Array = get(msg, "left")
-        .dyn_into()
-        .map_err(|_| "left must be a Float32Array")?;
-    let right: Float32Array = get(msg, "right")
-        .dyn_into()
-        .map_err(|_| "right must be a Float32Array")?;
-    let rate = get(msg, "rate").as_f64().unwrap_or(44_100.0) as u32;
+async fn mp3(
+    name: Option<String>,
+    [left, right]: [Float32Array; 2],
+    rate: Option<u32>,
+) -> Result<(), String> {
+    let name = name.unwrap_or_else(|| "stem.mp3".into());
+    let rate = rate.unwrap_or(44_100);
     let (l, r) = (left.to_vec(), right.to_vec());
     let mut pcm = Vec::with_capacity(2 * l.len());
     for (a, b) in l.iter().zip(&r) {
@@ -1296,14 +1608,7 @@ async fn mp3(msg: &JsValue) -> Result<(), String> {
         out.extend_from_slice(&packet);
     }
     let bytes = Uint8Array::from(out.as_slice());
-    post(
-        &[
-            ("type", "mp3".into()),
-            ("name", name.into()),
-            ("bytes", bytes.clone().into()),
-        ],
-        &[bytes.buffer().into()],
-    );
+    send(Reply::Mp3 { name, bytes });
     Ok(())
 }
 

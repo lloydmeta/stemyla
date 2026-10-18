@@ -18,6 +18,7 @@ safetensors = "0.7.0"
 # MP3 encoder for stem downloads: pure Rust, Apache-2.0.  Pinned: a young
 # crate (first released October 2026), so updates are taken deliberately.
 rusty_mp3 = "=1.0.0"
+stem-protocol = { path = "../protocol" }
 js-sys = "0.3.106"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"

@@ -4,7 +4,7 @@
 //! before its first separation, to choose its kernels; nothing is tuned
 //! while a song is being separated.
 
-use crate::{Act, AttentionPolicy, Gpu, MatMul, MatMulPolicy, TILES, View};
+use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, TILES, View};
 
 /// One matmul shape of the network and how often a chunk runs it.
 #[derive(Clone, Copy, Debug)]
@@ -111,10 +111,10 @@ pub fn shapes() -> Vec<Shape> {
 }
 
 struct Buffers {
-    act: wgpu::Buffer,
-    weight: wgpu::Buffer,
-    qkv: wgpu::Buffer,
-    out: wgpu::Buffer,
+    act: GpuBuffer,
+    weight: GpuBuffer,
+    qkv: GpuBuffer,
+    out: GpuBuffer,
 }
 
 fn matmul<'a>(s: &Shape, b: &'a Buffers, tile: usize) -> MatMul<'a> {
@@ -411,12 +411,12 @@ pub async fn measure(
 /// timed like [`time_one`]: `warm` seconds first, then one round of at
 /// least `round` seconds with enough submissions per wait to cover
 /// [`WAIT_SECS`].
-async fn time_rec(
-    gpu: &Gpu,
+async fn time_rec<'g>(
+    gpu: &'g Gpu,
     warm: f64,
     round: f64,
     now: &impl Fn() -> f64,
-    record: &impl Fn(&mut crate::Rec),
+    record: &impl Fn(&mut Rec<'g>),
 ) -> f64 {
     let submit = |times: usize| {
         for _ in 0..times {
@@ -449,10 +449,10 @@ async fn time_rec(
 /// Buffers for attention timings: q/k/v, gates, scores and output for up
 /// to four bands of a full chunk (the scores for one).
 struct AttnBufs {
-    qkv: wgpu::Buffer,
-    gates: wgpu::Buffer,
-    scores: wgpu::Buffer,
-    o: wgpu::Buffer,
+    qkv: GpuBuffer,
+    gates: GpuBuffer,
+    scores: GpuBuffer,
+    o: GpuBuffer,
 }
 
 fn attn_bufs(gpu: &Gpu) -> AttnBufs {
@@ -467,7 +467,7 @@ fn attn_bufs(gpu: &Gpu) -> AttnBufs {
 
 /// One attention step done the split way, as net.rs does it: scores
 /// matmul (this GPU's matmul policy), softmax, p.v matmul, gate.
-fn split_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
+fn split_attention<'b>(r: &mut Rec<'b>, b: &'b AttnBufs, seq: usize, nseq: usize) {
     let row = 1536;
     let mut sc = MatMul::new(
         (
@@ -550,7 +550,7 @@ fn split_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
     r.gate(&b.o, &b.gates, seq * nseq);
 }
 
-fn fused_attention(r: &mut crate::Rec, b: &AttnBufs, seq: usize, nseq: usize) {
+fn fused_attention<'b>(r: &mut Rec<'b>, b: &'b AttnBufs, seq: usize, nseq: usize) {
     r.attention(&b.qkv, Some(&b.gates), &b.o, seq, nseq, 0.125);
 }
 
@@ -577,37 +577,20 @@ pub async fn attention_per_chunk(
     let (mut ts, mut tf, mut fs, mut ff) = (empty(), empty(), empty(), empty());
     for rd in 0..rounds.max(1) {
         let w = if rd == 0 { warm } else { 0.0 };
-        ts.rounds.push(
-            time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                split_attention(r, &b, T, 1)
-            })
-            .await
-                * 744.0,
-        );
+        ts.rounds
+            .push(time_rec(gpu, w, round, now, &|r| split_attention(r, &b, T, 1)).await * 744.0);
         if freq {
             fs.rounds.push(
-                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                    split_attention(r, &b, 62, 88)
-                })
-                .await
-                    * 168.0,
+                time_rec(gpu, w, round, now, &|r| split_attention(r, &b, 62, 88)).await * 168.0,
             );
         }
         if gpu.fused_ok.get() {
             tf.rounds.push(
-                time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                    fused_attention(r, &b, T, 4)
-                })
-                .await
-                    * 186.0,
+                time_rec(gpu, w, round, now, &|r| fused_attention(r, &b, T, 4)).await * 186.0,
             );
             if freq {
                 ff.rounds.push(
-                    time_rec(gpu, w, round, now, &|r: &mut crate::Rec| {
-                        fused_attention(r, &b, 62, 88)
-                    })
-                    .await
-                        * 168.0,
+                    time_rec(gpu, w, round, now, &|r| fused_attention(r, &b, 62, 88)).await * 168.0,
                 );
             }
         }
