@@ -35,7 +35,10 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         i += 1;
     }
-    let lock = std::fs::read_to_string("Cargo.lock").context("reading Cargo.lock")?;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("xtask has no parent folder")?;
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
     let wanted = locked_version(&lock, "wasm-bindgen").context("no wasm-bindgen in Cargo.lock")?;
     check_runner(&wanted)?;
     let driver = browser.driver()?;
@@ -46,6 +49,7 @@ pub fn run(args: &[String]) -> Result<()> {
     ];
     for targets in runs {
         let mut cmd = Command::new(env!("CARGO"));
+        cmd.current_dir(root);
         cmd.args(["test", "--locked", "--target", "wasm32-unknown-unknown"])
             .args(targets)
             .env(
@@ -55,6 +59,8 @@ pub fn run(args: &[String]) -> Result<()> {
         for var in DRIVER_VARS {
             cmd.env_remove(var).env_remove(format!("{var}_REMOTE"));
         }
+        // It would skip every browser test and report success.
+        cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
         let var = match browser {
             Browser::Chrome => "CHROMEDRIVER",
             Browser::Safari => "SAFARIDRIVER",

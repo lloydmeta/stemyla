@@ -4,7 +4,8 @@
 //! Scenarios (the first three need no model and run in CI):
 //! * `smoke`: drop generated stems, Play, change the tempo.
 //! * `audio-resume`: a song restored at page load plays after one click,
-//!   with Web Audio behaving as in Safari.
+//!   with Web Audio behaving as in Safari; stems stored with it come back
+//!   with it.
 //! * `storage`: the worker's model storage across messages and workers:
 //!   queue order, the cross-tab lock, stalled downloads, `?model_url=`;
 //!   with `--weights`, also the paths that load a real model (GPU).
@@ -379,14 +380,13 @@ impl Drop for Page {
 /// the app's `log::error!`, which eframe's logger sends to `console.warn`
 /// as "ERROR: ...".
 fn page_errors(log: &[String]) -> Vec<String> {
-    log.iter()
-        .filter(|l| {
-            l.contains("PAGE ERROR")
-                || l.contains("console.error:")
-                || l.contains("console.warn: ERROR:")
-        })
-        .cloned()
-        .collect()
+    log.iter().filter(|l| is_page_error(l)).cloned().collect()
+}
+
+fn is_page_error(line: &str) -> bool {
+    line.contains("PAGE ERROR")
+        || line.contains("console.error:")
+        || line.contains("console.warn: ERROR:")
 }
 
 /// The number after `key` in `line` ("playhead 1234" -> 1234).
@@ -501,7 +501,8 @@ fn smoke(o: &Opts) -> Result<()> {
 /// loads, which creates its audio output before any user gesture; one
 /// click on Play must then start playback.  Chrome is made to behave like
 /// Safari (contexts start suspended; `resume()` only during a click);
-/// Safari is tested as it is.
+/// Safari is tested as it is.  Then stems added to the stored session
+/// must come back with the song at the next load.
 fn audio_resume(o: &Opts) -> Result<()> {
     let stems = synth_stems(&o.out)?;
     // One file that is not called "mix" (the app skips a mix).
@@ -549,6 +550,47 @@ fn audio_resume(o: &Opts) -> Result<()> {
     p.note(&format!("after the click: playhead {head}"));
     p.check(head >= 44_100.0, "one click on Play starts playback");
     p.screenshot("audio_resume")?;
+
+    // Separated stems in the stored session (written as `store::save_stems`
+    // writes them) come back with the song at the next page load.
+    in_page(
+        &mut p,
+        "const root = await navigator.storage.getDirectory();
+        const sessions = await root.getDirectoryHandle('sessions');
+        const id = (await (await (await sessions.getFileHandle('current')).getFile()).text()).trim();
+        const dir = await sessions.getDirectoryHandle(id);
+        const metaFile = await dir.getFileHandle('meta');
+        const meta = (await (await metaFile.getFile()).text()).trim();
+        const rate = 44100, frames = 1000;
+        const wav = (f) => {
+          const b = new DataView(new ArrayBuffer(44 + frames * 4));
+          const s = (o, t) => [...t].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)));
+          s(0, 'RIFF'); b.setUint32(4, 36 + frames * 4, true); s(8, 'WAVEfmt ');
+          b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 2, true);
+          b.setUint32(24, rate, true); b.setUint32(28, rate * 4, true); b.setUint16(32, 4, true); b.setUint16(34, 16, true);
+          s(36, 'data'); b.setUint32(40, frames * 4, true);
+          for (let i = 0; i < frames * 2; i++) b.setInt16(44 + 2 * i, Math.round(8000 * Math.sin(i * f)), true);
+          return b.buffer;
+        };
+        const stems = await dir.getDirectoryHandle('stems', { create: true });
+        for (const [n, f] of [['guitar', 0.01], ['drums', 0.03]]) {
+          const w = await (await stems.getFileHandle(`${n}.wav`, { create: true })).createWritable();
+          await w.write(wav(f)); await w.close();
+        }
+        const w = await metaFile.createWritable();
+        await w.write(meta + '\\nstem\\tguitar\\nstem\\tdrums\\n'); await w.close();",
+        json!([]),
+        30,
+    )?;
+    p.reload()?;
+    let from = p.mark();
+    let with_stems = p.wait_for(from, 60, |l| {
+        l.contains("Restored \"song\" and its separated stems from this browser")
+    })?;
+    p.check(
+        with_stems.is_some(),
+        "a stored song with stems comes back with them at page load",
+    );
     p.finish()
 }
 
@@ -663,6 +705,12 @@ fn storage(o: &Opts) -> Result<()> {
         t.len() == 2 && t[0].contains(not_a_model) && t[1].contains("model removed"),
         "the download is answered before the removal sent after it",
     );
+    // One worker's own messages queue for their turn; they never wait for
+    // the storage lock as if another tab held it.
+    p.check(
+        r["statuses"] == json!([]),
+        "no wait for another tab is reported",
+    );
     p.check(r["files"] == json!({}), "nothing is left in storage");
 
     p.note("case: a second download waits for the first");
@@ -687,6 +735,10 @@ fn storage(o: &Opts) -> Result<()> {
     p.check(
         at.len() == 2 && at[1] >= at[0] + 2_000,
         "the second download runs after the first (each takes about 3 s)",
+    );
+    p.check(
+        r["statuses"] == json!([]),
+        "no wait for another tab is reported",
     );
 
     p.note("case: another worker waits for the storage lock, and says so");
@@ -853,10 +905,9 @@ fn bench(o: &Opts) -> Result<()> {
         &["--enable-unsafe-webgpu"],
         &format!("index.html?{q}"),
     )?;
+    // Any error ends the wait (no WebGPU adapter, say), not only the verdict.
     let verdict = p.wait_for(0, 4 * 3600, |l| {
-        l.contains("bench finished")
-            || l.contains("WebGPU error")
-            || (l.contains("separator: ") && (l.contains("failed") || l.contains("stopped")))
+        l.contains("bench finished") || l.contains("WebGPU error") || is_page_error(l)
     })?;
     p.note(&format!("verdict: {verdict:?}"));
     p.check(
@@ -913,12 +964,14 @@ fn selftest(o: &Opts) -> Result<()> {
     )?;
     p.wait_for(0, 60, |l| l.contains("separator: "))?;
     drop_model(&mut p, &model)?;
+    // A model that does not load never starts the self-test, so its
+    // message ends the wait too.
     let verdict = p.wait_for(0, 4 * 3600, |l| {
         l.contains("selftest passed")
             || l.contains("selftest FAILED")
-            || l.contains("Separation failed")
-            || l.contains("separator: init:")
-            || l.contains("separator: model:")
+            || l.contains("could not be loaded")
+            || l.contains("not a BS-RoFormer")
+            || is_page_error(l)
     })?;
     p.note(&format!("verdict: {verdict:?}"));
     p.check(
@@ -968,9 +1021,9 @@ fn separate(o: &Opts) -> Result<()> {
     drop_model(&mut p, &model)?;
     let loaded = p.wait_for(from, 1200, |l| {
         l.contains("separator: model loaded")
-            || l.contains("separator: model:")
             || l.contains("could not be loaded")
             || l.contains("not a BS-RoFormer")
+            || is_page_error(l)
     })?;
     p.note(&format!("model: {loaded:?}"));
     p.check(
@@ -984,9 +1037,7 @@ fn separate(o: &Opts) -> Result<()> {
     let from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
     let done = p.wait_for(from, 4 * 3600, |l| {
-        (l.contains("separator: ") && l.contains(" stems in "))
-            || l.contains("Separation failed")
-            || l.contains("separator: separate:")
+        (l.contains("separator: ") && l.contains(" stems in ")) || is_page_error(l)
     })?;
     p.note(&format!("separated: {done:?}"));
     p.check(

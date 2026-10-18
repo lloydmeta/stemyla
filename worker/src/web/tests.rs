@@ -35,6 +35,17 @@ export async function files() {
 }
 export function blob_url(bytes) { return URL.createObjectURL(new Blob([bytes])); }
 export function revoke(url) { URL.revokeObjectURL(url); }
+// Makes WebGPU look absent (as on a device without it) until the
+// returned function is called.
+export function hide_gpu() {
+  const proto = Object.getPrototypeOf(navigator);
+  const own = Object.getOwnPropertyDescriptor(proto, "gpu");
+  Object.defineProperty(proto, "gpu", { get: () => undefined, configurable: true });
+  return () => {
+    if (own) Object.defineProperty(proto, "gpu", own);
+    else delete proto.gpu;
+  };
+}
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // The next fetch answers with 10 of 1000 bytes, then the connection breaks.
 export function break_next_fetch() {
@@ -58,6 +69,7 @@ extern "C" {
     fn revoke(url: &str);
     async fn sleep(ms: u32);
     fn break_next_fetch();
+    fn hide_gpu() -> js_sys::Function;
 }
 
 /// Writes a file at the root (from a copy: OPFS reads the bytes after
@@ -146,6 +158,28 @@ async fn turns_are_served_in_the_order_asked() {
         *order.borrow(),
         ["2 starts", "2 ends", "3 starts", "3 ends"],
         "each turn waits for the one before it to end"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn model_and_gpu_messages_wait_for_their_turn() {
+    fresh().await;
+    let held = Held::turn().await;
+    wasm_bindgen_futures::spawn_local(handle(of_type("init")));
+    wasm_bindgen_futures::spawn_local(handle(of_type("separate")));
+    sleep(200).await;
+    assert!(
+        sent("model").is_empty() && sent("error").is_empty(),
+        "nothing is answered while another message has the turn"
+    );
+    drop(held);
+    sleep(200).await;
+    assert_eq!(sent("model").len(), 1, "init answered");
+    assert_eq!(sent("error").len(), 1, "separate answered");
+    assert!(
+        sent("status").is_empty(),
+        "no other tab is waited for: {:?}",
+        sent("status")
     );
 }
 
@@ -280,9 +314,17 @@ async fn init_removes_partial_files_left_by_an_interrupted_save() {
     assert_eq!(listing().await, "");
 }
 
+/// The stored model's bytes, which these tests plant as `[7]`.
+async fn stored_bytes() -> Vec<u8> {
+    let got = cache_get(CACHE_NAME).await.expect("no error");
+    assert!(!got.is_null(), "the stored model is still there");
+    got.unchecked_into::<Uint8Array>().to_vec()
+}
+
 #[wasm_bindgen_test]
-async fn a_picked_file_that_is_not_a_model_is_not_stored() {
+async fn a_picked_file_that_is_not_a_model_leaves_the_stored_model_alone() {
     fresh().await;
+    plant(CACHE_NAME, &[7]).await;
     let bytes = Uint8Array::from(&[1u8, 2, 3][..]);
     handle(message(&[
         ("type", "model".into()),
@@ -290,15 +332,17 @@ async fn a_picked_file_that_is_not_a_model_is_not_stored() {
     ]))
     .await;
     let (ok, loaded, stored, text) = model_reply();
-    assert!(!ok && !loaded && !stored, "{text}");
+    assert!(!ok && !loaded && stored, "{text}");
     assert!(no_gpu(), "told unusable before the GPU opened");
     assert!(text.starts_with("not a BS-RoFormer SW model"), "{text}");
-    assert_eq!(listing().await, "");
+    assert_eq!(listing().await, CACHE_NAME);
+    assert_eq!(stored_bytes().await, [7]);
 }
 
 #[wasm_bindgen_test]
-async fn a_download_that_is_not_a_model_leaves_nothing() {
+async fn a_download_that_is_not_a_model_leaves_only_the_stored_model() {
     fresh().await;
+    plant(CACHE_NAME, &[7]).await;
     let url = blob_url(b"<!doctype html><title>not a model</title>");
     handle(message(&[
         ("type", "download".into()),
@@ -307,12 +351,13 @@ async fn a_download_that_is_not_a_model_leaves_nothing() {
     .await;
     revoke(&url);
     let (ok, _, stored, text) = model_reply();
-    assert!(!ok && !stored, "{text}");
+    assert!(!ok && stored, "{text}");
     assert!(
         text.starts_with("the downloaded file is not a usable BS-RoFormer SW model"),
         "{text}"
     );
-    assert_eq!(listing().await, "");
+    assert_eq!(listing().await, CACHE_NAME, "no partial download left");
+    assert_eq!(stored_bytes().await, [7]);
 }
 
 #[wasm_bindgen_test]
@@ -386,4 +431,21 @@ async fn errors_name_the_request_they_answer() {
         field(&errors[1], "text").as_string().as_deref(),
         Some("load the model first")
     );
+}
+
+#[wasm_bindgen_test]
+async fn init_keeps_a_stored_model_that_only_the_gpu_failed_to_load() {
+    fresh().await;
+    // A well-formed safetensors file (no tensors): it gets as far as the GPU.
+    plant(CACHE_NAME, &[2, 0, 0, 0, 0, 0, 0, 0, b'{', b'}']).await;
+    let show_gpu = hide_gpu();
+    handle(of_type("init")).await;
+    show_gpu.call0(&JsValue::NULL).expect("restored");
+    let (ok, loaded, stored, text) = model_reply();
+    assert!(!ok && !loaded && stored, "{text}");
+    assert!(
+        text.starts_with("the model in browser storage could not be loaded, and was kept"),
+        "{text}"
+    );
+    assert_eq!(listing().await, CACHE_NAME);
 }
