@@ -883,6 +883,22 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
         "the earlier model stays loaded and stored",
     );
 
+    p.note("case: a download that is not safetensors at all keeps the model loaded");
+    let r = in_page(
+        p,
+        "await e2e.wipe();
+        return e2e.ask([{ type: 'download', model_url: args[0], ...args[1] }, { type: 'download', model_url: '/__e2e/blank.html', ...args[1] }]);",
+        json!([model, opts]),
+        1200,
+    )?;
+    p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    p.check(
+        r["replies"][1]["ok"] == json!(false)
+            && r["replies"][1]["loaded"] == json!(true)
+            && r["replies"][1]["stored"] == json!(true),
+        "the file is refused before the model loaded before it is freed",
+    );
+
     p.note("case: a safetensors file that is not the model unloads the one before it");
     let r = in_page(
         p,

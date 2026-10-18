@@ -143,7 +143,7 @@ impl Settings {
                 field::MAX_ELEMS => s.max_elems = number.map(|n| n as usize),
                 field::STEP_LIMIT => s.step_limit = number,
                 field::BENCH_ROUNDS => s.bench_rounds = number,
-                field::BENCH_QUICK => s.bench_quick = number.is_some_and(|n| n != 0.0),
+                field::BENCH_QUICK => s.bench_quick = !v.is_empty() && number != Some(0.0),
                 field::GPU => s.gpu = text,
                 field::SELFTEST => s.selftest = text,
                 field::MM => s.mm = text,
@@ -662,6 +662,10 @@ mod tests {
         assert!(!s.profile, "empty is off");
         assert!(!Settings::from_query("profile=0").profile, "zero is off");
         assert!(Settings::from_query("profile=yes").profile);
+        assert!(
+            Settings::from_query("bench_quick=yes").bench_quick,
+            "as profile"
+        );
         assert_eq!(
             Settings {
                 step_limit: Some(2.5),

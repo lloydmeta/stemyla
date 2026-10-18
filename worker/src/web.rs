@@ -1529,7 +1529,12 @@ async fn download_from(url: &str, expected: Option<&str>, s: &Settings) -> Resul
             } else {
                 ""
             };
-            let unloaded = unloaded_note(had_model).await;
+            // A kept download already says to reload, which loads it.
+            let unloaded = if cached {
+                ""
+            } else {
+                unloaded_note(had_model).await
+            };
             post_model(false, &format!("{what}: {e}{fate}{unloaded}")).await;
         }
     }

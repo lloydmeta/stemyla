@@ -1688,10 +1688,6 @@ impl eframe::App for StemApp {
         {
             log::warn!("{e:#}");
         }
-        #[cfg(feature = "audio")]
-        if let Some(Output::Live(live)) = &self.output {
-            live.refresh_latency();
-        }
         self.handle_drops(&ctx);
         self.poll_jobs(&ctx);
         #[cfg(target_arch = "wasm32")]

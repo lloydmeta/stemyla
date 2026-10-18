@@ -120,10 +120,41 @@ async fn an_output_left_behind_by_a_busy_page_is_replaced() {
     assert!(first.upgrade().is_none(), "the first song is freed");
 
     sleep(300).await;
+    assert!(
+        !clock(&app).is_zero(),
+        "the new output runs, so it can be on time"
+    );
     app.open_song(song(44_100));
     assert_eq!(
         engine::live::opened(),
         opened + 1,
         "an output on time is kept"
     );
+}
+
+/// Needs a running audio context too (see above).  A page blocked for a
+/// second leaves cpal's schedule a second behind, which it closes at one
+/// second a second; the buffers in that time are silent, not rendered on
+/// top of each other.
+#[wasm_bindgen_test]
+async fn buffers_left_late_by_a_busy_page_are_silent_then_play_again() {
+    let mut app = StemApp::default();
+    app.open_song(song(44_100));
+    sleep(300).await;
+    if clock(&app).is_zero() {
+        assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
+        console_log!("skipped: the audio context is suspended");
+        return;
+    }
+    let before = callbacks(&app);
+    busy(1_000);
+    sleep(400).await;
+    let while_late = callbacks(&app) - before;
+    sleep(1_500).await;
+    let after = callbacks(&app) - before - while_late;
+    assert!(
+        while_late <= 2,
+        "{while_late} late buffers rendered (about 17 at double speed)"
+    );
+    assert!(after > 10, "then it plays again: {after} buffers rendered");
 }

@@ -20,7 +20,7 @@
 //! song (closing the context used to cut it off).  A kept output also
 //! outlives main-thread blocks, such as the one while a song loads, so in
 //! the browser a buffer due before its callback ran is left silent (see
-//! `starts`).  cpal's schedule then catches up at one second a second, so
+//! `is_late`).  cpal's schedule then catches up at one second a second, so
 //! an output that is behind when a song arrives is replaced
 //! ([`Unusable::Behind`]) rather than starting the song silent.
 //!
@@ -47,9 +47,10 @@ pub struct LiveOutput {
     /// When the latest buffer is due to start, as [`nanos`] of the stream's
     /// clock ([`NOT_YET`] before the first callback).
     scheduled: Arc<AtomicU64>,
-    /// The output's latency in nanoseconds, which cpal adds to a buffer's
-    /// start in its `playback` time (see [`starts`]).
-    latency: Arc<AtomicU64>,
+    /// The context's `baseLatency` in nanoseconds, which cpal adds to the
+    /// first buffer's start (see [`first_start`]): fixed for a context's
+    /// life, so read once.
+    base: Arc<AtomicU64>,
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
@@ -113,19 +114,25 @@ fn open(rate: u32) -> Result<LiveOutput> {
     let on_error = Arc::clone(&failed);
     let scheduled = Arc::new(AtomicU64::new(NOT_YET));
     let in_callback_scheduled = Arc::clone(&scheduled);
-    let latency = Arc::new(AtomicU64::new(0));
-    let in_callback_latency = Arc::clone(&latency);
+    let base = Arc::new(AtomicU64::new(0));
+    let in_callback_base = Arc::clone(&base);
+    let mut first = None;
+    let mut buffers: u32 = 0;
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                let latency = Duration::from_nanos(in_callback_latency.load(Relaxed));
-                let start = starts(info.timestamp(), latency);
-                in_callback_scheduled.store(nanos(start), Relaxed);
+                let callback = info.timestamp().callback;
                 let length =
                     Duration::from_secs_f64((data.len() / channels) as f64 / f64::from(rate));
-                if cfg!(target_arch = "wasm32") && is_late(start, info.timestamp().callback, length)
-                {
+                let first = *first.get_or_insert_with(|| {
+                    let base = Duration::from_nanos(in_callback_base.load(Relaxed));
+                    first_start(callback, base, length)
+                });
+                let start = nth_start(first, length, buffers);
+                buffers = buffers.saturating_add(1);
+                in_callback_scheduled.store(nanos(start), Relaxed);
+                if cfg!(target_arch = "wasm32") && is_late(start, callback, length) {
                     data.fill(0.0);
                 } else {
                     in_callback.render_interleaved(data, channels, &mut scratch);
@@ -147,12 +154,15 @@ fn open(rate: u32) -> Result<LiveOutput> {
         slot,
         failed,
         scheduled,
-        latency,
+        base,
         device_name: device_label(&device),
         sample_rate: rate,
         channels: config.channels,
     };
-    out.refresh_latency();
+    // Before the first callback: in the browser callbacks run on this
+    // thread, from timers, so none has yet.
+    let base = out.base_latency().as_nanos().try_into().unwrap_or(0);
+    out.base.store(base, Relaxed);
     Ok(out)
 }
 
@@ -171,7 +181,7 @@ pub enum Unusable {
     /// The song is at another sample rate than the output.
     OtherRate,
     /// The browser's schedule fell behind its clock while the page was
-    /// busy (see `starts`), so a song would start silent for about as
+    /// busy (see `is_late`), so a song would start silent for about as
     /// long; a new output starts on time.
     Behind,
 }
@@ -210,7 +220,6 @@ impl LiveOutput {
     /// play it (see [`Unusable`]), the player comes back with the reason,
     /// for the caller to open a new output.
     pub fn play(&self, player: Player) -> Result<Option<Player>, (Unusable, Box<Player>)> {
-        self.refresh_latency();
         let health = Health {
             failed: self.failed.load(Relaxed),
             poisoned: self.slot.is_poisoned(),
@@ -245,7 +254,6 @@ impl LiveOutput {
     /// handler.  Calling this while handling a click lets the audio play;
     /// on a running output it changes nothing.
     pub fn resume(&self) -> Result<()> {
-        self.refresh_latency();
         self.stream.play().context("resuming the audio output")
     }
 
@@ -257,38 +265,22 @@ impl LiveOutput {
             .saturating_duration_since(cpal::StreamInstant::ZERO)
     }
 
-    /// Reads the Web Audio context's latency for the callback: its fixed
-    /// `baseLatency` and its `outputLatency`, which changes with the device
-    /// (Bluetooth earphones add a few hundred milliseconds) and reads 0
-    /// until the context runs.  cpal reads it afresh for every buffer, but
-    /// the callback cannot reach the context, so the page calls this every
-    /// frame (and it runs when the output opens, with each song and each
-    /// resume).  Natively the latency stays zero: there callbacks are not
-    /// held up.
-    pub fn refresh_latency(&self) {
-        let latency = self.web_latency().unwrap_or(Duration::ZERO);
-        self.latency
-            .store(latency.as_nanos().try_into().unwrap_or(0), Relaxed);
-    }
-
+    /// The Web Audio context's `baseLatency`, fixed for its life; zero
+    /// natively, where cpal does not add it.
     #[cfg(target_arch = "wasm32")]
-    fn web_latency(&self) -> Option<Duration> {
+    fn base_latency(&self) -> Duration {
         let cpal::platform::StreamInner::WebAudio(web) = self.stream.as_inner();
-        let secs = |name: &str| {
-            js_sys::Reflect::get(web.audio_context().as_ref(), &name.into())
-                .ok()
-                .and_then(|v| v.as_f64())
-                .filter(|s| s.is_finite() && *s >= 0.0)
-                .unwrap_or(0.0)
-        };
-        Some(Duration::from_secs_f64(
-            secs("baseLatency") + secs("outputLatency"),
-        ))
+        let secs = js_sys::Reflect::get(web.audio_context().as_ref(), &"baseLatency".into())
+            .ok()
+            .and_then(|v| v.as_f64())
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .unwrap_or(0.0);
+        Duration::from_secs_f64(secs)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn web_latency(&self) -> Option<Duration> {
-        None
+    fn base_latency(&self) -> Duration {
+        Duration::ZERO
     }
 }
 
@@ -324,32 +316,40 @@ fn behind(now: cpal::StreamInstant, scheduled: u64) -> Duration {
     Duration::from_nanos(nanos(now).saturating_sub(scheduled))
 }
 
-/// When the buffer starts on the context's clock: cpal's `playback` time is
-/// that start plus the output's `latency`, and its `callback` time is the
-/// clock with none.
-///
-/// A buffer that starts well before its callback ran is late (see
-/// [`is_late`]).  cpal's Web Audio
-/// host schedules each buffer right after the previous one; when the main
-/// thread was blocked for longer than its two queued buffers (as while a
-/// song loads), the schedule falls behind the context's clock, every late
-/// buffer starts at once on top of the other, and the song would play
-/// doubled at twice the speed until the schedule catches up.  Late buffers
-/// are silent instead, so the song pauses for about as long as the block
-/// and then goes on where it was.
-fn starts(timestamp: cpal::OutputStreamTimestamp, latency: Duration) -> cpal::StreamInstant {
-    timestamp
-        .playback
-        .checked_sub(latency)
-        .unwrap_or(cpal::StreamInstant::ZERO)
+/// When cpal's Web Audio host starts the first buffer, called back at
+/// `callback`: `baseLatency` and one buffer `length` ahead of the clock.
+fn first_start(
+    callback: cpal::StreamInstant,
+    base: Duration,
+    length: Duration,
+) -> cpal::StreamInstant {
+    callback.checked_add(base + length).unwrap_or(callback)
+}
+
+/// When it starts buffer `n` (from 0): each right after the one before,
+/// whatever the clock says, since cpal never moves its schedule back to
+/// the clock.  Worked out here rather than from cpal's `playback` time,
+/// which adds `outputLatency` as it is when the buffer is filled (Bluetooth
+/// earphones change it by a few hundred milliseconds), so no reading of
+/// it here can be out of date.
+fn nth_start(first: cpal::StreamInstant, length: Duration, n: u32) -> cpal::StreamInstant {
+    length
+        .checked_mul(n)
+        .and_then(|after| first.checked_add(after))
+        .unwrap_or(first)
 }
 
 /// Whether a buffer `length` long, due to start at `start`, was due over a
-/// buffer's length before its callback ran at `callback`.  The margin
-/// covers a latency reading up to a frame old: cpal's own reading, in
-/// `playback`, is fresh, so one that dropped since (earphones unplugged)
-/// would otherwise make every buffer look late, and silent, until the next
-/// reading.
+/// buffer's length before its callback ran at `callback`.
+///
+/// When the main thread was blocked for longer than cpal's two queued
+/// buffers (as while a song loads), its schedule falls behind the
+/// context's clock, every late buffer starts at once on top of the other,
+/// and the song would play doubled at twice the speed until the schedule
+/// catches up.  Late buffers are silent instead, so the song pauses for
+/// about as long as the block and then goes on where it was.  A healthy
+/// stream fills each buffer about one buffer ahead, less the time the page
+/// took to call back; the margin leaves that time a buffer's length.
 fn is_late(start: cpal::StreamInstant, callback: cpal::StreamInstant, length: Duration) -> bool {
     start.checked_add(length).is_some_and(|end| end < callback)
 }
@@ -401,7 +401,7 @@ mod tests {
         assert!(!is_late(at(1_000), at(1_000), length), "on time");
         assert!(
             !is_late(at(960), at(1_000), length),
-            "a latency reading 40 ms too high (earphones just unplugged) still plays"
+            "a callback 40 ms slow still plays"
         );
         assert!(
             is_late(at(900), at(1_000), length),
@@ -414,27 +414,23 @@ mod tests {
     }
 
     #[test]
-    fn a_buffer_starts_its_latency_before_its_playback_time() {
-        let at = |callback_ms, playback_ms| cpal::OutputStreamTimestamp {
-            callback: cpal::StreamInstant::from_millis(callback_ms),
-            playback: cpal::StreamInstant::from_millis(playback_ms),
-        };
-        let late = |t: cpal::OutputStreamTimestamp, latency_ms| {
-            starts(t, Duration::from_millis(latency_ms)) < t.callback
-        };
-        assert!(!late(at(1_000, 1_050), 0), "scheduled ahead, as usual");
-        assert!(!late(at(1_000, 1_000), 0));
-        assert!(late(at(3_000, 1_100), 0), "after a two-second block");
-        // Bluetooth earphones: 200 ms of latency in the playback time.
-        assert!(!late(at(1_000, 1_250), 200), "ahead, with latency");
-        assert!(
-            late(at(1_000, 1_150), 200),
-            "started 50 ms ago, though its playback time is still to come"
-        );
+    fn buffers_follow_one_another_from_the_first_whatever_the_clock() {
+        let at = cpal::StreamInstant::from_millis;
+        let length = Duration::from_millis(46);
+        // cpal's first buffer: baseLatency (10 ms) and a buffer ahead.
+        let first = first_start(at(1_000), Duration::from_millis(10), length);
+        assert_eq!(first, at(1_056));
+        assert_eq!(nth_start(first, length, 0), first);
+        assert_eq!(nth_start(first, length, 10), at(1_516));
+        // Healthy: buffer 10 is filled when buffer 8 ends, ahead of it.
+        assert!(!is_late(at(1_516), at(1_470), length));
+        // The page then blocks for two seconds: buffer 11 is called back at
+        // 3,500 ms but still due at 1,562 ms, so it is late and silent.
+        let eleventh = nth_start(first, length, 11);
+        assert!(is_late(eleventh, at(3_500), length));
         assert_eq!(
-            starts(at(1_000, 100), Duration::from_millis(200)),
-            cpal::StreamInstant::ZERO,
-            "never before the clock began"
+            behind(at(3_500), nanos(eleventh)),
+            Duration::from_millis(1_938)
         );
     }
 
