@@ -29,16 +29,40 @@ A PyTorch checkpoint (`BS-Rofo-SW-Fixed.ckpt`) converts to the file the app read
 cargo run -p xtask --release -- roformer-convert BS-Rofo-SW-Fixed.ckpt bs_roformer_sw.f16.safetensors
 ```
 
-## Building and running locally
+## Setting up a machine
 
-Everything is built and served with Rust tools.
+Everything is built and served with Rust tools.  What each task needs, beyond a clone:
+
+| To | You need |
+| - | - |
+| Build and serve the web app | Rust stable, 1.99 or newer (CI pins 1.99.0), with the `wasm32-unknown-unknown` target; [Trunk](https://trunkrs.dev/) 0.21.14, the version CI uses.  On its first build Trunk downloads `wasm-bindgen` and `wasm-opt` into its own cache, so that build needs the network. |
+| Separate songs in it | A browser with WebGPU (see "Using it") and the model: **Download model** in the page, or a local `.safetensors` file (see "The model"). |
+| Build the native app, `cargo test`, `cargo clippy` | A C toolchain: Xcode Command Line Tools on macOS (`xcode-select --install`).  On Debian or Ubuntu, `build-essential pkg-config libasound2-dev` (the audio output links ALSA). |
+| The UI snapshot tests (`app/tests/ui.rs`) | A GPU, or a software Vulkan driver (`mesa-vulkan-drivers libvulkan1` on Debian or Ubuntu, with `WGPU_BACKEND=vulkan`).  The snapshot PNGs are made on macOS with Metal and may not match elsewhere pixel for pixel: there, run with `UPDATE_SNAPSHOTS=1` as CI does, so every check except the image comparison still runs, and discard the rewritten PNGs (`git checkout app/tests/snapshots`). |
+| The GPU kernel tests (`roformer-gpu`) | A Vulkan, Metal or DX12 GPU, or SwiftShader (see "Checks").  Kernel changes are judged on a real GPU, never SwiftShader alone. |
+| The browser tests | `wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock`, and a browser's WebDriver (see "Browser tests").  CI runs them anyway; locally they are optional. |
+| `?selftest`, and the `selftest`, `separate` and `worker-check` scenarios | A GPU, the model file, and for `selftest` the reference files made from it (below). |
+| The comparisons with PyTorch (`roformer`, `roformer-gpu`, `worker-check --reference`) | Fixtures from `tools/roformer_export.py`: Python 3 with `torch`, `numpy`, `pyyaml`, `ml_collections`, `safetensors` and [bs-roformer-infer](https://github.com/openmirlab/bs-roformer-infer) (module `bs_roformer`), plus the PyTorch checkpoint.  Without them those tests skip.  This is the only Python in the project, and it never builds or serves the app. |
+| MP3 files from `xtask gen-song` | `ffmpeg` on `PATH` (optional; WAV files are always written). |
+| `xtask publish` | Push access to the repository's `gh-pages` branch (see "Publishing"). |
+
+From a fresh clone, the web app:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install --locked trunk                                   # --locked matters: without it the build of Trunk itself fails
+cargo install --locked trunk --version 0.21.14                 # --locked matters: without it the build of Trunk itself fails
 (cd app && trunk build --release)                              # into app/dist
 cargo run -p xtask --release -- serve app/dist --port 8080     # http://localhost:8080/
 ```
+
+Then the checks (on Linux, install the packages in the table first):
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets
+```
+
+Model files, test fixtures, audio and stems live outside git (`.gitignore` keeps `third_party/`, `*.safetensors`, `*.wav` and `*.mp3` out): the weights have no stated licence and songs are copyrighted.  The tests that compare with PyTorch read their fixtures from `third_party/roformer/`.
 
 To use `?selftest`, make the reference files once and serve them too:
 
@@ -106,7 +130,7 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | `engine/` | decoding, playback, time-stretch, classic drum separation |
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
-| `xtask/` | the static server and other tools |
+| `xtask/` | the static server, the browser test runners and other tools |
 | `docs/ARCHITECTURE.md` | how the pieces fit together |
 
 ## Licence
