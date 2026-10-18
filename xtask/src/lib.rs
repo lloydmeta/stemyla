@@ -2,11 +2,13 @@
 
 pub mod bench;
 pub mod drivers;
+pub mod e2e;
 pub mod metrics;
 pub mod publish;
 pub mod roformer_cli;
 pub mod separate;
 pub mod serve;
 pub mod web_test;
+pub mod webdriver;
 /// The synthetic song lives in its own crate so the app can use it too.
 pub use ::synth;

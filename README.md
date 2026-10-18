@@ -74,7 +74,7 @@ cargo clippy --workspace --all-targets
 
 * `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them).
 * The GPU kernel tests run on any Vulkan, Metal or DX12 GPU.  Without one, SwiftShader's Vulkan driver works: `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan cargo test -p roformer-gpu --release`.
-* `tools/*.mjs` check the built page in headless Chromium (Node and Playwright): `web_selftest.mjs`, `worker_check.mjs`, `web_session.mjs`, `web_audio_resume.mjs`, `web_bench.mjs`, `web_separate.mjs`, `web_smoke.mjs`.
+* `tools/*.mjs` check the GPU paths of the built page in headless Chromium (Node and Playwright): `web_selftest.mjs`, `worker_check.mjs`, `web_bench.mjs`, `web_separate.mjs`.  The rest runs through `cargo run -p xtask -- web-test` and `cargo run -p xtask -- e2e <smoke|audio-resume|storage>`.
 
 ## Layout
 
