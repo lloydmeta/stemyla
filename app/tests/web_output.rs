@@ -41,10 +41,22 @@ fn callbacks(app: &StemApp) -> u64 {
 }
 
 #[wasm_bindgen(
-    inline_js = "export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }"
+    inline_js = "export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+export function busy(ms) { const t = performance.now(); while (performance.now() - t < ms) {} }
+export function in_chrome() { return navigator.userAgent.includes('Chrome/'); }"
 )]
 extern "C" {
     async fn sleep(ms: u32);
+    /// Holds the page's thread for `ms`, as decoding a song does.
+    fn busy(ms: u32);
+    fn in_chrome() -> bool;
+}
+
+fn clock(app: &StemApp) -> std::time::Duration {
+    match &app.output {
+        Some(Output::Live(live)) => live.clock(),
+        _ => panic!("no live output: {}", app.status),
+    }
 }
 
 #[wasm_bindgen_test]
@@ -80,5 +92,38 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
     assert!(
         third.upgrade().is_none(),
         "dropping the output frees its song"
+    );
+}
+
+/// Needs a running audio context: `xtask web-test` lets Chrome play without
+/// a click.  Elsewhere the context stays suspended, its clock stands still
+/// and nothing can fall behind, so the test says so and stops.
+#[wasm_bindgen_test]
+async fn an_output_left_behind_by_a_busy_page_is_replaced() {
+    let mut app = StemApp::default();
+    app.open_song(song(44_100));
+    sleep(300).await;
+    if clock(&app).is_zero() {
+        assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
+        console_log!("skipped: the audio context is suspended");
+        return;
+    }
+    let opened = engine::live::opened();
+    let first = Arc::downgrade(app.song.as_ref().expect("a song"));
+    busy(600);
+    app.open_song(song(44_100));
+    assert_eq!(
+        engine::live::opened(),
+        opened + 1,
+        "a new output, not one 600 ms behind"
+    );
+    assert!(first.upgrade().is_none(), "the first song is freed");
+
+    sleep(300).await;
+    app.open_song(song(44_100));
+    assert_eq!(
+        engine::live::opened(),
+        opened + 1,
+        "an output on time is kept"
     );
 }

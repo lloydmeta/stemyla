@@ -239,6 +239,9 @@ impl Settings {
 pub enum ModelSource {
     /// The file the user picked, read by the worker, never by the page.
     File(Blob),
+    /// The bytes, for tests and `xtask e2e`: they are copied, not
+    /// transferred (they may be a view of WebAssembly memory, which cannot
+    /// be), so the page sends a picked file as `File` instead.
     Bytes(Uint8Array),
 }
 

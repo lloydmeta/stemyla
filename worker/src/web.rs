@@ -280,9 +280,10 @@ fn send(reply: Reply) {
 }
 
 /// `ok`: whether the request succeeded.  `loaded` and `stored` say what
-/// the worker holds afterwards, which a failed request leaves as it was
-/// (a model loaded earlier stays loaded; a stored file kept after a GPU
-/// failure can still be removed).
+/// the worker holds afterwards.  A failed request leaves them as they
+/// were, except that a new file that parses and reaches the GPU unloads
+/// the model before it (see `build` and `unloaded_note`); a stored file
+/// kept after a GPU failure can still be removed.
 async fn post_model(ok: bool, text: &str) {
     let loaded = STATE.with_borrow(|s| s.net.is_some());
     let stored = opfs_has(CACHE_NAME).await.as_bool().unwrap_or(false);
@@ -808,6 +809,44 @@ async fn staged(source: &ModelSource) -> Option<ModelFile> {
     }
 }
 
+/// What a failed load of a picked file says, by why it failed.
+fn picked_failure(e: &LoadError) -> String {
+    match e {
+        LoadError::Weights(_) => format!("not a BS-RoFormer SW model: {e}"),
+        LoadError::Read(_) => format!("could not read the model file: {e}"),
+        LoadError::Gpu(_) => format!("the model could not be loaded: {e}"),
+    }
+}
+
+/// Added to a failed load's text when it unloaded the model loaded before
+/// it (`build` does once the new file parses and the GPU opens), so the
+/// page does not offer a 350 MB download for a model it still has.
+async fn unloaded_note(had_model: bool) -> &'static str {
+    if !had_model || STATE.with_borrow(|s| s.net.is_some()) {
+        ""
+    } else if opfs_has(CACHE_NAME).await.as_bool().unwrap_or(false) {
+        "; the model loaded before was unloaded to make room: reload the page to load the stored one"
+    } else {
+        "; the model loaded before was unloaded to make room"
+    }
+}
+
+fn source_file(source: &ModelSource) -> ModelFile {
+    match source {
+        ModelSource::File(f) => ModelFile::blob(f.clone()),
+        ModelSource::Bytes(b) => ModelFile::Bytes(b.clone()),
+    }
+}
+
+/// A file too large to read, or that is not safetensors at all.
+fn check_header(file: &ModelFile) -> Result<(), LoadError> {
+    if let ModelFile::Blob(f) = file {
+        reachable(f.blob.size())?;
+    }
+    Store::from_source(file)?;
+    Ok(())
+}
+
 async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), String> {
     let Some(source) = source else {
         post_model(
@@ -817,20 +856,21 @@ async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), Str
         .await;
         return Ok(());
     };
+    // Read before the file is copied into storage, so one that is not the
+    // model (perhaps gigabytes of something else) is refused unwritten.
+    if let Err(e) = check_header(&source_file(&source)) {
+        post_model(false, &picked_failure(&e)).await;
+        return Ok(());
+    }
     let (file, is_staged) = match staged(&source).await {
         Some(file) => {
             // Bytes sent are freed now, not after the upload.
             drop(source);
             (file, true)
         }
-        None => (
-            match source {
-                ModelSource::File(f) => ModelFile::blob(f),
-                ModelSource::Bytes(b) => ModelFile::Bytes(b),
-            },
-            false,
-        ),
+        None => (source_file(&source), false),
     };
+    let had_model = STATE.with_borrow(|s| s.net.is_some());
     let built = build(file, s).await;
     let cached = built.is_ok()
         && is_staged
@@ -853,21 +893,13 @@ async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), Str
                 &format!("model loaded in {secs:.1} s, {note} ({gpu})"),
             )
             .await;
-            Ok(())
         }
-        Err(e @ LoadError::Weights(_)) => {
-            post_model(false, &format!("not a BS-RoFormer SW model: {e}")).await;
-            Ok(())
-        }
-        Err(e @ LoadError::Read(_)) => {
-            post_model(false, &format!("could not read the model file: {e}")).await;
-            Ok(())
-        }
-        Err(e @ LoadError::Gpu(_)) => {
-            post_model(false, &format!("the model could not be loaded: {e}")).await;
-            Ok(())
+        Err(e) => {
+            let unloaded = unloaded_note(had_model).await;
+            post_model(false, &format!("{}{unloaded}", picked_failure(&e))).await;
         }
     }
+    Ok(())
 }
 
 fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
@@ -1445,6 +1477,7 @@ async fn download_from(url: &str, expected: Option<&str>, s: &Settings) -> Resul
         }
     };
     let secs = now_s() - t0;
+    let had_model = STATE.with_borrow(|s| s.net.is_some());
     let built = build(file, s).await;
     // A checked file that only the GPU failed to load is kept, as a
     // stored one is at start, so it is not downloaded again.
@@ -1491,7 +1524,8 @@ async fn download_from(url: &str, expected: Option<&str>, s: &Settings) -> Resul
             } else {
                 ""
             };
-            post_model(false, &format!("{what}: {e}{fate}")).await;
+            let unloaded = unloaded_note(had_model).await;
+            post_model(false, &format!("{what}: {e}{fate}{unloaded}")).await;
         }
     }
     Ok(())

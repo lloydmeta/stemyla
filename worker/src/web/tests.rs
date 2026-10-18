@@ -34,6 +34,10 @@ export async function files() {
   for await (const [name, h] of root.entries()) if (h.kind === "file") out.push(name);
   return out.sort().join(" ");
 }
+export async function plant_dir(name) {
+  const root = await navigator.storage.getDirectory();
+  await root.getDirectoryHandle(name, { create: true });
+}
 export function blob_url(bytes) { return URL.createObjectURL(new Blob([bytes])); }
 export function blob(bytes) { return new Blob([bytes]); }
 export function revoke(url) { URL.revokeObjectURL(url); }
@@ -97,6 +101,9 @@ extern "C" {
     async fn plant_js(name: &str, bytes: &Uint8Array);
     /// Names of the files at the root, sorted, space-separated.
     async fn files() -> JsValue;
+    /// Makes a directory at the root, where a file of that name cannot be
+    /// written.
+    async fn plant_dir(name: &str);
     fn blob_url(bytes: &[u8]) -> String;
     /// A `Blob` holding a copy of `bytes`, as a picked file is.
     fn blob(bytes: &[u8]) -> Blob;
@@ -358,9 +365,12 @@ async fn a_stored_file_removed_after_it_was_opened_is_a_read_error() {
 }
 
 #[wasm_bindgen_test]
-async fn a_picked_file_that_is_not_a_model_is_read_from_the_file() {
+/// Refused from its header, before it is copied into storage: a stale
+/// partial file is left as it was, not overwritten by a copy.
+async fn a_picked_file_that_is_not_a_model_is_refused_before_it_is_copied() {
     fresh().await;
     plant(CACHE_NAME, &[7]).await;
+    plant(DOWNLOAD_NAME, &[9]).await;
     handle(message(&[
         ("type", "model".into()),
         ("file", blob(&TRUNCATED).into()),
@@ -371,7 +381,12 @@ async fn a_picked_file_that_is_not_a_model_is_read_from_the_file() {
     assert!(no_gpu(), "told unusable before the GPU opened");
     assert!(text.starts_with("not a BS-RoFormer SW model"), "{text}");
     assert_eq!(stored_bytes().await, [7]);
-    assert_eq!(listing().await, CACHE_NAME, "no partial file left");
+    let stale = cache_get(DOWNLOAD_NAME).await.expect("no error");
+    assert_eq!(
+        stale.unchecked_into::<Uint8Array>().to_vec(),
+        [9],
+        "not copied"
+    );
 }
 
 /// A well-formed safetensors file with no tensors: it gets as far as the
@@ -742,4 +757,40 @@ async fn init_keeps_a_stored_model_that_only_the_gpu_failed_to_load() {
         "{text}"
     );
     assert_eq!(listing().await, CACHE_NAME);
+}
+
+#[wasm_bindgen_test]
+async fn a_picked_file_is_loaded_from_itself_when_storage_cannot_copy_it() {
+    fresh().await;
+    plant_dir(DOWNLOAD_NAME).await;
+    let show_gpu = hide_gpu();
+    handle(message(&[
+        ("type", "model".into()),
+        ("file", blob(&EMPTY_MODEL).into()),
+    ]))
+    .await;
+    show_gpu.call0(&JsValue::NULL).expect("restored");
+    let (ok, loaded, stored, text) = model_reply();
+    assert!(!ok && !loaded && !stored, "{text}");
+    assert!(
+        text.starts_with("the model could not be loaded"),
+        "built from the picked file, as far as the GPU: {text}"
+    );
+    assert_eq!(listing().await, "", "nothing stored");
+}
+
+#[wasm_bindgen_test]
+async fn a_failed_load_says_when_it_unloaded_the_model_before_it() {
+    fresh().await;
+    assert_eq!(unloaded_note(false).await, "", "there was none");
+    assert_eq!(
+        unloaded_note(true).await,
+        "; the model loaded before was unloaded to make room"
+    );
+    plant(CACHE_NAME, &[7]).await;
+    assert!(
+        unloaded_note(true)
+            .await
+            .ends_with("reload the page to load the stored one")
+    );
 }
