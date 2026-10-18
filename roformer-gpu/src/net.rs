@@ -16,45 +16,45 @@ use roformer::{
     BandGroup, DEPTH, DIM, DIM_HEAD, FEATURES, FREQS_PER_BANDS, HEADS, HIDDEN, STEMS, band_groups,
 };
 
-use crate::{Act, AttentionPolicy, Gpu, MatMul, Rec, View};
+use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, Rec, View};
 
 const INNER: usize = HEADS * DIM_HEAD;
 const BANDS: usize = FREQS_PER_BANDS.len();
 
 /// One `Transformer(depth=1)`: gated attention then feed-forward.
 struct Block {
-    attn_norm: wgpu::Buffer,
-    qkv: wgpu::Buffer,     // [1536, 256]
-    gates_w: wgpu::Buffer, // [8, 256]
-    gates_b: wgpu::Buffer, // [8]
-    out: wgpu::Buffer,     // [256, 512]
-    ff_norm: wgpu::Buffer,
-    w1: wgpu::Buffer, // [1024, 256]
-    b1: wgpu::Buffer,
-    w2: wgpu::Buffer, // [256, 1024]
-    b2: wgpu::Buffer,
+    attn_norm: GpuBuffer,
+    qkv: GpuBuffer,     // [1536, 256]
+    gates_w: GpuBuffer, // [8, 256]
+    gates_b: GpuBuffer, // [8]
+    out: GpuBuffer,     // [256, 512]
+    ff_norm: GpuBuffer,
+    w1: GpuBuffer, // [1024, 256]
+    b1: GpuBuffer,
+    w2: GpuBuffer, // [256, 1024]
+    b2: GpuBuffer,
 }
 
 struct SplitGroup {
     g: BandGroup,
     /// Per band RMSNorm gain times sqrt(width), applied on the CPU.
     gamma: Vec<f32>, // [count, width]
-    w: wgpu::Buffer, // [count, 256, width]
-    b: wgpu::Buffer, // [count, 256]
+    w: GpuBuffer, // [count, 256, width]
+    b: GpuBuffer, // [count, 256]
 }
 
 struct MaskGroup {
     g: BandGroup,
-    w1: wgpu::Buffer, // [count, 1024, 256]
-    b1: wgpu::Buffer, // [count, 1024]
-    w2: wgpu::Buffer, // [count, 2w, 1024]
-    b2: wgpu::Buffer, // [count, 2w]
+    w1: GpuBuffer, // [count, 1024, 256]
+    b1: GpuBuffer, // [count, 1024]
+    w2: GpuBuffer, // [count, 2w, 1024]
+    b2: GpuBuffer, // [count, 2w]
 }
 
 pub struct Net {
     split: Vec<SplitGroup>,
     layers: Vec<(Block, Block)>,
-    final_norm: wgpu::Buffer,
+    final_norm: GpuBuffer,
     masks: Vec<Vec<MaskGroup>>,
     /// Upper bound on the elements of any per-step intermediate (attention
     /// scores, q/k/v, hidden layers); at least one sequence always fits.
@@ -63,7 +63,7 @@ pub struct Net {
     pub bytes: u64,
 }
 
-fn norm(gpu: &Gpu, s: &mut Store, name: &str, dim: usize) -> Result<wgpu::Buffer, WeightError> {
+fn norm(gpu: &Gpu, s: &mut Store, name: &str, dim: usize) -> Result<GpuBuffer, WeightError> {
     let scale = (dim as f32).sqrt();
     let g: Vec<f32> = s
         .get(name, &[dim])?
@@ -73,12 +73,7 @@ fn norm(gpu: &Gpu, s: &mut Store, name: &str, dim: usize) -> Result<wgpu::Buffer
     Ok(gpu.upload(name, &g))
 }
 
-fn tensor(
-    gpu: &Gpu,
-    s: &mut Store,
-    name: &str,
-    shape: &[usize],
-) -> Result<wgpu::Buffer, WeightError> {
+fn tensor(gpu: &Gpu, s: &mut Store, name: &str, shape: &[usize]) -> Result<GpuBuffer, WeightError> {
     Ok(gpu.upload(name, &s.get(name, shape)?))
 }
 
@@ -88,7 +83,7 @@ fn stacked(
     names: &[String],
     shape: &[usize],
     scale: f32,
-) -> Result<wgpu::Buffer, WeightError> {
+) -> Result<GpuBuffer, WeightError> {
     Ok(gpu.upload(&names[0], &stacked_cpu(s, names, shape, scale)?))
 }
 
@@ -339,22 +334,22 @@ pub struct Job<'a> {
     attention: AttentionPolicy,
     pub frames: usize,
     /// Band-normalised input, per group `[count, T, width]`.
-    split_in: wgpu::Buffer,
+    split_in: GpuBuffer,
     /// Hidden state `[BANDS, T, DIM]`.
-    x: wgpu::Buffer,
+    x: GpuBuffer,
     /// `[T, BANDS, DIM]` during frequency transformers; after
     /// [`Step::FinalNorm`], the normalised `[BANDS, T, DIM]`.
-    xt: wgpu::Buffer,
-    xn: wgpu::Buffer,
-    qkv: wgpu::Buffer,
-    scores: wgpu::Buffer,
-    o: wgpu::Buffer,
-    gates: wgpu::Buffer,
-    h: wgpu::Buffer,
-    y: wgpu::Buffer,
-    mask: wgpu::Buffer,
-    rope_time: wgpu::Buffer,
-    rope_freq: wgpu::Buffer,
+    xt: GpuBuffer,
+    xn: GpuBuffer,
+    qkv: GpuBuffer,
+    scores: GpuBuffer,
+    o: GpuBuffer,
+    gates: GpuBuffer,
+    h: GpuBuffer,
+    y: GpuBuffer,
+    mask: GpuBuffer,
+    rope_time: GpuBuffer,
+    rope_freq: GpuBuffer,
 }
 
 impl<'a> Job<'a> {
@@ -575,7 +570,7 @@ impl<'a> Job<'a> {
         r.submit();
     }
 
-    fn split(&self, r: &mut Rec) {
+    fn split<'s>(&'s self, r: &mut Rec<'s>) {
         let t = self.frames;
         for sg in &self.net.split {
             let (g, w) = (sg.g, sg.g.width);
@@ -599,15 +594,15 @@ impl<'a> Job<'a> {
     /// One transformer on sequences `first..first + nb` of `buf`
     /// (`[*, seq, DIM]`), updated in place.
     #[allow(clippy::too_many_arguments)]
-    fn transformer(
-        &self,
-        r: &mut Rec,
-        b: &Block,
-        buf: &wgpu::Buffer,
+    fn transformer<'s>(
+        &'s self,
+        r: &mut Rec<'s>,
+        b: &'s Block,
+        buf: &'s wgpu::Buffer,
         seq: usize,
         first: usize,
         nb: usize,
-        rope: &wgpu::Buffer,
+        rope: &'s wgpu::Buffer,
         fused: bool,
     ) {
         let tok0 = first * seq;
@@ -680,7 +675,7 @@ impl<'a> Job<'a> {
 
     /// Attention as separate dispatches: scores matmul into `self.scores`,
     /// softmax, p.v matmul, gate.  The fused kernel computes the same.
-    fn split_attention(&self, r: &mut Rec, seq: usize, nb: usize, alpha: f32) {
+    fn split_attention<'s>(&'s self, r: &mut Rec<'s>, seq: usize, nb: usize, alpha: f32) {
         // scores[s, h, i, j] = q[s, i, h] . k[s, j, h] / 8
         let row = 3 * INNER;
         let mut sc = MatMul::new(
@@ -765,7 +760,7 @@ impl<'a> Job<'a> {
         r.gate(&self.o, &self.gates, nb * seq);
     }
 
-    fn mask_part(&self, r: &mut Rec, mg: &MaskGroup, k: usize, n: usize) {
+    fn mask_part<'s>(&'s self, r: &mut Rec<'s>, mg: &'s MaskGroup, k: usize, n: usize) {
         let t = self.frames;
         let (g, w) = (mg.g, mg.g.width);
         let mut h = MatMul::new(

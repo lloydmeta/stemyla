@@ -139,7 +139,7 @@ fn check_matmul(g: &Gpu, s: Spec, sizes: [usize; 4], what: &str) -> bool {
         mm.alpha = s.alpha;
         mm.act = s.act;
         mm.accumulate = s.accumulate;
-        mm.bias = s.bias.map(|(off, bo)| (&biasb, off, bo));
+        mm.bias = s.bias.map(|(off, bo)| (&*biasb, off, bo));
         mm.tile = Some(t);
         let ran = TILES[mm.kernel(t)].name;
         if tile.vec4 {

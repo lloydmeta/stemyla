@@ -885,14 +885,21 @@ fn wasm_mb() -> f64 {
 
 /// Where the worker's memory is, for the console: on iOS the whole tab is
 /// stopped at a fixed limit (2 GB on an iPhone 17 Pro), and GPU buffers
-/// count towards it.
+/// count towards it.  The GPU's live bytes are every buffer not yet
+/// destroyed, so they stay flat from chunk to chunk of the same length
+/// unless one leaks.
 fn memory_text(net: &Net, job: Option<&Job>) -> String {
     let mb = |b: u64| b as f64 / 1e6;
     let job = job.map_or(String::new(), |j| {
         format!(", chunk buffers {:.0} MB", mb(j.bytes()))
     });
+    let live = STATE
+        .with_borrow(|s| s.gpu.as_ref().map(|g| g.live_bytes()))
+        .map_or(String::new(), |b| {
+            format!(", GPU buffers live {:.0} MB", mb(b))
+        });
     format!(
-        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB{job}",
+        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB{job}{live}",
         wasm_mb(),
         mb(net.bytes)
     )
