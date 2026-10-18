@@ -47,10 +47,6 @@ pub struct LiveOutput {
     /// When the latest buffer is due to start, as [`nanos`] of the stream's
     /// clock ([`NOT_YET`] before the first callback).
     scheduled: Arc<AtomicU64>,
-    /// The context's `baseLatency` in nanoseconds, which cpal adds to the
-    /// first buffer's start (see [`first_start`]): fixed for a context's
-    /// life, so read once.
-    base: Arc<AtomicU64>,
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
@@ -147,23 +143,23 @@ fn open(rate: u32) -> Result<LiveOutput> {
             None,
         )
         .context("building output stream")?;
+    // Read where cpal reads it, before the stream plays (and so before the
+    // first callback, which in the browser runs later on this thread).
+    base.store(
+        base_latency(&stream).as_nanos().try_into().unwrap_or(0),
+        Relaxed,
+    );
     stream.play().context("starting output stream")?;
     OPENED.fetch_add(1, Relaxed);
-    let out = LiveOutput {
+    Ok(LiveOutput {
         stream,
         slot,
         failed,
         scheduled,
-        base,
         device_name: device_label(&device),
         sample_rate: rate,
         channels: config.channels,
-    };
-    // Before the first callback: in the browser callbacks run on this
-    // thread, from timers, so none has yet.
-    let base = out.base_latency().as_nanos().try_into().unwrap_or(0);
-    out.base.store(base, Relaxed);
-    Ok(out)
+    })
 }
 
 /// Why a kept output cannot play the next song, so a new one must be opened.
@@ -264,24 +260,25 @@ impl LiveOutput {
             .now()
             .saturating_duration_since(cpal::StreamInstant::ZERO)
     }
+}
 
-    /// The Web Audio context's `baseLatency`, fixed for its life; zero
-    /// natively, where cpal does not add it.
-    #[cfg(target_arch = "wasm32")]
-    fn base_latency(&self) -> Duration {
-        let cpal::platform::StreamInner::WebAudio(web) = self.stream.as_inner();
-        let secs = js_sys::Reflect::get(web.audio_context().as_ref(), &"baseLatency".into())
-            .ok()
-            .and_then(|v| v.as_f64())
-            .filter(|s| s.is_finite() && *s >= 0.0)
-            .unwrap_or(0.0);
-        Duration::from_secs_f64(secs)
-    }
+/// The stream's Web Audio context's `baseLatency`, which cpal adds to the
+/// first buffer's start (see [`first_start`]); zero natively, where it does
+/// not.
+#[cfg(target_arch = "wasm32")]
+fn base_latency(stream: &cpal::Stream) -> Duration {
+    let cpal::platform::StreamInner::WebAudio(web) = stream.as_inner();
+    let secs = js_sys::Reflect::get(web.audio_context().as_ref(), &"baseLatency".into())
+        .ok()
+        .and_then(|v| v.as_f64())
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .unwrap_or(0.0);
+    Duration::from_secs_f64(secs)
+}
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn base_latency(&self) -> Duration {
-        Duration::ZERO
-    }
+#[cfg(not(target_arch = "wasm32"))]
+fn base_latency(_: &cpal::Stream) -> Duration {
+    Duration::ZERO
 }
 
 impl Drop for LiveOutput {
@@ -331,7 +328,10 @@ fn first_start(
 /// the clock.  Worked out here rather than from cpal's `playback` time,
 /// which adds `outputLatency` as it is when the buffer is filled (Bluetooth
 /// earphones change it by a few hundred milliseconds), so no reading of
-/// it here can be out of date.
+/// it here can be out of date.  When cpal fails to queue a buffer it does
+/// not move its schedule on, so from then on this is a buffer late; it
+/// reports the stream as invalid too, so the output is then replaced
+/// ([`Unusable::Failed`]) before its schedule matters.
 fn nth_start(first: cpal::StreamInstant, length: Duration, n: u32) -> cpal::StreamInstant {
     length
         .checked_mul(n)
@@ -346,8 +346,9 @@ fn nth_start(first: cpal::StreamInstant, length: Duration, n: u32) -> cpal::Stre
 /// buffers (as while a song loads), its schedule falls behind the
 /// context's clock, every late buffer starts at once on top of the other,
 /// and the song would play doubled at twice the speed until the schedule
-/// catches up.  Late buffers are silent instead, so the song pauses for
-/// about as long as the block and then goes on where it was.  A healthy
+/// catches up.  Late buffers are silent instead, so the song pauses (for
+/// about twice as long as the block: the block, then as long again while
+/// the schedule catches up) and then goes on where it was.  A healthy
 /// stream fills each buffer about one buffer ahead, less the time the page
 /// took to call back; the margin leaves that time a buffer's length.
 fn is_late(start: cpal::StreamInstant, callback: cpal::StreamInstant, length: Duration) -> bool {
