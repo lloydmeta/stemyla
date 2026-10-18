@@ -267,7 +267,8 @@ pub struct Lane {
 
 /// Where audio goes.
 pub enum Output {
-    /// A real device through cpal; the callback owns the player.
+    /// A real device through cpal, opened once and kept while songs come
+    /// and go at its sample rate; the player is in its slot.
     #[cfg(feature = "audio")]
     Live(engine::live::LiveOutput),
     /// No device: the UI renders the player silently so the playhead still
@@ -289,7 +290,8 @@ pub struct StemApp {
     pub output: Option<Output>,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
-    /// Ask for a real audio device when a song is loaded.
+    /// Ask for a real audio device when an output is opened: for the first
+    /// song, and for a later one the kept output cannot play.
     pub want_device: bool,
     stretcher: StretcherKind,
     loop_drag_anchor: Option<u64>,
@@ -639,7 +641,7 @@ impl StemApp {
                 params.set_muted(i, true);
             }
         }
-        self.output = None; // stops any previous stream
+        self.stop_output();
         let player = Player::with_config(
             Arc::clone(&song),
             Arc::clone(&params),
@@ -654,14 +656,52 @@ impl StemApp {
         );
         self.song = Some(song);
         self.params = Some(params);
+        self.play_on_output(player);
+    }
+
+    /// Frees the playing player before the next one is built (the old song
+    /// goes when `self.song` is replaced).  A live output stays open,
+    /// silent, for the next song.
+    fn stop_output(&mut self) {
+        match &self.output {
+            #[cfg(feature = "audio")]
+            Some(Output::Live(live)) => drop(live.stop()),
+            _ => self.output = None,
+        }
+    }
+
+    /// Plays `player` on the live output if one is open and can play it
+    /// (`engine::live::Unusable`); otherwise opens an output for it.
+    fn play_on_output(&mut self, player: Player) {
+        #[cfg(feature = "audio")]
+        let player = match self.play_on_live(player) {
+            Ok(()) => return,
+            Err(player) => *player,
+        };
+        self.output = None;
         self.output = Some(self.open_output(player));
+    }
+
+    /// Swaps `player` into the open live output, freeing the one it
+    /// replaces, or hands it back when there is no output it can play on.
+    #[cfg(feature = "audio")]
+    fn play_on_live(&mut self, player: Player) -> Result<(), Box<Player>> {
+        let Some(Output::Live(live)) = &self.output else {
+            return Err(Box::new(player));
+        };
+        let previous = live.play(player).map_err(|(why, player)| {
+            log::info!("audio: opening a new output ({why:?})");
+            player
+        })?;
+        drop(previous);
+        self.status
+            .push_str(&format!(", playing on {}", live.device_name));
+        Ok(())
     }
 
     fn open_output(&mut self, player: Player) -> Output {
         #[cfg(feature = "audio")]
         if self.want_device {
-            // cpal's start() takes the player; on failure we never get it
-            // back, so probe first.
             match engine::live::probe_default_output() {
                 Ok(_) => match engine::live::start(player) {
                     Ok(out) => {
@@ -669,9 +709,9 @@ impl StemApp {
                             .push_str(&format!(", playing on {}", out.device_name));
                         return Output::Live(out);
                     }
-                    Err(e) => {
+                    Err((e, player)) => {
                         self.status.push_str(&format!(", audio failed: {e:#}"));
-                        return Output::Silent(Box::new(self.rebuild_player()));
+                        return Output::Silent(player);
                     }
                 },
                 Err(e) => self
@@ -680,19 +720,6 @@ impl StemApp {
             }
         }
         Output::Silent(Box::new(player))
-    }
-
-    /// Only used when a device fails after the player was handed over.
-    #[cfg(feature = "audio")]
-    fn rebuild_player(&self) -> Player {
-        let song = self.song.clone().expect("song loaded");
-        let params = self.params.clone().expect("params");
-        Player::with_config(
-            Arc::clone(&song),
-            params,
-            self.stretcher.build(song.sample_rate),
-            PlayerConfig::default(),
-        )
     }
 
     /// Loads stems from in-memory files (a multi-file drop).

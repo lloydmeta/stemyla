@@ -42,7 +42,17 @@ pub fn run(args: &[String]) -> Result<()> {
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
     let runs: [&[&str]; 3] = [
-        &["-p", "app", "--lib", "--test", "web", "--test", "web_close"],
+        &[
+            "-p",
+            "app",
+            "--lib",
+            "--test",
+            "web",
+            "--test",
+            "web_close",
+            "--test",
+            "web_output",
+        ],
         &["-p", "stem-worker", "--lib"],
         &["-p", "stem-protocol", "--test", "web"],
     ];
