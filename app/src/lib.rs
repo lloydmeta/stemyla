@@ -1361,14 +1361,14 @@ impl StemApp {
                 Event::Error { of, text } => {
                     log::error!("separator: {of}: {text}");
                     let what = match of.as_str() {
-                        "separate" => {
+                        stem_protocol::kind::SEPARATE => {
                             sep.running = false;
                             self.separating = None;
                             "Separation"
                         }
-                        "mp3" => "MP3 encoding",
-                        "selftest" => "Self-test",
-                        "bench" => "Benchmark",
+                        stem_protocol::kind::MP3 => "MP3 encoding",
+                        stem_protocol::kind::SELFTEST => "Self-test",
+                        stem_protocol::kind::BENCH => "Benchmark",
                         _ => "Worker request",
                     };
                     self.status = format!("{what} failed: {text}");

@@ -41,9 +41,10 @@ pub fn run(args: &[String]) -> Result<()> {
     check_runner(&wanted)?;
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
-    let runs: [&[&str]; 2] = [
+    let runs: [&[&str]; 3] = [
         &["-p", "app", "--lib", "--test", "web", "--test", "web_close"],
         &["-p", "stem-worker", "--lib"],
+        &["-p", "stem-protocol", "--test", "web"],
     ];
     for targets in runs {
         let mut cmd = Command::new(env!("CARGO"));

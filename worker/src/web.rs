@@ -3,13 +3,16 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+use js_sys::{Float32Array, Uint8Array};
 use roformer::demix::{Demixer, Segment};
 use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use stem_protocol::{
+    self as protocol, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
+};
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
@@ -229,11 +232,8 @@ fn now_s() -> f64 {
     perf_now() / 1000.0
 }
 
-fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
-    let o = Object::new();
-    for (k, v) in fields {
-        let _ = Reflect::set(&o, &JsValue::from_str(k), v);
-    }
+fn send(reply: Reply) {
+    let (o, transfer) = reply.to_js();
     // Under test the page is the test runner, so messages are kept instead.
     #[cfg(test)]
     {
@@ -242,9 +242,8 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
     }
     #[cfg(not(test))]
     {
-        let t: js_sys::Array = transfer.iter().collect();
-        // Not through `log`, which posts too.
-        if let Err(e) = scope().post_message_with_transfer(&o, &t) {
+        // Not through `log`, which sends too.
+        if let Err(e) = scope().post_message_with_transfer(&o, &transfer) {
             web_sys::console::error_2(&"stem-worker: a message to the page was lost:".into(), &e);
         }
     }
@@ -257,20 +256,16 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
 async fn post_model(ok: bool, text: &str) {
     let loaded = STATE.with_borrow(|s| s.net.is_some());
     let stored = opfs_has(CACHE_NAME).await.as_bool().unwrap_or(false);
-    post(
-        &[
-            ("type", "model".into()),
-            ("ok", ok.into()),
-            ("loaded", loaded.into()),
-            ("stored", stored.into()),
-            ("text", text.into()),
-        ],
-        &[],
-    );
+    send(Reply::Model {
+        ok,
+        loaded,
+        stored,
+        text: text.into(),
+    });
 }
 
 fn log(text: &str) {
-    post(&[("type", "log".into()), ("text", text.into())], &[]);
+    send(Reply::Log(text.into()));
 }
 
 /// A thrown JS value as text: "NotReadableError: ..." for an exception.
@@ -281,10 +276,6 @@ fn js_text(e: &JsValue) -> String {
     }
 }
 
-fn get(o: &JsValue, k: &str) -> JsValue {
-    Reflect::get(o, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED)
-}
-
 pub fn start() {
     console_error_panic_hook::set_once();
     let handler = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| {
@@ -292,7 +283,7 @@ pub fn start() {
     });
     scope().set_onmessage(Some(handler.as_ref().unchecked_ref()));
     handler.forget();
-    post(&[("type", "alive".into())], &[]);
+    send(Reply::Alive);
 }
 
 /// Adapter description and the limits the kernels are written to.
@@ -324,11 +315,11 @@ async fn gpu_text(gpu: &Gpu) -> String {
 
 /// The WebGPU device, created on first use.  `{gpu: "integrated"}` in the
 /// first message asks the browser for the low-power (integrated) adapter.
-async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
+async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
         return Ok(g);
     }
-    let integrated = get(msg, "gpu").as_string().as_deref() == Some("integrated");
+    let integrated = s.gpu.as_deref() == Some("integrated");
     let power = if integrated {
         wgpu::PowerPreference::LowPower
     } else {
@@ -337,8 +328,8 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     // Recorded before anything names the adapter by it: `choose_kernels`
     // keys this GPU's stored choice on it, and with the default still in
     // place an integrated GPU took the discrete GPU's choice.
-    STATE.with_borrow_mut(|s| {
-        s.power = if integrated {
+    STATE.with_borrow_mut(|st| {
+        st.power = if integrated {
             "low-power"
         } else {
             "high-performance"
@@ -346,7 +337,7 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     });
     // `?profile=1` opens the device with `timestamp-query` (when offered)
     // so every step reports GPU time per kernel; otherwise no features.
-    let g = Rc::new(if get(msg, "profile").is_truthy() {
+    let g = Rc::new(if s.profile {
         let g = Gpu::new_profiling(power).await?;
         if !g.profiling() {
             log("profile: this adapter has no timestamp-query; no GPU times");
@@ -367,9 +358,9 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
     }
     // Overrides from the URL; this GPU's own choice comes later, in
     // `ensure_kernels`.
-    apply_policy(&g, msg);
-    apply_attention(&g, msg);
-    STATE.with_borrow_mut(|s| s.gpu = Some(g.clone()));
+    apply_policy(&g, s);
+    apply_attention(&g, s);
+    STATE.with_borrow_mut(|st| st.gpu = Some(g.clone()));
     Ok(g)
 }
 
@@ -379,61 +370,85 @@ async fn gpu(msg: &JsValue) -> Result<Rc<Gpu>, String> {
 /// upload, or for `?bench` without a model after its matmul timings)
 /// rather than when the device opens, so calibration neither shares the
 /// GPU with the upload nor times a GPU that has only just woken.
-async fn ensure_kernels(g: &Gpu, msg: &JsValue) {
-    if STATE.with_borrow_mut(|s| std::mem::replace(&mut s.kernels_chosen, true)) {
+async fn ensure_kernels(g: &Gpu, s: &Settings) {
+    if STATE.with_borrow_mut(|st| std::mem::replace(&mut st.kernels_chosen, true)) {
         return;
     }
-    let set = |k: &str| get(msg, k).as_string().is_some_and(|v| v != "auto");
-    if !(set("mm") && set("attn")) {
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|v| v != "auto");
+    if !(set(&s.mm) && set(&s.attn)) {
         choose_kernels(g).await;
     }
-    apply_policy(g, msg);
-    apply_attention(g, msg);
+    apply_policy(g, s);
+    apply_attention(g, s);
 }
 
-fn budget(msg: &JsValue) -> usize {
-    get(msg, "max_elems")
-        .as_f64()
-        .map_or(BUDGET, |v| v as usize)
+fn budget(s: &Settings) -> usize {
+    s.max_elems.unwrap_or(BUDGET)
 }
 
 async fn handle(msg: JsValue) {
-    let kind = get(&msg, "type").as_string().unwrap_or_default();
-    let result = match kind.as_str() {
-        "init" | "model" | "download" | "forget_model" => {
-            let _turn = Held::turn().await;
-            apply_overrides(&msg);
-            model_task(&kind, &msg).await
-        }
-        "separate" | "selftest" | "bench" => {
-            let _turn = Held::turn().await;
-            apply_overrides(&msg);
-            match kind.as_str() {
-                "separate" => separate(&msg).await,
-                "selftest" => selftest(&msg).await,
-                _ => bench(&msg).await,
+    let kind = protocol::kind_of(&msg);
+    // Model and GPU requests wait for their turn before they are read, so
+    // even a malformed one is answered in the order sent.
+    let queued = [
+        kind::INIT,
+        kind::MODEL,
+        kind::DOWNLOAD,
+        kind::FORGET_MODEL,
+        kind::SEPARATE,
+        kind::SELFTEST,
+        kind::BENCH,
+    ]
+    .contains(&kind.as_str());
+    let _turn = if queued {
+        Some(Held::turn().await)
+    } else {
+        None
+    };
+    let request = ToWorker::from_js(&msg);
+    // The request holds what it needs; a transferred mix is then held only
+    // by it, and freed once copied in.
+    drop(msg);
+    let result = match request {
+        Err(bad) => Err(bad.text),
+        Ok(ToWorker { request, settings }) => {
+            if queued {
+                apply_overrides(&settings);
             }
+            serve(request, &settings).await
         }
-        "mp3" => mp3(&msg).await,
-        other => Err(format!("unknown message {other}")),
     };
     if let Err(text) = result {
-        post(
-            &[
-                ("type", "error".into()),
-                ("of", kind.into()),
-                ("text", text.into()),
-            ],
-            &[],
-        );
+        send(Reply::Error { of: kind, text });
+    }
+}
+
+async fn serve(request: Request, s: &Settings) -> Result<(), String> {
+    match request {
+        Request::Init => with_storage(init(s)).await,
+        Request::Model(source) => with_storage(load_model(source, s)).await,
+        Request::Download => with_storage(download(s)).await,
+        Request::ForgetModel => with_storage(forget_model()).await,
+        Request::Separate { left, right } => {
+            let (gpu, net) = loaded()?;
+            run(&gpu, &net, [left, right], s).await
+        }
+        Request::Selftest { base } => selftest(base, s).await,
+        Request::Bench => bench(s).await,
+        Request::Mp3 {
+            name,
+            left,
+            right,
+            rate,
+        } => mp3(name, [left, right], rate).await,
     }
 }
 
 /// Kernel overrides from the page URL, for a GPU opened earlier.
-fn apply_overrides(msg: &JsValue) {
-    if let Some(g) = STATE.with_borrow(|s| s.gpu.clone()) {
-        apply_policy(&g, msg);
-        apply_attention(&g, msg);
+fn apply_overrides(s: &Settings) {
+    if let Some(g) = STATE.with_borrow(|st| st.gpu.clone()) {
+        apply_policy(&g, s);
+        apply_attention(&g, s);
     }
 }
 
@@ -455,16 +470,9 @@ impl Held {
     /// The stored files are shared by every tab of this site.
     async fn storage() -> Option<Self> {
         let waiting = Closure::<dyn FnMut()>::new(|| {
-            post(
-                &[
-                    ("type", "status".into()),
-                    (
-                        "text",
-                        "Waiting for another tab of this site to finish with the model…".into(),
-                    ),
-                ],
-                &[],
-            );
+            send(Reply::Status(
+                "Waiting for another tab of this site to finish with the model…".into(),
+            ));
         });
         let lock = storage_lock(waiting.as_ref().unchecked_ref()).await;
         drop(waiting);
@@ -487,20 +495,15 @@ impl Drop for Held {
     }
 }
 
-async fn model_task(kind: &str, msg: &JsValue) -> Result<(), String> {
+/// Runs a model task holding the storage lock, shared by every tab.
+async fn with_storage(
+    task: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
     let _storage = Held::storage().await;
-    match kind {
-        "init" => init(msg).await,
-        "model" => load_model(msg).await,
-        "download" => download(msg).await,
-        _ => {
-            forget_model().await;
-            Ok(())
-        }
-    }
+    task.await
 }
 
-async fn forget_model() {
+async fn forget_model() -> Result<(), String> {
     STATE.with_borrow_mut(|s| s.net = None);
     let removed = opfs_remove(CACHE_NAME).await.as_bool().unwrap_or(false);
     remove_leftovers().await;
@@ -514,6 +517,7 @@ async fn forget_model() {
         },
     )
     .await;
+    Ok(())
 }
 
 /// Partial files from a download or save that never finished (a phone
@@ -649,14 +653,14 @@ impl Source for &ModelFile {
 
 /// Uploads the weights; returns the seconds taken and a description of
 /// the GPU.
-async fn build(file: ModelFile, msg: &JsValue) -> Result<(f64, String), LoadError> {
+async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError> {
     let t0 = now_s();
     // Parsed before the GPU opens: a file that is not safetensors at all is
     // then reported (and an unusable stored copy removed) even on a device
     // without WebGPU, instead of being kept behind a GPU error.
     Store::from_source(&file)?;
-    let g = gpu(msg).await?;
-    let net = Net::load_store(&g, Store::from_source(&file)?, budget(msg))?;
+    let g = gpu(s).await?;
+    let net = Net::load_store(&g, Store::from_source(&file)?, budget(s))?;
     // Its cached blocks, or a checked download's bytes, are not needed for
     // the GPU checks and kernel timing that follow.
     drop(file);
@@ -666,13 +670,13 @@ async fn build(file: ModelFile, msg: &JsValue) -> Result<(f64, String), LoadErro
             "the GPU rejected the model upload: {e}"
         )));
     }
-    ensure_kernels(&g, msg).await;
+    ensure_kernels(&g, s).await;
     log(&memory_text(&net, None));
     STATE.with_borrow_mut(|s| s.net = Some(Rc::new(net)));
     Ok((now_s() - t0, gpu_text(&g).await))
 }
 
-async fn init(msg: &JsValue) -> Result<(), String> {
+async fn init(s: &Settings) -> Result<(), String> {
     remove_leftovers().await;
     let unreadable = |e: &str| {
         format!(
@@ -692,7 +696,7 @@ async fn init(msg: &JsValue) -> Result<(), String> {
     }
     let file = ModelFile::blob(cached.unchecked_into());
     let size = (&file).size();
-    match build(file, msg).await {
+    match build(file, s).await {
         Ok((secs, gpu)) => {
             post_model(
                 true,
@@ -731,17 +735,11 @@ async fn init(msg: &JsValue) -> Result<(), String> {
     Ok(())
 }
 
-/// The model in a "model" message: the file the user picked, or bytes.
-fn model_file(msg: &JsValue) -> Option<ModelFile> {
-    let file = get(msg, "file");
-    if !file.is_undefined() {
-        return file.dyn_into().ok().map(ModelFile::blob);
-    }
-    get(msg, "bytes").dyn_into().ok().map(ModelFile::Bytes)
-}
-
-async fn load_model(msg: &JsValue) -> Result<(), String> {
-    let Some(file) = model_file(msg) else {
+async fn load_model(source: Option<ModelSource>, s: &Settings) -> Result<(), String> {
+    let Some(file) = source.map(|source| match source {
+        ModelSource::File(f) => ModelFile::blob(f),
+        ModelSource::Bytes(b) => ModelFile::Bytes(b),
+    }) else {
         post_model(
             false,
             "could not read the model file: model message without file or bytes",
@@ -751,7 +749,7 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
     };
     // A handle, not a copy: the picked file, or the bytes sent.
     let to_store = file.as_js().clone();
-    match build(file, msg).await {
+    match build(file, s).await {
         Ok((secs, gpu)) => {
             let cached = cache_put(CACHE_NAME, &to_store)
                 .await
@@ -791,11 +789,6 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
     })
 }
 
-async fn separate(msg: &JsValue) -> Result<(), String> {
-    let (gpu, net) = loaded()?;
-    run(&gpu, &net, msg).await
-}
-
 /// Keeps the GPU from being monopolised.  Every step is one short command
 /// buffer (one sub-batch of one transformer, a few GFLOP), and the worker
 /// waits for the GPU to finish it before submitting the next, so other
@@ -820,8 +813,8 @@ struct Pace {
 }
 
 impl Pace {
-    fn new(msg: &JsValue) -> Self {
-        let limit = get(msg, "step_limit").as_f64().unwrap_or(5.0);
+    fn new(s: &Settings) -> Self {
+        let limit = s.step_limit.unwrap_or(5.0);
         Self {
             limit,
             seen: HashSet::new(),
@@ -912,38 +905,25 @@ fn trace(on: bool, text: &str) {
     }
 }
 
-async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
-    let debug = get(msg, "debug").is_truthy();
-    let left: Float32Array = get(msg, "left")
-        .dyn_into()
-        .map_err(|_| "left must be a Float32Array")?;
-    let right: Float32Array = get(msg, "right")
-        .dyn_into()
-        .map_err(|_| "right must be a Float32Array")?;
-    let chunk = get(msg, "chunk").as_f64().map_or(CHUNK, |v| v as usize);
-    let overlap = get(msg, "overlap").as_f64().map_or(OVERLAP, |v| v as usize);
+async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Result<(), String> {
+    let debug = s.debug;
+    let chunk = s.chunk.unwrap_or(CHUNK);
+    let overlap = s.overlap.unwrap_or(OVERLAP);
     let t0 = now_s();
-    let mix = [left.to_vec(), right.to_vec()];
-    // The page transferred these; drop the worker's references so the
-    // browser can free them while the song is separated.
-    drop((left, right));
-    let _ = Reflect::delete_property(msg.unchecked_ref::<Object>(), &"left".into());
-    let _ = Reflect::delete_property(msg.unchecked_ref::<Object>(), &"right".into());
+    // The page transferred these and nothing else holds them: dropped once
+    // copied, so the browser can free them while the song is separated.
+    let mix = mix.map(|c| c.to_vec());
     let mut d = Demixer::new(mix, chunk, overlap, STEMS.len());
     let song_len = d.output_len();
     // The report after the song covers this separation only.
     gpu.reset_profile().await?;
-    let mut pace = Pace::new(msg);
+    let mut pace = Pace::new(s);
     let total = d.num_chunks();
-    post(
-        &[
-            ("type", "progress".into()),
-            ("done", 0.into()),
-            ("total", (total as u32).into()),
-            ("secs", 0.into()),
-        ],
-        &[],
-    );
+    send(Reply::Progress {
+        done: 0,
+        total: total as u32,
+        secs: 0.0,
+    });
     let mut job: Option<Job> = None;
     while let Some(x) = d.next_input() {
         let tc = now_s();
@@ -990,25 +970,18 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
             pace.summary(),
             memory_text(net, job.as_ref())
         ));
-        post(
-            &[
-                ("type", "progress".into()),
-                ("done", done.into()),
-                ("total", (total as u32).into()),
-                ("secs", (now_s() - t0).into()),
-            ],
-            &[],
-        );
+        send(Reply::Progress {
+            done,
+            total: total as u32,
+            secs: now_s() - t0,
+        });
     }
     if let Some(seg) = d.take_ready() {
         post_segment(seg, song_len);
     }
     log(&format!("separation: {}", pace.summary()));
     log_profile(gpu, &pace);
-    post(
-        &[("type", "done".into()), ("secs", (now_s() - t0).into())],
-        &[],
-    );
+    send(Reply::Done { secs: now_s() - t0 });
     Ok(())
 }
 
@@ -1016,24 +989,20 @@ async fn run(gpu: &Gpu, net: &Net, msg: &JsValue) -> Result<(), String> {
 /// song-length stems; the worker keeps at most a chunk of running sums
 /// instead of six whole songs (see `Demixer::take_ready`).
 fn post_segment(seg: Segment, song_len: usize) {
-    let stems = Array::new();
-    let mut transfer = Vec::with_capacity(2 * seg.stems.len());
-    for (name, stem) in STEMS.iter().zip(&seg.stems) {
-        let l = Float32Array::from(stem[0].as_slice());
-        let r = Float32Array::from(stem[1].as_slice());
-        transfer.push(l.buffer().into());
-        transfer.push(r.buffer().into());
-        stems.push(&Array::of3(&(*name).into(), &l, &r));
-    }
-    post(
-        &[
-            ("type", "segment".into()),
-            ("start", (seg.start as f64).into()),
-            ("len", (song_len as f64).into()),
-            ("stems", stems.into()),
-        ],
-        &transfer,
-    );
+    let stems = STEMS
+        .iter()
+        .zip(&seg.stems)
+        .map(|(name, [left, right])| SegmentStem {
+            name: (*name).into(),
+            left: Float32Array::from(left.as_slice()),
+            right: Float32Array::from(right.as_slice()),
+        })
+        .collect();
+    send(Reply::Segment {
+        start: seg.start,
+        len: song_len,
+        stems,
+    });
 }
 
 /// Signal-to-error ratio in dB.
@@ -1079,11 +1048,9 @@ fn tensor_f32(st: &safetensors::SafeTensors, name: &str) -> Result<(Vec<usize>, 
 /// full chunk.  Each line reports agreement in dB (higher is better; the
 /// references are stored as f16, so about 60 dB is the ceiling and anything
 /// under 30 dB is wrong) and any WebGPU errors seen during that stage.
-async fn selftest(msg: &JsValue) -> Result<(), String> {
+async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     let (gpu, net) = loaded()?;
-    let base = get(msg, "base")
-        .as_string()
-        .unwrap_or_else(|| "/selftest/".into());
+    let base = base.unwrap_or_else(|| "/selftest/".into());
     log(&format!("selftest: GPU {}", gpu_text(&gpu).await));
     let before = gpu.take_errors();
     if !before.is_empty() {
@@ -1106,7 +1073,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
     let (_, feats) = tensor_f32(&st, "features")?;
     let t0 = now_s();
     let job = Job::new(&gpu, &net, feats.len() / FEATURES);
-    let mut pace = Pace::new(msg);
+    let mut pace = Pace::new(s);
     job.set_input(&feats);
     pace.run(&gpu, &job, &Step::Split).await?;
     let (_, want) = tensor_f32(&st, "band_split")?;
@@ -1165,7 +1132,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
 
     // One full 13.35 s chunk; every step is paced, so it stops early (with
     // an error) rather than holding the GPU if this GPU is too slow.
-    let stages_only = get(msg, "selftest").as_string().as_deref() == Some("stages");
+    let stages_only = s.selftest.as_deref() == Some("stages");
     if stages_only {
         log("selftest: skipping the full chunk (selftest=stages)");
     } else if worst > 30.0 {
@@ -1182,7 +1149,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
             gpu.reset_profile().await?;
             let (spec, feats) = analyse(&[audio[..n].to_vec(), audio[n..].to_vec()]);
             let job = Job::new(&gpu, &net, feats.len() / FEATURES);
-            let mut pace = Pace::new(msg);
+            let mut pace = Pace::new(s);
             job.set_input(&feats);
             let mix_energy: f64 = audio.iter().map(|v| (*v as f64).powi(2)).sum();
             let mut s = 0;
@@ -1227,14 +1194,7 @@ async fn selftest(msg: &JsValue) -> Result<(), String> {
         format!("selftest FAILED: worst stage {worst:.1} dB; see the lines above")
     };
     log(&text);
-    post(
-        &[
-            ("type", "selftest".into()),
-            ("ok", ok.into()),
-            ("text", text.into()),
-        ],
-        &[],
-    );
+    send(Reply::Selftest { ok, text });
     Ok(())
 }
 
@@ -1278,12 +1238,8 @@ impl Pace {
 
 /// `?mm=` in the page URL: which matmul kernel to use (`auto` or a name
 /// from `roformer_gpu::TILES`).
-fn apply_policy(gpu: &Gpu, msg: &JsValue) {
-    if let Some(p) = get(msg, "mm")
-        .as_string()
-        .as_deref()
-        .and_then(roformer_gpu::MatMulPolicy::parse)
-    {
+fn apply_policy(gpu: &Gpu, s: &Settings) {
+    if let Some(p) = s.mm.as_deref().and_then(roformer_gpu::MatMulPolicy::parse) {
         gpu.policy.set(p);
     }
 }
@@ -1291,14 +1247,14 @@ fn apply_policy(gpu: &Gpu, msg: &JsValue) {
 /// `?attn=` in the page URL: `auto` (this GPU's choice), `split`,
 /// `fused`, or `time` / `freq` for fused attention on that axis only.
 /// Fused attention is used only if it passed the start-up check.
-fn apply_attention(gpu: &Gpu, msg: &JsValue) {
-    let Some(name) = get(msg, "attn").as_string() else {
+fn apply_attention(gpu: &Gpu, s: &Settings) {
+    let Some(name) = s.attn.as_deref() else {
         return;
     };
     if name == "auto" {
         return;
     }
-    match roformer_gpu::AttentionPolicy::parse(&name) {
+    match roformer_gpu::AttentionPolicy::parse(name) {
         Some(p) if p == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get() => {
             gpu.attention.set(p)
         }
@@ -1312,28 +1268,27 @@ fn apply_attention(gpu: &Gpu, msg: &JsValue) {
 }
 
 /// Times every matmul kernel on the shapes of a full chunk (`?bench`).
-async fn bench(msg: &JsValue) -> Result<(), String> {
-    let g = gpu(msg).await?;
+async fn bench(s: &Settings) -> Result<(), String> {
+    let g = gpu(s).await?;
     // Without a model the GPU has done nothing yet: choose its kernels
     // after the matmul timings below (which do not depend on the choice)
     // rather than on a GPU that has only just woken.
-    let loaded = STATE.with_borrow(|s| s.net.is_some());
+    let loaded = STATE.with_borrow(|st| st.net.is_some());
     if loaded {
-        ensure_kernels(&g, msg).await;
+        ensure_kernels(&g, s).await;
     }
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
-    let (warm, round) = if get(msg, "bench_quick").is_truthy() {
+    let (warm, round) = if s.bench_quick {
         (0.0, 0.0)
     } else {
         (0.3, 0.2)
     };
-    let rounds = get(msg, "bench_rounds")
-        .as_f64()
-        .map_or(3, |r| r.max(1.0) as usize);
-    let only = get(msg, "bench")
-        .as_string()
-        .and_then(|s| roformer_gpu::bench::parse_kernels(&s));
+    let rounds = s.bench_rounds.map_or(3, |r| r.max(1.0) as usize);
+    let only = s
+        .bench
+        .as_deref()
+        .and_then(roformer_gpu::bench::parse_kernels);
     let table =
         roformer_gpu::bench::measure(&g, warm, round, rounds, only.as_deref(), now_s, |l| log(&l))
             .await;
@@ -1341,33 +1296,24 @@ async fn bench(msg: &JsValue) -> Result<(), String> {
         log(&l);
     }
     if !loaded {
-        ensure_kernels(&g, msg).await;
+        ensure_kernels(&g, s).await;
     }
     roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
         "bench finished in {:.0} s; results in the browser console",
         now_s() - t0
     );
-    post(&[("type", "bench".into()), ("text", text.into())], &[]);
+    send(Reply::Bench(text));
     Ok(())
 }
 
 /// Downloads the model into browser storage with progress messages
 /// (`{type: "download", done, total}`), checks its hash, then loads it like
 /// a picked file.
-async fn download(msg: &JsValue) -> Result<(), String> {
-    let url = get(msg, "model_url")
-        .as_string()
-        .unwrap_or_else(|| MODEL_URL.to_string());
+async fn download(s: &Settings) -> Result<(), String> {
+    let url = s.model_url.clone().unwrap_or_else(|| MODEL_URL.to_string());
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|done: f64, total: f64| {
-        post(
-            &[
-                ("type", "download".into()),
-                ("done", done.into()),
-                ("total", total.into()),
-            ],
-            &[],
-        );
+        send(Reply::Download { done, total });
     });
     let t0 = now_s();
     let fetched = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
@@ -1386,7 +1332,7 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         }
     };
     let secs = now_s() - t0;
-    let built = build(file, msg).await;
+    let built = build(file, s).await;
     match built {
         Ok((load, gpu)) => {
             // The verified download becomes the stored model by a rename:
@@ -1466,17 +1412,13 @@ async fn verified_download(url: &str) -> Result<ModelFile, String> {
 /// rate}`) and sends the file back as `{type: "mp3", name, bytes}`.  Runs
 /// here, not on the page, because the encoder does most of its work in one
 /// final call (seconds for a whole song).
-async fn mp3(msg: &JsValue) -> Result<(), String> {
-    let name = get(msg, "name")
-        .as_string()
-        .unwrap_or_else(|| "stem.mp3".into());
-    let left: Float32Array = get(msg, "left")
-        .dyn_into()
-        .map_err(|_| "left must be a Float32Array")?;
-    let right: Float32Array = get(msg, "right")
-        .dyn_into()
-        .map_err(|_| "right must be a Float32Array")?;
-    let rate = get(msg, "rate").as_f64().unwrap_or(44_100.0) as u32;
+async fn mp3(
+    name: Option<String>,
+    [left, right]: [Float32Array; 2],
+    rate: Option<u32>,
+) -> Result<(), String> {
+    let name = name.unwrap_or_else(|| "stem.mp3".into());
+    let rate = rate.unwrap_or(44_100);
     let (l, r) = (left.to_vec(), right.to_vec());
     let mut pcm = Vec::with_capacity(2 * l.len());
     for (a, b) in l.iter().zip(&r) {
@@ -1495,14 +1437,7 @@ async fn mp3(msg: &JsValue) -> Result<(), String> {
         out.extend_from_slice(&packet);
     }
     let bytes = Uint8Array::from(out.as_slice());
-    post(
-        &[
-            ("type", "mp3".into()),
-            ("name", name.into()),
-            ("bytes", bytes.clone().into()),
-        ],
-        &[bytes.buffer().into()],
-    );
+    send(Reply::Mp3 { name, bytes });
     Ok(())
 }
 

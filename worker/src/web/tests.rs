@@ -6,6 +6,7 @@
 //! each starts from an empty one, and they run one at a time.
 
 use super::*;
+use js_sys::{Object, Reflect};
 use std::cell::RefCell;
 use wasm_bindgen_test::*;
 
@@ -101,7 +102,7 @@ async fn listing() -> String {
 }
 
 fn field(o: &JsValue, k: &str) -> JsValue {
-    get(o, k)
+    Reflect::get(o, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED)
 }
 
 /// The messages of type `kind` posted since the last [`fresh`].
@@ -519,7 +520,13 @@ async fn errors_name_the_request_they_answer() {
         ("rate", 96_000.into()),
     ]))
     .await;
-    handle(of_type("separate")).await;
+    let mix = Float32Array::new_with_length(4);
+    handle(message(&[
+        ("type", "separate".into()),
+        ("left", mix.clone().into()),
+        ("right", mix.into()),
+    ]))
+    .await;
     let errors = sent("error");
     let of: Vec<String> = errors
         .iter()

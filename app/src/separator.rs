@@ -27,7 +27,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use eframe::egui;
-use js_sys::{Array, Float32Array, Object, Reflect};
+use js_sys::Float32Array;
+use stem_protocol::{ModelSource, Reply, Request, SegmentStem, Settings, kind};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
@@ -92,8 +93,8 @@ pub struct Separator {
     _onerror: Closure<dyn FnMut(web_sys::Event)>,
     /// The separation's stems as their segments arrive.
     assembly: Rc<RefCell<Assembly>>,
-    /// Extra fields sent with every model and separate message.
-    settings: Vec<(String, JsValue)>,
+    /// Sent with every request but MP3 encoding.
+    settings: Settings,
     pub model_ready: bool,
     /// Whether browser storage holds a model file, usable or not.
     pub model_stored: bool,
@@ -122,44 +123,19 @@ fn has_param(name: &str) -> bool {
         })
 }
 
-fn get(o: &JsValue, k: &str) -> JsValue {
-    Reflect::get(o, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED)
-}
-
-fn object(fields: &[(&str, JsValue)], extra: &[(String, JsValue)]) -> Object {
-    let o = Object::new();
-    for (k, v) in fields {
-        let _ = Reflect::set(&o, &JsValue::from_str(k), v);
-    }
-    for (k, v) in extra {
-        let _ = Reflect::set(&o, &JsValue::from_str(k), v);
-    }
-    o
-}
-
 /// Worker settings from the page URL (see the module docs).
-fn url_settings() -> Vec<(String, JsValue)> {
-    let mut out = Vec::new();
-    let Some(search) = web_sys::window().and_then(|w| w.location().search().ok()) else {
-        return out;
-    };
-    for pair in search.trim_start_matches('?').split('&') {
-        let Some((k, v)) = pair.split_once('=') else {
-            continue;
-        };
-        match k {
-            "chunk" | "overlap" | "max_elems" | "step_limit" | "bench_quick" | "bench_rounds" => {
-                if let Ok(n) = v.parse::<f64>() {
-                    out.push((k.to_string(), JsValue::from_f64(n)));
-                }
-            }
-            "gpu" | "selftest" | "mm" | "model_url" | "bench" | "profile" | "attn" => {
-                out.push((k.to_string(), JsValue::from_str(v)))
-            }
-            _ => {}
-        }
-    }
-    out
+fn url_settings() -> Settings {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .map(|q| Settings::from_query(&q))
+        .unwrap_or_default()
+}
+
+/// Posts `request`, transferring what it carries; false if it could not
+/// be sent.
+fn post(worker: &Worker, request: &Request, settings: &Settings) -> bool {
+    let (msg, transfer) = request.to_js(settings);
+    worker.post_message_with_transfer(&msg, &transfer).is_ok()
 }
 
 /// Megabytes of the page's WebAssembly memory, which only ever grows: on iOS
@@ -172,27 +148,24 @@ pub fn page_wasm_mb() -> f64 {
         / 1e6
 }
 
-/// Copies one "segment" message (every stem's next samples, as
-/// transferred `Float32Array`s) into the song-length stems (see
-/// [`Assembly::segment`]).
-fn place_segment(asm: &mut Assembly, d: &JsValue) -> Result<(), String> {
-    let start = get(d, "start").as_f64().map(|s| s as usize);
-    asm.segment(start == Some(0), |asm| {
-        place_stems(asm, d, start.ok_or("segment without start")?)
-    })
-}
-
-fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), String> {
-    let len = get(d, "len").as_f64().ok_or("segment without len")? as usize;
-    let stems: Array = get(d, "stems")
-        .dyn_into()
-        .map_err(|_| "segment without stems")?;
+/// Copies one segment (every stem's next samples, as transferred
+/// `Float32Array`s) into the song-length stems (see [`Assembly::segment`]).
+fn place_stems(
+    asm: &mut Assembly,
+    start: usize,
+    len: usize,
+    stems: &[SegmentStem],
+) -> Result<(), String> {
     let mut end = None;
-    for (i, entry) in stems.iter().enumerate() {
-        let entry: Array = entry.dyn_into().map_err(|_| "malformed segment")?;
-        let name = entry.get(0).as_string().unwrap_or_default();
-        let l: Float32Array = entry.get(1).dyn_into().map_err(|_| "malformed segment")?;
-        let r: Float32Array = entry.get(2).dyn_into().map_err(|_| "malformed segment")?;
+    for (
+        i,
+        SegmentStem {
+            name,
+            left: l,
+            right: r,
+        },
+    ) in stems.iter().enumerate()
+    {
         let n = l.length() as usize;
         if r.length() as usize != n {
             return Err(format!("segment of {name}: channels differ in length"));
@@ -202,7 +175,7 @@ fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), Stri
         }
         asm.place(
             i,
-            &name,
+            name,
             start,
             len,
             |ld, rd| {
@@ -212,7 +185,7 @@ fn place_stems(asm: &mut Assembly, d: &JsValue, start: usize) -> Result<(), Stri
             n,
         )?;
     }
-    asm.advance(stems.length() as usize, end.unwrap_or(start))
+    asm.advance(stems.len(), end.unwrap_or(start))
 }
 
 impl Separator {
@@ -229,41 +202,63 @@ impl Separator {
         let settings = url_settings();
         let assembly: Rc<RefCell<Assembly>> = Default::default();
         let asm = assembly.clone();
-        let (ev, w, init, repaint) = (
+        let (ev, w, init_settings, repaint) = (
             events.clone(),
             worker.clone(),
-            object(&[("type", "init".into())], &settings),
+            settings.clone(),
             ctx.clone(),
         );
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
-            let d = e.data();
-            let text = || get(&d, "text").as_string().unwrap_or_default();
-            let num = |k: &str| get(&d, k).as_f64().unwrap_or(0.0);
-            let event = match get(&d, "type").as_string().as_deref() {
-                Some("alive") => {
+            let reply = match Reply::from_js(&e.data()) {
+                Ok(reply) => reply,
+                // A segment that cannot be read fails its separation, as one
+                // that does not fit does.
+                Err(bad) if bad.kind == kind::SEGMENT => {
+                    let failed = asm.borrow_mut().segment(true, |_| Err(bad.text));
+                    if let Err(text) = failed {
+                        ev.borrow_mut().push_back(Event::Error {
+                            of: kind::SEPARATE.into(),
+                            text,
+                        });
+                        ctx.request_repaint();
+                    }
+                    return;
+                }
+                Err(bad) => {
+                    log::warn!("separator: {}", bad.text);
+                    return;
+                }
+            };
+            let event = match reply {
+                Reply::Alive => {
                     // The worker only listens once its wasm has started.
-                    let _ = w.post_message(&init);
+                    post(&w, &Request::Init, &init_settings);
                     None
                 }
-                Some("model") => Some(Event::Model {
-                    ok: get(&d, "ok").is_truthy(),
-                    loaded: get(&d, "loaded").is_truthy(),
-                    stored: get(&d, "stored").is_truthy(),
-                    text: text(),
+                Reply::Model {
+                    ok,
+                    loaded,
+                    stored,
+                    text,
+                } => Some(Event::Model {
+                    ok,
+                    loaded,
+                    stored,
+                    text,
                 }),
-                Some("progress") => Some(Event::Progress {
-                    done: num("done") as u32,
-                    total: num("total") as u32,
-                    secs: num("secs"),
-                }),
-                Some("segment") => {
-                    let placed = place_segment(&mut asm.borrow_mut(), &d);
+                Reply::Progress { done, total, secs } => {
+                    Some(Event::Progress { done, total, secs })
+                }
+                Reply::Segment { start, len, stems } => {
+                    let placed = asm
+                        .borrow_mut()
+                        .segment(start == 0, |asm| place_stems(asm, start, len, &stems));
                     placed.err().map(|text| Event::Error {
-                        of: "separate".into(),
+                        of: kind::SEPARATE.into(),
                         text,
                     })
                 }
-                Some("done") => {
+                Reply::Done { secs } => {
                     let done = asm.borrow_mut().done();
                     match done {
                         None => None,
@@ -272,39 +267,28 @@ impl Separator {
                             for (name, left, right) in stems {
                                 q.push_back(Event::Stem { name, left, right });
                             }
-                            Some(Event::Done { secs: num("secs") })
+                            Some(Event::Done { secs })
                         }
                         Some(Err(text)) => Some(Event::Error {
-                            of: "separate".into(),
+                            of: kind::SEPARATE.into(),
                             text,
                         }),
                     }
                 }
-                Some("error") => {
-                    let of = get(&d, "of").as_string().unwrap_or_default();
+                Reply::Error { of, text } => {
                     // An MP3 or self-test error leaves a running separation be.
-                    let first = of != "separate" || asm.borrow_mut().abandon();
-                    first.then(|| Event::Error { of, text: text() })
+                    let first = of != kind::SEPARATE || asm.borrow_mut().abandon();
+                    first.then_some(Event::Error { of, text })
                 }
-                Some("status") => Some(Event::Status(text())),
-                Some("log") => Some(Event::Log(text())),
-                Some("selftest") => Some(Event::Selftest {
-                    ok: get(&d, "ok").is_truthy(),
-                    text: text(),
+                Reply::Status(text) => Some(Event::Status(text)),
+                Reply::Log(text) => Some(Event::Log(text)),
+                Reply::Selftest { ok, text } => Some(Event::Selftest { ok, text }),
+                Reply::Bench(text) => Some(Event::Bench(text)),
+                Reply::Mp3 { name, bytes } => Some(Event::Mp3 {
+                    name,
+                    bytes: bytes.to_vec(),
                 }),
-                Some("bench") => Some(Event::Bench(text())),
-                Some("mp3") => Some(Event::Mp3 {
-                    name: get(&d, "name").as_string().unwrap_or_default(),
-                    bytes: get(&d, "bytes")
-                        .dyn_into::<js_sys::Uint8Array>()
-                        .map(|a| a.to_vec())
-                        .unwrap_or_default(),
-                }),
-                Some("download") => Some(Event::Download {
-                    done: num("done"),
-                    total: num("total"),
-                }),
-                _ => None,
+                Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
             if let Some(event) = event {
                 ev.borrow_mut().push_back(event);
@@ -323,8 +307,9 @@ impl Separator {
         let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
             dead.terminate();
             asm.borrow_mut().clear();
-            let reason = get(&e, "message")
-                .as_string()
+            let reason = e
+                .dyn_ref::<web_sys::ErrorEvent>()
+                .map(|e| e.message())
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| "its script did not load".into());
             ev.borrow_mut().push_back(Event::Stopped(reason));
@@ -362,11 +347,8 @@ impl Separator {
         if self.model_loading || self.running {
             return false;
         }
-        let msg = object(
-            &[("type", "model".into()), ("file", file.into())],
-            &self.settings,
-        );
-        let sent = self.worker.post_message(&msg).is_ok();
+        let request = Request::Model(Some(ModelSource::File(file.clone().into())));
+        let sent = post(&self.worker, &request, &self.settings);
         self.model_loading |= sent;
         sent
     }
@@ -384,11 +366,8 @@ impl Separator {
         );
         crate::picker::pick_files(".safetensors", false, move |files| {
             if let Some(file) = files.into_iter().next() {
-                let msg = object(
-                    &[("type", "model".into()), ("file", file.into())],
-                    &settings,
-                );
-                if worker.post_message(&msg).is_ok() {
+                let request = Request::Model(Some(ModelSource::File(file.into())));
+                if post(&worker, &request, &settings) {
                     events.borrow_mut().push_back(Event::ModelLoading);
                 }
             }
@@ -409,8 +388,7 @@ impl Separator {
     /// Asks the worker to download the model (from Hugging Face unless
     /// `?model_url=` names another file) and keep it in browser storage.
     pub fn download_model(&mut self) {
-        let msg = object(&[("type", "download".into())], &self.settings);
-        if self.worker.post_message(&msg).is_ok() {
+        if post(&self.worker, &Request::Download, &self.settings) {
             self.model_loading = true;
             self.download = Some((0.0, 0.0));
         }
@@ -419,27 +397,18 @@ impl Separator {
     /// Asks the worker to encode one stem as MP3; the file comes back as
     /// [`Event::Mp3`].
     pub fn encode_mp3(&self, name: &str, left: &[f32], right: &[f32], rate: u32) {
-        let (l, r) = (Float32Array::from(left), Float32Array::from(right));
-        let msg = object(
-            &[
-                ("type", "mp3".into()),
-                ("name", name.into()),
-                ("left", l.clone().into()),
-                ("right", r.clone().into()),
-                ("rate", rate.into()),
-            ],
-            &[],
-        );
-        let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())]
-            .into_iter()
-            .collect();
-        let _ = self.worker.post_message_with_transfer(&msg, &transfer);
+        let request = Request::Mp3 {
+            name: Some(name.into()),
+            left: Float32Array::from(left),
+            right: Float32Array::from(right),
+            rate: Some(rate),
+        };
+        post(&self.worker, &request, &Settings::default());
     }
 
     /// Asks the worker to delete the model from browser storage and drop it.
     pub fn forget_model(&mut self) {
-        let msg = object(&[("type", "forget_model".into())], &self.settings);
-        if self.worker.post_message(&msg).is_ok() {
+        if post(&self.worker, &Request::ForgetModel, &self.settings) {
             self.model_ready = false;
             self.model_loading = true;
         }
@@ -447,37 +416,28 @@ impl Separator {
 
     /// Asks the worker to time every matmul kernel on the model's shapes.
     pub fn bench(&mut self) {
-        let msg = object(&[("type", "bench".into())], &self.settings);
-        let _ = self.worker.post_message(&msg);
+        post(&self.worker, &Request::Bench, &self.settings);
         self.bench_pending = false;
     }
 
     /// Asks the worker to compare its GPU results with the reference files.
     pub fn selftest(&mut self) {
-        let msg = object(&[("type", "selftest".into())], &self.settings);
-        let _ = self.worker.post_message(&msg);
+        post(
+            &self.worker,
+            &Request::Selftest { base: None },
+            &self.settings,
+        );
         self.selftest_pending = false;
     }
 
     /// Starts separating a 44.1 kHz stereo mix.
     /// Sends one song to the worker; false if it could not be sent.
     pub fn separate(&mut self, left: &[f32], right: &[f32]) -> bool {
-        let (l, r) = (Float32Array::from(left), Float32Array::from(right));
-        let msg = object(
-            &[
-                ("type", "separate".into()),
-                ("left", l.clone().into()),
-                ("right", r.clone().into()),
-            ],
-            &self.settings,
-        );
-        let transfer: Array = [JsValue::from(l.buffer()), JsValue::from(r.buffer())]
-            .into_iter()
-            .collect();
-        let sent = self
-            .worker
-            .post_message_with_transfer(&msg, &transfer)
-            .is_ok();
+        let request = Request::Separate {
+            left: Float32Array::from(left),
+            right: Float32Array::from(right),
+        };
+        let sent = post(&self.worker, &request, &self.settings);
         if sent {
             self.running = true;
             self.progress = (0, 0, 0.0);
