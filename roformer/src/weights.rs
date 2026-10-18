@@ -95,8 +95,11 @@ fn read_exact(src: &dyn Source, start: usize, end: usize) -> Result<Cow<'_, [u8]
     Ok(bytes)
 }
 
-/// The largest header `safetensors` itself accepts.
-const MAX_HEADER: usize = 100_000_000;
+/// The largest header accepted.  `safetensors` allows 100 MB, but this
+/// model's is about 200 KB, and a header is copied whole into WebAssembly
+/// memory, which never shrinks: a picked file that only claims a huge one
+/// would otherwise cost that much for good.
+const MAX_HEADER: usize = 1 << 20;
 
 /// The header of a safetensors file, checked as
 /// `SafeTensors::read_metadata` does, without its tensor data: returns the
@@ -315,6 +318,16 @@ mod tests {
                 Err("NotReadableError".into())
             }
         }
+    }
+
+    #[test]
+    fn a_header_over_a_megabyte_is_refused_before_it_is_read() {
+        let mut f = ((1u64 << 20) + 1).to_le_bytes().to_vec();
+        f.resize(8 + (1 << 20) + 1, b' ');
+        let src = Counting(&f, Default::default());
+        let e = Store::from_source(&src).err().unwrap();
+        assert_eq!(e.to_string(), "not a safetensors file: header too large");
+        assert_eq!(src.1.get(), 8, "only the length was read");
     }
 
     #[test]

@@ -14,7 +14,10 @@
 //! Messages out:
 //! * `{type: "model", ok, text}`
 //! * `{type: "progress", done, total, secs}`
-//! * `{type: "stem", name, left, right}` (buffers transferred), one per stem
+//! * `{type: "segment", start, len, stems: [[name, left, right], ...]}`
+//!   after each chunk: every stem's finished samples from `start` on, of a
+//!   song of `len` samples (buffers transferred); the page puts the stems
+//!   together
 //! * `{type: "done", secs}` or `{type: "error", text}`; a separation stops
 //!   with an error as soon as WebGPU reports one (an invalid kernel would
 //!   otherwise produce silent garbage)

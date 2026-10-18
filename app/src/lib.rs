@@ -34,8 +34,8 @@ pub fn mix_of_sources(song: &Song) -> (Vec<f32>, Vec<f32>) {
         return (vec![0.0; song.frames], vec![0.0; song.frames]);
     }
     let volumes = vec![1.0; src.len()];
-    let lefts: Vec<Vec<f32>> = src.iter().map(|s| s.left.clone()).collect();
-    let rights: Vec<Vec<f32>> = src.iter().map(|s| s.right.clone()).collect();
+    let lefts: Vec<&[f32]> = src.iter().map(|s| s.left.as_slice()).collect();
+    let rights: Vec<&[f32]> = src.iter().map(|s| s.right.as_slice()).collect();
     (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
 }
 
@@ -48,8 +48,8 @@ pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
             let (left, right) = mix_of_sources(source);
             Stem {
                 name: "original".into(),
-                left,
-                right,
+                left: left.into(),
+                right: right.into(),
             }
         }
     };
@@ -306,7 +306,7 @@ pub struct StemApp {
     /// missing from what the open read): the session, the stems, and what
     /// to say if the open does not show them.
     #[cfg(target_arch = "wasm32")]
-    stems_for_opening: Option<(String, std::rc::Rc<Vec<Stem>>, String)>,
+    stems_for_opening: Option<(String, Vec<Stem>, String)>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
 }
@@ -522,9 +522,6 @@ impl StemApp {
             .name
             .clone()
             .unwrap_or_else(|| "the separated song".into());
-        // Shared by the save and the held copy rather than copied for each:
-        // six stems of a song run to hundreds of MB.
-        let stems = std::rc::Rc::new(stems);
         #[cfg(target_arch = "wasm32")]
         if let Some(id) = job.session.clone() {
             let kept_text = format!(
@@ -571,11 +568,16 @@ impl StemApp {
             }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
-        self.load_song(with_original(&song, std::rc::Rc::unwrap_or_clone(stems)));
+        self.load_song(with_original(&song, stems));
         if let (Some(h), Some(p)) = (head, &self.params) {
             p.request_seek(h);
         }
         self.status = format!("Separated into {n} stems in {secs:.0} s.  {}", self.status);
+        #[cfg(target_arch = "wasm32")]
+        log::info!(
+            "separator: memory: page wasm {:.0} MB with the stems shown",
+            separator::page_wasm_mb()
+        );
     }
 
     /// Loads a song: builds lanes, shared params and the output.
@@ -690,8 +692,8 @@ impl StemApp {
                 .into_iter()
                 .map(|(name, st)| Stem {
                     name,
-                    left: st.left,
-                    right: st.right,
+                    left: st.left.into(),
+                    right: st.right.into(),
                 })
                 .collect(),
         };
@@ -705,8 +707,8 @@ impl StemApp {
             s.stems.retain(|st| st.name != name);
             s.stems.push(Stem {
                 name: name.into(),
-                left,
-                right,
+                left: left.into(),
+                right: right.into(),
             });
             self.load_song(s);
         }
@@ -1388,7 +1390,11 @@ impl StemApp {
         if let Some((stems, secs)) = finished {
             let stems = stems
                 .into_iter()
-                .map(|(name, left, right)| Stem { name, left, right })
+                .map(|(name, left, right)| Stem {
+                    name,
+                    left: left.into(),
+                    right: right.into(),
+                })
                 .collect();
             match self.separating.take() {
                 Some(job) => self.apply_separated(job, stems, secs),
@@ -1643,9 +1649,7 @@ impl eframe::App for StemApp {
                             .as_ref()
                             .is_some_and(|(id, ..)| opened.session.as_deref() == Some(id.as_str()));
                         let song = match self.stems_for_opening.take_if(|_| holds_these) {
-                            Some((_, stems, _)) => {
-                                with_original(&opened.song, std::rc::Rc::unwrap_or_clone(stems))
-                            }
+                            Some((_, stems, _)) => with_original(&opened.song, stems),
                             None => opened.song,
                         };
                         self.session = opened.session;
@@ -1735,6 +1739,37 @@ mod tests {
             session: session.map(String::from),
             name: None,
         }
+    }
+
+    fn stem(name: &str, v: f32) -> Stem {
+        Stem {
+            name: name.into(),
+            left: vec![v; 4].into(),
+            right: vec![-v; 4].into(),
+        }
+    }
+
+    #[test]
+    fn separated_stems_and_the_original_are_shared_not_copied() {
+        let source = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("original", 0.5)],
+        };
+        let stems = vec![stem("bass", 0.1), stem("drums", 0.2)];
+        let song = with_original(&source, stems.clone());
+        assert_eq!(song.stems.len(), 3);
+        for (a, b) in stems.iter().zip(&song.stems) {
+            assert!(
+                a.left.shares(&b.left) && a.right.shares(&b.right),
+                "{}",
+                a.name
+            );
+        }
+        assert!(
+            song.stems[2].left.shares(&source.stems[0].left),
+            "the original"
+        );
     }
 
     #[test]

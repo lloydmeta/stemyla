@@ -243,7 +243,10 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
     #[cfg(not(test))]
     {
         let t: js_sys::Array = transfer.iter().collect();
-        let _ = scope().post_message_with_transfer(&o, &t);
+        // Not through `log`, which posts too.
+        if let Err(e) = scope().post_message_with_transfer(&o, &t) {
+            web_sys::console::error_2(&"stem-worker: a message to the page was lost:".into(), &e);
+        }
     }
 }
 
@@ -646,14 +649,17 @@ impl Source for &ModelFile {
 
 /// Uploads the weights; returns the seconds taken and a description of
 /// the GPU.
-async fn build(file: &ModelFile, msg: &JsValue) -> Result<(f64, String), LoadError> {
+async fn build(file: ModelFile, msg: &JsValue) -> Result<(f64, String), LoadError> {
     let t0 = now_s();
     // Parsed before the GPU opens: a file that is not safetensors at all is
     // then reported (and an unusable stored copy removed) even on a device
     // without WebGPU, instead of being kept behind a GPU error.
-    Store::from_source(file)?;
+    Store::from_source(&file)?;
     let g = gpu(msg).await?;
-    let net = Net::load_store(&g, Store::from_source(file)?, budget(msg))?;
+    let net = Net::load_store(&g, Store::from_source(&file)?, budget(msg))?;
+    // Its cached blocks, or a checked download's bytes, are not needed for
+    // the GPU checks and kernel timing that follow.
+    drop(file);
     g.done().await;
     if let Some(e) = g.take_errors().into_iter().next() {
         return Err(LoadError::Gpu(format!(
@@ -685,7 +691,8 @@ async fn init(msg: &JsValue) -> Result<(), String> {
         return Ok(());
     }
     let file = ModelFile::blob(cached.unchecked_into());
-    match build(&file, msg).await {
+    let size = (&file).size();
+    match build(file, msg).await {
         Ok((secs, gpu)) => {
             post_model(
                 true,
@@ -707,7 +714,7 @@ async fn init(msg: &JsValue) -> Result<(), String> {
                 false,
                 &format!(
                     "the model in browser storage is unusable ({} bytes, {e}) and {fate}",
-                    (&file).size()
+                    size
                 ),
             )
             .await;
@@ -742,9 +749,11 @@ async fn load_model(msg: &JsValue) -> Result<(), String> {
         .await;
         return Ok(());
     };
-    match build(&file, msg).await {
+    // A handle, not a copy: the picked file, or the bytes sent.
+    let to_store = file.as_js().clone();
+    match build(file, msg).await {
         Ok((secs, gpu)) => {
-            let cached = cache_put(CACHE_NAME, file.as_js())
+            let cached = cache_put(CACHE_NAME, &to_store)
                 .await
                 .as_bool()
                 .unwrap_or(false);
@@ -1377,9 +1386,7 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         }
     };
     let secs = now_s() - t0;
-    // Released before the rename below, and before the next separation.
-    let built = build(&file, msg).await;
-    drop(file);
+    let built = build(file, msg).await;
     match built {
         Ok((load, gpu)) => {
             // The verified download becomes the stored model by a rename:

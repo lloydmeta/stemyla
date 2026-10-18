@@ -317,8 +317,8 @@ pub fn perf_song(n_stems: usize) -> (Arc<Song>, StretcherKind) {
         let (name, st) = &s.stems[i % s.stems.len()];
         stems.push(Stem {
             name: format!("{name}{i}"),
-            left: st.left.clone(),
-            right: st.right.clone(),
+            left: st.left.clone().into(),
+            right: st.right.clone().into(),
         });
     }
     let song = Song {

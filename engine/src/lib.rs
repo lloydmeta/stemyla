@@ -14,5 +14,5 @@ pub mod wav;
 pub use decode::{Audio, decode_bytes, decode_path};
 pub use params::SharedParams;
 pub use player::{Player, PlayerConfig};
-pub use song::{Song, Stem};
+pub use song::{Samples, Song, Stem};
 pub use stretch::{Stretcher, StretcherKind};

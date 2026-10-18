@@ -2,13 +2,54 @@
 
 use crate::decode::{Audio, decode_bytes, decode_path};
 use anyhow::{Result, anyhow};
+use std::ops::Deref;
 use std::path::Path;
+use std::sync::Arc;
+
+/// One channel of a stem: immutable once made, and shared rather than
+/// copied when a stem or song is cloned.  A song's stems run to hundreds of
+/// MB, and the web page's WebAssembly memory never shrinks, so a copy made
+/// for a moment (to save stems while they are shown, say) stays for good.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Samples(Arc<Vec<f32>>);
+
+impl Samples {
+    pub fn as_slice(&self) -> &[f32] {
+        &self.0
+    }
+
+    /// Whether `self` and `other` are the same buffer, not just equal.
+    pub fn shares(&self, other: &Samples) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Deref for Samples {
+    type Target = [f32];
+
+    fn deref(&self) -> &[f32] {
+        &self.0
+    }
+}
+
+/// Takes the vector as it is: no copy.
+impl From<Vec<f32>> for Samples {
+    fn from(v: Vec<f32>) -> Self {
+        Self(Arc::new(v))
+    }
+}
+
+impl PartialEq<Vec<f32>> for Samples {
+    fn eq(&self, other: &Vec<f32>) -> bool {
+        *self.0 == *other
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Stem {
     pub name: String,
-    pub left: Vec<f32>,
-    pub right: Vec<f32>,
+    pub left: Samples,
+    pub right: Samples,
 }
 
 #[derive(Clone, Debug)]
@@ -55,24 +96,34 @@ impl Song {
         }
         items.sort_by_key(|(n, _)| rank(n));
         let sample_rate = items[0].1.sample_rate;
-        let mut stems = Vec::with_capacity(items.len());
+        let mut decoded = Vec::with_capacity(items.len());
         for (name, audio) in items {
-            let (mut left, mut right) = match audio.channels.len() {
-                0 => return Err(anyhow!("stem {name} has no channels")),
-                1 => (audio.channels[0].clone(), audio.channels[0].clone()),
-                _ => (audio.channels[0].clone(), audio.channels[1].clone()),
+            let mut channels = audio.channels.into_iter().take(2).map(|c| {
+                if audio.sample_rate == sample_rate {
+                    c
+                } else {
+                    resample_linear(&c, audio.sample_rate, sample_rate)
+                }
+            });
+            let Some(left) = channels.next() else {
+                return Err(anyhow!("stem {name} has no channels"));
             };
-            if audio.sample_rate != sample_rate {
-                left = resample_linear(&left, audio.sample_rate, sample_rate);
-                right = resample_linear(&right, audio.sample_rate, sample_rate);
-            }
-            stems.push(Stem { name, left, right });
+            decoded.push((name, left, channels.next()));
         }
-        let frames = stems.iter().map(|s| s.left.len()).max().unwrap_or(0);
-        for s in &mut stems {
-            s.left.resize(frames, 0.0);
-            s.right.resize(frames, 0.0);
-        }
+        let frames = decoded.iter().map(|(_, l, _)| l.len()).max().unwrap_or(0);
+        let padded = |mut c: Vec<f32>| -> Samples {
+            c.resize(frames, 0.0);
+            c.into()
+        };
+        let stems = decoded
+            .into_iter()
+            .map(|(name, left, right)| {
+                let left = padded(left);
+                // A mono stem plays the same samples on both sides.
+                let right = right.map_or_else(|| left.clone(), padded);
+                Stem { name, left, right }
+            })
+            .collect();
         Ok(Song {
             sample_rate,
             frames,
@@ -128,8 +179,8 @@ impl Song {
     /// The mix lane: every stem at full volume, summed with `dsp::mix`.
     pub fn mix_lane(&self) -> (Vec<f32>, Vec<f32>) {
         let volumes = vec![1.0; self.stems.len()];
-        let lefts: Vec<Vec<f32>> = self.stems.iter().map(|s| s.left.clone()).collect();
-        let rights: Vec<Vec<f32>> = self.stems.iter().map(|s| s.right.clone()).collect();
+        let lefts: Vec<&[f32]> = self.stems.iter().map(|s| s.left.as_slice()).collect();
+        let rights: Vec<&[f32]> = self.stems.iter().map(|s| s.right.as_slice()).collect();
         (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
     }
 }
@@ -200,5 +251,30 @@ mod tests {
         assert_eq!(s.stems[1].left[..8], [0.25; 8]);
         assert_eq!(s.stems[1].right[9], 0.0);
         assert_eq!(s.stems[0].right[0], 0.5);
+    }
+
+    #[test]
+    fn a_mono_stem_shares_one_buffer_and_clones_share_every_buffer() {
+        let s = Song::from_audio(vec![
+            ("bass".into(), audio(10, vec![vec![0.25; 4]])),
+            ("drums".into(), audio(10, vec![vec![1.0; 4], vec![0.5; 4]])),
+        ])
+        .unwrap();
+        let (drums, bass) = (&s.stems[0], &s.stems[1]);
+        assert!(bass.left.shares(&bass.right), "mono: one buffer");
+        assert!(!drums.left.shares(&drums.right));
+        let copy = s.clone();
+        for (a, b) in s.stems.iter().zip(&copy.stems) {
+            assert!(a.left.shares(&b.left) && a.right.shares(&b.right));
+        }
+    }
+
+    #[test]
+    fn samples_from_a_vector_keep_its_buffer() {
+        let v = vec![1.0, 2.0];
+        let at = v.as_ptr();
+        let s = Samples::from(v);
+        assert_eq!(s.as_slice().as_ptr(), at);
+        assert_eq!(s, vec![1.0, 2.0]);
     }
 }

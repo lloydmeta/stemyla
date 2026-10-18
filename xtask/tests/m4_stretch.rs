@@ -20,8 +20,8 @@ fn engine_song(s: &synth::Song) -> Arc<Song> {
             .iter()
             .map(|(n, st)| Stem {
                 name: n.clone(),
-                left: st.left.clone(),
-                right: st.right.clone(),
+                left: st.left.clone().into(),
+                right: st.right.clone().into(),
             })
             .collect(),
     })

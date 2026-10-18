@@ -15,7 +15,7 @@
 
 use crate::store_meta::Meta;
 use anyhow::{Result, anyhow};
-use engine::{Song, Stem};
+use engine::{Samples, Song, Stem};
 use js_sys::{Array, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -318,8 +318,8 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
             .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
         let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
         let mut ch = audio.channels.into_iter();
-        let left = ch.next().unwrap_or_default();
-        let right = ch.next().unwrap_or_else(|| left.clone());
+        let left: Samples = ch.next().unwrap_or_default().into();
+        let right = ch.next().map_or_else(|| left.clone(), Samples::from);
         stems.push(Stem {
             name: name.clone(),
             left,

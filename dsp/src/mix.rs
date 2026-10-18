@@ -6,7 +6,7 @@
 ///
 /// There must be at least one stem, one volume for every stem, and every stem
 /// must be the same length.
-pub fn mix(stems: &[Vec<f32>], volumes: &[f32]) -> Vec<f32> {
+pub fn mix(stems: &[&[f32]], volumes: &[f32]) -> Vec<f32> {
     assert!(stems.len() > 0, "mix needs at least one stem");
     assert!(
         volumes.len() == stems.len(),
@@ -57,28 +57,28 @@ mod tests {
     #[test]
     fn one_stem_at_full_volume_is_unchanged() {
         let stem = vec![0.1, -0.2, 0.3];
-        assert_eq!(mix(&[stem.clone()], &[1.0]), stem);
+        assert_eq!(mix(&[&stem], &[1.0]), stem);
     }
 
     #[test]
     fn all_volumes_at_zero_is_silence() {
         let a = vec![0.5, 0.25];
         let b = vec![0.25, 0.5];
-        assert_eq!(mix(&[a, b], &[0.0, 0.0]), vec![0.0, 0.0]);
+        assert_eq!(mix(&[&a, &b], &[0.0, 0.0]), vec![0.0, 0.0]);
     }
 
     #[test]
     fn adds_stems_together() {
         let a = vec![0.5, 0.25];
         let b = vec![0.25, 0.5];
-        assert_eq!(mix(&[a, b], &[1.0, 1.0]), vec![0.75, 0.75]);
+        assert_eq!(mix(&[&a, &b], &[1.0, 1.0]), vec![0.75, 0.75]);
     }
 
     #[test]
     fn clamps_to_one() {
         let a = vec![0.9, -0.9];
         let b = vec![0.9, -0.9];
-        assert_eq!(mix(&[a, b], &[1.0, 1.0]), vec![1.0, -1.0]);
+        assert_eq!(mix(&[&a, &b], &[1.0, 1.0]), vec![1.0, -1.0]);
     }
 
     #[test]
@@ -86,13 +86,13 @@ mod tests {
     fn missing_volume_panics() {
         let a = vec![0.5];
         let b = vec![0.25];
-        mix(&[a, b], &[1.0]);
+        mix(&[&a, &b], &[1.0]);
     }
 
     #[test]
     #[should_panic(expected = "same length")]
     fn different_lengths_panic() {
-        mix(&[vec![0.5, 0.1], vec![0.25]], &[1.0, 1.0]);
+        mix(&[&[0.5, 0.1], &[0.25]], &[1.0, 1.0]);
     }
 
     #[test]

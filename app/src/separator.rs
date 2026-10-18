@@ -90,6 +90,8 @@ pub struct Separator {
     events: Rc<RefCell<VecDeque<Event>>>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
     _onerror: Closure<dyn FnMut(web_sys::Event)>,
+    /// The separation's stems as their segments arrive.
+    assembly: Rc<RefCell<Assembly>>,
     /// Extra fields sent with every model and separate message.
     settings: Vec<(String, JsValue)>,
     pub model_ready: bool,
@@ -158,6 +160,16 @@ fn url_settings() -> Vec<(String, JsValue)> {
         }
     }
     out
+}
+
+/// Megabytes of the page's WebAssembly memory, which only ever grows: on iOS
+/// the whole tab is stopped at a fixed limit.
+pub fn page_wasm_mb() -> f64 {
+    let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
+    mem.buffer()
+        .unchecked_into::<js_sys::ArrayBuffer>()
+        .byte_length() as f64
+        / 1e6
 }
 
 /// Copies one "segment" message (every stem's next samples, as
@@ -252,12 +264,6 @@ impl Separator {
                     })
                 }
                 Some("done") => {
-                    let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
-                    let bytes = mem
-                        .buffer()
-                        .unchecked_into::<js_sys::ArrayBuffer>()
-                        .byte_length();
-                    log::info!("separator: memory: page wasm {:.0} MB", bytes as f64 / 1e6);
                     let done = asm.borrow_mut().done();
                     match done {
                         None => None,
@@ -313,10 +319,10 @@ impl Separator {
         // An uncaught error does not end the worker by itself, and one that
         // trapped while holding the storage lock would keep every other tab
         // waiting; terminating it releases the lock.
-        let (ev, dead) = (events.clone(), worker.clone());
+        let (ev, dead, asm) = (events.clone(), worker.clone(), assembly.clone());
         let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
             dead.terminate();
-            assembly.borrow_mut().clear();
+            asm.borrow_mut().clear();
             let reason = get(&e, "message")
                 .as_string()
                 .filter(|m| !m.is_empty())
@@ -330,6 +336,7 @@ impl Separator {
             events,
             _onmessage: onmessage,
             _onerror: onerror,
+            assembly,
             settings,
             model_ready: false,
             model_stored: false,
@@ -392,6 +399,7 @@ impl Separator {
     /// deleted.
     pub fn stop(&mut self) {
         self.worker.terminate();
+        self.assembly.borrow_mut().clear();
         self.running = false;
         self.model_loading = false;
         self.stopped
