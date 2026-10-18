@@ -243,7 +243,8 @@ impl Separator {
             _onerror: onerror,
             settings,
             model_ready: false,
-            model_loading: false,
+            // The worker is asked for its stored model as soon as it starts.
+            model_loading: true,
             running: false,
             stopped: None,
             progress: (0, 0, 0.0),
