@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
-use xtask::serve::{resolve, serve};
+use xtask::serve::{inject_into, resolve, serve, serve_with};
 
 fn get(port: u16, path: &str) -> (String, Vec<u8>) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -72,4 +72,45 @@ fn serves_files_with_types_and_refuses_escapes() {
     );
     assert_eq!(resolve(&m, "//etc/passwd"), None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn injects_scripts_into_html_pages_only() {
+    let dir = std::env::temp_dir().join(format!("xtask-serve-inject-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("index.html"),
+        "<!DOCTYPE html><html><HEAD><script type=module src=app.js></script></HEAD></html>",
+    )
+    .unwrap();
+    std::fs::write(dir.join("app.js"), "<head>").unwrap();
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let inject = vec!["/__e2e/log.js".to_string(), "/x.js\"><b>".to_string()];
+    std::thread::spawn(move || serve_with(listener, vec![("/".to_string(), dir)], inject));
+
+    let (h, body) = get(port, "/");
+    assert!(
+        h.contains(&format!("Content-Length: {}", body.len())),
+        "{h}"
+    );
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        "<!DOCTYPE html><html><HEAD><script src=\"/__e2e/log.js\"></script><script src=\"/x.jsb\"></script><script type=module src=app.js></script></HEAD></html>",
+        "first in the head, quotes and angle brackets dropped from URLs"
+    );
+    assert_eq!(
+        get(port, "/app.js").1,
+        b"<head>",
+        "scripts are served as they are"
+    );
+}
+
+#[test]
+fn injects_at_the_start_without_a_head() {
+    assert_eq!(
+        inject_into("<p>hi</p>", "<script></script>"),
+        "<script></script><p>hi</p>"
+    );
 }

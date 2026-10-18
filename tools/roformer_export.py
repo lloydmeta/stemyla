@@ -16,8 +16,9 @@
    * web/clip.f32 and web/clip_ref.f32: a 0.5 s stereo clip and the real
      network's demix_track output for it with 0.37 s chunks (33 STFT
      frames; raw little-endian f32, [2, N] and [6, 2, N]), for the
-     in-browser check (tools/worker_check.mjs).  Short, because WebGPU on
-     SwiftShader (the CPU) runs the network at well under 1 GFLOP/s.
+     in-browser check (`xtask e2e worker-check --reference <out_dir>/web`).
+     Short, because WebGPU on SwiftShader (the CPU) runs the network at
+     well under 1 GFLOP/s.
 
 The checkpoint is loaded with torch.load(weights_only=True) and strictly.
 

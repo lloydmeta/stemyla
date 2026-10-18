@@ -1,6 +1,6 @@
 //! Each kernel against a plain CPU loop.  Runs on whatever adapter wgpu
 //! finds; in CI-like runs without a GPU, point Vulkan at SwiftShader:
-//! `VK_ICD_FILENAMES=/opt/pw-browsers/chromium-1194/chrome-linux/vk_swiftshader_icd.json WGPU_BACKEND=vulkan`.
+//! `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan`.
 //! Tests skip with a message when no adapter is available.
 
 use roformer_gpu::{Act, Gpu, MatMul, TILES, View};

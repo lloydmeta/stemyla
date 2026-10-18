@@ -1,4 +1,6 @@
 //! The Reset dialog: what it says, and which choice each button makes.
+//! Native only: egui_kittest renders through wgpu.
+#![cfg(not(target_arch = "wasm32"))]
 
 use app::reset::{
     DialogOutcome, ProgressOutcome, Reset, dialog, not_deleted, not_refreshed, progress,

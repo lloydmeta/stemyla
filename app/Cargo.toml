@@ -32,8 +32,13 @@ wasm-bindgen-futures = "0.4.79"
 js-sys = "0.3.106"
 web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Performance", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "HtmlInputElement", "FileList", "File", "Blob", "Location", "Event", "Navigator", "StorageManager", "ErrorEvent"] }
 
-[dev-dependencies]
+# The UI tests render natively through wgpu.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 egui_kittest = { version = "0.36.2", features = ["eframe", "snapshot", "wgpu"] }
+
+# Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.79"
 
 [lints]
 workspace = true

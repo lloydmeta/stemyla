@@ -342,3 +342,37 @@ pub async fn usage() -> (f64, f64) {
 pub fn download(name: &str, bytes: &[u8], mime: &str) {
     save_file(name, &Uint8Array::from(bytes), mime);
 }
+
+/// Browser tests of the private write path (`cargo run -p xtask --
+/// web-test`); the public functions are tested in `tests/web.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    async fn a_write_never_brings_back_a_removed_folder() {
+        st_remove(ROOT).await;
+        let refused = write_within("sessions/42", "stems/bass.wav", &[1, 2, 3]).await;
+        assert_eq!(
+            refused.expect_err("refused").to_string(),
+            "sessions/42 is gone (forgotten?)"
+        );
+        assert!(read("sessions/42/stems/bass.wav").await.is_none());
+        assert!(st_list(ROOT).await.unchecked_into::<Array>().length() == 0);
+
+        write("sessions/42/meta", b"name\tacme\n")
+            .await
+            .expect("written");
+        write_within("sessions/42", "stems/bass.wav", &[1, 2, 3])
+            .await
+            .expect("written");
+        assert_eq!(
+            read("sessions/42/stems/bass.wav").await,
+            Some(vec![1, 2, 3])
+        );
+        st_remove(ROOT).await;
+    }
+}

@@ -1,5 +1,7 @@
 //! M6 acceptance: interaction tests through AccessKit and pointer events,
 //! plus snapshot PNGs in `app/tests/snapshots`.
+//! Native only: egui_kittest renders through wgpu.
+#![cfg(not(target_arch = "wasm32"))]
 
 use app::StemApp;
 use eframe::egui::accesskit::Role;

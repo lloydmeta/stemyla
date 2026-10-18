@@ -8,7 +8,11 @@
 //! a served directory, and sends `.wasm` as `application/wasm`.
 //!
 //! `--mount /prefix=dir` serves another directory under a URL prefix (the
-//! headless tests use it for weights and test clips).
+//! end-to-end tests use it for weights and test clips).
+//!
+//! `--inject /url.js` adds `<script src="/url.js"></script>` at the start of
+//! every HTML page's `<head>`, so it runs before the page's own scripts
+//! (`xtask e2e` uses it for its console capture and audio stand-ins).
 
 use anyhow::{Context, Result, bail};
 use std::fs::File;
@@ -24,6 +28,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut root = PathBuf::from("app/dist");
     let mut port: u16 = 8080;
     let mut mounts: Mounts = Vec::new();
+    let mut inject = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -35,6 +40,14 @@ pub fn run(args: &[String]) -> Result<()> {
                 let spec = args.get(i + 1).context("--mount needs /prefix=dir")?;
                 let (prefix, dir) = spec.split_once('=').context("--mount needs /prefix=dir")?;
                 mounts.push((normalise_prefix(prefix), PathBuf::from(dir)));
+                i += 1;
+            }
+            "--inject" => {
+                inject.push(
+                    args.get(i + 1)
+                        .context("--inject needs a script URL")?
+                        .clone(),
+                );
                 i += 1;
             }
             other if other.starts_with("--") => bail!("unknown option {other}"),
@@ -55,7 +68,7 @@ pub fn run(args: &[String]) -> Result<()> {
     // Scripts read this line to find the port when started with --port 0.
     println!("serving {} at http://{addr}/", root.display());
     std::io::stdout().flush()?;
-    serve(listener, mounts)
+    serve_with(listener, mounts, inject)
 }
 
 fn normalise_prefix(p: &str) -> String {
@@ -68,20 +81,47 @@ fn normalise_prefix(p: &str) -> String {
 }
 
 /// Accepts connections forever, one thread per connection.
-pub fn serve(listener: TcpListener, mut mounts: Mounts) -> Result<()> {
+pub fn serve(listener: TcpListener, mounts: Mounts) -> Result<()> {
+    serve_with(listener, mounts, Vec::new())
+}
+
+/// [`serve`], adding a script tag for each of `inject` to HTML pages.
+pub fn serve_with(listener: TcpListener, mut mounts: Mounts, inject: Vec<String>) -> Result<()> {
     // Longest prefix first, so /weights/ wins over /.
     mounts.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-    let mounts = Arc::new(mounts);
+    let site = Arc::new((mounts, script_tags(&inject)));
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let mounts = Arc::clone(&mounts);
+        let site = Arc::clone(&site);
         std::thread::spawn(move || {
-            if let Err(e) = handle(stream, &mounts) {
+            let (mounts, tags) = &*site;
+            if let Err(e) = handle(stream, mounts, tags) {
                 eprintln!("serve: {e:#}");
             }
         });
     }
     Ok(())
+}
+
+fn script_tags(urls: &[String]) -> String {
+    urls.iter()
+        .map(|u| {
+            format!(
+                "<script src=\"{}\"></script>",
+                u.replace(['"', '<', '>'], "")
+            )
+        })
+        .collect()
+}
+
+/// `html` with `tags` at the start of its `<head>` (or of the document,
+/// without one).
+pub fn inject_into(html: &str, tags: &str) -> String {
+    let at = html
+        .to_ascii_lowercase()
+        .find("<head>")
+        .map_or(0, |i| i + "<head>".len());
+    format!("{}{tags}{}", &html[..at], &html[at..])
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -152,7 +192,7 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle(mut stream: TcpStream, mounts: &[(String, PathBuf)]) -> Result<()> {
+fn handle(mut stream: TcpStream, mounts: &[(String, PathBuf)], tags: &str) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -180,6 +220,21 @@ fn handle(mut stream: TcpStream, mounts: &[(String, PathBuf)]) -> Result<()> {
     let Ok(mut file) = File::open(&path) else {
         return respond(&mut stream, "404 Not Found", "not found\n");
     };
+    if !tags.is_empty() && content_type(&path).starts_with("text/html") {
+        let mut html = String::new();
+        file.read_to_string(&mut html)?;
+        let page = inject_into(&html, tags);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            page.len()
+        )?;
+        if method == "GET" {
+            stream.write_all(page.as_bytes())?;
+        }
+        stream.flush()?;
+        return Ok(());
+    }
     let len = file.metadata()?.len();
     write!(
         stream,
