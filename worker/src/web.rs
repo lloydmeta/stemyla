@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+use js_sys::{Float32Array, Object, Reflect, Uint8Array};
 use roformer::demix::Demixer;
 use roformer::separate::{analyse, apply_masks};
-use roformer::weights::WeightError;
+use roformer::weights::{Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
@@ -216,8 +216,17 @@ fn post(fields: &[(&str, JsValue)], transfer: &[JsValue]) {
     for (k, v) in fields {
         let _ = Reflect::set(&o, &JsValue::from_str(k), v);
     }
-    let t: Array = transfer.iter().collect();
-    let _ = scope().post_message_with_transfer(&o, &t);
+    // Under test the page is the test runner, so messages are kept instead.
+    #[cfg(test)]
+    {
+        let _ = transfer;
+        tests::SENT.with_borrow_mut(|s| s.push(o.into()));
+    }
+    #[cfg(not(test))]
+    {
+        let t: js_sys::Array = transfer.iter().collect();
+        let _ = scope().post_message_with_transfer(&o, &t);
+    }
 }
 
 /// `ok`: whether the request succeeded.  `loaded` and `stored` say what
@@ -518,6 +527,10 @@ impl From<String> for LoadError {
 /// the GPU.
 async fn build(bytes: &[u8], msg: &JsValue) -> Result<(f64, String), LoadError> {
     let t0 = now_s();
+    // Parsed before the GPU opens: a file that is not safetensors at all is
+    // then reported (and an unusable stored copy removed) even on a device
+    // without WebGPU, instead of being kept behind a GPU error.
+    Store::new(bytes).map_err(LoadError::Weights)?;
     let g = gpu(msg).await?;
     let net = Net::load(&g, bytes, budget(msg)).map_err(LoadError::Weights)?;
     g.done().await;
@@ -1354,3 +1367,6 @@ async fn choose_kernels(gpu: &Gpu) {
     let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);
     cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
 }
+
+#[cfg(test)]
+mod tests;
