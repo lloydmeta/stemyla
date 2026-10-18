@@ -857,6 +857,10 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
     )?;
     p.check(
         r["replies"][0]["ok"] == json!(true)
+            && r["replies"][0]["stored"] == json!(true)
+            && r["replies"][0]["text"].as_str().is_some_and(|t| {
+                t.contains("saved in browser storage") && !t.contains("could not")
+            })
             && r["files"]
                 .as_object()
                 .is_some_and(|f| f.len() <= 2 && !f.contains_key("download.part")),
@@ -899,18 +903,26 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
         "two models are never on the GPU at once, and the stored one is kept",
     );
 
-    p.note("case: a picked file is committed");
+    p.note("case: a picked file is committed, over a stored model");
     let r = in_page(
         p,
-        "await e2e.wipe();
+        "await e2e.plant('bs_roformer_sw.safetensors', [7]);
         const bytes = new Uint8Array(await (await fetch(args[0])).arrayBuffer());
         return e2e.ask([{ type: 'model', bytes, ...args[1] }]);",
         json!([model, opts]),
         1200,
     )?;
     p.check(
-        r["replies"][0]["ok"] == json!(true) && r["replies"][0]["stored"] == json!(true),
-        "the picked file loads and is stored",
+        r["replies"][0]["ok"] == json!(true)
+            && r["replies"][0]["stored"] == json!(true)
+            && r["replies"][0]["text"].as_str().is_some_and(|t| {
+                t.contains("saved in browser storage") && !t.contains("could not")
+            })
+            && r["files"].as_object().is_some_and(|f| {
+                !f.contains_key("download.part")
+                    && f["bs_roformer_sw.safetensors"].as_u64() > Some(1)
+            }),
+        "the picked file loads and replaces the stored one",
     );
     Ok(())
 }

@@ -150,7 +150,7 @@ impl Settings {
                 field::MODEL_URL => s.model_url = text,
                 field::BENCH => s.bench = text,
                 field::ATTN => s.attn = text,
-                field::PROFILE => s.profile = !v.is_empty(),
+                field::PROFILE => s.profile = !v.is_empty() && number != Some(0.0),
                 _ => {}
             }
         }
@@ -655,6 +655,8 @@ mod tests {
         assert_eq!(s.chunk, None);
         assert_eq!(s.step_limit, Some(2.5));
         assert!(!s.profile, "empty is off");
+        assert!(!Settings::from_query("profile=0").profile, "zero is off");
+        assert!(Settings::from_query("profile=yes").profile);
         assert_eq!(
             Settings {
                 step_limit: Some(2.5),

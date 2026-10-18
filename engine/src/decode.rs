@@ -51,33 +51,28 @@ fn frames_to_reserve(stated: Option<u64>, most: Option<u64>) -> usize {
     usize::try_from(stated.min(most)).unwrap_or(0)
 }
 
-/// The most frames `byte_len` bytes of audio in `params`' codec could hold.
+/// The most frames to reserve for `byte_len` bytes of audio in `params`'
+/// codec.
 ///
-/// MP3's smallest packet is an unpadded one at its lowest bitrate: 1,152
-/// frames at 32 kbit/s for MPEG-1's rates of 32 kHz and up, and 576 frames
-/// at 8 kbit/s below them (MPEG-2 and 2.5).  That is at most 12 frames a
-/// byte at 48 kHz and 24 at 24 kHz, the most of any rate.  An MP3 whose
-/// length is overstated (a crafted header, or a variable-bitrate file with
-/// no length tag whose length is estimated from a quiet start) can still
-/// reserve that much.  Every other codec here stores each sample in
+/// An MP3 is reserved for at most what it would hold at 128 kbit/s.  Most
+/// music is at that bitrate or more, so is reserved in full; a file at a
+/// lower one grows past its reservation an eighth at a time (see
+/// `append`).  An overstated length (a crafted header, or a variable-
+/// bitrate file with no length tag, whose length symphonia estimates from
+/// its first frames, which a quiet start makes small) then reserves at most
+/// 1.5 times a 192 kbit/s file, where the smallest legal packet would allow
+/// six times it.  Every other codec here stores each sample in
 /// `bits_per_coded_sample` bits, or in at least a byte (A-law, mu-law and
 /// float WAVs do not state it).
 fn most_frames(params: &AudioCodecParameters, byte_len: u64) -> u64 {
     if params.codec == CODEC_ID_MP3 {
-        let Some(rate) = params
+        // An unknown or impossible rate counts as the highest MP3 has.
+        let rate = params
             .sample_rate
             .filter(|r| (8_000..=48_000).contains(r))
-            .map(u64::from)
-        else {
-            return byte_len.saturating_mul(24);
-        };
-        // A packet's size in bytes is rounded down, as in the MP3 header.
-        let (frames, bytes) = if rate >= 32_000 {
-            (1_152, 144 * 32_000 / rate)
-        } else {
-            (576, 72 * 8_000 / rate)
-        };
-        return byte_len.saturating_mul(frames) / bytes;
+            .map_or(48_000, u64::from);
+        const BYTES_PER_SECOND: u64 = 128_000 / 8;
+        return byte_len.saturating_mul(rate) / BYTES_PER_SECOND;
     }
     let bits = params.bits_per_coded_sample.filter(|b| *b > 0).unwrap_or(8);
     let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
@@ -335,20 +330,22 @@ mod tests {
     }
 
     #[test]
-    fn an_mp3_holds_at_most_its_lowest_bitrate_worth() {
-        // 32 kbit/s at 48 kHz: 1,152 frames in 96 bytes.
-        assert_eq!(most_frames(&mp3_at(Some(48_000)), 960), 11_520);
-        // At 44.1 kHz the packet is 104 bytes (104.49 rounded down).
-        assert_eq!(most_frames(&mp3_at(Some(44_100)), 1040), 11_520);
-        assert_eq!(most_frames(&mp3_at(Some(32_000)), 1440), 11_520);
-        // 8 kbit/s at 24 kHz: 576 frames in 24 bytes, the most of any rate.
-        assert_eq!(most_frames(&mp3_at(Some(24_000)), 240), 5_760);
-        assert_eq!(most_frames(&mp3_at(Some(22_050)), 260), 5_760);
-        assert_eq!(most_frames(&mp3_at(Some(8_000)), 720), 5_760);
-        // An unknown or impossible rate gets the most of any rate.
-        assert_eq!(most_frames(&mp3_at(None), 1000), 24_000);
-        assert_eq!(most_frames(&mp3_at(Some(0)), 1000), 24_000);
-        assert_eq!(most_frames(&mp3_at(Some(96_000)), 1000), 24_000);
+    fn an_mp3_is_reserved_for_at_most_its_length_at_128_kbit_s() {
+        // 16,000 bytes is a second at 128 kbit/s.
+        assert_eq!(most_frames(&mp3_at(Some(44_100)), 16_000), 44_100);
+        assert_eq!(most_frames(&mp3_at(Some(24_000)), 32_000), 48_000);
+        // An unknown or impossible rate counts as 48 kHz.
+        for rate in [None, Some(0), Some(96_000)] {
+            assert_eq!(most_frames(&mp3_at(rate), 16_000), 48_000, "{rate:?}");
+        }
+        // A 192 kbit/s file of 24,000 bytes holds a second; its reservation
+        // is capped at 1.5 times that, however long its header says it is.
+        let a_second_at_192k = most_frames(&mp3_at(Some(44_100)), 24_000);
+        assert_eq!(a_second_at_192k, 66_150);
+        assert_eq!(
+            frames_to_reserve(Some(10 * 44_100), Some(a_second_at_192k)),
+            66_150
+        );
     }
 
     #[test]

@@ -76,6 +76,12 @@ export async function opfs_has(name) {
   try { const root = await navigator.storage.getDirectory(); await root.getFileHandle(name); return true; }
   catch (e) { return e.name !== "NotFoundError"; }
 }
+// Safari 27 writes a typed array view's whole buffer, not just the view
+// (`new Uint8Array(16).subarray(4, 8)` writes 16 bytes), so only whole
+// arrays are written: a view is copied out first.
+function whole(bytes) {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+}
 async function write_file(fh, body) {
   const w = await fh.createWritable();
   try {
@@ -95,7 +101,7 @@ export async function opfs_write(name, src) {
     await write_file(fh, async (w) => {
       for (let at = 0; at < size; at += slice) {
         const end = Math.min(at + slice, size);
-        await w.write(src instanceof Blob ? src.slice(at, end) : src.subarray(at, end));
+        await w.write(src instanceof Blob ? src.slice(at, end) : whole(src.subarray(at, end)));
       }
     });
     return true;
@@ -128,7 +134,7 @@ export async function gpu_info(pref) {
 export async function blob_bytes(blob) {
   return new Uint8Array(await blob.arrayBuffer());
 }
-export async function download_to_opfs(url, name, progress) {
+export async function download_to_opfs(url, name, progress, follow) {
   const ctl = new AbortController();
   let idle;
   const arm = () => {
@@ -136,11 +142,11 @@ export async function download_to_opfs(url, name, progress) {
     idle = setTimeout(() => ctl.abort(new Error("no data from the server for 60 s")), 60000);
   };
   arm();
-  try { return await download_with(url, name, progress, ctl.signal, arm); }
+  try { return await download_with(url, name, progress, ctl.signal, arm, follow); }
   finally { clearTimeout(idle); }
 }
-async function download_with(url, name, progress, signal, arm) {
-  const r = await fetch(url, { signal });
+async function download_with(url, name, progress, signal, arm, follow) {
+  const r = await fetch(url, { signal, redirect: follow ? "follow" : "error" });
   if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`);
   const total = Number(r.headers.get("content-length")) || 0;
   const root = await navigator.storage.getDirectory();
@@ -153,7 +159,7 @@ async function download_with(url, name, progress, signal, arm) {
         const { value, done: end } = await reader.read();
         if (end) break;
         arm();
-        await w.write(value);
+        await w.write(whole(value));
         done += value.length;
         if (done - last >= 4e6) { progress(done, total); last = done; }
       }
@@ -217,11 +223,16 @@ extern "C" {
     #[wasm_bindgen(catch)]
     async fn blob_bytes(blob: &JsValue) -> Result<JsValue, JsValue>;
     async fn fetch_bytes(url: &str) -> JsValue;
+    /// Fetches `url` into the file `name`.  `follow`: whether to follow
+    /// redirects, only for a file checked against its hash afterwards; any
+    /// other is taken only from the page's own site, which a redirect
+    /// could leave.
     #[wasm_bindgen(catch)]
     async fn download_to_opfs(
         url: &str,
         name: &str,
         progress: &js_sys::Function,
+        follow: bool,
     ) -> Result<JsValue, JsValue>;
     /// Whether the file is gone (removed, or never there).
     async fn opfs_remove(name: &str) -> JsValue;
@@ -1412,7 +1423,13 @@ async fn download_from(url: &str, expected: Option<&str>, s: &Settings) -> Resul
         send(Reply::Download { done, total });
     });
     let t0 = now_s();
-    let fetched = download_to_opfs(url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let fetched = download_to_opfs(
+        url,
+        DOWNLOAD_NAME,
+        progress.as_ref().unchecked_ref(),
+        expected.is_some(),
+    )
+    .await;
     drop(progress);
     if let Err(e) = fetched {
         opfs_remove(DOWNLOAD_NAME).await;

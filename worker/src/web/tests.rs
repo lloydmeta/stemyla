@@ -48,7 +48,37 @@ export function hide_gpu() {
     else delete proto.gpu;
   };
 }
+// The next fetch answers with "lloyd" and "acme" as views into larger
+// buffers, as a stream's chunks may be.
+export function next_fetch_sends_views() {
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => {
+    globalThis.fetch = real;
+    const view = (text) => {
+      const b = new Uint8Array(64);
+      const t = new TextEncoder().encode(text);
+      b.set(t, 8);
+      return b.subarray(8, 8 + t.length);
+    };
+    const body = new ReadableStream({
+      start(c) { c.enqueue(view("lloyd")); c.enqueue(view("acme")); c.close(); },
+    });
+    return new Response(body);
+  };
+}
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// The next fetch answers with one byte, and keeps how it was asked to
+// treat redirects for `last_redirect`.
+let redirect = null;
+export function record_next_fetch() {
+  const real = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    globalThis.fetch = real;
+    redirect = init.redirect;
+    return new Response(new Uint8Array(1));
+  };
+}
+export function last_redirect() { return redirect; }
 // The next fetch answers with 10 of 1000 bytes, then the connection breaks.
 export function break_next_fetch() {
   const real = globalThis.fetch;
@@ -72,7 +102,10 @@ extern "C" {
     fn blob(bytes: &[u8]) -> Blob;
     fn revoke(url: &str);
     async fn sleep(ms: u32);
+    fn next_fetch_sends_views();
     fn break_next_fetch();
+    fn record_next_fetch();
+    fn last_redirect() -> Option<String>;
     fn hide_gpu() -> js_sys::Function;
 }
 
@@ -364,16 +397,43 @@ async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
 }
 
 #[wasm_bindgen_test]
+async fn a_download_holds_only_the_bytes_of_its_chunks() {
+    fresh().await;
+    next_fetch_sends_views();
+    let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
+    let got = download_to_opfs(
+        "/weights/m",
+        DOWNLOAD_NAME,
+        progress.as_ref().unchecked_ref(),
+        false,
+    )
+    .await;
+    assert_eq!(got.ok().and_then(|n| n.as_f64()), Some(9.0));
+    let stored = cache_get(DOWNLOAD_NAME).await.expect("no error");
+    assert_eq!(stored.unchecked_into::<Uint8Array>().to_vec(), b"lloydacme");
+}
+
+#[wasm_bindgen_test]
 async fn opfs_write_writes_more_than_one_slice() {
     fresh().await;
     let body: Vec<u8> = (0..(9u32 << 20)).map(|i| (i % 251) as u8).collect();
-    for src in [
-        blob(&body).into(),
-        JsValue::from(Uint8Array::from(&body[..])),
+    for (what, src) in [
+        ("a blob", blob(&body).into()),
+        ("bytes", JsValue::from(Uint8Array::from(&body[..]))),
     ] {
         assert_eq!(opfs_write("model", &src).await.as_bool(), Some(true));
-        let got = cache_get("model").await.expect("no error");
-        assert!(got.unchecked_into::<Uint8Array>().to_vec() == body);
+        let got = cache_get("model")
+            .await
+            .expect("no error")
+            .unchecked_into::<Uint8Array>()
+            .to_vec();
+        let first_wrong = got.iter().zip(&body).position(|(a, b)| a != b);
+        assert!(
+            got.len() == body.len() && first_wrong.is_none(),
+            "{what}: {} bytes of {}, first wrong at {first_wrong:?}",
+            got.len(),
+            body.len()
+        );
     }
 }
 
@@ -423,6 +483,20 @@ async fn a_download_is_used_only_if_its_hash_matches() {
     assert!(matches!(unchecked, ModelFile::Blob(_)));
 }
 
+/// The same-site check on `?model_url=` covers the address asked for, so an
+/// unchecked download must not be redirected off the site.
+#[wasm_bindgen_test]
+async fn only_a_hash_checked_download_follows_redirects() {
+    for (expected, redirect) in [(Some("0".repeat(64)), "follow"), (None, "error")] {
+        fresh().await;
+        record_next_fetch();
+        download_from("/weights/m", expected.as_deref(), &Settings::default())
+            .await
+            .expect("answered");
+        assert_eq!(last_redirect().as_deref(), Some(redirect), "{expected:?}");
+    }
+}
+
 #[wasm_bindgen_test]
 async fn a_checked_download_the_gpu_failed_to_load_is_kept() {
     for (checked, kept) in [(true, true), (false, false)] {
@@ -462,7 +536,7 @@ async fn download_writes_the_whole_body_and_reports_progress() {
     let progress = Closure::<dyn FnMut(f64, f64)>::new(move |done: f64, total: f64| {
         *seen.borrow_mut() = (done, total);
     });
-    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref(), true).await;
     revoke(&url);
     assert_eq!(got.expect("downloaded").as_f64(), Some(100_000.0));
     assert_eq!(*last.borrow(), (100_000.0, 100_000.0), "last progress");
@@ -476,7 +550,7 @@ async fn a_failed_fetch_creates_no_file() {
     let url = blob_url(&[1, 2, 3]);
     revoke(&url);
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
-    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref()).await;
+    let got = download_to_opfs(&url, DOWNLOAD_NAME, progress.as_ref().unchecked_ref(), true).await;
     assert!(got.is_err(), "a revoked URL cannot be fetched");
     assert_eq!(listing().await, "");
 }

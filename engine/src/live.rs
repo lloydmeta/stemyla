@@ -20,7 +20,9 @@
 //! song (closing the context used to cut it off).  A kept output also
 //! outlives main-thread blocks, such as the one while a song loads, so in
 //! the browser a buffer due before its callback ran is left silent (see
-//! `is_late`).
+//! `is_late`).  cpal's schedule then catches up at one second a second, so
+//! an output that is behind when a song arrives is replaced
+//! ([`Unusable::Behind`]) rather than starting the song silent.
 //!
 //! An output that cannot play the next song ([`Unusable`]) is replaced.  In
 //! the browser each one replaced still keeps its callback: an empty slot,
@@ -33,12 +35,16 @@ use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::time::Duration;
 
 pub struct LiveOutput {
     stream: cpal::Stream,
     slot: PlayerSlot,
     /// Set by the stream's error callback.
     failed: Arc<AtomicBool>,
+    /// When the latest buffer is due to play, as [`nanos`] of the stream's
+    /// clock ([`NOT_YET`] before the first callback).
+    scheduled: Arc<AtomicU64>,
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
@@ -100,10 +106,13 @@ fn open(rate: u32) -> Result<LiveOutput> {
     let mut scratch = Scratch::default();
     let failed = Arc::new(AtomicBool::new(false));
     let on_error = Arc::clone(&failed);
+    let scheduled = Arc::new(AtomicU64::new(NOT_YET));
+    let in_callback_scheduled = Arc::clone(&scheduled);
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                in_callback_scheduled.store(nanos(info.timestamp().playback), Relaxed);
                 if cfg!(target_arch = "wasm32") && is_late(info.timestamp()) {
                     data.fill(0.0);
                 } else {
@@ -125,6 +134,7 @@ fn open(rate: u32) -> Result<LiveOutput> {
         stream,
         slot,
         failed,
+        scheduled,
         device_name: device_label(&device),
         sample_rate: rate,
         channels: config.channels,
@@ -145,6 +155,10 @@ pub enum Unusable {
     DeviceChanged,
     /// The song is at another sample rate than the output.
     OtherRate,
+    /// The browser's schedule fell behind its clock while the page was
+    /// busy (see `is_late`), so a song would start silent for about as
+    /// long; a new output starts on time.
+    Behind,
 }
 
 /// What the output knows about itself when a song arrives.
@@ -154,6 +168,8 @@ struct Health {
     poisoned: bool,
     on_default_device: bool,
     rate: u32,
+    /// How long ago the latest buffer was due to play.
+    behind: Duration,
 }
 
 /// Whether an output in this state can play a song at `song_rate`.
@@ -166,6 +182,8 @@ fn check(health: Health, song_rate: u32) -> Result<(), Unusable> {
         Err(Unusable::DeviceChanged)
     } else if health.rate != song_rate {
         Err(Unusable::OtherRate)
+    } else if health.behind > MAX_BEHIND {
+        Err(Unusable::Behind)
     } else {
         Ok(())
     }
@@ -184,6 +202,13 @@ impl LiveOutput {
                 .default_output_device()
                 .is_some_and(|device| device_label(&device) == self.device_name),
             rate: self.sample_rate,
+            // Natively cpal calls back on its own thread, which the page
+            // being busy does not hold up.
+            behind: if cfg!(target_arch = "wasm32") {
+                behind(self.stream.now(), self.scheduled.load(Relaxed))
+            } else {
+                Duration::ZERO
+            },
         };
         match check(health, player.song().sample_rate) {
             Ok(()) => Ok(self.slot.replace(Some(player))),
@@ -214,6 +239,30 @@ impl Drop for LiveOutput {
     fn drop(&mut self) {
         drop(self.slot.replace(None));
     }
+}
+
+/// [`LiveOutput::scheduled`] before the stream's first callback.
+const NOT_YET: u64 = u64::MAX;
+
+/// How far behind its clock a kept output's schedule may be when a song
+/// arrives: the song starts silent for about this long.
+const MAX_BEHIND: Duration = Duration::from_millis(250);
+
+fn nanos(at: cpal::StreamInstant) -> u64 {
+    at.saturating_duration_since(cpal::StreamInstant::ZERO)
+        .as_nanos()
+        .try_into()
+        .unwrap_or(NOT_YET - 1)
+}
+
+/// How long before `now` the latest buffer, due at `scheduled` (as
+/// [`nanos`]), was due to play: zero while it is still to come, and
+/// before the first callback.
+fn behind(now: cpal::StreamInstant, scheduled: u64) -> Duration {
+    if scheduled == NOT_YET {
+        return Duration::ZERO;
+    }
+    Duration::from_nanos(nanos(now).saturating_sub(scheduled))
 }
 
 /// Whether a buffer is due to start before the callback filling it ran.
@@ -284,7 +333,26 @@ mod tests {
         poisoned: false,
         on_default_device: true,
         rate: 44_100,
+        behind: Duration::ZERO,
     };
+
+    #[test]
+    fn a_schedule_is_behind_by_how_long_ago_its_latest_buffer_was_due() {
+        let at = cpal::StreamInstant::from_millis;
+        assert_eq!(behind(at(5_000), NOT_YET), Duration::ZERO, "no buffer yet");
+        assert_eq!(behind(at(1_000), nanos(at(1_050))), Duration::ZERO, "ahead");
+        assert_eq!(
+            behind(at(3_000), nanos(at(1_100))),
+            Duration::from_millis(1_900),
+            "after a two-second block"
+        );
+        let waited = |ms| Health {
+            behind: Duration::from_millis(ms),
+            ..HEALTHY
+        };
+        assert_eq!(check(waited(100), 44_100), Ok(()), "a short wait is kept");
+        assert_eq!(check(waited(2_000), 44_100), Err(Unusable::Behind));
+    }
 
     #[test]
     fn a_healthy_output_plays_a_song_at_its_rate() {
