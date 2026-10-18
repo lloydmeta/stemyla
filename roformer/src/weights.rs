@@ -24,6 +24,8 @@ pub enum WeightError {
     },
     Dtype(String),
     Unused(Vec<String>),
+    /// The file could not be read; it may well be a good model.
+    Read(String),
 }
 
 impl fmt::Display for WeightError {
@@ -42,6 +44,7 @@ impl fmt::Display for WeightError {
                 )
             }
             WeightError::Dtype(d) => write!(f, "unsupported dtype {d}"),
+            WeightError::Read(e) => write!(f, "could not read the file: {e}"),
             WeightError::Unused(n) => {
                 write!(
                     f,
@@ -57,14 +60,16 @@ impl fmt::Display for WeightError {
 impl std::error::Error for WeightError {}
 
 /// Where a safetensors file's bytes come from.  A slice in memory, or (in
-/// the browser) a `Uint8Array` the file was read into, so the whole file
-/// never has to be copied into WebAssembly memory: only the header and
-/// one tensor at a time are.
+/// the browser) the stored or picked file itself, or a `Uint8Array` it was
+/// read into, so the whole file never has to be copied into WebAssembly
+/// memory: only the header and one tensor at a time are.
 pub trait Source {
     /// Bytes in the file.
     fn size(&self) -> usize;
-    /// Bytes `start..end`; both are within `0..=size()`.
-    fn read(&self, start: usize, end: usize) -> Cow<'_, [u8]>;
+    /// Bytes `start..end`; both are within `0..=size()`.  An error means
+    /// the file could not be read (it changed, or the browser failed), not
+    /// that its contents are wrong.
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String>;
 }
 
 impl Source for &[u8] {
@@ -72,9 +77,22 @@ impl Source for &[u8] {
         self.len()
     }
 
-    fn read(&self, start: usize, end: usize) -> Cow<'_, [u8]> {
-        Cow::Borrowed(&self[start..end])
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String> {
+        Ok(Cow::Borrowed(&self[start..end]))
     }
+}
+
+/// Bytes `start..end` of `src`, all of them.
+fn read_exact(src: &dyn Source, start: usize, end: usize) -> Result<Cow<'_, [u8]>, WeightError> {
+    let bytes = src.read(start, end).map_err(WeightError::Read)?;
+    if bytes.len() != end - start {
+        return Err(WeightError::Read(format!(
+            "got {} bytes at {start}, expected {}",
+            bytes.len(),
+            end - start
+        )));
+    }
+    Ok(bytes)
 }
 
 /// The largest header `safetensors` itself accepts.
@@ -83,28 +101,30 @@ const MAX_HEADER: usize = 100_000_000;
 /// The header of a safetensors file, checked as
 /// `SafeTensors::read_metadata` does, without its tensor data: returns the
 /// header and where the tensor data starts.
-fn read_header(src: &dyn Source) -> Result<(Metadata, usize), SafeTensorError> {
+fn read_header(src: &dyn Source) -> Result<(Metadata, usize), WeightError> {
+    let parse = |e: SafeTensorError| WeightError::Parse(e.to_string());
     let len = src.size();
     if len < 8 {
-        return Err(SafeTensorError::HeaderTooSmall);
+        return Err(parse(SafeTensorError::HeaderTooSmall));
     }
-    let size: [u8; 8] = src.read(0, 8)[..].try_into().expect("8 bytes");
+    let size: [u8; 8] = read_exact(src, 0, 8)?[..].try_into().expect("8 bytes");
     let n: usize = u64::from_le_bytes(size)
         .try_into()
-        .map_err(|_| SafeTensorError::HeaderTooLarge)?;
+        .map_err(|_| parse(SafeTensorError::HeaderTooLarge))?;
     if n > MAX_HEADER {
-        return Err(SafeTensorError::HeaderTooLarge);
+        return Err(parse(SafeTensorError::HeaderTooLarge));
     }
     let stop = n
         .checked_add(8)
         .filter(|&stop| stop <= len)
-        .ok_or(SafeTensorError::InvalidHeaderLength)?;
-    let header = src.read(8, stop);
-    let text = std::str::from_utf8(&header).map_err(SafeTensorError::InvalidHeader)?;
-    let meta: Metadata =
-        serde_json::from_str(text).map_err(SafeTensorError::InvalidHeaderDeserialization)?;
+        .ok_or(parse(SafeTensorError::InvalidHeaderLength))?;
+    let header = read_exact(src, 8, stop)?;
+    let text =
+        std::str::from_utf8(&header).map_err(|e| parse(SafeTensorError::InvalidHeader(e)))?;
+    let meta: Metadata = serde_json::from_str(text)
+        .map_err(|e| parse(SafeTensorError::InvalidHeaderDeserialization(e)))?;
     if meta.data_len().checked_add(stop) != Some(len) {
-        return Err(SafeTensorError::MetadataIncompleteBuffer);
+        return Err(parse(SafeTensorError::MetadataIncompleteBuffer));
     }
     Ok((meta, stop))
 }
@@ -125,7 +145,7 @@ impl<'a> Store<'a> {
     }
 
     pub fn from_source(src: impl Source + 'a) -> Result<Self, WeightError> {
-        let (meta, data) = read_header(&src).map_err(|e| WeightError::Parse(e.to_string()))?;
+        let (meta, data) = read_header(&src)?;
         Ok(Self {
             src: Box::new(src),
             meta,
@@ -149,7 +169,7 @@ impl<'a> Store<'a> {
         }
         let (s, e) = info.data_offsets;
         let dtype = info.dtype;
-        let raw = self.src.read(self.data + s, self.data + e);
+        let raw = read_exact(self.src.as_ref(), self.data + s, self.data + e)?;
         let out = match dtype {
             Dtype::F32 => raw
                 .chunks_exact(4)
@@ -268,9 +288,56 @@ mod tests {
         fn size(&self) -> usize {
             self.0.len()
         }
-        fn read(&self, start: usize, end: usize) -> Cow<'_, [u8]> {
+        fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String> {
             self.1.set(self.1.get() + end - start);
-            Cow::Owned(self.0[start..end].to_vec())
+            Ok(Cow::Owned(self.0[start..end].to_vec()))
+        }
+    }
+
+    /// A file that fails, or comes back short, from byte `at` on, as a
+    /// browser's file read can.
+    struct Failing<'a> {
+        bytes: &'a [u8],
+        at: usize,
+        short: bool,
+    }
+
+    impl Source for &Failing<'_> {
+        fn size(&self) -> usize {
+            self.bytes.len()
+        }
+        fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String> {
+            if end <= self.at {
+                Ok(Cow::Borrowed(&self.bytes[start..end]))
+            } else if self.short {
+                Ok(Cow::Borrowed(&self.bytes[start..end - 1]))
+            } else {
+                Err("NotReadableError".into())
+            }
+        }
+    }
+
+    #[test]
+    fn a_read_that_fails_or_comes_back_short_is_a_read_error_not_a_bad_file() {
+        let f = mixed();
+        let header = 8 + u64::from_le_bytes(f[..8].try_into().unwrap()) as usize;
+        for short in [false, true] {
+            for at in [0, 8, header, f.len() - 1] {
+                let src = Failing {
+                    bytes: &f,
+                    at,
+                    short,
+                };
+                let got = Store::from_source(&src).and_then(|mut s| {
+                    s.get("a", &[3, 4])?;
+                    s.get("b", &[6])?;
+                    s.get("c", &[2, 2])
+                });
+                assert!(
+                    matches!(got, Err(WeightError::Read(_))),
+                    "failing at {at} (short {short}): {got:?}"
+                );
+            }
         }
     }
 

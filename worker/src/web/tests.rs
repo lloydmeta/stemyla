@@ -34,6 +34,7 @@ export async function files() {
   return out.sort().join(" ");
 }
 export function blob_url(bytes) { return URL.createObjectURL(new Blob([bytes])); }
+export function blob(bytes) { return new Blob([bytes]); }
 export function revoke(url) { URL.revokeObjectURL(url); }
 // Makes WebGPU look absent (as on a device without it) until the
 // returned function is called.
@@ -66,6 +67,8 @@ extern "C" {
     /// Names of the files at the root, sorted, space-separated.
     async fn files() -> JsValue;
     fn blob_url(bytes: &[u8]) -> String;
+    /// A `Blob` holding a copy of `bytes`, as a picked file is.
+    fn blob(bytes: &[u8]) -> Blob;
     fn revoke(url: &str);
     async fn sleep(ms: u32);
     fn break_next_fetch();
@@ -245,6 +248,92 @@ async fn cache_put_leaves_only_the_finished_file() {
     assert_eq!(listing().await, CACHE_NAME);
     let got = cache_get(CACHE_NAME).await.expect("no error");
     assert_eq!(got.unchecked_into::<Uint8Array>().to_vec(), [4, 5, 6]);
+}
+
+#[wasm_bindgen_test]
+async fn cache_put_stores_a_blob() {
+    fresh().await;
+    assert_eq!(
+        cache_put(CACHE_NAME, &blob(&[4, 5, 6])).await.as_bool(),
+        Some(true)
+    );
+    assert_eq!(listing().await, CACHE_NAME);
+    assert_eq!(stored_bytes().await, [4, 5, 6]);
+}
+
+/// Every range of `body`, read through `file`, in an order that crosses
+/// block boundaries, comes back to blocks already evicted, and ends in the
+/// last, partial block.
+fn reads_back(file: &ModelFile, body: &[u8]) {
+    let n = body.len();
+    assert_eq!(file.size(), n);
+    for (s, e) in [
+        (0, 8),
+        (8, 8),
+        (13, n / 2 + 1),
+        (99, 101),
+        (250, 1000),
+        (0, 1),
+        (n - 1, n),
+        (40, n),
+    ] {
+        assert_eq!(file.read(s, e).expect("read")[..], body[s..e], "{s}..{e}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_stored_file_is_read_in_blocks() {
+    fresh().await;
+    let body: Vec<u8> = (0..2_000u32).map(|i| (i * 7) as u8).collect();
+    plant(CACHE_NAME, &body).await;
+    assert!(cache_file("missing").await.expect("no error").is_null());
+    let stored = || async {
+        cache_file(CACHE_NAME)
+            .await
+            .expect("no error")
+            .unchecked_into()
+    };
+    reads_back(&ModelFile::blob(stored().await), &body);
+    reads_back(&ModelFile::blob_in_blocks(stored().await, 100, 2), &body);
+    reads_back(&ModelFile::blob_in_blocks(stored().await, 7, 1), &body);
+    reads_back(&ModelFile::Bytes(Uint8Array::from(&body[..])), &body);
+}
+
+/// Reset removing the file mid-load, say.  (A file rewritten after it was
+/// opened is a read error in Chrome, but Safari 27 reads the new bytes, so
+/// the hashed download is built from the bytes it hashed.)
+#[wasm_bindgen_test]
+async fn a_stored_file_removed_after_it_was_opened_is_a_read_error() {
+    fresh().await;
+    plant(CACHE_NAME, &TRUNCATED).await;
+    let file = ModelFile::blob(
+        cache_file(CACHE_NAME)
+            .await
+            .expect("no error")
+            .unchecked_into(),
+    );
+    opfs_remove(CACHE_NAME).await;
+    let got = Store::from_source(&file).err().expect("not readable");
+    assert!(
+        matches!(LoadError::from(got), LoadError::Read(_)),
+        "a read error, so a stored model is kept, not removed as unusable"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_picked_file_that_is_not_a_model_is_read_from_the_file() {
+    fresh().await;
+    plant(CACHE_NAME, &[7]).await;
+    handle(message(&[
+        ("type", "model".into()),
+        ("file", blob(&TRUNCATED).into()),
+    ]))
+    .await;
+    let (ok, _, stored, text) = model_reply();
+    assert!(!ok && stored, "{text}");
+    assert!(no_gpu(), "told unusable before the GPU opened");
+    assert!(text.starts_with("not a BS-RoFormer SW model"), "{text}");
+    assert_eq!(stored_bytes().await, [7]);
 }
 
 #[wasm_bindgen_test]
