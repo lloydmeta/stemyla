@@ -102,6 +102,45 @@ jobs:
       - run: trunk build --release
         working-directory: app
 
+  # The browser-only behaviour, in headless Chrome: the wasm-bindgen tests
+  # of browser storage, then the built app driven over WebDriver.  GPU
+  # scenarios (bench, selftest, separate, worker-check) are not run: the
+  # runner has no GPU, and the model weights cannot be in CI.
+  browser-tests:
+    name: browser tests (Chrome)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+      # Also caches ~/.cargo/bin, so wasm-bindgen-cli is built once per version.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # wasm-bindgen-test-runner must equal the wasm-bindgen in Cargo.lock,
+      # so the version comes from there and cannot drift.
+      - name: Install wasm-bindgen-test-runner at the lockfile's wasm-bindgen version
+        run: |
+          set -euo pipefail
+          v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          test -n "$v"
+          if [ "$(wasm-bindgen-test-runner --version 2>/dev/null | awk '{ print $2 }')" != "$v" ]; then
+            cargo install wasm-bindgen-cli --version "$v" --locked --force
+          fi
+          wasm-bindgen-test-runner --version
+      - uses: ./.github/actions/setup-trunk
+        with:
+          version: ${{ env.TRUNK_VERSION }}
+          sha256: ${{ env.TRUNK_SHA256 }}
+      # The runner image has Chrome and a matching ChromeDriver, in
+      # $CHROMEWEBDRIVER, which xtask finds by itself.
+      - run: cargo run --locked -p xtask -- web-test --browser chrome
+      - run: trunk build --release
+        working-directory: app
+      - run: cargo run --locked -p xtask -- e2e smoke --browser chrome
+      - run: cargo run --locked -p xtask -- e2e audio-resume --browser chrome
+      - run: cargo run --locked -p xtask -- e2e storage --browser chrome
+
   publish:
     name: publish to gh-pages
     needs: [fmt, clippy, test, wasm-build]
