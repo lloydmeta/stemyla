@@ -129,3 +129,45 @@ pub fn transpose(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use safetensors::tensor::TensorView;
+
+    fn file() -> Vec<u8> {
+        let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let view = TensorView::new(Dtype::F32, vec![2, 2], &data).unwrap();
+        safetensors::serialize([("w", view)], None).unwrap()
+    }
+
+    #[test]
+    fn whole_file_parses() {
+        let f = file();
+        let mut store = Store::new(&f).unwrap();
+        assert_eq!(store.get("w", &[2, 2]).unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// What a browser leaves behind when it creates the file but never
+    /// finishes writing it.
+    #[test]
+    fn empty_file_is_not_safetensors() {
+        let e = Store::new(&[]).err().unwrap();
+        assert_eq!(e.to_string(), "not a safetensors file: header too small");
+    }
+
+    #[test]
+    fn every_truncation_is_not_safetensors() {
+        let f = file();
+        for len in 0..f.len() {
+            assert!(
+                matches!(Store::new(&f[..len]), Err(WeightError::Parse(_))),
+                "{len} of {} bytes parsed",
+                f.len()
+            );
+        }
+    }
+}

@@ -39,12 +39,22 @@ export async function cache_get(name) {
   } catch (e) { return null; }
 }
 export async function cache_put(name, bytes) {
+  const part = name + ".part";
   try {
     const root = await navigator.storage.getDirectory();
-    const fh = await root.getFileHandle(name, { create: true });
+    const fh = await root.getFileHandle(part, { create: true });
     const w = await fh.createWritable();
     await w.write(bytes);
     await w.close();
+    return await opfs_commit(part, name);
+  } catch (e) { await opfs_remove(part); return false; }
+}
+export async function opfs_commit(from, to) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const fh = await root.getFileHandle(from);
+    try { await root.removeEntry(to); } catch (e) {}
+    await fh.move(root, to);
     return true;
   } catch (e) { return false; }
 }
@@ -110,6 +120,7 @@ extern "C" {
         progress: &js_sys::Function,
     ) -> Result<JsValue, JsValue>;
     async fn opfs_remove(name: &str) -> JsValue;
+    async fn opfs_commit(from: &str, to: &str) -> JsValue;
     async fn sha256_hex(bytes: &Uint8Array) -> JsValue;
 }
 
@@ -295,6 +306,8 @@ async fn handle(msg: JsValue) {
         "forget_model" => {
             STATE.with_borrow_mut(|s| s.net = None);
             opfs_remove(CACHE_NAME).await;
+            opfs_remove(DOWNLOAD_NAME).await;
+            opfs_remove(&format!("{CACHE_NAME}.part")).await;
             post_model(false, "model removed from this browser");
             Ok(())
         }
@@ -327,6 +340,20 @@ async fn init(msg: &JsValue) -> Result<(), String> {
         return Ok(());
     }
     let bytes = cached.unchecked_into::<Uint8Array>().to_vec();
+    // A copy that was never fully written (left by an older version of this
+    // page, or by the browser stopping mid-write) would otherwise fail every
+    // start until the browser storage is cleared by hand.
+    if let Err(e) = roformer::weights::Store::new(&bytes) {
+        opfs_remove(CACHE_NAME).await;
+        post_model(
+            false,
+            &format!(
+                "the model in browser storage was incomplete ({} bytes, {e}) and has been removed; download it again",
+                bytes.len()
+            ),
+        );
+        return Ok(());
+    }
     let (secs, gpu) = build(&bytes, msg).await?;
     post_model(
         true,
@@ -918,8 +945,8 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         return Ok(());
     }
     let part = cache_get(DOWNLOAD_NAME).await;
-    opfs_remove(DOWNLOAD_NAME).await;
     if part.is_null() {
+        opfs_remove(DOWNLOAD_NAME).await;
         post_model(
             false,
             "model download failed: the browser did not keep the file",
@@ -930,6 +957,7 @@ async fn download(msg: &JsValue) -> Result<(), String> {
     if url == MODEL_URL {
         let hash = sha256_hex(&arr).await.as_string().unwrap_or_default();
         if hash != MODEL_SHA256 {
+            opfs_remove(DOWNLOAD_NAME).await;
             post_model(
                 false,
                 &format!(
@@ -940,12 +968,24 @@ async fn download(msg: &JsValue) -> Result<(), String> {
         }
     }
     let secs = now_s() - t0;
-    match build(&arr.to_vec(), msg).await {
+    // Released before the upload so the browser can reclaim the page's copy
+    // of the file (350 MB) while the GPU copy is made; a phone's tab has
+    // little memory to spare.
+    let bytes = arr.to_vec();
+    drop(arr);
+    match build(&bytes, msg).await {
         Ok((load, gpu)) => {
-            let cached = cache_put(CACHE_NAME, &arr).await.as_bool().unwrap_or(false);
+            // The verified download becomes the stored model by a rename:
+            // no second 350 MB write, and no moment at which the stored
+            // model exists but is not yet complete.
+            let cached = opfs_commit(DOWNLOAD_NAME, CACHE_NAME)
+                .await
+                .as_bool()
+                .unwrap_or(false);
             let note = if cached {
                 "saved in browser storage"
             } else {
+                opfs_remove(DOWNLOAD_NAME).await;
                 "could not be saved in browser storage"
             };
             post_model(
@@ -955,10 +995,13 @@ async fn download(msg: &JsValue) -> Result<(), String> {
                 ),
             );
         }
-        Err(e) => post_model(
-            false,
-            &format!("the downloaded file is not a usable BS-RoFormer SW model: {e}"),
-        ),
+        Err(e) => {
+            opfs_remove(DOWNLOAD_NAME).await;
+            post_model(
+                false,
+                &format!("the downloaded file is not a usable BS-RoFormer SW model: {e}"),
+            );
+        }
     }
     Ok(())
 }
