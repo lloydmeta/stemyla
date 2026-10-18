@@ -10,7 +10,7 @@ Rust workspace for a browser app that separates a song into six stems (bass, dru
 * `roformer/`: STFT, chunking, weights, and the CPU reference network (Burn, ndarray).
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
 * `worker/`: the Web Worker that runs separations.
-* `xtask/`: the static server and other tools.
+* `xtask/`: the static server, the browser test runners (`web-test`, `e2e`) and other tools.
 
 ## Commands
 
@@ -19,13 +19,15 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 (cd app && trunk build --release)
 cargo run -p xtask --release -- serve app/dist --port 8080
+cargo run -p xtask -- web-test                  # browser tests (needs wasm-bindgen-cli; see README)
+cargo run -p xtask -- e2e <scenario>            # the built page over WebDriver (see README)
 cargo run -p xtask --release -- publish        # build, commit to gh-pages, push
 ```
 
 ## Rules
 
 * Building and serving the app is Rust only (Cargo, Trunk, `xtask serve`).  Never suggest or add Python or other non-Rust servers or build steps for it.  Python appears only in `tools/roformer_export.py`, which generates test fixtures from the PyTorch reference.
-* Correctness first: GPU code must stay within WebGPU's default limits, every change to a kernel is checked against the CPU (`cargo test -p roformer-gpu`) and in a browser (`?selftest`) before it becomes a default, and a new kernel is never made the default on the strength of SwiftShader alone.
+* Correctness first: GPU code must stay within WebGPU's default limits, every change to a kernel is checked against the CPU (`cargo test -p roformer-gpu`) and in a browser (`?selftest`, or `cargo run -p xtask -- e2e selftest --weights <model>`) before it becomes a default, and a new kernel is never made the default on the strength of SwiftShader alone.
 * Verify every behaviour with an automated check; "it compiles" is not acceptance.
 * Never commit audio, stems or model weights (see `.gitignore`).  The model weights have no stated licence: link to them, never host them.
 * Before adding a crate, confirm it exists and is maintained, pin young crates exactly, and keep `THIRD-PARTY.md` current.

@@ -74,7 +74,26 @@ cargo clippy --workspace --all-targets
 
 * `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them).
 * The GPU kernel tests run on any Vulkan, Metal or DX12 GPU.  Without one, SwiftShader's Vulkan driver works: `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan cargo test -p roformer-gpu --release`.
-* `tools/*.mjs` check the GPU paths of the built page in headless Chromium (Node and Playwright): `web_selftest.mjs`, `worker_check.mjs`, `web_bench.mjs`, `web_separate.mjs`.  The rest runs through `cargo run -p xtask -- web-test` and `cargo run -p xtask -- e2e <smoke|audio-resume|storage>`.
+
+### Browser tests
+
+The browser-only behaviour is tested in a real browser.  CI runs these in headless Chrome; locally they are optional and need one install, the test runner at the `wasm-bindgen` version in `Cargo.lock` (`xtask web-test` prints the exact line when the two differ, for example after a `wasm-bindgen` update):
+
+```bash
+cargo install wasm-bindgen-cli --version 0.2.129 --locked
+```
+
+and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver --enable` and Develop > "Allow Remote Automation" in Safari; otherwise, or with `--browser chrome`, a ChromeDriver matching Chrome's major version ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)) in `CHROMEDRIVER` or on `PATH`.  Safari 27.0's safaridriver may fail with "timed out while connecting to a Safari instance"; use `--browser chrome` meanwhile.
+
+```bash
+cargo run -p xtask -- web-test                  # browser storage and the worker (wasm-bindgen-test)
+(cd app && trunk build --release)
+cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage
+cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
+```
+
+* `smoke`, `audio-resume` and `storage` need no model.  `bench` needs WebGPU.  `selftest`, `separate` and `worker-check` need the model (`--weights`); `selftest` also the reference files above, and `worker-check` compares with PyTorch only given `--reference` (the outputs of `tools/roformer_export.py`).
+* Logs and screenshots go to `target/e2e/<scenario>`.  `--swiftshader` runs WebGPU in software on a machine without a GPU (slow; a compile check, not a verdict on the kernels).
 
 ## Layout
 

@@ -393,7 +393,7 @@ fn synth_stems(out: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `web_smoke.mjs`: the page loads with WebGL2, a multi-file drop opens
+/// The page loads with WebGL2, a multi-file drop opens
 /// the stems, Play starts Web Audio and the playhead, and the tempo slider
 /// changes the tempo; no page errors.
 fn smoke(o: &Opts) -> Result<()> {
@@ -475,7 +475,7 @@ fn smoke(o: &Opts) -> Result<()> {
     p.finish("smoke")
 }
 
-/// `web_audio_resume.mjs`: a song stored, then restored when the page
+/// A song stored, then restored when the page
 /// loads, which creates its audio output before any user gesture; one
 /// click on Play must then start playback.  Chrome is made to behave like
 /// Safari (contexts start suspended; `resume()` only during a click);
@@ -614,8 +614,8 @@ fn texts(replies: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The worker's model storage seen from outside (the cases of the old
-/// reference harness that need a whole worker, two workers, or the app).
+/// The worker's model storage seen from outside: the cases that need a
+/// whole worker, two workers, or the app.
 fn storage(o: &Opts) -> Result<()> {
     let drip = drip_server()?;
     let mut mounts = Vec::new();
@@ -820,7 +820,7 @@ fn query(o: &Opts, default: &str) -> String {
     o.query.clone().unwrap_or_else(|| default.to_string())
 }
 
-/// `web_bench.mjs`: `?bench` compiles and runs every matmul kernel on every
+/// `?bench` compiles and runs every matmul kernel on every
 /// model shape, with no WebGPU error.  No model needed.
 fn bench(o: &Opts) -> Result<()> {
     let base = start_server(&o.dist, Vec::new(), &["console.js"])?;
@@ -870,7 +870,7 @@ fn drop_model(p: &mut Page, url: &str) -> Result<()> {
     p.drop_files(&[(url, &name, "application/octet-stream")])
 }
 
-/// `web_selftest.mjs`: the in-app GPU self-test's verdict, with the model
+/// The in-app GPU self-test's verdict, with the model
 /// dropped on the page (the file picker cannot be driven over WebDriver).
 fn selftest(o: &Opts) -> Result<()> {
     let mut mounts = vec![("/selftest/".to_string(), o.selftest_dir.clone())];
@@ -919,7 +919,7 @@ fn clip(out: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `web_separate.mjs`: drop a clip and the model, press Separate, and the
+/// Drop a clip and the model, press Separate, and the
 /// six lanes appear; screenshots along the way.
 fn separate(o: &Opts) -> Result<()> {
     let mut mounts = vec![("/test/".to_string(), clip(&o.out)?)];
@@ -986,7 +986,7 @@ fn separate(o: &Opts) -> Result<()> {
     p.finish("separate")
 }
 
-/// `worker_check.mjs`: the worker loads the model (from bytes, or with
+/// The worker loads the model (from bytes, or with
 /// `--download` through its download path from this server), separates
 /// PyTorch's 0.5 s clip and compares every stem with PyTorch's output
 /// (`--reference`: `clip.f32` and `clip_ref.f32` from
