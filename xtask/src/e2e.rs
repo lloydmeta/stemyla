@@ -179,6 +179,8 @@ fn start_server(dist: &Path, mut mounts: serve::Mounts, inject: &[&str]) -> Resu
 }
 
 /// One browser on one page, with the page's console as it arrives.
+/// Its log is written to `<out>/<scenario>.log` when it is dropped, so a
+/// scenario that stops early still leaves one.
 struct Page {
     session: Session,
     _driver: Driver,
@@ -186,6 +188,7 @@ struct Page {
     t0: Instant,
     log: Vec<String>,
     out: PathBuf,
+    scenario: String,
     failures: Vec<String>,
 }
 
@@ -200,6 +203,9 @@ impl Page {
         if !o.headed {
             args.push("--headless=new".into());
         }
+        // Without a usable GPU (CI), Chrome refuses WebGL, which the app
+        // draws with, unless it may fall back to SwiftShader.
+        args.push("--enable-unsafe-swiftshader".into());
         args.push(format!("--window-size={},{}", VIEWPORT.0, VIEWPORT.1));
         let session = Session::new(&driver, o.browser, &args)?;
         session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
@@ -210,6 +216,7 @@ impl Page {
             t0: Instant::now(),
             log: Vec::new(),
             out: o.out.clone(),
+            scenario: o.scenario.clone(),
             failures: Vec::new(),
         };
         page.session.goto(&page.url(path))?;
@@ -339,24 +346,14 @@ impl Page {
         Ok(())
     }
 
-    /// Lines that report a page error.
     fn errors(&self) -> Vec<String> {
-        self.log
-            .iter()
-            .filter(|l| l.contains("PAGE ERROR") || l.contains("console.error:"))
-            .cloned()
-            .collect()
+        page_errors(&self.log)
     }
 
-    /// Writes the log; an error naming every failed check.
-    fn finish(mut self, name: &str) -> Result<()> {
+    /// An error naming every failed check.
+    fn finish(mut self) -> Result<()> {
         let _ = self.poll();
-        let path = self.out.join(format!("{name}.log"));
-        let mut f = std::fs::File::create(&path)?;
-        for l in &self.log {
-            writeln!(f, "{l}")?;
-        }
-        println!("log: {}", path.display());
+        let name = self.scenario.clone();
         if self.failures.is_empty() {
             println!("{name}: passed");
             Ok(())
@@ -364,6 +361,32 @@ impl Page {
             bail!("{name} FAILED: {}", self.failures.join("; "))
         }
     }
+}
+
+impl Drop for Page {
+    fn drop(&mut self) {
+        let path = self.out.join(format!("{}.log", self.scenario));
+        let written = std::fs::File::create(&path)
+            .and_then(|mut f| self.log.iter().try_for_each(|l| writeln!(f, "{l}")));
+        match written {
+            Ok(()) => println!("log: {}", path.display()),
+            Err(e) => eprintln!("could not write {}: {e}", path.display()),
+        }
+    }
+}
+
+/// Log lines that report a page error: uncaught ones, `console.error`, and
+/// the app's `log::error!`, which eframe's logger sends to `console.warn`
+/// as "ERROR: ...".
+fn page_errors(log: &[String]) -> Vec<String> {
+    log.iter()
+        .filter(|l| {
+            l.contains("PAGE ERROR")
+                || l.contains("console.error:")
+                || l.contains("console.warn: ERROR:")
+        })
+        .cloned()
+        .collect()
 }
 
 /// The number after `key` in `line` ("playhead 1234" -> 1234).
@@ -456,15 +479,14 @@ fn smoke(o: &Opts) -> Result<()> {
 
     let from = p.mark();
     p.click(o.tempo_x, "the tempo slider at 75%")?;
-    p.wait_for(from, 10, |l| {
-        l.contains("audio stats: ") && l.contains(" callbacks of ")
-    })?;
-    let tempo = audio_stats(&p.log, from).last().map(|(t, _)| *t);
-    p.note(&format!("tempo after the click: {tempo:?}"));
-    p.check(
-        tempo.is_some_and(|t| (0.70..=0.80).contains(&t)),
-        "the tempo slider sets about 75%",
-    );
+    // A stats line from just before the click may still be on its way.
+    let near_75 = |l: &str| {
+        audio_stats(&[l.to_string()], 0)
+            .first()
+            .is_some_and(|(t, _)| (0.70..=0.80).contains(t))
+    };
+    let tempo = p.wait_for(from, 10, near_75)?;
+    p.check(tempo.is_some(), "the tempo slider sets about 75%");
     p.idle(3.0)?;
     p.screenshot("smoke_playing")?;
     let errors = p.errors();
@@ -472,7 +494,7 @@ fn smoke(o: &Opts) -> Result<()> {
         errors.is_empty(),
         &format!("no page errors ({})", errors.len()),
     );
-    p.finish("smoke")
+    p.finish()
 }
 
 /// A song stored, then restored when the page
@@ -527,7 +549,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     p.note(&format!("after the click: playhead {head}"));
     p.check(head >= 44_100.0, "one click on Play starts playback");
     p.screenshot("audio_resume")?;
-    p.finish("audio-resume")
+    p.finish()
 }
 
 /// A local server for the storage cases that need a misbehaving one:
@@ -736,7 +758,7 @@ fn storage(o: &Opts) -> Result<()> {
         got.is_some(),
         "the app downloads from ?model_url= and refuses a non-model",
     );
-    p.finish("storage")
+    p.finish()
 }
 
 /// Storage cases that load the real model (a GPU, and `--weights`).
@@ -845,7 +867,7 @@ fn bench(o: &Opts) -> Result<()> {
     );
     let gpu_errors = p.log.iter().filter(|l| l.contains("WebGPU error")).count();
     p.check(gpu_errors == 0, "no WebGPU errors");
-    p.finish("bench")
+    p.finish()
 }
 
 /// Mounts the model's folder at `/weights/`; returns the model's URL.
@@ -905,7 +927,7 @@ fn selftest(o: &Opts) -> Result<()> {
             .is_some_and(|v| v.contains("selftest passed")),
         "the GPU self-test passes",
     );
-    p.finish("selftest")
+    p.finish()
 }
 
 /// A two-second clip of the synthetic mix as a WAV, for `separate`.
@@ -983,7 +1005,7 @@ fn separate(o: &Opts) -> Result<()> {
         errors.is_empty(),
         &format!("no page errors ({})", errors.len()),
     );
-    p.finish("separate")
+    p.finish()
 }
 
 /// The worker loads the model (from bytes, or with
@@ -1076,7 +1098,7 @@ fn worker_check(o: &Opts) -> Result<()> {
     } else {
         p.note("no --reference: the comparison with PyTorch did not run");
     }
-    p.finish("worker-check")
+    p.finish()
 }
 
 #[cfg(test)]
@@ -1103,6 +1125,20 @@ mod tests {
         assert!(Opts::parse(&args("--browser chrome")).is_err());
         assert!(Opts::parse(&args("smoke --play-x")).is_err());
         assert!(Opts::parse(&args("smoke --frobnicate")).is_err());
+    }
+
+    #[test]
+    fn page_errors_include_the_apps_log_errors() {
+        let log: Vec<String> = [
+            "console.info: fine",
+            "console.warn: [eframe] SetTheme not implemented",
+            "console.warn: ERROR: [app] failed to start eframe",
+            "console.error: boom",
+            "PAGE ERROR: x is not defined",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(page_errors(&log), log[2..]);
     }
 
     #[test]

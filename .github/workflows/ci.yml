@@ -109,6 +109,9 @@ jobs:
   browser-tests:
     name: browser tests (Chrome)
     runs-on: ubuntu-latest
+    # About 15 minutes when warm; a hung browser must not hold the runner
+    # for GitHub's 6 h default.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
@@ -140,6 +143,16 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e smoke --browser chrome
       - run: cargo run --locked -p xtask -- e2e audio-resume --browser chrome
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
+      # Logs and screenshots of the scenarios, to see why one failed.
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e
+          # Not the generated audio (tens of MB).
+          path: |
+            target/e2e/**/*.log
+            target/e2e/**/*.png
+          if-no-files-found: ignore
 
   publish:
     name: publish to gh-pages

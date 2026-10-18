@@ -100,6 +100,8 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("xtask-drivers-{name}-{}", std::process::id()));
+        // Empty, whatever an earlier run with the same process id left.
+        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
     }

@@ -20,10 +20,22 @@ pub fn free_port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
-/// One HTTP request to `127.0.0.1:port`; the status and the JSON body.
-pub fn http(port: u16, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
+/// How long a WebDriver command may take, unless it says otherwise.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// One HTTP request to `127.0.0.1:port`; the status and the JSON body.  A
+/// driver that stays silent for `timeout` is an error, not a hang.
+pub fn http(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    timeout: Duration,
+) -> Result<(u16, Value)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .with_context(|| format!("connecting to the driver on port {port}"))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     let body = body.map(Value::to_string).unwrap_or_default();
     write!(
         stream,
@@ -33,7 +45,9 @@ pub fn http(port: u16, method: &str, path: &str, body: Option<&Value>) -> Result
     let mut raw = Vec::new();
     let mut buf = [0u8; 1 << 16];
     while !is_complete(&raw)? {
-        let n = stream.read(&mut buf)?;
+        let n = stream
+            .read(&mut buf)
+            .with_context(|| format!("{method} {path}: no answer within {timeout:?}"))?;
         if n == 0 {
             break;
         }
@@ -161,7 +175,7 @@ impl Driver {
         let driver = Self { child, port };
         let t0 = Instant::now();
         loop {
-            if let Ok((200, body)) = http(port, "GET", "/status", None)
+            if let Ok((200, body)) = http(port, "GET", "/status", None, Duration::from_secs(5))
                 && body["value"]["ready"] != json!(false)
             {
                 return Ok(driver);
@@ -199,7 +213,13 @@ impl Session {
             Browser::Safari => json!({ "browserName": "safari" }),
         };
         let caps = json!({ "capabilities": { "alwaysMatch": always } });
-        let (status, body) = http(driver.port, "POST", "/session", Some(&caps))?;
+        let (status, body) = http(
+            driver.port,
+            "POST",
+            "/session",
+            Some(&caps),
+            COMMAND_TIMEOUT,
+        )?;
         let value =
             value_of(status, body).map_err(|e| anyhow!("{e:#}\n{}", browser.setup_hint()))?;
         let id = value["sessionId"]
@@ -213,8 +233,18 @@ impl Session {
     }
 
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+        self.call_within(method, path, body, COMMAND_TIMEOUT)
+    }
+
+    fn call_within(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value> {
         let path = format!("/session/{}{path}", self.id);
-        let (status, reply) = http(self.port, method, &path, body.as_ref())?;
+        let (status, reply) = http(self.port, method, &path, body.as_ref(), timeout)?;
         value_of(status, reply).with_context(|| format!("{method} {path}"))
     }
 
@@ -245,10 +275,13 @@ impl Session {
             "/timeouts",
             Some(json!({ "script": timeout.as_millis() as u64 })),
         )?;
-        self.call(
+        // The driver ends the script at `timeout`; a minute more for it
+        // to say so.
+        self.call_within(
             "POST",
             "/execute/async",
             Some(json!({ "script": script, "args": args })),
+            timeout + Duration::from_secs(60),
         )
     }
 
@@ -305,7 +338,13 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = http(self.port, "DELETE", &format!("/session/{}", self.id), None);
+        let _ = http(
+            self.port,
+            "DELETE",
+            &format!("/session/{}", self.id),
+            None,
+            COMMAND_TIMEOUT,
+        );
     }
 }
 
@@ -384,8 +423,14 @@ mod tests {
     #[test]
     fn sends_json_and_reads_a_sized_reply() {
         let (port, rx) = fake("200 OK", r#"{"value":"lloyd"}"#);
-        let (status, body) =
-            http(port, "POST", "/session/1/url", Some(&json!({"url": "x"}))).unwrap();
+        let (status, body) = http(
+            port,
+            "POST",
+            "/session/1/url",
+            Some(&json!({"url": "x"})),
+            COMMAND_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!((status, body), (200, json!({"value": "lloyd"})));
         let (line, sent) = rx.recv().unwrap();
         assert_eq!(line, "POST /session/1/url HTTP/1.1");
@@ -399,6 +444,20 @@ mod tests {
             parse_response(raw).unwrap(),
             (200, json!({"value": [1, 2]}))
         );
+    }
+
+    #[test]
+    fn a_silent_driver_times_out() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (_held, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        let t0 = Instant::now();
+        let e = http(port, "GET", "/status", None, Duration::from_millis(300)).unwrap_err();
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        assert!(format!("{e:#}").contains("no answer within"), "{e:#}");
     }
 
     #[test]
@@ -433,7 +492,7 @@ mod tests {
             "404 Not Found",
             r#"{"value":{"error":"no such window","message":"gone"}}"#,
         );
-        let (status, body) = http(port, "GET", "/session/1/url", None).unwrap();
+        let (status, body) = http(port, "GET", "/session/1/url", None, COMMAND_TIMEOUT).unwrap();
         let e = value_of(status, body).unwrap_err().to_string();
         assert_eq!(e, "WebDriver 404 no such window: gone");
     }
