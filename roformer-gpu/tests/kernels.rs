@@ -1,10 +1,14 @@
 //! Each kernel against a plain CPU loop.  Runs on whatever adapter wgpu
 //! finds; in CI-like runs without a GPU, point Vulkan at SwiftShader:
 //! `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan`.
-//! Tests skip with a message when no adapter is available.
+//! Tests skip with a message when no adapter is available, and fail
+//! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
+//! tests).
 
 use roformer_gpu::{Act, Gpu, MatMul, TILES, View};
+use test_support::{Need, skip};
 
+#[track_caller]
 fn gpu() -> Option<Gpu> {
     match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
         Ok(g) => {
@@ -12,7 +16,7 @@ fn gpu() -> Option<Gpu> {
             Some(g)
         }
         Err(e) => {
-            eprintln!("skipping: {e}");
+            skip(Need::Gpu, &e);
             None
         }
     }
@@ -691,14 +695,12 @@ fn check_kernels_accepts_all() {
 /// when the adapter has no `timestamp-query`.
 #[test]
 fn profile_labels_dispatches() {
-    let Ok(g) = pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
-    else {
-        eprintln!("skipping: no adapter");
-        return;
+    let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
     };
     if !g.profiling() {
-        eprintln!("skipping: adapter without timestamp-query");
-        return;
+        return skip(Need::Timestamps, "adapter without timestamp-query");
     }
     let (m, n, k) = (70, 90, 33);
     let a = g.upload("a", &rand(m * k, 1));
@@ -929,14 +931,12 @@ fn check_attention_accepts_all() {
 /// collected or not, so a report covers only what follows.
 #[test]
 fn profile_recording_and_reset() {
-    let Ok(g) = pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance))
-    else {
-        eprintln!("skipping: no adapter");
-        return;
+    let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
     };
     if !g.profiling() {
-        eprintln!("skipping: adapter without timestamp-query");
-        return;
+        return skip(Need::Timestamps, "adapter without timestamp-query");
     }
     let x = g.upload("x", &rand(64 * 64, 3));
     let softmax = |g: &Gpu| {

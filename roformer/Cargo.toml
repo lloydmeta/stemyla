@@ -23,6 +23,7 @@ ndarray = ["burn", "burn/ndarray", "burn/simd"]
 [dev-dependencies]
 # Default burn features give burn-ndarray its rayon multi-threading in tests.
 burn = { version = "0.20.1", features = ["ndarray"] }
+test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

@@ -6678,6 +6678,7 @@ dependencies = [
  "realfft",
  "safetensors 0.7.0",
  "serde_json",
+ "test-support",
 ]
 
 [[package]]
@@ -6690,6 +6691,7 @@ dependencies = [
  "pollster",
  "roformer",
  "safetensors 0.7.0",
+ "test-support",
  "wgpu 30.0.1",
 ]
 

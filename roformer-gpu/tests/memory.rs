@@ -3,7 +3,9 @@
 //! buffers, a failed upload, readbacks, start-up checks and benchmarks.
 //! The model is a synthetic file with every tensor the network reads, all
 //! zero, served a tensor at a time so the test never holds it whole.
-//! Tests skip with a message when no adapter is available.
+//! Tests skip with a message when no adapter is available, and fail
+//! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
+//! readback test).
 
 use std::borrow::Cow;
 use std::sync::Mutex;
@@ -12,11 +14,13 @@ use roformer::weights::{Source, Store, WeightError};
 use roformer::{DEPTH, DIM, DIM_HEAD, FEATURES, HEADS, HIDDEN, STEMS, band_groups};
 use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use test_support::{Need, skip};
 
 /// Held by the tests that upload a whole model, so at most one ~700 MB
 /// model is on the GPU at a time.
 static MODEL: Mutex<()> = Mutex::new(());
 
+#[track_caller]
 fn gpu() -> Option<Gpu> {
     match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
         Ok(g) => {
@@ -24,7 +28,7 @@ fn gpu() -> Option<Gpu> {
             Some(g)
         }
         Err(e) => {
-            eprintln!("skipping: {e}");
+            skip(Need::Gpu, &e);
             None
         }
     }
@@ -266,8 +270,8 @@ fn readbacks_checks_and_benchmarks_free_their_buffers() {
 fn collected_profile_readbacks_are_freed() {
     let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
         Ok(g) if g.profiling() => g,
-        Ok(_) => return eprintln!("skipping: no timestamp-query"),
-        Err(e) => return eprintln!("skipping: {e}"),
+        Ok(_) => return skip(Need::Timestamps, "adapter without timestamp-query"),
+        Err(e) => return skip(Need::Gpu, &e),
     };
     let x = g.upload("x", &[1.0; 256]);
     let start = g.live_bytes();

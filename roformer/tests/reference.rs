@@ -1,6 +1,7 @@
 //! Checks against PyTorch fixtures written by `tools/roformer_export.py`
 //! into `third_party/roformer/` (gitignored; the weights are not ours to
-//! publish).  Tests skip with a message when the fixtures are absent.
+//! publish).  Tests skip with a message when the fixtures are absent, and
+//! fail instead under `STEMYLA_REQUIRE=fixtures`.
 
 use std::path::PathBuf;
 
@@ -12,19 +13,21 @@ use roformer::separate::{analyse, apply_masks, to_tensor};
 use roformer::stft::{istft, stft};
 use roformer::{BINS, FEATURES, STEMS};
 use safetensors::{Dtype, SafeTensors};
+use test_support::{Need, skip};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../third_party/roformer")
 }
 
+#[track_caller]
 fn read(name: &str) -> Option<Vec<u8>> {
     let p = fixture_dir().join(name);
     match std::fs::read(&p) {
         Ok(b) => Some(b),
         Err(_) => {
-            eprintln!(
-                "skipping: {} not found (run tools/roformer_export.py)",
-                p.display()
+            skip(
+                Need::Fixtures,
+                format!("{} not found (run tools/roformer_export.py)", p.display()),
             );
             None
         }
