@@ -1,0 +1,16 @@
+---
+paths:
+  - "engine/**"
+  - "app/src/**"
+  - "worker/**"
+---
+
+# Memory and the audio callback
+
+The page and the worker run in WebAssembly, whose memory never shrinks, in a tab an iPhone kills at 2 GB.  The rules are MEM-1 to MEM-5 and RT-1 in `docs/invariants.md`; the design is in `docs/ARCHITECTURE.md` (memory on phones).
+
+* Before adding `to_vec`, `clone` on a `Vec<f32>`, `Vec::from`, `collect` or `copy_to` of audio, model or file bytes: is the buffer song- or model-sized?  If so, borrow it or share an `engine::Samples`; a copy needs a stated reason and a test that pins the sharing.
+* A typed array sent between page and worker goes in the transfer list, and the receiver does not copy it again.
+* Every OPFS write gets a whole array, never a view (`docs/references/browser-quirks.md`).
+* Nothing on the audio callback's path (`engine/src/slot.rs` `render_interleaved` and below) waits, locks without `try_lock`, logs, or drops a `Player` or `Song`.
+* Known breaches are TD-12 to TD-15 and TD-17 in `docs/tech-debt.md`; do not copy their pattern.

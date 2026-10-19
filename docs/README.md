@@ -1,0 +1,41 @@
+# Docs index
+
+What each doc is for and when to read it.  `CLAUDE.md` at the root is the map loaded into every session; everything here is read on demand.  `cargo run -p xtask -- docs-check` fails when a doc under `docs/` is missing from this list.
+
+## Always relevant
+
+* `invariants.md`: every rule by ID (MEM-1, GPU-1, ...), why it holds, what enforces it and its known gaps.  Read before any change.
+* `tech-debt.md`: known gaps in enforcement and known breaches of the rules, by ID (TD-1, ...).  Read before relying on a rule being checked, and add to it when leaving a gap.
+
+## How it works
+
+* `ARCHITECTURE.md`: the pipeline from a song to six stems, the crates and their layers, the model, memory on phones, the GPU kernels, browser storage, the tests, and a vocabulary of terms.
+
+## How work is done
+
+* `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against.
+* `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
+* `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `decisions/0001-harness-in-the-repo.md`: agent knowledge is versioned in the repo, with `CLAUDE.md` as a map; the harness is Claude Code only.
+* `decisions/0002-staged-background-autonomy.md`: agents are to work in the background, up to merging their own PRs, reached in stages with gates.
+
+## References
+
+Distilled facts from outside the repo, each with its source and the date it was checked.
+
+* `references/browser-quirks.md`: Safari, Web Audio and WebGPU behaviour the code works around.
+* `references/webgpu-limits.md`: the WebGPU default limits every kernel must fit (GPU-1).
+* `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures.
+
+## Conventions
+
+These are what `docs-check` holds the docs to:
+
+* Paths in code spans (`engine/src/song.rs`) exist, relative to the repo root, to the doc's own folder or, inside `docs/`, to `docs/`.  Plans and decisions are exempt: plans name files still to be made, and decisions are records of their time.  Name files, functions and types rather than linking to lines that move; `file.rs:12` is fine for evidence, and the check ignores the line.
+* IDs are defined once, as a `### ID: title` heading in `invariants.md` or `tech-debt.md`, and never reused.  Every ID mentioned anywhere is defined.
+* The tests an invariant names on its `* Enforced by:` line exist.
+* Every workspace crate is listed in the layout of `CLAUDE.md` and `README.md` and under the crates of `ARCHITECTURE.md`.
+* Decisions are numbered `0001-...` with no gaps and carry a `Status:` line.
+* Plans live in `plans/active/` or `plans/completed/` and keep the living sections listed in `plans/PLANS.md`.
+* Every rule in `.claude/rules/` has `paths:` frontmatter whose globs match files.
+* `CLAUDE.md` stays within 100 lines.

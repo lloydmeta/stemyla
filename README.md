@@ -135,6 +135,7 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | `engine/` | decoding, playback, time-stretch, classic drum separation |
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
+| `protocol/` | the messages between the page and the worker (`stem-protocol`) |
 | `xtask/` | the static server, the browser test runners and other tools |
 | `docs/ARCHITECTURE.md` | how the pieces fit together |
 
