@@ -5,8 +5,11 @@
 //! 30 seconds, 44.1 kHz, stereo, 120 BPM, A minor (Am F C G, one chord per
 //! bar).  Every stem is generated independently, so the mix is exactly the
 //! sum of the stems and each stem is a perfect separation target.
+//!
+//! The `files` feature adds `write_wav` and `write_song`, for tools and
+//! tests.  The web app takes `synth` without it, so it gets only song
+//! generation and no other crate (LAYER-1).
 
-use serde::Serialize;
 use std::f64::consts::TAU;
 
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -33,7 +36,8 @@ impl Stereo {
     }
 }
 
-#[derive(Serialize, Default, Clone, Debug)]
+#[cfg_attr(feature = "files", derive(serde::Serialize))]
+#[derive(Default, Clone, Debug)]
 pub struct Onsets {
     pub kick: Vec<f64>,
     pub snare: Vec<f64>,
@@ -43,7 +47,8 @@ pub struct Onsets {
     pub lead: Vec<f64>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[cfg_attr(feature = "files", derive(serde::Serialize))]
+#[derive(Clone, Debug)]
 pub struct Truth {
     pub sample_rate: u32,
     pub bpm: f64,
@@ -343,6 +348,7 @@ pub fn sum_stems(stems: &[(String, Stereo)]) -> Stereo {
     out
 }
 
+#[cfg(feature = "files")]
 pub fn write_wav(path: &std::path::Path, s: &Stereo) -> anyhow::Result<()> {
     let spec = hound::WavSpec {
         channels: 2,
@@ -361,6 +367,7 @@ pub fn write_wav(path: &std::path::Path, s: &Stereo) -> anyhow::Result<()> {
 
 /// Writes `mix.wav`, one WAV per stem, `truth.json`, and (if ffmpeg exists)
 /// `mix.mp3` into `dir`.
+#[cfg(feature = "files")]
 pub fn write_song(song: &Song, dir: &std::path::Path, mp3: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     write_wav(&dir.join("mix.wav"), &song.mix)?;

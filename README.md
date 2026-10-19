@@ -62,6 +62,9 @@ Then the checks CI gates on:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p synth --all-targets -- -D warnings
+cargo clippy -p app -- -D warnings
+cargo clippy -p app --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -99,6 +102,9 @@ The CDN in front of `beachape.com` (Cloudflare) lets browsers keep `.js` files f
 ```bash
 cargo test --workspace                       # unit, integration and UI snapshot tests (Linux needs ALSA headers)
 cargo clippy --workspace --all-targets
+cargo clippy -p synth --all-targets          # synth without its files feature
+cargo clippy -p app                          # app's lib and binary without any files feature
+cargo clippy -p app --all-targets            # app's tests without the workspace's merged features
 ```
 
 * `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them, and `STEMYLA_REQUIRE=fixtures` makes them fail).
