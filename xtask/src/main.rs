@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
 use std::path::PathBuf;
-use xtask::{bench, e2e, publish, roformer_cli, separate, serve, synth, web_test};
+use xtask::{bench, docs, e2e, publish, roformer_cli, separate, serve, synth, web_test};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
         bail!(
-            "usage: xtask <serve|web-test|e2e|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
+            "usage: xtask <serve|web-test|e2e|docs-check|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
         );
     };
     match cmd.as_str() {
@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         "serve" => serve::run(&args[1..])?,
         "web-test" => web_test::run(&args[1..])?,
         "e2e" => e2e::run(&args[1..])?,
+        "docs-check" => docs_check()?,
         "publish" => publish::main(&args[1..])?,
         other => bail!("unknown command {other}"),
     }
@@ -89,4 +90,17 @@ fn live_smoke() -> Result<()> {
 #[cfg(not(feature = "cpal"))]
 fn live_smoke() -> Result<()> {
     bail!("build with --features cpal")
+}
+
+/// Checks that CLAUDE.md, docs/ and .claude/rules/ match the code.
+fn docs_check() -> Result<()> {
+    let problems = docs::check(&xtask::workspace_root())?;
+    for problem in &problems {
+        println!("{problem}");
+    }
+    if !problems.is_empty() {
+        bail!("{} docs problem(s)", problems.len());
+    }
+    println!("docs match the code");
+    Ok(())
 }

@@ -33,8 +33,22 @@ flowchart LR
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
-* `worker`: the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark and MP3 encoding.
-* `xtask`: tools run with Cargo: the static file server, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.
+* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark and MP3 encoding.
+* `stem-protocol` (`protocol/`): the messages between the page and the worker, one encoder and one decoder per message, shared by both sides.
+* `xtask`: tools run with Cargo: the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`), publishing, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.
+
+### Layers
+
+Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`).  The page side and the worker side meet only through `stem-protocol`.
+
+| Layer | Crates | Depend on |
+| - | - | - |
+| Pure | `dsp`, `synth`, `roformer`, `stem-protocol` | no workspace crate |
+| Engine and GPU | `engine`, `roformer-gpu` | `dsp`; `roformer` |
+| Shells | `app`, `stem-worker` | `engine`, `dsp`, `synth`, `stem-protocol`; `roformer`, `roformer-gpu`, `stem-protocol` |
+| Tools | `xtask` | `dsp`, `engine`, `synth`, `roformer` |
+
+`app` depending on `synth` ships the demo song generator in the page (TD-4 in `docs/tech-debt.md`).
 
 ## From a song to six stems
 
@@ -182,10 +196,10 @@ The Storage menu lists the stored songs, opens or forgets one, shows the space u
 
 ## Tests
 
-* `cargo test --workspace`: unit and integration tests, including the UI snapshots.
+* `cargo test --workspace`: unit and integration tests, including the UI snapshots and the docs check (`xtask/tests/docs.rs`).
 * `cargo test -p roformer --release`: the CPU network against PyTorch (needs fixtures from `tools/roformer_export.py`; skipped without them).
 * `cargo test -p roformer-gpu --release`: every GPU kernel against CPU loops, and the whole network against PyTorch.  Without a GPU, point Vulkan at SwiftShader (see the README).
-* `cargo run -p xtask -- web-test`: browser tests (wasm-bindgen-test, in Safari or Chrome) of the song sessions in browser storage (`app/tests/web.rs`, and `app/src/store.rs` for its private write path), of the Web Audio output freeing each song it replaces (`app/tests/web_output.rs`), of the worker's model storage and messages (`worker/src/web/tests.rs`, in a dedicated worker; in tests the worker keeps what it would post), and of every page <-> worker message surviving a structured clone with its transfers (`protocol/tests/web.rs`).
+* `cargo run -p xtask -- web-test`: browser tests (wasm-bindgen-test, in Safari or Chrome) of the song sessions in browser storage (`app/tests/web.rs`, and `app/src/store.rs` for its private write path), of the Web Audio output freeing each song it replaces (`app/tests/web_output.rs`) and of closing the page (`app/tests/web_close.rs`), of the worker's model storage and messages (`worker/src/web/tests.rs`, in a dedicated worker; in tests the worker keeps what it would post), and of every page <-> worker message surviving a structured clone with its transfers (`protocol/tests/web.rs`).
 * `cargo run -p xtask -- e2e <scenario>`: the built page driven over WebDriver by a small std-only client (`xtask/src/webdriver.rs`, `xtask/src/e2e.rs`).  `xtask serve --inject` adds the page helpers in `xtask/e2e/` (console capture, AudioContext stand-ins, a blank page that drives the worker directly).  `smoke`, `audio-resume` and `storage` need no model and run in CI; `bench`, `selftest`, `separate` and `worker-check` need a GPU and, but for `bench`, the model.
 
 ## Vocabulary
