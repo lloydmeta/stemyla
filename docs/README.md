@@ -5,7 +5,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 ## Always relevant
 
 * `invariants.md`: every rule by ID (MEM-1, GPU-1, ...), why it holds, what enforces it and its known gaps.  Read before any change.
-* `tech-debt.md`: known gaps in enforcement and known breaches of the rules, by ID (TD-1, ...).  Read before relying on a rule being checked, and add to it when leaving a gap.
+* `tech-debt.md`: known gaps in enforcement and known breaches of the rules, by ID (`TD-n`).  Read before relying on a rule being checked, and add to it when leaving a gap.
 
 ## How it works
 
@@ -34,7 +34,7 @@ Distilled facts from outside the repo, each with its source and the date it was 
 These are what `docs-check` holds the docs to:
 
 * Paths in code spans (`engine/src/song.rs`) exist, relative to the repo root, to the doc's own folder or, inside `docs/`, to `docs/`.  Plans and decisions are exempt: plans name files still to be made, and decisions are records of their time.  Name files, functions and types rather than linking to lines that move; `file.rs:12` is fine for evidence, and the check ignores the line.
-* IDs are defined once, as a `### ID: title` heading in `invariants.md` or `tech-debt.md`, and never reused; every `###` heading there is an ID.  A mention of an ID whose prefix is in use (MEM, TD, ...) must be defined; an unknown prefix cannot be told from text such as `SHA-256`, so it is not checked.
+* IDs are defined once, as a `### ID: title` heading in `invariants.md` or `tech-debt.md`, and never reused; every `###` heading there is an ID.  A mention of an ID whose prefix is in use (MEM, TD, ...) must be defined; an unknown prefix cannot be told from text such as `SHA-256`, so it is not checked.  A closed ID is a `* ID: ...` bullet under `## Closed`.  Only plans and decisions may name it, and it cannot be defined again.
 * The tests an invariant names on its `* Enforced by:` line exist.
 * Every workspace crate is listed in the layout of `CLAUDE.md` and `README.md` and under the crates of `ARCHITECTURE.md`.
 * Decisions are numbered `0001-...` with no gaps and carry a `Status:` line.

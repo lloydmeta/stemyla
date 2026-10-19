@@ -87,7 +87,7 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## Before you merge
 
-* CI passes, including `browser tests (Chrome)`, which is not yet a required check (TD-20).
+* CI passes.  Every job but `publish` is a required check on `main`, including `browser tests (Chrome)`.
 * The PR says what was verified, how, and what was not verified.
 * A new rule, decision or gap is recorded, and the plan's progress is current.
 

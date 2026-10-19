@@ -20,6 +20,7 @@ Two principles shape it:
 | `references/` | guide | local setup and browser quirks rediscovered (chromedriver downloaded 8 times) | phase 1 |
 | `working-with-agents.md`, kept complete by `docs-check` | guide, for people | how to drive agents lived in one person's head and in old transcripts | phase 1 |
 | `xtask docs-check` (`the_map_and_docs_match_the_code`) | sensor, computational | docs drift from code (on 2026-10-19: `synth` missing from the map, `stem-protocol` from two crate lists) | phase 1 |
+| `every_kernel_fits_the_default_limits`, naga over every shader (GPU-1) | sensor, computational | a kernel over WebGPU's default limits fails only on a real adapter, on some GPUs; only the tile memory was checked before | phase 2 |
 
 Planned components, by phase, are in the plan.
 

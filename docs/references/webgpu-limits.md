@@ -15,4 +15,15 @@ The limits every kernel must fit (GPU-1).  `roformer-gpu` requests the device wi
 | `maxBufferSize` | 256 MiB | |
 | `maxBindGroups` | 4 | |
 
-wgpu enforces these when a pipeline or bind group is created on a real adapter; naga's validator does not check device limits, so a static test must assert them itself (TD-1).
+wgpu enforces these when a pipeline or bind group is created on a real adapter.  naga's validator does not check device limits.  So `every_kernel_fits_the_default_limits` (`roformer-gpu/src/lib.rs`) checks without a GPU the 8 limits that a shader shows.  These are the workgroup sizes, invocations, workgroup storage, the two buffer counts and `maxBindGroups`.  It parses each shader with naga 30.0.1 ([`front::wgsl::parse_str`](https://docs.rs/naga/30.0.1/naga/front/wgsl/fn.parse_str.html)), and counts as the WebGPU specification does ([compute pipeline creation](https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcomputepipeline)):
+
+* Workgroup size: each axis of `@workgroup_size` ([`EntryPoint::workgroup_size`](https://docs.rs/naga/30.0.1/naga/ir/struct.EntryPoint.html)), and the product x * y * z.
+* Workgroup storage: the sum of `roundUp(16, size)` over each `var<workgroup>` that the entry point statically uses.  naga's validator gives the use ([`FunctionInfo`](https://docs.rs/naga/30.0.1/naga/valid/struct.FunctionInfo.html)), and [`proc::Layouter`](https://docs.rs/naga/30.0.1/naga/proc/struct.Layouter.html) gives the size.
+* Buffers and bind groups: every storage and uniform buffer, and every `@group`, that the module declares ([`GlobalVariable`](https://docs.rs/naga/30.0.1/naga/ir/struct.GlobalVariable.html)).  The specification counts the entries of the pipeline layout.  `Kernels::new` gives each module one layout, from `MATMUL_BINDS` and the other lists.  `every_layout_matches_its_shaders` checks that each list is its modules' bindings, so the counts are the same.  The test does not read `Kernels::new`; wgpu's validation finds a pipeline given the wrong list.
+
+A shader that does not parse or validate, or that declares an `override`, fails the test, so no shader passes without a check.  `every_shader_file_is_checked` fails when a file in `roformer-gpu/src/shaders/` is not in the test's lists.
+
+The test cannot see the other three limits, which depend on the data:
+
+* `maxComputeWorkgroupsPerDimension`: `grid()` splits a dispatch over x and y, and `Rec::push` asserts each count.
+* `maxStorageBufferBindingSize` and `maxBufferSize`: the step budget keeps each buffer small.  Only wgpu checks them, at runtime.

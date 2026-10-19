@@ -1,16 +1,10 @@
 # Tech debt
 
-Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule it concerns, the evidence, and the fix in view.  An entry is closed by deleting it in the commit that fixes it (git keeps the history); its ID is never reused.
+Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule it concerns, the evidence, and the fix in view.  To close an entry, delete it in the commit that fixes it.  In the same commit, add its ID under `## Closed`, with what closed it.  An ID is never reused.  Plans and decisions may still name a closed ID; `docs-check` fails it in other docs.  Add new entries above `## Closed`.
 
 Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans/active/harness-engineering.md`); the plan's phase 2 closes most enforcement gaps.
 
 ## Enforcement gaps
-
-### TD-1: only the matmul and attention kernels' workgroup memory is checked statically
-
-`workgroup_memory_within_defaults` checks the workgroup memory of every `TILES` kernel (the hand-written `matmul.wgsl` among them) and of fused attention (GPU-1).  It does not check `softmax.wgsl` or `rmsnorm.wgsl`.  Nothing checks workgroup sizes, invocations per workgroup or buffers per stage before a kernel runs on a real adapter.  CI runs the crate's GPU-free tests since `plans/active/harness-phase-2.md` M1.
-
-* Fix: a naga-based test that parses every shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
 
 ### TD-2: dsp switches off every clippy lint
 
@@ -144,11 +138,14 @@ The app draws to one canvas.  `xtask e2e` clicks fixed coordinates (`VIEWPORT`, 
 
 ### TD-20: process rules rest on local settings
 
-Commit signing is set in the maintainer's own git config only, and nothing stops an agent from pushing (GIT-1, GIT-2).  The `main` ruleset:
+Commit signing is set in the maintainer's own git config only, and nothing stops an agent from pushing (GIT-1, GIT-2).  The `main` ruleset (checked 2026-10-19 with `gh api repos/lloydmeta/stemyla/rulesets/24980616`):
 
 * does not require signed commits;
-* does not require `browser tests (Chrome)`;
 * lets the admin role bypass it always, so agents running with the maintainer's credentials can skip the required checks and the approval;
 * does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
-* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings, and browser tests as a required check; in phase 5, the other ruleset changes.
+* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings; in phase 5, the other ruleset changes.
+
+## Closed
+
+* TD-1: closed by `every_kernel_fits_the_default_limits` (harness phase 2, M2).  It checks every shader against the default limits with naga (GPU-1).
