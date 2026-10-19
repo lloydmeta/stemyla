@@ -27,6 +27,10 @@ const SKIPPED_DIRS: &[&str] = &[
     ".claude/worktrees",
 ];
 
+/// Folders inside a crate, which docs name relative to that crate
+/// (`src/shaders/` on the line about `roformer-gpu/`).
+const CRATE_RELATIVE: &[&str] = &["src/", "tests/", "benches/", "e2e/"];
+
 /// Paths the docs may name that a build creates, so they are absent in a
 /// fresh checkout.
 const GENERATED_PREFIXES: &[&str] = &["app/dist", "target/", "third_party/", "audio/", "stems/"];
@@ -102,7 +106,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
         .iter()
         .filter_map(|f| f.split_once('/').map(|(first, _)| first.to_string()))
         .collect();
-    let rust_fns = rust_fn_names(
+    let test_fns = test_fn_names(
         &files
             .iter()
             .filter(|f| f.ends_with(".rs"))
@@ -143,7 +147,11 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
         problems.extend(ids_defined(file, text, &ids.defined));
     }
     if let Some(invariants) = doc("docs/invariants.md") {
-        problems.extend(enforcing_tests_exist(invariants, &rust_fns));
+        problems.extend(enforcing_tests_exist(invariants, &test_fns));
+        problems.extend(map_lists_every_rule(
+            doc("CLAUDE.md").unwrap_or_default(),
+            invariants,
+        ));
     }
     problems.extend(docs_indexed(&markdown, doc("docs/README.md")));
     problems.extend(rules_match_files(&markdown, &files));
@@ -193,16 +201,24 @@ pub fn repo_files(root: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// The folders listed in the root manifest's `members = [...]`.
+/// The folders listed in the root manifest's `members = [...]` (not
+/// `default-members`), with `#` comments ignored.
 pub fn workspace_members(cargo_toml: &str) -> Vec<String> {
-    let Some(start) = cargo_toml.find("members") else {
+    let lines: Vec<&str> = cargo_toml
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or_default())
+        .collect();
+    let Some(start) = lines.iter().position(|l| {
+        l.split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "members")
+    }) else {
         return Vec::new();
     };
-    let rest = &cargo_toml[start..];
-    let (Some(open), Some(close)) = (rest.find('['), rest.find(']')) else {
+    let list = lines[start..].join("\n");
+    let (Some(open), Some(close)) = (list.find('['), list.find(']')) else {
         return Vec::new();
     };
-    rest[open + 1..close]
+    list[open + 1..close]
         .split(',')
         .map(|s| s.trim().trim_matches('"').to_string())
         .filter(|s| !s.is_empty())
@@ -247,7 +263,12 @@ pub fn inline_code(markdown: &str) -> Vec<String> {
 pub fn section<'a>(markdown: &'a str, heading: &str) -> Option<&'a str> {
     let start = markdown
         .match_indices(heading)
-        .find(|(i, _)| *i == 0 || markdown.as_bytes()[i - 1] == b'\n')
+        .find(|(i, _)| {
+            let bytes = markdown.as_bytes();
+            let line_start = *i == 0 || bytes[i - 1] == b'\n';
+            let line_end = matches!(bytes.get(i + heading.len()), None | Some(b'\n' | b'\r'));
+            line_start && line_end
+        })
         .map(|(i, _)| i + heading.len())?;
     let level = &heading[..=heading.find(' ')?];
     let rest = &markdown[start..];
@@ -279,7 +300,11 @@ pub fn repo_path(span: &str, top_level: &BTreeSet<String>) -> Option<String> {
     }
     let first = path.split('/').next().unwrap_or_default();
     let in_tree = path.contains('/') && top_level.contains(first);
-    (path.ends_with(".md") || in_tree).then(|| path.to_string())
+    let file_name = path.rsplit('/').next().unwrap_or_default();
+    let names_a_file = path.contains('/')
+        && file_name.contains('.')
+        && !CRATE_RELATIVE.iter().any(|c| path.starts_with(c));
+    (path.ends_with(".md") || in_tree || names_a_file).then(|| path.to_string())
 }
 
 /// `file.rs:12` or `file.rs:12-20` without its line numbers.
@@ -304,7 +329,10 @@ fn names_current_paths(file: &str) -> bool {
 /// own folder, and inside `docs/`, the `docs/` folder.
 fn path_bases(file: &str) -> Vec<String> {
     let dir = file.rsplit_once('/').map_or("", |(dir, _)| dir);
-    let mut bases = vec![String::new(), format!("{dir}/")];
+    let mut bases = vec![String::new()];
+    if !dir.is_empty() {
+        bases.push(format!("{dir}/"));
+    }
     if file.starts_with("docs/") {
         bases.push("docs/".to_string());
     }
@@ -330,6 +358,39 @@ fn paths_exist(root: &Path, file: &str, text: &str, top_level: &BTreeSet<String>
             )
         })
         .collect()
+}
+
+/// The rules the map lists, one `* ID: ...` bullet each under `## Rules`,
+/// are exactly the invariants in `docs/invariants.md` that are not retired.
+pub fn map_lists_every_rule(claude: &str, invariants: &str) -> Vec<Problem> {
+    let listed: BTreeSet<&str> = section(claude, "## Rules")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.strip_prefix("* ")?.split_once(':'))
+        .map(|(id, _)| id)
+        .filter(|id| is_id(id))
+        .collect();
+    let rules: BTreeSet<&str> = invariants
+        .lines()
+        .filter_map(|l| l.strip_prefix("### ")?.split_once(':'))
+        .filter(|(id, title)| is_id(id) && !title.trim_start().starts_with("Retired"))
+        .map(|(id, _)| id)
+        .collect();
+    let missing = rules.difference(&listed).map(|id| {
+        Problem::new(
+            "rules",
+            "CLAUDE.md",
+            format!("rule `{id}` from docs/invariants.md is missing from `## Rules`.  Fix: add a one-line `* {id}: ...` bullet."),
+        )
+    });
+    let extra = listed.difference(&rules).map(|id| {
+        Problem::new(
+            "rules",
+            "CLAUDE.md",
+            format!("`{id}` is listed under `## Rules` but is not a current rule in docs/invariants.md.  Fix: define it there, or remove the bullet."),
+        )
+    });
+    missing.chain(extra).collect()
 }
 
 fn map_within_budget(claude: &str) -> Vec<Problem> {
@@ -452,27 +513,47 @@ fn ids_defined(file: &str, text: &str, defined: &BTreeSet<String>) -> Vec<Proble
         .collect()
 }
 
-/// Names of every `fn` in the given Rust sources.
-pub fn rust_fn_names(sources: &[String]) -> BTreeSet<String> {
+/// Attributes that mark a test function.
+const TEST_ATTRIBUTES: &[&str] = &["#[test]", "#[wasm_bindgen_test", "#[tokio::test"];
+
+/// Names of the test functions in the given Rust sources: each `fn` whose
+/// attributes include a test attribute.
+pub fn test_fn_names(sources: &[String]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for source in sources {
-        for (i, _) in source.match_indices("fn ") {
-            let boundary = i == 0 || !source.as_bytes()[i - 1].is_ascii_alphanumeric();
-            let name: String = source[i + 3..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if boundary && !name.is_empty() {
+        let mut is_test = false;
+        for line in source.lines().map(str::trim_start) {
+            if TEST_ATTRIBUTES.iter().any(|a| line.starts_with(a)) {
+                is_test = true;
+                continue;
+            }
+            if line.starts_with("#[") || line.starts_with("//") || line.is_empty() {
+                continue;
+            }
+            if let Some(name) = fn_name(line).filter(|_| is_test) {
                 names.insert(name);
             }
+            is_test = false;
         }
     }
     names
 }
 
+/// The name in a line that declares a function (`pub async fn name(`).
+fn fn_name(line: &str) -> Option<String> {
+    let (at, _) = line
+        .match_indices("fn ")
+        .find(|(i, _)| *i == 0 || line.as_bytes()[i - 1] == b' ')?;
+    let name: String = line[at + 3..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
 /// The tests an invariant names on its `* Enforced by:` line exist, so a
 /// rule never claims a check that was renamed or deleted.
-pub fn enforcing_tests_exist(invariants: &str, rust_fns: &BTreeSet<String>) -> Vec<Problem> {
+pub fn enforcing_tests_exist(invariants: &str, test_fns: &BTreeSet<String>) -> Vec<Problem> {
     invariants
         .lines()
         .filter(|l| l.trim_start().starts_with("* Enforced by:"))
@@ -480,12 +561,12 @@ pub fn enforcing_tests_exist(invariants: &str, rust_fns: &BTreeSet<String>) -> V
         .filter(|span| {
             span.contains('_') && span.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         })
-        .filter(|name| !rust_fns.contains(name))
+        .filter(|name| !test_fns.contains(name))
         .map(|name| {
             Problem::new(
                 "tests",
                 "docs/invariants.md",
-                format!("names test `{name}`, but no `fn {name}` exists.  Fix: name the test that now enforces the rule, or move the rule's gap to docs/tech-debt.md."),
+                format!("names test `{name}`, but no test function `{name}` exists.  Fix: name the test that now enforces the rule, or move the rule's gap to docs/tech-debt.md."),
             )
         })
         .collect()
@@ -550,7 +631,12 @@ pub fn glob_matches(glob: &str, path: &str) -> bool {
             None => glob == part,
             Some((head, tail)) => {
                 part.starts_with(head)
-                    && (head.len()..=part.len()).any(|i| segment(tail, &part[i..]))
+                    && part
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .chain([part.len()])
+                        .filter(|i| *i >= head.len())
+                        .any(|i| segment(tail, &part[i..]))
             }
         }
     }
@@ -665,6 +751,16 @@ mod tests {
             workspace_members("members = [\n  \"a\",\n  \"b\",\n]\n[workspace.package]\n"),
             ["a", "b"]
         );
+        assert_eq!(
+            workspace_members(
+                "[workspace]\ndefault-members = [\"app\"]\nmembers = [\"dsp\", \"app\"]\n"
+            ),
+            ["dsp", "app"]
+        );
+        assert_eq!(
+            workspace_members("members = [\n  # the [pure] crates\n  \"dsp\",\n]\n"),
+            ["dsp"]
+        );
     }
 
     #[test]
@@ -687,6 +783,8 @@ mod tests {
         assert!(layout.contains("`dsp/`") && layout.contains("`x/`"));
         assert!(!layout.contains("`y/`"));
         assert_eq!(section(md, "## Missing"), None);
+        let prefixed = "## Layout of the UI\n* `ui/`\n## Layout\n* `dsp/`\n";
+        assert_eq!(section(prefixed, "## Layout"), Some("\n* `dsp/`\n"));
     }
 
     #[test]
@@ -714,12 +812,18 @@ mod tests {
         assert_eq!(repo_path("v/<id>/", &t), None);
         assert_eq!(repo_path("sessions/<id>/", &t), None);
         assert_eq!(repo_path("src/shaders/", &t), None, "relative to a crate");
+        assert_eq!(repo_path("src/lib.rs", &t), None, "relative to a crate");
+        assert_eq!(
+            repo_path("enigne/src/song.rs", &t).as_deref(),
+            Some("enigne/src/song.rs"),
+            "a typo in the first folder is still checked"
+        );
         assert_eq!(repo_path("https://example.com/a.md", &t), None);
     }
 
     #[test]
     fn paths_resolve_from_the_root_the_file_or_docs() {
-        assert_eq!(path_bases("CLAUDE.md"), ["", "/"]);
+        assert_eq!(path_bases("CLAUDE.md"), [""]);
         assert_eq!(
             path_bases("docs/references/a.md"),
             ["", "docs/references/", "docs/"]
@@ -810,12 +914,32 @@ mod tests {
     }
 
     #[test]
+    fn the_map_lists_exactly_the_current_rules() {
+        let invariants = "### MEM-1: a\n### MEM-2: b\n### GPU-9: Retired: no longer needed\n";
+        let claude = "## Rules\n\n* MEM-1: a\n* DSP-1: c\n\n## Working here\n* MEM-2: not in the rules section\n";
+        let problems = map_lists_every_rule(claude, invariants);
+        let named: Vec<&str> = problems
+            .iter()
+            .map(|p| p.message.split('`').nth(1).unwrap())
+            .collect();
+        assert_eq!(named, ["MEM-2", "DSP-1"]);
+        assert!(map_lists_every_rule("## Rules\n* MEM-1: a\n* MEM-2: b\n", invariants).is_empty());
+    }
+
+    #[test]
+    fn only_test_functions_count_as_tests() {
+        let source = "#[test]\nfn a_buffer_is_shared() {}\n\n#[wasm_bindgen_test]\n#[ignore]\npub async fn another_one(x: u8) {}\n\nfn a_helper() {}\n#[test]\n// why\nfn after_a_comment() {}\nconst S: &str = \"fn in_a_string() {}\";\n";
+        let fns = test_fn_names(&[source.to_string()]);
+        let names: Vec<&str> = fns.iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            ["a_buffer_is_shared", "after_a_comment", "another_one"]
+        );
+    }
+
+    #[test]
     fn a_renamed_enforcing_test_is_reported() {
-        let fns = rust_fn_names(&[
-            "fn a_buffer_is_shared() {}\npub async fn another_one(x: u8) {}\nfn_like_not"
-                .to_string(),
-        ]);
-        assert!(fns.contains("a_buffer_is_shared") && fns.contains("another_one"));
+        let fns = test_fn_names(&["#[test]\nfn a_buffer_is_shared() {}\n".to_string()]);
         let invariants = "### MEM-1: x\n\n* Enforced by: `a_buffer_is_shared`, `gone_test`, CI `test` job, `engine/src/song.rs`.\n* Gaps: `not_checked_here`\n";
         let problems = enforcing_tests_exist(invariants, &fns);
         assert_eq!(problems.len(), 1, "{problems:#?}");
@@ -833,6 +957,17 @@ mod tests {
         assert!(glob_matches("**/Cargo.toml", "app/Cargo.toml"));
         assert!(!glob_matches("dsp/*.rs", "dsp/src/lib.rs"));
         assert!(!glob_matches("engine/**", "engineer/a.rs"));
+        assert!(!glob_matches(
+            "roformer-gpu/src/shaders/*.wgsl",
+            "roformer-gpu/src/shaders/mod.rs"
+        ));
+    }
+
+    #[test]
+    fn globs_match_names_that_are_not_ascii() {
+        assert!(glob_matches("**/*.md", "docs/é.md"));
+        assert!(glob_matches("audio/*ncé.mp3", "audio/Beyoncé.mp3"));
+        assert!(!glob_matches("*.rs", "é.md"));
     }
 
     #[test]

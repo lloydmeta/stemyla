@@ -16,6 +16,6 @@ third_party/
 # The project's Claude Code rules, agents, skills and settings are tracked
 # (docs/decisions/0001-harness-in-the-repo.md), even where a global gitignore
 # ignores .claude/; worktrees and personal settings are not.
-!.claude/
-.claude/worktrees/
-.claude/settings.local.json
+!/.claude/
+/.claude/worktrees/
+**/.claude/settings.local.json

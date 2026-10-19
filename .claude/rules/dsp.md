@@ -10,4 +10,4 @@ paths:
 * Use only `&[f32]`, `Vec<f32>`, `usize`, `for`, `while`, `if` and indexing.
 * Do not use iterators, closures or `swap`; write the loop out.
 * Add no dependency, not even a dev-dependency.
-* A function that the audio callback calls must not allocate (TD-15 in `docs/tech-debt.md`).
+* Avoid allocating in a function that the audio callback calls.  `double_speed` allocates today (TD-15 in `docs/tech-debt.md`).

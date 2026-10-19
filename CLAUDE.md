@@ -1,8 +1,8 @@
 # Stemyla
 
-Rust workspace for a browser app that separates a song into six stems (bass, drums, other, vocals, guitar, piano) on the user's GPU and plays them as lanes with mute, solo, tempo and loop.  `README.md` covers using and setting it up; `docs/ARCHITECTURE.md` covers how it fits together.
+Stemyla is a Rust workspace for a browser app.  The app separates a song into six stems (bass, drums, other, vocals, guitar, piano) on the user's GPU.  It plays the stems as lanes with mute, solo, tempo and loop.  `README.md` tells how to use and set up the app.  `docs/ARCHITECTURE.md` tells how the parts fit together.
 
-This file is the map, loaded into every session: what is always true, and where to look for the rest.  Everything else is read on demand from `docs/` (index: `docs/README.md`), and the rules for one part of the tree load from `.claude/rules/` when its files are touched.  `cargo run -p xtask -- docs-check` (also a test) fails when this map or the docs drift from the code.
+This file is the map.  Claude Code loads it into every session.  It gives what is always true and where to find the rest.  Read the rest from `docs/` when you need it (index: `docs/README.md`).  Claude Code loads a rule from `.claude/rules/` when you touch a file in that rule's paths.  `cargo run -p xtask -- docs-check` (also a test) fails when the map or the docs drift from the code.
 
 ## Layout
 
@@ -35,7 +35,7 @@ This file is the map, loaded into every session: what is always true, and where 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --exclude roformer-gpu   # what CI runs; roformer-gpu's tests need a GPU (see README)
+cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU (TD-1)
 cargo test -p roformer-gpu --release            # every kernel against the CPU, on this machine's GPU
 cargo run -p xtask -- docs-check                # the map and docs match the code
 (cd app && trunk build --release)
@@ -67,13 +67,13 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * PROTO-2: a `?model_url=` is accepted only from the page's own site.
 * VERIFY-1: every behaviour is verified by an automated check; "it compiles" is not acceptance, and a skipped test is not a pass.
 * GIT-1: never push, or run `xtask publish` (which pushes), without being asked.
-* GIT-2: small verified steps: fmt, clippy, tests and `docs-check` pass before every commit, and commits are signed (`git commit -S`).
+* GIT-2: make small verified steps.  Before each commit, run fmt, clippy, the tests and `docs-check`.  Sign every commit (`git commit -S`).
 * GIT-3: never squash or rewrite `gh-pages`.
 * DOC-1: a change that makes the map or a doc wrong fixes it in the same commit.
 
 ## Working here
 
-* Writing: docs, comments, commit messages and PR descriptions follow [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org): short sentences (at most 20 words for an instruction, 25 for a description), one instruction per sentence, active voice, and the same word for the same thing throughout.  STE's American English spelling is not required.
+* Writing: write docs, comments, commit messages and PR descriptions in [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org).  Keep an instruction to 20 words or fewer, and a description to 25 or fewer.  Write one instruction per sentence, in the active voice.  Use the same word for the same thing.  You need not use STE's American English spelling.
 * Plans: work of more than a few steps gets an execution plan in `docs/plans/active/` that follows `docs/plans/PLANS.md`, kept current at every stopping point and moved to `docs/plans/completed/` when done.
 * Decisions: a choice with lasting effect gets a record in `docs/decisions/`; agents write it as `proposed`, and only a person accepts it.
 * Review: after implementing, run three rounds of review, each by a new subagent with fresh context; verify each finding before fixing it, and fix the real ones with tests.
