@@ -70,7 +70,7 @@ Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when
 
 * Why: wgpu's web backend does nothing when a buffer is dropped, and Safari's garbage collector does not count WebGPU memory ([WebKit bug 283321](https://bugs.webkit.org/show_bug.cgi?id=283321)).
 * Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile; CI `test` job).
-* Gaps: TD-8.
+* Gaps: TD-8, TD-22.
 
 ### MEM-4: the tab stays under 2 GB on an iPhone
 
