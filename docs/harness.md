@@ -1,6 +1,6 @@
 # The agent harness
 
-This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md` and `decisions/0002-staged-background-autonomy.md`.
+This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md`, `decisions/0002-staged-background-autonomy.md` and `decisions/0003-required-skips-in-a-test-support-crate.md`.
 
 Two principles shape it:
 

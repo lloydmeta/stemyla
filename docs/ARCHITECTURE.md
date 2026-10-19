@@ -35,6 +35,7 @@ flowchart LR
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
 * `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark and MP3 encoding.
 * `stem-protocol` (`protocol/`): the messages between the page and the worker, one encoder and one decoder per message, shared by both sides.
+* `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature or no fixture.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  It is only a dev-dependency.
 * `xtask`: tools run with Cargo: the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`), publishing, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.
 
 ### Layers
@@ -43,10 +44,13 @@ Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`).
 
 | Layer | Crates | Depend on |
 | - | - | - |
+| Test support | `test-support` | no workspace crate |
 | Pure | `dsp`, `synth`, `roformer`, `stem-protocol` | no workspace crate |
 | Engine and GPU | `engine`, `roformer-gpu` | `dsp`; `roformer` |
 | Shells | `app`, `stem-worker` | `engine`, `dsp`, `synth`, `stem-protocol`; `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `synth`, `roformer` |
+
+Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal dependency, so it never ships.
 
 `app` depending on `synth` ships the demo song generator in the page (TD-4 in `docs/tech-debt.md`).
 

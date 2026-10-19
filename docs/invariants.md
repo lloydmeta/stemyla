@@ -32,7 +32,7 @@ Before you add a crate, confirm that it exists and is maintained.  Pin a young c
 
 ### LAYER-1: crates depend only downwards
 
-Workspace crates depend only on crates in a lower layer of `docs/ARCHITECTURE.md` (pure crates; engine and GPU; the two shells; tools).  The page side and the worker side meet only through `stem-protocol`.
+Workspace crates depend only on crates in a lower layer of `docs/ARCHITECTURE.md` (test support; pure crates; engine and GPU; the two shells; tools).  `test-support` is a dev-dependency only, and `dsp` does not take it.  The page side and the worker side meet only through `stem-protocol`.
 
 * Why: keeps the page from linking the model or the GPU code, and keeps the pure crates testable without a browser.
 * Enforced by: prose only (Cargo forbids cycles, nothing more).

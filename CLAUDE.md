@@ -14,6 +14,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
 * `worker/`: the Web Worker that runs separations (package `stem-worker`).
 * `protocol/`: the page <-> worker messages (package `stem-protocol`).
+* `test-support/`: `skip`, which fails a test that cannot run when `STEMYLA_REQUIRE` asks for evidence; a dev-dependency only.
 * `xtask/`: the static server, the browser test runners (`web-test`, `e2e`), `docs-check`, `publish` and other tools.
 
 ## Where to look

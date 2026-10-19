@@ -136,6 +136,7 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
 | `protocol/` | the messages between the page and the worker (`stem-protocol`) |
+| `test-support/` | `skip` and `STEMYLA_REQUIRE`, which make a test that cannot run fail where evidence is claimed |
 | `xtask/` | the static server, the browser test runners and other tools |
 | `docs/ARCHITECTURE.md` | how the pieces fit together |
 | `docs/working-with-agents.md` | how to get work done here with an AI coding agent |
