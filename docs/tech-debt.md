@@ -6,11 +6,11 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ## Enforcement gaps
 
-### TD-1: CI never runs roformer-gpu's GPU-free tests
+### TD-1: only the matmul and attention kernels' workgroup memory is checked statically
 
-`.github/workflows/ci.yml` runs `cargo test --workspace --exclude roformer-gpu`, which also drops the crate's unit tests that need no GPU, among them `workgroup_memory_within_defaults` and `sources_are_complete` (GPU-1) and the `net.rs` and `bench.rs` unit tests.
+`workgroup_memory_within_defaults` checks the workgroup memory of every `TILES` kernel (the hand-written `matmul.wgsl` among them) and of fused attention (GPU-1).  It does not check `softmax.wgsl` or `rmsnorm.wgsl`.  Nothing checks workgroup sizes, invocations per workgroup or buffers per stage before a kernel runs on a real adapter.  CI runs the crate's GPU-free tests since `plans/active/harness-phase-2.md` M1.
 
-* Fix: add `cargo test -p roformer-gpu --lib` to the `test` job; add a naga-based test that parses every generated shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
+* Fix: a naga-based test that parses every shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
 
 ### TD-2: dsp switches off every clippy lint
 
@@ -28,7 +28,7 @@ Nothing fails when `dsp/` gains an iterator, a closure or a dependency.
 
 No test checks the edges between workspace crates.  `app` depends on `synth`, so the demo song generator and its dependencies (hound, serde_json) compile into the page build.
 
-* Fix: a test over `cargo metadata` with an allowlist of edges per crate; decide whether `synth` is a pure crate the page may use or a fixture behind a feature.
+* Fix: a test over `cargo metadata` with an allowlist of edges per crate.  Decided 2026-10-19: `synth`'s file writing moves behind a feature, so the page links only song generation (`plans/active/harness-phase-2.md`, M4 and M5).
 
 ### TD-5: BUILD-1 is not checked
 
@@ -84,6 +84,12 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 * Fix: the drift job in phase 5a of the plan, which compares each doc with the code it describes.
 
+### TD-22: a compile-fail doctest passes on any compile error
+
+MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  The `no_run` doctest beside it compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.
+
+* Fix: run `cargo +nightly test -p roformer-gpu --doc` in CI, since nightly rustdoc checks the error code; or check it with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
+
 ## Known breaches
 
 ### TD-12: dropped files are copied before they are saved
@@ -108,7 +114,7 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 `engine/src/stretch/wsola_adapter.rs` calls `wsola` 0.1.0's `pull`, which returns a new `Vec` on every call, and the chipmunk path's `dsp::double_speed` returns a new `Vec` too.  RT-1 does not yet forbid allocation, but an allocation in the callback can miss its deadline.  No test counts allocations.
 
-* Fix: decide whether RT-1 forbids allocation; if so, a test with a counting global allocator over `render_interleaved` for each stretcher, and a pull into a reused buffer.
+* Fix: decided 2026-10-19: RT-1 is to forbid allocation after warm-up.  A test with a counting global allocator over `render_interleaved` for each stretcher the app ships, wsola 0.2.0 (whose `pull` does not allocate), and chipmunk decimation in place (`plans/active/harness-phase-2.md`, M11).
 
 ### TD-16: the wire format has unchecked copies and silent defaults
 

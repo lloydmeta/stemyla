@@ -69,8 +69,8 @@ A typed array sent between the page and the worker goes in the message's transfe
 Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when dropped.  `Rec` borrows the buffers it binds until it is submitted.
 
 * Why: wgpu's web backend does nothing when a buffer is dropped, and Safari's garbage collector does not count WebGPU memory ([WebKit bug 283321](https://bugs.webkit.org/show_bug.cgi?id=283321)).
-* Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile).
-* Gaps: TD-1, TD-8.
+* Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile; CI `test` job).
+* Gaps: TD-8, TD-22.
 
 ### MEM-4: the tab stays under 2 GB on an iPhone
 
@@ -105,7 +105,7 @@ The audio callback reads the player through `engine::slot`'s `try_lock`, renders
 Kernels fit the default limits (`docs/references/webgpu-limits.md`), and the device is requested with exactly those (`Limits::defaults()` in `roformer-gpu/src/lib.rs`), so nothing depends on what one GPU offers beyond them.
 
 * Why: a kernel that needs more fails on some users' GPUs only.
-* Enforced by: `workgroup_memory_within_defaults`, `sources_are_complete`, and wgpu's validation at runtime on a real adapter.
+* Enforced by: `workgroup_memory_within_defaults` (CI `test` job), and wgpu's validation at runtime on a real adapter.  `sources_are_complete` makes sure that the generated sources `workgroup_memory_within_defaults` reads have no unfilled placeholder.
 * Gaps: TD-1.
 
 ### GPU-2: a kernel change is checked against the CPU and in a browser

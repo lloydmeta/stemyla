@@ -1940,6 +1940,31 @@ mod tests {
         assert!((12 * 1024..=16 * 1024).contains(&attention), "{attention}");
     }
 
+    /// Every template placeholder in `src`: an upper-case name in braces,
+    /// such as `{BM}`.  WGSL's own braces never hold such a name.
+    fn unfilled_placeholders(src: &str) -> Vec<&str> {
+        src.match_indices('{')
+            .filter_map(|(open, _)| {
+                let close = src[open + 1..].find('}')?;
+                let name = &src[open + 1..open + 1 + close];
+                let is_placeholder = !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+                is_placeholder.then(|| &src[open..open + close + 2])
+            })
+            .collect()
+    }
+
+    /// The scan finds names with `_` and digits, and skips WGSL blocks.
+    #[test]
+    fn placeholders_are_found_and_wgsl_braces_are_not() {
+        let src = "fn f() { return; }\nvar<workgroup> a: array<f32, {SA_LEN}>;\n{}{SOFTMAX_1}{x}";
+        assert_eq!(unfilled_placeholders(src), ["{SA_LEN}", "{SOFTMAX_1}"]);
+        let template = unfilled_placeholders(include_str!("shaders/matmul_interleaved.wgsl"));
+        assert!(template.contains(&"{BM}"), "{template:?}");
+    }
+
     /// The generated sources have every placeholder filled.
     #[test]
     fn sources_are_complete() {
@@ -1948,22 +1973,8 @@ mod tests {
             .map(|t| (t.name, t.source()))
             .chain(std::iter::once(("attention", attention_source())));
         for (name, src) in all {
-            for p in [
-                "{ACC_DECLS}",
-                "{STAGE}",
-                "{COMPUTE}",
-                "{EPILOGUE}",
-                "{PAD}",
-                "{PADV}",
-                "{SA_LEN}",
-                "{TX}",
-                "{DECLS}",
-                "{S_STEP}",
-                "{VALUES}",
-                "{FINISH}",
-            ] {
-                assert!(!src.contains(p), "{name}: {p}");
-            }
+            let unfilled = unfilled_placeholders(&src);
+            assert!(unfilled.is_empty(), "{name}: {unfilled:?}");
         }
     }
 
