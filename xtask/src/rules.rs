@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn a_line_without_a_depth_is_a_problem() {
-        let tree = "0stem-worker v0.1.0\n1synth v0.1.0\n\nsynth v0.1.0\n";
+        let tree = "0stem-worker v0.1.0\n1synth v0.1.0\n\n  \nsynth v0.1.0\n";
         assert_eq!(
             synth_brings_no_crate(&[("stem-worker", tree)]),
             [Problem {
@@ -421,6 +421,20 @@ mod tests {
                 file: "worker/Cargo.toml".into(),
                 line: None,
                 message: "LAYER-1: the tree of stem-worker has a line without a depth: \"synth v0.1.0\".  Fix: run cargo tree with --prefix depth.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_first_line_below_depth_0_is_a_problem() {
+        let tree = "1app v0.1.0\n1synth v0.1.0\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", tree)]),
+            [Problem {
+                rule: "LAYER-1",
+                file: "app/Cargo.toml".into(),
+                line: None,
+                message: "LAYER-1: the tree of app does not start with app, so this check cannot read it.  Fix: run cargo tree -p app with --prefix depth.".into(),
             }]
         );
     }

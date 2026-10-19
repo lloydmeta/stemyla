@@ -4,7 +4,7 @@ Status: proposed
 
 ## Context
 
-`app`, one of the two WebAssembly modules of the web app (`app` and `stem-worker`), takes `synth` for the demo song.  So it compiles `hound` for writers that it never calls, and `THIRD-PARTY.md` credits `hound`.  The linker already removes the writers, so the download is only 242 bytes smaller without them.
+`app`, one of the two WebAssembly modules of the web app (`app` and `stem-worker`), takes `synth` for the demo song.  So it compiles `hound` for writers that it never calls, and `THIRD-PARTY.md` credits `hound`.  `app_bg.wasm` is only 242 bytes smaller without them, because the linker already drops the unused writers.
 
 ## Options
 
