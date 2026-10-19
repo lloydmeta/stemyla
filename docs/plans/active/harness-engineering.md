@@ -120,6 +120,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, `docs/working-with-agents.md`, and a `docs-check` rule that it names every tool.
 * [x] 2026-10-19: phase 1, review round 3: its findings fixed with tests.
 * [ ] Phase 1: PR, merged by the maintainer.
+* [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
 * [ ] Phase 2.
 * [ ] Phase 3.
 * [ ] Phase 4.
@@ -143,6 +144,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19, agent: no YAML frontmatter on docs in phase 1 (`covers` and `verified` freshness fields are deferred to phase 5a's drift job, where a stale doc becomes an issue rather than a failing build).
 * 2026-10-19, maintainer: a guide for the people who direct agents (`docs/working-with-agents.md`), written for an outsider, updated in every phase.
 * 2026-10-19, maintainer: the repo's writing standard is ASD-STE100 without its American spelling; personal style preferences stay out of the repo.
+* 2026-10-19, maintainer: RT-1 forbids allocation in the audio callback after warm-up (TD-15); `synth`'s file writing moves behind a feature so the app links only song generation (TD-4).
 * 2026-10-19, agent: the two older plans (versioned builds, browser tests in Rust) stay out of the repo; they are implemented, their PRs (#6, #9) describe them, and they hold local paths.
 
 ## Outcomes and retrospective

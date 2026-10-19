@@ -28,7 +28,7 @@ Nothing fails when `dsp/` gains an iterator, a closure or a dependency.
 
 No test checks the edges between workspace crates.  `app` depends on `synth`, so the demo song generator and its dependencies (hound, serde_json) compile into the page build.
 
-* Fix: a test over `cargo metadata` with an allowlist of edges per crate; decide whether `synth` is a pure crate the page may use or a fixture behind a feature.
+* Fix: a test over `cargo metadata` with an allowlist of edges per crate.  Decided 2026-10-19: `synth`'s file writing moves behind a feature, so the page links only song generation (`plans/active/harness-phase-2.md`, M4 and M5).
 
 ### TD-5: BUILD-1 is not checked
 
@@ -108,7 +108,7 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 `engine/src/stretch/wsola_adapter.rs` calls `wsola` 0.1.0's `pull`, which returns a new `Vec` on every call, and the chipmunk path's `dsp::double_speed` returns a new `Vec` too.  RT-1 does not yet forbid allocation, but an allocation in the callback can miss its deadline.  No test counts allocations.
 
-* Fix: decide whether RT-1 forbids allocation; if so, a test with a counting global allocator over `render_interleaved` for each stretcher, and a pull into a reused buffer.
+* Fix: decided 2026-10-19: RT-1 is to forbid allocation after warm-up.  A test with a counting global allocator over `render_interleaved` for each stretcher the app ships, wsola 0.2.0 (whose `pull` does not allocate), and chipmunk decimation in place (`plans/active/harness-phase-2.md`, M11).
 
 ### TD-16: the wire format has unchecked copies and silent defaults
 
