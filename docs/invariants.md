@@ -61,7 +61,7 @@ WebAssembly memory never shrinks, so a copy costs for the rest of the tab's life
 A typed array sent between the page and the worker goes in the message's transfer list, so it moves instead of being cloned, and the receiver does not copy it again without a reason.
 
 * Why: a structured clone of a stem doubles it until garbage collection, which Safari runs late.
-* Enforced by: `a_mix_is_transferred_not_copied` (CI `browser-tests` job, which is not a required check: TD-20).
+* Enforced by: `a_mix_is_transferred_not_copied` (CI `browser-tests` job).
 * Gaps: TD-13.
 
 ### MEM-3: GPU buffers are freed when dropped
@@ -85,7 +85,7 @@ iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memor
 Every OPFS `write` gets a whole typed array or a Blob, never a view into a larger buffer.
 
 * Why: Safari 27 writes a view's whole underlying buffer (`docs/references/browser-quirks.md`).
-* Enforced by: `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks` (CI `browser-tests` job, in Chrome, which is not a required check: TD-20).
+* Enforced by: `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks` (CI `browser-tests` job, in Chrome).
 * Gaps: TD-17.
 
 ## Audio
@@ -131,7 +131,7 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 `stem-protocol` has one encoder and one decoder per message, shared by the page and the worker.  `xtask e2e` also writes messages by hand (`xtask/e2e/worker.js`, `xtask/src/e2e.rs`), so the wire format changes only together with it.
 
 * Why: the page and the worker are built together but run as separate wasm modules; a mismatch fails at runtime only.
-* Enforced by: `replies_arrive_intact`, `requests_and_their_settings_arrive_intact`, `hand_written_requests_are_read` (CI `browser-tests` job, which is not a required check: TD-20).
+* Enforced by: `replies_arrive_intact`, `requests_and_their_settings_arrive_intact`, `hand_written_requests_are_read` (CI `browser-tests` job).
 * Gaps: TD-16.
 
 ### PROTO-2: a model URL only from the page's own site
@@ -139,7 +139,7 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 `?model_url=` skips the model's hash check, so it is accepted only from the page's own site.
 
 * Why: otherwise a crafted link could make the page run a model of an attacker's choosing.
-* Enforced by: `a_model_url_is_taken_only_from_the_pages_own_site` (CI `browser-tests` job, which is not a required check: TD-20).
+* Enforced by: `a_model_url_is_taken_only_from_the_pages_own_site` (CI `browser-tests` job).
 
 ## Verification and process
 
@@ -164,7 +164,7 @@ Never push, or run `xtask publish` (which pushes), without being asked.
 Work in small verified steps.  `cargo fmt --all --check`, clippy with `-D warnings`, the tests and `xtask docs-check` pass before every commit, and every commit is signed (`git commit -S`).
 
 * Why: a commit is the unit that review, bisect and revert work with; a signature attributes it.
-* Enforced by: CI's required checks on `main` (fmt, clippy, test, wasm build), which an admin can bypass (TD-20).
+* Enforced by: CI's required checks on `main` (fmt, clippy, test, wasm build, browser tests), which an admin can bypass (TD-20).
 * Gaps: TD-20.
 
 ### GIT-3: gh-pages is never squashed or rewritten

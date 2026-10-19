@@ -144,11 +144,10 @@ The app draws to one canvas.  `xtask e2e` clicks fixed coordinates (`VIEWPORT`, 
 
 ### TD-20: process rules rest on local settings
 
-Commit signing is set in the maintainer's own git config only, and nothing stops an agent from pushing (GIT-1, GIT-2).  The `main` ruleset:
+Commit signing is set in the maintainer's own git config only, and nothing stops an agent from pushing (GIT-1, GIT-2).  The `main` ruleset (checked 2026-10-19 with `gh api repos/lloydmeta/stemyla/rulesets/24980616`):
 
 * does not require signed commits;
-* does not require `browser tests (Chrome)`;
 * lets the admin role bypass it always, so agents running with the maintainer's credentials can skip the required checks and the approval;
 * does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
-* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings, and browser tests as a required check; in phase 5, the other ruleset changes.
+* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings; in phase 5, the other ruleset changes.

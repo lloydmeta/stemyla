@@ -181,7 +181,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 
 ### M19: close out phase 2
 
-* Person step: the maintainer makes `browser tests (Chrome)` a required check in the `main` ruleset (TD-20, part).  The agent gives the `gh api` command and does not run it.
+* Person step, done: the maintainer made `browser tests (Chrome)` a required check in the `main` ruleset on 2026-10-19.
 * Update the parent plan's progress, the guide's status and changelog ("phase 2"), and `harness.md`.  Count the "prose only" lines in `invariants.md` and record the change from 8.
 * Move this plan to `plans/completed/` and fill its retrospective.
 
@@ -223,7 +223,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [ ] M16: test-list guard.
 * [ ] M17: UI snapshots compared.
 * [ ] M18: TD-13, TD-14, TD-12, TD-17 fixed.
-* [ ] M19: browser tests required; phase 2 closed.
+* [x] 2026-10-19: browser tests are a required check (the maintainer, before PR #14; found by `gh api`).
+* [ ] M19: phase 2 closed.
 
 ## Surprises and discoveries
 
@@ -232,6 +233,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19: the shipped licence list (`THIRD-PARTY.md`) includes `hound`, `serde`, `serde_derive` and `serde_json`, pulled in only by `synth`'s file writers.
 * 2026-10-19: the chipmunk path also allocates in the callback (`dsp::double_speed`), not only the stretcher.
 * 2026-10-19, M1 review: `-p roformer-gpu` alone builds wgpu with fewer features than the workspace build, so the new CI steps rebuild wgpu, wgpu-core, wgpu-hal and naga.  On PR #14 it added 68 s to the `test` job.
+* 2026-10-19: the docs said `browser tests (Chrome)` was not a required check, and the agent repeated it to the maintainer.  The ruleset had required it since 03:36 UTC that day.  Ruleset facts in docs go stale; check them with `gh api` before stating them.
 * 2026-10-19, M1 review: `sources_are_complete` listed 12 placeholder names by hand and missed 8 that the templates use (`{BM}`, `{BN}`, `{BK}`, `{TY}`, `{SB_LEN}`, `{S_ZERO}`, `{SOFTMAX_1}`, `{SOFTMAX_2}`).  A test that lists what to look for goes stale; it now scans for the pattern.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
