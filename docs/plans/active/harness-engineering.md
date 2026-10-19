@@ -56,7 +56,7 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 * The maintainer's RTK hook is personal and stays outside the repo; its rewriting of `grep`, `sed -n` and wasm test runs is to be excluded in the maintainer's own settings (failure 9).
 * Breaches the new checks expose (TD-12 to TD-14, TD-17) are fixed in their own small PRs, or carry an `#[expect]` with a reason and stay in `tech-debt.md`.
 * Acceptance: every invariant that can be checked mechanically names a test or lint on its `* Enforced by:` line; each check is shown to fail on a planted breach.
-* Measured by: breaches caught by checks before review; "prose only" count in `invariants.md` (21 rules, most prose only, at the start).
+* Measured by: breaches caught by checks before review; "prose only" count in `invariants.md` (8 of 21 rules prose only at the start, and most of the rest only partly enforced).
 * Gate: CI green on `main` with the new checks required.
 * For IAM: express authorisation and data-handling rules as layering tests and disallowed-API lints (for example "only this module may call the token signer"), with exceptions that must state a reason and expire.
 
@@ -88,7 +88,7 @@ Each stage needs the previous one's gate.  Agents run in GitHub Actions with `an
 
 * 5a, report only: scheduled gardening jobs that open issues, not PRs: `docs-check` drift, plans whose status disagrees with `git log`, `THIRD-PARTY.md` against the lock file, unused dependencies.  A token with `contents: read` and `issues: write` only, no secrets but the model key, one concern per job, and no output when there is nothing to do.
 * 5b, PRs for humans to merge: the same jobs open PRs from a dedicated GitHub App with only contents and pull-request permissions (not workflows), one open PR per job on a fixed branch, labelled, size-capped, guarded by the test-count check.  `CODEOWNERS` requires the maintainer on `.github/**`, `.claude/**`, `CLAUDE.md`, `docs/invariants.md`, tests and shaders.
-* 5c, auto-merge for an allowlist: docs-only and lock-file-only changes from a known job, with CI, the routed reviewers and the validator all passing and no protected path touched.  Decision point for the maintainer: which identity approves.  The ruleset requires one approval and the maintainer is the only person.  The options: a second GitHub App approves under rules that require approval from someone other than the last pusher; the approval rule is scoped by path; or Copilot code review approves, which GitHub allows since 2026-09-01, off by default and limited by path ([GitHub changelog](https://github.blog/changelog/2026-09-01-copilot-code-review-can-now-approve-pull-requests)).  Copilot's approval is an LLM verdict, so it may count only when the deterministic checks are also required (decision 0002).  Also: signed commits required for bots, a merge queue, and browser tests required.
+* 5c, auto-merge for an allowlist: docs-only and lock-file-only changes from a known job, with CI, the routed reviewers and the validator all passing and no protected path touched.  Decision point for the maintainer: which identity approves.  The ruleset requires one approval and the maintainer is the only person.  The options: a second GitHub App approves under rules that require approval from someone other than the last pusher; the approval rule is scoped by path; or Copilot code review approves, which GitHub allows since 2026-09-01, off by default and limited by path ([GitHub changelog](https://github.blog/changelog/2026-09-01-copilot-code-review-can-now-approve-pull-requests)).  Copilot's approval is an LLM verdict, so it may count only when the deterministic checks are also required (decision 0002).  Also: signed commits required for bots, a merge queue, a strict status-check policy, and no admin bypass for agents' credentials (TD-20).
 * 5d, issue to PR: a maintainer-labelled issue starts a plan-driven implementation agent, merged by a human, then by 5c's rules for the classes that earn it.
 * Every stage keeps the lethal trifecta split ([Willison](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/), [Meta, agents rule of two](https://ai.meta.com/blog/practical-ai-agent-security/)): the job that reads untrusted text has no write token, and only maintainers can trigger an agent.  Untrusted text includes issues, comments and web pages, and also a PR's diff and its branch's `CLAUDE.md`, `docs/` and code: claude-code-action 1.0.74 restores only `.claude/` and `.mcp.json` from the base branch.  So a job that reviews PRs gets no write token either.
 * GPU checks cannot run on GitHub's hosted runners, and a self-hosted runner on a public repo would run strangers' PR code on the maintainer's machine, which GitHub advises against for public repositories (to be re-checked in GitHub's docs at this phase); so GPU evidence stays on the maintainer's Mac, attached to the PR, and nothing that changes a kernel default auto-merges (GPU-3).
@@ -118,7 +118,8 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, `CLAUDE.md` map, `docs/` knowledge base, `.claude/rules/`, `.claude/` tracked.
 * [x] 2026-10-19: phase 1, review rounds 1 and 2: their findings fixed with tests.
 * [x] 2026-10-19: phase 1, `docs/working-with-agents.md`, and a `docs-check` rule that it names every tool.
-* [ ] Phase 1: review round 3, PR, merged by the maintainer.
+* [x] 2026-10-19: phase 1, review round 3: its findings fixed with tests.
+* [ ] Phase 1: PR, merged by the maintainer.
 * [ ] Phase 2.
 * [ ] Phase 3.
 * [ ] Phase 4.
@@ -129,7 +130,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 
 * 2026-10-19: the docs were accurate where they spoke; every drift found was an omission (a crate, CI's real gates, a package name).  Evidence: 32 sampled claims, 4 omissions, none false.
 * 2026-10-19: several rules are already breached without anything noticing: three song-sized copies (TD-12 to TD-14) and an allocating audio callback (TD-15).  Rules in prose do not hold on their own.
-* 2026-10-19: the one GPU test that needs no GPU, `workgroup_memory_within_defaults`, has never run in CI (TD-1).
+* 2026-10-19: roformer-gpu's tests that need no GPU, among them `workgroup_memory_within_defaults` and `sources_are_complete`, have never run in CI (TD-1).
 * 2026-10-19: the maintainer's global gitignore ignores `.claude/`, so project rules would silently not be committed; the repo's `.gitignore` now re-includes it.
 * 2026-10-19: claude-code-action and GitHub's Copilot coding agent cannot approve PRs, so auto-merge with one maintainer needs a second identity by design.  Copilot code review can approve since 2026-09-01 (opt-in), and the `main` ruleset already runs it on every push; turning its approval on would let an LLM verdict alone merge.
 

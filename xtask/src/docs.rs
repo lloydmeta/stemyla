@@ -107,6 +107,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
         })
         .collect::<Result<Vec<_>>>()?;
     let tree = Tree::new(&files);
+    let member_dirs: Vec<String> = members.iter().map(|m| m.dir.clone()).collect();
     let top_level: BTreeSet<String> = files
         .iter()
         .filter_map(|f| f.split_once('/').map(|(first, _)| first.to_string()))
@@ -148,7 +149,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
     ));
     problems.extend(ids.problems.clone());
     for (file, text) in &markdown {
-        problems.extend(paths_exist(&tree, file, text, &top_level));
+        problems.extend(paths_exist(&tree, file, text, &top_level, &member_dirs));
         problems.extend(ids_defined(file, text, &ids.defined));
     }
     if let Some(invariants) = doc("docs/invariants.md") {
@@ -257,22 +258,57 @@ pub fn package_name(manifest: &str) -> Option<String> {
 /// length, within one paragraph; `` \` `` outside a span is a literal backtick.
 pub fn inline_code(markdown: &str) -> Vec<String> {
     let mut spans = Vec::new();
-    let mut fenced = false;
+    let mut fence: Option<(char, usize)> = None;
     let mut paragraph: Vec<&str> = Vec::new();
     for line in markdown.lines() {
-        let fence = line.trim_start().starts_with("```");
-        if fence || fenced || line.trim().is_empty() {
+        let trimmed = line.trim_start();
+        let marker = fence_marker(trimmed);
+        let closes = match (fence, marker) {
+            (Some((c, n)), Some((m, k))) => {
+                c == m && k >= n && trimmed.trim_start_matches(c).trim().is_empty()
+            }
+            _ => false,
+        };
+        let block_start =
+            fence.is_none() && (marker.is_some() || trimmed.is_empty() || starts_a_block(trimmed));
+        if closes || block_start || fence.is_some() {
             spans.extend(spans_in(&paragraph.join("\n")));
             paragraph.clear();
         }
-        if fence {
-            fenced = !fenced;
-        } else if !fenced && !line.trim().is_empty() {
+        if closes {
+            fence = None;
+        } else if fence.is_none() && marker.is_some() {
+            fence = marker;
+        } else if fence.is_none() && !trimmed.is_empty() {
             paragraph.push(line);
+            if trimmed.starts_with('#') {
+                spans.extend(spans_in(&paragraph.join("\n")));
+                paragraph.clear();
+            }
         }
     }
     spans.extend(spans_in(&paragraph.join("\n")));
     spans
+}
+
+/// The fence character and length of a line that opens or closes a fenced
+/// code block: three or more backticks or tildes.
+fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+    let c = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let n = trimmed.chars().take_while(|x| *x == c).count();
+    (n >= 3).then_some((c, n))
+}
+
+/// A line that starts a new block, so no code span runs into it from the
+/// line before: a list item, a heading, a table row or a quote.
+fn starts_a_block(trimmed: &str) -> bool {
+    let numbered = trimmed
+        .split_once(". ")
+        .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    numbered
+        || ["* ", "- ", "+ ", "#", "|", ">"]
+            .iter()
+            .any(|m| trimmed.starts_with(m))
 }
 
 /// The code spans in one paragraph.
@@ -282,7 +318,7 @@ fn spans_in(text: &str) -> Vec<String> {
     let mut spans = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\' && chars.get(i + 1) == Some(&'`') {
+        if chars[i] == '\\' && matches!(chars.get(i + 1), Some('`' | '\\')) {
             i += 2;
             continue;
         }
@@ -364,18 +400,23 @@ pub fn repo_path(span: &str, top_level: &BTreeSet<String>) -> Option<String> {
         return None;
     }
     let first = path.split('/').next().unwrap_or_default();
-    // `.flac` or `.gitkeep` is an extension or a file kind, and `docs.rs/wgpu`
-    // or `0.5/1.0` is a site or a number, unless a top-level folder has that name.
-    let dotted = first.contains('.') && first != ".." && !top_level.contains(first);
-    if dotted && (first.starts_with('.') || path.contains('/')) {
+    let nested = path.contains('/');
+    // `.flac` or `.gitkeep` alone is an extension or a file kind; a dotted
+    // folder (`.claude/rules`) is a path and is checked, typos included.
+    if first.starts_with('.') && first != ".." && !nested {
         return None;
     }
-    let in_tree = path.contains('/') && top_level.contains(first);
+    // `docs.rs/wgpu` or `0.5/1.0` is a site or a number, unless a
+    // top-level folder has that name.
+    if !first.starts_with('.') && first.contains('.') && nested && !top_level.contains(first) {
+        return None;
+    }
     let file_name = path.rsplit('/').next().unwrap_or_default();
-    let names_a_file = path.contains('/')
-        && file_name.contains('.')
-        && !CRATE_RELATIVE.iter().any(|c| path.starts_with(c));
-    (path.ends_with(".md") || in_tree || names_a_file).then(|| path.to_string())
+    let in_tree = nested && top_level.contains(first);
+    let names_a_file = nested && file_name.contains('.');
+    let crate_relative = CRATE_RELATIVE.iter().any(|c| path.starts_with(c));
+    (path.ends_with(".md") || in_tree || names_a_file || crate_relative && nested)
+        .then(|| path.to_string())
 }
 
 /// `file.rs:12` or `file.rs:12-20` without its line numbers.
@@ -450,16 +491,26 @@ fn normalise(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn paths_exist(tree: &Tree, file: &str, text: &str, top_level: &BTreeSet<String>) -> Vec<Problem> {
+fn paths_exist(
+    tree: &Tree,
+    file: &str,
+    text: &str,
+    top_level: &BTreeSet<String>,
+    member_dirs: &[String],
+) -> Vec<Problem> {
     if !names_current_paths(file) {
         return Vec::new();
     }
     let bases = path_bases(file);
+    let crate_bases: Vec<String> = member_dirs.iter().map(|d| format!("{d}/")).collect();
     inline_code(text)
         .iter()
         .filter_map(|span| repo_path(span, top_level))
         .filter(|p| {
-            !bases
+            // `src/lib.rs` is relative to a crate: any member's will do.
+            let in_a_crate = CRATE_RELATIVE.iter().any(|c| p.starts_with(c));
+            let tried = if in_a_crate { &crate_bases } else { &bases };
+            !tried
                 .iter()
                 .filter_map(|b| normalise(&format!("{b}{p}")))
                 .any(|candidate| tree.contains(&candidate))
@@ -514,11 +565,25 @@ pub const GUIDE: &str = "docs/working-with-agents.md";
 
 /// The subcommands `xtask` dispatches on: each `"name" =>` arm in `main.rs`.
 pub fn xtask_commands(main_rs: &str) -> BTreeSet<String> {
-    main_rs
-        .lines()
-        .map(str::trim_start)
-        .filter(|l| l.starts_with('"'))
-        .filter_map(|l| l.split_once("=>").map(|(arms, _)| arms))
+    // An arm's pattern may wrap over lines (`"a" | "b"` then `| "c" =>`), and
+    // may carry a guard (`"a" if ok =>`).
+    let mut patterns = Vec::new();
+    let mut pattern = String::new();
+    for line in main_rs.lines().map(str::trim_start) {
+        if !(line.starts_with('"') || (line.starts_with('|') && !pattern.is_empty())) {
+            pattern.clear();
+            continue;
+        }
+        pattern.push_str(line);
+        pattern.push(' ');
+        if let Some((arms, _)) = pattern.split_once("=>") {
+            let unguarded = arms.split(" if ").next().unwrap_or_default();
+            patterns.push(unguarded.to_string());
+            pattern.clear();
+        }
+    }
+    patterns
+        .iter()
         .flat_map(|arms| arms.split('|'))
         .map(|arm| arm.trim().trim_matches('"').to_string())
         .filter(|arm| {
@@ -539,11 +604,15 @@ pub fn agent_capabilities(files: &[String]) -> BTreeSet<String> {
             let skill = f
                 .strip_prefix(".claude/skills/")
                 .and_then(|s| s.strip_suffix("/SKILL.md"));
-            let agent = f
-                .strip_prefix(".claude/agents/")
-                .and_then(|a| a.strip_suffix(".md"))
-                .filter(|a| !a.contains('/'));
-            skill.or(agent).map(str::to_string)
+            let flat = |folder: &str| {
+                f.strip_prefix(folder)
+                    .and_then(|a| a.strip_suffix(".md"))
+                    .filter(|a| !a.contains('/'))
+            };
+            skill
+                .or(flat(".claude/agents/"))
+                .or(flat(".claude/commands/"))
+                .map(str::to_string)
         })
         .collect()
 }
@@ -821,8 +890,39 @@ fn unquote(s: &str) -> (&str, bool) {
     (s, false)
 }
 
+/// `s` split at commas outside braces, so `a,{b,c}` is two parts.
+fn split_outside_braces(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// A YAML value without a trailing ` # comment`, which an unquoted value
+/// may carry; a quoted value ends at its closing quote.
+fn strip_comment(raw: &str) -> &str {
+    let raw = raw.trim();
+    for q in ['"', '\''] {
+        if let Some(end) = raw.strip_prefix(q).and_then(|r| r.find(q)) {
+            return &raw[..end + 2];
+        }
+    }
+    raw.split(" #").next().unwrap_or_default()
+}
+
 fn rule_glob(raw: &str, quoted_outside: bool) -> RuleGlob {
-    let (pattern, quoted) = unquote(raw.trim());
+    let (pattern, quoted) = unquote(strip_comment(raw));
     RuleGlob {
         pattern: pattern.trim().to_string(),
         valid_yaml: quoted || quoted_outside || !pattern.starts_with(YAML_INDICATORS),
@@ -847,13 +947,18 @@ pub fn rule_globs(rule: &str) -> Option<Vec<RuleGlob>> {
         );
     }
     if let Some(flow) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        return Some(flow.split(',').map(|g| rule_glob(g, false)).collect());
+        return Some(
+            split_outside_braces(flow)
+                .into_iter()
+                .map(|g| rule_glob(g, false))
+                .collect(),
+        );
     }
-    let (string, quoted) = unquote(inline);
+    let (string, quoted) = unquote(strip_comment(inline));
     let valid = quoted || !string.starts_with(YAML_INDICATORS);
     Some(
-        string
-            .split(',')
+        split_outside_braces(string)
+            .into_iter()
             .map(|g| RuleGlob {
                 pattern: g.trim().to_string(),
                 valid_yaml: valid,
@@ -1086,8 +1191,18 @@ mod tests {
         assert_eq!(repo_path("xtask e2e", &t), None);
         assert_eq!(repo_path("v/<id>/", &t), None);
         assert_eq!(repo_path("sessions/<id>/", &t), None);
-        assert_eq!(repo_path("src/shaders/", &t), None, "relative to a crate");
-        assert_eq!(repo_path("src/lib.rs", &t), None, "relative to a crate");
+        assert_eq!(
+            repo_path("src/shaders/", &t).as_deref(),
+            Some("src/shaders"),
+            "relative to a crate, so checked against every crate"
+        );
+        assert_eq!(repo_path("src/lib.rs", &t).as_deref(), Some("src/lib.rs"));
+        assert_eq!(
+            repo_path(".cluade/rules/gpu.md", &t).as_deref(),
+            Some(".cluade/rules/gpu.md"),
+            "a typo in a dotted folder is still checked"
+        );
+        assert_eq!(repo_path(".md", &t), None);
         assert_eq!(
             repo_path("enigne/src/song.rs", &t).as_deref(),
             Some("enigne/src/song.rs"),
@@ -1110,10 +1225,16 @@ mod tests {
 
     fn missing(tree: &Tree, file: &str, text: &str) -> Vec<String> {
         let t = top(&["docs", "engine", ".claude"]);
-        paths_exist(tree, file, text, &t)
-            .iter()
-            .map(|p| p.message.split('`').nth(1).unwrap().to_string())
-            .collect()
+        paths_exist(
+            tree,
+            file,
+            text,
+            &t,
+            &["engine".to_string(), "app".to_string()],
+        )
+        .iter()
+        .map(|p| p.message.split('`').nth(1).unwrap().to_string())
+        .collect()
     }
 
     #[test]
@@ -1129,6 +1250,41 @@ mod tests {
             ["engine/gone.rs", "gone.md"]
         );
         assert!(missing(&tree, "docs/plans/active/a.md", text).is_empty());
+    }
+
+    #[test]
+    fn a_crate_relative_path_must_exist_in_some_crate() {
+        let tree = Tree::new(&[
+            "engine/src/song.rs".to_string(),
+            "app/src/lib.rs".to_string(),
+        ]);
+        assert_eq!(
+            missing(
+                &tree,
+                "CLAUDE.md",
+                "`src/lib.rs`, `src/song.rs`, `src/gone.rs`"
+            ),
+            ["src/gone.rs"]
+        );
+    }
+
+    #[test]
+    fn spans_do_not_run_across_blocks() {
+        let gone = "engine/gone.rs".to_string();
+        assert!(inline_code("* a ` stray\n* see `engine/gone.rs` here\n").contains(&gone));
+        assert!(inline_code("# A ` heading\nsee `engine/gone.rs`\n").contains(&gone));
+        assert!(inline_code("| a ` | b |\n| `engine/gone.rs` | c |\n").contains(&gone));
+        assert!(inline_code("1. a ` x\n2. `engine/gone.rs`\n").contains(&gone));
+        assert_eq!(
+            inline_code("an escaped \\\\`engine/gone.rs`"),
+            ["engine/gone.rs"]
+        );
+    }
+
+    #[test]
+    fn fences_open_and_close_as_commonmark_says() {
+        let md = "````md\n```\n`inside`\n```\n````\n`after`\n~~~\n`tilde`\n~~~\n`last`\n";
+        assert_eq!(inline_code(md), ["after", "last"]);
     }
 
     #[test]
@@ -1260,11 +1416,27 @@ mod tests {
         let commands = xtask_commands(main_rs);
         let named: Vec<&str> = commands.iter().map(String::as_str).collect();
         assert_eq!(named, ["gen-song", "hpss", "sdr"]);
+        let wrapped = "        \"hpss\" | \"sdr\" | \"classic\" | \"roformer\" | \"roformer-convert\" | \"perf\"\n        | \"gen-song\" => run(),\n        \"live\" if ok => go(),\n";
+        let wrapped_commands: Vec<String> = xtask_commands(wrapped).into_iter().collect();
+        assert_eq!(
+            wrapped_commands,
+            [
+                "classic",
+                "gen-song",
+                "hpss",
+                "live",
+                "perf",
+                "roformer",
+                "roformer-convert",
+                "sdr"
+            ]
+        );
         let files = [
             ".claude/skills/review/SKILL.md".to_string(),
             ".claude/skills/review/reference.md".to_string(),
             ".claude/agents/gpu-reviewer.md".to_string(),
             ".claude/rules/dsp.md".to_string(),
+            ".claude/commands/ship.md".to_string(),
         ];
         let tools: BTreeSet<String> = commands
             .into_iter()
@@ -1277,7 +1449,7 @@ mod tests {
             .iter()
             .map(|p| p.message.split('`').nth(1).unwrap())
             .collect();
-        assert_eq!(missing, ["gpu-reviewer"]);
+        assert_eq!(missing, ["gpu-reviewer", "ship"]);
     }
 
     #[test]
@@ -1383,6 +1555,20 @@ mod tests {
         assert_eq!(
             patterns("---\npaths: \"**/Cargo.toml\"\n---\n"),
             Some(vec![("**/Cargo.toml".to_string(), true)])
+        );
+        assert_eq!(
+            patterns("---\npaths: [\"src/*.{rs,toml}\", app/**]\n---\n"),
+            Some(vec![
+                ("src/*.{rs,toml}".to_string(), true),
+                ("app/**".to_string(), true)
+            ])
+        );
+        assert_eq!(
+            patterns("---\npaths:\n  - \"dsp/**\" # the dsp crate\n  - app/** # the app\n---\n"),
+            Some(vec![
+                ("dsp/**".to_string(), true),
+                ("app/**".to_string(), true)
+            ])
         );
         assert!(glob_matches("engine/src/*.{rs,toml}", "engine/src/a.toml"));
         assert!(!glob_matches("engine/src/*.{rs,toml}", "engine/src/a.md"));

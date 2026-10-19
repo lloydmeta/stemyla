@@ -80,6 +80,7 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 * An ID with a prefix not yet in use (`SEC-1`) is not checked, because it cannot be told from text such as `SHA-256`.
 * A path counts as present if the file is on disk, so a file not yet added to git passes locally and fails only in CI.
 * `README.md` and crate docs (`//!`) are checked for the crate list only.
+* A bare file name (`store.rs`) is not checked, because the check cannot tell which crate it means.
 
 * Fix: the drift job in phase 5a of the plan, which compares each doc with the code it describes.
 
@@ -144,4 +145,4 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 * lets the admin role bypass it always, so agents running with the maintainer's credentials can skip the required checks and the approval;
 * does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
-* Fix: permission rules and hooks in the project's Claude Code settings (phase 2 of the plan); ruleset changes in phase 5.
+* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings, and browser tests as a required check; in phase 5, the other ruleset changes.

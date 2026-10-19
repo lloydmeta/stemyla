@@ -12,13 +12,14 @@ Phase 1 is in place:
 * Rules for parts of the tree in `.claude/rules/`, which load when the agent touches those files.
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 
-A person still starts review rounds, gives evidence from real hardware, pushes and merges.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
+The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, pushes and merges.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
 
 ## Before you start
 
 1. Install Claude Code ([docs](https://code.claude.com/docs)) and start it at the repo root.  It loads `CLAUDE.md` itself.
-2. To run browser tests, set up the machine as `README.md` (setting up a machine) tells you.
-3. Read `CLAUDE.md` once.  It is short, and it is what the agent works from.
+2. Set up commit signing with a GPG or SSH key ([GitHub docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)).  The agent signs every commit (GIT-2), so a commit fails without a key.
+3. To run browser tests, set up the machine as `README.md` (setting up a machine) tells you.
+4. Read `CLAUDE.md` once.  It is short, and it is what the agent works from.
 
 ## How a task flows
 
@@ -47,7 +48,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 
 ### Change a GPU kernel
 
-* Prompt: as for a feature.  The agent loads `.claude/rules/gpu.md` when it touches `roformer-gpu/`.
+* Prompt: as for a feature.  The agent loads `.claude/rules/gpu.md` when it touches `roformer-gpu/` or `roformer/src/`.
 * The agent: keeps the kernel inside the WebGPU limits (GPU-1) and tests it against the CPU (GPU-2).
 * Check, on a machine with a real GPU: `cargo test -p roformer-gpu --release`, then `cargo run -p xtask -- e2e selftest --weights <model> --query mm=<kernel>`.  Put the adapter name in the PR.  A pass on SwiftShader alone is not enough (GPU-3).
 
@@ -112,4 +113,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 
 ## Changelog
 
-* 2026-10-19, phase 1: first version.  The map, the docs, rules by path and `docs-check`.  Review rounds start from a prompt.
+* 2026-10-19, phase 1: first version.  The map, the docs, rules by path and `docs-check`.  The agent runs review rounds because `CLAUDE.md` says so; the review recipe starts them by hand.

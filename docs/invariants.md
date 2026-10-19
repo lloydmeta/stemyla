@@ -180,3 +180,4 @@ A change that makes `CLAUDE.md`, a doc under `docs/` or a rule in `.claude/rules
 
 * Why: agents act on what the docs say; a stale doc is a wrong instruction.
 * Enforced by: `the_map_and_docs_match_the_code` (CI `test` job), which checks the conventions in `docs/README.md`.
+* Gaps: TD-21.
