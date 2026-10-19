@@ -631,7 +631,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M4 review round 3: no blockers; 1 should-fix and 4 nits, all checked.  The should-fix was real: without `--target wasm32-unknown-unknown`, `stem-worker`'s tree is its root line alone and passes every check, so a breach in the worker passed.  A tree with no `wasm-bindgen` at depth 1 is now a problem.  With the target removed, the real-tree test fails for both trees.  `a_tree_without_wasm_bindgen_is_a_problem` fails a mutant without the check and a mutant that accepts any depth.  Two nits were test gaps (`synth_seen` read from the last tree only, a root on any line); both mutants now fail.  One nit (equivalent mutants) needed no change.  The plan now quotes decision 0004's sentence on `app_bg.wasm`.
 * [x] 2026-10-20: M4, three review rounds done and their findings fixed.
 * [ ] M4: PR opened.  CI's `test` job lists the new test, and the `clippy` job runs the three new steps.
-* [ ] M4: decision 0004 accepted by the maintainer.
+* [x] 2026-10-20: M4, decision 0004 accepted by the maintainer.
 * [ ] M4: PR merged by the maintainer.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
@@ -700,7 +700,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, agent (M4): the check reads the children of the web app's `synth`, not a list of banned crates.  A feature check passes on today's tree, and a ban on `serde` gives false alarms.
 * 2026-10-19, agent (M4): the check reads the wasm tree only, as `THIRD-PARTY.md` does, because only the web app ships.
 * 2026-10-19, agent (M4): CI's `clippy` job also runs clippy on `synth`, on `app`'s lib, and on `app` with `--all-targets`.  `--workspace` builds turn `files` on everywhere.  So they hide warnings in `synth` without `files`, a native-only call to a writer in `app`, and a lost dev-dependency.  `-p app --all-targets` alone also turns `files` on for `app`'s lib, through the dev-dependency (review round 7).
-* 2026-10-19, agent (M4): M4 writes decision 0004 as `proposed`.  The `files` boundary and LAYER-1's new text outlive this plan.
+* 2026-10-19, agent (M4): M4 writes decision 0004 as `proposed`.  The `files` boundary and LAYER-1's new text outlive this plan.  The maintainer accepted it on 2026-10-20.
 
 ## Outcomes and retrospective
 

@@ -1,6 +1,6 @@
 # 0004: synth's file writers are behind a feature, so the web app takes only song generation
 
-Status: proposed
+Status: accepted (2026-10-20, by the maintainer)
 
 ## Context
 
