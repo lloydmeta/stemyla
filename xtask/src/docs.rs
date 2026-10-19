@@ -150,7 +150,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
     problems.extend(ids.problems.clone());
     for (file, text) in &markdown {
         problems.extend(paths_exist(&tree, file, text, &top_level, &member_dirs));
-        problems.extend(ids_defined(file, &without_closed(text), &ids));
+        problems.extend(id_references(file, text, &ids));
     }
     if let Some(invariants) = doc("docs/invariants.md") {
         problems.extend(enforcing_tests_exist(invariants, &test_fns));
@@ -727,6 +727,7 @@ fn without_closed(text: &str) -> String {
 
 pub fn defined_ids(files: &[(String, String)]) -> Ids {
     let mut ids = Ids::default();
+    let mut defined_in = Vec::new();
     for (file, text) in files {
         for heading in text.lines().filter_map(|l| l.strip_prefix("### ")) {
             let Some(id) = heading
@@ -748,6 +749,7 @@ pub fn defined_ids(files: &[(String, String)]) -> Ids {
                     format!("`{id}` is defined twice.  Fix: give the newer entry the next free number; IDs are never reused."),
                 ));
             }
+            defined_in.push((file, id));
         }
         for line in closed_section(text).filter(|l| !l.trim().is_empty()) {
             let Some(id) = line
@@ -772,10 +774,13 @@ pub fn defined_ids(files: &[(String, String)]) -> Ids {
             }
         }
     }
-    for id in ids.defined.intersection(&ids.closed) {
+    for (file, id) in defined_in
+        .into_iter()
+        .filter(|(_, id)| ids.closed.contains(*id))
+    {
         ids.problems.push(Problem::new(
             "ids",
-            "docs/tech-debt.md",
+            file,
             format!("`{id}` is closed but defined again.  Fix: give the new entry the next free number; IDs are never reused."),
         ));
     }
@@ -821,6 +826,17 @@ fn ids_defined(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
             Problem::new("ids", file, message)
         })
         .collect()
+}
+
+/// The ID problems of one doc.  Only the ID files' `## Closed` sections
+/// may name closed IDs, so only they are left out; a `## Closed` heading
+/// in another doc is checked like any other section.
+fn id_references(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
+    if ID_FILES.contains(&file) {
+        ids_defined(file, &without_closed(text), ids)
+    } else {
+        ids_defined(file, text, ids)
+    }
 }
 
 /// Plans and decisions are records of their time, so they may name an ID
@@ -1514,6 +1530,24 @@ mod tests {
         assert!(inside_closed.is_empty(), "{inside_closed:#?}");
     }
 
+    /// Only the ID files' `## Closed` sections are left out of the check.
+    #[test]
+    fn a_closed_section_elsewhere_is_checked() {
+        let ids = defined_ids(&[(
+            "docs/tech-debt.md".to_string(),
+            "### TD-2: open\n\n## Closed\n\n* TD-1: closed.\n".to_string(),
+        )]);
+        let text = "## Closed\n\n* TD-1: x, and TD-99\n";
+        let elsewhere = id_references("docs/README.md", text, &ids);
+        let named: Vec<&str> = elsewhere
+            .iter()
+            .map(|p| p.message.split('`').nth(1).unwrap())
+            .collect();
+        assert_eq!(named, ["TD-1", "TD-99"]);
+        let in_tech_debt = id_references("docs/tech-debt.md", text, &ids);
+        assert!(in_tech_debt.is_empty(), "{in_tech_debt:#?}");
+    }
+
     /// Every ID prefix is still checked when all its IDs are closed.
     #[test]
     fn a_closed_prefix_is_still_checked() {
@@ -1535,6 +1569,18 @@ mod tests {
         )]);
         let messages: Vec<&str> = ids.problems.iter().map(|p| p.message.as_str()).collect();
         assert_eq!(messages.len(), 3, "{messages:#?}");
+        let reused = defined_ids(&[
+            (
+                "docs/invariants.md".to_string(),
+                "### TD-1: back\n".to_string(),
+            ),
+            (
+                "docs/tech-debt.md".to_string(),
+                "## Closed\n\n* TD-1: closed.\n".to_string(),
+            ),
+        ]);
+        assert_eq!(reused.problems.len(), 1, "{:#?}", reused.problems);
+        assert_eq!(reused.problems[0].file, "docs/invariants.md");
         assert!(messages[0].starts_with("`TD-1` is closed twice"));
         assert!(
             messages[1]
