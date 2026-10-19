@@ -414,6 +414,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M3 review round 2: no blockers; 3 findings, all real and fixed.  (1) The real-tree test passed if the walk found no files, and nothing saw a stale allowlist entry.  It now asserts two known files, and `the_skip_allowlist_is_current` fails a reworded `web_output.rs` literal.  (2) VERIFY-1's text now names the wasm exception.  (3) The folder test removes its folder after a failed write too.
 * [x] 2026-10-19: M3 review round 3: no blockers and no should-fix items; 3 nits, all fixed.  The SwiftShader command gets `STEMYLA_REQUIRE=gpu`, `ARCHITECTURE.md` names `ROFORMER_GPU_FULL=1` for the end-to-end check, and one comment is re-wrapped.
 * [x] 2026-10-19: M3, PR #16 opened.  CI (run 39241946733) passes every job, and the `test` job lists the two revived tests, both checks of `xtask/tests/rules.rs` and both tests of `skip`.  The first attempt of the `test` job took 10m58s: `Cargo.lock` changed, so rust-cache restored an older cache and 167 crates were compiled again.  A re-run of the job took 4m41s (M2: 5m19s), with a 39 s build.  The revived tests add about 4 s.
+* [x] 2026-10-19: M3, decision 0003 accepted by the maintainer.
 * [ ] M3: PR #16 merged by the maintainer.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.

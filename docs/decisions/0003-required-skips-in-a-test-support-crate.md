@@ -1,6 +1,6 @@
 # 0003: STEMYLA_REQUIRE turns a skipped test into a failure, through one helper in a test-support crate
 
-Status: proposed (2026-10-19; the maintainer chose option (a) in `plans/active/harness-phase-2.md`, M3)
+Status: accepted (2026-10-19, by the maintainer)
 
 ## Context
 
