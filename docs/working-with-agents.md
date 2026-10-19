@@ -50,7 +50,13 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 
 * Prompt: as for a feature.  The agent loads `.claude/rules/gpu.md` when it touches `roformer-gpu/` or `roformer/src/`.
 * The agent: keeps the kernel inside the WebGPU limits (GPU-1) and tests it against the CPU (GPU-2).
-* Check, on a machine with a real GPU: `cargo test -p roformer-gpu --release`, then `cargo run -p xtask -- e2e selftest --weights <model> --query mm=<kernel>`.  Put the adapter name in the PR.  A pass on SwiftShader alone is not enough (GPU-3).
+* Check, on a machine with a real GPU: `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release`, then `cargo run -p xtask -- e2e selftest --weights <model> --query mm=<kernel>`.  Put the adapter name in the PR.  A pass on SwiftShader alone is not enough (GPU-3).
+
+### Ask for evidence that a test really ran
+
+* A test that has no GPU adapter, no `timestamp-query` or no PyTorch fixture prints "skipping" and passes.  `cargo test` hides that line.
+* Prompt: "Run it with STEMYLA_REQUIRE=gpu" (or `gpu,fixtures`, or `gpu,timestamps`).  Then each such skip is a failure that names VERIFY-1.
+* Check: the PR gives the command with `STEMYLA_REQUIRE`, and names the adapter.
 
 ### Change memory, buffers or audio playback
 
@@ -114,3 +120,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 ## Changelog
 
 * 2026-10-19, phase 1: first version.  The map, the docs, rules by path and `docs-check`.  The agent runs review rounds because `CLAUDE.md` says so; the review recipe starts them by hand.
+* 2026-10-19, phase 2 (M3): `STEMYLA_REQUIRE` turns a skipped test into a failure.  The GPU recipe uses it, and a new recipe says how to ask for evidence that a test ran.

@@ -22,4 +22,4 @@ Check `main` before treating any of these as a regression:
 
 ## The model
 
-`e2e selftest`, `separate` and `worker-check` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on this machine, so the reference tests skip (TD-8).
+`e2e selftest`, `separate` and `worker-check` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on this machine, so the reference tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail (TD-8).

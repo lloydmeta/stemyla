@@ -405,7 +405,12 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
   * Prototypes in rounds 3 to 9 built `test-support` and the sensor from the plan text.  They also applied steps 2 and 3 in a scratch worktree.  Every acceptance result for those steps held on the Mac.
   * Rounds 10 to 12: no blockers and no should-fix items.  The code reviewer of round 11 found nothing.  10 nits, all fixed.
 * [x] 2026-10-19: M3 decision point: the maintainer chose option (a), a `test-support` crate.
-* [ ] M3: `STEMYLA_REQUIRE`.
+* [x] 2026-10-19: M3 step 1: `test-support` written test first.  The 9 unit tests and the 2 tests of `skip` failed against the stubs, then passed.  They also pass with `STEMYLA_REQUIRE=gpu` or `gpus` in the outer shell, and with `--include-ignored`.
+* [x] 2026-10-19: M3 step 2: every skip in `roformer` and `roformer-gpu` calls `skip`.  On the AMD Radeon Pro 5500M: `STEMYLA_REQUIRE=gpu` passes (16 "adapter:" lines).  `gpu,timestamps --no-fail-fast` fails exactly the three profile tests.  `fixtures` fails all 5 `roformer` reference tests, and `gpus` fails them and names `gpus`.  With `WGPU_BACKEND=vulkan`, all 5 `memory.rs` tests skip, and with `gpu` they all fail.  Each panic names the test's line.
+* [x] 2026-10-19: M3 step 3: the folder and MP3 tests run.  Planted: half the MP3 bytes gives 661,248 frames and fails; a deleted `bass.wav` fails the stem names.
+* [x] 2026-10-19: M3 step 4: `every_skip_can_be_required` passes, with 11 unit tests.  Planted: without the doc-comment exclusion, the `//!`, `///` and `/**` cases fail.  A planted `eprintln!("skipping: ...")` in `roformer/tests/reference.rs` fails the real-tree test with its file and line.
+* [x] 2026-10-19: M3 step 5: docs, and TD-8 narrowed.
+* [ ] M3: three review rounds, the PR, CI, and the merge.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.

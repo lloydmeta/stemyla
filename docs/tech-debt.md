@@ -42,11 +42,14 @@ Nothing fails when a Python file or a `python`/`pip` step appears.
 
 * Fix: pin with `=`; a golden test that reruns the command at the top of `THIRD-PARTY.md` and diffs; `cargo deny` for licences and sources.
 
-### TD-8: tests that cannot run pass silently
+### TD-8: some evidence runs nowhere, and required skips rest on a person
 
-GPU tests (`roformer-gpu/tests/kernels.rs`, `memory.rs`) and the PyTorch reference tests print "skipping" and pass when there is no adapter or no fixture, so a run without them looks like a pass (VERIFY-1, GPU-2).  The fixtures are not on the maintainer's Mac either.
+`STEMYLA_REQUIRE` turns a skip into a failure (M3 of `plans/active/harness-phase-2.md`), but these gaps stay (VERIFY-1, GPU-2, MEM-3):
 
-* Fix: an environment variable (for example `STEMYLA_REQUIRE=gpu,fixtures`) that turns a skip into a failure, set wherever the evidence is claimed.
+* The PyTorch comparisons run nowhere, because neither CI nor the maintainer's Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
+* GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
+* `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, so a silent early `return` passes it.  Fix: phase 3's reviewers look for it.
+* The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere.  CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
 
 ### TD-9: UI snapshots are never compared in CI
 

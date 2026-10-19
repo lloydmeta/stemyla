@@ -21,6 +21,8 @@ Two principles shape it:
 | `working-with-agents.md`, kept complete by `docs-check` | guide, for people | how to drive agents lived in one person's head and in old transcripts | phase 1 |
 | `xtask docs-check` (`the_map_and_docs_match_the_code`) | sensor, computational | docs drift from code (on 2026-10-19: `synth` missing from the map, `stem-protocol` from two crate lists) | phase 1 |
 | `every_kernel_fits_the_default_limits`, naga over every shader (GPU-1) | sensor, computational | a kernel over WebGPU's default limits fails only on a real adapter, on some GPUs; only the tile memory was checked before | phase 2 |
+| `STEMYLA_REQUIRE` and `test_support::skip` (VERIFY-1) | sensor, computational | a test with no GPU or no fixture returned early and passed, so a run that checked nothing looked like evidence | phase 2 |
+| `every_skip_can_be_required` (VERIFY-1) | sensor, computational | a new skip that prints its own message escapes `STEMYLA_REQUIRE`.  It sees only messages that start with `skipping` or `skipped` (TD-8) | phase 2 |
 
 Planned components, by phase, are in the plan.
 

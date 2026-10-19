@@ -44,7 +44,7 @@ Everything is built and served with Rust tools.  What each task needs, beyond a 
 | The browser tests | `wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock`, and a browser's WebDriver (see "Browser tests").  CI runs them anyway; locally they are optional. |
 | `?bench`, and the `bench` scenario | A browser with WebGPU; no model. |
 | `?selftest`, and the `selftest`, `separate` and `worker-check` scenarios | A GPU, the model file, and for `selftest` the reference files made from it (below). |
-| The comparisons with PyTorch (`roformer`, `roformer-gpu`, `worker-check --reference`) | Fixtures from `tools/roformer_export.py`: Python 3 with `torch`, `numpy`, `pyyaml`, `ml_collections`, `safetensors` and [bs-roformer-infer](https://github.com/openmirlab/bs-roformer-infer) (module `bs_roformer`), plus the PyTorch checkpoint.  Without them those tests skip.  This is the only Python in the project, and it never builds or serves the app. |
+| The comparisons with PyTorch (`roformer`, `roformer-gpu`, `worker-check --reference`) | Fixtures from `tools/roformer_export.py`: Python 3 with `torch`, `numpy`, `pyyaml`, `ml_collections`, `safetensors` and [bs-roformer-infer](https://github.com/openmirlab/bs-roformer-infer) (module `bs_roformer`), plus the PyTorch checkpoint.  Without them those tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail.  This is the only Python in the project, and it never builds or serves the app. |
 | MP3 files from `xtask gen-song` | `ffmpeg` on `PATH` (optional; WAV files are always written). |
 | `xtask publish` | Push access to the repository's `gh-pages` branch (see "Publishing"). |
 
@@ -101,7 +101,7 @@ cargo test --workspace                       # unit, integration and UI snapshot
 cargo clippy --workspace --all-targets
 ```
 
-* `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them).
+* `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them, and `STEMYLA_REQUIRE=fixtures` makes them fail).
 * The GPU kernel tests run on any Vulkan, Metal or DX12 GPU.  Without one, SwiftShader's Vulkan driver works: `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan cargo test -p roformer-gpu --release`.
 
 ### Browser tests

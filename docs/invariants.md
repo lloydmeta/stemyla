@@ -69,7 +69,7 @@ A typed array sent between the page and the worker goes in the message's transfe
 Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when dropped.  `Rec` borrows the buffers it binds until it is submitted.
 
 * Why: wgpu's web backend does nothing when a buffer is dropped, and Safari's garbage collector does not count WebGPU memory ([WebKit bug 283321](https://bugs.webkit.org/show_bug.cgi?id=283321)).
-* Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile; CI `test` job).
+* Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI; `STEMYLA_REQUIRE=gpu` makes them fail where no adapter opens), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile; CI `test` job).
 * Gaps: TD-8, TD-22.
 
 ### MEM-4: the tab stays under 2 GB on an iPhone
@@ -109,10 +109,10 @@ Kernels fit the default limits (`docs/references/webgpu-limits.md`), and the dev
 
 ### GPU-2: a kernel change is checked against the CPU and in a browser
 
-Every change to a kernel is checked against the CPU (`cargo test -p roformer-gpu --release`) and in a browser (`?selftest`, or `cargo run -p xtask -- e2e selftest --weights <model>`, with `--query` naming the kernel) before it becomes a default.
+Every change to a kernel is checked against the CPU (`STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release`) and in a browser (`?selftest`, or `cargo run -p xtask -- e2e selftest --weights <model>`, with `--query` naming the kernel) before it becomes a default.
 
 * Why: kernels are hand-written WGSL; the CPU network is the reference.
-* Enforced by: `matmul_variants`, `attention_matches_cpu` (need a GPU, so not in CI), and the kernel checks that run when a GPU opens (`docs/ARCHITECTURE.md`, running it on the GPU).
+* Enforced by: `matmul_variants`, `attention_matches_cpu` (need a GPU, so not in CI; `STEMYLA_REQUIRE=gpu` makes them fail where no adapter opens), and the kernel checks that run when a GPU opens (`docs/ARCHITECTURE.md`, running it on the GPU).
 * Gaps: TD-8.
 
 ### GPU-3: never the default on SwiftShader alone
@@ -144,10 +144,10 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 
 ### VERIFY-1: every behaviour has an automated check
 
-Every behaviour is verified by an automated check; "it compiles" is not acceptance.  A test that skips (no GPU, no fixture) says so, and a skip is not evidence that the behaviour works.
+Every behaviour is verified by an automated check; "it compiles" is not acceptance.  A test that skips (no GPU, no fixture) says so, and a skip is not evidence that the behaviour works.  A test that skips calls `test_support::skip`.  Where evidence is claimed, `STEMYLA_REQUIRE` (for example `gpu`, `timestamps`, `fixtures`) turns the skip into a failure.
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
-* Enforced by: CI (`.github/workflows/ci.yml`) and review.
+* Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.
 * Gaps: TD-8, TD-9, TD-19.
 
 ### GIT-1: never push or publish unasked
