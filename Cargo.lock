@@ -9836,6 +9836,7 @@ dependencies = [
  "half",
  "hound",
  "roformer",
+ "rusty_mp3",
  "safetensors 0.7.0",
  "serde",
  "serde_json",

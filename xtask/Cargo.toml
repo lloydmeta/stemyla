@@ -19,6 +19,9 @@ burn-store = { version = "0.20.1", default-features = false, features = ["std", 
 half = "2.7.1"
 safetensors = "0.7.0"
 
+[dev-dependencies]
+rusty_mp3 = "=1.0.0"
+
 [lints]
 workspace = true
 

@@ -38,7 +38,7 @@ Nothing fails when a Python file or a `python`/`pip` step appears.
 
 ### TD-7: DEPS-1 is not checked, and young crates float
 
-`engine/Cargo.toml` takes `wsola = "0.1.0"` and `timestretch = "0.15.0"` as caret ranges, which accept later 0.1 and 0.15 releases (`cute-dsp = "0.0.41"` already accepts only 0.0.41); only `rusty_mp3` (in `worker/Cargo.toml`) is pinned exactly.  Nothing compares `THIRD-PARTY.md` with `cargo tree`, and there is no licence policy.
+`engine/Cargo.toml` takes `wsola = "0.1.0"` and `timestretch = "0.15.0"` as caret ranges, which accept later 0.1 and 0.15 releases (`cute-dsp = "0.0.41"` already accepts only 0.0.41); only `rusty_mp3` (in `worker/Cargo.toml` and `xtask/Cargo.toml`) and `naga` (in `roformer-gpu/Cargo.toml`) are pinned exactly.  Nothing compares `THIRD-PARTY.md` with `cargo tree`, and there is no licence policy.
 
 * Fix: pin with `=`; a golden test that reruns the command at the top of `THIRD-PARTY.md` and diffs; `cargo deny` for licences and sources.
 

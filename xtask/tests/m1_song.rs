@@ -45,15 +45,32 @@ fn stems_sum_to_mix_and_decode_back() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The mix encoded at 192 kbit/s with the calls the worker's MP3 export
+/// makes (`worker/src/web.rs`), so no ffmpeg is needed.
+fn mp3(mix: &synth::Stereo) -> Vec<u8> {
+    let pcm: Vec<f32> = mix
+        .left
+        .iter()
+        .zip(&mix.right)
+        .flat_map(|(l, r)| [*l, *r])
+        .collect();
+    let mut encoder = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig {
+        bitrate_kbps: 192,
+        vbr_quality: None,
+    });
+    encoder
+        .push_pcm_f32(&pcm, 2, synth::SAMPLE_RATE)
+        .expect("the encoder takes the mix");
+    encoder.finish();
+    std::iter::from_fn(|| encoder.next_packet().ok())
+        .flatten()
+        .collect()
+}
+
 #[test]
 fn mp3_decodes_to_roughly_the_right_length() {
-    // Only meaningful when gen-song has been run with ffmpeg available.
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../audio/synth/mix.mp3");
-    if !p.exists() {
-        eprintln!("skipping: {} not generated", p.display());
-        return;
-    }
-    let a = engine::decode_path(&p).unwrap();
+    let bytes = mp3(&synth::generate().mix);
+    let a = engine::decode_bytes(bytes, Some("mp3")).unwrap();
     let expected = 30 * 44_100;
     // MP3 adds encoder delay and padding (a few thousand frames at most).
     assert!(
