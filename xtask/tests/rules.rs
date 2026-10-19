@@ -28,6 +28,30 @@ fn every_skip_can_be_required() {
 }
 
 #[test]
+fn synth_brings_no_crate_into_the_web_app() {
+    let root = xtask::workspace_root();
+    let trees: Vec<(&str, String)> = xtask::rules::WEB_APP
+        .into_iter()
+        .map(|package| {
+            let tree = xtask::rules::web_app_tree(&root, package).expect("cargo tree runs");
+            (package, tree)
+        })
+        .collect();
+    let pairs: Vec<(&str, &str)> = trees
+        .iter()
+        .map(|(package, tree)| (*package, tree.as_str()))
+        .collect();
+    let problems = xtask::rules::synth_brings_no_crate(&pairs);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} problem(s) with synth in the web app:\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
+
+#[test]
 fn the_skip_allowlist_is_current() {
     let problems = xtask::rules::allowlisted_skips_exist(&rust_files());
     let report: Vec<String> = problems.iter().map(ToString::to_string).collect();

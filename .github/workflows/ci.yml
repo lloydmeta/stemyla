@@ -54,6 +54,17 @@ jobs:
       # --all-targets compiles roformer-gpu and every test target, so clippy
       # is also the native compile gate for the GPU crate.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # --workspace merges features across crates: xtask turns on synth's
+      # files feature for every crate in the build.  These steps check each
+      # crate without that merge (LAYER-1, decision 0004).
+      # synth without its files feature, as the web app takes it.
+      - run: cargo clippy --locked -p synth --all-targets -- -D warnings
+      # app's lib and binary without files: a native-only call to a writer
+      # fails here.  The first -p app step checks about 90 dependencies again.
+      - run: cargo clippy --locked -p app -- -D warnings
+      # app's tests, which take files only through their own dev-dependency:
+      # a lost dev-dependency fails here.
+      - run: cargo clippy --locked -p app --all-targets -- -D warnings
 
   test:
     name: test

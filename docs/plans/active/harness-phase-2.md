@@ -43,7 +43,7 @@ Terms:
 * The PR updates the rule's `* Enforced by:` line in `invariants.md` to name the new test.  `docs-check` confirms the test exists.
 * The PR deletes a closed `tech-debt.md` entry and adds its ID under `## Closed`, or narrows a partly closed one.  A new breach that the check finds and the PR does not fix gets an `#[expect(..., reason = "TD-n: ...")]` and a tech-debt entry.
 * The PR adds the sensor to the components table in `docs/harness.md`, and updates `docs/working-with-agents.md` when a person's work changes.
-* Before each commit: fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass (GIT-2).  Each commit is signed.
+* Before each commit: fmt, clippy (every clippy command in `CLAUDE.md`, from M4 on), `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass (GIT-2).  Each commit is signed.
 * After implementing: three review rounds, each by a new subagent with fresh context.  Verify each finding, then fix real ones with tests.
 * The PR description says what was verified, how, and what was not.  It is written to a file and passed with `--body-file`.
 * A new crate is vetted and pinned if young (DEPS-1).  This plan adds only these crates:
@@ -252,17 +252,209 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 * CI: the `test` job log lists `folder_loading_matches_the_generator ... ok` and `mp3_decodes_to_roughly_the_right_length ... ok`.
 * fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.
 
-### M4: the app links only song generation (TD-4, part; maintainer decision)
+### M4: the web app takes only song generation from synth (TD-4, part; LAYER-1, DEPS-1, DOC-1; maintainer decision, made 2026-10-19)
 
-* Change: in `synth/Cargo.toml`, make `hound`, `serde`, `serde_json` and `anyhow` optional, behind a feature `files` that is not a default.  Put `write_wav` and `write_song` behind `#[cfg(feature = "files")]`.  Derive `Serialize` on `Onsets` and `Truth` with `cfg_attr(feature = "files", ...)`.  `xtask` takes `synth` with `features = ["files"]`.  `app` keeps `synth` without features, and adds it with `files` as a native dev-dependency for `app/tests/ui.rs`.
-* Acceptance: `cargo tree -p app --target wasm32-unknown-unknown -e normal -i hound` finds nothing, and the same holds for `serde_json`.  `cargo test -p synth` and `cargo test -p synth --features files` pass.  `trunk build --release` passes.
-* Docs: regenerate `THIRD-PARTY.md` with the command at its top; `hound`, and `serde_json` if nothing else needs it, leave the list.  Remove the TD-4 note under the layers table in `ARCHITECTURE.md`.  Narrow TD-4 to the missing test.
+* Change: `synth`'s file writers and their four crates move behind a feature `files`, which is not a default.  `app` takes `synth` without it.  Only tools and tests take it.  A new check fails when `synth` brings another crate into the web app.
+* Term: "the web app" is the two WebAssembly modules, `app` and `stem-worker`, as in `THIRD-PARTY.md`.  "The page" means `app` in `invariants.md` and in the layers section of `ARCHITECTURE.md`, so M4 does not use it.  The text that M4 adds says "the web app (`app` and `stem-worker`)" at the first use in the body text of each doc.  These docs: `invariants.md`, `ARCHITECTURE.md`, `harness.md`, `docs/README.md`, decision 0004 and `harness-engineering.md`.
+* The gain is a correct licence list and a smaller dependency graph for the web app.  The gain is not a smaller download: the linker already removes the unused writers (see the sizes below).
+
+#### M4 state at the start
+
+On 2026-10-19, at commit `69f8cae` (M3 merged as PR #16):
+
+* `synth/Cargo.toml` has four dependencies and no features: `anyhow` 1, `hound` 3.5.1, `serde` 1 with `derive`, and `serde_json` 1.
+* In `synth/src/lib.rs`, only `write_wav` and `write_song` use `hound`, `serde_json` and `anyhow`.  `Onsets` and `Truth` derive `Serialize` only for the `truth.json` that `write_song` writes.  The rest (`generate`, `sum_stems`, the constants and the types) uses only `std`.  `synth` has no tests.
+* The callers:
+  * `app/src/lib.rs` calls only `synth::generate()` and `synth::SAMPLE_RATE`, for the demo song.
+  * `app/tests/ui.rs`: `dropping_several_files_loads_them_as_stems` calls `write_song`.  No wasm test in `app` uses `synth`.
+  * `xtask`: `gen-song` in `src/main.rs`, `src/e2e.rs`, and the tests `m1_song.rs` and `m3_engine.rs` call `write_song`.  `src/bench.rs` uses the type `Onsets`.
+* The web app's tree: `cargo tree -p app -p stem-worker -e normal --target wasm32-unknown-unknown --prefix depth -f "{p}"` gives `synth` four children: `anyhow`, `hound`, `serde` and `serde_json`.
+* Only `hound` leaves the web app.  `serde`, `serde_json` and the crates under them also come through `roformer` and `safetensors` in `stem-worker`.  `app` and `engine` use `anyhow` directly.
+* Trunk builds `app` and `stem-worker` in two separate Cargo runs (two `data-trunk rel="rust"` links in `app/index.html`).  So their features are not merged in what ships.
+* `.github/workflows/ci.yml` sets `CARGO_TERM_COLOR: always` for every job.  Its `test` and `clippy` jobs build `synth` and `app` with `--workspace` only.
+* Facts from two prototypes of the change, in scratch worktrees.  Their manifests and `cfg` attributes are those in "M4 design":
+  * `Cargo.lock` does not change.
+  * `THIRD-PARTY.md`'s first command, run before and after, differs in one row: `hound`.  This holds after the output is made into a set of rows: `sed -E 's/ \(\*\)$//; s/ \(\/[^)]*\)//' | sort -u`.  The raw output differs in more lines, because the full `serde` node moves from `app`'s tree to `stem-worker`'s.
+  * `trunk build --release`: `app_bg.wasm` is 5,194,829 bytes before and 5,194,587 after, 242 bytes less.  `stem-worker_bg.wasm` does not change (939,660 bytes).
+  * `cargo tree -e normal` does not apply a dev-dependency's features.  With `app`'s new dev-dependency on `synth` with `files`, `-e normal` shows `synth` with no features and no children.  `-e all --target all` shows `files` and `hound`; with `--target wasm32-unknown-unknown` it does not, because the dev-dependency is native-only.  The Cargo book says that `cargo tree -e normal,build` is "pretty close" to `cargo build` ([cargo tree](https://doc.rust-lang.org/cargo/commands/cargo-tree.html)).
+  * After the change, `cargo tree -p app -e normal --target wasm32-unknown-unknown -i hound` prints "warning: nothing to print" and exits 0.  An empty result with exit 0 passes in silence, so the check does not use `-i`.
+  * Before the change, the web app's `synth` also has no features, because `synth` has none.  So a check of the feature list alone passes on today's tree, and cannot be written test first.  A check of `synth`'s children fails today.
+  * With `--target all`, `-e normal` also shows `serde` on the native side, through `accesskit_atspi_common` (eframe on Linux).  So a check that bans crates by name gives false alarms.  The check reads `synth`'s children instead.
+  * With `CARGO_TERM_COLOR=always`, `cargo tree` writes ANSI colour codes around each `(*)` marker, also into a pipe.  The depths and names stay plain.  With `--color never`, there are no codes.
+  * A `(*)` line has no children: the Cargo book says that its dependencies "have already been shown elsewhere in the graph, and so are not repeated".
+  * With two `-p` roots in one run, Cargo merges their features and prints each package in full only once, under the first root.  A prototype gave `stem-worker` a `synth` with `files`.  The full `synth` node, with `hound`, was then under `app`, and `stem-worker` showed `1synth ... (*)`.  So the check runs `cargo tree` once for each root.
+  * The deepest line in today's tree is at depth 9.  One more level gives two-digit depths.
+  * `cargo tree` runs from inside a `cargo test` binary without lock contention.  It works for `wasm32-unknown-unknown` when that target is not installed.  It takes about 1 s on the maintainer's Mac.
+  * `cargo tree` downloads the packages that it shows.  The `test` job builds for the host only, so a first run without a cache may download the wasm-only crates.  rust-cache then keeps them.  This is not measured.  A machine that is offline and has never fetched them gets an `Err`, not a pass.
+  * Without `app`'s new dev-dependency, `cargo test -p app --test ui` fails with `E0425: cannot find function write_song`.  `cargo test --workspace --exclude roformer-gpu --no-run` still builds, because `xtask` turns `files` on for the whole build.
+  * After a workspace clippy, the first `-p app` clippy run checks about 90 dependencies again with other features, among them wgpu, naga, egui and eframe.  M1 saw the same effect (68 s).  Measured: `cargo clippy -p app` took 92 s, and then `-p app --all-targets` took 8 s.  Alone, `-p app --all-targets` took 55 s.  `-p synth` checks only `synth` again.
+  * A `use serde::Serialize;` without its `cfg` gives `E0432: unresolved import serde` without `files`.
+* Cargo facts:
+  * An optional dependency named with `dep:` in `[features]` gets no implicit feature of its own ([features](https://doc.rust-lang.org/cargo/reference/features.html)).
+  * Resolver 2: "Dev-dependencies do not activate features unless building a Cargo target that needs them (like tests or examples)" (same page).  Resolver 3, which this workspace uses, changes only the default of `incompatible-rust-versions` ([resolver](https://doc.rust-lang.org/cargo/reference/resolver.html)).
+  * "When a dependency is used by multiple packages, Cargo will use the union of all features enabled on that dependency" ([features](https://doc.rust-lang.org/cargo/reference/features.html)).  So `--workspace` builds compile `synth` with `files`, and hide a missing `files` in one crate.  Only `-p` builds of a crate that does not take `files`, and the `wasm build (trunk)` job, compile `synth` without `files`.  Trunk does not fail on warnings, and it builds no native code.
+  * `cargo clippy -p app --all-targets` builds `app`'s tests, so the dev-dependency's `files` also reaches `app`'s lib.  A prototype put a native-only call to `synth::write_song` in `app/src/lib.rs`.  `-p app --all-targets` passed, and `cargo clippy -p app -- -D warnings` failed with E0425.  So `app`'s native lib needs its own step.
+  * `xtask` runs Cargo as `env!("CARGO")`, as `xtask/src/web_test.rs` does.
+
+#### M4 design
+
+* The rule is LAYER-1.  Its text gains one sentence at the end of the paragraph: "In the normal dependency tree of the web app (`app` and `stem-worker`), `synth` brings no other crate."  This is what the check reads: `-f "{p}"` prints no features.  Dev-dependencies are not in that tree, so `app`'s dev-dependency with `files` keeps the rule.  Its "Why" gains: "It also keeps the crates that `synth` needs only for tools and tests out of the web app's build, so `THIRD-PARTY.md`'s first table does not credit them."
+* `CLAUDE.md`'s LAYER-1 line stays as it is: it is a summary, and stays true.
+* A decision record, `docs/decisions/0004-synth-file-writers-behind-a-feature.md`.  The `files` boundary and LAYER-1's new text outlive this plan.  The maintainer made the choice on 2026-10-19, and then accepts the record after review.  M11's record then takes 0005.
+  * Title: `# 0004: synth's file writers are behind a feature, so the web app takes only song generation`.
+  * Status line: `Status: proposed`.
+  * The line in `docs/README.md`: `` * `decisions/0004-synth-file-writers-behind-a-feature.md`: `synth`'s file writers are behind its `files` feature, so the web app (`app` and `stem-worker`) takes only song generation. ``
+  * It has the four sections of 0001 to 0003:
+    * Context: "`app`, one of the two WebAssembly modules of the web app (`app` and `stem-worker`), takes `synth` for the demo song.  So it compiles `hound` for writers that it never calls, and `THIRD-PARTY.md` credits `hound`.  `app_bg.wasm` is only 242 bytes smaller without them, because the linker already drops the unused writers."
+    * Options:
+      * (a) A `files` feature in `synth`, not a default.  It adds no crate.  The cost: `--workspace` builds merge the feature, so CI needs `-p` steps.
+      * (b) A separate crate for the writers.  It is an eleventh crate, with a row in the layers table and the crate lists.
+      * (c) The writers move into `xtask`.  `app`'s test `dropping_several_files_loads_them_as_stems` then writes its WAV files with `engine::wav::encode_pcm16`, as 16-bit files, not `synth`'s 32-bit float.  So `synth` is no longer the one source of the song's files.
+    * Decision: (a), with `app`'s dev-dependency on `synth` with `files` for its native tests only.
+    * Consequences, one sentence each:
+      * "LAYER-1 gains one sentence: in the web app's normal dependency tree, `synth` brings no other crate."
+      * "`synth_brings_no_crate_into_the_web_app` checks the web app's trees."
+      * "Three CI `clippy` steps check `synth`, `app`'s lib and `app`'s tests without the workspace's merged features."
+  * `harness.md`'s sentence on decisions does not name 0004.  0004 is about the product, not the harness.
+* `synth/Cargo.toml`:
+
+  ```toml
+  [dependencies]
+  anyhow = { version = "1", optional = true }
+  hound = { version = "3.5.1", optional = true }
+  serde = { version = "1", features = ["derive"], optional = true }
+  serde_json = { version = "1", optional = true }
+
+  [features]
+  # The WAV and truth.json writers, for tools and tests.  The web app does not take it (LAYER-1).
+  files = ["dep:anyhow", "dep:hound", "dep:serde", "dep:serde_json"]
+  ```
+
+  The versions do not change, so no crate is new (DEPS-1).
+* `synth/src/lib.rs`: `write_wav` and `write_song` get `#[cfg(feature = "files")]`.  `Onsets` and `Truth` get `#[cfg_attr(feature = "files", derive(serde::Serialize))]` above their other derives.  The `use serde::Serialize;` line goes.  The module comment names the feature.
+* `xtask/Cargo.toml`: `synth` takes `features = ["files"]`.
+* `app/Cargo.toml`: `[dependencies]` keeps `synth` without features.  Add `synth = { path = "../synth", features = ["files"] }` to the existing `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]` section.  Its comment names the test `dropping_several_files_loads_them_as_stems`.  It is native-only, because only the native UI test writes files.  So `hound` also stays out of `THIRD-PARTY.md`'s `## Browser tests only` table.
+* CI: the `clippy` job gets three steps after the workspace step.  Each has a comment that says why:
+  * `cargo clippy --locked -p synth --all-targets -- -D warnings` checks `synth` without `files`.  It costs a few seconds.
+  * `cargo clippy --locked -p app -- -D warnings` checks `app`'s lib and binary without any `files`.  So a native-only call to a writer in `app` fails CI.
+  * `cargo clippy --locked -p app --all-targets -- -D warnings` checks that `app`'s tests build without the workspace's merged features.  So a lost dev-dependency fails CI.
+  * The two `-p app` steps together check about 90 dependencies again: about 100 s measured, almost all in the first step.  The PR states the time in CI.  The `clippy` job runs beside the longer `test` job.
+  * The other direction needs no step: if `xtask` loses `files`, `cargo run -p xtask` in the `browser-tests` job does not compile.
+* Commands: three lists get the three clippy commands, so GIT-2's local clippy run covers them.  Like the lines beside them, they have no `--locked`.  Each list keeps its own style:
+  * `README.md`, the list of the checks that CI gates on, which has no comments.  Add these three lines after the workspace clippy line:
+
+    ```bash
+    cargo clippy -p synth --all-targets -- -D warnings
+    cargo clippy -p app -- -D warnings
+    cargo clippy -p app --all-targets -- -D warnings
+    ```
+
+  * `README.md`'s `## Checks`, whose clippy line has no `-D warnings`.  Add these three lines after it, with the comment column of that block:
+
+    ```bash
+    cargo clippy -p synth --all-targets          # synth without its files feature
+    cargo clippy -p app                          # app's lib and binary without any files feature
+    cargo clippy -p app --all-targets            # app's tests without the workspace's merged features
+    ```
+
+  * `CLAUDE.md`'s `## Commands`.  Add these three lines after the workspace clippy line.  The second line's comment uses the comment column.  The other two commands reach that column, so their comments start two spaces after them, as on the `STEMYLA_REQUIRE` line:
+
+    ```bash
+    cargo clippy -p synth --all-targets -- -D warnings  # synth without its files feature
+    cargo clippy -p app -- -D warnings              # app's lib and binary without any files feature
+    cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
+    ```
+* The check, in `xtask/src/rules.rs`:
+  * `web_app_tree(root: &Path, package: &str) -> Result<String>` runs `env!("CARGO") tree --locked --color never -p <package> -e normal --target wasm32-unknown-unknown --prefix depth -f "{p}"` in `root`.  A failed command gives an `Err` with Cargo's stderr.
+  * One run for each package, `app` and `stem-worker`, because one run with both merges their features (see the facts above).  Trunk builds them apart too.
+  * `--color never`, because CI's `CARGO_TERM_COLOR: always` reaches the test binary.  So the check reads the same text in CI and on the Mac.
+  * The target is `wasm32-unknown-unknown`, because the web app is what ships, and `THIRD-PARTY.md` reads the same target and edges (DEPS-1).  So a native-only breach passes; the native app does not ship.
+  * `synth_brings_no_crate(trees: &[(&str, &str)]) -> Vec<Problem>` is a pure function over `(package, tree)` pairs.  It reads each line as a depth (all the leading digits) and a package name (the first word after them).  It skips empty lines.
+  * For each `synth` line, at any depth, its children are the following lines at its depth plus one.  The children end at the first line at `synth`'s depth or less.  A `(*)` line gets no special case: Cargo prints no children under it.
+  * The name must equal `synth`, so `synthx` does not match.
+  * The problems, each with `rule: "LAYER-1"` and `line: None`.  `file` is the manifest of the package whose tree has the problem: `app/Cargo.toml` or `worker/Cargo.toml`.  The "no `synth`" problem takes `app/Cargo.toml`:
+    * `synth` has children: `LAYER-1: synth brings anyhow, hound, serde, serde_json into the web app, through app.  Fix: make each dependency of synth optional, behind its files feature.  Take synth without its files feature in the web app.  Tools and tests take features = ["files"].`  The names are the children, in the tree's order.  `app` is the package whose tree has the line.
+    * No `synth` line in any tree: `LAYER-1: the web app's trees have no synth, so this check read nothing.  Fix: if the web app no longer takes synth, remove synth_brings_no_crate_into_the_web_app.  Update the docs that name it (DOC-1).`
+    * A line that is not empty and has no depth: `LAYER-1: the tree of app has a line without a depth: "<line>".  Fix: run cargo tree with --prefix depth.`
+    * A tree whose first line is not the package at depth 0, an empty tree included: `LAYER-1: the tree of app does not start with app, so this check cannot read it.  Fix: run cargo tree -p app with --prefix depth.`  Without it, an empty output with exit 0 would pass in silence.
+    * A tree that starts with its package but has no `wasm-bindgen` at depth 1 (added in review round 3): `LAYER-1: the tree of stem-worker has no wasm-bindgen at depth 1, so it is not the wasm tree.  Fix: run cargo tree -p stem-worker with --target wasm32-unknown-unknown.`  Each module of the web app takes `wasm-bindgen` directly, and only on wasm32.  Natively, `stem-worker`'s tree is its root line alone, which passes every other check.
+  * The test `synth_brings_no_crate_into_the_web_app` in `xtask/tests/rules.rs` runs `web_app_tree` for both packages and then the check.  It asserts that the list is empty, and prints the messages, as `every_skip_can_be_required` does.
+  * `rules.rs`'s module comment says that this check reads Cargo's output, not the files.
+* The phase plan put this check in M5.  It moves to M4, so M4's result has an automated check (VERIFY-1).  M5 keeps the crate edges over `cargo metadata`.
+* LAYER-1's `* Enforced by:` line becomes: "`synth_brings_no_crate_into_the_web_app` (CI `test` job).  No test checks the crate edges (TD-4)."  `docs-check` confirms that the test exists.  The three clippy steps are not on this line, because they check the build, not the rule.
+
+#### M4 steps
+
+Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass before it (GIT-2).  Fixes from the review rounds are later commits.
+
+1. The checker, test first.
+   * Write `web_app_tree`, and `synth_brings_no_crate` as a stub that returns no problems.  Write the unit tests in `rules.rs`'s test module.  Each asserts the whole `Vec<Problem>`, not that it contains a problem:
+     * `synth_with_children_is_a_problem`: lines from today's `app` tree.  They keep `serde`'s own children (`3serde_core`, `3serde_derive`) between the children of `synth`, and a grandchild (`3itoa`) under `serde_json`.  It asserts the exact message, with only the four children and `app`.  So a parser that stops at the first deeper line fails it.
+     * `synth_without_children_is_no_problem`.
+     * `a_line_at_synths_depth_is_not_its_child`: exactly `0app`, `1synth`, `1engine`, `2hound`.  It asserts no problem.  So a parser that stops only at a shallower line fails it.
+     * `a_shallower_line_ends_synths_children`: `synth` at depth 2, then a depth-1 line, then a depth-3 line.  It asserts no problem.  So a parser that stops only at the same depth fails it.
+     * `a_deeper_synth_is_read`: a `9engine` line, then `10synth`, then `11hound`.  It gives the problem.  So a parser that reads only `1synth`, or only the first digit of a depth, fails it.
+     * `a_repeated_synth_gives_one_problem`: `synth` with a child, then a `synth ... (*)` line.
+     * `a_tree_without_synth_is_a_problem`: two trees, neither with `synth`, one with a `synthx` line that has a child.  So a parser that matches `synth` by prefix, when it finds `synth` or its children, fails it.
+     * `synth_under_stem_worker_is_named`: an `app` tree with a `1synth` line without children, as the real tree has.  Then a `stem-worker` tree with the lines that the planted `stem-worker` breach gives: `1synth`, `2anyhow`, `2hound`, `2serde v1.0.229 (*)` and `2serde_json v1.0.152 (*)`.  It asserts exactly one problem, which names `stem-worker` and `anyhow, hound, serde, serde_json`.  So a parser that reads only the first `synth`, or that skips `(*)` lines, fails it.
+     * `a_line_without_a_depth_is_a_problem`: a `stem-worker` tree that starts with `0stem-worker`, and holds a `synth` without children, an empty line and a line without a depth.  It asserts exactly one problem, which names `stem-worker`.
+     * `a_tree_that_does_not_start_with_its_package_is_a_problem`: an empty `app` tree, and a `stem-worker` tree that starts with `0app` and holds a `1synth` line without children.  It asserts exactly two problems, one for each tree.
+     * `a_first_line_below_depth_0_is_a_problem` (added in review round 1): a tree that starts with `1app`, with `0app` on a later line.  So a check of the name alone, or of any line, fails it.
+     * `a_tree_without_wasm_bindgen_is_a_problem` (added in review round 3): a `stem-worker` tree with `wasm-bindgen` only at depth 2.  So a tree read without `--target wasm32-unknown-unknown` fails the check.
+   * Each fixture tree starts with `0<package>` and has `1wasm-bindgen` right after it, unless the test is about one of those lines.  `synth_without_children_is_no_problem` has both trees, as the real tree has: `synth` in `app` only.
+   * Fixture lines copied from real output replace each local path with `(/x/<crate>)`, so no home folder is committed.
+   * See every test that expects a problem fail against the stub.  The tests that expect no problem pass against it; that is expected.  Then write the function.
+   * Update `rules.rs`'s module comment.
+2. The change, its sensor and its docs.  The real-tree test fails until the change, and the change makes docs wrong (DOC-1).  So these are one commit.
+   * Write `synth_brings_no_crate_into_the_web_app`.  Run it on today's tree.  It fails and names `anyhow, hound, serde, serde_json`.  Record the output in the PR.
+   * Make the change, as "M4 design" gives it: `synth/Cargo.toml`, `synth/src/lib.rs`, `xtask/Cargo.toml`, `app/Cargo.toml` and the three CI steps.  The real-tree test now passes.
+   * Add the three clippy commands to the three lists in "M4 design".
+   * `THIRD-PARTY.md`:
+     * Run the first command at its top.  Compare its output with the first table.
+     * Remove the `hound` row.  No other row changes.
+     * Run the command of `## Browser tests only`.  Confirm that `hound` is not in it, because `app`'s new dev-dependency is native-only.
+     * No check compares the tables until M9 (TD-7).
+   * `docs/decisions/0004-synth-file-writers-behind-a-feature.md`, with the title, status and content in "M4 design".  Add its line to `docs/README.md`, or `docs-check` fails.
+   * `docs/ARCHITECTURE.md`:
+     * Under the layers table, replace "`app` depending on `synth` ships the demo song generator in the page (TD-4 in `docs/tech-debt.md`)."  The new text: "`app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app` and `stem-worker`; LAYER-1)."
+     * The `synth` bullet in `## Crates` becomes: "`synth`: the built-in demo song, synthesised so its stems are known exactly.  Its `files` feature adds writers for the song's WAV files and `truth.json`, for tools and tests."
+   * `invariants.md`: LAYER-1's text, "Why" and `* Enforced by:` line, as in "M4 design".  `* Gaps: TD-4.` stays.
+   * `tech-debt.md`, TD-4:
+     * The title becomes "LAYER-1's crate edges are not checked".
+     * Remove "`app` depends on `synth`, so the demo song generator and its dependencies (hound, serde_json) compile into the page build."
+     * The fix line becomes: "* Fix: a test over `cargo metadata` with an allowlist of edges per crate (`plans/active/harness-phase-2.md`, M5)."  So the sentence "Decided 2026-10-19: ..." goes.
+   * `harness.md`, two components rows:
+     * `synth_brings_no_crate_into_the_web_app` (LAYER-1), kind "sensor, computational", added "phase 2".  The failure it addresses: `app`, in the web app (`app` and `stem-worker`), compiled `hound` for `synth`'s file writers, and the licence list credited it.
+     * Component cell: "the three `-p` clippy steps in CI".  Kind "sensor, computational", added "phase 2".  Failure cell: "`--workspace` builds merge features, so they hide warnings in `synth` without `files`, a native-only call to a writer in `app`, and a lost dev-dependency".
+   * `harness-engineering.md`: in phase 2's bullet on the structural test, "crate layering over `cargo metadata` (TD-4)" becomes "crate layering over `cargo metadata` (TD-4), `synth` in the web app (`app` and `stem-worker`) over `cargo tree` (LAYER-1, M4)".
+   * No change to `working-with-agents.md`, because the work of a person does not change.  The map's `synth/` and LAYER-1 lines stay true.
+
+#### M4 acceptance
+
+* `cargo test -p xtask --test rules`: `synth_brings_no_crate_into_the_web_app` passes.  Before the change it failed and named the four crates.  The 12 unit tests pass in `cargo test -p xtask --lib`, and each that expects a problem failed against the stub.
+* `THIRD-PARTY.md`: make the first command's output into a set of rows, as "M4 state at the start" gives it.  Apart from the workspace crates, that set equals the first table's rows.  The set before the change differs from the set after only in `hound`.  Record that diff in the PR.
+* Planted breaches, run locally and not kept.  Record each result in the PR:
+  * `features = ["files"]` on `synth` in `app`'s `[dependencies]`: the real-tree test fails and names `hound`.
+  * `default = ["files"]` in `synth/Cargo.toml`: the real-tree test fails.
+  * Without `app`'s new dev-dependency, `cargo clippy -p app --all-targets -- -D warnings` fails with E0425 on `write_song`.
+  * `use serde::Serialize;` left in `synth/src/lib.rs` without its `cfg`: `cargo clippy -p synth --all-targets -- -D warnings` fails with E0432.
+  * Put the plant above the test module, because below it clippy fails first on `items_after_test_module`.  A native-only call to `synth::write_song` in `app/src/lib.rs`: `cargo clippy -p app -- -D warnings` fails with E0425, and `-p app --all-targets` passes.
+  * A `synth` dependency with `features = ["files"]`, added to `[target.'cfg(target_arch = "wasm32")'.dependencies]` in `worker/Cargo.toml`: the real-tree test fails and names `stem-worker`.  This edge changes `Cargo.lock`, so the inner `cargo tree --locked` fails until the lock is updated.  Run the outer `cargo test -p xtask --test rules` without `--locked`, so it updates the lock first.  Afterwards, restore `Cargo.lock` with the manifest.
+* Each crate builds without the workspace's merged features:
+  * `cargo clippy -p synth --all-targets -- -D warnings` passes, and so does the same with `--features files`.
+  * `cargo clippy -p app -- -D warnings` passes, and so does the same with `--all-targets`.
+  * `cargo test -p app --test ui` passes, and `dropping_several_files_loads_them_as_stems` runs.
+  * `cargo test -p xtask --tests` passes.
+* `(cd app && trunk build --release)` passes.  The PR states the size of `app_bg.wasm` before and after.
+* `grep -c "Enforced by: prose only" docs/invariants.md` gives 7 (8 before).
+* fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.
+* CI: the `test` job log lists `synth_brings_no_crate_into_the_web_app ... ok`, and the `clippy` job runs the three new steps.  The PR states the time that each adds.
 
 ### M5: crate layering is a test (closes TD-4; LAYER-1)
 
-* Change: add pure checker functions to `xtask/src/rules.rs`, and tests that run them on the real tree to `xtask/tests/rules.rs`, as `docs.rs` does.  M3 makes both files.  The first check reads `cargo metadata --format-version 1 --no-deps` and compares each workspace crate's workspace dependencies with an allowlist built from the layers table in `ARCHITECTURE.md`.  A second check runs `cargo tree -p app --target wasm32-unknown-unknown -e normal` and fails if it holds `hound` or `serde_json` (M4's result).
-* Acceptance: the test `crates_depend_only_downwards` passes.  Unit tests plant an `engine -> app` edge and an `app -> roformer-gpu` edge; both fail with LAYER-1.  Adding `features = ["files"]` to `app`'s `synth` dependency fails the second check.
-* Note: dev-dependencies count as edges unless the allowlist says otherwise; `app`'s dev-dependency on `synth` with `files` is listed.  Any crate but `dsp` (DSP-1) may take `test-support` (M3) as a dev-dependency, and none may take it as a normal dependency.  A unit test plants a `dsp -> test-support` dev-dependency edge, and it fails.
+* Change: add pure checker functions to `xtask/src/rules.rs`, and tests that run them on the real tree to `xtask/tests/rules.rs`, as `docs.rs` does.  M3 makes both files.  The check reads `cargo metadata --format-version 1 --no-deps` and compares each workspace crate's workspace dependencies with an allowlist built from the layers table in `ARCHITECTURE.md`.  M4 already checks that `synth` brings no crate into the web app.
+* Acceptance: the test `crates_depend_only_downwards` passes.  Unit tests plant an `engine -> app` edge and an `app -> roformer-gpu` edge; both fail with LAYER-1.  LAYER-1's `* Enforced by:` line names `crates_depend_only_downwards` and `synth_brings_no_crate_into_the_web_app`, and no longer says that no test checks the crate edges.
+* Note: dev-dependencies count as edges, and the same layers apply to them.  `app`'s dev-dependency on `synth` (M4) needs no entry, because the layers table already lets `app` take `synth`.  Any crate but `dsp` (DSP-1) may take `test-support` (M3) as a dev-dependency, and none may take it as a normal dependency.  A unit test plants a `dsp -> test-support` dev-dependency edge, and it fails.
 
 ### M6: dsp relaxes only the style lints DSP-1 needs (closes TD-2)
 
@@ -286,6 +478,7 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 * Change: pin `wsola`, `timestretch` and `cute-dsp` in `engine/Cargo.toml` with `=`.  Add a check that reruns the `cargo tree` command at the top of `THIRD-PARTY.md` and compares each crate, version and licence with the tables.  Add a check that every dependency below 1.0 of a shipped crate is pinned with `=`.
 * Acceptance: `third_party_lists_what_ships` and `young_crates_are_pinned` pass.  Unit tests plant a crate missing from the tables, a changed licence and a caret range on a 0.x crate; each fails with DEPS-1.
 * Scope: `cargo deny` for licence policy and sources stays in TD-7.  It is a new tool and needs its own vetting.
+* Note: run `cargo tree` as M4's `web_app_tree` does, with `env!("CARGO")`, `--locked` and `--color never`.  CI's `CARGO_TERM_COLOR: always` otherwise puts colour codes into the output.
 
 ### M10: the hand-written e2e messages match the protocol (TD-16, part; PROTO-1)
 
@@ -374,7 +567,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 ## Idempotence and recovery
 
 * Each milestone is one PR and reverts on its own.  A reverted check removes its enforcement and nothing else; revert its `* Enforced by:` line and restore its tech-debt entry in the same commit.
-* M3 adds a crate.  To undo M3, revert its commits, then put back decision 0003 with `Status: rejected`, and its line in `docs/README.md`.  So the decision numbers have no gap.  If M5 or a later milestone has merged, keep `xtask/src/rules.rs` and `xtask/tests/rules.rs`.  Remove only `skips_use_the_helper`, `every_skip_can_be_required` and M5's `test-support` case.  Remove `proc-macro2` from `xtask`'s `[dependencies]` unless a later check uses it.  Then commit `Cargo.lock`.
+* M3 adds a crate.  To undo M3, revert its commits, then put back decision 0003 with `Status: rejected`, and its line in `docs/README.md`.  So the decision numbers have no gap.  If M4 or a later milestone has merged, keep `xtask/src/rules.rs` and `xtask/tests/rules.rs`.  Remove only `skips_use_the_helper`, `allowlisted_skips_exist`, `every_skip_can_be_required`, `the_skip_allowlist_is_current`, and M5's `test-support` case.  Remove `proc-macro2` from `xtask`'s `[dependencies]` unless a later check uses it.  Then commit `Cargo.lock`.
+* To undo M4, revert its commits.  That reverts the code, the manifests, the CI steps and the command lists in every case.  The revert also puts back the `hound` row, TD-4's text and LAYER-1's text.  If a later check shares a Cargo runner with `web_app_tree`, keep that runner.  Then put back decision 0004 with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.
+* If M5 has merged before M4 is undone, TD-4 is closed, and `docs-check` fails a closed ID outside plans and decisions.  So keep TD-4 closed, and do not put back its text.  The sentence that comes back under the layers table in `ARCHITECTURE.md` must not name TD-4.  On LAYER-1's line, remove only M4's test name.
 * Checks read the tree and write nothing, so they can run any number of times.  `xtask test-list` writes only to stdout.
 * M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -415,8 +610,31 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M3 review round 3: no blockers and no should-fix items; 3 nits, all fixed.  The SwiftShader command gets `STEMYLA_REQUIRE=gpu`, `ARCHITECTURE.md` names `ROFORMER_GPU_FULL=1` for the end-to-end check, and one comment is re-wrapped.
 * [x] 2026-10-19: M3, PR #16 opened.  CI (run 39241946733) passes every job, and the `test` job lists the two revived tests, both checks of `xtask/tests/rules.rs` and both tests of `skip`.  The first attempt of the `test` job took 10m58s: `Cargo.lock` changed, so rust-cache restored an older cache and 167 crates were compiled again.  A re-run of the job took 4m41s (M2: 5m19s), with a 39 s build.  The revived tests add about 4 s.
 * [x] 2026-10-19: M3, decision 0003 accepted by the maintainer.
-* [ ] M3: PR #16 merged by the maintainer.
-* [ ] M4: `synth`'s `files` feature.
+* [x] 2026-10-19: M3, PR #16 merged by the maintainer (`69f8cae`).
+* [x] 2026-10-19: M4 implementation plan written (the M4 sections under "Plan of work").  A prototype of the change in a scratch worktree measured the licence list, the size of `app_bg.wasm` and `cargo tree`'s output.
+* [x] 2026-10-19: M4 plan review round 1, by two new reviewers (code, and docs and process).  No blockers; 8 should-fix findings and 14 nits, all checked and real, all fixed in the plan.  The main fixes: CI's `CARGO_TERM_COLOR: always` colours `cargo tree`'s `(*)` markers, so the check passes `--color never`.  `--workspace` builds hide a lost dev-dependency, so CI's `clippy` job runs clippy on `synth` and on `app` alone.  "The web app" (`app` and `stem-worker`) is now a defined term.  M4 writes decision 0004.
+* [x] 2026-10-19: M4 plan review round 2, by two new reviewers.  No blockers; 9 should-fix findings and 11 nits, all checked and real, all fixed in the plan.  The main fixes: one `cargo tree` run per package, since one run with both put a `stem-worker` breach under `app` (shown in a prototype).  Decision 0004's options are written out.  LAYER-1's line names only the test.  `README.md` and `CLAUDE.md` get the two clippy commands.  The undo text covers M5.  Three more parser tests: a two-digit depth, a deeper `synth`, and a `stem-worker` breach.
+* [x] 2026-10-19: M4 plan review round 3, by two new reviewers.  No blockers; 5 should-fix findings and 13 nits, all checked.  One should-fix (a two-digit depth that a one-digit parser passed) was already fixed by a staged change, which puts `synth` itself at depth 10.  The rest were real and are fixed in the plan.  The main fixes: LAYER-1's new text says that no crate of the web app takes `files`, since `stem-worker` does not take `synth`.  The undo text keeps a closed TD-4 closed.  The planted `stem-worker` breach runs without `--locked`, since it changes `Cargo.lock`.  A tree that does not start with its package is a problem, so empty output cannot pass.  M5 needs no allowlist entry for `app`'s dev-dependency.
+* [x] 2026-10-19: M4 plan review round 4, by two new reviewers.  No blockers; 3 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  The should-fix items were all unit-test gaps.  A parser that ends `synth`'s children only at a shallower line, or that reads only the first `synth`, passed every planned test.  A test's expected count also left out the "no `synth`" problem.  The tests now catch each.  The nits gave exact texts for the command lines and the parent plan's bullet, and a note in M9 on `--color never`.
+* [x] 2026-10-19: M4 plan review round 5, by two new reviewers.  No blockers; 3 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  A code fence had text after its closing backticks, so the rest of the plan rendered as code; every fence line is now clean.  A parser that skips `(*)` lines passed every test; `synth_under_stem_worker_is_named` now uses the real lines of the planted breach.  "The web app" is defined at its first use in each doc that M4 changes.  The command lines are given for each of the three lists.
+* [x] 2026-10-19: M4 plan review round 6, by two new reviewers.  No blockers; 2 should-fix findings and 3 nits, all checked and real, all fixed in the plan.  The code reviewer found no should-fix item; 17 wrong parsers in its model each fail a planned test.  LAYER-1's new text now says "as a normal dependency", because M4's own dev-dependency takes `files`.  The parent plan's new bullet defines "the web app".  `clippy -p app --all-targets` took 55 s after a workspace clippy.
+* [x] 2026-10-19: M4 plan review round 7, by two new reviewers.  No blockers; 2 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  The docs reviewer found no should-fix item.  `-p app --all-targets` turns `files` on for `app`'s lib too, so a native-only call to a writer passed CI; a third step, `cargo clippy -p app`, catches it.  Decision 0004's option (c) had a false cost: `engine::wav::encode_pcm16` already writes WAV files.  LAYER-1's text now covers the whole normal dependency tree.
+* [x] 2026-10-19: M4 plan review round 8, by two new reviewers.  No blockers; 1 should-fix finding and 11 nits, all checked and real, all fixed in the plan.  The docs reviewer found no should-fix item.  The should-fix was a regression from round 7: a nit's fix dropped "as a normal dependency" from LAYER-1's text, so M4's own dev-dependency broke the rule.  LAYER-1's sentence was then limited to the web app's normal dependency tree.  The code reviewer found no CI job or command where a breach passes unseen, and no wrong parser that passes the ten tests.
+* [x] 2026-10-19: M4 plan review round 9, by two new reviewers.  No blockers; 2 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  LAYER-1's sentence now says only what the check reads: in the web app's normal dependency tree, `synth` brings no other crate.  The check's `-f "{p}"` prints no features, so the sentence no longer names the `files` feature.  The new "Why" no longer says that `THIRD-PARTY.md`'s first table lists only what ships, since it also lists build-only crates such as `syn`.  Measured in CI order: `clippy -p app` took 92 s after a workspace clippy, then `-p app --all-targets` took 8 s.
+* [x] 2026-10-19: M4 plan review round 10, by two new reviewers.  No blockers; 1 minor should-fix finding and 10 nits, all checked.  The should-fix: the licence-list diff holds only when `cargo tree`'s output is made into a set of rows, and the plan now gives that command.  8 nits were fixed; 2 optional ones were left out of M4's scope (the parent plan's CI bullet, and DEPS-1's wording of the web app).
+* [x] 2026-10-19: the maintainer judged the plan good enough after round 10 (no blockers and no significant should-fix), and asked to commit it and start M4.
+* [x] 2026-10-19: M4 step 1: `web_app_tree` and `synth_brings_no_crate`, test first.  Against a stub, the 7 tests that expect a problem failed and the 3 that expect none passed.  With the function, all 10 pass.
+* [x] 2026-10-19: M4 step 2: `synth`'s `files` feature, `synth_brings_no_crate_into_the_web_app`, the three CI steps and the docs.  Before the change, the real-tree test failed: "synth brings anyhow, hound, serde, serde_json into the web app, through app".  After it, the test passes, and `Cargo.lock` does not change.  `app_bg.wasm` went from 5,194,829 to 5,194,587 bytes.  The licence command's set of rows equals the first table (128 rows), and `hound` is in neither table.  "Prose only" lines: 7.
+  * Planted breaches, each run locally and restored.  (1) `files` on `app`'s `synth`: the test fails and names `hound`.  (2) `default = ["files"]`: the test fails.  (3) No dev-dependency: `clippy -p app --all-targets` fails with E0425, and `--workspace` passes.  (4) An ungated `use serde::Serialize;`: `clippy -p synth` fails with E0432.  (5) A native-only call to `write_song` in `app`: `clippy -p app` fails with E0425, and `--all-targets` passes.  (6) `synth` with `files` in `stem-worker`'s wasm dependencies, run without `--locked`: the test fails and names `stem-worker`.
+* [x] 2026-10-19: M4 review round 1: no blockers and no should-fix items; 3 nits.  (1) No test covered the depth-0 rule or a line of spaces: removing `first.depth == 0` or the `trim` passed every test.  `a_first_line_below_depth_0_is_a_problem` and a line of spaces in `a_line_without_a_depth_is_a_problem` now fail each mutant.  (2) `Problem.file` is not printed; the messages name the package, as the plan gives them, so this stays.  (3) Decision 0004 said "the download"; it now says `app_bg.wasm`.
+* [x] 2026-10-19: M4 review round 2: no blockers and no should-fix items; 2 nits, both real and fixed.  (1) Matching `synth` by prefix in the children check passed every test; the `synthx` line in `a_tree_without_synth_is_a_problem` now has a child, and that mutant fails.  (2) The plan still said 10 unit tests; it lists the 11th and says 11.
+* [x] 2026-10-20: M4 review round 3: no blockers; 1 should-fix and 4 nits, all checked.  The should-fix was real: without `--target wasm32-unknown-unknown`, `stem-worker`'s tree is its root line alone and passes every check, so a breach in the worker passed.  A tree with no `wasm-bindgen` at depth 1 is now a problem.  With the target removed, the real-tree test fails for both trees.  `a_tree_without_wasm_bindgen_is_a_problem` fails a mutant without the check and a mutant that accepts any depth.  Two nits were test gaps (`synth_seen` read from the last tree only, a root on any line); both mutants now fail.  One nit (equivalent mutants) needed no change.  The plan now quotes decision 0004's sentence on `app_bg.wasm`.
+* [x] 2026-10-20: M4, three review rounds done and their findings fixed.
+* [x] 2026-10-20: M4: PR #17 opened.  CI (run 39331145364): every job passes.  The `test` job lists `synth_brings_no_crate_into_the_web_app ... ok`; 43 test results, none failed.  The `clippy` job runs the three new steps.
+  * Step times: `-p synth --all-targets` under 1 s, `-p app` 1m30s, `-p app --all-targets` 22 s.  So the steps add 1m52s, against the plan's estimate of about 100 s locally.
+  * The `clippy` job took 5m22s, against 3m35s on `main` (run 39248866763).  In this run it is the longest job, 31 s more than `test` (4m51s).
+* [x] 2026-10-20: M4, decision 0004 accepted by the maintainer.
+* [ ] M4: PR merged by the maintainer.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
 * [ ] M7: DSP-1 allowlist test.
@@ -438,7 +656,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 
 * 2026-10-19: wsola 0.2.0 already removes the allocation in `pull`, so TD-15 needs no fork.  Evidence: `src/lib.rs` of the published 0.2.0 crate.
 * 2026-10-19: MEM-3's `compile_fail` doctest of `Rec` has never run in CI, since `--exclude roformer-gpu` drops doctests as well.
-* 2026-10-19: the shipped licence list (`THIRD-PARTY.md`) includes `hound`, `serde`, `serde_derive` and `serde_json`, pulled in only by `synth`'s file writers.
+* 2026-10-19: the shipped licence list (`THIRD-PARTY.md`) includes `hound`, `serde`, `serde_derive` and `serde_json`, pulled in only by `synth`'s file writers.  Corrected in the M4 survey: only `hound` comes only through `synth`.  The serde crates also come through `roformer` and `safetensors` in `stem-worker`.
 * 2026-10-19: the chipmunk path also allocates in the callback (`dsp::double_speed`), not only the stretcher.
 * 2026-10-19, M1 review: `-p roformer-gpu` alone builds wgpu with fewer features than the workspace build, so the new CI steps rebuild wgpu, wgpu-core, wgpu-hal and naga.  On PR #14 it added 68 s to the `test` job.
 * 2026-10-19: the docs said `browser tests (Chrome)` was not a required check, and the agent repeated it to the maintainer.  The ruleset had required it since 03:36 UTC that day.  Ruleset facts in docs go stale; check them with `gh api` before stating them.
@@ -447,6 +665,11 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, M2: WebGPU counts each `var<workgroup>` rounded up to 16 bytes, and only the ones the entry point statically uses ([compute pipeline creation](https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcomputepipeline)).  The text count in `workgroup_memory_within_defaults` does neither; the tiles here are multiples of 16, so the counts agree.
 * 2026-10-19, M3 CI: a change to `Cargo.lock` makes rust-cache restore an older cache by its restore key.  The `test` job then took 10m58s, not about 5 minutes; a re-run took 4m41s.  So a first CI time after a lock change is not the cost of the change.
 * 2026-10-19, M3 survey: two `xtask` tests have never run anywhere.  `folder_loading_matches_the_generator` and `mp3_decodes_to_roughly_the_right_length` need `audio/synth/`, which neither CI nor the maintainer's Mac has.  ffmpeg is on neither.
+* 2026-10-19, M4 survey: moving `synth`'s writers out of the web app saves 242 bytes of `app_bg.wasm`, because the linker already removed them.  Only `hound` leaves `THIRD-PARTY.md`; `serde_json` stays through `stem-worker`.
+* 2026-10-19, M4 review: CI's `CARGO_TERM_COLOR: always` reaches a test's child process, so `cargo tree` writes colour codes into a pipe (107 lines at `69f8cae`).  A check that reads Cargo's output passes `--color never`.
+* 2026-10-19, M4 review: `cargo tree -i <crate>` prints "nothing to print" and exits 0 when the crate is not in the graph.  A check built on it passes in silence.
+* 2026-10-19, M4 review: `--workspace` builds merge features across every crate, so they hide a lost dev-dependency.  Without `app`'s dev-dependency on `synth` with `files`, `cargo test --workspace --exclude roformer-gpu --no-run` still builds, and `cargo test -p app` fails with E0425.
+* 2026-10-19, M4 review: `cargo tree` with two `-p` roots merges their features, and prints a shared crate in full only under the first root.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
 ## Decision log
@@ -473,6 +696,13 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, agent (M3 review round 3): the README's SwiftShader command gets `STEMYLA_REQUIRE=gpu`, against step 5's text.  `gpu` accepts a software adapter, so the variable makes no GPU-3 claim.  It only makes a wrong driver path fail instead of skipping.
 * 2026-10-19, agent (M3): `gpu` accepts a software adapter.  GPU-3's real-GPU check stays with TD-10, in phase 4.
 * 2026-10-19, agent: `cargo deny`, TD-16's field and version checks, and TD-10 (GPU-3) stay out of phase 2; the phase plan does not list them.
+* 2026-10-19, agent (M4): the `cargo tree` check of the web app moves from M5 to M4, so M4's result has an automated check (VERIFY-1).
+* 2026-10-19, agent (M4): the check runs `cargo tree` once for each of `app` and `stem-worker`.  One run with both merges their features, and puts the blame on `app` for a breach in `stem-worker`.
+* 2026-10-19, agent (M4): `app`'s dev-dependency on `synth` with `files` is native-only.  Only the native UI test writes files, and `hound` stays out of the `## Browser tests only` table.
+* 2026-10-19, agent (M4): the check reads the children of the web app's `synth`, not a list of banned crates.  A feature check passes on today's tree, and a ban on `serde` gives false alarms.
+* 2026-10-19, agent (M4): the check reads the wasm tree only, as `THIRD-PARTY.md` does, because only the web app ships.
+* 2026-10-19, agent (M4): CI's `clippy` job also runs clippy on `synth`, on `app`'s lib, and on `app` with `--all-targets`.  `--workspace` builds turn `files` on everywhere.  So they hide warnings in `synth` without `files`, a native-only call to a writer in `app`, and a lost dev-dependency.  `-p app --all-targets` alone also turns `files` on for `app`'s lib, through the dev-dependency (review round 7).
+* 2026-10-19, agent (M4): M4 writes decision 0004 as `proposed`.  The `files` boundary and LAYER-1's new text outlive this plan.  The maintainer accepted it on 2026-10-20.
 
 ## Outcomes and retrospective
 

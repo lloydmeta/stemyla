@@ -18,11 +18,11 @@ Nothing fails when `dsp/` gains an iterator, a closure or a dependency.
 
 * Fix: a structural test in `xtask/tests/` that parses `dsp/src` and allows only the listed constructs (an allowlist, not a denylist), and asserts `dsp/Cargo.toml` has no dependencies.
 
-### TD-4: LAYER-1 is not checked, and app depends on synth
+### TD-4: LAYER-1's crate edges are not checked
 
-No test checks the edges between workspace crates.  `app` depends on `synth`, so the demo song generator and its dependencies (hound, serde_json) compile into the page build.
+No test checks the edges between workspace crates.
 
-* Fix: a test over `cargo metadata` with an allowlist of edges per crate.  Decided 2026-10-19: `synth`'s file writing moves behind a feature, so the page links only song generation (`plans/active/harness-phase-2.md`, M4 and M5).
+* Fix: a test over `cargo metadata` with an allowlist of edges per crate (`plans/active/harness-phase-2.md`, M5).
 
 ### TD-5: BUILD-1 is not checked
 

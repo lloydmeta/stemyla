@@ -1,10 +1,11 @@
 //! Structural checks of the tree.  Each one is a pure function over the
-//! files that returns problems, and each problem names its rule
-//! (`docs/invariants.md`) and the fix.  `xtask/tests/rules.rs` runs them on
-//! the real tree.
+//! files, or over Cargo's output, that returns problems, and each problem
+//! names its rule (`docs/invariants.md`) and the fix.  `xtask/tests/rules.rs`
+//! reads the real tree and Cargo's output, and runs them.
 
 use std::fmt;
 use std::path::Path;
+use std::process::Command;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -161,9 +162,340 @@ fn string_value(literal: &Literal) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The packages of the web app, one WebAssembly module each.
+pub const WEB_APP: [&str; 2] = ["app", "stem-worker"];
+
+/// The wasm tree of one package of the web app, as `cargo tree --prefix
+/// depth` prints it: normal edges only, and one package per line.  One run
+/// per package, because one run with both merges their features, and Trunk
+/// builds them apart.  `--color never`, because CI's `CARGO_TERM_COLOR:
+/// always` reaches this process and would colour each `(*)`.
+pub fn web_app_tree(root: &Path, package: &str) -> Result<String> {
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args(["tree", "--locked", "--color", "never", "-p", package])
+        .args(["-e", "normal", "--target", "wasm32-unknown-unknown"])
+        .args(["--prefix", "depth", "-f", "{p}"])
+        .output()
+        .with_context(|| format!("running cargo tree -p {package}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cargo tree -p {package} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("cargo tree -p {package} printed text that is not UTF-8"))
+}
+
+/// LAYER-1: in the normal dependency tree of the web app, `synth` brings no
+/// other crate.  `trees` holds `(package, tree)` pairs from `web_app_tree`.
+/// A tree that the check cannot read is a problem too, so that it cannot
+/// pass without reading anything.
+pub fn synth_brings_no_crate(trees: &[(&str, &str)]) -> Vec<Problem> {
+    let problems: Vec<Problem> = trees
+        .iter()
+        .flat_map(|(package, tree)| tree_problems(package, tree))
+        .collect();
+    let synth_seen = trees.iter().any(|(_, tree)| {
+        tree.lines()
+            .filter_map(tree_line)
+            .any(|line| line.name == "synth")
+    });
+    let unread = (!synth_seen).then(|| Problem {
+        rule: "LAYER-1",
+        file: manifest_of("app"),
+        line: None,
+        message: "LAYER-1: the web app's trees have no synth, so this check read nothing.  Fix: if the web app no longer takes synth, remove synth_brings_no_crate_into_the_web_app.  Update the docs that name it (DOC-1).".into(),
+    });
+    problems.into_iter().chain(unread).collect()
+}
+
+/// One line of `cargo tree --prefix depth`: the depth, then the package.
+struct TreeLine<'a> {
+    depth: usize,
+    name: &'a str,
+}
+
+fn tree_line(line: &str) -> Option<TreeLine<'_>> {
+    let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    let depth = line[..line.len() - rest.len()].parse().ok()?;
+    let name = rest.split_whitespace().next()?;
+    Some(TreeLine { depth, name })
+}
+
+fn manifest_of(package: &str) -> String {
+    match package {
+        "stem-worker" => "worker/Cargo.toml".into(),
+        _ => format!("{package}/Cargo.toml"),
+    }
+}
+
+fn tree_problems(package: &str, tree: &str) -> Vec<Problem> {
+    let problem = |message: String| Problem {
+        rule: "LAYER-1",
+        file: manifest_of(package),
+        line: None,
+        message,
+    };
+    let starts_with_package = tree
+        .lines()
+        .next()
+        .and_then(tree_line)
+        .is_some_and(|first| first.depth == 0 && first.name == package);
+    let bad_start = (!starts_with_package).then(|| {
+        problem(format!(
+            "LAYER-1: the tree of {package} does not start with {package}, so this check cannot read it.  Fix: run cargo tree -p {package} with --prefix depth."
+        ))
+    });
+    let without_depth = tree
+        .lines()
+        .filter(|line| !line.trim().is_empty() && tree_line(line).is_none())
+        .map(|line| {
+            problem(format!(
+                "LAYER-1: the tree of {package} has a line without a depth: \"{line}\".  Fix: run cargo tree with --prefix depth."
+            ))
+        });
+    let lines: Vec<TreeLine> = tree.lines().filter_map(tree_line).collect();
+    // Each module of the web app takes wasm-bindgen directly, and only on
+    // wasm32.  Natively, stem-worker's tree is its root line alone, which
+    // would pass every other check.
+    let is_wasm_tree = lines
+        .iter()
+        .any(|line| line.depth == 1 && line.name == "wasm-bindgen");
+    let not_wasm = (starts_with_package && !is_wasm_tree).then(|| {
+        problem(format!(
+            "LAYER-1: the tree of {package} has no wasm-bindgen at depth 1, so it is not the wasm tree.  Fix: run cargo tree -p {package} with --target wasm32-unknown-unknown."
+        ))
+    });
+    let synth_children = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.name == "synth")
+        .map(|(at, synth)| {
+            lines[at + 1..]
+                .iter()
+                .take_while(|line| line.depth > synth.depth)
+                .filter(|line| line.depth == synth.depth + 1)
+                .map(|line| line.name)
+                .collect::<Vec<_>>()
+        })
+        .filter(|children| !children.is_empty())
+        .map(|children| {
+            problem(format!(
+                "LAYER-1: synth brings {} into the web app, through {package}.  Fix: make each dependency of synth optional, behind its files feature.  Take synth without its files feature in the web app.  Tools and tests take features = [\"files\"].",
+                children.join(", ")
+            ))
+        });
+    bad_start
+        .into_iter()
+        .chain(not_wasm)
+        .chain(without_depth)
+        .chain(synth_children)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synth_problem(file: &str, package: &str, children: &str) -> Problem {
+        Problem {
+            rule: "LAYER-1",
+            file: file.into(),
+            line: None,
+            message: format!(
+                "LAYER-1: synth brings {children} into the web app, through {package}.  Fix: make each dependency of synth optional, behind its files feature.  Take synth without its files feature in the web app.  Tools and tests take features = [\"files\"]."
+            ),
+        }
+    }
+
+    const NO_SYNTH: &str = "LAYER-1: the web app's trees have no synth, so this check read nothing.  Fix: if the web app no longer takes synth, remove synth_brings_no_crate_into_the_web_app.  Update the docs that name it (DOC-1).";
+
+    #[test]
+    fn synth_with_children_is_a_problem() {
+        let tree = "\
+0app v0.1.0 (/x/app)
+1anyhow v1.0.104
+1synth v0.1.0 (/x/synth)
+2anyhow v1.0.104
+2hound v3.5.1
+2serde v1.0.229
+3serde_core v1.0.229
+3serde_derive v1.0.229 (proc-macro)
+4proc-macro2 v1.0.107 (*)
+4quote v1.0.47 (*)
+4syn v3.0.7 (*)
+2serde_json v1.0.152
+3itoa v1.0.18
+3memchr v2.8.3
+3serde_core v1.0.229
+3zmij v1.0.23
+1wasm-bindgen v0.2.129 (*)
+1web-sys v0.3.106 (*)
+";
+        let problems = synth_brings_no_crate(&[("app", tree)]);
+        assert_eq!(
+            problems,
+            [Problem {
+                rule: "LAYER-1",
+                file: "app/Cargo.toml".into(),
+                line: None,
+                message: "LAYER-1: synth brings anyhow, hound, serde, serde_json into the web app, through app.  Fix: make each dependency of synth optional, behind its files feature.  Take synth without its files feature in the web app.  Tools and tests take features = [\"files\"].".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn synth_without_children_is_no_problem() {
+        let app = "0app v0.1.0 (/x/app)\n1wasm-bindgen v0.2.129\n1synth v0.1.0 (/x/synth)\n1web-sys v0.3.106\n";
+        let worker = "0stem-worker v0.1.0 (/x/worker)\n1wasm-bindgen v0.2.129 (*)\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_tree_without_wasm_bindgen_is_a_problem() {
+        let app = "0app v0.1.0 (/x/app)\n1wasm-bindgen v0.2.129\n1synth v0.1.0 (/x/synth)\n";
+        let worker = "0stem-worker v0.1.0 (/x/worker)\n2wasm-bindgen v0.2.129\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
+            [Problem {
+                rule: "LAYER-1",
+                file: "worker/Cargo.toml".into(),
+                line: None,
+                message: "LAYER-1: the tree of stem-worker has no wasm-bindgen at depth 1, so it is not the wasm tree.  Fix: run cargo tree -p stem-worker with --target wasm32-unknown-unknown.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_line_at_synths_depth_is_not_its_child() {
+        let tree =
+            "0app v0.1.0\n1wasm-bindgen v0.2.129\n1synth v0.1.0\n1engine v0.1.0\n2hound v3.5.1\n";
+        assert_eq!(synth_brings_no_crate(&[("app", tree)]), []);
+    }
+
+    #[test]
+    fn a_shallower_line_ends_synths_children() {
+        let tree = "0app v0.1.0\n1wasm-bindgen v0.2.129\n1engine v0.1.0\n2synth v0.1.0\n1dsp v0.1.0\n3hound v3.5.1\n";
+        assert_eq!(synth_brings_no_crate(&[("app", tree)]), []);
+    }
+
+    #[test]
+    fn a_deeper_synth_is_read() {
+        let tree =
+            "0app v0.1.0\n1wasm-bindgen v0.2.129\n9engine v0.1.0\n10synth v0.1.0\n11hound v3.5.1\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", tree)]),
+            [synth_problem("app/Cargo.toml", "app", "hound")]
+        );
+    }
+
+    #[test]
+    fn a_repeated_synth_gives_one_problem() {
+        let tree = "\
+0app v0.1.0
+1wasm-bindgen v0.2.129
+1synth v0.1.0
+2hound v3.5.1
+1engine v0.1.0
+2synth v0.1.0 (*)
+";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", tree)]),
+            [synth_problem("app/Cargo.toml", "app", "hound")]
+        );
+    }
+
+    #[test]
+    fn a_tree_without_synth_is_a_problem() {
+        let app = "0app v0.1.0\n1wasm-bindgen v0.2.129\n1engine v0.1.0\n";
+        let worker = "0stem-worker v0.1.0\n1wasm-bindgen v0.2.129\n1synthx v1.0.0\n2hound v3.5.1\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
+            [Problem {
+                rule: "LAYER-1",
+                file: "app/Cargo.toml".into(),
+                line: None,
+                message: NO_SYNTH.into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn synth_under_stem_worker_is_named() {
+        let app = "0app v0.1.0 (/x/app)\n1wasm-bindgen v0.2.129\n1synth v0.1.0 (/x/synth)\n1web-sys v0.3.106\n";
+        let worker = "\
+0stem-worker v0.1.0 (/x/worker)
+1wasm-bindgen v0.2.129 (*)
+1synth v0.1.0 (/x/synth)
+2anyhow v1.0.104
+2hound v3.5.1
+2serde v1.0.229 (*)
+2serde_json v1.0.152 (*)
+";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
+            [synth_problem(
+                "worker/Cargo.toml",
+                "stem-worker",
+                "anyhow, hound, serde, serde_json"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_depth_is_a_problem() {
+        let tree =
+            "0stem-worker v0.1.0\n1wasm-bindgen v0.2.129\n1synth v0.1.0\n\n  \nsynth v0.1.0\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("stem-worker", tree)]),
+            [Problem {
+                rule: "LAYER-1",
+                file: "worker/Cargo.toml".into(),
+                line: None,
+                message: "LAYER-1: the tree of stem-worker has a line without a depth: \"synth v0.1.0\".  Fix: run cargo tree with --prefix depth.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_first_line_below_depth_0_is_a_problem() {
+        let tree = "1app v0.1.0\n0app v0.1.0\n1wasm-bindgen v0.2.129\n1synth v0.1.0\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", tree)]),
+            [Problem {
+                rule: "LAYER-1",
+                file: "app/Cargo.toml".into(),
+                line: None,
+                message: "LAYER-1: the tree of app does not start with app, so this check cannot read it.  Fix: run cargo tree -p app with --prefix depth.".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_tree_that_does_not_start_with_its_package_is_a_problem() {
+        let worker = "0app v0.1.0\n1synth v0.1.0\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", ""), ("stem-worker", worker)]),
+            [
+                Problem {
+                    rule: "LAYER-1",
+                    file: "app/Cargo.toml".into(),
+                    line: None,
+                    message: "LAYER-1: the tree of app does not start with app, so this check cannot read it.  Fix: run cargo tree -p app with --prefix depth.".into(),
+                },
+                Problem {
+                    rule: "LAYER-1",
+                    file: "worker/Cargo.toml".into(),
+                    line: None,
+                    message: "LAYER-1: the tree of stem-worker does not start with stem-worker, so this check cannot read it.  Fix: run cargo tree -p stem-worker with --prefix depth.".into(),
+                },
+            ]
+        );
+    }
 
     fn check(file: &str, text: &str) -> Vec<Problem> {
         skips_use_the_helper(&[(file.to_string(), text.to_string())])

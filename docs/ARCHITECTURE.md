@@ -29,7 +29,7 @@ flowchart LR
 
 * `dsp`: small audio functions (peaks, mixing, median, fades, loop wrapping) written in a deliberately plain style, loops and indexing only, as a first reading exercise.
 * `engine`: decoding (Symphonia), the player and mixer, pitch-preserving time-stretch (WSOLA), the classic drum separation (harmonic/percussive median filtering), and a 16-bit WAV writer.
-* `synth`: the built-in demo song, synthesised so its stems are known exactly.
+* `synth`: the built-in demo song, synthesised so its stems are known exactly.  Its `files` feature adds writers for the song's WAV files and `truth.json`, for tools and tests.
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
@@ -52,7 +52,7 @@ Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`).
 
 Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal dependency, so it never ships.
 
-`app` depending on `synth` ships the demo song generator in the page (TD-4 in `docs/tech-debt.md`).
+`app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app` and `stem-worker`; LAYER-1).
 
 ## From a song to six stems
 

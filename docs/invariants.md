@@ -32,10 +32,10 @@ Before you add a crate, confirm that it exists and is maintained.  Pin a young c
 
 ### LAYER-1: crates depend only downwards
 
-Workspace crates depend only on crates in a lower layer of `docs/ARCHITECTURE.md` (test support; pure crates; engine and GPU; the two shells; tools).  `test-support` is a dev-dependency only, and `dsp` does not take it.  The page side and the worker side meet only through `stem-protocol`.
+Workspace crates depend only on crates in a lower layer of `docs/ARCHITECTURE.md` (test support; pure crates; engine and GPU; the two shells; tools).  `test-support` is a dev-dependency only, and `dsp` does not take it.  The page side and the worker side meet only through `stem-protocol`.  In the normal dependency tree of the web app (`app` and `stem-worker`), `synth` brings no other crate.
 
-* Why: keeps the page from linking the model or the GPU code, and keeps the pure crates testable without a browser.
-* Enforced by: prose only (Cargo forbids cycles, nothing more).
+* Why: keeps the page from linking the model or the GPU code, and keeps the pure crates testable without a browser.  It also keeps the crates that `synth` needs only for tools and tests out of the web app's build, so `THIRD-PARTY.md`'s first table does not credit them.
+* Enforced by: `synth_brings_no_crate_into_the_web_app` (CI `test` job).  No test checks the crate edges (TD-4).
 * Gaps: TD-4.
 
 ### DSP-1: dsp is beginner style
