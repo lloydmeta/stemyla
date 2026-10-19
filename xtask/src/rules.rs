@@ -256,6 +256,17 @@ fn tree_problems(package: &str, tree: &str) -> Vec<Problem> {
             ))
         });
     let lines: Vec<TreeLine> = tree.lines().filter_map(tree_line).collect();
+    // Each module of the web app takes wasm-bindgen directly, and only on
+    // wasm32.  Natively, stem-worker's tree is its root line alone, which
+    // would pass every other check.
+    let is_wasm_tree = lines
+        .iter()
+        .any(|line| line.depth == 1 && line.name == "wasm-bindgen");
+    let not_wasm = (starts_with_package && !is_wasm_tree).then(|| {
+        problem(format!(
+            "LAYER-1: the tree of {package} has no wasm-bindgen at depth 1, so it is not the wasm tree.  Fix: run cargo tree -p {package} with --target wasm32-unknown-unknown."
+        ))
+    });
     let synth_children = lines
         .iter()
         .enumerate()
@@ -277,6 +288,7 @@ fn tree_problems(package: &str, tree: &str) -> Vec<Problem> {
         });
     bad_start
         .into_iter()
+        .chain(not_wasm)
         .chain(without_depth)
         .chain(synth_children)
         .collect()
@@ -335,25 +347,46 @@ mod tests {
 
     #[test]
     fn synth_without_children_is_no_problem() {
-        let tree = "0app v0.1.0 (/x/app)\n1synth v0.1.0 (/x/synth)\n1web-sys v0.3.106\n";
-        assert_eq!(synth_brings_no_crate(&[("app", tree)]), []);
+        let app = "0app v0.1.0 (/x/app)\n1wasm-bindgen v0.2.129\n1synth v0.1.0 (/x/synth)\n1web-sys v0.3.106\n";
+        let worker = "0stem-worker v0.1.0 (/x/worker)\n1wasm-bindgen v0.2.129 (*)\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_tree_without_wasm_bindgen_is_a_problem() {
+        let app = "0app v0.1.0 (/x/app)\n1wasm-bindgen v0.2.129\n1synth v0.1.0 (/x/synth)\n";
+        let worker = "0stem-worker v0.1.0 (/x/worker)\n2wasm-bindgen v0.2.129\n";
+        assert_eq!(
+            synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
+            [Problem {
+                rule: "LAYER-1",
+                file: "worker/Cargo.toml".into(),
+                line: None,
+                message: "LAYER-1: the tree of stem-worker has no wasm-bindgen at depth 1, so it is not the wasm tree.  Fix: run cargo tree -p stem-worker with --target wasm32-unknown-unknown.".into(),
+            }]
+        );
     }
 
     #[test]
     fn a_line_at_synths_depth_is_not_its_child() {
-        let tree = "0app v0.1.0\n1synth v0.1.0\n1engine v0.1.0\n2hound v3.5.1\n";
+        let tree =
+            "0app v0.1.0\n1wasm-bindgen v0.2.129\n1synth v0.1.0\n1engine v0.1.0\n2hound v3.5.1\n";
         assert_eq!(synth_brings_no_crate(&[("app", tree)]), []);
     }
 
     #[test]
     fn a_shallower_line_ends_synths_children() {
-        let tree = "0app v0.1.0\n1engine v0.1.0\n2synth v0.1.0\n1dsp v0.1.0\n3hound v3.5.1\n";
+        let tree = "0app v0.1.0\n1wasm-bindgen v0.2.129\n1engine v0.1.0\n2synth v0.1.0\n1dsp v0.1.0\n3hound v3.5.1\n";
         assert_eq!(synth_brings_no_crate(&[("app", tree)]), []);
     }
 
     #[test]
     fn a_deeper_synth_is_read() {
-        let tree = "0app v0.1.0\n9engine v0.1.0\n10synth v0.1.0\n11hound v3.5.1\n";
+        let tree =
+            "0app v0.1.0\n1wasm-bindgen v0.2.129\n9engine v0.1.0\n10synth v0.1.0\n11hound v3.5.1\n";
         assert_eq!(
             synth_brings_no_crate(&[("app", tree)]),
             [synth_problem("app/Cargo.toml", "app", "hound")]
@@ -364,6 +397,7 @@ mod tests {
     fn a_repeated_synth_gives_one_problem() {
         let tree = "\
 0app v0.1.0
+1wasm-bindgen v0.2.129
 1synth v0.1.0
 2hound v3.5.1
 1engine v0.1.0
@@ -377,8 +411,8 @@ mod tests {
 
     #[test]
     fn a_tree_without_synth_is_a_problem() {
-        let app = "0app v0.1.0\n1engine v0.1.0\n";
-        let worker = "0stem-worker v0.1.0\n1synthx v1.0.0\n2hound v3.5.1\n";
+        let app = "0app v0.1.0\n1wasm-bindgen v0.2.129\n1engine v0.1.0\n";
+        let worker = "0stem-worker v0.1.0\n1wasm-bindgen v0.2.129\n1synthx v1.0.0\n2hound v3.5.1\n";
         assert_eq!(
             synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
             [Problem {
@@ -392,9 +426,10 @@ mod tests {
 
     #[test]
     fn synth_under_stem_worker_is_named() {
-        let app = "0app v0.1.0 (/x/app)\n1synth v0.1.0 (/x/synth)\n1web-sys v0.3.106\n";
+        let app = "0app v0.1.0 (/x/app)\n1wasm-bindgen v0.2.129\n1synth v0.1.0 (/x/synth)\n1web-sys v0.3.106\n";
         let worker = "\
 0stem-worker v0.1.0 (/x/worker)
+1wasm-bindgen v0.2.129 (*)
 1synth v0.1.0 (/x/synth)
 2anyhow v1.0.104
 2hound v3.5.1
@@ -413,7 +448,8 @@ mod tests {
 
     #[test]
     fn a_line_without_a_depth_is_a_problem() {
-        let tree = "0stem-worker v0.1.0\n1synth v0.1.0\n\n  \nsynth v0.1.0\n";
+        let tree =
+            "0stem-worker v0.1.0\n1wasm-bindgen v0.2.129\n1synth v0.1.0\n\n  \nsynth v0.1.0\n";
         assert_eq!(
             synth_brings_no_crate(&[("stem-worker", tree)]),
             [Problem {
@@ -427,7 +463,7 @@ mod tests {
 
     #[test]
     fn a_first_line_below_depth_0_is_a_problem() {
-        let tree = "1app v0.1.0\n1synth v0.1.0\n";
+        let tree = "1app v0.1.0\n0app v0.1.0\n1wasm-bindgen v0.2.129\n1synth v0.1.0\n";
         assert_eq!(
             synth_brings_no_crate(&[("app", tree)]),
             [Problem {

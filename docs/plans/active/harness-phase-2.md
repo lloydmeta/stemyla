@@ -305,7 +305,7 @@ On 2026-10-19, at commit `69f8cae` (M3 merged as PR #16):
   * Status line: `Status: proposed`.
   * The line in `docs/README.md`: `` * `decisions/0004-synth-file-writers-behind-a-feature.md`: `synth`'s file writers are behind its `files` feature, so the web app (`app` and `stem-worker`) takes only song generation. ``
   * It has the four sections of 0001 to 0003:
-    * Context: "`app`, one of the two WebAssembly modules of the web app (`app` and `stem-worker`), takes `synth` for the demo song.  So it compiles `hound` for writers that it never calls, and `THIRD-PARTY.md` credits `hound`."
+    * Context: "`app`, one of the two WebAssembly modules of the web app (`app` and `stem-worker`), takes `synth` for the demo song.  So it compiles `hound` for writers that it never calls, and `THIRD-PARTY.md` credits `hound`.  `app_bg.wasm` is only 242 bytes smaller without them, because the linker already drops the unused writers."
     * Options:
       * (a) A `files` feature in `synth`, not a default.  It adds no crate.  The cost: `--workspace` builds merge the feature, so CI needs `-p` steps.
       * (b) A separate crate for the writers.  It is an eleventh crate, with a row in the layers table and the crate lists.
@@ -377,6 +377,7 @@ On 2026-10-19, at commit `69f8cae` (M3 merged as PR #16):
     * No `synth` line in any tree: `LAYER-1: the web app's trees have no synth, so this check read nothing.  Fix: if the web app no longer takes synth, remove synth_brings_no_crate_into_the_web_app.  Update the docs that name it (DOC-1).`
     * A line that is not empty and has no depth: `LAYER-1: the tree of app has a line without a depth: "<line>".  Fix: run cargo tree with --prefix depth.`
     * A tree whose first line is not the package at depth 0, an empty tree included: `LAYER-1: the tree of app does not start with app, so this check cannot read it.  Fix: run cargo tree -p app with --prefix depth.`  Without it, an empty output with exit 0 would pass in silence.
+    * A tree that starts with its package but has no `wasm-bindgen` at depth 1 (added in review round 3): `LAYER-1: the tree of stem-worker has no wasm-bindgen at depth 1, so it is not the wasm tree.  Fix: run cargo tree -p stem-worker with --target wasm32-unknown-unknown.`  Each module of the web app takes `wasm-bindgen` directly, and only on wasm32.  Natively, `stem-worker`'s tree is its root line alone, which passes every other check.
   * The test `synth_brings_no_crate_into_the_web_app` in `xtask/tests/rules.rs` runs `web_app_tree` for both packages and then the check.  It asserts that the list is empty, and prints the messages, as `every_skip_can_be_required` does.
   * `rules.rs`'s module comment says that this check reads Cargo's output, not the files.
 * The phase plan put this check in M5.  It moves to M4, so M4's result has an automated check (VERIFY-1).  M5 keeps the crate edges over `cargo metadata`.
@@ -398,8 +399,9 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
      * `synth_under_stem_worker_is_named`: an `app` tree with a `1synth` line without children, as the real tree has.  Then a `stem-worker` tree with the lines that the planted `stem-worker` breach gives: `1synth`, `2anyhow`, `2hound`, `2serde v1.0.229 (*)` and `2serde_json v1.0.152 (*)`.  It asserts exactly one problem, which names `stem-worker` and `anyhow, hound, serde, serde_json`.  So a parser that reads only the first `synth`, or that skips `(*)` lines, fails it.
      * `a_line_without_a_depth_is_a_problem`: a `stem-worker` tree that starts with `0stem-worker`, and holds a `synth` without children, an empty line and a line without a depth.  It asserts exactly one problem, which names `stem-worker`.
      * `a_tree_that_does_not_start_with_its_package_is_a_problem`: an empty `app` tree, and a `stem-worker` tree that starts with `0app` and holds a `1synth` line without children.  It asserts exactly two problems, one for each tree.
-     * `a_first_line_below_depth_0_is_a_problem` (added in review round 1): a tree that starts with `1app`.  So a check of the name alone fails it.
-   * Each fixture tree starts with `0<package>`, unless the test is about that line.
+     * `a_first_line_below_depth_0_is_a_problem` (added in review round 1): a tree that starts with `1app`, with `0app` on a later line.  So a check of the name alone, or of any line, fails it.
+     * `a_tree_without_wasm_bindgen_is_a_problem` (added in review round 3): a `stem-worker` tree with `wasm-bindgen` only at depth 2.  So a tree read without `--target wasm32-unknown-unknown` fails the check.
+   * Each fixture tree starts with `0<package>` and has `1wasm-bindgen` right after it, unless the test is about one of those lines.  `synth_without_children_is_no_problem` has both trees, as the real tree has: `synth` in `app` only.
    * Fixture lines copied from real output replace each local path with `(/x/<crate>)`, so no home folder is committed.
    * See every test that expects a problem fail against the stub.  The tests that expect no problem pass against it; that is expected.  Then write the function.
    * Update `rules.rs`'s module comment.
@@ -429,7 +431,7 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 
 #### M4 acceptance
 
-* `cargo test -p xtask --test rules`: `synth_brings_no_crate_into_the_web_app` passes.  Before the change it failed and named the four crates.  The 11 unit tests pass in `cargo test -p xtask --lib`, and each that expects a problem failed against the stub.
+* `cargo test -p xtask --test rules`: `synth_brings_no_crate_into_the_web_app` passes.  Before the change it failed and named the four crates.  The 12 unit tests pass in `cargo test -p xtask --lib`, and each that expects a problem failed against the stub.
 * `THIRD-PARTY.md`: make the first command's output into a set of rows, as "M4 state at the start" gives it.  Apart from the workspace crates, that set equals the first table's rows.  The set before the change differs from the set after only in `hound`.  Record that diff in the PR.
 * Planted breaches, run locally and not kept.  Record each result in the PR:
   * `features = ["files"]` on `synth` in `app`'s `[dependencies]`: the real-tree test fails and names `hound`.
@@ -626,7 +628,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
   * Planted breaches, each run locally and restored.  (1) `files` on `app`'s `synth`: the test fails and names `hound`.  (2) `default = ["files"]`: the test fails.  (3) No dev-dependency: `clippy -p app --all-targets` fails with E0425, and `--workspace` passes.  (4) An ungated `use serde::Serialize;`: `clippy -p synth` fails with E0432.  (5) A native-only call to `write_song` in `app`: `clippy -p app` fails with E0425, and `--all-targets` passes.  (6) `synth` with `files` in `stem-worker`'s wasm dependencies, run without `--locked`: the test fails and names `stem-worker`.
 * [x] 2026-10-19: M4 review round 1: no blockers and no should-fix items; 3 nits.  (1) No test covered the depth-0 rule or a line of spaces: removing `first.depth == 0` or the `trim` passed every test.  `a_first_line_below_depth_0_is_a_problem` and a line of spaces in `a_line_without_a_depth_is_a_problem` now fail each mutant.  (2) `Problem.file` is not printed; the messages name the package, as the plan gives them, so this stays.  (3) Decision 0004 said "the download"; it now says `app_bg.wasm`.
 * [x] 2026-10-19: M4 review round 2: no blockers and no should-fix items; 2 nits, both real and fixed.  (1) Matching `synth` by prefix in the children check passed every test; the `synthx` line in `a_tree_without_synth_is_a_problem` now has a child, and that mutant fails.  (2) The plan still said 10 unit tests; it lists the 11th and says 11.
-* [ ] M4: review round 3, and its findings fixed.
+* [x] 2026-10-20: M4 review round 3: no blockers; 1 should-fix and 4 nits, all checked.  The should-fix was real: without `--target wasm32-unknown-unknown`, `stem-worker`'s tree is its root line alone and passes every check, so a breach in the worker passed.  A tree with no `wasm-bindgen` at depth 1 is now a problem.  With the target removed, the real-tree test fails for both trees.  `a_tree_without_wasm_bindgen_is_a_problem` fails a mutant without the check and a mutant that accepts any depth.  Two nits were test gaps (`synth_seen` read from the last tree only, a root on any line); both mutants now fail.  One nit (equivalent mutants) needed no change.  The plan now quotes decision 0004's sentence on `app_bg.wasm`.
+* [x] 2026-10-20: M4, three review rounds done and their findings fixed.
 * [ ] M4: PR opened.  CI's `test` job lists the new test, and the `clippy` job runs the three new steps.
 * [ ] M4: decision 0004 accepted by the maintainer.
 * [ ] M4: PR merged by the maintainer.
