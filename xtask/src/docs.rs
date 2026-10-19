@@ -150,7 +150,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
     problems.extend(ids.problems.clone());
     for (file, text) in &markdown {
         problems.extend(paths_exist(&tree, file, text, &top_level, &member_dirs));
-        problems.extend(ids_defined(file, text, &ids.defined));
+        problems.extend(ids_defined(file, &without_closed(text), &ids));
     }
     if let Some(invariants) = doc("docs/invariants.md") {
         problems.extend(enforcing_tests_exist(invariants, &test_fns));
@@ -694,11 +694,35 @@ pub fn crates_documented(
     problems
 }
 
-/// IDs defined by `### PREFIX-N: title` headings, and the problems with them.
+/// IDs defined by `### PREFIX-N: title` headings, IDs closed by a
+/// `* PREFIX-N: ...` bullet under `## Closed`, and the problems with them.
 #[derive(Debug, Clone, Default)]
 pub struct Ids {
     pub defined: BTreeSet<String>,
+    pub closed: BTreeSet<String>,
     pub problems: Vec<Problem>,
+}
+
+const CLOSED: &str = "## Closed";
+
+/// The lines of `text` in its `## Closed` section.
+fn closed_section(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .skip_while(|l| *l != CLOSED)
+        .skip(1)
+        .take_while(|l| !l.starts_with("## "))
+}
+
+/// `text` without its `## Closed` section, whose bullets name closed IDs on
+/// purpose.
+fn without_closed(text: &str) -> String {
+    let before = text.lines().take_while(|l| *l != CLOSED);
+    let after = text
+        .lines()
+        .skip_while(|l| *l != CLOSED)
+        .skip(1)
+        .skip_while(|l| !l.starts_with("## "));
+    before.chain(after).collect::<Vec<_>>().join("\n")
 }
 
 pub fn defined_ids(files: &[(String, String)]) -> Ids {
@@ -725,6 +749,35 @@ pub fn defined_ids(files: &[(String, String)]) -> Ids {
                 ));
             }
         }
+        for line in closed_section(text).filter(|l| !l.trim().is_empty()) {
+            let Some(id) = line
+                .strip_prefix("* ")
+                .and_then(|l| l.split_once(':'))
+                .map(|(id, _)| id)
+                .filter(|id| is_id(id))
+            else {
+                ids.problems.push(Problem::new(
+                    "ids",
+                    file,
+                    format!("`{line}` under `{CLOSED}` is not `* ID: what closed it`, so it closes nothing.  Fix: write it as `* TD-1: closed by ...`."),
+                ));
+                continue;
+            };
+            if !ids.closed.insert(id.to_string()) {
+                ids.problems.push(Problem::new(
+                    "ids",
+                    file,
+                    format!("`{id}` is closed twice.  Fix: keep one bullet under `{CLOSED}`."),
+                ));
+            }
+        }
+    }
+    for id in ids.defined.intersection(&ids.closed) {
+        ids.problems.push(Problem::new(
+            "ids",
+            "docs/tech-debt.md",
+            format!("`{id}` is closed but defined again.  Fix: give the new entry the next free number; IDs are never reused."),
+        ));
     }
     ids
 }
@@ -741,10 +794,13 @@ fn is_id(token: &str) -> bool {
 }
 
 /// Every ID-shaped token whose prefix is one in use (`MEM-7` when `MEM-1`
-/// exists) must be defined, so a reference never points at nothing.
-fn ids_defined(file: &str, text: &str, defined: &BTreeSet<String>) -> Vec<Problem> {
-    let prefixes: BTreeSet<&str> = defined
+/// exists) must be defined, so a reference never points at nothing.  A
+/// closed ID may appear only where [`may_name_closed_ids`] allows it.
+fn ids_defined(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
+    let prefixes: BTreeSet<&str> = ids
+        .defined
         .iter()
+        .chain(&ids.closed)
         .filter_map(|id| id.split('-').next())
         .collect();
     let tokens: BTreeSet<&str> = text
@@ -754,15 +810,23 @@ fn ids_defined(file: &str, text: &str, defined: &BTreeSet<String>) -> Vec<Proble
         .collect();
     tokens
         .into_iter()
-        .filter(|t| !defined.contains(*t))
+        .filter(|t| !ids.defined.contains(*t))
+        .filter(|t| !(ids.closed.contains(*t) && may_name_closed_ids(file)))
         .map(|t| {
-            Problem::new(
-                "ids",
-                file,
-                format!("`{t}` is not defined in docs/invariants.md or docs/tech-debt.md.  Fix: define it there as `### {t}: ...`, or correct the reference."),
-            )
+            let message = if ids.closed.contains(t) {
+                format!("`{t}` is closed (`{CLOSED}` in docs/tech-debt.md), so nothing here may rely on it.  Fix: remove the reference, or name what closed it; only plans and decisions name closed IDs.")
+            } else {
+                format!("`{t}` is not defined in docs/invariants.md or docs/tech-debt.md.  Fix: define it there as `### {t}: ...`, or correct the reference.")
+            };
+            Problem::new("ids", file, message)
         })
         .collect()
+}
+
+/// Plans and decisions are records of their time, so they may name an ID
+/// that has since closed.
+fn may_name_closed_ids(file: &str) -> bool {
+    !names_current_paths(file)
 }
 
 /// Attributes that mark a test function.
@@ -1401,13 +1465,82 @@ mod tests {
         let problems = ids_defined(
             "CLAUDE.md",
             "see MEM-2, MEM-9 and TD-4; not SHA-256 or UTF-8",
-            &ids.defined,
+            &ids,
         );
         let named: Vec<&str> = problems
             .iter()
             .map(|p| p.message.split('`').nth(1).unwrap())
             .collect();
         assert_eq!(named, ["MEM-9", "TD-4"]);
+    }
+
+    #[test]
+    fn closed_ids_are_named_only_in_plans_and_decisions() {
+        let tech_debt = "## Gaps\n\n### TD-2: open\n\nsee TD-1\n\n## Closed\n\n* TD-1: closed by `a_test`.\n\n## After\n\nTD-1 again\n";
+        let ids = defined_ids(&[("docs/tech-debt.md".to_string(), tech_debt.to_string())]);
+        assert!(ids.problems.is_empty(), "{:#?}", ids.problems);
+        assert_eq!(ids.closed, BTreeSet::from(["TD-1".to_string()]));
+        assert_eq!(
+            without_closed(tech_debt),
+            "## Gaps\n\n### TD-2: open\n\nsee TD-1\n\n## After\n\nTD-1 again"
+        );
+
+        let text = "closes TD-1, keeps TD-2, not TD-3";
+        let in_plan = ids_defined("docs/plans/active/a.md", text, &ids);
+        assert_eq!(in_plan.len(), 1, "{in_plan:#?}");
+        assert!(in_plan[0].message.starts_with("`TD-3` is not defined"));
+        let in_decision = ids_defined("docs/decisions/0001-a.md", text, &ids);
+        assert_eq!(in_decision.len(), 1, "{in_decision:#?}");
+        let in_doc = ids_defined("docs/invariants.md", text, &ids);
+        assert_eq!(in_doc.len(), 2, "{in_doc:#?}");
+        assert!(
+            in_doc[0].message.starts_with("`TD-1` is closed"),
+            "{}",
+            in_doc[0].message
+        );
+        assert!(in_doc[0].message.contains("Fix: "));
+        for text in [
+            "see TD-1\n\n## Closed\n",
+            "## Closed\n\n## After\n\nTD-1 again",
+        ] {
+            let outside_closed = ids_defined("docs/tech-debt.md", &without_closed(text), &ids);
+            assert_eq!(outside_closed.len(), 1, "{text:?}: {outside_closed:#?}");
+        }
+        let inside_closed = ids_defined(
+            "docs/tech-debt.md",
+            &without_closed("## Closed\n\n* TD-1: x\n"),
+            &ids,
+        );
+        assert!(inside_closed.is_empty(), "{inside_closed:#?}");
+    }
+
+    /// Every ID prefix is still checked when all its IDs are closed.
+    #[test]
+    fn a_closed_prefix_is_still_checked() {
+        let ids = defined_ids(&[(
+            "docs/tech-debt.md".to_string(),
+            "## Closed\n\n* TD-1: closed.\n".to_string(),
+        )]);
+        let problems = ids_defined("docs/plans/active/a.md", "TD-1 and TD-9", &ids);
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert!(problems[0].message.starts_with("`TD-9` is not defined"));
+    }
+
+    #[test]
+    fn a_closed_id_is_never_reused_or_malformed() {
+        let ids = defined_ids(&[(
+            "docs/tech-debt.md".to_string(),
+            "### TD-1: back\n\n## Closed\n\n* TD-1: closed.\n* TD-1: again.\n* closed TD-4\n"
+                .to_string(),
+        )]);
+        let messages: Vec<&str> = ids.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(messages[0].starts_with("`TD-1` is closed twice"));
+        assert!(
+            messages[1]
+                .starts_with("`* closed TD-4` under `## Closed` is not `* ID: what closed it`")
+        );
+        assert!(messages[2].starts_with("`TD-1` is closed but defined again"));
     }
 
     #[test]
