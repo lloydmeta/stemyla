@@ -18,11 +18,16 @@
 //! still plays after a swap: in the browser cpal queues two buffers of
 //! 2,048 frames (93 ms at 44.1 kHz), plus the output's latency, of the old
 //! song (closing the context used to cut it off).  A kept output also
-//! outlives main-thread blocks, such as the one while a song loads, so in
-//! the browser a buffer due before its callback ran is left silent (see
-//! `is_late`).  cpal's schedule then catches up at one second a second, so
-//! an output that is behind when a song arrives is replaced
-//! ([`Unusable::Behind`]) rather than starting the song silent.
+//! outlives main-thread blocks, such as the one while a song loads.  cpal
+//! then schedules buffers in the past, which the Web Audio API starts at
+//! once, on top of one another.  So in the browser a buffer that would
+//! play over one already filled is left silent (see `plays_alone`), and
+//! the song goes on at its own speed, not doubled.  Behind its clock,
+//! though, cpal has no buffer queued ahead, and every further hold-up of
+//! the page is a gap until its schedule catches up: at one second a
+//! second, or never while the page stays busy for over two buffers at a
+//! time.  An output that is behind when a song arrives is therefore
+//! replaced ([`Unusable::Behind`]).
 //!
 //! An output that cannot play the next song ([`Unusable`]) is replaced.  In
 //! the browser each one replaced still keeps its callback: an empty slot,
@@ -112,26 +117,20 @@ fn open(rate: u32) -> Result<LiveOutput> {
     let in_callback_scheduled = Arc::clone(&scheduled);
     let base = Arc::new(AtomicU64::new(0));
     let in_callback_base = Arc::clone(&base);
-    let mut first = None;
-    let mut buffers: u32 = 0;
+    let mut schedule = Schedule::new(cfg!(target_arch = "wasm32"));
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                let callback = info.timestamp().callback;
                 let length =
                     Duration::from_secs_f64((data.len() / channels) as f64 / f64::from(rate));
-                let first = *first.get_or_insert_with(|| {
-                    let base = Duration::from_nanos(in_callback_base.load(Relaxed));
-                    first_start(callback, base, length)
-                });
-                let start = nth_start(first, length, buffers);
-                buffers = buffers.saturating_add(1);
+                let base = Duration::from_nanos(in_callback_base.load(Relaxed));
+                let (start, fill) = schedule.next(info.timestamp().callback, length, base);
                 in_callback_scheduled.store(nanos(start), Relaxed);
-                if cfg!(target_arch = "wasm32") && is_late(start, callback, length) {
-                    data.fill(0.0);
-                } else {
+                if fill {
                     in_callback.render_interleaved(data, channels, &mut scratch);
+                } else {
+                    data.fill(0.0);
                 }
             },
             move |err: cpal::Error| {
@@ -177,8 +176,9 @@ pub enum Unusable {
     /// The song is at another sample rate than the output.
     OtherRate,
     /// The browser's schedule fell behind its clock while the page was
-    /// busy (see `is_late`), so a song would start silent for about as
-    /// long; a new output starts on time.
+    /// busy, so until it catches up no buffer is queued ahead and every
+    /// hold-up of the page is a gap in the song (see `plays_alone`); a new
+    /// output starts a buffer ahead.
     Behind,
 }
 
@@ -293,8 +293,18 @@ impl Drop for LiveOutput {
 const NOT_YET: u64 = u64::MAX;
 
 /// How far behind its clock a kept output's schedule may be when a song
-/// arrives: the song starts silent for about this long.
+/// arrives: until it catches up, about this long, no buffer is queued
+/// ahead, so any hold-up of the page is a gap in the song.
 const MAX_BEHIND: Duration = Duration::from_millis(250);
+
+/// How coarse a browser's audio clock may be: `currentTime` moves in
+/// 128-frame blocks (2.9 ms at 44.1 kHz), and Firefox rounds it to 1 ms
+/// when blocks are shorter than that
+/// ([MDN](https://developer.mozilla.org/docs/Web/API/BaseAudioContext/currentTime)).
+/// With `privacy.resistFingerprinting`, Firefox rounds it to 16.667 ms,
+/// more than this allows for, so there a late buffer may be left silent
+/// where it would have played alone, or play over part of the one before.
+const CLOCK_GRAIN: Duration = Duration::from_millis(4);
 
 fn nanos(at: cpal::StreamInstant) -> u64 {
     at.saturating_duration_since(cpal::StreamInstant::ZERO)
@@ -311,6 +321,49 @@ fn behind(now: cpal::StreamInstant, scheduled: u64) -> Duration {
         return Duration::ZERO;
     }
     Duration::from_nanos(nanos(now).saturating_sub(scheduled))
+}
+
+/// cpal's schedule as its data callback sees it: when each buffer starts,
+/// and which buffers to fill.
+struct Schedule {
+    /// Whether this is the browser, where late buffers start at once (see
+    /// [`plays_alone`]).  Natively every buffer is filled.
+    in_browser: bool,
+    first: Option<cpal::StreamInstant>,
+    buffers: u32,
+    audible_until: cpal::StreamInstant,
+}
+
+impl Schedule {
+    fn new(in_browser: bool) -> Self {
+        Self {
+            in_browser,
+            first: None,
+            buffers: 0,
+            audible_until: cpal::StreamInstant::ZERO,
+        }
+    }
+
+    /// For the buffer `length` long called back at `callback` (with the
+    /// context's `base` latency): when cpal starts it, and whether to fill
+    /// it rather than leave it silent.
+    fn next(
+        &mut self,
+        callback: cpal::StreamInstant,
+        length: Duration,
+        base: Duration,
+    ) -> (cpal::StreamInstant, bool) {
+        let first = *self
+            .first
+            .get_or_insert_with(|| first_start(callback, base, length));
+        let start = nth_start(first, length, self.buffers);
+        self.buffers = self.buffers.saturating_add(1);
+        let alone = plays_alone(start, callback, length, self.audible_until);
+        if let Some(end) = alone {
+            self.audible_until = end;
+        }
+        (start, alone.is_some() || !self.in_browser)
+    }
 }
 
 /// When cpal's Web Audio host starts the first buffer, called back at
@@ -339,20 +392,36 @@ fn nth_start(first: cpal::StreamInstant, length: Duration, n: u32) -> cpal::Stre
         .unwrap_or(first)
 }
 
-/// Whether a buffer `length` long, due to start at `start`, was due over a
-/// buffer's length before its callback ran at `callback`.
+/// When a buffer `length` long, due to start at `start` and called back at
+/// `callback`, ends if it plays alone: `None` when it would start before
+/// `audible_until`, the end of the latest buffer filled.
 ///
-/// When the main thread was blocked for longer than cpal's two queued
-/// buffers (as while a song loads), its schedule falls behind the
-/// context's clock, every late buffer starts at once on top of the other,
-/// and the song would play doubled at twice the speed until the schedule
-/// catches up.  Late buffers are silent instead, so the song pauses (for
-/// about twice as long as the block: the block, then as long again while
-/// the schedule catches up) and then goes on where it was.  A healthy
-/// stream fills each buffer about one buffer ahead, less the time the page
-/// took to call back; the margin leaves that time a buffer's length.
-fn is_late(start: cpal::StreamInstant, callback: cpal::StreamInstant, length: Duration) -> bool {
-    start.checked_add(length).is_some_and(|end| end < callback)
+/// The Web Audio API starts a buffer due in the past at once.  When the
+/// main thread was blocked for longer than cpal's two queued buffers (as
+/// while a song loads), both are called back late, both start at once, and
+/// filling both would play the song doubled at twice its speed.  Filling
+/// only the buffers that play alone keeps it at its own speed: one of each
+/// late pair while the schedule catches up, and one a frame while the page
+/// stays busy for over two buffers at a time (when it never catches up).
+/// A healthy stream fills each buffer right after the one before.
+///
+/// A clock read up to [`CLOCK_GRAIN`] early (an eighth of a buffer at most,
+/// for short buffers) still counts as after the latest end, while the other
+/// buffer of a late pair, called back within a few milliseconds, would play
+/// over nearly all of it.  A late buffer really starts once cpal has
+/// started it, after the callback's work and at the next 128-frame block,
+/// so the latest end worked out here is early by that much, and a buffer
+/// filled after a late one may overlap it by as long, plus the grain.
+fn plays_alone(
+    start: cpal::StreamInstant,
+    callback: cpal::StreamInstant,
+    length: Duration,
+    audible_until: cpal::StreamInstant,
+) -> Option<cpal::StreamInstant> {
+    let from = start.max(callback);
+    let grain = CLOCK_GRAIN.min(length / 8);
+    (from.checked_add(grain).unwrap_or(from) >= audible_until)
+        .then(|| from.checked_add(length).unwrap_or(from))
 }
 
 /// Whether a stream error means the stream no longer plays.  An overload
@@ -396,22 +465,194 @@ mod tests {
     }
 
     #[test]
-    fn a_buffer_is_late_only_when_due_over_its_length_before_its_callback() {
+    fn a_buffer_plays_alone_unless_it_starts_before_the_latest_one_ends() {
         let at = cpal::StreamInstant::from_millis;
         let length = Duration::from_millis(46);
-        assert!(!is_late(at(1_000), at(1_000), length), "on time");
-        assert!(
-            !is_late(at(960), at(1_000), length),
-            "a callback 40 ms slow still plays"
+        assert_eq!(
+            plays_alone(at(1_046), at(1_000), length, at(1_046)),
+            Some(at(1_092)),
+            "on time, right after the one before"
+        );
+        assert_eq!(
+            plays_alone(at(1_000), at(3_000), length, at(1_000)),
+            Some(at(3_046)),
+            "due two seconds ago, it starts as it is called back"
+        );
+        assert_eq!(
+            plays_alone(at(1_046), at(3_000), length, at(3_046)),
+            None,
+            "the other late buffer would start at once on top of it"
+        );
+        assert_eq!(
+            plays_alone(at(1_046), at(3_010), length, at(3_046)),
+            None,
+            "nor when the first took 10 ms to fill"
+        );
+        let short = Duration::from_secs_f64(2_048.0 / 192_000.0);
+        let first_end = at(3_000).checked_add(short).unwrap();
+        assert_eq!(
+            plays_alone(at(1_000), at(3_008), short, first_end),
+            None,
+            "a buffer of 10.7 ms at 192 kHz allows a grain of 1.3 ms, not 4 ms"
         );
         assert!(
-            is_late(at(900), at(1_000), length),
-            "a buffer and more behind"
+            plays_alone(at(1_000), at(3_043), length, at(3_046)).is_some(),
+            "a clock read 3 ms short still counts as after the latest end"
         );
+        assert_eq!(
+            plays_alone(at(1_000), at(3_041), length, at(3_046)),
+            None,
+            "5 ms short is the other buffer of a late pair"
+        );
+    }
+
+    const MS: u64 = 1_000_000;
+    /// A Web Audio render block, 128 frames at 44.1 kHz.
+    const BLOCK: u64 = 2_902_494;
+
+    /// Runs a [`Schedule`] in the browser against cpal's two buffers in
+    /// flight, 2,048 frames at 44.1 kHz each.  The page can call back at
+    /// `free(t)` a buffer that ended at `t`, reads the clock in steps of
+    /// `step`, and is busy for `cost` with each callback, after which the
+    /// Web Audio API starts the buffer at the next render block.  Returns
+    /// when each buffer was called back and when each one filled really
+    /// plays, until `until`, in nanoseconds.
+    fn run(
+        free: impl Fn(u64) -> u64,
+        step: u64,
+        cost: u64,
+        until: u64,
+    ) -> (Vec<u64>, Vec<(u64, u64)>) {
+        let at = cpal::StreamInstant::from_nanos;
+        let length = Duration::from_secs_f64(2_048.0 / 44_100.0);
+        let mut schedule = Schedule::new(true);
+        let mut ends = [0, 0];
+        let mut called = Vec::new();
+        let mut filled = Vec::new();
+        let mut busy_until = 0;
+        loop {
+            let next = usize::from(ends[1] < ends[0]);
+            let now = free(ends[next]).max(busy_until);
+            if now > until {
+                return (called, filled);
+            }
+            busy_until = now + cost;
+            called.push(now);
+            let (start, fill) = schedule.next(at(now / step * step), length, Duration::ZERO);
+            let plays = nanos(start).max((now + cost).div_ceil(BLOCK) * BLOCK);
+            ends[next] = plays + nanos_of(length);
+            if fill {
+                filled.push((plays, ends[next]));
+            }
+        }
+    }
+
+    fn nanos_of(length: Duration) -> u64 {
+        length.as_nanos() as u64
+    }
+
+    /// The most that one buffer filled plays over the one filled before.
+    fn most_overlap(filled: &[(u64, u64)]) -> u64 {
+        filled
+            .windows(2)
+            .map(|w| w[0].1.saturating_sub(w[1].0))
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_healthy_stream_fills_every_buffer_back_to_back() {
+        let (called, filled) = run(|t| t, 1, 0, 3_000 * MS);
+        assert_eq!(filled.len(), called.len());
+        assert!(filled.windows(2).all(|w| w[1].0 == w[0].1));
+    }
+
+    #[test]
+    fn natively_every_buffer_is_filled() {
+        let at = cpal::StreamInstant::from_millis;
+        let length = Duration::from_millis(46);
+        let mut schedule = Schedule::new(false);
+        assert!(schedule.next(at(1_000), length, Duration::ZERO).1);
+        assert!(schedule.next(at(3_000), length, Duration::ZERO).1);
         assert!(
-            is_late(at(1_000), at(3_000), length),
-            "after a two-second block"
+            schedule.next(at(3_000), length, Duration::ZERO).1,
+            "a late pair, which in the browser would be filled once"
         );
+    }
+
+    fn blocked(t: u64) -> u64 {
+        if (1_000 * MS..2_000 * MS).contains(&t) {
+            2_000 * MS
+        } else {
+            t
+        }
+    }
+
+    #[test]
+    fn after_a_block_the_song_goes_on_at_its_own_speed() {
+        // An exact clock, one that moves a render block at a time (a buffer is
+        // 16 blocks, so it never reads short) and one rounded to 2 ms, with
+        // callbacks that take a while.
+        for (step, cost) in [(1, 0), (BLOCK, MS / 3), (BLOCK, MS), (2 * MS, MS / 3)] {
+            let (called, filled) = run(blocked, step, cost, 4_000 * MS);
+            let overlap = most_overlap(&filled);
+            assert!(overlap <= 4 * MS + cost + BLOCK, "{overlap} ns overlap");
+            let catching_up = |t: &u64| (2_000 * MS..2_900 * MS).contains(t);
+            let calls = called.iter().filter(|t| catching_up(t)).count();
+            let fills = filled.iter().filter(|f| catching_up(&f.0)).count();
+            // Called back twice a buffer while the schedule catches up, but
+            // filled once a buffer, from the end of the block on.
+            assert!(
+                (19..=20).contains(&fills),
+                "{fills} filled in 900 ms ({step}, {cost})"
+            );
+            assert!(
+                calls + 1 >= 2 * fills,
+                "{calls} called back, {fills} filled"
+            );
+            let resumed = filled.iter().find(|f| f.0 >= 2_000 * MS).unwrap().0;
+            assert!(resumed <= 2_000 * MS + cost + BLOCK, "resumed at {resumed}");
+            let played: u64 = filled
+                .iter()
+                .filter(|f| f.0 >= 2_000 * MS)
+                .map(|f| f.1 - f.0)
+                .sum();
+            assert!(
+                played >= 1_900 * MS,
+                "{played} ns of the 2 s after the block"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_too_busy_for_the_schedule_to_catch_up_still_plays() {
+        let frame = |t: u64| t.div_ceil(150 * MS) * 150 * MS;
+        let (called, filled) = run(frame, 1, 0, 3_000 * MS);
+        let overlap = most_overlap(&filled);
+        assert!(overlap <= 4 * MS + BLOCK, "{overlap} ns overlap");
+        let later = |t: &u64| *t >= 1_500 * MS;
+        let calls = called.iter().filter(|t| later(t)).count();
+        let fills = filled.iter().filter(|f| later(&f.0)).count();
+        assert!(
+            (9..=11).contains(&fills) && calls >= 2 * fills,
+            "one of the two buffers a frame: {fills} of {calls} in 1.5 s"
+        );
+    }
+
+    #[test]
+    fn a_late_pair_fills_one_buffer_however_long_filling_takes() {
+        for cost in [5 * MS, 15 * MS, 30 * MS] {
+            let (called, filled) = run(blocked, 1, cost, 3_000 * MS);
+            let overlap = most_overlap(&filled);
+            assert!(overlap <= 4 * MS + cost + BLOCK, "{overlap} ns overlap");
+            let after = |t: &u64| *t >= 2_000 * MS;
+            let calls = called.iter().filter(|t| after(t)).count();
+            let fills = filled.iter().filter(|f| after(&f.0)).count();
+            assert!(
+                fills >= 10 && 2 * fills <= calls + 2,
+                "{fills} filled of {calls} called back, filling for {cost} ns"
+            );
+        }
     }
 
     #[test]
@@ -423,15 +664,10 @@ mod tests {
         assert_eq!(first, at(1_056));
         assert_eq!(nth_start(first, length, 0), first);
         assert_eq!(nth_start(first, length, 10), at(1_516));
-        // Healthy: buffer 10 is filled when buffer 8 ends, ahead of it.
-        assert!(!is_late(at(1_516), at(1_470), length));
-        // The page then blocks for two seconds: buffer 11 is called back at
-        // 3,500 ms but still due at 1,562 ms, so it is late and silent.
-        let eleventh = nth_start(first, length, 11);
-        assert!(is_late(eleventh, at(3_500), length));
         assert_eq!(
-            behind(at(3_500), nanos(eleventh)),
-            Duration::from_millis(1_938)
+            behind(at(3_500), nanos(nth_start(first, length, 11))),
+            Duration::from_millis(1_938),
+            "buffer 11, due at 1,562 ms, after a block to 3,500 ms"
         );
     }
 
