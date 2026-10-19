@@ -762,6 +762,14 @@ pub fn defined_ids(files: &[(String, String)]) -> Ids {
             defined_in.push((file, id));
         }
         for line in closed_section(text).filter(|l| !l.trim().is_empty()) {
+            if line.starts_with("### ") {
+                ids.problems.push(Problem::new(
+                    "ids",
+                    file,
+                    format!("`{line}` is under `{CLOSED}`, which holds only closed IDs.  Fix: put open entries above `{CLOSED}`."),
+                ));
+                continue;
+            }
             let Some(id) = line
                 .strip_prefix("* ")
                 .and_then(|l| l.split_once(':'))
@@ -829,7 +837,7 @@ fn ids_defined(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
         .filter(|t| !(ids.closed.contains(*t) && may_name_closed_ids(file)))
         .map(|t| {
             let message = if ids.closed.contains(t) {
-                format!("`{t}` is closed (`{CLOSED}` in docs/tech-debt.md), so nothing here may rely on it.  Fix: remove the reference, or name what closed it; only plans and decisions name closed IDs.")
+                format!("`{t}` is closed (a bullet under `{CLOSED}`), so nothing here may rely on it.  Fix: remove the reference, or name what closed it; only plans and decisions name closed IDs.")
             } else {
                 format!("`{t}` is not defined in docs/invariants.md or docs/tech-debt.md.  Fix: define it there as `### {t}: ...`, or correct the reference.")
             };
@@ -1603,6 +1611,23 @@ mod tests {
                 .starts_with("`* closed TD-4` under `## Closed` is not `* ID: what closed it`")
         );
         assert!(messages[2].starts_with("`TD-1` is closed but defined again"));
+    }
+
+    /// A new entry added at the end of the file lands under `## Closed`;
+    /// the message says where it goes.
+    #[test]
+    fn an_open_entry_under_closed_is_reported() {
+        let ids = defined_ids(&[(
+            "docs/tech-debt.md".to_string(),
+            "## Closed\n\n* TD-1: closed.\n\n### TD-2: new gap\n".to_string(),
+        )]);
+        let messages: Vec<&str> = ids.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "`### TD-2: new gap` is under `## Closed`, which holds only closed IDs.  Fix: put open entries above `## Closed`."
+            ]
+        );
     }
 
     #[test]

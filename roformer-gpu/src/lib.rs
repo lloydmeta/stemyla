@@ -2200,12 +2200,25 @@ mod tests {
     }
 
     /// Every shader the GPU compiles fits WebGPU's default limits (GPU-1):
-    /// the generated sources, and [`SHADER_FILES`].
+    /// the generated sources, and [`SHADER_FILES`].  The names are pinned,
+    /// so a source cannot drop out of the check unseen.
     #[test]
     fn every_kernel_fits_the_default_limits() {
         let all: Vec<_> = generated_sources()
             .chain(SHADER_FILES.map(|(name, src)| (name, src.to_string())))
             .collect();
+        let names: Vec<&str> = all.iter().map(|(name, _)| *name).collect();
+        let want: Vec<&str> = TILES
+            .iter()
+            .map(|t| t.name)
+            .chain([
+                "attention",
+                "softmax.wgsl",
+                "rmsnorm.wgsl",
+                "elementwise.wgsl",
+            ])
+            .collect();
+        assert_eq!(names, want);
         let limits = wgpu::Limits::defaults();
         let breaches: Vec<String> = all
             .iter()
