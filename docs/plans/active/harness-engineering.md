@@ -46,7 +46,7 @@ Each phase lists what it adds, its acceptance check, what it is measured by, the
 Turn every mechanisable rule into a check whose message names the rule ID and the fix, cheapest first ([clippy configuration](https://doc.rust-lang.org/clippy/lint_configuration.html)):
 
 * CI: run `cargo test -p roformer-gpu --lib` (TD-1); compare UI snapshots (TD-9); make browser tests a required check.
-* Strict skips: `STEMYLA_REQUIRE=gpu,fixtures` turns a skipped test into a failure (TD-8).
+* Strict skips: `STEMYLA_REQUIRE=gpu,timestamps,fixtures` turns a skipped test into a failure (TD-8).
 * A structural test in `xtask/tests/rules.rs`: crate layering over `cargo metadata` (TD-4), the DSP-1 allowlist parsed with `syn` (TD-3), Python and asset bans over the tracked files (TD-5, TD-6), `THIRD-PARTY.md` against `cargo tree` (TD-7), message type strings in the e2e scripts against `stem_protocol::kind` (TD-16).  Each new crate is pinned and listed (DEPS-1).
 * Clippy `disallowed-methods` with reasons, per crate: slice and JS-array `to_vec` in `app`, `worker`, `engine` (MEM-1), `wgpu` buffer creation outside `GpuBuffer` (MEM-3); justified sites carry `#[expect(clippy::disallowed_methods, reason = "...")]`, which fails when the exception goes stale.  Narrow `dsp`'s `allow(clippy::all)` (TD-2).
 * A naga test over every generated shader for the limits in `references/webgpu-limits.md` (TD-1).  naga 30.0.1 is already in the lock file through wgpu.

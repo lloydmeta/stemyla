@@ -46,7 +46,13 @@ Terms:
 * Before each commit: fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass (GIT-2).  Each commit is signed.
 * After implementing: three review rounds, each by a new subagent with fresh context.  Verify each finding, then fix real ones with tests.
 * The PR description says what was verified, how, and what was not.  It is written to a file and passed with `--body-file`.
-* A new crate is vetted and pinned if young (DEPS-1).  This plan adds only naga (already in the lock file), syn (already in the lock file) and wsola 0.2.0.
+* A new crate is vetted and pinned if young (DEPS-1).  This plan adds only these crates:
+  * naga, already in the lock file (M2);
+  * syn, already in the lock file (M7);
+  * wsola 0.2.0 (M11);
+  * `rusty_mp3`, as a dev-dependency of `xtask`, already in the lock file (M3);
+  * `proc-macro2` 1.0.107 or later, as a dependency of `xtask`, already in the lock file and not pinned (M3);
+  * the workspace crate `test-support` (M3).
 
 ### M1: CI runs roformer-gpu's GPU-free tests (TD-1, part)
 
@@ -65,12 +71,186 @@ Terms:
 * Acceptance: the test passes on the real shaders.  A unit test feeds the checker `@workgroup_size(1, 1, 128)` and a 20,000-byte `var<workgroup>` array; it reports both, with the limit's name and GPU-1.
 * Note: confirm naga 30.0.1's API (parse, `Layouter`, global address spaces) before writing.  If `wgsl-in` adds a crate that the lock file lacks, record it in `THIRD-PARTY.md`'s dev section.
 
-### M3: a required test fails instead of skipping (closes TD-8; VERIFY-1, GPU-2)
+### M3: a required test fails instead of skipping (TD-8, part; VERIFY-1, GPU-2, MEM-3, LAYER-1, DEPS-1; maintainer decision)
 
-* Change: the environment variable `STEMYLA_REQUIRE` holds a comma-separated list of `gpu` and `fixtures`.  Every test that skips for want of an adapter or a fixture calls one helper.  The helper panics when that kind is required, and names VERIFY-1.  An unknown word in the list also fails, so a typo cannot turn the check off.
-* Where: the skips in `roformer-gpu/tests/kernels.rs`, `memory.rs` and `reference.rs`, and `roformer/tests/reference.rs`.  Each crate gets a small test-support module with the helper and its unit tests.
-* Acceptance: unit tests of the helper cover required and missing, required and present, not required, and an unknown word.  On the maintainer's Mac, `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release` passes, and `STEMYLA_REQUIRE=fixtures` fails while the fixtures are absent.
-* Docs: GPU-2 and the GPU recipe in `working-with-agents.md` give `STEMYLA_REQUIRE=gpu` as the command for GPU evidence.  If the fixtures stay absent on the Mac, record that in `tech-debt.md`.
+* Change: the environment variable `STEMYLA_REQUIRE` holds a comma-separated list of `gpu`, `timestamps` and `fixtures`.  Every test that skips because it has no adapter, no adapter feature or no fixture calls one helper.  The helper panics when that need is required, and names VERIFY-1.  An unknown word in the list also fails, so a typo cannot turn the check off.  Tests that can make their own input stop skipping.
+
+#### M3 state at the start
+
+On 2026-10-19, at commit `ad1b159` (M2 merged as PR #15):
+
+* Stable libtest has no run-time skip.  A test that returns early reports `ok`, and `cargo test` hides a passing test's stderr ([pre-RFC: skippable tests](https://internals.rust-lang.org/t/pre-rfc-skippable-tests/14611)).  So each skip below looks like a pass.
+* The skip sites in `cargo test` targets.  The first review found no other site in `tests/` folders, `#[cfg(test)]` modules or doctests.
+
+  | File | Test | Skips when | M3 gives it |
+  | - | - | - | - |
+  | `roformer-gpu/tests/kernels.rs` | every test that calls `gpu()` | `Gpu::new` fails | `gpu` |
+  | `roformer-gpu/tests/kernels.rs` | `profile_labels_dispatches`, `profile_recording_and_reset` | `Gpu::new_profiling` fails; the adapter has no `timestamp-query` | `gpu`; `timestamps` |
+  | `roformer-gpu/tests/memory.rs` | every test that calls `gpu()` | `Gpu::new` fails | `gpu` |
+  | `roformer-gpu/tests/memory.rs` | `collected_profile_readbacks_are_freed` | as the profile tests above | `gpu`; `timestamps` |
+  | `roformer-gpu/tests/reference.rs` | `forward_matches_pytorch` | a fixture is absent (`read()`); `Gpu::new` or `Gpu::new_profiling` fails; with `ROFORMER_GPU_MM`, no `timestamp-query`, so the kernels that ran are not checked | `fixtures`; `gpu`; `timestamps` |
+  | `roformer/tests/reference.rs` | `stft_matches_torch`, `demix_matches_reference`, `forward_matches_pytorch`, `f16_weights_stay_close`, `layer_in_parts_matches_layer` | a fixture is absent (`read()`) | `fixtures` |
+  | `xtask/tests/m3_engine.rs` | `folder_loading_matches_the_generator` | `audio/synth/drums.wav` is absent | no skip: the test writes its own song |
+  | `xtask/tests/m1_song.rs` | `mp3_decodes_to_roughly_the_right_length` | `audio/synth/mix.mp3` is absent (`gen-song` with ffmpeg) | no skip: the test encodes its own MP3 |
+
+* The two `xtask` tests have never run in CI or on the maintainer's Mac.  `audio/synth/` is absent on both.  ffmpeg is not on the Mac, and not in the Ubuntu 24.04 runner image ([runner image](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)).
+* A scratch crate in the first review ran both tests' logic as step 3 gives it, and both pass:
+  * The folder test loads `drums`, `bass`, `guitar`, `keys`, `lead` with 1,323,000 frames.  `Song::from_audio` sorts by `PREFERRED_ORDER` (`engine/src/song.rs`), which is the generator's order.
+  * `rusty_mp3` at 192 kbit/s, decoded by `engine::decode_bytes`, gives 1,323,648 frames.  That is 648 over 30 s, inside the test's bound of 4,000.  Half the bytes gives 661,248 frames, so the planted breach fails the test.  The encode takes about 0.3 s in release.
+* The maintainer's Mac (AMD Radeon Pro 5500M, Metal) has an adapter without `timestamp-query`, and has no fixtures.  On macOS, wgpu's `vulkan` feature does not build the Vulkan backend, which needs `vulkan-portability`.  So `WGPU_BACKEND=vulkan` gives no adapter there ("vulkan support not compiled in").
+* `Gpu::new` and `Gpu::new_profiling` return `Result<Gpu, String>`.  A failed adapter request and a failed device request both give `Err`.
+* `rusty_mp3` 1.0.0 is in `Cargo.lock` through `stem-worker`, pinned with `=` and listed in `THIRD-PARTY.md`.  It is pure Rust with no dependencies, Apache-2.0 ([docs.rs](https://docs.rs/rusty_mp3/1.0.0/rusty_mp3/)).  `worker/src/web.rs` encodes with `Mp3Encoder` at 192 kbit/s.
+* In edition 2024, `std::env::set_var` is `unsafe`, and it is unsound while other threads run ([edition guide](https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html)).  libtest runs tests on many threads, so the unit tests do not set the variable.
+* Cargo stops after the first test binary that fails, unless `--no-fail-fast` is given ([cargo test](https://doc.rust-lang.org/cargo/commands/cargo-test.html)).
+* Out of scope, with the reason:
+  * `#[ignore]` tests (`roformer-gpu/tests/speed.rs`, `calibration.rs`) are benchmarks, and libtest reports them as ignored.
+  * `ROFORMER_GPU_FULL` is an opt-in for the slow layers of `forward_matches_pytorch`.  Its message says what did not run.
+  * The wasm tests in `app/tests/web_output.rs` skip only when the audio context stays suspended.  They assert that the browser is not Chrome, and CI runs Chrome.  A wasm test cannot read the variable at run time.
+  * `xtask e2e storage` without `--weights` notes the cases that it does not run.  The person gives `--weights` on the command line.
+  * The UI snapshot tests in `app/tests/ui.rs` pass without a comparison under `UPDATE_SNAPSHOTS=1` in CI.  That is TD-9, and M17 closes it.
+
+#### M3 design
+
+* Decision point for the maintainer: where the helper lives.  The plan first said "a small test-support module" in each crate.  Decided on 2026-10-19: the maintainer chose (a).
+  * (a), recommended: a new workspace crate `test-support/` (package `test-support`).  It holds one parser and its tests, which run once.  The cost: a tenth crate, and a new first row in the layers table.  Also: a change to LAYER-1's text, the crate lists in three docs, and a special case in M5's layering check.
+  * (b) one file, `test-support/skip.rs`, that each test target includes with `#[path]`.  It adds no crate, and changes no crate list or layer.  But its tests run again in each target that includes it, and a source folder that is not a crate is new to this repo.
+  * (c) a copy in each crate, as first planned.  Two copies of the parser can drift, and no test sees it.
+  * (d) a module behind a `testing` feature in `roformer`, which `roformer-gpu` already depends on.  It adds no crate and keeps one parser.  The costs: test code in a shipped crate's source, and a later user outside the model crates must depend on `roformer`.  Also, `roformer`'s own tests need its feature, through a dev-dependency on itself or `required-features`.  Under `cargo test --workspace` the feature then turns on in every build of `roformer`.
+  * The steps below are written for (a).  For another option, revise the later M3 design bullets, every M3 step, the M3 acceptance and the decision log.  Also revise "Validation and acceptance", "What every milestone does", "Idempotence and recovery" and the `test-support` note in M5.  Then review the plan again before implementing.
+  * After the maintainer chooses, step 1 writes the decision record.  The choice and the `STEMYLA_REQUIRE` interface outlive this plan.
+* The crate uses only `std` and has no dependencies.  It is only ever a dev-dependency.  `roformer` and `roformer-gpu` take it.
+* The API, in `test-support/src/lib.rs`:
+
+  ```rust
+  pub const VAR: &str = "STEMYLA_REQUIRE";
+
+  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+  pub enum Need { Gpu, Timestamps, Fixtures }
+
+  /// The words of a list, or the message for the first unknown word.
+  pub fn parse(list: &str) -> Result<Vec<Need>, String>;
+
+  /// Ok: the line a skip prints.  Err: the message a required skip panics with.
+  pub fn verdict(list: Option<&OsStr>, need: Need, why: &str) -> Result<String, String>;
+
+  /// Reads `VAR` at run time, then prints the skip line or panics.
+  #[track_caller]
+  pub fn skip(need: Need, why: impl Display);
+  ```
+
+* `parse` splits the list on `,`, trims spaces and ignores empty items.  The words are lowercase only, and repeats are allowed.  An unset or empty variable requires nothing.  A value that is not Unicode fails.
+* The variable is read with `std::env::var_os` when a test skips, never with `env!`.  So a change to it does not rebuild anything.
+* `timestamps` implies `gpu`, because a test cannot use `timestamp-query` without an adapter.  Without this, `STEMYLA_REQUIRE=timestamps` and no adapter would pass the profile tests.
+* Each `skip` names the one need that is missing.  So the GPU's PyTorch comparison is evidence only under `STEMYLA_REQUIRE=gpu,fixtures`.  `fixtures` alone covers only the CPU comparison in `roformer`.
+* Any skip parses the whole list.  So a typo fails at the first skip, even when that skip's need is not in the list.  When nothing skips, a typo cannot hide anything.
+* `skip` and the test helpers that call it are `#[track_caller]`: each `gpu()`, and the fixture readers `read()` in `roformer/tests/reference.rs` and `roformer-gpu/tests/reference.rs`.  So the panic names the line in the test.  `skip` panics in its own body, in a `match`, not in a closure: a closure does not get the caller's location (`closure_track_caller` is unstable).
+* The messages:
+  * Skip: `skipping (<word>): <why>.  Set STEMYLA_REQUIRE=<word> to make this a failure.`  `<word>` is `gpu`, `timestamps` or `fixtures`, and the helper adds no other prefix.  For example, `Gpu::new`'s error gives `skipping (gpu): no GPU adapter: <wgpu error>.  Set STEMYLA_REQUIRE=gpu to make this a failure.`
+  * Required, one per need.  `<why>` is the text that the call site gives:
+    * `VERIFY-1: STEMYLA_REQUIRE has gpu, but this test cannot run: <why>.  Fix: run it where a GPU adapter opens, or remove gpu from STEMYLA_REQUIRE.`
+    * `VERIFY-1: STEMYLA_REQUIRE has timestamps, but this test cannot run: <why>.  Fix: run it on an adapter with timestamp-query, or remove timestamps from STEMYLA_REQUIRE.`
+    * `VERIFY-1: STEMYLA_REQUIRE has fixtures, but this test cannot run: <why>.  Fix: write the fixtures with tools/roformer_export.py, or remove fixtures from STEMYLA_REQUIRE.`
+    * When `timestamps` implies `gpu`, and the list does not have `gpu` itself: `VERIFY-1: STEMYLA_REQUIRE has timestamps, which needs gpu, but this test cannot run: <why>.  Fix: run it on an adapter with timestamp-query, or remove timestamps from STEMYLA_REQUIRE.`
+  * Unknown word: `VERIFY-1: STEMYLA_REQUIRE has the unknown word "gpus".  Fix: use only gpu, timestamps and fixtures, separated by commas.`
+  * Each message removes one full stop at the end of `<why>`.  The skip line does this too.  So a wgpu error such as "Not enough memory left." does not give two full stops.
+  * Not Unicode: `VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps and fixtures, separated by commas.`
+* `gpu` means that `Gpu::new` succeeds on any adapter.  A software adapter counts here.  GPU-3's real-GPU check stays with TD-10 (phase 4).
+* `timestamps` is its own need.  Without it, `STEMYLA_REQUIRE=gpu` would fail on the maintainer's Mac, which gives GPU evidence without `timestamp-query`.
+
+#### M3 steps
+
+Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass before it (GIT-2).
+
+1. The crate, test first.
+   * Write the decision record as `docs/decisions/` number 0003, with `Status: proposed`.  List it in `docs/README.md`, or `docs-check` fails.  Also name it in the sentence on decisions at the top of `harness.md`.
+   * Add `test-support` to the workspace `members`.  Commit the changed `Cargo.lock`, because CI builds with `--locked`.
+   * In `harness-engineering.md`, change "Each new crate is pinned and listed (DEPS-1)" to "Each new crate is vetted, pinned if young, and listed if shipped (DEPS-1)".  `test-support` and `proc-macro2` make the old sentence false.
+   * Its manifest takes `edition.workspace = true`, `license.workspace = true` and `[lints] workspace = true`, as `roformer` does.
+   * Write the tests first, against stubs: `parse` returns `Ok(vec![])`, `verdict` returns `Ok(String::new())`, and `skip` does nothing.  See every test fail, except the child test, which returns at once without its marker.  Then write the three functions.
+   * Each unit test asserts the exact message, or a `Vec<Need>` that is not empty, so a stub cannot pass it.
+   * The unit tests call `parse` and `verdict` with strings, never `set_var`:
+     * `a_required_need_that_cannot_run_fails`;
+     * `a_need_not_required_skips_with_a_hint`;
+     * `an_unknown_word_fails_even_when_not_needed`;
+     * `items_are_trimmed_and_empty_items_ignored`, with words among the empty items;
+     * `words_are_lowercase_only`;
+     * `a_full_stop_at_the_end_of_why_is_not_doubled`;
+     * `an_unset_or_empty_list_requires_nothing`, which asserts `verdict`'s exact skip line for `None` and for an empty value;
+     * `a_list_that_is_not_unicode_fails` (`#[cfg(unix)]`, through `OsStrExt::from_bytes`);
+     * `timestamps_requires_a_gpu`, which asserts that `STEMYLA_REQUIRE=timestamps` fails a `gpu` skip, with the message for an implied `gpu`.  With `gpu,timestamps` it asserts the `gpu` message.
+   * The test of `skip` itself is in `test-support/tests/skip.rs`.  It runs its own test binary again as a child process.  So it sets the variable on the child's `Command`, never with `set_var`.
+     * The child is the test `child_skips_without_a_gpu`.  It returns at once unless the marker `STEMYLA_TEST_CHILD=1` is set.  Then it calls `skip(Need::Gpu, "no adapter")`.  A marker, not `#[ignore]`, keeps a run with `--include-ignored` correct.
+     * `a_required_skip_fails_and_names_the_caller` runs `current_exe()` with `--exact child_skips_without_a_gpu --nocapture`, the marker, and `STEMYLA_REQUIRE=gpu`.  It asserts that the child fails, and that its stderr holds VERIFY-1 and `tests/skip.rs:<line>:`.  The colon before the column keeps line 13 from matching line 130.
+     * The parent finds `<line>` in `include_str!("skip.rs")`, not with `line!()` and an offset.  It is the one line whose trimmed text starts with `skip(Need::Gpu, "no adapter");`.  The parent asserts that exactly one line matches, because its own search text also holds the words.
+     * `a_skip_that_is_not_required_passes` runs the child with the same arguments and the marker, and with the variable removed (`env_remove`).  `--nocapture` is needed, because libtest holds back a passing test's stderr.  It asserts that the child passes, and that its stderr holds `skipping (gpu)`.
+   * Docs in the same commit, or `docs-check` fails: the `## Layout` lists in `CLAUDE.md` and `README.md`, and `## Crates` in `docs/ARCHITECTURE.md`.
+   * The layers table gets a first row, "Test support | `test-support` | no workspace crate".  A sentence under it says that any crate but `dsp` (DSP-1) may take it as a dev-dependency.  No crate may take it as a normal dependency.
+   * LAYER-1's text in `invariants.md` names the new layer and that exception (DOC-1).
+2. The call sites in `roformer` and `roformer-gpu`.
+   * Add `test-support` to the `[dev-dependencies]` of `roformer` and `roformer-gpu`.  Commit the changed `Cargo.lock`.
+   * At the skip sites in the table, every `Err` from `Gpu::new` or `Gpu::new_profiling` calls `test_support::skip(Need::Gpu, &e)`.  That includes the helpers `gpu()` and the profile tests' own `match`.  Rewrite each `let Ok(g) = ... else` as a `match`, so `skip` gets the error.
+   * `Gpu::new` has one `Err` for both failures, so under `gpu` both fail.  That is correct, because both mean that nothing ran.
+   * Each `timestamp-query` check calls `skip(Need::Timestamps, ...)`.  In `forward_matches_pytorch`, the check moves to just after the device opens, when `ROFORMER_GPU_MM` is set and `gpu.profiling()` is false.  So a required `timestamps` fails before the network runs, not minutes later.  When `timestamps` is not required, the test continues with the PyTorch comparison.  Only the check of which kernels ran does not occur.  The `why` text: "adapter without timestamp-query: the kernels that ran are not checked".  Remove the note after the network.  Merge the two `if`s into `if mm.is_some() && gpu.profiling()`, or `clippy::collapsible_if` fails.
+   * Each fixture reader `read()` calls `skip(Need::Fixtures, format!("{} not found (run tools/roformer_export.py)", p.display()))`.  This keeps today's hint in the skip line.
+   * The module comments on skips also name `STEMYLA_REQUIRE`: `roformer-gpu/tests/kernels.rs`, `memory.rs` and `reference.rs`, and `roformer/tests/reference.rs`.
+   * TD-8's text and VERIFY-1's text change in step 5.  Until then they are not complete, but they are not false, and the PR merges all five steps together.
+3. The two `xtask` tests make their own input.
+   * `folder_loading_matches_the_generator`: write `synth::generate()` with `synth::write_song(&song, &dir, false)` into a temporary folder.  The folder's name holds a fixed prefix and the process ID, as `m1_song.rs` does.  Remove the folder at the end.
+   * `mp3_decodes_to_roughly_the_right_length`: encode the generated mix in memory with `rusty_mp3` at 192 kbit/s, with the calls that `worker/src/web.rs` makes.  Decode it with `engine::decode_bytes(bytes, Some("mp3"))`.
+   * Add `rusty_mp3 = "=1.0.0"` to `xtask`'s `[dev-dependencies]`.  DEPS-1: it is the same pinned version, so no new crate is downloaded.  Commit the changed `Cargo.lock`.
+   * TD-7 says that only `rusty_mp3` in `worker/` is pinned exactly.  That is already false (`naga` in `roformer-gpu/`, M2).  Change it to name the exact pins: `rusty_mp3` in `worker/` and `xtask/`, and `naga` in `roformer-gpu/`.
+   * Keep each test's expectations, the 4,000-frame bound included.  If a test fails when it first runs, find the cause before an expectation changes.  State the cause in the PR.
+   * Measure the time that the two tests add to the `test` job.  State it in the PR.  A prototype in the seventh review took 3.2 s for `m1_song` and 3.8 s for `m3_engine`, in a debug build.
+4. The sensor: `xtask/src/rules.rs` and `xtask/tests/rules.rs`, which M5 then extends.
+   * Declare `pub mod rules;` in `xtask/src/lib.rs`.
+   * `rules::skips_use_the_helper(files: &[(String, String)]) -> Vec<Problem>` takes `(path, text)` pairs.  It is a pure function, as the checks in `docs.rs` are.
+   * `rules::Problem` is new: `rule: &'static str`, `file: String`, `line: Option<usize>` and `message: String`.  `line` is `None` for a problem with the whole file.  `message` holds the full text below, and `Display` writes only `message`.  M5 to M10 use the same type.  `docs::Problem` stays as it is.
+   * The input is every `.rs` file from `docs::repo_files`.  `skips_use_the_helper` itself leaves out the files in `test-support/` and `xtask/src/rules.rs`.  The checker's own allowlist and planted inputs hold the words that it looks for.
+   * A problem is a string literal, plain or raw, whose text starts with `skipping` or `skipped`.
+   * The checker tokenises each file with `proc_macro2::TokenStream::from_str`, and reads the literals in groups and macro calls too.  Comments, char literals such as `'"'`, raw strings and escapes then cannot confuse it.  proc-macro2 makes a doc comment into a `#[doc = "..."]` string literal.  So the check leaves out each literal whose `span().source_text()` starts with `//` or `/*`.  A scan of quote characters gets out of step on today's tree, at `'"'` in `serve.rs` and `web_test.rs`.
+   * Add `proc-macro2 = { version = "1.0.107", features = ["span-locations"] }` to `xtask`'s `[dependencies]`, for the line numbers.  DEPS-1: 1.0.107 is in `Cargo.lock` through `syn`, and dtolnay maintains it.  It is not pinned with `=`, because it is a mature 1.x crate.  Cargo keeps one version per semver range, so a pin in `xtask` would hold back every proc macro in the workspace.  `xtask` does not ship, so `THIRD-PARTY.md` does not change.  Commit the changed `Cargo.lock`.
+   * Cargo builds a second proc-macro2 for `xtask` with `span-locations`, and the proc macros keep theirs (`cargo tree`, in the third review's prototype).  Measure the build time that it adds to the `test` job.  State it in the PR.
+   * A file that does not tokenise is a problem, so the check cannot pass without reading it.  The message: `VERIFY-1: <file> does not tokenise: <error>.  Fix: make the file valid Rust, or leave it out of the tree.`
+   * An allowlist, of file and literal, has a reason for each entry.  Its one entry is `app/tests/web_output.rs`'s `"skipped: the audio context is suspended"`, because a wasm test cannot read the variable.
+   * The message: `VERIFY-1: roformer/tests/x.rs:12 prints "<word>" itself.  Fix: call test_support::skip(Need::..., why), so STEMYLA_REQUIRE can make it a failure.  Outside test code, add the literal to the allowlist with a reason.`  `<word>` is the word that the literal starts with, `skipping` or `skipped`.
+   * The test `every_skip_can_be_required` runs it on the real tree.  It asserts that the list is empty, and prints the count and the messages, as `xtask/tests/docs.rs` does.
+   * The unit tests plant `eprintln!("skipping: no adapter")` in a `tests/` file and `"skipped: x"` in a `src/` file.  Each gives VERIFY-1 with the file and the line.
+   * More unit tests:
+     * a skip literal after `'"'` on the same line is found;
+     * `r"skipping"` is found;
+     * `r#"a "b"#`, `"\\"`, an allowlisted literal, and a skip phrase in a comment give no problem.  The comments include `// skipping`, `///skipping: x`, `//!skipping x` and `/**skipped */`.  Each doc-comment case has no space after the comment marker, so it fails when the exclusion is removed;
+     * a file in `test-support/`, and `xtask/src/rules.rs`, give no problem;
+     * a file that does not tokenise gives a problem.
+5. The docs, and TD-8 narrowed.
+   * `invariants.md`: VERIFY-1's text says that `STEMYLA_REQUIRE` turns a skip into a failure where evidence is claimed.  Its `* Enforced by:` line names `every_skip_can_be_required`, `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller`.
+   * `invariants.md`: GPU-2's rule text and GPU-2's and MEM-3's `* Enforced by:` lines give `STEMYLA_REQUIRE=gpu` for their GPU tests.
+   * `tech-debt.md`: TD-8 narrows to what M3 leaves open, with a new title, the rules it concerns (VERIFY-1, GPU-2, MEM-3) and a fix for each part:
+     * The PyTorch comparisons run nowhere, because neither CI nor the Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
+     * GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
+     * The sensor sees only messages that start with `skipping` or `skipped`, so a silent early `return` passes it.  Fix: phase 3's reviewers look for it.
+     * The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere: CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
+   * `harness-engineering.md`: phase 3's bullets name the fix of the sensor's limit, for phase 3's reviewers.  Phase 4's bullets name the fix of the evidence, for the evaluator.  Phase 2's bullet on the structural test (`xtask/tests/rules.rs`) names the skip sensor.
+   * TD-8 stays in the `Gaps` of VERIFY-1, GPU-2 and MEM-3.
+   * Text about skips in `.claude/rules/gpu.md`, and the sentence on the reference tests in `docs/references/local-browser-testing.md`, give `STEMYLA_REQUIRE`.  That file's text on the wasm skip stays, because a wasm test cannot read the variable.
+   * The commands for GPU evidence become `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release`.  Change them in `CLAUDE.md`, `.claude/rules/gpu.md`, the GPU recipe in `working-with-agents.md`, and `## Tests` in `docs/ARCHITECTURE.md`.  That last line also says that its PyTorch part needs `STEMYLA_REQUIRE=gpu,fixtures`.  `README.md`'s SwiftShader command stays, because a software adapter is not GPU evidence (GPU-3).
+   * Text that says the reference tests "skip without them" adds that `STEMYLA_REQUIRE=fixtures` makes a missing fixture fail.  The text is in `README.md` (the table in `## Setting up a machine`, and `## Checks`) and in `## Tests` in `docs/ARCHITECTURE.md`.  `docs-check` cannot see this text (TD-21), so search these files for "skip".
+   * `working-with-agents.md`: a line on how to ask for evidence with `STEMYLA_REQUIRE`, and a changelog entry.
+   * `harness.md`: the helper and the sensor in the components table, with the sensor's limit.
+   * CI sets no `STEMYLA_REQUIRE`.  Its `test` job has no fixtures (ASSET-1), and it excludes `roformer-gpu`'s adapter tests on purpose.
+
+#### M3 acceptance
+
+* `cargo test -p test-support`: the nine unit tests and the two tests of `skip` pass.  The child test passes at once without its marker.  Each failed against the stubs first.
+* `cargo test -p xtask --test rules`: `every_skip_can_be_required` passes.  Its unit tests pass in `cargo test -p xtask --lib`.
+* On the maintainer's Mac, record each result in the PR:
+  * `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release -- --nocapture` passes, and the log names the adapter.
+  * `STEMYLA_REQUIRE=gpu,timestamps cargo test -p roformer-gpu --release --no-fail-fast` fails exactly three tests, each with VERIFY-1: `profile_labels_dispatches`, `profile_recording_and_reset` and `collected_profile_readbacks_are_freed`.
+  * `STEMYLA_REQUIRE=fixtures cargo test -p roformer --test reference` fails all five tests, each with VERIFY-1 and the missing path.  Without the variable they pass, and `-- --nocapture` shows `skipping (fixtures)`.
+  * `WGPU_BACKEND=vulkan cargo test -p roformer-gpu --release --test memory -- --nocapture` prints `skipping (gpu)` for every test.  With `STEMYLA_REQUIRE=gpu` added, every test in `memory.rs` fails.
+  * `STEMYLA_REQUIRE=gpus cargo test -p roformer --test reference` fails, and names `gpus`.
+* Planted breaches in the two `xtask` tests, run locally and not kept.  Drop the second half of the MP3 bytes, and the MP3 test fails.  Delete `bass.wav` before loading, and the folder test fails.
+* CI: the `test` job log lists `folder_loading_matches_the_generator ... ok` and `mp3_decodes_to_roughly_the_right_length ... ok`.
+* fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.
 
 ### M4: the app links only song generation (TD-4, part; maintainer decision)
 
@@ -80,9 +260,9 @@ Terms:
 
 ### M5: crate layering is a test (closes TD-4; LAYER-1)
 
-* Change: add `xtask/src/rules.rs` with pure checker functions, and `xtask/tests/rules.rs` that runs them on the real tree, as `docs.rs` does.  The first check reads `cargo metadata --format-version 1 --no-deps` and compares each workspace crate's workspace dependencies with an allowlist built from the layers table in `ARCHITECTURE.md`.  A second check runs `cargo tree -p app --target wasm32-unknown-unknown -e normal` and fails if it holds `hound` or `serde_json` (M4's result).
+* Change: add pure checker functions to `xtask/src/rules.rs`, and tests that run them on the real tree to `xtask/tests/rules.rs`, as `docs.rs` does.  M3 makes both files.  The first check reads `cargo metadata --format-version 1 --no-deps` and compares each workspace crate's workspace dependencies with an allowlist built from the layers table in `ARCHITECTURE.md`.  A second check runs `cargo tree -p app --target wasm32-unknown-unknown -e normal` and fails if it holds `hound` or `serde_json` (M4's result).
 * Acceptance: the test `crates_depend_only_downwards` passes.  Unit tests plant an `engine -> app` edge and an `app -> roformer-gpu` edge; both fail with LAYER-1.  Adding `features = ["files"]` to `app`'s `synth` dependency fails the second check.
-* Note: dev-dependencies count as edges unless the allowlist says otherwise; `app`'s dev-dependency on `synth` with `files` is listed.
+* Note: dev-dependencies count as edges unless the allowlist says otherwise; `app`'s dev-dependency on `synth` with `files` is listed.  Any crate but `dsp` (DSP-1) may take `test-support` (M3) as a dev-dependency, and none may take it as a normal dependency.  A unit test plants a `dsp -> test-support` dev-dependency edge, and it fails.
 
 ### M6: dsp relaxes only the style lints DSP-1 needs (closes TD-2)
 
@@ -115,7 +295,7 @@ Terms:
 
 ### M11: the audio callback does not allocate after warm-up (closes TD-15; RT-1; maintainer decision)
 
-* Rule: RT-1 becomes "the audio callback never waits, never frees a player, and never allocates or frees memory after warm-up".  Update `invariants.md`, the RT-1 line in `CLAUDE.md` and `.claude/rules/memory.md`.  Write `decisions/0003-rt-1-forbids-allocation.md` as `proposed`; the maintainer accepts it.
+* Rule: RT-1 becomes "the audio callback never waits, never frees a player, and never allocates or frees memory after warm-up".  Update `invariants.md`, the RT-1 line in `CLAUDE.md` and `.claude/rules/memory.md`.  Write its record in `docs/decisions/` as `proposed`, with the next free number; the maintainer accepts it.
 * Test first: `engine/tests/realtime.rs` is its own test binary, so its counting global allocator affects no other test.  The allocator wraps `System` and counts `alloc`, `alloc_zeroed`, `realloc` and `dealloc` in `thread_local` counters, so parallel tests do not mix.  The test `the_callback_does_not_allocate_after_warm_up` makes a song of six noise stems in the test, a `Player` for each stretcher the app ships (`StretcherKind::Varispeed` and `StretcherKind::Wsola`), and puts it in a `PlayerSlot`.  It then calls `render_interleaved` with blocks of 128, 512 and 4,096 frames.  The count must be zero from the first callback, through each of these changes:
   * tempo changes over 0.5 to 1.5;
   * chipmunk on and off;
@@ -188,14 +368,15 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 ## Validation and acceptance
 
 * `grep -c "Enforced by: prose only" docs/invariants.md` falls from 8 to 3.  BUILD-1, DEPS-1, LAYER-1, DSP-1 and GIT-1 gain tests; ASSET-1 and RT-1 gain tests beside what they have.  MEM-4, GPU-3 and GIT-3 stay prose only: phase 4 covers MEM-4 and GPU-3, and nothing in view checks GIT-3.
-* Each check's planted breach fails it: the unit tests in `xtask/src/rules.rs`, `roformer-gpu` and `engine/tests/realtime.rs`, and the clippy cases stated in each PR.
+* Each check's planted breach fails it: the unit tests in `xtask/src/rules.rs`, `test-support`, `roformer-gpu` and `engine/tests/realtime.rs`, and the clippy cases stated in each PR.
 * `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, clippy and `docs-check` pass; CI is green on `main` with browser tests required (the phase gate).
 
 ## Idempotence and recovery
 
 * Each milestone is one PR and reverts on its own.  A reverted check removes its enforcement and nothing else; revert its `* Enforced by:` line and restore its tech-debt entry in the same commit.
+* M3 adds a crate.  To undo M3, revert its commits, then put back decision 0003 with `Status: rejected`, and its line in `docs/README.md`.  So the decision numbers have no gap.  If M5 or a later milestone has merged, keep `xtask/src/rules.rs` and `xtask/tests/rules.rs`.  Remove only `skips_use_the_helper`, `every_skip_can_be_required` and M5's `test-support` case.  Remove `proc-macro2` from `xtask`'s `[dependencies]` unless a later check uses it.  Then commit `Cargo.lock`.
 * Checks read the tree and write nothing, so they can run any number of times.  `xtask test-list` writes only to stdout.
-* M11 changes a rule.  If the maintainer rejects decision 0003, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
+* M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
 
 ## Progress
@@ -216,7 +397,14 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M2 review round 3: 4 findings, all real and fixed.  The limits test now pins its 8 source names, so dropping `.chain(SHADER_FILES ...)` fails it.  A `###` entry under `## Closed` gets its own message.  GPU-1 names `Rec::push`, and this plan counted 7 sources, not 8.
 * [x] 2026-10-19: M2, PR #15 opened.  CI (run 39207559143) passes every job.  The `test` job lists the 26 `--lib` tests, among them `every_kernel_fits_the_default_limits ... ok`, and both `Rec` doctests.
 * [x] 2026-10-19: M2, `cargo test -p roformer-gpu --release` on the maintainer's Mac (AMD Radeon Pro 5500M, Metal) passes.  12 of 14 `kernels.rs` tests and 4 of 5 `memory.rs` tests ran on the GPU.  Four skipped: three need `timestamp-query`, which this adapter lacks, and `forward_matches_pytorch` needs the absent weights (TD-8).
-* [ ] M2: PR #15 merged by the maintainer.
+* [x] 2026-10-19: M2, PR #15 merged by the maintainer (`ad1b159`).
+* [x] 2026-10-19: M3 implementation plan written (the M3 sections under "Plan of work").  Survey of every skip in the `cargo test` targets.
+* [x] 2026-10-19: M3 plan reviewed in 12 rounds, each by two new reviewers (code, and docs and process).  Every finding was checked, and the real ones were fixed in the plan.
+  * Rounds 1 to 4: 60 findings.  The stem-order risk was wrong.  TD-8 narrows instead of closing.  The sensor tokenises with `proc-macro2`, since a quote scan gets out of step at `'"'`.  `timestamps` implies `gpu`, since `timestamps` alone passed a run with no adapter.  `proc-macro2` takes a caret version.
+  * Rounds 5 to 9: 43 findings, no blockers.  The messages, the skip line, `rules::Problem` and the revert steps are now defined.
+  * Prototypes in rounds 3 to 9 built `test-support` and the sensor from the plan text.  They also applied steps 2 and 3 in a scratch worktree.  Every acceptance result for those steps held on the Mac.
+  * Rounds 10 to 12: no blockers and no should-fix items.  The code reviewer of round 11 found nothing.  10 nits, all fixed.
+* [x] 2026-10-19: M3 decision point: the maintainer chose option (a), a `test-support` crate.
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.
@@ -247,6 +435,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, M1 review: `sources_are_complete` listed 12 placeholder names by hand and missed 8 that the templates use (`{BM}`, `{BN}`, `{BK}`, `{TY}`, `{SB_LEN}`, `{S_ZERO}`, `{SOFTMAX_1}`, `{SOFTMAX_2}`).  A test that lists what to look for goes stale; it now scans for the pattern.
 * 2026-10-19, M2: deleting TD-1 made `docs-check` fail on each `TD-1` in the plans.  It checks every ID token in every Markdown file, plans included.  Every later milestone closes an ID, so it needed a rule for closed IDs.
 * 2026-10-19, M2: WebGPU counts each `var<workgroup>` rounded up to 16 bytes, and only the ones the entry point statically uses ([compute pipeline creation](https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcomputepipeline)).  The text count in `workgroup_memory_within_defaults` does neither; the tiles here are multiples of 16, so the counts agree.
+* 2026-10-19, M3 survey: two `xtask` tests have never run anywhere.  `folder_loading_matches_the_generator` and `mp3_decodes_to_roughly_the_right_length` need `audio/synth/`, which neither CI nor the maintainer's Mac has.  ffmpeg is on neither.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
 ## Decision log
@@ -261,6 +450,16 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, maintainer: a closed tech-debt ID moves to a `## Closed` bullet with what closed it.  `docs-check` allows it only in plans and decisions, and fails it if it is defined again.  The rejected options: exempt plans and decisions from the ID check (loses typo checks), or reword each reference (loses the history).
 * 2026-10-19, agent (M2): the limits test counts buffers over the whole module, not per entry point.  `Kernels::new` gives each module one layout with every binding it declares.  The per-entry-point count is lower, so it can pass a layout that fails.
 * 2026-10-19, agent (M2): a shader that does not parse or validate, or that declares an `override`, fails the limits test.  Otherwise it would pass without a check.
+* 2026-10-19, agent (M3): the plan recommends one `test-support` crate for the helper, not a module in each crate as first planned.  Two copies of the parser could drift, and no test would see it.  The maintainer decides (decision point in M3's design).
+* 2026-10-19, maintainer (M3): the helper lives in a new workspace crate `test-support`, option (a).  Step 1 records it as decision 0003.
+* 2026-10-19, agent (M3): TD-8 narrows, and gets no new ID.  M3 gives the mechanism, but the fixtures still exist nowhere, and the evidence still rests on a person.
+* 2026-10-19, agent (M3): the sensor tokenises with `proc-macro2` 1.0.107, which is already in the lock file.  A scan of quote characters gets out of step on char literals and raw strings.
+* 2026-10-19, agent (M3): `timestamps` is a need of its own, beside `gpu` and `fixtures`.  The maintainer's Mac gives GPU evidence, but its adapter has no `timestamp-query`.
+* 2026-10-19, agent (M3): `timestamps` implies `gpu`, and the other words imply nothing.  `fixtures` alone must stay usable on a machine with no GPU, for the CPU comparison.
+* 2026-10-19, agent (M3): a test that can make its own input stops skipping, and gets no need.  So the song-folder and MP3 tests make their own input and need no ffmpeg.
+* 2026-10-19, agent (M3): `proc-macro2` takes a caret version, not an `=` pin.  It is a mature 1.x crate, and a pin in `xtask` would hold back every proc macro in the workspace.  So the phase plan's DEPS-1 sentence becomes "vetted, pinned if young, and listed if shipped".
+* 2026-10-19, agent (M3): `dsp` may not take `test-support`, even as a dev-dependency, because DSP-1 gives `dsp` zero dependencies.
+* 2026-10-19, agent (M3): `gpu` accepts a software adapter.  GPU-3's real-GPU check stays with TD-10, in phase 4.
 * 2026-10-19, agent: `cargo deny`, TD-16's field and version checks, and TD-10 (GPU-3) stay out of phase 2; the phase plan does not list them.
 
 ## Outcomes and retrospective
