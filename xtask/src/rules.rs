@@ -59,9 +59,9 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[(
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that
 /// `STEMYLA_REQUIRE` can make it a failure.  A problem is a string literal,
-/// plain or raw, that starts with `skipping` or `skipped`, in any case.  The files are
-/// tokenised, so comments, char literals such as `'"'`, raw strings and
-/// escapes cannot confuse the check.
+/// plain or raw, that starts with `skipping` or `skipped`, in any case.
+/// The files are tokenised, so comments, char literals such as `'"'`, raw
+/// strings and escapes cannot confuse the check.
 pub fn skips_use_the_helper(files: &[(String, String)]) -> Vec<Problem> {
     files
         .iter()

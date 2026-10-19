@@ -412,7 +412,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M3 step 5: docs, and TD-8 narrowed.
 * [x] 2026-10-19: M3 review round 1: no blockers; 3 findings, all real and fixed.  (1) The sensor missed `"Skipping"`; it now ignores case, and `a_skip_word_in_any_case_is_a_problem` failed before the fix.  (2) README claimed `STEMYLA_REQUIRE` reaches `worker-check`.  (3) The folder test left its folder when it failed.
 * [x] 2026-10-19: M3 review round 2: no blockers; 3 findings, all real and fixed.  (1) The real-tree test passed if the walk found no files, and nothing saw a stale allowlist entry.  It now asserts two known files, and `the_skip_allowlist_is_current` fails a reworded `web_output.rs` literal.  (2) VERIFY-1's text now names the wasm exception.  (3) The folder test removes its folder after a failed write too.
-* [ ] M3: three review rounds, the PR, CI, and the merge.
+* [x] 2026-10-19: M3 review round 3: no blockers and no should-fix items; 3 nits, all fixed.  The SwiftShader command gets `STEMYLA_REQUIRE=gpu`, `ARCHITECTURE.md` names `ROFORMER_GPU_FULL=1` for the end-to-end check, and one comment is re-wrapped.
+* [ ] M3: the PR, CI, and the merge.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
@@ -466,6 +467,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, agent (M3): a test that can make its own input stops skipping, and gets no need.  So the song-folder and MP3 tests make their own input and need no ffmpeg.
 * 2026-10-19, agent (M3): `proc-macro2` takes a caret version, not an `=` pin.  It is a mature 1.x crate, and a pin in `xtask` would hold back every proc macro in the workspace.  So the phase plan's DEPS-1 sentence becomes "vetted, pinned if young, and listed if shipped".
 * 2026-10-19, agent (M3): `dsp` may not take `test-support`, even as a dev-dependency, because DSP-1 gives `dsp` zero dependencies.
+* 2026-10-19, agent (M3 review round 3): the README's SwiftShader command gets `STEMYLA_REQUIRE=gpu`, against step 5's text.  `gpu` accepts a software adapter, so the variable makes no GPU-3 claim.  It only makes a wrong driver path fail instead of skipping.
 * 2026-10-19, agent (M3): `gpu` accepts a software adapter.  GPU-3's real-GPU check stays with TD-10, in phase 4.
 * 2026-10-19, agent: `cargo deny`, TD-16's field and version checks, and TD-10 (GPU-3) stay out of phase 2; the phase plan does not list them.
 

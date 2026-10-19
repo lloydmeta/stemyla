@@ -1,6 +1,7 @@
 //! Each kernel against a plain CPU loop.  Runs on whatever adapter wgpu
 //! finds; in CI-like runs without a GPU, point Vulkan at SwiftShader:
-//! `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan`.
+//! `VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan`,
+//! with `STEMYLA_REQUIRE=gpu` so that a wrong path fails instead of skipping.
 //! Tests skip with a message when no adapter is available, and fail
 //! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
 //! tests).
