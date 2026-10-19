@@ -70,6 +70,29 @@ pub fn skips_use_the_helper(files: &[(String, String)]) -> Vec<Problem> {
         .collect()
 }
 
+/// VERIFY-1: each entry of the skip allowlist still matches a literal in
+/// its file, so a stale entry cannot wait there to hide a new skip.
+pub fn allowlisted_skips_exist(files: &[(String, String)]) -> Vec<Problem> {
+    SKIP_ALLOWLIST
+        .iter()
+        .filter(|(path, literal, _)| {
+            !files.iter().any(|(file, text)| {
+                file == path
+                    && TokenStream::from_str(text)
+                        .is_ok_and(|tokens| string_literals(tokens).iter().any(|(_, value)| value == literal))
+            })
+        })
+        .map(|(path, literal, _)| Problem {
+            rule: "VERIFY-1",
+            file: path.to_string(),
+            line: None,
+            message: format!(
+                "VERIFY-1: the skip allowlist in xtask/src/rules.rs names \"{literal}\" in {path}, but the file has no such literal.  Fix: remove the entry, or change it to the file's skip message."
+            ),
+        })
+        .collect()
+}
+
 fn skips_in(file: &str, text: &str) -> Vec<Problem> {
     match TokenStream::from_str(text) {
         Err(e) => vec![Problem {
@@ -237,6 +260,31 @@ mod tests {
         let text = "fn f() { console_log!(\"skipped: the audio context is suspended\"); }";
         assert_eq!(check("app/tests/web_output.rs", text), []);
         assert_eq!(lines(&check("app/tests/web.rs", text)), [Some(1)]);
+    }
+
+    #[test]
+    fn an_allowlist_entry_whose_literal_is_gone_is_a_problem() {
+        let (file, literal, _) = SKIP_ALLOWLIST[0];
+        let current = format!("fn f() {{ console_log!(\"{literal}\"); }}");
+        assert_eq!(allowlisted_skips_exist(&[(file.to_string(), current)]), []);
+        let reworded = "fn f() { console_log!(\"skipped: suspended\"); }".to_string();
+        let problems = allowlisted_skips_exist(&[(file.to_string(), reworded)]);
+        assert_eq!(
+            problems,
+            [Problem {
+                rule: "VERIFY-1",
+                file: file.into(),
+                line: None,
+                message: format!(
+                    "VERIFY-1: the skip allowlist in xtask/src/rules.rs names \"{literal}\" in {file}, but the file has no such literal.  Fix: remove the entry, or change it to the file's skip message."
+                ),
+            }]
+        );
+        assert_eq!(
+            lines(&allowlisted_skips_exist(&[])),
+            [None],
+            "a file that is not in the tree"
+        );
     }
 
     #[test]

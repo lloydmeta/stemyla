@@ -203,8 +203,7 @@ fn seek_is_accurate_to_one_block_and_audio_follows() {
 fn folder_loading_matches_the_generator() {
     let (song, generated) = synth_song();
     let dir = std::env::temp_dir().join(format!("stems-m3-folder-{}", std::process::id()));
-    synth::write_song(&generated, &dir, false).unwrap();
-    let loaded = Song::load_folder(&dir);
+    let loaded = synth::write_song(&generated, &dir, false).and_then(|()| Song::load_folder(&dir));
     std::fs::remove_dir_all(&dir).ok();
     let loaded = loaded.unwrap();
     let names: Vec<_> = loaded.stems.iter().map(|s| s.name.as_str()).collect();

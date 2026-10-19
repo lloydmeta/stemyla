@@ -411,6 +411,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M3 step 4: `every_skip_can_be_required` passes, with 11 unit tests.  Planted: without the doc-comment exclusion, the `//!`, `///` and `/**` cases fail.  A planted `eprintln!("skipping: ...")` in `roformer/tests/reference.rs` fails the real-tree test with its file and line.
 * [x] 2026-10-19: M3 step 5: docs, and TD-8 narrowed.
 * [x] 2026-10-19: M3 review round 1: no blockers; 3 findings, all real and fixed.  (1) The sensor missed `"Skipping"`; it now ignores case, and `a_skip_word_in_any_case_is_a_problem` failed before the fix.  (2) README claimed `STEMYLA_REQUIRE` reaches `worker-check`.  (3) The folder test left its folder when it failed.
+* [x] 2026-10-19: M3 review round 2: no blockers; 3 findings, all real and fixed.  (1) The real-tree test passed if the walk found no files, and nothing saw a stale allowlist entry.  It now asserts two known files, and `the_skip_allowlist_is_current` fails a reworded `web_output.rs` literal.  (2) VERIFY-1's text now names the wasm exception.  (3) The folder test removes its folder after a failed write too.
 * [ ] M3: three review rounds, the PR, CI, and the merge.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.
