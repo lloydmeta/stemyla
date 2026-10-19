@@ -6,9 +6,9 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ## Enforcement gaps
 
-### TD-1: only the generated kernels' workgroup memory is checked statically
+### TD-1: only the matmul and attention kernels' workgroup memory is checked statically
 
-`workgroup_memory_within_defaults` checks the workgroup memory of the generated kernels (`TILES` and fused attention) (GPU-1).  It does not check the hand-written `matmul.wgsl`, `softmax.wgsl` or `rmsnorm.wgsl`.  Nothing checks workgroup sizes, invocations per workgroup or buffers per stage before a kernel runs on a real adapter.  CI runs the crate's GPU-free tests since `plans/active/harness-phase-2.md` M1.
+`workgroup_memory_within_defaults` checks the workgroup memory of every `TILES` kernel (the hand-written `matmul.wgsl` among them) and of fused attention (GPU-1).  It does not check `softmax.wgsl` or `rmsnorm.wgsl`.  Nothing checks workgroup sizes, invocations per workgroup or buffers per stage before a kernel runs on a real adapter.  CI runs the crate's GPU-free tests since `plans/active/harness-phase-2.md` M1.
 
 * Fix: a naga-based test that parses every shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
 
@@ -88,7 +88,7 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  The `no_run` doctest beside it compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.
 
-* Fix: keep the two doctests identical except for the order of `drop` and `submit`, or check the error code with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
+* Fix: run `cargo +nightly test -p roformer-gpu --doc` in CI, since nightly rustdoc checks the error code; or check it with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
 
 ## Known breaches
 

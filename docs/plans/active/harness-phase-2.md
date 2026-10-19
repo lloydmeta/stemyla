@@ -57,7 +57,11 @@ Terms:
 
 ### M2: every shader is checked against the default limits (closes TD-1; GPU-1)
 
-* Change: add `naga = { version = "=30.0.1", default-features = false, features = ["wgsl-in"] }` as a dev-dependency of `roformer-gpu`, the version already in the lock file.  Add the unit test `every_kernel_fits_the_default_limits` in `roformer-gpu/src/lib.rs`.  It parses each source that `sources_are_complete` covers, plus every file in `src/shaders/`.  It asserts the limits in `references/webgpu-limits.md`: workgroup x and y at most 256, z at most 64, x * y * z at most 256, workgroup storage at most 16,384 bytes, and at most 8 storage and 12 uniform buffers per entry point.
+* Change: add `naga = { version = "=30.0.1", default-features = false, features = ["wgsl-in"] }` as a dev-dependency of `roformer-gpu`, the version already in the lock file.  Add the unit test `every_kernel_fits_the_default_limits` in `roformer-gpu/src/lib.rs`.  It parses each generated source that `sources_are_complete` covers.  It also parses the shader files that are not templates: `matmul.wgsl`, `softmax.wgsl`, `rmsnorm.wgsl` and `elementwise.wgsl`.  The three templates hold `{NAME}` placeholders and are not valid WGSL.  The test asserts the limits in `references/webgpu-limits.md`:
+  * workgroup x and y at most 256, and z at most 64;
+  * x * y * z at most 256;
+  * workgroup storage at most 16,384 bytes;
+  * at most 8 storage buffers and 12 uniform buffers per entry point.
 * Acceptance: the test passes on the real shaders.  A unit test feeds the checker `@workgroup_size(1, 1, 128)` and a 20,000-byte `var<workgroup>` array; it reports both, with the limit's name and GPU-1.
 * Note: confirm naga 30.0.1's API (parse, `Layouter`, global address spaces) before writing.  If `wgsl-in` adds a crate that the lock file lacks, record it in `THIRD-PARTY.md`'s dev section.
 
@@ -112,7 +116,12 @@ Terms:
 ### M11: the audio callback does not allocate after warm-up (closes TD-15; RT-1; maintainer decision)
 
 * Rule: RT-1 becomes "the audio callback never waits, never frees a player, and never allocates or frees memory after warm-up".  Update `invariants.md`, the RT-1 line in `CLAUDE.md` and `.claude/rules/memory.md`.  Write `decisions/0003-rt-1-forbids-allocation.md` as `proposed`; the maintainer accepts it.
-* Test first: `engine/tests/realtime.rs` is its own test binary, so its counting global allocator affects no other test.  The allocator wraps `System` and counts `alloc`, `alloc_zeroed`, `realloc` and `dealloc` in `thread_local` counters, so parallel tests do not mix.  The test `the_callback_does_not_allocate_after_warm_up` makes a song of six noise stems in the test, a `Player` for each stretcher the app ships (`StretcherKind::Varispeed` and `StretcherKind::Wsola`), and puts it in a `PlayerSlot`.  It then calls `render_interleaved` with blocks of 128, 512 and 4,096 frames.  It counts across tempo changes over 0.5 to 1.5, chipmunk on and off, a seek, a loop wrap with crossfade, and mute and solo changes.  The count must be zero from the first callback.
+* Test first: `engine/tests/realtime.rs` is its own test binary, so its counting global allocator affects no other test.  The allocator wraps `System` and counts `alloc`, `alloc_zeroed`, `realloc` and `dealloc` in `thread_local` counters, so parallel tests do not mix.  The test `the_callback_does_not_allocate_after_warm_up` makes a song of six noise stems in the test, a `Player` for each stretcher the app ships (`StretcherKind::Varispeed` and `StretcherKind::Wsola`), and puts it in a `PlayerSlot`.  It then calls `render_interleaved` with blocks of 128, 512 and 4,096 frames.  The count must be zero from the first callback, through each of these changes:
+  * tempo changes over 0.5 to 1.5;
+  * chipmunk on and off;
+  * a seek;
+  * a loop wrap with crossfade;
+  * mute and solo changes.
 * The test fails before the fix, on wsola 0.1.0's `pull` and on `dsp::double_speed`.  Record both failures in the PR.
 * Fix: bump to `wsola = "=0.2.0"`, and copy `pull`'s iterator straight into the output queues.  In `render_chipmunk`, decimate `chip_l` and `chip_r` into the output slices in place, in `engine`.  `dsp::double_speed` stays as the beginner version, and a unit test asserts that both give the same samples.  Warm-up in `Player::new` runs the stretcher at the highest tempo for long enough to reach its steady buffer sizes, then resets it; `reset` keeps capacity.
 * Acceptance: the test passes.  `m4_stretch` and `the_callback_does_not_allocate_after_warm_up` pass on wsola 0.2.0.  Output on the demo song is identical to wsola 0.1.0's, sample for sample, or the latency table in `wsola_adapter.rs` is measured again with its example and the change is stated in the PR.
@@ -180,7 +189,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 
 * `grep -c "Enforced by: prose only" docs/invariants.md` falls from 8 to 3.  BUILD-1, DEPS-1, LAYER-1, DSP-1 and GIT-1 gain tests; ASSET-1 and RT-1 gain tests beside what they have.  MEM-4, GPU-3 and GIT-3 stay prose only: phase 4 covers MEM-4 and GPU-3, and nothing in view checks GIT-3.
 * Each check's planted breach fails it: the unit tests in `xtask/src/rules.rs`, `roformer-gpu` and `engine/tests/realtime.rs`, and the clippy cases stated in each PR.
-* `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib`, clippy and `docs-check` pass; CI is green on `main` with browser tests required (the phase gate).
+* `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, clippy and `docs-check` pass; CI is green on `main` with browser tests required (the phase gate).
 
 ## Idempotence and recovery
 
@@ -193,7 +202,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 
 * [x] 2026-10-19: plan written.  Survey of the code, the CI workflow, wsola 0.1.0 and 0.2.0, and the docs for clippy, naga, egui_kittest and Claude Code hooks.
 * [x] 2026-10-19: plan reviewed by the maintainer, who asked for M1.
-* [x] 2026-10-19: M1, CI runs roformer-gpu's GPU-free tests and doctests.  Locally: 14 lib tests and 2 doctests pass; `pad: 66` on `i64` fails `workgroup_memory_within_defaults` with "i64: 16640 bytes".  The CI log is still to be seen on the PR.
+* [x] 2026-10-19: M1 implemented locally: CI runs roformer-gpu's GPU-free tests and doctests.  15 lib tests and 2 doctests pass.  `pad: 66` on `i64` fails `workgroup_memory_within_defaults` with "i64: 16640 bytes".
+* [x] 2026-10-19: M1 review: `sources_are_complete` missed 8 placeholders; it now finds any `{NAME}`.  Deleting the `{BM}` replace fails it with `i64: ["{BM}", "{BM}"]`.
+* [ ] M1: the CI log of the PR shows the new steps pass.
 * [ ] M2: naga limits test.
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.
@@ -220,6 +231,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19: the shipped licence list (`THIRD-PARTY.md`) includes `hound`, `serde`, `serde_derive` and `serde_json`, pulled in only by `synth`'s file writers.
 * 2026-10-19: the chipmunk path also allocates in the callback (`dsp::double_speed`), not only the stretcher.
 * 2026-10-19, M1 review: `-p roformer-gpu` alone builds wgpu with fewer features than the workspace build, so the new CI steps rebuild wgpu, wgpu-core, wgpu-hal and naga.  The added time is not yet measured.
+* 2026-10-19, M1 review: `sources_are_complete` listed 12 placeholder names by hand and missed 8 that the templates use (`{BM}`, `{BN}`, `{BK}`, `{TY}`, `{SB_LEN}`, `{S_ZERO}`, `{SOFTMAX_1}`, `{SOFTMAX_2}`).  A test that lists what to look for goes stale; it now scans for the pattern.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
 ## Decision log

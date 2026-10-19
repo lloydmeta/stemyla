@@ -84,8 +84,9 @@ jobs:
       # from clippy --all-targets and a wasm compile check from the trunk
       # build below.
       - run: cargo test --locked --workspace --exclude roformer-gpu
-      # roformer-gpu's unit tests and doctests need no GPU: the WebGPU limits
-      # (GPU-1) and the compile-fail check that Rec keeps a buffer alive (MEM-3).
+      # roformer-gpu's unit tests and doctests need no GPU: workgroup memory
+      # within WebGPU's default (GPU-1), complete generated shaders, and the
+      # compile-fail check that Rec keeps a buffer alive (MEM-3).
       - run: cargo test --locked -p roformer-gpu --lib
       - run: cargo test --locked -p roformer-gpu --doc
 
