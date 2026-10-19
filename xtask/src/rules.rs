@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn a_tree_without_synth_is_a_problem() {
         let app = "0app v0.1.0\n1engine v0.1.0\n";
-        let worker = "0stem-worker v0.1.0\n1synthx v1.0.0\n";
+        let worker = "0stem-worker v0.1.0\n1synthx v1.0.0\n2hound v3.5.1\n";
         assert_eq!(
             synth_brings_no_crate(&[("app", app), ("stem-worker", worker)]),
             [Problem {

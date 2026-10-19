@@ -394,10 +394,11 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
      * `a_shallower_line_ends_synths_children`: `synth` at depth 2, then a depth-1 line, then a depth-3 line.  It asserts no problem.  So a parser that stops only at the same depth fails it.
      * `a_deeper_synth_is_read`: a `9engine` line, then `10synth`, then `11hound`.  It gives the problem.  So a parser that reads only `1synth`, or only the first digit of a depth, fails it.
      * `a_repeated_synth_gives_one_problem`: `synth` with a child, then a `synth ... (*)` line.
-     * `a_tree_without_synth_is_a_problem`: two trees, neither with `synth`, one with a `synthx` line.
+     * `a_tree_without_synth_is_a_problem`: two trees, neither with `synth`, one with a `synthx` line that has a child.  So a parser that matches `synth` by prefix, when it finds `synth` or its children, fails it.
      * `synth_under_stem_worker_is_named`: an `app` tree with a `1synth` line without children, as the real tree has.  Then a `stem-worker` tree with the lines that the planted `stem-worker` breach gives: `1synth`, `2anyhow`, `2hound`, `2serde v1.0.229 (*)` and `2serde_json v1.0.152 (*)`.  It asserts exactly one problem, which names `stem-worker` and `anyhow, hound, serde, serde_json`.  So a parser that reads only the first `synth`, or that skips `(*)` lines, fails it.
      * `a_line_without_a_depth_is_a_problem`: a `stem-worker` tree that starts with `0stem-worker`, and holds a `synth` without children, an empty line and a line without a depth.  It asserts exactly one problem, which names `stem-worker`.
      * `a_tree_that_does_not_start_with_its_package_is_a_problem`: an empty `app` tree, and a `stem-worker` tree that starts with `0app` and holds a `1synth` line without children.  It asserts exactly two problems, one for each tree.
+     * `a_first_line_below_depth_0_is_a_problem` (added in review round 1): a tree that starts with `1app`.  So a check of the name alone fails it.
    * Each fixture tree starts with `0<package>`, unless the test is about that line.
    * Fixture lines copied from real output replace each local path with `(/x/<crate>)`, so no home folder is committed.
    * See every test that expects a problem fail against the stub.  The tests that expect no problem pass against it; that is expected.  Then write the function.
@@ -428,7 +429,7 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 
 #### M4 acceptance
 
-* `cargo test -p xtask --test rules`: `synth_brings_no_crate_into_the_web_app` passes.  Before the change it failed and named the four crates.  The 10 unit tests pass in `cargo test -p xtask --lib`, and each that expects a problem failed against the stub.
+* `cargo test -p xtask --test rules`: `synth_brings_no_crate_into_the_web_app` passes.  Before the change it failed and named the four crates.  The 11 unit tests pass in `cargo test -p xtask --lib`, and each that expects a problem failed against the stub.
 * `THIRD-PARTY.md`: make the first command's output into a set of rows, as "M4 state at the start" gives it.  Apart from the workspace crates, that set equals the first table's rows.  The set before the change differs from the set after only in `hound`.  Record that diff in the PR.
 * Planted breaches, run locally and not kept.  Record each result in the PR:
   * `features = ["files"]` on `synth` in `app`'s `[dependencies]`: the real-tree test fails and names `hound`.
@@ -624,7 +625,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M4 step 2: `synth`'s `files` feature, `synth_brings_no_crate_into_the_web_app`, the three CI steps and the docs.  Before the change, the real-tree test failed: "synth brings anyhow, hound, serde, serde_json into the web app, through app".  After it, the test passes, and `Cargo.lock` does not change.  `app_bg.wasm` went from 5,194,829 to 5,194,587 bytes.  The licence command's set of rows equals the first table (128 rows), and `hound` is in neither table.  "Prose only" lines: 7.
   * Planted breaches, each run locally and restored.  (1) `files` on `app`'s `synth`: the test fails and names `hound`.  (2) `default = ["files"]`: the test fails.  (3) No dev-dependency: `clippy -p app --all-targets` fails with E0425, and `--workspace` passes.  (4) An ungated `use serde::Serialize;`: `clippy -p synth` fails with E0432.  (5) A native-only call to `write_song` in `app`: `clippy -p app` fails with E0425, and `--all-targets` passes.  (6) `synth` with `files` in `stem-worker`'s wasm dependencies, run without `--locked`: the test fails and names `stem-worker`.
 * [x] 2026-10-19: M4 review round 1: no blockers and no should-fix items; 3 nits.  (1) No test covered the depth-0 rule or a line of spaces: removing `first.depth == 0` or the `trim` passed every test.  `a_first_line_below_depth_0_is_a_problem` and a line of spaces in `a_line_without_a_depth_is_a_problem` now fail each mutant.  (2) `Problem.file` is not printed; the messages name the package, as the plan gives them, so this stays.  (3) Decision 0004 said "the download"; it now says `app_bg.wasm`.
-* [ ] M4: review rounds 2 and 3, and their findings fixed.
+* [x] 2026-10-19: M4 review round 2: no blockers and no should-fix items; 2 nits, both real and fixed.  (1) Matching `synth` by prefix in the children check passed every test; the `synthx` line in `a_tree_without_synth_is_a_problem` now has a child, and that mutant fails.  (2) The plan still said 10 unit tests; it lists the 11th and says 11.
+* [ ] M4: review round 3, and its findings fixed.
 * [ ] M4: PR opened.  CI's `test` job lists the new test, and the `clippy` job runs the three new steps.
 * [ ] M4: decision 0004 accepted by the maintainer.
 * [ ] M4: PR merged by the maintainer.
