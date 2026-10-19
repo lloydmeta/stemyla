@@ -19,6 +19,7 @@ futures-channel = "0.3.34"
 naga = { version = "=30.0.1", default-features = false, features = ["wgsl-in"] }
 pollster = "1.0.1"
 safetensors = "0.7.0"
+test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

@@ -14,6 +14,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
 * `worker/`: the Web Worker that runs separations (package `stem-worker`).
 * `protocol/`: the page <-> worker messages (package `stem-protocol`).
+* `test-support/`: `skip`, which fails a test that cannot run when `STEMYLA_REQUIRE` asks for evidence; a dev-dependency only.
 * `xtask/`: the static server, the browser test runners (`web-test`, `e2e`), `docs-check`, `publish` and other tools.
 
 ## Where to look
@@ -38,7 +39,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
 cargo test -p roformer-gpu --lib                # CI runs these too, and --doc; they need no GPU
-cargo test -p roformer-gpu --release            # every kernel against the CPU, on this machine's GPU
+STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release  # every kernel against the CPU; fails without a GPU
 cargo run -p xtask -- docs-check                # the map and docs match the code
 (cd app && trunk build --release)
 cargo run -p xtask --release -- serve app/dist --port 8080

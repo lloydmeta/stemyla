@@ -18,6 +18,10 @@ burn = { version = "0.20.1", features = ["ndarray"] }
 burn-store = { version = "0.20.1", default-features = false, features = ["std", "pytorch"] }
 half = "2.7.1"
 safetensors = "0.7.0"
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+
+[dev-dependencies]
+rusty_mp3 = "=1.0.0"
 
 [lints]
 workspace = true

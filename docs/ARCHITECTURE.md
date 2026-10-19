@@ -35,6 +35,7 @@ flowchart LR
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
 * `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark and MP3 encoding.
 * `stem-protocol` (`protocol/`): the messages between the page and the worker, one encoder and one decoder per message, shared by both sides.
+* `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature or no fixture.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  It is only a dev-dependency.
 * `xtask`: tools run with Cargo: the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`), publishing, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.
 
 ### Layers
@@ -43,10 +44,13 @@ Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`).
 
 | Layer | Crates | Depend on |
 | - | - | - |
+| Test support | `test-support` | no workspace crate |
 | Pure | `dsp`, `synth`, `roformer`, `stem-protocol` | no workspace crate |
 | Engine and GPU | `engine`, `roformer-gpu` | `dsp`; `roformer` |
 | Shells | `app`, `stem-worker` | `engine`, `dsp`, `synth`, `stem-protocol`; `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `synth`, `roformer` |
+
+Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal dependency, so it never ships.
 
 `app` depending on `synth` ships the demo song generator in the page (TD-4 in `docs/tech-debt.md`).
 
@@ -197,8 +201,8 @@ The Storage menu lists the stored songs, opens or forgets one, shows the space u
 ## Tests
 
 * `cargo test --workspace`: unit and integration tests, including the UI snapshots and the docs check (`xtask/tests/docs.rs`).
-* `cargo test -p roformer --release`: the CPU network against PyTorch (needs fixtures from `tools/roformer_export.py`; skipped without them).
-* `cargo test -p roformer-gpu --release`: every GPU kernel against CPU loops, and the whole network against PyTorch.  Without a GPU, point Vulkan at SwiftShader (see the README).
+* `cargo test -p roformer --release`: the CPU network against PyTorch (needs fixtures from `tools/roformer_export.py`; skipped without them, and `STEMYLA_REQUIRE=fixtures` makes a missing fixture fail).
+* `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release`: every GPU kernel against CPU loops, and each layer and mask of the network against PyTorch.  The PyTorch part needs `STEMYLA_REQUIRE=gpu,fixtures`, and its end-to-end check also needs `ROFORMER_GPU_FULL=1`.  Without a GPU, point Vulkan at SwiftShader (see the README).
 * `cargo test -p roformer-gpu --lib` and `--doc`: the GPU crate's tests that need no GPU (workgroup memory, kernel choice, the compile-fail check of `Rec`).  CI runs them.
 * `cargo run -p xtask -- web-test`: browser tests (wasm-bindgen-test, in Safari or Chrome) of the song sessions in browser storage (`app/tests/web.rs`, and `app/src/store.rs` for its private write path), of the Web Audio output freeing each song it replaces (`app/tests/web_output.rs`) and of closing the page (`app/tests/web_close.rs`), of the worker's model storage and messages (`worker/src/web/tests.rs`, in a dedicated worker; in tests the worker keeps what it would post), and of every page <-> worker message surviving a structured clone with its transfers (`protocol/tests/web.rs`).
 * `cargo run -p xtask -- e2e <scenario>`: the built page driven over WebDriver by a small std-only client (`xtask/src/webdriver.rs`, `xtask/src/e2e.rs`).  `xtask serve --inject` adds the page helpers in `xtask/e2e/` (console capture, AudioContext stand-ins, a blank page that drives the worker directly).  `smoke`, `audio-resume` and `storage` need no model and run in CI; `bench`, `selftest`, `separate` and `worker-check` need a GPU and, but for `bench`, the model.

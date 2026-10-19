@@ -1,8 +1,9 @@
 //! The whole network on the GPU kernels against the PyTorch fixtures that
 //! `tools/roformer_export.py` writes into `third_party/roformer/`
 //! (gitignored).  Same thresholds as the CPU port's own test
-//! (`roformer/tests/reference.rs`).  Skips without fixtures or adapter;
-//! see `kernels.rs` for running on SwiftShader.
+//! (`roformer/tests/reference.rs`).  Skips without fixtures or adapter, and
+//! fails instead under `STEMYLA_REQUIRE=gpu,fixtures`; see `kernels.rs` for
+//! running on SwiftShader.
 
 use std::path::PathBuf;
 
@@ -11,7 +12,9 @@ use roformer::{BINS, DEPTH, FEATURES, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
 use roformer_gpu::{Gpu, MatMulPolicy, TILES};
 use safetensors::{Dtype, SafeTensors};
+use test_support::{Need, skip};
 
+#[track_caller]
 fn read(name: &str) -> Option<Vec<u8>> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../third_party/roformer")
@@ -19,9 +22,9 @@ fn read(name: &str) -> Option<Vec<u8>> {
     match std::fs::read(&p) {
         Ok(b) => Some(b),
         Err(_) => {
-            eprintln!(
-                "skipping: {} not found (run tools/roformer_export.py)",
-                p.display()
+            skip(
+                Need::Fixtures,
+                format!("{} not found (run tools/roformer_export.py)", p.display()),
             );
             None
         }
@@ -116,9 +119,15 @@ fn forward_matches_pytorch() {
     };
     let gpu = match opened {
         Ok(g) => g,
-        Err(e) => return eprintln!("skipping: {e}"),
+        Err(e) => return skip(Need::Gpu, &e),
     };
     eprintln!("adapter: {} ({:?})", gpu.info.name, gpu.info.backend);
+    if mm.is_some() && !gpu.profiling() {
+        skip(
+            Need::Timestamps,
+            "adapter without timestamp-query: the kernels that ran are not checked",
+        );
+    }
     if let Some(name) = &mm {
         let policy = MatMulPolicy::parse(name).unwrap_or_else(|| panic!("unknown kernel {name}"));
         let problems = pollster::block_on(gpu.check_kernels()).unwrap();
@@ -204,20 +213,16 @@ fn forward_matches_pytorch() {
         assert!(db > 80.0);
     }
 
-    if mm.is_some() {
-        if gpu.profiling() {
-            pollster::block_on(gpu.collect_profile()).unwrap();
-            let labels: Vec<String> = gpu.take_profile().into_keys().collect();
-            let policy = gpu.policy.get();
-            for t in [policy.pick(1000, 1000), policy.pick(10, 10)] {
-                let name = TILES[t].name;
-                assert!(
-                    labels.iter().any(|l| l.ends_with(&format!(" {name}"))),
-                    "no product ran {name}: {labels:#?}"
-                );
-            }
-        } else {
-            eprintln!("adapter without timestamp-query: kernels that ran not checked");
+    if mm.is_some() && gpu.profiling() {
+        pollster::block_on(gpu.collect_profile()).unwrap();
+        let labels: Vec<String> = gpu.take_profile().into_keys().collect();
+        let policy = gpu.policy.get();
+        for t in [policy.pick(1000, 1000), policy.pick(10, 10)] {
+            let name = TILES[t].name;
+            assert!(
+                labels.iter().any(|l| l.ends_with(&format!(" {name}"))),
+                "no product ran {name}: {labels:#?}"
+            );
         }
     }
 

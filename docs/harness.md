@@ -1,6 +1,6 @@
 # The agent harness
 
-This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md` and `decisions/0002-staged-background-autonomy.md`.
+This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md`, `decisions/0002-staged-background-autonomy.md` and `decisions/0003-required-skips-in-a-test-support-crate.md`.
 
 Two principles shape it:
 
@@ -21,6 +21,8 @@ Two principles shape it:
 | `working-with-agents.md`, kept complete by `docs-check` | guide, for people | how to drive agents lived in one person's head and in old transcripts | phase 1 |
 | `xtask docs-check` (`the_map_and_docs_match_the_code`) | sensor, computational | docs drift from code (on 2026-10-19: `synth` missing from the map, `stem-protocol` from two crate lists) | phase 1 |
 | `every_kernel_fits_the_default_limits`, naga over every shader (GPU-1) | sensor, computational | a kernel over WebGPU's default limits fails only on a real adapter, on some GPUs; only the tile memory was checked before | phase 2 |
+| `STEMYLA_REQUIRE` and `test_support::skip` (VERIFY-1) | sensor, computational | a test with no GPU or no fixture returned early and passed, so a run that checked nothing looked like evidence | phase 2 |
+| `every_skip_can_be_required`, `the_skip_allowlist_is_current` (VERIFY-1) | sensor, computational | a new skip that prints its own message escapes `STEMYLA_REQUIRE`.  It sees only messages that start with `skipping` or `skipped`, in any case (TD-8) | phase 2 |
 
 Planned components, by phase, are in the plan.
 

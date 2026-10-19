@@ -201,15 +201,13 @@ fn seek_is_accurate_to_one_block_and_audio_follows() {
 
 #[test]
 fn folder_loading_matches_the_generator() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../audio/synth");
-    if !dir.join("drums.wav").exists() {
-        eprintln!("skipping: run `cargo run -p xtask -- gen-song` first");
-        return;
-    }
-    let loaded = Song::load_folder(&dir).unwrap();
+    let (song, generated) = synth_song();
+    let dir = std::env::temp_dir().join(format!("stems-m3-folder-{}", std::process::id()));
+    let loaded = synth::write_song(&generated, &dir, false).and_then(|()| Song::load_folder(&dir));
+    std::fs::remove_dir_all(&dir).ok();
+    let loaded = loaded.unwrap();
     let names: Vec<_> = loaded.stems.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["drums", "bass", "guitar", "keys", "lead"]);
-    let (song, _) = synth_song();
     assert_eq!(loaded.frames, song.frames);
     assert_eq!(loaded.stems[0].left, song.stems[0].left);
     let (ml, _) = loaded.mix_lane();

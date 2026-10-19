@@ -1,0 +1,9 @@
+[package]
+name = "test-support"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "STEMYLA_REQUIRE: a test that has no GPU or no fixture fails instead of skipping, where evidence is claimed"
+
+[lints]
+workspace = true
