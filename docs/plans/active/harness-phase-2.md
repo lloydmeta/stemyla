@@ -410,6 +410,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M3 step 3: the folder and MP3 tests run.  Planted: half the MP3 bytes gives 661,248 frames and fails; a deleted `bass.wav` fails the stem names.
 * [x] 2026-10-19: M3 step 4: `every_skip_can_be_required` passes, with 11 unit tests.  Planted: without the doc-comment exclusion, the `//!`, `///` and `/**` cases fail.  A planted `eprintln!("skipping: ...")` in `roformer/tests/reference.rs` fails the real-tree test with its file and line.
 * [x] 2026-10-19: M3 step 5: docs, and TD-8 narrowed.
+* [x] 2026-10-19: M3 review round 1: no blockers; 3 findings, all real and fixed.  (1) The sensor missed `"Skipping"`; it now ignores case, and `a_skip_word_in_any_case_is_a_problem` failed before the fix.  (2) README claimed `STEMYLA_REQUIRE` reaches `worker-check`.  (3) The folder test left its folder when it failed.
 * [ ] M3: three review rounds, the PR, CI, and the merge.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.

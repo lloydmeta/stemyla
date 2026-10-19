@@ -40,7 +40,7 @@ pub fn rust_files(root: &Path) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-/// The words that start a skip message.
+/// The words that start a skip message, in any case.
 const SKIP_WORDS: [&str; 2] = ["skipping", "skipped"];
 
 /// Files that hold the skip words on purpose: the helper itself, and this
@@ -59,7 +59,7 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[(
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that
 /// `STEMYLA_REQUIRE` can make it a failure.  A problem is a string literal,
-/// plain or raw, that starts with `skipping` or `skipped`.  The files are
+/// plain or raw, that starts with `skipping` or `skipped`, in any case.  The files are
 /// tokenised, so comments, char literals such as `'"'`, raw strings and
 /// escapes cannot confuse the check.
 pub fn skips_use_the_helper(files: &[(String, String)]) -> Vec<Problem> {
@@ -88,7 +88,11 @@ fn skips_in(file: &str, text: &str) -> Vec<Problem> {
                     .any(|(path, literal, _)| *path == file && literal == value)
             })
             .filter_map(|(line, value)| {
-                let word = SKIP_WORDS.into_iter().find(|word| value.starts_with(word))?;
+                let word = SKIP_WORDS.into_iter().find_map(|word| {
+                    value
+                        .get(..word.len())
+                        .filter(|start| start.eq_ignore_ascii_case(word))
+                })?;
                 Some(Problem {
                     rule: "VERIFY-1",
                     file: file.to_string(),
@@ -172,6 +176,18 @@ mod tests {
             problems[0]
                 .message
                 .starts_with("VERIFY-1: engine/src/a.rs:1 prints \"skipped\" itself."),
+            "{}",
+            problems[0]
+        );
+    }
+
+    #[test]
+    fn a_skip_word_in_any_case_is_a_problem() {
+        let text = "fn f() {\n    eprintln!(\"Skipping: x\");\n    eprintln!(\"SKIPPED: x\");\n}\n";
+        let problems = check("a/tests/b.rs", text);
+        assert_eq!(lines(&problems), [Some(2), Some(3)]);
+        assert!(
+            problems[0].message.contains("prints \"Skipping\" itself."),
             "{}",
             problems[0]
         );
