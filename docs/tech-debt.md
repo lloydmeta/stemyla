@@ -6,11 +6,11 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ## Enforcement gaps
 
-### TD-1: CI never runs roformer-gpu's GPU-free tests
+### TD-1: only workgroup memory is checked statically
 
-`.github/workflows/ci.yml` runs `cargo test --workspace --exclude roformer-gpu`, which also drops the crate's unit tests that need no GPU, among them `workgroup_memory_within_defaults` and `sources_are_complete` (GPU-1) and the `net.rs` and `bench.rs` unit tests.
+`workgroup_memory_within_defaults` checks the workgroup memory of the generated kernels (GPU-1).  Nothing checks workgroup sizes, invocations per workgroup or buffers per stage before a kernel runs on a real adapter.  CI runs the crate's GPU-free tests since `plans/active/harness-phase-2.md` M1.
 
-* Fix: add `cargo test -p roformer-gpu --lib` to the `test` job; add a naga-based test that parses every generated shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
+* Fix: a naga-based test that parses every shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
 
 ### TD-2: dsp switches off every clippy lint
 

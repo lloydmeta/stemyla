@@ -65,7 +65,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan UPDATE_SNAPSHOTS=1 cargo test --workspace --exclude roformer-gpu` (software Vulkan for the UI tests, no image comparison, and no GPU kernel tests, which are never judged on software alone), then `git checkout app/tests/snapshots`.
+On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan UPDATE_SNAPSHOTS=1 cargo test --workspace --exclude roformer-gpu` (software Vulkan for the UI tests, no image comparison, and no GPU kernel tests, which are never judged on software alone), then `git checkout app/tests/snapshots`.  CI also runs `cargo test -p roformer-gpu --lib` and `cargo test -p roformer-gpu --doc`, which need no GPU.
 
 Model files, test fixtures, audio and stems live outside git (`.gitignore` keeps `third_party/`, `*.safetensors`, `*.wav` and `*.mp3` out): the weights have no stated licence and songs are copyrighted.  The tests that compare with PyTorch read their fixtures from `third_party/roformer/`.
 

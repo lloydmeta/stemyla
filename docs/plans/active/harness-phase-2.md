@@ -192,8 +192,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 ## Progress
 
 * [x] 2026-10-19: plan written.  Survey of the code, the CI workflow, wsola 0.1.0 and 0.2.0, and the docs for clippy, naga, egui_kittest and Claude Code hooks.
-* [ ] Plan reviewed by the maintainer.
-* [ ] M1: CI runs roformer-gpu's GPU-free tests and doctests.
+* [x] 2026-10-19: plan reviewed by the maintainer, who asked for M1.
+* [x] 2026-10-19: M1, CI runs roformer-gpu's GPU-free tests and doctests.  Locally: 14 lib tests and 2 doctests pass; `pad: 66` on `i64` fails `workgroup_memory_within_defaults` with "i64: 16640 bytes".  The CI log is still to be seen on the PR.
 * [ ] M2: naga limits test.
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.
