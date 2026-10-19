@@ -205,7 +205,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M1 implemented locally: CI runs roformer-gpu's GPU-free tests and doctests.  14 lib tests and 2 doctests pass (15 lib tests after the review added one).  `pad: 66` on `i64` fails `workgroup_memory_within_defaults` with "i64: 16640 bytes".
 * [x] 2026-10-19: M1 review: `sources_are_complete` missed 8 placeholders; it now finds any `{NAME}`.  Deleting the `{BM}` replace fails it with `i64: ["{BM}", "{BM}"]`.  Round 3: the scan's test now covers a name with a digit (`{SOFTMAX_1}`); a scan without digits fails it.
 * [x] 2026-10-19: M1, three review rounds done and their findings fixed.
-* [ ] M1: the CI log of the PR shows the new steps pass.
+* [x] 2026-10-19: M1, CI (PR #14, run 39199280124): the `test` job lists `workgroup_memory_within_defaults ... ok`, 15 lib tests and both `Rec` doctests.  The new steps took 67 s (`--lib`, mostly the wgpu rebuild) and 1 s (`--doc`).
 * [ ] M2: naga limits test.
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.
@@ -231,7 +231,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19: MEM-3's `compile_fail` doctest of `Rec` has never run in CI, since `--exclude roformer-gpu` drops doctests as well.
 * 2026-10-19: the shipped licence list (`THIRD-PARTY.md`) includes `hound`, `serde`, `serde_derive` and `serde_json`, pulled in only by `synth`'s file writers.
 * 2026-10-19: the chipmunk path also allocates in the callback (`dsp::double_speed`), not only the stretcher.
-* 2026-10-19, M1 review: `-p roformer-gpu` alone builds wgpu with fewer features than the workspace build, so the new CI steps rebuild wgpu, wgpu-core, wgpu-hal and naga.  The added time is not yet measured.
+* 2026-10-19, M1 review: `-p roformer-gpu` alone builds wgpu with fewer features than the workspace build, so the new CI steps rebuild wgpu, wgpu-core, wgpu-hal and naga.  On PR #14 it added 68 s to the `test` job.
 * 2026-10-19, M1 review: `sources_are_complete` listed 12 placeholder names by hand and missed 8 that the templates use (`{BM}`, `{BN}`, `{BK}`, `{TY}`, `{SB_LEN}`, `{S_ZERO}`, `{SOFTMAX_1}`, `{SOFTMAX_2}`).  A test that lists what to look for goes stale; it now scans for the pattern.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
