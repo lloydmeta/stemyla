@@ -212,7 +212,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M2, planted breaches in the real tree fail the test: z = 128 in `softmax.wgsl`, 5,000 floats in `rmsnorm.wgsl`, and `pad: 66` on `i64`.  naga counts 16,640 bytes for `i64`, as M1's hand count does.
 * [x] 2026-10-19: M2, TD-1 is the first closed ID.  `docs-check` now reads `## Closed` in `tech-debt.md` (maintainer's choice).  It found a stale `TD-1` in `docs/README.md`.
 * [x] 2026-10-19: M2 review round 1: 3 findings, all real and fixed with tests.  (1) A `## Closed` heading in any doc hid its IDs from the check; now only the ID files' sections are left out.  (2) "Closed but defined again" named the wrong file.  (3) The docs claimed every limit.  The test now checks `maxBindGroups`, and `every_layout_matches_its_shaders` ties the layouts to the shaders.  Planted: an extra `MATMUL_BINDS` entry and `@group(4)` in `softmax.wgsl` fail.
-* [ ] M2: review rounds 2 and 3.
+* [x] 2026-10-19: M2 review round 2: 7 findings, all real and fixed.  The `## Closed` bullets' text is now checked; only the opening ID is left out.  New tests cover values at each limit, every entry point and every file in `shaders/`.  The reviewer's 4 surviving mutants now fail: `>=` on buffers, `.take(1)` on entry points, `get_entry_point(0)`, and a new `.wgsl` file.  A message no longer computes `max - 1`, and the layout test's docs no longer claim that it reads `Kernels::new`.
+* [ ] M2: review round 3.
 * [ ] M2: PR opened (the maintainer asks for the push).
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.

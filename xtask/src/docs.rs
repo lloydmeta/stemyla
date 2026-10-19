@@ -713,16 +713,26 @@ fn closed_section(text: &str) -> impl Iterator<Item = &str> {
         .take_while(|l| !l.starts_with("## "))
 }
 
-/// `text` without its `## Closed` section, whose bullets name closed IDs on
-/// purpose.
-fn without_closed(text: &str) -> String {
+/// `text` without the `* ID:` that opens each bullet of its `## Closed`
+/// section, which names a closed ID on purpose.  The rest of each bullet
+/// is kept, so the IDs it names are checked.
+fn without_closed_ids(text: &str) -> String {
     let before = text.lines().take_while(|l| *l != CLOSED);
+    let closed = closed_section(text).map(|l| {
+        l.strip_prefix("* ")
+            .and_then(|bullet| bullet.split_once(':'))
+            .map_or(l, |(_, rest)| rest)
+    });
     let after = text
         .lines()
         .skip_while(|l| *l != CLOSED)
         .skip(1)
         .skip_while(|l| !l.starts_with("## "));
-    before.chain(after).collect::<Vec<_>>().join("\n")
+    before
+        .chain(closed)
+        .chain(after)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn defined_ids(files: &[(String, String)]) -> Ids {
@@ -828,12 +838,13 @@ fn ids_defined(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
         .collect()
 }
 
-/// The ID problems of one doc.  Only the ID files' `## Closed` sections
-/// may name closed IDs, so only they are left out; a `## Closed` heading
-/// in another doc is checked like any other section.
+/// The ID problems of one doc.  Only the bullets of the ID files'
+/// `## Closed` sections may open with a closed ID, so only that ID is left
+/// out; a `## Closed` heading in another doc is checked like any other
+/// section.
 fn id_references(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
     if ID_FILES.contains(&file) {
-        ids_defined(file, &without_closed(text), ids)
+        ids_defined(file, &without_closed_ids(text), ids)
     } else {
         ids_defined(file, text, ids)
     }
@@ -1497,8 +1508,8 @@ mod tests {
         assert!(ids.problems.is_empty(), "{:#?}", ids.problems);
         assert_eq!(ids.closed, BTreeSet::from(["TD-1".to_string()]));
         assert_eq!(
-            without_closed(tech_debt),
-            "## Gaps\n\n### TD-2: open\n\nsee TD-1\n\n## After\n\nTD-1 again"
+            without_closed_ids(tech_debt),
+            "## Gaps\n\n### TD-2: open\n\nsee TD-1\n\n\n closed by `a_test`.\n\n## After\n\nTD-1 again"
         );
 
         let text = "closes TD-1, keeps TD-2, not TD-3";
@@ -1519,18 +1530,19 @@ mod tests {
             "see TD-1\n\n## Closed\n",
             "## Closed\n\n## After\n\nTD-1 again",
         ] {
-            let outside_closed = ids_defined("docs/tech-debt.md", &without_closed(text), &ids);
+            let outside_closed = ids_defined("docs/tech-debt.md", &without_closed_ids(text), &ids);
             assert_eq!(outside_closed.len(), 1, "{text:?}: {outside_closed:#?}");
         }
         let inside_closed = ids_defined(
             "docs/tech-debt.md",
-            &without_closed("## Closed\n\n* TD-1: x\n"),
+            &without_closed_ids("## Closed\n\n* TD-1: x\n"),
             &ids,
         );
         assert!(inside_closed.is_empty(), "{inside_closed:#?}");
     }
 
-    /// Only the ID files' `## Closed` sections are left out of the check.
+    /// Only the opening ID of each bullet in the ID files' `## Closed`
+    /// sections is left out of the check.
     #[test]
     fn a_closed_section_elsewhere_is_checked() {
         let ids = defined_ids(&[(
@@ -1545,7 +1557,11 @@ mod tests {
             .collect();
         assert_eq!(named, ["TD-1", "TD-99"]);
         let in_tech_debt = id_references("docs/tech-debt.md", text, &ids);
-        assert!(in_tech_debt.is_empty(), "{in_tech_debt:#?}");
+        let named: Vec<&str> = in_tech_debt
+            .iter()
+            .map(|p| p.message.split('`').nth(1).unwrap())
+            .collect();
+        assert_eq!(named, ["TD-99"], "the bullet's text is checked");
     }
 
     /// Every ID prefix is still checked when all its IDs are closed.

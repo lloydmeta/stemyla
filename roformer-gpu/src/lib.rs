@@ -2078,8 +2078,7 @@ mod tests {
             .collect();
         if let Some(&group) = groups.iter().find(|&&g| g >= max) {
             breaches.push(format!(
-                "GPU-1: {name} uses @group({group}), over maxBindGroups ({max}: groups 0 to {}).  Fix: move the binding into a lower group; {LIMITS_DOC}.",
-                max - 1
+                "GPU-1: {name} uses @group({group}), over maxBindGroups ({max}).  Fix: use a group number below {max}; {LIMITS_DOC}."
             ));
         }
 
@@ -2161,22 +2160,52 @@ mod tests {
         assert_eq!(checked, [256, 256, 64, 256, 16_384, 8, 12, 4]);
     }
 
+    /// The shader files that are compiled as they are.
+    const SHADER_FILES: [(&str, &str); 3] = [
+        ("softmax.wgsl", include_str!("shaders/softmax.wgsl")),
+        ("rmsnorm.wgsl", include_str!("shaders/rmsnorm.wgsl")),
+        ("elementwise.wgsl", include_str!("shaders/elementwise.wgsl")),
+    ];
+
+    /// The shader files that [`generated_sources`] covers: three
+    /// templates, and `matmul.wgsl`, which is `s64`'s source.
+    const GENERATED_FROM: [&str; 4] = [
+        "matmul_interleaved.wgsl",
+        "matmul_vec4.wgsl",
+        "attention_tiled.wgsl",
+        "matmul.wgsl",
+    ];
+
+    /// Every file in `src/shaders/` is checked, as it is or through a
+    /// generated source, so a new shader cannot be left out.
+    #[test]
+    fn every_shader_file_is_checked() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("shaders folder")
+            .map(|e| e.expect("entry").file_name().into_string().expect("UTF-8"))
+            .filter(|f| f.ends_with(".wgsl"))
+            .collect();
+        on_disk.sort();
+        let mut checked: Vec<String> = SHADER_FILES
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(GENERATED_FROM)
+            .map(String::from)
+            .collect();
+        checked.sort();
+        assert_eq!(on_disk, checked);
+        let s64 = TILES.iter().find(|t| t.hand_written).expect("s64");
+        assert_eq!(s64.source(), include_str!("shaders/matmul.wgsl"));
+    }
+
     /// Every shader the GPU compiles fits WebGPU's default limits (GPU-1):
-    /// the generated sources, and the shader files that are not
-    /// templates.  `matmul_interleaved.wgsl`, `matmul_vec4.wgsl` and
-    /// `attention_tiled.wgsl` are templates; their generated sources are
-    /// checked instead.
+    /// the generated sources, and [`SHADER_FILES`].
     #[test]
     fn every_kernel_fits_the_default_limits() {
-        let files = [
-            ("softmax.wgsl", include_str!("shaders/softmax.wgsl")),
-            ("rmsnorm.wgsl", include_str!("shaders/rmsnorm.wgsl")),
-            ("elementwise.wgsl", include_str!("shaders/elementwise.wgsl")),
-        ];
         let all: Vec<_> = generated_sources()
-            .chain(files.map(|(name, src)| (name, src.to_string())))
+            .chain(SHADER_FILES.map(|(name, src)| (name, src.to_string())))
             .collect();
-        assert_eq!(all.len(), TILES.len() + 1 + files.len());
         let limits = wgpu::Limits::defaults();
         let breaches: Vec<String> = all
             .iter()
@@ -2236,7 +2265,7 @@ mod tests {
         assert_eq!(breaches.len(), 1, "{breaches:#?}");
         assert!(
             breaches[0].starts_with(
-                "GPU-1: groups uses @group(4), over maxBindGroups (4: groups 0 to 3).  Fix: "
+                "GPU-1: groups uses @group(4), over maxBindGroups (4).  Fix: use a group number below 4"
             ),
             "{}",
             breaches[0]
@@ -2277,10 +2306,12 @@ mod tests {
         binds.into_iter().map(|(_, bind)| bind).collect()
     }
 
-    /// Each layout in `Kernels::new` binds exactly what its shaders
-    /// declare, so the module-wide buffer counts in [`limit_breaches`]
-    /// are the counts of the pipeline layouts.  The entry points that
-    /// `Kernels::new` names exist.
+    /// Each bind list binds exactly what the shaders it is paired with here
+    /// declare, so the module-wide buffer counts in [`limit_breaches`] are
+    /// the counts of the lists.  The test pairs them as `Kernels::new`
+    /// does, but does not read it: only wgpu's validation sees a pipeline
+    /// given the wrong list.  The entry points that `Kernels::new` names
+    /// exist.
     #[test]
     fn every_layout_matches_its_shaders() {
         let file = |src: &str| src.to_string();
@@ -2355,6 +2386,63 @@ mod tests {
             breaches[0].contains("16400 bytes of workgroup storage"),
             "{}",
             breaches[0]
+        );
+    }
+
+    /// A value equal to its limit passes: 64 on z, 256 on x and y, 256
+    /// invocations, 16,384 bytes, 8 storage and 12 uniform buffers, group 3.
+    #[test]
+    fn values_at_the_limits_pass() {
+        let limits = wgpu::Limits::defaults();
+        let storage: String = (0..8)
+            .map(|i| {
+                format!("@group(0) @binding({i}) var<storage, read_write> s{i}: array<f32>;\n")
+            })
+            .collect();
+        let uniform: String = (0..12)
+            .map(|i| format!("@group(3) @binding({i}) var<uniform> u{i}: vec4<f32>;\n"))
+            .collect();
+        let src = format!(
+            "{storage}{uniform}
+            var<workgroup> w: array<f32, 4096>;
+            @compute @workgroup_size(4, 1, 64) fn z() {{ w[0] = s0[0]; _ = u0; }}
+            @compute @workgroup_size(256, 1, 1) fn x() {{ w[0] = 1.0; }}
+            @compute @workgroup_size(1, 256, 1) fn y() {{ w[0] = 1.0; }}"
+        );
+        assert_eq!(
+            limit_breaches("at limits", &src, &limits),
+            Vec::<String>::new()
+        );
+        let over = src.replace("array<f32, 4096>", "array<f32, 4097>");
+        assert_eq!(
+            limit_breaches("over", &over, &limits).len(),
+            3,
+            "one per entry point"
+        );
+    }
+
+    /// Each entry point is checked with its own workgroup size and the
+    /// workgroup variables it uses, not only the first.
+    #[test]
+    fn every_entry_point_is_checked() {
+        let limits = wgpu::Limits::defaults();
+        let src = "
+            var<workgroup> small: array<f32, 16>;
+            var<workgroup> big: array<f32, 5000>;
+            @compute @workgroup_size(64) fn first() { small[0] = 1.0; }
+            @compute @workgroup_size(1, 1, 128) fn second() { big[0] = 1.0; }
+        ";
+        let breaches = limit_breaches("two", src, &limits);
+        assert_eq!(breaches.len(), 2, "{breaches:#?}");
+        assert!(
+            breaches[0].starts_with("GPU-1: two `second`: workgroup size z is 128"),
+            "{}",
+            breaches[0]
+        );
+        assert!(
+            breaches[1].starts_with("GPU-1: two `second`: 20000 bytes of workgroup storage"),
+            "{}",
+            breaches[1]
         );
     }
 
