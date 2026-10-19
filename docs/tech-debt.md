@@ -6,12 +6,6 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ## Enforcement gaps
 
-### TD-1: only the matmul and attention kernels' workgroup memory is checked statically
-
-`workgroup_memory_within_defaults` checks the workgroup memory of every `TILES` kernel (the hand-written `matmul.wgsl` among them) and of fused attention (GPU-1).  It does not check `softmax.wgsl` or `rmsnorm.wgsl`.  Nothing checks workgroup sizes, invocations per workgroup or buffers per stage before a kernel runs on a real adapter.  CI runs the crate's GPU-free tests since `plans/active/harness-phase-2.md` M1.
-
-* Fix: a naga-based test that parses every shader and asserts the limits in `references/webgpu-limits.md` (workgroup z is 64, not 256).
-
 ### TD-2: dsp switches off every clippy lint
 
 `dsp/src/lib.rs` has `#![allow(clippy::all)]`, which turns off the correctness and performance groups as well as style, and silences `disallowed_methods` (DSP-1).
@@ -151,3 +145,7 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 * does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
 * Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings; in phase 5, the other ruleset changes.
+
+## Closed
+
+* TD-1: closed by `every_kernel_fits_the_default_limits` (harness phase 2, M2).  It checks every shader against the default limits with naga (GPU-1).

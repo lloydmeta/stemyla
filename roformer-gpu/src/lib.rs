@@ -1965,16 +1965,314 @@ mod tests {
         assert!(template.contains(&"{BM}"), "{template:?}");
     }
 
+    /// Every generated source, by name: each entry of [`TILES`] (`s64` is
+    /// `matmul.wgsl`) and fused attention.
+    fn generated_sources() -> impl Iterator<Item = (&'static str, String)> {
+        TILES
+            .iter()
+            .map(|t| (t.name, t.source()))
+            .chain(std::iter::once(("attention", attention_source())))
+    }
+
     /// The generated sources have every placeholder filled.
     #[test]
     fn sources_are_complete() {
-        let all = TILES
-            .iter()
-            .map(|t| (t.name, t.source()))
-            .chain(std::iter::once(("attention", attention_source())));
-        for (name, src) in all {
+        for (name, src) in generated_sources() {
             let unfilled = unfilled_placeholders(&src);
             assert!(unfilled.is_empty(), "{name}: {unfilled:?}");
+        }
+    }
+
+    const LIMITS_DOC: &str = "see docs/references/webgpu-limits.md";
+
+    /// The GPU-1 breaches in one shader, as messages that name the limit
+    /// and the fix.  Per entry point: each workgroup size axis, the
+    /// invocations per workgroup, and the workgroup storage.  Workgroup
+    /// storage is counted as WebGPU counts it: each `var<workgroup>` that
+    /// the entry point statically uses, rounded up to 16 bytes.  Storage
+    /// and uniform buffers are counted over the whole module, because
+    /// `Kernels::new` gives a module's pipelines one layout with every
+    /// binding the module declares.
+    fn limit_breaches(name: &str, src: &str, limits: &wgpu::Limits) -> Vec<String> {
+        let module = match naga::front::wgsl::parse_str(src) {
+            Ok(module) => module,
+            Err(e) => {
+                let error = e.emit_to_string_with_path(src, name);
+                return vec![format!(
+                    "GPU-1: {name} does not parse, so its limits are not checked:\n{error}Fix: correct the WGSL."
+                )];
+            }
+        };
+        if !module.overrides.is_empty() {
+            return vec![format!(
+                "GPU-1: {name} declares an `override`, so its sizes are not known before pipeline creation.  Fix: use `const`, so this test can check them."
+            )];
+        }
+        let info = match naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        {
+            Ok(info) => info,
+            Err(e) => {
+                let error = e.emit_to_string_with_path(src, name);
+                return vec![format!(
+                    "GPU-1: {name} is not valid WGSL, so its limits are not checked:\n{error}Fix: correct the WGSL."
+                )];
+            }
+        };
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("a validated module has a layout");
+
+        let mut breaches = Vec::new();
+        let buffers = [
+            (
+                "storage",
+                "maxStorageBuffersPerShaderStage",
+                limits.max_storage_buffers_per_shader_stage,
+            ),
+            (
+                "uniform",
+                "maxUniformBuffersPerShaderStage",
+                limits.max_uniform_buffers_per_shader_stage,
+            ),
+        ];
+        for (kind, limit, max) in buffers {
+            let count = module
+                .global_variables
+                .iter()
+                .filter(|(_, g)| match g.space {
+                    naga::AddressSpace::Storage { .. } => kind == "storage",
+                    naga::AddressSpace::Uniform => kind == "uniform",
+                    _ => false,
+                })
+                .count();
+            if count > max as usize {
+                breaches.push(format!(
+                    "GPU-1: {name} declares {count} {kind} buffers, over {limit} ({max}).  Fix: bind fewer buffers (pack them into one, or split the kernel); {LIMITS_DOC}."
+                ));
+            }
+        }
+
+        let compute = module
+            .entry_points
+            .iter()
+            .enumerate()
+            .filter(|(_, ep)| ep.stage == naga::ShaderStage::Compute);
+        for (index, ep) in compute {
+            let entry = format!("{name} `{}`", ep.name);
+            let axes = [
+                (
+                    "x",
+                    "maxComputeWorkgroupSizeX",
+                    limits.max_compute_workgroup_size_x,
+                ),
+                (
+                    "y",
+                    "maxComputeWorkgroupSizeY",
+                    limits.max_compute_workgroup_size_y,
+                ),
+                (
+                    "z",
+                    "maxComputeWorkgroupSizeZ",
+                    limits.max_compute_workgroup_size_z,
+                ),
+            ];
+            for ((axis, limit, max), size) in axes.into_iter().zip(ep.workgroup_size) {
+                if size > max {
+                    breaches.push(format!(
+                        "GPU-1: {entry}: workgroup size {axis} is {size}, over {limit} ({max}).  Fix: lower @workgroup_size, or move the work to another axis or a loop; {LIMITS_DOC}."
+                    ));
+                }
+            }
+
+            let invocations: u64 = ep.workgroup_size.iter().map(|&s| u64::from(s)).product();
+            let max = limits.max_compute_invocations_per_workgroup;
+            if invocations > u64::from(max) {
+                let [x, y, z] = ep.workgroup_size;
+                breaches.push(format!(
+                    "GPU-1: {entry}: {x} * {y} * {z} = {invocations} invocations per workgroup, over maxComputeInvocationsPerWorkgroup ({max}).  Fix: lower @workgroup_size so that x * y * z is at most {max}; {LIMITS_DOC}."
+                ));
+            }
+
+            let uses = info.get_entry_point(index);
+            let bytes: u64 = module
+                .global_variables
+                .iter()
+                .filter(|(handle, g)| {
+                    g.space == naga::AddressSpace::WorkGroup && !uses[*handle].is_empty()
+                })
+                .map(|(_, g)| u64::from(layouter[g.ty].size.next_multiple_of(16)))
+                .sum();
+            let max = limits.max_compute_workgroup_storage_size;
+            if bytes > u64::from(max) {
+                breaches.push(format!(
+                    "GPU-1: {entry}: {bytes} bytes of workgroup storage, over maxComputeWorkgroupStorageSize ({max}).  Fix: shrink the var<workgroup> arrays (smaller tiles or less padding); {LIMITS_DOC}."
+                ));
+            }
+        }
+        breaches
+    }
+
+    /// The device is opened with these limits, and
+    /// `references/webgpu-limits.md` gives the same numbers.
+    #[test]
+    fn default_limits_match_the_reference() {
+        let l = wgpu::Limits::defaults();
+        let checked = [
+            l.max_compute_workgroup_size_x,
+            l.max_compute_workgroup_size_y,
+            l.max_compute_workgroup_size_z,
+            l.max_compute_invocations_per_workgroup,
+            l.max_compute_workgroup_storage_size,
+            l.max_storage_buffers_per_shader_stage,
+            l.max_uniform_buffers_per_shader_stage,
+        ];
+        assert_eq!(checked, [256, 256, 64, 256, 16_384, 8, 12]);
+    }
+
+    /// Every shader the GPU compiles fits WebGPU's default limits (GPU-1):
+    /// the generated sources, and the shader files that are not
+    /// templates.  `matmul_interleaved.wgsl`, `matmul_vec4.wgsl` and
+    /// `attention_tiled.wgsl` are templates; their generated sources are
+    /// checked instead.
+    #[test]
+    fn every_kernel_fits_the_default_limits() {
+        let files = [
+            ("softmax.wgsl", include_str!("shaders/softmax.wgsl")),
+            ("rmsnorm.wgsl", include_str!("shaders/rmsnorm.wgsl")),
+            ("elementwise.wgsl", include_str!("shaders/elementwise.wgsl")),
+        ];
+        let all: Vec<_> = generated_sources()
+            .chain(files.map(|(name, src)| (name, src.to_string())))
+            .collect();
+        assert_eq!(all.len(), TILES.len() + 1 + files.len());
+        let limits = wgpu::Limits::defaults();
+        let breaches: Vec<String> = all
+            .iter()
+            .flat_map(|(name, src)| limit_breaches(name, src, &limits))
+            .collect();
+        assert!(breaches.is_empty(), "{}", breaches.join("\n"));
+    }
+
+    /// Planted breaches: each is reported once, with the limit's name and
+    /// GPU-1.
+    #[test]
+    fn limit_breaches_are_reported() {
+        let limits = wgpu::Limits::defaults();
+        let planted = "
+            var<workgroup> big: array<f32, 5000>;
+            @compute @workgroup_size(1, 1, 128)
+            fn main(@builtin(local_invocation_index) i: u32) { big[i] = 0.0; }
+        ";
+        let breaches = limit_breaches("planted", planted, &limits);
+        assert_eq!(breaches.len(), 2, "{breaches:#?}");
+        assert!(breaches[0].starts_with("GPU-1: planted `main`: workgroup size z is 128, over maxComputeWorkgroupSizeZ (64).  Fix: "), "{}", breaches[0]);
+        assert!(breaches[1].starts_with("GPU-1: planted `main`: 20000 bytes of workgroup storage, over maxComputeWorkgroupStorageSize (16384).  Fix: "), "{}", breaches[1]);
+
+        let wide = "
+            @compute @workgroup_size(512, 2, 1)
+            fn main() {}
+        ";
+        let breaches = limit_breaches("wide", wide, &limits);
+        assert_eq!(breaches.len(), 2, "{breaches:#?}");
+        assert!(breaches[0].contains("x is 512, over maxComputeWorkgroupSizeX (256)"));
+        assert!(breaches[1].contains("512 * 2 * 1 = 1024 invocations per workgroup, over maxComputeInvocationsPerWorkgroup (256)"));
+
+        let square = "
+            @compute @workgroup_size(16, 32, 1)
+            fn main() {}
+        ";
+        let breaches = limit_breaches("square", square, &limits);
+        assert_eq!(breaches.len(), 1, "{breaches:#?}");
+        assert!(breaches[0].contains("maxComputeInvocationsPerWorkgroup (256)"));
+        assert!(
+            breaches
+                .iter()
+                .all(|b| b.starts_with("GPU-1: ") && b.contains("Fix: "))
+        );
+    }
+
+    /// WebGPU counts each workgroup variable rounded up to 16 bytes, and
+    /// only the ones the entry point uses, also through a function it calls.
+    #[test]
+    fn workgroup_storage_is_counted_as_webgpu_counts_it() {
+        let limits = wgpu::Limits::defaults();
+        let shader = |used_by_main: &str| {
+            format!(
+                "
+                var<workgroup> a: array<f32, 4093>; // 16,372 bytes, 16,384 rounded up
+                var<workgroup> b: f32;              // 4 bytes, 16 rounded up
+                var<workgroup> unused: array<f32, 4096>;
+                fn touch_b() {{ b = 1.0; }}
+                @compute @workgroup_size(64)
+                fn main() {{ a[0] = 1.0; {used_by_main} }}
+                "
+            )
+        };
+        assert_eq!(
+            limit_breaches("a", &shader(""), &limits),
+            Vec::<String>::new()
+        );
+        let breaches = limit_breaches("a and b", &shader("touch_b();"), &limits);
+        assert_eq!(breaches.len(), 1, "{breaches:#?}");
+        assert!(
+            breaches[0].contains("16400 bytes of workgroup storage"),
+            "{}",
+            breaches[0]
+        );
+    }
+
+    #[test]
+    fn too_many_buffers_are_reported() {
+        let limits = wgpu::Limits::defaults();
+        let storage: String = (0..9)
+            .map(|i| {
+                format!("@group(0) @binding({i}) var<storage, read_write> s{i}: array<f32>;\n")
+            })
+            .collect();
+        let uniform: String = (0..13)
+            .map(|i| format!("@group(1) @binding({i}) var<uniform> u{i}: vec4<f32>;\n"))
+            .collect();
+        let src = format!("{storage}{uniform}@compute @workgroup_size(1) fn main() {{}}");
+        let breaches = limit_breaches("buffers", &src, &limits);
+        assert_eq!(breaches.len(), 2, "{breaches:#?}");
+        assert!(breaches[0].starts_with("GPU-1: buffers declares 9 storage buffers, over maxStorageBuffersPerShaderStage (8).  Fix: "));
+        assert!(breaches[1].starts_with("GPU-1: buffers declares 13 uniform buffers, over maxUniformBuffersPerShaderStage (12).  Fix: "));
+    }
+
+    /// A shader the checker cannot size fails, so it never passes unchecked.
+    #[test]
+    fn unchecked_shaders_fail() {
+        let limits = wgpu::Limits::defaults();
+        let cases = [
+            (
+                "template",
+                include_str!("shaders/matmul_interleaved.wgsl"),
+                "does not parse",
+            ),
+            (
+                "invalid",
+                "@compute @workgroup_size(1) fn main(@builtin(vertex_index) i: u32) {}",
+                "is not valid WGSL",
+            ),
+            (
+                "override",
+                "override n: u32 = 64; @compute @workgroup_size(n) fn main() {}",
+                "declares an `override`",
+            ),
+        ];
+        for (name, src, want) in cases {
+            let breaches = limit_breaches(name, src, &limits);
+            assert_eq!(breaches.len(), 1, "{name}: {breaches:#?}");
+            assert!(
+                breaches[0].starts_with(&format!("GPU-1: {name} {want}")),
+                "{}",
+                breaches[0]
+            );
         }
     }
 

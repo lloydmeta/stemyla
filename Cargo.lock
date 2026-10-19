@@ -6686,6 +6686,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "futures-channel",
+ "naga 30.0.1",
  "pollster",
  "roformer",
  "safetensors 0.7.0",

@@ -41,7 +41,7 @@ Terms:
 * Each check's message names the rule ID and the fix, as `docs-check` does: `LAYER-1: app depends on roformer-gpu.  Fix: ...`.
 * Each check has a unit test with a planted breach that fails, and runs on the real tree.
 * The PR updates the rule's `* Enforced by:` line in `invariants.md` to name the new test.  `docs-check` confirms the test exists.
-* The PR deletes a closed `tech-debt.md` entry, or narrows a partly closed one.  A new breach that the check finds and the PR does not fix gets an `#[expect(..., reason = "TD-n: ...")]` and a tech-debt entry.
+* The PR deletes a closed `tech-debt.md` entry and adds its ID under `## Closed`, or narrows a partly closed one.  A new breach that the check finds and the PR does not fix gets an `#[expect(..., reason = "TD-n: ...")]` and a tech-debt entry.
 * The PR adds the sensor to the components table in `docs/harness.md`, and updates `docs/working-with-agents.md` when a person's work changes.
 * Before each commit: fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass (GIT-2).  Each commit is signed.
 * After implementing: three review rounds, each by a new subagent with fresh context.  Verify each finding, then fix real ones with tests.
@@ -172,7 +172,7 @@ Terms:
 
 ### M18: the breaches the checks found (TD-12, TD-13, TD-14, TD-17)
 
-One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the fix, and deletes the tech-debt entry.
+One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the fix, and closes the tech-debt entry (`## Closed`).
 
 * TD-13: keep the `Uint8Array` in `Event::Mp3`; a browser test asserts that no copy is made.
 * TD-14: interleave from the JS arrays in blocks; a test bounds the worker's memory during an encode.
@@ -207,7 +207,12 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M1, three review rounds done and their findings fixed.
 * [x] 2026-10-19: M1, CI (PR #14, run 39199280124): the `test` job lists `workgroup_memory_within_defaults ... ok`, 15 lib tests and both `Rec` doctests.  The new steps took 67 s (`--lib`, mostly the wgpu rebuild) and 1 s (`--doc`).
 * [x] 2026-10-19: M1, PR #14 merged by the maintainer (with the plan).
-* [ ] M2: naga limits test.
+* [x] 2026-10-19: M2 implemented locally.  naga 30.0.1 is a dev-dependency with `wgsl-in`.  `cargo tree` and `Cargo.lock` show no new crate (936 packages before and after).  wgpu already turns on `wgsl-in`.
+* [x] 2026-10-19: M2, `every_kernel_fits_the_default_limits` passes on 7 sources: 4 tiles, attention, `softmax.wgsl`, `rmsnorm.wgsl` and `elementwise.wgsl`.  The planted shader (`@workgroup_size(1, 1, 128)`, 20,000 bytes) gives exactly two breaches.  Each names the limit, GPU-1 and the fix.
+* [x] 2026-10-19: M2, planted breaches in the real tree fail the test: z = 128 in `softmax.wgsl`, 5,000 floats in `rmsnorm.wgsl`, and `pad: 66` on `i64`.  naga counts 16,640 bytes for `i64`, as M1's hand count does.
+* [x] 2026-10-19: M2, TD-1 is the first closed ID.  `docs-check` now reads `## Closed` in `tech-debt.md` (maintainer's choice).  It found a stale `TD-1` in `docs/README.md`.
+* [ ] M2: three review rounds.
+* [ ] M2: PR opened (the maintainer asks for the push).
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.
@@ -236,6 +241,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, M1 review: `-p roformer-gpu` alone builds wgpu with fewer features than the workspace build, so the new CI steps rebuild wgpu, wgpu-core, wgpu-hal and naga.  On PR #14 it added 68 s to the `test` job.
 * 2026-10-19: the docs said `browser tests (Chrome)` was not a required check, and the agent repeated it to the maintainer.  The ruleset had required it since 03:36 UTC that day.  Ruleset facts in docs go stale; check them with `gh api` before stating them.
 * 2026-10-19, M1 review: `sources_are_complete` listed 12 placeholder names by hand and missed 8 that the templates use (`{BM}`, `{BN}`, `{BK}`, `{TY}`, `{SB_LEN}`, `{S_ZERO}`, `{SOFTMAX_1}`, `{SOFTMAX_2}`).  A test that lists what to look for goes stale; it now scans for the pattern.
+* 2026-10-19, M2: deleting TD-1 made `docs-check` fail on each `TD-1` in the plans.  It checks every ID token in every Markdown file, plans included.  Every later milestone closes an ID, so it needed a rule for closed IDs.
+* 2026-10-19, M2: WebGPU counts each `var<workgroup>` rounded up to 16 bytes, and only the ones the entry point statically uses ([compute pipeline creation](https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcomputepipeline)).  The text count in `workgroup_memory_within_defaults` does neither; the tiles here are multiples of 16, so the counts agree.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
 ## Decision log
@@ -247,6 +254,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, agent: hooks are an `xtask hook` command in Rust, not shell scripts, so their decisions have unit tests (VERIFY-1).  The cost is that a hook does not block when `xtask` fails to build; CI tests stay the controls.
 * 2026-10-19, agent: the structural checks are tests in `xtask/tests/rules.rs`, with no new `xtask` command, so CI runs them without a workflow change.
 * 2026-10-19, agent: the test-removal guard uses a PR label, set by a person, not text in the PR body, which the author controls.
+* 2026-10-19, maintainer: a closed tech-debt ID moves to a `## Closed` bullet with what closed it.  `docs-check` allows it only in plans and decisions, and fails it if it is defined again.  The rejected options: exempt plans and decisions from the ID check (loses typo checks), or reword each reference (loses the history).
+* 2026-10-19, agent (M2): the limits test counts buffers over the whole module, not per entry point.  `Kernels::new` gives each module one layout with every binding it declares.  The per-entry-point count is lower, so it can pass a layout that fails.
+* 2026-10-19, agent (M2): a shader that does not parse or validate, or that declares an `override`, fails the limits test.  Otherwise it would pass without a check.
 * 2026-10-19, agent: `cargo deny`, TD-16's field and version checks, and TD-10 (GPU-3) stay out of phase 2; the phase plan does not list them.
 
 ## Outcomes and retrospective
