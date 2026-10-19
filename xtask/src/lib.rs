@@ -7,6 +7,7 @@ pub mod e2e;
 pub mod metrics;
 pub mod publish;
 pub mod roformer_cli;
+pub mod rules;
 pub mod separate;
 pub mod serve;
 pub mod web_test;

@@ -9835,6 +9835,7 @@ dependencies = [
  "engine",
  "half",
  "hound",
+ "proc-macro2",
  "roformer",
  "rusty_mp3",
  "safetensors 0.7.0",
