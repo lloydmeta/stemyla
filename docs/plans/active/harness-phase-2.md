@@ -630,7 +630,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M4 review round 2: no blockers and no should-fix items; 2 nits, both real and fixed.  (1) Matching `synth` by prefix in the children check passed every test; the `synthx` line in `a_tree_without_synth_is_a_problem` now has a child, and that mutant fails.  (2) The plan still said 10 unit tests; it lists the 11th and says 11.
 * [x] 2026-10-20: M4 review round 3: no blockers; 1 should-fix and 4 nits, all checked.  The should-fix was real: without `--target wasm32-unknown-unknown`, `stem-worker`'s tree is its root line alone and passes every check, so a breach in the worker passed.  A tree with no `wasm-bindgen` at depth 1 is now a problem.  With the target removed, the real-tree test fails for both trees.  `a_tree_without_wasm_bindgen_is_a_problem` fails a mutant without the check and a mutant that accepts any depth.  Two nits were test gaps (`synth_seen` read from the last tree only, a root on any line); both mutants now fail.  One nit (equivalent mutants) needed no change.  The plan now quotes decision 0004's sentence on `app_bg.wasm`.
 * [x] 2026-10-20: M4, three review rounds done and their findings fixed.
-* [ ] M4: PR opened.  CI's `test` job lists the new test, and the `clippy` job runs the three new steps.
+* [x] 2026-10-20: M4: PR #17 opened.  CI (run 39331145364): every job passes.  The `test` job lists `synth_brings_no_crate_into_the_web_app ... ok`; 43 test results, none failed.  The `clippy` job runs the three new steps.
+  * Step times: `-p synth --all-targets` under 1 s, `-p app` 1m30s, `-p app --all-targets` 22 s.  So the steps add 1m52s, against the plan's estimate of about 100 s locally.
+  * The `clippy` job took 5m22s, against 3m35s on `main` (run 39248866763).  In this run it is the longest job, 31 s more than `test` (4m51s).
 * [x] 2026-10-20: M4, decision 0004 accepted by the maintainer.
 * [ ] M4: PR merged by the maintainer.
 * [ ] M5: layering test.
