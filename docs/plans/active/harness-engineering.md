@@ -119,7 +119,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, review rounds 1 and 2: their findings fixed with tests.
 * [x] 2026-10-19: phase 1, `docs/working-with-agents.md`, and a `docs-check` rule that it names every tool.
 * [x] 2026-10-19: phase 1, review round 3: its findings fixed with tests.
-* [ ] Phase 1: PR, merged by the maintainer.
+* [x] 2026-10-19: phase 1, PR #13 merged by the maintainer.
 * [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
 * [ ] Phase 2.
 * [ ] Phase 3.
