@@ -134,10 +134,10 @@ async fn an_output_left_behind_by_a_busy_page_is_replaced() {
 
 /// Needs a running audio context too (see above).  A page blocked for a
 /// second leaves cpal's schedule a second behind, which it closes at one
-/// second a second; the buffers in that time are silent, not rendered on
-/// top of each other.
+/// second a second by calling back two buffers at once; one of each pair
+/// is rendered, so the song goes on at its own speed, not doubled.
 #[wasm_bindgen_test]
-async fn buffers_left_late_by_a_busy_page_are_silent_then_play_again() {
+async fn buffers_left_late_by_a_busy_page_play_once_not_doubled() {
     let mut app = StemApp::default();
     app.open_song(song(44_100));
     sleep(300).await;
@@ -146,15 +146,45 @@ async fn buffers_left_late_by_a_busy_page_are_silent_then_play_again() {
         console_log!("skipped: the audio context is suspended");
         return;
     }
-    let before = callbacks(&app);
     busy(1_000);
-    sleep(400).await;
-    let while_late = callbacks(&app) - before;
-    sleep(1_500).await;
-    let after = callbacks(&app) - before - while_late;
+    let (before, from) = (callbacks(&app), clock(&app));
+    sleep(500).await;
+    let rendered = callbacks(&app) - before;
+    let buffers = (clock(&app) - from).as_secs_f64() / (2_048.0 / 44_100.0);
+    assert!(buffers > 5.0, "the clock ran for {buffers:.1} buffers");
     assert!(
-        while_late <= 2,
-        "{while_late} late buffers rendered (about 17 at double speed)"
+        (buffers / 2.0..=buffers * 1.5).contains(&(rendered as f64)),
+        "{rendered} rendered in {buffers:.1} buffers' time (twice as many doubled)"
     );
-    assert!(after > 10, "then it plays again: {after} buffers rendered");
+}
+
+/// A page that keeps its thread busy for longer than two buffers at a time
+/// (as a slow phone, or Chrome drawing without a GPU, can while a song
+/// plays) leaves cpal's schedule further behind with every frame, so it
+/// never catches up.  The song must still play then, not stay silent.
+#[wasm_bindgen_test]
+async fn a_page_too_busy_for_the_schedule_to_catch_up_still_plays() {
+    let mut app = StemApp::default();
+    app.open_song(song(44_100));
+    sleep(300).await;
+    if clock(&app).is_zero() {
+        assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
+        console_log!("skipped: the audio context is suspended");
+        return;
+    }
+    let frames = |n| async move {
+        for _ in 0..n {
+            busy(150);
+            sleep(0).await;
+        }
+    };
+    frames(10).await;
+    let before = callbacks(&app);
+    frames(10).await;
+    let rendered = callbacks(&app) - before;
+    // One of the two buffers called back each frame.
+    assert!(
+        (5..=13).contains(&rendered),
+        "{rendered} buffers rendered in 1.5 s of 150 ms frames"
+    );
 }
