@@ -12,7 +12,7 @@ Make agents productive and correct in this repo without the maintainer re-explai
 * The agent needs a way to verify its own work, and a separate, sceptical evaluator, since agents grade their own work too kindly.
 * The harness grows from observed failures, and parts are removed when models no longer need them.
 
-The evidence behind these is uneven.  Measured: context degrades with length ([Chroma](https://www.trychroma.com/research/context-rot)); context files help little and cost about 20% more tokens ([arXiv 2602.11988](https://arxiv.org/abs/2602.11988v1)); a harness change alone moved one benchmark from 52.8% to 66.5% ([LangChain](https://blog.langchain.com/improving-deep-agents-with-harness-engineering)).  The large productivity figures are self-reported case studies.  Hence a bias, in every phase, towards deterministic sensors over more prose.
+The evidence behind these is uneven.  Measured: context degrades with length ([Chroma](https://www.trychroma.com/research/context-rot)); context files tend to lower task success and add over 20% to cost ([arXiv 2602.11988](https://arxiv.org/abs/2602.11988v1)); a harness change alone moved one benchmark from 52.8% to 66.5% ([LangChain](https://blog.langchain.com/improving-deep-agents-with-harness-engineering)).  The large productivity figures are self-reported case studies.  Hence a bias, in every phase, towards deterministic sensors over more prose.
 
 ## Context and orientation
 
@@ -31,11 +31,11 @@ On 2026-10-19 the repo had a 36-line `CLAUDE.md`, `docs/ARCHITECTURE.md`, a CI w
 
 ## Plan of work
 
-Each phase lists what it adds, its acceptance check, what it is measured by, the gate before the next phase, and the lesson for IAM.
+Each phase lists what it adds, its acceptance check, what it is measured by, the gate before the next phase, and the lesson for IAM.  Every phase also updates `docs/working-with-agents.md`, the guide for people who direct agents: its acceptance includes that the guide covers the phase's new ways of working and that its changelog says so.  `docs-check` enforces part of this: the guide must name every `xtask` command, project skill and project subagent.
 
 ### Phase 1: the map and the knowledge base (guides, plus one sensor)
 
-* Adds: `CLAUDE.md` as a map of at most 100 lines, with every crate, corrected commands, a task-to-doc table and the rules by ID; `docs/README.md` (index), `invariants.md` (rules, why, enforcement, gaps), `tech-debt.md` (seeded from the survey), `harness.md` (components and baseline), `decisions/`, `plans/` (this plan), `references/` (from the maintainer's local memory, so other sessions and agents see it); path-scoped rules in `.claude/rules/` for `dsp/`, the GPU crate, memory and the wire format; `.claude/` tracked in git; `xtask docs-check` and the test `the_map_and_docs_match_the_code`.
+* Adds: `CLAUDE.md` as a map of at most 100 lines, with every crate, corrected commands, a task-to-doc table and the rules by ID; `docs/README.md` (index), `invariants.md` (rules, why, enforcement, gaps), `tech-debt.md` (seeded from the survey), `harness.md` (components and baseline), `decisions/`, `plans/` (this plan), `references/` (from the maintainer's local memory, so other sessions and agents see it); path-scoped rules in `.claude/rules/` for `dsp/`, the GPU crate, memory and the wire format; `.claude/` tracked in git; `xtask docs-check` and the test `the_map_and_docs_match_the_code`; `docs/working-with-agents.md`, a guide for the people who direct agents.
 * Acceptance: the docs test fails on the drift of 2026-10-19 (`synth` missing from the map, `stem-protocol` from two crate lists) and passes once fixed; each check has a unit test with a failing case; `cargo test --workspace --exclude roformer-gpu` and clippy pass.
 * Measured by: what `docs-check` catches in later PRs; whether sessions still ask for or rediscover what the docs hold.
 * Gate: the maintainer reviews and merges the PR.
@@ -52,7 +52,7 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 * A naga test over every generated shader for the limits in `references/webgpu-limits.md` (TD-1).  naga 30.0.1 is already in the lock file through wgpu.
 * An allocation-counting test of the audio callback, once RT-1's scope is decided (TD-15).
 * A test-count guard: CI fails a PR that lowers the number of tests in `cargo test -- --list` without a stated reason (guards against deleting tests to pass, and feeds phase 5).
-* Claude Code project settings in `.claude/settings.json` ([hooks](https://code.claude.com/docs/en/hooks), [permissions](https://code.claude.com/docs/en/permissions)): deny rules for `git push` and `xtask publish` (GIT-1); a PreToolUse hook blocking edits and `git add` of audio and weights (ASSET-1; deny rules do not cover `Write`); `rustfmt` on edited `.rs` files after each edit; a Stop hook that runs the fast checks once, guarded by `stop_hook_active` so it cannot loop; a hook that requires `--body-file` for `gh pr create` (failure 7); a SessionStart preflight that reports the WebDriver state (failure 3).
+* Claude Code project settings in `.claude/settings.json` ([hooks](https://code.claude.com/docs/en/hooks), [permissions](https://code.claude.com/docs/en/permissions)): deny rules for `git push` and `xtask publish` (GIT-1); a PreToolUse hook blocking edits and `git add` of audio and weights (ASSET-1; `Edit` deny rules cover every file tool, but not Bash commands such as `cp` or `git add -f`); `rustfmt` on edited `.rs` files after each edit; a Stop hook that runs the fast checks once, guarded by `stop_hook_active` so it cannot loop; a hook that requires `--body-file` for `gh pr create` (failure 7); a SessionStart preflight that reports the WebDriver state (failure 3).
 * The maintainer's RTK hook is personal and stays outside the repo; its rewriting of `grep`, `sed -n` and wasm test runs is to be excluded in the maintainer's own settings (failure 9).
 * Breaches the new checks expose (TD-12 to TD-14, TD-17) are fixed in their own small PRs, or carry an `#[expect]` with a reason and stay in `tech-debt.md`.
 * Acceptance: every invariant that can be checked mechanically names a test or lint on its `* Enforced by:` line; each check is shown to fail on a planted breach.
@@ -86,11 +86,11 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 
 Each stage needs the previous one's gate.  Agents run in GitHub Actions with `anthropics/claude-code-action` ([GitHub Actions](https://code.claude.com/docs/en/github-actions)), pinned by commit SHA at 1.0.74 or later (CVE-2026-47751: earlier versions loaded `.mcp.json` from the PR head, [GHSA-8q5r-mmjf-575q](https://osv.dev/vulnerability/GHSA-8q5r-mmjf-575q)).
 
-* 5a, report only: scheduled gardening jobs that open issues, not PRs: `docs-check` drift, plans whose status disagrees with `git log`, `THIRD-PARTY.md` against the lock file, unused dependencies.  Read-only token, no secrets but the model key, one concern per job, and no output when there is nothing to do.
+* 5a, report only: scheduled gardening jobs that open issues, not PRs: `docs-check` drift, plans whose status disagrees with `git log`, `THIRD-PARTY.md` against the lock file, unused dependencies.  A token with `contents: read` and `issues: write` only, no secrets but the model key, one concern per job, and no output when there is nothing to do.
 * 5b, PRs for humans to merge: the same jobs open PRs from a dedicated GitHub App with only contents and pull-request permissions (not workflows), one open PR per job on a fixed branch, labelled, size-capped, guarded by the test-count check.  `CODEOWNERS` requires the maintainer on `.github/**`, `.claude/**`, `CLAUDE.md`, `docs/invariants.md`, tests and shaders.
-* 5c, auto-merge for an allowlist: docs-only and lock-file-only changes from a known job, with CI, the routed reviewers and the validator all passing and no protected path touched.  Decision point for the maintainer: which identity approves.  The ruleset requires one approval and the maintainer is the only person, so either a second GitHub App approves under rules that require approval from someone other than the last pusher, or the ruleset's approval rule is scoped by path.  Also: signed commits required for bots, a merge queue, and browser tests required.
+* 5c, auto-merge for an allowlist: docs-only and lock-file-only changes from a known job, with CI, the routed reviewers and the validator all passing and no protected path touched.  Decision point for the maintainer: which identity approves.  The ruleset requires one approval and the maintainer is the only person.  The options: a second GitHub App approves under rules that require approval from someone other than the last pusher; the approval rule is scoped by path; or Copilot code review approves, which GitHub allows since 2026-09-01, off by default and limited by path ([GitHub changelog](https://github.blog/changelog/2026-09-01-copilot-code-review-can-now-approve-pull-requests)).  Copilot's approval is an LLM verdict, so it may count only when the deterministic checks are also required (decision 0002).  Also: signed commits required for bots, a merge queue, and browser tests required.
 * 5d, issue to PR: a maintainer-labelled issue starts a plan-driven implementation agent, merged by a human, then by 5c's rules for the classes that earn it.
-* Every stage keeps the lethal trifecta split ([Willison](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/), [Meta, agents rule of two](https://ai.meta.com/blog/practical-ai-agent-security/)): the job that reads untrusted text (issues, comments, web pages) has no write token, and only maintainers can trigger an agent.
+* Every stage keeps the lethal trifecta split ([Willison](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/), [Meta, agents rule of two](https://ai.meta.com/blog/practical-ai-agent-security/)): the job that reads untrusted text has no write token, and only maintainers can trigger an agent.  Untrusted text includes issues, comments and web pages, and also a PR's diff and its branch's `CLAUDE.md`, `docs/` and code: claude-code-action 1.0.74 restores only `.claude/` and `.mcp.json` from the base branch.  So a job that reviews PRs gets no write token either.
 * GPU checks cannot run on GitHub's hosted runners, and a self-hosted runner on a public repo would run strangers' PR code on the maintainer's machine, which GitHub advises against for public repositories (to be re-checked in GitHub's docs at this phase); so GPU evidence stays on the maintainer's Mac, attached to the PR, and nothing that changes a kernel default auto-merges (GPU-3).
 * Acceptance per stage: a planted injection in an issue or comment cannot reach a write token (tested); the jobs stay silent when there is nothing to do.
 * Measured by: merge rate per job (published reference points: 46% for Anthropic's internal routines, [The Decoder](https://the-decoder.com/claude-code-now-runs-daily-maintenance-on-anthropics-software-with-a-46-percent-merge-rate/)), reverts within 30 days, rework within 7 days, cost per merged PR.  A job whose merge rate falls below a threshold pauses itself.
@@ -116,7 +116,9 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: decisions 0001 and 0002 accepted by the maintainer.
 * [x] 2026-10-19: phase 1, `xtask docs-check` written test-first; it failed on the real drift before the docs were fixed.
 * [x] 2026-10-19: phase 1, `CLAUDE.md` map, `docs/` knowledge base, `.claude/rules/`, `.claude/` tracked.
-* [ ] Phase 1: three review rounds, PR, merged by the maintainer.
+* [x] 2026-10-19: phase 1, review rounds 1 and 2: their findings fixed with tests.
+* [x] 2026-10-19: phase 1, `docs/working-with-agents.md`, and a `docs-check` rule that it names every tool.
+* [ ] Phase 1: review round 3, PR, merged by the maintainer.
 * [ ] Phase 2.
 * [ ] Phase 3.
 * [ ] Phase 4.
@@ -129,7 +131,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19: several rules are already breached without anything noticing: three song-sized copies (TD-12 to TD-14) and an allocating audio callback (TD-15).  Rules in prose do not hold on their own.
 * 2026-10-19: the one GPU test that needs no GPU, `workgroup_memory_within_defaults`, has never run in CI (TD-1).
 * 2026-10-19: the maintainer's global gitignore ignores `.claude/`, so project rules would silently not be committed; the repo's `.gitignore` now re-includes it.
-* 2026-10-19: claude-code-action and GitHub's own Copilot agent cannot approve PRs, so auto-merge with one maintainer needs a second identity by design.
+* 2026-10-19: claude-code-action and GitHub's Copilot coding agent cannot approve PRs, so auto-merge with one maintainer needs a second identity by design.  Copilot code review can approve since 2026-09-01 (opt-in), and the `main` ruleset already runs it on every push; turning its approval on would let an LLM verdict alone merge.
 
 ## Decision log
 
@@ -138,6 +140,8 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19, maintainer: one general reviewer always, plus specialists by changed path.
 * 2026-10-19, agent: the docs check is written in Rust inside `xtask` with no new crate (BUILD-1, DEPS-1), as a test so CI runs it without a workflow change.
 * 2026-10-19, agent: no YAML frontmatter on docs in phase 1 (`covers` and `verified` freshness fields are deferred to phase 5a's drift job, where a stale doc becomes an issue rather than a failing build).
+* 2026-10-19, maintainer: a guide for the people who direct agents (`docs/working-with-agents.md`), written for an outsider, updated in every phase.
+* 2026-10-19, maintainer: the repo's writing standard is ASD-STE100 without its American spelling; personal style preferences stay out of the repo.
 * 2026-10-19, agent: the two older plans (versioned builds, browser tests in Rust) stay out of the repo; they are implemented, their PRs (#6, #9) describe them, and they hold local paths.
 
 ## Outcomes and retrospective

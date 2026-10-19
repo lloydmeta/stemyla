@@ -26,7 +26,7 @@ Nothing fails when `dsp/` gains an iterator, a closure or a dependency.
 
 ### TD-4: LAYER-1 is not checked, and app depends on synth
 
-No test checks the edges between workspace crates.  `app` depends on `synth`, so the demo song generator and its dependencies (hound, serde_json) ship in the page.
+No test checks the edges between workspace crates.  `app` depends on `synth`, so the demo song generator and its dependencies (hound, serde_json) compile into the page build.
 
 * Fix: a test over `cargo metadata` with an allowlist of edges per crate; decide whether `synth` is a pure crate the page may use or a fixture behind a feature.
 
@@ -38,13 +38,13 @@ Nothing fails when a Python file or a `python`/`pip` step appears.
 
 ### TD-6: ASSET-1 rests on .gitignore alone
 
-`git add -f` gets past it, and `.flac`, `.ogg`, `.m4a`, `.pt`, `.pth`, `.onnx`, `.npy` are not listed.
+`git add -f` gets past it, and `.flac`, `.ogg`, `.m4a`, `.pt`, `.pth`, `.onnx`, `.npy` are not listed.  Its folder patterns (`audio/`, `stems/`, `dist/`, `pages/`) are not anchored, so they also ignore a source folder of that name at any depth.
 
 * Fix: list the missing extensions; a CI check over `git ls-files` for audio and weight extensions and a size cap.
 
 ### TD-7: DEPS-1 is not checked, and young crates float
 
-`engine/Cargo.toml` takes `wsola = "0.1.0"`, `cute-dsp = "0.0.41"` and `timestretch = "0.15.0"` as caret ranges; only `rusty_mp3` (in `worker/Cargo.toml`) is pinned exactly.  Nothing compares `THIRD-PARTY.md` with `cargo tree`, and there is no licence policy.
+`engine/Cargo.toml` takes `wsola = "0.1.0"` and `timestretch = "0.15.0"` as caret ranges, which accept later 0.1 and 0.15 releases (`cute-dsp = "0.0.41"` already accepts only 0.0.41); only `rusty_mp3` (in `worker/Cargo.toml`) is pinned exactly.  Nothing compares `THIRD-PARTY.md` with `cargo tree`, and there is no licence policy.
 
 * Fix: pin with `=`; a golden test that reruns the command at the top of `THIRD-PARTY.md` and diffs; `cargo deny` for licences and sources.
 
@@ -71,6 +71,17 @@ Nothing records which adapter a kernel passed on, and any new `TILES` entry beco
 The worker logs its wasm memory and live GPU bytes and the page its wasm memory, but no test asserts a total, and the page's WebGL textures and the JS heap are not counted.
 
 * Fix: a tab total (page wasm, worker wasm, GPU live bytes) in an e2e scenario that separates a song and fails over a budget.
+
+### TD-21: what docs-check cannot see
+
+`xtask docs-check` (DOC-1) checks the shape of the docs, not whether they are still true:
+
+* A doc that names real files and tests but describes old behaviour passes.
+* An ID with a prefix not yet in use (`SEC-1`) is not checked, because it cannot be told from text such as `SHA-256`.
+* A path counts as present if the file is on disk, so a file not yet added to git passes locally and fails only in CI.
+* `README.md` and crate docs (`//!`) are checked for the crate list only.
+
+* Fix: the drift job in phase 5a of the plan, which compares each doc with the code it describes.
 
 ## Known breaches
 
@@ -104,9 +115,9 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 * Fix: a test that extracts the type strings from the e2e scripts and checks them against `stem_protocol::kind`; fail decoding on a missing required field; a version in `Alive`.
 
-### TD-17: one OPFS write path is safe only by convention
+### TD-17: one OPFS write path is safe only by construction
 
-`app/src/store.rs` passes its argument straight to `write`; it is safe only because every caller passes a whole `Uint8Array`, and no test writes a view through it (MEM-5).
+`app/src/store.rs` passes its argument straight to `write`.  Its one caller passes `Uint8Array::from(bytes)`, a new whole array, so no view reaches it today; but nothing stops a later caller passing one, and no test writes a view through it (MEM-5).
 
 * Fix: a wasm-bindgen test that writes a `subarray` through it and reads back the exact bytes, or copy views as the worker's `whole()` does.
 
@@ -126,6 +137,11 @@ The app draws to one canvas.  `xtask e2e` clicks fixed coordinates (`VIEWPORT`, 
 
 ### TD-20: process rules rest on local settings
 
-Commit signing is set in the maintainer's own git config only, the `main` ruleset does not require signed commits, `browser tests (Chrome)` is not a required check, and nothing stops an agent from pushing (GIT-1, GIT-2).
+Commit signing is set in the maintainer's own git config only, and nothing stops an agent from pushing (GIT-1, GIT-2).  The `main` ruleset:
+
+* does not require signed commits;
+* does not require `browser tests (Chrome)`;
+* lets the admin role bypass it always, so agents running with the maintainer's credentials can skip the required checks and the approval;
+* does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
 * Fix: permission rules and hooks in the project's Claude Code settings (phase 2 of the plan); ruleset changes in phase 5.

@@ -5,7 +5,7 @@ This repo has been written by AI agents (Claude Code) from its first commit.  Th
 Two principles shape it:
 
 * Every component encodes an assumption about what the model cannot do on its own ([Anthropic, harness design for long-running apps](https://www.anthropic.com/engineering/harness-design-long-running-apps)).  So each one below names the failure it addresses, and is removed when it stops earning its place.
-* Prefer computational sensors (tests, lints, structural checks: fast and deterministic) to inferential ones (LLM review), and pair each guide with a sensor ([Böckeler, harness engineering](https://martinfowler.com/articles/harness-engineering.html)).  Context files on their own help little and cost tokens ([Evaluating AGENTS.md, arXiv 2602.11988](https://arxiv.org/abs/2602.11988v1)), so the map stays short and rules move into checks.
+* Prefer computational sensors (tests, lints, structural checks: fast and deterministic) to inferential ones (LLM review), and pair each guide with a sensor ([Böckeler, harness engineering](https://martinfowler.com/articles/harness-engineering.html)).  Context files on their own tend to lower task success and add over 20% to cost ([Evaluating AGENTS.md, arXiv 2602.11988](https://arxiv.org/abs/2602.11988v1)), so the map stays short and rules move into checks.
 
 ## Components
 
@@ -18,6 +18,7 @@ Two principles shape it:
 | `decisions/` | guide | settled choices re-argued, or silently reversed | phase 1 |
 | `tech-debt.md` | guide | known gaps rediscovered, or mistaken for enforced rules | phase 1 |
 | `references/` | guide | local setup and browser quirks rediscovered (chromedriver downloaded 8 times) | phase 1 |
+| `working-with-agents.md`, kept complete by `docs-check` | guide, for people | how to drive agents lived in one person's head and in old transcripts | phase 1 |
 | `xtask docs-check` (`the_map_and_docs_match_the_code`) | sensor, computational | docs drift from code (on 2026-10-19: `synth` missing from the map, `stem-protocol` from two crate lists) | phase 1 |
 
 Planned components, by phase, are in the plan.

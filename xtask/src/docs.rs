@@ -13,8 +13,9 @@ use std::path::Path;
 /// Longest the always-loaded map may grow: everything else is read on demand.
 pub const MAP_LINE_BUDGET: usize = 100;
 
-/// Folders never walked: build output, git, and the gitignored audio, model
-/// and page folders that exist on some machines and not on others.
+/// Folders never walked, relative to the root: git, build output, and the
+/// gitignored audio, model and page folders that exist on some machines only.
+/// The same names deeper in the tree are walked.
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     "target",
@@ -22,8 +23,7 @@ const SKIPPED_DIRS: &[&str] = &[
     "audio",
     "stems",
     "pages",
-    "dist",
-    "node_modules",
+    "app/dist",
     ".claude/worktrees",
 ];
 
@@ -32,8 +32,12 @@ const SKIPPED_DIRS: &[&str] = &[
 const CRATE_RELATIVE: &[&str] = &["src/", "tests/", "benches/", "e2e/"];
 
 /// Paths the docs may name that a build creates, so they are absent in a
-/// fresh checkout.
-const GENERATED_PREFIXES: &[&str] = &["app/dist", "target/", "third_party/", "audio/", "stems/"];
+/// fresh checkout: these folders and everything in them.
+const GENERATED: &[&str] = &["app/dist", "target", "third_party", "audio", "stems"];
+
+/// Characters that make a code span prose, a template or a Rust path rather
+/// than a file path: `xtask e2e`, `v/<id>/`, `engine::Samples`, `a@v1`.
+const NOT_IN_PATHS: &str = "<>*?{}=()$:,;'\"|\\@";
 
 const DECISION_STATUSES: &[&str] = &["proposed", "accepted", "superseded", "rejected"];
 
@@ -102,6 +106,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
             Ok(Member { dir, package })
         })
         .collect::<Result<Vec<_>>>()?;
+    let tree = Tree::new(&files);
     let top_level: BTreeSet<String> = files
         .iter()
         .filter_map(|f| f.split_once('/').map(|(first, _)| first.to_string()))
@@ -143,7 +148,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
     ));
     problems.extend(ids.problems.clone());
     for (file, text) in &markdown {
-        problems.extend(paths_exist(root, file, text, &top_level));
+        problems.extend(paths_exist(&tree, file, text, &top_level));
         problems.extend(ids_defined(file, text, &ids.defined));
     }
     if let Some(invariants) = doc("docs/invariants.md") {
@@ -152,6 +157,18 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
             doc("CLAUDE.md").unwrap_or_default(),
             invariants,
         ));
+    }
+    let tools: BTreeSet<String> = xtask_commands(&read("xtask/src/main.rs")?)
+        .into_iter()
+        .chain(agent_capabilities(&files))
+        .collect();
+    match doc(GUIDE) {
+        Some(guide) => problems.extend(guide_covers(guide, &tools)),
+        None => problems.push(Problem::new(
+            "guide",
+            GUIDE,
+            "is missing.  Fix: restore the guide for people who direct agents here.".into(),
+        )),
     }
     problems.extend(docs_indexed(&markdown, doc("docs/README.md")));
     problems.extend(rules_match_files(&markdown, &files));
@@ -181,10 +198,7 @@ pub fn repo_files(root: &Path) -> Result<Vec<String>> {
                 .expect("walked from root")
                 .to_string_lossy()
                 .replace('\\', "/");
-            if SKIPPED_DIRS
-                .iter()
-                .any(|s| rel == *s || rel.ends_with(&format!("/{s}")))
-            {
+            if SKIPPED_DIRS.contains(&rel.as_str()) {
                 continue;
             }
             if path.is_dir() {
@@ -238,22 +252,71 @@ pub fn package_name(manifest: &str) -> Option<String> {
         })
 }
 
-/// Inline code spans (`like this`) outside fenced code blocks.
+/// Inline code spans outside fenced code blocks, as CommonMark reads them: a
+/// span opens with a run of backticks and closes at the next run of the same
+/// length, within one paragraph; `` \` `` outside a span is a literal backtick.
 pub fn inline_code(markdown: &str) -> Vec<String> {
     let mut spans = Vec::new();
     let mut fenced = false;
+    let mut paragraph: Vec<&str> = Vec::new();
     for line in markdown.lines() {
-        if line.trim_start().starts_with("```") {
+        let fence = line.trim_start().starts_with("```");
+        if fence || fenced || line.trim().is_empty() {
+            spans.extend(spans_in(&paragraph.join("\n")));
+            paragraph.clear();
+        }
+        if fence {
             fenced = !fenced;
+        } else if !fenced && !line.trim().is_empty() {
+            paragraph.push(line);
+        }
+    }
+    spans.extend(spans_in(&paragraph.join("\n")));
+    spans
+}
+
+/// The code spans in one paragraph.
+fn spans_in(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let run_at = |i: usize| chars[i..].iter().take_while(|c| **c == '`').count();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'`') {
+            i += 2;
             continue;
         }
-        if fenced {
+        if chars[i] != '`' {
+            i += 1;
             continue;
         }
-        let mut parts = line.split('`');
-        parts.next();
-        while let (Some(code), Some(_)) = (parts.next(), parts.next()) {
-            spans.push(code.to_string());
+        let open = run_at(i);
+        let start = i + open;
+        let mut j = start;
+        let close = loop {
+            if j >= chars.len() {
+                break None;
+            }
+            let run = if chars[j] == '`' { run_at(j) } else { 0 };
+            if run == open {
+                break Some(j);
+            }
+            j += run.max(1);
+        };
+        match close {
+            Some(end) => {
+                let code: String = chars[start..end]
+                    .iter()
+                    .collect::<String>()
+                    .replace('\n', " ");
+                let stripped = match code.strip_prefix(' ').and_then(|c| c.strip_suffix(' ')) {
+                    Some(inner) if !code.trim().is_empty() => inner.to_string(),
+                    _ => code,
+                };
+                spans.push(stripped);
+                i = end + open;
+            }
+            None => i = start,
         }
     }
     spans
@@ -289,16 +352,24 @@ pub fn repo_path(span: &str, top_level: &BTreeSet<String>) -> Option<String> {
         .next()
         .unwrap_or_default()
         .trim_end_matches('/');
+    let path = path.strip_prefix("./").unwrap_or(path);
     let prose = path.is_empty()
         || path.starts_with("http")
-        || path.starts_with(['~', '/', '-', '@', '.'].as_slice())
-            && !path.starts_with(".claude/")
-            && !path.starts_with(".github/")
-        || path.contains(|c: char| c.is_whitespace() || "<>*?{}=()$:,;'\"|\\".contains(c));
-    if prose || GENERATED_PREFIXES.iter().any(|g| path.starts_with(g)) {
+        || path.starts_with(['~', '/', '-'].as_slice())
+        || path.contains(|c: char| c.is_whitespace() || NOT_IN_PATHS.contains(c));
+    let generated = GENERATED
+        .iter()
+        .any(|g| path == *g || path.starts_with(&format!("{g}/")));
+    if prose || generated {
         return None;
     }
     let first = path.split('/').next().unwrap_or_default();
+    // `.flac` or `.gitkeep` is an extension or a file kind, and `docs.rs/wgpu`
+    // or `0.5/1.0` is a site or a number, unless a top-level folder has that name.
+    let dotted = first.contains('.') && first != ".." && !top_level.contains(first);
+    if dotted && (first.starts_with('.') || path.contains('/')) {
+        return None;
+    }
     let in_tree = path.contains('/') && top_level.contains(first);
     let file_name = path.rsplit('/').next().unwrap_or_default();
     let names_a_file = path.contains('/')
@@ -339,7 +410,47 @@ fn path_bases(file: &str) -> Vec<String> {
     bases
 }
 
-fn paths_exist(root: &Path, file: &str, text: &str, top_level: &BTreeSet<String>) -> Vec<Problem> {
+/// The files in the repo and the folders that hold them, as `/` paths.  A
+/// path is looked up here, not on disk, so case matters on every system.
+#[derive(Debug, Clone, Default)]
+pub struct Tree {
+    pub files: BTreeSet<String>,
+    pub dirs: BTreeSet<String>,
+}
+
+impl Tree {
+    pub fn new(files: &[String]) -> Tree {
+        let dirs = files
+            .iter()
+            .flat_map(|f| f.match_indices('/').map(move |(i, _)| f[..i].to_string()))
+            .collect();
+        Tree {
+            files: files.iter().cloned().collect(),
+            dirs,
+        }
+    }
+
+    fn contains(&self, path: &str) -> bool {
+        self.files.contains(path) || self.dirs.contains(path)
+    }
+}
+
+/// `a/./b/../c` as `a/c`; `None` when `..` climbs out of the repo.
+fn normalise(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn paths_exist(tree: &Tree, file: &str, text: &str, top_level: &BTreeSet<String>) -> Vec<Problem> {
     if !names_current_paths(file) {
         return Vec::new();
     }
@@ -347,7 +458,12 @@ fn paths_exist(root: &Path, file: &str, text: &str, top_level: &BTreeSet<String>
     inline_code(text)
         .iter()
         .filter_map(|span| repo_path(span, top_level))
-        .filter(|p| !bases.iter().any(|b| root.join(format!("{b}{p}")).exists()))
+        .filter(|p| {
+            !bases
+                .iter()
+                .filter_map(|b| normalise(&format!("{b}{p}")))
+                .any(|candidate| tree.contains(&candidate))
+        })
         .map(|p| {
             Problem::new(
                 "paths",
@@ -391,6 +507,69 @@ pub fn map_lists_every_rule(claude: &str, invariants: &str) -> Vec<Problem> {
         )
     });
     missing.chain(extra).collect()
+}
+
+/// The guide for people who direct agents.
+pub const GUIDE: &str = "docs/working-with-agents.md";
+
+/// The subcommands `xtask` dispatches on: each `"name" =>` arm in `main.rs`.
+pub fn xtask_commands(main_rs: &str) -> BTreeSet<String> {
+    main_rs
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with('"'))
+        .filter_map(|l| l.split_once("=>").map(|(arms, _)| arms))
+        .flat_map(|arms| arms.split('|'))
+        .map(|arm| arm.trim().trim_matches('"').to_string())
+        .filter(|arm| {
+            !arm.is_empty()
+                && arm
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+        .collect()
+}
+
+/// The project's skills (`.claude/skills/<name>/SKILL.md`) and subagents
+/// (`.claude/agents/<name>.md`).
+pub fn agent_capabilities(files: &[String]) -> BTreeSet<String> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let skill = f
+                .strip_prefix(".claude/skills/")
+                .and_then(|s| s.strip_suffix("/SKILL.md"));
+            let agent = f
+                .strip_prefix(".claude/agents/")
+                .and_then(|a| a.strip_suffix(".md"))
+                .filter(|a| !a.contains('/'));
+            skill.or(agent).map(str::to_string)
+        })
+        .collect()
+}
+
+/// The guide names every `xtask` command, skill and subagent in a code span,
+/// so a new way of working is never left undocumented.
+pub fn guide_covers(guide: &str, names: &BTreeSet<String>) -> Vec<Problem> {
+    let words: BTreeSet<String> = inline_code(guide)
+        .iter()
+        .flat_map(|span| {
+            span.split_whitespace()
+                .map(|w| w.trim_start_matches('/').to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    names
+        .iter()
+        .filter(|name| !words.contains(*name))
+        .map(|name| {
+            Problem::new(
+                "guide",
+                GUIDE,
+                format!("does not mention `{name}`.  Fix: say when a person or the agent uses it, in a recipe or the tools table, and add a changelog line."),
+            )
+        })
+        .collect()
 }
 
 fn map_within_budget(claude: &str) -> Vec<Problem> {
@@ -456,13 +635,17 @@ pub struct Ids {
 pub fn defined_ids(files: &[(String, String)]) -> Ids {
     let mut ids = Ids::default();
     for (file, text) in files {
-        for line in text.lines() {
-            let Some(id) = line
-                .strip_prefix("### ")
-                .and_then(|h| h.split_once(':'))
+        for heading in text.lines().filter_map(|l| l.strip_prefix("### ")) {
+            let Some(id) = heading
+                .split_once(':')
                 .map(|(id, _)| id)
                 .filter(|id| is_id(id))
             else {
+                ids.problems.push(Problem::new(
+                    "ids",
+                    file,
+                    format!("heading `### {heading}` is not `### ID: title`, so it defines nothing.  Fix: an ID is two to six capitals, a dash and a number, followed by a colon (`### MEM-6: ...`)."),
+                ));
                 continue;
             };
             if !ids.defined.insert(id.to_string()) {
@@ -516,27 +699,43 @@ fn ids_defined(file: &str, text: &str, defined: &BTreeSet<String>) -> Vec<Proble
 /// Attributes that mark a test function.
 const TEST_ATTRIBUTES: &[&str] = &["#[test]", "#[wasm_bindgen_test", "#[tokio::test"];
 
-/// Names of the test functions in the given Rust sources: each `fn` whose
-/// attributes include a test attribute.
-pub fn test_fn_names(sources: &[String]) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
+/// The test functions in the sources: those `cargo test` runs, and those
+/// marked `#[ignore]`, which it does not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tests {
+    pub run: BTreeSet<String>,
+    pub ignored: BTreeSet<String>,
+}
+
+/// The test functions in the given Rust sources: each `fn` whose attributes
+/// include a test attribute.
+pub fn test_fn_names(sources: &[String]) -> Tests {
+    let mut tests = Tests::default();
     for source in sources {
-        let mut is_test = false;
+        let (mut is_test, mut is_ignored) = (false, false);
         for line in source.lines().map(str::trim_start) {
             if TEST_ATTRIBUTES.iter().any(|a| line.starts_with(a)) {
                 is_test = true;
+                continue;
+            }
+            if line.starts_with("#[ignore") {
+                is_ignored = true;
                 continue;
             }
             if line.starts_with("#[") || line.starts_with("//") || line.is_empty() {
                 continue;
             }
             if let Some(name) = fn_name(line).filter(|_| is_test) {
-                names.insert(name);
+                if is_ignored {
+                    tests.ignored.insert(name);
+                } else {
+                    tests.run.insert(name);
+                }
             }
-            is_test = false;
+            (is_test, is_ignored) = (false, false);
         }
     }
-    names
+    tests
 }
 
 /// The name in a line that declares a function (`pub async fn name(`).
@@ -553,7 +752,7 @@ fn fn_name(line: &str) -> Option<String> {
 
 /// The tests an invariant names on its `* Enforced by:` line exist, so a
 /// rule never claims a check that was renamed or deleted.
-pub fn enforcing_tests_exist(invariants: &str, test_fns: &BTreeSet<String>) -> Vec<Problem> {
+pub fn enforcing_tests_exist(invariants: &str, tests: &Tests) -> Vec<Problem> {
     invariants
         .lines()
         .filter(|l| l.trim_start().starts_with("* Enforced by:"))
@@ -561,13 +760,14 @@ pub fn enforcing_tests_exist(invariants: &str, test_fns: &BTreeSet<String>) -> V
         .filter(|span| {
             span.contains('_') && span.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         })
-        .filter(|name| !test_fns.contains(name))
+        .filter(|name| !tests.run.contains(name))
         .map(|name| {
-            Problem::new(
-                "tests",
-                "docs/invariants.md",
-                format!("names test `{name}`, but no test function `{name}` exists.  Fix: name the test that now enforces the rule, or move the rule's gap to docs/tech-debt.md."),
-            )
+            let why = if tests.ignored.contains(&name) {
+                format!("names test `{name}`, which is `#[ignore]`d, so `cargo test` never runs it.  Fix: name a test that runs, or record the gap in docs/tech-debt.md.")
+            } else {
+                format!("names test `{name}`, but no test function `{name}` exists.  Fix: name the test that now enforces the rule, or move the rule's gap to docs/tech-debt.md.")
+            };
+            Problem::new("tests", "docs/invariants.md", why)
         })
         .collect()
 }
@@ -601,21 +801,90 @@ fn docs_indexed(markdown: &[(String, String)], index: Option<&str>) -> Vec<Probl
         .collect()
 }
 
-/// The `paths:` globs in a rule's frontmatter.
-pub fn rule_globs(rule: &str) -> Option<Vec<String>> {
+/// One glob from a rule's `paths:`, and whether YAML can read it as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleGlob {
+    pub pattern: String,
+    pub valid_yaml: bool,
+}
+
+/// Characters that cannot start a plain (unquoted) YAML scalar.
+const YAML_INDICATORS: &[char] = &['*', '&', '!', '{', '[', '%', '@', '`', '|', '>'];
+
+/// `"x"` or `'x'` without its quotes, and whether it was quoted.
+fn unquote(s: &str) -> (&str, bool) {
+    for q in ['"', '\''] {
+        if let Some(inner) = s.strip_prefix(q).and_then(|s| s.strip_suffix(q)) {
+            return (inner, true);
+        }
+    }
+    (s, false)
+}
+
+fn rule_glob(raw: &str, quoted_outside: bool) -> RuleGlob {
+    let (pattern, quoted) = unquote(raw.trim());
+    RuleGlob {
+        pattern: pattern.trim().to_string(),
+        valid_yaml: quoted || quoted_outside || !pattern.starts_with(YAML_INDICATORS),
+    }
+}
+
+/// The `paths:` globs in a rule's frontmatter, in any form Claude Code
+/// reads: a YAML list, a `[a, b]` flow list, or a comma-separated string.
+pub fn rule_globs(rule: &str) -> Option<Vec<RuleGlob>> {
+    let rule = rule.replace("\r\n", "\n");
     let body = rule.strip_prefix("---\n")?;
     let front = &body[..body.find("\n---")?];
-    let list = &front[front.find("paths:")? + "paths:".len()..];
+    let mut lines = front.lines().skip_while(|l| !l.starts_with("paths:"));
+    let inline = lines.next()?.strip_prefix("paths:")?.trim();
+    if inline.is_empty() {
+        return Some(
+            lines
+                .take_while(|l| l.starts_with([' ', '\t', '-']))
+                .filter_map(|l| l.trim().strip_prefix("- "))
+                .map(|g| rule_glob(g, false))
+                .collect(),
+        );
+    }
+    if let Some(flow) = inline.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        return Some(flow.split(',').map(|g| rule_glob(g, false)).collect());
+    }
+    let (string, quoted) = unquote(inline);
+    let valid = quoted || !string.starts_with(YAML_INDICATORS);
     Some(
-        list.lines()
-            .filter_map(|l| l.trim().strip_prefix("- "))
-            .map(|g| g.trim().trim_matches('"').to_string())
+        string
+            .split(',')
+            .map(|g| RuleGlob {
+                pattern: g.trim().to_string(),
+                valid_yaml: valid,
+            })
             .collect(),
     )
 }
 
-/// `*` matches within one path segment and `**` any number of segments.
+/// `a.{rs,toml}` as `a.rs` and `a.toml`.
+fn expand_braces(glob: &str) -> Vec<String> {
+    let Some(open) = glob.find('{') else {
+        return vec![glob.to_string()];
+    };
+    let Some(close) = glob[open..].find('}').map(|i| open + i) else {
+        return vec![glob.to_string()];
+    };
+    glob[open + 1..close]
+        .split(',')
+        .flat_map(|alt| expand_braces(&format!("{}{alt}{}", &glob[..open], &glob[close + 1..])))
+        .collect()
+}
+
+/// `*` matches within one path segment, `**` any number of segments, and
+/// `{a,b}` either alternative.
 pub fn glob_matches(glob: &str, path: &str) -> bool {
+    expand_braces(glob)
+        .iter()
+        .any(|g| glob_matches_one(g, path))
+}
+
+fn glob_matches_one(glob: &str, path: &str) -> bool {
     fn segments(globs: &[&str], parts: &[&str]) -> bool {
         match (globs.first(), parts.first()) {
             (None, None) => true,
@@ -659,15 +928,21 @@ fn rules_match_files(markdown: &[(String, String)], files: &[String]) -> Vec<Pro
             ));
             continue;
         };
-        for glob in globs
-            .iter()
-            .filter(|g| !files.iter().any(|f| glob_matches(g, f)))
-        {
-            problems.push(Problem::new(
-                "rules",
-                file,
-                format!("glob `{glob}` matches no file, so the rule never loads.  Fix: point it at the files it is about."),
-            ));
+        for glob in &globs {
+            let pattern = &glob.pattern;
+            if !glob.valid_yaml {
+                problems.push(Problem::new(
+                    "rules",
+                    file,
+                    format!("glob `{pattern}` starts with a character YAML reserves, so the frontmatter does not parse and Claude Code loads the rule in every session.  Fix: quote it (`- \"{pattern}\"`)."),
+                ));
+            } else if !files.iter().any(|f| glob_matches(pattern, f)) {
+                problems.push(Problem::new(
+                    "rules",
+                    file,
+                    format!("glob `{pattern}` matches no file, so the rule never loads.  Fix: point it at the files it is about."),
+                ));
+            }
         }
     }
     problems
@@ -833,21 +1108,81 @@ mod tests {
         assert!(!names_current_paths("docs/decisions/0001-a.md"));
     }
 
+    fn missing(tree: &Tree, file: &str, text: &str) -> Vec<String> {
+        let t = top(&["docs", "engine", ".claude"]);
+        paths_exist(tree, file, text, &t)
+            .iter()
+            .map(|p| p.message.split('`').nth(1).unwrap().to_string())
+            .collect()
+    }
+
     #[test]
     fn a_missing_path_is_reported_and_a_present_one_is_not() {
-        let root = std::env::temp_dir().join(format!("docs-check-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("docs")).unwrap();
-        std::fs::write(root.join("docs/invariants.md"), "").unwrap();
-        let t = top(&["docs", "engine"]);
-        let text = "see `invariants.md`, `docs/invariants.md`, `engine/gone.rs` and `gone.md`";
-        let problems = paths_exist(&root, "docs/tech-debt.md", text, &t);
-        let named: Vec<&str> = problems
-            .iter()
-            .map(|p| p.message.split('`').nth(1).unwrap())
-            .collect();
-        assert_eq!(named, ["engine/gone.rs", "gone.md"]);
-        assert!(paths_exist(&root, "docs/plans/active/a.md", text, &t).is_empty());
-        std::fs::remove_dir_all(&root).unwrap();
+        let tree = Tree::new(&[
+            "docs/invariants.md".to_string(),
+            "docs/ARCHITECTURE.md".to_string(),
+            "engine/src/song.rs".to_string(),
+        ]);
+        let text = "see `invariants.md`, `docs/invariants.md`, `engine/src`, `engine/gone.rs` and `gone.md`";
+        assert_eq!(
+            missing(&tree, "docs/tech-debt.md", text),
+            ["engine/gone.rs", "gone.md"]
+        );
+        assert!(missing(&tree, "docs/plans/active/a.md", text).is_empty());
+    }
+
+    #[test]
+    fn paths_are_matched_by_exact_case_and_resolved() {
+        let tree = Tree::new(&[
+            "docs/ARCHITECTURE.md".to_string(),
+            "engine/src/song.rs".to_string(),
+        ]);
+        let text = "`docs/architecture.md`, `./engine/gone.rs`, `../ARCHITECTURE.md`, `../../../x.md`, `./engine/src/song.rs`";
+        assert_eq!(
+            missing(&tree, "docs/references/a.md", text),
+            ["docs/architecture.md", "engine/gone.rs", "../../../x.md"]
+        );
+    }
+
+    #[test]
+    fn sites_versions_and_actions_are_not_paths() {
+        let t = top(&["app", "docs", ".claude"]);
+        for span in [
+            "actions/checkout@v4.2.0",
+            "docs.rs/wgpu/latest/wgpu/struct.Limits.html",
+            "0.5/1.0",
+            ".flac",
+            ".gitkeep",
+        ] {
+            assert_eq!(repo_path(span, &t), None, "{span}");
+        }
+        assert_eq!(
+            repo_path("app/distortion.rs", &t).as_deref(),
+            Some("app/distortion.rs")
+        );
+        assert_eq!(repo_path("app/dist/index.html", &t), None);
+    }
+
+    #[test]
+    fn code_spans_follow_commonmark() {
+        assert_eq!(
+            inline_code("| `` ` `` | `engine/gone.rs` |"),
+            ["`", "engine/gone.rs"]
+        );
+        assert_eq!(inline_code("``engine/gone.rs``"), ["engine/gone.rs"]);
+        assert_eq!(
+            inline_code("a \\` b and `engine/gone.rs`"),
+            ["engine/gone.rs"]
+        );
+        assert_eq!(
+            inline_code("a span `that\nwraps` and `next`"),
+            ["that wraps", "next"]
+        );
+        assert_eq!(
+            inline_code("an `unclosed span\n\nthen `x`"),
+            ["x"],
+            "a span never crosses a paragraph"
+        );
     }
 
     #[test]
@@ -901,6 +1236,12 @@ mod tests {
         let ids = defined_ids(&files);
         assert_eq!(ids.defined.len(), 3);
         assert_eq!(ids.problems.len(), 1, "MEM-1 twice");
+        let malformed = defined_ids(&[(
+            "docs/invariants.md".to_string(),
+            "### SEC-1 - no colon\n### LEGIBLE-1: seven letters\n### OK-1: fine\n".to_string(),
+        )]);
+        assert_eq!(malformed.defined.len(), 1);
+        assert_eq!(malformed.problems.len(), 2, "{:#?}", malformed.problems);
         let problems = ids_defined(
             "CLAUDE.md",
             "see MEM-2, MEM-9 and TD-4; not SHA-256 or UTF-8",
@@ -911,6 +1252,32 @@ mod tests {
             .map(|p| p.message.split('`').nth(1).unwrap())
             .collect();
         assert_eq!(named, ["MEM-9", "TD-4"]);
+    }
+
+    #[test]
+    fn the_guide_names_every_command_skill_and_subagent() {
+        let main_rs = "match cmd.as_str() {\n    \"gen-song\" => {\n    \"hpss\" | \"sdr\" => x,\n    Err(e) => y,\n    other => bail!(),\n}\n";
+        let commands = xtask_commands(main_rs);
+        let named: Vec<&str> = commands.iter().map(String::as_str).collect();
+        assert_eq!(named, ["gen-song", "hpss", "sdr"]);
+        let files = [
+            ".claude/skills/review/SKILL.md".to_string(),
+            ".claude/skills/review/reference.md".to_string(),
+            ".claude/agents/gpu-reviewer.md".to_string(),
+            ".claude/rules/dsp.md".to_string(),
+        ];
+        let tools: BTreeSet<String> = commands
+            .into_iter()
+            .chain(agent_capabilities(&files))
+            .collect();
+        let guide =
+            "Run `cargo run -p xtask -- gen-song`, then `/review`.\n\n| `hpss`, `sdr` | x |\n";
+        let problems = guide_covers(guide, &tools);
+        let missing: Vec<&str> = problems
+            .iter()
+            .map(|p| p.message.split('`').nth(1).unwrap())
+            .collect();
+        assert_eq!(missing, ["gpu-reviewer"]);
     }
 
     #[test]
@@ -929,21 +1296,32 @@ mod tests {
     #[test]
     fn only_test_functions_count_as_tests() {
         let source = "#[test]\nfn a_buffer_is_shared() {}\n\n#[wasm_bindgen_test]\n#[ignore]\npub async fn another_one(x: u8) {}\n\nfn a_helper() {}\n#[test]\n// why\nfn after_a_comment() {}\nconst S: &str = \"fn in_a_string() {}\";\n";
-        let fns = test_fn_names(&[source.to_string()]);
-        let names: Vec<&str> = fns.iter().map(String::as_str).collect();
-        assert_eq!(
-            names,
-            ["a_buffer_is_shared", "after_a_comment", "another_one"]
-        );
+        let tests = test_fn_names(&[source.to_string()]);
+        let run: Vec<&str> = tests.run.iter().map(String::as_str).collect();
+        let ignored: Vec<&str> = tests.ignored.iter().map(String::as_str).collect();
+        assert_eq!(run, ["a_buffer_is_shared", "after_a_comment"]);
+        assert_eq!(ignored, ["another_one"]);
     }
 
     #[test]
-    fn a_renamed_enforcing_test_is_reported() {
-        let fns = test_fn_names(&["#[test]\nfn a_buffer_is_shared() {}\n".to_string()]);
-        let invariants = "### MEM-1: x\n\n* Enforced by: `a_buffer_is_shared`, `gone_test`, CI `test` job, `engine/src/song.rs`.\n* Gaps: `not_checked_here`\n";
-        let problems = enforcing_tests_exist(invariants, &fns);
-        assert_eq!(problems.len(), 1, "{problems:#?}");
-        assert!(problems[0].message.contains("`gone_test`"));
+    fn a_renamed_or_ignored_enforcing_test_is_reported() {
+        let tests = test_fn_names(&[
+            "#[test]\nfn a_buffer_is_shared() {}\n#[test]\n#[ignore]\nfn a_slow_check() {}\n"
+                .to_string(),
+        ]);
+        let invariants = "### MEM-1: x\n\n* Enforced by: `a_buffer_is_shared`, `gone_test`, `a_slow_check`, CI `test` job, `engine/src/song.rs`.\n* Gaps: `not_checked_here`\n";
+        let problems = enforcing_tests_exist(invariants, &tests);
+        assert_eq!(problems.len(), 2, "{problems:#?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("`gone_test`, but no test function")
+        );
+        assert!(
+            problems[1]
+                .message
+                .contains("`a_slow_check`, which is `#[ignore]`d")
+        );
     }
 
     #[test]
@@ -970,12 +1348,48 @@ mod tests {
         assert!(!glob_matches("*.rs", "é.md"));
     }
 
+    fn patterns(rule: &str) -> Option<Vec<(String, bool)>> {
+        rule_globs(rule).map(|g| g.into_iter().map(|g| (g.pattern, g.valid_yaml)).collect())
+    }
+
+    #[test]
+    fn rule_paths_are_read_in_every_form_claude_code_accepts() {
+        let both = Some(vec![
+            ("dsp/**".to_string(), true),
+            ("engine/src/*.rs".to_string(), true),
+        ]);
+        assert_eq!(
+            patterns("---\npaths:\n  - \"dsp/**\"\n  - engine/src/*.rs\n---\nbody\n"),
+            both
+        );
+        assert_eq!(
+            patterns("---\npaths:\n  - 'dsp/**'\n  - engine/src/*.rs\n---\n"),
+            both
+        );
+        assert_eq!(
+            patterns("---\r\npaths:\r\n  - \"dsp/**\"\r\n  - engine/src/*.rs\r\n---\r\n"),
+            both
+        );
+        assert_eq!(patterns("---\npaths: dsp/**, engine/src/*.rs\n---\n"), both);
+        assert_eq!(
+            patterns("---\npaths: [\"dsp/**\", engine/src/*.rs]\n---\n"),
+            both
+        );
+        assert_eq!(
+            patterns("---\npaths:\n  - **/Cargo.toml\n---\n"),
+            Some(vec![("**/Cargo.toml".to_string(), false)]),
+            "YAML reads a leading * as an alias"
+        );
+        assert_eq!(
+            patterns("---\npaths: \"**/Cargo.toml\"\n---\n"),
+            Some(vec![("**/Cargo.toml".to_string(), true)])
+        );
+        assert!(glob_matches("engine/src/*.{rs,toml}", "engine/src/a.toml"));
+        assert!(!glob_matches("engine/src/*.{rs,toml}", "engine/src/a.md"));
+    }
+
     #[test]
     fn a_rule_without_paths_or_with_a_dead_glob_is_reported() {
-        assert_eq!(
-            rule_globs("---\npaths:\n  - \"dsp/**\"\n  - engine/src/*.rs\n---\nbody\n"),
-            Some(vec!["dsp/**".to_string(), "engine/src/*.rs".to_string()])
-        );
         let files = vec!["dsp/src/lib.rs".to_string()];
         let markdown = vec![
             (
@@ -990,6 +1404,10 @@ mod tests {
                 ".claude/rules/bare.md".to_string(),
                 "no frontmatter\n".to_string(),
             ),
+            (
+                ".claude/rules/alias.md".to_string(),
+                "---\npaths:\n  - **/lib.rs\n---\n".to_string(),
+            ),
         ];
         let files_with_problems: Vec<String> = rules_match_files(&markdown, &files)
             .into_iter()
@@ -997,7 +1415,11 @@ mod tests {
             .collect();
         assert_eq!(
             files_with_problems,
-            [".claude/rules/old.md", ".claude/rules/bare.md"]
+            [
+                ".claude/rules/old.md",
+                ".claude/rules/bare.md",
+                ".claude/rules/alias.md"
+            ]
         );
     }
 

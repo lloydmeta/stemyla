@@ -13,6 +13,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 
 ## How work is done
 
+* `working-with-agents.md`: for the person who directs the agent: recipes for common tasks, what a person must still do, and the tools.  Read it first when you start to work here.
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
@@ -32,7 +33,7 @@ Distilled facts from outside the repo, each with its source and the date it was 
 These are what `docs-check` holds the docs to:
 
 * Paths in code spans (`engine/src/song.rs`) exist, relative to the repo root, to the doc's own folder or, inside `docs/`, to `docs/`.  Plans and decisions are exempt: plans name files still to be made, and decisions are records of their time.  Name files, functions and types rather than linking to lines that move; `file.rs:12` is fine for evidence, and the check ignores the line.
-* IDs are defined once, as a `### ID: title` heading in `invariants.md` or `tech-debt.md`, and never reused.  Every ID mentioned anywhere is defined.
+* IDs are defined once, as a `### ID: title` heading in `invariants.md` or `tech-debt.md`, and never reused; every `###` heading there is an ID.  A mention of an ID whose prefix is in use (MEM, TD, ...) must be defined; an unknown prefix cannot be told from text such as `SHA-256`, so it is not checked.
 * The tests an invariant names on its `* Enforced by:` line exist.
 * Every workspace crate is listed in the layout of `CLAUDE.md` and `README.md` and under the crates of `ARCHITECTURE.md`.
 * Decisions are numbered `0001-...` with no gaps and carry a `Status:` line.

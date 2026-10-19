@@ -22,6 +22,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 | - | - |
 | Any change | `docs/invariants.md` (the rules below, with why and what enforces each) |
 | Find a doc | `docs/README.md` |
+| How the person directing you works | `docs/working-with-agents.md` |
 | Work of more than a few steps | `docs/plans/PLANS.md`, then `docs/plans/active/` |
 | GPU kernels, the model | `docs/ARCHITECTURE.md` (the model; running it on the GPU) |
 | Memory, buffers, storage | `docs/ARCHITECTURE.md` (memory on phones; browser storage) |
