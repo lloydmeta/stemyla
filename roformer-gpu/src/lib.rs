@@ -1956,10 +1956,11 @@ mod tests {
             .collect()
     }
 
+    /// The scan finds names with `_` and digits, and skips WGSL blocks.
     #[test]
     fn placeholders_are_found_and_wgsl_braces_are_not() {
-        let src = "fn f() { return; }\nvar<workgroup> a: array<f32, {SA_LEN}>;\n{}{S_ZERO}{x}";
-        assert_eq!(unfilled_placeholders(src), ["{SA_LEN}", "{S_ZERO}"]);
+        let src = "fn f() { return; }\nvar<workgroup> a: array<f32, {SA_LEN}>;\n{}{SOFTMAX_1}{x}";
+        assert_eq!(unfilled_placeholders(src), ["{SA_LEN}", "{SOFTMAX_1}"]);
         let template = unfilled_placeholders(include_str!("shaders/matmul_interleaved.wgsl"));
         assert!(template.contains(&"{BM}"), "{template:?}");
     }

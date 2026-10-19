@@ -105,7 +105,7 @@ The audio callback reads the player through `engine::slot`'s `try_lock`, renders
 Kernels fit the default limits (`docs/references/webgpu-limits.md`), and the device is requested with exactly those (`Limits::defaults()` in `roformer-gpu/src/lib.rs`), so nothing depends on what one GPU offers beyond them.
 
 * Why: a kernel that needs more fails on some users' GPUs only.
-* Enforced by: `workgroup_memory_within_defaults` (CI `test` job), and wgpu's validation at runtime on a real adapter.  `sources_are_complete` makes sure the generated sources it reads have no unfilled placeholder.
+* Enforced by: `workgroup_memory_within_defaults` (CI `test` job), and wgpu's validation at runtime on a real adapter.  `sources_are_complete` makes sure that the generated sources `workgroup_memory_within_defaults` reads have no unfilled placeholder.
 * Gaps: TD-1.
 
 ### GPU-2: a kernel change is checked against the CPU and in a browser

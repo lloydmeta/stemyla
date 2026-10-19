@@ -8,7 +8,7 @@ paths:
 
 Read `docs/ARCHITECTURE.md` (the model; running it on the GPU) before changing a kernel.  The rules are GPU-1, GPU-2, GPU-3 and MEM-3 in `docs/invariants.md`.
 
-* Limits: every kernel fits `docs/references/webgpu-limits.md`.  Workgroup z is at most 64, not 256.  `sources_are_complete` finds any unfilled `{NAME}` placeholder by itself; a new shared-memory tile goes into `workgroup_memory_within_defaults`.
+* Limits: every kernel fits `docs/references/webgpu-limits.md`.  Workgroup z is at most 64, not 256.  A new generated source goes into `sources_are_complete`, which finds any unfilled `{NAME}` placeholder in it; a new shared-memory tile goes into `workgroup_memory_within_defaults`.
 * Evidence before a default: `cargo test -p roformer-gpu --release` on a real GPU (name the adapter in the PR; SwiftShader and lavapipe do not count), then `cargo run -p xtask -- e2e selftest --weights <model> --query mm=<kernel>`.  A test that printed "skipping" proves nothing (TD-8).
 * Buffers: make every buffer through `Gpu`, never `device.create_buffer` directly, so it is a `GpuBuffer` that is destroyed when dropped.  Extend `roformer-gpu/tests/memory.rs` for a new allocation.
 * Calibration: a change to how kernels are chosen bumps `CALIBRATION` in `roformer-gpu/src/bench.rs`.

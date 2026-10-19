@@ -57,7 +57,7 @@ Terms:
 
 ### M2: every shader is checked against the default limits (closes TD-1; GPU-1)
 
-* Change: add `naga = { version = "=30.0.1", default-features = false, features = ["wgsl-in"] }` as a dev-dependency of `roformer-gpu`, the version already in the lock file.  Add the unit test `every_kernel_fits_the_default_limits` in `roformer-gpu/src/lib.rs`.  It parses each generated source that `sources_are_complete` covers.  It also parses the shader files that are not templates: `matmul.wgsl`, `softmax.wgsl`, `rmsnorm.wgsl` and `elementwise.wgsl`.  The three templates hold `{NAME}` placeholders and are not valid WGSL.  The test asserts the limits in `references/webgpu-limits.md`:
+* Change: add `naga = { version = "=30.0.1", default-features = false, features = ["wgsl-in"] }` as a dev-dependency of `roformer-gpu`, the version already in the lock file.  Add the unit test `every_kernel_fits_the_default_limits` in `roformer-gpu/src/lib.rs`.  It parses each generated source that `sources_are_complete` covers, which includes `matmul.wgsl` as the `s64` tile.  It also parses the other shader files that are not templates: `softmax.wgsl`, `rmsnorm.wgsl` and `elementwise.wgsl`.  The three templates hold `{NAME}` placeholders and are not valid WGSL.  The test asserts the limits in `references/webgpu-limits.md`:
   * workgroup x and y at most 256, and z at most 64;
   * x * y * z at most 256;
   * workgroup storage at most 16,384 bytes;
@@ -202,8 +202,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 
 * [x] 2026-10-19: plan written.  Survey of the code, the CI workflow, wsola 0.1.0 and 0.2.0, and the docs for clippy, naga, egui_kittest and Claude Code hooks.
 * [x] 2026-10-19: plan reviewed by the maintainer, who asked for M1.
-* [x] 2026-10-19: M1 implemented locally: CI runs roformer-gpu's GPU-free tests and doctests.  15 lib tests and 2 doctests pass.  `pad: 66` on `i64` fails `workgroup_memory_within_defaults` with "i64: 16640 bytes".
-* [x] 2026-10-19: M1 review: `sources_are_complete` missed 8 placeholders; it now finds any `{NAME}`.  Deleting the `{BM}` replace fails it with `i64: ["{BM}", "{BM}"]`.
+* [x] 2026-10-19: M1 implemented locally: CI runs roformer-gpu's GPU-free tests and doctests.  14 lib tests and 2 doctests pass (15 lib tests after the review added one).  `pad: 66` on `i64` fails `workgroup_memory_within_defaults` with "i64: 16640 bytes".
+* [x] 2026-10-19: M1 review: `sources_are_complete` missed 8 placeholders; it now finds any `{NAME}`.  Deleting the `{BM}` replace fails it with `i64: ["{BM}", "{BM}"]`.  Round 3: the scan's test now covers a name with a digit (`{SOFTMAX_1}`); a scan without digits fails it.
+* [x] 2026-10-19: M1, three review rounds done and their findings fixed.
 * [ ] M1: the CI log of the PR shows the new steps pass.
 * [ ] M2: naga limits test.
 * [ ] M3: `STEMYLA_REQUIRE`.
