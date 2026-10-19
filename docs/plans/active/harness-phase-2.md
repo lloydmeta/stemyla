@@ -413,7 +413,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M3 review round 1: no blockers; 3 findings, all real and fixed.  (1) The sensor missed `"Skipping"`; it now ignores case, and `a_skip_word_in_any_case_is_a_problem` failed before the fix.  (2) README claimed `STEMYLA_REQUIRE` reaches `worker-check`.  (3) The folder test left its folder when it failed.
 * [x] 2026-10-19: M3 review round 2: no blockers; 3 findings, all real and fixed.  (1) The real-tree test passed if the walk found no files, and nothing saw a stale allowlist entry.  It now asserts two known files, and `the_skip_allowlist_is_current` fails a reworded `web_output.rs` literal.  (2) VERIFY-1's text now names the wasm exception.  (3) The folder test removes its folder after a failed write too.
 * [x] 2026-10-19: M3 review round 3: no blockers and no should-fix items; 3 nits, all fixed.  The SwiftShader command gets `STEMYLA_REQUIRE=gpu`, `ARCHITECTURE.md` names `ROFORMER_GPU_FULL=1` for the end-to-end check, and one comment is re-wrapped.
-* [ ] M3: the PR, CI, and the merge.
+* [x] 2026-10-19: M3, PR #16 opened.  CI (run 39241946733) passes every job, and the `test` job lists the two revived tests, both checks of `xtask/tests/rules.rs` and both tests of `skip`.  The first attempt of the `test` job took 10m58s: `Cargo.lock` changed, so rust-cache restored an older cache and 167 crates were compiled again.  A re-run of the job took 4m41s (M2: 5m19s), with a 39 s build.  The revived tests add about 4 s.
+* [ ] M3: PR #16 merged by the maintainer.
 * [ ] M4: `synth`'s `files` feature.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
@@ -443,6 +444,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, M1 review: `sources_are_complete` listed 12 placeholder names by hand and missed 8 that the templates use (`{BM}`, `{BN}`, `{BK}`, `{TY}`, `{SB_LEN}`, `{S_ZERO}`, `{SOFTMAX_1}`, `{SOFTMAX_2}`).  A test that lists what to look for goes stale; it now scans for the pattern.
 * 2026-10-19, M2: deleting TD-1 made `docs-check` fail on each `TD-1` in the plans.  It checks every ID token in every Markdown file, plans included.  Every later milestone closes an ID, so it needed a rule for closed IDs.
 * 2026-10-19, M2: WebGPU counts each `var<workgroup>` rounded up to 16 bytes, and only the ones the entry point statically uses ([compute pipeline creation](https://gpuweb.github.io/gpuweb/#dom-gpudevice-createcomputepipeline)).  The text count in `workgroup_memory_within_defaults` does neither; the tiles here are multiples of 16, so the counts agree.
+* 2026-10-19, M3 CI: a change to `Cargo.lock` makes rust-cache restore an older cache by its restore key.  The `test` job then took 10m58s, not about 5 minutes; a re-run took 4m41s.  So a first CI time after a lock change is not the cost of the change.
 * 2026-10-19, M3 survey: two `xtask` tests have never run anywhere.  `folder_loading_matches_the_generator` and `mp3_decodes_to_roughly_the_right_length` need `audio/synth/`, which neither CI nor the maintainer's Mac has.  ffmpeg is on neither.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
 
