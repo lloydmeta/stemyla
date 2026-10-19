@@ -215,6 +215,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-19: M2 review round 2: 7 findings, all real and fixed.  The `## Closed` bullets' text is now checked; only the opening ID is left out.  New tests cover values at each limit, every entry point and every file in `shaders/`.  The reviewer's 4 surviving mutants now fail: `>=` on buffers, `.take(1)` on entry points, `get_entry_point(0)`, and a new `.wgsl` file.  A message no longer computes `max - 1`, and the layout test's docs no longer claim that it reads `Kernels::new`.
 * [x] 2026-10-19: M2 review round 3: 4 findings, all real and fixed.  The limits test now pins its 8 source names, so dropping `.chain(SHADER_FILES ...)` fails it.  A `###` entry under `## Closed` gets its own message.  GPU-1 names `Rec::push`, and this plan counted 7 sources, not 8.
 * [x] 2026-10-19: M2, PR #15 opened.  CI (run 39207559143) passes every job.  The `test` job lists the 26 `--lib` tests, among them `every_kernel_fits_the_default_limits ... ok`, and both `Rec` doctests.
+* [x] 2026-10-19: M2, `cargo test -p roformer-gpu --release` on the maintainer's Mac (AMD Radeon Pro 5500M, Metal) passes.  12 of 14 `kernels.rs` tests and 4 of 5 `memory.rs` tests ran on the GPU.  Four skipped: three need `timestamp-query`, which this adapter lacks, and `forward_matches_pytorch` needs the absent weights (TD-8).
 * [ ] M2: PR #15 merged by the maintainer.
 * [ ] M3: `STEMYLA_REQUIRE`.
 * [ ] M4: `synth`'s `files` feature.
