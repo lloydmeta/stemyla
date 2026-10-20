@@ -1234,7 +1234,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
   * The known gap, each with `n == n` planted, passes as the plan says: `allow(clippy::all)` before the `expect`s, `expect(clippy::all)`, `expect(eq_op)` on `fade_in`, `allow(eq_op)` on the `let`, and `[lints.clippy] all = "allow"`.  TD-3 names it until M7.
 * [x] 2026-10-20: M6 review round 1: no blockers and no should-fix items; 3 nits, all real and fixed.  (1) The `assign_op_pattern` `expect` also silences `x = x * y`, `/` and `%`; a planted `amount = amount / n as f32;` passed clippy, while DSP-1 named only `+` and `-`.  DSP-1, the rule file, the reason, TD-3 and decision 0006 now cover every compound assignment.  (2) TD-3 says "the four `expect`s".  (3) The `harness.md` cell uses the past tense.
 * [x] 2026-10-20: M6 review round 2: no blockers; 1 should-fix and 6 nits, all checked.  The should-fix was real: round 1 widened decision 0006's ban after the maintainer accepted it, with nothing that marked the change.  0006 now has a dated "Amendment" section, and the PR asks the maintainer to confirm it.  A planted `q = q << 1`, `q = q | 1` and `m = m / 2.0` passed clippy, which confirms the widened ban.  Five nits were fixed: STE lengths in DSP-1 and TD-3, a false past tense in `harness.md`, a note on the quoted texts in "M6 design", and M7's "arithmetic".  One was left: `CLAUDE.md`'s DSP-1 line stays a summary, and stays true.
-* [ ] M6: review round 3.
+* [x] 2026-10-20: M6 review round 3: no blockers; 1 should-fix and 3 nits, all checked and real.  The should-fix: Surprises lacked round 1's finding on `assign_op_pattern`; it now has it.  Nits: the Decision log's plan-review entries say "plan review"; the rule file says what to do with a lint that fires only in a test; the PR description says "keeps its workspace level", not the first commit's "every other clippy lint now runs".
+* [x] 2026-10-20: M6, three review rounds done and their findings fixed.
 * [ ] M6: PR merged by the maintainer.
 * [ ] M7: DSP-1 allowlist test.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
@@ -1273,6 +1274,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, M6 survey: two of the four lints that `dsp` relaxes are in clippy's complexity group, not style (`manual_clamp`, `manual_swap`).  DSP-1 and TD-2 said "style".  Also, `let x = x;` fires `redundant_locals`, which is in the suspicious group, not correctness.  Evidence: clippy 1.99.0 with each group allowed in turn.
 * 2026-10-20, M6 survey: an `expect` does not guard against an `allow` before it.  `#![allow(clippy::all)]` before the four `expect`s passes clippy, and after them it fails with four unfulfilled expectations.
 * 2026-10-20, M6 survey: `dsp` uses types outside DSP-1's list: `f32` in `biggest` and `median`, `Vec<(f32, f32)>` in `peaks`, `&[&[f32]]` in `mix` and `bool` in `median`.  So DSP-1's "A scan on 2026-10-19 found no breach" was false for the types.  M6 records them as a breach, and M7 decides them.
+* 2026-10-20, M6 review round 1: the `assign_op_pattern` `expect` also silences `x = x * y`, `/`, `%`, `<<`, `|` and `^`, not only `+` and `-`.  Evidence: with the `expect` removed, each fires the lint.
 * 2026-10-20, M6 plan review: an `expect` of a lint group silences the whole group.  `#![expect(clippy::all, reason = "x")]` is fulfilled by a style lint, and `n == n` then passes.  So M7 must name each lint, not only require `expect`.
 
 ## Decision log
@@ -1322,9 +1324,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M6): the lints that `dsp` relaxes are crate-level `#![expect]` attributes in `dsp/src/lib.rs`, one for each lint, each with a reason.  `expect` fails a stale exception.  Cargo's `[lints]` cannot hold them: it rejects overrides beside `workspace = true`, and has no `expect` level.
 * 2026-10-20, agent (M6): the plan recommends keeping all four lints, option (x), so no function body changes.  The maintainer decides (decision point in M6's design).
 * 2026-10-20, agent (M6): M6 adds no check of the lint attributes.  M7 parses the same files with `syn` and closes the gap; TD-3 names it until then.
-* 2026-10-20, agent (M6 review round 1): under (x), DSP-1 names the beginner forms, so each `expect`'s reason cites DSP-1's text.  Without it, DSP-1 forced only `manual_swap`, and M6's own rule for a new lint failed the other three.
-* 2026-10-20, agent (M6 review round 1): the types outside DSP-1's list are a breach, with their own entry under `## Known breaches`, not a sentence in TD-3.  TD-3 is a gap in enforcement; M7 closes both.
-* 2026-10-20, agent (M6 review round 2): decision 0006 records the choice at M6's decision point.  Under (x), DSP-1 gains a ban on `+=`, `-=`, `is_empty` and `clamp`, which is a rule change.
+* 2026-10-20, agent (M6 plan review round 1): under (x), DSP-1 names the beginner forms, so each `expect`'s reason cites DSP-1's text.  Without it, DSP-1 forced only `manual_swap`, and M6's own rule for a new lint failed the other three.
+* 2026-10-20, agent (M6 plan review round 1): the types outside DSP-1's list are a breach, with their own entry under `## Known breaches`, not a sentence in TD-3.  TD-3 is a gap in enforcement; M7 closes both.
+* 2026-10-20, agent (M6 plan review round 2): decision 0006 records the choice at M6's decision point.  Under (x), DSP-1 gains a ban on `+=`, `-=`, `is_empty` and `clamp`, which is a rule change.
 * 2026-10-20, maintainer (M6): option (x).  `dsp` keeps `x = x + 1`, `len() > 0`, the two `if`s of the clamp and the swap through `temp`, each lint as an `expect` with a reason.  DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp`.
 * 2026-10-20, agent (M6 review round 1): DSP-1's ban covers every compound assignment, not only `+=` and `-=`.  The `assign_op_pattern` `expect` silences all of them, so a ban on two left the others allowed and unchecked.  This keeps (x)'s intent, so decision 0006 is amended, not replaced.
 
