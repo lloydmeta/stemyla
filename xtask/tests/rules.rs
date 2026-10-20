@@ -205,3 +205,31 @@ fn no_audio_or_weights_are_tracked() {
         report.join("\n")
     );
 }
+
+#[test]
+fn e2e_messages_use_protocol_types() {
+    let root = xtask::workspace_root();
+    let read = |file: &str| {
+        std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("reading {file}: {e}"))
+    };
+    let scripts = xtask::rules::e2e_scripts(&root).expect("xtask/e2e can be read");
+    assert!(
+        scripts
+            .iter()
+            .any(|(file, _)| file == "xtask/e2e/worker.js"),
+        "the scripts do not include xtask/e2e/worker.js"
+    );
+    let problems = xtask::rules::e2e_types_match_the_protocol(
+        &read("protocol/src/lib.rs"),
+        &scripts,
+        &read("xtask/src/e2e.rs"),
+        &xtask::rules::SCRIPT_ONLY_TYPES,
+    );
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} PROTO-1 problem(s):\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}

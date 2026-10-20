@@ -66,7 +66,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 ### Change a message between the page and the worker
 
 * The agent loads `.claude/rules/protocol.md`, and changes the hand-written e2e scripts in the same commit (PROTO-1).
-* Check: `cargo run -p xtask -- web-test` and `cargo run -p xtask -- e2e storage` pass.
+* Check: `cargo run -p xtask -- web-test`, `cargo run -p xtask -- e2e storage` and `cargo test -p xtask --test rules` pass.
 
 ### Review a change
 
@@ -125,3 +125,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-20, phase 2 (M5): `crates_depend_only_downwards` compares the layers table with the dependencies between crates.  `the_page_and_the_worker_meet_only_through_stem_protocol` keeps the page side and the worker side apart.  Review a change to the table as a design change.
 * 2026-10-20, phase 2 (M8): `no_python_in_the_build` and `no_audio_or_weights_are_tracked` check the git index.  A tracked file over 1 MiB fails; raise `MAX_TRACKED_BYTES` only with a reason in the PR.
 * 2026-10-20, phase 2 (M9): `young_crates_are_pinned` fails a crate below 1.0 without an `=` pin; pin it, or list it in `SETTLED_CRATES` with the date of its first version, two years old or more.  `third_party_lists_what_ships` fails when `THIRD-PARTY.md` differs from its commands; run the command and copy the rows.
+* 2026-10-20, phase 2 (M10): `e2e_messages_use_protocol_types` fails a message type in the e2e scripts that `stem_protocol::kind` does not have.  Fix the script, or add a type that only the scripts make to `SCRIPT_ONLY_TYPES` with a reason.

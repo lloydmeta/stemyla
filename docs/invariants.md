@@ -128,7 +128,7 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 `stem-protocol` has one encoder and one decoder per message, shared by the page and the worker.  `xtask e2e` also writes messages by hand (`xtask/e2e/worker.js`, `xtask/src/e2e.rs`), so the wire format changes only together with it.
 
 * Why: the page and the worker are built together but run as separate wasm modules; a mismatch fails at runtime only.
-* Enforced by: `replies_arrive_intact`, `requests_and_their_settings_arrive_intact`, `hand_written_requests_are_read` (CI `browser-tests` job).
+* Enforced by: `replies_arrive_intact`, `requests_and_their_settings_arrive_intact`, `hand_written_requests_are_read` (CI `browser-tests` job), and `e2e_messages_use_protocol_types` (CI `test` job).  The last compares the message types in `xtask/e2e/*.js` and in the scripts of `xtask/src/e2e.rs` with `stem_protocol::kind`.  It does not read field names.
 * Gaps: TD-16.
 
 ### PROTO-2: a model URL only from the page's own site
