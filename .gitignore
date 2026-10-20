@@ -1,15 +1,32 @@
 target/
-dist/
-pages/
+/app/dist/
+/pages/
 # Audio, stems and model files are never committed: songs are copyrighted,
 # and the model weights have no stated licence.
-audio/
-stems/
-third_party/
+# The folders are anchored at the root, so a source folder of the same name
+# deeper in the tree is not ignored.  xtask/src/rules.rs checks the index too
+# (ASSET-1).
+/audio/
+/stems/
+/third_party/
 *.mp3
 *.wav
+*.flac
+*.ogg
+*.opus
+*.m4a
+*.aac
+*.aif
+*.aiff
 *.safetensors
 *.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+*.npy
+*.npz
+*.gguf
 **/tests/snapshots/**/*.diff.png
 **/tests/snapshots/**/*.new.png
 **/tests/snapshots/**/*.old.png

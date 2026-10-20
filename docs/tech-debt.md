@@ -12,18 +12,6 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 * Fix: review; no check is planned.  `dsp` is small and seldom changes, so a full allowlist costs more than it gains (`plans/active/harness-phase-2.md`, M7).
 
-### TD-5: BUILD-1 is not checked
-
-Nothing fails when a Python file or a `python`/`pip` step appears.
-
-* Fix: a test that fails on any tracked `*.py` other than `tools/roformer_export.py`, and on Python in workflows, `app/Trunk.toml` or a `build.rs`.
-
-### TD-6: ASSET-1 rests on .gitignore alone
-
-`git add -f` gets past it, and `.flac`, `.ogg`, `.m4a`, `.pt`, `.pth`, `.onnx`, `.npy` are not listed.  Its folder patterns (`audio/`, `stems/`, `dist/`, `pages/`) are not anchored, so they also ignore a source folder of that name at any depth.
-
-* Fix: list the missing extensions; a CI check over `git ls-files` for audio and weight extensions and a size cap.
-
 ### TD-7: DEPS-1 is not checked, and young crates float
 
 `engine/Cargo.toml` takes `wsola = "0.1.0"` and `timestretch = "0.15.0"` as caret ranges, which accept later 0.1 and 0.15 releases (`cute-dsp = "0.0.41"` already accepts only 0.0.41); only `rusty_mp3` (in `worker/Cargo.toml` and `xtask/Cargo.toml`) and `naga` (in `roformer-gpu/Cargo.toml`) are pinned exactly.  Nothing compares `THIRD-PARTY.md` with `cargo tree`, and there is no licence policy.
@@ -152,4 +140,6 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 * TD-1: closed by `every_kernel_fits_the_default_limits` (harness phase 2, M2).  It checks every shader against the default limits with naga (GPU-1).
 * TD-2: closed by four `#![expect]`s in `dsp/src/lib.rs`, one for each lint, with a reason (harness phase 2, M6).  Every other clippy lint keeps its workspace level in `dsp`.  With `-D warnings`, an `expect` whose lint stops firing fails clippy (DSP-1).
 * TD-4: closed by `crates_depend_only_downwards` (harness phase 2, M5).  It compares the dependencies between crates in `cargo metadata` with the layers table in `ARCHITECTURE.md` (LAYER-1).
+* TD-5: closed by `no_python_in_the_build` (harness phase 2, M8).  It checks the git index and the build files for Python (BUILD-1).
+* TD-6: closed by `no_audio_or_weights_are_tracked` and the anchored `.gitignore` (harness phase 2, M8).  The test checks the git index for audio, weights and large files (ASSET-1).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.

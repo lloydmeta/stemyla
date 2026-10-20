@@ -123,3 +123,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-19, phase 1: first version.  The map, the docs, rules by path and `docs-check`.  The agent runs review rounds because `CLAUDE.md` says so; the review recipe starts them by hand.
 * 2026-10-19, phase 2 (M3): `STEMYLA_REQUIRE` turns a skipped test into a failure.  The GPU recipe uses it, and a new recipe says how to ask for evidence that a test ran.
 * 2026-10-20, phase 2 (M5): `crates_depend_only_downwards` compares the layers table with the dependencies between crates.  `the_page_and_the_worker_meet_only_through_stem_protocol` keeps the page side and the worker side apart.  Review a change to the table as a design change.
+* 2026-10-20, phase 2 (M8): `no_python_in_the_build` and `no_audio_or_weights_are_tracked` check the git index.  A tracked file over 1 MiB fails; raise `MAX_TRACKED_BYTES` only with a reason in the PR.

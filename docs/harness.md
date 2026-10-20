@@ -28,6 +28,7 @@ Two principles shape it:
 | `crates_depend_only_downwards`, `the_page_and_the_worker_meet_only_through_stem_protocol` (LAYER-1) | sensor, computational | nothing compared the layers table with the manifests, or kept the page side and the worker side apart; a crate outside the workspace could hide a dependency | phase 2 |
 | the `#![expect]`s in `dsp/src/lib.rs`, one for each lint | sensor, computational | `#![allow(clippy::all)]` in `dsp` switched off every clippy lint, so a correctness lint passed there, and a `disallowed-methods` list could not reach it | phase 2 |
 | `dsp_is_beginner_style` (DSP-1) | sensor, computational | clippy has no lint against iterators, closures or `swap`, and one more `+=` passed the `expect`s.  It scans for the likely breaches only (TD-3) | phase 2 |
+| `no_python_in_the_build` (BUILD-1), `no_audio_or_weights_are_tracked` (ASSET-1), over the git index | sensor, computational | nothing failed a Python file or a Python step in CI, and `git add -f` could put a song or a model file past `.gitignore`.  `.gitignore` also ignored source folders named `audio` or `stems` at any depth | phase 2 |
 
 Planned components, by phase, are in the plan.
 
