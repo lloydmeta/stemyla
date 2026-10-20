@@ -26,4 +26,4 @@ The maintainer also weighed (z): fix only `assign_op_pattern`, because the Rust 
 
 ## Amendment
 
-Amended on 2026-10-20 by the agent, in M6 review round 1.  Option (x) named only `+=` and `-=`.  The `assign_op_pattern` `expect` silences every operator, so the ban now covers every compound assignment.  The maintainer confirms this amendment at PR review.
+Amended on 2026-10-20 by the agent, in M6 review round 1.  Option (x) named only `+=` and `-=`.  The `assign_op_pattern` `expect` silences every operator, so the ban now covers every compound assignment.  The maintainer accepted this amendment on 2026-10-20.

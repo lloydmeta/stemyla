@@ -1236,6 +1236,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M6 review round 2: no blockers; 1 should-fix and 6 nits, all checked.  The should-fix was real: round 1 widened decision 0006's ban after the maintainer accepted it, with nothing that marked the change.  0006 now has a dated "Amendment" section, and the PR asks the maintainer to confirm it.  A planted `q = q << 1`, `q = q | 1` and `m = m / 2.0` passed clippy, which confirms the widened ban.  Five nits were fixed: STE lengths in DSP-1 and TD-3, a false past tense in `harness.md`, a note on the quoted texts in "M6 design", and M7's "arithmetic".  One was left: `CLAUDE.md`'s DSP-1 line stays a summary, and stays true.
 * [x] 2026-10-20: M6 review round 3: no blockers; 1 should-fix and 3 nits, all checked and real.  The should-fix: Surprises lacked round 1's finding on `assign_op_pattern`; it now has it.  Nits: the Decision log's plan-review entries say "plan review"; the rule file says what to do with a lint that fires only in a test; the PR description says "keeps its workspace level", not the first commit's "every other clippy lint now runs".
 * [x] 2026-10-20: M6, three review rounds done and their findings fixed.
+* [x] 2026-10-20: M6, the maintainer accepted the amendment to decision 0006: the ban covers every compound assignment.
 * [ ] M6: PR merged by the maintainer.
 * [ ] M7: DSP-1 allowlist test.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
