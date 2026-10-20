@@ -1169,8 +1169,9 @@ pub fn dsp_files(root: &Path) -> Result<Vec<(String, String)>> {
 /// likely breaches: methods other than `len`, `push` and `capacity`,
 /// closures, compound assignments, `for` over a list, lint attributes, and
 /// files or manifest text that can relax the lints.  A name after its own
-/// module, as in `pub use max::max`, is `dsp`'s own function.  TD-3 names
-/// what the scan cannot see.
+/// module, as in `pub use max::max`, is `dsp`'s own function; with a prefix,
+/// as in `self::max::max`, it still fails.  TD-3 names what the scan cannot
+/// see.
 pub fn dsp_keeps_beginner_style(files: &[(String, String)]) -> Vec<Problem> {
     files
         .iter()
