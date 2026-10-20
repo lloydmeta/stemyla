@@ -59,7 +59,7 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * ASSET-1: never commit audio, stems or model weights; link to the weights, never host them.
 * DEPS-1: before adding a crate, confirm it exists and is maintained, pin young crates exactly, keep `THIRD-PARTY.md` current.
 * LAYER-1: crates depend only downwards through the layers in `docs/ARCHITECTURE.md`.
-* DSP-1: `dsp/` uses only `&[f32]`, `Vec<f32>`, `usize`, `for`, `while`, `if` and indexing; no iterators, closures or `swap`.
+* DSP-1: `dsp/` is beginner style: plain types, `while`, `for` over a range, `if` and indexing; no iterators, closures or `swap`.
 * MEM-1: a song- or model-sized buffer is never copied to share it; stem audio is `engine::Samples`.
 * MEM-2: JS arrays that cross between page and worker are transferred, not cloned.
 * MEM-3: GPU buffers are freed explicitly when dropped, never left to garbage collection.

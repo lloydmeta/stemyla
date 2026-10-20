@@ -94,3 +94,22 @@ fn the_page_and_the_worker_meet_only_through_stem_protocol() {
         report.join("\n")
     );
 }
+
+#[test]
+fn dsp_is_beginner_style() {
+    let files = xtask::rules::dsp_files(&xtask::workspace_root()).expect("dsp/ can be read");
+    for known in ["dsp/Cargo.toml", "dsp/src/lib.rs", "dsp/src/mix.rs"] {
+        assert!(
+            files.iter().any(|(file, _)| file == known),
+            "the walk did not reach {known}"
+        );
+    }
+    let problems = xtask::rules::dsp_keeps_beginner_style(&files);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} DSP-1 problem(s):\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
