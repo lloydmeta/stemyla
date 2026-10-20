@@ -1168,8 +1168,9 @@ pub fn dsp_files(root: &Path) -> Result<Vec<(String, String)>> {
 /// DSP-1: `dsp` keeps its beginner style.  A scan of the tokens finds the
 /// likely breaches: methods other than `len`, `push` and `capacity`,
 /// closures, compound assignments, `for` over a list, lint attributes, and
-/// files or manifest text that can relax the lints.  TD-3 names what the
-/// scan cannot see.
+/// files or manifest text that can relax the lints.  A name after its own
+/// module, as in `pub use max::max`, is `dsp`'s own function.  TD-3 names
+/// what the scan cannot see.
 pub fn dsp_keeps_beginner_style(files: &[(String, String)]) -> Vec<Problem> {
     files
         .iter()
@@ -1318,8 +1319,11 @@ fn dsp_breach_at(
         let after_dot = punct_spacing(at(-1), '.').is_some() && !joint(at(-2), '.');
         let first_in_import =
             level == DspLevel::ImportList && (k == 0 || punct_spacing(at(-1), ',').is_some());
-        let after_path =
-            first_in_import || (punct_spacing(at(-1), ':').is_some() && joint(at(-2), ':'));
+        let after_colons = punct_spacing(at(-1), ':').is_some() && joint(at(-2), ':');
+        let own_module = after_colons
+            && ident_name(at(-3))
+                .is_some_and(|segment| segment.strip_prefix("r#").unwrap_or(&segment) == name);
+        let after_path = first_in_import || (after_colons && !own_module);
         if after_dot && !DSP_METHODS.contains(&name) {
             return Some((
                 DspBreach::Method,
@@ -3176,8 +3180,10 @@ mod tests {
 #![expect(clippy::manual_clamp, reason = "DSP-1: an `if` for each bound")]
 #![expect(clippy::manual_swap, reason = "DSP-1 forbids `swap`")]
 
+mod max;
 mod mix;
 
+pub use max::max;
 pub use mix::mix;
 "#;
         let mix = r#"/// Adds the stems.
