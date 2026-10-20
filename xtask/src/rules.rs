@@ -2706,9 +2706,9 @@ pub fn e2e_types_match_the_protocol(
             ),
         )
     };
-    let (in_rust, rust_problems): (Vec<ScriptType>, Vec<Problem>) = match TokenStream::from_str(
-        e2e_rust,
-    ) {
+    let e2e_tokens = TokenStream::from_str(e2e_rust);
+    let rust_was_read = e2e_tokens.is_ok();
+    let (in_rust, rust_problems): (Vec<ScriptType>, Vec<Problem>) = match e2e_tokens {
         Err(e) => (
             Vec::new(),
             vec![proto1(
@@ -2758,7 +2758,7 @@ pub fn e2e_types_match_the_protocol(
     let stale = script_only.iter().filter_map(|(entry, _)| {
         let why = if kinds.contains(*entry) {
             "`stem_protocol::kind` has it"
-        } else if !in_js.iter().chain(&in_rust).any(|found| found.value == *entry) {
+        } else if rust_was_read && !in_js.iter().chain(&in_rust).any(|found| found.value == *entry) {
             "no e2e script uses it"
         } else {
             return None;
@@ -5786,6 +5786,11 @@ fn f() {
                 (
                     RULES_FILE,
                     check(&js, RUST_OK, &[worker_error, in_kind]),
+                    None,
+                ),
+                (
+                    E2E_RUST,
+                    check(&js, "fn f() {", &[worker_error, unused]),
                     None,
                 ),
                 (
