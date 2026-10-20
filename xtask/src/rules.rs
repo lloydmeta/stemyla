@@ -2338,8 +2338,8 @@ fn is_js_ident_char(c: char) -> bool {
 }
 
 /// The tokens of `text`, each with its line from 1.  It skips comments and
-/// template literals.  A string without its closing quote on its line gives
-/// no token, so prose with an apostrophe gives no type, and the lex never
+/// template literals.  A string goes on past `\` and a newline, as in JS.
+/// A string without its closing quote on its line gives no token, so prose with an apostrophe gives no type, and the lex never
 /// fails.  It reads no regex literal.
 fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
     let chars: Vec<char> = text.chars().collect();
@@ -2375,13 +2375,15 @@ fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
             }
             index += 1;
         } else if c == '"' || c == '\'' {
+            let start_line = line;
             let mut value = String::new();
             let mut end = index + 1;
             let closed = loop {
                 match at(end) {
                     None | Some('\n') => break false,
                     Some(quote) if quote == c => break true,
-                    Some('\\') if at(end + 1).is_some_and(|next| next != '\n') => {
+                    Some('\\') if at(end + 1).is_some() => {
+                        line += usize::from(at(end + 1) == Some('\n'));
                         value.extend(at(end + 1));
                         end += 2;
                     }
@@ -2392,7 +2394,7 @@ fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
                 }
             };
             if closed {
-                tokens.push((line, JsToken::Str(value)));
+                tokens.push((start_line, JsToken::Str(value)));
                 index = end + 1;
             } else {
                 index = end;
@@ -5622,7 +5624,7 @@ pub mod kind {
 
     #[test]
     fn js_is_lexed() {
-        let text = "a.type === 'x'\n// type: 'y'\n\"it\\\"s\" /* type: 'z'\n */ b `t\\` ${ \"w\" }\n` c page's\ntypeof d";
+        let text = "a.type === 'x'\n// type: 'y'\n\"it\\\"s\" /* type: 'z'\n */ b `t\\` ${ \"w\" }\n` c page's\ntypeof d 'e\\\nf' g";
         let ident = |name: &str| JsToken::Ident(name.into());
         let string = |value: &str| JsToken::Str(value.into());
         assert_eq!(
@@ -5641,6 +5643,8 @@ pub mod kind {
                 (5, &ident("page")),
                 (6, &ident("typeof")),
                 (6, &ident("d")),
+                (6, &string("e\nf")),
+                (7, &ident("g")),
             ]
         );
     }
@@ -5708,6 +5712,8 @@ fn f() {
             "fn f() {\n    p.check(\n        \n        r[\"end\"][\"type\"] == \"segmnt\");\n}",
             "fn f() {\n    in_page(\"\", json!([{\n        \n        \"type\": \"segmnt\" }]));\n}",
             "fn f() {\n    in_page(\"\", json!([{\n        \n        \"type\": json!(\"segmnt\") }]));\n}",
+            "fn f() {\n    in_page(\"\n        \n        const p = \\\"a\\\\\\\"b\\\"; return e2e.ask([{ type: 'segmnt' }]);\");\n}",
+            "fn f() {\n    in_page(r#\"\n        \n        const p = \"C:\\\\\"; return e2e.ask([{ type: 'segmnt' }]);\"#);\n}",
         ];
         for case in rust_cases {
             assert_one_each(
@@ -5743,6 +5749,7 @@ fn f() {
         }
         let rust = r#"fn f() {
     let files = json!({ "url": url, "type": kind });
+    let opts = json!({ "mm": "s64" });
     p.check(l.contains("Restored \"song\" from this browser"), "the page's song");
 }"#;
         assert_eq!(check(JS_OK, &format!("{rust}\n{RUST_OK}"), &[]), vec![]);
