@@ -1193,12 +1193,77 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 * `Cargo.lock` does not change.  `grep -c "Enforced by: prose only" docs/invariants.md` gives 4.
 * fmt, clippy, the tests and `docs-check` pass.
 
-### M10: the hand-written e2e messages match the protocol (TD-16, part; PROTO-1)
+### M10: the hand-written e2e messages match the protocol (TD-16, part; PROTO-1, DOC-1)
 
-* Change: a check extracts the message type strings from `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs`, and compares them with the constants in `stem_protocol::kind`.  Types that exist only in the scripts (for example `worker-error`) are on a named allowlist.
-* Acceptance: `e2e_messages_use_protocol_types` passes.  A unit test plants a misspelt type (`"segmnt"`) and fails with PROTO-1.
-* Scope: failing on a missing field and a version handshake stay in TD-16.
-* Note: if the check takes `stem-protocol` as a dependency of `xtask`, add `stem-protocol` to `xtask`'s row in the layers table in `ARCHITECTURE.md`.  `crates_depend_only_downwards` (M5) fails until the row lists it.
+* Scope, by the rule for proportionate sensors: one token scan, with no new crate, no new crate edge and no decision record.  No type has drifted.  `stem_protocol::kind` has not changed since the crate came in (`fd4656c`, 2026-10-19).  The likely breach: an agent renames or adds a type in `stem-protocol`, or writes a new e2e case with a misspelt type.  CI runs the `smoke`, `audio-resume` and `storage` scenarios only.  So a drift in `worker-check` fails nowhere, and a drift in `storage` fails late, as a script timeout or a failed check that names no rule.
+
+#### M10 state at the start
+
+On 2026-10-20, at commit `7a99a88` (M9 merged as PR #22):
+
+* `pub mod kind` in `protocol/src/lib.rs` holds 15 items, each `pub const NAME: &str = "...";`, and nothing else.  The private `mod field` holds the field names.  Three of them have the same text as a type: `"done"`, `"selftest"` and `"bench"`.
+* `xtask/e2e/worker.js` uses types in three shapes: `{ type: "worker-error", ... }`, `d.type === "status"` (5 times, one as `e.data.type`), and `["model", "error", "selftest", "done"].includes(d.type)`.  `worker-error` is the reply that `e2e.ask` makes when the worker throws; `kind` does not have it.  The file also has `new Worker(..., { type: "module" })`, an option of the `Worker` constructor, not a message.
+* `xtask/src/e2e.rs` holds its scripts as Rust string literals, passed to `in_page` and `session.execute`.  They use `{ type: '...' }` 20 times: `download` 11, `model` 4, `init` 3, `forget_model` 1 and `separate` 1.  The Rust code compares one reply type: `r["end"]["type"] == json!("done")`.  `drop_files` has `{ type: f.type }` in a raw literal and `json!({ ..., "type": kind })`.  Both are the MIME types of dropped files, not messages.  No script literal holds `\"`; two prose literals do.
+* The other e2e helpers hold no message: `console.js` (`typeof`), `audio_contexts.js` and `audio_like_safari.js` (`prototype`), and `blank.html`, which only loads `worker.js`.
+* `xtask/src/rules.rs` will hold misspelt types in its unit tests, so the check must not read it.
+
+#### M10 design
+
+* The types: the check reads `protocol/src/lib.rs` with `proc-macro2`, as M3 and M7 do.  It takes every string literal in the brace group after the idents `mod kind`, at the top level of the file.  `string_literals` (M3) already leaves out doc comments.  So `xtask` takes no dependency on `stem-protocol`, the layers table does not change, and a new constant needs no second list.  A dependency would need that list, since Rust code cannot list a module's items.
+* The check: `pub fn e2e_types_match_the_protocol(protocol: &str, scripts: &[(String, String)], e2e_rust: &str, script_only: &[(&str, &str)]) -> Vec<Problem>` in `xtask/src/rules.rs`.  `scripts` holds each `xtask/e2e/*.js` file with its text.  `e2e_rust` is the text of `xtask/src/e2e.rs`.  The real-tree test passes `SCRIPT_ONLY_TYPES`; unit tests pass a small list, as M9's do.
+* `pub const SCRIPT_ONLY_TYPES: [(&str, &str); 2]`, each a type and its reason: `"worker-error"`, "the reply that `e2e.ask` makes when the worker throws"; and `"module"`, "the `Worker` constructor's option in `worker.js`, not a message".
+* A small JS lexer: `fn js_tokens(text: &str) -> Vec<(usize, JsToken)>` gives each token with its line, from 1.  `JsToken` is `Ident(String)`, `Str(String)` or `Punct(char)`.  An ident is a run of letters, digits, `_` and `$`, so `typeof` is not `type`.  The lexer skips white space, `//` and `/* */` comments, and template literals (backtick to backtick, past a `\` escape, with no look inside `${}`).  A string reads to its closing quote, past a `\` escape.  A string that has no closing quote before the end of its line gives no token, and the lex goes on from the next line.  So the lexer never fails, and a prose literal with an apostrophe ("the page's") gives no type.  It reads no regex literal; no script has one.
+* The shapes of a type in JS, each giving the string and its line:
+  * The ident `type` or the string `"type"`, then `:`, then a string: `{ type: 'download' }` and `{ "type": "download" }`.
+  * The ident `type`, alone or after `.`, then an operator, then a string: `d.type === "alive"` and `type === "alive"`.  The operator is `===`, `==`, `!==` or `!=`, read as a run of `=` and `!` puncts.
+  * A string, an operator, then a chain of idents joined by `.` whose last ident is `type`: `"alive" === e.data.type`.
+  * `[`, one or more strings joined by `,`, then `]`, `.`, `includes`, `(`, a chain whose last ident is `type`, and `)`.  Each string is a type.
+* In `xtask/src/e2e.rs`, from `proc-macro2`'s tokens:
+  * Each string literal, plain or raw, is lexed as JS on its own, so an unmatched quote in one hides nothing in the next.  `string_value` gives the source text between the quotes.  So for a plain literal, the check first maps `\\` to `\` and `\"` to `"`; this keeps the newlines.  A token's line is the literal's first line plus the newlines before the token in the literal's text.
+  * Two Rust shapes, each with two forms of its value: a string literal, or `json` `!` and a paren group that holds only a string literal.
+    * A bracket group that holds only the literal `"type"`, then `==` or `!=`, then the value: `r["end"]["type"] == json!("done")`.
+    * In a brace group, the literal `"type"`, then `:`, then a string literal: `json!([{ "type": "download" }])`, as script args.  `json!({ ..., "type": kind })` has an ident after the `:`, so it gives no type.
+* Problems, each with PROTO-1, the file, the line if any, and the fix:
+  * A type that is in neither `kind` nor `script_only`: "PROTO-1: xtask/e2e/worker.js:26 uses the message type \"alve\", which `stem_protocol::kind` does not have.  Fix: use a type from `kind` (\"init\", ...); or change `kind`, its encoder and its decoder together; or, for a type that only the scripts make or an option that is not a message, add it to `SCRIPT_ONLY_TYPES` with a reason."
+  * An entry of `script_only` that no script uses, or that `kind` has.  It names `xtask/src/rules.rs`.  Fix: "remove the entry".
+  * `protocol/src/lib.rs` that does not tokenise, has no `mod kind`, or has no string in `kind`.  Fix: "keep the message types as string constants in `stem_protocol::kind`, or update the check".
+  * `xtask/src/e2e.rs` that does not tokenise.
+  * No type in the `*.js` files, and no type in `xtask/src/e2e.rs`: one problem for each, which names the files or the file.  So a script that moves or changes shape cannot pass in silence.
+* Out of scope, named in PROTO-1's `* Enforced by:` line and in TD-16: field names; a type in a shape the scan does not read (a `switch` and its `case`s, a variable, a template literal, `.as_str() == Some("x")`); scripts in other files; a reply with a missing field, which decodes as a default; and a version handshake.
+
+#### M10 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. Test first: `js_tokens`, the reader of `kind`, a stub of `e2e_types_match_the_protocol` that returns no problem, and the unit tests, in a module `proto_tests`.  Every test that expects a problem fails against the stub.  Then write the check, and all pass.  Unit tests:
+   * `js_is_lexed`: the lines of tokens on three lines, both quotes, an escaped quote in a string, both comment forms, a template literal with `${ "x" }` and with an escaped backtick, a quote not closed before the end of its line, and `typeof`.
+   * `the_kinds_are_read`: a fixture with `pub mod kind` and `mod field` gives the strings of `kind` only.  A doc comment in `kind` is left out, and `field`'s `"text"` is not a type.
+   * `the_e2e_types_match`: a fixture `worker.js` with each JS shape, in both quotes and both orders of the comparison, gives no problem.  So does a fixture `e2e.rs` with a script in a plain and a raw literal, and each Rust shape in both forms.
+   * `a_misspelt_type_is_named`: `"segmnt"` gives one problem with PROTO-1, the file and the line, in each of these: the four JS shapes, with the ident `type`, the string `"type"`, `d.type` and a bare `type` where they apply; the second of three strings in an `includes` array; `\"segmnt\"` in a plain Rust literal; and each Rust shape in both forms.  In `e2e.rs` it is on the third line of a script literal, and the line is right.  `"text"`, a field name, gives a problem too.
+   * `other_type_words_are_not_types`: `{ type: f.type }`, `typeof a === "string"`, `const { type } = d`, a comment, a template literal, `json!({ "type": kind })` and a prose literal with `\"` each give no problem.  A prose literal with an unmatched `'` before a script literal does not hide the script's misspelt type.
+   * `the_script_only_list_is_checked`: an entry that no script uses, and an entry that `kind` has, give one problem each.  `{ type: "module" }` without its entry gives one.
+   * `e2e_nothing_to_read_is_a_problem`: a protocol without `mod kind`, a `kind` with no string, an `e2e.rs` that does not tokenise, `*.js` files with no type, and an `e2e.rs` with no type each give one problem.
+2. The real-tree test `e2e_messages_use_protocol_types` in `xtask/tests/rules.rs`, and the docs.  The test reads `protocol/src/lib.rs`, each `xtask/e2e/*.js` file in name order, and `xtask/src/e2e.rs`.  It asserts that the scripts include `xtask/e2e/worker.js`.  Plant each of these on the real tree, one at a time; each fails the test with PROTO-1 and the right line.  Restore each, and record the results in the PR:
+   * `"alive"` as `"alve"` in `worker.js`;
+   * `type: 'forget_model'` as `type: 'forget'` in `e2e.rs`;
+   * `json!("done")` as `json!("dne")` in `e2e.rs`;
+   * `LOG`'s value as `"logs"` in `protocol/src/lib.rs`, which names `worker.js:43`;
+   * `"worker-error"` removed from `SCRIPT_ONLY_TYPES`, which then has the type `[(&str, &str); 1]`.
+* Docs (DOC-1), in step 2's commit:
+  * `invariants.md`, PROTO-1: `* Enforced by:` adds "`e2e_messages_use_protocol_types` (CI `test` job).  It compares the message types in `xtask/e2e/*.js` and in the scripts of `xtask/src/e2e.rs` with `stem_protocol::kind`.  It does not read field names."  `* Gaps: TD-16.` stays.
+  * `tech-debt.md`: TD-16 is narrowed to the field names in the e2e scripts, the type shapes the scan does not read, the silent defaults and the handshake.  Its title becomes "TD-16: the wire format has unchecked field names and silent defaults".  Its fix drops the type test.
+  * `.claude/rules/protocol.md`: the e2e bullet says that `e2e_messages_use_protocol_types` checks the type strings, and that a person checks the field names.
+  * `working-with-agents.md`: the protocol recipe's "Check:" line adds `cargo test -p xtask --test rules`.
+  * `harness.md`: a components row.  `working-with-agents.md`: a changelog line that says how to fix a failure.
+  * The parent plan's phase 2 bullet tags the e2e types with "PROTO-1, M10".
+  * `ARCHITECTURE.md`, `CLAUDE.md` and the manifests do not change.  "Prose only" lines stay at 4.
+
+#### M10 acceptance
+
+* The unit tests pass, and failed against the stub in step 1.
+* `e2e_messages_use_protocol_types` passes, and the CI `test` job lists it as `ok`.  The five planted breaches fail it.
+* `Cargo.lock` and `xtask/Cargo.toml` do not change.  The CI `browser-tests` job passes; M10 changes no script.
+* fmt, clippy, the tests and `docs-check` pass.
 
 ### M11: the audio callback does not allocate after warm-up (closes TD-15; RT-1; maintainer decision)
 
@@ -1280,9 +1345,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
   * M5 rewrites LAYER-1 and `ARCHITECTURE.md`, so a plain revert of M3's text conflicts there.  Edit them by hand.
 * To undo M4, revert its commits.  That reverts the code, the manifests, the CI steps and the command lists in every case.  The revert also puts back the `hound` row, TD-4's text and LAYER-1's text.  If a later check shares a Cargo runner with `web_app_tree`, keep that runner.  Then put back decision 0004 with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.
 * If M5 is in the tree when M4 is undone, TD-4 is closed, and `docs-check` fails a closed ID outside plans and decisions.  So keep TD-4 closed, and do not put back its text.  The sentence that comes back under the layers table in `ARCHITECTURE.md` must not name TD-4.  Keep `rules::WEB_APP`, because M5's shell check uses it.  M5 rewrites LAYER-1 and edits the same lines in `harness-engineering.md` and `harness.md`, so a plain revert of M4 conflicts there.  Resolve the conflicts by hand.  In LAYER-1, remove only M4's last sentence of the text, M4's sentence in "Why" and M4's test name, and fix the list's "and".  Keep M5's text.
-* To undo M5, revert its commits.  That puts back the old table, TD-4 and LAYER-1's lines, and removes TD-4's bullet under `## Closed` and the new crates entry.  Keep the new crates entry's ID, so it is never reused and the plan still names a defined ID: add `* TD-<n>: withdrawn by the revert of M5; TD-4 covers the crate edges again.` under `## Closed`.  Do the same for option (c)'s entry, if it exists.  Put decision 0005 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.  Point TD-4's fix line at the plan's current folder, `active/` or `completed/`.  If a later milestone added an edge, such as `xtask -> stem-protocol` in M10, add it to the old table too (DOC-1).
+* To undo M5, revert its commits.  That puts back the old table, TD-4 and LAYER-1's lines, and removes TD-4's bullet under `## Closed` and the new crates entry.  Keep the new crates entry's ID, so it is never reused and the plan still names a defined ID: add `* TD-<n>: withdrawn by the revert of M5; TD-4 covers the crate edges again.` under `## Closed`.  Do the same for option (c)'s entry, if it exists.  Put decision 0005 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.  Point TD-4's fix line at the plan's current folder, `active/` or `completed/`.  If a later milestone added an edge between workspace crates, add it to the old table too (DOC-1).
 * To undo M6, revert its commits.  That puts back the allow, TD-2, TD-3's text and DSP-1's text.  It removes TD-2's bullet under `## Closed`, decision 0006 and TD-24.  The breach stays, so restore TD-24 by hand, and keep its ID in DSP-1's `* Gaps:` line.  Keep the narrowed `* Enforced by:` text, because "found no breach" is false while the breach stays.  Keep this plan's living sections.  Put decision 0006 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  If M7 is in the tree, its allowlist fails the blanket allow, so revert M7 first, or keep M6.
 * To undo M7, revert its commits.  That removes the check, and puts back TD-24, TD-3's text and DSP-1's text.  Keep this plan's living sections.
+* To undo M10, revert its commits.  That removes the check, the `harness.md` row and the guide's changelog line.  It puts back TD-16's text, PROTO-1's `* Enforced by:` line and the line in `.claude/rules/protocol.md`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * Checks read the tree and write nothing, so they can run any number of times.
 * M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -1426,7 +1492,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M9 review round 3, by one new reviewer, who read the whole diff and tried mutants of the newest code.  No blockers; 2 should-fix and 2 nits, all checked.  (1) Real: the vendored `log` still gave "remove the row" beside "cannot read", because its row was compared as usual; a unit test passed only because its doc had no `log` row.  A row whose crate and version are on a line that cannot be read is now left out of the comparison, and the replant gives exactly one problem.  (2) Real: no test had an unread line in the second command only, so a mutant that reads only the first command's unread lines passed.  New cases kill it, its mirror, and dropping the new filter.  (3) Real: a vendored folder inside a member's folder passed as the member; `/root/app/vendor/log` is now a "cannot read" case.  (4) Not changed: a member's git dependency gives two problems in the real shape (the dependency, and its package), both true.
 * [x] 2026-10-20: M9, three review rounds done and their findings fixed.
 * [x] 2026-10-20: M9: PR #22 opened.  CI (run 39421297846): every job passes.  The `test` job lists `young_crates_are_pinned`, `third_party_lists_what_ships` and the 10 unit tests in `deps_tests` as `ok`, so `cargo tree --locked` works on the runner.  `test` took 3m13s.
-* [ ] M9: merged.
+* [x] 2026-10-20: M9, PR #22 merged by the maintainer (`7a99a88`).
+* [x] 2026-10-20: M10 implementation plan written (the M10 sections under "Plan of work").  Survey of `stem_protocol::kind`, of each message type in `xtask/e2e/*.js` and `xtask/src/e2e.rs`, and of the e2e scenarios that CI runs.
+* [x] 2026-10-20: M10 plan review round 1, by one new reviewer with a prototype of the check in a scratch worktree.  Every fact held.  The real tree gave no problem, from 32 types, and each of the 5 plants gave one problem on the right line.  No blockers; 3 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  The should-fix items were shapes that hid a misspelt type: a quoted key `"type": "x"` in JS and in `json!`, a bare `type === "x"`, and `\"` in a plain Rust literal.  The nits: a test order that let a mutant pass, a vacuity rule for each source, an escape in template literals, the fix text for a non-message option, a reference to text the implementer cannot see, the type of the list after plant 5, and the undo line.
 * [ ] M10: e2e message types test.
 * [ ] M11: RT-1 forbids allocation; allocation test; wsola 0.2.0.
 * [ ] M12: MEM-1 lint.
@@ -1532,6 +1600,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M9 plan review round 1): a line of `cargo tree` with text in parentheses that is not a workspace path or `proc-macro` is a problem, not a dropped line.  The check fails closed, so a git or path crate cannot leave the licence list in silence.
 * 2026-10-20, agent (M9 review round 2): the licence check drops a path crate only when its folder is a member's, not any folder under the root.  A vendored copy under the root still ships, so it must fail closed.
 * 2026-10-20, agent (M9 plan review round 2): a git dependency in a member is a DEPS-1 problem.  None exists today, and one that tracks a branch is the least pinned kind.  For a crate that `SETTLED_CRATES` does not name, a requirement with a pre-release passes only as an `=` pin.
+* 2026-10-20, agent (M10): the check reads `stem_protocol::kind` from `protocol/src/lib.rs` with `proc-macro2`, not through a dependency.  A dependency needs a second list of the constants and a new edge in the layers table; the scan needs neither.
+* 2026-10-20, agent (M10): the scan reads the shapes of a type that the scripts use today, and the reversed comparison.  Other shapes, and field names, stay in TD-16, by the rule for proportionate sensors.
 
 ## Outcomes and retrospective
 
