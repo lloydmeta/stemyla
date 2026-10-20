@@ -33,8 +33,8 @@ thread_local! {
 }
 
 fn add_one(counter: &'static LocalKey<Cell<u64>>) {
-    // `try_with`, since a thread that is ending still frees memory after
-    // its thread-locals are gone.
+    // A `const` `Cell` has no destructor, so `try_with` never fails; it
+    // keeps a panic out of the allocator all the same.
     let _ = counter.try_with(|c| c.set(c.get() + 1));
 }
 
@@ -329,6 +329,49 @@ fn the_callback_does_not_allocate_after_warm_up() {
     let problems: Vec<String> = runs
         .into_iter()
         .flat_map(|run| run.join().expect("a run does not panic"))
+        .collect();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// What `Stretcher::warm_up` promises: after it, a push of up to 4,096
+/// frames and a pull of up to `max_frames`, at up to `max_tempo`, do not
+/// allocate.  The player pushes less, so this checks the promise itself,
+/// at low rates too, where wsola's buffers are smallest.
+#[test]
+fn a_stretcher_keeps_its_warm_up_promise() {
+    const PUSH: usize = 4_096;
+    const PULL: usize = 512;
+    let mut runs = Vec::new();
+    for kind in SHIPPED {
+        for rate in [8_000, 16_000, 44_100, 48_000] {
+            runs.push(std::thread::spawn(move || {
+                let input = noise(PUSH, rate);
+                let (mut left, mut right) = (vec![0.0; PULL], vec![0.0; PULL]);
+                let mut stretcher = kind.build(rate);
+                stretcher.set_tempo(1.5);
+                stretcher.warm_up(1.5, PULL);
+                let ((), counts) = counted(|| {
+                    for _ in 0..400 {
+                        while !stretcher.can_pull(PULL) {
+                            stretcher.push(&input, &input);
+                        }
+                        stretcher.pull(&mut left, &mut right);
+                    }
+                });
+                (counts != Counts::default()).then(|| {
+                    format!(
+                        "RT-1: {} at {rate} Hz allocated after `warm_up`, with pushes of {PUSH} frames and pulls of {PULL} at tempo 1.5: {} allocations, {} frees.  Fix: make `warm_up` size the buffer, or narrow its promise.",
+                        kind.label(),
+                        counts.allocations,
+                        counts.frees
+                    )
+                })
+            }));
+        }
+    }
+    let problems: Vec<String> = runs
+        .into_iter()
+        .filter_map(|run| run.join().expect("a run does not panic"))
         .collect();
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }

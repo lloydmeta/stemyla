@@ -18,7 +18,7 @@ RT-1 said that the audio callback never waits and never frees a player.  It did 
 
 ## Consequences
 
-* `Stretcher::warm_up` makes each stretcher's buffers reach their largest size before the player enters the slot.  For wsola, this is a push of about 620 KB of silence and a reset, on the thread that opens a song.
+* `Stretcher::warm_up` makes each stretcher's buffers reach their largest size before the player enters the slot.  For wsola, this is a push of about 650 KB of silence and a reset, on the thread that opens a song.
 * wsola is 0.2.0, whose `pull` gives an iterator and does not allocate.
 * `engine/tests/realtime.rs` runs the callback under a counting allocator, through tempo, chipmunk, seek, loop and mix changes, for each stretcher that the app ships.
 * RT-1 covers only the stretchers that the app ships.  `timestretch` and `cute-dsp` are for benches only.
