@@ -1504,7 +1504,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M10 review round 2, by one new reviewer who ran 42 mutants.  No blockers; 1 should-fix and 4 nits, all checked and real, all fixed.  The should-fix: a `js_after_typeof` that skipped every type after any earlier `typeof` passed the tests, so `typeof d === 'object' && d.type === 'segmnt'` is now a case.  The nits: a long doc comment line; Rust fixtures for the bracket and brace rules (`c["state"] == "running"`, `f("type") == "x"`, `m!["type": "x"]`); and TD-16 now names a regex literal and the false type in `typeof d?.type === "string"`.  The three new cases each kill their mutant.
 * [x] 2026-10-20: M10 review round 3, by one new reviewer who read the whole diff and ran 25 probes.  No blockers and no should-fix; 3 nits, all checked.  Two were real and are fixed.  TD-16's lists of shapes not read now say "for example", since probes found more, such as `(d.type) === 'x'`.  An `e2e.rs` that does not tokenise also gave "no e2e script uses it" for an entry used only there; that reason now needs a read `e2e.rs`, and a test pins it.  The third, a raw literal with a lone `"`, is correct lexing of invalid JS.
 * [x] 2026-10-20: M10, three review rounds done and their findings fixed.
-* [ ] M10: e2e message types test.
+* [x] 2026-10-20: M10: PR #23 opened.  CI (run 39441862201): every job passes.  The `test` job lists `e2e_messages_use_protocol_types` and the 7 unit tests in `proto_tests` as `ok`.  `test` took 4m12s, and `browser tests (Chrome)` passed with no script changed.
+* [ ] M10: merged.
 * [ ] M11: RT-1 forbids allocation; allocation test; wsola 0.2.0.
 * [ ] M12: MEM-1 lint.
 * [ ] M13: MEM-3 lint.
