@@ -2,6 +2,7 @@
 
 use super::Stretcher;
 use std::collections::VecDeque;
+use std::num::{NonZeroU16, NonZeroU32};
 
 pub struct WsolaStretcher {
     ts: wsola::TimeStretch,
@@ -14,8 +15,10 @@ pub struct WsolaStretcher {
 impl WsolaStretcher {
     pub fn new(sample_rate: u32) -> Self {
         let cfg = wsola::Config::default();
+        let rate = NonZeroU32::new(sample_rate).expect("a song has a sample rate");
+        let stereo = NonZeroU16::new(2).expect("two is not zero");
         Self {
-            ts: wsola::TimeStretch::with_config(sample_rate, 2, cfg).expect("valid config"),
+            ts: wsola::TimeStretch::with_config(rate, stereo, cfg).expect("valid config"),
             interleaved: Vec::with_capacity(8192),
             out_l: VecDeque::with_capacity(16384),
             out_r: VecDeque::with_capacity(16384),
@@ -43,13 +46,15 @@ impl Stretcher for WsolaStretcher {
     fn can_pull(&mut self, frames: usize) -> bool {
         while self.out_l.len() < frames {
             let want = (frames - self.out_l.len()) * 2;
-            let v = self.ts.pull(want);
-            if v.is_empty() {
-                break;
+            let mut samples = self.ts.pull(want);
+            let mut got = false;
+            while let (Some(l), Some(r)) = (samples.next(), samples.next()) {
+                self.out_l.push_back(l);
+                self.out_r.push_back(r);
+                got = true;
             }
-            for f in v.chunks_exact(2) {
-                self.out_l.push_back(f[0]);
-                self.out_r.push_back(f[1]);
+            if !got {
+                break;
             }
         }
         self.out_l.len() >= frames

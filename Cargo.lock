@@ -9744,9 +9744,9 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "wsola"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "542a5d4e1f44b1af2eeef27a918d15d117ce326af641153efbfe436b586418f5"
+checksum = "9e172e22be78e8ed2843e3acd0c87e120508c0baa2d07337b8db47ce62299a12"
 dependencies = [
  "thiserror 2.0.21",
 ]

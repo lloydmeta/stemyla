@@ -95,9 +95,9 @@ MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does
 
 ### TD-15: the default stretcher allocates in the audio callback
 
-`engine/src/stretch/wsola_adapter.rs` calls `wsola` 0.1.0's `pull`, which returns a new `Vec` on every call, and the chipmunk path's `dsp::double_speed` returns a new `Vec` too.  RT-1 does not yet forbid allocation, but an allocation in the callback can miss its deadline.  No test counts allocations.
+`wsola`'s input buffer, behind `engine/src/stretch/wsola_adapter.rs`, grows over the first 1.5 s or so of play.  The chipmunk path's `dsp::double_speed` returns a new `Vec`.  A loop of a few frames grows the player's `anchors` queue.  RT-1 does not yet forbid allocation, but an allocation in the callback can miss its deadline.  No test counts allocations.
 
-* Fix: decided 2026-10-19: RT-1 is to forbid allocation after warm-up.  A test with a counting global allocator over `render_interleaved` for each stretcher the app ships, wsola 0.2.0 (whose `pull` does not allocate), and chipmunk decimation in place (`plans/active/harness-phase-2.md`, M11).
+* Fix: decided 2026-10-19: RT-1 is to forbid allocation after warm-up.  A test with a counting global allocator over `render_interleaved` for each stretcher the app ships, a warm-up of each stretcher, and chipmunk decimation in place (`plans/active/harness-phase-2.md`, M11).
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
