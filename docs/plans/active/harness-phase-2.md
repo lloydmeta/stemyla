@@ -300,7 +300,7 @@ On 2026-10-19, at commit `69f8cae` (M3 merged as PR #16):
 
 * The rule is LAYER-1.  Its text gains one sentence at the end of the paragraph: "In the normal dependency tree of the web app (`app` and `stem-worker`), `synth` brings no other crate."  This is what the check reads: `-f "{p}"` prints no features.  Dev-dependencies are not in that tree, so `app`'s dev-dependency with `files` keeps the rule.  Its "Why" gains: "It also keeps the crates that `synth` needs only for tools and tests out of the web app's build, so `THIRD-PARTY.md`'s first table does not credit them."
 * `CLAUDE.md`'s LAYER-1 line stays as it is: it is a summary, and stays true.
-* A decision record, `docs/decisions/0004-synth-file-writers-behind-a-feature.md`.  The `files` boundary and LAYER-1's new text outlive this plan.  The maintainer made the choice on 2026-10-19, and then accepts the record after review.  M11's record then takes 0005.
+* A decision record, `docs/decisions/0004-synth-file-writers-behind-a-feature.md`.  The `files` boundary and LAYER-1's new text outlive this plan.  The maintainer made the choice on 2026-10-19, and then accepts the record after review.  M11's record takes the next free number.
   * Title: `# 0004: synth's file writers are behind a feature, so the web app takes only song generation`.
   * Status line: `Status: proposed`.
   * The line in `docs/README.md`: `` * `decisions/0004-synth-file-writers-behind-a-feature.md`: `synth`'s file writers are behind its `files` feature, so the web app (`app` and `stem-worker`) takes only song generation. ``
@@ -450,11 +450,390 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 * fmt, clippy, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.
 * CI: the `test` job log lists `synth_brings_no_crate_into_the_web_app ... ok`, and the `clippy` job runs the three new steps.  The PR states the time that each adds.
 
-### M5: crate layering is a test (closes TD-4; LAYER-1)
+### M5: crate layering is a test (closes TD-4; LAYER-1, DOC-1; maintainer decision)
 
-* Change: add pure checker functions to `xtask/src/rules.rs`, and tests that run them on the real tree to `xtask/tests/rules.rs`, as `docs.rs` does.  M3 makes both files.  The check reads `cargo metadata --format-version 1 --no-deps` and compares each workspace crate's workspace dependencies with an allowlist built from the layers table in `ARCHITECTURE.md`.  M4 already checks that `synth` brings no crate into the web app.
-* Acceptance: the test `crates_depend_only_downwards` passes.  Unit tests plant an `engine -> app` edge and an `app -> roformer-gpu` edge; both fail with LAYER-1.  LAYER-1's `* Enforced by:` line names `crates_depend_only_downwards` and `synth_brings_no_crate_into_the_web_app`, and no longer says that no test checks the crate edges.
-* Note: dev-dependencies count as edges, and the same layers apply to them.  `app`'s dev-dependency on `synth` (M4) needs no entry, because the layers table already lets `app` take `synth`.  Any crate but `dsp` (DSP-1) may take `test-support` (M3) as a dev-dependency, and none may take it as a normal dependency.  A unit test plants a `dsp -> test-support` dev-dependency edge, and it fails.
+* Change: a check compares the edges between workspace crates, from `cargo metadata`, with the layers table in `docs/ARCHITECTURE.md`.  The table gets one row per crate, so a person and the check read it the same way.  A second check fails when the page side and the worker side share a workspace crate other than `stem-protocol`.
+* Terms:
+  * An edge is a dependency of one workspace crate on another, of any kind (normal, dev or build) and for any target.
+  * A stray is a crate that the build takes from outside the members, but that can hold or reach workspace code: a path crate that is not a member, a member's name from a registry or git, or an outside crate that takes a member.
+
+#### M5 state at the start
+
+On 2026-10-20, at commit `054c003` (M4 merged as PR #17):
+
+* The layers table (`### Layers` in `docs/ARCHITECTURE.md`) has one row per layer, five rows in all.  Its columns are Layer, Crates and "Depend on".  A row with two crates has two lists in its last cell, split by `;`, in the order of the crates.  For example, the row `engine`, `roformer-gpu` has `dsp`; `roformer`.
+* Above the table: "Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`).  The page side and the worker side meet only through `stem-protocol`."
+* Under the table: "Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal dependency, so it never ships."
+* The edges, from `cargo metadata --format-version 1 --all-features`:
+
+  | From | To | Kind | Target |
+  | - | - | - | - |
+  | `app` | `dsp`, `engine`, `synth` | normal | any |
+  | `app` | `stem-protocol` | normal | `cfg(target_arch = "wasm32")` |
+  | `app` | `synth` | dev | `cfg(not(target_arch = "wasm32"))` |
+  | `engine` | `dsp` | normal | any |
+  | `roformer` | `test-support` | dev | any |
+  | `roformer-gpu` | `roformer` | normal | any |
+  | `roformer-gpu` | `test-support` | dev | any |
+  | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` | normal | `cfg(target_arch = "wasm32")` |
+  | `xtask` | `dsp`, `engine`, `roformer`, `synth` | normal | any |
+
+  `dsp`, `synth`, `stem-protocol` and `test-support` have no edges.  No crate has a build edge.  Each edge is in the table today, and each crate that the table lists for a row is an edge.  So the check passes on today's manifests once the table has its new form.
+* No stray exists today.  Each of the 16 path dependencies is on a member, and no other dependency has a member's name.  Of the 937 packages, every one whose `source` is `null` is a member, and every other one comes from a registry.  No package outside the members has a member's name.  In `resolve.nodes`, no node outside the members takes a member.
+* `cargo metadata`'s JSON, from the Cargo book ([cargo metadata](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html)) and from the output on the Mac:
+  * `packages` holds every package of the build, and "all feature-enabled dependencies unless --no-deps is used".  With `--no-deps`, it holds the members only.
+  * Each dependency has `name`, `source`, `rename` ("null if it is not renamed"), `kind` ("dev", "build", or null for a normal dependency) and `target` (null if not a target dependency).  `path` is "the file system path for a local path dependency", and is "not present if not a path dependency".
+  * `name` is the package name, also when `rename` is set: `ts = { package = "test-support", ... }` gives `name` `test-support`.  A dependency's `source` is `null` for a path dependency.  Otherwise it starts with `registry+`, `sparse+` or `git+`.
+  * `path` is absolute and normalised.  `"../dsp"`, `"../dsp/"`, `"./../dsp"` and `"../app/../dsp"` all give `<root>/dsp`.  A workspace-inherited `dsp.workspace = true` gives the same `path`.
+  * Each package has `id`, `source` (`null` for a path crate) and `manifest_path`, absolute.  `workspace_root` is the absolute root, and `workspace_members` holds the IDs of the members.
+* "All `path` dependencies residing in the workspace directory automatically become members" ([workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html)).  The next sentence names the exception: "The `exclude` key can be used to prevent paths from being included in a workspace."  This workspace has no `exclude`.  A path outside the repo is never a member either.
+* The reviews found three ways round a check of member edges alone.  Each hides what the outside crate depends on:
+  * A path dependency on a crate that is not a member.  `shim/` takes `roformer`, the root has `exclude = ["shim"]`, and `app` takes `shim` by path.  `cargo metadata --no-deps` lists 10 members, without `shim`.  `cargo tree -p app` shows `shim -> roformer`.
+  * A `[patch]` to such a crate.  The root has `[patch.crates-io] shim = { path = "shim" }`, and `app` takes `shim = "0.1"`.  In `--no-deps` output, the dependency has a `registry+` source and no `path`.  `cargo tree -p app -e normal -i roformer` shows `roformer <- shim <- app`.  A patch in `.cargo/config.toml` to a folder outside the repo works the same way.  Without `--no-deps`, `shim` is in `packages` with `source` `null`, and is not a member.
+  * A git dependency with a member's name: `roformer = { git = "..." }` in `app` has no `path`.
+  * An outside crate that takes a member, with a `[patch]` back to the member.  A local git repo holds `foo`, which takes `roformer`.  `app` takes `foo` from git, and the root has `[patch."file://.../gitfoo"] roformer = { path = "roformer" }`.  No member's dependency is a stray, and `cargo tree -p app -e normal -i roformer` shows `roformer <- foo <- app` (fourth review).  Only `resolve.nodes` shows it: each node has `id` and `deps`, and each dep has `pkg`, the ID of the package.
+  * The `[patch]` above, behind a feature that is off: `app` takes `shim = { version = "0.1", optional = true }` with `extra = ["dep:shim"]`.  Without `--all-features`, `packages` has no `shim`, and `cargo build -p app --features extra` links `roformer`.  With `--all-features`, `shim` is in `packages` with `source` `null` (third review).
+* A path dependency through a symbolic link to a member fails in Cargo: "two packages named `dsp` in this workspace".
+* Prototypes in scratch worktrees, on cargo 1.99.0:
+  * `cargo metadata --format-version 1 --all-features --locked` took 0.8 s on the Mac, and lists the same 937 packages as without `--all-features`.  With `--no-deps` it took 0.04 s.
+  * With `roformer = { path = "../roformer" }` added to `app`'s `[dependencies]`, `cargo metadata --no-deps --locked` exits 0 and shows the edge.  The full command with `--locked` exits 101: "cannot update the lock file ... because --locked was passed".  Without `--locked`, it exits 0 and rewrites `Cargo.lock`.  So a planted edge runs as in M4: the outer `cargo test` without `--locked` updates `Cargo.lock`, and the inner command then passes.
+  * With `app = { path = "../app" }` in `engine`'s `[dev-dependencies]`, a cycle through a dev edge, the full `cargo metadata` exits 0.  So Cargo accepts that planted breach.
+  * Two dependencies on one crate, for example a normal and a dev one, give two entries in `dependencies`.
+* `cargo metadata` without `--no-deps` downloads the packages that it lists, for every target and, with `--all-features`, for every feature.  M4's `cargo tree --target wasm32-unknown-unknown` downloads only what that target reaches.  So a cold CI cache may download more crates, such as Windows-only ones.  rust-cache then keeps them.  This is not measured.
+* `xtask` already takes `serde` with `derive` and `serde_json`, so the parser adds no crate (DEPS-1).
+* `docs::section(markdown, "### Layers")` gives the text from the heading to the next `###` heading, at about line 126.  `### Layers` is the last `###` under `## Crates`, so that text runs on into the later `##` sections.  It holds the parameters table, `| Part | Parameters | ...`, at about line 102.  `docs::inline_code` gives the code spans of a text.
+* `docs-check`'s `crates_documented` reads every code span under `## Crates`, the layers table included.  It checks only that each crate is named.  So nothing compares the table's edges with the workspace today.
+* LAYER-1's `* Enforced by:` line says "No test checks the crate edges (TD-4)", and its `* Gaps:` line names TD-4 only.  In the docs, `TD-4` is in `docs/invariants.md` and `docs/tech-debt.md` only, outside the plans.  Test strings in `xtask/src/docs.rs` also hold it, and `docs-check` reads only Markdown.  The highest tech-debt ID is TD-22.  `docs-check` fails an ID that no doc defines, so this plan calls the next one "the new crates entry" until step 2 writes it.
+* `rules::manifest_of` (M4) gives `worker/Cargo.toml` for `stem-worker` by a fixed case.  M5 reads each manifest from `cargo metadata`, and leaves M4's helper as it is.
+
+#### M5 design
+
+* Decision points for the maintainer.  Ask both questions before step 1.  Record each choice in Progress and the Decision log, and add "Decided on <date>: ..." to its question, as M3 did.  If a choice is not the recommended one, make the changes below, then review the plan again before implementing.
+* Question 1: what "the page side and the worker side meet only through `stem-protocol`" means for the second check.
+  * (a), recommended: the workspace crates that `app` and `stem-worker` reach through normal edges have only `stem-protocol` in common.  It is LAYER-1's text as written, and it keeps `stem-protocol` the one contract between the two WebAssembly modules.  The gain: it costs nothing today, because the two sides share no other workspace crate.  A later share can loosen the rule, with a record, and to tighten it after a share exists costs more.  The cost: a crate that both sides need later, such as `dsp` in the worker, needs a change to LAYER-1 and a record.  Also, `stem-protocol` can take no workspace crate as a normal dependency, even if it moves to a higher layer.  The walk reads every target, so a native-only edge from `app` to `roformer`, for separation in the native app, also fails.
+  * (b) only LAYER-1's "Why": `app` reaches none of `roformer`, `roformer-gpu` and `stem-worker`.  The gain: the two sides may share pure crates such as `dsp`.  The cost: the check names crates, so a new model crate needs a change to the check.  Also, LAYER-1's sentence "The page side and the worker side meet only through `stem-protocol`" is then false, so (b) removes it from LAYER-1 and `ARCHITECTURE.md`.
+  * (c) no second check, only the table.  The gain: no second check, 9 fewer unit tests and one fewer real-tree test.  The cost: a change to `app`'s row, with the dependency, lets `app` take `roformer`.  LAYER-1's sentence on the two sides stays prose only, with a new tech-debt entry.
+* Question 2: is the table exact, or a ceiling?
+  * (x), recommended: exact.  A row lists each workspace crate that its crate depends on, apart from dev-dependencies on `test-support`, and no other.  The gain: the doc stays true (DOC-1), and the check cannot pass when the parser finds no edges.  The cost: each added or removed dependency between workspace crates changes the table.
+  * (y) a ceiling, as this plan's first M5 text gave ("an allowlist built from the layers table").  A row may list a crate that its crate does not depend on.  The gain: a removed dependency needs no change to the table, and a row can allow a dependency before the code takes it.  The cost: the table can go stale, and the check needs another guard against a parser that finds no edges.
+* The plan is written for (a) and (x).  For (b), change these:
+  * the shell check, its tests, its messages and the shell-test count in "M5 acceptance";
+  * the second test's name, and its words on LAYER-1's `* Enforced by:` line;
+  * LAYER-1's text and "Why".  In `ARCHITECTURE.md`, the two sentences on the two sides above the table: "meet only through" and "have only `stem-protocol` in common";
+  * the sentence on `the_page_and_the_worker_meet_only_through_stem_protocol` in the guide's changelog line;
+  * 0005's text and its line in `docs/README.md`;
+  * the `harness.md` row, the planted breach that only the shell check catches, and the CI line in "M5 acceptance";
+  * the bullet in `harness-engineering.md`, and the bullet and opening line of `protocol.md`;
+  * keep the M4-undo sentence on `rules::WEB_APP`, because (b)'s check uses `app`.
+* For (c), change these:
+  * remove the shell check and its 9 tests, the second real-tree test, and its name in the CI line in "M5 acceptance";
+  * 0005 keeps both questions and records (c): change its Decision, its Consequences and its line in `docs/README.md`.  Its file name and title stay;
+  * remove the shell's part of the first planted breach.  Keep the second planted breach, with the result "`crates_depend_only_downwards` passes", as the evidence for the new tech-debt entry;
+  * remove the new sentences on the two sides in LAYER-1 and in `ARCHITECTURE.md`, and LAYER-1's new "Why" sentence;
+  * remove the second test's name and its sentence on the `* Enforced by:` line, because `docs-check` fails a name with no test;
+  * remove the shell test's part of the `harness.md` row, ", with the page side and the worker side apart" in the `harness-engineering.md` bullet, and the bullet and opening-line change of `protocol.md`;
+  * remove the M4-undo sentence on `rules::WEB_APP`, and the M3-undo item that names the shell test;
+  * remove the sentence on `the_page_and_the_worker_meet_only_through_stem_protocol` in the guide's changelog line;
+  * keep the earlier Decision log lines, and add a line with the maintainer's choice;
+  * add a tech-debt entry, with the next free ID after the new crates entry, and name it on LAYER-1's `* Gaps:` line.  Heading: `### TD-<n+1>: only the layers table keeps the page side and the worker side apart`.  Body: "A change to `app`'s row, with the dependency, lets `app` take `roformer` (LAYER-1)."  Fix: "the check of option (a) in `plans/active/harness-phase-2.md`, M5."
+* For (y), change these:
+  * the bullet "The table is exact", and the stale-entry check, its message and its tests, and the stale part of `a_row_that_lists_test_support_is_a_problem`;
+  * the clauses "no stale-entry problem" in "What each case gives", and the table-test count;
+  * add a guard that fails when the parser finds no edge, with a unit test, and rewrite "Why the check cannot pass while it reads nothing";
+  * the paragraph "Each row lists every workspace crate ..." under the table in `ARCHITECTURE.md`, and 0005's text on the table;
+  * the planted breach "`synth` added to `engine`'s row", which then passes;
+  * the Decision log line on the exact table.
+* For (b), (c) and (y), also change every other line of M5 that is true only for the recommended choices: the "Change" bullet, the API block, and the design bullets on the two sides and on decision 0005.  In "Idempotence and recovery", change the M3-undo item's shell test.
+* Both answers give LAYER-1 a reading that outlives this plan.  So step 2 writes decision 0005 as `proposed` for any choices, and the maintainer accepts it after review.  M11's record then takes the next free number.
+* The new table, lowest layer first.  The last column is "Depends on", because each row now has one crate:
+
+  | Layer | Crate | Depends on |
+  | - | - | - |
+  | Test support | `test-support` | no workspace crate |
+  | Pure | `dsp` | no workspace crate |
+  | Pure | `synth` | no workspace crate |
+  | Pure | `roformer` | no workspace crate |
+  | Pure | `stem-protocol` | no workspace crate |
+  | Engine and GPU | `engine` | `dsp` |
+  | Engine and GPU | `roformer-gpu` | `roformer` |
+  | Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
+  | Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
+  | Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
+
+* One row per crate, because the `;` form maps each list to a crate by its position.  A person can misread that, and a parser needs a rule for it.
+* The table is exact.  A row lists each workspace crate that its crate has an edge to, and no other crate.  It leaves out `test-support`.  So a row that lists a crate without an edge fails the check, as a stale doc must (DOC-1).
+* The table allows only downward dependencies when its order holds.  Each layer's rank is the position of its first row, and a layer's rows are together.  A row may list only crates of a lower rank.  So the check also fails a table that lets a crate depend on its own layer or a higher one.
+* The layers are fixed: `rules::LAYERS` holds "Test support", "Pure", "Engine and GPU", "Shells" and "Tools", in that order.  The table's layers, in rank order, must equal it.  So an agent cannot pass the rank check with a new layer, which makes LAYER-1's list of layers false (DOC-1).
+* `test-support` (M3): it takes no workspace crate, with an edge of any kind.  So a dev edge to it reaches nothing, and the table can leave it out.  A dev edge to it from any crate but `dsp` needs no entry in the table.  A normal or build edge to it is a problem: a normal edge would ship it, and a build edge breaks "a dev-dependency only".  An edge of any kind from `dsp` is a problem (DSP-1).  A row that lists `test-support` is a problem, so the table keeps one way to say it.
+* Strays are problems, because a stray hides what it depends on from the check.  The check reads `cargo metadata` without `--no-deps`, so `packages` also holds the crates that the build takes, patched crates included.  It still finds edges by `path`, not by name, so a renamed dependency counts under its package name.
+* Gaps that stay, in a new tech-debt entry with the next free ID ("the new crates entry"), titled "LAYER-1 sees crates, not code":
+  * A crate from a registry or git, under another name, can hold a copy of a workspace crate, such as `roformer`.
+  * Source can reach across crates without an edge: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
+  * A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
+  * A symbolic link in a crate's folder can point to another crate's source.
+  * Fix: phase 3's reviewers look for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
+* The page side and the worker side, under option (a): the workspace crates that `app` reaches through normal edges, and the workspace crates that `stem-worker` reaches, share only `stem-protocol`.  Registry crates such as `wasm-bindgen` are on both sides, and the check does not read them.
+  * Why a second check: a row of the table may list any crate of a lower layer.  So a change to `app`'s row, with the dependency, lets `app` take `roformer`, and the table check passes.  LAYER-1's "Why" is that the page does not link the model or the GPU code.
+  * Each shell's set holds the shell itself, so `stem-worker` taking `app` is a shared crate.
+  * The walk follows normal edges only, at every step, from every crate it reaches, `stem-protocol` included.  It keeps a set of the crates it has seen, so a cycle cannot make it loop.  A dev or build edge does not link into what ships.  M4's check reads normal edges too, but for wasm32 only.  This walk reads every target, so it is stricter for native code.
+  * The two shells are `rules::WEB_APP` (M4).
+* Decision 0005, for (a) and (x):
+  * File: `docs/decisions/0005-how-strictly-the-crate-checks-read-layer-1.md`.
+  * Title: `# 0005: how strictly the crate checks read LAYER-1`.
+  * Status line: `Status: proposed`.
+  * The line in `docs/README.md`: `` * `decisions/0005-how-strictly-the-crate-checks-read-layer-1.md`: the layers table lists each dependency between workspace crates, and the page side and the worker side share only `stem-protocol` (LAYER-1). ``
+  * The four sections of 0001 to 0004:
+    * Context: "LAYER-1 says that crates depend only on crates in a lower layer of the layers table.  It also says that the page side and the worker side meet only through `stem-protocol`.  Its 'Why' says that the page does not link the model or the GPU code.  `crates_depend_only_downwards` compares the dependencies between workspace crates with the table.  Two choices set how strictly the checks read the rule."
+    * Options:
+      * "The table: (x) exact.  A row lists each workspace crate that its crate depends on, apart from dev-dependencies on `test-support`, and no other.  The cost: each added or removed dependency between workspace crates changes the table."
+      * "The table: (y) a ceiling.  A row may list a crate that its crate does not depend on.  The cost: the table can go stale, and the check needs another guard against reading nothing."
+      * "The two sides: (a) the workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.  The cost: a crate that both sides need later, such as `dsp` in the worker, needs a change to LAYER-1 and a record.  A native-only dependency of `app` on `roformer` also fails."
+      * "The two sides: (b) `app` reaches none of `roformer`, `roformer-gpu` and `stem-worker`, as LAYER-1's 'Why' says.  The two sides may share pure crates such as `dsp`, so LAYER-1 no longer says that they meet only through `stem-protocol`.  The cost: the check names crates, so a new model crate needs a change to the check."
+      * "The two sides: (c) no second check.  The cost: a change to `app`'s row, with the dependency, lets `app` take `roformer`.  LAYER-1's sentence on the two sides stays prose only."
+    * Decision: "(x) and (a).", or the choices that the maintainer makes.
+    * Consequences, one sentence each:
+      * "The layers table lists each dependency between workspace crates, apart from dev-dependencies on `test-support`, and no other."
+      * "LAYER-1's sentence on the two sides gains: the workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common."
+      * "`the_page_and_the_worker_meet_only_through_stem_protocol` follows the normal dependencies from `app` and `stem-worker`, and fails on any shared workspace crate but `stem-protocol`."
+      * "`stem-protocol` takes no workspace crate as a normal dependency, because both sides reach what it takes."
+      * "A crate that both sides need is a change to LAYER-1, with its own record."
+      * "`LAYERS` in `xtask/src/rules.rs` fixes the five layers.  A change of layers changes the table, `LAYERS` and LAYER-1 in one commit."
+  * `harness.md`'s sentence on decisions names 0005 too, because 0005 is about how the harness's checks read a rule.
+* The API, in `xtask/src/rules.rs`:
+
+  ```rust
+  /// The kind of an edge, as `cargo metadata` gives it.
+  #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+  pub enum Kind { Normal, Dev, Build }
+
+  /// A dependency of one workspace crate on another.
+  #[derive(Clone, Debug, PartialEq, Eq)]
+  pub struct Edge { pub to: String, pub kind: Kind }
+
+  /// Where a stray comes from: a folder, or a `source` such as `git+...`.
+  #[derive(Clone, Debug, PartialEq, Eq)]
+  pub enum Origin { Path(String), Source(String) }
+
+  /// A crate from outside the members that can hold or reach workspace
+  /// code: its name, and where it comes from.
+  #[derive(Clone, Debug, PartialEq, Eq)]
+  pub struct Stray { pub name: String, pub origin: Origin }
+
+  /// A crate outside the members that takes a member: its name, its
+  /// `source`, and the member.
+  #[derive(Clone, Debug, PartialEq, Eq)]
+  pub struct OutsideEdge { pub from: String, pub source: String, pub to: String }
+
+  /// A workspace crate: its package name, its manifest relative to the
+  /// root, its edges and the strays that it takes.
+  #[derive(Clone, Debug, PartialEq, Eq)]
+  pub struct WorkspaceCrate { pub name: String, pub manifest: String, pub edges: Vec<Edge>, pub strays: Vec<Stray> }
+
+  /// The workspace crates, the path crates and member names in the build
+  /// that are not members, and the crates outside the members that take a member.
+  #[derive(Clone, Debug, PartialEq, Eq)]
+  pub struct Workspace { pub crates: Vec<WorkspaceCrate>, pub outside: Vec<Stray>, pub outside_takes: Vec<OutsideEdge> }
+
+  /// The layers of LAYER-1, lowest first.  The layers table must use these.
+  pub const LAYERS: [&str; 5] = ["Test support", "Pure", "Engine and GPU", "Shells", "Tools"];
+
+  /// Runs `cargo metadata --format-version 1 --all-features --locked` in `root`.
+  pub fn workspace_metadata(root: &Path) -> Result<String>;
+
+  /// The workspace, from `cargo metadata`'s JSON.
+  pub fn workspace(metadata: &str) -> Result<Workspace>;
+
+  /// LAYER-1: the edges match the layers table, the table goes only downwards, and no stray hides a dependency.
+  pub fn crates_follow_the_layers(workspace: &Workspace, architecture: &str) -> Vec<Problem>;
+
+  /// LAYER-1: the page side and the worker side meet only through `stem-protocol`.
+  pub fn shells_meet_only_through_the_protocol(crates: &[WorkspaceCrate]) -> Vec<Problem>;
+  ```
+
+* `workspace_metadata` runs `env!("CARGO") metadata --format-version 1 --all-features --locked` in `root`, as `web_app_tree` runs `cargo tree`.  A failed command gives an `Err` with Cargo's stderr.
+  * Without `--no-deps`, so that `packages` holds the patched and excluded path crates.
+  * `--all-features`, so that `packages` also holds a crate behind a feature that is off.
+  * `--locked`, so that a test never writes `Cargo.lock`.  Checks read the tree and write nothing.
+  * No `--color never`: JSON has no colour codes, and the parser reads stdout only.
+* `workspace` reads the JSON with `serde` structs that name only the fields it uses.
+  * `crates` holds the packages whose `id` is in `workspace_members`, in the order of `packages`.
+  * A member's folder is the parent of its `manifest_path`.  The parser compares folders as `Path` values, never as string prefixes, so `/x/roformer` does not match `/x/roformer-gpu`.
+  * A dependency with a `path` that equals a member's folder is an edge, with that member's package name.
+  * A dependency with a `path` that is not a member's folder is a stray of its crate, with `Origin::Path`.
+  * A dependency without a `path` whose `name` is a member's package name is a stray of its crate, with `Origin::Source`.
+  * `outside` holds each package that is not a member and whose `source` is `null`, with `Origin::Path` and its folder.  This catches a `[patch]` and an excluded path crate.  Such a package goes in once, also when it has a member's name.
+  * `outside` also holds each other package that is not a member but has a member's name, with `Origin::Source`.  This catches a copy of a member that an outside crate takes.  Today there is none.
+  * `outside_takes` holds one entry for each pair of a `resolve.nodes` entry and a member in its `deps[].pkg`, where the node is not a member and its package has a `source` that is not `null`.  A path crate that takes a member is already in `outside`, so it is not here as well.  This catches an outside crate that takes a member's name, with a `[patch]` back to the member.  Today there is none.
+  * The unit-test JSON may leave out `resolve`, or give `null`, so its serde field is an `Option`.  `outside` is in the order of `packages`, and `outside_takes` in the order of `resolve.nodes`.
+  * An edge from a crate to itself, as `engine = { path = "." }` in `[dev-dependencies]` gives, is left out.  Cargo accepts it, and it adds no crate to the build.
+  * `manifest` is `manifest_path` relative to `workspace_root`, for example `worker/Cargo.toml`.  A manifest outside the root is an `Err`.
+  * A `kind` other than `null`, `"dev"` or `"build"` is an `Err`, so a new kind cannot pass unread.
+  * Two dependencies on one crate give two edges, in the order of the JSON, for example `app`'s normal and dev edges to `synth`.
+* `crates_follow_the_layers` reads the table:
+  * The table is the run of lines that start with `|`, right after `### Layers` and its text.  It must come before the next heading of any level.  So a later table, such as the parameters table, is never read as the layers table.
+  * The header must be `| Layer | Crate | Depends on |`, after each cell is trimmed.  The second line is the separator: three cells of `-` only.  A wrong header or separator gives one problem, and the check does not read the rows.
+  * Each row starts and ends with `|`, and has three cells.  The Layer cell is not empty.  The crate cell is one code span and nothing else.  The last cell is `no workspace crate`, or code spans joined by `, ` and nothing else, each crate once.  The list need not be sorted.
+* What each case gives, so the expected problems are exact:
+  * No workspace crate: that one problem.  The table is not read.
+  * A table that cannot be read (no table, or a wrong header or separator): that one problem.  The edge, row and rank checks do not run.  The checks of strays and of `test-support` edges still run, because they do not need the table.
+  * A row that cannot be read: one problem that quotes the row.  The row is left out of every other check.
+  * Two rows for one crate: one problem.  The first row counts.  The second row is left out of every other check.
+  * A row for a crate that is not a member: one problem.  The row is left out of every other check.
+  * A member with no row: one problem.  The edges from it and to it, and the rows that list it, give no more table problems.  Its strays and `test-support` edges still give their problems.  The rank check skips it.  If its row was the only row of its layer, the layers problem is given too.
+  * Ranks come only from the rows that count.
+  * A row that is left out of every other check is also left out of the check that a layer's rows are together.
+  * A layer whose rows are apart: one problem for the layer, however many rows are apart.
+  * Layers that are not `LAYERS`: one problem for the table.  The rank check still runs on the table's own ranks.
+  * A listed crate that is not a member: one problem.  It gives no stale-entry problem, and the rank check skips it.
+  * A listed `test-support`: one problem.  It is left out of the stale-entry and rank checks.
+  * An edge of any kind, or several, from `dsp` to `test-support`: the `dsp` problem, once.
+  * An edge of any kind from `test-support` to a workspace crate: one problem for each crate that it takes, and no table problem.
+  * A normal or build edge to `test-support` from a crate other than `dsp` and `test-support`: one problem for each of the two kinds that occurs, and no table problem.
+  * Several edges from one crate to another, in any order: one problem for the pair.  `<kinds>` names each kind once, in the order normal, dev, build, joined by `, `.
+* `shells_meet_only_through_the_protocol` walks normal edges from each of `app` and `stem-worker`, to every depth.  Each set holds its shell.  The shared crates, apart from `stem-protocol`, are a problem.  They are named in sorted order.
+* Every problem has `rule: "LAYER-1"` and `line: None`.  `file` is set as follows:
+  * `docs/ARCHITECTURE.md` for a problem whose fix is in the table: a table or a row that cannot be read, a stale entry, a rank, layer rows that are apart, a member without a row, a row for a crate that is not a member, two rows, a listed crate that is not a member, `test-support` in a row, and layers that are not `LAYERS`.
+  * The crate's `manifest` for a problem whose fix is in a manifest: an edge that the table does not list, a stray of a crate, an edge to `test-support`, and an edge from it.
+  * `Cargo.toml` for a problem with the workspace: a package in `outside`, an entry in `outside_takes`, no workspace crate, a missing shell, and shared crates.
+* The messages:
+  * An edge that the table does not list: `LAYER-1: engine depends on app (dev), but the layers table in docs/ARCHITECTURE.md does not list it.  Fix: remove the dependency from engine/Cargo.toml.  If the design changes, add app to engine's row in the same commit.`
+  * A listed crate without an edge: `LAYER-1: the layers table in docs/ARCHITECTURE.md lists dsp for app, but app/Cargo.toml has no dependency on it.  Fix: remove dsp from app's row, so the table stays true.`
+  * A row that lists a crate that is not lower: `LAYER-1: the layers table in docs/ARCHITECTURE.md lets engine (Engine and GPU) depend on app (Shells), which is not in a lower layer.  Fix: remove the dependency, or move a crate to another layer of the table, so that each crate depends only on lower layers.`
+  * Layers that are not `LAYERS`: `LAYER-1: the layers table in docs/ARCHITECTURE.md has the layers "Test support, Base, Pure, Engine and GPU, Shells, Tools", not those in LAYERS in xtask/src/rules.rs.  Fix: use the five layers in LAYERS: Test support, Pure, Engine and GPU, Shells, Tools.  To change the layers, change the table, LAYERS and LAYER-1 in one commit (DOC-1).`  The layers are in rank order.
+  * A layer whose rows are apart: `LAYER-1: the layers table in docs/ARCHITECTURE.md has rows for Pure that are not together.  Fix: put each layer's rows together, lowest layer first.`
+  * A member without a row: `LAYER-1: the workspace crate engine has no row in the layers table in docs/ARCHITECTURE.md.  Fix: add a row with its layer and the workspace crates that it depends on.`
+  * A row for a crate that is not a member: `LAYER-1: the layers table in docs/ARCHITECTURE.md has a row for foo, which is not a workspace crate.  Fix: remove the row, or use the package name from its Cargo.toml.`
+  * Two rows for one crate: `LAYER-1: the layers table in docs/ARCHITECTURE.md has 2 rows for engine.  Fix: keep one row for each crate.`
+  * A listed crate that is not a member: `LAYER-1: the layers table in docs/ARCHITECTURE.md lists foo for app, but foo is not a workspace crate.  Fix: correct the name, or remove it from app's row.`
+  * A row that lists `test-support`: `LAYER-1: the layers table in docs/ARCHITECTURE.md lists test-support for engine.  Fix: remove it.  The table leaves out test-support, which any crate but dsp may take as a dev-dependency.`
+  * A normal edge to `test-support`: `LAYER-1: engine takes test-support as a normal dependency, so it would ship.  Fix: move it to [dev-dependencies] in engine/Cargo.toml.`
+  * A build edge to `test-support`: `LAYER-1: engine takes test-support as a build dependency, but it is a dev-dependency only.  Fix: move it to [dev-dependencies] in engine/Cargo.toml.`
+  * An edge from `dsp` to `test-support`: `LAYER-1: dsp takes test-support, but dsp must have no dependencies (DSP-1).  Fix: remove it from dsp/Cargo.toml.`
+  * An edge from `test-support`: `LAYER-1: test-support takes dsp, but test-support must take no workspace crate.  The crates that take it must reach nothing through it.  Fix: remove dsp from test-support/Cargo.toml.`
+  * A path stray of a crate: `LAYER-1: app takes shim from /x/shim, which is not a workspace crate, so this check cannot see what shim depends on.  Fix: make shim a workspace crate with a row in the layers table, or remove it.`
+  * A stray with a member's name: `LAYER-1: app takes roformer from git+https://example.com/x, not from the workspace.  Fix: take roformer by path, or remove it.`
+  * A package in `outside` with a member's name: `LAYER-1: the build takes roformer from git+https://example.com/x, not from the workspace.  Fix: remove the dependency that brings it in.`
+  * A path crate in `outside`: `LAYER-1: the build takes shim from /x/shim, a path crate that is not a workspace crate, so this check cannot see what shim depends on.  Fix: remove the [patch] or exclude that brings it in.  Or make it a workspace crate with a row in the layers table.`
+  * An outside crate that takes a member: `LAYER-1: foo, from git+file:///x/gitfoo, takes the workspace crate roformer, so this check cannot see the dependency.  Fix: remove the [patch] that points roformer at the workspace, or remove foo.`
+  * No table, or no table before the next heading: `LAYER-1: docs/ARCHITECTURE.md has no table under ### Layers, so this check read nothing.  Fix: restore the table, with the columns Layer, Crate and Depends on.`
+  * Another header or separator: `LAYER-1: the layers table in docs/ARCHITECTURE.md starts with "<line>", not "| Layer | Crate | Depends on |" and "| - | - | - |".  Fix: use those three columns, one row for each crate.`  `<line>` is the first line that is wrong.
+  * A row that the check cannot read: `LAYER-1: the layers table in docs/ARCHITECTURE.md has a row that this check cannot read: "<line>".  Fix: give the layer and one crate in a code span.  Then give its dependencies once each, as code spans joined by ", ", or "no workspace crate".`
+  * No workspace crate: `LAYER-1: cargo metadata gave no workspace crate, so this check read nothing.  Fix: run cargo metadata --format-version 1 --all-features --locked at the workspace root.`
+  * Shared crates: `LAYER-1: app and stem-worker both depend on roformer, roformer-gpu, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol.`
+  * A shell that is not a member: `LAYER-1: the workspace has no crate stem-worker, so this check cannot compare the page side and the worker side.  Fix: if the web app changed, change WEB_APP in xtask/src/rules.rs and LAYER-1's text (DOC-1).`
+* Why the check cannot pass while it reads nothing: the table and the edges must match both ways.  If the parser finds no edges, each crate that a row lists is a problem.  If it finds no crates, the "no workspace crate" problem fails it.  If the table is empty or absent, the "no table" problem or each member without a row fails it.
+* The real-tree tests, in `xtask/tests/rules.rs`.  Each asserts that the list is empty, and prints the count and the messages, as `synth_brings_no_crate_into_the_web_app` does:
+  * `crates_depend_only_downwards` runs `workspace_metadata`, `workspace` and `crates_follow_the_layers` with the text of `docs/ARCHITECTURE.md`.
+  * `the_page_and_the_worker_meet_only_through_stem_protocol` runs `shells_meet_only_through_the_protocol` on the same crates.
+* LAYER-1, in `invariants.md`, under option (a):
+  * The text becomes: "Each workspace crate depends only on the workspace crates that its row in the layers table of `docs/ARCHITECTURE.md` lists, and on `test-support` as a dev-dependency.  This covers dev- and build-dependencies, for every target and feature.  Every path crate in the build is a workspace crate.  No crate from a registry or git has a workspace crate's name, or takes a workspace crate.  Each listed crate is in a lower layer of the table (Test support, Pure, Engine and GPU, Shells, Tools).  `test-support` is a dev-dependency only and takes no workspace crate, and `dsp` does not take it.  The page side and the worker side meet only through `stem-protocol`.  The workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.  In the normal dependency tree of the web app (`app` and `stem-worker`), `synth` brings no other crate."
+  * "Why" gains, after its first sentence: "It keeps `stem-protocol` the one contract between the two WebAssembly modules."
+  * `* Enforced by:` becomes: "`crates_depend_only_downwards`, `the_page_and_the_worker_meet_only_through_stem_protocol` and `synth_brings_no_crate_into_the_web_app` (CI `test` job).  The first compares the dependencies between workspace crates in `cargo metadata` with the layers table.  It also fails on a crate that hides a dependency from that comparison.  The second follows the normal dependencies from `app` and `stem-worker`, and fails on a shared workspace crate other than `stem-protocol`."
+  * `* Gaps:` names the new crates entry by its ID.
+* `CLAUDE.md`'s LAYER-1 line stays as it is: it is still true.
+
+#### M5 steps
+
+Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass before it (GIT-2).  Fixes from the review rounds are later commits.
+
+1. The parser and the two checks, test first.
+   * Write the types, `workspace_metadata`, and stubs: `workspace` returns an empty `Workspace`, and each check returns no problems.
+   * Write the unit tests in `rules.rs`'s test module.  Each test asserts the whole result.  A check test asserts the whole list of `Problem`s, sorted by file and message, so the order is free.  So a wrong `file`, or an extra problem, fails it.
+   * The parser tests feed JSON with `workspace_root` `/x`, and paths such as `/x/dsp`.  So no home folder is committed.  The members are listed with `roformer` before `roformer-gpu`, and `stem-protocol`'s manifest is `/x/protocol/Cargo.toml`.  Each asserts the whole `Workspace`, so none passes against the stub:
+     * `path_dependencies_on_members_are_edges`: `app` takes `dsp` (normal), `engine` renamed as `audio`, `synth` both as a normal edge and as a dev edge for `cfg(not(target_arch = "wasm32"))`, and `stem-protocol` as a build edge.  It also takes `anyhow` from the registry.  `stem-worker`'s manifest is `/x/worker/Cargo.toml`, and it takes `roformer-gpu`.  `engine` also takes itself as a dev edge, which the result leaves out.  So a parser that uses `rename`, keeps one edge for each crate, or matches folders by prefix fails.
+     * `a_path_that_is_not_a_member_is_a_stray`: `app` takes `shim` from `/x/shim`, `nested` from `/x/app/nested`, a folder under a member, and `roformer` from `/x/vendor/roformer`.  So a parser that matches with `Path::starts_with`, or matches a path dependency by its name, fails.
+     * `a_members_name_from_elsewhere_is_a_stray`: `dsp` takes `engine` from `registry+https://github.com/rust-lang/crates.io-index`, and `roformer` from `git+https://example.com/x`, each with no `path`.  So a parser that matches by name, drops them, or knows one source only fails.
+     * `a_path_package_that_is_not_a_member_is_outside`: a package `shim` with `source` `null`, not in `workspace_members`, as a `[patch]` gives it.  `app`'s dependency on it has a `registry+` source.  Also a git package `roformer` that is not a member, and a path package `roformer` that is not a member, which goes in once.  A `resolve` node for `shim -> roformer` gives no `outside_takes` entry.  So a parser that reads only dependencies, or chains the two filters, fails.
+     * `a_package_that_is_not_a_member_is_left_out`: a member, and a registry package that is not in `workspace_members`.
+     * `an_outside_package_that_takes_a_member_is_found`: a `resolve` node for a git `foo` with a dep whose `pkg` is `roformer-gpu`'s ID and whose `name` is `roformer_gpu`.  A second dep, on a git `roformer` that is not a member, gives no entry.  So a parser that matches `deps[].name`, or a name in the ID, fails.
+     * `an_unknown_kind_is_an_error`: `"kind": "other"`.
+     * `a_manifest_outside_the_root_is_an_error`: a member at `/y/app/Cargo.toml`, and in a second case at `/xy/app/Cargo.toml`.  So a parser that strips the root as a string prefix fails.
+   * The table tests use a fixture: the new table under `### Layers`, and the crates of today's edges.  A test that adds a row puts it where the layer's rows stay together, unless it tests that rule.
+     * `the_layers_of_today_give_no_problem`.
+     * `an_edge_that_the_table_does_not_list_is_a_problem`: a normal `engine -> app` edge, and a normal `stem-worker -> dsp` edge.  It expects `worker/Cargo.toml` in the second problem, so a check that builds the file from the crate's name fails.
+     * `a_dev_edge_counts`: a dev `engine -> app` edge.  It asserts `(dev)` in the message.
+     * `an_edge_from_a_crate_with_no_workspace_crate_is_a_problem`: a normal `synth -> dsp` edge, with `synth`'s row unchanged, gives one problem in `synth/Cargo.toml`.  So a check that compares only rows with a list fails.
+     * `a_dev_edge_keeps_a_listed_crate`: a dev `roformer-gpu -> dsp` edge, with `dsp` added to `roformer-gpu`'s row, gives no problem.  So does a build `roformer-gpu -> dsp` edge in place of the dev one.  So a stale-entry check that reads only normal edges fails.
+     * `kinds_are_named_once_in_their_order`: a build, a dev, a normal and a second normal `engine -> app` edge, in that order, give one problem with `(normal, dev, build)`.  So a check that drops build edges, or names kinds in the order of the JSON, fails.
+     * `a_listed_crate_without_an_edge_is_a_problem`: `app` without its `dsp` edge, and `stem-worker` without its `roformer` edge.  So a check that reads only one way, or does not use `manifest`, fails.
+     * `a_row_that_lists_a_higher_layer_is_a_problem`: `app` in `engine`'s row, and the edge.  It asserts only the rank problem.
+     * `a_row_that_lists_its_own_layer_is_a_problem`: `dsp` in `synth`'s row, and the edge.  So a check with `<=`, or one that ranks rows and not layers, fails.
+     * `the_layers_are_fixed`: a row `` | Base | `dsp` | no workspace crate | `` between the `Test support` row and the `Pure` rows, with `dsp`'s own row removed, and `dsp` in `synth`'s row with the edge.  It asserts the layers problem only.  Then two more cases, each from the base fixture, each with the layers problem only.  First, the `Test support` row after `stem-protocol`'s row, which gives "Pure, Test support, Engine and GPU, Shells, Tools".  Second, `` | Pure | `test-support` | no workspace crate | `` in place of the `Test support` row, a missing layer.  So a check that takes any layer names, compares the layers as a set, or checks only that each layer is in `LAYERS`, fails.
+     * `a_layer_whose_rows_are_apart_is_a_problem`: `roformer`'s and `stem-protocol`'s rows moved to after `xtask`'s row.  It asserts one problem for `Pure`.
+     * `a_crate_without_a_row_is_a_problem`: `engine`'s row removed, with `app`'s and `xtask`'s rows unchanged.  It asserts one problem, for `engine` alone.
+     * `a_row_for_a_crate_that_is_not_a_member_is_a_problem`: a row `` | Pure | `foo` | `dsp` | `` after `stem-protocol`'s row.  It asserts one problem.
+     * `a_repeated_row_is_a_problem`: a second `engine` row, with the Layer `Engine and GPU`, right after the first, that lists `app`.  It asserts one problem, because the first row counts.
+     * `a_listed_crate_that_is_not_a_member_is_a_problem`: `foo` in `app`'s row.  It asserts one problem.
+     * `test_support_as_a_dev_dependency_needs_no_row`: dev edges to `test-support` from `app`, `stem-protocol` and `xtask`, beside the fixture's own, give no problem.
+     * `test_support_as_a_normal_or_build_dependency_is_a_problem`: a normal `engine` edge and a build `synth` edge give two problems, with their two messages.
+     * `test_support_between_dev_edges_is_still_a_problem`: `engine` takes `test-support` as a dev edge, a normal edge, a dev edge and a second normal edge, in that order.  It asserts one normal-edge problem.  So a parser or a check that keeps the first or the last kind fails.
+     * `dsp_may_not_take_test_support`: a dev and a normal `dsp` edge give the `dsp` problem, once.
+     * `test_support_takes_no_workspace_crate`: a dev `test-support -> dsp` edge, with `test-support`'s row unchanged, gives the `test-support` problem only.  So a relayered `test-support` cannot carry a dev edge upwards.
+     * `a_row_that_lists_test_support_is_a_problem`: `test-support` in `engine`'s row, and `engine` has no edge to it.  It asserts one problem, not a stale-entry problem as well.
+     * `strays_are_problems`: a path stray and a git stray in `app`, a path crate in `outside`, and a git package with a member's name in `outside`.  It asserts four problems, each with its own message.
+     * `an_outside_package_that_takes_a_member_is_a_problem`: one entry in `outside_takes`.
+     * `a_missing_table_is_a_problem`: no `### Layers` heading.  Then a `### Layers` heading with no table, and a later `## X` section that holds a table.  Each gives the "no table" problem only.  Then the first case with a path stray in `app`, which gives the stray problem too.  So a check that returns early on "no table" fails.
+     * `the_old_table_is_a_problem`: today's table, with its `Crates` and `Depend on` header.  It asserts the header problem only.
+     * `a_bad_separator_is_a_problem`: `| Layer | Crate | Depends on |` and then a row in place of the separator.
+     * `a_row_that_cannot_be_read_is_a_problem`: each bad row is added after `xtask`'s row, one case at a time, with the Layer `Pure` except in the empty-Layer case.  Each gives one problem that quotes it, and no layer-order problem.  The crate cell is `` `dsp` `` unless a case names another, so a lenient parser gives a two-rows problem and fails.  The cases are in the last cell unless they name another: `` `dsp` (dev only) ``, `dsp` without a code span in the crate cell (one case) and in the last cell (a second case), `` `dsp` (pure) `` in the crate cell, two crates in the crate cell, a row with two cells, an empty Layer cell, a row without its last `|`, an empty last cell, `` `dsp`,`engine` `` and `` `dsp`, `dsp` ``.
+     * `an_empty_workspace_is_a_problem`: no crates, and a table with its header and separator and no rows.  It asserts the "no workspace crate" problem only.  So a check that only compares the two lists fails.
+   * The shell tests use the fixture crates:
+     * `the_shells_of_today_meet_only_through_stem_protocol`.
+     * `a_crate_on_both_sides_is_a_problem`: an `app -> roformer-gpu` edge.  It asserts the message with `roformer, roformer-gpu`, so a check that does not follow `roformer-gpu -> roformer` fails.
+     * `a_crate_reached_through_another_is_found`: an `engine -> roformer` edge.  `app` reaches `roformer` only through `engine`.  So a check that reads only `app`'s own edges fails.
+     * `the_worker_side_is_followed_to_every_depth`: `stem-worker` without its direct `roformer` edge, and a `roformer -> dsp` edge.  `stem-worker` then reaches `dsp` at depth 3, through `roformer-gpu` and `roformer`.  It asserts the message with `dsp` only, because `app` does not reach `roformer`.  So a walk of depth 2 or less fails.
+     * `a_crate_reached_through_stem_protocol_is_found`: a normal `stem-protocol -> test-support` edge gives `test-support`, which neither side reaches otherwise.  So a check that stops at `stem-protocol` fails.
+     * `a_shell_is_in_its_own_set`: a `stem-worker -> app` edge gives the message with `app, dsp, engine, synth`.  So a check that leaves out the shell itself gives `dsp, engine, synth`, and fails.  Then, from the base fixture, an `app -> stem-worker` edge gives `roformer, roformer-gpu, stem-worker`.
+     * `a_dev_or_build_edge_does_not_join_the_sides`: a dev `app -> roformer` edge, a dev `engine -> roformer` edge, a build `app -> roformer` edge and a build `engine -> roformer` edge give no problem.  So a check that follows dev or build edges, at the first step or later, fails.
+     * `a_cycle_ends`: a normal `dsp -> engine` edge beside `engine -> dsp`.  It gives no problem and returns.  A walk with no set of seen crates loops or overflows the stack, so a person sees that failure as a hang or an abort, not as a failed test.
+     * `a_missing_shell_is_a_problem`: crates without `stem-worker`, then crates without `app`.  Each gives its problem.
+   * See every test that expects a problem fail against the stubs.  The tests that expect no problem pass against them; that is expected.  Then write the functions.
+   * Update `rules.rs`'s module comment if it no longer says what the file reads.
+2. The real-tree tests, the new table and the docs, in one commit: the new table makes the docs that describe it wrong until they change (DOC-1).
+   * Write the two tests in `xtask/tests/rules.rs`.  Run `crates_depend_only_downwards` on today's table.  It fails with the header problem.  Record the output in the PR.
+   * Replace the table in `docs/ARCHITECTURE.md` with the table in "M5 design".  Both tests now pass.
+   * `docs/ARCHITECTURE.md`, above the table:
+     * "Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`)." becomes "Each workspace crate depends only on the workspace crates that its row lists, and on `test-support` as a dev-dependency (LAYER-1 in `docs/invariants.md`).  Each listed crate is in a lower layer."
+     * After "The page side and the worker side meet only through `stem-protocol`.", add: "The workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common."
+   * `docs/ARCHITECTURE.md`, under the table:
+     * Before the two sentences on `test-support`, add as a new paragraph: "The rows run from the lowest layer to the highest.  Each row lists every workspace crate that its crate depends on, dev- and build-dependencies included, apart from `test-support`.  `crates_depend_only_downwards` compares the table with `cargo metadata`.  Change the table in the commit that adds or removes a crate, or a dependency between crates.  The layers are those of LAYER-1, and `LAYERS` in `xtask/src/rules.rs` holds them."
+     * After the sentence "Change the table ...", add: "Every path crate in the build is a workspace crate with a row.  No crate from a registry or git has a workspace crate's name, or takes a workspace crate."
+     * "No crate may take it as a normal dependency, so it never ships." becomes "No crate may take it as a normal or build dependency: it is a dev-dependency only, so it never ships.  It takes no workspace crate."
+   * `docs/ARCHITECTURE.md`, `## Tests`: the bullet that names the docs check also names "the structural checks (`xtask/tests/rules.rs`)".  M3 and M4 left this out.
+   * `docs/decisions/0005-how-strictly-the-crate-checks-read-layer-1.md`, as in "M5 design".  Add its line to `docs/README.md`, or `docs-check` fails.
+   * `invariants.md`: LAYER-1's text, "Why", `* Enforced by:` line and `* Gaps:` line, as in "M5 design".
+   * `tech-debt.md`:
+     * Delete TD-4.  Under `## Closed`, add: "* TD-4: closed by `crates_depend_only_downwards` (harness phase 2, M5).  It compares the dependencies between crates in `cargo metadata` with the layers table in `ARCHITECTURE.md` (LAYER-1)."
+     * Add the new crates entry, with the next free ID `<n>`, under `## Enforcement gaps`, after the last entry of that section.  The text:
+       * Heading: `### TD-<n>: LAYER-1 sees crates, not code`.
+       * Body: "`crates_depend_only_downwards` reads the dependencies between crates, not the source (LAYER-1)."  Then the four gaps and the fix in "M5 design" as bullets.  Keep `#[path = "../../roformer/src/x.rs"] mod x;` in one code span, so `docs-check` does not read it as a path: `#` and `=` make a code span prose.
+   * `harness.md`, one components row.  Component: "`crates_depend_only_downwards`, `the_page_and_the_worker_meet_only_through_stem_protocol` (LAYER-1)".  Kind "sensor, computational", added "phase 2".  Failure: "nothing compared the layers table with the manifests, or kept the page side and the worker side apart; a crate outside the workspace could hide a dependency".  Also add decision 0005 to the sentence on decisions at the top of `harness.md`.  The row goes after M4's two rows.
+   * `working-with-agents.md`:
+     * Under "Before you merge", add the bullet: "* A change to the layers table in `docs/ARCHITECTURE.md` changes what LAYER-1 allows.  Review it as a design change."
+     * In the changelog, add: "* <date>, phase 2 (M5): `crates_depend_only_downwards` compares the layers table with the dependencies between crates.  `the_page_and_the_worker_meet_only_through_stem_protocol` keeps the page side and the worker side apart.  Review a change to the table as a design change."  `<date>` is the date of the commit.
+   * `harness-engineering.md`: in phase 2's bullet on the structural test, "crate layering over `cargo metadata` (TD-4)" becomes "crate layering over `cargo metadata` against the layers table, with the page side and the worker side apart (TD-4, M5)".
+   * `.claude/rules/protocol.md`: add the bullet "* `stem-protocol` takes no workspace crate as a normal dependency, because both sides take it (LAYER-1, decision 0005)."  Change its opening line from "PROTO-1 and PROTO-2 in `docs/invariants.md`." to "LAYER-1, PROTO-1 and PROTO-2 in `docs/invariants.md`.".  So the rule that loads for `protocol/` matches the new check.
+   * Measure the time that the two tests add to `cargo test -p xtask --test rules`.  State it in the PR.
+
+#### M5 acceptance
+
+* `cargo test -p xtask --lib`: the 8 parser tests, the 28 table tests and the 9 shell tests pass.  Each that expects a problem, or a parse result that is not empty, failed against the stubs.
+* `cargo test -p xtask --test rules`: `crates_depend_only_downwards` and `the_page_and_the_worker_meet_only_through_stem_protocol` pass.  On the old table, `crates_depend_only_downwards` failed with the header problem.
+* Planted breaches on the real tree, run locally and not kept.  Run the outer `cargo test -p xtask --test rules` without `--locked`, because a planted edge changes `Cargo.lock`.  Afterwards restore the manifests, `Cargo.lock` and the docs, and delete `shim/` and the local git repo.  Record each result in the PR:
+  * `roformer = { path = "../roformer" }` in `app`'s `[dependencies]`: `crates_depend_only_downwards` fails and names `app` and `roformer`.  The shell test fails and names `roformer`.
+  * The same edge, with `roformer` also added to `app`'s row: `crates_depend_only_downwards` passes, and only the shell test fails.
+  * `app = { path = "../app" }` in `engine`'s `[dev-dependencies]`: `crates_depend_only_downwards` fails with `(dev)`.
+  * `test-support = { path = "../test-support" }` in `dsp`'s `[dev-dependencies]`: `crates_depend_only_downwards` fails with the DSP-1 message.
+  * A crate `shim/` that takes `roformer`, `exclude = ["shim"]` in the root `Cargo.toml`, and `shim = { path = "../shim" }` in `app`: `crates_depend_only_downwards` fails with the path stray and the path crate in `outside`.
+  * The same `shim/`, with `[patch.crates-io] shim = { path = "shim" }` in the root and `shim = "0.1"` in `app`: `crates_depend_only_downwards` fails with the path crate in `outside`.
+  * The same `[patch]`, with `shim = { version = "0.1", optional = true }` and `extra = ["dep:shim"]` in `app`: `crates_depend_only_downwards` fails with the path crate in `outside`.
+  * A local git repo with a crate `foo` that takes `roformer`, `foo` from that repo in `app`, and a `[patch]` of that repo's `roformer` to `roformer/`: `crates_depend_only_downwards` fails with the outside crate that takes a member.
+  * `dsp` removed from `app`'s row: `crates_depend_only_downwards` fails, and says that the table does not list the edge.
+  * `stem-protocol`'s row removed: `crates_depend_only_downwards` fails, and names `stem-protocol` as a crate without a row.
+  * `synth` added to `engine`'s row, with no edge: `crates_depend_only_downwards` fails with the stale-entry message only, which names `engine/Cargo.toml`.
+* `grep -c "Enforced by: prose only" docs/invariants.md` still gives 7.
+* fmt, clippy (every clippy command in `CLAUDE.md`), `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.
+* CI: the `test` job log lists `crates_depend_only_downwards ... ok` and `the_page_and_the_worker_meet_only_through_stem_protocol ... ok`.  The PR states the time that the two tests add in CI.
 
 ### M6: dsp relaxes only the style lints DSP-1 needs (closes TD-2)
 
@@ -485,6 +864,7 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 * Change: a check extracts the message type strings from `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs`, and compares them with the constants in `stem_protocol::kind`.  Types that exist only in the scripts (for example `worker-error`) are on a named allowlist.
 * Acceptance: `e2e_messages_use_protocol_types` passes.  A unit test plants a misspelt type (`"segmnt"`) and fails with PROTO-1.
 * Scope: failing on a missing field and a version handshake stay in TD-16.
+* Note: if the check takes `stem-protocol` as a dependency of `xtask`, add `stem-protocol` to `xtask`'s row in the layers table in `ARCHITECTURE.md`.  `crates_depend_only_downwards` (M5) fails until the row lists it.
 
 ### M11: the audio callback does not allocate after warm-up (closes TD-15; RT-1; maintainer decision)
 
@@ -567,9 +947,14 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 ## Idempotence and recovery
 
 * Each milestone is one PR and reverts on its own.  A reverted check removes its enforcement and nothing else; revert its `* Enforced by:` line and restore its tech-debt entry in the same commit.
-* M3 adds a crate.  To undo M3, revert its commits, then put back decision 0003 with `Status: rejected`, and its line in `docs/README.md`.  So the decision numbers have no gap.  If M4 or a later milestone has merged, keep `xtask/src/rules.rs` and `xtask/tests/rules.rs`.  Remove only `skips_use_the_helper`, `allowlisted_skips_exist`, `every_skip_can_be_required`, `the_skip_allowlist_is_current`, and M5's `test-support` case.  Remove `proc-macro2` from `xtask`'s `[dependencies]` unless a later check uses it.  Then commit `Cargo.lock`.
+* M3 adds a crate.  To undo M3, revert its commits, then put back decision 0003 with `Status: rejected`, and its line in `docs/README.md`.  So the decision numbers have no gap.  If M4 or a later milestone is in the tree (merged and not reverted), keep `xtask/src/rules.rs` and `xtask/tests/rules.rs`.  Remove `skips_use_the_helper`, `allowlisted_skips_exist` and their unit tests.  Remove the private items that only they use: `SKIP_WORDS`, `holds_skip_words_on_purpose`, `SKIP_ALLOWLIST`, `skips_in`, `string_literals`, `string_value`, and the `FromStr` and `proc_macro2` imports.  Remove `rules::rust_files`, unless a later check uses it, the `rust_files` helper in `xtask/tests/rules.rs`, and the tests `every_skip_can_be_required` and `the_skip_allowlist_is_current`.  Otherwise the build or clippy fails on dead code.  Remove `proc-macro2` from `xtask`'s `[dependencies]` unless a later check uses it.  Then commit `Cargo.lock`.  If M5 is in the tree, also remove these:
+  * in `ARCHITECTURE.md`: the `Test support` row, the sentences on `test-support` under the layers table, from "Any crate but `dsp`" to "It takes no workspace crate.", ", apart from `test-support`" in the sentence "Each row lists ...", and ", and on `test-support` as a dev-dependency" above the table;
+  * in LAYER-1: "Test support, " in the list of layers, ", and on `test-support` as a dev-dependency", and its `test-support` sentence;
+  * in `rules.rs`: "Test support" in `LAYERS`, which becomes `[&str; 4]`, "five layers" in the layers message, the `Test support` cases of `the_layers_are_fixed`, the `test-support` rules in `crates_follow_the_layers`, their messages and unit tests, the shell test `a_crate_reached_through_stem_protocol_is_found` (or give it another crate), and the fixture's `Test support` row, `test-support` crate and `test-support` edges;
+  * M5 rewrites LAYER-1 and `ARCHITECTURE.md`, so a plain revert of M3's text conflicts there.  Edit them by hand.
 * To undo M4, revert its commits.  That reverts the code, the manifests, the CI steps and the command lists in every case.  The revert also puts back the `hound` row, TD-4's text and LAYER-1's text.  If a later check shares a Cargo runner with `web_app_tree`, keep that runner.  Then put back decision 0004 with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.
-* If M5 has merged before M4 is undone, TD-4 is closed, and `docs-check` fails a closed ID outside plans and decisions.  So keep TD-4 closed, and do not put back its text.  The sentence that comes back under the layers table in `ARCHITECTURE.md` must not name TD-4.  On LAYER-1's line, remove only M4's test name.
+* If M5 is in the tree when M4 is undone, TD-4 is closed, and `docs-check` fails a closed ID outside plans and decisions.  So keep TD-4 closed, and do not put back its text.  The sentence that comes back under the layers table in `ARCHITECTURE.md` must not name TD-4.  Keep `rules::WEB_APP`, because M5's shell check uses it.  M5 rewrites LAYER-1 and edits the same lines in `harness-engineering.md` and `harness.md`, so a plain revert of M4 conflicts there.  Resolve the conflicts by hand.  In LAYER-1, remove only M4's last sentence of the text, M4's sentence in "Why" and M4's test name, and fix the list's "and".  Keep M5's text.
+* To undo M5, revert its commits.  That puts back the old table, TD-4 and LAYER-1's lines, and removes TD-4's bullet under `## Closed` and the new crates entry.  Keep the new crates entry's ID, so it is never reused and the plan still names a defined ID: add `* TD-<n>: withdrawn by the revert of M5; TD-4 covers the crate edges again.` under `## Closed`.  Do the same for option (c)'s entry, if it exists.  Put decision 0005 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.  Point TD-4's fix line at the plan's current folder, `active/` or `completed/`.  If a later milestone added an edge, such as `xtask -> stem-protocol` in M10, add it to the old table too (DOC-1).
 * Checks read the tree and write nothing, so they can run any number of times.  `xtask test-list` writes only to stdout.
 * M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -634,7 +1019,17 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
   * Step times: `-p synth --all-targets` under 1 s, `-p app` 1m30s, `-p app --all-targets` 22 s.  So the steps add 1m52s, against the plan's estimate of about 100 s locally.
   * The `clippy` job took 5m22s, against 3m35s on `main` (run 39248866763).  In this run it is the longest job, 31 s more than `test` (4m51s).
 * [x] 2026-10-20: M4, decision 0004 accepted by the maintainer.
-* [ ] M4: PR merged by the maintainer.
+* [x] 2026-10-20: M4, PR #17 merged by the maintainer (`054c003`).
+* [x] 2026-10-20: M5 implementation plan written (the M5 sections under "Plan of work").  Prototypes in a scratch worktree ran `cargo metadata --no-deps` with planted edges.
+* [x] 2026-10-20: M5 plan review round 1, by two new reviewers (code, and docs and process).  No blockers; 9 should-fix findings and 14 nits, all checked and real, all fixed in the plan.  The main fixes: a path crate excluded from the workspace, or a git crate with a member's name, passed every check, so such strays are now problems.  The second check is a new reading of LAYER-1, so it is now a decision point for the maintainer, with decision 0005.  Tests now assert each problem's file, two edges to one crate, and walks through `stem-protocol` and at every depth.
+* [x] 2026-10-20: M5 plan review round 2, by two new reviewers.  No blockers; 12 should-fix findings and 15 nits, all checked and real, all fixed in the plan.  The main fixes: a `[patch]` to a path crate outside the members passed every check, so the check now reads `cargo metadata` without `--no-deps`, and a path package that is not a member is a problem.  The plan now says exactly what each case gives, so each test's expected problems are exact; several tests had wrong counts.  Mutants that keep the last kind, drop build edges, or walk to a fixed depth now fail.  Decision 0005's options are written out, and the undo text for M3 and M4 works after M5.  A new tech-debt entry records what a check of crate edges cannot see.
+* [x] 2026-10-20: M5 plan review round 3, by two new reviewers.  No blockers; 11 should-fix findings and 15 nits, all checked and real, all fixed in the plan.  The main fixes: a `[patch]` crate behind a feature that is off passed every check, so the check adds `--all-features`.  A relayered `test-support` could carry a dev edge upwards, so `test-support` now takes no workspace crate.  LAYER-1's new first sentence was false for the dev edges to `test-support`.  Three wrong implementations passed every planned test, and new tests now fail them.  The undo text now keeps every ID defined, and removes the code that M3's revert would leave dead.
+* [x] 2026-10-20: M5 plan review round 4, by two new reviewers.  No blockers; 6 should-fix findings and 18 nits, all checked and real, all fixed in the plan.  The main fixes: a git crate that takes a member's name, with a `[patch]` back to the member, passed every check, so the check also reads `resolve.nodes`.  The two kinds of stray now have their own type, and each message has a test.  The rule text said "crates" where it means workspace crates, since the two sides share registry crates such as `wasm-bindgen`.  LAYER-1 now states the rule on strays.
+* [x] 2026-10-20: M5 plan review round 5, by two new reviewers.  No blockers; 6 should-fix findings and 21 nits, all checked and real, all fixed in the plan.  The should-fix items were all details of the text: `outside` and `outside_takes` overlapped for a path crate, a parser with `Path::starts_with` passed every test, and the M3 undo text left dead code and a broken sentence.  Also, option (b)'s cost now says that it removes a sentence of LAYER-1, and the first sentence of LAYER-1 now says "workspace crates".
+* [x] 2026-10-20: M5 plan review round 6, by two new reviewers.  No blockers.  The code reviewer found no should-fix item, and no realistic breach outside the known gap.  The docs reviewer found 4 should-fix items, and the two reviewers found 21 nits.  All were checked and real, and all are fixed in the plan.  Decision 0005 now states that option (a) also fails a native-only edge.  The plan no longer says that the maintainer accepted an exact table: the accepted text gave a ceiling, so the decision point now asks about it.
+* [x] 2026-10-20: M5 plan review round 7, by two new reviewers.  No blockers; 7 should-fix findings and 19 nits, all checked and real, all fixed in the plan.  The main fixes: an agent that follows the rank message could add a new layer, pass every check and make LAYER-1's list of layers false, so `rules::LAYERS` now fixes the layers.  Round 6's question on an exact table had no change list, and its record text was false; the decision points now hold two questions, each with its changes, and decision 0005 records both for any choice.  The M3 undo text again removes `proc-macro2` whether or not M5 is in the tree.
+* [x] 2026-10-20: M5 plan review round 8, by two new reviewers.  No blockers.  7 should-fix findings and 15 nits, all small fixes to round 7's new text, all checked and real, all fixed in the plan.  The layers problem got its file, and `the_layers_are_fixed` now fails a set comparison.  The stale-entry direction got a planted breach.  Question 2's ceiling now states its gain.  The layers message and LAYER-1 use the names in `LAYERS`.  The code reviewer found no realistic breach outside the known gap.
+* [x] 2026-10-20: plan review stopped after round 8, by the maintainer's rule: no blockers, and no should-fix item beyond small local fixes.  Not yet implemented.  Next: the maintainer answers M5's two decision questions.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
 * [ ] M7: DSP-1 allowlist test.
@@ -703,6 +1098,18 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, agent (M4): the check reads the wasm tree only, as `THIRD-PARTY.md` does, because only the web app ships.
 * 2026-10-19, agent (M4): CI's `clippy` job also runs clippy on `synth`, on `app`'s lib, and on `app` with `--all-targets`.  `--workspace` builds turn `files` on everywhere.  So they hide warnings in `synth` without `files`, a native-only call to a writer in `app`, and a lost dev-dependency.  `-p app --all-targets` alone also turns `files` on for `app`'s lib, through the dev-dependency (review round 7).
 * 2026-10-19, agent (M4): M4 writes decision 0004 as `proposed`.  The `files` boundary and LAYER-1's new text outlive this plan.  The maintainer accepted it on 2026-10-20.
+* 2026-10-20, agent (M5): the layers table gets one row per crate.  The `;` form maps each list to a crate by position, which a person can misread.
+* 2026-10-20, agent (M5): the plan recommends an exact table, both ways.  A row that lists a crate without an edge is a stale doc (DOC-1), and the two-way match keeps the check from passing on empty input.  The first M5 text gave a ceiling, so the maintainer decides it (question 2 of M5's decision points, review round 6).
+* 2026-10-20, agent (M5): the check finds edges by `path`, not by name.  A registry crate can have a member's name, and a renamed dependency keeps its package name in `name`.
+* 2026-10-20, agent (M5): the plan recommends a second check that keeps the page side and the worker side apart, over normal edges.  A row of the table may list any crate of a lower layer, so a change to `app`'s row, with the dependency, lets `app` take `roformer`.  The maintainer decides how strict it is (question 1 of M5's decision points), and step 2 records both answers as decision 0005.
+* 2026-10-20, agent (M5 review round 1): a dependency that goes round the members is a problem.  A path crate excluded from the workspace, or a git crate with a member's name, hid its dependencies from the check.
+* 2026-10-20, agent (M5 review round 2): the check reads `cargo metadata` without `--no-deps`, with `--locked`.  A `[patch]` to a path crate outside the members has no `path` in `--no-deps` output, so only the full `packages` shows it.  `--locked` keeps the test from writing `Cargo.lock`.
+* 2026-10-20, agent (M5 review round 2): what LAYER-1's crate checks cannot see goes into a new tech-debt entry: a copy of workspace code in an outside crate, and `#[path]` or `include!` across crates.
+* 2026-10-20, agent (M5 review round 3): `--all-features` too, because a `[patch]` crate behind a feature that is off is not in `packages` without it.  On today's tree it lists the same 937 packages.
+* 2026-10-20, agent (M5 review round 3): `test-support` takes no workspace crate, of any kind.  Dev edges to it are not in the table, so a relayered `test-support` could otherwise carry a dependency upwards.
+* 2026-10-20, agent (M5 review round 4): the check also reads `resolve.nodes`, and fails on a crate outside the workspace crates that takes one.  LAYER-1 states the rule on strays.  The cost: a patched or vendored path crate must become a workspace crate with a row.
+* 2026-10-20, agent (M5 review round 7): `rules::LAYERS` fixes the five layers, and the table's layers must equal it.  Otherwise an agent that follows the rank message can add a layer, and make LAYER-1's list false.  A change of layers changes the table, `LAYERS` and LAYER-1 in one commit.
+* 2026-10-20, agent (M5 review round 6): a package outside the members with a member's name fails, even when it is an unrelated crate.  crates.io has crates named `app`, `dsp`, `engine`, `synth` and `xtask`, with almost no reverse dependencies.  If one is ever pulled in, the check gets an allowlist with a reason.
 
 ## Outcomes and retrospective
 
