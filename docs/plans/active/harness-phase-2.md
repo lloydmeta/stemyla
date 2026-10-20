@@ -881,7 +881,7 @@ On 2026-10-20, at commit `df8a954` (M5 merged as PR #18):
 #### M6 design
 
 * Decision point for the maintainer.  Ask before step 1.  Record the choice in Progress and the Decision log.  Add "Decided on <date>: ..." to the question.  If the choice is not the recommended one, make the changes listed under it.  Then review the plan again before implementing.
-* Question: which lints does `dsp` keep, and which does it fix?
+* Question: which lints does `dsp` keep, and which does it fix?  Decided on 2026-10-20: the maintainer chose (x), after weighing a mixed option (z) that fixed only `assign_op_pattern`.
   * (x), recommended: keep all four, each as an `expect` with a reason.  DSP-1 names the beginner forms and forbids their shortcuts, so each reason cites DSP-1's text.  No function body changes.  The gain: the code that a beginner reads stays as it is.  M7's allowlist needs no compound assignment, `is_empty` or `clamp`.  The cost: four exceptions, and DSP-1 gains a sentence that forbids `+=`, `-=`, `is_empty` and `clamp`.
   * (y) fix three, and keep only `manual_swap`.  The gain: one exception, which DSP-1's text already forces, and no new sentence in DSP-1.  The cost: the beginner text changes in 7 files, and M7's allowlist must permit `+=`, `-=`, `is_empty` and `clamp`.  For (y), make these changes:
     * Change the 13 sites of `x = x + ...` and `p = p - length` to `+=` and `-=`.
@@ -1226,7 +1226,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M6 plan review round 3, by two new reviewers.  No blockers in M6.  1 should-fix in M6: TD-3's new text named `.cargo/config.toml`, which `docs-check` fails as a missing path.  2 should-fix items in M7's bullets: `syn` does not enter macros, and nothing planted `is_empty` or `clamp`.  11 nits.  All checked and real, all fixed in the plan.  The docs reviewer applied every M6 doc edit to a scratch copy, and `docs-check` then passed.
 * [x] 2026-10-20: M6 plan review round 4, by two new reviewers.  No blockers; 3 should-fix findings and 11 nits, all small fixes to the text, all checked and real, all fixed in the plan.  (y) now changes DSP-1's `* Enforced by:` and `* Gaps:` lines too.  A form added to DSP-1 needs a `proposed` record.  M7 compares the whole `dsp/Cargo.toml`, so no `toml` crate is needed.  The docs reviewer applied every doc edit for (x) to a scratch tree, and `docs-check` passed.
 * [x] 2026-10-20: plan review stopped after round 4, by the maintainer's rule: no blockers, and no should-fix item beyond small local fixes.  Not yet implemented.
-* [ ] M6: the maintainer answers the decision point, (x) or (y).
+* [x] 2026-10-20: M6 decision point: the maintainer chose (x), all four lints kept as `expect`s.  The agent had offered (z), which fixed only `assign_op_pattern`, because the Rust Book teaches `+=`.  The maintainer kept (x).  Decision 0006 records it as accepted when step 2 writes it.
 * [ ] M6: the change, its docs, decision 0006 and three review rounds.
 * [ ] M6: PR merged by the maintainer.
 * [ ] M7: DSP-1 allowlist test.
@@ -1318,6 +1318,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M6 review round 1): under (x), DSP-1 names the beginner forms, so each `expect`'s reason cites DSP-1's text.  Without it, DSP-1 forced only `manual_swap`, and M6's own rule for a new lint failed the other three.
 * 2026-10-20, agent (M6 review round 1): the types outside DSP-1's list are a breach, with their own entry under `## Known breaches`, not a sentence in TD-3.  TD-3 is a gap in enforcement; M7 closes both.
 * 2026-10-20, agent (M6 review round 2): decision 0006 records the choice at M6's decision point.  Under (x), DSP-1 gains a ban on `+=`, `-=`, `is_empty` and `clamp`, which is a rule change.
+* 2026-10-20, maintainer (M6): option (x).  `dsp` keeps `x = x + 1`, `len() > 0`, the two `if`s of the clamp and the swap through `temp`, each lint as an `expect` with a reason.  DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp`.
 
 ## Outcomes and retrospective
 
