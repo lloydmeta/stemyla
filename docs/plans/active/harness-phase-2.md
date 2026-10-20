@@ -1260,6 +1260,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M6, PR #19 merged by the maintainer (`6f9c337`).
 * [x] 2026-10-20: M7 plan first written as a `syn` allowlist (about 200 lines).  The maintainer judged it out of proportion, and chose a token scan of the likely breaches.  M7 rewritten; a prototype with `proc-macro2` 1.0.107 confirmed the token facts.
 * [x] 2026-10-20: M7 plan review round 1, by one reviewer with a prototype of the scan.  No blockers.  The real tree passes the prototype, and the three planted breaches fail it.  2 should-fix findings and 4 nits, all checked and real, all fixed in the plan.  `to_vec`, `sort_by`, `min` and `max` passed a denylist, so methods after `.` are now an allowlist.  `for s in &samples[1..]` passed when `..` was searched inside groups.  Not changed: `needless_range_loop` does not fire, because the workspace allows it.
+* [x] 2026-10-20: M7 step 1: `dsp_files`, the check and its three unit tests.  Against the stub, `each_breach_is_named` and `the_manifest_and_files_are_fixed` failed, and `beginner_code_passes` passed.  With the check, all three pass.  Two small additions to the design: a `for` with no `in`, as in `impl A for B`, is not a loop; a listed `#![expect]` passes only at the top level of `dsp/src/lib.rs`.
 * [ ] M7: DSP-1 token scan.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
 * [ ] M9: pins and `THIRD-PARTY.md` test.
