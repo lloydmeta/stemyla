@@ -1219,23 +1219,23 @@ On 2026-10-20, at commit `7a99a88` (M9 merged as PR #22):
   * A string, an operator, then a chain of idents joined by `.` whose last ident is `type`: `"alive" === e.data.type`.
   * `[`, one or more strings joined by `,`, with an optional trailing `,`, then `]`, `.`, `includes`, `(`, a chain whose last ident is `type`, and `)`.  Each string is a type.
 * In `xtask/src/e2e.rs`, from `proc-macro2`'s tokens:
-  * Each string literal, plain or raw, is lexed as JS on its own, so an unmatched quote in one hides nothing in the next.  `string_value` gives the source text between the quotes.  So for a plain literal, the check first maps `\\` to `\` and `\"` to `"`; this keeps the newlines.  A token's line is the literal's first line plus the newlines before the token in the literal's text.
+  * Each string literal, plain or raw, is lexed as JS on its own, so an unmatched quote in one hides nothing in the next.  `string_value` gives the source text between the quotes.  A literal is raw when its text (`literal.to_string()`) starts with `r`.  For a plain literal, the check first maps `\\` to `\` and `\"` to `"`; this keeps the newlines.  A token's line is the literal's first line plus the newlines before the token in the literal's text.
   * Two Rust shapes, each with two forms of its value: a string literal, or `json` `!` and a paren group that holds only a string literal.
     * A bracket group that holds only the literal `"type"`, then `==` or `!=`, then the value: `r["end"]["type"] == json!("done")`.
     * In a brace group, the literal `"type"`, then `:`, then a string literal: `json!([{ "type": "download" }])`, as script args.  `json!({ ..., "type": kind })` has an ident after the `:`, so it gives no type.
-* Problems, each with PROTO-1, the file, the line if any, and the fix.  When `protocol_kinds` fails, the check gives that one problem and stops, so no type is reported as unknown.  An `e2e.rs` that does not tokenise gives one problem, and no "no type" problem.
+* Problems, each with PROTO-1, the file, the line if any, and the fix.  When `protocol_kinds` fails, the check gives that one problem and stops, so no type is reported as unknown.  An `e2e.rs` that does not tokenise gives one problem, and no "no type" problem.  An entry of `script_only` that is unused and also in `kind` gives one problem.
   * A type that is in neither `kind` nor `script_only`: "PROTO-1: xtask/e2e/worker.js:26 uses the message type \"alve\", which `stem_protocol::kind` does not have.  Fix: use a type from `kind` (\"init\", ...); or change `kind`, its encoder and its decoder together; or, for a type that only the scripts make or an option that is not a message, add it to `SCRIPT_ONLY_TYPES` with a reason."
   * An entry of `script_only` that no script uses, or that `kind` has.  It names `xtask/src/rules.rs`.  Fix: "remove the entry".
   * `protocol/src/lib.rs` that does not tokenise, has no `mod kind`, or has no string in `kind`.  Fix: "keep the message types as string constants in `stem_protocol::kind`, or update the check".
-  * `xtask/src/e2e.rs` that does not tokenise.
-  * No type in the `*.js` files, and no type in `xtask/src/e2e.rs`: one problem for each.  Its file is `xtask/e2e` or `xtask/src/e2e.rs`.  So a script that moves or changes shape cannot pass in silence.
-* Out of scope, named in PROTO-1's `* Enforced by:` line and in TD-16: field names; a type in a shape the scan does not read (a `switch` and its `case`s, an assignment `m.type = "x"`, `d?.type`, a variable, a template literal, `.as_str() == Some("x")`, and a `\n` escape in a plain Rust literal after a `//` comment, which hides the rest of that literal); a false type that fails closed, such as `{ type: '{kind}' }` in a `format!` string; scripts in other files; a reply with a missing field, which decodes as a default; and a version handshake.
+  * `xtask/src/e2e.rs` that does not tokenise.  Fix: "make the file valid Rust".
+  * No type in the `*.js` files, and no type in `xtask/src/e2e.rs`: one problem for each.  Its file is `xtask/e2e` or `xtask/src/e2e.rs`.  Fix: "write each type in a shape that the check reads, or update the check".  So a script that moves or changes shape cannot pass in silence.
+* Out of scope, named in PROTO-1's `* Enforced by:` line and in TD-16: field names; a type in a shape the scan does not read (a `switch` and its `case`s, an assignment `m.type = "x"`, `d?.type`, `d["type"]` in JS, a variable, a template literal, `.as_str() == Some("x")`, and a `\n` escape in a plain Rust literal after a `//` comment, which hides the rest of that literal); a false type that fails closed, such as `{ type: '{kind}' }` in a `format!` string or `c ? type : 'x'`; scripts in other files; a reply with a missing field, which decodes as a default; and a version handshake.
 
 #### M10 steps
 
 Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
 
-1. Test first: `js_tokens`, the reader of `kind`, a stub of `e2e_types_match_the_protocol` that returns no problem, and the unit tests, in a module `proto_tests`.  Every test that expects a problem fails against the stub.  Then write the check, and all pass.  Unit tests:
+1. Test first: `js_tokens`, `protocol_kinds`, a stub of `e2e_types_match_the_protocol` that returns no problem, and the unit tests, in a module `proto_tests`.  Every test that expects a problem fails against the stub.  Tests that count problems pass an empty `script_only`, except `the_script_only_list_is_checked`.  Then write the check, and all pass.  Unit tests:
    * `js_is_lexed`: the lines of tokens on three lines, both quotes, an escaped quote in a string, both comment forms, a template literal with `${ "x" }` and with an escaped backtick, a quote not closed before the end of its line, and `typeof`.  A token after a `/* */` comment over two lines, and a token after a template literal over two lines, each has the right line.
    * `the_kinds_are_read`: a fixture with `mod field` and then `pub mod kind` gives the strings of `kind` only.  A doc comment in `kind` is left out, and `field`'s `"text"` is not a type.
    * `the_e2e_types_match`: a fixture `worker.js` with each JS shape, in both quotes and both orders of the comparison, gives no problem.  So does a fixture `e2e.rs` with a script in a plain and a raw literal, and each Rust shape in both forms.
@@ -1260,7 +1260,7 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 
 #### M10 acceptance
 
-* The unit tests pass, and failed against the stub in step 1.
+* The unit tests pass.  In step 1, each test that expects a problem failed against the stub.
 * `e2e_messages_use_protocol_types` passes, and the CI `test` job lists it as `ok`.  The five planted breaches fail it.
 * `Cargo.lock` and `xtask/Cargo.toml` do not change.  The CI `browser-tests` job passes; M10 changes no script.
 * fmt, clippy, the tests and `docs-check` pass.
@@ -1496,6 +1496,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M10 implementation plan written (the M10 sections under "Plan of work").  Survey of `stem_protocol::kind`, of each message type in `xtask/e2e/*.js` and `xtask/src/e2e.rs`, and of the e2e scenarios that CI runs.
 * [x] 2026-10-20: M10 plan review round 1, by one new reviewer with a prototype of the check in a scratch worktree.  Every fact held.  The real tree gave no problem, from 32 types, and each of the 5 plants gave one problem on the right line.  No blockers; 3 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  The should-fix items were shapes that hid a misspelt type: a quoted key `"type": "x"` in JS and in `json!`, a bare `type === "x"`, and `\"` in a plain Rust literal.  The nits: a test order that let a mutant pass, a vacuity rule for each source, an escape in template literals, the fix text for a non-message option, a reference to text the implementer cannot see, the type of the list after plant 5, and the undo line.
 * [x] 2026-10-20: M10 plan review round 2, by one new reviewer with a prototype of the check.  The real tree and the 5 plants gave the stated results again, and `docs-check` passed with the planned doc edits.  No blockers; 1 should-fix and 7 nits, all checked and real, all fixed in the plan.  The should-fix: the real tree uses only `===` in JS, only `==` in Rust and no raw script with a type, so a check that dropped one of these passed every test; `a_misspelt_type_is_named` now uses each.  The nits: two over-reporting mutants, the fixture order of `the_kinds_are_read`, the stop after a protocol problem, a signature for `protocol_kinds`, lines after multi-line comments and templates, the gaps of the scan, and the parent plan's tag.
+* [x] 2026-10-20: M10 plan review round 3, by one new reviewer with a prototype of the check and the planned doc edits.  The real tree, the 5 plants and `docs-check` gave the stated results, and the planned tests caught each mutant tried.  No blockers and no should-fix; 5 nits, all checked and real, all fixed in the plan: the acceptance text on the stub, an empty `script_only` in the counting tests, how to tell a raw literal, two fix texts, and two more gaps.
+* [x] 2026-10-20: plan review stopped after round 3, by the maintainer's rule: no blockers and no should-fix.  Not yet implemented.
 * [ ] M10: e2e message types test.
 * [ ] M11: RT-1 forbids allocation; allocation test; wsola 0.2.0.
 * [ ] M12: MEM-1 lint.
