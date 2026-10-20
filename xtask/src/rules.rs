@@ -581,6 +581,7 @@ fn workspace_crate(
 const ARCHITECTURE: &str = "docs/ARCHITECTURE.md";
 const TEST_SUPPORT: &str = "test-support";
 const PROTOCOL: &str = "stem-protocol";
+const DSP: &str = "dsp";
 const TABLE_HEADER: [&str; 3] = ["Layer", "Crate", "Depends on"];
 
 fn layer1(file: &str, message: String) -> Problem {
@@ -603,6 +604,8 @@ enum Table<'a> {
     Missing,
     /// The first line of the header or separator that is wrong.
     BadStart(&'a str),
+    /// A header with no line after it.
+    NoSeparator,
     /// Each row, or the line of a row that cannot be read.
     Rows(Vec<std::result::Result<Row<'a>, &'a str>>),
 }
@@ -644,7 +647,7 @@ fn layers_table(architecture: &str) -> Table<'_> {
     match table.get(1) {
         Some(separator) if is_separator(separator) => {}
         Some(separator) => return Table::BadStart(separator),
-        None => return Table::BadStart(header),
+        None => return Table::NoSeparator,
     }
     Table::Rows(
         table[2..]
@@ -705,6 +708,10 @@ pub fn crates_follow_the_layers(workspace: &Workspace, architecture: &str) -> Ve
                 "LAYER-1: the layers table in docs/ARCHITECTURE.md starts with \"{line}\", not \"| Layer | Crate | Depends on |\" and \"| - | - | - |\".  Fix: use those three columns, one row for each crate."
             ),
         )],
+        Table::NoSeparator => vec![layer1(
+            ARCHITECTURE,
+            "LAYER-1: the layers table in docs/ARCHITECTURE.md has no separator line after its header.  Fix: add \"| - | - | - |\" after \"| Layer | Crate | Depends on |\", then one row for each crate.".into(),
+        )],
         Table::Rows(rows) => table_problems(&workspace.crates, &rows),
     };
     table
@@ -726,10 +733,12 @@ fn table_problems(
     crates: &[WorkspaceCrate],
     lines: &[std::result::Result<Row<'_>, &str>],
 ) -> Vec<Problem> {
-    let members: &BTreeMap<&str, &WorkspaceCrate> = &crates
+    let by_name: BTreeMap<&str, &WorkspaceCrate> = crates
         .iter()
         .map(|krate| (krate.name.as_str(), krate))
         .collect();
+    // Borrowed, so the `move` closures below take a reference.
+    let members = &by_name;
     let unreadable = lines.iter().filter_map(|line| line.as_ref().err()).map(|line| {
         layer1(
             ARCHITECTURE,
@@ -928,7 +937,7 @@ fn test_support_problems(crates: &[WorkspaceCrate]) -> Vec<Problem> {
                 .collect();
             let manifest = &krate.manifest;
             match krate.name.as_str() {
-                "dsp" => (!kinds.is_empty())
+                DSP => (!kinds.is_empty())
                     .then(|| {
                         layer1(
                             manifest,
@@ -1723,6 +1732,8 @@ mod tests {
     #[test]
     fn the_layers_of_today_give_no_problem() {
         assert_problems(layers(&today(), LAYERS_TABLE), vec![]);
+        let trailing_spaces = architecture(LAYERS_TABLE).replace("### Layers\n", "### Layers  \n");
+        assert_problems(crates_follow_the_layers(&today(), &trailing_spaces), vec![]);
     }
 
     #[test]
@@ -1886,6 +1897,34 @@ mod tests {
     }
 
     #[test]
+    fn a_row_left_out_is_left_out_of_the_layer_checks() {
+        let not_a_member = edit(
+            LAYERS_TABLE,
+            XTASK_ROW,
+            &format!("{XTASK_ROW}| Base | `foo` | no workspace crate |\n"),
+        );
+        assert_problems(
+            layers(&today(), &not_a_member),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has a row for foo, which is not a workspace crate.  Fix: remove the row, or use the package name from its Cargo.toml.",
+            )],
+        );
+        let repeated = edit(
+            LAYERS_TABLE,
+            XTASK_ROW,
+            &format!("{XTASK_ROW}| Engine and GPU | `engine` | `dsp` |\n"),
+        );
+        assert_problems(
+            layers(&today(), &repeated),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has 2 rows for engine.  Fix: keep one row for each crate.",
+            )],
+        );
+    }
+
+    #[test]
     fn a_crate_without_a_row_is_a_problem() {
         let table = edit(LAYERS_TABLE, ENGINE_ROW, "");
         assert_problems(layers(&today(), &table), vec![no_row("engine")]);
@@ -1998,6 +2037,12 @@ mod tests {
 
     #[test]
     fn dsp_may_not_take_test_support() {
+        let dsp_problem = || {
+            vec![layer1(
+                "dsp/Cargo.toml",
+                "LAYER-1: dsp takes test-support, but dsp must have no dependencies (DSP-1).  Fix: remove it from dsp/Cargo.toml.",
+            )]
+        };
         let workspace = with_edges(
             today(),
             &[
@@ -2005,18 +2050,20 @@ mod tests {
                 ("dsp", "test-support", Kind::Normal),
             ],
         );
-        assert_problems(
-            layers(&workspace, LAYERS_TABLE),
-            vec![layer1(
-                "dsp/Cargo.toml",
-                "LAYER-1: dsp takes test-support, but dsp must have no dependencies (DSP-1).  Fix: remove it from dsp/Cargo.toml.",
-            )],
-        );
+        assert_problems(layers(&workspace, LAYERS_TABLE), dsp_problem());
+        let build_only = with_edges(today(), &[("dsp", "test-support", Kind::Build)]);
+        assert_problems(layers(&build_only, LAYERS_TABLE), dsp_problem());
     }
 
     #[test]
     fn test_support_takes_no_workspace_crate() {
-        let workspace = with_edges(today(), &[("test-support", "dsp", Kind::Dev)]);
+        let workspace = with_edges(
+            today(),
+            &[
+                ("test-support", "dsp", Kind::Dev),
+                ("test-support", "dsp", Kind::Normal),
+            ],
+        );
         assert_problems(
             layers(&workspace, LAYERS_TABLE),
             vec![layer1(
@@ -2186,6 +2233,21 @@ mod tests {
                 "| Test support | `test-support` | no workspace crate |",
             )],
         );
+        for separator in ["| - | - |", "| - |  | - |"] {
+            let table = edit(LAYERS_TABLE, "| - | - | - |\n", &format!("{separator}\n"));
+            assert_problems(layers(&today(), &table), vec![bad_start(separator)]);
+        }
+    }
+
+    #[test]
+    fn a_header_alone_is_a_problem() {
+        assert_problems(
+            layers(&today(), "| Layer | Crate | Depends on |\n"),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has no separator line after its header.  Fix: add \"| - | - | - |\" after \"| Layer | Crate | Depends on |\", then one row for each crate.",
+            )],
+        );
     }
 
     #[test]
@@ -2202,6 +2264,7 @@ mod tests {
             "| Pure | `dsp` |  |",
             "| Pure | `dsp` | `dsp`,`engine` |",
             "| Pure | `dsp` | `dsp`, `dsp` |",
+            "| Pure | `` | no workspace crate |",
         ];
         for case in cases {
             let table = edit(LAYERS_TABLE, XTASK_ROW, &format!("{XTASK_ROW}{case}\n"));

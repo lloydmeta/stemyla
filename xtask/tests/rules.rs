@@ -58,10 +58,14 @@ fn the_skip_allowlist_is_current() {
     assert!(problems.is_empty(), "{}", report.join("\n"));
 }
 
-fn workspace() -> xtask::rules::Workspace {
-    let root = xtask::workspace_root();
-    let metadata = xtask::rules::workspace_metadata(&root).expect("cargo metadata runs");
-    xtask::rules::workspace(&metadata).expect("cargo metadata's JSON parses")
+/// One `cargo metadata` run (about 0.75 s) for both layer tests.
+fn workspace() -> &'static xtask::rules::Workspace {
+    static WORKSPACE: std::sync::OnceLock<xtask::rules::Workspace> = std::sync::OnceLock::new();
+    WORKSPACE.get_or_init(|| {
+        let root = xtask::workspace_root();
+        let metadata = xtask::rules::workspace_metadata(&root).expect("cargo metadata runs");
+        xtask::rules::workspace(&metadata).expect("cargo metadata's JSON parses")
+    })
 }
 
 #[test]
@@ -69,7 +73,7 @@ fn crates_depend_only_downwards() {
     let architecture =
         std::fs::read_to_string(xtask::workspace_root().join("docs/ARCHITECTURE.md"))
             .expect("docs/ARCHITECTURE.md can be read");
-    let problems = xtask::rules::crates_follow_the_layers(&workspace(), &architecture);
+    let problems = xtask::rules::crates_follow_the_layers(workspace(), &architecture);
     let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
     assert!(
         problems.is_empty(),
