@@ -113,3 +113,57 @@ fn dsp_is_beginner_style() {
         report.join("\n")
     );
 }
+
+/// One `git ls-files` run for both index tests.
+fn tracked_files() -> &'static [xtask::rules::TrackedFile] {
+    static TRACKED: std::sync::OnceLock<Vec<xtask::rules::TrackedFile>> =
+        std::sync::OnceLock::new();
+    TRACKED.get_or_init(|| {
+        let tracked =
+            xtask::rules::tracked_files(&xtask::workspace_root()).expect("git ls-files runs");
+        for known in [
+            "Cargo.toml",
+            "tools/roformer_export.py",
+            "app/tests/snapshots/six_lanes.png",
+        ] {
+            assert!(
+                tracked.iter().any(|file| file.path == known),
+                "git ls-files did not list {known}"
+            );
+        }
+        tracked
+    })
+}
+
+#[test]
+fn no_python_in_the_build() {
+    let tracked = tracked_files();
+    let texts = xtask::rules::tracked_texts(&xtask::workspace_root(), tracked)
+        .expect("the tracked files can be read");
+    for known in [".github/workflows/ci.yml", "README.md"] {
+        assert!(
+            texts.iter().any(|(file, _)| file == known),
+            "the texts do not hold {known}"
+        );
+    }
+    let problems = xtask::rules::python_in_the_build(tracked, &texts);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} BUILD-1 problem(s):\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
+
+#[test]
+fn no_audio_or_weights_are_tracked() {
+    let problems = xtask::rules::assets_in_the_index(tracked_files());
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} ASSET-1 problem(s):\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
