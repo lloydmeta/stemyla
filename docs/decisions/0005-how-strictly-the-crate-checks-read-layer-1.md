@@ -21,7 +21,7 @@ LAYER-1 says that crates depend only on crates in a lower layer of the layers ta
 ## Consequences
 
 * The layers table lists each dependency between workspace crates, apart from dev-dependencies on `test-support`, and no other.
-* LAYER-1's sentence on the two sides gains: the workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.
+* LAYER-1's sentence on the two sides gains one sentence.  The workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.
 * `the_page_and_the_worker_meet_only_through_stem_protocol` follows the normal dependencies from `app` and `stem-worker`, and fails on any shared workspace crate but `stem-protocol`.
 * `stem-protocol` takes no workspace crate as a normal dependency, because both sides reach what it takes.
 * A crate that both sides need is a change to LAYER-1, with its own record.

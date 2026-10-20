@@ -58,13 +58,13 @@ fn the_skip_allowlist_is_current() {
     assert!(problems.is_empty(), "{}", report.join("\n"));
 }
 
-/// One `cargo metadata` run (about 0.75 s) for both layer tests.
+/// One `cargo metadata` run for both layer tests.
 fn workspace() -> &'static xtask::rules::Workspace {
     static WORKSPACE: std::sync::OnceLock<xtask::rules::Workspace> = std::sync::OnceLock::new();
     WORKSPACE.get_or_init(|| {
         let root = xtask::workspace_root();
         let metadata = xtask::rules::workspace_metadata(&root).expect("cargo metadata runs");
-        xtask::rules::workspace(&metadata).expect("cargo metadata's JSON parses")
+        xtask::rules::workspace(&metadata).expect("cargo metadata's JSON gives the workspace")
     })
 }
 

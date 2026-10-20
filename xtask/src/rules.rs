@@ -2206,13 +2206,15 @@ mod tests {
             vec![layer1(ARCH, NO_TABLE)],
         );
 
-        let table_in_a_later_section = format!(
-            "# How it works\n\n### Layers\n\nCrates depend only downwards.\n\n## X\n\n{LAYERS_TABLE}"
-        );
-        assert_problems(
-            crates_follow_the_layers(&today(), &table_in_a_later_section),
-            vec![layer1(ARCH, NO_TABLE)],
-        );
+        for later in ["## X", "### X"] {
+            let table_in_a_later_section = format!(
+                "# How it works\n\n### Layers\n\nCrates depend only downwards.\n\n{later}\n\n{LAYERS_TABLE}"
+            );
+            assert_problems(
+                crates_follow_the_layers(&today(), &table_in_a_later_section),
+                vec![layer1(ARCH, NO_TABLE)],
+            );
+        }
 
         let base = today();
         let with_a_stray = Workspace {
@@ -2758,6 +2760,19 @@ mod tests {
             error.to_string().contains("--all-features") && error.to_string().contains("cpal"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn a_member_without_a_resolve_node_is_an_error() {
+        let json = json!({
+            "packages": [package("dsp", "/x/dsp", None, vec![])],
+            "workspace_members": [id("dsp", "/x/dsp")],
+            "workspace_root": "/x",
+            "resolve": { "nodes": [] },
+        })
+        .to_string();
+        let error = workspace(&json).expect_err("a member without a node is an error");
+        assert!(error.to_string().contains("no node for dsp"), "{error:#}");
     }
 
     #[test]
