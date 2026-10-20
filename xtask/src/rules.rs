@@ -2018,6 +2018,18 @@ fn tree_rows<'a>(
     (rows, unread)
 }
 
+/// The crate and version of a line that the check cannot read, if the line
+/// gives them, so that its row is neither "add" nor "remove": the line's
+/// own problem says what to do.
+fn unread_crate(line: &str) -> Option<(&str, &str)> {
+    let package = line.split('|').next()?;
+    let package = package.strip_suffix(" (proc-macro)").unwrap_or(package);
+    let package = package
+        .split_once(" (")
+        .map_or(package, |(package, _)| package);
+    package.split_once(" v")
+}
+
 fn unread_line(line: &str) -> Problem {
     deps1(
         THIRD_PARTY,
@@ -2153,9 +2165,19 @@ pub fn third_party_matches(
         .collect();
     let (first_table, first_unread) = table_rows(first_section, 1);
     let (second_table, second_unread) = table_rows(second_section, split + 1);
-    let differences = table_differences(&first_table, &shipped)
+    let unread_crates: BTreeSet<(&str, &str)> = shipped_unread
+        .union(&with_tests_unread)
+        .filter_map(|line| unread_crate(line))
+        .collect();
+    let readable = |table: Vec<(usize, LicenceRow)>| -> Vec<(usize, LicenceRow)> {
+        table
+            .into_iter()
+            .filter(|(_, row)| !unread_crates.contains(&row.key()))
+            .collect()
+    };
+    let differences = table_differences(&readable(first_table), &shipped)
         .into_iter()
-        .chain(table_differences(&second_table, &tests_only));
+        .chain(table_differences(&readable(second_table), &tests_only));
     let no_licence = shipped
         .iter()
         .chain(&with_tests)
@@ -4808,6 +4830,7 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
             "x v0.1.0 (/elsewhere/x)|MIT|",
             "x v0.1.0 (/root-other/x)|MIT|",
             "log v0.4.34 (/root/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log",
+            "log v0.4.34 (/root/app/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log",
             "foo v1.0.0|MIT",
             "x v0.1.0 extra|MIT|",
             "garbage",
@@ -4952,6 +4975,32 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
                 &today_doc(),
                 &format!("{SHIPPED}{vendored}\n{vendored} (*)\n"),
                 TESTS_ONLY,
+            ),
+            "(/root/vendor/log)",
+        );
+        let log_row = "| log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |";
+        assert_one_drift(
+            &check(
+                &doc(&with_rows(&SHIPPED_ROWS, &[log_row]), &TESTS_ONLY_ROWS),
+                &format!("{SHIPPED}{vendored}\n"),
+                TESTS_ONLY,
+            ),
+            "(/root/vendor/log)",
+        );
+        assert_one_drift(
+            &check(
+                &doc(&SHIPPED_ROWS, &with_rows(&TESTS_ONLY_ROWS, &[log_row])),
+                SHIPPED,
+                &format!("{TESTS_ONLY}{vendored}\n"),
+            ),
+            "(/root/vendor/log)",
+        );
+        assert_one_drift(
+            &third_party_matches(
+                &today_doc(),
+                &format!("{SHIPPED}{vendored}\n"),
+                &format!("{SHIPPED}{TESTS_ONLY}"),
+                &members(),
             ),
             "(/root/vendor/log)",
         );
