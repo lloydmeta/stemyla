@@ -1336,6 +1336,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M8 review round 2, by one new reviewer, who ran about 20 inputs and 3 mutants.  No blockers and no should-fix items; 6 nits, all checked.  Two fixed: `_` is now part of a word, so `uv_scale` in a `build.rs` passes, and the asset fix message is three sentences.  Four need no change: mutants that only add false results on odd paths, a file added with `git add -N` (size 0 until staged), the temp-folder test on Windows (CI runs Linux), and `gen-song` run from a crate folder (its audio is ignored by extension).
 * [x] 2026-10-20: M8 review round 3, by one new reviewer.  No blockers and no should-fix items; 5 nits, all checked and real, all fixed.  The M8 design now says what the code does after rounds 1 and 2.  The parent plan tags M8.  The cap is "about twice" the largest file.  A raised cap needs "a reason in the PR" in both the guide and the message.  README names the test.  The reviewer found no way for either real-tree test to pass without checking anything.
 * [x] 2026-10-20: M8, three review rounds done and their findings fixed.
+* [x] 2026-10-20: M8: PR #21 opened.  CI (run 39406037091): every job passes.  The `test` job lists `no_python_in_the_build`, `no_audio_or_weights_are_tracked` and the 9 unit tests as `ok`, so `git ls-files --format` works on the runner.  `test` took 3m14s.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
 * [ ] M9: pins and `THIRD-PARTY.md` test.
 * [ ] M10: e2e message types test.
