@@ -1640,7 +1640,7 @@ const WEIGHT_EXTENSIONS: [&str; 9] = [
     "gguf",
 ];
 
-/// The largest file that the index may hold: twice the largest file on
+/// The largest file that the index may hold: about twice the largest file on
 /// 2026-10-20 (a UI snapshot of 486,664 bytes), and well under a song or a
 /// model file.
 pub const MAX_TRACKED_BYTES: u64 = 1_048_576;
@@ -1662,7 +1662,7 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
                     "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached '{path}'.  Keep it in an ignored folder (audio/, stems/ or third_party/).  Link to its source."
                 ));
             let too_big = (file.size > MAX_TRACKED_BYTES).then(|| format!(
-                "ASSET-1: {path} is {} bytes, over MAX_TRACKED_BYTES ({MAX_TRACKED_BYTES}).  Fix: if it is audio or weights, remove it with git rm --cached '{path}' and link to its source; else raise MAX_TRACKED_BYTES in xtask/src/rules.rs with a reason.",
+                "ASSET-1: {path} is {} bytes, over MAX_TRACKED_BYTES ({MAX_TRACKED_BYTES}).  Fix: if it is audio or weights, remove it with git rm --cached '{path}' and link to its source; else raise MAX_TRACKED_BYTES in xtask/src/rules.rs, with a reason in the PR.",
                 file.size
             ));
             [asset, too_big].into_iter().flatten().map(|message| Problem {
