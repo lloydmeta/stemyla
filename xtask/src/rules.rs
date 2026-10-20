@@ -1600,7 +1600,7 @@ pub fn python_in_the_build(tracked: &[TrackedFile], texts: &[(String, String)]) 
             let word = build_file
                 .then(|| {
                     lower
-                        .split(|c: char| !c.is_alphanumeric())
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                         .find(|word| PYTHON_WORDS.contains(word))
                         .map(|word| format!("runs Python (\"{word}\") in a build file.  Fix: use Cargo, Trunk or an xtask command."))
                 })
@@ -1659,7 +1659,7 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
                         || WEIGHT_EXTENSIONS.contains(&extension.as_str())
                 })
                 .map(|extension| format!(
-                    "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached '{path}', keep it in an ignored folder (audio/, stems/ or third_party/), and link to its source."
+                    "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached '{path}'.  Keep it in an ignored folder (audio/, stems/ or third_party/).  Link to its source."
                 ));
             let too_big = (file.size > MAX_TRACKED_BYTES).then(|| format!(
                 "ASSET-1: {path} is {} bytes, over MAX_TRACKED_BYTES ({MAX_TRACKED_BYTES}).  Fix: if it is audio or weights, remove it with git rm --cached '{path}' and link to its source; else raise MAX_TRACKED_BYTES in xtask/src/rules.rs with a reason.",
@@ -3723,11 +3723,13 @@ mod tracked_tests {
     #[test]
     fn clean_build_files_pass() {
         let ci = "      - run: set -o pipefail\n      # the pipeline, a snippet, Pythonic\n";
+        let build = "    let uv_scale = 2;\n";
         assert_eq!(
             python_in_the_build(
                 &[],
                 &texts(&[
                     (".github/workflows/ci.yml", ci),
+                    ("engine/build.rs", build),
                     ("README.md", "pip install x\n")
                 ])
             ),
