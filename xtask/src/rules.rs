@@ -1469,6 +1469,210 @@ fn is_dsp1_expect(attribute: TokenStream) -> bool {
         && rest.len() <= 1
 }
 
+/// A file in the git index, with the size of its staged content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedFile {
+    pub path: String,
+    pub size: u64,
+}
+
+/// Every file in the git index of `root`, with its staged size.  The index
+/// is what the next commit holds, so a file staged with `git add -f` is
+/// seen before the commit.  It needs git 2.42 or later, for `%(objectsize)`.
+pub fn tracked_files(root: &Path) -> Result<Vec<TrackedFile>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--format=%(objectsize) %(path)"])
+        .output()
+        .context("running git ls-files")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files failed: {}.  The check needs git 2.42 or later, in a git checkout.",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text =
+        String::from_utf8(output.stdout).context("git ls-files gave a path that is not UTF-8")?;
+    parse_ls_files(&text)
+}
+
+/// Reads `git ls-files -z --format='%(objectsize) %(path)'`: entries that
+/// end in NUL, each a size, a space and a path.
+pub fn parse_ls_files(output: &str) -> Result<Vec<TrackedFile>> {
+    output
+        .split_terminator('\0')
+        .map(|entry| {
+            let (size, path) = entry
+                .split_once(' ')
+                .with_context(|| format!("git ls-files gave {entry:?}, with no space"))?;
+            let size = size.parse().with_context(|| {
+                format!("git ls-files gave the size {size:?} for {path}; the checks read files, not submodules")
+            })?;
+            Ok(TrackedFile {
+                path: path.to_string(),
+                size,
+            })
+        })
+        .collect()
+}
+
+/// Each tracked file that reads as UTF-8, from the working tree, with its
+/// text.  It skips a file that the working tree has deleted, since a
+/// deletion adds nothing, and a file that is not UTF-8, such as a PNG.
+pub fn tracked_texts(root: &Path, tracked: &[TrackedFile]) -> Result<Vec<(String, String)>> {
+    tracked
+        .iter()
+        .filter_map(|file| match std::fs::read(root.join(&file.path)) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .ok()
+                .map(|text| Ok((file.path.clone(), text))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(Err(
+                anyhow::Error::new(e).context(format!("reading {}", file.path))
+            )),
+        })
+        .collect()
+}
+
+/// The files that build, serve or test the project outside Cargo's own
+/// Rust: CI and its actions, Trunk's configuration, build scripts, and
+/// Cargo's configuration in any `.cargo/` folder.
+pub fn is_build_file(path: &str) -> bool {
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let in_cargo_folder = folder == ".cargo" || folder.ends_with("/.cargo");
+    path.starts_with(".github/")
+        || name == "Trunk.toml"
+        || name == "build.rs"
+        || (in_cargo_folder && (name == "config.toml" || name == "config"))
+}
+
+/// The one Python file that BUILD-1 allows.
+const EXPORT_TOOL: &str = "tools/roformer_export.py";
+
+/// Extensions and file names of Python code and of its package tools,
+/// compared in lower case.
+const PYTHON_EXTENSIONS: [&str; 3] = ["py", "pyc", "ipynb"];
+const PYTHON_FILE_NAMES: [&str; 4] = ["requirements.txt", "pyproject.toml", "pipfile", "uv.lock"];
+
+/// Words that run Python or install its packages, in lower case.
+const PYTHON_WORDS: [&str; 7] = ["python", "python3", "pip", "pip3", "pipx", "uv", "uvx"];
+
+/// The names of Python's built-in web server, in lower case.  Each is
+/// joined by `concat!`, so this file never holds the name and needs no
+/// exception.
+const PYTHON_SERVERS: [&str; 2] = [concat!("http", ".server"), concat!("simplehttp", "server")];
+
+/// Folders of history, which may quote a breach.
+const HISTORY: [&str; 2] = ["docs/plans/", "docs/decisions/"];
+
+/// The text after the last `.` of the file name, in lower case.
+fn extension(path: &str) -> Option<String> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension.to_lowercase())
+}
+
+/// BUILD-1: Python appears only in `tools/roformer_export.py`.  It fails a
+/// tracked Python file, a Python word in a build file, and the name of
+/// Python's web server in a tracked text file outside plans and decisions.
+/// `texts` holds the tracked files that read as UTF-8 (`tracked_texts`).
+pub fn python_in_the_build(tracked: &[TrackedFile], texts: &[(String, String)]) -> Vec<Problem> {
+    let python_files = tracked
+        .iter()
+        .filter(|file| file.path != EXPORT_TOOL && is_python_file(&file.path))
+        .map(|file| Problem {
+            rule: "BUILD-1",
+            file: file.path.clone(),
+            line: None,
+            message: format!(
+                "BUILD-1: {} is a Python file.  Fix: write it in Rust, as an xtask command; Python appears only in {EXPORT_TOOL}.",
+                file.path
+            ),
+        });
+    let in_texts = texts.iter().flat_map(|(file, text)| {
+        let build_file = is_build_file(file);
+        let history = HISTORY.iter().any(|folder| file.starts_with(folder));
+        text.lines().enumerate().flat_map(move |(index, line)| {
+            let lower = line.to_lowercase();
+            let word = build_file
+                .then(|| {
+                    lower
+                        .split(|c: char| !c.is_alphanumeric())
+                        .find(|word| PYTHON_WORDS.contains(word))
+                        .map(|word| format!("runs Python (\"{word}\") in a build file.  Fix: use Cargo, Trunk or an xtask command."))
+                })
+                .flatten();
+            let server = (!history && PYTHON_SERVERS.iter().any(|server| lower.contains(server)))
+                .then(|| "names Python's web server.  Fix: serve with cargo run -p xtask -- serve.".to_string());
+            [word, server].into_iter().flatten().map(move |what| Problem {
+                rule: "BUILD-1",
+                file: file.clone(),
+                line: Some(index + 1),
+                message: format!("BUILD-1: {file}:{} {what}", index + 1),
+            })
+        })
+    });
+    python_files.chain(in_texts).collect()
+}
+
+fn is_python_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    PYTHON_FILE_NAMES.contains(&name.as_str())
+        || extension(path).is_some_and(|extension| PYTHON_EXTENSIONS.contains(&extension.as_str()))
+}
+
+/// Extensions of audio and of model weights, in lower case.
+const AUDIO_EXTENSIONS: [&str; 9] = [
+    "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "aif", "aiff",
+];
+const WEIGHT_EXTENSIONS: [&str; 9] = [
+    "safetensors",
+    "ckpt",
+    "pt",
+    "pth",
+    "bin",
+    "onnx",
+    "npy",
+    "npz",
+    "gguf",
+];
+
+/// The largest file that the index may hold: twice the largest file on
+/// 2026-10-20 (a UI snapshot of 486,664 bytes), and well under a song or a
+/// model file.
+pub const MAX_TRACKED_BYTES: u64 = 1_048_576;
+
+/// ASSET-1: no audio or model weights in the repo.  It fails a tracked
+/// file with an audio or weight extension, and a file over
+/// `MAX_TRACKED_BYTES`.
+pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
+    tracked
+        .iter()
+        .flat_map(|file| {
+            let path = &file.path;
+            let asset = extension(path)
+                .filter(|extension| {
+                    AUDIO_EXTENSIONS.contains(&extension.as_str())
+                        || WEIGHT_EXTENSIONS.contains(&extension.as_str())
+                })
+                .map(|extension| format!(
+                    "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached {path}, keep it in an ignored folder (audio/, stems/ or third_party/), and link to its source."
+                ));
+            let too_big = (file.size > MAX_TRACKED_BYTES).then(|| format!(
+                "ASSET-1: {path} is {} bytes, over MAX_TRACKED_BYTES ({MAX_TRACKED_BYTES}).  Fix: if it is audio or weights, remove it with git rm --cached {path} and link to its source; else raise MAX_TRACKED_BYTES in xtask/src/rules.rs with a reason.",
+                file.size
+            ));
+            [asset, too_big].into_iter().flatten().map(|message| Problem {
+                rule: "ASSET-1",
+                file: path.clone(),
+                line: None,
+                message,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3371,5 +3575,229 @@ mod tests {
             );
             assert!(problems[0].message.contains("Fix: "), "{}", problems[0]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tracked_tests {
+    use super::*;
+
+    fn tracked(paths: &[&str]) -> Vec<TrackedFile> {
+        paths
+            .iter()
+            .map(|path| TrackedFile {
+                path: path.to_string(),
+                size: 1,
+            })
+            .collect()
+    }
+
+    fn texts(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        files
+            .iter()
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect()
+    }
+
+    /// Asserts one problem for each case, with `rule`, the file and the
+    /// line, and a fix.
+    fn assert_one_each(rule: &str, cases: &[(&str, Vec<Problem>, Option<usize>)]) {
+        for (file, problems, line) in cases {
+            assert_eq!(problems.len(), 1, "{file}\n{problems:#?}");
+            let problem = &problems[0];
+            assert_eq!(problem.rule, rule, "{problem}");
+            assert_eq!(&problem.file, file, "{problem}");
+            assert_eq!(&problem.line, line, "{problem}");
+            let at = line.map_or(file.to_string(), |line| format!("{file}:{line}"));
+            assert!(
+                problem.message.starts_with(&format!("{rule}: {at} ")),
+                "{problem}"
+            );
+            assert!(problem.message.contains("Fix: "), "{problem}");
+        }
+    }
+
+    #[test]
+    fn ls_files_output_is_parsed() {
+        assert_eq!(
+            parse_ls_files("1376 .claude/rules/dsp.md\x0010 a b.txt\x00").unwrap(),
+            [
+                TrackedFile {
+                    path: ".claude/rules/dsp.md".into(),
+                    size: 1376,
+                },
+                TrackedFile {
+                    path: "a b.txt".into(),
+                    size: 10,
+                },
+            ]
+        );
+        assert_eq!(parse_ls_files("").unwrap(), []);
+        let submodule = parse_ls_files("- sub\x00").unwrap_err();
+        assert!(format!("{submodule:#}").contains("sub"), "{submodule:#}");
+        let no_space = parse_ls_files("12\x00").unwrap_err();
+        assert!(format!("{no_space:#}").contains("12"), "{no_space:#}");
+    }
+
+    #[test]
+    fn build_files_are_chosen() {
+        for path in [
+            ".github/workflows/ci.yml",
+            ".github/dependabot.yml",
+            "app/Trunk.toml",
+            "engine/build.rs",
+            ".cargo/config.toml",
+            ".cargo/config",
+            "app/.cargo/config.toml",
+        ] {
+            assert!(is_build_file(path), "{path}");
+        }
+        for path in [
+            "README.md",
+            "xtask/src/serve.rs",
+            "tools/roformer_export.py",
+            "config.toml",
+            "docs/.cargo.md",
+        ] {
+            assert!(!is_build_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn python_files_are_named() {
+        let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
+            "tools/x.py",
+            "Tools/X.PY",
+            "a.pyc",
+            "a.ipynb",
+            "requirements.txt",
+            "pyproject.toml",
+            "Pipfile",
+            "uv.lock",
+            "engine/tools/roformer_export.py",
+            "tools/ROFORMER_EXPORT.PY",
+        ]
+        .into_iter()
+        .map(|path| (path, python_in_the_build(&tracked(&[path]), &[]), None))
+        .collect();
+        assert_one_each("BUILD-1", &cases);
+        assert_eq!(
+            python_in_the_build(&tracked(&["tools/roformer_export.py"]), &[]),
+            []
+        );
+    }
+
+    #[test]
+    fn python_in_a_build_file_is_named() {
+        let ci = ".github/workflows/ci.yml";
+        let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
+            (ci, "      - run: pip install numpy"),
+            (ci, "      - uses: actions/setup-python@v5"),
+            (ci, "      - name: Set up Python"),
+            (ci, "      - run: uv sync"),
+            (ci, "      - run: pipx run x"),
+            (ci, "      - run: python -m pip install x"),
+            (".github/dependabot.yml", "  - package-ecosystem: \"pip\""),
+            ("app/Trunk.toml", "command = \"python3\""),
+            ("engine/build.rs", "    Command::new(\"python\");"),
+            (".cargo/config", "runner = \"pip3\""),
+            (".cargo/config", "x = \"uvx ruff\""),
+        ]
+        .into_iter()
+        .map(|(file, line)| {
+            let text = format!("# line 1\n{line}\n# line 3\n");
+            (
+                file,
+                python_in_the_build(&[], &texts(&[(file, &text)])),
+                Some(2),
+            )
+        })
+        .collect();
+        assert_one_each("BUILD-1", &cases);
+    }
+
+    #[test]
+    fn clean_build_files_pass() {
+        let ci = "      - run: set -o pipefail\n      # the pipeline, a snippet, Pythonic\n";
+        assert_eq!(
+            python_in_the_build(
+                &[],
+                &texts(&[
+                    (".github/workflows/ci.yml", ci),
+                    ("README.md", "pip install x\n")
+                ])
+            ),
+            []
+        );
+    }
+
+    #[test]
+    fn a_python_server_is_named() {
+        let server = concat!("python3 -m http", ".server 8080");
+        let old_server = concat!("python -m SimpleHTTP", "Server");
+        let ci_server = concat!("      - run: serve http", ".server");
+        let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
+            ("README.md", server),
+            ("xtask/src/serve.rs", old_server),
+            (".github/workflows/ci.yml", ci_server),
+        ]
+        .into_iter()
+        .map(|(file, line)| {
+            let text = format!("Serve it:\n{line}\n");
+            (
+                file,
+                python_in_the_build(&[], &texts(&[(file, &text)])),
+                Some(2),
+            )
+        })
+        .collect();
+        assert_one_each("BUILD-1", &cases);
+        let history = format!("Serve it:\n{server}\n");
+        assert_eq!(
+            python_in_the_build(
+                &[],
+                &texts(&[
+                    ("docs/plans/x.md", &history),
+                    ("docs/decisions/x.md", &history)
+                ])
+            ),
+            []
+        );
+    }
+
+    #[test]
+    fn assets_are_named() {
+        let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
+            "song.flac",
+            "a/Model.SafeTensors",
+            "bs_roformer_sw.f32.safetensors",
+            "weights.bin",
+            "x.npy",
+        ]
+        .into_iter()
+        .map(|path| (path, assets_in_the_index(&tracked(&[path])), None))
+        .collect();
+        assert_one_each("ASSET-1", &cases);
+        assert_eq!(
+            assets_in_the_index(&tracked(&[
+                "engine/src/wav.rs",
+                "xtask/src/bin/x.rs",
+                "docs/prompt",
+                "app/tests/snapshots/six_lanes.png",
+            ])),
+            []
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_named() {
+        let file = |size| TrackedFile {
+            path: "docs/big.txt".into(),
+            size,
+        };
+        let over = assets_in_the_index(&[file(1_048_577)]);
+        assert_one_each("ASSET-1", &[("docs/big.txt", over.clone(), None)]);
+        assert!(over[0].message.contains("1048577"), "{}", over[0]);
+        assert_eq!(assets_in_the_index(&[file(1_048_576)]), []);
     }
 }
