@@ -1,6 +1,6 @@
 # The agent harness
 
-This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md`, `decisions/0002-staged-background-autonomy.md`, `decisions/0003-required-skips-in-a-test-support-crate.md` and `decisions/0005-how-strictly-the-crate-checks-read-layer-1.md`.
+This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md`, `decisions/0002-staged-background-autonomy.md`, `decisions/0003-required-skips-in-a-test-support-crate.md`, `decisions/0005-how-strictly-the-crate-checks-read-layer-1.md` and `decisions/0006-clippy-exceptions-in-dsp.md`.
 
 Two principles shape it:
 
@@ -26,6 +26,7 @@ Two principles shape it:
 | `synth_brings_no_crate_into_the_web_app` (LAYER-1) | sensor, computational | `app`, in the web app (`app` and `stem-worker`), compiled `hound` for `synth`'s file writers, and the licence list credited it | phase 2 |
 | the three `-p` clippy steps in CI | sensor, computational | `--workspace` builds merge features, so they hide warnings in `synth` without `files`, a native-only call to a writer in `app`, and a lost dev-dependency | phase 2 |
 | `crates_depend_only_downwards`, `the_page_and_the_worker_meet_only_through_stem_protocol` (LAYER-1) | sensor, computational | nothing compared the layers table with the manifests, or kept the page side and the worker side apart; a crate outside the workspace could hide a dependency | phase 2 |
+| the `#![expect]`s in `dsp/src/lib.rs`, one for each lint | sensor, computational | `#![allow(clippy::all)]` in `dsp` switched off every clippy lint, so a correctness lint, or a disallowed method, would have passed there | phase 2 |
 
 Planned components, by phase, are in the plan.
 
