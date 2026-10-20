@@ -413,6 +413,10 @@ struct MetadataDependency {
     kind: Option<String>,
     /// Present for a path dependency only.
     path: Option<PathBuf>,
+    /// The version requirement, normalised by Cargo (`0.1` is `^0.1`).
+    /// `None` only in the layer tests' fixtures.
+    #[serde(default)]
+    req: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1673,6 +1677,606 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
             })
         })
         .collect()
+}
+
+/// Crates below 1.0 that DEPS-1 counts as settled, not young.  Each date is
+/// the crate's first version on crates.io, two years or more before the
+/// crate was listed.  The check reads only the date's form; a reviewer
+/// checks it at `https://crates.io/api/v1/crates/<crate>`.
+pub const SETTLED_CRATES: [(&str, &str); 13] = [
+    ("burn", "2022-07-27"),
+    ("console_error_panic_hook", "2018-05-23"),
+    ("cpal", "2014-12-17"),
+    ("eframe", "2021-01-04"),
+    ("futures-channel", "2018-03-05"),
+    ("js-sys", "2018-07-19"),
+    ("log", "2014-12-13"),
+    ("safetensors", "2022-12-13"),
+    ("symphonia", "2020-09-01"),
+    ("wasm-bindgen", "2018-03-06"),
+    ("wasm-bindgen-futures", "2018-08-13"),
+    ("wasm-bindgen-test", "2018-07-26"),
+    ("web-sys", "2018-07-19"),
+];
+
+const RULES_FILE: &str = "xtask/src/rules.rs";
+
+fn deps1(file: &str, line: Option<usize>, message: String) -> Problem {
+    Problem {
+        rule: "DEPS-1",
+        file: file.into(),
+        line,
+        message,
+    }
+}
+
+fn is_registry(source: &str) -> bool {
+    source.starts_with("registry+") || source.starts_with("sparse+")
+}
+
+/// One comparator `=M.m.p`, with or without a pre-release.
+fn is_pin(requirement: &str) -> bool {
+    let Some(version) = requirement.trim().strip_prefix('=') else {
+        return false;
+    };
+    let version = version.trim();
+    let core = version.split_once('-').map_or(version, |(core, _)| core);
+    let parts: Vec<&str> = core.split('.').collect();
+    !requirement.contains(',')
+        && parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// No comparator has a pre-release, and one sets a lower bound of 1.0.0 or
+/// more, so the requirement admits no version below 1.0.
+fn is_settled_above_1(requirement: &str) -> bool {
+    let comparators: Vec<&str> = requirement.split(',').map(str::trim).collect();
+    comparators
+        .iter()
+        .all(|comparator| !comparator.contains('-'))
+        && comparators
+            .iter()
+            .any(|comparator| sets_a_bound_of_1(comparator))
+}
+
+fn sets_a_bound_of_1(comparator: &str) -> bool {
+    let operator_end = comparator
+        .find(|c: char| c.is_ascii_digit() || c == '*')
+        .unwrap_or(comparator.len());
+    let (operator, version) = comparator.split_at(operator_end);
+    let major: Option<u64> = version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse().ok());
+    let at_least_1 = major.is_some_and(|major| major >= 1);
+    match operator.trim() {
+        "" | "^" | "~" | "=" | ">=" => at_least_1,
+        ">" => at_least_1 || version == "0",
+        _ => false,
+    }
+}
+
+fn is_date(text: &str) -> bool {
+    text.len() == 10
+        && text.char_indices().all(|(index, c)| match index {
+            4 | 7 => c == '-',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// A member's dependency on a crate that is not a path.
+struct SourcedDependency<'a> {
+    manifest: String,
+    name: &'a str,
+    source: &'a str,
+    requirement: Option<&'a str>,
+}
+
+/// DEPS-1: a young crate is pinned with `=`.  A crate below 1.0 is young
+/// unless `settled` names it (`SETTLED_CRATES` on the real tree).  It also
+/// fails every source that is not a registry, in the members' manifests
+/// and in the whole build, since a `[patch]` to git shows only there.
+pub fn young_crates_are_pinned_in(
+    metadata: &str,
+    settled: &[(&str, &str)],
+) -> Result<Vec<Problem>> {
+    let metadata: Metadata =
+        serde_json::from_str(metadata).context("reading cargo metadata's JSON")?;
+    let is_member = |id: &str| metadata.workspace_members.iter().any(|member| member == id);
+    let dependencies = metadata
+        .packages
+        .iter()
+        .filter(|package| is_member(&package.id))
+        .flat_map(|package| {
+            let manifest = package
+                .manifest_path
+                .strip_prefix(&metadata.workspace_root)
+                .unwrap_or(&package.manifest_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            package.dependencies.iter().filter_map(move |dependency| {
+                Some(SourcedDependency {
+                    manifest: manifest.clone(),
+                    name: &dependency.name,
+                    source: dependency.source.as_deref()?,
+                    requirement: dependency.req.as_deref(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let registry: Vec<&SourcedDependency> = dependencies
+        .iter()
+        .filter(|dependency| is_registry(dependency.source))
+        .collect();
+    let unpinned = registry
+        .iter()
+        .map(|dependency| {
+            let requirement = dependency.requirement.with_context(|| {
+                format!(
+                    "cargo metadata gave no requirement for {} in {}",
+                    dependency.name, dependency.manifest
+                )
+            })?;
+            Ok((*dependency, requirement))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(_, requirement)| !is_pin(requirement) && !is_settled_above_1(requirement))
+        .collect::<Vec<_>>();
+    let young = unpinned
+        .iter()
+        .filter(|(dependency, _)| !settled.iter().any(|(name, _)| *name == dependency.name))
+        .map(|(dependency, requirement)| {
+            deps1(
+                &dependency.manifest,
+                None,
+                format!(
+                    "DEPS-1: {} takes {} {requirement}, which admits a version below 1.0 and is not a pin.  Fix: pin it, or the [workspace.dependencies] entry it inherits, with = and its version in Cargo.lock, or, if its first version on crates.io is two years old or more, add it to SETTLED_CRATES in {RULES_FILE} with that date.",
+                    dependency.manifest, dependency.name
+                ),
+            )
+        });
+    let not_registry = dependencies
+        .iter()
+        .filter(|dependency| !is_registry(dependency.source))
+        .map(|dependency| {
+            deps1(
+                &dependency.manifest,
+                None,
+                format!(
+                    "DEPS-1: {} takes {} from {}, which is not a registry.  Fix: use a registry release, or ask the maintainer.",
+                    dependency.manifest, dependency.name, dependency.source
+                ),
+            )
+        });
+    let built_from_elsewhere = metadata
+        .packages
+        .iter()
+        .filter_map(|package| Some((package, package.source.as_deref()?)))
+        .filter(|(_, source)| !is_registry(source))
+        .map(|(package, source)| {
+            deps1(
+                "Cargo.toml",
+                None,
+                format!(
+                    "DEPS-1: Cargo.toml and the manifests it names bring {} from {source}, which is not a registry; a [patch] can do this.  Fix: use a registry release, or ask the maintainer.",
+                    package.name
+                ),
+            )
+        });
+    let stale = settled
+        .iter()
+        .filter(|(name, _)| !unpinned.iter().any(|(dependency, _)| dependency.name == *name))
+        .map(|(name, _)| {
+            deps1(
+                RULES_FILE,
+                None,
+                format!(
+                    "DEPS-1: {RULES_FILE} lists {name} in SETTLED_CRATES, but no member takes it with a range below 1.0.  Fix: remove the entry."
+                ),
+            )
+        });
+    let bad_dates = settled
+        .iter()
+        .filter(|(_, date)| !is_date(date))
+        .map(|(name, date)| {
+            deps1(
+                RULES_FILE,
+                None,
+                format!(
+                    "DEPS-1: {RULES_FILE} gives {name} the date {date:?} in SETTLED_CRATES.  Fix: write the date of its first version on crates.io as YYYY-MM-DD."
+                ),
+            )
+        });
+    let unread = registry.is_empty().then(|| {
+        deps1(
+            "Cargo.toml",
+            None,
+            "DEPS-1: Cargo.toml gives no member with a registry dependency, so this check read nothing.  Fix: run the check on cargo metadata's output for the workspace.".into(),
+        )
+    });
+    Ok(young
+        .chain(not_registry)
+        .chain(built_from_elsewhere)
+        .chain(stale)
+        .chain(bad_dates)
+        .chain(unread)
+        .collect())
+}
+
+const THIRD_PARTY: &str = "THIRD-PARTY.md";
+const BROWSER_TESTS_HEADING: &str = "## Browser tests only";
+const THIRD_PARTY_HEADER: &str = "| Crate | Version | Licence | Source |";
+
+/// The `-e` values of the two commands in `THIRD-PARTY.md`: what ships, and
+/// what ships plus the browser tests.
+pub const THIRD_PARTY_EDGES: [&str; 2] = ["normal", "normal,dev"];
+
+/// The args of a command in `THIRD-PARTY.md`, in its order, after `cargo`.
+pub fn third_party_args(edges: &str) -> [&str; 13] {
+    [
+        "tree",
+        "-p",
+        "app",
+        "-p",
+        "stem-worker",
+        "--target",
+        "wasm32-unknown-unknown",
+        "-e",
+        edges,
+        "--prefix",
+        "none",
+        "-f",
+        "{p}|{l}|{r}",
+    ]
+}
+
+/// The command as `THIRD-PARTY.md` writes it.
+fn third_party_command(edges: &str) -> String {
+    let args = third_party_args(edges);
+    let (format, rest) = args.split_last().expect("the args are not empty");
+    format!("cargo {} \"{format}\"", rest.join(" "))
+}
+
+/// Runs a command of `THIRD-PARTY.md` in `root`, with `--locked` and
+/// `--color never` added, as `web_app_tree` does.
+pub fn third_party_tree(root: &Path, edges: &str) -> Result<String> {
+    let [tree, rest @ ..] = third_party_args(edges);
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .arg(tree)
+        .args(["--locked", "--color", "never"])
+        .args(rest)
+        .output()
+        .with_context(|| format!("running cargo tree -e {edges}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cargo tree -e {edges} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("cargo tree -e {edges} printed text that is not UTF-8"))
+}
+
+/// The folder of each workspace crate, from `cargo metadata`'s JSON, as
+/// `cargo tree` prints it after a path crate's version.
+pub fn member_folders(metadata: &str) -> Result<Vec<PathBuf>> {
+    let metadata: Metadata =
+        serde_json::from_str(metadata).context("reading cargo metadata's JSON")?;
+    Ok(metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .map(|package| folder_of(package).to_path_buf())
+        .collect())
+}
+
+/// A crate in a table of `THIRD-PARTY.md`, or in a command's output.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LicenceRow {
+    name: String,
+    version: String,
+    licence: String,
+    source: String,
+}
+
+impl LicenceRow {
+    fn key(&self) -> (&str, &str) {
+        (&self.name, &self.version)
+    }
+
+    fn text(&self) -> String {
+        format!(
+            "| {} | {} | {} | {} |",
+            self.name, self.version, self.licence, self.source
+        )
+    }
+}
+
+/// The rows of a command's output, without workspace crates and repeats,
+/// and the lines that the check cannot read, without their ` (*)`.
+fn tree_rows<'a>(
+    output: &'a str,
+    members: &[PathBuf],
+) -> (BTreeSet<LicenceRow>, BTreeSet<&'a str>) {
+    let read: Vec<std::result::Result<Option<LicenceRow>, &str>> = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| tree_row(line, members).ok_or(line))
+        .collect();
+    let rows = read
+        .iter()
+        .filter_map(|row| row.as_ref().ok().cloned().flatten())
+        .collect();
+    let unread = read
+        .iter()
+        .filter_map(|row| row.as_ref().err())
+        .map(|line| line.strip_suffix(" (*)").unwrap_or(line))
+        .collect();
+    (rows, unread)
+}
+
+/// The crate and version of a line that the check cannot read, if the line
+/// gives them, so that its row is neither "add" nor "remove": the line's
+/// own problem says what to do.
+fn unread_crate(line: &str) -> Option<(&str, &str)> {
+    let package = line.split('|').next()?;
+    let package = package.strip_suffix(" (proc-macro)").unwrap_or(package);
+    let package = package
+        .split_once(" (")
+        .map_or(package, |(package, _)| package);
+    package.split_once(" v")
+}
+
+fn unread_line(line: &str) -> Problem {
+    deps1(
+        THIRD_PARTY,
+        None,
+        format!(
+            "DEPS-1: {THIRD_PARTY} cannot be checked against the cargo tree line {line:?}.  Fix: if the crate comes from git, another registry or a vendored folder, ask the maintainer.  Otherwise add its rows by hand, and extend the parser in {RULES_FILE}."
+        ),
+    )
+}
+
+/// `Some(None)` for a workspace crate, `None` for a line it cannot read.
+fn tree_row(line: &str, members: &[PathBuf]) -> Option<Option<LicenceRow>> {
+    let cells: Vec<&str> = line.split('|').collect();
+    let [package, licence, source] = cells.as_slice() else {
+        return None;
+    };
+    let source = source.strip_suffix(" (*)").unwrap_or(source);
+    let package = package.strip_suffix(" (proc-macro)").unwrap_or(package);
+    let (package, origin) = match package.split_once(" (") {
+        Some((package, origin)) => (package, Some(origin.strip_suffix(')')?)),
+        None => (package, None),
+    };
+    let (name, version) = package.split_once(" v")?;
+    let well_formed = !name.is_empty()
+        && !name.contains(' ')
+        && version.starts_with(|c: char| c.is_ascii_digit())
+        && !version.contains(' ');
+    if !well_formed {
+        return None;
+    }
+    match origin {
+        Some(origin) if members.iter().any(|member| member == Path::new(origin)) => Some(None),
+        Some(_) => None,
+        None => Some(Some(LicenceRow {
+            name: name.into(),
+            version: version.into(),
+            licence: (*licence).into(),
+            source: source.into(),
+        })),
+    }
+}
+
+/// The rows of the table in one section of `THIRD-PARTY.md`, with the line
+/// of each, from 1.  `first_line` is the section's first line.
+fn table_rows(section: &[&str], first_line: usize) -> (Vec<(usize, LicenceRow)>, Vec<Problem>) {
+    let Some(header) = section.iter().position(|line| *line == THIRD_PARTY_HEADER) else {
+        return (vec![], vec![]);
+    };
+    let read: Vec<(usize, Option<LicenceRow>)> = section
+        .iter()
+        .enumerate()
+        .skip(header + 2)
+        .take_while(|(_, line)| line.starts_with('|'))
+        .map(|(index, line)| (first_line + index, doc_row(line)))
+        .collect();
+    let rows = read
+        .iter()
+        .filter_map(|(line, row)| Some((*line, row.clone()?)))
+        .collect();
+    let unread = read
+        .iter()
+        .filter(|(_, row)| row.is_none())
+        .map(|(line, _)| {
+            deps1(
+                THIRD_PARTY,
+                Some(*line),
+                format!(
+                    "DEPS-1: {THIRD_PARTY}:{line} is not a row of four cells.  Fix: write it as | Crate | Version | Licence | Source |."
+                ),
+            )
+        })
+        .collect();
+    (rows, unread)
+}
+
+fn doc_row(line: &str) -> Option<LicenceRow> {
+    let inner = line.strip_prefix("| ")?.strip_suffix(" |")?;
+    let cells: Vec<&str> = inner.split(" | ").collect();
+    let [name, version, licence, source] = cells.as_slice() else {
+        return None;
+    };
+    Some(LicenceRow {
+        name: (*name).into(),
+        version: (*version).into(),
+        licence: (*licence).into(),
+        source: (*source).into(),
+    })
+}
+
+/// DEPS-1: `THIRD-PARTY.md` lists what ships.  `normal` and
+/// `normal_and_dev` are the output of its two commands
+/// (`third_party_tree`).  Its first table must equal the first command's
+/// rows; its second table, the second command's rows that are not in the
+/// first.  `members` holds the folder of each workspace crate
+/// (`member_folders`); a path crate in another folder, such as a vendored
+/// copy, is a line that the check cannot read.
+pub fn third_party_matches(
+    doc: &str,
+    normal: &str,
+    normal_and_dev: &str,
+    members: &[PathBuf],
+) -> Vec<Problem> {
+    let lines: Vec<&str> = doc.lines().collect();
+    let split = lines
+        .iter()
+        .position(|line| *line == BROWSER_TESTS_HEADING)
+        .unwrap_or(lines.len());
+    let (first_section, second_section) = lines.split_at(split);
+    let missing_commands = [
+        (first_section, THIRD_PARTY_EDGES[0], "above"),
+        (second_section, THIRD_PARTY_EDGES[1], "below"),
+    ]
+    .into_iter()
+    .filter_map(|(section, edges, place)| {
+        let command = third_party_command(edges);
+        (!section.contains(&command.as_str())).then(|| {
+            deps1(
+                THIRD_PARTY,
+                None,
+                format!(
+                    "DEPS-1: {THIRD_PARTY} lacks the command {command} {place} {BROWSER_TESTS_HEADING:?}.  Fix: restore the command; the check runs it."
+                ),
+            )
+        })
+    });
+    let (shipped, shipped_unread) = tree_rows(normal, members);
+    let (with_tests, with_tests_unread) = tree_rows(normal_and_dev, members);
+    let shipped_keys: BTreeSet<(&str, &str)> = shipped.iter().map(LicenceRow::key).collect();
+    let tests_only: BTreeSet<LicenceRow> = with_tests
+        .iter()
+        .filter(|row| !shipped_keys.contains(&row.key()))
+        .cloned()
+        .collect();
+    let (first_table, first_unread) = table_rows(first_section, 1);
+    let (second_table, second_unread) = table_rows(second_section, split + 1);
+    let unread_crates: BTreeSet<(&str, &str)> = shipped_unread
+        .union(&with_tests_unread)
+        .filter_map(|line| unread_crate(line))
+        .collect();
+    let readable = |table: Vec<(usize, LicenceRow)>| -> Vec<(usize, LicenceRow)> {
+        table
+            .into_iter()
+            .filter(|(_, row)| !unread_crates.contains(&row.key()))
+            .collect()
+    };
+    let differences = table_differences(&readable(first_table), &shipped)
+        .into_iter()
+        .chain(table_differences(&readable(second_table), &tests_only));
+    let no_licence = shipped
+        .iter()
+        .chain(&with_tests)
+        .filter(|row| row.licence.is_empty())
+        .map(LicenceRow::key)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|(name, version)| {
+            deps1(
+                THIRD_PARTY,
+                None,
+                format!(
+                    "DEPS-1: {THIRD_PARTY} cannot credit {name} {version}, whose manifest gives no licence.  Fix: ask the maintainer; the check has no exception for a crate without a licence."
+                ),
+            )
+        });
+    let unread = (!["wgpu", "eframe"]
+        .iter()
+        .all(|known| shipped.iter().any(|row| row.name == *known)))
+    .then(|| {
+        deps1(
+            THIRD_PARTY,
+            None,
+            format!(
+                "DEPS-1: {THIRD_PARTY} cannot be checked: its first command gave no wgpu or no eframe, so the check read too little.  Fix: run the check on the output of {}.",
+                third_party_command(THIRD_PARTY_EDGES[0])
+            ),
+        )
+    });
+    let unread_lines = shipped_unread
+        .union(&with_tests_unread)
+        .map(|line| unread_line(line));
+    missing_commands
+        .chain(unread_lines)
+        .chain(first_unread)
+        .chain(second_unread)
+        .chain(differences)
+        .chain(no_licence)
+        .chain(unread)
+        .collect()
+}
+
+/// The rows to add, remove or change for a table to equal `rows`, and the
+/// rows it holds twice.
+fn table_differences(table: &[(usize, LicenceRow)], rows: &BTreeSet<LicenceRow>) -> Vec<Problem> {
+    let twice = table
+        .iter()
+        .enumerate()
+        .filter(|(index, (_, row))| {
+            table[..*index]
+                .iter()
+                .any(|(_, earlier)| earlier.key() == row.key())
+        })
+        .map(|(_, (line, row))| {
+            deps1(
+                THIRD_PARTY,
+                Some(*line),
+                format!(
+                    "DEPS-1: {THIRD_PARTY}:{line} lists {} {} a second time.  Fix: remove the row.",
+                    row.name, row.version
+                ),
+            )
+        });
+    let changed_or_stale = table
+        .iter()
+        .filter(|(line, row)| {
+            table
+                .iter()
+                .find(|(_, first)| first.key() == row.key())
+                .is_some_and(|(first_line, _)| first_line == line)
+        })
+        .filter_map(|(line, row)| {
+            let message = match rows.iter().find(|tree| tree.key() == row.key()) {
+                Some(tree) if tree == row => return None,
+                Some(tree) => format!(
+                    "DEPS-1: {THIRD_PARTY}:{line} gives {} {} the licence {:?} and source {:?}, but cargo tree gives {:?} and {:?}.  Fix: read the new licence; if it is not permissive, ask the maintainer; then update the row to {}.",
+                    row.name, row.version, row.licence, row.source, tree.licence, tree.source, tree.text()
+                ),
+                None => format!(
+                    "DEPS-1: {THIRD_PARTY}:{line} lists {} {}, which its command does not give.  Fix: remove the row {}.",
+                    row.name, row.version, row.text()
+                ),
+            };
+            Some(deps1(THIRD_PARTY, Some(*line), message))
+        });
+    let missing = rows
+        .iter()
+        .filter(|tree| !table.iter().any(|(_, row)| row.key() == tree.key()))
+        .map(|tree| {
+            deps1(
+                THIRD_PARTY,
+                None,
+                format!(
+                    "DEPS-1: {THIRD_PARTY} lacks {} {}, which its command gives.  Fix: add the row {}.",
+                    tree.name, tree.version, tree.text()
+                ),
+            )
+        });
+    twice.chain(changed_or_stale).chain(missing).collect()
 }
 
 #[cfg(test)]
@@ -2964,11 +3568,16 @@ mod tests {
     // The parser of `cargo metadata`'s JSON.  Paths are under `/x`, so no
     // home folder is committed.
 
-    fn id(name: &str, folder: &str) -> String {
+    pub(super) fn id(name: &str, folder: &str) -> String {
         format!("path+file://{folder}#{name}@0.1.0")
     }
 
-    fn package(name: &str, folder: &str, source: Option<&str>, dependencies: Vec<Value>) -> Value {
+    pub(super) fn package(
+        name: &str,
+        folder: &str,
+        source: Option<&str>,
+        dependencies: Vec<Value>,
+    ) -> Value {
         json!({
             "id": source.map_or_else(|| id(name, folder), |s| format!("{s}#{name}@0.1.0")),
             "name": name,
@@ -2979,7 +3588,7 @@ mod tests {
         })
     }
 
-    fn path_dep(name: &str, path: &str, kind: Option<&str>) -> Value {
+    pub(super) fn path_dep(name: &str, path: &str, kind: Option<&str>) -> Value {
         json!({ "name": name, "source": null, "rename": null, "kind": kind, "target": null, "path": path })
     }
 
@@ -2989,7 +3598,11 @@ mod tests {
 
     /// The JSON, with a resolve node for each member (no features, no
     /// dependencies) and the `other_nodes`.
-    fn metadata(packages: Vec<Value>, members: &[String], other_nodes: Vec<Value>) -> String {
+    pub(super) fn metadata(
+        packages: Vec<Value>,
+        members: &[String],
+        other_nodes: Vec<Value>,
+    ) -> String {
         let nodes: Vec<Value> = members
             .iter()
             .map(|member| json!({ "id": member, "deps": [], "features": [] }))
@@ -3603,7 +4216,7 @@ mod tracked_tests {
 
     /// Asserts one problem for each case, with `rule`, the file and the
     /// line, and a fix.
-    fn assert_one_each(rule: &str, cases: &[(&str, Vec<Problem>, Option<usize>)]) {
+    pub(super) fn assert_one_each(rule: &str, cases: &[(&str, Vec<Problem>, Option<usize>)]) {
         for (file, problems, line) in cases {
             assert_eq!(problems.len(), 1, "{file}\n{problems:#?}");
             let problem = &problems[0];
@@ -3838,5 +4451,635 @@ mod tracked_tests {
         );
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(texts.unwrap(), [("README.md".into(), "text\n".into())]);
+    }
+}
+
+#[cfg(test)]
+mod deps_tests {
+    use super::tests::{id, metadata, package, path_dep};
+    use super::tracked_tests::assert_one_each;
+    use super::*;
+    use serde_json::{Value, json};
+
+    // DEPS-1: the pins, over `cargo metadata`'s JSON in its real shape.
+
+    const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    const SETTLED_LOG: [(&str, &str); 1] = [("log", "2014-12-13")];
+
+    fn requirement(name: &str, req: &str) -> Value {
+        json!({
+            "name": name, "source": CRATES_IO, "req": req, "rename": null,
+            "kind": null, "target": null, "optional": false,
+        })
+    }
+
+    fn with(dependency: Value, key: &str, value: Value) -> Value {
+        let mut dependency = dependency;
+        dependency[key] = value;
+        dependency
+    }
+
+    /// `app` takes `anyhow ^1`, and `engine` takes `engine_dependencies`, so
+    /// a check that reads only the first member misses the cases.
+    fn two_members(engine_dependencies: Vec<Value>, others: Vec<Value>) -> String {
+        let app = package("app", "/x/app", None, vec![requirement("anyhow", "^1")]);
+        let engine = package("engine", "/x/engine", None, engine_dependencies);
+        let members = [id("app", "/x/app"), id("engine", "/x/engine")];
+        metadata([vec![app, engine], others].concat(), &members, vec![])
+    }
+
+    fn pins(metadata: &str, settled: &[(&str, &str)]) -> Vec<Problem> {
+        young_crates_are_pinned_in(metadata, settled).expect("the fixture is cargo metadata's JSON")
+    }
+
+    #[test]
+    fn pins_and_settled_crates_pass() {
+        let dependencies = vec![
+            requirement("a", "=0.1.0"),
+            requirement("b", "=0.1.0-alpha.1"),
+            requirement("c", "^1"),
+            requirement("d", "^1.0.107"),
+            requirement("e", "1.*"),
+            requirement("f", "1.2.*"),
+            requirement("g", ">=1.0, <2"),
+            requirement("h", ">0"),
+            requirement("i", "~1"),
+            requirement("j", "=1"),
+            with(path_dep("dsp", "/x/dsp", None), "req", json!("^0.1.0")),
+            requirement("log", "^0.4.34"),
+        ];
+        let outside = package(
+            "outside",
+            "/r/outside",
+            Some(CRATES_IO),
+            vec![requirement("wsola", "^0.1.0")],
+        );
+        let dsp = package("dsp", "/x/dsp", None, vec![]);
+        let app = package("app", "/x/app", None, dependencies);
+        let members = [id("app", "/x/app"), id("dsp", "/x/dsp")];
+        let metadata = metadata(vec![app, dsp, outside], &members, vec![]);
+        assert_eq!(pins(&metadata, &SETTLED_LOG), []);
+    }
+
+    #[test]
+    fn a_young_crate_with_a_range_is_named() {
+        let requirements = [
+            "^0.1.0",
+            "^0.0.41",
+            "*",
+            "<1",
+            "<2.0",
+            "0.*",
+            "^0",
+            ">0.1",
+            ">0.0.1",
+            ">=0.1",
+            ">=0.1, <0.3",
+            "~0.1.2",
+            "=0.1",
+            "^1.0.0-rc.1",
+            ">=1.0.0-rc.1, <2",
+            "=0.1.x",
+            "=0.1.0-a, <0.2",
+        ];
+        let shapes: [fn(Value) -> Value; 6] = [
+            |dependency| dependency,
+            |dependency| with(dependency, "kind", json!("dev")),
+            |dependency| with(dependency, "kind", json!("build")),
+            |dependency| with(dependency, "target", json!("cfg(target_arch = \"wasm32\")")),
+            |dependency| {
+                with(
+                    dependency,
+                    "source",
+                    json!("sparse+https://index.crates.io/"),
+                )
+            },
+            |dependency| with(dependency, "rename", json!("young_crate")),
+        ];
+        for (index, req) in requirements.into_iter().enumerate() {
+            let shape = shapes[index % shapes.len()];
+            let problems = pins(
+                &two_members(vec![shape(requirement("young-crate", req))], vec![]),
+                &SETTLED_LOG[..0],
+            );
+            assert!(
+                problems.first().is_some_and(|problem| problem
+                    .message
+                    .contains(&format!("young-crate {req},"))),
+                "{req}: {problems:#?}"
+            );
+            assert_one_each("DEPS-1", &[("engine/Cargo.toml", problems, None)]);
+        }
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_registry_is_named() {
+        let git = "git+https://github.com/acme/wsola?branch=main#0123abc";
+        let cases = [
+            two_members(
+                vec![with(requirement("wsola", "*"), "source", json!(git))],
+                vec![],
+            ),
+            two_members(
+                vec![with(
+                    requirement("wsola", "^0.1.0"),
+                    "source",
+                    json!("path+file:///r/wsola"),
+                )],
+                vec![],
+            ),
+        ];
+        for metadata in &cases {
+            assert_one_each(
+                "DEPS-1",
+                &[("engine/Cargo.toml", pins(metadata, &[]), None)],
+            );
+        }
+        let patched = two_members(
+            vec![requirement("wsola", "=0.1.0")],
+            vec![package("wsola", "/r/wsola", Some(git), vec![])],
+        );
+        let problems = pins(&patched, &[]);
+        assert!(problems[0].message.contains(git), "{problems:#?}");
+        assert_one_each("DEPS-1", &[("Cargo.toml", problems, None)]);
+    }
+
+    #[test]
+    fn a_stale_settled_entry_is_named() {
+        let unused = pins(&two_members(vec![], vec![]), &SETTLED_LOG);
+        let pinned = pins(
+            &two_members(vec![requirement("log", "=0.4.34")], vec![]),
+            &SETTLED_LOG,
+        );
+        let bad_date = pins(
+            &two_members(vec![requirement("log", "^0.4.34")], vec![]),
+            &[("log", "2024-1-5")],
+        );
+        assert!(bad_date[0].message.contains("2024-1-5"), "{bad_date:#?}");
+        let long_date = pins(
+            &two_members(vec![requirement("log", "^0.4.34")], vec![]),
+            &[("log", "2024-01-055")],
+        );
+        assert_one_each(
+            "DEPS-1",
+            &[
+                (RULES_FILE, unused, None),
+                (RULES_FILE, pinned, None),
+                (RULES_FILE, bad_date, None),
+                (RULES_FILE, long_date, None),
+            ],
+        );
+    }
+
+    #[test]
+    fn nothing_to_read_is_a_problem() {
+        let no_member = metadata(vec![], &[], vec![]);
+        let no_registry = metadata(
+            vec![package("dsp", "/x/dsp", None, vec![])],
+            &[id("dsp", "/x/dsp")],
+            vec![],
+        );
+        assert_one_each(
+            "DEPS-1",
+            &[
+                ("Cargo.toml", pins(&no_member, &[]), None),
+                ("Cargo.toml", pins(&no_registry, &[]), None),
+            ],
+        );
+        let git_only = metadata(
+            vec![package(
+                "app",
+                "/x/app",
+                None,
+                vec![with(
+                    requirement("wsola", "*"),
+                    "source",
+                    json!("git+https://github.com/acme/wsola#0123abc"),
+                )],
+            )],
+            &[id("app", "/x/app")],
+            vec![],
+        );
+        let problems = pins(&git_only, &[]);
+        assert_eq!(problems.len(), 2, "{problems:#?}");
+        assert!(
+            problems[1].message.contains("so this check read nothing"),
+            "{problems:#?}"
+        );
+    }
+
+    // DEPS-1: the licence list, over `cargo tree`'s output in its real shape.
+
+    fn members() -> Vec<PathBuf> {
+        ["/root/app", "/root/roformer", "/root/worker"]
+            .map(PathBuf::from)
+            .to_vec()
+    }
+
+    const SHIPPED: &str = "\
+app v0.1.0 (/root/app)||
+eframe v0.36.2|MIT OR Apache-2.0|https://github.com/emilk/egui
+epaint_default_fonts v0.36.2|(MIT OR Apache-2.0) AND OFL-1.1|https://github.com/emilk/egui
+hashbrown v0.16.1|MIT OR Apache-2.0|https://github.com/rust-lang/hashbrown
+hashbrown v0.17.1|MIT OR Apache-2.0|https://github.com/rust-lang/hashbrown (*)
+roformer v0.1.0 (/root/roformer) (proc-macro)|MIT OR Apache-2.0| (*)
+serde_derive v1.0.229 (proc-macro)|MIT OR Apache-2.0|https://github.com/serde-rs/serde
+unsourced v1.0.0|MIT|
+wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu
+
+stem-worker v0.1.0 (/root/worker)|MIT OR Apache-2.0|
+wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
+";
+
+    const TESTS_ONLY: &str = "wasm-bindgen-test v0.3.79|MIT OR Apache-2.0|https://github.com/wasm-bindgen/wasm-bindgen\n";
+
+    const SHIPPED_ROWS: [&str; 7] = [
+        "| eframe | 0.36.2 | MIT OR Apache-2.0 | https://github.com/emilk/egui |",
+        "| epaint_default_fonts | 0.36.2 | (MIT OR Apache-2.0) AND OFL-1.1 | https://github.com/emilk/egui |",
+        "| hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |",
+        "| hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |",
+        "| serde_derive | 1.0.229 | MIT OR Apache-2.0 | https://github.com/serde-rs/serde |",
+        "| unsourced | 1.0.0 | MIT |  |",
+        "| wgpu | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |",
+    ];
+
+    const TESTS_ONLY_ROWS: [&str; 1] = [
+        "| wasm-bindgen-test | 0.3.79 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |",
+    ];
+
+    fn row(name: &str, version: &str, licence: &str, source: &str) -> LicenceRow {
+        LicenceRow {
+            name: name.into(),
+            version: version.into(),
+            licence: licence.into(),
+            source: source.into(),
+        }
+    }
+
+    /// A `THIRD-PARTY.md` in the shape of the real one.
+    fn third_party_doc(commands: [&str; 2], first: &[&str], second: &[&str]) -> String {
+        let table = |rows: &[&str]| {
+            [THIRD_PARTY_HEADER, "| - | - | - | - |"]
+                .iter()
+                .chain(rows)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        format!(
+            "# Third-party software\n\nRegenerate the table with:\n\n```bash\n{}\n```\n\n{}\n\n{BROWSER_TESTS_HEADING}\n\nRegenerate the table with:\n\n```bash\n{}\n```\n\n{}\n",
+            commands[0],
+            table(first),
+            commands[1],
+            table(second)
+        )
+    }
+
+    fn commands() -> [String; 2] {
+        THIRD_PARTY_EDGES.map(third_party_command)
+    }
+
+    fn check(doc: &str, shipped: &str, tests_only: &str) -> Vec<Problem> {
+        third_party_matches(doc, shipped, &format!("{shipped}{tests_only}"), &members())
+    }
+
+    fn today_doc() -> String {
+        let [normal, dev] = commands();
+        third_party_doc([&normal, &dev], &SHIPPED_ROWS, &TESTS_ONLY_ROWS)
+    }
+
+    /// One DEPS-1 problem with `THIRD-PARTY.md`, that holds `part`.
+    fn assert_one_drift(problems: &[Problem], part: &str) {
+        assert_eq!(problems.len(), 1, "{part}: {problems:#?}");
+        let problem = &problems[0];
+        assert_eq!(
+            (problem.rule, problem.file.as_str()),
+            ("DEPS-1", THIRD_PARTY)
+        );
+        let at = problem.line.map_or(THIRD_PARTY.to_string(), |line| {
+            format!("{THIRD_PARTY}:{line}")
+        });
+        assert!(
+            problem.message.starts_with(&format!("DEPS-1: {at} ")),
+            "{problem}"
+        );
+        assert!(problem.message.contains(part), "{part}: {problem}");
+        assert!(problem.message.contains("Fix: "), "{problem}");
+    }
+
+    #[test]
+    fn member_folders_leave_out_a_vendored_crate() {
+        let metadata = metadata(
+            vec![
+                package("app", "/x/app", None, vec![]),
+                package("log", "/x/vendor/log", None, vec![]),
+            ],
+            &[id("app", "/x/app")],
+            vec![],
+        );
+        assert_eq!(
+            member_folders(&metadata).unwrap(),
+            [PathBuf::from("/x/app")]
+        );
+    }
+
+    #[test]
+    fn the_commands_are_the_docs() {
+        assert_eq!(
+            commands(),
+            [
+                "cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn third_party_rows_are_read() {
+        let (rows, unread) = tree_rows(SHIPPED, &members());
+        assert!(unread.is_empty(), "{unread:?}");
+        let names: Vec<(&str, &str)> = rows.iter().map(LicenceRow::key).collect();
+        assert_eq!(
+            names,
+            [
+                ("eframe", "0.36.2"),
+                ("epaint_default_fonts", "0.36.2"),
+                ("hashbrown", "0.16.1"),
+                ("hashbrown", "0.17.1"),
+                ("serde_derive", "1.0.229"),
+                ("unsourced", "1.0.0"),
+                ("wgpu", "30.0.1"),
+            ]
+        );
+        assert!(rows.contains(&row(
+            "epaint_default_fonts",
+            "0.36.2",
+            "(MIT OR Apache-2.0) AND OFL-1.1",
+            "https://github.com/emilk/egui"
+        )));
+        assert!(rows.contains(&row("unsourced", "1.0.0", "MIT", "")));
+        assert!(rows.contains(&row(
+            "hashbrown",
+            "0.17.1",
+            "MIT OR Apache-2.0",
+            "https://github.com/rust-lang/hashbrown"
+        )));
+        for line in [
+            "x v0.1.0 (https://github.com/acme/x#0123abc)|MIT|https://github.com/acme/x",
+            "x v0.1.0 (registry `acme`)|MIT|https://github.com/acme/x",
+            "x v0.1.0 (/elsewhere/x)|MIT|",
+            "x v0.1.0 (/root-other/x)|MIT|",
+            "log v0.4.34 (/root/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log",
+            "log v0.4.34 (/root/app/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log",
+            "foo v1.0.0|MIT",
+            "x v0.1.0 extra|MIT|",
+            "garbage",
+        ] {
+            let (rows, unread) = tree_rows(line, &members());
+            assert_eq!(rows, BTreeSet::new(), "{line}");
+            let problems: Vec<Problem> = unread.into_iter().map(unread_line).collect();
+            assert_one_drift(&problems, "cannot be checked against the cargo tree line");
+        }
+        let (rows, unread) = table_rows(&today_doc().lines().collect::<Vec<_>>(), 1);
+        assert_eq!(unread, []);
+        assert_eq!(rows.len(), SHIPPED_ROWS.len());
+    }
+
+    #[test]
+    fn the_third_party_tables_match() {
+        assert_eq!(check(&today_doc(), SHIPPED, TESTS_ONLY), []);
+    }
+
+    #[test]
+    fn a_third_party_drift_is_named() {
+        let [normal, dev] = commands();
+        let doc = |first: &[&str], second: &[&str]| third_party_doc([&normal, &dev], first, second);
+        let without = |rows: &[&'static str], left_out: &str| -> Vec<&'static str> {
+            rows.iter()
+                .copied()
+                .filter(|row| !row.contains(left_out))
+                .collect()
+        };
+        let with_rows = |rows: &[&'static str], added: &[&'static str]| -> Vec<&'static str> {
+            rows.iter().chain(added).copied().collect()
+        };
+        let replaced = |rows: &[&'static str], from: &str, to: &str| -> Vec<String> {
+            rows.iter().map(|row| row.replace(from, to)).collect()
+        };
+        let doc_of = |first: &[String]| {
+            let first: Vec<&str> = first.iter().map(String::as_str).collect();
+            doc(&first, &TESTS_ONLY_ROWS)
+        };
+        let cases: Vec<(String, String, &str)> = vec![
+            (
+                doc(&without(&SHIPPED_ROWS, "0.16.1"), &TESTS_ONLY_ROWS),
+                SHIPPED.into(),
+                "lacks hashbrown 0.16.1",
+            ),
+            (
+                doc(
+                    &with_rows(&SHIPPED_ROWS, &["| zzz | 1.0.0 | MIT | https://zzz |"]),
+                    &TESTS_ONLY_ROWS,
+                ),
+                SHIPPED.into(),
+                "Fix: remove the row | zzz",
+            ),
+            (
+                doc_of(&replaced(
+                    &SHIPPED_ROWS,
+                    "| 0.36.2 | MIT OR Apache-2.0 |",
+                    "| 0.36.2 | MIT |",
+                )),
+                SHIPPED.into(),
+                "gives eframe 0.36.2 the licence \"MIT\"",
+            ),
+            (
+                doc_of(&replaced(
+                    &SHIPPED_ROWS,
+                    "https://github.com/serde-rs/serde",
+                    "https://acme",
+                )),
+                SHIPPED.into(),
+                "gives serde_derive 1.0.229 the licence",
+            ),
+            (
+                doc(
+                    &with_rows(&SHIPPED_ROWS, &[SHIPPED_ROWS[0]]),
+                    &TESTS_ONLY_ROWS,
+                ),
+                SHIPPED.into(),
+                "lists eframe 0.36.2 a second time",
+            ),
+            (
+                doc(
+                    &with_rows(&SHIPPED_ROWS, &TESTS_ONLY_ROWS),
+                    &TESTS_ONLY_ROWS,
+                ),
+                SHIPPED.into(),
+                "lists wasm-bindgen-test 0.3.79, which its command does not give",
+            ),
+            (
+                third_party_doc(["", &dev], &SHIPPED_ROWS, &TESTS_ONLY_ROWS),
+                SHIPPED.into(),
+                "-e normal --prefix",
+            ),
+            (
+                third_party_doc([&normal, ""], &SHIPPED_ROWS, &TESTS_ONLY_ROWS),
+                SHIPPED.into(),
+                "-e normal,dev --prefix",
+            ),
+            (
+                third_party_doc(
+                    ["", &format!("{normal}\n{dev}")],
+                    &SHIPPED_ROWS,
+                    &TESTS_ONLY_ROWS,
+                ),
+                SHIPPED.into(),
+                "-e normal --prefix none -f \"{p}|{l}|{r}\" above",
+            ),
+            (
+                doc(
+                    &with_rows(&SHIPPED_ROWS, &["| nameless | 1.0.0 |  | https://x |"]),
+                    &TESTS_ONLY_ROWS,
+                ),
+                format!("{SHIPPED}nameless v1.0.0||https://x\n"),
+                "cannot credit nameless 1.0.0",
+            ),
+            (doc(&[], &[]), String::new(), "gave no wgpu or no eframe"),
+            (
+                doc(&without(&SHIPPED_ROWS, "wgpu"), &TESTS_ONLY_ROWS),
+                SHIPPED
+                    .lines()
+                    .filter(|line| !line.contains("wgpu"))
+                    .map(|line| format!("{line}\n"))
+                    .collect(),
+                "gave no wgpu or no eframe",
+            ),
+            (
+                doc(&without(&SHIPPED_ROWS, "eframe"), &TESTS_ONLY_ROWS),
+                SHIPPED.replace(
+                    "eframe v0.36.2|MIT OR Apache-2.0|https://github.com/emilk/egui\n",
+                    "",
+                ),
+                "gave no wgpu or no eframe",
+            ),
+        ];
+        for (doc, shipped, part) in &cases {
+            let tests_only = if shipped.is_empty() { "" } else { TESTS_ONLY };
+            assert_one_drift(&check(doc, shipped, tests_only), part);
+        }
+        let vendored =
+            "log v0.4.34 (/root/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log";
+        assert_one_drift(
+            &check(
+                &today_doc(),
+                &format!("{SHIPPED}{vendored}\n{vendored} (*)\n"),
+                TESTS_ONLY,
+            ),
+            "(/root/vendor/log)",
+        );
+        let log_row = "| log | 0.4.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |";
+        assert_one_drift(
+            &check(
+                &doc(&with_rows(&SHIPPED_ROWS, &[log_row]), &TESTS_ONLY_ROWS),
+                &format!("{SHIPPED}{vendored}\n"),
+                TESTS_ONLY,
+            ),
+            "(/root/vendor/log)",
+        );
+        assert_one_drift(
+            &check(
+                &doc(&SHIPPED_ROWS, &with_rows(&TESTS_ONLY_ROWS, &[log_row])),
+                SHIPPED,
+                &format!("{TESTS_ONLY}{vendored}\n"),
+            ),
+            "(/root/vendor/log)",
+        );
+        assert_one_drift(
+            &third_party_matches(
+                &today_doc(),
+                &format!("{SHIPPED}{vendored}\n"),
+                &format!("{SHIPPED}{TESTS_ONLY}"),
+                &members(),
+            ),
+            "(/root/vendor/log)",
+        );
+        let second = |rows: &[&str]| doc(&SHIPPED_ROWS, rows);
+        assert_one_drift(
+            &check(&second(&[]), SHIPPED, TESTS_ONLY),
+            "lacks wasm-bindgen-test 0.3.79",
+        );
+        let stale_second = second(&[TESTS_ONLY_ROWS[0], "| zzz | 1.0.0 | MIT | https://zzz |"]);
+        let zzz_line = stale_second
+            .lines()
+            .position(|line| line.starts_with("| zzz |"))
+            .map(|index| index + 1);
+        let problems = check(&stale_second, SHIPPED, TESTS_ONLY);
+        assert_one_drift(&problems, "Fix: remove the row | zzz");
+        assert_eq!(problems[0].line, zzz_line);
+        assert_one_drift(
+            &check(
+                &second(&[TESTS_ONLY_ROWS[0], "| nameless | 1.0.0 |  | https://x |"]),
+                SHIPPED,
+                &format!("{TESTS_ONLY}nameless v1.0.0||https://x\n"),
+            ),
+            "cannot credit nameless 1.0.0",
+        );
+        assert_one_drift(
+            &check(
+                &third_party_doc(
+                    [&format!("{normal}\n{dev}"), ""],
+                    &SHIPPED_ROWS,
+                    &TESTS_ONLY_ROWS,
+                ),
+                SHIPPED,
+                TESTS_ONLY,
+            ),
+            "-e normal,dev --prefix none -f \"{p}|{l}|{r}\" below",
+        );
+        let stale_twice = check(
+            &doc(
+                &with_rows(&SHIPPED_ROWS, &["| zzz | 1.0.0 | MIT | https://zzz |"; 2]),
+                &TESTS_ONLY_ROWS,
+            ),
+            SHIPPED,
+            TESTS_ONLY,
+        );
+        assert_eq!(stale_twice.len(), 2, "{stale_twice:#?}");
+        let no_wgpu: String = SHIPPED
+            .lines()
+            .filter(|line| !line.contains("wgpu"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let wgpu_in_tests_only = third_party_matches(
+            &doc(&without(&SHIPPED_ROWS, "wgpu"), &TESTS_ONLY_ROWS),
+            &no_wgpu,
+            &format!(
+                "{no_wgpu}{TESTS_ONLY}wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu\n"
+            ),
+            &members(),
+        );
+        assert!(
+            wgpu_in_tests_only
+                .iter()
+                .any(|problem| problem.message.contains("gave no wgpu or no eframe")),
+            "{wgpu_in_tests_only:#?}"
+        );
+        let new_version = check(
+            &today_doc(),
+            &SHIPPED.replace("eframe v0.36.2", "eframe v0.37.0"),
+            TESTS_ONLY,
+        );
+        assert_eq!(new_version.len(), 2, "{new_version:#?}");
+        assert!(
+            new_version
+                .iter()
+                .any(|problem| problem.message.contains("lacks eframe 0.37.0"))
+        );
+        assert!(new_version.iter().any(|problem| {
+            problem
+                .message
+                .contains("lists eframe 0.36.2, which its command does not give")
+        }));
     }
 }

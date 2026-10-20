@@ -58,14 +58,52 @@ fn the_skip_allowlist_is_current() {
     assert!(problems.is_empty(), "{}", report.join("\n"));
 }
 
-/// One `cargo metadata` run for both layer tests.
+/// One `cargo metadata` run for the layer tests and the pin test.
+fn metadata() -> &'static str {
+    static METADATA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    METADATA.get_or_init(|| {
+        xtask::rules::workspace_metadata(&xtask::workspace_root()).expect("cargo metadata runs")
+    })
+}
+
 fn workspace() -> &'static xtask::rules::Workspace {
     static WORKSPACE: std::sync::OnceLock<xtask::rules::Workspace> = std::sync::OnceLock::new();
     WORKSPACE.get_or_init(|| {
-        let root = xtask::workspace_root();
-        let metadata = xtask::rules::workspace_metadata(&root).expect("cargo metadata runs");
-        xtask::rules::workspace(&metadata).expect("cargo metadata's JSON gives the workspace")
+        xtask::rules::workspace(metadata()).expect("cargo metadata's JSON gives the workspace")
     })
+}
+
+#[test]
+fn young_crates_are_pinned() {
+    let problems =
+        xtask::rules::young_crates_are_pinned_in(metadata(), &xtask::rules::SETTLED_CRATES)
+            .expect("cargo metadata's JSON can be read");
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} DEPS-1 problem(s) with pins:\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
+
+#[test]
+fn third_party_lists_what_ships() {
+    let root = xtask::workspace_root();
+    let doc =
+        std::fs::read_to_string(root.join("THIRD-PARTY.md")).expect("THIRD-PARTY.md can be read");
+    let [normal, normal_and_dev] = xtask::rules::THIRD_PARTY_EDGES
+        .map(|edges| xtask::rules::third_party_tree(&root, edges).expect("cargo tree runs"));
+    let members =
+        xtask::rules::member_folders(metadata()).expect("cargo metadata's JSON can be read");
+    let problems = xtask::rules::third_party_matches(&doc, &normal, &normal_and_dev, &members);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} DEPS-1 problem(s) with THIRD-PARTY.md:\n{}",
+        problems.len(),
+        report.join("\n")
+    );
 }
 
 #[test]
