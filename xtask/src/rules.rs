@@ -1789,29 +1789,22 @@ pub fn young_crates_are_pinned_in(
         .packages
         .iter()
         .filter(|package| is_member(&package.id))
-        .map(|package| {
+        .flat_map(|package| {
             let manifest = package
                 .manifest_path
                 .strip_prefix(&metadata.workspace_root)
                 .unwrap_or(&package.manifest_path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            package
-                .dependencies
-                .iter()
-                .filter_map(|dependency| {
-                    Some(SourcedDependency {
-                        manifest: manifest.clone(),
-                        name: &dependency.name,
-                        source: dependency.source.as_deref()?,
-                        requirement: dependency.req.as_deref(),
-                    })
+            package.dependencies.iter().filter_map(move |dependency| {
+                Some(SourcedDependency {
+                    manifest: manifest.clone(),
+                    name: &dependency.name,
+                    source: dependency.source.as_deref()?,
+                    requirement: dependency.req.as_deref(),
                 })
-                .collect::<Vec<_>>()
+            })
         })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flatten()
         .collect::<Vec<_>>();
     let registry: Vec<&SourcedDependency> = dependencies
         .iter()
@@ -4467,6 +4460,8 @@ mod deps_tests {
             requirement("f", "1.2.*"),
             requirement("g", ">=1.0, <2"),
             requirement("h", ">0"),
+            requirement("i", "~1"),
+            requirement("j", "=1"),
             with(path_dep("dsp", "/x/dsp", None), "req", json!("^0.1.0")),
             requirement("log", "^0.4.34"),
         ];
@@ -4500,6 +4495,9 @@ mod deps_tests {
             "~0.1.2",
             "=0.1",
             "^1.0.0-rc.1",
+            ">=1.0.0-rc.1, <2",
+            "=0.1.x",
+            "=0.1.0-a, <0.2",
         ];
         let shapes: [fn(Value) -> Value; 6] = [
             |dependency| dependency,
@@ -4575,12 +4573,17 @@ mod deps_tests {
             &[("log", "2024-1-5")],
         );
         assert!(bad_date[0].message.contains("2024-1-5"), "{bad_date:#?}");
+        let long_date = pins(
+            &two_members(vec![requirement("log", "^0.4.34")], vec![]),
+            &[("log", "2024-01-055")],
+        );
         assert_one_each(
             "DEPS-1",
             &[
                 (RULES_FILE, unused, None),
                 (RULES_FILE, pinned, None),
                 (RULES_FILE, bad_date, None),
+                (RULES_FILE, long_date, None),
             ],
         );
     }
@@ -4599,6 +4602,26 @@ mod deps_tests {
                 ("Cargo.toml", pins(&no_member, &[]), None),
                 ("Cargo.toml", pins(&no_registry, &[]), None),
             ],
+        );
+        let git_only = metadata(
+            vec![package(
+                "app",
+                "/x/app",
+                None,
+                vec![with(
+                    requirement("wsola", "*"),
+                    "source",
+                    json!("git+https://github.com/acme/wsola#0123abc"),
+                )],
+            )],
+            &[id("app", "/x/app")],
+            vec![],
+        );
+        let problems = pins(&git_only, &[]);
+        assert_eq!(problems.len(), 2, "{problems:#?}");
+        assert!(
+            problems[1].message.contains("so this check read nothing"),
+            "{problems:#?}"
         );
     }
 
@@ -4744,6 +4767,7 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
             "x v0.1.0 (/elsewhere/x)|MIT|",
             "x v0.1.0 (/root-other/x)|MIT|",
             "foo v1.0.0|MIT",
+            "x v0.1.0 extra|MIT|",
             "garbage",
         ] {
             let (rows, unread) = tree_rows(line, Path::new(ROOT));
@@ -4878,6 +4902,67 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
             let tests_only = if shipped.is_empty() { "" } else { TESTS_ONLY };
             assert_one_drift(&check(doc, shipped, tests_only), part);
         }
+        let second = |rows: &[&str]| doc(&SHIPPED_ROWS, rows);
+        assert_one_drift(
+            &check(&second(&[]), SHIPPED, TESTS_ONLY),
+            "lacks wasm-bindgen-test 0.3.79",
+        );
+        let stale_second = second(&[TESTS_ONLY_ROWS[0], "| zzz | 1.0.0 | MIT | https://zzz |"]);
+        let zzz_line = stale_second
+            .lines()
+            .position(|line| line.starts_with("| zzz |"))
+            .map(|index| index + 1);
+        let problems = check(&stale_second, SHIPPED, TESTS_ONLY);
+        assert_one_drift(&problems, "Fix: remove the row | zzz");
+        assert_eq!(problems[0].line, zzz_line);
+        assert_one_drift(
+            &check(
+                &second(&[TESTS_ONLY_ROWS[0], "| nameless | 1.0.0 |  | https://x |"]),
+                SHIPPED,
+                &format!("{TESTS_ONLY}nameless v1.0.0||https://x\n"),
+            ),
+            "cannot credit nameless 1.0.0",
+        );
+        assert_one_drift(
+            &check(
+                &third_party_doc(
+                    [&format!("{normal}\n{dev}"), ""],
+                    &SHIPPED_ROWS,
+                    &TESTS_ONLY_ROWS,
+                ),
+                SHIPPED,
+                TESTS_ONLY,
+            ),
+            "-e normal,dev --prefix none -f \"{p}|{l}|{r}\" below",
+        );
+        let stale_twice = check(
+            &doc(
+                &with_rows(&SHIPPED_ROWS, &["| zzz | 1.0.0 | MIT | https://zzz |"; 2]),
+                &TESTS_ONLY_ROWS,
+            ),
+            SHIPPED,
+            TESTS_ONLY,
+        );
+        assert_eq!(stale_twice.len(), 2, "{stale_twice:#?}");
+        let no_wgpu: String = SHIPPED
+            .lines()
+            .filter(|line| !line.contains("wgpu"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let wgpu_in_tests_only = third_party_matches(
+            &doc(&without(&SHIPPED_ROWS, "wgpu"), &TESTS_ONLY_ROWS),
+            &no_wgpu,
+            &format!(
+                "{no_wgpu}{TESTS_ONLY}wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu\n"
+            ),
+            ROOT,
+        );
+        assert!(
+            wgpu_in_tests_only
+                .iter()
+                .any(|problem| problem.message.contains("gave no wgpu or no eframe")),
+            "{wgpu_in_tests_only:#?}"
+        );
         let new_version = check(
             &today_doc(),
             &SHIPPED.replace("eframe v0.36.2", "eframe v0.37.0"),

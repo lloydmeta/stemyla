@@ -14,7 +14,7 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ### TD-7: no licence policy and no allowlist of registries
 
-`young_crates_are_pinned` and `third_party_lists_what_ships` check the pins and the licence list (DEPS-1).  Nothing fails a licence that is not permissive, or a registry other than crates.io.
+`young_crates_are_pinned` and `third_party_lists_what_ships` check the pins and the licence list (DEPS-1).  Nothing fails a licence that is not permissive.  A crate from a registry other than crates.io fails only if it ships, since `third_party_lists_what_ships` cannot read its line.
 
 * Fix: `cargo deny` for licences and registries.  It is a new tool, so vet it first (DEPS-1).
 
