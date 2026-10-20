@@ -1,15 +1,18 @@
 //! Structural checks of the tree.  Each one is a pure function over the
-//! files, or over Cargo's output, that returns problems, and each problem
-//! names its rule (`docs/invariants.md`) and the fix.  `xtask/tests/rules.rs`
-//! reads the real tree and Cargo's output, and runs them.
+//! files, the docs or Cargo's output, that returns problems, and each
+//! problem names its rule (`docs/invariants.md`) and the fix.
+//! `xtask/tests/rules.rs` reads the real tree, the docs and Cargo's output,
+//! and runs them.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use proc_macro2::{Literal, TokenStream, TokenTree};
+use serde::Deserialize;
 
 /// A breach of a rule, found in one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +295,826 @@ fn tree_problems(package: &str, tree: &str) -> Vec<Problem> {
         .chain(without_depth)
         .chain(synth_children)
         .collect()
+}
+
+/// The kind of an edge, as `cargo metadata` gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    Normal,
+    Dev,
+    Build,
+}
+
+/// A dependency of one workspace crate on another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edge {
+    pub to: String,
+    pub kind: Kind,
+}
+
+/// Where a stray comes from: a folder, or a `source` such as `git+...`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Path(String),
+    Source(String),
+}
+
+/// A crate from outside the members that can hold or reach workspace
+/// code: its name, and where it comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stray {
+    pub name: String,
+    pub origin: Origin,
+}
+
+/// A crate outside the members that takes a member: its name, its
+/// `source`, and the member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutsideEdge {
+    pub from: String,
+    pub source: String,
+    pub to: String,
+}
+
+/// A workspace crate: its package name, its manifest relative to the
+/// root, its edges and the strays that it takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceCrate {
+    pub name: String,
+    pub manifest: String,
+    pub edges: Vec<Edge>,
+    pub strays: Vec<Stray>,
+}
+
+/// The workspace crates, the path crates and member names in the build
+/// that are not members, and the crates outside the members that take a
+/// member.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Workspace {
+    pub crates: Vec<WorkspaceCrate>,
+    pub outside: Vec<Stray>,
+    pub outside_takes: Vec<OutsideEdge>,
+}
+
+/// The layers of LAYER-1, lowest first.  The layers table must use these.
+pub const LAYERS: [&str; 5] = ["Test support", "Pure", "Engine and GPU", "Shells", "Tools"];
+
+/// Runs `cargo metadata --format-version 1 --all-features --locked` in
+/// `root`.  Without `--no-deps`, so that `packages` also holds patched and
+/// excluded path crates; with `--all-features`, so that it holds crates
+/// behind a feature that is off; `--locked`, so a test never writes
+/// `Cargo.lock`.
+pub fn workspace_metadata(root: &Path) -> Result<String> {
+    let output = Command::new(env!("CARGO"))
+        .current_dir(root)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--all-features",
+            "--locked",
+        ])
+        .output()
+        .context("running cargo metadata")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).context("cargo metadata printed text that is not UTF-8")
+}
+
+/// The parts of `cargo metadata`'s JSON that the layer checks read.
+#[derive(Deserialize)]
+struct Metadata {
+    packages: Vec<MetadataPackage>,
+    workspace_members: Vec<String>,
+    workspace_root: PathBuf,
+    /// `null` with `--no-deps`.
+    resolve: Option<Resolve>,
+}
+
+#[derive(Deserialize)]
+struct MetadataPackage {
+    id: String,
+    name: String,
+    source: Option<String>,
+    manifest_path: PathBuf,
+    dependencies: Vec<MetadataDependency>,
+    /// The features that the package declares, by name.
+    features: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct MetadataDependency {
+    /// The package name, also when the dependency is renamed.
+    name: String,
+    source: Option<String>,
+    kind: Option<String>,
+    /// Present for a path dependency only.
+    path: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct Resolve {
+    nodes: Vec<ResolveNode>,
+}
+
+#[derive(Deserialize)]
+struct ResolveNode {
+    id: String,
+    deps: Vec<ResolveDep>,
+    /// The features turned on in this build.
+    #[serde(default)]
+    features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ResolveDep {
+    /// The ID of the package that the node takes.
+    pkg: String,
+}
+
+/// What one dependency of a workspace crate is to the layer checks.
+enum Found {
+    Edge(Edge),
+    Stray(Stray),
+    Neither,
+}
+
+fn kind_of(dependency: &MetadataDependency) -> Result<Kind> {
+    match dependency.kind.as_deref() {
+        None => Ok(Kind::Normal),
+        Some("dev") => Ok(Kind::Dev),
+        Some("build") => Ok(Kind::Build),
+        Some(other) => anyhow::bail!(
+            "cargo metadata gave the dependency kind {other:?} for {}, which this check cannot read",
+            dependency.name
+        ),
+    }
+}
+
+fn folder_of(package: &MetadataPackage) -> &Path {
+    package.manifest_path.parent().unwrap_or(Path::new(""))
+}
+
+/// The workspace, from `cargo metadata`'s JSON.  Edges are found by
+/// `path`, compared as whole paths, so a renamed dependency counts under its
+/// package name, and a registry crate with a member's name is no edge.
+pub fn workspace(metadata: &str) -> Result<Workspace> {
+    let metadata: Metadata =
+        serde_json::from_str(metadata).context("reading cargo metadata's JSON")?;
+    let is_member = |id: &str| metadata.workspace_members.iter().any(|member| member == id);
+    let members: Vec<&MetadataPackage> = metadata
+        .packages
+        .iter()
+        .filter(|package| is_member(&package.id))
+        .collect();
+    let member_names: BTreeSet<&str> = members
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect();
+    let resolve = metadata.resolve.as_ref().context(
+        "cargo metadata gave no resolve, so it ran with --no-deps; the checks need the whole build",
+    )?;
+    for package in &members {
+        let node = resolve
+            .nodes
+            .iter()
+            .find(|node| node.id == package.id)
+            .with_context(|| {
+                format!("cargo metadata's resolve has no node for {}", package.name)
+            })?;
+        let off: Vec<&str> = package
+            .features
+            .keys()
+            .filter(|feature| !node.features.contains(feature))
+            .map(String::as_str)
+            .collect();
+        anyhow::ensure!(
+            off.is_empty(),
+            "cargo metadata ran without --all-features: {} has {} off, so a dependency behind a feature can hide",
+            package.name,
+            off.join(", ")
+        );
+    }
+    let crates = members
+        .iter()
+        .map(|package| workspace_crate(package, &members, &member_names, &metadata.workspace_root))
+        .collect::<Result<Vec<_>>>()?;
+    let outside = metadata
+        .packages
+        .iter()
+        .filter(|package| !is_member(&package.id))
+        .filter_map(|package| match &package.source {
+            None => Some(Stray {
+                name: package.name.clone(),
+                origin: Origin::Path(folder_of(package).display().to_string()),
+            }),
+            Some(source) if member_names.contains(package.name.as_str()) => Some(Stray {
+                name: package.name.clone(),
+                origin: Origin::Source(source.clone()),
+            }),
+            Some(_) => None,
+        })
+        .collect();
+    // A path crate that takes a member is in `outside` already.
+    let outside_takes = resolve
+        .nodes
+        .iter()
+        .filter(|node| !is_member(&node.id))
+        .filter_map(|node| {
+            let package = metadata
+                .packages
+                .iter()
+                .find(|package| package.id == node.id)?;
+            let source = package.source.as_ref()?;
+            Some(
+                node.deps
+                    .iter()
+                    .filter_map(|dep| members.iter().find(|member| member.id == dep.pkg))
+                    .map(|member| OutsideEdge {
+                        from: package.name.clone(),
+                        source: source.clone(),
+                        to: member.name.clone(),
+                    }),
+            )
+        })
+        .flatten()
+        .collect();
+    Ok(Workspace {
+        crates,
+        outside,
+        outside_takes,
+    })
+}
+
+fn workspace_crate(
+    package: &MetadataPackage,
+    members: &[&MetadataPackage],
+    member_names: &BTreeSet<&str>,
+    root: &Path,
+) -> Result<WorkspaceCrate> {
+    let manifest = package.manifest_path.strip_prefix(root).with_context(|| {
+        format!(
+            "the manifest {} is outside the workspace root {}",
+            package.manifest_path.display(),
+            root.display()
+        )
+    })?;
+    let found = package
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            let kind = kind_of(dependency)?;
+            Ok(match &dependency.path {
+                Some(path) => match members.iter().find(|member| folder_of(member) == path) {
+                    Some(member) if member.id == package.id => Found::Neither,
+                    Some(member) => Found::Edge(Edge {
+                        to: member.name.clone(),
+                        kind,
+                    }),
+                    None => Found::Stray(Stray {
+                        name: dependency.name.clone(),
+                        origin: Origin::Path(path.display().to_string()),
+                    }),
+                },
+                None if member_names.contains(dependency.name.as_str()) => Found::Stray(Stray {
+                    name: dependency.name.clone(),
+                    origin: Origin::Source(dependency.source.clone().unwrap_or_default()),
+                }),
+                None => Found::Neither,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(WorkspaceCrate {
+        name: package.name.clone(),
+        manifest: manifest.to_string_lossy().replace('\\', "/"),
+        edges: found
+            .iter()
+            .filter_map(|found| match found {
+                Found::Edge(edge) => Some(edge.clone()),
+                _ => None,
+            })
+            .collect(),
+        strays: found
+            .into_iter()
+            .filter_map(|found| match found {
+                Found::Stray(stray) => Some(stray),
+                _ => None,
+            })
+            .collect(),
+    })
+}
+
+const ARCHITECTURE: &str = "docs/ARCHITECTURE.md";
+const TEST_SUPPORT: &str = "test-support";
+const PROTOCOL: &str = "stem-protocol";
+const DSP: &str = "dsp";
+const TABLE_HEADER: [&str; 3] = ["Layer", "Crate", "Depends on"];
+
+fn layer1(file: &str, message: String) -> Problem {
+    Problem {
+        rule: "LAYER-1",
+        file: file.to_string(),
+        line: None,
+        message,
+    }
+}
+
+/// One row of the layers table that the check can read.
+struct Row<'a> {
+    layer: &'a str,
+    name: &'a str,
+    deps: Vec<&'a str>,
+}
+
+enum Table<'a> {
+    Missing,
+    /// The first line of the header or separator that is wrong.
+    BadStart(&'a str),
+    /// A header with no line after it.
+    NoSeparator,
+    /// Each row, or the line of a row that cannot be read.
+    Rows(Vec<std::result::Result<Row<'a>, &'a str>>),
+}
+
+/// The table that follows `### Layers` before any other heading.
+fn layers_table(architecture: &str) -> Table<'_> {
+    let lines: Vec<&str> = architecture.lines().collect();
+    let Some(heading) = lines
+        .iter()
+        .position(|line| line.trim_end() == "### Layers")
+    else {
+        return Table::Missing;
+    };
+    let after = &lines[heading + 1..];
+    let Some(start) = after
+        .iter()
+        .position(|line| line.starts_with('|') || line.starts_with('#'))
+        .filter(|&at| after[at].starts_with('|'))
+    else {
+        return Table::Missing;
+    };
+    let table: Vec<&str> = after[start..]
+        .iter()
+        .take_while(|line| line.starts_with('|'))
+        .copied()
+        .collect();
+    let header = table[0];
+    if cells(header).as_deref() != Some(&TABLE_HEADER[..]) {
+        return Table::BadStart(header);
+    }
+    let is_separator = |line: &str| {
+        cells(line).is_some_and(|cells| {
+            cells.len() == 3
+                && cells
+                    .iter()
+                    .all(|cell| !cell.is_empty() && cell.chars().all(|c| c == '-'))
+        })
+    };
+    match table.get(1) {
+        Some(separator) if is_separator(separator) => {}
+        Some(separator) => return Table::BadStart(separator),
+        None => return Table::NoSeparator,
+    }
+    Table::Rows(
+        table[2..]
+            .iter()
+            .map(|line| row(line).ok_or(*line))
+            .collect(),
+    )
+}
+
+/// The trimmed cells of a line that starts and ends with `|`.
+fn cells(line: &str) -> Option<Vec<&str>> {
+    let inner = line.trim_end().strip_prefix('|')?.strip_suffix('|')?;
+    Some(inner.split('|').map(str::trim).collect())
+}
+
+fn code_span(cell: &str) -> Option<&str> {
+    let inner = cell.strip_prefix('`')?.strip_suffix('`')?;
+    (!inner.is_empty() && !inner.contains('`')).then_some(inner)
+}
+
+fn row(line: &str) -> Option<Row<'_>> {
+    let cells = cells(line)?;
+    let [layer, name, deps] = cells.as_slice() else {
+        return None;
+    };
+    let deps: Vec<&str> = if *deps == "no workspace crate" {
+        Vec::new()
+    } else {
+        deps.split(", ").map(code_span).collect::<Option<_>>()?
+    };
+    let once = deps.iter().collect::<BTreeSet<_>>().len() == deps.len();
+    (!layer.is_empty() && once).then_some(())?;
+    Some(Row {
+        layer,
+        name: code_span(name)?,
+        deps,
+    })
+}
+
+/// LAYER-1: the edges match the layers table, the table goes only
+/// downwards, and no stray hides a dependency.  The table and the edges
+/// must match both ways, so the check cannot pass while it reads nothing.
+pub fn crates_follow_the_layers(workspace: &Workspace, architecture: &str) -> Vec<Problem> {
+    if workspace.crates.is_empty() {
+        return vec![layer1(
+            "Cargo.toml",
+            "LAYER-1: cargo metadata gave no workspace crate, so this check read nothing.  Fix: run cargo metadata --format-version 1 --all-features --locked at the workspace root.".into(),
+        )];
+    }
+    let table = match layers_table(architecture) {
+        Table::Missing => vec![layer1(
+            ARCHITECTURE,
+            "LAYER-1: docs/ARCHITECTURE.md has no table under ### Layers, so this check read nothing.  Fix: restore the table, with the columns Layer, Crate and Depends on.".into(),
+        )],
+        Table::BadStart(line) => vec![layer1(
+            ARCHITECTURE,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md starts with \"{line}\", not \"| Layer | Crate | Depends on |\" and \"| - | - | - |\".  Fix: use those three columns, one row for each crate."
+            ),
+        )],
+        Table::NoSeparator => vec![layer1(
+            ARCHITECTURE,
+            "LAYER-1: the layers table in docs/ARCHITECTURE.md has no separator line after its header.  Fix: add \"| - | - | - |\" after \"| Layer | Crate | Depends on |\", then one row for each crate.".into(),
+        )],
+        Table::Rows(rows) => table_problems(&workspace.crates, &rows),
+    };
+    table
+        .into_iter()
+        .chain(test_support_problems(&workspace.crates))
+        .chain(stray_problems(workspace))
+        .collect()
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Normal => "normal",
+        Kind::Dev => "dev",
+        Kind::Build => "build",
+    }
+}
+
+fn table_problems(
+    crates: &[WorkspaceCrate],
+    lines: &[std::result::Result<Row<'_>, &str>],
+) -> Vec<Problem> {
+    let by_name: BTreeMap<&str, &WorkspaceCrate> = crates
+        .iter()
+        .map(|krate| (krate.name.as_str(), krate))
+        .collect();
+    // Borrowed, so the `move` closures below take a reference.
+    let members = &by_name;
+    let unreadable = lines.iter().filter_map(|line| line.as_ref().err()).map(|line| {
+        layer1(
+            ARCHITECTURE,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has a row that this check cannot read: \"{line}\".  Fix: give the layer and one crate in a code span.  Then give its dependencies once each, as code spans joined by \", \", or \"no workspace crate\"."
+            ),
+        )
+    });
+    let readable: Vec<&Row> = lines.iter().filter_map(|line| line.as_ref().ok()).collect();
+    let not_members = readable
+        .iter()
+        .filter(|row| !members.contains_key(row.name))
+        .map(|row| {
+            layer1(
+                ARCHITECTURE,
+                format!(
+                    "LAYER-1: the layers table in docs/ARCHITECTURE.md has a row for {}, which is not a workspace crate.  Fix: remove the row, or use the package name from its Cargo.toml.",
+                    row.name
+                ),
+            )
+        });
+    let member_rows: Vec<&Row> = readable
+        .iter()
+        .filter(|row| members.contains_key(row.name))
+        .copied()
+        .collect();
+    // The first row of each crate counts; the rest are left out.
+    let rows: Vec<&Row> = member_rows
+        .iter()
+        .enumerate()
+        .filter(|(at, row)| {
+            !member_rows[..*at]
+                .iter()
+                .any(|earlier| earlier.name == row.name)
+        })
+        .map(|(_, row)| *row)
+        .collect();
+    let repeated = rows.iter().filter_map(|row| {
+        let count = member_rows.iter().filter(|other| other.name == row.name).count();
+        (count > 1).then(|| {
+            layer1(
+                ARCHITECTURE,
+                format!(
+                    "LAYER-1: the layers table in docs/ARCHITECTURE.md has {count} rows for {}.  Fix: keep one row for each crate.",
+                    row.name
+                ),
+            )
+        })
+    });
+    let layers: Vec<&str> = rows
+        .iter()
+        .enumerate()
+        .filter(|(at, row)| !rows[..*at].iter().any(|earlier| earlier.layer == row.layer))
+        .map(|(_, row)| row.layer)
+        .collect();
+    let wrong_layers = (layers != LAYERS).then(|| {
+        layer1(
+            ARCHITECTURE,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has the layers \"{}\", not those in LAYERS in xtask/src/rules.rs.  Fix: use the five layers in LAYERS: {}.  To change the layers, change the table, LAYERS and LAYER-1 in one commit (DOC-1).",
+                layers.join(", "),
+                LAYERS.join(", ")
+            ),
+        )
+    });
+    let apart = layers
+        .iter()
+        .filter(|layer| {
+            let first = rows.iter().position(|row| row.layer == **layer);
+            let last = rows.iter().rposition(|row| row.layer == **layer);
+            first
+                .zip(last)
+                .is_some_and(|(first, last)| rows[first..=last].iter().any(|row| row.layer != **layer))
+        })
+        .map(|layer| {
+            layer1(
+                ARCHITECTURE,
+                format!(
+                    "LAYER-1: the layers table in docs/ARCHITECTURE.md has rows for {layer} that are not together.  Fix: put each layer's rows together, lowest layer first."
+                ),
+            )
+        });
+    let row_of = &|name: &str| rows.iter().find(|row| row.name == name).copied();
+    let rank_of = &|row: &Row| layers.iter().position(|layer| *layer == row.layer);
+    let without_rows = crates
+        .iter()
+        .filter(|krate| row_of(&krate.name).is_none())
+        .map(|krate| {
+            layer1(
+                ARCHITECTURE,
+                format!(
+                    "LAYER-1: the workspace crate {} has no row in the layers table in docs/ARCHITECTURE.md.  Fix: add a row with its layer and the workspace crates that it depends on.",
+                    krate.name
+                ),
+            )
+        });
+    let listed = rows.iter().flat_map(|row| {
+        let krate = members[row.name];
+        row.deps.iter().flat_map(move |dep| {
+            if *dep == TEST_SUPPORT {
+                return vec![layer1(
+                    ARCHITECTURE,
+                    format!(
+                        "LAYER-1: the layers table in docs/ARCHITECTURE.md lists test-support for {}.  Fix: remove it.  The table leaves out test-support, which any crate but dsp may take as a dev-dependency.",
+                        row.name
+                    ),
+                )];
+            }
+            if !members.contains_key(dep) {
+                return vec![layer1(
+                    ARCHITECTURE,
+                    format!(
+                        "LAYER-1: the layers table in docs/ARCHITECTURE.md lists {dep} for {name}, but {dep} is not a workspace crate.  Fix: correct the name, or remove it from {name}'s row.",
+                        name = row.name
+                    ),
+                )];
+            }
+            let Some(dep_row) = row_of(dep) else {
+                return Vec::new();
+            };
+            let stale = (!krate.edges.iter().any(|edge| edge.to == *dep)).then(|| {
+                layer1(
+                    ARCHITECTURE,
+                    format!(
+                        "LAYER-1: the layers table in docs/ARCHITECTURE.md lists {dep} for {name}, but {manifest} has no dependency on it.  Fix: remove {dep} from {name}'s row, so the table stays true.",
+                        name = row.name,
+                        manifest = krate.manifest
+                    ),
+                )
+            });
+            let not_lower = (rank_of(dep_row) >= rank_of(row)).then(|| {
+                layer1(
+                    ARCHITECTURE,
+                    format!(
+                        "LAYER-1: the layers table in docs/ARCHITECTURE.md lets {} ({}) depend on {dep} ({}), which is not in a lower layer.  Fix: remove the dependency, or move a crate to another layer of the table, so that each crate depends only on lower layers.",
+                        row.name, row.layer, dep_row.layer
+                    ),
+                )
+            });
+            stale.into_iter().chain(not_lower).collect()
+        })
+    });
+    // test-support's own edges, and edges to it, have rules of their own.
+    let unlisted = rows
+        .iter()
+        .filter(|row| row.name != TEST_SUPPORT)
+        .flat_map(|row| {
+            let krate = members[row.name];
+            let kinds: BTreeMap<&str, BTreeSet<Kind>> = krate
+                .edges
+                .iter()
+                .filter(|edge| edge.to != TEST_SUPPORT && row_of(&edge.to).is_some())
+                .fold(BTreeMap::new(), |mut kinds, edge| {
+                    kinds.entry(edge.to.as_str()).or_default().insert(edge.kind);
+                    kinds
+                });
+            kinds
+                .into_iter()
+                .filter(|(to, _)| !row.deps.contains(to))
+                .map(|(to, kinds)| {
+                    let kinds: Vec<&str> = kinds.into_iter().map(kind_name).collect();
+                    layer1(
+                        &krate.manifest,
+                        format!(
+                            "LAYER-1: {name} depends on {to} ({kinds}), but the layers table in docs/ARCHITECTURE.md does not list it.  Fix: remove the dependency from {manifest}.  If the design changes, add {to} to {name}'s row in the same commit.",
+                            name = krate.name,
+                            kinds = kinds.join(", "),
+                            manifest = krate.manifest
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+    unreadable
+        .chain(not_members)
+        .chain(repeated)
+        .chain(wrong_layers)
+        .chain(apart)
+        .chain(without_rows)
+        .chain(listed)
+        .chain(unlisted)
+        .collect()
+}
+
+/// `test-support` is a dev-dependency only, takes no workspace crate, and
+/// `dsp` does not take it.  These rules need no table.
+fn test_support_problems(crates: &[WorkspaceCrate]) -> Vec<Problem> {
+    crates
+        .iter()
+        .flat_map(|krate| {
+            let kinds: BTreeSet<Kind> = krate
+                .edges
+                .iter()
+                .filter(|edge| edge.to == TEST_SUPPORT)
+                .map(|edge| edge.kind)
+                .collect();
+            let manifest = &krate.manifest;
+            match krate.name.as_str() {
+                DSP => (!kinds.is_empty())
+                    .then(|| {
+                        layer1(
+                            manifest,
+                            format!(
+                                "LAYER-1: dsp takes test-support, but dsp must have no dependencies (DSP-1).  Fix: remove it from {manifest}."
+                            ),
+                        )
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                TEST_SUPPORT => krate
+                    .edges
+                    .iter()
+                    .map(|edge| edge.to.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(|to| {
+                        layer1(
+                            manifest,
+                            format!(
+                                "LAYER-1: test-support takes {to}, but test-support must take no workspace crate.  The crates that take it must reach nothing through it.  Fix: remove {to} from {manifest}."
+                            ),
+                        )
+                    })
+                    .collect(),
+                name => {
+                    let normal = kinds.contains(&Kind::Normal).then(|| {
+                        layer1(
+                            manifest,
+                            format!(
+                                "LAYER-1: {name} takes test-support as a normal dependency, so it would ship.  Fix: move it to [dev-dependencies] in {manifest}."
+                            ),
+                        )
+                    });
+                    let build = kinds.contains(&Kind::Build).then(|| {
+                        layer1(
+                            manifest,
+                            format!(
+                                "LAYER-1: {name} takes test-support as a build dependency, but it is a dev-dependency only.  Fix: move it to [dev-dependencies] in {manifest}."
+                            ),
+                        )
+                    });
+                    normal.into_iter().chain(build).collect()
+                }
+            }
+        })
+        .collect()
+}
+
+/// A stray hides what it depends on from the check, so each is a problem.
+fn stray_problems(workspace: &Workspace) -> Vec<Problem> {
+    let of_crates = workspace.crates.iter().flat_map(|krate| {
+        krate.strays.iter().map(|stray| {
+            let (from, name) = (&krate.name, &stray.name);
+            let message = match &stray.origin {
+                Origin::Path(path) => format!(
+                    "LAYER-1: {from} takes {name} from {path}, which is not a workspace crate, so this check cannot see what {name} depends on.  Fix: make {name} a workspace crate with a row in the layers table, or remove it."
+                ),
+                Origin::Source(source) => format!(
+                    "LAYER-1: {from} takes {name} from {source}, not from the workspace.  Fix: take {name} by path, or remove it."
+                ),
+            };
+            layer1(&krate.manifest, message)
+        })
+    });
+    let outside = workspace.outside.iter().map(|stray| {
+        let name = &stray.name;
+        let message = match &stray.origin {
+            Origin::Path(path) => format!(
+                "LAYER-1: the build takes {name} from {path}, a path crate that is not a workspace crate, so this check cannot see what {name} depends on.  Fix: remove the [patch] or exclude that brings it in.  Or make it a workspace crate with a row in the layers table."
+            ),
+            Origin::Source(source) => format!(
+                "LAYER-1: the build takes {name} from {source}, not from the workspace.  Fix: remove the dependency that brings it in."
+            ),
+        };
+        layer1("Cargo.toml", message)
+    });
+    let takes = workspace.outside_takes.iter().map(|edge| {
+        layer1(
+            "Cargo.toml",
+            format!(
+                "LAYER-1: {from}, from {source}, takes the workspace crate {to}, so this check cannot see the dependency.  Fix: remove the [patch] that points {to} at the workspace, or remove {from}.",
+                from = edge.from,
+                source = edge.source,
+                to = edge.to
+            ),
+        )
+    });
+    of_crates.chain(outside).chain(takes).collect()
+}
+
+/// LAYER-1: the page side and the worker side meet only through
+/// `stem-protocol`.  Each side is its shell and every workspace crate that
+/// it reaches through normal edges, for any target.
+pub fn shells_meet_only_through_the_protocol(crates: &[WorkspaceCrate]) -> Vec<Problem> {
+    let missing: Vec<Problem> = WEB_APP
+        .iter()
+        .filter(|shell| !crates.iter().any(|krate| krate.name == **shell))
+        .map(|shell| {
+            layer1(
+                "Cargo.toml",
+                format!(
+                    "LAYER-1: the workspace has no crate {shell}, so this check cannot compare the page side and the worker side.  Fix: if the web app changed, change WEB_APP in xtask/src/rules.rs and LAYER-1's text (DOC-1)."
+                ),
+            )
+        })
+        .collect();
+    if !missing.is_empty() {
+        return missing;
+    }
+    let [page, worker] = WEB_APP.map(|shell| reached(crates, shell));
+    let shared: Vec<&str> = page
+        .intersection(&worker)
+        .filter(|name| **name != PROTOCOL)
+        .copied()
+        .collect();
+    if shared.is_empty() {
+        return Vec::new();
+    }
+    vec![layer1(
+        "Cargo.toml",
+        format!(
+            "LAYER-1: {} and {} both depend on {}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol.",
+            WEB_APP[0],
+            WEB_APP[1],
+            shared.join(", ")
+        ),
+    )]
+}
+
+/// `shell` and every workspace crate that it reaches through normal edges.
+fn reached<'a>(crates: &'a [WorkspaceCrate], shell: &'a str) -> BTreeSet<&'a str> {
+    let mut seen = BTreeSet::from([shell]);
+    let mut frontier = vec![shell];
+    while let Some(name) = frontier.pop() {
+        let next = crates
+            .iter()
+            .filter(|krate| krate.name == name)
+            .flat_map(|krate| &krate.edges)
+            .filter(|edge| edge.kind == Kind::Normal)
+            .map(|edge| edge.to.as_str());
+        for to in next {
+            if seen.insert(to) {
+                frontier.push(to);
+            }
+        }
+    }
+    seen
 }
 
 #[cfg(test)]
@@ -653,5 +1476,1331 @@ mod tests {
             "{}",
             problems[0]
         );
+    }
+
+    // LAYER-1, crate layering (M5).
+
+    use serde_json::{Value, json};
+
+    const ARCH: &str = "docs/ARCHITECTURE.md";
+
+    const LAYERS_TABLE: &str = "\
+| Layer | Crate | Depends on |
+| - | - | - |
+| Test support | `test-support` | no workspace crate |
+| Pure | `dsp` | no workspace crate |
+| Pure | `synth` | no workspace crate |
+| Pure | `roformer` | no workspace crate |
+| Pure | `stem-protocol` | no workspace crate |
+| Engine and GPU | `engine` | `dsp` |
+| Engine and GPU | `roformer-gpu` | `roformer` |
+| Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
+| Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
+| Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
+";
+
+    const TEST_SUPPORT_ROW: &str = "| Test support | `test-support` | no workspace crate |\n";
+    const DSP_ROW: &str = "| Pure | `dsp` | no workspace crate |\n";
+    const SYNTH_ROW: &str = "| Pure | `synth` | no workspace crate |\n";
+    const ROFORMER_ROW: &str = "| Pure | `roformer` | no workspace crate |\n";
+    const PROTOCOL_ROW: &str = "| Pure | `stem-protocol` | no workspace crate |\n";
+    const ENGINE_ROW: &str = "| Engine and GPU | `engine` | `dsp` |\n";
+    const GPU_ROW: &str = "| Engine and GPU | `roformer-gpu` | `roformer` |\n";
+    const APP_ROW: &str = "| Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |\n";
+    const XTASK_ROW: &str = "| Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |\n";
+
+    /// A doc shaped like `docs/ARCHITECTURE.md`, with `table` under
+    /// `### Layers` and a later table that the check must not read.
+    fn architecture(table: &str) -> String {
+        format!(
+            "# How it works\n\n## Crates\n\n### Layers\n\nCrates depend only downwards.\n\n{table}\nAny crate but `dsp` may take `test-support`.\n\n## The model\n\n| Part | Parameters |\n| - | - |\n| band split | 1 M |\n"
+        )
+    }
+
+    fn edit(table: &str, from: &str, to: &str) -> String {
+        assert!(table.contains(from), "the fixture has no {from:?}");
+        table.replacen(from, to, 1)
+    }
+
+    fn krate(name: &str, manifest: &str, edges: &[(&str, Kind)]) -> WorkspaceCrate {
+        WorkspaceCrate {
+            name: name.into(),
+            manifest: manifest.into(),
+            edges: edges
+                .iter()
+                .map(|(to, kind)| Edge {
+                    to: (*to).into(),
+                    kind: *kind,
+                })
+                .collect(),
+            strays: Vec::new(),
+        }
+    }
+
+    /// The workspace crates and edges of 2026-10-20.
+    fn today() -> Workspace {
+        use Kind::{Dev, Normal};
+        Workspace {
+            crates: vec![
+                krate("dsp", "dsp/Cargo.toml", &[]),
+                krate("engine", "engine/Cargo.toml", &[("dsp", Normal)]),
+                krate(
+                    "app",
+                    "app/Cargo.toml",
+                    &[
+                        ("dsp", Normal),
+                        ("engine", Normal),
+                        ("synth", Normal),
+                        ("stem-protocol", Normal),
+                        ("synth", Dev),
+                    ],
+                ),
+                krate("synth", "synth/Cargo.toml", &[]),
+                krate("stem-protocol", "protocol/Cargo.toml", &[]),
+                krate(
+                    "xtask",
+                    "xtask/Cargo.toml",
+                    &[
+                        ("dsp", Normal),
+                        ("engine", Normal),
+                        ("synth", Normal),
+                        ("roformer", Normal),
+                    ],
+                ),
+                krate("roformer", "roformer/Cargo.toml", &[("test-support", Dev)]),
+                krate("test-support", "test-support/Cargo.toml", &[]),
+                krate(
+                    "roformer-gpu",
+                    "roformer-gpu/Cargo.toml",
+                    &[("roformer", Normal), ("test-support", Dev)],
+                ),
+                krate(
+                    "stem-worker",
+                    "worker/Cargo.toml",
+                    &[
+                        ("roformer", Normal),
+                        ("roformer-gpu", Normal),
+                        ("stem-protocol", Normal),
+                    ],
+                ),
+            ],
+            ..Workspace::default()
+        }
+    }
+
+    fn with_edges(workspace: Workspace, added: &[(&str, &str, Kind)]) -> Workspace {
+        Workspace {
+            crates: workspace
+                .crates
+                .into_iter()
+                .map(|c| {
+                    let edges = c
+                        .edges
+                        .iter()
+                        .cloned()
+                        .chain(added.iter().filter(|(from, _, _)| *from == c.name).map(
+                            |(_, to, kind)| Edge {
+                                to: (*to).into(),
+                                kind: *kind,
+                            },
+                        ))
+                        .collect();
+                    WorkspaceCrate { edges, ..c }
+                })
+                .collect(),
+            ..workspace
+        }
+    }
+
+    fn without_edge(workspace: Workspace, from: &str, to: &str) -> Workspace {
+        Workspace {
+            crates: workspace
+                .crates
+                .into_iter()
+                .map(|c| {
+                    let edges = c
+                        .edges
+                        .iter()
+                        .filter(|e| !(c.name == from && e.to == to))
+                        .cloned()
+                        .collect();
+                    WorkspaceCrate { edges, ..c }
+                })
+                .collect(),
+            ..workspace
+        }
+    }
+
+    fn without_crate(workspace: Workspace, name: &str) -> Workspace {
+        Workspace {
+            crates: workspace
+                .crates
+                .into_iter()
+                .filter(|c| c.name != name)
+                .collect(),
+            ..workspace
+        }
+    }
+
+    fn layer1(file: &str, message: impl Into<String>) -> Problem {
+        Problem {
+            rule: "LAYER-1",
+            file: file.into(),
+            line: None,
+            message: message.into(),
+        }
+    }
+
+    fn by_file_and_message(problems: Vec<Problem>) -> Vec<Problem> {
+        let mut sorted = problems;
+        sorted.sort_by(|a, b| (&a.file, &a.message).cmp(&(&b.file, &b.message)));
+        sorted
+    }
+
+    #[track_caller]
+    fn assert_problems(actual: Vec<Problem>, expected: Vec<Problem>) {
+        assert_eq!(by_file_and_message(actual), by_file_and_message(expected));
+    }
+
+    fn layers(workspace: &Workspace, table: &str) -> Vec<Problem> {
+        crates_follow_the_layers(workspace, &architecture(table))
+    }
+
+    fn unlisted(from: &str, to: &str, kinds: &str, manifest: &str) -> Problem {
+        layer1(
+            manifest,
+            format!(
+                "LAYER-1: {from} depends on {to} ({kinds}), but the layers table in docs/ARCHITECTURE.md does not list it.  Fix: remove the dependency from {manifest}.  If the design changes, add {to} to {from}'s row in the same commit."
+            ),
+        )
+    }
+
+    fn stale(from: &str, to: &str, manifest: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md lists {to} for {from}, but {manifest} has no dependency on it.  Fix: remove {to} from {from}'s row, so the table stays true."
+            ),
+        )
+    }
+
+    fn not_lower(from: &str, from_layer: &str, to: &str, to_layer: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md lets {from} ({from_layer}) depend on {to} ({to_layer}), which is not in a lower layer.  Fix: remove the dependency, or move a crate to another layer of the table, so that each crate depends only on lower layers."
+            ),
+        )
+    }
+
+    fn wrong_layers(layers: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has the layers \"{layers}\", not those in LAYERS in xtask/src/rules.rs.  Fix: use the five layers in LAYERS: Test support, Pure, Engine and GPU, Shells, Tools.  To change the layers, change the table, LAYERS and LAYER-1 in one commit (DOC-1)."
+            ),
+        )
+    }
+
+    fn apart(layer: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has rows for {layer} that are not together.  Fix: put each layer's rows together, lowest layer first."
+            ),
+        )
+    }
+
+    fn no_row(name: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the workspace crate {name} has no row in the layers table in docs/ARCHITECTURE.md.  Fix: add a row with its layer and the workspace crates that it depends on."
+            ),
+        )
+    }
+
+    fn unreadable(line: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has a row that this check cannot read: \"{line}\".  Fix: give the layer and one crate in a code span.  Then give its dependencies once each, as code spans joined by \", \", or \"no workspace crate\"."
+            ),
+        )
+    }
+
+    fn bad_start(line: &str) -> Problem {
+        layer1(
+            ARCH,
+            format!(
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md starts with \"{line}\", not \"| Layer | Crate | Depends on |\" and \"| - | - | - |\".  Fix: use those three columns, one row for each crate."
+            ),
+        )
+    }
+
+    const NO_TABLE: &str = "LAYER-1: docs/ARCHITECTURE.md has no table under ### Layers, so this check read nothing.  Fix: restore the table, with the columns Layer, Crate and Depends on.";
+
+    fn path_stray(from: &str, name: &str, path: &str, manifest: &str) -> Problem {
+        layer1(
+            manifest,
+            format!(
+                "LAYER-1: {from} takes {name} from {path}, which is not a workspace crate, so this check cannot see what {name} depends on.  Fix: make {name} a workspace crate with a row in the layers table, or remove it."
+            ),
+        )
+    }
+
+    fn shared(names: &str) -> Problem {
+        layer1(
+            "Cargo.toml",
+            format!(
+                "LAYER-1: app and stem-worker both depend on {names}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol."
+            ),
+        )
+    }
+
+    #[test]
+    fn the_layers_of_today_give_no_problem() {
+        assert_problems(layers(&today(), LAYERS_TABLE), vec![]);
+        let trailing_spaces = architecture(LAYERS_TABLE).replace("### Layers\n", "### Layers  \n");
+        assert_problems(crates_follow_the_layers(&today(), &trailing_spaces), vec![]);
+    }
+
+    #[test]
+    fn an_edge_that_the_table_does_not_list_is_a_problem() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("engine", "app", Kind::Normal),
+                ("stem-worker", "dsp", Kind::Normal),
+            ],
+        );
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![
+                unlisted("engine", "app", "normal", "engine/Cargo.toml"),
+                unlisted("stem-worker", "dsp", "normal", "worker/Cargo.toml"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_dev_edge_counts() {
+        let workspace = with_edges(today(), &[("engine", "app", Kind::Dev)]);
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![unlisted("engine", "app", "dev", "engine/Cargo.toml")],
+        );
+    }
+
+    #[test]
+    fn an_edge_from_a_crate_with_no_workspace_crate_is_a_problem() {
+        let workspace = with_edges(today(), &[("synth", "dsp", Kind::Normal)]);
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![unlisted("synth", "dsp", "normal", "synth/Cargo.toml")],
+        );
+    }
+
+    #[test]
+    fn a_dev_edge_keeps_a_listed_crate() {
+        let table = edit(
+            LAYERS_TABLE,
+            GPU_ROW,
+            "| Engine and GPU | `roformer-gpu` | `roformer`, `dsp` |\n",
+        );
+        for kind in [Kind::Dev, Kind::Build] {
+            let workspace = with_edges(today(), &[("roformer-gpu", "dsp", kind)]);
+            assert_problems(layers(&workspace, &table), vec![]);
+        }
+    }
+
+    #[test]
+    fn kinds_are_named_once_in_their_order() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("engine", "app", Kind::Build),
+                ("engine", "app", Kind::Dev),
+                ("engine", "app", Kind::Normal),
+                ("engine", "app", Kind::Normal),
+            ],
+        );
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![unlisted(
+                "engine",
+                "app",
+                "normal, dev, build",
+                "engine/Cargo.toml",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_listed_crate_without_an_edge_is_a_problem() {
+        let workspace = without_edge(
+            without_edge(today(), "app", "dsp"),
+            "stem-worker",
+            "roformer",
+        );
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![
+                stale("app", "dsp", "app/Cargo.toml"),
+                stale("stem-worker", "roformer", "worker/Cargo.toml"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_row_that_lists_a_higher_layer_is_a_problem() {
+        let table = edit(
+            LAYERS_TABLE,
+            ENGINE_ROW,
+            "| Engine and GPU | `engine` | `dsp`, `app` |\n",
+        );
+        let workspace = with_edges(today(), &[("engine", "app", Kind::Normal)]);
+        assert_problems(
+            layers(&workspace, &table),
+            vec![not_lower("engine", "Engine and GPU", "app", "Shells")],
+        );
+    }
+
+    #[test]
+    fn a_row_that_lists_its_own_layer_is_a_problem() {
+        let table = edit(LAYERS_TABLE, SYNTH_ROW, "| Pure | `synth` | `dsp` |\n");
+        let workspace = with_edges(today(), &[("synth", "dsp", Kind::Normal)]);
+        assert_problems(
+            layers(&workspace, &table),
+            vec![not_lower("synth", "Pure", "dsp", "Pure")],
+        );
+    }
+
+    #[test]
+    fn the_layers_are_fixed() {
+        let base = edit(
+            &edit(LAYERS_TABLE, DSP_ROW, ""),
+            TEST_SUPPORT_ROW,
+            &format!("{TEST_SUPPORT_ROW}| Base | `dsp` | no workspace crate |\n"),
+        );
+        let base = edit(&base, SYNTH_ROW, "| Pure | `synth` | `dsp` |\n");
+        let workspace = with_edges(today(), &[("synth", "dsp", Kind::Normal)]);
+        assert_problems(
+            layers(&workspace, &base),
+            vec![wrong_layers(
+                "Test support, Base, Pure, Engine and GPU, Shells, Tools",
+            )],
+        );
+
+        let moved = edit(
+            &edit(LAYERS_TABLE, TEST_SUPPORT_ROW, ""),
+            PROTOCOL_ROW,
+            &format!("{PROTOCOL_ROW}{TEST_SUPPORT_ROW}"),
+        );
+        assert_problems(
+            layers(&today(), &moved),
+            vec![wrong_layers(
+                "Pure, Test support, Engine and GPU, Shells, Tools",
+            )],
+        );
+
+        let missing = edit(
+            LAYERS_TABLE,
+            TEST_SUPPORT_ROW,
+            "| Pure | `test-support` | no workspace crate |\n",
+        );
+        assert_problems(
+            layers(&today(), &missing),
+            vec![wrong_layers("Pure, Engine and GPU, Shells, Tools")],
+        );
+    }
+
+    #[test]
+    fn a_layer_whose_rows_are_apart_is_a_problem() {
+        let table = edit(
+            &edit(&edit(LAYERS_TABLE, ROFORMER_ROW, ""), PROTOCOL_ROW, ""),
+            XTASK_ROW,
+            &format!("{XTASK_ROW}{ROFORMER_ROW}{PROTOCOL_ROW}"),
+        );
+        assert_problems(layers(&today(), &table), vec![apart("Pure")]);
+    }
+
+    #[test]
+    fn a_row_left_out_is_left_out_of_the_layer_checks() {
+        let not_a_member = edit(
+            LAYERS_TABLE,
+            XTASK_ROW,
+            &format!("{XTASK_ROW}| Base | `foo` | no workspace crate |\n"),
+        );
+        assert_problems(
+            layers(&today(), &not_a_member),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has a row for foo, which is not a workspace crate.  Fix: remove the row, or use the package name from its Cargo.toml.",
+            )],
+        );
+        let repeated = edit(
+            LAYERS_TABLE,
+            XTASK_ROW,
+            &format!("{XTASK_ROW}| Engine and GPU | `engine` | `dsp` |\n"),
+        );
+        assert_problems(
+            layers(&today(), &repeated),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has 2 rows for engine.  Fix: keep one row for each crate.",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_crate_without_a_row_is_a_problem() {
+        let table = edit(
+            &edit(LAYERS_TABLE, ENGINE_ROW, ""),
+            XTASK_ROW,
+            "| Tools | `xtask` | `dsp`, `roformer`, `synth` |\n",
+        );
+        assert_problems(layers(&today(), &table), vec![no_row("engine")]);
+    }
+
+    #[test]
+    fn a_row_for_a_crate_that_is_not_a_member_is_a_problem() {
+        let table = edit(
+            LAYERS_TABLE,
+            PROTOCOL_ROW,
+            &format!("{PROTOCOL_ROW}| Pure | `foo` | `dsp` |\n"),
+        );
+        assert_problems(
+            layers(&today(), &table),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has a row for foo, which is not a workspace crate.  Fix: remove the row, or use the package name from its Cargo.toml.",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_repeated_row_is_a_problem() {
+        let table = edit(
+            LAYERS_TABLE,
+            ENGINE_ROW,
+            &format!("{ENGINE_ROW}| Engine and GPU | `engine` | `app` |\n"),
+        );
+        assert_problems(
+            layers(&today(), &table),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has 2 rows for engine.  Fix: keep one row for each crate.",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_listed_crate_that_is_not_a_member_is_a_problem() {
+        let table = edit(
+            LAYERS_TABLE,
+            APP_ROW,
+            "| Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth`, `foo` |\n",
+        );
+        assert_problems(
+            layers(&today(), &table),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md lists foo for app, but foo is not a workspace crate.  Fix: correct the name, or remove it from app's row.",
+            )],
+        );
+    }
+
+    #[test]
+    fn test_support_as_a_dev_dependency_needs_no_row() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("app", "test-support", Kind::Dev),
+                ("stem-protocol", "test-support", Kind::Dev),
+                ("xtask", "test-support", Kind::Dev),
+            ],
+        );
+        assert_problems(layers(&workspace, LAYERS_TABLE), vec![]);
+    }
+
+    #[test]
+    fn test_support_as_a_normal_or_build_dependency_is_a_problem() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("engine", "test-support", Kind::Normal),
+                ("synth", "test-support", Kind::Build),
+            ],
+        );
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![
+                layer1(
+                    "engine/Cargo.toml",
+                    "LAYER-1: engine takes test-support as a normal dependency, so it would ship.  Fix: move it to [dev-dependencies] in engine/Cargo.toml.",
+                ),
+                layer1(
+                    "synth/Cargo.toml",
+                    "LAYER-1: synth takes test-support as a build dependency, but it is a dev-dependency only.  Fix: move it to [dev-dependencies] in synth/Cargo.toml.",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_support_between_dev_edges_is_still_a_problem() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("engine", "test-support", Kind::Dev),
+                ("engine", "test-support", Kind::Normal),
+                ("engine", "test-support", Kind::Dev),
+                ("engine", "test-support", Kind::Normal),
+            ],
+        );
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![layer1(
+                "engine/Cargo.toml",
+                "LAYER-1: engine takes test-support as a normal dependency, so it would ship.  Fix: move it to [dev-dependencies] in engine/Cargo.toml.",
+            )],
+        );
+    }
+
+    #[test]
+    fn dsp_may_not_take_test_support() {
+        let dsp_problem = || {
+            vec![layer1(
+                "dsp/Cargo.toml",
+                "LAYER-1: dsp takes test-support, but dsp must have no dependencies (DSP-1).  Fix: remove it from dsp/Cargo.toml.",
+            )]
+        };
+        let workspace = with_edges(
+            today(),
+            &[
+                ("dsp", "test-support", Kind::Dev),
+                ("dsp", "test-support", Kind::Normal),
+            ],
+        );
+        assert_problems(layers(&workspace, LAYERS_TABLE), dsp_problem());
+        let build_only = with_edges(today(), &[("dsp", "test-support", Kind::Build)]);
+        assert_problems(layers(&build_only, LAYERS_TABLE), dsp_problem());
+    }
+
+    #[test]
+    fn test_support_takes_no_workspace_crate() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("test-support", "dsp", Kind::Dev),
+                ("test-support", "dsp", Kind::Normal),
+            ],
+        );
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![layer1(
+                "test-support/Cargo.toml",
+                "LAYER-1: test-support takes dsp, but test-support must take no workspace crate.  The crates that take it must reach nothing through it.  Fix: remove dsp from test-support/Cargo.toml.",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_row_that_lists_test_support_is_a_problem() {
+        let table = edit(
+            LAYERS_TABLE,
+            ENGINE_ROW,
+            "| Engine and GPU | `engine` | `dsp`, `test-support` |\n",
+        );
+        assert_problems(
+            layers(&today(), &table),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md lists test-support for engine.  Fix: remove it.  The table leaves out test-support, which any crate but dsp may take as a dev-dependency.",
+            )],
+        );
+    }
+
+    #[test]
+    fn strays_are_problems() {
+        let base = today();
+        let workspace = Workspace {
+            crates: base
+                .crates
+                .into_iter()
+                .map(|c| {
+                    let strays = if c.name == "app" {
+                        vec![
+                            Stray {
+                                name: "shim".into(),
+                                origin: Origin::Path("/x/shim".into()),
+                            },
+                            Stray {
+                                name: "roformer".into(),
+                                origin: Origin::Source("git+https://example.com/x".into()),
+                            },
+                        ]
+                    } else {
+                        c.strays.clone()
+                    };
+                    WorkspaceCrate { strays, ..c }
+                })
+                .collect(),
+            outside: vec![
+                Stray {
+                    name: "shim".into(),
+                    origin: Origin::Path("/x/shim".into()),
+                },
+                Stray {
+                    name: "roformer".into(),
+                    origin: Origin::Source("git+https://example.com/x".into()),
+                },
+            ],
+            ..base
+        };
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![
+                path_stray("app", "shim", "/x/shim", "app/Cargo.toml"),
+                layer1(
+                    "app/Cargo.toml",
+                    "LAYER-1: app takes roformer from git+https://example.com/x, not from the workspace.  Fix: take roformer by path, or remove it.",
+                ),
+                layer1(
+                    "Cargo.toml",
+                    "LAYER-1: the build takes shim from /x/shim, a path crate that is not a workspace crate, so this check cannot see what shim depends on.  Fix: remove the [patch] or exclude that brings it in.  Or make it a workspace crate with a row in the layers table.",
+                ),
+                layer1(
+                    "Cargo.toml",
+                    "LAYER-1: the build takes roformer from git+https://example.com/x, not from the workspace.  Fix: remove the dependency that brings it in.",
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_outside_package_that_takes_a_member_is_a_problem() {
+        let workspace = Workspace {
+            outside_takes: vec![OutsideEdge {
+                from: "foo".into(),
+                source: "git+file:///x/gitfoo".into(),
+                to: "roformer".into(),
+            }],
+            ..today()
+        };
+        assert_problems(
+            layers(&workspace, LAYERS_TABLE),
+            vec![layer1(
+                "Cargo.toml",
+                "LAYER-1: foo, from git+file:///x/gitfoo, takes the workspace crate roformer, so this check cannot see the dependency.  Fix: remove the [patch] that points roformer at the workspace, or remove foo.",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_missing_table_is_a_problem() {
+        let no_heading = architecture(LAYERS_TABLE).replace("### Layers", "### Tiers");
+        assert_problems(
+            crates_follow_the_layers(&today(), &no_heading),
+            vec![layer1(ARCH, NO_TABLE)],
+        );
+
+        for later in ["## X", "### X"] {
+            let table_in_a_later_section = format!(
+                "# How it works\n\n### Layers\n\nCrates depend only downwards.\n\n{later}\n\n{LAYERS_TABLE}"
+            );
+            assert_problems(
+                crates_follow_the_layers(&today(), &table_in_a_later_section),
+                vec![layer1(ARCH, NO_TABLE)],
+            );
+        }
+
+        let base = today();
+        let with_a_stray = Workspace {
+            crates: base
+                .crates
+                .into_iter()
+                .map(|c| {
+                    let strays = if c.name == "app" {
+                        vec![Stray {
+                            name: "shim".into(),
+                            origin: Origin::Path("/x/shim".into()),
+                        }]
+                    } else {
+                        c.strays.clone()
+                    };
+                    WorkspaceCrate { strays, ..c }
+                })
+                .collect(),
+            ..base
+        };
+        assert_problems(
+            crates_follow_the_layers(&with_a_stray, &no_heading),
+            vec![
+                layer1(ARCH, NO_TABLE),
+                path_stray("app", "shim", "/x/shim", "app/Cargo.toml"),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_old_table_is_a_problem() {
+        let old = "\
+| Layer | Crates | Depend on |
+| - | - | - |
+| Test support | `test-support` | no workspace crate |
+| Pure | `dsp`, `synth`, `roformer`, `stem-protocol` | no workspace crate |
+| Engine and GPU | `engine`, `roformer-gpu` | `dsp`; `roformer` |
+";
+        assert_problems(
+            layers(&today(), old),
+            vec![bad_start("| Layer | Crates | Depend on |")],
+        );
+    }
+
+    #[test]
+    fn a_bad_separator_is_a_problem() {
+        let table = edit(LAYERS_TABLE, "| - | - | - |\n", "");
+        assert_problems(
+            layers(&today(), &table),
+            vec![bad_start(
+                "| Test support | `test-support` | no workspace crate |",
+            )],
+        );
+        for separator in ["| - | - |", "| - |  | - |"] {
+            let table = edit(LAYERS_TABLE, "| - | - | - |\n", &format!("{separator}\n"));
+            assert_problems(layers(&today(), &table), vec![bad_start(separator)]);
+        }
+    }
+
+    #[test]
+    fn a_header_alone_is_a_problem() {
+        assert_problems(
+            layers(&today(), "| Layer | Crate | Depends on |\n"),
+            vec![layer1(
+                ARCH,
+                "LAYER-1: the layers table in docs/ARCHITECTURE.md has no separator line after its header.  Fix: add \"| - | - | - |\" after \"| Layer | Crate | Depends on |\", then one row for each crate.",
+            )],
+        );
+    }
+
+    #[test]
+    fn a_row_that_cannot_be_read_is_a_problem() {
+        let cases = [
+            "| Pure | `dsp` | `dsp` (dev only) |",
+            "| Pure | dsp | no workspace crate |",
+            "| Pure | `dsp` | dsp |",
+            "| Pure | `dsp` (pure) | no workspace crate |",
+            "| Pure | `dsp`, `synth` | no workspace crate |",
+            "| Pure | `dsp` |",
+            "|  | `dsp` | no workspace crate |",
+            "| Pure | `dsp` | no workspace crate",
+            "| Pure | `dsp` |  |",
+            "| Pure | `dsp` | `dsp`,`engine` |",
+            "| Pure | `dsp` | `dsp`, `dsp` |",
+            "| Pure | `` | no workspace crate |",
+        ];
+        for case in cases {
+            let table = edit(LAYERS_TABLE, XTASK_ROW, &format!("{XTASK_ROW}{case}\n"));
+            assert_problems(layers(&today(), &table), vec![unreadable(case)]);
+        }
+    }
+
+    #[test]
+    fn an_empty_workspace_is_a_problem() {
+        assert_problems(
+            layers(
+                &Workspace::default(),
+                "| Layer | Crate | Depends on |\n| - | - | - |\n",
+            ),
+            vec![layer1(
+                "Cargo.toml",
+                "LAYER-1: cargo metadata gave no workspace crate, so this check read nothing.  Fix: run cargo metadata --format-version 1 --all-features --locked at the workspace root.",
+            )],
+        );
+    }
+
+    fn shells(workspace: &Workspace) -> Vec<Problem> {
+        shells_meet_only_through_the_protocol(&workspace.crates)
+    }
+
+    #[test]
+    fn the_shells_of_today_meet_only_through_stem_protocol() {
+        assert_problems(shells(&today()), vec![]);
+    }
+
+    #[test]
+    fn a_crate_on_both_sides_is_a_problem() {
+        let workspace = with_edges(today(), &[("app", "roformer-gpu", Kind::Normal)]);
+        assert_problems(shells(&workspace), vec![shared("roformer, roformer-gpu")]);
+    }
+
+    #[test]
+    fn a_crate_reached_through_another_is_found() {
+        let workspace = with_edges(today(), &[("engine", "roformer", Kind::Normal)]);
+        assert_problems(shells(&workspace), vec![shared("roformer")]);
+    }
+
+    #[test]
+    fn the_worker_side_is_followed_to_every_depth() {
+        let workspace = with_edges(
+            without_edge(today(), "stem-worker", "roformer"),
+            &[("roformer", "dsp", Kind::Normal)],
+        );
+        assert_problems(shells(&workspace), vec![shared("dsp")]);
+    }
+
+    #[test]
+    fn a_crate_reached_through_stem_protocol_is_found() {
+        let workspace = with_edges(today(), &[("stem-protocol", "test-support", Kind::Normal)]);
+        assert_problems(shells(&workspace), vec![shared("test-support")]);
+    }
+
+    #[test]
+    fn a_shell_is_in_its_own_set() {
+        let workspace = with_edges(today(), &[("stem-worker", "app", Kind::Normal)]);
+        assert_problems(shells(&workspace), vec![shared("app, dsp, engine, synth")]);
+        let workspace = with_edges(today(), &[("app", "stem-worker", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("roformer, roformer-gpu, stem-worker")],
+        );
+    }
+
+    #[test]
+    fn a_dev_or_build_edge_does_not_join_the_sides() {
+        let workspace = with_edges(
+            today(),
+            &[
+                ("app", "roformer", Kind::Dev),
+                ("engine", "roformer", Kind::Dev),
+                ("app", "roformer", Kind::Build),
+                ("engine", "roformer", Kind::Build),
+            ],
+        );
+        assert_problems(shells(&workspace), vec![]);
+    }
+
+    #[test]
+    fn a_cycle_ends() {
+        let workspace = with_edges(today(), &[("dsp", "engine", Kind::Normal)]);
+        assert_problems(shells(&workspace), vec![]);
+    }
+
+    #[test]
+    fn a_missing_shell_is_a_problem() {
+        for shell in ["stem-worker", "app"] {
+            assert_problems(
+                shells(&without_crate(today(), shell)),
+                vec![layer1(
+                    "Cargo.toml",
+                    format!(
+                        "LAYER-1: the workspace has no crate {shell}, so this check cannot compare the page side and the worker side.  Fix: if the web app changed, change WEB_APP in xtask/src/rules.rs and LAYER-1's text (DOC-1)."
+                    ),
+                )],
+            );
+        }
+    }
+
+    // The parser of `cargo metadata`'s JSON.  Paths are under `/x`, so no
+    // home folder is committed.
+
+    fn id(name: &str, folder: &str) -> String {
+        format!("path+file://{folder}#{name}@0.1.0")
+    }
+
+    fn package(name: &str, folder: &str, source: Option<&str>, dependencies: Vec<Value>) -> Value {
+        json!({
+            "id": source.map_or_else(|| id(name, folder), |s| format!("{s}#{name}@0.1.0")),
+            "name": name,
+            "source": source,
+            "manifest_path": format!("{folder}/Cargo.toml"),
+            "dependencies": dependencies,
+            "features": {},
+        })
+    }
+
+    fn path_dep(name: &str, path: &str, kind: Option<&str>) -> Value {
+        json!({ "name": name, "source": null, "rename": null, "kind": kind, "target": null, "path": path })
+    }
+
+    fn source_dep(name: &str, source: &str) -> Value {
+        json!({ "name": name, "source": source, "rename": null, "kind": null, "target": null })
+    }
+
+    /// The JSON, with a resolve node for each member (no features, no
+    /// dependencies) and the `other_nodes`.
+    fn metadata(packages: Vec<Value>, members: &[String], other_nodes: Vec<Value>) -> String {
+        let nodes: Vec<Value> = members
+            .iter()
+            .map(|member| json!({ "id": member, "deps": [], "features": [] }))
+            .chain(other_nodes)
+            .collect();
+        json!({
+            "packages": packages,
+            "workspace_members": members,
+            "workspace_root": "/x",
+            "resolve": { "nodes": nodes },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn path_dependencies_on_members_are_edges() {
+        let synth_for_tests = json!({
+            "name": "synth", "source": null, "rename": null, "kind": "dev",
+            "target": "cfg(not(target_arch = \"wasm32\"))", "path": "/x/synth",
+        });
+        let renamed_engine = json!({
+            "name": "engine", "source": null, "rename": "audio", "kind": null,
+            "target": null, "path": "/x/engine",
+        });
+        let members = [
+            ("roformer", "/x/roformer"),
+            ("roformer-gpu", "/x/roformer-gpu"),
+            ("dsp", "/x/dsp"),
+            ("engine", "/x/engine"),
+            ("synth", "/x/synth"),
+            ("stem-protocol", "/x/protocol"),
+            ("app", "/x/app"),
+            ("stem-worker", "/x/worker"),
+        ];
+        let deps = |name: &str| -> Vec<Value> {
+            match name {
+                "engine" => vec![path_dep("engine", "/x/engine", Some("dev"))],
+                "app" => vec![
+                    path_dep("dsp", "/x/dsp", None),
+                    renamed_engine.clone(),
+                    path_dep("synth", "/x/synth", None),
+                    synth_for_tests.clone(),
+                    path_dep("stem-protocol", "/x/protocol", Some("build")),
+                    source_dep(
+                        "anyhow",
+                        "registry+https://github.com/rust-lang/crates.io-index",
+                    ),
+                ],
+                "stem-worker" => vec![path_dep("roformer-gpu", "/x/roformer-gpu", None)],
+                _ => vec![],
+            }
+        };
+        let json = metadata(
+            members
+                .iter()
+                .map(|(name, folder)| package(name, folder, None, deps(name)))
+                .collect(),
+            &members.map(|(name, folder)| id(name, folder)),
+            vec![],
+        );
+        use Kind::{Build, Dev, Normal};
+        let expected = Workspace {
+            crates: vec![
+                krate("roformer", "roformer/Cargo.toml", &[]),
+                krate("roformer-gpu", "roformer-gpu/Cargo.toml", &[]),
+                krate("dsp", "dsp/Cargo.toml", &[]),
+                krate("engine", "engine/Cargo.toml", &[]),
+                krate("synth", "synth/Cargo.toml", &[]),
+                krate("stem-protocol", "protocol/Cargo.toml", &[]),
+                krate(
+                    "app",
+                    "app/Cargo.toml",
+                    &[
+                        ("dsp", Normal),
+                        ("engine", Normal),
+                        ("synth", Normal),
+                        ("synth", Dev),
+                        ("stem-protocol", Build),
+                    ],
+                ),
+                krate(
+                    "stem-worker",
+                    "worker/Cargo.toml",
+                    &[("roformer-gpu", Normal)],
+                ),
+            ],
+            ..Workspace::default()
+        };
+        assert_eq!(workspace(&json).expect("the JSON parses"), expected);
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_member_is_a_stray() {
+        let json = metadata(
+            vec![
+                package(
+                    "app",
+                    "/x/app",
+                    None,
+                    vec![
+                        path_dep("shim", "/x/shim", None),
+                        path_dep("nested", "/x/app/nested", None),
+                        path_dep("roformer", "/x/vendor/roformer", None),
+                    ],
+                ),
+                package("roformer", "/x/roformer", None, vec![]),
+            ],
+            &[id("app", "/x/app"), id("roformer", "/x/roformer")],
+            vec![],
+        );
+        let path = |name: &str, folder: &str| Stray {
+            name: name.into(),
+            origin: Origin::Path(folder.into()),
+        };
+        let expected = Workspace {
+            crates: vec![
+                WorkspaceCrate {
+                    strays: vec![
+                        path("shim", "/x/shim"),
+                        path("nested", "/x/app/nested"),
+                        path("roformer", "/x/vendor/roformer"),
+                    ],
+                    ..krate("app", "app/Cargo.toml", &[])
+                },
+                krate("roformer", "roformer/Cargo.toml", &[]),
+            ],
+            ..Workspace::default()
+        };
+        assert_eq!(workspace(&json).expect("the JSON parses"), expected);
+    }
+
+    #[test]
+    fn a_members_name_from_elsewhere_is_a_stray() {
+        let json = metadata(
+            vec![
+                package(
+                    "dsp",
+                    "/x/dsp",
+                    None,
+                    vec![
+                        source_dep(
+                            "engine",
+                            "registry+https://github.com/rust-lang/crates.io-index",
+                        ),
+                        source_dep("roformer", "git+https://example.com/x"),
+                    ],
+                ),
+                package("engine", "/x/engine", None, vec![]),
+                package("roformer", "/x/roformer", None, vec![]),
+            ],
+            &[
+                id("dsp", "/x/dsp"),
+                id("engine", "/x/engine"),
+                id("roformer", "/x/roformer"),
+            ],
+            vec![],
+        );
+        let expected = Workspace {
+            crates: vec![
+                WorkspaceCrate {
+                    strays: vec![
+                        Stray {
+                            name: "engine".into(),
+                            origin: Origin::Source(
+                                "registry+https://github.com/rust-lang/crates.io-index".into(),
+                            ),
+                        },
+                        Stray {
+                            name: "roformer".into(),
+                            origin: Origin::Source("git+https://example.com/x".into()),
+                        },
+                    ],
+                    ..krate("dsp", "dsp/Cargo.toml", &[])
+                },
+                krate("engine", "engine/Cargo.toml", &[]),
+                krate("roformer", "roformer/Cargo.toml", &[]),
+            ],
+            ..Workspace::default()
+        };
+        assert_eq!(workspace(&json).expect("the JSON parses"), expected);
+    }
+
+    #[test]
+    fn a_path_package_that_is_not_a_member_is_outside() {
+        let registry = "registry+https://github.com/rust-lang/crates.io-index";
+        let json = metadata(
+            vec![
+                package("app", "/x/app", None, vec![source_dep("shim", registry)]),
+                package("roformer", "/x/roformer", None, vec![]),
+                package(
+                    "shim",
+                    "/x/shim",
+                    None,
+                    vec![path_dep("roformer", "/x/roformer", None)],
+                ),
+                package(
+                    "roformer",
+                    "/git/roformer",
+                    Some("git+https://example.com/x"),
+                    vec![],
+                ),
+                package("roformer", "/x/vendor/roformer", None, vec![]),
+            ],
+            &[id("app", "/x/app"), id("roformer", "/x/roformer")],
+            vec![json!({
+                "id": id("shim", "/x/shim"),
+                "deps": [ { "name": "roformer", "pkg": id("roformer", "/x/roformer") } ],
+            })],
+        );
+        let expected = Workspace {
+            crates: vec![
+                krate("app", "app/Cargo.toml", &[]),
+                krate("roformer", "roformer/Cargo.toml", &[]),
+            ],
+            outside: vec![
+                Stray {
+                    name: "shim".into(),
+                    origin: Origin::Path("/x/shim".into()),
+                },
+                Stray {
+                    name: "roformer".into(),
+                    origin: Origin::Source("git+https://example.com/x".into()),
+                },
+                Stray {
+                    name: "roformer".into(),
+                    origin: Origin::Path("/x/vendor/roformer".into()),
+                },
+            ],
+            outside_takes: vec![],
+        };
+        assert_eq!(workspace(&json).expect("the JSON parses"), expected);
+    }
+
+    #[test]
+    fn a_package_that_is_not_a_member_is_left_out() {
+        let json = metadata(
+            vec![
+                package("dsp", "/x/dsp", None, vec![]),
+                package(
+                    "anyhow",
+                    "/registry/anyhow",
+                    Some("registry+https://github.com/rust-lang/crates.io-index"),
+                    vec![],
+                ),
+            ],
+            &[id("dsp", "/x/dsp")],
+            vec![],
+        );
+        let expected = Workspace {
+            crates: vec![krate("dsp", "dsp/Cargo.toml", &[])],
+            ..Workspace::default()
+        };
+        assert_eq!(workspace(&json).expect("the JSON parses"), expected);
+    }
+
+    #[test]
+    fn an_outside_package_that_takes_a_member_is_found() {
+        let git_foo = "git+file:///x/gitfoo";
+        let git_roformer = "git+https://example.com/x";
+        let json = metadata(
+            vec![
+                package("roformer", "/x/roformer", None, vec![]),
+                package("roformer-gpu", "/x/roformer-gpu", None, vec![]),
+                package("app", "/x/app", None, vec![source_dep("foo", git_foo)]),
+                package("foo", "/git/foo", Some(git_foo), vec![]),
+                package("roformer", "/git/roformer", Some(git_roformer), vec![]),
+            ],
+            &[
+                id("roformer", "/x/roformer"),
+                id("roformer-gpu", "/x/roformer-gpu"),
+                id("app", "/x/app"),
+            ],
+            vec![json!({
+                "id": format!("{git_foo}#foo@0.1.0"),
+                "deps": [
+                    { "name": "roformer_gpu", "pkg": id("roformer-gpu", "/x/roformer-gpu") },
+                    { "name": "roformer", "pkg": format!("{git_roformer}#roformer@0.1.0") },
+                ],
+            })],
+        );
+        let expected = Workspace {
+            crates: vec![
+                krate("roformer", "roformer/Cargo.toml", &[]),
+                krate("roformer-gpu", "roformer-gpu/Cargo.toml", &[]),
+                krate("app", "app/Cargo.toml", &[]),
+            ],
+            outside: vec![Stray {
+                name: "roformer".into(),
+                origin: Origin::Source(git_roformer.into()),
+            }],
+            outside_takes: vec![OutsideEdge {
+                from: "foo".into(),
+                source: git_foo.into(),
+                to: "roformer-gpu".into(),
+            }],
+        };
+        assert_eq!(workspace(&json).expect("the JSON parses"), expected);
+    }
+
+    #[test]
+    fn a_metadata_without_resolve_is_an_error() {
+        let json = json!({
+            "packages": [package("dsp", "/x/dsp", None, vec![])],
+            "workspace_members": [id("dsp", "/x/dsp")],
+            "workspace_root": "/x",
+            "resolve": null,
+        })
+        .to_string();
+        let error = workspace(&json).expect_err("a run with --no-deps is an error");
+        assert!(error.to_string().contains("--no-deps"), "{error:#}");
+    }
+
+    #[test]
+    fn a_metadata_without_all_features_is_an_error() {
+        let xtask = json!({
+            "id": id("xtask", "/x/xtask"),
+            "name": "xtask",
+            "source": null,
+            "manifest_path": "/x/xtask/Cargo.toml",
+            "dependencies": [],
+            "features": { "cpal": ["engine/cpal"] },
+        });
+        let json = metadata(vec![xtask], &[id("xtask", "/x/xtask")], vec![]);
+        let error = workspace(&json).expect_err("a run without --all-features is an error");
+        assert!(
+            error.to_string().contains("--all-features") && error.to_string().contains("cpal"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_member_without_a_resolve_node_is_an_error() {
+        let json = json!({
+            "packages": [package("dsp", "/x/dsp", None, vec![])],
+            "workspace_members": [id("dsp", "/x/dsp")],
+            "workspace_root": "/x",
+            "resolve": { "nodes": [] },
+        })
+        .to_string();
+        let error = workspace(&json).expect_err("a member without a node is an error");
+        assert!(error.to_string().contains("no node for dsp"), "{error:#}");
+    }
+
+    #[test]
+    fn an_unknown_kind_is_an_error() {
+        let json = metadata(
+            vec![package(
+                "app",
+                "/x/app",
+                None,
+                vec![path_dep("dsp", "/x/dsp", Some("other"))],
+            )],
+            &[id("app", "/x/app")],
+            vec![],
+        );
+        let error = workspace(&json).expect_err("an unknown kind is an error");
+        assert!(error.to_string().contains("other"), "{error:#}");
+    }
+
+    #[test]
+    fn a_manifest_outside_the_root_is_an_error() {
+        for folder in ["/y/app", "/xy/app"] {
+            let json = metadata(
+                vec![package("app", folder, None, vec![])],
+                &[id("app", folder)],
+                vec![],
+            );
+            let error = workspace(&json).expect_err("a manifest outside the root is an error");
+            assert!(error.to_string().contains(folder), "{error:#}");
+        }
     }
 }

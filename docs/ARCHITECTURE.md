@@ -40,17 +40,24 @@ flowchart LR
 
 ### Layers
 
-Crates depend only on crates in a lower layer (LAYER-1 in `docs/invariants.md`).  The page side and the worker side meet only through `stem-protocol`.
+Each workspace crate depends only on the workspace crates that its row lists, and on `test-support` as a dev-dependency (LAYER-1 in `docs/invariants.md`).  Each listed crate is in a lower layer.  The page side and the worker side meet only through `stem-protocol`.  The workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.
 
-| Layer | Crates | Depend on |
+| Layer | Crate | Depends on |
 | - | - | - |
 | Test support | `test-support` | no workspace crate |
-| Pure | `dsp`, `synth`, `roformer`, `stem-protocol` | no workspace crate |
-| Engine and GPU | `engine`, `roformer-gpu` | `dsp`; `roformer` |
-| Shells | `app`, `stem-worker` | `engine`, `dsp`, `synth`, `stem-protocol`; `roformer`, `roformer-gpu`, `stem-protocol` |
-| Tools | `xtask` | `dsp`, `engine`, `synth`, `roformer` |
+| Pure | `dsp` | no workspace crate |
+| Pure | `synth` | no workspace crate |
+| Pure | `roformer` | no workspace crate |
+| Pure | `stem-protocol` | no workspace crate |
+| Engine and GPU | `engine` | `dsp` |
+| Engine and GPU | `roformer-gpu` | `roformer` |
+| Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
+| Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
+| Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
 
-Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal dependency, so it never ships.
+The rows run from the lowest layer to the highest.  Each row lists every workspace crate that its crate depends on, dev- and build-dependencies included, apart from `test-support`.  `crates_depend_only_downwards` compares the table with `cargo metadata`.  Change the table in the commit that adds or removes a crate, or a dependency between crates.  Every path crate in the build is a workspace crate with a row.  No crate from a registry or git has a workspace crate's name, or takes a workspace crate.  The layers are those of LAYER-1, and `LAYERS` in `xtask/src/rules.rs` holds them.
+
+Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal or build dependency: it is a dev-dependency only, so it never ships.  It takes no workspace crate.
 
 `app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app` and `stem-worker`; LAYER-1).
 
@@ -200,7 +207,7 @@ The Storage menu lists the stored songs, opens or forgets one, shows the space u
 
 ## Tests
 
-* `cargo test --workspace`: unit and integration tests, including the UI snapshots and the docs check (`xtask/tests/docs.rs`).
+* `cargo test --workspace`: unit and integration tests, including the UI snapshots, the docs check (`xtask/tests/docs.rs`) and the structural checks (`xtask/tests/rules.rs`).
 * `cargo test -p roformer --release`: the CPU network against PyTorch (needs fixtures from `tools/roformer_export.py`; skipped without them, and `STEMYLA_REQUIRE=fixtures` makes a missing fixture fail).
 * `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release`: every GPU kernel against CPU loops, and each layer and mask of the network against PyTorch.  The PyTorch part needs `STEMYLA_REQUIRE=gpu,fixtures`, and its end-to-end check also needs `ROFORMER_GPU_FULL=1`.  Without a GPU, point Vulkan at SwiftShader (see the README).
 * `cargo test -p roformer-gpu --lib` and `--doc`: the GPU crate's tests that need no GPU (workgroup memory, kernel choice, the compile-fail check of `Rec`).  CI runs them.
