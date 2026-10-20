@@ -12,11 +12,11 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 * Fix: review; no check is planned.  `dsp` is small and seldom changes, so a full allowlist costs more than it gains (`plans/active/harness-phase-2.md`, M7).
 
-### TD-7: DEPS-1 is not checked, and young crates float
+### TD-7: no licence policy and no allowlist of registries
 
-`engine/Cargo.toml` takes `wsola = "0.1.0"` and `timestretch = "0.15.0"` as caret ranges, which accept later 0.1 and 0.15 releases (`cute-dsp = "0.0.41"` already accepts only 0.0.41); only `rusty_mp3` (in `worker/Cargo.toml` and `xtask/Cargo.toml`) and `naga` (in `roformer-gpu/Cargo.toml`) are pinned exactly.  Nothing compares `THIRD-PARTY.md` with `cargo tree`, and there is no licence policy.
+`young_crates_are_pinned` and `third_party_lists_what_ships` check the pins and the licence list (DEPS-1).  Nothing fails a licence that is not permissive, or a registry other than crates.io.
 
-* Fix: pin with `=`; a golden test that reruns the command at the top of `THIRD-PARTY.md` and diffs; `cargo deny` for licences and sources.
+* Fix: `cargo deny` for licences and registries.  It is a new tool, so vet it first (DEPS-1).
 
 ### TD-8: some evidence runs nowhere, and required skips rest on a person
 

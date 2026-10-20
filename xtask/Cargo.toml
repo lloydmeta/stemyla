@@ -15,7 +15,7 @@ roformer = { version = "0.1.0", path = "../roformer" }
 # Default features give burn-ndarray rayon threads for the roformer command.
 burn = { version = "0.20.1", features = ["ndarray"] }
 # Reads PyTorch checkpoints (zip + pickle) in Rust, for `roformer-convert`.
-burn-store = { version = "0.20.1", default-features = false, features = ["std", "pytorch"] }
+burn-store = { version = "=0.20.1", default-features = false, features = ["std", "pytorch"] }
 half = "2.7.1"
 safetensors = "0.7.0"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }

@@ -1418,7 +1418,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M9 plan review round 4, by one new reviewer who read the section as its implementer.  No blockers; 2 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  Both should-fix items were one-bullet fixes.  A `[patch]` that points a registry crate at git passed both checks, so every package's source is now read.  A `cargo tree` line that the parser cannot read had no stated result; it is now a "cannot read" problem.  The nits: a step 0 records the maintainer's answer; the doc parser skips the header and separator; an empty licence fails in either table; M11 adds rows for new crates; phase 5a's gardening job is retagged.
 * [x] 2026-10-20: plan review stopped after round 4, by the maintainer's rule: no blockers, and no should-fix item beyond small local fixes.  Not yet implemented.  Next: the maintainer answers M9's decision point.
 * [x] 2026-10-20: M9 step 0: the maintainer chose option (b) at the decision point.
-* [ ] M9: pins and `THIRD-PARTY.md` test.
+* [x] 2026-10-20: M9 step 1: the two checks and their parsers, test first.  Against stubs of the checks, the 5 tests that expect a problem failed, and the 4 others passed.  With the checks, all 9 pass.  The tests sit in their own module, `deps_tests`, which takes the metadata fixtures of M5's tests.
+* [x] 2026-10-20: M9 step 2: `young_crates_are_pinned` and `third_party_lists_what_ships` on the real tree, the 5 pins and the docs.  Before the pins, `young_crates_are_pinned` failed and named exactly `egui_kittest`, `cute-dsp`, `timestretch`, `wsola` and `burn-store`; `third_party_lists_what_ships` passed.  After the pins, both pass, and `Cargo.lock` did not change.  "Prose only" lines: 4.
+  * Planted breaches, each run and restored, each failed its test with one DEPS-1 problem: `wsola` without `=` (`engine/Cargo.toml takes wsola ^0.1.0`), `log` removed from `SETTLED_CRATES` (`app/Cargo.toml takes log ^0.4.34`), a `zzz` entry (`lists zzz in SETTLED_CRATES`), the `log` row removed (`lacks log 0.4.34`), and `MIT` in the `indexmap` row (`THIRD-PARTY.md:65 gives indexmap 2.14.2 the licence "MIT"`).
+* [ ] M9: review rounds, PR.
 * [ ] M10: e2e message types test.
 * [ ] M11: RT-1 forbids allocation; allocation test; wsola 0.2.0.
 * [ ] M12: MEM-1 lint.

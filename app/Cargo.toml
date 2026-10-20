@@ -35,7 +35,7 @@ web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "H
 
 # The UI tests render natively through wgpu.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-egui_kittest = { version = "0.36.2", features = ["eframe", "snapshot", "wgpu"] }
+egui_kittest = { version = "=0.36.2", features = ["eframe", "snapshot", "wgpu"] }
 # dropping_several_files_loads_them_as_stems writes the demo song as WAV files.
 synth = { path = "../synth", features = ["files"] }
 

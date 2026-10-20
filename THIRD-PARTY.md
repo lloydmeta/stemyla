@@ -15,6 +15,8 @@ Regenerate the table with:
 cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal --prefix none -f "{p}|{l}|{r}"
 ```
 
+The test `third_party_lists_what_ships` compares the table with this command's output.
+
 | Crate | Version | Licence | Source |
 | - | - | - | - |
 | accesskit | 0.24.1 | MIT OR Apache-2.0 | https://github.com/AccessKit/accesskit |
@@ -155,6 +157,8 @@ Regenerate the table with (the rows not in the table above):
 ```bash
 cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f "{p}|{l}|{r}"
 ```
+
+The test `third_party_lists_what_ships` compares the table with this command's output.
 
 | Crate | Version | Licence | Source |
 | - | - | - | - |
