@@ -23,3 +23,7 @@ The maintainer also weighed (z): fix only `assign_op_pattern`, because the Rust 
 * `dsp/src/lib.rs` expects the four lints; every other lint keeps its workspace level.
 * A new lint in `dsp` is fixed with DSP-1's constructs, or gets an `expect` whose reason cites DSP-1.
 * M7's allowlist fails the forbidden shortcuts.
+
+## Amendment
+
+Amended on 2026-10-20 by the agent, in M6 review round 1.  Option (x) named only `+=` and `-=`.  The `assign_op_pattern` `expect` silences every operator, so the ban now covers every compound assignment.  The maintainer confirms this amendment at PR review.

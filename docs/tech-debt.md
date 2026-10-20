@@ -8,7 +8,7 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ### TD-3: DSP-1 is not checked
 
-Nothing fails when `dsp/` gains an iterator, a closure, a dependency, a compound assignment such as `+=`, `is_empty` or `clamp`, or a lint setting that switches clippy off.  These can pass clippy: a lint attribute that switches a lint off, other than the four `expect`s in `dsp/src/lib.rs`, and a `[lints]` table in `dsp/Cargo.toml`.  A `-A clippy::all` in `RUSTFLAGS`, or in a `config.toml` in `.cargo/`, passes too, for every crate, and M7 does not check it.
+Nothing fails when `dsp/` gains an iterator, a closure or a dependency.  Nothing fails on a compound assignment, `is_empty`, `clamp`, or a lint setting that switches clippy off.  These can pass clippy: a lint attribute that switches a lint off, other than the four `expect`s in `dsp/src/lib.rs`, and a `[lints]` table in `dsp/Cargo.toml`.  A `-A clippy::all` in `RUSTFLAGS`, or in a `config.toml` in `.cargo/`, passes too, for every crate, and M7 does not check it.
 
 * Fix: a structural test in `xtask/tests/` that parses `dsp/src` and allows only the listed constructs (an allowlist, not a denylist).  It accepts lint attributes only as crate-level `#![expect]`s in `dsp/src/lib.rs`, of the lints on a list in the check, each with a reason.  It asserts that `dsp/Cargo.toml` has no dependencies, and a `[lints]` table with only `workspace = true` (`plans/active/harness-phase-2.md`, M7).
 
