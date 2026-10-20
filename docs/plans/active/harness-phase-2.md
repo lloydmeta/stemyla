@@ -1237,6 +1237,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M6 review round 3: no blockers; 1 should-fix and 3 nits, all checked and real.  The should-fix: Surprises lacked round 1's finding on `assign_op_pattern`; it now has it.  Nits: the Decision log's plan-review entries say "plan review"; the rule file says what to do with a lint that fires only in a test; the PR description says "keeps its workspace level", not the first commit's "every other clippy lint now runs".
 * [x] 2026-10-20: M6, three review rounds done and their findings fixed.
 * [x] 2026-10-20: M6, the maintainer accepted the amendment to decision 0006: the ban covers every compound assignment.
+* [x] 2026-10-20: M6: PR #19 opened.  CI (run 39373923147): every job passes, with no new step.  `clippy` took 5m56s and `test` 4m12s.
 * [ ] M6: PR merged by the maintainer.
 * [ ] M7: DSP-1 allowlist test.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
