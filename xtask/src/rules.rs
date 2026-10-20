@@ -1519,7 +1519,8 @@ pub fn parse_ls_files(output: &str) -> Result<Vec<TrackedFile>> {
 
 /// Each tracked file that reads as UTF-8, from the working tree, with its
 /// text.  It skips a file that the working tree has deleted, since a
-/// deletion adds nothing, and a file that is not UTF-8, such as a PNG.
+/// deletion adds nothing, a file that is not UTF-8, such as a PNG, and a
+/// tracked link to a folder.
 pub fn tracked_texts(root: &Path, tracked: &[TrackedFile]) -> Result<Vec<(String, String)>> {
     tracked
         .iter()
@@ -1528,6 +1529,7 @@ pub fn tracked_texts(root: &Path, tracked: &[TrackedFile]) -> Result<Vec<(String
                 .ok()
                 .map(|text| Ok((file.path.clone(), text))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => None,
             Err(e) => Some(Err(
                 anyhow::Error::new(e).context(format!("reading {}", file.path))
             )),
@@ -1558,10 +1560,10 @@ const PYTHON_FILE_NAMES: [&str; 4] = ["requirements.txt", "pyproject.toml", "pip
 /// Words that run Python or install its packages, in lower case.
 const PYTHON_WORDS: [&str; 7] = ["python", "python3", "pip", "pip3", "pipx", "uv", "uvx"];
 
-/// The names of Python's built-in web server, in lower case.  Each is
-/// joined by `concat!`, so this file never holds the name and needs no
-/// exception.
-const PYTHON_SERVERS: [&str; 2] = [concat!("http", ".server"), concat!("simplehttp", "server")];
+/// The names of Python's built-in web server, matched with case, as Python
+/// matches module names.  Each is joined by `concat!`, so this file never
+/// holds the name and needs no exception.
+const PYTHON_SERVERS: [&str; 2] = [concat!("http", ".server"), concat!("SimpleHTTP", "Server")];
 
 /// Folders of history, which may quote a breach.
 const HISTORY: [&str; 2] = ["docs/plans/", "docs/decisions/"];
@@ -1603,7 +1605,7 @@ pub fn python_in_the_build(tracked: &[TrackedFile], texts: &[(String, String)]) 
                         .map(|word| format!("runs Python (\"{word}\") in a build file.  Fix: use Cargo, Trunk or an xtask command."))
                 })
                 .flatten();
-            let server = (!history && PYTHON_SERVERS.iter().any(|server| lower.contains(server)))
+            let server = (!history && PYTHON_SERVERS.iter().any(|server| line.contains(server)))
                 .then(|| "names Python's web server.  Fix: serve with cargo run -p xtask -- serve.".to_string());
             [word, server].into_iter().flatten().map(move |what| Problem {
                 rule: "BUILD-1",
@@ -1657,10 +1659,10 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
                         || WEIGHT_EXTENSIONS.contains(&extension.as_str())
                 })
                 .map(|extension| format!(
-                    "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached {path}, keep it in an ignored folder (audio/, stems/ or third_party/), and link to its source."
+                    "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached '{path}', keep it in an ignored folder (audio/, stems/ or third_party/), and link to its source."
                 ));
             let too_big = (file.size > MAX_TRACKED_BYTES).then(|| format!(
-                "ASSET-1: {path} is {} bytes, over MAX_TRACKED_BYTES ({MAX_TRACKED_BYTES}).  Fix: if it is audio or weights, remove it with git rm --cached {path} and link to its source; else raise MAX_TRACKED_BYTES in xtask/src/rules.rs with a reason.",
+                "ASSET-1: {path} is {} bytes, over MAX_TRACKED_BYTES ({MAX_TRACKED_BYTES}).  Fix: if it is audio or weights, remove it with git rm --cached '{path}' and link to its source; else raise MAX_TRACKED_BYTES in xtask/src/rules.rs with a reason.",
                 file.size
             ));
             [asset, too_big].into_iter().flatten().map(|message| Problem {
@@ -3646,9 +3648,11 @@ mod tracked_tests {
             ".github/dependabot.yml",
             "app/Trunk.toml",
             "engine/build.rs",
+            "roformer/build.rs",
             ".cargo/config.toml",
             ".cargo/config",
             "app/.cargo/config.toml",
+            "app/.cargo/config",
         ] {
             assert!(is_build_file(path), "{path}");
         }
@@ -3738,6 +3742,7 @@ mod tracked_tests {
         let ci_server = concat!("      - run: serve http", ".server");
         let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
             ("README.md", server),
+            ("notes/docs/plans/x.md", server),
             ("xtask/src/serve.rs", old_server),
             (".github/workflows/ci.yml", ci_server),
         ]
@@ -3758,7 +3763,8 @@ mod tracked_tests {
                 &[],
                 &texts(&[
                     ("docs/plans/x.md", &history),
-                    ("docs/decisions/x.md", &history)
+                    ("docs/decisions/x.md", &history),
+                    ("xtask/src/serve.rs", "struct SimpleHttpServer;\n")
                 ])
             ),
             []
@@ -3768,11 +3774,25 @@ mod tracked_tests {
     #[test]
     fn assets_are_named() {
         let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
+            "song.mp3",
+            "song.wav",
             "song.flac",
+            "song.ogg",
+            "song.opus",
+            "song.m4a",
+            "song.aac",
+            "song.aif",
+            "song.aiff",
             "a/Model.SafeTensors",
             "bs_roformer_sw.f32.safetensors",
+            "model.ckpt",
+            "model.pt",
+            "model.pth",
             "weights.bin",
+            "model.onnx",
             "x.npy",
+            "x.npz",
+            "model.gguf",
         ]
         .into_iter()
         .map(|path| (path, assets_in_the_index(&tracked(&[path])), None))
@@ -3799,5 +3819,22 @@ mod tracked_tests {
         assert_one_each("ASSET-1", &[("docs/big.txt", over.clone(), None)]);
         assert!(over[0].message.contains("1048577"), "{}", over[0]);
         assert_eq!(assets_in_the_index(&[file(1_048_576)]), []);
+    }
+
+    #[test]
+    fn tracked_texts_skips_what_has_no_text() {
+        let root = std::env::temp_dir().join(format!("xtask-tracked-texts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("README.md"), "text\n").unwrap();
+        std::fs::write(root.join("a.png"), [0x89, b'P', b'N', b'G', 0xff]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("docs", root.join("link")).unwrap();
+        let texts = tracked_texts(
+            &root,
+            &tracked(&["README.md", "a.png", "deleted.md", "link", "docs"]),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(texts.unwrap(), [("README.md".into(), "text\n".into())]);
     }
 }

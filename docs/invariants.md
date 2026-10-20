@@ -11,7 +11,7 @@ Each rule names its enforcement on an `* Enforced by:` line, where a name in a c
 Building and serving the app uses only Cargo, Trunk and `xtask serve`.  Never suggest or add Python or another non-Rust server or build step.  Python appears only in `tools/roformer_export.py`, which generates test fixtures from the PyTorch reference.
 
 * Why: one toolchain to install and audit; the maintainer's choice for this repo.
-* Enforced by: `no_python_in_the_build` (CI `test` job), over the git index.  It fails a tracked Python file other than `tools/roformer_export.py`.  It fails the words `python`, `pip` or `uv` in CI, Trunk, `build.rs` or Cargo's config.  It fails the name of Python's web server in a tracked text file outside plans and decisions.  It does not see Rust code that starts Python, a script with a shebang and no extension, or a server in another language.
+* Enforced by: `no_python_in_the_build` (CI `test` job), over the git index.  It fails a tracked Python file other than `tools/roformer_export.py`.  It fails the words `python`, `pip` or `uv` in CI, Trunk, `build.rs` or Cargo's config.  It fails the name of Python's web server in a tracked text file outside plans and decisions.  It does not see Rust code outside `build.rs` that starts Python, or a shell script that runs Python.  It also does not see a script with a shebang and no extension, or a server in another language.
 
 ### ASSET-1: no audio, stems or model weights in the repo
 
