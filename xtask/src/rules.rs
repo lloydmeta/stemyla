@@ -1215,7 +1215,7 @@ fn dsp_file_problems(file: &str, text: &str) -> Vec<Problem> {
         }]
     };
     if file == "dsp/Cargo.toml" {
-        if text == DSP_MANIFEST {
+        if text.replace("\r\n", "\n") == DSP_MANIFEST {
             return Vec::new();
         }
         return whole_file(format!(
@@ -1236,7 +1236,7 @@ fn dsp_file_problems(file: &str, text: &str) -> Vec<Problem> {
         }
     };
     let mut breaches = BTreeMap::new();
-    scan_dsp_tokens(file, tokens, true, &mut breaches);
+    scan_dsp_tokens(file, tokens, DspLevel::Top, &mut breaches);
     breaches
         .into_iter()
         .map(|((line, _), what)| Problem {
@@ -1248,20 +1248,37 @@ fn dsp_file_problems(file: &str, text: &str) -> Vec<Problem> {
         .collect()
 }
 
+/// Where a stream of tokens is in a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DspLevel {
+    Top,
+    Group,
+    /// The braces of an import, as in `use std::mem::{replace, swap}`.
+    ImportList,
+}
+
 /// Finds the breaches in `tokens` and in every group in them.  For each
 /// line and kind, it keeps the first breach and its message.
 fn scan_dsp_tokens(
     file: &str,
     tokens: TokenStream,
-    top_level: bool,
+    level: DspLevel,
     breaches: &mut BTreeMap<(usize, DspBreach), String>,
 ) {
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
     for (k, tree) in trees.iter().enumerate() {
         if let TokenTree::Group(group) = tree {
-            scan_dsp_tokens(file, group.stream(), false, breaches);
+            let after_path = k >= 2
+                && punct_spacing(trees.get(k - 1), ':').is_some()
+                && joint(trees.get(k - 2), ':');
+            let inner = if group.delimiter() == Delimiter::Brace && after_path {
+                DspLevel::ImportList
+            } else {
+                DspLevel::Group
+            };
+            scan_dsp_tokens(file, group.stream(), inner, breaches);
         }
-        if let Some((kind, what)) = dsp_breach_at(file, &trees, k, top_level) {
+        if let Some((kind, what)) = dsp_breach_at(file, &trees, k, level) {
             breaches
                 .entry((tree.span().start().line, kind))
                 .or_insert(what);
@@ -1292,14 +1309,17 @@ fn dsp_breach_at(
     file: &str,
     trees: &[TokenTree],
     k: usize,
-    top_level: bool,
+    level: DspLevel,
 ) -> Option<(DspBreach, String)> {
     let at = |offset: isize| k.checked_add_signed(offset).and_then(|j| trees.get(j));
     let tree = &trees[k];
     if let Some(raw) = ident_name(Some(tree)) {
         let name = raw.strip_prefix("r#").unwrap_or(&raw);
         let after_dot = punct_spacing(at(-1), '.').is_some() && !joint(at(-2), '.');
-        let after_path = punct_spacing(at(-1), ':').is_some() && joint(at(-2), ':');
+        let first_in_import =
+            level == DspLevel::ImportList && (k == 0 || punct_spacing(at(-1), ',').is_some());
+        let after_path =
+            first_in_import || (punct_spacing(at(-1), ':').is_some() && joint(at(-2), ':'));
         if after_dot && !DSP_METHODS.contains(&name) {
             return Some((
                 DspBreach::Method,
@@ -1323,7 +1343,7 @@ fn dsp_breach_at(
         if raw == "for" {
             return dsp_for_breach(&trees[k + 1..]);
         }
-        if raw == "include" && punct_spacing(at(1), '!').is_some() {
+        if name == "include" && punct_spacing(at(1), '!').is_some() {
             return Some((
                 DspBreach::Include,
                 "brings in another file with include!.  Fix: put the code in a module in dsp/src/."
@@ -1366,9 +1386,13 @@ fn dsp_breach_at(
         if let Some(TokenTree::Group(group)) = body
             && group.delimiter() == Delimiter::Bracket
         {
-            let name = ident_name(group.stream().into_iter().next().as_ref())?;
-            let listed = inner && top_level && file == DSP_LIB && is_dsp1_expect(group.stream());
-            if DSP_ATTRIBUTES.contains(&name.as_str()) && !listed {
+            let raw = ident_name(group.stream().into_iter().next().as_ref())?;
+            let name = raw.strip_prefix("r#").unwrap_or(&raw);
+            let listed = inner
+                && level == DspLevel::Top
+                && file == DSP_LIB
+                && is_dsp1_expect(group.stream());
+            if DSP_ATTRIBUTES.contains(&name) && !listed {
                 return Some((
                     DspBreach::Attribute,
                     format!(
@@ -3274,6 +3298,14 @@ mod tests {
             ),
             (module, at_top("#[path = \"x.rs\"]"), vec!["`path`"]),
             (module, in_body("include!(\"x.rs\");"), vec!["include!"]),
+            (module, in_body("r#include!(\"x.rs\");"), vec!["include!"]),
+            (lib, at_top("#![r#allow(clippy::all)]"), vec!["`allow`"]),
+            (
+                module,
+                at_top("use std::mem::{replace, swap};"),
+                vec!["`swap`"],
+            ),
+            (module, at_top("use std::{cmp::{max}};"), vec!["`max`"]),
         ]
         .into_iter()
         .chain(compound)
@@ -3298,6 +3330,10 @@ mod tests {
     #[test]
     fn the_manifest_and_files_are_fixed() {
         let manifest = "dsp/Cargo.toml";
+        assert_eq!(
+            dsp_problems(manifest, &DSP_MANIFEST.replace('\n', "\r\n")),
+            []
+        );
         let cases = [
             (
                 manifest,
