@@ -2279,6 +2279,506 @@ fn table_differences(table: &[(usize, LicenceRow)], rows: &BTreeSet<LicenceRow>)
     twice.chain(changed_or_stale).chain(missing).collect()
 }
 
+const PROTOCOL_LIB: &str = "protocol/src/lib.rs";
+const E2E_SCRIPTS: &str = "xtask/e2e";
+const E2E_RUST: &str = "xtask/src/e2e.rs";
+
+/// Words in a message type's place in the e2e scripts that
+/// `stem_protocol::kind` does not have, each with its reason.
+pub const SCRIPT_ONLY_TYPES: [(&str, &str); 2] = [
+    (
+        "worker-error",
+        "the reply that `e2e.ask` makes when the worker throws",
+    ),
+    (
+        "module",
+        "the `Worker` constructor's option in `worker.js`, not a message",
+    ),
+];
+
+fn proto1(file: &str, line: Option<usize>, message: String) -> Problem {
+    Problem {
+        rule: "PROTO-1",
+        file: file.into(),
+        line,
+        message,
+    }
+}
+
+/// Each `*.js` file in `xtask/e2e`, in name order, with its text.
+pub fn e2e_scripts(root: &Path) -> Result<Vec<(String, String)>> {
+    let folder = root.join(E2E_SCRIPTS);
+    let mut names: Vec<String> = std::fs::read_dir(&folder)
+        .with_context(|| format!("reading {E2E_SCRIPTS}"))?
+        .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_>>()?;
+    names.retain(|name| name.ends_with(".js"));
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let file = format!("{E2E_SCRIPTS}/{name}");
+            let text = std::fs::read_to_string(folder.join(&name))
+                .with_context(|| format!("reading {file}"))?;
+            Ok((file, text))
+        })
+        .collect()
+}
+
+/// A JavaScript token, as far as the scan of message types needs one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsToken {
+    Ident(String),
+    Str(String),
+    Punct(char),
+}
+
+fn is_js_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// The tokens of `text`, each with its line from 1.  It skips comments and
+/// template literals.  A string goes on past `\` and a newline, as in JS.
+/// A string without its closing quote on its line gives no token, so
+/// prose with an apostrophe gives no type, and the lex never fails.  It
+/// reads no regex literal.
+fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
+    let chars: Vec<char> = text.chars().collect();
+    let at = |index: usize| chars.get(index).copied();
+    let mut tokens = Vec::new();
+    let mut line = 1;
+    let mut index = 0;
+    while let Some(c) = at(index) {
+        if c == '\n' {
+            line += 1;
+            index += 1;
+        } else if c.is_whitespace() {
+            index += 1;
+        } else if c == '/' && at(index + 1) == Some('/') {
+            while at(index).is_some_and(|c| c != '\n') {
+                index += 1;
+            }
+        } else if c == '/' && at(index + 1) == Some('*') {
+            index += 2;
+            while at(index).is_some() && !(at(index) == Some('*') && at(index + 1) == Some('/')) {
+                line += usize::from(at(index) == Some('\n'));
+                index += 1;
+            }
+            index += 2;
+        } else if c == '`' {
+            index += 1;
+            while let Some(c) = at(index).filter(|c| *c != '`') {
+                let skipped = if c == '\\' { 2 } else { 1 };
+                line += (index..index + skipped)
+                    .filter(|i| at(*i) == Some('\n'))
+                    .count();
+                index += skipped;
+            }
+            index += 1;
+        } else if c == '"' || c == '\'' {
+            let start_line = line;
+            let mut value = String::new();
+            let mut end = index + 1;
+            let closed = loop {
+                match at(end) {
+                    None | Some('\n') => break false,
+                    Some(quote) if quote == c => break true,
+                    Some('\\') if at(end + 1).is_some() => {
+                        line += usize::from(at(end + 1) == Some('\n'));
+                        value.extend(at(end + 1));
+                        end += 2;
+                    }
+                    Some(other) => {
+                        value.push(other);
+                        end += 1;
+                    }
+                }
+            };
+            if closed {
+                tokens.push((start_line, JsToken::Str(value)));
+                index = end + 1;
+            } else {
+                index = end;
+            }
+        } else if is_js_ident_char(c) {
+            let start = index;
+            while at(index).is_some_and(is_js_ident_char) {
+                index += 1;
+            }
+            tokens.push((line, JsToken::Ident(chars[start..index].iter().collect())));
+        } else {
+            tokens.push((line, JsToken::Punct(c)));
+            index += 1;
+        }
+    }
+    tokens
+}
+
+/// The message types in `stem_protocol::kind`: every string in the brace
+/// group after `mod kind`, at the top level of `protocol`.  The error says
+/// why there is none.
+fn protocol_kinds(protocol: &str) -> std::result::Result<BTreeSet<String>, String> {
+    let tokens = TokenStream::from_str(protocol).map_err(|e| format!("does not tokenise: {e}"))?;
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let kind = trees
+        .windows(3)
+        .find_map(|window| match window {
+            [
+                TokenTree::Ident(word),
+                TokenTree::Ident(name),
+                TokenTree::Group(group),
+            ] if word == "mod" && name == "kind" && group.delimiter() == Delimiter::Brace => {
+                Some(group.stream())
+            }
+            _ => None,
+        })
+        .ok_or("has no `mod kind`")?;
+    let kinds: BTreeSet<String> = string_literals(kind)
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
+    if kinds.is_empty() {
+        Err("has no string in `mod kind`".into())
+    } else {
+        Ok(kinds)
+    }
+}
+
+fn js_ident(token: Option<&(usize, JsToken)>, name: &str) -> bool {
+    matches!(token, Some((_, JsToken::Ident(ident))) if ident == name)
+}
+
+fn js_punct(token: Option<&(usize, JsToken)>, char: char) -> bool {
+    matches!(token, Some((_, JsToken::Punct(punct))) if *punct == char)
+}
+
+fn js_str(token: Option<&(usize, JsToken)>) -> Option<(usize, String)> {
+    match token {
+        Some((line, JsToken::Str(value))) => Some((*line, value.clone())),
+        _ => None,
+    }
+}
+
+/// The index after `===`, `==`, `!==` or `!=` at `start`.
+fn js_comparison_end(tokens: &[(usize, JsToken)], start: usize) -> Option<usize> {
+    let run: String = tokens[start.min(tokens.len())..]
+        .iter()
+        .map_while(|(_, token)| match token {
+            JsToken::Punct(c @ ('=' | '!')) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    matches!(run.as_str(), "===" | "==" | "!==" | "!=").then_some(start + run.len())
+}
+
+/// The last ident of the chain `a.b.c` at `start`, and the index after it.
+fn js_chain_end(tokens: &[(usize, JsToken)], start: usize) -> Option<(&str, usize)> {
+    let Some((_, JsToken::Ident(first))) = tokens.get(start) else {
+        return None;
+    };
+    let mut last = first.as_str();
+    let mut end = start + 1;
+    while let (true, Some((_, JsToken::Ident(next)))) =
+        (js_punct(tokens.get(end), '.'), tokens.get(end + 1))
+    {
+        last = next;
+        end += 2;
+    }
+    Some((last, end))
+}
+
+/// True when the chain that ends with the ident at `end` follows `typeof`.
+fn js_after_typeof(tokens: &[(usize, JsToken)], end: usize) -> bool {
+    let mut start = end;
+    while start >= 2
+        && js_punct(tokens.get(start - 1), '.')
+        && matches!(tokens.get(start - 2), Some((_, JsToken::Ident(_))))
+    {
+        start -= 2;
+    }
+    start >= 1 && js_ident(tokens.get(start - 1), "typeof")
+}
+
+/// The strings of `[ "a", "b", ]` at `start`, if `.includes(<chain>.type)`
+/// follows it.
+fn js_included_types(tokens: &[(usize, JsToken)], start: usize) -> Vec<(usize, String)> {
+    if !js_punct(tokens.get(start), '[') {
+        return Vec::new();
+    }
+    let mut strings = Vec::new();
+    let mut end = start + 1;
+    while let Some(string) = js_str(tokens.get(end)) {
+        strings.push(string);
+        end += 1;
+        if !js_punct(tokens.get(end), ',') {
+            break;
+        }
+        end += 1;
+    }
+    let includes_a_type = !strings.is_empty()
+        && js_punct(tokens.get(end), ']')
+        && js_punct(tokens.get(end + 1), '.')
+        && js_ident(tokens.get(end + 2), "includes")
+        && js_punct(tokens.get(end + 3), '(')
+        && js_chain_end(tokens, end + 4)
+            .is_some_and(|(last, after)| last == "type" && js_punct(tokens.get(after), ')'));
+    if includes_a_type { strings } else { Vec::new() }
+}
+
+/// Each message type in a script, with its line: `type: "x"` or
+/// `"type": "x"`; `d.type === "x"` or `type === "x"`, and the reverse
+/// order; and `["x", "y"].includes(d.type)`.
+fn js_types(tokens: &[(usize, JsToken)]) -> Vec<(usize, String)> {
+    (0..tokens.len())
+        .flat_map(|index| {
+            let token = tokens.get(index);
+            let is_type_word = js_ident(token, "type");
+            let is_type_key =
+                is_type_word || js_str(token).is_some_and(|(_, value)| value == "type");
+            let key_value = (is_type_key && js_punct(tokens.get(index + 1), ':'))
+                .then(|| js_str(tokens.get(index + 2)))
+                .flatten();
+            let compared = (is_type_word && !js_after_typeof(tokens, index))
+                .then(|| js_comparison_end(tokens, index + 1))
+                .flatten()
+                .and_then(|end| js_str(tokens.get(end)));
+            let reversed = js_str(token).filter(|_| {
+                js_comparison_end(tokens, index + 1)
+                    .and_then(|end| js_chain_end(tokens, end))
+                    .is_some_and(|(last, _)| last == "type")
+            });
+            key_value
+                .into_iter()
+                .chain(compared)
+                .chain(reversed)
+                .chain(js_included_types(tokens, index))
+        })
+        .collect()
+}
+
+/// `\\` as `\` and `\"` as `"`, so a plain Rust literal reads as the JS it
+/// holds.  Other escapes stay, and so do the newlines.
+fn unescape_quotes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(&next)) if next == '\\' || next == '"' => {
+                out.push(next);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn is_type_literal(tree: Option<&TokenTree>) -> bool {
+    matches!(tree, Some(TokenTree::Literal(literal)) if string_value(literal).as_deref() == Some("type"))
+}
+
+fn rust_string(tree: Option<&TokenTree>) -> Option<(usize, String)> {
+    match tree {
+        Some(TokenTree::Literal(literal)) => {
+            string_value(literal).map(|value| (literal.span().start().line, value))
+        }
+        _ => None,
+    }
+}
+
+/// A string literal at `start`, or `json!("x")`.
+fn rust_type_value(trees: &[TokenTree], start: usize) -> Option<(usize, String)> {
+    rust_string(trees.get(start)).or_else(|| {
+        let is_json = ident_name(trees.get(start)).as_deref() == Some("json")
+            && punct_spacing(trees.get(start + 1), '!').is_some();
+        match trees.get(start + 2) {
+            Some(TokenTree::Group(group))
+                if is_json && group.delimiter() == Delimiter::Parenthesis =>
+            {
+                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                match inner.as_slice() {
+                    [only] => rust_string(Some(only)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Each message type in Rust tokens, with its line: in each string literal,
+/// read as JS; after `["type"] ==` or `!=`; and after `"type":` in a brace
+/// group, as in `json!([{ "type": "x" }])`.
+fn rust_types(tokens: TokenStream, in_braces: bool) -> Vec<(usize, String)> {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    trees
+        .iter()
+        .enumerate()
+        .flat_map(|(index, tree)| match tree {
+            TokenTree::Group(group) => {
+                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                let is_type_index = group.delimiter() == Delimiter::Bracket
+                    && inner.len() == 1
+                    && is_type_literal(inner.first());
+                let compares = (joint(trees.get(index + 1), '=')
+                    || joint(trees.get(index + 1), '!'))
+                    && punct_spacing(trees.get(index + 2), '=').is_some();
+                let compared = (is_type_index && compares)
+                    .then(|| rust_type_value(&trees, index + 3))
+                    .flatten();
+                let nested = rust_types(group.stream(), group.delimiter() == Delimiter::Brace);
+                compared.into_iter().chain(nested).collect::<Vec<_>>()
+            }
+            TokenTree::Literal(literal) => {
+                let script = string_value(literal)
+                    .map(|value| {
+                        let first_line = literal.span().start().line;
+                        let is_raw = literal.to_string().starts_with('r');
+                        let text = if is_raw {
+                            value
+                        } else {
+                            unescape_quotes(&value)
+                        };
+                        js_types(&js_tokens(&text))
+                            .into_iter()
+                            .map(|(line, value)| (first_line + line - 1, value))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let keyed = (in_braces
+                    && is_type_literal(Some(tree))
+                    && punct_spacing(trees.get(index + 1), ':').is_some())
+                .then(|| rust_type_value(&trees, index + 2))
+                .flatten();
+                script.into_iter().chain(keyed).collect()
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) => Vec::new(),
+        })
+        .collect()
+}
+
+/// A message type in an e2e script.
+struct ScriptType {
+    file: String,
+    line: usize,
+    value: String,
+}
+
+/// PROTO-1: each message type that the e2e scripts write by hand is in
+/// `stem_protocol::kind`, or `script_only` names it.  `scripts` holds the
+/// `xtask/e2e/*.js` files; `e2e_rust` is the text of `xtask/src/e2e.rs`.
+pub fn e2e_types_match_the_protocol(
+    protocol: &str,
+    scripts: &[(String, String)],
+    e2e_rust: &str,
+    script_only: &[(&str, &str)],
+) -> Vec<Problem> {
+    let kinds = match protocol_kinds(protocol) {
+        Ok(kinds) => kinds,
+        Err(why) => {
+            return vec![proto1(
+                PROTOCOL_LIB,
+                None,
+                format!(
+                    "PROTO-1: {PROTOCOL_LIB} {why}, so the check has no message type.  Fix: keep the message types as string constants in `stem_protocol::kind`, or update the check in {RULES_FILE}."
+                ),
+            )];
+        }
+    };
+    let in_js: Vec<ScriptType> = scripts
+        .iter()
+        .flat_map(|(file, text)| {
+            js_types(&js_tokens(text))
+                .into_iter()
+                .map(move |(line, value)| ScriptType {
+                    file: file.clone(),
+                    line,
+                    value,
+                })
+        })
+        .collect();
+    let no_type = |file: &str, place: &str| {
+        proto1(
+            file,
+            None,
+            format!(
+                "PROTO-1: {file} has no message type in {place}.  Fix: write each type in a shape that the check reads, or update the check in {RULES_FILE}."
+            ),
+        )
+    };
+    let e2e_tokens = TokenStream::from_str(e2e_rust);
+    let rust_was_read = e2e_tokens.is_ok();
+    let (in_rust, rust_problems): (Vec<ScriptType>, Vec<Problem>) = match e2e_tokens {
+        Err(e) => (
+            Vec::new(),
+            vec![proto1(
+                E2E_RUST,
+                None,
+                format!(
+                    "PROTO-1: {E2E_RUST} does not tokenise: {e}.  Fix: make the file valid Rust."
+                ),
+            )],
+        ),
+        Ok(tokens) => {
+            let found: Vec<ScriptType> = rust_types(tokens, false)
+                .into_iter()
+                .map(|(line, value)| ScriptType {
+                    file: E2E_RUST.into(),
+                    line,
+                    value,
+                })
+                .collect();
+            let empty = found.is_empty().then(|| no_type(E2E_RUST, "its scripts"));
+            (found, empty.into_iter().collect())
+        }
+    };
+    let js_problems = in_js
+        .is_empty()
+        .then(|| no_type(E2E_SCRIPTS, "its `*.js` files"));
+    let known = kinds
+        .iter()
+        .map(|kind| format!("\"{kind}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let is_script_only = |value: &str| script_only.iter().any(|(entry, _)| *entry == value);
+    let unknown = in_js
+        .iter()
+        .chain(&in_rust)
+        .filter(|found| !kinds.contains(&found.value) && !is_script_only(&found.value))
+        .map(|found| {
+            let ScriptType { file, line, value } = found;
+            proto1(
+                file,
+                Some(*line),
+                format!(
+                    "PROTO-1: {file}:{line} uses the message type \"{value}\", which `stem_protocol::kind` does not have.  Fix: use a type from `kind` ({known}); or change `kind`, its encoder and its decoder together; or, for a type that only the scripts make or an option that is not a message, add it to `SCRIPT_ONLY_TYPES` in {RULES_FILE} with a reason."
+                ),
+            )
+        });
+    let stale = script_only.iter().filter_map(|(entry, _)| {
+        let why = if kinds.contains(*entry) {
+            "`stem_protocol::kind` has it"
+        } else if rust_was_read && !in_js.iter().chain(&in_rust).any(|found| found.value == *entry) {
+            "no e2e script uses it"
+        } else {
+            return None;
+        };
+        Some(proto1(
+            RULES_FILE,
+            None,
+            format!(
+                "PROTO-1: {RULES_FILE} lists \"{entry}\" in `SCRIPT_ONLY_TYPES`, but {why}.  Fix: remove the entry."
+            ),
+        ))
+    });
+    js_problems
+        .into_iter()
+        .chain(rust_problems)
+        .chain(unknown)
+        .chain(stale)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5081,5 +5581,256 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
                 .message
                 .contains("lists eframe 0.36.2, which its command does not give")
         }));
+    }
+}
+
+#[cfg(test)]
+mod proto_tests {
+    use super::tracked_tests::assert_one_each;
+    use super::*;
+
+    // PROTO-1: the message types in the e2e scripts.
+
+    /// `field` comes first, so a reader of the first `mod` fails.
+    const PROTOCOL: &str = r#"
+mod field {
+    pub const TEXT: &str = "text";
+}
+
+/// The `type` of each message.
+pub mod kind {
+    /// Sent once the worker listens.
+    pub const ALIVE: &str = "alive";
+    pub const SEGMENT: &str = "segment";
+    pub const DONE: &str = "done";
+}
+"#;
+    const WORKER_JS: &str = "xtask/e2e/worker.js";
+    /// One type in each source, so neither is empty.
+    const JS_OK: &str = "w.onmessage = (e) => { if (e.data.type === \"alive\") go(); };";
+    const RUST_OK: &str = "fn ok() { in_page(\"return e2e.ask([{ type: 'done' }]);\"); }";
+
+    fn check(js: &str, rust: &str, script_only: &[(&str, &str)]) -> Vec<Problem> {
+        e2e_types_match_the_protocol(
+            PROTOCOL,
+            &[(WORKER_JS.to_string(), js.to_string())],
+            rust,
+            script_only,
+        )
+    }
+
+    fn values(tokens: &[(usize, JsToken)]) -> Vec<(usize, &JsToken)> {
+        tokens.iter().map(|(line, token)| (*line, token)).collect()
+    }
+
+    #[test]
+    fn js_is_lexed() {
+        let text = "a.type === 'x'\n// type: 'y'\n\"it\\\"s\" /* type: 'z'\n */ b `t\\` ${ \"w\" }\n` c page's\ntypeof d 'e\\\nf' g";
+        let ident = |name: &str| JsToken::Ident(name.into());
+        let string = |value: &str| JsToken::Str(value.into());
+        assert_eq!(
+            values(&js_tokens(text)),
+            vec![
+                (1, &ident("a")),
+                (1, &JsToken::Punct('.')),
+                (1, &ident("type")),
+                (1, &JsToken::Punct('=')),
+                (1, &JsToken::Punct('=')),
+                (1, &JsToken::Punct('=')),
+                (1, &string("x")),
+                (3, &string("it\"s")),
+                (4, &ident("b")),
+                (5, &ident("c")),
+                (5, &ident("page")),
+                (6, &ident("typeof")),
+                (6, &ident("d")),
+                (6, &string("e\nf")),
+                (7, &ident("g")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_kinds_are_read() {
+        let kinds = protocol_kinds(PROTOCOL).expect("the fixture has kinds");
+        assert_eq!(
+            kinds.into_iter().collect::<Vec<_>>(),
+            ["alive", "done", "segment"]
+        );
+    }
+
+    #[test]
+    fn the_e2e_types_match() {
+        let js = r#"
+const a = { type: 'alive' }, b = { "type": "segment" };
+if (d.type === 'alive' || type == "done" || 'alive' !== e.data.type || "done" != d.type) {}
+if (["alive", 'done',].includes(e.data.type)) {}
+"#;
+        let rust = r##"
+fn f() {
+    in_page("return e2e.ask([{ type: 'alive' }]);");
+    in_page(r#"return e2e.ask([{ type: "done" }]);"#);
+    p.check(r["end"]["type"] == json!("done"));
+    p.check(r["end"]["type"] != "alive");
+    in_page("return e2e.ask(args[0]);", json!([{ "type": "segment" }]));
+    in_page("return e2e.ask(args[0]);", json!([{ "type": json!("segment") }]));
+}
+"##;
+        assert_eq!(check(js, rust, &[]), vec![]);
+    }
+
+    #[test]
+    fn a_misspelt_type_is_named() {
+        let js_cases = [
+            "{ type: 'segmnt' }",
+            "{ \"type\": \"segmnt\" }",
+            "if (d.type === \"segmnt\") {}",
+            "if (type == 'segmnt') {}",
+            "if (d.type !== 'segmnt') {}",
+            "if (d.type != 'segmnt') {}",
+            "if ('segmnt' === e.data.type) {}",
+            "if ('segmnt' != type) {}",
+            "if (['alive', 'segmnt', 'done',].includes(d.type)) {}",
+            "if (['alive', 'segmnt', 'done'].includes(type)) {}",
+            "if (typeof d === 'object' && d.type === 'segmnt') {}",
+            "{ type: 'text' }",
+        ];
+        for case in js_cases {
+            assert_one_each(
+                "PROTO-1",
+                &[(
+                    WORKER_JS,
+                    check(&format!("{JS_OK}\n{case}"), RUST_OK, &[]),
+                    Some(2),
+                )],
+            );
+        }
+        let rust_cases = [
+            "fn f() {\n    in_page(\"const a = 1;\n        const b = 2;\n        return e2e.ask([{ type: \\\"segmnt\\\" }]);\");\n}",
+            "fn f() {\n    in_page(r#\"const a = 1;\n        const b = 2;\n        return e2e.ask([{ type: 'segmnt' }]);\"#);\n}",
+            "fn f() {\n    in_page(\"const a = 1;\n        const b = 2;\n        return e2e.ask([{ type: 'segmnt' }]);\");\n}",
+            "fn f() {\n    p.check(\n        \n        r[\"end\"][\"type\"] == json!(\"segmnt\"));\n}",
+            "fn f() {\n    p.check(\n        \n        r[\"end\"][\"type\"] != \"segmnt\");\n}",
+            "fn f() {\n    p.check(\n        \n        r[\"end\"][\"type\"] == \"segmnt\");\n}",
+            "fn f() {\n    in_page(\"\", json!([{\n        \n        \"type\": \"segmnt\" }]));\n}",
+            "fn f() {\n    in_page(\"\", json!([{\n        \n        \"type\": json!(\"segmnt\") }]));\n}",
+            "fn f() {\n    in_page(\"\n        \n        const p = \\\"a\\\\\\\"b\\\"; return e2e.ask([{ type: 'segmnt' }]);\");\n}",
+            "fn f() {\n    in_page(r#\"\n        \n        const p = \"C:\\\\\"; return e2e.ask([{ type: 'segmnt' }]);\"#);\n}",
+        ];
+        for case in rust_cases {
+            assert_one_each(
+                "PROTO-1",
+                &[(
+                    E2E_RUST,
+                    check(JS_OK, &format!("{case}\n{RUST_OK}"), &[]),
+                    Some(4),
+                )],
+            );
+        }
+    }
+
+    #[test]
+    fn other_type_words_are_not_types() {
+        let js_cases = [
+            "new File([b], f.name, { type: f.type })",
+            "typeof a === \"string\"",
+            "typeof d.type === \"string\"",
+            "\"file\" === h.kind",
+            "[\"a\"].includes(d.kind)",
+            "const { type, of } = d;",
+            "// { type: 'x' }",
+            "/* d.type === 'x' */",
+            "`${ { type: 'x' } }`",
+        ];
+        for case in js_cases {
+            assert_eq!(
+                check(&format!("{JS_OK}\n{case}"), RUST_OK, &[]),
+                vec![],
+                "{case}"
+            );
+        }
+        let rust = r#"fn f() {
+    let files = json!({ "url": url, "type": kind });
+    let opts = json!({ "mm": "s64" });
+    p.check(c["state"] == "running" && f("type") == "x");
+    let pairs = m!["type": "x"];
+    p.check(l.contains("Restored \"song\" from this browser"), "the page's song");
+}"#;
+        assert_eq!(check(JS_OK, &format!("{rust}\n{RUST_OK}"), &[]), vec![]);
+        let hidden = "fn f() {\n    p.note(\"the page's lanes\");\n    in_page(\"return e2e.ask([{ type: 'segmnt' }]);\");\n}";
+        assert_one_each(
+            "PROTO-1",
+            &[(
+                E2E_RUST,
+                check(JS_OK, &format!("{hidden}\n{RUST_OK}"), &[]),
+                Some(3),
+            )],
+        );
+    }
+
+    #[test]
+    fn the_script_only_list_is_checked() {
+        let worker_error = ("worker-error", "the reply that `e2e.ask` makes");
+        let js = format!("{JS_OK}\nout.replies.push({{ type: \"worker-error\" }});");
+        assert_eq!(check(&js, RUST_OK, &[worker_error]), vec![]);
+        let unused = ("zzz", "nothing");
+        let in_kind = ("done", "a type");
+        assert_one_each(
+            "PROTO-1",
+            &[
+                (
+                    RULES_FILE,
+                    check(&js, RUST_OK, &[worker_error, unused]),
+                    None,
+                ),
+                (
+                    RULES_FILE,
+                    check(&js, RUST_OK, &[worker_error, in_kind]),
+                    None,
+                ),
+                (
+                    E2E_RUST,
+                    check(&js, "fn f() {", &[worker_error, unused]),
+                    None,
+                ),
+                (
+                    WORKER_JS,
+                    check(&format!("{JS_OK}\n{{ type: \"module\" }}"), RUST_OK, &[]),
+                    Some(2),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn e2e_nothing_to_read_is_a_problem() {
+        let protocol_problem = |protocol: &str| {
+            e2e_types_match_the_protocol(
+                protocol,
+                &[(WORKER_JS.to_string(), JS_OK.to_string())],
+                RUST_OK,
+                &[],
+            )
+        };
+        assert_one_each(
+            "PROTO-1",
+            &[
+                (
+                    PROTOCOL_LIB,
+                    protocol_problem("pub mod field { pub const A: &str = \"alive\"; }"),
+                    None,
+                ),
+                (PROTOCOL_LIB, protocol_problem("pub mod kind {}"), None),
+                (PROTOCOL_LIB, protocol_problem("pub mod kind { \""), None),
+                (E2E_RUST, check(JS_OK, "fn f() {", &[]), None),
+                (E2E_SCRIPTS, check("const a = 1;", RUST_OK, &[]), None),
+                (
+                    E2E_SCRIPTS,
+                    e2e_types_match_the_protocol(PROTOCOL, &[], RUST_OK, &[]),
+                    None,
+                ),
+                (E2E_RUST, check(JS_OK, "fn f() {}", &[]), None),
+            ],
+        );
     }
 }

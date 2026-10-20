@@ -99,11 +99,11 @@ MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does
 
 * Fix: decided 2026-10-19: RT-1 is to forbid allocation after warm-up.  A test with a counting global allocator over `render_interleaved` for each stretcher the app ships, wsola 0.2.0 (whose `pull` does not allocate), and chipmunk decimation in place (`plans/active/harness-phase-2.md`, M11).
 
-### TD-16: the wire format has unchecked copies and silent defaults
+### TD-16: the wire format has unchecked field names and silent defaults
 
-`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat message types and field names by hand, unchecked against `stem_protocol::kind`; a reply missing a field decodes as `""`, `0` or `false`; and there is no version handshake between page and worker (PROTO-1).
+`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
-* Fix: a test that extracts the type strings from the e2e scripts and checks them against `stem_protocol::kind`; fail decoding on a missing required field; a version in `Alive`.
+* Fix: fail decoding on a missing required field; a version in `Alive`.
 
 ### TD-17: one OPFS write path is safe only by construction
 
