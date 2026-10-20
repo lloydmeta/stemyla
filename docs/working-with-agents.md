@@ -96,6 +96,7 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 * CI passes.  Every job but `publish` is a required check on `main`, including `browser tests (Chrome)`.
 * The PR says what was verified, how, and what was not verified.
 * A new rule, decision or gap is recorded, and the plan's progress is current.
+* A change to the layers table in `docs/ARCHITECTURE.md` changes what LAYER-1 allows.  Review it as a design change.
 
 ## Tools
 
@@ -121,3 +122,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 
 * 2026-10-19, phase 1: first version.  The map, the docs, rules by path and `docs-check`.  The agent runs review rounds because `CLAUDE.md` says so; the review recipe starts them by hand.
 * 2026-10-19, phase 2 (M3): `STEMYLA_REQUIRE` turns a skipped test into a failure.  The GPU recipe uses it, and a new recipe says how to ask for evidence that a test ran.
+* 2026-10-20, phase 2 (M5): `crates_depend_only_downwards` compares the layers table with the dependencies between crates.  `the_page_and_the_worker_meet_only_through_stem_protocol` keeps the page side and the worker side apart.  Review a change to the table as a design change.

@@ -32,11 +32,11 @@ Before you add a crate, confirm that it exists and is maintained.  Pin a young c
 
 ### LAYER-1: crates depend only downwards
 
-Workspace crates depend only on crates in a lower layer of `docs/ARCHITECTURE.md` (test support; pure crates; engine and GPU; the two shells; tools).  `test-support` is a dev-dependency only, and `dsp` does not take it.  The page side and the worker side meet only through `stem-protocol`.  In the normal dependency tree of the web app (`app` and `stem-worker`), `synth` brings no other crate.
+Each workspace crate depends only on the workspace crates that its row in the layers table of `docs/ARCHITECTURE.md` lists, and on `test-support` as a dev-dependency.  This covers dev- and build-dependencies, for every target and feature.  Every path crate in the build is a workspace crate.  No crate from a registry or git has a workspace crate's name, or takes a workspace crate.  Each listed crate is in a lower layer of the table (Test support, Pure, Engine and GPU, Shells, Tools).  `test-support` is a dev-dependency only and takes no workspace crate, and `dsp` does not take it.  The page side and the worker side meet only through `stem-protocol`.  The workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.  In the normal dependency tree of the web app (`app` and `stem-worker`), `synth` brings no other crate.
 
-* Why: keeps the page from linking the model or the GPU code, and keeps the pure crates testable without a browser.  It also keeps the crates that `synth` needs only for tools and tests out of the web app's build, so `THIRD-PARTY.md`'s first table does not credit them.
-* Enforced by: `synth_brings_no_crate_into_the_web_app` (CI `test` job).  No test checks the crate edges (TD-4).
-* Gaps: TD-4.
+* Why: keeps the page from linking the model or the GPU code, and keeps the pure crates testable without a browser.  It keeps `stem-protocol` the one contract between the two WebAssembly modules.  It also keeps the crates that `synth` needs only for tools and tests out of the web app's build, so `THIRD-PARTY.md`'s first table does not credit them.
+* Enforced by: `crates_depend_only_downwards`, `the_page_and_the_worker_meet_only_through_stem_protocol` and `synth_brings_no_crate_into_the_web_app` (CI `test` job).  The first compares the dependencies between workspace crates in `cargo metadata` with the layers table.  It also fails on a crate that hides a dependency from that comparison.  The second follows the normal dependencies from `app` and `stem-worker`, and fails on a shared workspace crate other than `stem-protocol`.  Decision 0005 sets how strictly they read the rule.
+* Gaps: TD-23.
 
 ### DSP-1: dsp is beginner style
 

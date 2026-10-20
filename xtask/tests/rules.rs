@@ -57,3 +57,36 @@ fn the_skip_allowlist_is_current() {
     let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
     assert!(problems.is_empty(), "{}", report.join("\n"));
 }
+
+fn workspace() -> xtask::rules::Workspace {
+    let root = xtask::workspace_root();
+    let metadata = xtask::rules::workspace_metadata(&root).expect("cargo metadata runs");
+    xtask::rules::workspace(&metadata).expect("cargo metadata's JSON parses")
+}
+
+#[test]
+fn crates_depend_only_downwards() {
+    let architecture =
+        std::fs::read_to_string(xtask::workspace_root().join("docs/ARCHITECTURE.md"))
+            .expect("docs/ARCHITECTURE.md can be read");
+    let problems = xtask::rules::crates_follow_the_layers(&workspace(), &architecture);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} problem(s) with the crate layers:\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
+
+#[test]
+fn the_page_and_the_worker_meet_only_through_stem_protocol() {
+    let problems = xtask::rules::shells_meet_only_through_the_protocol(&workspace().crates);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} problem(s) with the page side and the worker side:\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}

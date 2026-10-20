@@ -18,12 +18,6 @@ Nothing fails when `dsp/` gains an iterator, a closure or a dependency.
 
 * Fix: a structural test in `xtask/tests/` that parses `dsp/src` and allows only the listed constructs (an allowlist, not a denylist), and asserts `dsp/Cargo.toml` has no dependencies.
 
-### TD-4: LAYER-1's crate edges are not checked
-
-No test checks the edges between workspace crates.
-
-* Fix: a test over `cargo metadata` with an allowlist of edges per crate (`plans/active/harness-phase-2.md`, M5).
-
 ### TD-5: BUILD-1 is not checked
 
 Nothing fails when a Python file or a `python`/`pip` step appears.
@@ -86,6 +80,16 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  The `no_run` doctest beside it compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.
 
 * Fix: run `cargo +nightly test -p roformer-gpu --doc` in CI, since nightly rustdoc checks the error code; or check it with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
+
+### TD-23: LAYER-1 sees crates, not code
+
+`crates_depend_only_downwards` reads the dependencies between crates, not the source (LAYER-1).
+
+* A crate from a registry or git, under another name, can hold a copy of a workspace crate, such as `roformer`.
+* Source can reach across crates without a dependency: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
+* A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
+* A symbolic link in a crate's folder can point to another crate's source.
+* Fix: phase 3's reviewers look for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
 
 ## Known breaches
 
@@ -152,3 +156,4 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 ## Closed
 
 * TD-1: closed by `every_kernel_fits_the_default_limits` (harness phase 2, M2).  It checks every shader against the default limits with naga (GPU-1).
+* TD-4: closed by `crates_depend_only_downwards` (harness phase 2, M5).  It compares the dependencies between crates in `cargo metadata` with the layers table in `ARCHITECTURE.md` (LAYER-1).

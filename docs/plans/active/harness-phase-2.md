@@ -1032,6 +1032,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M5 plan review round 8, by two new reviewers.  No blockers.  7 should-fix findings and 15 nits, all small fixes to round 7's new text, all checked and real, all fixed in the plan.  The layers problem got its file, and `the_layers_are_fixed` now fails a set comparison.  The stale-entry direction got a planted breach.  Question 2's ceiling now states its gain.  The layers message and LAYER-1 use the names in `LAYERS`.  The code reviewer found no realistic breach outside the known gap.
 * [x] 2026-10-20: plan review stopped after round 8, by the maintainer's rule: no blockers, and no should-fix item beyond small local fixes.  Not yet implemented.  Next: the maintainer answers M5's two decision questions.
 * [x] 2026-10-20: M5 decision points: the maintainer chose (a) and (x), and asked to note (a)'s native cost as a choice to revisit.  Decision 0005 gets a "Revisit if" section for it.
+* [x] 2026-10-20: M5 step 1: the parser and the two checks, test first.  Against stubs, 39 of the 45 new unit tests failed; the 6 that expect no problem passed.  With the functions, all 70 tests in `rules.rs` pass.
+* [x] 2026-10-20: M5 step 2: the real-tree tests, the new table and the docs.  On the old table, `crates_depend_only_downwards` failed with the header problem only.  On the new table, both tests pass.  Each takes about 0.75 s, most of it `cargo metadata`.  The new crates entry is TD-23.  "Prose only" lines: 7.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
 * [ ] M7: DSP-1 allowlist test.
