@@ -2339,8 +2339,9 @@ fn is_js_ident_char(c: char) -> bool {
 
 /// The tokens of `text`, each with its line from 1.  It skips comments and
 /// template literals.  A string goes on past `\` and a newline, as in JS.
-/// A string without its closing quote on its line gives no token, so prose with an apostrophe gives no type, and the lex never
-/// fails.  It reads no regex literal.
+/// A string without its closing quote on its line gives no token, so
+/// prose with an apostrophe gives no type, and the lex never fails.  It
+/// reads no regex literal.
 fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
     let chars: Vec<char> = text.chars().collect();
     let at = |index: usize| chars.get(index).copied();
@@ -5691,6 +5692,7 @@ fn f() {
             "if ('segmnt' != type) {}",
             "if (['alive', 'segmnt', 'done',].includes(d.type)) {}",
             "if (['alive', 'segmnt', 'done'].includes(type)) {}",
+            "if (typeof d === 'object' && d.type === 'segmnt') {}",
             "{ type: 'text' }",
         ];
         for case in js_cases {
@@ -5750,6 +5752,8 @@ fn f() {
         let rust = r#"fn f() {
     let files = json!({ "url": url, "type": kind });
     let opts = json!({ "mm": "s64" });
+    p.check(c["state"] == "running" && f("type") == "x");
+    let pairs = m!["type": "x"];
     p.check(l.contains("Restored \"song\" from this browser"), "the page's song");
 }"#;
         assert_eq!(check(JS_OK, &format!("{rust}\n{RUST_OK}"), &[]), vec![]);
