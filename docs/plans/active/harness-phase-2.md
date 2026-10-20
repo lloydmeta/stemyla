@@ -1266,6 +1266,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M7 review round 2, by one new reviewer, who ran 33 inputs through the check.  No blockers and no should-fix items; 4 nits, all checked and real.  `pub use max::max;` failed, so a name after its own module now passes, with a case in `beginner_code_passes`.  A glob import such as `use std::mem::*` hides `swap`; TD-3 now names it.  DSP-1 in `invariants.md` now names the three methods.  The rule file says a problem names the line "if any".
 * [x] 2026-10-20: M7 review round 3, by one new reviewer, who ran 24 inputs and the three planted breaches.  No blockers and no should-fix items; 3 nits, all checked.  The own-module exception holds only for `module::name` with nothing before it, so `self::max::max` still fails; the doc comment now says so.  The design and Decision log now record the scan refinements.  Not changed: `Vec<Vec<f32>>=` reads as `>>=`, but rustfmt never writes it.
 * [x] 2026-10-20: M7, three review rounds done and their findings fixed.
+* [x] 2026-10-20: M7: PR #20 opened.  CI (run 39392378348): every job passes, and the `test` job lists `dsp_is_beginner_style` and the three unit tests as `ok`.  `test` took 4m20s.
 * [ ] M7: DSP-1 token scan.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
 * [ ] M9: pins and `THIRD-PARTY.md` test.
