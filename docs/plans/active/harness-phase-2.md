@@ -1052,10 +1052,66 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 * `grep -c "Enforced by: prose only" docs/invariants.md` gives 6.  `Cargo.lock` does not change.
 * fmt, clippy, the tests and `docs-check` pass; `docs-check` finds no `TD-24` outside plans, decisions and the `## Closed` bullet.
 
-### M8: Python and assets are tests over the tracked files (closes TD-5, TD-6; BUILD-1, ASSET-1)
+### M8: Python and assets are tests over the tracked files (closes TD-5, TD-6; BUILD-1, ASSET-1, DOC-1)
 
-* Change: two checks in `xtask/src/rules.rs` over `git ls-files`.  BUILD-1: no `*.py` except `tools/roformer_export.py`, and no `python` or `pip` in `.github/`, `app/Trunk.toml` or a `build.rs`.  ASSET-1: no tracked file with an audio or weight extension (`mp3`, `wav`, `flac`, `ogg`, `m4a`, `aac`, `safetensors`, `ckpt`, `pt`, `pth`, `onnx`, `npy`), and no tracked file over a size cap except an allowlist (the UI snapshot PNGs).  Add the missing extensions to `.gitignore`, and anchor its folder patterns at the root (`/audio/`, `/stems/`, `/dist/`, `/pages/`).
-* Acceptance: `no_python_in_the_build` and `no_audio_or_weights_are_tracked` pass.  Unit tests plant `tools/x.py`, a `pip install` step and `song.flac`; each fails with its rule ID.  `git check-ignore -v engine/src/audio/x.rs` shows that a source folder named `audio` is no longer ignored.
+* Scope: small checks, by the rule for proportionate sensors (the parent plan's Decision log, 2026-10-20).  Nothing has broken BUILD-1 or ASSET-1, and no commit in the history adds Python or audio.  The likely breaches: an agent adds a helper script in Python, or a CI step that installs Python.  Or a person or agent runs `git add -f` on a song or a model file.  So M8 adds no crate, no decision record and no allowlist.
+
+#### M8 state at the start
+
+* BUILD-1 is "prose only" (TD-5).  The one tracked `.py` file is `tools/roformer_export.py`.  No tracked build file names Python: CI, Dependabot and the `setup-trunk` action in `.github/`, `app/Trunk.toml`, and no `build.rs` exists.
+* ASSET-1 rests on `.gitignore` (TD-6).  It lists `*.mp3`, `*.wav`, `*.safetensors` and `*.ckpt`, and the folders `dist/`, `pages/`, `audio/`, `stems/` and `third_party/`, none anchored.
+* 151 files are tracked.  The largest is `app/tests/snapshots/spectrograms_classic_drums.png`, 486,664 bytes; next are `Cargo.lock` (246,510) and this plan (223,066).  The selftest fixtures in the ignored `third_party/roformer/selftest/` are 18 and 24 MB.
+* On the maintainer's Mac, `git status --ignored` lists only `app/dist/`, `target/` and `third_party/`.  The folders that people or the code use are `app/dist/` (Trunk), `target/` (Cargo, and `target/pages/` for `xtask publish`), `audio/synth/` (`xtask gen-song`) and `stems/` (the input example for `app/tests/ui.rs`'s `STEMS_DIR`), each at the root.  Nothing writes `pages/` at the root.  So the first M8 text's anchored `/dist/` is wrong: it would stop ignoring `app/dist/`.  The anchored form is `/app/dist/`.
+* `git ls-files --format` with `%(objectsize)` reads each file's size from the index, so it needs no read of the working tree.  It came in git 2.42 ([2.42.0 docs](https://git-scm.com/docs/git-ls-files/2.42.0); the 2.41 page redirects to 2.40, which lacks the field).  The Mac has git 2.50.1.  The `ubuntu-latest` image (Ubuntu 24.04) has git 2.55.0 ([runner image](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)).  With `-z`, each entry ends in NUL and no path is quoted (checked on the Mac).
+
+#### M8 design
+
+* The reader: `pub fn tracked_files(root: &Path) -> Result<Vec<TrackedFile>>` in `xtask/src/rules.rs`.  It runs `git -C <root> ls-files -z --format=%(objectsize) %(path)`, and a pure `parse_ls_files(&str) -> Result<Vec<TrackedFile>>` reads the output.  `TrackedFile` has `path: String` and `size: u64`.  A failed `git` run is an error that holds git's stderr and says the check needs git 2.42 or later.  A size that is not a number (`-` for a submodule) is an error that names the path.  The index is what the next commit holds, so a file staged with `git add -f` is seen before the commit.
+* BUILD-1: `pub fn python_in_the_build(tracked: &[TrackedFile], texts: &[(String, String)]) -> Vec<Problem>`.  `texts` holds each tracked file that reads as UTF-8, from the working tree.  A problem names BUILD-1, the file, the line if any, and the fix.
+  * A tracked path, compared without case, that ends in `.py`, `.pyc` or `.ipynb`, or whose file name is `requirements.txt`, `pyproject.toml`, `Pipfile` or `uv.lock`.  The one exception is the exact path `tools/roformer_export.py`, compared with case.  Fix: "write it in Rust, as an `xtask` command; Python appears only in `tools/roformer_export.py`".
+  * In a build file, the word `python`, `python3`, `pip`, `pip3`, `pipx`, `uv` or `uvx`, without case.  A word is a run of letters and digits, so `setup-python` and `python3.12` hold one, and `pipefail` and `pipeline` hold none.  One problem for each line.  Fix: "use Cargo, Trunk or an `xtask` command".
+  * `pub fn is_build_file(path: &str) -> bool` chooses the build files: a path under `.github/`, a file named `Trunk.toml` or `build.rs`, and a file named `config.toml` or `config` in any `.cargo/` folder.  Cargo reads the one in `app/` too, when Trunk builds there.  `pub fn tracked_texts(root: &Path, tracked: &[TrackedFile]) -> Result<Vec<(String, String)>>` reads each tracked file from the working tree.  It skips a file that the working tree has deleted, since a deletion adds no Python.  It skips a file that is not UTF-8, such as a PNG.
+  * In any tracked text file, the module name of Python's built-in web server (`http` and `.server` joined) or its Python 2 name (`SimpleHTTP` and `Server` joined).  That server is what an agent suggests to serve a wasm build.  Files under `docs/plans/` and `docs/decisions/` are history and are left out.  `xtask/src/rules.rs` builds each name with `concat!`, so its own text never holds the joined name, and it needs no exception.  One problem for each line.  Fix: "serve with `cargo run -p xtask -- serve`".  The plan and the docs write these names in two parts, so that no doc outside `docs/plans/` holds them.
+  * Out of scope: Rust code that starts Python, such as a `Command::new` in `xtask`; a script with a Python shebang and no extension; and suggestions in chat.  BUILD-1's `* Enforced by:` line says so, as GPU-1's line names what its test cannot see.
+* ASSET-1: `pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem>`.  The two lib names differ from the real-tree tests' names, as `dsp_keeps_beginner_style` differs from `dsp_is_beginner_style`.
+  * A tracked path whose extension (the text after its last `.`), compared without case, is an audio extension (`mp3`, `wav`, `flac`, `ogg`, `opus`, `m4a`, `aac`, `aif`, `aiff`) or a weight extension (`safetensors`, `ckpt`, `pt`, `pth`, `bin`, `onnx`, `npy`, `npz`, `gguf`).  Fix: "remove it from the index with `git rm --cached <path>`, keep it in an ignored folder (`audio/`, `stems/` or `third_party/`), and link to its source".
+  * A tracked file over `MAX_TRACKED_BYTES`, 1,048,576 bytes (1 MiB).  That is twice the largest file today.  A 3-minute MP3 at 128 kbit/s is about 2.9 MB, and each selftest fixture is over 18 MB.  So no allowlist is needed.  Fix: "if it is audio or weights, remove it as above; else raise `MAX_TRACKED_BYTES` in `xtask/src/rules.rs` with a reason".
+  * Out of scope: an audio file under another extension and under 1 MiB, and files in the history.  ASSET-1's `* Enforced by:` line says so.
+* `.gitignore`: anchor the folders at the root (`/app/dist/`, `/pages/`, `/audio/`, `/stems/`, `/third_party/`).  Add the extensions that the check has and `.gitignore` lacks, so a normal `git add` leaves them out too.  `target/` stays unanchored, since Cargo makes it in any folder where it runs.
+* Docs (DOC-1), in the commit that adds the real-tree tests:
+  * `invariants.md`, BUILD-1: `* Enforced by:` becomes "`no_python_in_the_build` (CI `test` job), over the git index.  It fails a tracked Python file other than `tools/roformer_export.py`.  It fails the words `python`, `pip` or `uv` in CI, Trunk, `build.rs` or Cargo's config.  It fails the name of Python's web server in a tracked text file outside plans and decisions.  It does not see Rust code that starts Python, a script with a shebang and no extension, or a server in another language."  The `* Gaps:` line goes.  "Prose only" lines fall from 6 to 5.
+  * `invariants.md`, ASSET-1: `* Enforced by:` becomes "`no_audio_or_weights_are_tracked` (CI `test` job), over the git index, and `.gitignore`.  It fails an audio or weight extension, and a file over 1 MiB.  A short clip under another extension passes.  It does not read the history."  The `* Gaps:` line goes.
+  * `tech-debt.md`: TD-5 and TD-6 removed, and under `## Closed`: "TD-5: closed by `no_python_in_the_build` (harness phase 2, M8)." and "TD-6: closed by `no_audio_or_weights_are_tracked` and the anchored `.gitignore` (harness phase 2, M8)."
+  * `harness.md`: one components row for the two tests.
+  * `README.md`: the "Build the native app, `cargo test`, `cargo clippy`" row adds "git 2.42 or newer".  The `.gitignore` sentence under "Setting up a machine" stays true.
+
+#### M8 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. Test first: `TrackedFile`, `parse_ls_files`, `tracked_files`, `tracked_texts`, `is_build_file`, stubs of `python_in_the_build` and `assets_in_the_index` that return no problem, and the unit tests.  Every test that expects a problem fails against the stubs.  Then write the functions, and all pass.  Unit tests:
+   * `ls_files_output_is_parsed`: two NUL-ended entries, one path with a space; a `-` size and a missing space are errors.
+   * `build_files_are_chosen`: `.github/workflows/ci.yml`, `.github/dependabot.yml`, `app/Trunk.toml`, `engine/build.rs`, `config.toml` and `config` in the root `.cargo/` folder, and `config.toml` in `app/.cargo/` are build files.  `README.md`, `xtask/src/serve.rs` and `tools/roformer_export.py` are not.
+   * `python_files_are_named`: `tools/x.py`, `Tools/X.PY`, `a.pyc`, `a.ipynb`, `requirements.txt`, `pyproject.toml`, `Pipfile`, `uv.lock`, `engine/tools/roformer_export.py` and `tools/ROFORMER_EXPORT.PY` each give one BUILD-1 problem with the path.  `tools/roformer_export.py` gives none.
+   * `python_in_a_build_file_is_named`: each gives one problem with its line: `run: pip install numpy`, `uses: actions/setup-python@v5`, `package-ecosystem: "pip"` in `.github/dependabot.yml`, `command = "python3"` in `app/Trunk.toml`, `Command::new("python")` in `engine/build.rs`, `runner = "pip3"` and `uvx ruff` in `config` in `.cargo/`, `- name: Set up Python` (capital P), `run: uv sync`, `pipx run x`, and `python -m pip` on one line.
+   * `clean_build_files_pass`: `set -o pipefail`, `pipeline`, `snippet` and `Pythonic` in `ci.yml` give no problem.  A `pip` in `README.md` gives none, since it is not a build file.
+   * `a_python_server_is_named`: `python3 -m http` + `.server 8080` in `README.md`, the Python 2 name in `xtask/src/serve.rs`, and the first name in `.github/workflows/ci.yml` each give one problem with its line.  The same text in `docs/plans/x.md` and `docs/decisions/x.md` gives none.  (The test builds the names with `concat!`.)
+   * `assets_are_named`: `song.flac`, `a/Model.SafeTensors`, `bs_roformer_sw.f32.safetensors`, `weights.bin` and `x.npy` each give one ASSET-1 problem.  `engine/src/wav.rs`, `xtask/src/bin/x.rs`, `docs/prompt` and `app/tests/snapshots/six_lanes.png` give none.
+   * `a_file_over_the_cap_is_named`: 1,048,577 bytes gives one problem with the size; 1,048,576 gives none.
+2. The real-tree tests `no_python_in_the_build` and `no_audio_or_weights_are_tracked` in `xtask/tests/rules.rs`, `.gitignore` and the docs.  The tests share one `tracked_files` run.  They assert that the list holds `Cargo.toml`, `tools/roformer_export.py` and `app/tests/snapshots/six_lanes.png`, and that the texts hold `.github/workflows/ci.yml` and `README.md`, so an empty list cannot pass.  Plant each of these on the real tree, one at a time; each fails its test with the rule ID and the path.  Restore each, and record the results in the PR:
+   * `git add -f song.flac` (10 bytes);
+   * `git add tools/x.py`;
+   * `- run: pip install numpy` in `ci.yml`, not staged;
+   * `python3 -m http` + `.server` as one word in `README.md`, not staged;
+   * `git add -f` a 2 MB file of zeros as `docs/big.txt`.
+
+#### M8 acceptance
+
+* The unit tests pass, and failed against the stubs in step 1.
+* Both real-tree tests pass, and the CI `test` job lists them as `ok`.  The five planted breaches fail them.
+* `git check-ignore -v engine/src/audio/x.rs` prints nothing and exits 1.  `git check-ignore -v app/dist/index.html stems/a.txt audio/synth/a.txt` names `/app/dist/`, `/stems/` and `/audio/`.  `git status --ignored` on the Mac lists the same three folders as before.
+* `grep -c "Enforced by: prose only" docs/invariants.md` gives 5.  `Cargo.lock` does not change.
+* fmt, clippy, the tests and `docs-check` pass; `docs-check` finds no `TD-5` or `TD-6` outside plans, decisions and the `## Closed` bullets.
 
 ### M9: young crates are pinned and the licence list is a test (TD-7, part; DEPS-1)
 
@@ -1267,7 +1323,11 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M7 review round 3, by one new reviewer, who ran 24 inputs and the three planted breaches.  No blockers and no should-fix items; 3 nits, all checked.  The own-module exception holds only for `module::name` with nothing before it, so `self::max::max` still fails; the doc comment now says so.  The design and Decision log now record the scan refinements.  Not changed: `Vec<Vec<f32>>=` reads as `>>=`, but rustfmt never writes it.
 * [x] 2026-10-20: M7, three review rounds done and their findings fixed.
 * [x] 2026-10-20: M7: PR #20 opened.  CI (run 39392378348): every job passes, and the `test` job lists `dsp_is_beginner_style` and the three unit tests as `ok`.  `test` took 4m20s.
-* [ ] M7: DSP-1 token scan.
+* [x] 2026-10-20: M7, PR #20 merged by the maintainer (`a57272e`).
+* [x] 2026-10-20: M8 implementation plan written (the M8 sections under "Plan of work").  Survey of the tracked files, their sizes, the ignored folders on the Mac, and `git ls-files --format` on git 2.42 and later.
+* [x] 2026-10-20: M8 plan review round 1, by one new reviewer with a prototype in a scratch worktree.  No blockers; 2 should-fix findings and 5 nits, all checked and real, all fixed in the plan.  The anchored `.gitignore`, the word scan over today's build files and the `ls-files` parse held in the prototype.  The should-fix items: a suggested Python web server in the docs passed unseen, and a literal match finds it, so it is now a rule.  Six wrong implementations passed the unit tests (a suffix or case-free exception, a case-sensitive word match, an extension without its dot, and lists that drop a named entry); new cases fail each.
+* [x] 2026-10-20: M8 plan review round 2, by one new reviewer with a prototype in a scratch worktree.  No blockers; 1 should-fix and 8 nits, all checked.  The server rule gave no false result over the 145 tracked text files.  The should-fix: the planned `* Enforced by:` lines left out three gaps that the design names (a shebang script, a server in another language, the history); they now name them.  The nits were all fixed.  New cases fail a scan of Markdown only, a list without `uv` or `pipx`, and an extension read from the first `.`.  `rules.rs` builds the server names with `concat!` and needs no exception.  `.cargo/` means any such folder.  The `check-ignore` acceptance uses `.txt` paths, which only the folder rules match.  Not changed: Rust code that starts Python stays out of scope, as the reviewer accepted.
+* [x] 2026-10-20: plan review stopped after round 2, by the maintainer's rule: no blockers, and no should-fix item beyond a small text fix.  Not yet implemented.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
 * [ ] M9: pins and `THIRD-PARTY.md` test.
 * [ ] M10: e2e message types test.
@@ -1307,6 +1367,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, M6 review round 1: the `assign_op_pattern` `expect` also silences `x = x * y`, `/`, `%`, `<<`, `|` and `^`, not only `+` and `-`.  Evidence: with the `expect` removed, each fires the lint.
 * 2026-10-20, M7 survey: `dsp` never writes `bool`.  `median`'s `swapped` gets it from `true`, so a check of written types cannot see it, and TD-24's "has a `bool`" is an inferred type.
 * 2026-10-20, M6 plan review: an `expect` of a lint group silences the whole group.  `#![expect(clippy::all, reason = "x")]` is fulfilled by a style lint, and `n == n` then passes.  So M7 must name each lint, not only require `expect`.
+* 2026-10-20, M8 survey: the first M8 text said to anchor `dist/` as `/dist/`.  The only `dist` folder is `app/dist/`, Trunk's output, so `/dist/` would stop ignoring it.  The anchored form is `/app/dist/`.
 
 ## Decision log
 
@@ -1364,6 +1425,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M7): DSP-1's list of types is corrected to the types the code writes, with no decision record.  The text was wrong, and no choice is made.
 * 2026-10-20, agent (M7): small refinements to the scan, found while implementing and in review.  A `for` with no `in` is not a loop.  A listed `#![expect]` passes only at the top level of `dsp/src/lib.rs`.  Names in an import's braces count as after `::`, and a name after its own module passes.  `r#` is stripped from attribute names and `include!`.  `dsp/Cargo.toml` is compared with LF line ends.  Each closes a false result that a test now pins; none changes what DSP-1 permits.
 * 2026-10-20, maintainer: M14 keeps only the deny rules, M15 only the `rustfmt` hook, and M16 moves to phase 5b.  The hooks in `xtask` cost a build per tool call and are not controls.  No deleted test has been seen here.  This replaces the 2026-10-19 decision that hooks are an `xtask` command.
+
+* 2026-10-20, agent (M8): TD-5 and TD-6 close with no new entry.  What the checks cannot see goes in the `* Enforced by:` lines, as GPU-1's line does.  No fix is planned for it, so an entry would add nothing.
+* 2026-10-20, agent (M8): the checks read the git index with `git ls-files`, not a walk of the folders.  The index is what the next commit holds, and the walk skips the ignored folders where audio lives.
+* 2026-10-20, agent (M8 plan review round 1): a literal match for Python's web server joins the BUILD-1 check, over every tracked text file outside plans and decisions.  It is the breach that an agent most likely writes, and it gives no false result today.
 
 ## Outcomes and retrospective
 
