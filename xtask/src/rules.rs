@@ -1833,7 +1833,7 @@ pub fn young_crates_are_pinned_in(
                 &dependency.manifest,
                 None,
                 format!(
-                    "DEPS-1: {} takes {} {requirement}, which admits a version below 1.0 and is not a pin.  Fix: pin it with = and its version in Cargo.lock, or, if its first version on crates.io is two years old or more, add it to SETTLED_CRATES in {RULES_FILE} with that date.",
+                    "DEPS-1: {} takes {} {requirement}, which admits a version below 1.0 and is not a pin.  Fix: pin it, or the [workspace.dependencies] entry it inherits, with = and its version in Cargo.lock, or, if its first version on crates.io is two years old or more, add it to SETTLED_CRATES in {RULES_FILE} with that date.",
                     dependency.manifest, dependency.name
                 ),
             )
@@ -1960,6 +1960,19 @@ pub fn third_party_tree(root: &Path, edges: &str) -> Result<String> {
         .with_context(|| format!("cargo tree -e {edges} printed text that is not UTF-8"))
 }
 
+/// The folder of each workspace crate, from `cargo metadata`'s JSON, as
+/// `cargo tree` prints it after a path crate's version.
+pub fn member_folders(metadata: &str) -> Result<Vec<PathBuf>> {
+    let metadata: Metadata =
+        serde_json::from_str(metadata).context("reading cargo metadata's JSON")?;
+    Ok(metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .map(|package| folder_of(package).to_path_buf())
+        .collect())
+}
+
 /// A crate in a table of `THIRD-PARTY.md`, or in a command's output.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct LicenceRow {
@@ -1983,12 +1996,15 @@ impl LicenceRow {
 }
 
 /// The rows of a command's output, without workspace crates and repeats,
-/// and the lines that the check cannot read.
-fn tree_rows(output: &str, workspace_root: &Path) -> (BTreeSet<LicenceRow>, Vec<Problem>) {
+/// and the lines that the check cannot read, without their ` (*)`.
+fn tree_rows<'a>(
+    output: &'a str,
+    members: &[PathBuf],
+) -> (BTreeSet<LicenceRow>, BTreeSet<&'a str>) {
     let read: Vec<std::result::Result<Option<LicenceRow>, &str>> = output
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| tree_row(line, workspace_root).ok_or(line))
+        .map(|line| tree_row(line, members).ok_or(line))
         .collect();
     let rows = read
         .iter()
@@ -1997,21 +2013,23 @@ fn tree_rows(output: &str, workspace_root: &Path) -> (BTreeSet<LicenceRow>, Vec<
     let unread = read
         .iter()
         .filter_map(|row| row.as_ref().err())
-        .map(|line| {
-            deps1(
-                THIRD_PARTY,
-                None,
-                format!(
-                    "DEPS-1: {THIRD_PARTY} cannot be checked against the cargo tree line {line:?}.  Fix: add the crate to the tables by hand, and extend the parser in {RULES_FILE}."
-                ),
-            )
-        })
+        .map(|line| line.strip_suffix(" (*)").unwrap_or(line))
         .collect();
     (rows, unread)
 }
 
+fn unread_line(line: &str) -> Problem {
+    deps1(
+        THIRD_PARTY,
+        None,
+        format!(
+            "DEPS-1: {THIRD_PARTY} cannot be checked against the cargo tree line {line:?}.  Fix: if the crate comes from git, another registry or a vendored folder, ask the maintainer.  Otherwise add its rows by hand, and extend the parser in {RULES_FILE}."
+        ),
+    )
+}
+
 /// `Some(None)` for a workspace crate, `None` for a line it cannot read.
-fn tree_row(line: &str, workspace_root: &Path) -> Option<Option<LicenceRow>> {
+fn tree_row(line: &str, members: &[PathBuf]) -> Option<Option<LicenceRow>> {
     let cells: Vec<&str> = line.split('|').collect();
     let [package, licence, source] = cells.as_slice() else {
         return None;
@@ -2031,7 +2049,7 @@ fn tree_row(line: &str, workspace_root: &Path) -> Option<Option<LicenceRow>> {
         return None;
     }
     match origin {
-        Some(origin) if Path::new(origin).starts_with(workspace_root) => Some(None),
+        Some(origin) if members.iter().any(|member| member == Path::new(origin)) => Some(None),
         Some(_) => None,
         None => Some(Some(LicenceRow {
             name: name.into(),
@@ -2093,14 +2111,15 @@ fn doc_row(line: &str) -> Option<LicenceRow> {
 /// `normal_and_dev` are the output of its two commands
 /// (`third_party_tree`).  Its first table must equal the first command's
 /// rows; its second table, the second command's rows that are not in the
-/// first.
+/// first.  `members` holds the folder of each workspace crate
+/// (`member_folders`); a path crate in another folder, such as a vendored
+/// copy, is a line that the check cannot read.
 pub fn third_party_matches(
     doc: &str,
     normal: &str,
     normal_and_dev: &str,
-    workspace_root: &str,
+    members: &[PathBuf],
 ) -> Vec<Problem> {
-    let root = Path::new(workspace_root);
     let lines: Vec<&str> = doc.lines().collect();
     let split = lines
         .iter()
@@ -2124,8 +2143,8 @@ pub fn third_party_matches(
             )
         })
     });
-    let (shipped, shipped_unread) = tree_rows(normal, root);
-    let (with_tests, with_tests_unread) = tree_rows(normal_and_dev, root);
+    let (shipped, shipped_unread) = tree_rows(normal, members);
+    let (with_tests, with_tests_unread) = tree_rows(normal_and_dev, members);
     let shipped_keys: BTreeSet<(&str, &str)> = shipped.iter().map(LicenceRow::key).collect();
     let tests_only: BTreeSet<LicenceRow> = with_tests
         .iter()
@@ -2166,9 +2185,11 @@ pub fn third_party_matches(
             ),
         )
     });
+    let unread_lines = shipped_unread
+        .union(&with_tests_unread)
+        .map(|line| unread_line(line));
     missing_commands
-        .chain(shipped_unread)
-        .chain(with_tests_unread)
+        .chain(unread_lines)
         .chain(first_unread)
         .chain(second_unread)
         .chain(differences)
@@ -4627,7 +4648,11 @@ mod deps_tests {
 
     // DEPS-1: the licence list, over `cargo tree`'s output in its real shape.
 
-    const ROOT: &str = "/root";
+    fn members() -> Vec<PathBuf> {
+        ["/root/app", "/root/roformer", "/root/worker"]
+            .map(PathBuf::from)
+            .to_vec()
+    }
 
     const SHIPPED: &str = "\
 app v0.1.0 (/root/app)||
@@ -4693,7 +4718,7 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
     }
 
     fn check(doc: &str, shipped: &str, tests_only: &str) -> Vec<Problem> {
-        third_party_matches(doc, shipped, &format!("{shipped}{tests_only}"), ROOT)
+        third_party_matches(doc, shipped, &format!("{shipped}{tests_only}"), &members())
     }
 
     fn today_doc() -> String {
@@ -4721,6 +4746,22 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
     }
 
     #[test]
+    fn member_folders_leave_out_a_vendored_crate() {
+        let metadata = metadata(
+            vec![
+                package("app", "/x/app", None, vec![]),
+                package("log", "/x/vendor/log", None, vec![]),
+            ],
+            &[id("app", "/x/app")],
+            vec![],
+        );
+        assert_eq!(
+            member_folders(&metadata).unwrap(),
+            [PathBuf::from("/x/app")]
+        );
+    }
+
+    #[test]
     fn the_commands_are_the_docs() {
         assert_eq!(
             commands(),
@@ -4733,8 +4774,8 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
 
     #[test]
     fn third_party_rows_are_read() {
-        let (rows, unread) = tree_rows(SHIPPED, Path::new(ROOT));
-        assert_eq!(unread, []);
+        let (rows, unread) = tree_rows(SHIPPED, &members());
+        assert!(unread.is_empty(), "{unread:?}");
         let names: Vec<(&str, &str)> = rows.iter().map(LicenceRow::key).collect();
         assert_eq!(
             names,
@@ -4766,13 +4807,15 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
             "x v0.1.0 (registry `acme`)|MIT|https://github.com/acme/x",
             "x v0.1.0 (/elsewhere/x)|MIT|",
             "x v0.1.0 (/root-other/x)|MIT|",
+            "log v0.4.34 (/root/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log",
             "foo v1.0.0|MIT",
             "x v0.1.0 extra|MIT|",
             "garbage",
         ] {
-            let (rows, unread) = tree_rows(line, Path::new(ROOT));
+            let (rows, unread) = tree_rows(line, &members());
             assert_eq!(rows, BTreeSet::new(), "{line}");
-            assert_one_drift(&unread, "cannot be checked against the cargo tree line");
+            let problems: Vec<Problem> = unread.into_iter().map(unread_line).collect();
+            assert_one_drift(&problems, "cannot be checked against the cargo tree line");
         }
         let (rows, unread) = table_rows(&today_doc().lines().collect::<Vec<_>>(), 1);
         assert_eq!(unread, []);
@@ -4902,6 +4945,16 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
             let tests_only = if shipped.is_empty() { "" } else { TESTS_ONLY };
             assert_one_drift(&check(doc, shipped, tests_only), part);
         }
+        let vendored =
+            "log v0.4.34 (/root/vendor/log)|MIT OR Apache-2.0|https://github.com/rust-lang/log";
+        assert_one_drift(
+            &check(
+                &today_doc(),
+                &format!("{SHIPPED}{vendored}\n{vendored} (*)\n"),
+                TESTS_ONLY,
+            ),
+            "(/root/vendor/log)",
+        );
         let second = |rows: &[&str]| doc(&SHIPPED_ROWS, rows);
         assert_one_drift(
             &check(&second(&[]), SHIPPED, TESTS_ONLY),
@@ -4955,7 +5008,7 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
             &format!(
                 "{no_wgpu}{TESTS_ONLY}wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu\n"
             ),
-            ROOT,
+            &members(),
         );
         assert!(
             wgpu_in_tests_only

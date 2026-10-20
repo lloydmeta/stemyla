@@ -94,8 +94,9 @@ fn third_party_lists_what_ships() {
         std::fs::read_to_string(root.join("THIRD-PARTY.md")).expect("THIRD-PARTY.md can be read");
     let [normal, normal_and_dev] = xtask::rules::THIRD_PARTY_EDGES
         .map(|edges| xtask::rules::third_party_tree(&root, edges).expect("cargo tree runs"));
-    let problems =
-        xtask::rules::third_party_matches(&doc, &normal, &normal_and_dev, &root.to_string_lossy());
+    let members =
+        xtask::rules::member_folders(metadata()).expect("cargo metadata's JSON can be read");
+    let problems = xtask::rules::third_party_matches(&doc, &normal, &normal_and_dev, &members);
     let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
     assert!(
         problems.is_empty(),
