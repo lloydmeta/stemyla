@@ -1041,7 +1041,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M5 code review round 3: no blockers and no should-fix items; 5 nits, all checked and fixed.  A member without a resolve node, and a later `###` heading, now have tests that fail their mutants.  The real-tree helper's message and comment no longer claim more than they check.  A sentence of decision 0005 was over 25 words.  The reviewer also found the feature check correct for optional dependencies, with and without the `dep:` form.
 * [x] 2026-10-20: M5, three code review rounds done and their findings fixed.
 * [x] 2026-10-20: M5: PR #18 opened.  CI (run 39360333192): every job passes.  The `test` job lists both new tests as `ok`, and the `rules` binary took 2.17 s.  rust-cache found no cache, because its environment hash changed on `main` before this PR (`296abb86` to `30197891`), so `test` took 10m1s and `clippy` 7m12s.  `cargo metadata` passed on that cold cache.
-* [ ] M5: PR merged by the maintainer, and decision 0005 accepted.
+* [x] 2026-10-20: M5, decision 0005 accepted by the maintainer, with the choice of (a) and (x).
+* [ ] M5: PR merged by the maintainer.
 * [ ] M5: layering test.
 * [ ] M6: dsp's clippy allow narrowed.
 * [ ] M7: DSP-1 allowlist test.

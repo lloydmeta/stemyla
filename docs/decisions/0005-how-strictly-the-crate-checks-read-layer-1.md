@@ -1,6 +1,6 @@
 # 0005: how strictly the crate checks read LAYER-1
 
-Status: proposed
+Status: accepted (2026-10-20, by the maintainer)
 
 ## Context
 
