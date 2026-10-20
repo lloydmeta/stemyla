@@ -390,6 +390,7 @@ struct Metadata {
     packages: Vec<MetadataPackage>,
     workspace_members: Vec<String>,
     workspace_root: PathBuf,
+    /// `null` with `--no-deps`.
     resolve: Option<Resolve>,
 }
 
@@ -400,6 +401,8 @@ struct MetadataPackage {
     source: Option<String>,
     manifest_path: PathBuf,
     dependencies: Vec<MetadataDependency>,
+    /// The features that the package declares, by name.
+    features: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -421,6 +424,9 @@ struct Resolve {
 struct ResolveNode {
     id: String,
     deps: Vec<ResolveDep>,
+    /// The features turned on in this build.
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -468,6 +474,30 @@ pub fn workspace(metadata: &str) -> Result<Workspace> {
         .iter()
         .map(|package| package.name.as_str())
         .collect();
+    let resolve = metadata.resolve.as_ref().context(
+        "cargo metadata gave no resolve, so it ran with --no-deps; the checks need the whole build",
+    )?;
+    for package in &members {
+        let node = resolve
+            .nodes
+            .iter()
+            .find(|node| node.id == package.id)
+            .with_context(|| {
+                format!("cargo metadata's resolve has no node for {}", package.name)
+            })?;
+        let off: Vec<&str> = package
+            .features
+            .keys()
+            .filter(|feature| !node.features.contains(feature))
+            .map(String::as_str)
+            .collect();
+        anyhow::ensure!(
+            off.is_empty(),
+            "cargo metadata ran without --all-features: {} has {} off, so a dependency behind a feature can hide",
+            package.name,
+            off.join(", ")
+        );
+    }
     let crates = members
         .iter()
         .map(|package| workspace_crate(package, &members, &member_names, &metadata.workspace_root))
@@ -489,10 +519,9 @@ pub fn workspace(metadata: &str) -> Result<Workspace> {
         })
         .collect();
     // A path crate that takes a member is in `outside` already.
-    let outside_takes = metadata
-        .resolve
+    let outside_takes = resolve
+        .nodes
         .iter()
-        .flat_map(|resolve| &resolve.nodes)
         .filter(|node| !is_member(&node.id))
         .filter_map(|node| {
             let package = metadata
@@ -1926,7 +1955,11 @@ mod tests {
 
     #[test]
     fn a_crate_without_a_row_is_a_problem() {
-        let table = edit(LAYERS_TABLE, ENGINE_ROW, "");
+        let table = edit(
+            &edit(LAYERS_TABLE, ENGINE_ROW, ""),
+            XTASK_ROW,
+            "| Tools | `xtask` | `dsp`, `roformer`, `synth` |\n",
+        );
         assert_problems(layers(&today(), &table), vec![no_row("engine")]);
     }
 
@@ -2382,6 +2415,7 @@ mod tests {
             "source": source,
             "manifest_path": format!("{folder}/Cargo.toml"),
             "dependencies": dependencies,
+            "features": {},
         })
     }
 
@@ -2393,12 +2427,19 @@ mod tests {
         json!({ "name": name, "source": source, "rename": null, "kind": null, "target": null })
     }
 
-    fn metadata(packages: Vec<Value>, members: &[String], resolve: Value) -> String {
+    /// The JSON, with a resolve node for each member (no features, no
+    /// dependencies) and the `other_nodes`.
+    fn metadata(packages: Vec<Value>, members: &[String], other_nodes: Vec<Value>) -> String {
+        let nodes: Vec<Value> = members
+            .iter()
+            .map(|member| json!({ "id": member, "deps": [], "features": [] }))
+            .chain(other_nodes)
+            .collect();
         json!({
             "packages": packages,
             "workspace_members": members,
             "workspace_root": "/x",
-            "resolve": resolve,
+            "resolve": { "nodes": nodes },
         })
         .to_string()
     }
@@ -2447,7 +2488,7 @@ mod tests {
                 .map(|(name, folder)| package(name, folder, None, deps(name)))
                 .collect(),
             &members.map(|(name, folder)| id(name, folder)),
-            Value::Null,
+            vec![],
         );
         use Kind::{Build, Dev, Normal};
         let expected = Workspace {
@@ -2497,7 +2538,7 @@ mod tests {
                 package("roformer", "/x/roformer", None, vec![]),
             ],
             &[id("app", "/x/app"), id("roformer", "/x/roformer")],
-            Value::Null,
+            vec![],
         );
         let path = |name: &str, folder: &str| Stray {
             name: name.into(),
@@ -2544,7 +2585,7 @@ mod tests {
                 id("engine", "/x/engine"),
                 id("roformer", "/x/roformer"),
             ],
-            Value::Null,
+            vec![],
         );
         let expected = Workspace {
             crates: vec![
@@ -2593,9 +2634,10 @@ mod tests {
                 package("roformer", "/x/vendor/roformer", None, vec![]),
             ],
             &[id("app", "/x/app"), id("roformer", "/x/roformer")],
-            json!({ "nodes": [
-                { "id": id("shim", "/x/shim"), "deps": [ { "name": "roformer", "pkg": id("roformer", "/x/roformer") } ] },
-            ] }),
+            vec![json!({
+                "id": id("shim", "/x/shim"),
+                "deps": [ { "name": "roformer", "pkg": id("roformer", "/x/roformer") } ],
+            })],
         );
         let expected = Workspace {
             crates: vec![
@@ -2634,7 +2676,7 @@ mod tests {
                 ),
             ],
             &[id("dsp", "/x/dsp")],
-            Value::Null,
+            vec![],
         );
         let expected = Workspace {
             crates: vec![krate("dsp", "dsp/Cargo.toml", &[])],
@@ -2660,12 +2702,13 @@ mod tests {
                 id("roformer-gpu", "/x/roformer-gpu"),
                 id("app", "/x/app"),
             ],
-            json!({ "nodes": [
-                { "id": format!("{git_foo}#foo@0.1.0"), "deps": [
+            vec![json!({
+                "id": format!("{git_foo}#foo@0.1.0"),
+                "deps": [
                     { "name": "roformer_gpu", "pkg": id("roformer-gpu", "/x/roformer-gpu") },
                     { "name": "roformer", "pkg": format!("{git_roformer}#roformer@0.1.0") },
-                ] },
-            ] }),
+                ],
+            })],
         );
         let expected = Workspace {
             crates: vec![
@@ -2687,6 +2730,37 @@ mod tests {
     }
 
     #[test]
+    fn a_metadata_without_resolve_is_an_error() {
+        let json = json!({
+            "packages": [package("dsp", "/x/dsp", None, vec![])],
+            "workspace_members": [id("dsp", "/x/dsp")],
+            "workspace_root": "/x",
+            "resolve": null,
+        })
+        .to_string();
+        let error = workspace(&json).expect_err("a run with --no-deps is an error");
+        assert!(error.to_string().contains("--no-deps"), "{error:#}");
+    }
+
+    #[test]
+    fn a_metadata_without_all_features_is_an_error() {
+        let xtask = json!({
+            "id": id("xtask", "/x/xtask"),
+            "name": "xtask",
+            "source": null,
+            "manifest_path": "/x/xtask/Cargo.toml",
+            "dependencies": [],
+            "features": { "cpal": ["engine/cpal"] },
+        });
+        let json = metadata(vec![xtask], &[id("xtask", "/x/xtask")], vec![]);
+        let error = workspace(&json).expect_err("a run without --all-features is an error");
+        assert!(
+            error.to_string().contains("--all-features") && error.to_string().contains("cpal"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn an_unknown_kind_is_an_error() {
         let json = metadata(
             vec![package(
@@ -2696,7 +2770,7 @@ mod tests {
                 vec![path_dep("dsp", "/x/dsp", Some("other"))],
             )],
             &[id("app", "/x/app")],
-            Value::Null,
+            vec![],
         );
         let error = workspace(&json).expect_err("an unknown kind is an error");
         assert!(error.to_string().contains("other"), "{error:#}");
@@ -2708,7 +2782,7 @@ mod tests {
             let json = metadata(
                 vec![package("app", folder, None, vec![])],
                 &[id("app", folder)],
-                Value::Null,
+                vec![],
             );
             let error = workspace(&json).expect_err("a manifest outside the root is an error");
             assert!(error.to_string().contains(folder), "{error:#}");

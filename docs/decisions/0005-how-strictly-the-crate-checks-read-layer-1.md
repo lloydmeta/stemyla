@@ -26,6 +26,7 @@ LAYER-1 says that crates depend only on crates in a lower layer of the layers ta
 * `stem-protocol` takes no workspace crate as a normal dependency, because both sides reach what it takes.
 * A crate that both sides need is a change to LAYER-1, with its own record.
 * `LAYERS` in `xtask/src/rules.rs` fixes the five layers.  A change of layers changes the table, `LAYERS` and LAYER-1 in one commit.
+* A crate from a registry with a workspace crate's name fails the check, even when it is not related.  crates.io has crates named `app`, `dsp`, `engine`, `synth` and `xtask`.  If a dependency ever takes one, give the check an allowlist with a reason, or rename the workspace crate.
 
 ## Revisit if
 
