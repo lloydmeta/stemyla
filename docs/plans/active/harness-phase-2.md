@@ -48,7 +48,6 @@ Terms:
 * The PR description says what was verified, how, and what was not.  It is written to a file and passed with `--body-file`.
 * A new crate is vetted and pinned if young (DEPS-1).  This plan adds only these crates:
   * naga, already in the lock file (M2);
-  * syn, already in the lock file (M7);
   * wsola 0.2.0 (M11);
   * `rusty_mp3`, as a dev-dependency of `xtask`, already in the lock file (M3);
   * `proc-macro2` 1.0.107 or later, as a dependency of `xtask`, already in the lock file and not pinned (M3);
@@ -1007,24 +1006,51 @@ Step 2 is one signed commit, and fmt, clippy (every clippy command in `CLAUDE.md
 * fmt, clippy (every clippy command in `CLAUDE.md`), `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.  `docs-check` finds no `TD-2` outside plans and decisions.
 * CI: the `clippy` job passes with no new step.
 
-### M7: dsp's beginner style is a test (closes TD-3 and TD-24; DSP-1)
+### M7: dsp's beginner style is a test (narrows TD-3, closes TD-24; DSP-1, DOC-1)
 
-* Change: add a check to `xtask/src/rules.rs` that parses each file in `dsp/src/` with `syn` (full syntax, visitor) and allows only the listed constructs.  It is an allowlist: types `f32`, `usize`, `bool`, `&[f32]` and `Vec<f32>`; `fn`, `let`, `for` over a range, `while`, `if`, indexing, arithmetic with binary operators (no compound assignment), comparisons, and calls to `dsp` functions and the methods DSP-1 permits (`len`, `push`, `Vec::new` and `vec![...]`).  `syn` has no types, so the list holds names; write each name, and leave out `clamp` (from M6).  `dsp` calls no `f32` method today.  `#[cfg(test)]` modules are checked too.  The check also compares the whole of `dsp/Cargo.toml` with its expected text (from M6).  So any dependency table, of any kind or target, fails it, and so does a `[lints]` table other than `workspace = true`.
-* Acceptance: `dsp_is_beginner_style` passes on the real tree.  Unit tests plant `.iter()`, a closure, `swap` and a dependency; each fails with DSP-1 and the construct's file and line.
-* Note: use syn 2, which is already in `Cargo.lock` with its `full` and `visit` features on, so no new crate is downloaded.  `Cargo.lock` also holds syn 3.  Write the exact method list in the PR from a scan of `dsp/src/`.
-* Lint attributes (from M6): the allowlist accepts lint attributes only as crate-level `#![expect]`s in `dsp/src/lib.rs`.  Each names one lint from a list in `rules.rs`, and has a reason.  A change to that list is a reviewed edit.  The check fails every group name (`all`, `correctness`, `suspicious`, `style`, `complexity`, `perf`, `pedantic`, `nursery`, `cargo`, `restriction`) and `warnings`.  It fails every other lint attribute, wherever it is (item, module file, statement, expression, field), also inside `cfg_attr`.  Planted cases:
-  * `#![allow(clippy::all)]` before the `expect`s;
-  * `#![expect(clippy::all, reason = "x")]`;
-  * `#[expect(clippy::eq_op, reason = "x")]` on a function;
-  * `#![allow(clippy::all)]` at the top of `fade_in.rs`;
-  * `#[allow(clippy::eq_op)]` on a `let`;
-  * `#![allow(clippy::eq_op)]` as the first line of a function body;
-  * `#![cfg_attr(clippy, allow(clippy::all))]` in `lib.rs`, before the `expect`s.
-* Macros (from the M6 plan review): `syn`'s visitor does not enter a macro's tokens, so code inside `assert!` would pass unseen.  Parse the tokens of each permitted macro as code, and visit them.  `assert!` and `assert_eq!` take comma-separated expressions; `vec!` takes `expr; expr` or a comma list.  Fail every other macro.  Planted cases: `.iter()` inside `assert!`, and `#[allow(clippy::eq_op)]` on a `let` in a block inside `assert!`.
-* Other attributes (from the M6 plan review): list the attributes that the check permits (`cfg(test)`, `test`, `should_panic`, doc comments).  Fail every other attribute, for example `#[path]`, which can read a file outside `dsp/src`.  The check reads every file under `dsp/src/`, in subfolders too.  It can also require each `expect`'s reason to start with "DSP-1".
-* Lints table (from M6): the whole-file compare of `dsp/Cargo.toml` covers the `[lints]` table.  `xtask` has no TOML parser, and `cargo metadata` gives no lints.  A new `toml` dependency would make this plan's crate list false, and a scan of lines by hand misses `lints = { clippy = { all = "allow" } }`.  Planted cases: `[lints.clippy] all = "allow"` in place of `workspace = true`, and a `[dev-dependencies]` entry.
-* Forbidden shortcuts (from M6, under option (x)): the check fails every compound assignment (`+=`, `-=`, `*=` and the others), `is_empty` and `clamp`, as DSP-1 says after M6's review round 1.  Planted cases: `i += 1`, `!samples.is_empty()` and `total.clamp(-1.0, 1.0)`.
-* Types (from the M6 survey): the code uses more than DSP-1's list (TD-24 in `tech-debt.md`, which M7 closes).  `biggest` and `median` return `f32`, `peaks` returns `Vec<(f32, f32)>`, `mix` takes `&[&[f32]]`, and `median` has a `bool`.  The functions use `as f32`, `assert!` with format arguments, tuple expressions, `&&`, `%`, unary `-`, `&` borrows and `vec![0.0; length]`.  The tests use `assert_eq!` and call `capacity()`.  The files use `mod`, `pub use` and `use super::*`.  No function uses `for`.  Decide each before writing the allowlist, and change DSP-1's text or the code to match (DOC-1).
+* Scope, set by the maintainer on 2026-10-20: a small denylist of the likely breaches, not a full allowlist.  `dsp` has 453 lines and 3 commits, and nothing has broken DSP-1.  The likely breach is an agent that tidies `dsp` into idiomatic Rust.  So the check reuses M3's `proc-macro2` tokenizer, and adds no crate and no decision record.
+* What M6 does not catch: clippy has no lint against iterators, closures or `swap`, so `samples.iter().map(...)` passes it.  One added `+=` passes, because an `expect` fails only when every site of its form is gone.  A lint attribute that switches clippy off, or a `[lints]` table in `dsp/Cargo.toml`, passes too (TD-3).
+
+#### M7 design
+
+* The check: `pub fn dsp_keeps_beginner_style(files: &[(String, String)]) -> Vec<Problem>` in `xtask/src/rules.rs`.  The input is every file under `dsp/`, as a path relative to the root and its text.  A reader `dsp_files(root)` walks `dsp/` with `std::fs`.  The test `dsp_is_beginner_style` in `xtask/tests/rules.rs` runs both on the real tree.  It asserts that the files include `dsp/Cargo.toml`, `dsp/src/lib.rs` and `dsp/src/mix.rs`, so an empty walk cannot pass.
+* Each `.rs` file in `dsp/src/` is tokenised with `proc_macro2::TokenStream::from_str`, as `skips_in` does.  The scan enters every group, so macro arguments are read too.  A problem names DSP-1, the file, the line and the fix.  A problem fails on these:
+  * a method other than `len`, `push` or `capacity`: an identifier after a `.` that is not part of `..`.  So `iter`, `to_vec`, `sort_by`, `min`, `max`, `abs`, `swap`, `is_empty` and `clamp` fail.  This one rule is an allowlist, because the methods a tidy-up reaches for are many.  A raw identifier (`r#iter`) counts as its name.  Fix: write the loop with `while` and indexing, `len() > 0`, an `if` for each bound, or a swap through `temp`.
+  * a path segment `iter`, `into_iter`, `swap`, `min`, `max` or `clamp` after `::`, for example `std::mem::swap` or `f32::max`.  A name first in an import's braces, or after a `,` there, counts too, as in `use std::mem::{replace, swap}`.  A name straight after a module of the same name, as in `pub use max::max`, is `dsp`'s own function and passes.  Fix: as above.
+  * a closure: a `|` that is not part of `||` and not followed by a joint `=`, or the keyword `move`.  Fix: write the loop out.
+  * a compound assignment: `=` straight after a joint `+`, `-`, `*`, `/`, `%`, `^`, `&` or `|`, or after `<<` or `>>`.  Fix: write `x = x + y`.
+  * `for` whose expression has no `..` at its top level, outside any group, before its `{` block.  So `for s in samples`, `for s in &samples[1..]` and `for i in (0..n).rev()` fail, and `for i in 0..n` passes.  Fix: loop over a range of indices.
+  * an attribute, outer or inner, whose name is `allow`, `warn`, `deny`, `forbid`, `expect`, `cfg_attr` or `path`, and the macro `include!`.  The exception: the `#![expect(clippy::<lint>, reason = "DSP-1...")]` attributes in `dsp/src/lib.rs`, one lint each, from `DSP1_LINTS` (`assign_op_pattern`, `len_zero`, `manual_clamp`, `manual_swap`).  Fix: fix the lint with DSP-1's constructs, or add the lint to the `#![expect]` list and to `DSP1_LINTS`, with a reason.
+  * a file under `dsp/` other than `Cargo.toml` and `.rs` files in `src/`, such as `build.rs` or `clippy.toml`.  The walk skips `.DS_Store`, which Finder makes.  Fix: remove it.
+  * `dsp/Cargo.toml` that differs from `DSP_MANIFEST`, a constant with today's text.  So any dependency table and any `[lints]` override fail.  Fix: restore the text.
+  * a file that does not tokenise.
+* The check reports at most one problem for each rule on a line, so `|x| x` gives one problem, not two.
+* Facts from a prototype with `proc-macro2` 1.0.107: `+=` is `+` (joint) then `=`.  `<=` is `<` (joint) then `=`, and `<<=` is two joint `<` then `=`.  `||` is a joint `|` then `|`; `|x|` has two lone `|`.  `#![allow(...)]` is a joint `#`, `!`, and a bracket group.  A doc comment is `#` and a bracket group that starts with `doc`.
+* TD-24: DSP-1's text lists the types that the code writes, plus `bool`: `f32`, `usize`, `bool`, `&[f32]`, `&[&[f32]]`, `Vec<f32>` and `Vec<(f32, f32)>`.  This corrects the text to match the code, so no decision record.  The check does not read types.
+* What the check does not see stays in TD-3, narrowed: types; a closure with no arguments (`|| x`, which tokenises as `||`); and constructs not on the denylist, such as `match` or `loop`.  Also `-A clippy::all` in `RUSTFLAGS`, in a `config.toml` in `.cargo/`, or in `[workspace.lints]`, for every crate.  Fix: review; no check planned.
+* Docs (DOC-1), in the commit that adds the real-tree test:
+  * `invariants.md`, DSP-1: the first sentence names the seven types and "`while`, `for` over a range, `if` and indexing".  `* Enforced by:` becomes "`dsp_is_beginner_style` (CI `test` job), a scan of the tokens in `dsp/` for the likely breaches.  Clippy fails a stale `#![expect]`."  `* Gaps: TD-3.`  "Prose only" lines fall from 7 to 6.
+  * `tech-debt.md`: TD-3 narrowed as above.  TD-24 removed, and added under `## Closed`: "TD-24: closed by DSP-1's new list of types (harness phase 2, M7)."
+  * `.claude/rules/dsp.md`: the types in the first bullet, and one bullet that names the test.
+  * `CLAUDE.md`, the DSP-1 line: "`dsp/` is beginner style: plain types, `while`, `for` over a range, `if` and indexing; no iterators, closures or `swap`."
+  * `harness.md`: a components row for `dsp_is_beginner_style`.
+
+#### M7 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. Test first: `dsp_files`, a stub of the check that returns no problem, and the unit tests.  Every test that expects a problem fails against the stub.  Then write the check, and all pass.  Unit tests:
+   * `beginner_code_passes`: a file with `x = x + 1`, `x = -1`, `a <= b`, `a >= b`, `a == b`, `a != b`, `a && b`, `a || b`, `for i in 0..n`, `vec![0.0; n]`, `.len()`, `.push(x)`, `.capacity()`, `Vec::new()`, `stems[s][i]`, doc comments and the four `#![expect]`s in `lib.rs`.  No problem.
+   * `each_breach_is_named`: a table of snippets, each giving exactly one problem with DSP-1 and its line: `.iter()`, `.to_vec()`, `.sort_by(f)`, `.min(x)`, `r#iter`, `.swap(a, b)`, `std::mem::swap(a, b)`, `f32::max(a, b)`, `.is_empty()`, `.clamp(a, b)`, `|x| x`, `move`, each of the ten compound assignments, `for s in samples {}`, `for s in &samples[1..] {}`, `for i in (0..n).rev() {}`, `.iter()` inside `assert!`, `#![allow(clippy::all)]`, `#![expect(clippy::all, reason = "x")]`, `#![expect(clippy::eq_op, reason = "DSP-1")]`, `#[allow(clippy::eq_op)]` on a `let`, `#![allow(clippy::eq_op)]` as the first line of a body, `#![cfg_attr(clippy, allow(clippy::all))]`, a listed `#![expect]` in a module file, `#[path = "x.rs"]` and `include!("x.rs")`.
+   * `the_manifest_and_files_are_fixed`: `[dev-dependencies]` with an entry, `[lints.clippy] all = "allow"`, `dsp/build.rs` and `dsp/clippy.toml` each give one problem.
+2. `dsp_is_beginner_style` on the real tree, and the docs.  Plant `samples.iter().count();` in `biggest`, `i += 1` in `double_speed` and `#![allow(clippy::all)]` in `lib.rs`, one at a time; each fails the test with DSP-1, the file and the line.  Restore each, and record the results in the PR.
+
+#### M7 acceptance
+
+* The unit tests pass, and failed against the stub in step 1.
+* `dsp_is_beginner_style` passes on the real tree, and the CI `test` job lists it as `ok`.  The three planted breaches fail it.
+* `grep -c "Enforced by: prose only" docs/invariants.md` gives 6.  `Cargo.lock` does not change.
+* fmt, clippy, the tests and `docs-check` pass; `docs-check` finds no `TD-24` outside plans, decisions and the `## Closed` bullet.
 
 ### M8: Python and assets are tests over the tracked files (closes TD-5, TD-6; BUILD-1, ASSET-1)
 
@@ -1070,30 +1096,22 @@ Step 2 is one signed commit, and fmt, clippy (every clippy command in `CLAUDE.md
 * Change: add `roformer-gpu/clippy.toml` with `disallowed-methods` for `wgpu::Device::create_buffer` and `wgpu::util::DeviceExt::create_buffer_init`, with a MEM-3 reason.  `GpuBuffer`'s constructor carries the one `#[expect]`.
 * Acceptance: clippy passes.  A planted `device.create_buffer(...)` in `net.rs` fails clippy with the MEM-3 reason.
 
-### M14: Claude Code guards (GIT-1, ASSET-1, PR bodies)
+### M14: Claude Code deny rules (GIT-1)
 
-* Change: add `.claude/settings.json` with deny rules for `Bash(git push *)` and the `publish` forms of `cargo run -p xtask`.  Add a PreToolUse hook, `cargo run -q -p xtask -- hook pre-tool-use`, that reads the hook's JSON on stdin and exits 2 with a reason:
-  * a Write or Edit whose `file_path` has an audio or weight extension (ASSET-1);
-  * a Bash command that runs `git add` with such a path, or `git add -f` (ASSET-1);
-  * a Bash command with `git push` or `xtask` `publish` in any form, as a second layer behind the deny rules (GIT-1);
-  * `gh pr create` or `gh pr edit` with `--body` instead of `--body-file` (failure 7 in the phase plan).
-* Acceptance: unit tests in `xtask` feed the hook each planted input and assert exit 2 and the rule ID, and assert exit 0 for ordinary edits and commands.  In a session, `git push --dry-run` is refused.
-* Known limits, stated in `harness.md`: deny rules and hooks match command text and are not a security boundary.  A hook that cannot build or run does not block.  The controls stay M8's CI test (ASSET-1) and the `main` ruleset (GIT-1).
-* Docs: the guide's tools table names `hook`.  A "What the agent cannot do" note says what is refused and why.
+* Scope, set by the maintainer on 2026-10-20: deny rules only.  The first plan added a PreToolUse hook in `xtask`, run on every tool call.  Hooks match command text and are not a security boundary, and the controls stay M8's CI test (ASSET-1) and the `main` ruleset (GIT-1).
+* Change: add `.claude/settings.json` with deny rules for `Bash(git push *)` and the `publish` forms of `cargo run -p xtask`.  If a deny pattern can tell `--body` from `--body-file`, add one for `gh pr create --body` (failure 7 in the phase plan); else leave it.
+* Acceptance: in a session, `git push --dry-run` and `cargo run -p xtask -- publish --help` are refused.  Record both in the PR.  GIT-1's `* Enforced by:` names the deny rules and says that they match command text only.
+* Docs: a "What the agent cannot do" note in the guide says what is refused and why.
 
-### M15: Claude Code feedback hooks
+### M15: rustfmt after each edit
 
-* Change: in `.claude/settings.json`, add hooks that call `xtask hook <event>`:
-  * PostToolUse on `Edit|Write`: run `rustfmt --edition 2024` on the edited `.rs` file.
-  * Stop: run `cargo fmt --all --check` and `docs-check`; on failure, exit 2 with the output so the agent continues.  When `stop_hook_active` is true, exit 0, so the hook cannot loop.
-  * SessionStart: report whether `safaridriver` and a chromedriver are found and answer, from the facts in `references/local-browser-testing.md` (failure 3).
-* Acceptance: unit tests cover the Stop hook's loop guard, and a non-Rust file is not formatted.  The Stop hook finishes in under 30 seconds on the maintainer's Mac, measured and stated in the PR.
+* Scope, set by the maintainer on 2026-10-20: the `rustfmt` hook only.  The Stop hook (fmt and `docs-check` at each stop) and the SessionStart WebDriver report are dropped.
+* Change: in `.claude/settings.json`, a PostToolUse hook on `Edit|Write` runs `rustfmt --edition 2024` on the edited file when it ends in `.rs`.  It is a shell command that reads `tool_input.file_path` from stdin, not an `xtask` command.  The control stays CI's `fmt` job; the hook saves a round trip.
+* Acceptance: in a session, an edit that leaves a `.rs` file unformatted is formatted, and an edit of a `.md` file is not touched.  Record both in the PR.
 
-### M16: a PR cannot silently remove tests
+### M16: moved to phase 5
 
-* Change: add `xtask test-list`, which prints the sorted names from `cargo test --workspace --exclude roformer-gpu -- --list`.  The `test` job runs it on the PR head and on the merge base, in a worktree with the same target folder.  It fails if a name on the base is missing from the head, unless the PR has the label `tests-removed`.  The PR description must then say why.
-* Acceptance: unit tests of the comparison cover a removed test, a renamed test and an added test.  A draft PR that deletes a test fails the job, and passes when the label is added.
-* Note: a label is set by a person with triage access; the PR body is author text.  Measure the extra job time and state it in the PR.
+* The test-count guard moves to phase 5b, where bots open PRs (maintainer, 2026-10-20).  No deleted test has been seen in this repo; vacuous tests have, and phase 3 targets them.  The guard also doubles the `test` job's build.
 
 ### M17: UI snapshots are compared in CI (closes TD-9; VERIFY-1)
 
@@ -1119,7 +1137,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 
 ## Validation and acceptance
 
-* `grep -c "Enforced by: prose only" docs/invariants.md` falls from 8 to 3.  BUILD-1, DEPS-1, LAYER-1, DSP-1 and GIT-1 gain tests; ASSET-1 and RT-1 gain tests beside what they have.  MEM-4, GPU-3 and GIT-3 stay prose only: phase 4 covers MEM-4 and GPU-3, and nothing in view checks GIT-3.
+* `grep -c "Enforced by: prose only" docs/invariants.md` falls from 8 to 3.  BUILD-1, DEPS-1, LAYER-1 and DSP-1 gain tests, and GIT-1 gains deny rules; ASSET-1 and RT-1 gain tests beside what they have.  MEM-4, GPU-3 and GIT-3 stay prose only: phase 4 covers MEM-4 and GPU-3, and nothing in view checks GIT-3.
 * Each check's planted breach fails it: the unit tests in `xtask/src/rules.rs`, `test-support`, `roformer-gpu` and `engine/tests/realtime.rs`, and the clippy cases stated in each PR.
 * `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, clippy and `docs-check` pass; CI is green on `main` with browser tests required (the phase gate).
 
@@ -1135,7 +1153,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * If M5 is in the tree when M4 is undone, TD-4 is closed, and `docs-check` fails a closed ID outside plans and decisions.  So keep TD-4 closed, and do not put back its text.  The sentence that comes back under the layers table in `ARCHITECTURE.md` must not name TD-4.  Keep `rules::WEB_APP`, because M5's shell check uses it.  M5 rewrites LAYER-1 and edits the same lines in `harness-engineering.md` and `harness.md`, so a plain revert of M4 conflicts there.  Resolve the conflicts by hand.  In LAYER-1, remove only M4's last sentence of the text, M4's sentence in "Why" and M4's test name, and fix the list's "and".  Keep M5's text.
 * To undo M5, revert its commits.  That puts back the old table, TD-4 and LAYER-1's lines, and removes TD-4's bullet under `## Closed` and the new crates entry.  Keep the new crates entry's ID, so it is never reused and the plan still names a defined ID: add `* TD-<n>: withdrawn by the revert of M5; TD-4 covers the crate edges again.` under `## Closed`.  Do the same for option (c)'s entry, if it exists.  Put decision 0005 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.  Point TD-4's fix line at the plan's current folder, `active/` or `completed/`.  If a later milestone added an edge, such as `xtask -> stem-protocol` in M10, add it to the old table too (DOC-1).
 * To undo M6, revert its commits.  That puts back the allow, TD-2, TD-3's text and DSP-1's text.  It removes TD-2's bullet under `## Closed`, decision 0006 and TD-24.  The breach stays, so restore TD-24 by hand, and keep its ID in DSP-1's `* Gaps:` line.  Keep the narrowed `* Enforced by:` text, because "found no breach" is false while the breach stays.  Keep this plan's living sections.  Put decision 0006 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  If M7 is in the tree, its allowlist fails the blanket allow, so revert M7 first, or keep M6.
-* Checks read the tree and write nothing, so they can run any number of times.  `xtask test-list` writes only to stdout.
+* To undo M7, revert its commits.  That removes the check, and puts back TD-24, TD-3's text and DSP-1's text.  Keep this plan's living sections.
+* Checks read the tree and write nothing, so they can run any number of times.
 * M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
 
@@ -1238,17 +1257,26 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M6, three review rounds done and their findings fixed.
 * [x] 2026-10-20: M6, the maintainer accepted the amendment to decision 0006: the ban covers every compound assignment.
 * [x] 2026-10-20: M6: PR #19 opened.  CI (run 39373923147): every job passes, with no new step.  `clippy` took 5m56s and `test` 4m12s.
-* [ ] M6: PR merged by the maintainer.
-* [ ] M7: DSP-1 allowlist test.
+* [x] 2026-10-20: M6, PR #19 merged by the maintainer (`6f9c337`).
+* [x] 2026-10-20: M7 plan first written as a `syn` allowlist (about 200 lines).  The maintainer judged it out of proportion, and chose a token scan of the likely breaches.  M7 rewritten; a prototype with `proc-macro2` 1.0.107 confirmed the token facts.
+* [x] 2026-10-20: M7 plan review round 1, by one reviewer with a prototype of the scan.  No blockers.  The real tree passes the prototype, and the three planted breaches fail it.  2 should-fix findings and 4 nits, all checked and real, all fixed in the plan.  `to_vec`, `sort_by`, `min` and `max` passed a denylist, so methods after `.` are now an allowlist.  `for s in &samples[1..]` passed when `..` was searched inside groups.  Not changed: `needless_range_loop` does not fire, because the workspace allows it.
+* [x] 2026-10-20: M7 step 1: `dsp_files`, the check and its three unit tests.  Against the stub, `each_breach_is_named` and `the_manifest_and_files_are_fixed` failed, and `beginner_code_passes` passed.  With the check, all three pass.  Two small additions to the design: a `for` with no `in`, as in `impl A for B`, is not a loop; a listed `#![expect]` passes only at the top level of `dsp/src/lib.rs`.
+* [x] 2026-10-20: M7 step 2: `dsp_is_beginner_style` passes on the real tree, and the docs follow it.  Planted one at a time, each breach gave one problem: `samples.iter().count();` in `biggest` (`dsp/src/biggest.rs:8`, the method `iter`), `i += 1;` in `double_speed` (`dsp/src/double_speed.rs:9`, `+=`), and `#![allow(clippy::all)]` (`dsp/src/lib.rs:24`, `allow`).  "Prose only" lines: 6.  `Cargo.lock` did not change.
+* [x] 2026-10-20: M7 review round 1, by one new reviewer, who ran about 30 inputs through the check.  No blockers and no should-fix items; 3 nits, all checked and real, all fixed with test cases.  `use std::mem::{replace, swap};` passed, because `swap` is not straight after `::`; a name first in an import's braces, or after a `,` there, now counts.  `#![r#allow(...)]` and `r#include!` passed; the check now strips `r#` there too.  `dsp/Cargo.toml` with CRLF line ends failed; the check now compares it with LF line ends.
+* [x] 2026-10-20: M7 review round 2, by one new reviewer, who ran 33 inputs through the check.  No blockers and no should-fix items; 4 nits, all checked and real.  `pub use max::max;` failed, so a name after its own module now passes, with a case in `beginner_code_passes`.  A glob import such as `use std::mem::*` hides `swap`; TD-3 now names it.  DSP-1 in `invariants.md` now names the three methods.  The rule file says a problem names the line "if any".
+* [x] 2026-10-20: M7 review round 3, by one new reviewer, who ran 24 inputs and the three planted breaches.  No blockers and no should-fix items; 3 nits, all checked.  The own-module exception holds only for `module::name` with nothing before it, so `self::max::max` still fails; the doc comment now says so.  The design and Decision log now record the scan refinements.  Not changed: `Vec<Vec<f32>>=` reads as `>>=`, but rustfmt never writes it.
+* [x] 2026-10-20: M7, three review rounds done and their findings fixed.
+* [x] 2026-10-20: M7: PR #20 opened.  CI (run 39392378348): every job passes, and the `test` job lists `dsp_is_beginner_style` and the three unit tests as `ok`.  `test` took 4m20s.
+* [ ] M7: DSP-1 token scan.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
 * [ ] M9: pins and `THIRD-PARTY.md` test.
 * [ ] M10: e2e message types test.
 * [ ] M11: RT-1 forbids allocation; allocation test; wsola 0.2.0.
 * [ ] M12: MEM-1 lint.
 * [ ] M13: MEM-3 lint.
-* [ ] M14: Claude Code guards.
-* [ ] M15: Claude Code feedback hooks.
-* [ ] M16: test-list guard.
+* [ ] M14: Claude Code deny rules.
+* [ ] M15: rustfmt hook.
+* [x] 2026-10-20: M16 moved to phase 5b by the maintainer.
 * [ ] M17: UI snapshots compared.
 * [ ] M18: TD-13, TD-14, TD-12, TD-17 fixed.
 * [x] 2026-10-19: browser tests are a required check (the maintainer, before PR #14; found by `gh api`).
@@ -1277,6 +1305,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, M6 survey: an `expect` does not guard against an `allow` before it.  `#![allow(clippy::all)]` before the four `expect`s passes clippy, and after them it fails with four unfulfilled expectations.
 * 2026-10-20, M6 survey: `dsp` uses types outside DSP-1's list: `f32` in `biggest` and `median`, `Vec<(f32, f32)>` in `peaks`, `&[&[f32]]` in `mix` and `bool` in `median`.  So DSP-1's "A scan on 2026-10-19 found no breach" was false for the types.  M6 records them as a breach, and M7 decides them.
 * 2026-10-20, M6 review round 1: the `assign_op_pattern` `expect` also silences `x = x * y`, `/`, `%`, `<<`, `|` and `^`, not only `+` and `-`.  Evidence: with the `expect` removed, each fires the lint.
+* 2026-10-20, M7 survey: `dsp` never writes `bool`.  `median`'s `swapped` gets it from `true`, so a check of written types cannot see it, and TD-24's "has a `bool`" is an inferred type.
 * 2026-10-20, M6 plan review: an `expect` of a lint group silences the whole group.  `#![expect(clippy::all, reason = "x")]` is fulfilled by a style lint, and `n == n` then passes.  So M7 must name each lint, not only require `expect`.
 
 ## Decision log
@@ -1331,6 +1360,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M6 plan review round 2): decision 0006 records the choice at M6's decision point.  Under (x), DSP-1 gains a ban on `+=`, `-=`, `is_empty` and `clamp`, which is a rule change.
 * 2026-10-20, maintainer (M6): option (x).  `dsp` keeps `x = x + 1`, `len() > 0`, the two `if`s of the clamp and the swap through `temp`, each lint as an `expect` with a reason.  DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp`.
 * 2026-10-20, agent (M6 review round 1): DSP-1's ban covers every compound assignment, not only `+=` and `-=`.  The `assign_op_pattern` `expect` silences all of them, so a ban on two left the others allowed and unchecked.  This keeps (x)'s intent, so decision 0006 is amended, not replaced.
+* 2026-10-20, maintainer (M7): a token scan of the likely breaches, not a `syn` allowlist.  `dsp` is small, rarely changes and was never breached, so a full allowlist costs more than it saves.  TD-3 narrows instead of closing.
+* 2026-10-20, agent (M7): DSP-1's list of types is corrected to the types the code writes, with no decision record.  The text was wrong, and no choice is made.
+* 2026-10-20, agent (M7): small refinements to the scan, found while implementing and in review.  A `for` with no `in` is not a loop.  A listed `#![expect]` passes only at the top level of `dsp/src/lib.rs`.  Names in an import's braces count as after `::`, and a name after its own module passes.  `r#` is stripped from attribute names and `include!`.  `dsp/Cargo.toml` is compared with LF line ends.  Each closes a false result that a test now pins; none changes what DSP-1 permits.
+* 2026-10-20, maintainer: M14 keeps only the deny rules, M15 only the `rustfmt` hook, and M16 moves to phase 5b.  The hooks in `xtask` cost a build per tool call and are not controls.  No deleted test has been seen here.  This replaces the 2026-10-19 decision that hooks are an `xtask` command.
 
 ## Outcomes and retrospective
 

@@ -11,7 +11,7 @@ use std::process::Command;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use proc_macro2::{Literal, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Literal, Spacing, TokenStream, TokenTree};
 use serde::Deserialize;
 
 /// A breach of a rule, found in one file.
@@ -1115,6 +1115,358 @@ fn reached<'a>(crates: &'a [WorkspaceCrate], shell: &'a str) -> BTreeSet<&'a str
         }
     }
     seen
+}
+
+/// The lints that DSP-1's forms trip, each relaxed by one `#![expect]` in
+/// `dsp/src/lib.rs` with a reason that starts with `DSP-1`.
+pub const DSP1_LINTS: [&str; 4] = [
+    "assign_op_pattern",
+    "len_zero",
+    "manual_clamp",
+    "manual_swap",
+];
+
+/// The text of `dsp/Cargo.toml`.  Other text, such as a dependency or a
+/// `[lints]` override, can break DSP-1.
+const DSP_MANIFEST: &str = "[package]
+name = \"dsp\"
+version = \"0.1.0\"
+edition.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
+";
+
+/// Every file under `dsp/`, as a path from the root and its text, except
+/// the `.DS_Store` files that Finder makes.
+pub fn dsp_files(root: &Path) -> Result<Vec<(String, String)>> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else if path.file_name().is_none_or(|name| name != ".DS_Store") {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("walked from root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let bytes = std::fs::read(&path).with_context(|| format!("reading {rel}"))?;
+                out.push((rel, String::from_utf8_lossy(&bytes).into_owned()));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, &root.join(DSP), &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+/// DSP-1: `dsp` keeps its beginner style.  A scan of the tokens finds the
+/// likely breaches: methods other than `len`, `push` and `capacity`,
+/// closures, compound assignments, `for` over a list, lint attributes, and
+/// files or manifest text that can relax the lints.  A name after its own
+/// module, as in `pub use max::max`, is `dsp`'s own function; with a prefix,
+/// as in `self::max::max`, it still fails.  TD-3 names what the scan cannot
+/// see.
+pub fn dsp_keeps_beginner_style(files: &[(String, String)]) -> Vec<Problem> {
+    files
+        .iter()
+        .flat_map(|(file, text)| dsp_file_problems(file, text))
+        .collect()
+}
+
+/// The only methods that `dsp` calls.
+const DSP_METHODS: [&str; 3] = ["len", "push", "capacity"];
+
+/// Names that a tidy-up reaches through `::`, as in `std::mem::swap`.
+const DSP_PATH_NAMES: [&str; 6] = ["iter", "into_iter", "swap", "min", "max", "clamp"];
+
+/// Attributes that can relax a lint or bring in other code.
+const DSP_ATTRIBUTES: [&str; 7] = [
+    "allow", "warn", "deny", "forbid", "expect", "cfg_attr", "path",
+];
+
+const DSP_LIB: &str = "dsp/src/lib.rs";
+
+const DSP_STYLE_FIX: &str = "write the loop with while and indexing, len() > 0, an if for each bound, or a swap through a temporary";
+
+/// The kinds of breach that the scan finds, one problem for each kind on a
+/// line at most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DspBreach {
+    Method,
+    Path,
+    Closure,
+    CompoundAssignment,
+    ForOverAList,
+    Attribute,
+    Include,
+}
+
+fn dsp_file_problems(file: &str, text: &str) -> Vec<Problem> {
+    let whole_file = |message: String| {
+        vec![Problem {
+            rule: "DSP-1",
+            file: file.to_string(),
+            line: None,
+            message,
+        }]
+    };
+    if file == "dsp/Cargo.toml" {
+        if text.replace("\r\n", "\n") == DSP_MANIFEST {
+            return Vec::new();
+        }
+        return whole_file(format!(
+            "DSP-1: {file} differs from DSP_MANIFEST in xtask/src/rules.rs, so it can add a crate or relax a lint.  Fix: restore the text."
+        ));
+    }
+    if !(file.starts_with("dsp/src/") && file.ends_with(".rs")) {
+        return whole_file(format!(
+            "DSP-1: {file} is not dsp/Cargo.toml or a .rs file in dsp/src/, so it can change how dsp builds or is linted.  Fix: remove it."
+        ));
+    }
+    let tokens = match TokenStream::from_str(text) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            return whole_file(format!(
+                "DSP-1: {file} does not tokenise: {e}.  Fix: make the file valid Rust."
+            ));
+        }
+    };
+    let mut breaches = BTreeMap::new();
+    scan_dsp_tokens(file, tokens, DspLevel::Top, &mut breaches);
+    breaches
+        .into_iter()
+        .map(|((line, _), what)| Problem {
+            rule: "DSP-1",
+            file: file.to_string(),
+            line: Some(line),
+            message: format!("DSP-1: {file}:{line} {what}"),
+        })
+        .collect()
+}
+
+/// Where a stream of tokens is in a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DspLevel {
+    Top,
+    Group,
+    /// The braces of an import, as in `use std::mem::{replace, swap}`.
+    ImportList,
+}
+
+/// Finds the breaches in `tokens` and in every group in them.  For each
+/// line and kind, it keeps the first breach and its message.
+fn scan_dsp_tokens(
+    file: &str,
+    tokens: TokenStream,
+    level: DspLevel,
+    breaches: &mut BTreeMap<(usize, DspBreach), String>,
+) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (k, tree) in trees.iter().enumerate() {
+        if let TokenTree::Group(group) = tree {
+            let after_path = k >= 2
+                && punct_spacing(trees.get(k - 1), ':').is_some()
+                && joint(trees.get(k - 2), ':');
+            let inner = if group.delimiter() == Delimiter::Brace && after_path {
+                DspLevel::ImportList
+            } else {
+                DspLevel::Group
+            };
+            scan_dsp_tokens(file, group.stream(), inner, breaches);
+        }
+        if let Some((kind, what)) = dsp_breach_at(file, &trees, k, level) {
+            breaches
+                .entry((tree.span().start().line, kind))
+                .or_insert(what);
+        }
+    }
+}
+
+fn punct_spacing(tree: Option<&TokenTree>, char: char) -> Option<Spacing> {
+    match tree {
+        Some(TokenTree::Punct(punct)) if punct.as_char() == char => Some(punct.spacing()),
+        _ => None,
+    }
+}
+
+fn joint(tree: Option<&TokenTree>, char: char) -> bool {
+    punct_spacing(tree, char) == Some(Spacing::Joint)
+}
+
+fn ident_name(tree: Option<&TokenTree>) -> Option<String> {
+    match tree {
+        Some(TokenTree::Ident(ident)) => Some(ident.to_string()),
+        _ => None,
+    }
+}
+
+/// The breach that starts at `trees[k]`, if any, and its message.
+fn dsp_breach_at(
+    file: &str,
+    trees: &[TokenTree],
+    k: usize,
+    level: DspLevel,
+) -> Option<(DspBreach, String)> {
+    let at = |offset: isize| k.checked_add_signed(offset).and_then(|j| trees.get(j));
+    let tree = &trees[k];
+    if let Some(raw) = ident_name(Some(tree)) {
+        let name = raw.strip_prefix("r#").unwrap_or(&raw);
+        let after_dot = punct_spacing(at(-1), '.').is_some() && !joint(at(-2), '.');
+        let first_in_import =
+            level == DspLevel::ImportList && (k == 0 || punct_spacing(at(-1), ',').is_some());
+        let after_colons = punct_spacing(at(-1), ':').is_some() && joint(at(-2), ':');
+        let own_module = after_colons
+            && ident_name(at(-3))
+                .is_some_and(|segment| segment.strip_prefix("r#").unwrap_or(&segment) == name);
+        let after_path = first_in_import || (after_colons && !own_module);
+        if after_dot && !DSP_METHODS.contains(&name) {
+            return Some((
+                DspBreach::Method,
+                format!(
+                    "calls the method `{name}`; dsp calls only len, push and capacity.  Fix: {DSP_STYLE_FIX}."
+                ),
+            ));
+        }
+        if after_path && DSP_PATH_NAMES.contains(&name) {
+            return Some((
+                DspBreach::Path,
+                format!("calls `{name}` through `::`.  Fix: {DSP_STYLE_FIX}."),
+            ));
+        }
+        if raw == "move" {
+            return Some((
+                DspBreach::Closure,
+                "has a `move` closure.  Fix: write the loop out with while, or with for over a range.".into(),
+            ));
+        }
+        if raw == "for" {
+            return dsp_for_breach(&trees[k + 1..]);
+        }
+        if name == "include" && punct_spacing(at(1), '!').is_some() {
+            return Some((
+                DspBreach::Include,
+                "brings in another file with include!.  Fix: put the code in a module in dsp/src/."
+                    .into(),
+            ));
+        }
+        return None;
+    }
+    if let Some(spacing) = punct_spacing(Some(tree), '|') {
+        let first_of_pair = spacing == Spacing::Joint
+            && (punct_spacing(at(1), '|').is_some() || punct_spacing(at(1), '=').is_some());
+        if !first_of_pair && !joint(at(-1), '|') {
+            return Some((
+                DspBreach::Closure,
+                "has a closure, a lone `|`.  Fix: write the loop out with while, or with for over a range.".into(),
+            ));
+        }
+    }
+    if punct_spacing(Some(tree), '=').is_some() {
+        let operator = ['+', '-', '*', '/', '%', '^', '&', '|']
+            .into_iter()
+            .find(|&op| joint(at(-1), op))
+            .map(String::from)
+            .or_else(|| {
+                ['<', '>']
+                    .into_iter()
+                    .find(|&op| joint(at(-1), op) && joint(at(-2), op))
+                    .map(|op| format!("{op}{op}"))
+            });
+        if let Some(op) = operator {
+            return Some((
+                DspBreach::CompoundAssignment,
+                format!("uses the compound assignment `{op}=`.  Fix: write x = x {op} y."),
+            ));
+        }
+    }
+    if punct_spacing(Some(tree), '#').is_some() {
+        let inner = punct_spacing(at(1), '!').is_some();
+        let body = if inner { at(2) } else { at(1) };
+        if let Some(TokenTree::Group(group)) = body
+            && group.delimiter() == Delimiter::Bracket
+        {
+            let raw = ident_name(group.stream().into_iter().next().as_ref())?;
+            let name = raw.strip_prefix("r#").unwrap_or(&raw);
+            let listed = inner
+                && level == DspLevel::Top
+                && file == DSP_LIB
+                && is_dsp1_expect(group.stream());
+            if DSP_ATTRIBUTES.contains(&name) && !listed {
+                return Some((
+                    DspBreach::Attribute,
+                    format!(
+                        "has the attribute `{name}`, which can relax a lint or bring in other code.  Fix: remove it.  To keep a form that DSP-1 needs, add #![expect(clippy::<lint>, reason = \"DSP-1: ...\")] to {DSP_LIB}, and the lint to DSP1_LINTS."
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// A `for` breach unless the loop's expression, before its `{` block, has
+/// `..` outside any group.  A `for` with no `in`, as in `impl A for B`, is
+/// not a loop.
+fn dsp_for_breach(rest: &[TokenTree]) -> Option<(DspBreach, String)> {
+    let header: Vec<&TokenTree> = rest
+        .iter()
+        .take_while(|tree| !matches!(tree, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace))
+        .collect();
+    let is_loop = header
+        .iter()
+        .any(|tree| ident_name(Some(tree)).as_deref() == Some("in"));
+    let over_a_range = header
+        .windows(2)
+        .any(|pair| joint(Some(pair[0]), '.') && punct_spacing(Some(pair[1]), '.').is_some());
+    (is_loop && !over_a_range).then(|| {
+        (
+            DspBreach::ForOverAList,
+            "has a `for` loop that is not over a range.  Fix: loop over a range of indices, as in for i in 0..samples.len().".into(),
+        )
+    })
+}
+
+/// `expect(clippy::<lint>, reason = "DSP-1...")`, with one lint from
+/// DSP1_LINTS.
+fn is_dsp1_expect(attribute: TokenStream) -> bool {
+    let trees: Vec<TokenTree> = attribute.into_iter().collect();
+    let [TokenTree::Ident(expect), TokenTree::Group(arguments)] = trees.as_slice() else {
+        return false;
+    };
+    let arguments: Vec<TokenTree> = arguments.stream().into_iter().collect();
+    let [
+        clippy,
+        colon,
+        second_colon,
+        lint,
+        comma,
+        reason,
+        equals,
+        TokenTree::Literal(text),
+        rest @ ..,
+    ] = arguments.as_slice()
+    else {
+        return false;
+    };
+    *expect == "expect"
+        && ident_name(Some(clippy)).as_deref() == Some("clippy")
+        && joint(Some(colon), ':')
+        && punct_spacing(Some(second_colon), ':').is_some()
+        && ident_name(Some(lint)).is_some_and(|lint| DSP1_LINTS.contains(&lint.as_str()))
+        && punct_spacing(Some(comma), ',').is_some()
+        && ident_name(Some(reason)).as_deref() == Some("reason")
+        && punct_spacing(Some(equals), '=').is_some()
+        && string_value(text).is_some_and(|reason| reason.starts_with("DSP-1"))
+        && rest
+            .iter()
+            .all(|tree| punct_spacing(Some(tree), ',').is_some())
+        && rest.len() <= 1
 }
 
 #[cfg(test)]
@@ -2801,6 +3153,223 @@ mod tests {
             );
             let error = workspace(&json).expect_err("a manifest outside the root is an error");
             assert!(error.to_string().contains(folder), "{error:#}");
+        }
+    }
+
+    fn dsp_problems(file: &str, text: &str) -> Vec<Problem> {
+        dsp_keeps_beginner_style(&[(file.into(), text.into())])
+    }
+
+    /// `statement` on line 2, in the body of a function.
+    fn in_body(statement: &str) -> String {
+        format!("fn f() {{\n    {statement}\n}}\n")
+    }
+
+    /// `attribute` on line 2, at the top of a file.
+    fn at_top(attribute: &str) -> String {
+        format!("//! A sound helper.\n{attribute}\nfn f() {{}}\n")
+    }
+
+    #[test]
+    fn beginner_code_passes() {
+        let lib = r#"//! Tiny sound helpers.
+#![expect(
+    clippy::assign_op_pattern,
+    reason = "DSP-1: `x = x + y` shows the operation in full"
+)]
+#![expect(clippy::len_zero, reason = "DSP-1: `len() > 0` needs only `len`")]
+#![expect(clippy::manual_clamp, reason = "DSP-1: an `if` for each bound")]
+#![expect(clippy::manual_swap, reason = "DSP-1 forbids `swap`")]
+
+mod max;
+mod mix;
+
+pub use max::max;
+pub use mix::mix;
+"#;
+        let mix = r#"/// Adds the stems.
+pub fn mix(stems: &[&[f32]], volumes: &[f32]) -> Vec<(f32, f32)> {
+    let mut result = Vec::new();
+    let mut x = 0;
+    x = x + 1;
+    x = -1;
+    let n = stems.len();
+    if x <= 1 && x >= -1 || x == 0 && x != 2 {
+        result.push((volumes[0], stems[0][x as usize]));
+    }
+    for i in 0..n {}
+    for i in 0..=n {}
+    for i in 0..stems.len() {}
+    let mut i = 0;
+    while i < n {
+        i = i + 1;
+    }
+    let zeros = vec![0.0; n];
+    assert!(zeros.len() > 0, "{}", result.capacity());
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "mix needs at least one stem")]
+    fn no_stems() {
+        mix(&[], &[]);
+    }
+}
+"#;
+        let files = [
+            ("dsp/Cargo.toml".into(), DSP_MANIFEST.into()),
+            ("dsp/src/lib.rs".into(), lib.into()),
+            ("dsp/src/mix.rs".into(), mix.into()),
+        ];
+        assert_eq!(dsp_keeps_beginner_style(&files), []);
+    }
+
+    #[test]
+    fn each_breach_is_named() {
+        let module = "dsp/src/mix.rs";
+        let lib = "dsp/src/lib.rs";
+        let compound: Vec<(&str, String, Vec<&str>)> =
+            ["+", "-", "*", "/", "%", "^", "&", "|", "<<", ">>"]
+                .into_iter()
+                .map(|op| (module, in_body(&format!("a {op}= b;")), vec!["compound"]))
+                .collect();
+        let cases: Vec<(&str, String, Vec<&str>)> = [
+            (module, in_body("let a = b.iter();"), vec!["`iter`"]),
+            (module, in_body("let a = b.to_vec();"), vec!["`to_vec`"]),
+            (module, in_body("b.sort_by(f);"), vec!["`sort_by`"]),
+            (module, in_body("let a = b.min(c);"), vec!["`min`"]),
+            (module, in_body("let a = b.r#iter();"), vec!["`iter`"]),
+            (module, in_body("b.swap(c, d);"), vec!["`swap`"]),
+            (
+                module,
+                in_body("std::mem::swap(&mut a, &mut b);"),
+                vec!["`swap`"],
+            ),
+            (module, in_body("let a = f32::max(b, c);"), vec!["`max`"]),
+            (module, in_body("let a = b.is_empty();"), vec!["`is_empty`"]),
+            (module, in_body("let a = b.clamp(c, d);"), vec!["`clamp`"]),
+            (module, in_body("let g = |x| x;"), vec!["closure"]),
+            (module, in_body("let g = move || 0;"), vec!["closure"]),
+            (module, in_body("for s in samples {}"), vec!["`for`"]),
+            (module, in_body("for s in &samples[1..] {}"), vec!["`for`"]),
+            (
+                module,
+                in_body("for i in (0..n).rev() {}"),
+                vec!["`rev`", "`for`"],
+            ),
+            (
+                module,
+                in_body("assert!(a.iter().count() > 0);"),
+                vec!["`iter`"],
+            ),
+            (lib, at_top("#![allow(clippy::all)]"), vec!["`allow`"]),
+            (
+                lib,
+                at_top(r#"#![expect(clippy::all, reason = "x")]"#),
+                vec!["`expect`"],
+            ),
+            (
+                lib,
+                at_top(r#"#![expect(clippy::eq_op, reason = "DSP-1")]"#),
+                vec!["`expect`"],
+            ),
+            (
+                lib,
+                at_top(r#"#![expect(clippy::len_zero, reason = "x")]"#),
+                vec!["`expect`"],
+            ),
+            (
+                lib,
+                in_body(r#"#![expect(clippy::len_zero, reason = "DSP-1: x")]"#),
+                vec!["`expect`"],
+            ),
+            (
+                module,
+                at_top(r#"#![expect(clippy::len_zero, reason = "DSP-1: x")]"#),
+                vec!["`expect`"],
+            ),
+            (
+                module,
+                in_body("#[allow(clippy::eq_op)]\n    let a = 1;"),
+                vec!["`allow`"],
+            ),
+            (module, in_body("#![allow(clippy::eq_op)]"), vec!["`allow`"]),
+            (
+                lib,
+                at_top("#![cfg_attr(clippy, allow(clippy::all))]"),
+                vec!["`cfg_attr`"],
+            ),
+            (module, at_top("#[path = \"x.rs\"]"), vec!["`path`"]),
+            (module, in_body("include!(\"x.rs\");"), vec!["include!"]),
+            (module, in_body("r#include!(\"x.rs\");"), vec!["include!"]),
+            (lib, at_top("#![r#allow(clippy::all)]"), vec!["`allow`"]),
+            (
+                module,
+                at_top("use std::mem::{replace, swap};"),
+                vec!["`swap`"],
+            ),
+            (module, at_top("use std::{cmp::{max}};"), vec!["`max`"]),
+        ]
+        .into_iter()
+        .chain(compound)
+        .collect();
+        for (file, text, named) in cases {
+            let problems = dsp_problems(file, &text);
+            assert_eq!(problems.len(), named.len(), "{text}\n{problems:#?}");
+            for (problem, name) in problems.iter().zip(&named) {
+                assert_eq!(problem.rule, "DSP-1", "{text}");
+                assert_eq!(problem.file, file, "{text}");
+                assert_eq!(problem.line, Some(2), "{text}\n{problem}");
+                assert!(
+                    problem.message.starts_with(&format!("DSP-1: {file}:2 ")),
+                    "{problem}"
+                );
+                assert!(problem.message.contains(name), "{name} in {problem}");
+                assert!(problem.message.contains("Fix: "), "{problem}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_manifest_and_files_are_fixed() {
+        let manifest = "dsp/Cargo.toml";
+        assert_eq!(
+            dsp_problems(manifest, &DSP_MANIFEST.replace('\n', "\r\n")),
+            []
+        );
+        let cases = [
+            (
+                manifest,
+                DSP_MANIFEST.replace("[lints]", "[dev-dependencies]\nrand = \"0.9\"\n\n[lints]"),
+            ),
+            (
+                manifest,
+                format!("{DSP_MANIFEST}\n[lints.clippy]\nall = \"allow\"\n"),
+            ),
+            ("dsp/build.rs", "fn main() {}\n".into()),
+            (
+                "dsp/clippy.toml",
+                "too-many-lines-threshold = 1000\n".into(),
+            ),
+            ("dsp/src/notes.txt", "a note\n".into()),
+            ("dsp/src/mix.rs", "fn f() { \"\n".into()),
+        ];
+        for (file, text) in cases {
+            let problems = dsp_problems(file, &text);
+            assert_eq!(problems.len(), 1, "{file}\n{text}\n{problems:#?}");
+            assert_eq!(problems[0].rule, "DSP-1");
+            assert_eq!(problems[0].file, file);
+            assert_eq!(problems[0].line, None);
+            assert!(
+                problems[0].message.starts_with(&format!("DSP-1: {file} ")),
+                "{}",
+                problems[0]
+            );
+            assert!(problems[0].message.contains("Fix: "), "{}", problems[0]);
         }
     }
 }

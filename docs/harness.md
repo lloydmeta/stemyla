@@ -27,6 +27,7 @@ Two principles shape it:
 | the three `-p` clippy steps in CI | sensor, computational | `--workspace` builds merge features, so they hide warnings in `synth` without `files`, a native-only call to a writer in `app`, and a lost dev-dependency | phase 2 |
 | `crates_depend_only_downwards`, `the_page_and_the_worker_meet_only_through_stem_protocol` (LAYER-1) | sensor, computational | nothing compared the layers table with the manifests, or kept the page side and the worker side apart; a crate outside the workspace could hide a dependency | phase 2 |
 | the `#![expect]`s in `dsp/src/lib.rs`, one for each lint | sensor, computational | `#![allow(clippy::all)]` in `dsp` switched off every clippy lint, so a correctness lint passed there, and a `disallowed-methods` list could not reach it | phase 2 |
+| `dsp_is_beginner_style` (DSP-1) | sensor, computational | clippy has no lint against iterators, closures or `swap`, and one more `+=` passed the `expect`s.  It scans for the likely breaches only (TD-3) | phase 2 |
 
 Planned components, by phase, are in the plan.
 
