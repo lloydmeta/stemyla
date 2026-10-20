@@ -87,4 +87,7 @@ impl Stretcher for CuteStretcher {
         self.in_r.clear();
         self.carry = 0.0;
     }
+    /// Nothing: this stretcher is for benches only, and RT-1 does not
+    /// cover it.
+    fn warm_up(&mut self, _max_tempo: f64, _max_frames: usize) {}
 }

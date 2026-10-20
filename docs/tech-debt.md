@@ -73,6 +73,12 @@ MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does
 * A symbolic link in a crate's folder can point to another crate's source.
 * Fix: phase 3's reviewers look for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
 
+### TD-25: RT-1's allocation test runs natively only
+
+`the_callback_does_not_allocate_after_warm_up` does not count the WebAssembly build, cpal's hosts, or the closure in `engine/src/live.rs`.  That closure calls `Schedule::next`, whose fields are all `Copy`.  On the web, the first `web_time::Instant::now` in `render_interleaved` fills a `thread_local`.  A zero count is evidence, not proof, since the optimiser may remove an allocation.  The bench-only stretchers (`timestretch`, `cute-dsp`) are not covered.  `the_app_ships_only_these_stretchers` reads the text of `app/Cargo.toml` only, so it does not see a stretcher that another crate turns on through feature unification (RT-1).
+
+* Fix: none planned; phase 4's evaluator may count allocations in the browser.
+
 ## Known breaches
 
 ### TD-12: dropped files are copied before they are saved
@@ -92,12 +98,6 @@ MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does
 `worker/src/web.rs:1593` copies both channels out of JS (`left.to_vec()`, `right.to_vec()`) and then interleaves them into a third buffer, and all live through the encode: about 170 MB of worker memory for a 4-minute song (MEM-1).
 
 * Fix: interleave from the JS arrays in blocks, or drop the channel copies before encoding.
-
-### TD-15: the default stretcher allocates in the audio callback
-
-`wsola`'s input buffer, behind `engine/src/stretch/wsola_adapter.rs`, grows over the first 1.5 s or so of play.  The chipmunk path's `dsp::double_speed` returns a new `Vec`.  A loop of a few frames grows the player's `anchors` queue.  RT-1 does not yet forbid allocation, but an allocation in the callback can miss its deadline.  No test counts allocations.
-
-* Fix: decided 2026-10-19: RT-1 is to forbid allocation after warm-up.  A test with a counting global allocator over `render_interleaved` for each stretcher the app ships, a warm-up of each stretcher, and chipmunk decimation in place (`plans/active/harness-phase-2.md`, M11).
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
@@ -142,4 +142,5 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 * TD-4: closed by `crates_depend_only_downwards` (harness phase 2, M5).  It compares the dependencies between crates in `cargo metadata` with the layers table in `ARCHITECTURE.md` (LAYER-1).
 * TD-5: closed by `no_python_in_the_build` (harness phase 2, M8).  It checks the git index and the build files for Python (BUILD-1).
 * TD-6: closed by `no_audio_or_weights_are_tracked` and the anchored `.gitignore` (harness phase 2, M8).  The test checks the git index for audio, weights and large files (ASSET-1).
+* TD-15: closed by `the_callback_does_not_allocate_after_warm_up` (harness phase 2, M11).  wsola 0.2.0, a warm-up of each stretcher, chipmunk decimation in place and a bound on the playhead's anchors removed the allocations in the audio callback (RT-1).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.

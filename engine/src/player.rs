@@ -10,7 +10,7 @@
 //!
 //! Because there is only one read position, stems cannot drift apart.
 
-use crate::params::SharedParams;
+use crate::params::{MAX_TEMPO, SharedParams};
 use crate::song::Song;
 use crate::stretch::{Stretcher, StretcherKind};
 use std::collections::VecDeque;
@@ -82,8 +82,7 @@ pub struct Player {
     consumed: f64,
     chipmunk: bool,
 
-    // Scratch buffers, sized once so the audio path does not allocate
-    // (except for `dsp::double_speed` in chipmunk mode).
+    // Scratch buffers, sized once so the audio path does not allocate.
     in_l: Vec<f32>,
     in_r: Vec<f32>,
     pos_buf: Vec<u64>,
@@ -99,10 +98,12 @@ impl Player {
         Self::with_config(song, params, stretcher, PlayerConfig::default())
     }
 
+    /// Makes a player, and warms its stretcher up on this thread, so the
+    /// audio callback does not allocate (RT-1).
     pub fn with_config(
         song: Arc<Song>,
         params: Arc<SharedParams>,
-        stretcher: Box<dyn Stretcher>,
+        mut stretcher: Box<dyn Stretcher>,
         cfg: PlayerConfig,
     ) -> Self {
         assert_eq!(
@@ -121,6 +122,7 @@ impl Player {
             .map(|i| params.effective_gain(i))
             .collect();
         let max_in = cfg.hop.max(cfg.block * 2);
+        stretcher.warm_up(f64::from(MAX_TEMPO), cfg.block);
         Self {
             song,
             params,
@@ -287,8 +289,9 @@ impl Player {
         self.consumed += l.len() as f64 * tempo;
     }
 
-    /// Chipmunk mode: read twice as many frames and keep every second one
-    /// with `dsp::double_speed`.  Bypasses the stretcher.
+    /// Chipmunk mode: read twice as many frames and keep every second one,
+    /// in place, as `dsp::double_speed` does without allocating.  Bypasses
+    /// the stretcher.
     fn render_chipmunk(&mut self, l: &mut [f32], r: &mut [f32]) {
         let n2 = l.len() * 2;
         let mut got = 0;
@@ -299,10 +302,10 @@ impl Player {
             self.chip_r[got..got + m].copy_from_slice(&self.in_r[..m]);
             got += m;
         }
-        let dl = dsp::double_speed(&self.chip_l[..n2]);
-        let dr = dsp::double_speed(&self.chip_r[..n2]);
-        l.copy_from_slice(&dl);
-        r.copy_from_slice(&dr);
+        for i in 0..l.len() {
+            l[i] = self.chip_l[2 * i];
+            r[i] = self.chip_r[2 * i];
+        }
         // No stretcher in the path: what was just read is what is heard.
         self.anchors.clear();
         self.pushed = 0;
@@ -326,6 +329,7 @@ impl Player {
                         self.xf_k = 0;
                     }
                     self.pos = dsp::wrap_loop(self.pos as usize, s as usize, e as usize) as u64;
+                    self.drop_oldest_anchor_when_full();
                     self.anchors.push_back(Anchor {
                         input_index: self.pushed + i as u64,
                         song_pos: self.pos,
@@ -388,6 +392,17 @@ impl Player {
                 self.in_l[i] += vl * g;
                 self.in_r[i] += vr * g;
             }
+        }
+    }
+
+    /// Keeps `anchors` within its capacity, so the audio callback does not
+    /// allocate (RT-1).  Only a loop of under 16 frames fills it.  The
+    /// anchor dropped can be the one being heard, and the playhead then
+    /// shows the loop's start early, while the stretcher's buffered audio
+    /// plays; the audio does not change.
+    fn drop_oldest_anchor_when_full(&mut self) {
+        if self.anchors.len() == self.anchors.capacity() {
+            self.anchors.pop_front();
         }
     }
 
@@ -521,6 +536,40 @@ mod tests {
         // Without a crossfade, output after the wrap is the loop start.
         let [l, _] = p.render(2_000);
         assert!(l.iter().all(|v| (0.0..0.15 + 1e-3).contains(v)));
+    }
+
+    #[test]
+    fn chipmunk_matches_dsp_double_speed() {
+        let rising: Vec<f32> = (0..4_000).map(|i| i as f32 / 4_000.0).collect();
+        let falling: Vec<f32> = rising.iter().map(|v| 1.0 - v).collect();
+        let s = Arc::new(Song {
+            sample_rate: 44_100,
+            frames: rising.len(),
+            stems: vec![Stem {
+                name: "lloyd".into(),
+                left: rising.clone().into(),
+                right: falling.clone().into(),
+            }],
+        });
+        let mut p = player(s, 256);
+        p.gains = vec![1.0];
+        p.params.chipmunk.store(true, Relaxed);
+        let [l, r] = p.render(1_000);
+        assert_eq!(l, dsp::double_speed(&rising[..2_000]));
+        assert_eq!(r, dsp::double_speed(&falling[..2_000]));
+    }
+
+    #[test]
+    fn a_very_short_loop_keeps_its_anchors() {
+        let s = song(vec![("a", noise(20_000, 4))]);
+        let mut p = player(s, 256);
+        let capacity = p.anchors.capacity();
+        p.params.set_tempo(1.5);
+        p.params.set_loop(1_000, 1_001);
+        p.render(8_192);
+        assert_eq!(p.anchors.capacity(), capacity, "RT-1: the queue grew");
+        let h = p.params.playhead();
+        assert!((1_000..=1_001).contains(&h), "playhead {h}");
     }
 
     #[test]

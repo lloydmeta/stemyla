@@ -74,6 +74,27 @@ impl Stretcher for WsolaStretcher {
         self.out_l.clear();
         self.out_r.clear();
     }
+    /// wsola keeps 65,536 frames of input behind its read position before
+    /// it drops old input, so its input buffer grows over the first 1.5 s
+    /// of play.  It can hold up to
+    /// `65,536 + 4 * search + frame + 2 * tempo * hop + 256` frames, where
+    /// a step can pass 65,536 by its advance and the search's jitter: about
+    /// 71,200 at 44.1 kHz and tempo 1.5.  The extra over 65,536 is below
+    /// `sample_rate / 4` above about 2,020 Hz.  So one push of that much
+    /// silence gives the buffer its largest size.  The push goes straight
+    /// to wsola, so `interleaved` keeps its size (MEM-4).  A pull of
+    /// `max_frames` plus 20 ms, more than one 15 ms wsola hop, does the
+    /// same for wsola's output buffer.  `reset` keeps both capacities.
+    fn warm_up(&mut self, max_tempo: f64, max_frames: usize) {
+        let rate = self.ts.sample_rate().get() as usize;
+        let frames = (1 << 16) + rate / 4;
+        self.ts.push(&vec![0.0; 2 * frames]);
+        let tempo = self.tempo;
+        self.set_tempo(max_tempo);
+        self.can_pull(max_frames + rate / 50);
+        self.reset();
+        self.set_tempo(tempo);
+    }
 }
 
 /// Output-frame latency measured with a click train by

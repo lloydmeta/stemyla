@@ -31,6 +31,7 @@ Two principles shape it:
 | `no_python_in_the_build` (BUILD-1), `no_audio_or_weights_are_tracked` (ASSET-1), over the git index | sensor, computational | nothing failed a Python file or a Python step in CI, and `git add -f` could put a song or a model file past `.gitignore`.  `.gitignore` also ignored source folders named `audio` or `stems` at any depth | phase 2 |
 | `young_crates_are_pinned`, `third_party_lists_what_ships` (DEPS-1), over `cargo metadata` and `cargo tree` | sensor, computational | `wsola` and `timestretch` came in as caret ranges, and nothing compared `THIRD-PARTY.md` with what ships | phase 2 |
 | `e2e_messages_use_protocol_types` (PROTO-1) | sensor, computational | the e2e scripts write message types by hand, and CI runs only some scenarios, so a renamed type failed late or nowhere.  It reads the likely shapes only, and no field names (TD-16) | phase 2 |
+| `the_callback_does_not_allocate_after_warm_up`, a counting allocator over the audio callback (RT-1) | sensor, computational | wsola's `pull`, wsola's growing input, chipmunk's `double_speed` and a short loop's anchors allocated in the callback, and nothing counted.  It runs natively only (TD-25) | phase 2 |
 
 Planned components, by phase, are in the plan.
 

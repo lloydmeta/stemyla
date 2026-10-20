@@ -31,6 +31,12 @@ pub trait Stretcher: Send {
     fn latency(&self) -> f64;
     /// Drops all buffered audio and state, ready for a new position.
     fn reset(&mut self);
+    /// Makes each buffer that `push` and `pull` use reach its largest
+    /// size, on the thread that makes the player.  After it, `push` of at
+    /// most 4,096 frames and `pull` of at most `max_frames`, at a tempo of
+    /// at most `max_tempo`, do not allocate (RT-1).  It leaves the
+    /// stretcher as [`Self::reset`] does, with the tempo it had.
+    fn warm_up(&mut self, max_tempo: f64, max_frames: usize);
 }
 
 /// Which stretcher to build.
@@ -173,6 +179,10 @@ impl Stretcher for Varispeed {
         self.right.clear();
         self.t = 0.0;
     }
+    /// Nothing to do: the queues hold `max_frames * max_tempo` frames,
+    /// plus one push and 2 frames, well within the 32,768 frames that
+    /// `new` gives them.
+    fn warm_up(&mut self, _max_tempo: f64, _max_frames: usize) {}
 }
 
 #[cfg(test)]
@@ -208,6 +218,46 @@ mod tests {
         let mut r = vec![0.0; 6];
         v.pull(&mut l, &mut r);
         assert_eq!(l, [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]);
+    }
+
+    /// Output of a stretcher at tempo 0.75 for a sine pushed in hops of
+    /// 256 frames, as the player pushes it.
+    fn stretched(s: &mut dyn Stretcher) -> Vec<f32> {
+        let x: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let mut fed = 0;
+        let mut out = Vec::new();
+        let mut l = vec![0.0; 512];
+        let mut r = vec![0.0; 512];
+        for _ in 0..40 {
+            while !s.can_pull(512) && fed + 256 <= x.len() {
+                s.push(&x[fed..fed + 256], &x[fed..fed + 256]);
+                fed += 256;
+            }
+            s.pull(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+        out
+    }
+
+    #[test]
+    fn a_warmed_stretcher_sounds_the_same() {
+        for kind in StretcherKind::all() {
+            let mut cold = kind.build(44_100);
+            let mut warmed = kind.build(44_100);
+            cold.set_tempo(0.75);
+            warmed.set_tempo(0.75);
+            warmed.warm_up(1.5, 512);
+            let (cold, warmed) = (stretched(&mut *cold), stretched(&mut *warmed));
+            assert!(cold.iter().any(|v| *v != 0.0), "{}: silent", kind.label());
+            assert!(
+                cold.iter()
+                    .zip(&warmed)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{}: warm_up must leave the stretcher as reset does, with its tempo",
+                kind.label()
+            );
+        }
     }
 
     #[test]
