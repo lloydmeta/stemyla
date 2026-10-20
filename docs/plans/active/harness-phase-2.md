@@ -837,17 +837,194 @@ Each step is one signed commit, and fmt, clippy, the tests and `docs-check` pass
 * fmt, clippy (every clippy command in `CLAUDE.md`), `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.
 * CI: the `test` job log lists `crates_depend_only_downwards ... ok` and `the_page_and_the_worker_meet_only_through_stem_protocol ... ok`.  The PR states the time that the two tests add in CI.
 
-### M6: dsp relaxes only the style lints DSP-1 needs (closes TD-2)
+### M6: dsp relaxes only the lints DSP-1 needs (closes TD-2; DSP-1, DOC-1; maintainer decision)
 
-* Change: replace `#![allow(clippy::all)]` in `dsp/src/lib.rs` with the style lints that DSP-1's constructs trigger, named one by one with a reason each.  Find them by removing the allow and running clippy.
-* Acceptance: `cargo clippy -p dsp --all-targets -- -D warnings` passes.  A planted correctness lint (for example `let x = x;` in a `dsp` function, or a self-comparison) now fails clippy.
-* Rule: fixes in `dsp/` keep DSP-1's beginner style; a lint that only an iterator would fix goes on the allow list.
+* Change: replace `#![allow(clippy::all)]` in `dsp/src/lib.rs` with one `#![expect(clippy::<lint>, reason = "...")]` for each lint that a DSP-1 construct triggers.  Every other clippy lint then has its workspace level in `dsp`.
+* The gain: the correctness, suspicious, complexity, `perf` and style groups run on `dsp` again.  A `disallowed-methods` list that reaches `dsp` (a `dsp/clippy.toml` or a root `clippy.toml`) now applies there.  M12 and M13 configure other crates only.  With `-D warnings`, an exception that no longer fires fails clippy.
+* The phase plan said "the style lints".  Two of the four lints are in the complexity group, so the title says "the lints".
+* Terms: "the beginner forms" are `x = x + ...`, `x = x - ...`, `len() > 0` and an `if` for each bound of a clamp.  "DSP-1's constructs" are the types and syntax that DSP-1 lists.  M6 uses "a beginner" for the reader of `dsp`, as `dsp/src/lib.rs` does.
 
-### M7: dsp's beginner style is a test (closes TD-3; DSP-1)
+#### M6 state at the start
 
-* Change: add a check to `xtask/src/rules.rs` that parses each file in `dsp/src/` with `syn` (full syntax, visitor) and allows only the listed constructs.  It is an allowlist: types `f32`, `usize`, `bool`, `&[f32]` and `Vec<f32>`; `fn`, `let`, `for` over a range, `while`, `if`, indexing, arithmetic, comparisons, and calls to `dsp` functions and the methods DSP-1 permits (`len`, `push`, `Vec::new`, `vec![...]` and the `f32` maths methods).  `#[cfg(test)]` modules are checked too.  The check also asserts that `dsp/Cargo.toml` has an empty `[dependencies]`.
+On 2026-10-20, at commit `df8a954` (M5 merged as PR #18):
+
+* `dsp/src/lib.rs` (25 lines) has `#![allow(clippy::all)]` on line 9.  Its comment says that the crate uses plain `for`, `while`, `if` and indexing, "so all Clippy lints are switched off".  `dsp/Cargo.toml` has `[lints] workspace = true` and no dependencies.
+* The workspace `Cargo.toml` allows two clippy lints for every crate: `needless_range_loop` and `chunks_exact_to_as_chunks`.  No `clippy.toml` and no `.cargo/` folder exist.  The only other clippy attribute in the tree is `#[allow(clippy::too_many_arguments)]` in `roformer-gpu/src/net.rs`.
+* CI pins the toolchain: `RUST_VERSION: "1.99.0"` in `.github/workflows/ci.yml`, with the comment "Bump deliberately".  The `clippy` job runs `cargo clippy --locked --workspace --all-targets -- -D warnings`, which checks `dsp`'s lib and its unit tests.  No CI step runs clippy on `dsp` alone.
+* DSP-1 in `invariants.md` says: "Clippy's style lints are relaxed there on purpose."  `* Enforced by: prose only.  A scan on 2026-10-19 found no breach.`  `* Gaps: TD-2, TD-3.`
+* TD-2 says that the allow "turns off the correctness and performance groups as well as style, and silences `disallowed_methods` (DSP-1)".  Its fix: "allow only the style lints DSP-1 relaxes, by name."
+* `.claude/rules/dsp.md` gives DSP-1's constructs and says nothing about clippy.
+* The code uses types outside DSP-1's list (`&[f32]`, `Vec<f32>`, `usize`).  `biggest` and `median` return `f32`, `peaks` returns `Vec<(f32, f32)>`, `mix` takes `&[&[f32]]`, and `median` has a `bool`.  So the scan's "found no breach" is false for the types.  It holds for iterators, closures and `swap`.
+* Facts from a prototype in a scratch worktree, with clippy 1.99.0:
+  * Without the allow, `cargo clippy -p dsp --all-targets -- -D warnings` gives 33 errors from four lints: 16 in the lib and 17 in the lib test.  Most sites count twice, once in each target:
+    * `clippy::assign_op_pattern` (style), 25 errors at 13 sites, one of them in a test: every `x = x + ...`, and `p = p - length` in `wrap_loop`.  The fix is `x += ...`.
+    * `clippy::len_zero` (style), 4 errors at 2 sites: `samples.len() > 0` in `biggest` and `stems.len() > 0` in `mix`.  The fix is `!samples.is_empty()`.
+    * `clippy::manual_clamp` (complexity), 2 errors at 1 site: the two `if`s that clamp `total` in `mix`.  The fix is `total.clamp(-1.0, 1.0)`.
+    * `clippy::manual_swap` (complexity), 2 errors at 1 site: the swap through `temp` in `median`'s bubble sort.  The fix is `copy.swap(j, j + 1)`, which DSP-1 forbids.
+  * The groups were found by allowing `clippy::style`, then `clippy::complexity`, and seeing which lints were left.  Clippy's lint list gives the default levels: correctness is `deny`; suspicious, style, complexity and `perf` are `warn` ([Clippy lints](https://clippy.rust-lang.org/stable/index.html)).
+  * The four crate-level `#![expect]` attributes in "M6 design" pass these:
+    * `cargo fmt -p dsp --check`, `cargo clippy -p dsp --all-targets -- -D warnings` and the workspace clippy command;
+    * `RUSTFLAGS="-D warnings" cargo test -p dsp` (30 tests, no doctests);
+    * `RUSTDOCFLAGS="-D warnings" cargo doc -p dsp`;
+    * `RUSTFLAGS="-D warnings" cargo build -p dsp --target wasm32-unknown-unknown --release`, as Trunk builds it.
+  * So `rustc` and `rustdoc` without clippy do not report the clippy expectations as unfulfilled.  The Reference says only that tool lints "only get checked when the associated tool is active" ([diagnostics attributes](https://doc.rust-lang.org/reference/attributes/diagnostics.html)).  So this fact rests on the runs.
+  * Planted on the prototype: `let n = n;` in `fade_in` fails with `clippy::redundant_locals`, which is in the suspicious group, not correctness.  `n == n` fails with `clippy::eq_op`, which is in the correctness group.  On today's tree, with `#![allow(clippy::all)]`, both pass.
+  * A planted `dsp/clippy.toml` with `disallowed-methods = [{ path = "std::vec::Vec::new", reason = "planted" }]` fails clippy with 4 errors in the lib and 9 in the lib test.  `vec![]` expands to `Vec::new`, so the test count holds three `vec![]`s.  `disallowed_methods` is in the style group: `-A clippy::style` silences it.
+  * When `median`'s swap is replaced by one assignment, clippy fails with "this lint expectation is unfulfilled" at the `manual_swap` line.  A rewrite with another temporary name still fires `manual_swap`.
+  * `#![allow(clippy::all)]` after the four `expect`s fails with four unfulfilled expectations.  The same allow before them passes: the later `expect`s set the level of their four lints again, and the allow silences every other lint.  A blanket allow that replaces the `expect`s also passes.  The Reference: an expectation "is only fulfilled by lint emissions which have been suppressed by the `expect` attribute".
+  * Other attributes that pass clippy with `n == n` planted:
+    * `#![expect(clippy::all, reason = "...")]` in place of the four.  A style lint fulfils it, and it silences `eq_op`.
+    * `#[expect(clippy::eq_op, reason = "...")]` on `fade_in`.
+  * `[workspace.lints.clippy]` with `correctness` and `suspicious` at `forbid`, `priority = -1`, does not stop a later `#![allow(clippy::all)]`.  It only warns (`forbidden_lint_groups`), and `n == n` still passes under `-D warnings`.  So no cheap guard exists in Cargo.
+  * Cargo cannot hold the list.  `[lints.clippy]` beside `workspace = true` fails: "cannot override `workspace.lints` in `lints`".  Its levels are `forbid`, `deny`, `warn` and `allow`, and `"expect"` fails with "unknown variant" ([manifest, lints](https://doc.rust-lang.org/cargo/reference/manifest.html)).
+
+#### M6 design
+
+* Review round 1 widened the ban to every compound assignment (see the Decision log).  The texts in the tree replace the quoted texts below.
+* Decision point for the maintainer.  Ask before step 1.  Record the choice in Progress and the Decision log.  Add "Decided on <date>: ..." to the question.  If the choice is not the recommended one, make the changes listed under it.  Then review the plan again before implementing.
+* Question: which lints does `dsp` keep, and which does it fix?  Decided on 2026-10-20: the maintainer chose (x), after weighing a mixed option (z) that fixed only `assign_op_pattern`.
+  * (x), recommended: keep all four, each as an `expect` with a reason.  DSP-1 names the beginner forms and forbids their shortcuts, so each reason cites DSP-1's text.  No function body changes.  The gain: the code that a beginner reads stays as it is.  M7's allowlist needs no compound assignment, `is_empty` or `clamp`.  The cost: four exceptions, and DSP-1 gains a sentence that forbids `+=`, `-=`, `is_empty` and `clamp`.
+  * (y) fix three, and keep only `manual_swap`.  The gain: one exception, which DSP-1's text already forces, and no new sentence in DSP-1.  The cost: the beginner text changes in 7 files, and M7's allowlist must permit `+=`, `-=`, `is_empty` and `clamp`.  For (y), make these changes:
+    * Change the 13 sites of `x = x + ...` and `p = p - length` to `+=` and `-=`.
+    * Change the two `len() > 0` to `!...is_empty()`.
+    * Change the two `if`s in `mix` to `total = total.clamp(-1.0, 1.0);`.  `mix`'s doc says that the total "is clamped", so the doc stays.
+    * `dsp/src/lib.rs` keeps only the `manual_swap` `expect`, and the comment says "the lint below".
+    * DSP-1 gets these two sentences in place of the sentence on clippy: "`dsp/src/lib.rs` expects each clippy lint that a DSP-1 construct triggers, by name and with a reason.  Every other lint keeps its workspace level."  DSP-1's "Why" stays.
+    * DSP-1's `* Enforced by:` and `* Gaps:` lines change as under (x).
+    * `.claude/rules/dsp.md` gets only the second new bullet.
+    * M7's first bullet permits `clamp`; remove "leave out `clamp` (from M6)".
+    * TD-3 does not name `+=`, `-=`, `is_empty` and `clamp`.
+    * TD-2's closed bullet says "one `#![expect]`".  The `harness.md` row says "the `#![expect]` in `dsp/src/lib.rs`".
+    * "Why crate-level `expect`" says 1 site, not 17.
+    * In "M6 acceptance": remove the planted breaches of the three fixed lints.  "Each of the four is needed" becomes "the one `expect` is needed".  "Four unfulfilled expectations" becomes "one".  "In place of the four" becomes "in place of the one".
+    * M7's bullet "Forbidden shortcuts" goes, and M7's allowlist permits `+=`, `-=`, `is_empty` and `clamp`.
+    * Decision 0006 records (y).  Its Consequences drop the ban and M7's shortcut line, and name the one `expect`.
+* Decision record: `docs/decisions/0006-clippy-exceptions-in-dsp.md`.  Under (x), DSP-1 gains a ban, which is a rule change.  So the choice gets a record, as M11's rule change does.
+  * Title: `# 0006: how dsp meets clippy`.
+  * Status line: `Status: accepted (<date>, by the maintainer)`.  The maintainer's answer at the decision point accepts the record.
+  * The line in `docs/README.md`: `` * `decisions/0006-clippy-exceptions-in-dsp.md`: `dsp` keeps its beginner forms (DSP-1), and `dsp/src/lib.rs` expects each clippy lint that they trigger, by name and with a reason. ``  Under (y): `` * `decisions/0006-clippy-exceptions-in-dsp.md`: `dsp/src/lib.rs` expects each clippy lint that a DSP-1 construct triggers, by name and with a reason. ``
+  * Context: "`dsp/src/lib.rs` had `#![allow(clippy::all)]`, so no clippy lint ran on `dsp`.  Four lints fire on its beginner code: `assign_op_pattern`, `len_zero`, `manual_clamp` and `manual_swap`.  DSP-1 forbids only the fix of `manual_swap`."
+  * Options: (x) and (y), each with its gain and cost, as the question above gives them.
+  * Decision: the maintainer's choice and its date.
+  * Consequences, one sentence each.  Under (x):
+    * "DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp` in `dsp`."
+    * "`dsp/src/lib.rs` expects the four lints; every other lint keeps its workspace level."
+    * "A new lint in `dsp` is fixed with DSP-1's constructs, or gets an `expect` whose reason cites DSP-1."
+    * "M7's allowlist fails the forbidden shortcuts."
+  * `harness.md`'s sentence on decisions names 0006 after 0005, because 0006 sets how a sensor's exceptions work, as 0005 sets how strictly a sensor reads a rule.
+* `dsp/src/lib.rs`: lines 6 to 9 (the comment and the allow) become:
+
+  ```rust
+  // Clippy suggests shortcuts that a beginner does not know yet.
+  // Each lint below fires on a form that DSP-1 keeps on purpose.
+  // All other lints keep their workspace level.  If a lint below
+  // stops firing, clippy warns, and `-D warnings` (as in CI) fails.
+  // Then remove that lint from the list.
+  #![expect(
+      clippy::assign_op_pattern,
+      reason = "DSP-1: `x = x + 1` and `x = x - 1` show the sum in full"
+  )]
+  #![expect(
+      clippy::len_zero,
+      reason = "DSP-1: `len() > 0` needs only `len`, not `is_empty`"
+  )]
+  #![expect(
+      clippy::manual_clamp,
+      reason = "DSP-1: an `if` for each bound shows what a clamp does"
+  )]
+  #![expect(clippy::manual_swap, reason = "DSP-1 forbids `swap`")]
+  ```
+
+  rustfmt sets the line breaks.  The module doc comment (lines 1 to 4) stays.
+* Why crate-level `expect`, not `allow` and not one attribute at each site:
+  * `expect` fails when its lint stops firing, so a stale exception cannot stay (phase plan, "which fails when the exception goes stale").
+  * One list at the crate root keeps 17 attributes, one at each site, out of the code that a beginner reads.  DSP-1 covers the whole crate, so the scope is the same.
+  * Each `expect` must fire in the lib target, not only in tests.  Otherwise `--all-targets` fails the lib build with an unfulfilled expectation.  All four fire in lib code today.
+  * Cargo's `[lints]` cannot hold the list (see the facts above).
+* The rule for a new lint in `dsp`: fix it with DSP-1's constructs if it can be fixed so.  If every fix needs a construct outside DSP-1, add an `expect` with a reason that cites DSP-1.  If DSP-1's text does not name the form, adding it changes the rule.  So write a `proposed` decision record, and ask the maintainer.  A toolchain bump in CI can bring a new lint, because clippy then checks `dsp` like every other crate.  The bump is deliberate, so the PR that bumps it handles the new lint.
+* M6 adds no unit test of its own.  This departs from "Each check has a unit test with a planted breach" in "What every milestone does".  The sensor is clippy, so the planted breaches are manual, and the PR records them.
+* The gap that stays: these settings switch lints off in `dsp` and pass clippy.
+  * `#![allow(clippy::all)]` before the `expect`s, or in their place.
+  * `#![expect(clippy::all, reason = "...")]`, or an `expect` of another group.  A lint attribute with `warnings` passes too, but only for warn-level lints: `eq_op` is deny-level, and still fails.
+  * Any other lint attribute: on an item, at the top of a module file, on a statement, or at crate level inside `cfg_attr`.
+  * A `[lints]` table in `dsp/Cargo.toml` in place of `workspace = true`, for example `[lints.clippy] all = "allow"`.
+  * M7 closes these, and is the next PR.  M7 parses the same files with `syn`, so it would replace a check in M6 for the attributes alone.  Cargo gives no cheap guard (see the facts above).  Until M7 merges, TD-3 names the gap.
+  * M7 does not close one more: `-A clippy::all` in `RUSTFLAGS` or in a `.cargo/config.toml`.  It switches clippy off for every crate, so a reviewer sees it in the diff.  TD-3 names it.
+* `invariants.md`, DSP-1, under (x):
+  * The sentence "Clippy's style lints are relaxed there on purpose." becomes three sentences.  The first: "Write `x = x + 1`, `x = x - 1`, `len() > 0` and an `if` for each bound of a clamp, not `+=`, `-=`, `is_empty` or `clamp`."  Then: "`dsp/src/lib.rs` expects each clippy lint that these forms, or a swap written out, trigger.  Each has a reason, and every other lint keeps its workspace level."  These name no lint, so `invariants.md` does not repeat the list.
+  * The "Why" becomes: "`dsp/` is a first reading exercise in Rust; it must stay readable without knowing the iterator API, or shortcuts such as `+=`, `is_empty` and `clamp`."
+  * `* Enforced by:` becomes "prose only.  A scan on 2026-10-19 found no iterator, closure or `swap`."  It still starts with "prose only", so the count of "prose only" lines stays 7.  Clippy checks the code's lints, not DSP-1's constructs.
+  * `* Gaps:` becomes `* Gaps: TD-3, TD-<n>.`, where TD-<n> is the dsp types entry below.
+* `tech-debt.md`:
+  * Remove `### TD-2` and its text.  Add under `## Closed`, after TD-1: "* TD-2: closed by four `#![expect]`s in `dsp/src/lib.rs`, one for each lint, with a reason (harness phase 2, M6).  Every other clippy lint keeps its workspace level in `dsp`.  With `-D warnings`, an `expect` whose lint stops firing fails clippy (DSP-1)."  `docs-check` then fails any `TD-2` left outside plans and decisions.
+  * TD-3's text becomes three sentences.  "Nothing fails when `dsp/` gains an iterator, a closure, a dependency, `+=`, `-=`, `is_empty` or `clamp`, or a lint setting that switches clippy off."  "These can pass clippy: a lint attribute that switches a lint off, other than the `expect`s in `dsp/src/lib.rs`, and a `[lints]` table in `dsp/Cargo.toml`."  "A `-A clippy::all` in `RUSTFLAGS`, or in a `config.toml` in `.cargo/`, passes too, for every crate, and M7 does not check it."  `docs-check` reads code spans in `tech-debt.md` as paths, so the text must not hold a path to a `.cargo/` file that does not exist.
+  * TD-3's fix becomes: "a structural test in `xtask/tests/` that parses `dsp/src` and allows only the listed constructs (an allowlist, not a denylist).  It accepts lint attributes only as crate-level `#![expect]`s in `dsp/src/lib.rs`, of the lints on a list in the check, each with a reason.  It asserts that `dsp/Cargo.toml` has no dependencies, and a `[lints]` table with only `workspace = true` (`plans/active/harness-phase-2.md`, M7)."
+  * The dsp types entry: a new entry at the end of `## Known breaches`, with the next free ID.  Today the highest ID is TD-23, so it is the next after TD-23.  Check the file first.  Title: "dsp uses types outside DSP-1's list".  Text: "DSP-1 lists only `&[f32]`, `Vec<f32>` and `usize`.  `biggest` and `median` return `f32`, `peaks` returns `Vec<(f32, f32)>`, `mix` takes `&[&[f32]]`, and `median` has a `bool`."  Fix: "M7 decides each type: widen DSP-1's list, or change the code (`plans/active/harness-phase-2.md`, M7)."
+* `.claude/rules/dsp.md`, two bullets after the swap bullet:
+  * "Write `x = x + 1`, `x = x - 1`, `len() > 0` and an `if` for each bound of a clamp, not `+=`, `-=`, `is_empty` or `clamp`."
+  * "Fix a clippy lint with DSP-1's constructs.  If every fix needs another construct, add the lint to the `#![expect]` list in `dsp/src/lib.rs`.  Give a reason that cites DSP-1.  The lint must fire in lib code, not only in tests; otherwise fix it.  If DSP-1 does not name the form, write a `proposed` decision record, and ask the maintainer."
+  * Its "Use only ..." bullet stays: it states the rule, and the dsp types entry records the breach.
+* `harness.md`, one components row after M5's row: component "the `#![expect]`s in `dsp/src/lib.rs`, one for each lint", kind "sensor, computational", added "phase 2".  Failure cell: "`#![allow(clippy::all)]` in `dsp` switched off every clippy lint, so a correctness lint, or a disallowed method, would have passed there".
+* `harness-engineering.md`, phase 2's clippy bullet: "Narrow `dsp`'s `allow(clippy::all)` (TD-2)." becomes "Narrow `dsp`'s `allow(clippy::all)` (TD-2, M6).", as M4 and M5 tagged their bullets.
+* No change to `CLAUDE.md` (the DSP-1 line stays true), `ARCHITECTURE.md`, the guide (the work of a person does not change), or CI.
+* M7's section already has the bullets "Lint attributes (from M6)", "Lints table (from M6)", "Forbidden shortcuts (from M6)" and "Types (from the M6 survey)", added with this plan.  Step 2 confirms that they still hold.
+
+#### M6 steps
+
+Step 2 is one signed commit, and fmt, clippy (every clippy command in `CLAUDE.md`), `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass before it (GIT-2).  Fixes from the review rounds are later commits.
+
+1. Before the change, record what today's tree lets through.  This step has no commit.
+   * Plant `let n = n;` and `let _same = n == n;` after `let n = samples.len();` in `fade_in`.  `cargo clippy -p dsp --all-targets -- -D warnings` passes.
+   * Remove the two plants.  Then plant the `dsp/clippy.toml` of "M6 state at the start".  Clippy passes again.
+   * Record both results in the PR, and restore the files.
+2. The change and its docs, in one commit, because the change makes DSP-1 and TD-2 wrong (DOC-1):
+   * `dsp/src/lib.rs`, as "M6 design" gives it, for the maintainer's choice.
+   * Decision 0006, and its line in `docs/README.md`.
+   * `invariants.md`, `tech-debt.md`, `.claude/rules/dsp.md`, `harness.md` and `harness-engineering.md`, as "M6 design" gives them.
+   * In this plan, replace "the dsp types entry" with its ID in M7's heading, in M7's "Types" bullet and in "Idempotence and recovery".  `docs-check` fails an ID that no doc defines, so this waits until the entry exists.
+   * Confirm that M7's four bullets from M6 still hold.
+   * Run the planted breaches in "M6 acceptance", and record each result in the PR.
+   * Update this plan's Progress, and its other living sections where they changed (`plans/PLANS.md`).
+
+#### M6 acceptance
+
+* `cargo clippy -p dsp --all-targets -- -D warnings` passes, and so does the workspace clippy command.
+* `RUSTFLAGS="-D warnings" cargo test -p dsp` passes its 30 tests, so `rustc` alone does not fail on the clippy expectations.  `RUSTFLAGS="-D warnings" cargo build -p dsp --target wasm32-unknown-unknown --release` and `RUSTDOCFLAGS="-D warnings" cargo doc -p dsp` pass.
+* Planted breaches, run locally and not kept.  Each fails `cargo clippy -p dsp --all-targets -- -D warnings` as stated.  The first three passed before the change (step 1):
+  * `let n = n;` in `fade_in`: `clippy::redundant_locals`.
+  * `let _same = n == n;` in `fade_in`: `clippy::eq_op`.
+  * The planted `dsp/clippy.toml`: `clippy::disallowed_methods`, 4 errors in the lib and 9 in the lib test.
+  * Each `expect` removed in turn: its lint fails at its sites.  So each of the four is needed.
+  * `median`'s three swap lines replaced by `copy[j] = copy[j + 1];`: "this lint expectation is unfulfilled" at the `manual_swap` line.
+  * `#![allow(clippy::all)]` after the `expect`s: four unfulfilled expectations.
+* The known gap, with `n == n` planted.  Each of these passes, and stays in TD-3 until M7.  Record each in the PR:
+  * `#![allow(clippy::all)]` before the `expect`s;
+  * `#![expect(clippy::all, reason = "x")]` in place of the four;
+  * `#[expect(clippy::eq_op, reason = "x")]` on `fade_in`;
+  * `#[allow(clippy::eq_op)]` on the planted `let`;
+  * `[lints.clippy] all = "allow"` in place of `[lints] workspace = true` in `dsp/Cargo.toml`.
+* `grep -c "Enforced by: prose only" docs/invariants.md` still gives 7.
+* fmt, clippy (every clippy command in `CLAUDE.md`), `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `--doc`, and `docs-check` pass.  `docs-check` finds no `TD-2` outside plans and decisions.
+* CI: the `clippy` job passes with no new step.
+
+### M7: dsp's beginner style is a test (closes TD-3 and TD-24; DSP-1)
+
+* Change: add a check to `xtask/src/rules.rs` that parses each file in `dsp/src/` with `syn` (full syntax, visitor) and allows only the listed constructs.  It is an allowlist: types `f32`, `usize`, `bool`, `&[f32]` and `Vec<f32>`; `fn`, `let`, `for` over a range, `while`, `if`, indexing, arithmetic with binary operators (no compound assignment), comparisons, and calls to `dsp` functions and the methods DSP-1 permits (`len`, `push`, `Vec::new` and `vec![...]`).  `syn` has no types, so the list holds names; write each name, and leave out `clamp` (from M6).  `dsp` calls no `f32` method today.  `#[cfg(test)]` modules are checked too.  The check also compares the whole of `dsp/Cargo.toml` with its expected text (from M6).  So any dependency table, of any kind or target, fails it, and so does a `[lints]` table other than `workspace = true`.
 * Acceptance: `dsp_is_beginner_style` passes on the real tree.  Unit tests plant `.iter()`, a closure, `swap` and a dependency; each fails with DSP-1 and the construct's file and line.
-* Note: use the `syn` major version already in `Cargo.lock` for `xtask`'s dependency tree, so no new crate is downloaded.  Write the exact method list in the PR from a scan of `dsp/src/`.
+* Note: use syn 2, which is already in `Cargo.lock` with its `full` and `visit` features on, so no new crate is downloaded.  `Cargo.lock` also holds syn 3.  Write the exact method list in the PR from a scan of `dsp/src/`.
+* Lint attributes (from M6): the allowlist accepts lint attributes only as crate-level `#![expect]`s in `dsp/src/lib.rs`.  Each names one lint from a list in `rules.rs`, and has a reason.  A change to that list is a reviewed edit.  The check fails every group name (`all`, `correctness`, `suspicious`, `style`, `complexity`, `perf`, `pedantic`, `nursery`, `cargo`, `restriction`) and `warnings`.  It fails every other lint attribute, wherever it is (item, module file, statement, expression, field), also inside `cfg_attr`.  Planted cases:
+  * `#![allow(clippy::all)]` before the `expect`s;
+  * `#![expect(clippy::all, reason = "x")]`;
+  * `#[expect(clippy::eq_op, reason = "x")]` on a function;
+  * `#![allow(clippy::all)]` at the top of `fade_in.rs`;
+  * `#[allow(clippy::eq_op)]` on a `let`;
+  * `#![allow(clippy::eq_op)]` as the first line of a function body;
+  * `#![cfg_attr(clippy, allow(clippy::all))]` in `lib.rs`, before the `expect`s.
+* Macros (from the M6 plan review): `syn`'s visitor does not enter a macro's tokens, so code inside `assert!` would pass unseen.  Parse the tokens of each permitted macro as code, and visit them.  `assert!` and `assert_eq!` take comma-separated expressions; `vec!` takes `expr; expr` or a comma list.  Fail every other macro.  Planted cases: `.iter()` inside `assert!`, and `#[allow(clippy::eq_op)]` on a `let` in a block inside `assert!`.
+* Other attributes (from the M6 plan review): list the attributes that the check permits (`cfg(test)`, `test`, `should_panic`, doc comments).  Fail every other attribute, for example `#[path]`, which can read a file outside `dsp/src`.  The check reads every file under `dsp/src/`, in subfolders too.  It can also require each `expect`'s reason to start with "DSP-1".
+* Lints table (from M6): the whole-file compare of `dsp/Cargo.toml` covers the `[lints]` table.  `xtask` has no TOML parser, and `cargo metadata` gives no lints.  A new `toml` dependency would make this plan's crate list false, and a scan of lines by hand misses `lints = { clippy = { all = "allow" } }`.  Planted cases: `[lints.clippy] all = "allow"` in place of `workspace = true`, and a `[dev-dependencies]` entry.
+* Forbidden shortcuts (from M6, under option (x)): the check fails every compound assignment (`+=`, `-=`, `*=` and the others), `is_empty` and `clamp`, as DSP-1 says after M6's review round 1.  Planted cases: `i += 1`, `!samples.is_empty()` and `total.clamp(-1.0, 1.0)`.
+* Types (from the M6 survey): the code uses more than DSP-1's list (TD-24 in `tech-debt.md`, which M7 closes).  `biggest` and `median` return `f32`, `peaks` returns `Vec<(f32, f32)>`, `mix` takes `&[&[f32]]`, and `median` has a `bool`.  The functions use `as f32`, `assert!` with format arguments, tuple expressions, `&&`, `%`, unary `-`, `&` borrows and `vec![0.0; length]`.  The tests use `assert_eq!` and call `capacity()`.  The files use `mod`, `pub use` and `use super::*`.  No function uses `for`.  Decide each before writing the allowlist, and change DSP-1's text or the code to match (DOC-1).
 
 ### M8: Python and assets are tests over the tracked files (closes TD-5, TD-6; BUILD-1, ASSET-1)
 
@@ -957,6 +1134,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * To undo M4, revert its commits.  That reverts the code, the manifests, the CI steps and the command lists in every case.  The revert also puts back the `hound` row, TD-4's text and LAYER-1's text.  If a later check shares a Cargo runner with `web_app_tree`, keep that runner.  Then put back decision 0004 with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.
 * If M5 is in the tree when M4 is undone, TD-4 is closed, and `docs-check` fails a closed ID outside plans and decisions.  So keep TD-4 closed, and do not put back its text.  The sentence that comes back under the layers table in `ARCHITECTURE.md` must not name TD-4.  Keep `rules::WEB_APP`, because M5's shell check uses it.  M5 rewrites LAYER-1 and edits the same lines in `harness-engineering.md` and `harness.md`, so a plain revert of M4 conflicts there.  Resolve the conflicts by hand.  In LAYER-1, remove only M4's last sentence of the text, M4's sentence in "Why" and M4's test name, and fix the list's "and".  Keep M5's text.
 * To undo M5, revert its commits.  That puts back the old table, TD-4 and LAYER-1's lines, and removes TD-4's bullet under `## Closed` and the new crates entry.  Keep the new crates entry's ID, so it is never reused and the plan still names a defined ID: add `* TD-<n>: withdrawn by the revert of M5; TD-4 covers the crate edges again.` under `## Closed`.  Do the same for option (c)'s entry, if it exists.  Put decision 0005 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.  Point TD-4's fix line at the plan's current folder, `active/` or `completed/`.  If a later milestone added an edge, such as `xtask -> stem-protocol` in M10, add it to the old table too (DOC-1).
+* To undo M6, revert its commits.  That puts back the allow, TD-2, TD-3's text and DSP-1's text.  It removes TD-2's bullet under `## Closed`, decision 0006 and TD-24.  The breach stays, so restore TD-24 by hand, and keep its ID in DSP-1's `* Gaps:` line.  Keep the narrowed `* Enforced by:` text, because "found no breach" is false while the breach stays.  Keep this plan's living sections.  Put decision 0006 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  If M7 is in the tree, its allowlist fails the blanket allow, so revert M7 first, or keep M6.
 * Checks read the tree and write nothing, so they can run any number of times.  `xtask test-list` writes only to stdout.
 * M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -1042,9 +1220,25 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M5, three code review rounds done and their findings fixed.
 * [x] 2026-10-20: M5: PR #18 opened.  CI (run 39360333192): every job passes.  The `test` job lists both new tests as `ok`, and the `rules` binary took 2.17 s.  rust-cache found no cache, because its environment hash changed on `main` before this PR (`296abb86` to `30197891`), so `test` took 10m1s and `clippy` 7m12s.  `cargo metadata` passed on that cold cache.
 * [x] 2026-10-20: M5, decision 0005 accepted by the maintainer, with the choice of (a) and (x).
-* [ ] M5: PR merged by the maintainer.
-* [ ] M5: layering test.
-* [ ] M6: dsp's clippy allow narrowed.
+* [x] 2026-10-20: M5, PR #18 merged by the maintainer (`df8a954`).
+* [x] 2026-10-20: M6 implementation plan written (the M6 sections under "Plan of work").  A prototype in a scratch worktree ran clippy on `dsp` without the allow, with the four `expect`s, and with each planted breach.
+* [x] 2026-10-20: M6 plan review round 1, by two new reviewers (code, and docs and process).  No blockers; 10 should-fix findings and 9 nits, all checked and real, all fixed in the plan.  The main fixes: `#![expect(clippy::all)]` and an `expect` on one function also pass clippy, so M7's rule now names each lint and fails groups.  DSP-1 now names the beginner forms, so each reason cites its text.  The types outside DSP-1's list get a breach entry.  M12's and M13's lists never reach `dsp`; the gain no longer claims it.
+* [x] 2026-10-20: M6 plan review round 2, by two new reviewers.  No blockers; 9 should-fix findings and 12 nits, all checked and real, all fixed in the plan.  The main fixes: a `[lints]` table in `dsp/Cargo.toml`, a lint attribute on a statement or at the top of a module file, and `cfg_attr` at crate level also switch lints off, so M7 checks them too.  Under (x), DSP-1 gains a ban, so decision 0006 records the choice.  The types breach now names `f32`, and the undo text keeps it.
+* [x] 2026-10-20: M6 plan review round 3, by two new reviewers.  No blockers in M6.  1 should-fix in M6: TD-3's new text named `.cargo/config.toml`, which `docs-check` fails as a missing path.  2 should-fix items in M7's bullets: `syn` does not enter macros, and nothing planted `is_empty` or `clamp`.  11 nits.  All checked and real, all fixed in the plan.  The docs reviewer applied every M6 doc edit to a scratch copy, and `docs-check` then passed.
+* [x] 2026-10-20: M6 plan review round 4, by two new reviewers.  No blockers; 3 should-fix findings and 11 nits, all small fixes to the text, all checked and real, all fixed in the plan.  (y) now changes DSP-1's `* Enforced by:` and `* Gaps:` lines too.  A form added to DSP-1 needs a `proposed` record.  M7 compares the whole `dsp/Cargo.toml`, so no `toml` crate is needed.  The docs reviewer applied every doc edit for (x) to a scratch tree, and `docs-check` passed.
+* [x] 2026-10-20: plan review stopped after round 4, by the maintainer's rule: no blockers, and no should-fix item beyond small local fixes.  Not yet implemented.
+* [x] 2026-10-20: M6 decision point: the maintainer chose (x), all four lints kept as `expect`s.  The agent had offered (z), which fixed only `assign_op_pattern`, because the Rust Book teaches `+=`.  The maintainer kept (x).  Decision 0006 records it as accepted when step 2 writes it.
+* [x] 2026-10-20: M6 step 1: on today's tree, `let n = n;` and `n == n` planted in `fade_in` pass clippy, and so does the planted `dsp/clippy.toml`.
+* [x] 2026-10-20: M6 step 2: the four `#![expect]`s, decision 0006 and the docs.  The breach entry is TD-24.  clippy, `RUSTFLAGS="-D warnings" cargo test -p dsp` (30 tests), the wasm release build and `cargo doc` pass.  "Prose only" lines: 7.
+  * Planted breaches, each run and restored.  `let n = n;` fails with `redundant_locals`, and `n == n` with `eq_op`.  The `dsp/clippy.toml` gives 4 errors in the lib and 9 in the lib test.  Each `expect` removed fails its lint: 25, 4, 2 and 2 errors.  The one-line swap gives one unfulfilled expectation, and `allow(clippy::all)` after the `expect`s gives four.
+  * The known gap, each with `n == n` planted, passes as the plan says: `allow(clippy::all)` before the `expect`s, `expect(clippy::all)`, `expect(eq_op)` on `fade_in`, `allow(eq_op)` on the `let`, and `[lints.clippy] all = "allow"`.  TD-3 names it until M7.
+* [x] 2026-10-20: M6 review round 1: no blockers and no should-fix items; 3 nits, all real and fixed.  (1) The `assign_op_pattern` `expect` also silences `x = x * y`, `/` and `%`; a planted `amount = amount / n as f32;` passed clippy, while DSP-1 named only `+` and `-`.  DSP-1, the rule file, the reason, TD-3 and decision 0006 now cover every compound assignment.  (2) TD-3 says "the four `expect`s".  (3) The `harness.md` cell uses the past tense.
+* [x] 2026-10-20: M6 review round 2: no blockers; 1 should-fix and 6 nits, all checked.  The should-fix was real: round 1 widened decision 0006's ban after the maintainer accepted it, with nothing that marked the change.  0006 now has a dated "Amendment" section, and the PR asks the maintainer to confirm it.  A planted `q = q << 1`, `q = q | 1` and `m = m / 2.0` passed clippy, which confirms the widened ban.  Five nits were fixed: STE lengths in DSP-1 and TD-3, a false past tense in `harness.md`, a note on the quoted texts in "M6 design", and M7's "arithmetic".  One was left: `CLAUDE.md`'s DSP-1 line stays a summary, and stays true.
+* [x] 2026-10-20: M6 review round 3: no blockers; 1 should-fix and 3 nits, all checked and real.  The should-fix: Surprises lacked round 1's finding on `assign_op_pattern`; it now has it.  Nits: the Decision log's plan-review entries say "plan review"; the rule file says what to do with a lint that fires only in a test; the PR description says "keeps its workspace level", not the first commit's "every other clippy lint now runs".
+* [x] 2026-10-20: M6, three review rounds done and their findings fixed.
+* [x] 2026-10-20: M6, the maintainer accepted the amendment to decision 0006: the ban covers every compound assignment.
+* [x] 2026-10-20: M6: PR #19 opened.  CI (run 39373923147): every job passes, with no new step.  `clippy` took 5m56s and `test` 4m12s.
+* [ ] M6: PR merged by the maintainer.
 * [ ] M7: DSP-1 allowlist test.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
 * [ ] M9: pins and `THIRD-PARTY.md` test.
@@ -1079,6 +1273,11 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-19, M4 review: `--workspace` builds merge features across every crate, so they hide a lost dev-dependency.  Without `app`'s dev-dependency on `synth` with `files`, `cargo test --workspace --exclude roformer-gpu --no-run` still builds, and `cargo test -p app` fails with E0425.
 * 2026-10-19, M4 review: `cargo tree` with two `-p` roots merges their features, and prints a shared crate in full only under the first root.
 * 2026-10-19, M1 review: stable rustdoc does not check a `compile_fail` doctest's error code, so MEM-3's doctest passes on any compile error (TD-22).  Evidence: a throwaway crate on rustc 1.99.0.
+* 2026-10-20, M6 survey: two of the four lints that `dsp` relaxes are in clippy's complexity group, not style (`manual_clamp`, `manual_swap`).  DSP-1 and TD-2 said "style".  Also, `let x = x;` fires `redundant_locals`, which is in the suspicious group, not correctness.  Evidence: clippy 1.99.0 with each group allowed in turn.
+* 2026-10-20, M6 survey: an `expect` does not guard against an `allow` before it.  `#![allow(clippy::all)]` before the four `expect`s passes clippy, and after them it fails with four unfulfilled expectations.
+* 2026-10-20, M6 survey: `dsp` uses types outside DSP-1's list: `f32` in `biggest` and `median`, `Vec<(f32, f32)>` in `peaks`, `&[&[f32]]` in `mix` and `bool` in `median`.  So DSP-1's "A scan on 2026-10-19 found no breach" was false for the types.  M6 records them as a breach, and M7 decides them.
+* 2026-10-20, M6 review round 1: the `assign_op_pattern` `expect` also silences `x = x * y`, `/`, `%`, `<<`, `|` and `^`, not only `+` and `-`.  Evidence: with the `expect` removed, each fires the lint.
+* 2026-10-20, M6 plan review: an `expect` of a lint group silences the whole group.  `#![expect(clippy::all, reason = "x")]` is fulfilled by a style lint, and `n == n` then passes.  So M7 must name each lint, not only require `expect`.
 
 ## Decision log
 
@@ -1124,6 +1323,14 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M5 review round 4): the check also reads `resolve.nodes`, and fails on a crate outside the workspace crates that takes one.  LAYER-1 states the rule on strays.  The cost: a patched or vendored path crate must become a workspace crate with a row.
 * 2026-10-20, agent (M5 review round 7): `rules::LAYERS` fixes the five layers, and the table's layers must equal it.  Otherwise an agent that follows the rank message can add a layer, and make LAYER-1's list false.  A change of layers changes the table, `LAYERS` and LAYER-1 in one commit.
 * 2026-10-20, agent (M5 review round 6): a package outside the members with a member's name fails, even when it is an unrelated crate.  crates.io has crates named `app`, `dsp`, `engine`, `synth` and `xtask`, with almost no reverse dependencies.  If one is ever pulled in, the check gets an allowlist with a reason.
+* 2026-10-20, agent (M6): the lints that `dsp` relaxes are crate-level `#![expect]` attributes in `dsp/src/lib.rs`, one for each lint, each with a reason.  `expect` fails a stale exception.  Cargo's `[lints]` cannot hold them: it rejects overrides beside `workspace = true`, and has no `expect` level.
+* 2026-10-20, agent (M6): the plan recommends keeping all four lints, option (x), so no function body changes.  The maintainer decides (decision point in M6's design).
+* 2026-10-20, agent (M6): M6 adds no check of the lint attributes.  M7 parses the same files with `syn` and closes the gap; TD-3 names it until then.
+* 2026-10-20, agent (M6 plan review round 1): under (x), DSP-1 names the beginner forms, so each `expect`'s reason cites DSP-1's text.  Without it, DSP-1 forced only `manual_swap`, and M6's own rule for a new lint failed the other three.
+* 2026-10-20, agent (M6 plan review round 1): the types outside DSP-1's list are a breach, with their own entry under `## Known breaches`, not a sentence in TD-3.  TD-3 is a gap in enforcement; M7 closes both.
+* 2026-10-20, agent (M6 plan review round 2): decision 0006 records the choice at M6's decision point.  Under (x), DSP-1 gains a ban on `+=`, `-=`, `is_empty` and `clamp`, which is a rule change.
+* 2026-10-20, maintainer (M6): option (x).  `dsp` keeps `x = x + 1`, `len() > 0`, the two `if`s of the clamp and the swap through `temp`, each lint as an `expect` with a reason.  DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp`.
+* 2026-10-20, agent (M6 review round 1): DSP-1's ban covers every compound assignment, not only `+=` and `-=`.  The `assign_op_pattern` `expect` silences all of them, so a ban on two left the others allowed and unchecked.  This keeps (x)'s intent, so decision 0006 is amended, not replaced.
 
 ## Outcomes and retrospective
 

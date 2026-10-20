@@ -6,17 +6,11 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ## Enforcement gaps
 
-### TD-2: dsp switches off every clippy lint
-
-`dsp/src/lib.rs` has `#![allow(clippy::all)]`, which turns off the correctness and performance groups as well as style, and silences `disallowed_methods` (DSP-1).
-
-* Fix: allow only the style lints DSP-1 relaxes, by name.
-
 ### TD-3: DSP-1 is not checked
 
-Nothing fails when `dsp/` gains an iterator, a closure or a dependency.
+Nothing fails when `dsp/` gains an iterator, a closure or a dependency.  Nothing fails on a compound assignment, `is_empty`, `clamp`, or a lint setting that switches clippy off.  These can pass clippy: a lint attribute that switches a lint off, other than the four `expect`s in `dsp/src/lib.rs`, and a `[lints]` table in `dsp/Cargo.toml`.  A `-A clippy::all` in `RUSTFLAGS`, or in a `config.toml` in `.cargo/`, passes too, for every crate, and M7 does not check it.
 
-* Fix: a structural test in `xtask/tests/` that parses `dsp/src` and allows only the listed constructs (an allowlist, not a denylist), and asserts `dsp/Cargo.toml` has no dependencies.
+* Fix: a structural test in `xtask/tests/` that parses `dsp/src` and allows only the listed constructs (an allowlist, not a denylist).  It accepts lint attributes only as crate-level `#![expect]`s in `dsp/src/lib.rs`, of the lints on a list in the check, each with a reason.  It asserts that `dsp/Cargo.toml` has no dependencies, and a `[lints]` table with only `workspace = true` (`plans/active/harness-phase-2.md`, M7).
 
 ### TD-5: BUILD-1 is not checked
 
@@ -129,6 +123,12 @@ MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does
 
 * Fix: a wasm-bindgen test that writes a `subarray` through it and reads back the exact bytes, or copy views as the worker's `whole()` does.
 
+### TD-24: dsp uses types outside DSP-1's list
+
+DSP-1 lists only `&[f32]`, `Vec<f32>` and `usize`.  `biggest` and `median` return `f32`, `peaks` returns `Vec<(f32, f32)>`, `mix` takes `&[&[f32]]`, and `median` has a `bool`.
+
+* Fix: M7 decides each type: widen DSP-1's list, or change the code (`plans/active/harness-phase-2.md`, M7).
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
@@ -156,4 +156,5 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 ## Closed
 
 * TD-1: closed by `every_kernel_fits_the_default_limits` (harness phase 2, M2).  It checks every shader against the default limits with naga (GPU-1).
+* TD-2: closed by four `#![expect]`s in `dsp/src/lib.rs`, one for each lint, with a reason (harness phase 2, M6).  Every other clippy lint keeps its workspace level in `dsp`.  With `-D warnings`, an `expect` whose lint stops firing fails clippy (DSP-1).
 * TD-4: closed by `crates_depend_only_downwards` (harness phase 2, M5).  It compares the dependencies between crates in `cargo metadata` with the layers table in `ARCHITECTURE.md` (LAYER-1).

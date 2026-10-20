@@ -40,11 +40,11 @@ Each workspace crate depends only on the workspace crates that its row in the la
 
 ### DSP-1: dsp is beginner style
 
-`dsp/` has zero dependencies and uses only `&[f32]`, `Vec<f32>`, `usize`, `for`, `while`, `if` and indexing: no iterators, closures or `swap`.  Clippy's style lints are relaxed there on purpose.
+`dsp/` has zero dependencies and uses only `&[f32]`, `Vec<f32>`, `usize`, `for`, `while`, `if` and indexing: no iterators, closures or `swap`.  Write `x = x + y`, `len() > 0` and an `if` for each bound of a clamp.  Do not write a compound assignment (`x += y` and the others), `is_empty` or `clamp`.  `dsp/src/lib.rs` expects each clippy lint that these forms, or a swap written out, trigger.  Each has a reason, and every other lint keeps its workspace level.
 
-* Why: `dsp/` is a first reading exercise in Rust; it must stay readable without knowing the iterator API.
-* Enforced by: prose only.  A scan on 2026-10-19 found no breach.
-* Gaps: TD-2, TD-3.
+* Why: `dsp/` is a first reading exercise in Rust; it must stay readable without knowing the iterator API, or shortcuts such as `+=`, `is_empty` and `clamp`.
+* Enforced by: prose only.  A scan on 2026-10-19 found no iterator, closure or `swap`.
+* Gaps: TD-3, TD-24.
 
 ## Memory
 
