@@ -19,7 +19,7 @@ The maintainer also weighed (z): fix only `assign_op_pattern`, because the Rust 
 
 ## Consequences
 
-* DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp` in `dsp`.
+* DSP-1 forbids compound assignment (`+=`, `-=`, `*=` and the others), `is_empty` and `clamp` in `dsp`.  `assign_op_pattern` fires on `x = x * y` as on `x = x + y`, so the ban covers every operator.
 * `dsp/src/lib.rs` expects the four lints; every other lint keeps its workspace level.
 * A new lint in `dsp` is fixed with DSP-1's constructs, or gets an `expect` whose reason cites DSP-1.
 * M7's allowlist fails the forbidden shortcuts.

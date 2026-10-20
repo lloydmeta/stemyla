@@ -10,7 +10,7 @@
 // Then remove that lint from the list.
 #![expect(
     clippy::assign_op_pattern,
-    reason = "DSP-1: `x = x + 1` and `x = x - 1` show the sum in full"
+    reason = "DSP-1: `x = x + y` shows the operation in full"
 )]
 #![expect(
     clippy::len_zero,

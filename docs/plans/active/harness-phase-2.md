@@ -1022,7 +1022,7 @@ Step 2 is one signed commit, and fmt, clippy (every clippy command in `CLAUDE.md
 * Macros (from the M6 plan review): `syn`'s visitor does not enter a macro's tokens, so code inside `assert!` would pass unseen.  Parse the tokens of each permitted macro as code, and visit them.  `assert!` and `assert_eq!` take comma-separated expressions; `vec!` takes `expr; expr` or a comma list.  Fail every other macro.  Planted cases: `.iter()` inside `assert!`, and `#[allow(clippy::eq_op)]` on a `let` in a block inside `assert!`.
 * Other attributes (from the M6 plan review): list the attributes that the check permits (`cfg(test)`, `test`, `should_panic`, doc comments).  Fail every other attribute, for example `#[path]`, which can read a file outside `dsp/src`.  The check reads every file under `dsp/src/`, in subfolders too.  It can also require each `expect`'s reason to start with "DSP-1".
 * Lints table (from M6): the whole-file compare of `dsp/Cargo.toml` covers the `[lints]` table.  `xtask` has no TOML parser, and `cargo metadata` gives no lints.  A new `toml` dependency would make this plan's crate list false, and a scan of lines by hand misses `lints = { clippy = { all = "allow" } }`.  Planted cases: `[lints.clippy] all = "allow"` in place of `workspace = true`, and a `[dev-dependencies]` entry.
-* Forbidden shortcuts (from M6, under option (x)): the check fails `+=`, `-=`, `is_empty` and `clamp`.  DSP-1 names only `+=` and `-=`; M7 decides the other compound assignments, which no code uses.  Planted cases: `i += 1`, `!samples.is_empty()` and `total.clamp(-1.0, 1.0)`.
+* Forbidden shortcuts (from M6, under option (x)): the check fails every compound assignment (`+=`, `-=`, `*=` and the others), `is_empty` and `clamp`, as DSP-1 says after M6's review round 1.  Planted cases: `i += 1`, `!samples.is_empty()` and `total.clamp(-1.0, 1.0)`.
 * Types (from the M6 survey): the code uses more than DSP-1's list (TD-24 in `tech-debt.md`, which M7 closes).  `biggest` and `median` return `f32`, `peaks` returns `Vec<(f32, f32)>`, `mix` takes `&[&[f32]]`, and `median` has a `bool`.  The functions use `as f32`, `assert!` with format arguments, tuple expressions, `&&`, `%`, unary `-`, `&` borrows and `vec![0.0; length]`.  The tests use `assert_eq!` and call `capacity()`.  The files use `mod`, `pub use` and `use super::*`.  No function uses `for`.  Decide each before writing the allowlist, and change DSP-1's text or the code to match (DOC-1).
 
 ### M8: Python and assets are tests over the tracked files (closes TD-5, TD-6; BUILD-1, ASSET-1)
@@ -1231,7 +1231,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M6 step 2: the four `#![expect]`s, decision 0006 and the docs.  The breach entry is TD-24.  clippy, `RUSTFLAGS="-D warnings" cargo test -p dsp` (30 tests), the wasm release build and `cargo doc` pass.  "Prose only" lines: 7.
   * Planted breaches, each run and restored.  `let n = n;` fails with `redundant_locals`, and `n == n` with `eq_op`.  The `dsp/clippy.toml` gives 4 errors in the lib and 9 in the lib test.  Each `expect` removed fails its lint: 25, 4, 2 and 2 errors.  The one-line swap gives one unfulfilled expectation, and `allow(clippy::all)` after the `expect`s gives four.
   * The known gap, each with `n == n` planted, passes as the plan says: `allow(clippy::all)` before the `expect`s, `expect(clippy::all)`, `expect(eq_op)` on `fade_in`, `allow(eq_op)` on the `let`, and `[lints.clippy] all = "allow"`.  TD-3 names it until M7.
-* [ ] M6: three review rounds.
+* [x] 2026-10-20: M6 review round 1: no blockers and no should-fix items; 3 nits, all real and fixed.  (1) The `assign_op_pattern` `expect` also silences `x = x * y`, `/` and `%`; a planted `amount = amount / n as f32;` passed clippy, while DSP-1 named only `+` and `-`.  DSP-1, the rule file, the reason, TD-3 and decision 0006 now cover every compound assignment.  (2) TD-3 says "the four `expect`s".  (3) The `harness.md` cell uses the past tense.
+* [ ] M6: review rounds 2 and 3.
 * [ ] M6: PR merged by the maintainer.
 * [ ] M7: DSP-1 allowlist test.
 * [ ] M8: BUILD-1 and ASSET-1 tests.
@@ -1323,6 +1324,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M6 review round 1): the types outside DSP-1's list are a breach, with their own entry under `## Known breaches`, not a sentence in TD-3.  TD-3 is a gap in enforcement; M7 closes both.
 * 2026-10-20, agent (M6 review round 2): decision 0006 records the choice at M6's decision point.  Under (x), DSP-1 gains a ban on `+=`, `-=`, `is_empty` and `clamp`, which is a rule change.
 * 2026-10-20, maintainer (M6): option (x).  `dsp` keeps `x = x + 1`, `len() > 0`, the two `if`s of the clamp and the swap through `temp`, each lint as an `expect` with a reason.  DSP-1 forbids `+=`, `-=`, `is_empty` and `clamp`.
+* 2026-10-20, agent (M6 review round 1): DSP-1's ban covers every compound assignment, not only `+=` and `-=`.  The `assign_op_pattern` `expect` silences all of them, so a ban on two left the others allowed and unchecked.  This keeps (x)'s intent, so decision 0006 is amended, not replaced.
 
 ## Outcomes and retrospective
 
