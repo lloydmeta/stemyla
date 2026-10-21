@@ -103,6 +103,7 @@ The rules match the command text, so they are not a security boundary (TD-28).  
 * The PR says what was verified, how, and what was not verified.
 * A new rule, decision or gap is recorded, and the plan's progress is current.
 * A change to the layers table in `docs/ARCHITECTURE.md` changes what LAYER-1 allows.  Review it as a design change.
+* A changed snapshot PNG in `app/tests/snapshots/` is a change to the UI.  Look at it before you merge.
 
 ## Tools
 
@@ -138,3 +139,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  Decide if you want each one; merge to `main` through a PR.  `claude_settings_hold_the_deny_rules` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.
 * 2026-10-21, phase 2 (M14): on GitHub, `main` refuses a direct push, also from an admin; merge through a PR.  `gh-pages` refuses a force push and deletion from everyone (GIT-3).
 * 2026-10-21, phase 2 (M15): a hook runs rustfmt on each `.rs` file in the repo that the agent edits.  An edit of a crate root formats its module tree too.  The agent may see a note that the file changed, and read it again before its next edit.  `the_rustfmt_hook_formats_rust_files` fails if the hook goes or stops formatting.
+* 2026-10-22, phase 2 (M17): CI compares the UI snapshots.  When you change the UI on purpose, run `UPDATE_SNAPSHOTS=1 cargo test -p app --test ui`.  Then commit the PNGs.  On a CI failure, the `ui-snapshots` artifact holds the diff images.

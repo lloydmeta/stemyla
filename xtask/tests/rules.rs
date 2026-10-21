@@ -195,6 +195,26 @@ fn no_python_in_the_build() {
 }
 
 #[test]
+fn no_build_file_updates_snapshots() {
+    let texts = xtask::rules::tracked_texts(&xtask::workspace_root(), tracked_files())
+        .expect("the tracked files can be read");
+    assert!(
+        texts
+            .iter()
+            .any(|(file, _)| file == ".github/workflows/ci.yml"),
+        "the texts do not hold .github/workflows/ci.yml"
+    );
+    let problems = xtask::rules::snapshot_updates(&texts);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} VERIFY-1 problem(s):\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}
+
+#[test]
 fn no_audio_or_weights_are_tracked() {
     let problems = xtask::rules::assets_in_the_index(tracked_files());
     let report: Vec<String> = problems.iter().map(ToString::to_string).collect();

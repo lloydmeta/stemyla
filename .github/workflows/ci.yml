@@ -81,14 +81,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # egui_kittest renders through wgpu; on a headless runner the only
-      # adapter is Mesa's software Vulkan (lavapipe).
+      # adapter is Mesa's software Vulkan (lavapipe).  The snapshot PNGs
+      # match lavapipe at egui_kittest's default threshold (harness phase 2,
+      # M17).
       WGPU_BACKEND: vulkan
-      # The snapshot PNGs are generated on macOS/Metal and will not match a
-      # Linux software renderer.  UPDATE_SNAPSHOTS makes egui_kittest write
-      # instead of pixel-compare (and pass), so every interaction and logic
-      # test still runs while the platform-sensitive image diff is skipped.
-      # The written PNGs are discarded with the runner.
-      UPDATE_SNAPSHOTS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -116,6 +112,15 @@ jobs:
       # doctests).  mem3_lint_is_on runs here, but the clippy job proves it.
       - run: cargo test --locked -p roformer-gpu --lib
       - run: cargo test --locked -p roformer-gpu --doc
+      # The images of a snapshot that did not match, to see what changed.
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-snapshots
+          path: |
+            app/tests/snapshots/*.diff.png
+            app/tests/snapshots/*.new.png
+          if-no-files-found: ignore
 
   wasm-build:
     name: wasm build (trunk)

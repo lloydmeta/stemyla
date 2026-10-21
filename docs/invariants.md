@@ -145,8 +145,8 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 Every behaviour is verified by an automated check; "it compiles" is not acceptance.  A test that skips (no GPU, no fixture) says so, and a skip is not evidence that the behaviour works.  A test that skips calls `test_support::skip`.  The one exception is `app/tests/web_output.rs`, allowlisted in `xtask/src/rules.rs`, because a wasm test cannot read the variable.  Where evidence is claimed, `STEMYLA_REQUIRE` (for example `gpu`, `timestamps`, `fixtures`) turns the skip into a failure.
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
-* Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.
-* Gaps: TD-8, TD-9, TD-19.
+* Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
+* Gaps: TD-8, TD-19, TD-29.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 
