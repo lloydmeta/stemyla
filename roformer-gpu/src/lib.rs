@@ -1910,18 +1910,16 @@ mod tests {
                 clippy::disallowed_methods,
                 reason = "MEM-3 canary: clippy fails here if this path is off"
             )]
-            let belt = wgpu::util::StagingBelt::new(device.clone(), 1024);
-            drop(belt);
+            let _belt = wgpu::util::StagingBelt::new(device.clone(), 1024);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "MEM-3 canary: clippy fails here if this path is off"
             )]
-            let belt = wgpu::util::StagingBelt::new_with_buffer_usages(
+            let _belt_with_usages = wgpu::util::StagingBelt::new_with_buffer_usages(
                 device.clone(),
                 1024,
                 wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
             );
-            drop(belt);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "MEM-3 canary: clippy fails here if this path is off"

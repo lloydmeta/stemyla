@@ -103,7 +103,7 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 * an `#[allow]` in place of an `#[expect]`;
 * a path that no longer resolves after a wgpu update, except through the canary, and a new helper that makes buffers in a later wgpu;
 * a second call that makes a buffer in the `let` of a `GpuBuffer` constructor, which its `#[expect]` passes;
-* a new public function or `Deref` on `Gpu` that returns or lends the device, or a clone of it;
+* a new public function or `Deref` on `Gpu` that returns or lends the device, or a clone of it, or a new public constructor that takes a device, since the caller can keep a clone;
 * other ways in wgpu to make a buffer that do not run on the web today: `create_buffer_from_hal`, `create_blas` and `create_tlas`;
 * a `GpuBuffer` that is kept and never dropped; the tests in `roformer-gpu/tests/memory.rs` measure that on a real GPU only.
 
