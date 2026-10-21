@@ -1681,7 +1681,8 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
 
 /// VERIFY-1: no build file sets `UPDATE_SNAPSHOTS`, which makes
 /// egui_kittest rewrite a snapshot that does not match and pass.  It skips
-/// comment lines, which start with `#` or `//`.
+/// comment lines, which start with `#` or `//`.  A line that names the
+/// variable only in a trailing comment, or sets it to `0`, still counts.
 pub fn snapshot_updates(texts: &[(String, String)]) -> Vec<Problem> {
     texts
         .iter()
@@ -5098,6 +5099,12 @@ mod tracked_tests {
         .map(|(file, text, line)| (file, snapshot_updates(&texts(&[(file, text)])), Some(line)))
         .collect();
         assert_one_each("VERIFY-1", &cases);
+        let two = snapshot_updates(&texts(&[(
+            ".github/workflows/ci.yml",
+            "env:\n  UPDATE_SNAPSHOTS: \"1\"\nrun: UPDATE_SNAPSHOTS=1 cargo test\n",
+        )]));
+        let lines: Vec<Option<usize>> = two.iter().map(|problem| problem.line).collect();
+        assert_eq!(lines, [Some(2), Some(3)], "{two:#?}");
         assert_eq!(
             snapshot_updates(&texts(&[
                 (

@@ -118,8 +118,8 @@ jobs:
         with:
           name: ui-snapshots
           path: |
-            app/tests/snapshots/*.diff.png
-            app/tests/snapshots/*.new.png
+            app/tests/snapshots/**/*.diff.png
+            app/tests/snapshots/**/*.new.png
           if-no-files-found: ignore
 
   wasm-build:
