@@ -19,7 +19,7 @@ impl WsolaStretcher {
         let stereo = NonZeroU16::new(2).expect("two is not zero");
         Self {
             ts: wsola::TimeStretch::with_config(rate, stereo, cfg).expect("valid config"),
-            interleaved: Vec::with_capacity(8192),
+            interleaved: Vec::with_capacity(2 * MAX_PUSH_FRAMES),
             out_l: VecDeque::with_capacity(16384),
             out_r: VecDeque::with_capacity(16384),
             tempo: 1.0,
@@ -80,12 +80,12 @@ impl Stretcher for WsolaStretcher {
     /// `65,536 + 4 * search + frame + 2 * tempo * hop + push` frames, where
     /// a step can pass 65,536 by its advance and the search's jitter, and
     /// `push` is at most `MAX_PUSH_FRAMES`: about 75,000 at 44.1 kHz and
-    /// tempo 1.5.
-    /// `4 * search + frame + 2 * tempo * hop` is below `sample_rate / 4` at
-    /// any tempo that wsola accepts (up to 4).  So one push of
-    /// `65,536 + sample_rate / 4 + MAX_PUSH_FRAMES` frames of silence gives the buffer
-    /// its largest size, whatever `max_tempo` is.  The push goes straight
-    /// to wsola, so `interleaved` keeps its size (MEM-4).  A pull of
+    /// tempo 1.5.  `4 * search + frame + 2 * tempo * hop` is below
+    /// `sample_rate / 4` at any tempo that wsola accepts (up to 4).  So
+    /// one push of `65,536 + sample_rate / 4 + MAX_PUSH_FRAMES` frames of
+    /// silence gives the buffer its largest size, whatever `max_tempo` is.
+    /// The push goes straight to wsola, so `interleaved` keeps the size
+    /// that `new` gives it, one push of `MAX_PUSH_FRAMES` (MEM-4).  A pull of
     /// `max_frames` plus 20 ms, more than one 15 ms wsola hop, does the
     /// same for wsola's output buffer.  `reset` keeps both capacities.
     fn warm_up(&mut self, max_tempo: f64, max_frames: usize) {

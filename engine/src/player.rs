@@ -543,16 +543,25 @@ mod tests {
         assert!(l.iter().all(|v| (0.0..0.15 + 1e-3).contains(v)));
     }
 
-    #[test]
-    #[should_panic(expected = "RT-1: a hop of 8192 frames")]
-    fn a_hop_the_warm_up_does_not_cover_is_refused() {
+    fn with_hop(hop: usize) -> Player {
         let s = song(vec![("a", vec![0.0; 1_000])]);
         let params = Arc::new(SharedParams::new(1));
         let cfg = PlayerConfig {
-            hop: 8_192,
+            hop,
             ..Default::default()
         };
-        Player::with_config(s, params, Box::new(Varispeed::new()), cfg);
+        Player::with_config(s, params, Box::new(Varispeed::new()), cfg)
+    }
+
+    #[test]
+    fn the_largest_hop_the_warm_up_covers_is_accepted() {
+        assert_eq!(with_hop(MAX_PUSH_FRAMES).cfg.hop, MAX_PUSH_FRAMES);
+    }
+
+    #[test]
+    #[should_panic(expected = "RT-1: a hop of")]
+    fn a_hop_the_warm_up_does_not_cover_is_refused() {
+        with_hop(MAX_PUSH_FRAMES + 1);
     }
 
     #[test]

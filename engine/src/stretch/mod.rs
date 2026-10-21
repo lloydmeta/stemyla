@@ -38,8 +38,8 @@ pub trait Stretcher: Send {
     /// size, on the thread that makes the player.  After it, `push` of at
     /// most [`MAX_PUSH_FRAMES`] and `pull` of at most `max_frames`, at a
     /// tempo of at most `max_tempo`, do not allocate (RT-1).  It panics
-    /// when it cannot keep that promise.  It leaves the
-    /// stretcher as [`Self::reset`] does, with the tempo it had.
+    /// when it cannot keep that promise.  It leaves the stretcher as
+    /// [`Self::reset`] does, with the tempo it had.
     fn warm_up(&mut self, max_tempo: f64, max_frames: usize);
 }
 
@@ -255,6 +255,13 @@ mod tests {
     #[should_panic(expected = "RT-1: varispeed's queues hold")]
     fn varispeed_refuses_a_block_its_queues_cannot_hold() {
         Varispeed::new().warm_up(1.5, 20_000);
+    }
+
+    #[test]
+    fn varispeed_takes_the_largest_block_its_queues_hold() {
+        // `new` gives 32,768 frames: 19,113 frames at 1.5 round up to
+        // 28,670, plus a push of 4,096 and 2 frames, is 32,768.
+        Varispeed::new().warm_up(1.5, 19_113);
     }
 
     #[test]

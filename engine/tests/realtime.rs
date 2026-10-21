@@ -7,7 +7,7 @@
 //! proof (`std::alloc::GlobalAlloc`).
 
 use engine::slot::Scratch;
-use engine::stretch::StretcherKind;
+use engine::stretch::{MAX_PUSH_FRAMES, StretcherKind};
 use engine::{Player, PlayerSlot, SharedParams, Song, Stem};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -359,20 +359,30 @@ fn the_callback_does_not_allocate_after_warm_up() {
 /// at low rates, where wsola's buffers are smallest, and at high ones.
 #[test]
 fn a_stretcher_keeps_its_warm_up_promise() {
-    const PUSH: usize = 4_096;
-    const PULL: usize = 512;
+    const PUSH: usize = MAX_PUSH_FRAMES;
     let mut runs = Vec::new();
     for kind in SHIPPED {
-        for rate in [8_000, 16_000, 44_100, 48_000, 96_000, 192_000] {
+        for (rate, pull) in [
+            (8_000, 512),
+            (16_000, 512),
+            (44_100, 512),
+            (44_100, 4_096),
+            (48_000, 512),
+            (96_000, 512),
+            (192_000, 512),
+        ] {
             runs.push(std::thread::spawn(move || {
                 let input = noise(PUSH, rate);
-                let (mut left, mut right) = (vec![0.0; PULL], vec![0.0; PULL]);
+                let (mut left, mut right) = (vec![0.0; pull], vec![0.0; pull]);
                 let mut stretcher = kind.build(rate);
                 stretcher.set_tempo(1.5);
-                stretcher.warm_up(1.5, PULL);
+                stretcher.warm_up(1.5, pull);
+                // About 190,000 input frames: wsola drops old input about
+                // every 70,000.
+                let pulls = 250 * 512 / pull;
                 let ((), counts) = counted(|| {
-                    for _ in 0..250 {
-                        while !stretcher.can_pull(PULL) {
+                    for _ in 0..pulls {
+                        while !stretcher.can_pull(pull) {
                             stretcher.push(&input, &input);
                         }
                         stretcher.pull(&mut left, &mut right);
@@ -380,7 +390,7 @@ fn a_stretcher_keeps_its_warm_up_promise() {
                 });
                 (counts != Counts::default()).then(|| {
                     format!(
-                        "RT-1: {} at {rate} Hz allocated after `warm_up`, with pushes of {PUSH} frames and pulls of {PULL} at tempo 1.5: {} allocations, {} frees.  Fix: make `warm_up` size the buffer, or narrow its promise.",
+                        "RT-1: {} at {rate} Hz allocated after `warm_up`, with pushes of {PUSH} frames and pulls of {pull} at tempo 1.5: {} allocations, {} frees.  Fix: make `warm_up` size the buffer, or narrow its promise.",
                         kind.label(),
                         counts.allocations,
                         counts.frees
