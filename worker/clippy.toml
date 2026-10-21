@@ -1,0 +1,7 @@
+# MEM-1 (docs/invariants.md).  Clippy reads only this file for this crate.
+# Each path has a canary: `mem1_lint_is_on_for_js_arrays` in `worker/src/web/tests.rs`.
+disallowed-methods = [
+  { path = "slice::to_vec", reason = 'MEM-1: a copy of a song- or model-sized buffer stays in wasm memory for good.  Fix: borrow the slice or share an `engine::Samples`.  For a needed copy, add #[expect(clippy::disallowed_methods, reason = "MEM-1: why")] to its statement, field or match arm.' },
+  { path = "js_sys::Uint8Array::to_vec", reason = 'MEM-1, MEM-2: this copies a JS array into wasm memory.  Fix: keep the JS array, or copy in blocks with `subarray` and `copy_to`.  For the one copy that Rust must read, add #[expect(clippy::disallowed_methods, reason = "MEM-1: why")] to its statement, field or match arm.' },
+  { path = "js_sys::Float32Array::to_vec", reason = 'MEM-1, MEM-2: this copies a JS array into wasm memory.  Fix: keep the JS array, or copy in blocks with `subarray` and `copy_to`.  For the one copy that Rust must read, add #[expect(clippy::disallowed_methods, reason = "MEM-1: why")] to its statement, field or match arm.' },
+]

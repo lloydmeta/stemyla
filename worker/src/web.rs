@@ -681,6 +681,10 @@ impl Source for &ModelFile {
 
     fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String> {
         match self {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: one range of the model file, such as a tensor, copied once into wasm memory to load it"
+            )]
             ModelFile::Bytes(b) => Ok(Cow::Owned(b.subarray(start as u32, end as u32).to_vec())),
             ModelFile::Blob(f) => f.read(start, end).map(Cow::Owned),
         }
@@ -1044,6 +1048,10 @@ async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Resu
     let t0 = now_s();
     // The page transferred these and nothing else holds them: dropped once
     // copied, so the browser can free them while the song is separated.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: the one copy of the transferred mix into wasm memory, for the demixer; the JS arrays drop after"
+    )]
     let mix = mix.map(|c| c.to_vec());
     let mut d = Demixer::new(mix, chunk, overlap, STEMS.len());
     let song_len = d.output_len();
@@ -1175,7 +1183,12 @@ fn tensor_f32(st: &safetensors::SafeTensors, name: &str) -> Result<(Vec<usize>, 
             .collect(),
         d => return Err(format!("{name}: unexpected dtype {d:?}")),
     };
-    Ok((v.shape().to_vec(), data))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: a tensor's shape, a few numbers"
+    )]
+    let shape = v.shape().to_vec();
+    Ok((shape, data))
 }
 
 /// Compares GPU results with the CPU port's reference files
@@ -1203,6 +1216,10 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
             "no reference files at {base} (run xtask roformer-selftest and serve them with --mount /selftest=<dir>)"
         ));
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: selftest only; the reference file is copied once into wasm memory to parse it"
+    )]
     let stages = stages.unchecked_into::<Uint8Array>().to_vec();
     let st = safetensors::SafeTensors::deserialize(&stages).map_err(|e| e.to_string())?;
     let (_, feats) = tensor_f32(&st, "features")?;
@@ -1275,6 +1292,10 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
         if chunk.is_null() {
             log("selftest: no chunk.safetensors; skipping the full chunk");
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: selftest only; the reference file is copied once into wasm memory to parse it"
+            )]
             let bytes = chunk.unchecked_into::<Uint8Array>().to_vec();
             let ct = safetensors::SafeTensors::deserialize(&bytes).map_err(|e| e.to_string())?;
             let (ashape, audio) = tensor_f32(&ct, "audio")?;
@@ -1282,6 +1303,10 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
             let n = ashape[1];
             let t0 = now_s();
             gpu.reset_profile().await?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: selftest only; the two channels of one reference chunk"
+            )]
             let (spec, feats) = analyse(&[audio[..n].to_vec(), audio[n..].to_vec()]);
             let job = Job::new(&gpu, &net, feats.len() / FEATURES);
             let mut pace = Pace::new(s);
@@ -1590,6 +1615,10 @@ async fn mp3(
 ) -> Result<(), String> {
     let name = name.unwrap_or_else(|| "stem.mp3".into());
     let rate = rate.unwrap_or(44_100);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "TD-14: both channels are copied out of JS, and live through the encode"
+    )]
     let (l, r) = (left.to_vec(), right.to_vec());
     let mut pcm = Vec::with_capacity(2 * l.len());
     for (a, b) in l.iter().zip(&r) {
@@ -1639,6 +1668,10 @@ async fn choose_kernels(gpu: &Gpu) {
     let text = if stored.is_null() {
         String::new()
     } else {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the stored kernel choice, a few bytes"
+        )]
         String::from_utf8_lossy(&stored.unchecked_into::<Uint8Array>().to_vec()).to_string()
     };
     for v in text

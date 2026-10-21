@@ -61,7 +61,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 ### Change memory, buffers or audio playback
 
 * The agent loads `.claude/rules/memory.md` when it touches `engine/`, `app/src/` or `worker/`.
-* Check: does the change copy a song- or model-sized buffer (MEM-1)?  If so, the PR must say why, and a test must pin the sharing.
+* Check: does the change copy a song- or model-sized buffer (MEM-1)?  If so, the PR must say why, and a test must pin the sharing.  Read the reason of each new `#[expect(clippy::disallowed_methods)]`.
 
 ### Change a message between the page and the worker
 
@@ -127,3 +127,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-20, phase 2 (M9): `young_crates_are_pinned` fails a crate below 1.0 without an `=` pin; pin it, or list it in `SETTLED_CRATES` with the date of its first version, two years old or more.  `third_party_lists_what_ships` fails when `THIRD-PARTY.md` differs from its commands; run the command and copy the rows.
 * 2026-10-20, phase 2 (M10): `e2e_messages_use_protocol_types` fails a message type in the e2e scripts that `stem_protocol::kind` does not have.  Fix the script, or add a type that only the scripts make to `SCRIPT_ONLY_TYPES` with a reason.
 * 2026-10-21, phase 2 (M11): RT-1 forbids allocation in the audio callback after warm-up.  `the_callback_does_not_allocate_after_warm_up` names the stretcher, the callback size and the phase that allocated.  Size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse one.
+* 2026-10-21, phase 2 (M12): clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three.  CI also runs clippy for `wasm32`.  Borrow the slice or share an `engine::Samples`.  For a needed copy, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]`.  A canary in each crate fails clippy if its path is off.

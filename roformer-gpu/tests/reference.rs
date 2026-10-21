@@ -5,6 +5,11 @@
 //! fails instead under `STEMYLA_REQUIRE=gpu,fixtures`; see `kernels.rs` for
 //! running on SwiftShader.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
+
 use std::path::PathBuf;
 
 use roformer::separate::{analyse, apply_masks};

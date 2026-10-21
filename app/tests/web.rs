@@ -187,3 +187,24 @@ async fn sessions_are_listed_newest_first() {
     assert_eq!(ids, [newer.clone(), older]);
     assert_eq!(store::current().await, Some(newer));
 }
+
+/// MEM-1: proves each path in this crate's `clippy.toml` (see the `#[expect]`s).
+#[wasm_bindgen_test]
+fn mem1_lint_is_on_for_js_arrays() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let slice = [1.0_f32].to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let bytes = js_sys::Uint8Array::from(&[2_u8][..]).to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let floats = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();
+    assert_eq!((slice, bytes, floats), (vec![1.0], vec![2], vec![3.0]));
+}

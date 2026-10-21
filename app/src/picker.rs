@@ -45,5 +45,10 @@ pub async fn read(file: &web_sys::File) -> Result<Vec<u8>, String> {
     let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
         .await
         .map_err(|e| format!("could not read {}: {e:?}", file.name()))?;
-    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: the decoder reads wasm memory, so a chosen file is copied in once"
+    )]
+    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+    Ok(bytes)
 }

@@ -205,6 +205,10 @@ pub fn stem_name(file_name: &str) -> String {
 /// to the song rate; not used on the playback path.
 pub fn resample_linear(x: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || x.is_empty() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the contract returns a new buffer; Song::from_audio does not call this at the same rate"
+        )]
         return x.to_vec();
     }
     let ratio = from as f64 / to as f64;
@@ -224,6 +228,16 @@ pub fn resample_linear(x: &[f32], from: u32, to: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mem1_lint_is_on() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1 canary: clippy fails here if this path is off"
+        )]
+        let copy = [1.0_f32].to_vec();
+        assert_eq!(copy, [1.0]);
+    }
 
     fn audio(rate: u32, chans: Vec<Vec<f32>>) -> Audio {
         Audio {
