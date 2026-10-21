@@ -285,15 +285,21 @@ fn rustfmt_hook_command(settings: &serde_json::Value) -> String {
 }
 
 /// Runs the hook as Claude Code does: `sh -c`, the tool call as JSON on
-/// stdin, and `CLAUDE_PROJECT_DIR` set to the project root.
+/// stdin, and `CLAUDE_PROJECT_DIR` set to the project root.  `path`, when
+/// given, replaces `PATH`.
 fn run_hook(
     command: &str,
     project: &std::path::Path,
     input: &serde_json::Value,
+    path: Option<&std::path::Path>,
 ) -> std::process::Output {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("sh")
+    let mut sh = Command::new("/bin/sh");
+    if let Some(path) = path {
+        sh.env("PATH", path);
+    }
+    let mut child = sh
         .arg("-c")
         .arg(command)
         .env("CLAUDE_PROJECT_DIR", project)
@@ -324,7 +330,14 @@ fn the_rustfmt_hook_formats_rust_files() {
 
     let folder = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rustfmt hook");
     let project = folder.join("project");
-    std::fs::create_dir_all(&project).expect("the test folder can be made");
+    let sibling = folder.join("project2");
+    let no_tools = folder.join("no tools");
+    for made in [&project, &sibling, &no_tools] {
+        std::fs::create_dir_all(made).expect("the test folder can be made");
+    }
+    // rustfmt reads the first rustfmt.toml above the file, so an empty one
+    // here keeps out a config above the target folder.
+    std::fs::write(folder.join("rustfmt.toml"), "").expect("the test config can be written");
     let left = |file: &str, text: &str, output: &std::process::Output| {
         let code = output
             .status
@@ -340,12 +353,13 @@ fn the_rustfmt_hook_formats_rust_files() {
         (project.join("lib.rs"), FORMATTED),
         (project.join("notes.md"), UNFORMATTED),
         (folder.join("outside.rs"), UNFORMATTED),
+        (sibling.join("lib.rs"), UNFORMATTED),
     ];
     for (path, expected) in &cases {
         std::fs::write(path, UNFORMATTED).expect("the test file can be written");
         let input =
             serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": path } });
-        let output = run_hook(&command, &project, &input);
+        let output = run_hook(&command, &project, &input, None);
         let text = std::fs::read_to_string(path).expect("the test file can be read");
         assert!(
             output.status.success() && text == *expected,
@@ -355,6 +369,14 @@ fn the_rustfmt_hook_formats_rust_files() {
     }
 
     let input = serde_json::json!({ "tool_name": "Write", "tool_input": {} });
-    let output = run_hook(&command, &project, &input);
+    let output = run_hook(&command, &project, &input, None);
     assert!(output.status.success(), "{}", left("no file", "", &output));
+
+    let lib = project.join("lib.rs");
+    let input = serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": lib } });
+    let output = run_hook(&command, &project, &input, Some(&no_tools));
+    assert!(
+        !output.status.success(),
+        "GIT-2: the rustfmt hook in .claude/settings.json exits 0 without jq on PATH, so a missing jq is silent.  Fix: keep `|| exit 1` after the jq command substitution."
+    );
 }
