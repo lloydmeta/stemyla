@@ -29,5 +29,18 @@
       "Bash(target/*/xtask publish*)",
       "Bash(./target/*/xtask publish*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty') || exit 1; case \"$f\" in \"$CLAUDE_PROJECT_DIR\"/*.rs) rustfmt --edition 2024 \"$f\";; esac"
+          }
+        ]
+      }
+    ]
   }
 }
