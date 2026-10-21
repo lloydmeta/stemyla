@@ -57,7 +57,8 @@ jobs:
       - name: Install ALSA headers (cpal links libasound on Linux)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       # --all-targets compiles roformer-gpu and every test target, so clippy
-      # is also the native compile gate for the GPU crate.
+      # is also the native compile gate for the GPU crate.  It also checks
+      # the canaries of the MEM-1 and MEM-3 lints.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The web code compiles only for wasm32, so the native steps never lint
       # it (MEM-1).  roformer and roformer-gpu have no wasm32-only code, and
@@ -106,8 +107,9 @@ jobs:
       - run: cargo test --locked --workspace --exclude roformer-gpu
       # roformer-gpu's unit tests and doctests need no GPU.  They check every
       # shader against WebGPU's default limits with naga (GPU-1), that the
-      # generated shaders are complete, and that Rec keeps a buffer alive
-      # (MEM-3, a compile-fail doctest).
+      # generated shaders are complete, that Rec keeps a buffer alive, and
+      # that Gpu's device and from_device stay private (MEM-3, compile-fail
+      # doctests).  mem3_lint_is_on runs here, but the clippy job proves it.
       - run: cargo test --locked -p roformer-gpu --lib
       - run: cargo test --locked -p roformer-gpu --doc
 

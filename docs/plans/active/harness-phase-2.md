@@ -1887,6 +1887,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-21: M13 step 2: the lint, the canary and the docs.  Before the `#[expect]`s, `cargo clippy -p roformer-gpu --all-targets` warned at the two constructors only (`lib.rs:506`, `515`), each with the MEM-3 note.  After them, every clippy command passed.
   * Plants, each run and restored: `gpu.device.create_buffer(...)` in `Net::load_store` failed the native step with the MEM-3 note (`net.rs:142`); the same line in `gpu_text` failed the `wasm32` step with "E0616: field `device` of struct `roformer_gpu::Gpu` is private"; `pub device` failed the E0616 doctest, and `pub fn from_device` the E0624 doctest.
   * The 5 paths, each turned off and restored, each failed with "this lint expectation is unfulfilled": `create_buffer` and `create_buffer_init` at their constructor and canary line; the three helper paths at their canary line.
+* [x] 2026-10-21: M13 review round 1, by one new reviewer who turned off each path, planted raw buffers and helpers, and read wgpu's sources.  No blockers and no should-fix items; 3 nits, all checked and real, all fixed: the CI comments did not name the `Gpu` doctests or the canaries; "(three paths)" read as all paths; a clone of a `GpuBuffer`'s buffer may outlive it, but must not be used after it drops.
 * [ ] M13: MEM-3 lint.
 * [ ] M14: Claude Code deny rules.
 * [ ] M15: rustfmt hook.

@@ -493,8 +493,8 @@ impl MatMulPolicy {
 /// recorded dispatch still needs it.  Make buffers with [`Gpu::buffer`]
 /// and [`Gpu::upload`] only.  Clippy fails five other ways to make a
 /// buffer in this crate (MEM-3).  No other crate reaches the device.  A
-/// clone of the inner `wgpu::Buffer` is destroyed with it, so a clone
-/// must not outlive its `GpuBuffer`.
+/// clone of the inner `wgpu::Buffer` is destroyed with it, so do not use
+/// a clone after its `GpuBuffer` drops.
 pub struct GpuBuffer {
     buffer: wgpu::Buffer,
     /// [`Gpu::live_bytes`], less this buffer's size once it is dropped.
