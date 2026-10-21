@@ -111,10 +111,15 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 
 ### TD-28: GIT-1's deny rules match command text only
 
-Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They also refuse a branch whose name ends in `main`, such as `fix-main`.  They do not see:
+Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They also refuse by mistake:
+
+* a branch whose name ends in `main`, such as `fix-main`, or holds `gh-pages`, `--all`, `--branches` or `--mirror`;
+* a pipeline that starts with a push or `cargo run` and names one of those words or `publish` later, such as `git push origin x | grep main` or `cargo run --help | grep publish`.  In runs on 2026-10-21, Claude Code matched a rule against a whole pipeline, but matched a chain with `&&` part by part.  Run the command without the pipe.
+
+They do not see:
 
 * a push that names no branch, such as `git push` or `git push origin HEAD` while on `main`; a branch named through a variable or a config, such as `push.default`; the `main` ruleset refuses such a push to `main`, but not to `gh-pages`;
-* a push that reaches `main` through the matching refspec `:`, a glob refspec such as `refs/heads/*:refs/heads/*`, a quoted branch (`"main"`) or a short option (`--mir`);
+* a push that reaches `main` through the matching refspec `:`, a glob refspec such as `refs/heads/*:refs/heads/*`, a quoted branch (`"main"`) or an abbreviated option (`--mir`, `--bra`);
 * a push to another branch without being asked, which rests on prose (decision 0010);
 * a shell or `eval` that runs a string, and a script that the agent writes and then runs;
 * `git -C`, `git -c`, a git alias, `env`, an absolute path to `git` or `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;

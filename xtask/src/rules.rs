@@ -2787,7 +2787,9 @@ const SETTINGS_FILE: &str = ".claude/settings.json";
 /// `*main` matches a command that ends in `main`, such as ` main`, `:main`,
 /// `/main` or `+main`, and also refuses `fix-main`.  Each rule starts
 /// with the program name, so a commit message or a grep that holds the
-/// words is not refused.  The `rtk` forms are the commands that the
+/// words is not refused on its own.  Claude Code matched a rule against a
+/// whole pipeline in runs on 2026-10-21, so `cargo run --help | grep
+/// publish` is refused; a chain with `&&` was matched part by part.  The `rtk` forms are the commands that the
 /// maintainer's RTK hook makes, and that an agent can write itself.
 pub const REQUIRED_DENY_RULES: [&str; 26] = [
     "Bash(git push *main)",
