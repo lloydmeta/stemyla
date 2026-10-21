@@ -14,7 +14,7 @@ Claude Code matches a rule against the command text, after a PreToolUse hook rew
 * (b) Deny `xtask publish` and `gh pr merge`, and ask for `git push`.  Claude Code prompts for each push, also in auto mode, and the agent pushes when the person accepts.
 * (c) Take push rights away from the agent's credentials, or sandbox the network.  These do not depend on command text.  But the agent has only the maintainer's credentials, and the sandbox blocks a host, not a command.
 * (d) Deny `xtask publish` and `gh pr merge` only.  The agent pushes a branch when asked, as before.
-* (e) (d), and deny a push that names `main` or `gh-pages`, and `git push --all` and `--mirror`.  The agent pushes other branches when asked.
+* (e) The rules of (d), and deny a push that names `main` or `gh-pages`, and `git push --all`, `--branches` and `--mirror`.  The agent pushes other branches when asked.
 
 ## Decision
 

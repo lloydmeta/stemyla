@@ -12,7 +12,7 @@ Phase 1 is in place:
 * Rules for parts of the tree in `.claude/rules/`, which load when the agent touches those files.
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 
-The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish` and `gh pr merge` to the agent.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
+The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
 
 ## Before you start
 
@@ -93,7 +93,7 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## What deny rules refuse
 
-Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `git push --all` and `--mirror`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each can publish the site.  The agent sees "Permission to use Bash with command ... has been denied", and the message does not name the rule.  When it stops there, run the command yourself.
+Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `git push --all`, `--branches` and `--mirror`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each can publish the site.  The agent sees "Permission to use Bash with command ... has been denied", and the message does not name the rule.  When it stops there, decide if you want the command.  Merge to `main` through a PR, not a push.
 
 The rules match the command text, so they are not a security boundary (TD-28).  They do not see a push that names no branch, such as `git push` while on `main`.  The agent pushes other branches when asked.
 
@@ -135,4 +135,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-21, phase 2 (M11): RT-1 forbids allocation in the audio callback after warm-up.  `the_callback_does_not_allocate_after_warm_up` names the stretcher, the callback size and the phase that allocated.  Size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse one.
 * 2026-10-21, phase 2 (M12): clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three.  CI also runs clippy for `wasm32`.  Borrow the slice, share an `engine::Samples` in `app` and `engine`, or move the buffer instead of copying it.  For a needed copy, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]`.  A canary in each crate fails clippy if its path is off.
 * 2026-10-21, phase 2 (M13): clippy fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init`, `StagingBelt` and `DownloadBuffer::read_buffer` in `roformer-gpu` outside `GpuBuffer`.  `Gpu`'s device is private.  Make the buffer with `Gpu::buffer` or `Gpu::upload`, or read back with `Gpu::read`.
-* 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  Do these yourself.  `claude_settings_hold_the_deny_rules` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.
+* 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  Decide if you want each one; merge to `main` through a PR.  `claude_settings_hold_the_deny_rules` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.

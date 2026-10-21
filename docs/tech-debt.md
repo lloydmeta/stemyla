@@ -111,11 +111,11 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 
 ### TD-28: GIT-1's deny rules match command text only
 
-Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They do not see:
+Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They also refuse a branch whose name ends in `main`, such as `fix-main`.  They do not see:
 
 * a push that names no branch, such as `git push` or `git push origin HEAD` while on `main`; a branch named through a variable or a config, such as `push.default`;
+* a push that reaches `main` through the matching refspec `:`, a glob refspec such as `refs/heads/*:refs/heads/*`, a quoted branch (`"main"`) or a short option (`--mir`);
 * a push to another branch without being asked, which rests on prose (decision 0010);
-* a branch whose name ends in `main`, such as `fix-main`, which the rules refuse by mistake;
 * a shell or `eval` that runs a string, and a script that the agent writes and then runs;
 * `git -C`, `git -c`, a git alias, `env`, an absolute path to `git` or `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;
 * a `gh` alias, such as `gh alias set m 'pr merge'`;
@@ -125,7 +125,7 @@ Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pag
 * a mod that answers `tool.check`, which can approve a denied call on a personal account;
 * a cloud session in a project or with several repositories, and a session started with `--setting-sources` without `project`; these read no project permission rules ([settings](https://code.claude.com/docs/en/settings));
 * an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
-* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once.
+* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review sees it.
 
 * Fix: re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to `.claude/settings.json`, or an upgrade of Claude Code or RTK.  No control exists today: the admin role bypasses the `main` ruleset, and `gh-pages` has no ruleset (TD-20).  Phase 5 adds the agents' own identity and removes the bypass.
 
@@ -185,7 +185,7 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 
 `gh-pages` has no ruleset or branch protection (checked 2026-10-21 with `gh api repos/lloydmeta/stemyla/branches/gh-pages/protection`: "Branch not protected").  So a plain push to it publishes the site (GIT-1).
 
-* Fix: in phase 5 of the plan, the ruleset changes and the agents' own identity.  Phase 2 denies only publish and merge (decision 0010).
+* Fix: in phase 5 of the plan, the ruleset changes and the agents' own identity.  Phase 2 denies a push that names `main` or `gh-pages`, publish and merge (decision 0010).
 
 ## Closed
 

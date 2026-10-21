@@ -2784,26 +2784,30 @@ const SETTINGS_FILE: &str = ".claude/settings.json";
 /// The deny rules that `.claude/settings.json` holds for GIT-1: an agent
 /// never pushes to `main` or `gh-pages`, publishes the site or merges a PR
 /// (decision 0010).  A push rule sees only a branch that the command names:
-/// `*main` ends with ` main`, `:main`, `/main` or `+main`.  Each rule starts
+/// `*main` matches a command that ends in `main`, such as ` main`, `:main`,
+/// `/main` or `+main`, and also refuses `fix-main`.  Each rule starts
 /// with the program name, so a commit message or a grep that holds the
 /// words is not refused.  The `rtk` forms are the commands that the
 /// maintainer's RTK hook makes, and that an agent can write itself.
-pub const REQUIRED_DENY_RULES: [&str; 23] = [
+pub const REQUIRED_DENY_RULES: [&str; 26] = [
     "Bash(git push *main)",
     "Bash(git push *main *)",
     "Bash(git push *gh-pages*)",
     "Bash(git push *--all*)",
     "Bash(git push *--mirror*)",
+    "Bash(git push *--branches*)",
     "Bash(rtk git push *main)",
     "Bash(rtk git push *main *)",
     "Bash(rtk git push *gh-pages*)",
     "Bash(rtk git push *--all*)",
     "Bash(rtk git push *--mirror*)",
+    "Bash(rtk git push *--branches*)",
     "Bash(rtk proxy git push *main)",
     "Bash(rtk proxy git push *main *)",
     "Bash(rtk proxy git push *gh-pages*)",
     "Bash(rtk proxy git push *--all*)",
     "Bash(rtk proxy git push *--mirror*)",
+    "Bash(rtk proxy git push *--branches*)",
     "Bash(gh pr merge *)",
     "Bash(rtk gh pr merge *)",
     "Bash(rtk proxy gh pr merge *)",
@@ -5996,6 +6000,22 @@ mod settings_tests {
             "{}",
             problems[0]
         );
+
+        let removed = ["Bash(git push *main)", "Bash(cargo r* publish*)"];
+        let without_two = with(|v| {
+            v["permissions"]["deny"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|rule| !removed.iter().any(|gone| rule == gone))
+        });
+        let problems = claude_settings_problems(&without_two);
+        assert_eq!(problems.len(), 2, "{problems:#?}");
+        for (problem, gone) in problems.iter().zip(removed) {
+            assert!(
+                problem.message.contains(&format!("does not deny `{gone}`")),
+                "{problem}"
+            );
+        }
     }
 
     #[test]
