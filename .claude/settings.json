@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Bash(gh pr merge *)",
+      "Bash(rtk gh pr merge *)",
+      "Bash(rtk proxy gh pr merge *)",
+      "Bash(cargo r* publish*)",
+      "Bash(rtk cargo r* publish*)",
+      "Bash(rtk proxy cargo r* publish*)",
+      "Bash(target/*/xtask publish*)",
+      "Bash(./target/*/xtask publish*)"
+    ]
+  }
+}

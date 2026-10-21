@@ -23,5 +23,5 @@ Claude Code matches a rule against the command text, after a PreToolUse hook rew
 
 * GIT-1: an agent never runs `xtask publish` or merges a PR; a person does.  An agent pushes only when asked, and that part stays prose.
 * `.claude/settings.json` holds the deny rules.  A test in `xtask` fails when a rule is missing, or when the file has a key that could make Claude Code drop it.
-* The rules match command text only, so they are not a security boundary.  Auto mode still pushes with no prompt, `main` and `gh-pages` included.  The control is the `main` ruleset and the agents' own identity (phase 5).
+* The rules match command text only, so they are not a security boundary.  TD-28 lists the gaps.  Auto mode still pushes with no prompt, `main` and `gh-pages` included.  The control is the `main` ruleset and the agents' own identity (phase 5).
 * claude-code-action restores `.claude/` from the base branch, so the rules bind the bots of phase 5 too.  Phase 5c revisits GIT-1 and this decision before a bot merges.

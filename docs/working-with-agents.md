@@ -12,11 +12,11 @@ Phase 1 is in place:
 * Rules for parts of the tree in `.claude/rules/`, which load when the agent touches those files.
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 
-The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, pushes and merges.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
+The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish` and `gh pr merge` to the agent.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
 
 ## Before you start
 
-1. Install Claude Code ([docs](https://code.claude.com/docs)) and start it at the repo root.  It loads `CLAUDE.md` itself.
+1. Install Claude Code ([docs](https://code.claude.com/docs)) and start it at the repo root.  It loads `CLAUDE.md` itself.  It reads the project settings only from the folder where it starts.
 2. Set up commit signing with a GPG or SSH key ([GitHub docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)).  The agent signs every commit (GIT-2), so a commit fails without a key.
 3. To run browser tests, set up the machine as `README.md` (setting up a machine) tells you.
 4. Read `CLAUDE.md` once.  It is short, and it is what the agent works from.
@@ -85,11 +85,17 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## What a person must do
 
-* Push, and run `cargo run -p xtask --release -- publish`.  The agent does neither unless asked (GIT-1).
+* Push, or ask the agent to push; it does not push unasked (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules stop the agent from running it.
 * Accept or reject decisions.
 * Give evidence from real hardware: a real GPU (GPU-3), Safari, an iPhone for memory (MEM-4).
-* Merge.  `main` needs an approval.
+* Merge.  `main` needs an approval.  Deny rules stop the agent from running `gh pr merge`.
 * Decide when the agent stops because a change would break a rule.
+
+## What the agent cannot do
+
+Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each publishes the site.  The agent sees "Permission to use Bash with command ... has been denied", and the rule's reason is not shown.  When it stops there, run the command yourself.
+
+The rules match the command text, so they are not a security boundary (TD-28).  They do not stop a push: the agent pushes when asked.
 
 ## Before you merge
 
@@ -108,7 +114,7 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 | `serve` | serves the built page (`serve app/dist --port 8080`) | `trunk build` first |
 | `web-test` | browser tests (wasm-bindgen-test) in Safari or Chrome | wasm-bindgen-cli, a WebDriver |
 | `e2e` | drives the built page over WebDriver (`e2e smoke`, `e2e storage`, ...) | `trunk build`, a WebDriver; some scenarios need a GPU and the model |
-| `publish` | builds, commits to `gh-pages` and pushes | only when asked (GIT-1) |
+| `publish` | builds, commits to `gh-pages` and pushes | a person only (GIT-1) |
 | `gen-song` | writes the demo song's stems, mix and ground truth | ffmpeg for MP3 (optional) |
 | `stretch-bench` | compares the time-stretch methods for quality and cost | nothing |
 | `perf` | measures the cost of one audio callback | nothing |
@@ -129,3 +135,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-21, phase 2 (M11): RT-1 forbids allocation in the audio callback after warm-up.  `the_callback_does_not_allocate_after_warm_up` names the stretcher, the callback size and the phase that allocated.  Size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse one.
 * 2026-10-21, phase 2 (M12): clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three.  CI also runs clippy for `wasm32`.  Borrow the slice, share an `engine::Samples` in `app` and `engine`, or move the buffer instead of copying it.  For a needed copy, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]`.  A canary in each crate fails clippy if its path is off.
 * 2026-10-21, phase 2 (M13): clippy fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init`, `StagingBelt` and `DownloadBuffer::read_buffer` in `roformer-gpu` outside `GpuBuffer`.  `Gpu`'s device is private.  Make the buffer with `Gpu::buffer` or `Gpu::upload`, or read back with `Gpu::read`.
+* 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge` to the agent.  Run them yourself.  `claude_settings_deny_publish_and_merge` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.

@@ -233,3 +233,18 @@ fn e2e_messages_use_protocol_types() {
         report.join("\n")
     );
 }
+
+#[test]
+fn claude_settings_deny_publish_and_merge() {
+    let file = xtask::workspace_root().join(".claude/settings.json");
+    let settings = std::fs::read_to_string(&file)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
+    let problems = xtask::rules::claude_settings_problems(&settings);
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} GIT-1 problem(s):\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+}

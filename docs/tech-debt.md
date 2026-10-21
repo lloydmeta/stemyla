@@ -109,6 +109,22 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 
 * Fix: none planned.  Phase 3's GPU reviewer looks for GPU memory that is not destroyed.
 
+### TD-28: GIT-1's deny rules match command text only
+
+Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge` in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They do not see:
+
+* a push by the agent, to any branch, `main` and `gh-pages` included; GIT-1's push half rests on prose (decision 0010, TD-20);
+* a shell or `eval` that runs a string, and a script that the agent writes and then runs;
+* `env`, an absolute path to `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;
+* a cargo option before `run`, such as `cargo -q run` or `cargo +nightly run`;
+* `gh api`, which can merge a PR;
+* a session started outside the repo root, or moved with `/cd`, since Claude Code reads the project settings from the session's working directory only;
+* a mod that answers `tool.check`, which can approve a denied call on a personal account;
+* an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
+* whether Claude Code refuses anything: `claude_settings_deny_publish_and_merge` keeps the rules in the file, and M14's step 3 showed the refusals by hand once.
+
+* Fix: re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to `.claude/settings.json`, or an upgrade of Claude Code or RTK.  The control is the `main` ruleset and the agents' own identity (phase 5).
+
 ## Known breaches
 
 ### TD-12: dropped files are copied before they are saved
@@ -163,7 +179,7 @@ Commit signing is set in the maintainer's own git config only, and nothing stops
 * lets the admin role bypass it always, so agents running with the maintainer's credentials can skip the required checks and the approval;
 * does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
-* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings; in phase 5, the other ruleset changes.
+* Fix: in phase 5 of the plan, the ruleset changes and the agents' own identity.  Phase 2 denies only publish and merge (decision 0010).
 
 ## Closed
 
