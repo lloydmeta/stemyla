@@ -1265,19 +1265,130 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 * `Cargo.lock` and `xtask/Cargo.toml` do not change.  The CI `browser-tests` job passes; M10 changes no script.
 * fmt, clippy, the tests and `docs-check` pass.
 
-### M11: the audio callback does not allocate after warm-up (closes TD-15; RT-1; maintainer decision)
+### M11: the audio callback does not allocate after warm-up (closes TD-15; RT-1, DEPS-1, DOC-1; maintainer decision, made 2026-10-19)
 
-* Rule: RT-1 becomes "the audio callback never waits, never frees a player, and never allocates or frees memory after warm-up".  Update `invariants.md`, the RT-1 line in `CLAUDE.md` and `.claude/rules/memory.md`.  Write its record in `docs/decisions/` as `proposed`, with the next free number; the maintainer accepts it.
-* Test first: `engine/tests/realtime.rs` is its own test binary, so its counting global allocator affects no other test.  The allocator wraps `System` and counts `alloc`, `alloc_zeroed`, `realloc` and `dealloc` in `thread_local` counters, so parallel tests do not mix.  The test `the_callback_does_not_allocate_after_warm_up` makes a song of six noise stems in the test, a `Player` for each stretcher the app ships (`StretcherKind::Varispeed` and `StretcherKind::Wsola`), and puts it in a `PlayerSlot`.  It then calls `render_interleaved` with blocks of 128, 512 and 4,096 frames.  The count must be zero from the first callback, through each of these changes:
-  * tempo changes over 0.5 to 1.5;
-  * chipmunk on and off;
-  * a seek;
-  * a loop wrap with crossfade;
-  * mute and solo changes.
-* The test fails before the fix, on wsola 0.1.0's `pull` and on `dsp::double_speed`.  Record both failures in the PR.
-* Fix: bump to `wsola = "=0.2.0"`, and update its rows in `THIRD-PARTY.md`, and add rows for any new crate that wsola 0.2.0 brings.  `third_party_lists_what_ships` (M9) otherwise fails.  Copy `pull`'s iterator straight into the output queues.  In `render_chipmunk`, decimate `chip_l` and `chip_r` into the output slices in place, in `engine`.  `dsp::double_speed` stays as the beginner version, and a unit test asserts that both give the same samples.  Warm-up in `Player::new` runs the stretcher at the highest tempo for long enough to reach its steady buffer sizes, then resets it; `reset` keeps capacity.
-* Acceptance: the test passes.  `m4_stretch` and `the_callback_does_not_allocate_after_warm_up` pass on wsola 0.2.0.  Output on the demo song is identical to wsola 0.1.0's, sample for sample, or the latency table in `wsola_adapter.rs` is measured again with its example and the change is stated in the PR.
-* Scope: `timestretch` and `cute-dsp` are bench-only and are not in the app; the RT-1 text says it covers the stretchers the app ships.  The closure in `engine/src/live.rs` also calls `Schedule::next`.  If the test cannot reach it, record that gap in `tech-debt.md`.
+* Scope: RT-1 is a realtime rule, and its breach is known (TD-15).  So this check is stronger than the token scans of M7 to M10: a test runs the real callback under a counting allocator.  No new crate: wsola 0.2.0 takes no crate that the lock file lacks.
+
+#### M11 state at the start
+
+On 2026-10-21, at commit `7cd8518` (M10 merged as PR #23):
+
+* The callback's path: cpal's data callback in `engine/src/live.rs` (`open`) calls `Schedule::next`, then `PlayerSlot::render_interleaved` (`engine/src/slot.rs`).  That calls `Player::process` (`engine/src/player.rs`) for at most `SCRATCH_FRAMES` (8,192) frames at a time.  `process` renders blocks of at most `PlayerConfig::block` (512) frames, through `render_stretched` or `render_chipmunk`.
+* The app makes each player with `Player::with_config(.., self.stretcher.build(song.sample_rate), PlayerConfig::default())` in `app/src/lib.rs`.  It builds `engine` with `default-features = false, features = ["stretch-wsola"]`, so it ships `Varispeed` and `WsolaStretcher`.  It plays through `StretcherKind::default_pitch_preserving()`, which is wsola; `Varispeed` is compiled in but not chosen.  RT-1 covers both.  `xtask` builds `engine` with every stretcher, for its benches.
+* What allocates on the path today, from a read of the code:
+  * `WsolaStretcher::can_pull` calls wsola 0.1.0's `pull`, which returns a new `Vec` (`self.output.drain(0..n).collect()`).
+  * wsola's `TimeStretch` starts with an empty `input` and `output`.  `push` extends `input`, and `compact` drops old input only when more than 65,536 frames (`1 << 16`) lie behind the read position.  So `input` grows, with a reallocation at each doubling, over the first 1.5 s or so of play.  This is the same in 0.1.0 and 0.2.0.
+  * `render_chipmunk` calls `dsp::double_speed` twice per block, and each call returns a new `Vec`.
+  * `read_mixed` adds an `Anchor` to `anchors` (capacity 1,024) at each loop wrap, and `playhead` drops old anchors only at the end of `process`.  At tempo 1.5, a loop shorter than about 9 frames with 4,096-frame callbacks, or 15 frames with 8,192-frame callbacks, adds more than 1,024 anchors, so the queue grows.  The loop bar cannot make a loop that short: one pixel is about 1,000 frames of the 30 s demo song.  `SharedParams::set_loop` accepts any loop of 1 frame or more.
+  * Nothing else allocates.  The rest reads atomics, writes into buffers that `with_config` sizes, uses `VecDeque`s within their capacity, and clones the `Arc`s of `params` and `song` without freeing them.  `Varispeed` holds about 1,100 frames at most, in queues of capacity 32,768.
+* wsola 0.2.0 (MIT, published 2026-10-12, by the author of 0.1.0; [crates.io](https://crates.io/crates/wsola)), from a diff of the two published sources:
+  * `pull` and `flush` return `impl Iterator<Item = f32>`, which is `self.output.drain(0..n)` and does not allocate.  `output` is a `Vec`, and `step` calls `output.reserve(hop * channels)` first.
+  * `new` and `with_config` take `NonZeroU32` and `NonZeroU16`; the errors for zero are gone.
+  * The rest of `step`, `compact` and the window is unchanged, so the output is the same, sample for sample.
+  * Its one dependency is `thiserror` 2.0, which the lock file already has at 2.0.21.
+* The tests of the callback are in `engine/src/slot.rs`.  None counts allocations.
+* Facts on the method:
+  * A global allocator may use `std::thread_local`: "a few features from `std` are guaranteed to not use `#[global_allocator]` to allocate", and it is one.  The optimiser may remove an allocation, so "you cannot rely on global allocations actually happening" ([`GlobalAlloc`](https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html)).  A zero count is evidence, not proof.  The `dev` profile builds the workspace crates at opt-level 0, and the dependencies at 2 (`Cargo.toml`).
+  * Why a callback must not allocate: an allocator can take a lock or fault a page, so its time has no bound ([Bencina, "Real-time audio programming 101: time waits for nothing"](http://www.rossbencina.com/code/real-time-audio-programming-101-time-waits-for-nothing), summarised in [these rules of thumb](https://w2.mat.ucsb.edu/240/A/2017/05/17/realtime.html)).
+  * The off-the-shelf tool is `assert_no_alloc` 1.1.2 (BSD-1-Clause, last release 2021-08-03).  It is a global allocator over `System` with a flag per thread, and it aborts or warns on an allocation.  By default it does nothing in release builds ([docs.rs](https://docs.rs/assert_no_alloc/latest/assert_no_alloc/)).  M11 does not use it.  A counter in the test is about 40 lines, gives counts for the failure message, and adds no crate (DEPS-1).
+
+#### M11 design
+
+* The rule.  RT-1 becomes "the audio callback never waits, never frees a player, and never allocates or frees memory after warm-up".  Warm-up is the work that `Player::with_config` does, on the thread that makes the player.  RT-1 covers the stretchers that the app ships.
+* The record: `docs/decisions/0007-no-allocation-in-the-audio-callback.md`, with `Status: accepted (2026-10-19, by the maintainer)`, since the maintainer chose the rule (decision log, 2026-10-19).  Its options:
+  * (a) no allocation after warm-up, chosen;
+  * (b) no allocation at all, which cannot hold, since a new player must make its buffers;
+  * (c) allocation allowed and measured only, which leaves TD-15 open.
+  * Its consequences: `Stretcher::warm_up`, the test, wsola 0.2.0, the gaps in TD-<n>, and the bench-only stretchers that RT-1 does not cover.
+* Warm-up: a new required method of `Stretcher`, `fn warm_up(&mut self, max_tempo: f64, max_frames: usize)`.  Its doc: after it, `push` of at most 4,096 frames (what wsola's `interleaved` holds) and `pull` of at most `max_frames`, at a tempo of at most `max_tempo`, do not allocate (RT-1).  It leaves the stretcher as `reset` does, with the tempo it had.  `Player::with_config` calls `stretcher.warm_up(f64::from(params::MAX_TEMPO), cfg.block)` before it returns.
+  * `Varispeed`: nothing to do.  Its doc says why: its queues have capacity 32,768 frames from `new`, and hold at most `max_frames * max_tempo` plus one push and 2 frames.
+  * `WsolaStretcher`:
+    1. Push `(1 << 16) + sample_rate / 4 + MAX_PUSH_FRAMES` frames of silence in one call, `self.ts.push(&vec![0.0; 2 * n])`, not through `Stretcher::push`.  `MAX_PUSH_FRAMES` (4,096, in `engine/src/stretch/mod.rs`) is the largest push that `warm_up` covers; review round 1 added it.  Through `push`, `interleaved` would grow and keep about 1 MB for good (MEM-4).  So `input` gets a capacity of at least that many frames.  In play, `input` holds at most `65,536 + 4 * search + frame + 2 * tempo * hop + push` frames.  Compaction runs after each step, so one step's advance and the search's jitter can pass 65,536.  That is about 75,000 frames at 44.1 kHz and tempo 1.5 with pushes of 4,096; the most a prototype measured, with the player's pushes of 256, was 69,116.  `4 * search + frame + 2 * tempo * hop` is below `sample_rate / 4` at any tempo up to wsola's 4.  A comment in the code gives this sum.  The capacity is then about 650 KB, where doubling gave about 1 MB (MEM-4).
+    2. Set the tempo to `max_tempo` and call `can_pull(max_frames + sample_rate / 50)`.  So wsola's `output` reaches its largest size: a request of `max_frames`, plus one wsola hop of 15 ms, which is less than 20 ms.
+    3. `reset`, and set the tempo back.
+    * The cost: a copy of about 650 KB and a few wsola steps, on the thread that opens a song.  wsola's `reset` clears its `Vec`s and keeps their capacity.
+  * `TimestretchStretcher` and `CuteStretcher` are bench-only.  Their `warm_up` does nothing, and its doc says that RT-1 does not cover them.
+* Chipmunk mode in place: `render_chipmunk` writes `l[i] = self.chip_l[2 * i]` and `r[i] = self.chip_r[2 * i]`, for `i` in `0..l.len()`.  `dsp::double_speed` stays as the beginner version (DSP-1), off the callback's path.
+* Anchors: in `read_mixed`, before each `push_back`, drop the oldest anchor when `anchors.len() == anchors.capacity()`.  Only a loop shorter than 16 frames fills the queue, with callbacks of up to `SCRATCH_FRAMES`.  The dropped anchor can be the one being heard, such as the run before the loop.  The playhead then shows the loop's start early, for as long as the stretcher's buffered audio plays: about 1,900 frames (44 ms) in a prototype.  The audio does not change.
+* wsola 0.2.0: `engine/Cargo.toml` takes `wsola = { version = "=0.2.0", optional = true }`.  The adapter passes `NonZeroU32::new(sample_rate)` with an `expect` that says a song has a sample rate, as `with_config`'s `expect` does today.  `can_pull` copies `pull`'s iterator, two samples a frame, into `out_l` and `out_r`.  It stops, as today, when `pull` gives nothing.
+* The test file, `engine/tests/realtime.rs`, is its own test binary, so its allocator is in no other test:
+  * `CountingAllocator` wraps `System`.  It forwards each call to `System`.  It counts `alloc`, `alloc_zeroed` and `realloc` as allocations, and `dealloc` as frees, in `thread_local!` `Cell<u64>` counters with `const` initialisers.  So other test threads do not mix in.
+  * `fn counted<T>(f: impl FnOnce() -> T) -> (T, Counts)` gives the counts on this thread while `f` runs.
+  * `SHIPPED: [StretcherKind; 2]` is `Varispeed` and `Wsola`.
+  * Each configuration runs on its own thread, which the counters per thread allow.  A prototype took 16.5 s on one thread in the `dev` profile, about 1.4 s per configuration.
+* `the_counter_sees_an_allocation`: in `counted`, through `std::hint::black_box`, a `Vec::<u8>::with_capacity(64)` (`alloc`), then `reserve_exact(4096)` on it (`realloc`), and a `vec![0u8; 64]` (`alloc_zeroed`), both dropped.  It counts 3 allocations and 2 frees.  So a counter that misses one of the four calls fails, and the planted breach stays as a test.  Vec growth in play comes through `realloc`.
+* `the_callback_does_not_allocate_after_warm_up`, for each of `SHIPPED`, each sample rate of 44,100 and 48,000, and each callback of 128, 512, 4,096 and 10,000 frames (10,000 since review round 2):
+  * Set-up, not counted: a song of 6 noise stems, 10 s long, made with `Song`, `Stem` and `Samples::from`.  Then `SharedParams`, `Player::new(song, params, kind)` and a `PlayerSlot` that holds it.  The callback's `data` and `Scratch` are made once.
+  * Each callback, `slot.render_interleaved(&mut data, 2, &mut scratch)`, is counted, from the first.  Changes to `params` happen between callbacks.  Durations are of output, unless a phase says "of the song".  A phase of `d` seconds of output is `ceil(d * rate / callback)` callbacks, where `callback` is the callback's frames.  The phases, in order:
+    1. "start": play at tempo 1.0 for 0.5 s;
+    2. "tempo sweep": tempo from 0.5 to 1.5 in steps of 0.1, 0.1 s each;
+    3. "fast": tempo 1.5 for 3.5 s of the song (7/3 s of output), more than twice 65,536 input frames at either rate.  So wsola's `input` reaches its largest size and is compacted twice.  The tempo stays 1.5 from here on;
+    4. "chipmunk": chipmunk on for 0.2 s, then off for 0.2 s;
+    5. "seek": a seek to 2 s while playing (a fade out and a fade in), 0.2 s of play, a pause of one callback, a seek to 3 s while paused, one more paused callback, and 0.2 s of play again.  So `jump_to` runs while paused;
+    6. "loop": a 1 s loop (of the song) from the playhead, for 2 s of output, which is 3 wraps at tempo 1.5, with the crossfade;
+    7. "short loop": a 1-frame loop at the playhead, for 0.2 s;
+    8. "mix": the loop cleared, then mute, solo, unmute and unsolo of one stem, each followed by 0.1 s of play;
+    9. "end": a seek to 0.1 s before the end, and play until `playing` is false, for at most 2 s.  Then two callbacks of silence.
+  * So that a player that renders silence, or does not play, cannot pass:
+    * each phase gives a sample that is not zero;
+    * after "fast", the playhead is at least 3 s of song past its value before the phase;
+    * "loop" starts its loop at the playhead, and after it `s <= playhead <= e`.  Varispeed's playhead can equal `e`;
+    * after "end", `playing` is false.
+  * A failed check of these has its own message: "RT-1 test: wsola, 48000 Hz, 4096-frame callbacks, phase "seek" gave only silence, so it checked nothing.  Fix: make the phase play, or correct the test."
+  * A prototype showed that stricter playhead checks fail on correct code.  A playhead runs past a short loop while the stretcher's buffered audio plays, and a seek can land inside the phase's first callback.
+  * One failure lists every phase that allocated or freed: "RT-1: the audio callback allocated or freed memory after warm-up: wsola, 48000 Hz, 4096-frame callbacks, phase "short loop": 3 allocations, 0 frees.  Fix: size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse a buffer.  Do not allocate in `Player::process` or below."
+* The manifest check: a pure `fn app_stretcher_problems(manifest: &str) -> Vec<String>` in `engine/tests/realtime.rs`.
+  * It splits the text on each character outside `[A-Za-z0-9_-]`, and collects each word that starts with `stretch-`.  So `"engine/stretch-cute"` in `[features]` gives `stretch-cute`.  The set must be exactly `{"stretch-wsola"}`.
+  * Each line that starts with `engine =`, in any table, must hold `default-features = false`, since `engine`'s default features turn on every stretcher.  There must be one such line at least.
+  * `engine` in another form is a problem, with the fix "write `engine` as one inline table": a table header that ends in `.engine]`, or a line that starts with `engine.`.
+  * `default` after `engine/` or `engine?/`, and `"default"` in the `features` of an `engine =` line, are problems too.
+  * Unit tests, `the_manifest_check_finds_a_stretcher`: each of these gives one problem: `stretch-cute` in a `[features]` list; an `engine =` line without `default-features = false`; `engine/default`; `engine?/default`; a `[target.'cfg(unix)'.dependencies.engine]` table; and `engine.path = "../engine"`.  The real manifest is left to `the_app_ships_only_these_stretchers`.
+* `the_app_ships_only_these_stretchers`: it runs the check on `app/Cargo.toml`, read with `include_str!`.  Failure: "RT-1: `app/Cargo.toml` turns on {..}, but `engine/tests/realtime.rs` covers only `SHIPPED`.  Fix: add the stretcher to `SHIPPED`, make the test pass, and update this set."  An empty set fails too.
+* Unit tests beside the code:
+  * `a_warmed_stretcher_sounds_the_same` (`engine/src/stretch/mod.rs`): for each of `StretcherKind::all()`, two stretchers get tempo 0.75, then the same input, a sine, not silence; only one is warmed up, after its tempo is set.  Their output is the same, bit for bit.  So a warm-up that does not reset, or does not restore the tempo, fails.
+  * `chipmunk_matches_dsp_double_speed` (`engine/src/player.rs`): one stem, with a rising ramp on the left and a falling ramp on the right, in chipmunk mode.  Each channel gives `dsp::double_speed` of that channel's ramp, sample for sample.  So a mix-up of the channels fails.
+  * `a_very_short_loop_keeps_its_anchors` (`engine/src/player.rs`): from frame 0, `set_loop(1_000, 1_001)` at tempo 1.5, then 8,192 frames.  The capacity of `anchors` is as it was, and `1_000 <= playhead <= 1_001`.  A prototype without the bound grew it from 1,024 to 16,384.
+* The gaps, as a new entry TD-<n> under "Enforcement gaps", where `<n>` is the next free ID (25 on 2026-10-21), "RT-1's allocation test runs natively only".  It does not count the WebAssembly build, cpal's hosts, or the closure in `live.rs`.  That closure calls `Schedule::next`, whose fields are all `Copy`.  On the web, the first `web_time::Instant::now` in `render_interleaved` fills a `thread_local`.  A zero count is evidence, not proof, since the optimiser may remove an allocation.  The bench-only stretchers are not covered.  The manifest check reads the text of `app/Cargo.toml` only, so it does not see a stretcher that another crate turns on through feature unification.  Fix: none planned; phase 4's evaluator may count in the browser.
+* Out of scope: an allocation check in the app at run time, such as `assert_no_alloc` in debug builds.
+
+#### M11 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. wsola 0.2.0, alone.
+   * Before the bump, a throwaway test in `xtask/tests/`, not committed, renders `synth::generate()` through `Player::new` with `StretcherKind::Wsola`.  It renders 10 s at tempo 0.75 and 10 s at 1.25 in 512-frame blocks, and prints a hash of the samples' bits.  Run it before and after the bump, and again after step 2's warm-up.  The hashes must be equal; record them in the PR, then delete the test.  The latency table in `wsola_adapter.rs` then stays.
+   * The pin, the adapter, `Cargo.lock` (only wsola's entry changes) and the wsola row in `THIRD-PARTY.md`.  `young_crates_are_pinned`, `third_party_lists_what_ships` and `m4_stretch` pass.
+   * TD-15's text loses wsola's `pull` and keeps the other allocations: wsola's growing `input`, `dsp::double_speed` and the anchors (DOC-1).
+2. The test, the fixes and the docs.
+   * Test first: write `engine/tests/realtime.rs` and run it on step 1's code.  Record each phase that fails, with its counts, for each stretcher.  Expected, from a prototype: "start" (10 allocations) and "tempo sweep" (2) for wsola; "chipmunk" for both (hundreds); "short loop" for wsola at every callback size, and for varispeed at 4,096 frames only.  "fast" does not fail.  The test is not committed on its own, since it fails (GIT-2).
+   * Then `Stretcher::warm_up`, chipmunk in place, the anchor bound and the three unit tests.  All tests pass.
+   * Plant each of these on the real tree, one at a time; each fails `the_callback_does_not_allocate_after_warm_up` with RT-1 and the named phase.  Restore each, and record the results in the PR:
+     * the `warm_up` call removed from `Player::with_config` ("start" and "tempo sweep", wsola);
+     * a warm-up push of `(1 << 16) + sample_rate / 50` frames ("tempo sweep", wsola);
+     * `render_chipmunk` back on `dsp::double_speed` ("chipmunk");
+     * the anchor bound removed ("short loop");
+     * `let _ = format!("{frames}");` in `render_interleaved` (every phase).
+   * Plant `"stretch-cute"` in `app/Cargo.toml`'s engine features, then, on its own, remove `default-features = false`.  Each fails `the_app_ships_only_these_stretchers`.  Restore each.
+   * Record how long the `realtime` test binary takes, locally and in CI.
+* Docs (DOC-1), in step 2's commit:
+  * `invariants.md`, RT-1: the title becomes "the audio callback never waits, frees a player or allocates".  The text adds that after warm-up (`Player::with_config`) the callback never allocates or frees memory, for the stretchers the app ships.  "Why" adds that an allocator can take a lock or fault a page.  `* Enforced by:` adds `the_callback_does_not_allocate_after_warm_up` and `the_app_ships_only_these_stretchers` (CI `test` job).  `* Gaps:` becomes TD-<n>.
+  * `CLAUDE.md`: "RT-1: the audio callback never waits for the player slot, never frees a player, and never allocates after warm-up."  The map keeps its line count.
+  * `tech-debt.md`: TD-15 is deleted, and `* TD-15: closed by the_callback_does_not_allocate_after_warm_up (harness phase 2, M11). ...` goes under `## Closed`.  TD-<n> is added.
+  * `.claude/rules/memory.md`: the callback bullet adds "or allocates after warm-up", and names `engine/tests/realtime.rs`.  In the breaches bullet, "TD-15 and TD-17 are risks" becomes "TD-17 is a risk".
+  * `engine/src/player.rs`: the comment on the scratch buffers drops "except for `dsp::double_speed` in chipmunk mode", and the doc of `render_chipmunk` no longer says "with `dsp::double_speed`".
+  * `.claude/rules/dsp.md`: the allocation bullet keeps its first sentence.  The second becomes "`wrap_loop` is the one `dsp` function on the callback's path, and it must not allocate.  The player decimates chipmunk audio itself (RT-1)."
+  * `docs/decisions/0007-no-allocation-in-the-audio-callback.md`, and its line in `docs/README.md`.
+  * `harness.md`: a components row.  `working-with-agents.md`: a changelog line that says how to fix a failure.
+  * The parent plan's phase 2 bullet: "(TD-15)" after the allocation-counting test becomes "(RT-1, TD-15, M11)".
+  * `ARCHITECTURE.md` does not change.  "Prose only" lines stay at 4.
+
+#### M11 acceptance
+
+* In step 2, before the fixes, `the_callback_does_not_allocate_after_warm_up` failed, and the PR names the phases and counts.  After them, it passes for both stretchers, both rates and the four callback sizes.
+* The five planted breaches fail it with the named phases, and the two planted manifest changes fail `the_app_ships_only_these_stretchers`.
+* `the_counter_sees_an_allocation`, `the_manifest_check_finds_a_stretcher`, `the_app_ships_only_these_stretchers` and the three unit tests pass.
+* The demo song's hashes through wsola are equal before and after the bump, and after step 2.  `Cargo.lock` changes only wsola's entry.
+* fmt, clippy, the tests and `docs-check` pass, and the CI `test` job lists the `realtime` tests as `ok`.
 
 ### M12: song-sized copies are a lint (MEM-1)
 
@@ -1349,8 +1460,9 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * To undo M6, revert its commits.  That puts back the allow, TD-2, TD-3's text and DSP-1's text.  It removes TD-2's bullet under `## Closed`, decision 0006 and TD-24.  The breach stays, so restore TD-24 by hand, and keep its ID in DSP-1's `* Gaps:` line.  Keep the narrowed `* Enforced by:` text, because "found no breach" is false while the breach stays.  Keep this plan's living sections.  Put decision 0006 back with `Status: rejected`, and its line in `docs/README.md`, so the decision numbers have no gap.  If M7 is in the tree, its allowlist fails the blanket allow, so revert M7 first, or keep M6.
 * To undo M7, revert its commits.  That removes the check, and puts back TD-24, TD-3's text and DSP-1's text.  Keep this plan's living sections.
 * To undo M10, revert its commits.  That removes the check, the `harness.md` row and the guide's changelog line.  It puts back TD-16's text, PROTO-1's `* Enforced by:` line and the line in `.claude/rules/protocol.md`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
+* To undo M11, revert its commits.  That puts back wsola 0.1.0, its `THIRD-PARTY.md` row, TD-15, RT-1's text and the rule files.  It removes decision 0007, TD-<n> and the components row.  Put decision 0007 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice, and TD-15's fix line says so.  Keep TD-<n>'s ID: add `* TD-<n>: withdrawn by the revert of M11; TD-15 covers the gap again.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * Checks read the tree and write nothing, so they can run any number of times.
-* M11 changes a rule.  If the maintainer rejects M11's decision record, revert M11's rule text and keep the test as a measurement, marked in `tech-debt.md`.
+* M11 changes a rule that the maintainer chose on 2026-10-19.  If they reverse it, revert M11's rule text and decision, and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
 
 ## Progress
@@ -1505,8 +1617,22 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-20: M10 review round 3, by one new reviewer who read the whole diff and ran 25 probes.  No blockers and no should-fix; 3 nits, all checked.  Two were real and are fixed.  TD-16's lists of shapes not read now say "for example", since probes found more, such as `(d.type) === 'x'`.  An `e2e.rs` that does not tokenise also gave "no e2e script uses it" for an entry used only there; that reason now needs a read `e2e.rs`, and a test pins it.  The third, a raw literal with a lone `"`, is correct lexing of invalid JS.
 * [x] 2026-10-20: M10, three review rounds done and their findings fixed.
 * [x] 2026-10-20: M10: PR #23 opened.  CI (run 39441862201): every job passes.  The `test` job lists `e2e_messages_use_protocol_types` and the 7 unit tests in `proto_tests` as `ok`.  `test` took 4m12s, and `browser tests (Chrome)` passed with no script changed.
-* [ ] M10: merged.
-* [ ] M11: RT-1 forbids allocation; allocation test; wsola 0.2.0.
+* [x] 2026-10-21: M10, PR #23 merged by the maintainer (`7cd8518`).
+* [x] 2026-10-21: M11 implementation plan written (the M11 sections under "Plan of work").  Survey of the callback's path in `engine`, of wsola 0.1.0 and 0.2.0 (a diff of both published sources), and of where the app makes players and loops.
+* [x] 2026-10-21: M11 plan review round 1, by one new reviewer with a prototype of the design in a scratch worktree.  The demo song's hash was equal on wsola 0.1.0, on 0.2.0 and after warm-up.  After the fixes, all 12 configurations gave 0 allocations and 0 frees; each planted breach failed.  1 blocker, 3 should-fix findings and 6 nits, all checked and real, all fixed in the plan.  The blocker: the playhead checks failed on correct code, so they are now three checks that hold.  The should-fix items: the expected failures were wrong ("tempo sweep", not "fast"); the manifest test passed without `default-features = false`; and the claim on a dropped anchor was false.  The nits: the wsola bound's sum, a thread per configuration, a tempo before `warm_up`, a stale comment, TD-<n>'s text and why `Varispeed` is covered.
+* [x] 2026-10-21: M11 plan review round 2, by one new reviewer with a prototype of the whole design and mutants.  The fixed code gave 0 allocations in all 12 configurations, in 3.5 s with a thread per configuration, and the anti-vacuity checks held on correct code.  No blockers; 5 should-fix findings and 8 nits, all checked and real, all fixed in the plan.  The should-fix items: a counter that missed `realloc` passed every test; a chipmunk mutant that mixed up the channels passed; the manifest check missed a feature in `[features]` and had no unit test; the anchor unit test could fail on correct code or test nothing; and a revert marked decision 0007 rejected.  The nits: the warm-up push bypasses `interleaved`, the phases' parameters, frees alone fail, a message for a silent phase, a sine in the warm-up test, a second stale comment, the push size in `warm_up`'s doc, and 2,020 Hz.
+* [x] 2026-10-21: M11 plan review round 3, by one new reviewer with a full prototype.  `the_counter_sees_an_allocation` counted 3 allocations and 2 frees in dev and release; the fixed code passed and each planted breach failed.  No blockers; 3 should-fix findings and 3 nits, all checked and real, all fixed in the plan.  The should-fix items, each a local fix: how seconds become callbacks (the named phase of a plant depended on it) and a pause with no callback; the new `dsp.md` sentence was false, since `read_mixed` calls `dsp::wrap_loop`; and the manifest check missed a table-form `engine`, a dotted key and `engine?/default`.  The nits: the exact `memory.md` text, the acceptance list, and a duplicate test case.
+* [x] 2026-10-21: plan review stopped after round 3, by the maintainer's rule: no blockers, and no should-fix item beyond small local fixes.  Not yet implemented.
+* [x] 2026-10-21: M11 step 1: wsola 0.2.0.  The demo song at tempos 0.75 and 1.25 gave the hash `cc06c36c82de4b04` on 0.1.0 and on 0.2.0.  `Cargo.lock` changed only wsola's version and checksum.
+* [x] 2026-10-21: M11 step 2: the test, the fixes and the docs.  Before the fixes, `the_callback_does_not_allocate_after_warm_up` failed in 32 rows, as the plan expected: wsola "start" (10 allocations) and "tempo sweep" (2) at every rate and size; "chipmunk" for both stretchers (288 to 900 allocations, 36 to 150 frees); "short loop" for wsola at every size (2 to 4) and for varispeed at 4,096 frames (3).  After the fixes, all 12 configurations give 0 allocations and 0 frees, in 3.4 s.  The hash after warm-up is still `cc06c36c82de4b04`.
+  * Planted breaches, each run and restored: no `warm_up` call ("start" and "tempo sweep", wsola, 12 rows); a warm-up push of `(1 << 16) + rate / 50` frames ("tempo sweep", wsola, 1 allocation, 6 rows); `dsp::double_speed` back in chipmunk mode ("chipmunk", 12 rows); no anchor bound ("short loop", 8 rows); `format!` in `render_interleaved` (every phase).  `stretch-cute` in `app/Cargo.toml`, and the loss of `default-features = false`, each fail `the_app_ships_only_these_stretchers` with one RT-1 problem.
+  * Unit-test mutants, each caught: a mix-up of the chipmunk channels (`chipmunk_matches_dsp_double_speed`), no anchor bound (`a_very_short_loop_keeps_its_anchors`, capacity 16,384), and a `warm_up` without `reset` or without the tempo restore (`a_warmed_stretcher_sounds_the_same`).  "Prose only" lines: 4.
+* [x] 2026-10-21: M11 review round 1, by one new reviewer who read wsola's sources and ran mutants and other sample rates.  No blockers; 1 should-fix and 4 nits, all checked.  The should-fix, real: `Stretcher::warm_up` promised that a push of 4,096 frames does not allocate, but wsola's warm-up covered only the player's 256.  The new test `a_stretcher_keeps_its_warm_up_promise` failed at 8 and 16 kHz with 1 allocation; the warm-up now pushes 4,096 frames more (about 650 KB in all, not 620 KB), and it passes.  Nits: RT-1's title now says "after warm-up"; the allocator's comment on `try_with` was wrong; wsola's doc says that the push covers any tempo up to 4, so `max_tempo` only sets the warm-up pull's tempo.  Not changed: 22,050 Hz in `RATES`, since the new test covers low rates.
+* [x] 2026-10-21: M11 review round 2, by one new reviewer who ran 94 more configurations (8 to 192 kHz, other `PlayerConfig`s, 1 to 6 stems, seeks in fades, loops in chipmunk mode): 0 allocations in all.  No blockers; 1 should-fix and 4 nits, all checked and real, all fixed.  The should-fix: two callback paths had no phase, a pause while a seek's fade runs and a callback over `SCRATCH_FRAMES`, so an allocation planted in either passed.  "seek" now pauses one callback after the seek, and `CALLBACK_FRAMES` adds 10,000; each plant now fails ("seek" at 128 frames; every phase at 10,000).  Nits: the promise test adds 96 and 192 kHz; `Player::with_config` and `Varispeed::warm_up` panic on a hop over `MAX_PUSH_FRAMES` or a block the queues cannot hold, each with a test; `render_chipmunk`'s doc; and "chipmunk" checks that the playhead moves 1.8 song frames or more per frame played, which a player that ignores chipmunk fails.
+* [x] 2026-10-21: M11 review round 3, by one new reviewer who read the whole diff and ran 11 mutants.  No blockers; 1 should-fix and 4 nits, all checked.  The should-fix, real: `interleaved`'s capacity and the promise test's push were 4,096 by hand, so a raised `MAX_PUSH_FRAMES` broke RT-1 and failed only a test with a hard-coded number.  Both now use the constant; with the constant at 8,192, the promise test still passes.  Nits fixed: the asserts' edges are pinned (`<` in place of `<=` now fails a test in each); the promise test also pulls 4,096 frames at 44.1 kHz; two doc comments rewrapped; this plan's design text now says `+ MAX_PUSH_FRAMES`, about 650 KB and four callback sizes.  Not changed, with reasons: a `pop_back` mutant of the anchor bound passes, but it keeps the newest anchor, so the playhead after the loop stays right; a smaller warm-up margin (`rate / 8`) passes, since noise does not reach the bound's worst case, which its arithmetic covers; a `warm_up(.., 256)` in `Player::with_config` passes, since the promise test checks the stretchers directly; `required-features` on the test would turn a compile error into a silent skip (VERIFY-1).
+* [x] 2026-10-21: M11, three review rounds done and their findings fixed.
+* [x] 2026-10-21: M11: PR #25 opened.  CI (run 39521993920): every job passes.  The `test` job lists the 5 `realtime` tests as `ok`; the binary took about 11 s on the runner.  `test` took 15 min, since Rust 1.99.1 changed rust-cache's key and the build started cold (`Finished` in 9m 58s); M11 did not cause that.
+* [ ] M11: merged.
 * [ ] M12: MEM-1 lint.
 * [ ] M13: MEM-3 lint.
 * [ ] M14: Claude Code deny rules.

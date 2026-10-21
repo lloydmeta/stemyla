@@ -12,7 +12,7 @@ realfft = "3.5.0"
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "wav", "pcm"] }
 timestretch = { version = "=0.15.0", optional = true }
 web-time = "1.1.0"
-wsola = { version = "=0.1.0", optional = true }
+wsola = { version = "=0.2.0", optional = true }
 
 # Reads the Web Audio output's latency (`live`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]

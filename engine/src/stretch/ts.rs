@@ -97,6 +97,9 @@ impl Stretcher for TimestretchStretcher {
         // Re-apply tempo after the cold reset.
         self.controller.set_tempo_rate(self.tempo);
     }
+    /// Nothing: this stretcher is for benches only, and RT-1 does not
+    /// cover it.
+    fn warm_up(&mut self, _max_tempo: f64, _max_frames: usize) {}
 }
 
 #[allow(dead_code)]

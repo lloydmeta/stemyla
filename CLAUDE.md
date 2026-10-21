@@ -65,7 +65,7 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * MEM-3: GPU buffers are freed explicitly when dropped, never left to garbage collection.
 * MEM-4: the tab stays under 2 GB on an iPhone, GPU buffers included.
 * MEM-5: every browser-storage (OPFS) write passes a whole array, never a view.
-* RT-1: the audio callback never waits for the player slot and never frees a player.
+* RT-1: the audio callback never waits for the player slot, never frees a player, and never allocates after warm-up.
 * GPU-1: every kernel fits WebGPU's default limits.
 * GPU-2: a kernel change is checked against the CPU and in a browser before it becomes a default.
 * GPU-3: a kernel never becomes the default on the strength of SwiftShader alone.

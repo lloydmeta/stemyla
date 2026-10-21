@@ -143,7 +143,7 @@ The test `third_party_lists_what_ships` compares the table with this command's o
 | web-time | 1.1.0 | MIT OR Apache-2.0 | https://github.com/daxpedda/web-time |
 | wgpu | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
 | wgpu-types | 30.0.1 | MIT OR Apache-2.0 | https://github.com/gfx-rs/wgpu |
-| wsola | 0.1.0 | MIT | https://github.com/jhheider/pdcst |
+| wsola | 0.2.0 | MIT | https://github.com/jhheider/pdcst |
 | zerocopy | 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zerocopy-derive | 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
