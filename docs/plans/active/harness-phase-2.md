@@ -1755,11 +1755,93 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 * `grep -c "Enforced by: prose only" docs/invariants.md` gives 2: GIT-1 names the deny rules, and GIT-3 names the `gh-pages history` ruleset.
 * fmt, clippy, the tests and `docs-check` pass.
 
-### M15: rustfmt after each edit
+### M15: rustfmt after each edit (GIT-2)
 
 * Scope, set by the maintainer on 2026-10-20: the `rustfmt` hook only.  The Stop hook (fmt and `docs-check` at each stop) and the SessionStart WebDriver report are dropped.
 * Change: in `.claude/settings.json`, a PostToolUse hook on `Edit|Write` runs `rustfmt --edition 2024` on the edited file when it ends in `.rs`.  It is a shell command that reads `tool_input.file_path` from stdin, not an `xtask` command.  The control stays CI's `fmt` job; the hook saves a round trip.
-* Acceptance: in a session, an edit that leaves a `.rs` file unformatted is formatted, and an edit of a `.md` file is not touched.  Record both in the PR.  The file still passes `claude_settings_hold_the_deny_rules`, and `cargo run -p xtask -- publish --help` and `git push --dry-run origin main` are still refused (M14), since a settings file that the schema rejects drops its deny rules.
+* Scope, by the rule for proportionate sensors: one shell command in the settings file, one real-tree test that runs it, and recorded runs.  No script file, no change to `claude_settings_problems`, no decision record and no tech-debt entry.  The hook is a convenience, not a control.  No unit test: the plants of step 1, recorded in the PR, take its place.
+
+#### M15 state at the start
+
+On 2026-10-21, at commit `f7e3d2d` (M14 merged as PR #28):
+
+* `.claude/settings.json` holds `$schema` and `permissions.deny` (26 rules).  `SETTINGS_KEYS` already lists `hooks`, and `settings_that_deny_every_rule_pass` passes a file with a `hooks` key.  `claude_settings_problems` does not read `hooks`.
+* No `rustfmt.toml` exists.  The workspace edition is 2024 (`Cargo.toml`), and `cargo fmt` passes it to rustfmt.
+* CI: the `fmt` job installs the `rustfmt` component.  The `test` job does not: `dtolnay/rust-toolchain` installs with `--profile minimal` and only the listed `components` ([action.yml](https://github.com/dtolnay/rust-toolchain/blob/master/action.yml)).
+* Need: CI's `fmt` job has never failed (92 runs of `ci.yml`, 1 failure, in `browser tests`).  In 5 of the 31 local sessions in this repo, `cargo fmt --all --check` reported a diff, which cost the agent a run of `cargo fmt` and a second check before a commit.
+* The guide's Status says "No hooks, project skills or project subagents exist yet (phases 2 and 3)".  GIT-2's `* Enforced by:` line names CI's required checks only.
+* Tools on the maintainer's Mac: Claude Code 2.1.306, rustfmt 1.10.0 (Rust 1.99.0), jq 1.7.1 at `/usr/bin/jq` on the sealed system volume of macOS 26.7.  The `ubuntu-latest` image (24.04, 20261012) has jq 1.7.1 ([runner image](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)).
+
+Facts checked for M15:
+
+* PostToolUse fires after a tool succeeds.  For `Write` and `Edit`, `tool_input.file_path` is always absolute.  A matcher of letters and `|` is a list of exact names, so `Edit|Write` does not match `NotebookEdit`.  With no `args`, the command is shell form, run with `sh -c` on macOS and Linux.  On exit 0, stdout and stderr are not shown to the model; exit 2 shows stderr to the model; any other code is a non-blocking error.  The default timeout is 600 s.  A file that a `Bash` command rewrites does not fire the hook.  The file watcher picks up an edit to the hooks ([hooks](https://code.claude.com/docs/en/hooks)).
+* The guide's formatter example is `jq -r '.tool_input.file_path' | xargs npx prettier --write` ([hooks guide](https://code.claude.com/docs/en/hooks-guide#auto-format-code-after-edits)).  `xargs` splits a path at a space, so M15 takes the path with a command substitution.  In a pipeline, a missing `jq` exits 0 in silence, since the status is the last command's; so M15 stops with `|| exit 1` (plan review round 1).
+* A hook may also take an `if` field, a permission rule such as `"Edit(*.rs)"`, to filter by path ([hooks](https://code.claude.com/docs/en/hooks)).  M15 filters with `case` in the command instead, so the test runs the filter too.
+* Headless runs, `claude -p --model haiku` in a scratch repo with the hook below, 3 runs, $0.01:
+  * after a `Write` of `pub fn f(){let x=1;}` to a `.rs` file, the file was formatted.  Claude Code added a note to the model's context, which the model quoted.  The session transcript (`~/.claude/projects/<folder>/<session_id>.jsonl`, where `<folder>` is the working folder's path with each `/` as `-`) holds it as a `hook_additional_context` attachment.  `--output-format stream-json` does not show it (plan review round 1).  The note: "PostToolUse hook modified <path> after your edit (likely a formatter).  Your next Edit will not fail with a stale-file error, but if its old_string targets a region the hook reformatted, Read the file first."  An `Edit` of the unformatted text `let x=1;`, made without a `Read`, failed with "String to replace not found in file";
+  * a `Write` of Rust text to a `.md` file left it as written;
+  * a `Write` of `fn main({` to a `.rs` file: rustfmt exited 1, and the model saw no message.
+* Bare `rustfmt` parses as edition 2015 unless told, and `style_edition` follows `edition` ([Configurations.md](https://github.com/rust-lang/rustfmt/blob/main/Configurations.md#edition)).  The 2024 style sorts by version ([style editions](https://doc.rust-lang.org/style-guide/editions.html)): `use x::{a10,a9};` becomes `use x::{a9, a10};` with `--edition 2024`, and `use x::{a10, a9};` with `--edition 2015`.  `rustfmt --edition 2024 --check xtask/src/rules.rs` passes, as `cargo fmt` does.
+* rustfmt also formats a file's out-of-line modules: on a `lib.rs` with `mod m;`, it formatted `m.rs`.  `skip_children` is unstable.  So an edit of a crate root formats the crate's module tree; on a tree that passes the `fmt` job, nothing else changes.  One file of 6,000 lines took 0.2 s.
+* Cargo sets `CARGO_TARGET_TMPDIR` for integration tests, a folder in `target/` where they may write ([environment variables](https://doc.rust-lang.org/cargo/reference/environment-variables.html)).
+
+#### M15 design
+
+* `.claude/settings.json` gets a `hooks` key after `permissions`:
+
+```json
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty') || exit 1; case \"$f\" in *.rs) rustfmt --edition 2024 \"$f\";; esac"
+          }
+        ]
+      }
+    ]
+  }
+```
+
+* What it does: it formats every `.rs` file that `Edit` or `Write` changes, in the repo or outside it, such as a reviewer's scratch worktree.  Another path, or none, exits 0 with no output.  The command is POSIX `sh`, so `dash` on CI and `sh` on macOS run it the same way.
+* What it does not do: on a parse error, or with `jq` or `rustfmt` missing, it exits 1 or 127, not 2.  That is a non-blocking error: the person sees a notice, and the model sees nothing.  A half-done edit is not reported to the model; the compiler reports it later.  It does not see a file that `Bash`, `NotebookEdit` or a person writes, or a session outside the repo root.  It formats a `.rs` file of another project with edition 2024 too, which may differ from that project's style.  The `fmt` job stays the control, so these gaps get no tech-debt entry.
+* The edition is written in the command, as `cargo fmt` takes it from `Cargo.toml`.  A change of the workspace edition changes the command in the same commit; the `fmt` job fails if it does not.
+* The test, `the_rustfmt_hook_formats_rust_files` in `xtask/tests/rules.rs`, beside `claude_settings_hold_the_deny_rules`:
+  * It reads `.claude/settings.json` with `serde_json` and takes the `command` of each hook in each `hooks.PostToolUse` entry whose `matcher` is `Edit|Write`.  It needs exactly one, else it fails: "GIT-2: .claude/settings.json has <n> PostToolUse hooks on `Edit|Write`, not 1.  Fix: keep one hook that runs rustfmt on the edited .rs file (harness phase 2, M15)."  The hook must have the keys `type` and `command` and no other, with `type` equal to `command`, else it fails: "GIT-2: the rustfmt hook in .claude/settings.json has the key `<key>`.  Fix: keep only `type` and `command`; the test runs the command in shell form."  So `args`, `async` (which races the next edit), `if` and `timeout` fail it (plan review round 1).  A hook that is not an object, lacks `type` or `command`, or has a `type` other than `command` fails with: "GIT-2: the rustfmt hook in .claude/settings.json is not `{"type": "command", "command": ...}`.  Fix: keep only `type` and `command`; the test runs the command in shell form."
+  * In `CARGO_TARGET_TMPDIR/rustfmt hook/`, a folder with a space, it writes `lib.rs` and `notes.md`, each with `use x::{a10,a9};\nfn f(){let x=1;}\n`.  For each file it runs `sh -c <command>` with the stdin `{"tool_name":"Write","tool_input":{"file_path":"<absolute path>"}}`, and asserts exit 0.  Then `lib.rs` must equal `use x::{a9, a10};\nfn f() {\n    let x = 1;\n}\n`, and `notes.md` must be unchanged.  With `{"tool_name":"Write","tool_input":{}}`, the command exits 0.
+  * A failure names the file ("no file" for the input without `file_path`), its text, and the command's exit code and stderr: "GIT-2: the rustfmt hook in .claude/settings.json left <file> as <text> (exit <code>: <stderr>).  Fix: the hook needs jq and rustfmt on PATH (`rustup component add rustfmt`); it formats .rs files only, with the workspace edition."
+* CI: the `test` job's toolchain step gets `components: rustfmt`, with a comment that `the_rustfmt_hook_formats_rust_files` runs rustfmt.
+* Docs (DOC-1):
+  * `invariants.md`, GIT-2's `* Enforced by:` line adds: "A PostToolUse hook in `.claude/settings.json` runs rustfmt on each `.rs` file that the agent's `Edit` or `Write` tool changes, kept by `the_rustfmt_hook_formats_rust_files`.  It saves a round trip; the `fmt` job is the control."  "Prose only" lines stay at 2.
+  * `harness.md`, a components row: "a PostToolUse hook in `.claude/settings.json` runs rustfmt on each `.rs` file that `Edit` or `Write` changes, kept by `the_rustfmt_hook_formats_rust_files` (GIT-2) | sensor, computational | in 5 of 31 sessions, `cargo fmt --all --check` found a diff before a commit, and the agent ran fmt and the check again.  It sees `Edit` and `Write` only; the `fmt` job is the control | phase 2".
+  * `working-with-agents.md`: in Status, the hooks sentence becomes "The project settings also run rustfmt on each `.rs` file that the agent edits.  No project skills or project subagents exist yet (phase 3)."  "Before you start", step 1, adds: "The rustfmt hook needs `jq` and `rustfmt` on `PATH`; macOS 26 has `/usr/bin/jq`."  A changelog line: "2026-10-2x, phase 2 (M15): a hook runs rustfmt on each `.rs` file that the agent edits.  The agent may see a note that the file changed, and read it again before its next edit.  `the_rustfmt_hook_formats_rust_files` fails if the hook goes or stops formatting."
+  * The parent plan's phase 2 bullet: "and `rustfmt` on edited `.rs` files after each edit" becomes "and `rustfmt` on edited `.rs` files after each edit (GIT-2, M15)".
+
+#### M15 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. Test first: write `the_rustfmt_hook_formats_rust_files`, and run it on the tree without the hook.  It fails with "has 0 PostToolUse hooks"; record the message.  Then add the hook, the CI component and the docs; the test passes.  Plant each of these in the settings file, one at a time, and restore it; record each failure in the PR:
+   * the matcher `Edit`: "has 0 PostToolUse hooks";
+   * `*.rx)` for `*.rs)`: `lib.rs` is left unformatted;
+   * `--edition 2015`: `lib.rs` is left with `a10, a9`;
+   * `*)` for `*.rs)`: `notes.md` is formatted;
+   * the guide's form, `jq -r '.tool_input.file_path' | xargs rustfmt --edition 2024`: the path with a space fails;
+   * `"async": true` in the hook: "has the key `async`".
+2. Run the hook in sessions, before the PR.  In a scratch clone of the branch, as in M14's step 3, start `claude -p --model haiku --allowedTools Write,Edit,Read --output-format stream-json --verbose` from the clone's root:
+   * a `Write` of `pub fn f(){let x=1;}` to `scratch.rs` at the root: the file is formatted, and the session transcript (`~/.claude/projects/<folder>/<session_id>.jsonl`, with `session_id` from the stream) holds the note "PostToolUse hook modified";
+   * an `Edit` of `scratch.rs` that leaves it unformatted (`let x = 1;` to `let x=2;`): the file is formatted;
+   * a `Write` of the same text to `scratch.md`: it is unchanged.
+   * Then re-run M14's step 3 with the new file, as TD-28's fix says: each command is refused or allowed as listed, with this branch's name in place of `ai-agent-harness-phase-2-ms14`.  Record each result and the cost in the PR.
+
+#### M15 acceptance
+
+* `the_rustfmt_hook_formats_rust_files` failed without the hook, passes with it, and the CI `test` job lists it as `ok`.  Each plant of step 1 fails it.
+* The runs of step 2 give the results listed, and M14's step 3 gives its listed results with the new file.  `claude_settings_hold_the_deny_rules` passes.
+* `grep -c "Enforced by: prose only" docs/invariants.md` still gives 2.
+* fmt, clippy, the tests and `docs-check` pass.
 
 ### M16: moved to phase 5
 
@@ -1811,7 +1893,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * To undo M12, revert its commits.  That removes the six `clippy.toml` files, the `#[expect]`s, the canaries and the `wasm32` step, and puts back MEM-1's and MEM-2's lines.  Put decision 0008 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice.  Keep TD-26's ID: add `* TD-26: withdrawn by the revert of M12.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * To undo M13, revert its commits.  That removes the five paths, the canary, the two constructors and the private field, and puts back MEM-3's lines and the rule file.  Put decision 0009 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice.  Keep TD-27's ID: add `* TD-27: withdrawn by the revert of M13.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * To undo M14, revert its commits.  The revert removes the check and its tests, and puts back GIT-1's lines, TD-20 and the `CLAUDE.md` lines.  It also removes `.claude/settings.json`, unless M15 is in the tree: then keep the file and remove only its `permissions` key by hand.  Put decision 0010 and its line in `docs/README.md` back as they were, still accepted.  Keep TD-28's ID: add `* TD-28: withdrawn by the revert of M14.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the rules were reverted.  The rulesets are GitHub settings, which a revert does not touch: delete ruleset 25544673 and set the admin bypass of ruleset 24980616 back to `always` with `gh api`, then put GIT-3 back to prose only.
-* Checks read the tree and write nothing, so they can run any number of times.
+* To undo M15, revert its commits.  That removes the hook, the test, the CI component, and the lines in GIT-2, `harness.md`, the guide and the parent plan.  `.claude/settings.json` keeps its deny rules.  Keep this plan's living sections, and add a changelog line to the guide that says the hook was reverted.
+* Checks read the tree and write nothing, so they can run any number of times.  `the_rustfmt_hook_formats_rust_files` writes only under `CARGO_TARGET_TMPDIR`, and overwrites its files on each run.
 * M11 changes a rule that the maintainer chose on 2026-10-19.  If they reverse it, revert M11's rule text and decision, and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
 
@@ -2033,7 +2116,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-21: M14, GitHub rulesets, with the maintainer's go-ahead.  Ruleset 24980616 (`main`): the admin bypass changed from `always` to `pull_request`; `current_user_can_bypass` is now `pull_requests_only`.  New ruleset 25544673, `gh-pages history`: `deletion` and `non_fast_forward` on `refs/heads/gh-pages`, no bypass; `gh api repos/lloydmeta/stemyla/rules/branches/gh-pages` lists both, and `current_user_can_bypass` is `never`.  The backup of the old `main` ruleset is in the session's scratch folder.  No test push was made.  GIT-3 is no longer prose only: 2 lines left.
 * [x] 2026-10-21: M14 review round 4, by one new reviewer at `6ae16cc` (with a short pass over `0d0470a`), who compared the 26 rules in both lists, ran the `xtask` tests and `docs-check`, and checked the branch names in the history.  No blockers; 2 should-fix findings and 4 nits, all checked.  The significant one, real but narrower than reported: a pipeline is matched as a whole.  6 runs ($0.017): `cargo run --help | grep -c publish` and `git push --dry-run origin HEAD | grep main` were refused, with hooks on and off; `git push --dry-run origin HEAD && echo main` and `... && git switch --help main` ran, so an `&&` chain is matched part by part, not as the reviewer inferred.  TD-28, the guide, the doc comment and the plan say so.  The minor one, real and fixed: the plan's design, step 3 and acceptance still had 23 rules and a count of 3.  Nits fixed: `docs/README.md` and the guide say "a push that names"; abbreviated options; TD-28 lists other branch names that the rules refuse.  Review stops here: no blockers and no significant open items.
 * [x] 2026-10-21: M14: PR #28 opened.  CI (run 39599376636 at `02fb118`): every job passes.  The `test` job lists `claude_settings_hold_the_deny_rules ... ok` and the 3 `rules::settings_tests` as `ok`.  Copilot did not review: the account had reached its quota.
-* [ ] M14: Claude Code deny rules.
+* [x] 2026-10-21: M14, PR #28 merged by the maintainer (`f7e3d2d`).
+* [x] 2026-10-21: M15 implementation plan written (the M15 sections under "Plan of work").  Survey of Claude Code 2.1.306's PostToolUse hooks, rustfmt 1.10.0's edition and child modules, and CI's toolchains; 3 headless runs in a scratch repo ($0.01).
+* [x] 2026-10-21: M15 plan review round 1, by one new reviewer who built the test, the hook and every doc edit as worded in a scratch worktree, ran each plant, ran the command under `dash`, and made 2 headless runs ($0.009).  The test failed without the hook and passed with it; each plant failed it; `docs-check` passed.  No blockers; 2 should-fix findings and 5 nits, all checked.  The significant one, real: `--output-format stream-json` does not show the hook note, so step 2 reads it from the session transcript.  The minor one, real: in a pipeline, a missing `jq` exited 0 in silence, so the command now stops with `|| exit 1`.  Nits fixed: the hook may hold only `type` and `command`, so `async` or `args` fails the test; the fix text names `rustup component add rustfmt`; the `if` field is named as an option not taken.  Not changed: step 2 re-runs all of M14's step 3, as TD-28's fix says; it costs about $0.15.
+* [x] 2026-10-21: M15 plan review round 2, by one new reviewer who built the revised test, hook, CI change and every doc edit as worded in a scratch worktree, ran fmt, clippy, the `xtask` tests, `docs-check` and the 6 plants, and made 2 headless runs ($0.009).  Each plant failed as listed; a misspelt test name in GIT-2 failed `docs-check`; the transcript held the note as `hook_additional_context`, and a parse error as `hook_non_blocking_error`.  No blockers; 1 minor should-fix and 5 nits, all checked and real, all fixed.  The should-fix: the scope did not say that the plants take the place of a unit test.  Nits fixed: messages for a hook of the wrong shape and for the input without a path; the branch name in M14's step 3; the transcript folder; a long sentence; a `.rs` file of another project.  Review stops here: no blockers and no significant should-fix items.
 * [ ] M15: rustfmt hook.
 * [x] 2026-10-20: M16 moved to phase 5b by the maintainer.
 * [ ] M17: UI snapshots compared.
@@ -2156,6 +2242,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-21, maintainer (M14): deny a push to `main` or `gh-pages` after all, but not to other branches (option (e)).  A rule sees only a branch that the command names (TD-28).
 * 2026-10-21, maintainer (M14): set the `main` ruleset's admin bypass to pull requests only, and add a `gh-pages` ruleset that blocks force pushes and deletion.  A ruleset that lets only CI push to `gh-pages` would also stop the maintainer's local `xtask publish`, so it is not made.
 * 2026-10-21, agent (M14): no deny rule for `gh pr create --body`.  It is outside GIT-1 and the maintainer's scope for M14, and `-b` takes a body in four `gh pr` commands.
+* 2026-10-21, agent (M15): the hook is one shell command in the settings file, not a script, and the test runs that command as written.  A rustfmt error is a non-blocking error, not exit 2, so a half-done edit does not interrupt the model.  The hook formats any `.rs` path, so a scratch worktree is formatted too.  It stops with `|| exit 1` when `jq` fails, so a missing `jq` is not silent.
 
 ## Outcomes and retrospective
 
