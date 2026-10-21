@@ -73,7 +73,7 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * PROTO-1: each message has one encoder and one decoder for both sides; `xtask e2e` writes them by hand too, so the wire format changes only with it.
 * PROTO-2: a `?model_url=` is accepted only from the page's own site.
 * VERIFY-1: every behaviour is verified by an automated check; "it compiles" is not acceptance, and a skipped test is not a pass.
-* GIT-1: never push without being asked; never merge a PR or run `xtask publish`, which deny rules refuse.
+* GIT-1: never push without being asked; never merge a PR or run `xtask publish`; deny rules refuse the usual commands.
 * GIT-2: make small verified steps.  Before each commit, run fmt, clippy, the tests and `docs-check`.  Sign every commit (`git commit -S`).
 * GIT-3: never squash or rewrite `gh-pages`.
 * DOC-1: a change that makes the map or a doc wrong fixes it in the same commit.

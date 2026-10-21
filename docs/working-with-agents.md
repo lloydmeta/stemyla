@@ -85,13 +85,13 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## What a person must do
 
-* Push, or ask the agent to push; it does not push unasked (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules stop the agent from running it.
+* Push, or ask the agent to push; it does not push unasked (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules refuse it in the forms that an agent usually writes.
 * Accept or reject decisions.
 * Give evidence from real hardware: a real GPU (GPU-3), Safari, an iPhone for memory (MEM-4).
-* Merge.  `main` needs an approval.  Deny rules stop the agent from running `gh pr merge`.
+* Merge.  `main` needs an approval.  Deny rules refuse `gh pr merge` in the forms that an agent usually writes.
 * Decide when the agent stops because a change would break a rule.
 
-## What the agent cannot do
+## What deny rules refuse
 
 Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each publishes the site.  The agent sees "Permission to use Bash with command ... has been denied", and the message does not name the rule.  When it stops there, run the command yourself.
 
