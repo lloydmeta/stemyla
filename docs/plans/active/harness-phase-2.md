@@ -1768,7 +1768,8 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-21: M12 review round 2, by one new reviewer who read both pinned actions' sources, built the `wasm32` step from cold (1m 34s) and ran the canaries in Chrome.  No blockers; 1 should-fix and 3 nits, all checked.  The should-fix, real: the guide's changelog line still told every crate to share an `engine::Samples`.  Nits fixed: TD-26 names an outer `#[expect]` on `mod tests` too, and the M12 design names TD-26 and the 12 pairs.  Not changed: the file-wide `#![expect]`s in two `roformer-gpu` test files, which the design allows for tests.
 * [x] 2026-10-21: M12 review round 3, by one new reviewer who read the whole diff as a maintainer and ran every CI command.  No blockers; 1 should-fix and 2 nits, all checked.  The should-fix, real: the choice at M12's decision point outlives the plan, as M6's and M11's did, so it is now decision 0008, accepted.  Nit fixed: the design gives (b)'s counts beside (a)'s.  Not changed: `app/tests/web.rs` stays outside `memory.md`'s paths, as plan review decided.
 * [x] 2026-10-21: M12, three review rounds done and their findings fixed.
-* [ ] M12: MEM-1 lint.
+* [x] 2026-10-21: M12: PR #26 opened.  CI (runs 39547092472 and 39549517927): every job passes.  The `wasm32` clippy step took 1m 46s on the first run, 1m 49s on its re-run, and 1 s on the last run (`6317cb6`, after the merge of `main`).
+* [x] 2026-10-21: M12, PR #26 merged by the maintainer (`a5b7b8f`).
 * [ ] M13: MEM-3 lint.
 * [ ] M14: Claude Code deny rules.
 * [ ] M15: rustfmt hook.
