@@ -109,6 +109,31 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 
 * Fix: none planned.  Phase 3's GPU reviewer looks for GPU memory that is not destroyed.
 
+### TD-28: GIT-1's deny rules match command text only
+
+Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They also refuse by mistake:
+
+* a branch whose name ends in `main`, such as `fix-main`, or holds `gh-pages`, `--all`, `--branches` or `--mirror`;
+* a pipeline that starts with a push or `cargo run` and names one of those words or `publish` later, such as `git push origin x | grep main` or `cargo run --help | grep publish`.  In runs on 2026-10-21, Claude Code matched a rule against a whole pipeline, but matched a chain with `&&` part by part.  Run the command without the pipe.
+
+They do not see:
+
+* a push that names no branch, such as `git push` or `git push origin HEAD` while on `main`; a branch named through a variable or a config, such as `push.default`; the `main` ruleset refuses such a push to `main`, but not to `gh-pages`;
+* a push that reaches `main` through the matching refspec `:`, a glob refspec such as `refs/heads/*:refs/heads/*`, a quoted branch (`"main"`) or an abbreviated option (`--mir`, `--bra`);
+* a push to another branch without being asked, which rests on prose (decision 0010);
+* a shell or `eval` that runs a string, and a script that the agent writes and then runs;
+* `git -C`, `git -c`, a git alias, `env`, an absolute path to `git` or `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;
+* a `gh` alias, such as `gh alias set m 'pr merge'`;
+* a cargo option before `run`, such as `cargo -q run` or `cargo +nightly run`;
+* `gh api`, which can merge a PR;
+* a session started outside the repo root, or moved with `/cd`, since Claude Code reads the project settings from the session's working directory only;
+* a mod that answers `tool.check`, which can approve a denied call on a personal account;
+* a cloud session in a project or with several repositories, and a session started with `--setting-sources` without `project`; these read no project permission rules ([settings](https://code.claude.com/docs/en/settings));
+* an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
+* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review sees it.
+
+* Fix: re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to `.claude/settings.json`, or an upgrade of Claude Code or RTK.  On GitHub, the `main` ruleset refuses a direct push to `main`, and the `gh-pages history` ruleset refuses a rewrite of `gh-pages` (TD-20).  Nothing on GitHub refuses a fast-forward push to `gh-pages`, a PR merge with the admin override, or `xtask publish`.  Phase 5 adds the agents' own identity.
+
 ## Known breaches
 
 ### TD-12: dropped files are copied before they are saved
@@ -157,13 +182,15 @@ The app draws to one canvas.  `xtask e2e` clicks fixed coordinates (`VIEWPORT`, 
 
 ### TD-20: process rules rest on local settings
 
-Commit signing is set in the maintainer's own git config only, and nothing stops an agent from pushing (GIT-1, GIT-2).  The `main` ruleset (checked 2026-10-19 with `gh api repos/lloydmeta/stemyla/rulesets/24980616`):
+Commit signing is set in the maintainer's own git config only (GIT-2).  The agent runs with the maintainer's credentials, so GitHub cannot tell the two apart (GIT-1).  The `main` ruleset (checked 2026-10-21 with `gh api repos/lloydmeta/stemyla/rulesets/24980616`):
 
 * does not require signed commits;
-* lets the admin role bypass it always, so agents running with the maintainer's credentials can skip the required checks and the approval;
+* lets the admin role bypass it for pull requests only (since 2026-10-21; before, always).  A direct push to `main` is refused.  An agent can still merge a PR past the approval and the checks (`gh pr merge --admin`); only the deny rules refuse that;
 * does not require a branch to be up to date before merging (`strict_required_status_checks_policy: false`), so a PR can merge untested against the current `main` (the failure behind PR #12).
 
-* Fix: in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings; in phase 5, the other ruleset changes.
+The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force pushes and deletion of `gh-pages` for everyone (GIT-3).  It does not restrict a fast-forward push, so a plain push to `gh-pages` publishes the site (GIT-1).  A rule that only CI may push needs a credential that the agent cannot use, such as a deploy key in an environment limited to `main`.  The maintainer's local `xtask publish` would then stop working.
+
+* Fix: in phase 5 of the plan, the other ruleset changes and the agents' own identity.  Phase 2 denies a push that names `main` or `gh-pages`, publish and merge (decision 0010), and set the two rulesets above.
 
 ## Closed
 

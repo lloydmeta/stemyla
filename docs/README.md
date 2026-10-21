@@ -27,6 +27,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0007-no-allocation-in-the-audio-callback.md`: after warm-up, the audio callback never allocates or frees memory, for the stretchers the app ships (RT-1).
 * `decisions/0008-mem-1-lint-in-each-crate.md`: six crates, each with its own `clippy.toml`, fail `to_vec` on a slice or a JS typed array (MEM-1).
 * `decisions/0009-mem-3-lint-and-private-device.md`: clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer`, and `Gpu`'s device is private (MEM-3).
+* `decisions/0010-git-1-deny-rules.md`: Claude Code deny rules refuse an agent's push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`; it pushes other branches when asked (GIT-1).
 
 ## References
 

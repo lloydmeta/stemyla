@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Bash(git push *main)",
+      "Bash(git push *main *)",
+      "Bash(git push *gh-pages*)",
+      "Bash(git push *--all*)",
+      "Bash(git push *--mirror*)",
+      "Bash(git push *--branches*)",
+      "Bash(rtk git push *main)",
+      "Bash(rtk git push *main *)",
+      "Bash(rtk git push *gh-pages*)",
+      "Bash(rtk git push *--all*)",
+      "Bash(rtk git push *--mirror*)",
+      "Bash(rtk git push *--branches*)",
+      "Bash(rtk proxy git push *main)",
+      "Bash(rtk proxy git push *main *)",
+      "Bash(rtk proxy git push *gh-pages*)",
+      "Bash(rtk proxy git push *--all*)",
+      "Bash(rtk proxy git push *--mirror*)",
+      "Bash(rtk proxy git push *--branches*)",
+      "Bash(gh pr merge *)",
+      "Bash(rtk gh pr merge *)",
+      "Bash(rtk proxy gh pr merge *)",
+      "Bash(cargo r* publish*)",
+      "Bash(rtk cargo r* publish*)",
+      "Bash(rtk proxy cargo r* publish*)",
+      "Bash(target/*/xtask publish*)",
+      "Bash(./target/*/xtask publish*)"
+    ]
+  }
+}

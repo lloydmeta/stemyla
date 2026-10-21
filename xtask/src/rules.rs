@@ -2779,6 +2779,120 @@ pub fn e2e_types_match_the_protocol(
         .collect()
 }
 
+const SETTINGS_FILE: &str = ".claude/settings.json";
+
+/// The deny rules that `.claude/settings.json` holds for GIT-1: an agent
+/// never pushes to `main` or `gh-pages`, publishes the site or merges a PR
+/// (decision 0010).  A push rule sees only a branch that the command names:
+/// `*main` matches a command that ends in `main`, such as ` main`, `:main`,
+/// `/main` or `+main`, and also refuses `fix-main`.  Each rule starts
+/// with the program name, so a commit message or a grep that holds the
+/// words is not refused on its own.  Claude Code matched a rule against a
+/// whole pipeline in runs on 2026-10-21, so `cargo run --help | grep
+/// publish` is refused; a chain with `&&` was matched part by part.  The `rtk` forms are the commands that the
+/// maintainer's RTK hook makes, and that an agent can write itself.
+pub const REQUIRED_DENY_RULES: [&str; 26] = [
+    "Bash(git push *main)",
+    "Bash(git push *main *)",
+    "Bash(git push *gh-pages*)",
+    "Bash(git push *--all*)",
+    "Bash(git push *--mirror*)",
+    "Bash(git push *--branches*)",
+    "Bash(rtk git push *main)",
+    "Bash(rtk git push *main *)",
+    "Bash(rtk git push *gh-pages*)",
+    "Bash(rtk git push *--all*)",
+    "Bash(rtk git push *--mirror*)",
+    "Bash(rtk git push *--branches*)",
+    "Bash(rtk proxy git push *main)",
+    "Bash(rtk proxy git push *main *)",
+    "Bash(rtk proxy git push *gh-pages*)",
+    "Bash(rtk proxy git push *--all*)",
+    "Bash(rtk proxy git push *--mirror*)",
+    "Bash(rtk proxy git push *--branches*)",
+    "Bash(gh pr merge *)",
+    "Bash(rtk gh pr merge *)",
+    "Bash(rtk proxy gh pr merge *)",
+    "Bash(cargo r* publish*)",
+    "Bash(rtk cargo r* publish*)",
+    "Bash(rtk proxy cargo r* publish*)",
+    "Bash(target/*/xtask publish*)",
+    "Bash(./target/*/xtask publish*)",
+];
+
+/// The top-level keys of `.claude/settings.json` that the check knows.
+/// Claude Code drops a settings file with a value that its schema rejects,
+/// deny rules included, so a key joins this list only after a run of M14's
+/// step 3 (`docs/plans/active/harness-phase-2.md`) shows the rules still
+/// hold.
+pub const SETTINGS_KEYS: [&str; 3] = ["$schema", "permissions", "hooks"];
+
+/// GIT-1: `.claude/settings.json` denies each rule of
+/// `REQUIRED_DENY_RULES`, and holds only keys that the check knows.  A file
+/// of the wrong shape gives one problem.
+pub fn claude_settings_problems(settings: &str) -> Vec<Problem> {
+    let git1 = |message: String| Problem {
+        rule: "GIT-1",
+        file: SETTINGS_FILE.into(),
+        line: None,
+        message,
+    };
+    match deny_rules(settings) {
+        Err(what) => vec![git1(format!(
+            "GIT-1: {SETTINGS_FILE} {what}.  Fix: Claude Code drops a settings file that it cannot read or that its schema rejects, deny rules included.  Keep to the keys this check knows, or add a key to SETTINGS_KEYS in xtask/src/rules.rs after a run of M14's step 3 (docs/plans/active/harness-phase-2.md) shows the rules still hold."
+        ))],
+        Ok(deny) => REQUIRED_DENY_RULES
+            .iter()
+            .filter(|rule| !deny.contains(**rule))
+            .map(|rule| {
+                git1(format!(
+                    "GIT-1: {SETTINGS_FILE} does not deny `{rule}`.  Fix: put it back in permissions.deny; GIT-1 keeps these commands from agents."
+                ))
+            })
+            .collect(),
+    }
+}
+
+/// The rules in `permissions.deny`, or what is wrong with the file's shape.
+fn deny_rules(settings: &str) -> Result<BTreeSet<String>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(settings).map_err(|e| format!("is not JSON ({e})"))?;
+    let top = value
+        .as_object()
+        .ok_or_else(|| "is not a JSON object".to_string())?;
+    if let Some(key) = top
+        .keys()
+        .find(|key| !SETTINGS_KEYS.contains(&key.as_str()))
+    {
+        return Err(format!(
+            "has the key `{key}`, which the check does not know"
+        ));
+    }
+    if top.get("$schema").is_some_and(|schema| !schema.is_string()) {
+        return Err("has a `$schema` that is not a string".to_string());
+    }
+    let permissions = top
+        .get("permissions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "has no `permissions` object".to_string())?;
+    if let Some(key) = permissions.keys().find(|key| *key != "deny") {
+        return Err(format!(
+            "has the key `permissions.{key}`, which the check does not know"
+        ));
+    }
+    permissions
+        .get("deny")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "has no `permissions.deny` list".to_string())?
+        .iter()
+        .map(|rule| {
+            rule.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("has `{rule}` in `permissions.deny`, which is not a string"))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5832,5 +5946,125 @@ fn f() {
                 (E2E_RUST, check(JS_OK, "fn f() {}", &[]), None),
             ],
         );
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::tracked_tests::assert_one_each;
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn settings() -> Value {
+        json!({
+            "$schema": "https://json.schemastore.org/claude-code-settings.json",
+            "permissions": { "deny": REQUIRED_DENY_RULES }
+        })
+    }
+
+    fn with(change: impl FnOnce(&mut Value)) -> String {
+        let mut value = settings();
+        change(&mut value);
+        value.to_string()
+    }
+
+    #[test]
+    fn settings_that_deny_every_rule_pass() {
+        let cases = [
+            settings().to_string(),
+            with(|v| {
+                v["permissions"]["deny"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!("Bash(rm -rf *)"))
+            }),
+            with(|v| v["hooks"] = json!({ "PostToolUse": [] })),
+        ];
+        for case in cases {
+            assert_eq!(claude_settings_problems(&case), [], "{case}");
+        }
+    }
+
+    #[test]
+    fn a_missing_deny_rule_is_named() {
+        let without_merge = with(|v| {
+            v["permissions"]["deny"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|rule| rule != "Bash(gh pr merge *)")
+        });
+        let problems = claude_settings_problems(&without_merge);
+        assert_one_each("GIT-1", &[(SETTINGS_FILE, problems.clone(), None)]);
+        assert!(
+            problems[0]
+                .message
+                .contains("does not deny `Bash(gh pr merge *)`"),
+            "{}",
+            problems[0]
+        );
+
+        let removed = ["Bash(git push *main)", "Bash(cargo r* publish*)"];
+        let without_two = with(|v| {
+            v["permissions"]["deny"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|rule| !removed.iter().any(|gone| rule == gone))
+        });
+        let problems = claude_settings_problems(&without_two);
+        assert_eq!(problems.len(), 2, "{problems:#?}");
+        for (problem, gone) in problems.iter().zip(removed) {
+            assert!(
+                problem.message.contains(&format!("does not deny `{gone}`")),
+                "{problem}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_settings_are_named() {
+        let cases = [
+            ("{".to_string(), "is not JSON (EOF"),
+            ("[]".to_string(), "is not a JSON object"),
+            ("{}".to_string(), "has no `permissions` object"),
+            (
+                r#"{"permissions":1}"#.to_string(),
+                "has no `permissions` object",
+            ),
+            (
+                r#"{"permissions":{}}"#.to_string(),
+                "has no `permissions.deny` list",
+            ),
+            (
+                r#"{"permissions":{"deny":"Bash(gh pr merge *)"}}"#.to_string(),
+                "has no `permissions.deny` list",
+            ),
+            (
+                r#"{"permissions":{"deny":[1]}}"#.to_string(),
+                "has `1` in `permissions.deny`, which is not a string",
+            ),
+            (
+                with(|v| v["permissions"]["allow"] = json!(["Bash(ls *)"])),
+                "has the key `permissions.allow`",
+            ),
+            (with(|v| v["model"] = json!(5)), "has the key `model`"),
+            (
+                with(|v| v["$schema"] = json!(5)),
+                "has a `$schema` that is not a string",
+            ),
+        ];
+        let checked: Vec<_> = cases
+            .iter()
+            .map(|(case, _)| (SETTINGS_FILE, claude_settings_problems(case), None))
+            .collect();
+        assert_one_each("GIT-1", &checked);
+        for ((case, what), (_, problems, _)) in cases.iter().zip(&checked) {
+            assert!(
+                problems[0]
+                    .message
+                    .starts_with(&format!("GIT-1: {SETTINGS_FILE} {what}")),
+                "{case}: {}",
+                problems[0]
+            );
+        }
     }
 }

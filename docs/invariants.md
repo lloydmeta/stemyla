@@ -148,13 +148,13 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.
 * Gaps: TD-8, TD-9, TD-19.
 
-### GIT-1: never push or publish unasked
+### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 
-Never push, or run `xtask publish` (which pushes), without being asked.
+Never push without being asked.  An agent never pushes to `main` or `gh-pages`, runs `xtask publish` (which pushes) or merges a PR; a person does.
 
-* Why: pushing to `main` or `gh-pages` publishes the site.
-* Enforced by: prose only.
-* Gaps: TD-20.
+* Why: pushing to `main` or `gh-pages` publishes the site, and merging a PR pushes to `main`.
+* Enforced by: deny rules in `.claude/settings.json`, kept by `claude_settings_hold_the_deny_rules` (CI `test` job).  They refuse a push that names `main` or `gh-pages`, `--all`, `--branches`, `--mirror`, publish and merge.  They match the command text that an agent usually writes, and were checked by hand (harness phase 2, M14).  On GitHub, the `main` ruleset refuses a direct push to `main`, admin included (TD-20).  A push that names no branch, and a push unasked, rest on prose (decision 0010); TD-28 lists the gaps.
+* Gaps: TD-20, TD-28.
 
 ### GIT-2: small, verified, signed commits
 
@@ -169,7 +169,8 @@ Work in small verified steps.  `cargo fmt --all --check`, clippy with `-D warnin
 Publishing a build id again keeps its published copy, so `gh-pages` needs its full history: never squash or rewrite it, and publish from a full clone.
 
 * Why: `README.md` (publishing on GitHub Pages) explains the write-once `v/<id>/` folders.
-* Enforced by: prose only.
+* Enforced by: the `gh-pages history` ruleset on GitHub (id 25544673), which blocks force pushes and deletion of `gh-pages` for everyone, admins included (checked 2026-10-21 with `gh api repos/lloydmeta/stemyla/rules/branches/gh-pages`).  Nothing in the repo checks that the ruleset stays.
+* Gaps: TD-20.
 
 ### DOC-1: the map and docs match the code
 

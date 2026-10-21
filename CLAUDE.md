@@ -49,7 +49,7 @@ cargo run -p xtask -- docs-check                # the map and docs match the cod
 cargo run -p xtask --release -- serve app/dist --port 8080
 cargo run -p xtask -- web-test                  # browser tests (needs wasm-bindgen-cli; see README)
 cargo run -p xtask -- e2e <scenario>            # the built page over WebDriver (see README)
-cargo run -p xtask --release -- publish         # build, commit to gh-pages, push (GIT-1)
+cargo run -p xtask --release -- publish         # build, commit to gh-pages, push: a person only (GIT-1)
 ```
 
 ## Rules
@@ -73,7 +73,7 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * PROTO-1: each message has one encoder and one decoder for both sides; `xtask e2e` writes them by hand too, so the wire format changes only with it.
 * PROTO-2: a `?model_url=` is accepted only from the page's own site.
 * VERIFY-1: every behaviour is verified by an automated check; "it compiles" is not acceptance, and a skipped test is not a pass.
-* GIT-1: never push, or run `xtask publish` (which pushes), without being asked.
+* GIT-1: push only when asked, never to `main` or `gh-pages`; never merge a PR or run `xtask publish`.  Deny rules refuse the usual commands.
 * GIT-2: make small verified steps.  Before each commit, run fmt, clippy, the tests and `docs-check`.  Sign every commit (`git commit -S`).
 * GIT-3: never squash or rewrite `gh-pages`.
 * DOC-1: a change that makes the map or a doc wrong fixes it in the same commit.
