@@ -333,27 +333,32 @@ impl Session {
     }
 
     /// Sizes the window so the page's viewport is `width` by `height` CSS
-    /// pixels (the window also holds toolbars, whose size varies).
-    pub fn set_viewport(&self, width: u32, height: u32) -> Result<()> {
-        let (mut w, mut h) = (width, height);
-        for _ in 0..3 {
-            self.call(
-                "POST",
-                "/window/rect",
-                Some(json!({ "width": w, "height": h })),
-            )?;
-            let got = self.execute("return [window.innerWidth, window.innerHeight];", json!([]))?;
-            let (gw, gh) = (
-                got[0].as_u64().unwrap_or(0) as u32,
-                got[1].as_u64().unwrap_or(0) as u32,
-            );
-            if (gw, gh) == (width, height) {
-                return Ok(());
-            }
-            w = (w + width).saturating_sub(gw);
-            h = (h + height).saturating_sub(gh);
-        }
-        bail!("could not size the viewport to {width}x{height}")
+    /// pixels, and returns what each try saw, for the log.
+    pub fn set_viewport(&self, width: u32, height: u32) -> Result<Vec<String>> {
+        fit_viewport(
+            (width, height),
+            |(w, h)| {
+                self.call(
+                    "POST",
+                    "/window/rect",
+                    Some(json!({ "width": w, "height": h })),
+                )
+                .map(drop)
+            },
+            || self.viewport(),
+            || {
+                self.frames(2)?;
+                self.viewport()
+            },
+        )
+    }
+
+    fn viewport(&self) -> Result<Size> {
+        let got = self.execute("return [window.innerWidth, window.innerHeight];", json!([]))?;
+        Ok((
+            got[0].as_u64().unwrap_or(0) as u32,
+            got[1].as_u64().unwrap_or(0) as u32,
+        ))
     }
 
     pub fn screenshot(&self, path: &Path) -> Result<()> {
@@ -397,6 +402,112 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+/// A width and a height in CSS pixels.
+type Size = (u32, u32);
+
+/// Resizes the window until the viewport is `target`.  The window also
+/// holds the browser's own UI (143 pixels high in headless Chrome 155), so
+/// it takes a second resize.  A read at once can still give the viewport
+/// from before the resize, so each try decides on `settled`, a read after
+/// two frames (TD-30).  `at_once` is only logged, as evidence of the race.
+fn fit_viewport(
+    target: Size,
+    mut resize: impl FnMut(Size) -> Result<()>,
+    mut at_once: impl FnMut() -> Result<Size>,
+    mut settled: impl FnMut() -> Result<Size>,
+) -> Result<Vec<String>> {
+    let mut window = target;
+    let mut tries = Vec::new();
+    for _ in 0..3 {
+        resize(window)?;
+        let now = at_once()?;
+        let after = settled()?;
+        tries.push(format!(
+            "window {}x{}: viewport {}x{} at once, {}x{} after two frames",
+            window.0, window.1, now.0, now.1, after.0, after.1
+        ));
+        if after == target {
+            return Ok(tries);
+        }
+        window = (
+            (window.0 + target.0).saturating_sub(after.0),
+            (window.1 + target.1).saturating_sub(after.1),
+        );
+    }
+    bail!(
+        "could not size the viewport to {}x{}: {}",
+        target.0,
+        target.1,
+        tries.join("; ")
+    )
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// A headless Chrome window with 143 pixels of its own UI, whose read at
+    /// once still gives the viewport from before the last resize.
+    struct LaggingWindow {
+        window: Cell<Size>,
+        before: Cell<Size>,
+        max_height: u32,
+    }
+
+    impl LaggingWindow {
+        fn new(max_height: u32) -> Self {
+            Self {
+                window: Cell::new((1100, 700)),
+                before: Cell::new((1100, 557)),
+                max_height,
+            }
+        }
+
+        fn viewport(&self) -> Size {
+            let (w, h) = self.window.get();
+            (w, h.saturating_sub(143))
+        }
+
+        fn fit(&self) -> Result<Vec<String>> {
+            fit_viewport(
+                (1100, 700),
+                |(w, h)| {
+                    self.before.set(self.viewport());
+                    self.window.set((w, h.min(self.max_height)));
+                    Ok(())
+                },
+                || Ok(self.before.get()),
+                || Ok(self.viewport()),
+            )
+        }
+    }
+
+    #[test]
+    fn a_stale_read_does_not_upset_the_viewport() {
+        let chrome = LaggingWindow::new(u32::MAX);
+        let tries = chrome.fit().unwrap();
+        assert_eq!(chrome.window.get(), (1100, 843), "{tries:?}");
+        assert_eq!(
+            tries,
+            [
+                "window 1100x700: viewport 1100x557 at once, 1100x557 after two frames",
+                "window 1100x843: viewport 1100x557 at once, 1100x700 after two frames",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_viewport_that_never_fits_names_each_try() {
+        let error = LaggingWindow::new(800).fit().unwrap_err().to_string();
+        assert!(
+            error.starts_with("could not size the viewport to 1100x700: window 1100x700: "),
+            "{error}"
+        );
+        assert_eq!(error.matches("after two frames").count(), 3, "{error}");
+    }
 }
 
 #[cfg(test)]
