@@ -491,8 +491,8 @@ impl MatMulPolicy {
 /// completes first), and a pending mapping is cancelled.  [`Rec`] borrows
 /// its buffers until it is submitted, so none can be dropped while a
 /// recorded dispatch still needs it.  Make buffers with [`Gpu::buffer`]
-/// and [`Gpu::upload`] only.  Clippy fails five other ways to make a
-/// buffer in this crate (MEM-3).  No other crate reaches the device.  A
+/// and [`Gpu::upload`] only.  Clippy fails five ways to make a buffer in
+/// this crate outside `GpuBuffer`'s constructors (MEM-3).  No other crate reaches the device.  A
 /// clone of the inner `wgpu::Buffer` is destroyed with it, so do not use
 /// a clone after its `GpuBuffer` drops.
 pub struct GpuBuffer {

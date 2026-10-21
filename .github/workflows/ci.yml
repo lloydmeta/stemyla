@@ -58,7 +58,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       # --all-targets compiles roformer-gpu and every test target, so clippy
       # is also the native compile gate for the GPU crate.  It also checks
-      # the canaries of the MEM-1 and MEM-3 lints.
+      # the MEM-3 canary and the native MEM-1 canaries.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The web code compiles only for wasm32, so the native steps never lint
       # it (MEM-1).  roformer and roformer-gpu have no wasm32-only code, and
