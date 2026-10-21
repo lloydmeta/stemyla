@@ -132,7 +132,7 @@ They do not see:
 * an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
 * whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review sees it.
 
-* Fix: re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to the deny rules, or an upgrade of Claude Code or RTK.  After another change to `.claude/settings.json`, run one refused command for each kind of rule and two allowed commands, as M15's step 2 does.  On GitHub, the `main` ruleset refuses a direct push to `main`, and the `gh-pages history` ruleset refuses a rewrite of `gh-pages` (TD-20).  Nothing on GitHub refuses a fast-forward push to `gh-pages`, a PR merge with the admin override, or `xtask publish`.  Phase 5 adds the agents' own identity.
+* Fix: re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to the deny rules, or an upgrade of Claude Code or RTK.  After another change to `.claude/settings.json`, run the 9 commands in M15's step 2.  On GitHub, the `main` ruleset refuses a direct push to `main`, and the `gh-pages history` ruleset refuses a rewrite of `gh-pages` (TD-20).  Nothing on GitHub refuses a fast-forward push to `gh-pages`, a PR merge with the admin override, or `xtask publish`.  Phase 5 adds the agents' own identity.
 
 ## Known breaches
 

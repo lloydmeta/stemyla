@@ -308,12 +308,18 @@ fn run_hook(
         .stderr(Stdio::piped())
         .spawn()
         .expect("sh starts");
-    child
+    // A hook that stops before it reads stdin, such as one without jq,
+    // closes the pipe; its exit status, not the write, decides the test.
+    let written = child
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(input.to_string().as_bytes())
-        .expect("the hook reads stdin");
+        .write_all(input.to_string().as_bytes());
+    if let Err(e) = written
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        panic!("writing the tool call to the hook: {e}");
+    }
     child.wait_with_output().expect("the hook finishes")
 }
 
