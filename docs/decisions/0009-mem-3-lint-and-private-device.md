@@ -21,4 +21,4 @@ Harness phase 2, M13, makes clippy's `disallowed-methods` fail each way to make 
 * `roformer-gpu/clippy.toml` lists the five paths.  Each has a line in the canary `mem3_lint_is_on`, since clippy passes a path that does not resolve.
 * `GpuBuffer::new` and `GpuBuffer::with_contents` are the only sites of the first two paths.
 * `Gpu`'s device and `Gpu::from_device` are private.  Doctests on `Gpu` fail if either becomes public.  No later crate can wrap a device that it already has without a change to `roformer-gpu`.
-* Textures and query sets stay out of the lint, as a gap in `tech-debt.md`.  `roformer-gpu` makes no texture, and one query set of 1 KiB for each profiling device.
+* Textures and query sets stay out of the lint, as a gap (TD-27).  `roformer-gpu` makes no texture, and one query set of 1 KiB for each profiling device.

@@ -503,6 +503,10 @@ pub struct GpuBuffer {
 
 impl GpuBuffer {
     fn new(device: &wgpu::Device, desc: &wgpu::BufferDescriptor, live: &Arc<AtomicU64>) -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-3: the one call that makes a buffer from a descriptor.  The `GpuBuffer` destroys it when dropped"
+        )]
         let buffer = device.create_buffer(desc);
         Self::counted(buffer, live)
     }
@@ -512,6 +516,10 @@ impl GpuBuffer {
         desc: &wgpu::util::BufferInitDescriptor,
         live: &Arc<AtomicU64>,
     ) -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-3: the one call that makes a buffer with contents.  The `GpuBuffer` destroys it when dropped"
+        )]
         let buffer = device.create_buffer_init(desc);
         Self::counted(buffer, live)
     }
@@ -1876,6 +1884,61 @@ mod tests {
         )]
         let copy = [1.0_f32].to_vec();
         assert_eq!(copy, [1.0]);
+    }
+
+    /// Clippy's check of this code, not the run, is the evidence: `raw` is
+    /// compiled and linted, and never called, so no GPU is needed.
+    #[test]
+    fn mem3_lint_is_on() {
+        fn raw(
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            read: &wgpu::Buffer,
+        ) -> [wgpu::Buffer; 2] {
+            let desc = wgpu::BufferDescriptor {
+                label: None,
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            };
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-3 canary: clippy fails here if this path is off"
+            )]
+            let plain = device.create_buffer(&desc);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-3 canary: clippy fails here if this path is off"
+            )]
+            let belt = wgpu::util::StagingBelt::new(device.clone(), 1024);
+            drop(belt);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-3 canary: clippy fails here if this path is off"
+            )]
+            let belt = wgpu::util::StagingBelt::new_with_buffer_usages(
+                device.clone(),
+                1024,
+                wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            );
+            drop(belt);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-3 canary: clippy fails here if this path is off"
+            )]
+            wgpu::util::DownloadBuffer::read_buffer(device, queue, &read.slice(..), |_| {});
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-3 canary: clippy fails here if this path is off"
+            )]
+            let init = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[0; 16],
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            [plain, init]
+        }
+        let _linted: fn(&wgpu::Device, &wgpu::Queue, &wgpu::Buffer) -> [wgpu::Buffer; 2] = raw;
     }
 
     /// Worst number of distinct addresses one bank serves in a single
