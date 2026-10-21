@@ -12,11 +12,11 @@ Phase 1 is in place:
 * Rules for parts of the tree in `.claude/rules/`, which load when the agent touches those files.
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 
-The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  No hooks, project skills or project subagents exist yet (phases 2 and 3).
+The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.  No project skills or project subagents exist yet (phase 3).
 
 ## Before you start
 
-1. Install Claude Code ([docs](https://code.claude.com/docs)) and start it at the repo root.  It loads `CLAUDE.md` itself.  It reads the project settings only from the folder where it starts.
+1. Install Claude Code ([docs](https://code.claude.com/docs)) and start it at the repo root.  It loads `CLAUDE.md` itself.  It reads the project settings only from the folder where it starts.  The rustfmt hook needs `jq` and `rustfmt` on `PATH`; macOS 26 has `/usr/bin/jq`.
 2. Set up commit signing with a GPG or SSH key ([GitHub docs](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)).  The agent signs every commit (GIT-2), so a commit fails without a key.
 3. To run browser tests, set up the machine as `README.md` (setting up a machine) tells you.
 4. Read `CLAUDE.md` once.  It is short, and it is what the agent works from.
@@ -137,3 +137,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-21, phase 2 (M13): clippy fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init`, `StagingBelt` and `DownloadBuffer::read_buffer` in `roformer-gpu` outside `GpuBuffer`.  `Gpu`'s device is private.  Make the buffer with `Gpu::buffer` or `Gpu::upload`, or read back with `Gpu::read`.
 * 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  Decide if you want each one; merge to `main` through a PR.  `claude_settings_hold_the_deny_rules` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.
 * 2026-10-21, phase 2 (M14): on GitHub, `main` refuses a direct push, also from an admin; merge through a PR.  `gh-pages` refuses a force push and deletion from everyone (GIT-3).
+* 2026-10-21, phase 2 (M15): a hook runs rustfmt on each `.rs` file in the repo that the agent edits.  An edit of a crate root formats its module tree too.  The agent may see a note that the file changed, and read it again before its next edit.  `the_rustfmt_hook_formats_rust_files` fails if the hook goes or stops formatting.

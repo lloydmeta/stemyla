@@ -248,3 +248,141 @@ fn claude_settings_hold_the_deny_rules() {
         report.join("\n")
     );
 }
+
+/// The one PostToolUse hook on `Edit|Write` in `.claude/settings.json`.  It
+/// must be a plain shell-form command, which is what the test runs.
+fn rustfmt_hook_command(settings: &serde_json::Value) -> String {
+    let hooks: Vec<&serde_json::Value> = settings["hooks"]["PostToolUse"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["matcher"] == "Edit|Write")
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .collect();
+    assert!(
+        hooks.len() == 1,
+        "GIT-2: .claude/settings.json has {} PostToolUse hooks on `Edit|Write`, not 1.  Fix: keep one hook that runs rustfmt on the edited .rs file (harness phase 2, M15).",
+        hooks.len()
+    );
+    let shape = "GIT-2: the rustfmt hook in .claude/settings.json is not `{\"type\": \"command\", \"command\": ...}`.  Fix: keep only `type` and `command`; the test runs the command in shell form.";
+    let hook = hooks[0].as_object().unwrap_or_else(|| panic!("{shape}"));
+    if let Some(key) = hook
+        .keys()
+        .find(|key| !["type", "command"].contains(&key.as_str()))
+    {
+        panic!(
+            "GIT-2: the rustfmt hook in .claude/settings.json has the key `{key}`.  Fix: keep only `type` and `command`; the test runs the command in shell form."
+        );
+    }
+    assert!(
+        hook.get("type").is_some_and(|kind| kind == "command"),
+        "{shape}"
+    );
+    hook.get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("{shape}"))
+        .to_string()
+}
+
+/// Runs the hook as Claude Code does: `sh -c`, the tool call as JSON on
+/// stdin, and `CLAUDE_PROJECT_DIR` set to the project root.  `path`, when
+/// given, replaces `PATH`.
+fn run_hook(
+    command: &str,
+    project: &std::path::Path,
+    input: &serde_json::Value,
+    path: Option<&std::path::Path>,
+) -> std::process::Output {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut sh = Command::new("/bin/sh");
+    if let Some(path) = path {
+        sh.env("PATH", path);
+    }
+    let mut child = sh
+        .arg("-c")
+        .arg(command)
+        .env("CLAUDE_PROJECT_DIR", project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sh starts");
+    // A hook that stops before it reads stdin, such as one without jq,
+    // closes the pipe; its exit status, not the write, decides the test.
+    let written = child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(input.to_string().as_bytes());
+    if let Err(e) = written
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        panic!("writing the tool call to the hook: {e}");
+    }
+    child.wait_with_output().expect("the hook finishes")
+}
+
+#[test]
+fn the_rustfmt_hook_formats_rust_files() {
+    const UNFORMATTED: &str = "use x::{a10,a9};\nfn f(){let x=1;}\n";
+    const FORMATTED: &str = "use x::{a9, a10};\nfn f() {\n    let x = 1;\n}\n";
+    let file = xtask::workspace_root().join(".claude/settings.json");
+    let settings = std::fs::read_to_string(&file)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
+    let settings: serde_json::Value = serde_json::from_str(&settings)
+        .unwrap_or_else(|e| panic!("{} is not JSON: {e}", file.display()));
+    let command = rustfmt_hook_command(&settings);
+
+    let folder = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rustfmt hook");
+    let project = folder.join("project");
+    let sibling = folder.join("project2");
+    let no_tools = folder.join("no tools");
+    for made in [&project, &sibling, &no_tools] {
+        std::fs::create_dir_all(made).expect("the test folder can be made");
+    }
+    // rustfmt reads the first rustfmt.toml above the file, so an empty one
+    // here keeps out a config above the target folder.
+    std::fs::write(folder.join("rustfmt.toml"), "").expect("the test config can be written");
+    let left = |file: &str, text: &str, output: &std::process::Output| {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "a signal".to_string(), |code| code.to_string());
+        format!(
+            "GIT-2: the rustfmt hook in .claude/settings.json left {file} as {text:?} (exit {code}: {}).  Fix: the hook needs jq and rustfmt on PATH (`rustup component add rustfmt`); it formats .rs files under CLAUDE_PROJECT_DIR only, with the workspace edition.",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    };
+
+    let cases = [
+        (project.join("lib.rs"), FORMATTED),
+        (project.join("notes.md"), UNFORMATTED),
+        (folder.join("outside.rs"), UNFORMATTED),
+        (sibling.join("lib.rs"), UNFORMATTED),
+    ];
+    for (path, expected) in &cases {
+        std::fs::write(path, UNFORMATTED).expect("the test file can be written");
+        let input =
+            serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": path } });
+        let output = run_hook(&command, &project, &input, None);
+        let text = std::fs::read_to_string(path).expect("the test file can be read");
+        assert!(
+            output.status.success() && text == *expected,
+            "{}",
+            left(&path.display().to_string(), &text, &output)
+        );
+    }
+
+    let input = serde_json::json!({ "tool_name": "Write", "tool_input": {} });
+    let output = run_hook(&command, &project, &input, None);
+    assert!(output.status.success(), "{}", left("no file", "", &output));
+
+    let lib = project.join("lib.rs");
+    let input = serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": lib } });
+    let output = run_hook(&command, &project, &input, Some(&no_tools));
+    assert!(
+        !output.status.success(),
+        "GIT-2: the rustfmt hook in .claude/settings.json exits 0 without jq on PATH, so a missing jq is silent.  Fix: keep `|| exit 1` after the jq command substitution."
+    );
+}

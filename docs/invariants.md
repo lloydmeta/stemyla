@@ -161,7 +161,7 @@ Never push without being asked.  An agent never pushes to `main` or `gh-pages`, 
 Work in small verified steps.  `cargo fmt --all --check`, clippy with `-D warnings`, the tests and `xtask docs-check` pass before every commit, and every commit is signed (`git commit -S`).
 
 * Why: a commit is the unit that review, bisect and revert work with; a signature attributes it.
-* Enforced by: CI's required checks on `main` (fmt, clippy, test, wasm build, browser tests), which an admin can bypass (TD-20).
+* Enforced by: CI's required checks on `main` (fmt, clippy, test, wasm build, browser tests), which an admin can bypass (TD-20).  A PostToolUse hook in `.claude/settings.json` runs rustfmt on each `.rs` file in the repo that the agent's `Edit` or `Write` tool changes, kept by `the_rustfmt_hook_formats_rust_files`.  It saves a round trip; the `fmt` job is the control.
 * Gaps: TD-20.
 
 ### GIT-3: gh-pages is never squashed or rewritten

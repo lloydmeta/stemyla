@@ -94,6 +94,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          # the_rustfmt_hook_formats_rust_files runs the rustfmt hook in
+          # .claude/settings.json, which needs rustfmt (and jq, which the
+          # runner has).
+          components: rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install ALSA headers and software Vulkan (lavapipe)
         run: |
