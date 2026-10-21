@@ -130,7 +130,15 @@ They do not see:
 
 ### TD-29: no check stops a change that makes a snapshot pass
 
-A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `SnapshotOptions`, passes a real change of the UI.  egui_kittest reads a `kittest.toml` in any folder above the test, also outside the repo.  A PNG rewritten with `UPDATE_SNAPSHOTS=1` and committed passes.  `no_build_file_updates_snapshots` reads only the build files in the repo.  So these pass it: `std::env::set_var` in a test, a variable from `xtask`, a repository variable on GitHub, `[env]` in a Cargo `config.toml` outside the repo, `env` in a person's own Claude Code settings, and `#[ignore]` on a snapshot test.  (`env` in `.claude/settings.json` fails `claude_settings_hold_the_deny_rules`, which allows only `$schema`, `permissions` and `hooks`.)  dify does not count a pixel that it finds anti-aliased, and the default passes a change of 1 colour level (VERIFY-1).
+A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `SnapshotOptions`, passes a real change of the UI.  egui_kittest reads a `kittest.toml` in any folder above the test, also outside the repo.  A PNG rewritten with `UPDATE_SNAPSHOTS=1` and committed passes.  dify does not count a pixel that it finds anti-aliased, and the default passes a change of 1 colour level (VERIFY-1).
+
+`no_build_file_updates_snapshots` reads only the build files in the repo.  These pass it:
+
+* `std::env::set_var` in a test, or a variable from `xtask`;
+* a repository variable on GitHub;
+* `[env]` in a Cargo `config.toml` outside the repo;
+* `env` in a person's own Claude Code settings.  `env` in `.claude/settings.json` fails `claude_settings_hold_the_deny_rules`, which allows only `$schema`, `permissions` and `hooks`;
+* `#[ignore]` on a snapshot test.
 
 * Fix: review; a changed PNG or threshold is a UI change, and the reviewer looks at it.  Phase 3's reviewers check for it.  No check is planned.
 

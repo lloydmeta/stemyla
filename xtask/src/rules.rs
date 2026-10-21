@@ -1701,7 +1701,7 @@ pub fn snapshot_updates(texts: &[(String, String)]) -> Vec<Problem> {
                     file: file.clone(),
                     line: Some(index + 1),
                     message: format!(
-                        "VERIFY-1: {file}:{} sets UPDATE_SNAPSHOTS, so egui_kittest rewrites a snapshot that does not match, and the test passes.  Fix: remove it.  To change a snapshot on purpose, run `UPDATE_SNAPSHOTS=1 cargo test -p app --test ui` and commit the PNGs.",
+                        "VERIFY-1: {file}:{} names UPDATE_SNAPSHOTS, which makes egui_kittest rewrite a snapshot that does not match, so the test passes.  Fix: remove it.  If a snapshot fails and you did not change the UI, stop and ask the maintainer (TD-29).  To change a snapshot on purpose, run `UPDATE_SNAPSHOTS=1 cargo test -p app --test ui`.  Then commit only the PNGs of the views that you changed.",
                         index + 1
                     ),
                 })
