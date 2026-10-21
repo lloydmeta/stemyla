@@ -38,7 +38,7 @@ Everything is built and served with Rust tools.  What each task needs, beyond a 
 | Anything | A C compiler, since some dependencies build C code (zstd in xtask, ring in Trunk): Xcode Command Line Tools on macOS (`xcode-select --install`), `build-essential` on Debian or Ubuntu. |
 | Build and serve the web app | Rust stable, 1.99 or newer (CI pins 1.99.0), with the `wasm32-unknown-unknown` target; [Trunk](https://trunkrs.dev/) 0.21.14, the version CI uses.  On its first build Trunk downloads `wasm-bindgen` and `wasm-opt` into its own cache, so that build needs the network. |
 | Separate songs in it | A browser with WebGPU (see "Using it") and the model: **Download model** in the page, or a local `.safetensors` file (see "The model"). |
-| Build the native app, `cargo test`, `cargo clippy` | git 2.42 or newer, for the checks of the git index (`xtask/tests/rules.rs`).  Nothing more on macOS.  On Debian or Ubuntu, `pkg-config libasound2-dev` (the audio output links ALSA). |
+| Build the native app, `cargo test`, `cargo clippy` | git 2.42 or newer, for the checks of the git index (`xtask/tests/rules.rs`).  The `wasm32` clippy command also needs `rustup target add wasm32-unknown-unknown`.  On Debian or Ubuntu, `pkg-config libasound2-dev` (the audio output links ALSA). |
 | The UI snapshot tests (`app/tests/ui.rs`) | A GPU, or a software Vulkan driver (`mesa-vulkan-drivers libvulkan1` on Debian or Ubuntu, with `WGPU_BACKEND=vulkan`).  The snapshot PNGs are made on macOS with Metal and may not match elsewhere pixel for pixel: there, run with `UPDATE_SNAPSHOTS=1` as CI does, so every check except the image comparison still runs, and discard the rewritten PNGs (`git checkout app/tests/snapshots`). |
 | The GPU kernel tests (`roformer-gpu`) | A Vulkan, Metal or DX12 GPU, or SwiftShader (see "Checks").  Kernel changes are judged on a real GPU, never SwiftShader alone. |
 | The browser tests | `wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock`, and a browser's WebDriver (see "Browser tests").  CI runs them anyway; locally they are optional. |
@@ -65,6 +65,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings
 cargo clippy -p app -- -D warnings
 cargo clippy -p app --all-targets -- -D warnings
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -105,6 +106,7 @@ cargo clippy --workspace --all-targets
 cargo clippy -p synth --all-targets          # synth without its files feature
 cargo clippy -p app                          # app's lib and binary without any files feature
 cargo clippy -p app --all-targets            # app's tests without the workspace's merged features
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets  # the web code, which compiles only for wasm32
 ```
 
 * `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them, and `STEMYLA_REQUIRE=fixtures` makes them fail).

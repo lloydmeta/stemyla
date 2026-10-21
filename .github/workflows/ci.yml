@@ -48,12 +48,21 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # A new key, so the cache saves the wasm32 output too: rust-cache
+          # saves only when the key it restored does not match exactly.
+          key: wasm32
       - name: Install ALSA headers (cpal links libasound on Linux)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       # --all-targets compiles roformer-gpu and every test target, so clippy
       # is also the native compile gate for the GPU crate.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The web code compiles only for wasm32, so the native steps never lint
+      # it (MEM-1).  roformer and roformer-gpu have no wasm32-only code, and
+      # their dev-dependencies do not build for wasm32.
+      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings
       # --workspace merges features across crates: xtask turns on synth's
       # files feature for every crate in the build.  These steps check each
       # crate without that merge (LAYER-1, decision 0004).
