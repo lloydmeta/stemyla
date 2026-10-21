@@ -804,6 +804,10 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
         let now = &now;
         async move {
             let mut t = vec![Timing { rounds: Vec::new() }; TILES.len()];
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: which tiles are usable, one flag for each"
+            )]
             let mut alive = gpu.usable.get().to_vec();
             for rd in 0..rounds {
                 if rd == 1 {
@@ -826,7 +830,15 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
         }
     };
     let recording = gpu.set_recording(false);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: three matmul shapes to time"
+    )]
     let (l, lt) = secs(large.to_vec()).await;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: two matmul shapes to time"
+    )]
     let (s, st) = secs(small.to_vec()).await;
     let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
     gpu.policy.set(matmul);

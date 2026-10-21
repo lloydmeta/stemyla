@@ -115,6 +115,10 @@ impl Player {
         // leading zero leaves a fade-in whose reverse is the matching
         // fade-out: each pair sums to exactly 1, so the level never dips.
         let ramp = dsp::fade_in(&vec![1.0; cfg.crossfade + 1]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the crossfade ramp, made once for each player"
+        )]
         let fin: Vec<f32> = ramp[1..].to_vec();
         let mut fout = fin.clone();
         fout.reverse();

@@ -3,6 +3,11 @@
 //! publish).  Tests skip with a message when the fixtures are absent, and
 //! fail instead under `STEMYLA_REQUIRE=fixtures`.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
+
 use std::path::PathBuf;
 
 use burn::backend::NdArray;

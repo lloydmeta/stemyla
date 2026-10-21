@@ -7,6 +7,11 @@
 //! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
 //! readback test).
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
+
 use std::borrow::Cow;
 use std::sync::Mutex;
 

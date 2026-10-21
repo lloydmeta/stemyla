@@ -3,6 +3,10 @@
 //! (`cargo run -p xtask -- web-test`).
 
 #![cfg(target_arch = "wasm32")]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use stem_protocol::{Malformed, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker};
@@ -298,4 +302,25 @@ fn a_model_url_is_taken_only_from_the_pages_own_site() {
     let s = Settings::from_page(&format!("{page}https://example.com/m"));
     assert_eq!(s.mm.as_deref(), Some("s64"), "the other settings are kept");
     assert_eq!(Settings::from_page("not a url"), Settings::default());
+}
+
+/// MEM-1: proves each path in this crate's `clippy.toml` (see the `#[expect]`s).
+#[wasm_bindgen_test]
+fn mem1_lint_is_on_for_js_arrays() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let slice = [1.0_f32].to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let bytes = js_sys::Uint8Array::from(&[2_u8][..]).to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let floats = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();
+    assert_eq!((slice, bytes, floats), (vec![1.0], vec![2], vec![3.0]));
 }

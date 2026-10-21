@@ -5,6 +5,11 @@
 //! The tests share one worker and its origin's private file system, so
 //! each starts from an empty one, and they run one at a time.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
+
 use super::*;
 use js_sys::{Object, Reflect};
 use std::cell::RefCell;
@@ -797,4 +802,25 @@ async fn a_failed_load_says_when_it_unloaded_the_model_before_it() {
             .await
             .ends_with("reload the page to load the stored one")
     );
+}
+
+/// MEM-1: proves each path in this crate's `clippy.toml` (see the `#[expect]`s).
+#[wasm_bindgen_test]
+fn mem1_lint_is_on_for_js_arrays() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let slice = [1.0_f32].to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let bytes = js_sys::Uint8Array::from(&[2_u8][..]).to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1 canary: clippy fails here if this path is off"
+    )]
+    let floats = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();
+    assert_eq!((slice, bytes, floats), (vec![1.0], vec![2], vec![3.0]));
 }

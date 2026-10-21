@@ -286,6 +286,10 @@ impl Separator {
                 Reply::Bench(text) => Some(Event::Bench(text)),
                 Reply::Mp3 { name, bytes } => Some(Event::Mp3 {
                     name,
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "TD-13: the MP3 is copied into page memory, and copied out again to save it"
+                    )]
                     bytes: bytes.to_vec(),
                 }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),

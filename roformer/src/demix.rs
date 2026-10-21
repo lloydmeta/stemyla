@@ -271,6 +271,10 @@ impl Demixer {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
 mod tests {
     use super::*;
 

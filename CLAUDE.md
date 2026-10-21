@@ -40,6 +40,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings  # synth without its files feature
 cargo clippy -p app -- -D warnings              # app's lib and binary without any files feature
 cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
 cargo test -p roformer-gpu --lib                # CI runs these too, and --doc; they need no GPU
 STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release  # every kernel against the CPU; fails without a GPU

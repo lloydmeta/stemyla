@@ -1390,11 +1390,130 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 * The demo song's hashes through wsola are equal before and after the bump, and after step 2.  `Cargo.lock` changes only wsola's entry.
 * fmt, clippy, the tests and `docs-check` pass, and the CI `test` job lists the `realtime` tests as `ok`.
 
-### M12: song-sized copies are a lint (MEM-1)
+### M12: song-sized copies are a lint (MEM-1, MEM-2, DOC-1; maintainer decision)
 
-* Change: add `clippy.toml` to `app/`, `worker/` and `engine/` with `disallowed-methods` for slice `to_vec` and `js_sys` typed-array `to_vec` (`Uint8Array`, `Float32Array`), each with a reason that names MEM-1 and the fix.  The known breaches get `#[expect(clippy::disallowed_methods, reason = "TD-13: ...")]` and `"TD-14: ..."`.  Other sites that copy small buffers get an `#[expect]` with their reason.
-* Acceptance: clippy passes.  A planted `samples.to_vec()` in `engine` fails clippy with the MEM-1 reason.  Removing an `#[expect]` whose site no longer copies fails clippy (`unfulfilled_lint_expectations`).
-* Note: first confirm the path syntax that clippy accepts for the inherent slice method, with the planted case.  Each `clippy.toml` holds the crate's full configuration, since clippy reads only the first file it finds.  TD-12's `files.clone()` is a `Vec` clone, not `to_vec`; it stays in `tech-debt.md` for M18.
+* Scope: a clippy `disallowed-methods` list for `to_vec`, as the phase plan says, with no new crate.  MEM-1 is a memory rule, so a canary proves that each path in the list is on.  Other forms of copy stay a gap (TD-26).
+
+#### M12 state at the start
+
+On 2026-10-21, at commit `cb1d0be` (M11 merged as PR #25):
+
+* No `clippy.toml` exists.  `app`, `stem-worker`, `stem-protocol` and `engine` take `[lints] workspace = true`, and `[workspace.lints.clippy]` allows two lints.
+* CI's `clippy` job lints the native target only.  `worker/src/web.rs` and `app/src/store.rs`, `separator.rs` and `picker.rs` compile only for `wasm32`.  So no clippy lint has ever run in CI on the code of TD-13 and TD-14.
+* `cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings` passes today.  It took 26 s and 43 s in two runs on this Mac, with the `wasm32` dependencies already checked in the dev profile.  Trunk's release build does not count, since clippy uses its own check output.
+* The `to_vec` calls outside tests:
+
+| Site | What it copies | Size | Reason or entry |
+| - | - | - | - |
+| `app/src/store.rs:162`, `read` | a stored file, from OPFS into wasm memory, for the decoder | a song | MEM-1: the one copy into wasm memory |
+| `app/src/picker.rs:48`, `read` | a chosen file into wasm memory, for the decoder | a song | MEM-1: the one copy into wasm memory |
+| `app/src/separator.rs:289` | the MP3 reply, which is copied out again to save it | a stem | TD-13 |
+| `worker/src/web.rs:684`, `ModelFile::read` | one range of the model file, such as one tensor | a tensor | MEM-1: the one copy into wasm memory |
+| `worker/src/web.rs:1047`, `run` | the transferred mix, for the demixer; the JS arrays drop after | a song | MEM-1: the one copy into wasm memory |
+| `worker/src/web.rs:1178`, `tensor_f32` | a tensor's shape | a few numbers | small |
+| `worker/src/web.rs:1206` and `1278`, selftest | a reference file, to parse it | a few MB | selftest only |
+| `worker/src/web.rs:1285`, selftest | the two channels of the reference chunk | one chunk | selftest only |
+| `worker/src/web.rs:1593`, `mp3` | both channels of a stem | a stem | TD-14 |
+| `worker/src/web.rs:1642` | the stored kernel choice | a few bytes | small |
+| `engine/src/song.rs:208`, `resample_linear` | its input, when the two rates are equal; `Song::from_audio` never calls it so | a stem | MEM-1: the contract returns a new buffer |
+| `engine/src/player.rs:118`, `Player::with_config` | the crossfade ramp, once for each player | `crossfade` samples | small |
+
+* In tests: `worker/src/web/tests.rs` has 9 calls and `protocol/tests/web.rs` has 7, each of a few bytes.  The tests of `app` and `engine` have none.  `engine/src/decode.rs:191` calls symphonia's `copy_to_vecs_planar`, which the list does not name.
+* `roformer` has 8 calls of `to_vec` in `src/`, of which 5 are on slices; `separate.rs:83`, `model.rs:516` and `540` are Burn's `TensorData::to_vec`.  Only 1 of the slice calls is outside `mod tests`: `weights.rs:169`.  `roformer-gpu` has 4, such as the read-back in `lib.rs:1023` and `bench.rs:829`.  `roformer/tests/` and `roformer-gpu/tests/` have 12 more.  The worker runs both.
+
+Facts checked for M12, with clippy 0.1.99 (rustc 1.99.0), in a scratch worktree:
+
+* The path `slice::to_vec` names `<[T]>::to_vec`.  It catches a method call, a call in a closure, `<[f32]>::to_vec` passed as a function, the call `<[f32]>::to_vec(x)`, and calls on an array or a `&Vec` through auto-deref.  It does not catch `to_owned` on a slice.
+* `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec` resolve in a `wasm32` build.  Together with `slice::to_vec`, they found each `wasm32` site in the table, and the calls in `worker/src/web/tests.rs`.
+* A path that does not resolve does not fail `-D warnings`.  A wrong method on a primitive type (`slice::to_vecc`) and a crate that the build lacks (`js_sy::Uint8Array::to_vec`, or `js_sys` in a native build of `app`) give no message.  `stem-protocol` takes `js_sys` on every target, so a wrong `js_sys` path warns in its native build too.  A wrong type or method in a present crate (`js_sys::Nonexistent::to_vec`, `js_sys::Float32Array::to_vecc`) gives a warning that `-D warnings` does not deny.  Clippy exits 0 in each case.  Clippy's docs say that such a path is an error ([lint configuration](https://doc.rust-lang.org/clippy/lint_configuration.html)).  So only a canary proves that a path is on.
+* `#[expect(clippy::disallowed_methods, reason = "...")]` works on a `let` statement, a `return` statement, a match arm and a field of a struct expression.  A stale one fails with "this lint expectation is unfulfilled".
+* With `-D warnings`, a lint error in `engine` stops the build before `app` is linted, since `app` takes `engine`.  So a count of every site runs without `-D warnings`.
+* `docs-check` takes each code span on an `* Enforced by:` line that has only lowercase letters, digits and `_`, and holds a `_`, as a test name (`enforcing_tests_exist` in `xtask/src/docs.rs`).  So `` `to_vec` `` there fails it, and `` `slice::to_vec` `` does not.
+* `xtask web-test` runs `-p app --lib --test web --test web_close --test web_output`, `-p stem-worker --lib` (which holds `web/tests.rs`) and `-p stem-protocol --test web`.
+* A change to a crate's `clippy.toml` makes cargo check the crate again.
+* Clippy has no option that turns `disallowed-methods` off in tests, as `allow-unwrap-in-tests` does for `unwrap_used` ([lint configuration](https://doc.rust-lang.org/clippy/lint_configuration.html)).
+* `docs-check` takes a `#[wasm_bindgen_test]` function as a test name on an `* Enforced by:` line (`TEST_ATTRIBUTES` in `xtask/src/docs.rs`).
+
+#### M12 decision point for the maintainer: which crates
+
+* (a) `app`, `worker`, `protocol` and `engine`.  `protocol` has no site today.  But a decoder in `protocol` that copies a stem is the most likely new breach of MEM-1 and MEM-2.  `roformer` and `roformer-gpu` go into TD-26.
+* (b) (a), and `roformer` and `roformer-gpu`.  5 more sites outside tests to read and mark, 17 slice calls in tests, and 5 more module `#![expect]`s.  Each crate gets a canary, so the pairs become 12.  TD-26 drops its `roformer` bullet.  M13 then adds MEM-3's entries to `roformer-gpu/clippy.toml`.
+* (c) the phase plan's three crates only: `app`, `worker` and `engine`.  `protocol/clippy.toml`, its canary, its module `#![expect]` and the `protocol.md` bullet go, and `stem-protocol` leaves MEM-1's and MEM-2's lines, `memory.md`'s first bullet, the guide's changelog line and the parent bullet.  The pairs become 7.
+* (d) one `clippy.toml` at the root with the three paths, and a file in `roformer/`, `roformer-gpu/` and `xtask/` that holds only a comment, to opt out.  `dsp`, `synth` and `test-support` have no `to_vec`.  So `synth` and a new crate are covered by default, at the same number of files.  Each covered crate needs a canary, so `synth` adds one pair, and `dsp` and `test-support` add one each if they get canaries.  The cost: a root file reaches `dsp`'s lint settings, which DSP-1's file check guards against a `dsp/clippy.toml`; every crate's lint configuration then lives in two places, and M13 writes MEM-3 into an opt-out file.
+* Recommendation, first written: (a).  It covers each crate where a breach is known, and the crate that carries arrays between them.  No breach is known in the model crates, and a new crate is rare.
+* Chosen: (b), by the maintainer on 2026-10-21.  MEM-1 covers model-sized buffers, and the model crates hold the largest buffers in the tab.  The lint's value is the next copy, not the breaches known today.  The sections below follow (a), and "Under (b)" in the design gives what (b) adds.
+
+#### M12 design
+
+* The files: `app/clippy.toml`, `worker/clippy.toml` and `protocol/clippy.toml` list the three paths.  `engine/clippy.toml` lists `slice::to_vec` only, since `engine` handles no typed array.  Its `js_sys`, under `cpal` on `wasm32`, serves only `Reflect` in `live.rs`.  Each file starts with a comment: "MEM-1 (`docs/invariants.md`).  Clippy reads only this file for this crate.  Each path has a canary: `<test name>` in `<file>`."
+* Each entry has a `reason` that names the rule and the fix, which clippy prints as a note.  Each reason is a TOML literal string (`'...'`), since it holds double quotes:
+  * `slice::to_vec`: "MEM-1: a copy of a song- or model-sized buffer stays in wasm memory for good.  Fix: borrow the slice or share an `engine::Samples`.  For a needed copy, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]` to its statement, field or match arm."
+  * `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`: "MEM-1, MEM-2: this copies a JS array into wasm memory.  Fix: keep the JS array, or copy in blocks with `subarray` and `copy_to`.  For the one copy that Rust must read, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]` to its statement, field or match arm."
+* Each site in the table gets an `#[expect(clippy::disallowed_methods, reason = "...")]` on its statement, field or match arm: a `let` (`web.rs:1047`, `1206`, `1278`, `1285`, `1593`, `1642`, `player.rs:118`), a field (`separator.rs:289`), a match arm (`web.rs:684`) or a `return` (`song.rs:208`).  A site in a tail expression gets a `let` first (`picker.rs:48`, `store.rs:162`, `web.rs:1178`).  The reason starts with `MEM-1:`, or with `TD-13:` or `TD-14:` for a breach, and gives the "Reason" column in words.  An `#[expect]` never goes on a function or a module, except in tests.
+* Tests: `worker/src/web/tests.rs` and `protocol/tests/web.rs` get `#![expect(clippy::disallowed_methods, reason = "MEM-1: tests copy a few bytes to compare them")]`.  In `protocol/tests/web.rs` it goes after `#![cfg(target_arch = "wasm32")]`; before it, the native step fails with an unfulfilled expectation.  In `worker/src/web/tests.rs` it goes after the module doc and before the first `use`.
+* Canaries.  Each is a test with one `let` for each path in its crate's file, each under its own `#[expect]`, with the reason "MEM-1 canary: clippy fails here if this path is off".  Each `let` copies one or two values, and the test asserts them.  An inner `#[expect]` takes its own lint, so the canaries in the test files above still prove their paths.  The canaries:
+  * `mem1_lint_is_on` (`#[test]`, in `engine/src/song.rs`'s tests): the slice path.  It is compiled by both the native and the `wasm32` clippy steps.
+  * `mem1_lint_is_on_for_js_arrays` (`#[wasm_bindgen_test]`), in `app/tests/web.rs`, `worker/src/web/tests.rs` and `protocol/tests/web.rs`: the three paths.  The `wasm32` clippy step compiles them, and `xtask web-test` runs them.
+  * Native builds of `app` and `protocol` get no canary.  The slice path resolves the same way on both targets.
+  * A canary proves its path only under a clippy step with `--all-targets`, since it is test code.  Its run in `cargo test` or `xtask web-test` proves nothing about the lint.
+* CI: the `clippy` job installs `wasm32-unknown-unknown` (`targets:` on `dtolnay/rust-toolchain`).  Directly after the `--workspace --all-targets` step, a new step runs the `wasm32` command from the state above.  Its comment: "the web code compiles only for wasm32, so the native steps never lint it (MEM-1)".  `engine` is in the step for its `wasm32` code in `live.rs`.
+* CI cache: the job's `Swatinem/rust-cache` step gets `with: key: wasm32`.  rust-cache saves only when the restored key is not an exact match (`src/restore.ts` and `src/save.ts` at v2.9.2), and its key does not hash the installed targets ([README](https://github.com/Swatinem/rust-cache/blob/v2.9.2/README.md)).  M12 changes no manifest, so without a new key the job restores its old cache exactly, never saves, and checks the `wasm32` dependencies from cold on each run.  The new key adds one cache entry, against GitHub's 10 GB limit for each repository.
+* The gaps, as a new entry TD-26 under "Enforcement gaps", where `<n>` is the next free ID (26 on 2026-10-21), "MEM-1's lint sees only `to_vec`".  Its lead sentence: "Clippy fails `to_vec` on a slice, a `Uint8Array` or a `Float32Array` in four crates (six under (b)), and nothing else."  Its bullets:
+  * other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec` (TD-12);
+  * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;
+  * an `#[allow]` in place of an `#[expect]`, as clippy's own help line suggests, and a reason that does not say why;
+  * crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
+  * the canaries prove their paths only while the clippy steps keep `--all-targets`; nothing fails if the `wasm32` step goes;
+  * one `#[expect]` covers each call in its statement, so a new `to_vec` in the same `let` passes; the module `#![expect]`s cover each new test in their files;
+  * a `#[wasm_bindgen]` export that takes a `Vec<f32>` or a `&[f32]` copies a JS array in, and passes;
+  * Fix: none planned.  Phase 3's memory reviewer looks for a new copy of any form.
+* Under (b), the maintainer's choice:
+  * `roformer/clippy.toml` and `roformer-gpu/clippy.toml` list `slice::to_vec` only, since neither crate handles a typed array.
+  * Neither crate has code behind a target `cfg`, so the native steps lint all of it.  Their dev-dependencies do not build for `wasm32` (getrandom 0.3 needs `wasm_js`), so the `wasm32` step leaves them out.
+  * The sites, each with an `#[expect]`: `roformer/src/weights.rs:169` (a shape, for an error), `roformer-gpu/src/lib.rs:1023` (the one copy of a chunk out of mapped GPU memory, which drops next), and `roformer-gpu/src/bench.rs:807` (which tiles are usable), `829` and `830` (the matmul shapes to time).
+  * Module `#![expect]`s: the tests of `roformer/src/demix.rs` and `weights.rs`, `roformer/tests/reference.rs`, `roformer-gpu/tests/memory.rs` and `roformer-gpu/tests/reference.rs`.
+  * Canaries: `mem1_lint_is_on` in the tests of `roformer/src/weights.rs` and of `roformer-gpu/src/lib.rs`.  So the pairs become 12.
+  * The docs name the two crates wherever they name the other four, and `.claude/rules/gpu.md` gets the `memory.md` sentences.  TD-26 drops them from its crate bullet.
+* Out of scope: `clippy::allow_attributes`, which would fail an `#[allow]`, since the workspace has other `#[allow]`s.  TD-12, TD-13 and TD-14 are fixed in M18.
+
+#### M12 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. The `wasm32` clippy step, alone.  It passes on today's tree.
+   * `.github/workflows/ci.yml`: the target, the step (`cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings`) and the cache key.
+   * `CLAUDE.md`'s commands, after the last clippy line (the map stays under 100 lines): `cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32`.
+   * `README.md`: the same line, without its `#` comment, in the list after "Then the checks CI gates on:", and in the `## Checks` list without `-- -D warnings`, as that list writes its clippy lines.  The setup table's row "Build the native app, `cargo test`, `cargo clippy`" replaces "Nothing more on macOS." with "The `wasm32` clippy command also needs `rustup target add wasm32-unknown-unknown`."
+   * `harness.md`: a components row, "the `wasm32` clippy step in CI | sensor, computational | the web code compiles only for `wasm32`, so no lint ever ran on it in CI, where TD-13 and TD-14 are | phase 2".
+   * Record in the PR the step's time in CI, on the first run (cold) and on a re-run (warm).
+2. The lint, its sites, the canaries and the docs.
+   * Lint first: add the four files (six under (b)), with no `#[expect]`.  Run the native workspace command and the `wasm32` command without `-D warnings`, so that `app` is linted too.  Record each warning; expected: 15 calls on the 13 lines of the table's 12 rows, and the calls in the two test files.  Each message names MEM-1 and the fix.  If a site differs from the table, update the table.
+   * Then the `#[expect]`s and the canaries.  Every clippy command in `CLAUDE.md` passes.
+   * Plant each of these on the real tree, one at a time, and restore it.  Record each result in the PR:
+     * `let _copy = left.to_vec();` in `Song::from_audio`, after the `let Some(left) = ... else { ... };` statement and before `decoded.push`, fails the native step, with the MEM-1 note;
+     * `let _copy = mix[0].to_vec();` in `run`, before the `#[expect]` on the copy, fails the `wasm32` step;
+     * `bytes: Vec::with_capacity(bytes.length() as usize)` at TD-13's site fails with only "this lint expectation is unfulfilled" there.
+   * Turn off each of the 12 (crate, path) pairs (10 under (a)), one at a time: append `c` to the path in that crate's `clippy.toml`.  Run the `wasm32` step for `app`, `stem-worker` and `stem-protocol`, and both steps for `engine`.  The native step passes for the other three, since their native code has no site and no canary.  Each named run fails with "this lint expectation is unfulfilled".  Record the lines for each pair in the PR.  With `-D warnings`, a failure in a crate's lib stops its test targets from building, so record what each run shows.  Expected, from a prototype:
+     * engine, slice: `song.rs`, `player.rs` and the canary, on both steps;
+     * worker, each path: its sites in `web.rs` and the canary in `web/tests.rs`;
+     * app, slice and Float32Array: only the canary in `app/tests/web.rs`, since no site in `app`'s lib uses them.  So the canary proves paths that no real site proves;
+     * app, Uint8Array: the lib sites in `picker.rs`, `store.rs` and `separator.rs`;
+     * protocol, each path: only its canary in `protocol/tests/web.rs`.
+* Docs (DOC-1), in step 2's commit:
+  * `invariants.md`, MEM-1: `* Enforced by:` adds "Clippy's `disallowed-methods` (CI `clippy` job) for `slice::to_vec`, `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`, in `app`, `stem-worker`, `stem-protocol` and `engine`, on both targets.  The `#[expect]`s in `mem1_lint_is_on` and `mem1_lint_is_on_for_js_arrays`, under the clippy steps with `--all-targets`, prove each path".  Each method keeps its path in the code span, since `docs-check` takes `` `to_vec` `` alone as a test name.  `* Gaps:` adds TD-26.
+  * `invariants.md`, MEM-2: `* Enforced by:` adds "MEM-1's lint on `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`, where the receiver copies".  `* Gaps:` adds TD-26.
+  * `tech-debt.md`: TD-26.  TD-13 and TD-14 each add "Its site carries an `#[expect]` for the MEM-1 lint", and give their sites by function, not line number (the `Reply::Mp3` arm in `Separator::new`, and `mp3` in `worker/src/web.rs`), since the `#[expect]`s move the lines.
+  * `.claude/rules/memory.md`: the first bullet adds "Clippy fails `to_vec` on a slice, a `Uint8Array` or a `Float32Array`, in `app`, `stem-worker`, `stem-protocol` and `engine`.  A needed copy gets `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]` on its statement, field or match arm."  `.claude/rules/protocol.md`: the same sentences in a new bullet, since `protocol/` is not in `memory.md`'s paths.  `memory.md`'s paths add `app/clippy.toml`.
+  * `harness.md`: a second components row, "clippy's `disallowed-methods` for `to_vec`, with a canary for each path (MEM-1) | sensor, computational | three song-sized copies (TD-12 to TD-14) went unnoticed, and a wrong path in `clippy.toml` passes clippy.  It sees `to_vec` only (TD-26) | phase 2".  `working-with-agents.md`: a changelog line, with the same words for what clippy fails, that says how to fix a failure.  The "Change memory" recipe's check adds "read the reason of each new `#[expect]`".
+  * The parent plan's phase 2 bullet: "slice and JS-array `to_vec` in `app`, `worker`, `engine` (MEM-1)," becomes "slice and JS-array `to_vec` in `app`, `worker`, `protocol` and `engine`, on both targets (MEM-1, M12);".
+  * `ARCHITECTURE.md` does not change.  "Prose only" lines stay at 4.
+
+#### M12 acceptance
+
+* In step 2, before the `#[expect]`s, the two clippy commands, run without `-D warnings`, warn at the 15 calls of the table and in the two test files, each with the MEM-1 note.  After them, every clippy command in `CLAUDE.md` passes, locally and in CI's `clippy` job.
+* The three plants and the 12 (crate, path) pairs of (b) fail as stated.
+* `mem1_lint_is_on` passes in the CI `test` job, and `mem1_lint_is_on_for_js_arrays` passes in `browser tests (Chrome)` for each of the three crates.
+* fmt, the tests and `docs-check` pass.
 
 ### M13: GPU buffers are made only by GpuBuffer (MEM-3)
 
@@ -1461,6 +1580,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * To undo M7, revert its commits.  That removes the check, and puts back TD-24, TD-3's text and DSP-1's text.  Keep this plan's living sections.
 * To undo M10, revert its commits.  That removes the check, the `harness.md` row and the guide's changelog line.  It puts back TD-16's text, PROTO-1's `* Enforced by:` line and the line in `.claude/rules/protocol.md`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * To undo M11, revert its commits.  That puts back wsola 0.1.0, its `THIRD-PARTY.md` row, TD-15, RT-1's text and the rule files.  It removes decision 0007, TD-<n> and the components row.  Put decision 0007 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice, and TD-15's fix line says so.  Keep TD-<n>'s ID: add `* TD-<n>: withdrawn by the revert of M11; TD-15 covers the gap again.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
+* To undo M12, revert its commits.  That removes the six `clippy.toml` files, the `#[expect]`s, the canaries and the `wasm32` step, and puts back MEM-1's and MEM-2's lines.  Put decision 0008 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice.  Keep TD-26's ID: add `* TD-26: withdrawn by the revert of M12.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * Checks read the tree and write nothing, so they can run any number of times.
 * M11 changes a rule that the maintainer chose on 2026-10-19.  If they reverse it, revert M11's rule text and decision, and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -1632,7 +1752,22 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-21: M11 review round 3, by one new reviewer who read the whole diff and ran 11 mutants.  No blockers; 1 should-fix and 4 nits, all checked.  The should-fix, real: `interleaved`'s capacity and the promise test's push were 4,096 by hand, so a raised `MAX_PUSH_FRAMES` broke RT-1 and failed only a test with a hard-coded number.  Both now use the constant; with the constant at 8,192, the promise test still passes.  Nits fixed: the asserts' edges are pinned (`<` in place of `<=` now fails a test in each); the promise test also pulls 4,096 frames at 44.1 kHz; two doc comments rewrapped; this plan's design text now says `+ MAX_PUSH_FRAMES`, about 650 KB and four callback sizes.  Not changed, with reasons: a `pop_back` mutant of the anchor bound passes, but it keeps the newest anchor, so the playhead after the loop stays right; a smaller warm-up margin (`rate / 8`) passes, since noise does not reach the bound's worst case, which its arithmetic covers; a `warm_up(.., 256)` in `Player::with_config` passes, since the promise test checks the stretchers directly; `required-features` on the test would turn a compile error into a silent skip (VERIFY-1).
 * [x] 2026-10-21: M11, three review rounds done and their findings fixed.
 * [x] 2026-10-21: M11: PR #25 opened.  CI (run 39521993920): every job passes.  The `test` job lists the 5 `realtime` tests as `ok`; the binary took about 11 s on the runner.  `test` took 15 min, since Rust 1.99.1 changed rust-cache's key and the build started cold (`Finished` in 9m 58s); M11 did not cause that.
-* [ ] M11: merged.
+* [x] 2026-10-21: M11, PR #25 merged by the maintainer (`cb1d0be`).
+* [x] 2026-10-21: M12 implementation plan written (the M12 sections under "Plan of work").  Survey of every `to_vec` in `app`, `worker`, `protocol` and `engine`, of CI's clippy targets, and of clippy's `disallowed-methods` paths in a scratch worktree.
+* [x] 2026-10-21: M12 plan review round 1, by one new reviewer with a prototype of the whole design in a scratch worktree.  Every clippy command passed on both targets; inner `#[expect]`s under a module `#![expect]` proved their paths.  1 blocker, 5 should-fix findings and 9 nits, all checked.  The blocker, real: `docs-check` takes `` `to_vec` `` on an `* Enforced by:` line as a test name; MEM-1's line now gives each path.  The should-fix items, real and fixed: with `-D warnings`, engine's errors hid `app`'s sites, so the count runs without it; deleting `app/clippy.toml` never reached the app's canary, so a wrong `Float32Array` path is planted instead; the TD-13 plant also gave an unused variable; three sites are a match arm, a tail expression and a `return`; TD-13 and TD-14 named line numbers that move.  Nits fixed: the counts, the warning for a wrong method in `js_sys`, `engine`'s `js_sys`, TOML literal strings, MEM-2's line, the step 1 `harness.md` row.  Not changed: `memory.md`'s paths for `app/tests/` (a canary is not a site), rustfmt's wrapping, and the engine and worker canaries, which stay for when M18 removes TD-13 and TD-14.
+* [x] 2026-10-21: M12 plan review round 2, by one new reviewer with a prototype of the whole design and every doc edit.  The site count, the plants, `docs-check` and `cargo test -p xtask` held.  No blockers; 6 should-fix findings and 12 nits, all checked and real, all fixed in the plan.  The should-fix items: rust-cache saves only on a key that does not match exactly, so the `wasm32` step needs a new cache key (read in rust-cache's `restore.ts` at v2.9.2); the plants tried 3 of the 10 (crate, path) pairs, so step 2 now tries all 10; a plant's stated result was incomplete; a canary proves its path only under a clippy step with `--all-targets`, now in TD-<n> and MEM-1's line; `README.md`'s setup table must name the `wasm32` target; "a JS typed array" claimed more than two types.  The nits: TD-<n>'s list of forms, MEM-2's gaps, the JS reason's lint name, the timing, `web-test`'s targets, `roformer`'s count, "in CI", the plant's place in `from_audio`, the parent bullet's punctuation and "the one copy into wasm memory".  Not changed: `memory.md`'s paths.
+* [x] 2026-10-21: M12 plan review round 3, by one new reviewer who applied the design and each doc edit as worded.  Every clippy command, `docs-check` and `cargo test -p xtask` passed, and the 3 plants and 10 pairs failed as stated.  No blockers; 3 should-fix findings and 7 nits, all checked and real, all fixed in the plan.  The should-fix items, each a local fix: a module `#![expect]` before `#![cfg(target_arch = "wasm32")]` in `protocol/tests/web.rs` failed the native step; "each run fails" was false for the native step of three crates; the decision point gave no changes for (b) and (c), and (b)'s size was wrong.  The reviewer's root `clippy.toml` is now option (d).  The nits: `demix.rs` is in `roformer`, plant 1's place, the exact command lines, two more gaps in TD-<n>, both `harness.md` rows, `app/clippy.toml` in `memory.md`'s paths and the cache size.
+* [x] 2026-10-21: M12 plan review round 4, by one new reviewer who did both steps as worded in a scratch worktree.  fmt, the 5 clippy commands, the tests and `docs-check` passed; the 3 plants and the 10 pairs failed as stated.  No blockers; 2 should-fix findings and 9 nits, all checked and real, all fixed in the plan.  The should-fix items, each one line: TD-<n> did not name `synth`, which makes the demo song in the web app; the `README.md` setup row said "Nothing more on macOS".  The nits: which `README.md` list, plant 2's place, MEM-1's capital and CI job, TD-<n>'s lead sentence, "in silence", `js_sys` in `stem-protocol`'s native build, (b)'s counts, (c)'s list, the CI step's place.  Plan review stops here: no blockers or significant should-fix.  Not verified: the canaries in a browser, since no WebDriver ran here.
+* [x] 2026-10-21: M12, option (b) chosen by the maintainer.
+* [x] 2026-10-21: M12 step 1: the `wasm32` clippy step, with the cache key.  It passed on the tree as it was.
+* [x] 2026-10-21: M12 step 2: the lint, its sites, the canaries and the docs.  Before the `#[expect]`s, without `-D warnings`: the `wasm32` run warned at the 15 calls on the 13 table lines, the 5 sites of `roformer` and `roformer-gpu`, 9 calls in `worker/src/web/tests.rs` and 7 in `protocol/tests/web.rs`.  The native run warned at the 2 `engine` sites, the 5 model-crate sites and the 17 model-crate test calls.  Each warning had the MEM-1 note.  After them, every clippy command passed.
+  * Plants, each run and restored: a copy in `Song::from_audio` failed the native step (`song.rs:114`, `slice::to_vec`); a copy in `run` failed the `wasm32` step (`web.rs:1051`, `js_sys::Float32Array::to_vec`); TD-13's site with no copy failed with only "this lint expectation is unfulfilled" (`separator.rs:290`).
+  * The 12 (crate, path) pairs, each turned off and restored, each failed with "this lint expectation is unfulfilled": app slice and Float32Array at the canary only; app Uint8Array at `picker.rs`, `store.rs` and `separator.rs`; worker each path at its sites and the canary; protocol each path at its canary only; engine, roformer and roformer-gpu at their sites and canary on the native step, and at their lib sites on the `wasm32` step.
+  * `xtask web-test --browser chrome` (Chrome 155): `mem1_lint_is_on_for_js_arrays` passed in `app`, `stem-worker` and `stem-protocol`, and every other browser test passed.  Safari not run: safaridriver needs "Allow Remote Automation", a person step.
+* [x] 2026-10-21: M12 review round 1, by one new reviewer who planted a copy in each of the six crates and turned off paths.  Each failed clippy as claimed.  No blockers; 2 should-fix findings and 4 nits, all checked and real, all fixed.  The should-fix items: the slice message told `stem-worker`, `stem-protocol`, `roformer` and `roformer-gpu` to share an `engine::Samples`, which LAYER-1 forbids them; they now say "move the buffer instead of copying it".  Two bench reasons said "kernel choices" for matmul shapes.  The nits: the parent plan's bullet, `roformer/clippy.toml` in `gpu.md`'s paths, a 27-word sentence in MEM-1, and `store.rs`'s reason, since `read` also loads `meta`.
+* [x] 2026-10-21: M12 review round 2, by one new reviewer who read both pinned actions' sources, built the `wasm32` step from cold (1m 34s) and ran the canaries in Chrome.  No blockers; 1 should-fix and 3 nits, all checked.  The should-fix, real: the guide's changelog line still told every crate to share an `engine::Samples`.  Nits fixed: TD-26 names an outer `#[expect]` on `mod tests` too, and the M12 design names TD-26 and the 12 pairs.  Not changed: the file-wide `#![expect]`s in two `roformer-gpu` test files, which the design allows for tests.
+* [x] 2026-10-21: M12 review round 3, by one new reviewer who read the whole diff as a maintainer and ran every CI command.  No blockers; 1 should-fix and 2 nits, all checked.  The should-fix, real: the choice at M12's decision point outlives the plan, as M6's and M11's did, so it is now decision 0008, accepted.  Nit fixed: the design gives (b)'s counts beside (a)'s.  Not changed: `app/tests/web.rs` stays outside `memory.md`'s paths, as plan review decided.
+* [x] 2026-10-21: M12, three review rounds done and their findings fixed.
 * [ ] M12: MEM-1 lint.
 * [ ] M13: MEM-3 lint.
 * [ ] M14: Claude Code deny rules.
@@ -1669,6 +1804,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, M7 survey: `dsp` never writes `bool`.  `median`'s `swapped` gets it from `true`, so a check of written types cannot see it, and TD-24's "has a `bool`" is an inferred type.
 * 2026-10-20, M6 plan review: an `expect` of a lint group silences the whole group.  `#![expect(clippy::all, reason = "x")]` is fulfilled by a style lint, and `n == n` then passes.  So M7 must name each lint, not only require `expect`.
 * 2026-10-20, M8 survey: the first M8 text said to anchor `dist/` as `/dist/`.  The only `dist` folder is `app/dist/`, Trunk's output, so `/dist/` would stop ignoring it.  The anchored form is `/app/dist/`.
+* 2026-10-21, M12 survey: CI's clippy has never linted the `wasm32`-only code: `worker/src/web.rs` and most of the page side in `app/src/`.  TD-13 and TD-14 are in that code.  A `wasm32` clippy run passes today.
+* 2026-10-21, M12 survey: a `disallowed-methods` path that does not resolve passes `-D warnings`, in silence or with a warning, though clippy's docs say it is an error.  Evidence: `slice::to_vecc` and `js_sy::Uint8Array::to_vec` give no message on clippy 0.1.99.
+* 2026-10-21, M12: the `wasm32` step also lints the lib code of `roformer` and `roformer-gpu`, which it builds as workspace members.  So their lib `#[expect]`s fail on both steps when the path is off.
+* 2026-10-21, M12: the planned reason for the test modules, "tests copy a few bytes", was false for `roformer/tests/reference.rs`, which copies fixture audio.  The reason is now "test code, which does not ship".
 
 ## Decision log
 
@@ -1738,6 +1877,10 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-20, agent (M9 plan review round 2): a git dependency in a member is a DEPS-1 problem.  None exists today, and one that tracks a branch is the least pinned kind.  For a crate that `SETTLED_CRATES` does not name, a requirement with a pre-release passes only as an `=` pin.
 * 2026-10-20, agent (M10): the check reads `stem_protocol::kind` from `protocol/src/lib.rs` with `proc-macro2`, not through a dependency.  A dependency needs a second list of the constants and a new edge in the layers table; the scan needs neither.
 * 2026-10-20, agent (M10): the scan reads the shapes of a type that the scripts use today, and the reversed comparison.  Other shapes, and field names, stay in TD-16, by the rule for proportionate sensors.
+* 2026-10-21, agent (M12): each path in a `clippy.toml` gets a canary, an `#[expect]` on a deliberate copy in a test.  A wrong or stale path passes clippy in silence, so without the canary the lint can be off with no sign.
+* 2026-10-21, agent (M12): CI's `clippy` job gains a `wasm32` step for `app`, `stem-worker`, `stem-protocol` and `engine`.  Without it the lint never sees TD-13 or TD-14.
+* 2026-10-21, agent (M12): the plan recommends option (a) at M12's decision point: `app`, `worker`, `protocol` and `engine`.  The maintainer decides.
+* 2026-10-21, maintainer (M12): option (b), `app`, `worker`, `protocol`, `engine`, `roformer` and `roformer-gpu`.  MEM-1 covers model-sized buffers, and the lint's value is the next copy.  The agent's recommendation of (a) weighed known breaches too much.  Recorded as decision 0008 in review round 3.
 
 ## Outcomes and retrospective
 

@@ -159,7 +159,12 @@ async fn read(path: &str) -> Option<Vec<u8>> {
     if v.is_null() {
         None
     } else {
-        Some(v.unchecked_into::<Uint8Array>().to_vec())
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: a stored file is copied once into wasm memory, for the decoder or to parse it"
+        )]
+        let bytes = v.unchecked_into::<Uint8Array>().to_vec();
+        Some(bytes)
     }
 }
 

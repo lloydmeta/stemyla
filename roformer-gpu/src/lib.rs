@@ -1020,6 +1020,10 @@ impl Gpu {
         let view = staging
             .get_mapped_range(..)
             .map_err(|e| format!("readback: {e}"))?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the one copy of a read-back out of mapped GPU memory, which is unmapped next"
+        )]
         let out = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
         drop(view);
         staging.unmap();
@@ -1815,6 +1819,16 @@ pub fn kernels_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mem1_lint_is_on() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1 canary: clippy fails here if this path is off"
+        )]
+        let copy = [1.0_f32].to_vec();
+        assert_eq!(copy, [1.0]);
+    }
 
     /// Worst number of distinct addresses one bank serves in a single
     /// 32-lane access to workgroup memory, in RDNA's model of the LDS (32

@@ -166,6 +166,10 @@ impl<'a> Store<'a> {
         if info.shape != shape {
             return Err(WeightError::Shape {
                 name: name.to_string(),
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "MEM-1: a tensor's shape, for the error"
+                )]
                 expected: shape.to_vec(),
                 found: info.shape.clone(),
             });
@@ -221,9 +225,23 @@ pub fn transpose(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
 mod tests {
     use super::*;
     use safetensors::tensor::TensorView;
+
+    #[test]
+    fn mem1_lint_is_on() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1 canary: clippy fails here if this path is off"
+        )]
+        let copy = [1.0_f32].to_vec();
+        assert_eq!(copy, [1.0]);
+    }
 
     fn file() -> Vec<u8> {
         let data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
