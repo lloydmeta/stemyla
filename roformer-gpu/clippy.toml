@@ -1,5 +1,10 @@
-# MEM-1 (docs/invariants.md).  Clippy reads only this file for this crate.
-# Each path has a canary: `mem1_lint_is_on` in `roformer-gpu/src/lib.rs`.
+# MEM-1 and MEM-3 (docs/invariants.md).  Clippy reads only this file for this crate.
+# Each path has a canary: `mem1_lint_is_on` and `mem3_lint_is_on` in `roformer-gpu/src/lib.rs`.
 disallowed-methods = [
   { path = "slice::to_vec", reason = 'MEM-1: a copy of a song- or model-sized buffer stays in wasm memory for good.  Fix: borrow the slice, or move the buffer instead of copying it.  For a needed copy, add #[expect(clippy::disallowed_methods, reason = "MEM-1: why")] to its statement, field or match arm.' },
+  { path = "wgpu::Device::create_buffer", reason = "MEM-3: wgpu's web backend does nothing when a buffer is dropped.  The buffer stays on the GPU until JavaScript collects it, and Safari collects late.  Fix: make it with Gpu::buffer or Gpu::upload, which return a GpuBuffer that is destroyed when dropped." },
+  { path = "wgpu::util::DeviceExt::create_buffer_init", reason = "MEM-3: wgpu's web backend does nothing when a buffer is dropped.  The buffer stays on the GPU until JavaScript collects it, and Safari collects late.  Fix: make it with Gpu::buffer or Gpu::upload, which return a GpuBuffer that is destroyed when dropped." },
+  { path = "wgpu::util::StagingBelt::new", reason = "MEM-3: this wgpu helper makes GPU buffers that are never destroyed on the web.  Fix: read back with Gpu::read, and write with Gpu::write or Gpu::upload." },
+  { path = "wgpu::util::StagingBelt::new_with_buffer_usages", reason = "MEM-3: this wgpu helper makes GPU buffers that are never destroyed on the web.  Fix: read back with Gpu::read, and write with Gpu::write or Gpu::upload." },
+  { path = "wgpu::util::DownloadBuffer::read_buffer", reason = "MEM-3: this wgpu helper makes GPU buffers that are never destroyed on the web.  Fix: read back with Gpu::read, and write with Gpu::write or Gpu::upload." },
 ]

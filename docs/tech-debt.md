@@ -59,7 +59,7 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 ### TD-22: a compile-fail doctest passes on any compile error
 
-MEM-3's doctest on `Rec` is marked `compile_fail,E0505`, but stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  The `no_run` doctest beside it compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.
+MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E0616`, `E0624`) pass on any compile error, since stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  `Rec`'s `no_run` doctest compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.  The `Gpu` doctests have no such twin, since a `no_run` doctest cannot call a private item.  So a rename that also makes an item public (`pub dev`) fails them with another error, and they pass.
 
 * Fix: run `cargo +nightly test -p roformer-gpu --doc` in CI, since nightly rustdoc checks the error code; or check it with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
 
@@ -92,6 +92,22 @@ Clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`,
 * a path that no longer resolves, except through the canaries, which prove their paths only while the clippy steps keep `--all-targets`.  Nothing fails if the `wasm32` step goes.
 
 * Fix: none planned.  Phase 3's memory reviewer looks for a new copy of any form.
+
+### TD-27: MEM-3's lint sees only how `roformer-gpu` makes buffers
+
+Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer` (MEM-3), and no other crate reaches a `Gpu`'s device.  It does not see:
+
+* a device that another crate, or a test in another crate, opens with `wgpu` itself; `stem-worker` takes `wgpu` directly, for `wgpu::PowerPreference` only, and a re-export of it from `roformer-gpu` would let it drop `wgpu`;
+* textures and query sets, which the web backend does not free either; `Gpu`'s profiling query set is never destroyed, and lives as long as its `Gpu`;
+* a buffer made in a statement that has an `#[expect]` for a MEM-1 copy, since both rules share the lint; the file-wide `#![expect]`s in `roformer-gpu/tests/memory.rs` and `tests/reference.rs` pass a buffer made there on a device that the test opens itself;
+* an `#[allow]` in place of an `#[expect]`;
+* a path that no longer resolves after a wgpu update, except through the canary, and a new helper that makes buffers in a later wgpu;
+* a second call that makes a buffer in the `let` of a `GpuBuffer` constructor, which its `#[expect]` passes;
+* a new public function or `Deref` on `Gpu` that returns or lends the device, or a clone of it, or a new public constructor that takes a device, since the caller can keep a clone;
+* other ways in wgpu to make a buffer that do not run on the web today: `create_buffer_from_hal`, `create_blas` and `create_tlas`;
+* a `GpuBuffer` that is kept and never dropped; the tests in `roformer-gpu/tests/memory.rs` measure that on a real GPU only.
+
+* Fix: none planned.  Phase 3's GPU reviewer looks for GPU memory that is not destroyed.
 
 ## Known breaches
 

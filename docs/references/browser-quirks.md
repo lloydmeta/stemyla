@@ -13,6 +13,7 @@ Safari 27.0 on macOS 26.7.1 (checked 2026-10-19): `FileSystemWritableFileStream.
 
 Safari's garbage collector is not told how much memory WebGPU objects hold ([WebKit bug 283321](https://bugs.webkit.org/show_bug.cgi?id=283321)), and wgpu's web backend does nothing when a buffer is dropped, so a dropped buffer can stay allocated long enough to push the tab over its memory limit.
 
+* wgpu 30.0.1's web backend does nothing when a buffer, a query set or a texture is dropped ([source](https://docs.rs/crate/wgpu/30.0.1/source/src/backend/webgpu.rs), checked 2026-10-21).
 * The code: `GpuBuffer` in `roformer-gpu/src/lib.rs` calls `destroy()` when dropped.
 * Rule: MEM-3.
 

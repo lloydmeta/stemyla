@@ -64,11 +64,11 @@ A typed array sent between the page and the worker goes in the message's transfe
 
 ### MEM-3: GPU buffers are freed when dropped
 
-Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when dropped.  `Rec` borrows the buffers it binds until it is submitted.
+Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when dropped.  Clippy fails five ways to make a buffer in `roformer-gpu` outside `GpuBuffer`.  No other crate reaches a `Gpu`'s device.  `Rec` borrows the buffers it binds until it is submitted.
 
 * Why: wgpu's web backend does nothing when a buffer is dropped, and Safari's garbage collector does not count WebGPU memory ([WebKit bug 283321](https://bugs.webkit.org/show_bug.cgi?id=283321)).
-* Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI; `STEMYLA_REQUIRE=gpu` makes them fail where no adapter opens), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile; CI `test` job).
-* Gaps: TD-8, TD-22.
+* Enforced by: `a_dropped_buffer_is_destroyed`, `a_failed_load_frees_what_it_uploaded` (need a GPU, so not in CI; `STEMYLA_REQUIRE=gpu` makes them fail where no adapter opens), and a doctest showing that `Rec` keeps a buffer alive until submitted (it must fail to compile; CI `test` job).  Clippy's `disallowed-methods` in `roformer-gpu` (CI `clippy` job) fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init` and two wgpu helpers that make buffers, in three paths.  `mem3_lint_is_on` proves each path, under CI's native `--workspace --all-targets` clippy step.  `Gpu`'s device and `Gpu::from_device` are private.  Doctests on `Gpu` fail if either becomes public (CI `test` job).
+* Gaps: TD-8, TD-22, TD-27.
 
 ### MEM-4: the tab stays under 2 GB on an iPhone
 

@@ -26,6 +26,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0006-clippy-exceptions-in-dsp.md`: `dsp` keeps its beginner forms (DSP-1), and `dsp/src/lib.rs` expects each clippy lint that they trigger, by name and with a reason.
 * `decisions/0007-no-allocation-in-the-audio-callback.md`: after warm-up, the audio callback never allocates or frees memory, for the stretchers the app ships (RT-1).
 * `decisions/0008-mem-1-lint-in-each-crate.md`: six crates, each with its own `clippy.toml`, fail `to_vec` on a slice or a JS typed array (MEM-1).
+* `decisions/0009-mem-3-lint-and-private-device.md`: clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer`, and `Gpu`'s device is private (MEM-3).
 
 ## References
 
