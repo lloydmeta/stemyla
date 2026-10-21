@@ -235,7 +235,7 @@ fn e2e_messages_use_protocol_types() {
 }
 
 #[test]
-fn claude_settings_deny_publish_and_merge() {
+fn claude_settings_hold_the_deny_rules() {
     let file = xtask::workspace_root().join(".claude/settings.json");
     let settings = std::fs::read_to_string(&file)
         .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));

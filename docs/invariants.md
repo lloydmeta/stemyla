@@ -148,12 +148,12 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.
 * Gaps: TD-8, TD-9, TD-19.
 
-### GIT-1: never push unasked; never publish or merge a PR
+### GIT-1: push only when asked, never to main or gh-pages
 
-Never push without being asked.  An agent never runs `xtask publish` (which pushes) or merges a PR; a person does.
+Never push without being asked.  An agent never pushes to `main` or `gh-pages`, runs `xtask publish` (which pushes) or merges a PR; a person does.
 
 * Why: pushing to `main` or `gh-pages` publishes the site, and merging a PR pushes to `main`.
-* Enforced by: deny rules in `.claude/settings.json` for publish and merge, kept by `claude_settings_deny_publish_and_merge` (CI `test` job).  They match the command text that an agent usually writes, and were checked by hand (harness phase 2, M14).  A push rests on prose (decision 0010); TD-28 lists the gaps.
+* Enforced by: deny rules in `.claude/settings.json`, kept by `claude_settings_hold_the_deny_rules` (CI `test` job).  They refuse a push that names `main` or `gh-pages`, `--all`, `--mirror`, publish and merge.  They match the command text that an agent usually writes, and were checked by hand (harness phase 2, M14).  A push that names no branch, and a push unasked, rest on prose (decision 0010); TD-28 lists the gaps.
 * Gaps: TD-20, TD-28.
 
 ### GIT-2: small, verified, signed commits

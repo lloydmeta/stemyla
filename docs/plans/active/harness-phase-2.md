@@ -1670,11 +1670,12 @@ Each option denies `xtask publish` and `gh pr merge`, which publish the site.  T
 * (d), added on 2026-10-21 after the maintainer first chose (a): no rule for `git push`.  The agent pushes a branch when asked, as before, and GIT-1's text for a push stays prose.  Without a rule, auto mode pushes with no prompt.
 * Recommendation, before the choice: (a).
 * The choice outlives the plan, so it becomes decision 0010, accepted when the maintainer chooses.
-* Chosen: (a), by the maintainer on 2026-10-21; then (d), by the maintainer on 2026-10-21, before step 1 started (decision 0010).
+* (e), added on 2026-10-21 during the implementation: (d), and deny a push that names `main` or `gh-pages`, and `git push --all` and `--mirror`.  A rule sees only a branch that the command names; a bare `git push` on `main` passes.
+* Chosen: (a), by the maintainer on 2026-10-21; then (d), by the maintainer on 2026-10-21, before step 1 started (decision 0010).  Then (e), by the maintainer on 2026-10-21, after step 3.
 
 #### M14 design
 
-The design follows (d).
+The design follows (e).
 
 * `.claude/settings.json`:
 
@@ -1683,6 +1684,21 @@ The design follows (d).
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "deny": [
+      "Bash(git push *main)",
+      "Bash(git push *main *)",
+      "Bash(git push *gh-pages*)",
+      "Bash(git push *--all*)",
+      "Bash(git push *--mirror*)",
+      "Bash(rtk git push *main)",
+      "Bash(rtk git push *main *)",
+      "Bash(rtk git push *gh-pages*)",
+      "Bash(rtk git push *--all*)",
+      "Bash(rtk git push *--mirror*)",
+      "Bash(rtk proxy git push *main)",
+      "Bash(rtk proxy git push *main *)",
+      "Bash(rtk proxy git push *gh-pages*)",
+      "Bash(rtk proxy git push *--all*)",
+      "Bash(rtk proxy git push *--mirror*)",
       "Bash(gh pr merge *)",
       "Bash(rtk gh pr merge *)",
       "Bash(rtk proxy gh pr merge *)",
@@ -1696,18 +1712,19 @@ The design follows (d).
 }
 ```
 
+* `git push *main` and `git push *main *` refuse a push whose branch ends in ` main`, `:main`, `/main` or `+main`, as the last word or before another word.  So they cover `origin main`, `-u origin main`, `HEAD:main`, `HEAD:refs/heads/main`, `+main` and `main --force`.  They also refuse a branch whose name ends in `main`, such as `fix-main`.  `git push *gh-pages*` refuses any push that holds the name.
 * `cargo r* publish*` covers `cargo run -p xtask -- publish`, `cargo run -p xtask publish`, `cargo run --release -p xtask -- publish`, `cargo run --manifest-path xtask/Cargo.toml -- publish` and `cargo r -p xtask -- publish`.  It also refuses `publish --no-push`, which pushes nothing, and any `cargo run` that holds the word, such as `--out publish-dir`; the person runs those.  It leaves `cargo run -p xtask -- e2e ...`, `cargo test -p xtask publish` and `git commit -m "... xtask publish ..."` alone, since each pattern starts with the program name.
-* Out of scope, named in TD-28: a push by the agent, to any branch, `main` and `gh-pages` included (TD-20); a shell or `eval` that runs a string; a script that the agent writes and then runs; `env`; an absolute path to `xtask`, or a path outside `target/`; a quoted subcommand; `gh api`, which can merge; a session started outside the repo root; `/cd` to another folder; a cargo option before `run` (`cargo -q run`, `cargo +nightly run`); and a mod that answers `tool.check`.
-* The check: `pub fn claude_settings_problems(settings: &str) -> Vec<Problem>` in `xtask/src/rules.rs`, with `pub const REQUIRED_DENY_RULES: [&str; 8]`, the list above.  It parses the text with `serde_json`, already a dependency of `xtask`.  A problem names GIT-1.  The function returns after the first problem of shape, so a broken file gives one problem:
+* Out of scope, named in TD-28: a push that names no branch, such as `git push` or `git push origin HEAD` while on `main`; a push to another branch without being asked; a shell or `eval` that runs a string; a script that the agent writes and then runs; `env`; an absolute path to `xtask`, or a path outside `target/`; a quoted subcommand; `gh api`, which can merge; a session started outside the repo root; `/cd` to another folder; a cargo option before `run` (`cargo -q run`, `cargo +nightly run`); and a mod that answers `tool.check`.
+* The check: `pub fn claude_settings_problems(settings: &str) -> Vec<Problem>` in `xtask/src/rules.rs`, with `pub const REQUIRED_DENY_RULES: [&str; 23]`, the list above.  It parses the text with `serde_json`, already a dependency of `xtask`.  A problem names GIT-1.  The function returns after the first problem of shape, so a broken file gives one problem:
   * the text is not JSON; a top-level key other than `$schema`, `permissions` and `hooks` (`SETTINGS_KEYS`); a `$schema` that is not a string; `permissions` is missing or not an object; a `permissions` key other than `deny`; or `permissions.deny` is missing or not an array of strings: "GIT-1: .claude/settings.json <what>, such as 'is not JSON (trailing comma at line 13 column 5)'.  Fix: Claude Code drops a settings file that it cannot read or that its schema rejects, deny rules included.  Keep to the keys this check knows, or add a key to `SETTINGS_KEYS` in xtask/src/rules.rs after a run of M14's step 3 shows the rules still hold."
   * each rule of `REQUIRED_DENY_RULES` that is not in `deny`: "GIT-1: .claude/settings.json does not deny `<rule>`.  Fix: put it back in `permissions.deny`; a person publishes and merges."
-  * Extra deny rules pass.  The real-tree test `claude_settings_deny_publish_and_merge` in `xtask/tests/rules.rs` reads `.claude/settings.json` and asserts no problem.
+  * Extra deny rules pass.  The real-tree test `claude_settings_hold_the_deny_rules` in `xtask/tests/rules.rs` reads `.claude/settings.json` and asserts no problem.
 * Docs (DOC-1):
-  * `invariants.md`, GIT-1: the heading becomes "### GIT-1: never push unasked; never publish or merge".  The statement becomes "Never push without being asked.  An agent never runs `xtask publish` (which pushes) or merges a PR; a person does."  "Why" adds "and merging a PR pushes to `main`".  `* Enforced by:` becomes "deny rules in `.claude/settings.json` for publish and merge, kept by `claude_settings_deny_publish_and_merge` (CI `test` job).  They match the command text that an agent usually writes, and were checked by hand (M14).  A push rests on prose (decision 0010); TD-28 lists the gaps."  `* Gaps:` becomes TD-20, TD-28.  "Prose only" lines fall from 4 to 3.
+  * `invariants.md`, GIT-1: the heading becomes "### GIT-1: never push unasked; never publish or merge".  The statement becomes "Never push without being asked.  An agent never runs `xtask publish` (which pushes) or merges a PR; a person does."  "Why" adds "and merging a PR pushes to `main`".  `* Enforced by:` becomes "deny rules in `.claude/settings.json` for publish and merge, kept by `claude_settings_hold_the_deny_rules` (CI `test` job).  They match the command text that an agent usually writes, and were checked by hand (M14).  A push rests on prose (decision 0010); TD-28 lists the gaps."  `* Gaps:` becomes TD-20, TD-28.  "Prose only" lines fall from 4 to 3.
   * `CLAUDE.md`, the GIT-1 line: "GIT-1: never push without being asked; never merge or run `xtask publish`, which deny rules refuse."  The comment on the `publish` command line becomes "# build, commit to gh-pages, push: a person only (GIT-1)".  The line count does not change.
   * `tech-debt.md`, TD-20: the first sentence stays.  The fix line "in phase 2 of the plan, permission rules and hooks in the project's Claude Code settings; in phase 5, the other ruleset changes." becomes "in phase 5 of the plan, the ruleset changes and the agents' own identity.  Phase 2 denies only publish and merge (decision 0010)."  TD-28, "GIT-1's deny rules match command text only", under "Enforcement gaps" .  Its bullets: the out-of-scope list above; an edit to `.claude/settings.json` during a session, which Claude Code reloads at once; and "the test keeps the rules in the file, but does not show that Claude Code refuses anything; M14's step 3 showed it by hand once".  Its fix: "re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to `.claude/settings.json`, or an upgrade of Claude Code or RTK.  The control is the `main` ruleset and the agents' own identity (phase 5)."
   * `working-with-agents.md`: "Before you start" says to start at the repo root, since the project settings load only there.  "What a person must do": the first bullet becomes "Push, or ask the agent to push; it does not push unasked (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules stop the agent from running it."  The "Merge" bullet adds "Deny rules stop the agent from running `gh pr merge`."  The Tools row for `publish`: "a person only (GIT-1)".  A new short section "What the agent cannot do" lists the refused commands, the denial text that the person sees, and that the rules are not a security boundary.  The Status paragraph: "pushes and merges" becomes "publishes and merges", and "No hooks ... exist yet" says that the project settings deny publish and merge.  A changelog line.
-  * `harness.md`: a components row, "deny rules in `.claude/settings.json` for `xtask publish` and `gh pr merge`, kept by `claude_settings_deny_publish_and_merge` (GIT-1) | sensor, computational | nothing stopped an agent from publishing the site or merging a PR, which then publishes it.  It refuses the call before it runs, and matches command text only (TD-28) | phase 2".
+  * `harness.md`: a components row, "deny rules in `.claude/settings.json` for `xtask publish` and `gh pr merge`, kept by `claude_settings_hold_the_deny_rules` (GIT-1) | sensor, computational | nothing stopped an agent from publishing the site or merging a PR, which then publishes it.  It refuses the call before it runs, and matches command text only (TD-28) | phase 2".
   * `decisions/0010-git-1-deny-rules.md`: options (a) to (d), the choice of (a) and then (d), and consequences for (d).  Step 2 adds TD-28 to its consequences.  Its line in `docs/README.md` says that the rules refuse publish and merge, and that the agent pushes when asked.
   * The parent plan's phase 2 bullet: "deny rules for `git push` and `xtask publish` (GIT-1)" becomes "deny rules for `xtask publish` and `gh pr merge` (GIT-1, M14; `git push` dropped by the maintainer, decision 0010)".  Its 5c bullet adds: "Auto-merge needs a change to GIT-1 and decision 0010 first."
 
@@ -1724,12 +1741,13 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
    * a trailing comma in the file: the test fails with the parse error.
 3. Run the rules, before the PR.  In a scratch clone of the branch whose `origin` is a path that does not exist, start `claude -p` from the clone's root, where the project settings load, and run each command below with `claude -p --model haiku --allowedTools Bash --output-format json "Run exactly this shell command and nothing else: <cmd>"`.  Run each with the maintainer's hooks.  Run the `rtk` forms and the compound command once more with `--settings '{"disableAllHooks": true}'`.  A command passes if `permission_denials` holds it (refused), or if it ran (allowed).  Rerun a command that the model changed.  Record each result and the cost in the PR.  Set `CARGO_TARGET_DIR` to a folder inside the scratch folder, and run `cargo build -p xtask` in the clone first: a cold build takes about 2 minutes, close to the Bash tool's default timeout.  Do not use the main checkout's `target/`: `xtask` fixes `CARGO_MANIFEST_DIR` at compile time, so a build from the clone breaks the main checkout's `xtask` once the clone is gone.  The refused `target/*/xtask` forms need no binary.
    * Refused, at least one for each rule: `gh pr merge --help`, `GH_PAGER=cat gh pr merge --help`, `rtk gh pr merge --help`, `rtk proxy gh pr merge --help`, `cargo run -p xtask -- publish --help`, `cargo run -p xtask publish --help`, `cargo run --release -p xtask -- publish --help`, `cargo r -p xtask -- publish --help`, `timeout 5 cargo run -p xtask -- publish --help`, `echo x && cargo run -p xtask -- publish --help`, `rtk cargo run -p xtask -- publish --help`, `rtk proxy cargo run -p xtask -- publish --help`, `target/debug/xtask publish --help`, `./target/debug/xtask publish --help`.
-   * Allowed: `git status`, `git push --dry-run origin HEAD` (it runs and fails on the missing remote), `git commit --dry-run --allow-empty -m "docs: say that xtask publish pushes"`, `grep -rn "xtask publish" .claude`, `gh pr view --help`, `cargo run -p xtask -- docs-check`.
+   * Refused, for the push rules: `git push --dry-run origin main`, `git push --dry-run -u origin main`, `git push --dry-run origin HEAD:main`, `git push --dry-run origin HEAD:refs/heads/main`, `git push --dry-run origin +main`, `git push --dry-run origin main --force`, `git push --dry-run origin gh-pages`, `git push --dry-run origin refs/heads/gh-pages:refs/heads/gh-pages`, `git push --dry-run --all origin`, `git push --dry-run --mirror origin`, `cd . && git push --dry-run origin main`, `FOO=1 git push --dry-run origin main`, `rtk git push --dry-run origin main`, `rtk proxy git push --dry-run origin gh-pages`.  The last four run once more with hooks off.
+   * Allowed: `git status`, `git push --dry-run origin HEAD` (it runs and fails on the missing remote), `git push --dry-run -u origin ai-agent-harness-phase-2-ms14`, `git commit --dry-run --allow-empty -m "docs: never git push origin main"`, `git commit --dry-run --allow-empty -m "docs: say that xtask publish pushes"`, `grep -rn "xtask publish" .claude`, `gh pr view --help`, `cargo run -p xtask -- docs-check`.
 
 #### M14 acceptance
 
 * The unit tests pass, and failed against the stub.
-* `claude_settings_deny_publish_and_merge` passes, and the CI `test` job lists it as `ok`.  The two plants fail it.
+* `claude_settings_hold_the_deny_rules` passes, and the CI `test` job lists it as `ok`.  The two plants fail it.
 * Every command of step 3 is refused or allowed as listed, with the hooks and, for the commands run twice, without them.
 * `grep -c "Enforced by: prose only" docs/invariants.md` gives 3.
 * fmt, clippy, the tests and `docs-check` pass.
@@ -2007,6 +2025,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-21: M14 step 3, with Claude Code 2.1.306 and RTK 0.42.4, in a scratch clone at `c5258c2` with `origin` set to a missing path: 26 `claude -p --model haiku` runs, $0.076, all as listed.  The 14 refused commands each had their command in `permission_denials`, with hooks on; `GH_PAGER=cat gh pr merge --help` was denied as `GH_PAGER=cat rtk gh pr merge --help`.  The 6 allowed commands ran, `git push --dry-run origin HEAD` included.  With hooks off, the 4 `rtk` forms, the assignment and the compound command were refused too.
 * [x] 2026-10-21: M14 review round 1, by one new reviewer who mutated the check (6 mutations, each failed a test) and planted a typo, an `allow` key and a trailing comma in the real file.  No blockers; 2 should-fix findings and 8 nits, all checked.  The should-fix items, real and fixed: "never merge" read as a ban on a local `git merge`, so GIT-1 says "merge a PR"; GIT-1 and TD-28 cited step 3 before its record was committed.  Nits fixed: each shape case now names its message; a `$schema` that is not a string is a problem; a `gh` alias joins TD-28; the guide's denial text and task flow; a plural in `harness.md`; the plan's TD-28 and status text.  Not changed: the progress line for step 1 came with step 2's commit; later steps keep it current.
 * [x] 2026-10-21: M14 review round 2, by one new reviewer who ran each CI command as `ci.yml` runs it (`--locked`; `trunk build --release` too; browser tests and publish skipped) in a scratch worktree: all passed, and the `test` job lists `claude_settings_deny_publish_and_merge ... ok`.  `.claude/settings.json` is tracked and did not change after step 3.  No blockers; 2 should-fix findings and 6 nits, all checked.  The should-fix items, real and fixed: decision 0010 and TD-28 named the `main` ruleset as a control, but the admin role bypasses it and `gh-pages` has no protection (`gh api`: "Branch not protected"), so TD-20 says so and both say no control exists today; decision 0010 said auto mode pushes to `gh-pages` freely, but the classifier judges that push.  Nits fixed: the guide's heading is "What deny rules refuse"; `CLAUDE.md`'s GIT-1 line; TD-28 names cloud sessions and `--setting-sources`; decision 0010 cites claude-code-action's sources; two long sentences split.  Not changed: an older progress line that says 5b; it is history.
+* [x] 2026-10-21: M14, option (e) by the maintainer, during review round 3: deny a push that names `main` or `gh-pages`, and `--all` and `--mirror`, in three forms each (15 more rules, 23 in all); decision 0010 records (e).  The real-tree test is now `claude_settings_hold_the_deny_rules`.  Step 3 for the push rules, at the same versions and with the 23-rule file: 21 runs, $0.060, all as listed.  The 14 refused pushes each had their command in `permission_denials`, `FOO=1 git push --dry-run origin main` as `FOO=1 rtk git push ...`; the 3 allowed commands ran, `git push --dry-run origin HEAD` on the feature branch included; with hooks off, the assignment, the 2 `rtk` forms and the compound command were refused.  fmt, the 5 clippy commands, the tests and `docs-check` passed.
 * [ ] M14: Claude Code deny rules.
 * [ ] M15: rustfmt hook.
 * [x] 2026-10-20: M16 moved to phase 5b by the maintainer.
@@ -2127,6 +2146,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-21, agent (M14): the plan recommends option (a) at M14's decision point: deny `git push`, so a person pushes.  It matches the guide, needs no personal setting, and an admin push to `main` publishes the site; a rule for the branch alone cannot work, and an ask holds only while a person reads each prompt.  The maintainer decides.
 * 2026-10-21, maintainer (M14): option (a), as recommended.  Recorded as decision 0010, accepted.
 * 2026-10-21, maintainer (M14): drop the `git push` rule, before step 1 started; deny only `xtask publish` and `gh pr merge` (option (d)).  Decision 0010 records (d).
+* 2026-10-21, maintainer (M14): deny a push to `main` or `gh-pages` after all, but not to other branches (option (e)).  A rule sees only a branch that the command names (TD-28).
 * 2026-10-21, agent (M14): no deny rule for `gh pr create --body`.  It is outside GIT-1 and the maintainer's scope for M14, and `-b` takes a body in four `gh pr` commands.
 
 ## Outcomes and retrospective

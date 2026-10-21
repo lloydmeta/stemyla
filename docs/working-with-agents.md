@@ -85,7 +85,7 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## What a person must do
 
-* Push, or ask the agent to push; it does not push unasked (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules refuse it in the forms that an agent usually writes.
+* Push, or ask the agent to push a branch; it does not push unasked, and deny rules refuse its pushes to `main` and `gh-pages` (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules refuse it in the forms that an agent usually writes.
 * Accept or reject decisions.
 * Give evidence from real hardware: a real GPU (GPU-3), Safari, an iPhone for memory (MEM-4).
 * Merge.  `main` needs an approval.  Deny rules refuse `gh pr merge` in the forms that an agent usually writes.
@@ -93,9 +93,9 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## What deny rules refuse
 
-Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each publishes the site.  The agent sees "Permission to use Bash with command ... has been denied", and the message does not name the rule.  When it stops there, run the command yourself.
+Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `git push --all` and `--mirror`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each can publish the site.  The agent sees "Permission to use Bash with command ... has been denied", and the message does not name the rule.  When it stops there, run the command yourself.
 
-The rules match the command text, so they are not a security boundary (TD-28).  They do not stop a push: the agent pushes when asked.
+The rules match the command text, so they are not a security boundary (TD-28).  They do not see a push that names no branch, such as `git push` while on `main`.  The agent pushes other branches when asked.
 
 ## Before you merge
 
@@ -135,4 +135,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-21, phase 2 (M11): RT-1 forbids allocation in the audio callback after warm-up.  `the_callback_does_not_allocate_after_warm_up` names the stretcher, the callback size and the phase that allocated.  Size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse one.
 * 2026-10-21, phase 2 (M12): clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three.  CI also runs clippy for `wasm32`.  Borrow the slice, share an `engine::Samples` in `app` and `engine`, or move the buffer instead of copying it.  For a needed copy, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]`.  A canary in each crate fails clippy if its path is off.
 * 2026-10-21, phase 2 (M13): clippy fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init`, `StagingBelt` and `DownloadBuffer::read_buffer` in `roformer-gpu` outside `GpuBuffer`.  `Gpu`'s device is private.  Make the buffer with `Gpu::buffer` or `Gpu::upload`, or read back with `Gpu::read`.
-* 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge` to the agent.  Run them yourself.  `claude_settings_deny_publish_and_merge` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.
+* 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  Do these yourself.  `claude_settings_hold_the_deny_rules` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.

@@ -2782,11 +2782,28 @@ pub fn e2e_types_match_the_protocol(
 const SETTINGS_FILE: &str = ".claude/settings.json";
 
 /// The deny rules that `.claude/settings.json` holds for GIT-1: an agent
-/// never publishes the site or merges a PR (decision 0010).  Each rule
-/// starts with the program name, so a commit message or a grep that holds
-/// the words is not refused.  The `rtk` forms are the commands that the
+/// never pushes to `main` or `gh-pages`, publishes the site or merges a PR
+/// (decision 0010).  A push rule sees only a branch that the command names:
+/// `*main` ends with ` main`, `:main`, `/main` or `+main`.  Each rule starts
+/// with the program name, so a commit message or a grep that holds the
+/// words is not refused.  The `rtk` forms are the commands that the
 /// maintainer's RTK hook makes, and that an agent can write itself.
-pub const REQUIRED_DENY_RULES: [&str; 8] = [
+pub const REQUIRED_DENY_RULES: [&str; 23] = [
+    "Bash(git push *main)",
+    "Bash(git push *main *)",
+    "Bash(git push *gh-pages*)",
+    "Bash(git push *--all*)",
+    "Bash(git push *--mirror*)",
+    "Bash(rtk git push *main)",
+    "Bash(rtk git push *main *)",
+    "Bash(rtk git push *gh-pages*)",
+    "Bash(rtk git push *--all*)",
+    "Bash(rtk git push *--mirror*)",
+    "Bash(rtk proxy git push *main)",
+    "Bash(rtk proxy git push *main *)",
+    "Bash(rtk proxy git push *gh-pages*)",
+    "Bash(rtk proxy git push *--all*)",
+    "Bash(rtk proxy git push *--mirror*)",
     "Bash(gh pr merge *)",
     "Bash(rtk gh pr merge *)",
     "Bash(rtk proxy gh pr merge *)",
@@ -2823,7 +2840,7 @@ pub fn claude_settings_problems(settings: &str) -> Vec<Problem> {
             .filter(|rule| !deny.contains(**rule))
             .map(|rule| {
                 git1(format!(
-                    "GIT-1: {SETTINGS_FILE} does not deny `{rule}`.  Fix: put it back in permissions.deny; a person publishes and merges."
+                    "GIT-1: {SETTINGS_FILE} does not deny `{rule}`.  Fix: put it back in permissions.deny; GIT-1 keeps these commands from agents."
                 ))
             })
             .collect(),

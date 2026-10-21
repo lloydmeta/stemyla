@@ -111,11 +111,13 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 
 ### TD-28: GIT-1's deny rules match command text only
 
-Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge` in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They do not see:
+Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1).  Claude Code matches them against the command text, so they are not a security boundary.  They do not see:
 
-* a push by the agent, to any branch, `main` and `gh-pages` included; a push to `gh-pages` publishes the site with no `xtask`; GIT-1's push half rests on prose (decision 0010, TD-20);
+* a push that names no branch, such as `git push` or `git push origin HEAD` while on `main`; a branch named through a variable or a config, such as `push.default`;
+* a push to another branch without being asked, which rests on prose (decision 0010);
+* a branch whose name ends in `main`, such as `fix-main`, which the rules refuse by mistake;
 * a shell or `eval` that runs a string, and a script that the agent writes and then runs;
-* `env`, an absolute path to `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;
+* `git -C`, `git -c`, a git alias, `env`, an absolute path to `git` or `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;
 * a `gh` alias, such as `gh alias set m 'pr merge'`;
 * a cargo option before `run`, such as `cargo -q run` or `cargo +nightly run`;
 * `gh api`, which can merge a PR;
@@ -123,7 +125,7 @@ Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge` i
 * a mod that answers `tool.check`, which can approve a denied call on a personal account;
 * a cloud session in a project or with several repositories, and a session started with `--setting-sources` without `project`; these read no project permission rules ([settings](https://code.claude.com/docs/en/settings));
 * an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
-* whether Claude Code refuses anything: `claude_settings_deny_publish_and_merge` keeps the rules in the file, and M14's step 3 showed the refusals by hand once.
+* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once.
 
 * Fix: re-run M14's step 3 (`plans/active/harness-phase-2.md`) after a change to `.claude/settings.json`, or an upgrade of Claude Code or RTK.  No control exists today: the admin role bypasses the `main` ruleset, and `gh-pages` has no ruleset (TD-20).  Phase 5 adds the agents' own identity and removes the bypass.
 
