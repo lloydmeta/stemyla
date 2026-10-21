@@ -1515,10 +1515,115 @@ Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the te
 * `mem1_lint_is_on` passes in the CI `test` job, and `mem1_lint_is_on_for_js_arrays` passes in `browser tests (Chrome)` for each of the three crates.
 * fmt, the tests and `docs-check` pass.
 
-### M13: GPU buffers are made only by GpuBuffer (MEM-3)
+### M13: GPU buffers are made only by GpuBuffer (MEM-3, DOC-1; maintainer decision)
 
-* Change: add `roformer-gpu/clippy.toml` with `disallowed-methods` for `wgpu::Device::create_buffer` and `wgpu::util::DeviceExt::create_buffer_init`, with a MEM-3 reason.  `GpuBuffer`'s constructor carries the one `#[expect]`.
-* Acceptance: clippy passes.  A planted `device.create_buffer(...)` in `net.rs` fails clippy with the MEM-3 reason.
+* Scope: MEM-3's paths go into M12's `roformer-gpu/clippy.toml`, with a canary, as M12 did for MEM-1.  The decision point below sets which paths, and whether other crates can reach a `Gpu`'s device.
+
+#### M13 state at the start
+
+On 2026-10-21, at commit `a5b7b8f` (M12 merged as PR #26):
+
+* `roformer-gpu/clippy.toml` lists `slice::to_vec` only (MEM-1, decision 0008).  Clippy reads only this file for `roformer-gpu`, so MEM-3's paths go in it.
+* `GpuBuffer` (`roformer-gpu/src/lib.rs`) holds a `wgpu::Buffer`, adds its size to `Gpu::live_bytes`, and calls `destroy()` when dropped.  Its constructor `GpuBuffer::new(buffer, live)` takes a buffer that is already made.
+* The calls that make a buffer, all in `roformer-gpu/src/lib.rs`:
+
+| Site | Call | What it makes |
+| - | - | - |
+| `Gpu::from_device`, its `make` closure | `wgpu::Device::create_buffer` | `dummy`, `uniforms` and the profile `resolve` buffer |
+| `Gpu::create` | `wgpu::Device::create_buffer` | each other buffer: `Gpu::buffer`, the staging buffer of `Gpu::read`, the profile readback of `Rec::submit` |
+| `Gpu::upload` | `wgpu::util::DeviceExt::create_buffer_init` | a buffer with contents, when the length is a multiple of 4 |
+
+* `Gpu::from_device` also makes the profiling query set with `wgpu::Device::create_query_set`.  The query set lives as long as its `Gpu`.
+* No other crate and no test makes a buffer.  `bench.rs`, `net.rs` and `roformer-gpu/tests/` use `Gpu::buffer` and `Gpu::upload` only.
+* `Gpu`'s fields `device`, `queue` and `info` are public, and so is `Gpu::from_device`.  Outside `lib.rs`, two lines read `device`: `gpu.device.limits()` in `gpu_text` (`worker/src/web.rs`) and `g.device.features()` in `plain_device_does_not_profile` (`roformer-gpu/tests/kernels.rs`).  Only the private `Gpu::open`, which `Gpu::new` and `Gpu::new_profiling` call, calls `from_device`.  `stem-worker` takes `wgpu` directly, for `wgpu::PowerPreference` only.
+* `roformer-gpu` has no code behind a target `cfg`.  So CI's native step (`cargo clippy --workspace --all-targets`) lints all of it.  The `wasm32` step also lints its lib, which `stem-worker` builds (M12, in surprises).
+* `roformer-gpu/tests/memory.rs` and `tests/reference.rs` each have a file-wide `#![expect(clippy::disallowed_methods)]` for MEM-1.
+
+Facts checked for M13, with clippy 0.1.99 (rustc 1.99.0) and wgpu 30.0.1, in a scratch worktree:
+
+* wgpu's web backend frees nothing when a resource is dropped.  `Drop` for `WebBuffer` and `WebQuerySet` is a no-op, and `Drop` for `WebTexture` destroys nothing (`src/backend/webgpu.rs` of the published crate).  `wgpu::Buffer`, `wgpu::QuerySet` and `wgpu::Texture` each have `destroy`.
+* Two wgpu helpers make buffers that nothing destroys.  `wgpu::util::StagingBelt` makes its chunks with `create_buffer` and has no `Drop` (`src/util/belt.rs`).  It has two constructors, `new` and `new_with_buffer_usages`.  `wgpu::util::DownloadBuffer::read_buffer` makes a staging buffer (`src/util/mod.rs`).  Clippy does not lint wgpu's own code, so each helper needs its own path.
+* These paths resolve: `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init`, `wgpu::util::StagingBelt::new`, `wgpu::util::DownloadBuffer::read_buffer`, `wgpu::Device::create_query_set` and `wgpu::Device::create_texture`.  Clippy warned at a method call, at a call by path (`wgpu::Device::create_buffer(device, &desc)`, `DeviceExt::create_buffer_init(device, &init)`) and at a function passed as a value.  On the tree as it is, it warned at the 3 sites of the table and at `create_query_set` in `from_device`, each with its note.  `new_with_buffer_usages` resolves too (plan review round 1).
+* A path that does not resolve (`wgpu::util::StagingBelt::newc`) gives the warning "does not refer to a reachable function", and `cargo clippy -p roformer-gpu --lib -- -D warnings` exits 0, as M12 found.  So each path needs a canary.
+* `disallowed_methods` is one lint for every path in the file.  So an `#[expect(clippy::disallowed_methods)]` for a MEM-1 copy also passes a MEM-3 call in the same statement.  The file-wide `#![expect]`s above pass any call in their files.
+* `wgpu::Device` is `Clone`, so a caller of a public `from_device` can keep a copy of the device.
+* A private field gives E0616 in another crate.  A planted `gpu.device.create_buffer(...)` in `gpu_text` failed the `wasm32` clippy step with "field `device` of struct `roformer_gpu::Gpu` is private".
+
+#### M13 decision point for the maintainer: which paths, and who reaches the device
+
+* (a) The phase plan's text: `wgpu::Device::create_buffer` and `wgpu::util::DeviceExt::create_buffer_init`.  `Gpu`'s device stays public, so `stem-worker` can make a buffer on it with no lint, and TD-<n> names it.
+* (b) (a), and:
+  * the two helpers, in three paths: `wgpu::util::StagingBelt::new`, `wgpu::util::StagingBelt::new_with_buffer_usages` and `wgpu::util::DownloadBuffer::read_buffer`;
+  * the `device` field and `Gpu::from_device` become private, and `Gpu::limits` and `Gpu::features` serve the two readers.  Then no other crate reaches a `Gpu`'s device, and the compiler, not a lint, keeps buffers out of `stem-worker`.  The limit: a later public function that returns the device passes every check, and only review sees it (TD-<n>).  The cost: no later crate can wrap a device that it already has, such as eframe's, without a change to `roformer-gpu`.
+* (c) (b), and the other GPU memory that the web backend does not free: `wgpu::Device::create_texture`, `wgpu::util::DeviceExt::create_texture_with_data` and `wgpu::Device::create_query_set`.  MEM-3 then covers textures and query sets.  The `create_query_set` call in `from_device` then gets an `#[expect]`.  It is the one query set of the crate, and it lives as long as its `Gpu`.
+* Recommendation: (b).  A buffer that is not destroyed can push an iPhone tab over 2 GB, and iOS then kills the tab (MEM-4).  A helper is the likely way to a new readback or upload.  The private field costs two small functions, and closes the one other crate that holds a `Gpu`.  (c) adds paths for memory that `roformer-gpu` does not use: it makes no texture, and one query set of 1 KiB for each profiling device.
+* The choice outlives the plan, so it becomes decision 0009, accepted when the maintainer chooses.
+
+#### M13 design
+
+The design follows (b).  When the maintainer chooses (a) or (c), rewrite this section, the steps and the acceptance to that option before step 1.  Re-derive each count, quoted text, plant and undo line from the bullets below.
+
+* Under (a): leave out the helper paths, their lines in the canary, the private field, its two functions and the three doctests.  TD-<n> names `Gpu`'s public device as its first bullet.  Decision 0009 is `0009-mem-3-lint.md`, "0009: which calls MEM-3's lint covers", and its README line leaves out the private device.
+* Under (c): (b), and three more paths, so 8 in all.  Their reason: "MEM-3: wgpu's web backend does nothing when a texture or a query set is dropped.  Fix: destroy it when its owner drops, and add an #[expect] with the reason."  The canary gets a line for each.  `from_device` gets an `#[expect]` on the `create_query_set` statement, with the reason "MEM-3: the one query set, which lives as long as its `Gpu`".  MEM-3's title and first sentence cover textures and query sets.  TD-<n> drops its textures bullet, and its lead sentence says "eight ways to make GPU memory".
+
+* `GpuBuffer` gets two constructors.  Each is the one site of its path, with an `#[expect(clippy::disallowed_methods, reason = "...")]` on its `let`:
+  * `GpuBuffer::new(device, desc, live)` calls `device.create_buffer(desc)`.  Reason: "MEM-3: the one call that makes a buffer from a descriptor.  The `GpuBuffer` destroys it when dropped".
+  * `GpuBuffer::with_contents(device, desc, live)` calls `device.create_buffer_init(desc)`.  Reason: "MEM-3: the one call that makes a buffer with contents.  The `GpuBuffer` destroys it when dropped".
+  * Both pass the buffer to the old body, renamed `GpuBuffer::counted(buffer, live)`.
+  * `make` in `from_device`, `Gpu::create` and `Gpu::upload` call them.  No behaviour changes: each buffer keeps its descriptor, and `live` counts the same bytes.
+* `Gpu`: `device` and `from_device` lose `pub`.  `pub fn limits(&self) -> wgpu::Limits` and `pub fn features(&self) -> wgpu::Features` return the device's.  `gpu_text` and `plain_device_does_not_profile` call them.  `queue` and `info` stay public: a queue write makes no buffer that the caller holds.
+* `GpuBuffer`'s doc comment: its last sentence, from "A clone of the inner `wgpu::Buffer`" to "[`Gpu::upload`] only.", becomes: "Make buffers with [`Gpu::buffer`] and [`Gpu::upload`] only.  Clippy fails five other ways to make a buffer in this crate (MEM-3).  No other crate reaches the device.  A clone of the inner `wgpu::Buffer` is destroyed with it, so a clone must not outlive its `GpuBuffer`."  The old text said that a clone escapes, but `destroy()` frees the memory of each clone.
+* `roformer-gpu/clippy.toml`: the header comment names MEM-1 and MEM-3, and the canaries `mem1_lint_is_on` and `mem3_lint_is_on`.  Five new entries.  Each `reason` is a TOML basic string (`"..."`), since the first reason holds an apostrophe and neither holds a double quote; a literal string (`'...'`) cannot hold an apostrophe:
+  * `wgpu::Device::create_buffer` and `wgpu::util::DeviceExt::create_buffer_init`: "MEM-3: wgpu's web backend does nothing when a buffer is dropped.  The buffer stays on the GPU until JavaScript collects it, and Safari collects late.  Fix: make it with Gpu::buffer or Gpu::upload, which return a GpuBuffer that is destroyed when dropped."
+  * The three helper paths: "MEM-3: this wgpu helper makes GPU buffers that are never destroyed on the web.  Fix: read back with Gpu::read, and write with Gpu::write or Gpu::upload."
+* Canary: `mem3_lint_is_on`, a `#[test]` in the tests of `roformer-gpu/src/lib.rs`, after `mem1_lint_is_on`.  It holds a nested `fn raw(device, queue, read)` with one call for each of the five paths, each under its own `#[expect]` with the reason "MEM-3 canary: clippy fails here if this path is off".  Both `StagingBelt` constructors take a `wgpu::Device` by value, so they get `device.clone()`.  The test takes `raw` as a function pointer and never calls it, so clippy lints the calls and no GPU is needed.  Its doc comment says that clippy's check, not the run, is the evidence.
+* Doctests on `Gpu`, as on `Rec`, keep the field and `from_device` private: a `no_run` one calls `gpu.limits()`; a `compile_fail,E0616` one reads `gpu.device.limits()`; a `compile_fail,E0624` one calls `roformer_gpu::Gpu::from_device(device, queue, info)` in a function that takes the three as arguments.  Without them, a later `pub device` or `pub fn from_device` passes every check.  TD-22 applies: stable rustdoc does not check the error code.  The `no_run` doctest cannot call a private item, so no twin guards the two `compile_fail` doctests: a rename that also makes the item public (`pub dev`) fails them with E0609 or E0599, and they pass.
+* CI does not change.  The native step lints `roformer-gpu` with `--all-targets`, and the `wasm32` step builds `stem-worker` against the private field.
+* TD-<n>, "MEM-3's lint sees only how `roformer-gpu` makes buffers", under "Enforcement gaps" where `<n>` is the next free ID (27 on 2026-10-21).  Its lead sentence: "Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer` (MEM-3), and no other crate reaches a `Gpu`'s device.  It does not see:"  Its bullets:
+  * a device that another crate, or a test in another crate, opens with `wgpu` itself; `stem-worker` takes `wgpu` directly, for `wgpu::PowerPreference` only, and a re-export of it from `roformer-gpu` would let it drop `wgpu`;
+  * textures and query sets, which the web backend does not free either; `Gpu`'s profiling query set is never destroyed, and lives as long as its `Gpu`;
+  * a buffer made in a statement that has an `#[expect]` for a MEM-1 copy, since both rules share the lint; the file-wide `#![expect]`s in `roformer-gpu/tests/memory.rs` and `tests/reference.rs` pass a buffer made there on a device that the test opens itself;
+  * an `#[allow]` in place of an `#[expect]`;
+  * a path that no longer resolves after a wgpu update, except through the canary, and a new helper that makes buffers in a later wgpu;
+  * a second call that makes a buffer in the `let` of a `GpuBuffer` constructor, which its `#[expect]` passes;
+  * a new public function or `Deref` on `Gpu` that returns or lends the device, or a clone of it;
+  * other ways in wgpu to make a buffer that do not run on the web today: `create_buffer_from_hal`, `create_blas` and `create_tlas`;
+  * a `GpuBuffer` that is kept and never dropped; the tests in `roformer-gpu/tests/memory.rs` measure that on a real GPU only;
+  * Fix: none planned.  Phase 3's GPU reviewer looks for GPU memory that is not destroyed.
+
+#### M13 steps
+
+Each step is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. The constructors, the private field and the three `Gpu` doctests, with no lint.
+   * `cargo test -p roformer-gpu --lib` and `--doc` pass.  The `wasm32` clippy step shows that `stem-worker` builds with `gpu.limits()`.  No browser test calls `gpu_text`, so `xtask web-test` adds nothing here.  On the Mac, `cargo run -p xtask -- e2e bench` needs no model and calls `gpu_text`; record that its GPU line prints the limits.
+   * On the Mac: `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release --test memory --test kernels -- --nocapture` passes.  Record the adapter line in the PR; without `--nocapture`, a passing test does not print it.  The memory tests show that `live_bytes` still comes back after each path but the profiling ones.  On an adapter with no `timestamp-query`, such as this Mac's, `collected_profile_readbacks_are_freed` skips; record its skip line.  `STEMYLA_REQUIRE=gpu,timestamps` on an adapter with the feature covers the `resolve` buffer and the readback of `Rec::submit`.
+2. The lint, the canary and the docs.
+   * Lint first: add the five entries, with no `#[expect]`.  `cargo clippy -p roformer-gpu --all-targets`, without `-D warnings`, warns at the two constructors only, each with the MEM-3 note.
+   * Then the two `#[expect]`s and the canary.  Every clippy command in `CLAUDE.md` passes.
+   * Plant each of these on the real tree, one at a time, and restore it.  Record each result in the PR:
+     * `let _raw = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });` as the first statement of `Net::load_store` (`net.rs`) fails the native step with the MEM-3 note;
+     * the same line in `gpu_text` (`worker/src/web.rs`) fails the `wasm32` step with E0616;
+     * `pub device` put back on `Gpu` fails the E0616 doctest, and `pub fn from_device` fails the E0624 doctest (`cargo test -p roformer-gpu --doc`, "Test compiled successfully, but it's marked compile_fail");
+     * each of the five paths turned off by appending `c`: the native step fails with "this lint expectation is unfulfilled" at the canary, and for the first two paths at its constructor too.
+* Docs (DOC-1), in step 2's commit:
+  * `invariants.md`, MEM-3: after the first sentence, insert "Clippy fails five ways to make a buffer in `roformer-gpu` outside `GpuBuffer`.  No other crate reaches a `Gpu`'s device."  `* Enforced by:` adds "Clippy's `disallowed-methods` in `roformer-gpu` (CI `clippy` job) fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init` and two wgpu helpers that make buffers (three paths).  `mem3_lint_is_on` proves each path, under the clippy steps with `--all-targets`.  `Gpu`'s device and `Gpu::from_device` are private.  Doctests on `Gpu` fail if either becomes public (CI `test` job)."  Each method keeps its path in the code span, `Gpu::from_device` included, since `docs-check` takes `` `create_buffer` `` or `` `from_device` `` alone as a test name.  `* Gaps:` becomes TD-8, TD-22, TD-<n>.
+  * `tech-debt.md`: TD-<n>.  TD-22's first sentence becomes "MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E0616`, `E0624`) pass on any compile error, since stable rustdoc does not check the error code."  Its last sentence says that `Rec`'s `no_run` doctest compiles the same calls, and that the `Gpu` doctests have no such twin, so a rename that also makes an item public passes.
+  * `.claude/rules/gpu.md`, the "Buffers" bullet: "make every buffer with `Gpu::buffer` or `Gpu::upload`, so it is a `GpuBuffer` that is destroyed when dropped.  Clippy fails `StagingBelt` and `DownloadBuffer`, and `wgpu::Device::create_buffer` and `wgpu::util::DeviceExt::create_buffer_init` outside `GpuBuffer`'s constructors (MEM-3).  Extend `roformer-gpu/tests/memory.rs` for a new allocation."
+  * `references/browser-quirks.md`, the Safari garbage collection entry, a new bullet before `* The code:`: "wgpu 30.0.1's web backend does nothing when a buffer, a query set or a texture is dropped ([source](https://docs.rs/crate/wgpu/30.0.1/source/src/backend/webgpu.rs), checked 2026-10-21)."  A code span such as `` `src/backend/webgpu.rs` `` fails `docs-check`, which reads `src/` as a path in a workspace crate.
+  * `harness.md`: a components row, "clippy's `disallowed-methods` for `wgpu` buffer creation, with a canary, and a private device (MEM-3) | sensor, computational | `GpuBuffer` was a convention: a buffer made on `Gpu`'s public device, or by a wgpu helper, is never destroyed on the web.  It sees `roformer-gpu` only (TD-<n>) | phase 2".
+  * `working-with-agents.md`: a changelog line that says what clippy fails, and the fix: make the buffer with `Gpu::buffer` or `Gpu::upload`.
+  * The parent plan's phase 2 bullet: "`wgpu` buffer creation outside `GpuBuffer` (MEM-3);" becomes "`wgpu` buffer creation outside `GpuBuffer` in `roformer-gpu`, and a private device (MEM-3, M13);".
+  * `decisions/0009-mem-3-lint-and-private-device.md`, "0009: how MEM-3's lint and the device keep buffers in `GpuBuffer`", in the form of 0008: `Status: accepted (<date>, by the maintainer)`, the context (the web backend frees nothing on drop; `Gpu`'s device was public), the options and the choice from the decision point.  Consequences: the paths in `roformer-gpu/clippy.toml`, each with a line in `mem3_lint_is_on`; the device and `from_device` private, kept so by doctests; textures and query sets left out (TD-<n>).  Its line in `docs/README.md`, after 0008's: "`decisions/0009-mem-3-lint-and-private-device.md`: clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer`, and `Gpu`'s device is private (MEM-3)."
+  * `ARCHITECTURE.md` does not change.  "Prose only" lines stay at 4.
+
+#### M13 acceptance
+
+* In step 2, before the `#[expect]`s, clippy warns at the two constructors, each with the MEM-3 note.  After them, every clippy command in `CLAUDE.md` passes, locally and in CI's `clippy` job.
+* The plants and the five paths fail as stated.
+* `mem3_lint_is_on` passes in the CI `test` job (`cargo test -p roformer-gpu --lib`), and the three `Gpu` doctests pass (`--doc`).
+* `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release --test memory --test kernels -- --nocapture` passes on the Mac, with the adapter named.
+* fmt, the tests and `docs-check` pass.
 
 ### M14: Claude Code deny rules (GIT-1)
 
@@ -1581,6 +1686,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * To undo M10, revert its commits.  That removes the check, the `harness.md` row and the guide's changelog line.  It puts back TD-16's text, PROTO-1's `* Enforced by:` line and the line in `.claude/rules/protocol.md`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * To undo M11, revert its commits.  That puts back wsola 0.1.0, its `THIRD-PARTY.md` row, TD-15, RT-1's text and the rule files.  It removes decision 0007, TD-<n> and the components row.  Put decision 0007 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice, and TD-15's fix line says so.  Keep TD-<n>'s ID: add `* TD-<n>: withdrawn by the revert of M11; TD-15 covers the gap again.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * To undo M12, revert its commits.  That removes the six `clippy.toml` files, the `#[expect]`s, the canaries and the `wasm32` step, and puts back MEM-1's and MEM-2's lines.  Put decision 0008 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice.  Keep TD-26's ID: add `* TD-26: withdrawn by the revert of M12.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
+* To undo M13, revert its commits.  That removes the five paths, the canary, the two constructors and the private field, and puts back MEM-3's lines and the rule file.  Put decision 0009 and its line in `docs/README.md` back as they were, still accepted: a revert for a bug does not reverse the maintainer's choice.  Keep TD-<n>'s ID: add `* TD-<n>: withdrawn by the revert of M13.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the check was reverted.
 * Checks read the tree and write nothing, so they can run any number of times.
 * M11 changes a rule that the maintainer chose on 2026-10-19.  If they reverse it, revert M11's rule text and decision, and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -1770,6 +1876,11 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * [x] 2026-10-21: M12, three review rounds done and their findings fixed.
 * [x] 2026-10-21: M12: PR #26 opened.  CI (runs 39547092472 and 39549517927): every job passes.  The `wasm32` clippy step took 1m 46s on the first run, 1m 49s on its re-run, and 1 s on the last run (`6317cb6`, after the merge of `main`).
 * [x] 2026-10-21: M12, PR #26 merged by the maintainer (`a5b7b8f`).
+* [x] 2026-10-21: M13 implementation plan written (the M13 sections under "Plan of work").  Survey of each call that makes GPU memory in `roformer-gpu`, of who reads `Gpu`'s device, of wgpu 30.0.1's web backend and helpers, and of clippy's paths and a private device in a scratch worktree.
+* [x] 2026-10-21: M13 plan review round 1, by one new reviewer with a prototype of (b) in a scratch worktree.  fmt, both clippy steps, the lib tests and doctests, and `STEMYLA_REQUIRE=gpu` memory tests passed; each plant and each path failed as stated once fixed.  No blockers; 5 should-fix findings and 6 nits, all checked and real, all fixed in the plan.  The should-fix items: the reasons were TOML literal strings with an apostrophe, which breaks the file; a code span `src/...` in `browser-quirks.md` fails `docs-check`; the first plant was a parse error; nothing kept the device private after the PR, so two doctests now do; the doc comment edit left a broken sentence, and a clone does not escape `destroy()`.
+* [x] 2026-10-21: M13 plan review round 2, by one new reviewer who did both steps and every doc edit as worded in a scratch worktree.  fmt, the 5 clippy commands, the lib tests and doctests, 157 `xtask` tests, `docs-check` and `STEMYLA_REQUIRE=gpu` memory and kernel tests (AMD Radeon Pro 5500M, Metal) passed; the plants and the 5 paths failed as stated.  No blockers; 5 should-fix findings and 6 nits, all checked and real, all fixed in the plan.  The should-fix items: nothing kept `from_device` private, so a third doctest does; TD-22 named only `Rec`'s doctest; the profiling buffers skip on this Mac's adapter; "three helpers" were two helpers in three paths; TD-<n> lacked a new helper in a later wgpu and a second call in a constructor's `let`.
+* [x] 2026-10-21: M13 plan review round 3, by one new reviewer who read it as the maintainer and as the implementer, and built (b) with every doc edit.  The three doctests failed for the right reasons (E0616, E0624); fmt, the clippy commands, the lib tests, 157 `xtask` tests and the plants passed or failed as stated.  No blockers; 3 should-fix findings and 4 nits, all checked and real, all fixed in the plan.  The should-fix items: `` `from_device` `` alone on MEM-3's `* Enforced by:` line fails `docs-check` as a test name; the `Gpu` doctests have no `no_run` twin, so a rename that also makes an item public passes, and a new function that returns the device passes too (both now in TD-<n> and TD-22); options (a) and (c) now say what changes under them.
+* [x] 2026-10-21: M13 plan review round 4, by one new reviewer who read the section for consistency and did both steps and every doc edit as worded.  fmt, the 6 clippy commands, 28 lib tests, the doctests, the `xtask` tests and `docs-check` passed; each plant and each path failed as stated.  No blockers; 3 should-fix findings and 5 nits, all checked and real, all fixed in the plan.  The should-fix items, each a local fix: the quoted texts assume (b), so the section is rewritten before step 1 if the maintainer chooses (a) or (c); decision 0009's README line said "each way"; TD-<n> said that a test in `roformer-gpu` escapes the lint, but only the two files with a file-wide `#![expect]` do.
 * [ ] M13: MEM-3 lint.
 * [ ] M14: Claude Code deny rules.
 * [ ] M15: rustfmt hook.
@@ -1809,6 +1920,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-21, M12 survey: a `disallowed-methods` path that does not resolve passes `-D warnings`, in silence or with a warning, though clippy's docs say it is an error.  Evidence: `slice::to_vecc` and `js_sy::Uint8Array::to_vec` give no message on clippy 0.1.99.
 * 2026-10-21, M12: the `wasm32` step also lints the lib code of `roformer` and `roformer-gpu`, which it builds as workspace members.  So their lib `#[expect]`s fail on both steps when the path is off.
 * 2026-10-21, M12: the planned reason for the test modules, "tests copy a few bytes", was false for `roformer/tests/reference.rs`, which copies fixture audio.  The reason is now "test code, which does not ship".
+* 2026-10-21, M13 survey: two wgpu helpers, `StagingBelt` and `DownloadBuffer::read_buffer`, make GPU buffers that nothing destroys on the web.  wgpu 30.0.1's web backend does nothing when a buffer, a query set or a texture is dropped.  Evidence: `src/util/belt.rs`, `src/util/mod.rs` and `src/backend/webgpu.rs` of the published crate.
 
 ## Decision log
 
@@ -1882,6 +1994,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-21, agent (M12): CI's `clippy` job gains a `wasm32` step for `app`, `stem-worker`, `stem-protocol` and `engine`.  Without it the lint never sees TD-13 or TD-14.
 * 2026-10-21, agent (M12): the plan recommends option (a) at M12's decision point: `app`, `worker`, `protocol` and `engine`.  The maintainer decides.
 * 2026-10-21, maintainer (M12): option (b), `app`, `worker`, `protocol`, `engine`, `roformer` and `roformer-gpu`.  MEM-1 covers model-sized buffers, and the lint's value is the next copy.  The agent's recommendation of (a) weighed known breaches too much.  Recorded as decision 0008 in review round 3.
+* 2026-10-21, agent (M13): the plan recommends option (b) at M13's decision point: the two paths, two wgpu helpers in three paths, and a private device.  The maintainer decides.
 
 ## Outcomes and retrospective
 
