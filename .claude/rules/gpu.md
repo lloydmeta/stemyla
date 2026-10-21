@@ -2,6 +2,7 @@
 paths:
   - "roformer-gpu/**"
   - "roformer/src/**"
+  - "roformer/clippy.toml"
 ---
 
 # GPU kernels and the reference network
