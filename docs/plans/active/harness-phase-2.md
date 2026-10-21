@@ -1419,7 +1419,7 @@ On 2026-10-21, at commit `cb1d0be` (M11 merged as PR #25):
 | `engine/src/player.rs:118`, `Player::with_config` | the crossfade ramp, once for each player | `crossfade` samples | small |
 
 * In tests: `worker/src/web/tests.rs` has 9 calls and `protocol/tests/web.rs` has 7, each of a few bytes.  The tests of `app` and `engine` have none.  `engine/src/decode.rs:191` calls symphonia's `copy_to_vecs_planar`, which the list does not name.
-* `roformer` has 8 calls of `to_vec` in `src/`, of which 6 are on slices; `model.rs:516` and `540` are Burn's `TensorData::to_vec`.  Only 2 of the slice calls are outside `mod tests`: `separate.rs:83` and `weights.rs:169`.  `roformer-gpu` has 4, such as the read-back in `lib.rs:1023` and `bench.rs:829`.  `roformer/tests/` and `roformer-gpu/tests/` have 12 more.  The worker runs both.
+* `roformer` has 8 calls of `to_vec` in `src/`, of which 5 are on slices; `separate.rs:83`, `model.rs:516` and `540` are Burn's `TensorData::to_vec`.  Only 1 of the slice calls is outside `mod tests`: `weights.rs:169`.  `roformer-gpu` has 4, such as the read-back in `lib.rs:1023` and `bench.rs:829`.  `roformer/tests/` and `roformer-gpu/tests/` have 12 more.  The worker runs both.
 
 Facts checked for M12, with clippy 0.1.99 (rustc 1.99.0), in a scratch worktree:
 
@@ -1437,10 +1437,11 @@ Facts checked for M12, with clippy 0.1.99 (rustc 1.99.0), in a scratch worktree:
 #### M12 decision point for the maintainer: which crates
 
 * (a) `app`, `worker`, `protocol` and `engine`.  `protocol` has no site today.  But a decoder in `protocol` that copies a stem is the most likely new breach of MEM-1 and MEM-2.  `roformer` and `roformer-gpu` go into TD-<n>.
-* (b) (a), and `roformer` and `roformer-gpu`.  6 more sites outside tests to read and mark, 17 slice calls in tests, and 5 more module `#![expect]`s.  Each crate gets a canary, so the pairs become 12.  TD-<n> drops its `roformer` bullet.  M13 then adds MEM-3's entries to `roformer-gpu/clippy.toml`.
+* (b) (a), and `roformer` and `roformer-gpu`.  5 more sites outside tests to read and mark, 17 slice calls in tests, and 5 more module `#![expect]`s.  Each crate gets a canary, so the pairs become 12.  TD-<n> drops its `roformer` bullet.  M13 then adds MEM-3's entries to `roformer-gpu/clippy.toml`.
 * (c) the phase plan's three crates only: `app`, `worker` and `engine`.  `protocol/clippy.toml`, its canary, its module `#![expect]` and the `protocol.md` bullet go, and `stem-protocol` leaves MEM-1's and MEM-2's lines, `memory.md`'s first bullet, the guide's changelog line and the parent bullet.  The pairs become 7.
 * (d) one `clippy.toml` at the root with the three paths, and a file in `roformer/`, `roformer-gpu/` and `xtask/` that holds only a comment, to opt out.  `dsp`, `synth` and `test-support` have no `to_vec`.  So `synth` and a new crate are covered by default, at the same number of files.  Each covered crate needs a canary, so `synth` adds one pair, and `dsp` and `test-support` add one each if they get canaries.  The cost: a root file reaches `dsp`'s lint settings, which DSP-1's file check guards against a `dsp/clippy.toml`; every crate's lint configuration then lives in two places, and M13 writes MEM-3 into an opt-out file.
-* Recommendation: (a).  It covers each crate where a breach is known, and the crate that carries arrays between them.  No breach is known in the model crates, and a new crate is rare.  The sections below assume (a).
+* Recommendation, first written: (a).  It covers each crate where a breach is known, and the crate that carries arrays between them.  No breach is known in the model crates, and a new crate is rare.
+* Chosen: (b), by the maintainer on 2026-10-21.  MEM-1 covers model-sized buffers, and the model crates hold the largest buffers in the tab.  The lint's value is the next copy, not the breaches known today.  The sections below follow (a), and "Under (b)" in the design gives what (b) adds.
 
 #### M12 design
 
@@ -1461,11 +1462,18 @@ Facts checked for M12, with clippy 0.1.99 (rustc 1.99.0), in a scratch worktree:
   * other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec` (TD-12);
   * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;
   * an `#[allow]` in place of an `#[expect]`, as clippy's own help line suggests, and a reason that does not say why;
-  * crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, `roformer` and `roformer-gpu` (under (a)), and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
+  * crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
   * the canaries prove their paths only while the clippy steps keep `--all-targets`; nothing fails if the `wasm32` step goes;
   * one `#[expect]` covers each call in its statement, so a new `to_vec` in the same `let` passes; the module `#![expect]`s cover each new test in their files;
   * a `#[wasm_bindgen]` export that takes a `Vec<f32>` or a `&[f32]` copies a JS array in, and passes;
   * Fix: none planned.  Phase 3's memory reviewer looks for a new copy of any form.
+* Under (b), the maintainer's choice:
+  * `roformer/clippy.toml` and `roformer-gpu/clippy.toml` list `slice::to_vec` only, since neither crate handles a typed array.
+  * Neither crate has code behind a target `cfg`, so the native steps lint all of it.  Their dev-dependencies do not build for `wasm32` (getrandom 0.3 needs `wasm_js`), so the `wasm32` step leaves them out.
+  * The sites, each with an `#[expect]`: `roformer/src/weights.rs:169` (a shape, for an error), `roformer-gpu/src/lib.rs:1023` (the one copy of a chunk out of mapped GPU memory, which drops next), and `roformer-gpu/src/bench.rs:807`, `829` and `830` (lists of kernel choices).
+  * Module `#![expect]`s: the tests of `roformer/src/demix.rs` and `weights.rs`, `roformer/tests/reference.rs`, `roformer-gpu/tests/memory.rs` and `roformer-gpu/tests/reference.rs`.
+  * Canaries: `mem1_lint_is_on` in the tests of `roformer/src/weights.rs` and of `roformer-gpu/src/lib.rs`.  So the pairs become 12.
+  * The docs name the two crates wherever they name the other four, and `.claude/rules/gpu.md` gets the `memory.md` sentences.  TD-<n> drops them from its crate bullet.
 * Out of scope: `clippy::allow_attributes`, which would fail an `#[allow]`, since the workspace has other `#[allow]`s.  TD-12, TD-13 and TD-14 are fixed in M18.
 
 #### M12 steps
@@ -1859,6 +1867,7 @@ One PR each, after M12.  Each removes its `#[expect]`, adds a test that pins the
 * 2026-10-21, agent (M12): each path in a `clippy.toml` gets a canary, an `#[expect]` on a deliberate copy in a test.  A wrong or stale path passes clippy in silence, so without the canary the lint can be off with no sign.
 * 2026-10-21, agent (M12): CI's `clippy` job gains a `wasm32` step for `app`, `stem-worker`, `stem-protocol` and `engine`.  Without it the lint never sees TD-13 or TD-14.
 * 2026-10-21, agent (M12): the plan recommends option (a) at M12's decision point: `app`, `worker`, `protocol` and `engine`.  The maintainer decides.
+* 2026-10-21, maintainer (M12): option (b), `app`, `worker`, `protocol`, `engine`, `roformer` and `roformer-gpu`.  MEM-1 covers model-sized buffers, and the lint's value is the next copy.  The agent's recommendation of (a) weighed known breaches too much.
 
 ## Outcomes and retrospective
 
