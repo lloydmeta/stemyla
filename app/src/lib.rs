@@ -1601,7 +1601,7 @@ impl StemApp {
                     let color = if audible {
                         l.color
                     } else {
-                        Color32::from_gray(90)
+                        Color32::from_gray(92)
                     };
                     painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
                     if let Some((s, e)) = params.loop_region() {
