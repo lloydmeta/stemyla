@@ -142,6 +142,12 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 
 * Fix: review; a changed PNG or threshold is a UI change, and the reviewer looks at it.  Phase 3's reviewers check for it.  No check is planned.
 
+### TD-30: `e2e audio-resume` sometimes cannot size Chrome's viewport
+
+On 2026-10-22, in PR #30, `cargo run -p xtask -- e2e audio-resume --browser chrome` failed in 2 of 6 CI runs with "could not size the viewport to 1100x700" (runs 39688212822 and 39689907090).  It failed on the runner images 20261012.334.1 and 20261018.339.1.  `e2e smoke` passed in the same job each time, and a re-run of the job passed.  `set_viewport` in `xtask/src/webdriver.rs` does not report the size that it got, so the cause is not known (VERIFY-1).
+
+* Fix: make `set_viewport` report the size that it got, and find the cause.  Until then, re-run the failed job, and name the failed run in the PR.
+
 ## Known breaches
 
 ### TD-12: dropped files are copied before they are saved
