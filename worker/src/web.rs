@@ -321,7 +321,7 @@ pub fn start() {
 async fn gpu_text(gpu: &Gpu) -> String {
     let pref = STATE.with_borrow(|s| s.power);
     let name = gpu_info(pref).await.as_string().unwrap_or_default();
-    let l = gpu.device.limits();
+    let l = gpu.limits();
     let usable: Vec<&str> = roformer_gpu::TILES
         .iter()
         .zip(gpu.usable.get())

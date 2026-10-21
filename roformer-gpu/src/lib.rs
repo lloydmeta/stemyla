@@ -490,9 +490,11 @@ impl MatMulPolicy {
 /// Destroying a buffer whose work was submitted is valid (the work
 /// completes first), and a pending mapping is cancelled.  [`Rec`] borrows
 /// its buffers until it is submitted, so none can be dropped while a
-/// recorded dispatch still needs it.  A clone of the inner `wgpu::Buffer`,
-/// or a buffer made with `Gpu::device` directly, escapes all this: make
-/// buffers with [`Gpu::buffer`] and [`Gpu::upload`] only.
+/// recorded dispatch still needs it.  Make buffers with [`Gpu::buffer`]
+/// and [`Gpu::upload`] only.  Clippy fails five other ways to make a
+/// buffer in this crate (MEM-3).  No other crate reaches the device.  A
+/// clone of the inner `wgpu::Buffer` is destroyed with it, so a clone
+/// must not outlive its `GpuBuffer`.
 pub struct GpuBuffer {
     buffer: wgpu::Buffer,
     /// [`Gpu::live_bytes`], less this buffer's size once it is dropped.
@@ -500,7 +502,21 @@ pub struct GpuBuffer {
 }
 
 impl GpuBuffer {
-    fn new(buffer: wgpu::Buffer, live: &Arc<AtomicU64>) -> Self {
+    fn new(device: &wgpu::Device, desc: &wgpu::BufferDescriptor, live: &Arc<AtomicU64>) -> Self {
+        let buffer = device.create_buffer(desc);
+        Self::counted(buffer, live)
+    }
+
+    fn with_contents(
+        device: &wgpu::Device,
+        desc: &wgpu::util::BufferInitDescriptor,
+        live: &Arc<AtomicU64>,
+    ) -> Self {
+        let buffer = device.create_buffer_init(desc);
+        Self::counted(buffer, live)
+    }
+
+    fn counted(buffer: wgpu::Buffer, live: &Arc<AtomicU64>) -> Self {
         live.fetch_add(buffer.size(), Ordering::Relaxed);
         Self {
             buffer,
@@ -524,8 +540,29 @@ impl Drop for GpuBuffer {
     }
 }
 
+/// The device, its kernels and the buffers it makes.  The device is
+/// private, so no other crate can make a buffer on it that is not a
+/// [`GpuBuffer`] (MEM-3).
+///
+/// ```no_run
+/// fn limits(gpu: &roformer_gpu::Gpu) -> u32 {
+///     gpu.limits().max_compute_invocations_per_workgroup
+/// }
+/// ```
+///
+/// ```compile_fail,E0616
+/// fn limits(gpu: &roformer_gpu::Gpu) -> u32 {
+///     gpu.device.limits().max_compute_invocations_per_workgroup
+/// }
+/// ```
+///
+/// ```compile_fail,E0624
+/// fn wrap(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) {
+///     roformer_gpu::Gpu::from_device(device, queue, info);
+/// }
+/// ```
 pub struct Gpu {
-    pub device: wgpu::Device,
+    device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub info: wgpu::AdapterInfo,
     /// Which matmul kernel [`Rec::matmul`] uses unless a [`MatMul`] names one.
@@ -768,7 +805,7 @@ impl Gpu {
         Ok(Self::from_device(device, queue, adapter.get_info()))
     }
 
-    pub fn from_device(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Self {
+    fn from_device(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Self {
         let errors: Arc<Mutex<Vec<String>>> = Default::default();
         let sink = errors.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
@@ -778,8 +815,7 @@ impl Gpu {
         }));
         let kernels = Kernels::new(&device);
         let live = Arc::new(AtomicU64::new(0));
-        let make =
-            |desc: &wgpu::BufferDescriptor| GpuBuffer::new(device.create_buffer(desc), &live);
+        let make = |desc: &wgpu::BufferDescriptor| GpuBuffer::new(&device, desc, &live);
         let dummy = make(&wgpu::BufferDescriptor {
             label: Some("dummy"),
             size: 16,
@@ -832,7 +868,18 @@ impl Gpu {
 
     /// A buffer described by `desc`, counted in [`Gpu::live_bytes`].
     fn create(&self, desc: &wgpu::BufferDescriptor) -> GpuBuffer {
-        GpuBuffer::new(self.device.create_buffer(desc), &self.live)
+        GpuBuffer::new(&self.device, desc, &self.live)
+    }
+
+    /// The device's limits: WebGPU's defaults.
+    pub fn limits(&self) -> wgpu::Limits {
+        self.device.limits()
+    }
+
+    /// The device's optional features: `timestamp-query` on a profiling
+    /// device that has it, else none.
+    pub fn features(&self) -> wgpu::Features {
+        self.device.features()
     }
 
     /// True when this device records GPU time per dispatch.
@@ -945,16 +992,17 @@ impl Gpu {
         }
         self.created
             .set(self.created.get() + std::mem::size_of_val(data) as u64);
-        let buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        GpuBuffer::with_contents(
+            &self.device,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents: bytemuck::cast_slice(data),
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
-            });
-        GpuBuffer::new(buf, &self.live)
+            },
+            &self.live,
+        )
     }
 
     /// Bytes of storage buffers made by [`Gpu::buffer`] and

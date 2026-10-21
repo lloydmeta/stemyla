@@ -744,7 +744,7 @@ fn profile_labels_dispatches() {
 fn plain_device_does_not_profile() {
     let Some(g) = gpu() else { return };
     assert!(!g.profiling());
-    assert!(g.device.features().is_empty());
+    assert!(g.features().is_empty());
 }
 
 /// Compile time and resident memory after each matmul kernel's first use
