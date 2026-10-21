@@ -27,7 +27,7 @@ The agent runs three review rounds after it implements a change, because `CLAUDE
 2. A small task: the agent does it, runs the checks and commits.  A larger task: the agent writes a plan first.
 3. Review the plan before the code.  One wrong line in a plan becomes many wrong lines of code.
 4. The agent makes small signed commits, then runs three review rounds.
-5. Do what only a person can do (see below), then push and merge.
+5. Do what only a person can do (see below).  Push, or ask the agent to push, then merge.
 
 ## Recipes
 
@@ -93,7 +93,7 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 
 ## What the agent cannot do
 
-Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each publishes the site.  The agent sees "Permission to use Bash with command ... has been denied", and the rule's reason is not shown.  When it stops there, run the command yourself.
+Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge`, in the forms that an agent usually writes (GIT-1, decision 0010).  Each publishes the site.  The agent sees "Permission to use Bash with command ... has been denied", and the message does not name the rule.  When it stops there, run the command yourself.
 
 The rules match the command text, so they are not a security boundary (TD-28).  They do not stop a push: the agent pushes when asked.
 

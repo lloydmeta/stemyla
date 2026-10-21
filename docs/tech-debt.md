@@ -115,7 +115,7 @@ Deny rules in `.claude/settings.json` refuse `xtask publish` and `gh pr merge` i
 
 * a push by the agent, to any branch, `main` and `gh-pages` included; GIT-1's push half rests on prose (decision 0010, TD-20);
 * a shell or `eval` that runs a string, and a script that the agent writes and then runs;
-* `env`, an absolute path to `xtask`, a path to `xtask` outside `target/`, and a quoted subcommand;
+* `env`, an absolute path to `xtask`, a path to `xtask` outside `target/`, a quoted subcommand, and a `gh` alias such as `gh alias set m 'pr merge'`;
 * a cargo option before `run`, such as `cargo -q run` or `cargo +nightly run`;
 * `gh api`, which can merge a PR;
 * a session started outside the repo root, or moved with `/cd`, since Claude Code reads the project settings from the session's working directory only;

@@ -148,7 +148,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.
 * Gaps: TD-8, TD-9, TD-19.
 
-### GIT-1: never push unasked; never publish or merge
+### GIT-1: never push unasked; never publish or merge a PR
 
 Never push without being asked.  An agent never runs `xtask publish` (which pushes) or merges a PR; a person does.
 

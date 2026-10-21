@@ -2845,6 +2845,9 @@ fn deny_rules(settings: &str) -> Result<BTreeSet<String>, String> {
             "has the key `{key}`, which the check does not know"
         ));
     }
+    if top.get("$schema").is_some_and(|schema| !schema.is_string()) {
+        return Err("has a `$schema` that is not a string".to_string());
+    }
     let permissions = top
         .get("permissions")
         .and_then(serde_json::Value::as_object)
@@ -5981,20 +5984,48 @@ mod settings_tests {
     #[test]
     fn unreadable_settings_are_named() {
         let cases = [
-            "{".to_string(),
-            "{}".to_string(),
-            "[]".to_string(),
-            r#"{"permissions":{"deny":"Bash(gh pr merge *)"}}"#.to_string(),
-            r#"{"permissions":{"deny":[1]}}"#.to_string(),
-            r#"{"permissions":1}"#.to_string(),
-            r#"{"permissions":{}}"#.to_string(),
-            with(|v| v["permissions"]["allow"] = json!(["Bash(ls *)"])),
-            with(|v| v["model"] = json!(5)),
+            ("{".to_string(), "is not JSON (EOF"),
+            ("[]".to_string(), "is not a JSON object"),
+            ("{}".to_string(), "has no `permissions` object"),
+            (
+                r#"{"permissions":1}"#.to_string(),
+                "has no `permissions` object",
+            ),
+            (
+                r#"{"permissions":{}}"#.to_string(),
+                "has no `permissions.deny` list",
+            ),
+            (
+                r#"{"permissions":{"deny":"Bash(gh pr merge *)"}}"#.to_string(),
+                "has no `permissions.deny` list",
+            ),
+            (
+                r#"{"permissions":{"deny":[1]}}"#.to_string(),
+                "has `1` in `permissions.deny`, which is not a string",
+            ),
+            (
+                with(|v| v["permissions"]["allow"] = json!(["Bash(ls *)"])),
+                "has the key `permissions.allow`",
+            ),
+            (with(|v| v["model"] = json!(5)), "has the key `model`"),
+            (
+                with(|v| v["$schema"] = json!(5)),
+                "has a `$schema` that is not a string",
+            ),
         ];
         let checked: Vec<_> = cases
             .iter()
-            .map(|case| (SETTINGS_FILE, claude_settings_problems(case), None))
+            .map(|(case, _)| (SETTINGS_FILE, claude_settings_problems(case), None))
             .collect();
         assert_one_each("GIT-1", &checked);
+        for ((case, what), (_, problems, _)) in cases.iter().zip(&checked) {
+            assert!(
+                problems[0]
+                    .message
+                    .starts_with(&format!("GIT-1: {SETTINGS_FILE} {what}")),
+                "{case}: {}",
+                problems[0]
+            );
+        }
     }
 }
