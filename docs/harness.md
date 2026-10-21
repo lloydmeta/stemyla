@@ -36,6 +36,7 @@ Two principles shape it:
 | `e2e_messages_use_protocol_types` (PROTO-1) | sensor, computational | the e2e scripts write message types by hand, and CI runs only some scenarios, so a renamed type failed late or nowhere.  It reads the likely shapes only, and no field names (TD-16) | phase 2 |
 | `the_callback_does_not_allocate_after_warm_up`, a counting allocator over the audio callback (RT-1) | sensor, computational | wsola's `pull`, wsola's growing input, chipmunk's `double_speed` and a short loop's anchors allocated in the callback, and nothing counted.  It runs natively only (TD-25) | phase 2 |
 | deny rules in `.claude/settings.json` for a push to `main` or `gh-pages`, `xtask publish` and `gh pr merge`, kept by `claude_settings_hold_the_deny_rules` (GIT-1) | sensor, computational | nothing stopped an agent from pushing to `main` or `gh-pages`, publishing the site or merging a PR; auto mode pushes with no prompt.  They refuse the call before it runs, and match command text only (TD-28) | phase 2 |
+| GitHub rulesets: `main` lets the admin role bypass for pull requests only, and `gh-pages history` blocks force pushes and deletion for everyone (GIT-1, GIT-3) | sensor, on GitHub | the admin role, which the agent shares, could push to `main` directly, and nothing stopped a rewrite of `gh-pages`.  Nothing in the repo checks the rulesets (TD-20) | phase 2 |
 
 Planned components, by phase, are in the plan.
 

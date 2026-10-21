@@ -153,7 +153,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 Never push without being asked.  An agent never pushes to `main` or `gh-pages`, runs `xtask publish` (which pushes) or merges a PR; a person does.
 
 * Why: pushing to `main` or `gh-pages` publishes the site, and merging a PR pushes to `main`.
-* Enforced by: deny rules in `.claude/settings.json`, kept by `claude_settings_hold_the_deny_rules` (CI `test` job).  They refuse a push that names `main` or `gh-pages`, `--all`, `--branches`, `--mirror`, publish and merge.  They match the command text that an agent usually writes, and were checked by hand (harness phase 2, M14).  A push that names no branch, and a push unasked, rest on prose (decision 0010); TD-28 lists the gaps.
+* Enforced by: deny rules in `.claude/settings.json`, kept by `claude_settings_hold_the_deny_rules` (CI `test` job).  They refuse a push that names `main` or `gh-pages`, `--all`, `--branches`, `--mirror`, publish and merge.  They match the command text that an agent usually writes, and were checked by hand (harness phase 2, M14).  On GitHub, the `main` ruleset refuses a direct push to `main`, admin included (TD-20).  A push that names no branch, and a push unasked, rest on prose (decision 0010); TD-28 lists the gaps.
 * Gaps: TD-20, TD-28.
 
 ### GIT-2: small, verified, signed commits
@@ -169,7 +169,8 @@ Work in small verified steps.  `cargo fmt --all --check`, clippy with `-D warnin
 Publishing a build id again keeps its published copy, so `gh-pages` needs its full history: never squash or rewrite it, and publish from a full clone.
 
 * Why: `README.md` (publishing on GitHub Pages) explains the write-once `v/<id>/` folders.
-* Enforced by: prose only.
+* Enforced by: the `gh-pages history` ruleset on GitHub (id 25544673), which blocks force pushes and deletion of `gh-pages` for everyone, admins included (checked 2026-10-21 with `gh api repos/lloydmeta/stemyla/rules/branches/gh-pages`).  Nothing in the repo checks that the ruleset stays.
+* Gaps: TD-20.
 
 ### DOC-1: the map and docs match the code
 

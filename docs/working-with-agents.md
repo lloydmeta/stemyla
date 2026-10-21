@@ -88,7 +88,7 @@ See `references/local-browser-testing.md`: Safari first, Chrome when safaridrive
 * Push, or ask the agent to push a branch; it does not push unasked, and deny rules refuse its pushes to `main` and `gh-pages` (GIT-1).  Run `cargo run -p xtask --release -- publish`; deny rules refuse it in the forms that an agent usually writes.
 * Accept or reject decisions.
 * Give evidence from real hardware: a real GPU (GPU-3), Safari, an iPhone for memory (MEM-4).
-* Merge.  `main` needs an approval.  Deny rules refuse `gh pr merge` in the forms that an agent usually writes.
+* Merge.  `main` needs an approval, and refuses a direct push; the admin override works on a PR only.  Deny rules refuse `gh pr merge` in the forms that an agent usually writes.
 * Decide when the agent stops because a change would break a rule.
 
 ## What deny rules refuse
@@ -136,3 +136,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-21, phase 2 (M12): clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three.  CI also runs clippy for `wasm32`.  Borrow the slice, share an `engine::Samples` in `app` and `engine`, or move the buffer instead of copying it.  For a needed copy, add `#[expect(clippy::disallowed_methods, reason = "MEM-1: why")]`.  A canary in each crate fails clippy if its path is off.
 * 2026-10-21, phase 2 (M13): clippy fails `wgpu::Device::create_buffer`, `wgpu::util::DeviceExt::create_buffer_init`, `StagingBelt` and `DownloadBuffer::read_buffer` in `roformer-gpu` outside `GpuBuffer`.  `Gpu`'s device is private.  Make the buffer with `Gpu::buffer` or `Gpu::upload`, or read back with `Gpu::read`.
 * 2026-10-21, phase 2 (M14): deny rules in `.claude/settings.json` refuse `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  Decide if you want each one; merge to `main` through a PR.  `claude_settings_hold_the_deny_rules` fails if a rule goes, or if the file could make Claude Code drop it.  Start Claude Code at the repo root, where it reads the file.
+* 2026-10-21, phase 2 (M14): on GitHub, `main` refuses a direct push, also from an admin; merge through a PR.  `gh-pages` refuses a force push and deletion from everyone (GIT-3).
