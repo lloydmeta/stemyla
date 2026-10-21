@@ -1,6 +1,6 @@
 //! Adapter for the `wsola` crate (WSOLA, tuned for speech).
 
-use super::Stretcher;
+use super::{MAX_PUSH_FRAMES, Stretcher};
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroU32};
 
@@ -79,17 +79,18 @@ impl Stretcher for WsolaStretcher {
     /// of play.  It can hold up to
     /// `65,536 + 4 * search + frame + 2 * tempo * hop + push` frames, where
     /// a step can pass 65,536 by its advance and the search's jitter, and
-    /// `push` is at most 4,096: about 75,000 at 44.1 kHz and tempo 1.5.
+    /// `push` is at most `MAX_PUSH_FRAMES`: about 75,000 at 44.1 kHz and
+    /// tempo 1.5.
     /// `4 * search + frame + 2 * tempo * hop` is below `sample_rate / 4` at
     /// any tempo that wsola accepts (up to 4).  So one push of
-    /// `65,536 + sample_rate / 4 + 4,096` frames of silence gives the buffer
+    /// `65,536 + sample_rate / 4 + MAX_PUSH_FRAMES` frames of silence gives the buffer
     /// its largest size, whatever `max_tempo` is.  The push goes straight
     /// to wsola, so `interleaved` keeps its size (MEM-4).  A pull of
     /// `max_frames` plus 20 ms, more than one 15 ms wsola hop, does the
     /// same for wsola's output buffer.  `reset` keeps both capacities.
     fn warm_up(&mut self, max_tempo: f64, max_frames: usize) {
         let rate = self.ts.sample_rate().get() as usize;
-        let frames = (1 << 16) + rate / 4 + 4_096;
+        let frames = (1 << 16) + rate / 4 + MAX_PUSH_FRAMES;
         self.ts.push(&vec![0.0; 2 * frames]);
         let tempo = self.tempo;
         self.set_tempo(max_tempo);

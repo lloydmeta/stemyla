@@ -13,6 +13,9 @@ mod ts;
 #[cfg(feature = "stretch-wsola")]
 mod wsola_adapter;
 
+/// The largest push that [`Stretcher::warm_up`] covers, in frames (RT-1).
+pub const MAX_PUSH_FRAMES: usize = 4_096;
+
 pub trait Stretcher: Send {
     fn name(&self) -> &'static str;
     /// Playback speed: 0.75 plays at 75% speed (longer), 1.25 faster.
@@ -33,8 +36,9 @@ pub trait Stretcher: Send {
     fn reset(&mut self);
     /// Makes each buffer that `push` and `pull` use reach its largest
     /// size, on the thread that makes the player.  After it, `push` of at
-    /// most 4,096 frames and `pull` of at most `max_frames`, at a tempo of
-    /// at most `max_tempo`, do not allocate (RT-1).  It leaves the
+    /// most [`MAX_PUSH_FRAMES`] and `pull` of at most `max_frames`, at a
+    /// tempo of at most `max_tempo`, do not allocate (RT-1).  It panics
+    /// when it cannot keep that promise.  It leaves the
     /// stretcher as [`Self::reset`] does, with the tempo it had.
     fn warm_up(&mut self, max_tempo: f64, max_frames: usize);
 }
@@ -179,10 +183,17 @@ impl Stretcher for Varispeed {
         self.right.clear();
         self.t = 0.0;
     }
-    /// Nothing to do: the queues hold `max_frames * max_tempo` frames,
-    /// plus one push and 2 frames, well within the 32,768 frames that
+    /// Nothing to do but check: the queues hold `max_frames * max_tempo`
+    /// frames, plus one push and 2 frames, within the 32,768 frames that
     /// `new` gives them.
-    fn warm_up(&mut self, _max_tempo: f64, _max_frames: usize) {}
+    fn warm_up(&mut self, max_tempo: f64, max_frames: usize) {
+        let most = (max_frames as f64 * max_tempo).ceil() as usize + MAX_PUSH_FRAMES + 2;
+        assert!(
+            most <= self.left.capacity(),
+            "RT-1: varispeed's queues hold {} frames, but a pull of {max_frames} at tempo {max_tempo} needs {most}.  Fix: give `Varispeed::new` larger queues, or a smaller block.",
+            self.left.capacity()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +249,12 @@ mod tests {
             out.extend_from_slice(&r);
         }
         out
+    }
+
+    #[test]
+    #[should_panic(expected = "RT-1: varispeed's queues hold")]
+    fn varispeed_refuses_a_block_its_queues_cannot_hold() {
+        Varispeed::new().warm_up(1.5, 20_000);
     }
 
     #[test]

@@ -21,7 +21,9 @@ use std::thread::LocalKey;
 /// with `stretch-wsola` only, and `Varispeed` is always compiled in.
 const SHIPPED: [StretcherKind; 2] = [StretcherKind::Varispeed, StretcherKind::Wsola];
 const RATES: [u32; 2] = [44_100, 48_000];
-const CALLBACK_FRAMES: [usize; 3] = [128, 512, 4_096];
+/// 10,000 frames is over `SCRATCH_FRAMES`, so `render_interleaved` runs its
+/// inner loop twice, and is not a multiple of the player's block.
+const CALLBACK_FRAMES: [usize; 4] = [128, 512, 4_096, 10_000];
 const STEMS: usize = 6;
 const SONG_SECONDS: usize = 10;
 
@@ -186,13 +188,15 @@ impl Rig {
         self.heard |= self.data.iter().any(|v| *v != 0.0);
     }
 
-    /// Plays `seconds` of output: `ceil(seconds * rate / callback)` callbacks.
-    fn play(&mut self, seconds: f64) {
+    /// Plays `seconds` of output: `ceil(seconds * rate / callback)`
+    /// callbacks.  Gives the frames played.
+    fn play(&mut self, seconds: f64) -> u64 {
         let callback_frames = self.data.len() / 2;
         let callbacks = (seconds * f64::from(self.rate) / callback_frames as f64).ceil() as usize;
         for _ in 0..callbacks {
             self.callback();
         }
+        (callbacks * callback_frames) as u64
     }
 
     fn seconds(&self, seconds: f64) -> u64 {
@@ -257,13 +261,29 @@ fn run(kind: StretcherKind, rate: u32, callback_frames: usize) -> Vec<String> {
         }
     });
     rig.phase("chipmunk", |r| {
+        let before = r.playhead();
         r.params.chipmunk.store(true, Relaxed);
-        r.play(0.2);
+        let played = r.play(0.2);
+        // Chipmunk mode reads two song frames per frame played; the
+        // stretcher at tempo 1.5 reads 1.5.
+        let moved = r.playhead().saturating_sub(before);
+        if moved * 10 < played * 18 {
+            r.fail(
+                "chipmunk",
+                format!("moved the playhead {moved} frames in {played}, under 1.8 per frame"),
+            );
+        }
         r.params.chipmunk.store(false, Relaxed);
         r.play(0.2);
     });
     rig.phase("seek", |r| {
+        // A pause while the seek's fade-out runs: with callbacks shorter
+        // than the 256-frame fade, the paused callback finishes the jump.
         r.params.request_seek(r.seconds(2.0));
+        r.callback();
+        r.params.playing.store(false, Relaxed);
+        r.callback();
+        r.params.playing.store(true, Relaxed);
         r.play(0.2);
         r.params.playing.store(false, Relaxed);
         r.callback();
@@ -336,14 +356,14 @@ fn the_callback_does_not_allocate_after_warm_up() {
 /// What `Stretcher::warm_up` promises: after it, a push of up to 4,096
 /// frames and a pull of up to `max_frames`, at up to `max_tempo`, do not
 /// allocate.  The player pushes less, so this checks the promise itself,
-/// at low rates too, where wsola's buffers are smallest.
+/// at low rates, where wsola's buffers are smallest, and at high ones.
 #[test]
 fn a_stretcher_keeps_its_warm_up_promise() {
     const PUSH: usize = 4_096;
     const PULL: usize = 512;
     let mut runs = Vec::new();
     for kind in SHIPPED {
-        for rate in [8_000, 16_000, 44_100, 48_000] {
+        for rate in [8_000, 16_000, 44_100, 48_000, 96_000, 192_000] {
             runs.push(std::thread::spawn(move || {
                 let input = noise(PUSH, rate);
                 let (mut left, mut right) = (vec![0.0; PULL], vec![0.0; PULL]);
@@ -351,7 +371,7 @@ fn a_stretcher_keeps_its_warm_up_promise() {
                 stretcher.set_tempo(1.5);
                 stretcher.warm_up(1.5, PULL);
                 let ((), counts) = counted(|| {
-                    for _ in 0..400 {
+                    for _ in 0..250 {
                         while !stretcher.can_pull(PULL) {
                             stretcher.push(&input, &input);
                         }

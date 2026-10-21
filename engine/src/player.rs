@@ -12,7 +12,7 @@
 
 use crate::params::{MAX_TEMPO, SharedParams};
 use crate::song::Song;
-use crate::stretch::{Stretcher, StretcherKind};
+use crate::stretch::{MAX_PUSH_FRAMES, Stretcher, StretcherKind};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
@@ -122,6 +122,11 @@ impl Player {
             .map(|i| params.effective_gain(i))
             .collect();
         let max_in = cfg.hop.max(cfg.block * 2);
+        assert!(
+            cfg.hop <= MAX_PUSH_FRAMES,
+            "RT-1: a hop of {} frames is over the {MAX_PUSH_FRAMES} that `Stretcher::warm_up` covers.  Fix: use a smaller hop, or raise `MAX_PUSH_FRAMES`.",
+            cfg.hop
+        );
         stretcher.warm_up(f64::from(MAX_TEMPO), cfg.block);
         Self {
             song,
@@ -290,8 +295,8 @@ impl Player {
     }
 
     /// Chipmunk mode: read twice as many frames and keep every second one,
-    /// in place, as `dsp::double_speed` does without allocating.  Bypasses
-    /// the stretcher.
+    /// as `dsp::double_speed` does, but write them into `l` and `r` without
+    /// allocating (RT-1).  Bypasses the stretcher.
     fn render_chipmunk(&mut self, l: &mut [f32], r: &mut [f32]) {
         let n2 = l.len() * 2;
         let mut got = 0;
@@ -536,6 +541,18 @@ mod tests {
         // Without a crossfade, output after the wrap is the loop start.
         let [l, _] = p.render(2_000);
         assert!(l.iter().all(|v| (0.0..0.15 + 1e-3).contains(v)));
+    }
+
+    #[test]
+    #[should_panic(expected = "RT-1: a hop of 8192 frames")]
+    fn a_hop_the_warm_up_does_not_cover_is_refused() {
+        let s = song(vec![("a", vec![0.0; 1_000])]);
+        let params = Arc::new(SharedParams::new(1));
+        let cfg = PlayerConfig {
+            hop: 8_192,
+            ..Default::default()
+        };
+        Player::with_config(s, params, Box::new(Varispeed::new()), cfg);
     }
 
     #[test]
