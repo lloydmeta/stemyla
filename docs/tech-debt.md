@@ -87,7 +87,7 @@ Clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`,
 * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;
 * a `#[wasm_bindgen]` export that takes a `Vec<f32>` or a `&[f32]`, which copies a JS array in;
 * an `#[allow]` in place of an `#[expect]`, as clippy's own help line suggests, and a reason that does not say why;
-* a new `to_vec` in a statement that already has an `#[expect]`, and a new test in a test module with a module `#![expect]`;
+* a new `to_vec` in a statement that already has an `#[expect]`, and a new test in a test module with a module-level `#[expect]` or `#![expect]`;
 * crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
 * a path that no longer resolves, except through the canaries, which prove their paths only while the clippy steps keep `--all-targets`.  Nothing fails if the `wasm32` step goes.
 
