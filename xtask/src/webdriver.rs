@@ -350,19 +350,12 @@ impl Session {
         )
     }
 
-    /// The viewport once the page knows the window's new size, which is when
-    /// its outer size equals `window`.  It reads after two frames, again
-    /// and again for up to `SETTLE_TIME`, and then gives the last read; a
-    /// window that the screen clamps never matches.
+    /// The viewport once the page knows the window's new size; see `settle`.
     fn settled_viewport(&self, window: Size) -> Result<Size> {
-        let deadline = Instant::now() + SETTLE_TIME;
-        loop {
+        settle(window, Instant::now() + SETTLE_TIME, Instant::now, || {
             self.frames(2)?;
-            let (inner, outer) = self.sizes()?;
-            if outer == window || Instant::now() >= deadline {
-                return Ok(inner);
-            }
-        }
+            self.sizes()
+        })
     }
 
     /// The page's inner (viewport) and outer (window) sizes.
@@ -421,8 +414,27 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
 /// A width and a height in CSS pixels.
 type Size = (u32, u32);
 
-/// How long a settled read waits for the page to know the window's size.
+/// How long `settle` starts new reads for.
 const SETTLE_TIME: Duration = Duration::from_secs(2);
+
+/// Reads the page's inner and outer sizes until the outer size equals
+/// `window`, which shows that the page knows the window's new size, and
+/// gives that read's inner size.  It starts no new read after `deadline`,
+/// and then gives the last inner size: a window that the screen clamps
+/// never matches.
+fn settle(
+    window: Size,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut read: impl FnMut() -> Result<(Size, Size)>,
+) -> Result<Size> {
+    loop {
+        let (inner, outer) = read()?;
+        if outer == window || now() >= deadline {
+            return Ok(inner);
+        }
+    }
+}
 
 /// Resizes the window until the viewport is `target`.  The window also
 /// holds the browser's own UI (143 pixels high in headless Chrome 155, on
@@ -473,6 +485,7 @@ mod viewport_tests {
     /// settled read with the number `stale_settle` (from 1) gives it too.
     struct LaggingWindow {
         window: Cell<Size>,
+        asked: Cell<Size>,
         before: Cell<Size>,
         settles: Cell<usize>,
         max_height: u32,
@@ -483,6 +496,7 @@ mod viewport_tests {
         fn new(max_height: u32, stale_settle: usize) -> Self {
             Self {
                 window: Cell::new((1100, 700)),
+                asked: Cell::new((1100, 700)),
                 before: Cell::new((1100, 557)),
                 settles: Cell::new(0),
                 max_height,
@@ -500,11 +514,17 @@ mod viewport_tests {
                 (1100, 700),
                 |(w, h)| {
                     self.before.set(self.viewport());
+                    self.asked.set((w, h));
                     self.window.set((w, h.min(self.max_height)));
                     Ok(())
                 },
                 || Ok(self.before.get()),
-                |_| {
+                |window| {
+                    assert_eq!(
+                        window,
+                        self.asked.get(),
+                        "settle waits for the window it asked for"
+                    );
                     self.settles.set(self.settles.get() + 1);
                     Ok(if self.settles.get() == self.stale_settle {
                         self.before.get()
@@ -516,8 +536,46 @@ mod viewport_tests {
         }
     }
 
+    /// A clock that moves 1 s at each look, and reads of `outers` in order,
+    /// each with the inner size 1100x(its number).
+    fn settle_with(window: Size, outers: &[Size]) -> (Result<Size>, usize) {
+        let start = Instant::now();
+        let looks = Cell::new(0);
+        let reads = Cell::new(0);
+        let inner = settle(
+            window,
+            start + SETTLE_TIME,
+            || {
+                looks.set(looks.get() + 1);
+                start + Duration::from_secs(looks.get())
+            },
+            || {
+                let index = reads.get();
+                assert!(index < 10, "settle read 10 times and did not stop");
+                reads.set(index + 1);
+                let outer = outers[index.min(outers.len() - 1)];
+                Ok(((1100, index as u32), outer))
+            },
+        );
+        (inner, reads.get())
+    }
+
     #[test]
-    fn a_stale_read_does_not_upset_the_viewport() {
+    fn settle_gives_the_first_read_whose_outer_size_matches() {
+        let (inner, reads) = settle_with((1100, 843), &[(1100, 843)]);
+        assert_eq!((inner.unwrap(), reads), ((1100, 0), 1));
+        let (inner, reads) = settle_with((1100, 843), &[(1100, 700), (1100, 843)]);
+        assert_eq!((inner.unwrap(), reads), ((1100, 1), 2));
+    }
+
+    #[test]
+    fn settle_stops_at_the_deadline_with_the_last_read() {
+        let (inner, reads) = settle_with((1100, 986), &[(1100, 800)]);
+        assert_eq!((inner.unwrap(), reads), ((1100, 1), 2));
+    }
+
+    #[test]
+    fn the_viewport_fits_despite_a_stale_read_at_once() {
         let chrome = LaggingWindow::new(u32::MAX, 0);
         let tries = chrome.fit().unwrap();
         assert_eq!(chrome.window.get(), (1100, 843), "{tries:?}");
