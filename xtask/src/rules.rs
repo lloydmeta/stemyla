@@ -2853,7 +2853,7 @@ pub const REQUIRED_DENY_RULES: [&str; 26] = [
 /// The top-level keys of `.claude/settings.json` that the check knows.
 /// Claude Code drops a settings file with a value that its schema rejects,
 /// deny rules included, so a key joins this list only after a run of M14's
-/// step 3 (`docs/plans/active/harness-phase-2.md`) shows the rules still
+/// step 3 (`docs/plans/completed/harness-phase-2.md`) shows the rules still
 /// hold.
 pub const SETTINGS_KEYS: [&str; 3] = ["$schema", "permissions", "hooks"];
 
@@ -2869,7 +2869,7 @@ pub fn claude_settings_problems(settings: &str) -> Vec<Problem> {
     };
     match deny_rules(settings) {
         Err(what) => vec![git1(format!(
-            "GIT-1: {SETTINGS_FILE} {what}.  Fix: Claude Code drops a settings file that it cannot read or that its schema rejects, deny rules included.  Keep to the keys this check knows, or add a key to SETTINGS_KEYS in xtask/src/rules.rs after a run of M14's step 3 (docs/plans/active/harness-phase-2.md) shows the rules still hold."
+            "GIT-1: {SETTINGS_FILE} {what}.  Fix: Claude Code drops a settings file that it cannot read or that its schema rejects, deny rules included.  Keep to the keys this check knows, or add a key to SETTINGS_KEYS in xtask/src/rules.rs after a run of M14's step 3 (docs/plans/completed/harness-phase-2.md) shows the rules still hold."
         ))],
         Ok(deny) => REQUIRED_DENY_RULES
             .iter()

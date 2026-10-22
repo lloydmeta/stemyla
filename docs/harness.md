@@ -1,6 +1,6 @@
 # The agent harness
 
-This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are `decisions/0001-harness-in-the-repo.md`, `decisions/0002-staged-background-autonomy.md`, `decisions/0003-required-skips-in-a-test-support-crate.md`, `decisions/0005-how-strictly-the-crate-checks-read-layer-1.md` and `decisions/0006-clippy-exceptions-in-dsp.md`.
+This repo has been written by AI agents (Claude Code) from its first commit.  The harness is everything around the model that makes that work reliable: what the agent reads (guides), what checks its output (sensors), and how work is planned and reviewed.  The roadmap is `plans/active/harness-engineering.md`; the decisions behind it are the records in `decisions/`.
 
 Two principles shape it:
 
@@ -20,6 +20,8 @@ Two principles shape it:
 | `references/` | guide | local setup and browser quirks rediscovered (chromedriver downloaded 8 times) | phase 1 |
 | `working-with-agents.md`, kept complete by `docs-check` | guide, for people | how to drive agents lived in one person's head and in old transcripts | phase 1 |
 | `xtask docs-check` (`the_map_and_docs_match_the_code`) | sensor, computational | docs drift from code (on 2026-10-19: `synth` missing from the map, `stem-protocol` from two crate lists) | phase 1 |
+| CI runs `cargo test -p roformer-gpu --lib` and `--doc` | sensor, computational | `--exclude roformer-gpu` also dropped the crate's tests that need no GPU, and its doctests, so they never ran in CI | phase 2 |
+| `browser tests (Chrome)` is a required check in the `main` ruleset | sensor, on GitHub | a PR could merge while the browser tests failed | phase 2 |
 | `every_kernel_fits_the_default_limits`, naga over every shader (GPU-1) | sensor, computational | a kernel over WebGPU's default limits fails only on a real adapter, on some GPUs; only the tile memory was checked before | phase 2 |
 | `STEMYLA_REQUIRE` and `test_support::skip` (VERIFY-1) | sensor, computational | a test with no GPU or no fixture returned early and passed, so a run that checked nothing looked like evidence | phase 2 |
 | `every_skip_can_be_required`, `the_skip_allowlist_is_current` (VERIFY-1) | sensor, computational | a new skip that prints its own message escapes `STEMYLA_REQUIRE`.  It sees only messages that start with `skipping` or `skipped`, in any case (TD-8) | phase 2 |
@@ -52,6 +54,18 @@ Measured on 2026-10-19 from the repo's history (PRs #1 to #12) and the 15 local 
 * CI: PR #11 passed CI and then failed on `main` (a timing-sensitive e2e check); PR #12 fixed it.
 * Environment: 54 WebDriver "timed out while connecting" errors and chromedriver downloaded 8 times in 3 sessions.
 * Size: PRs grew to +5,307 lines in 47 files (#11) from a 14-hour session that compacted twice.
+
+## Phase 2, measured
+
+Measured on 2026-10-22 over phase 2's 18 PRs (#14 to #32, without the Dependabot bump #24), against the baseline above.
+
+* Rules: "prose only" fell from 8 to 2 of the 21 rules in `invariants.md`.
+* CI: the 18 runs on `main`, one for each PR, passed.  No run failed on `main` after a green PR.
+* Size: without the plans, the median PR adds 418 lines (#30 adds 402, #17 adds 434), and the largest (#18) adds 2,260.
+* Review: about 26 of 58 implementation review rounds (a recount gave up to 33) found a test that could pass on wrong code (about 35 findings, in 14 of 18 PRs).  The baseline had 17 of 65 review transcripts.  Phase 2's reviewers ran mutants on purpose, so the counts are not like for like.
+* Checks: a new check found one real breach first; the surveys had found the others.
+
+The rest is in `plans/completed/harness-phase-2.md`.
 
 ## Measuring
 

@@ -120,7 +120,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, review round 3: its findings fixed with tests.
 * [x] 2026-10-19: phase 1, PR #13 merged by the maintainer.
 * [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
-* [ ] Phase 2.
+* [x] 2026-10-22: phase 2.  M1 to M15, M17, M18a and M18b merged as PRs #14 to #32 (#24 is a Dependabot bump); M16 moved to phase 5b.  M19 closes it (`plans/completed/harness-phase-2.md`).  "Prose only" rules: 8 to 2.  Gate met at `cf7437d` (run 39753865469), with the five checks required.
 * [ ] Phase 3.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
@@ -133,6 +133,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19: roformer-gpu's tests that need no GPU, among them `workgroup_memory_within_defaults` and `sources_are_complete`, have never run in CI (TD-1).
 * 2026-10-19: the maintainer's global gitignore ignores `.claude/`, so project rules would silently not be committed; the repo's `.gitignore` now re-includes it.
 * 2026-10-19: claude-code-action and GitHub's Copilot coding agent cannot approve PRs, so auto-merge with one maintainer needs a second identity by design.  Copilot code review can approve since 2026-09-01 (opt-in), and the `main` ruleset already runs it on every push; turning its approval on would let an LLM verdict alone merge.
+* 2026-10-22: phase 2's plan grew to 2,539 lines and 505,910 bytes at `cf7437d`.  It has a design for each milestone from M3 on, and a Progress line for each step.  Claude Code's `Read` tool refuses more than 25,000 tokens at once by default, so each session read the plan in parts.  Evidence: `wc -lc` on the file; the `Read` error in M19's planning session.
 
 ## Decision log
 
