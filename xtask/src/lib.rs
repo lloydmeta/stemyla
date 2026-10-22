@@ -6,6 +6,7 @@ pub mod drivers;
 pub mod e2e;
 pub mod metrics;
 pub mod publish;
+pub mod review;
 pub mod roformer_cli;
 pub mod rules;
 pub mod separate;

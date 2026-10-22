@@ -142,6 +142,14 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 
 * Fix: review; a changed PNG or threshold is a UI change, and the reviewer looks at it.  Phase 3's reviewers check for it.  No check is planned.
 
+### TD-31: the route of `xtask review` is a short denylist, from the branch's own code
+
+`xtask/src/review.rs` chooses the reviewers of a diff from its paths and from content signs.  The content signs are a short denylist, not a full list.  A sign matches as a whole token only.  So `create_buffer` does not match `create_buffer_init`, which `roformer-gpu/src/lib.rs` calls.  A sign counts only on an added line of a Rust file outside a `tests` folder and outside the reviewer's own paths.  A copy or a GPU buffer that a macro, an alias or a helper makes routes nothing.
+
+The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.
+
+* Fix: review; `reviewer` reads every diff.  Phase 5 routes with the base branch's `xtask`.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
