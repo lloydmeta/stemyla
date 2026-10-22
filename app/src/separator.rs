@@ -27,7 +27,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use eframe::egui;
-use js_sys::Float32Array;
+use js_sys::{Float32Array, Uint8Array};
 use stem_protocol::{ModelSource, Reply, Request, SegmentStem, Settings, kind};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
@@ -80,9 +80,10 @@ pub enum Event {
         done: f64,
         total: f64,
     },
+    /// The encoded file, as the worker transferred it.
     Mp3 {
         name: String,
-        bytes: Vec<u8>,
+        bytes: Uint8Array,
     },
 }
 
@@ -284,14 +285,7 @@ impl Separator {
                 Reply::Log(text) => Some(Event::Log(text)),
                 Reply::Selftest { ok, text } => Some(Event::Selftest { ok, text }),
                 Reply::Bench(text) => Some(Event::Bench(text)),
-                Reply::Mp3 { name, bytes } => Some(Event::Mp3 {
-                    name,
-                    #[expect(
-                        clippy::disallowed_methods,
-                        reason = "TD-13: the MP3 is copied into page memory, and copied out again to save it"
-                    )]
-                    bytes: bytes.to_vec(),
-                }),
+                Reply::Mp3 { name, bytes } => Some(Event::Mp3 { name, bytes }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
             if let Some(event) = event {
@@ -448,5 +442,52 @@ impl Separator {
             self.stems.clear();
         }
         sent
+    }
+}
+
+/// Browser tests of the worker's replies (`cargo run -p xtask --
+/// web-test`).  `store.rs` sets the whole binary to run in a page.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use js_sys::Object;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen(inline_js = r#"
+export function deliver(worker, data) {
+  worker.dispatchEvent(new MessageEvent("message", { data }));
+}
+"#)]
+    extern "C" {
+        /// Runs `worker`'s `onmessage` on `data` itself, with no
+        /// structured clone, as a transfer gives it.
+        fn deliver(worker: &Worker, data: &JsValue);
+    }
+
+    #[wasm_bindgen_test]
+    fn an_mp3_reply_reaches_the_page_as_sent() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let sent = Uint8Array::from(&[0xff, 0xfb, 0x90, 0x00][..]);
+        let (message, _) = Reply::Mp3 {
+            name: "bass.mp3".into(),
+            bytes: sent.clone(),
+        }
+        .to_js();
+        deliver(&sep.worker, &message);
+        // The worker's script is not in the test page, but its error comes
+        // after this synchronous test.
+        let mp3 = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Mp3 { name, bytes } => Some((name, bytes)),
+            _ => None,
+        });
+        // Before any assert: a failed assert aborts the test.
+        sep.stop();
+        let (name, bytes) = mp3.expect("an Event::Mp3");
+        assert_eq!(name, "bass.mp3");
+        assert!(
+            Object::is(&bytes, &sent),
+            "MEM-2: the page copied the MP3 that the worker transferred.  \
+             Fix: keep the Uint8Array in Event::Mp3."
+        );
     }
 }

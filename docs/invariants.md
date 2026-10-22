@@ -52,15 +52,15 @@ WebAssembly memory never shrinks, so a copy costs for the rest of the tab's life
 
 * Why: MEM-4.
 * Enforced by: `a_mono_stem_shares_one_buffer_and_clones_share_every_buffer`, `separated_stems_and_the_original_are_shared_not_copied`, and the type: `Samples` has a private field and derefs only to `&[f32]`.  Clippy's `disallowed-methods` (CI `clippy` job, both targets) fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`.  It also fails `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec` in `app`, `stem-worker` and `stem-protocol`.  A needed copy carries an `#[expect]` with its reason.  The page saves a chosen song from the browser's files, not their bytes.  `an_mp3_is_encoded_in_blocks` (CI `browser-tests` job) bounds the peak memory of an MP3 encode.  The `#[expect]`s in `mem1_lint_is_on` and `mem1_lint_is_on_for_js_arrays`, under the clippy steps with `--all-targets`, prove each path.
-* Gaps: TD-13, TD-26.
+* Gaps: TD-26.
 
 ### MEM-2: JS arrays are transferred between page and worker
 
 A typed array sent between the page and the worker goes in the message's transfer list, so it moves instead of being cloned, and the receiver does not copy it again without a reason.
 
 * Why: a structured clone of a stem doubles it until garbage collection, which Safari runs late.
-* Enforced by: `a_mix_is_transferred_not_copied` (CI `browser-tests` job).  MEM-1's lint on `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`, where the receiver copies.
-* Gaps: TD-13, TD-26.
+* Enforced by: `a_mix_is_transferred_not_copied`, `an_mp3_reply_reaches_the_page_as_sent` (CI `browser-tests` job).  MEM-1's lint on `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`, where the receiver copies.
+* Gaps: TD-26.
 
 ### MEM-3: GPU buffers are freed when dropped
 
