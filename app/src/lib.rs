@@ -215,7 +215,8 @@ const SONG_FILES: &str = ".mp3,.wav";
 /// Decodes files the user chose and keeps them in browser storage, so a
 /// reload brings the song back.  The result arrives through the inbox.
 /// Each file comes with its bytes, which the decoder takes, and the
-/// browser's file, which is saved as it is, so the bytes are never copied.
+/// browser's file, which is saved as it is.  So the page does not copy the
+/// bytes again to save them.
 #[cfg(target_arch = "wasm32")]
 async fn load_and_keep(
     chosen: Vec<(String, web_sys::File, Vec<u8>)>,

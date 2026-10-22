@@ -38,17 +38,22 @@ function whole(bytes) {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
 }
 export async function st_write(within, rel, body) {
+  let w;
   try {
     let base;
     try { base = await dir(within, false); }
     catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
     const [d, n] = split("/" + rel);
     const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
-    const w = await fh.createWritable();
+    w = await fh.createWritable();
     await w.write(body instanceof Blob ? body : whole(body));
     await w.close();
     return true;
-  } catch (e) { console.warn("storage write failed", within, rel, e); return false; }
+  } catch (e) {
+    if (w) try { await w.abort(); } catch (_) {}
+    console.warn("storage write failed", within, rel, e);
+    return false;
+  }
 }
 export async function st_read(path) {
   try {
@@ -90,8 +95,9 @@ export function save_file(name, bytes, mime) {
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
-    /// Writes `body`, a `Blob` or a typed array, to `within/rel`, creating
-    /// the folders in `rel`; `within` must exist already.  True, false, or
+    /// Writes `body`, a `Blob` or a typed array (no other type), to
+    /// `within/rel`, creating the folders in `rel`; `within` must exist
+    /// already.  True, false, or
     /// "gone" when `within` does not exist.
     async fn st_write(within: &str, rel: &str, body: &JsValue) -> JsValue;
     async fn st_read(path: &str) -> JsValue;
@@ -142,7 +148,7 @@ async fn write_bytes(within: &str, rel: &str, bytes: &[u8]) -> Result<()> {
     write_within(within, rel, &Uint8Array::from(bytes)).await
 }
 
-/// Writes `body`, a `Blob` or a typed array, to `within/rel` only if the
+/// Writes `body`, a `Blob` or a typed array (no other type), to `within/rel` only if the
 /// folder `within` still exists, so a save into a session forgotten
 /// meanwhile cannot bring it back.
 async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
@@ -195,10 +201,25 @@ fn file_stem(name: &str) -> String {
 
 /// Starts a session for files the user dropped and makes it current.
 /// Returns its id.  Each file is written as the browser's `Blob`, so the
-/// page keeps no copy of its bytes to save it (MEM-1).
+/// page keeps no copy of its bytes to save it (MEM-1).  A save that fails
+/// removes what it wrote, since a session without `meta` is not listed and
+/// cannot be forgotten.
 pub async fn save_sources(files: &[(String, web_sys::Blob)], rate: u32) -> Result<String> {
     let id = format!("{}", js_sys::Date::now() as u64);
     let base = format!("{ROOT}/{id}");
+    let saved = save_sources_now(&id, &base, files, rate).await;
+    if saved.is_err() {
+        st_remove(&base).await;
+    }
+    saved.map(|()| id)
+}
+
+async fn save_sources_now(
+    id: &str,
+    base: &str,
+    files: &[(String, web_sys::Blob)],
+    rate: u32,
+) -> Result<()> {
     let mut meta = Meta {
         rate,
         ..Default::default()
@@ -219,8 +240,7 @@ pub async fn save_sources(files: &[(String, web_sys::Blob)], rate: u32) -> Resul
         .map(|(n, _)| crate::store_meta::file_title(n))
         .unwrap_or_default();
     write(&format!("{base}/meta"), meta.to_text().as_bytes()).await?;
-    write(&format!("{ROOT}/current"), id.as_bytes()).await?;
-    Ok(id)
+    write(&format!("{ROOT}/current"), id.as_bytes()).await
 }
 
 /// Adds separated stems to session `id`.
@@ -375,12 +395,20 @@ let record = null;
 let real = null;
 // Records what each OPFS write gets, in call order: "blob", "whole" (a
 // typed array that is its whole buffer) or "view".
-export function start_spy() {
+// "same" is a write of `expected` itself.  From call `fail_from` on (0 is
+// the first), a write is refused, as a full disk refuses it.
+export function start_spy(expected, fail_from) {
+  if (real) throw new Error("a spy is already on write");
   const proto = FileSystemWritableFileStream.prototype;
   real = proto.write;
   record = [];
   proto.write = function (data) {
-    if (data instanceof Blob) record.push("blob");
+    if (record.length >= fail_from) {
+      record.push("refused");
+      return Promise.reject(new DOMException("refused by the test", "QuotaExceededError"));
+    }
+    if (data === expected) record.push("same");
+    else if (data instanceof Blob) record.push("blob");
     else if (ArrayBuffer.isView(data))
       record.push(data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view");
     else record.push(typeof data);
@@ -390,32 +418,68 @@ export function start_spy() {
 // Restores `write` and returns the record, joined by spaces.
 export function stop_spy() {
   FileSystemWritableFileStream.prototype.write = real;
+  real = null;
   return record.join(" ");
 }
-export function lloyd_in_a_larger_buffer() {
+// "lloyd" at `at` in a buffer of 16 bytes, as a view of 5 bytes.
+export function lloyd_in_a_larger_buffer(at) {
   const b = new Uint8Array(16);
-  b.set(new TextEncoder().encode("lloyd"), 4);
-  return b.subarray(4, 9);
+  b.set(new TextEncoder().encode("lloyd"), at);
+  return b.subarray(at, at + 5);
 }
 "#)]
     extern "C" {
-        fn start_spy();
+        fn start_spy(expected: &JsValue, fail_from: f64);
         fn stop_spy() -> String;
-        fn lloyd_in_a_larger_buffer() -> Uint8Array;
+        fn lloyd_in_a_larger_buffer(at: u32) -> Uint8Array;
+    }
+
+    /// Records every write, refusing none.
+    fn spy() {
+        start_spy(&JsValue::UNDEFINED, f64::INFINITY);
     }
 
     /// MEM-5: a view reaches storage as a whole array.  The spy sees what
     /// `write` gets, so a view fails this in any browser; a read-back
     /// alone fails only in Safari (`docs/references/browser-quirks.md`).
+    /// The views start at the buffer's start, in its middle, and end at its
+    /// end, so `whole` must check both the offset and the length.
     #[wasm_bindgen_test]
     async fn a_view_is_written_whole() {
         st_remove(ROOT).await;
-        start_spy();
-        let written = st_write("", "sessions/v/x", &lloyd_in_a_larger_buffer()).await;
+        let starts = [0, 4, 11];
+        let mut written = Vec::new();
+        spy();
+        for at in starts {
+            let path = format!("sessions/v/{at}");
+            written.push(st_write("", &path, &lloyd_in_a_larger_buffer(at)).await);
+        }
         let record = stop_spy();
-        assert_eq!(written.as_bool(), Some(true));
-        assert_eq!(record, "whole");
-        assert_eq!(read("sessions/v/x").await.as_deref(), Some(&b"lloyd"[..]));
+        assert!(written.iter().all(|w| w.as_bool() == Some(true)));
+        assert_eq!(record, "whole whole whole");
+        for at in starts {
+            let back = read(&format!("sessions/v/{at}")).await;
+            assert_eq!(back.as_deref(), Some(&b"lloyd"[..]), "view at {at}");
+        }
+        st_remove(ROOT).await;
+    }
+
+    fn blob(bytes: &[u8]) -> web_sys::Blob {
+        let parts = Array::of1(&Uint8Array::from(bytes));
+        web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob")
+    }
+
+    /// A save refused after the song's file (here, at `meta`) removes the
+    /// session, which would otherwise hold the file and never be listed.
+    #[wasm_bindgen_test]
+    async fn a_failed_save_leaves_no_session() {
+        st_remove(ROOT).await;
+        start_spy(&JsValue::UNDEFINED, 1.0);
+        let saved = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 8_000).await;
+        let record = stop_spy();
+        assert_eq!(record, "blob refused");
+        assert!(saved.is_err());
+        assert_eq!(st_list(ROOT).await.unchecked_into::<Array>().length(), 0);
         st_remove(ROOT).await;
     }
 
@@ -430,15 +494,15 @@ export function lloyd_in_a_larger_buffer() {
     #[wasm_bindgen_test]
     async fn sources_are_saved_from_their_files() {
         st_remove(ROOT).await;
-        let file = web_sys::Blob::new_with_u8_array_sequence(&Array::of1(&Uint8Array::from(
-            &tone(800)[..],
-        )))
-        .expect("a blob");
-        start_spy();
+        let file = blob(&tone(800));
+        start_spy(&file, f64::INFINITY);
         let saved = save_sources(&[("Lloyd - Tune.wav".into(), file)], 8_000).await;
         let record = stop_spy();
         let id = saved.expect("saved");
-        assert_eq!(record, "blob whole whole");
+        assert_eq!(
+            record, "same whole whole",
+            "the file itself, then meta and current"
+        );
         let (got, song, meta) = restore().await.expect("stored").expect("readable");
         assert_eq!((got, song.frames, meta.rate), (id, 800, 8_000));
         st_remove(ROOT).await;

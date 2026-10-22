@@ -82,6 +82,7 @@ export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 let record = null;
 let real_write = null;
 export function start_spy() {
+  if (real_write) throw new Error("a spy is already on write");
   const proto = FileSystemWritableFileStream.prototype;
   real_write = proto.write;
   record = [];
@@ -96,6 +97,7 @@ export function start_spy() {
 // Restores `write` and returns the record, joined by spaces.
 export function stop_spy() {
   FileSystemWritableFileStream.prototype.write = real_write;
+  real_write = null;
   return record.join(" ");
 }
 // The next fetch answers with one byte, and keeps how it was asked to
