@@ -890,19 +890,26 @@ async fn an_mp3_is_encoded_in_blocks() {
 #[wasm_bindgen_test]
 async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
     fresh().await;
-    // The shorter channel ends inside the second block.
-    let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, MP3_BLOCK + 7));
-    mp3(
-        Some("tone.mp3".into()),
-        [left.clone(), right.clone()],
-        Some(TONE_RATE),
-    )
-    .await
-    .expect("encoded");
-    let replies = sent("mp3");
-    assert_eq!(replies.len(), 1, "one mp3 reply");
-    let bytes = Uint8Array::new(&field(&replies[0], "bytes")).to_vec();
-    assert_eq!(bytes, encoded_in_one_push(&left, &right));
+    // The shorter channel ends inside the second block, on either side.
+    let (long, short) = (TONE_FRAMES, MP3_BLOCK + 7);
+    for (left_frames, right_frames) in [(long, short), (short, long)] {
+        let (left, right) = (tone(220.0, left_frames), tone(330.0, right_frames));
+        mp3(
+            Some("tone.mp3".into()),
+            [left.clone(), right.clone()],
+            Some(TONE_RATE),
+        )
+        .await
+        .expect("encoded");
+        let replies = sent("mp3");
+        let bytes = Uint8Array::new(&field(&replies[replies.len() - 1], "bytes")).to_vec();
+        assert_eq!(
+            bytes,
+            encoded_in_one_push(&left, &right),
+            "left {left_frames} frames, right {right_frames}"
+        );
+    }
+    assert_eq!(sent("mp3").len(), 2, "one mp3 reply for each encode");
 }
 
 #[wasm_bindgen_test]
