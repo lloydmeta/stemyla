@@ -6,7 +6,7 @@ Behaviour of browsers and libraries that the code works around.  Each entry says
 
 Safari 27.0 on macOS 26.7.1 (checked 2026-10-19): `FileSystemWritableFileStream.write(new Uint8Array(16).subarray(4, 8))` writes 16 bytes, not 4; Chrome writes 4.  No matching WebKit bug was found.  A sliced model write once grew a 9 MB write to 18 MB, silently corrupting the file.
 
-* The code: the worker's JavaScript `whole()` helper in `worker/src/web.rs` copies a partial view before writing; a `Uint8Array::from` made in Rust is already whole.
+* The code: the JavaScript `whole()` helpers in `worker/src/web.rs`, and the one that `st_write` calls in `app/src/store.rs`, copy a partial view before writing; a `Uint8Array::from` made in Rust is already whole.  The tests spy on `write`, since Chrome writes a view correctly.
 * Rule: MEM-5.
 
 ## Safari does not count WebGPU memory when collecting garbage

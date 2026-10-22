@@ -14,4 +14,4 @@ The page and the worker run in WebAssembly, whose memory never shrinks, in a tab
 * A typed array sent between page and worker goes in the transfer list, and the receiver does not copy it again.
 * Every OPFS write gets a whole array, never a view (`docs/references/browser-quirks.md`).
 * Nothing on the audio callback's path (`engine/src/slot.rs` `render_interleaved` and below) waits, locks without `try_lock`, logs, drops a `Player` or `Song`, or allocates after warm-up.  `engine/tests/realtime.rs` counts allocations; size a new buffer in `Player::with_config` or `Stretcher::warm_up`.
-* Known breaches are TD-12 to TD-14 in `docs/tech-debt.md`, and TD-17 is a risk; do not copy their pattern.
+* Known breaches are TD-13 and TD-14 in `docs/tech-debt.md`; do not copy their pattern.  Spy on `write` in a test of an OPFS write.

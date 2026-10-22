@@ -77,7 +77,7 @@ MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E06
 
 Clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three (MEM-1, MEM-2).  It does not see:
 
-* other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec` (TD-12);
+* other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec`;
 * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;
 * a `#[wasm_bindgen]` export that takes a `Vec<f32>` or a `&[f32]`, which copies a JS array in;
 * an `#[allow]` in place of an `#[expect]`, as clippy's own help line suggests, and a reason that does not say why;
@@ -144,12 +144,6 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 
 ## Known breaches
 
-### TD-12: dropped files are copied before they are saved
-
-`app/src/lib.rs:224` calls `Song::load_files(files.clone())`, copying every dropped file's bytes in page memory so they can be saved afterwards, with no stated reason (MEM-1).
-
-* Fix: save first, or decode from a shared buffer; a test that pins it.
-
 ### TD-13: an MP3 reply is copied into page memory
 
 The `Reply::Mp3` arm in `Separator::new` (`app/src/separator.rs`) turns the transferred MP3 into a `Vec` with `bytes.to_vec()`, and saving it copies it back out to JS (MEM-1, MEM-2).  Its site carries an `#[expect]` for the MEM-1 lint.
@@ -167,12 +161,6 @@ The `Reply::Mp3` arm in `Separator::new` (`app/src/separator.rs`) turns the tran
 `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.
-
-### TD-17: one OPFS write path is safe only by construction
-
-`app/src/store.rs` passes its argument straight to `write`.  Its one caller passes `Uint8Array::from(bytes)`, a new whole array, so no view reaches it today; but nothing stops a later caller passing one, and no test writes a view through it (MEM-5).
-
-* Fix: a wasm-bindgen test that writes a `subarray` through it and reads back the exact bytes, or copy views as the worker's `whole()` does.
 
 ## Legibility for agents
 
@@ -208,6 +196,8 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-5: closed by `no_python_in_the_build` (harness phase 2, M8).  It checks the git index and the build files for Python (BUILD-1).
 * TD-6: closed by `no_audio_or_weights_are_tracked` and the anchored `.gitignore` (harness phase 2, M8).  The test checks the git index for audio, weights and large files (ASSET-1).
 * TD-9: closed by harness phase 2, M17.  CI's `test` job compares the UI snapshots, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files (VERIFY-1).
+* TD-12: closed by `sources_are_saved_from_their_files` (harness phase 2, M18a).  The page saves a chosen song from the browser's `File`s and moves the bytes into the decoder, so it no longer copies them.  The test shows that the source reaches storage as the browser's file (MEM-1).
 * TD-15: closed by `the_callback_does_not_allocate_after_warm_up` (harness phase 2, M11).  wsola 0.2.0, a warm-up of each stretcher, chipmunk decimation in place and a bound on the playhead's anchors removed the allocations in the audio callback (RT-1).
+* TD-17: closed by `a_view_is_written_whole` (harness phase 2, M18a).  `st_write` copies a view into a whole array, as the worker's `whole()` does (MEM-5).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.

@@ -50,12 +50,18 @@ async fn has(path: &str) -> bool {
 
 const RATE: u32 = 8_000;
 
+/// A `Blob` holding a copy of `bytes`, as a chosen file is.
+fn blob(bytes: &[u8]) -> web_sys::Blob {
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+    web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob")
+}
+
 #[wasm_bindgen_test]
 async fn close_waits_for_the_write_in_progress_then_refuses_every_write() {
     let id = store::save_sources(
         &[(
             "acme.wav".into(),
-            engine::wav::encode_pcm16(&[0.1; 800], &[0.1; 800], RATE),
+            blob(&engine::wav::encode_pcm16(&[0.1; 800], &[0.1; 800], RATE)),
         )],
         RATE,
     )
@@ -94,7 +100,7 @@ async fn close_waits_for_the_write_in_progress_then_refuses_every_write() {
     );
     assert!(!has("sessions").await, "nothing was written after close");
 
-    let refused = store::save_sources(&[("acme.wav".into(), vec![1, 2, 3])], RATE).await;
+    let refused = store::save_sources(&[("acme.wav".into(), blob(&[1, 2, 3]))], RATE).await;
     assert_eq!(
         refused.expect_err("refused").to_string(),
         "browser storage is being reset"

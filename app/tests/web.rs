@@ -45,6 +45,12 @@ extern "C" {
 
 const RATE: u32 = 8_000;
 
+/// A `Blob` holding a copy of `bytes`, as a chosen file is.
+fn blob(bytes: &[u8]) -> web_sys::Blob {
+    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+    web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob")
+}
+
 /// A short stereo tone as a WAV file, made in memory.
 fn tone(frames: usize, hz: f32) -> Vec<u8> {
     let wave: Vec<f32> = (0..frames)
@@ -69,9 +75,12 @@ async fn has(path: &str) -> bool {
 /// A stored song of one WAV file, made current; returns its id.
 async fn stored_song() -> String {
     wipe().await;
-    store::save_sources(&[("Lloyd - Tune.wav".into(), tone(800, 440.0))], RATE)
-        .await
-        .expect("saved")
+    store::save_sources(
+        &[("Lloyd - Tune.wav".into(), blob(&tone(800, 440.0)))],
+        RATE,
+    )
+    .await
+    .expect("saved")
 }
 
 /// Starts `save_stems` and lets it run up to its first wait, so it is in
@@ -180,7 +189,7 @@ async fn sessions_are_listed_newest_first() {
     let older = stored_song().await;
     // Ids are creation times in milliseconds.
     sleep(5).await;
-    let newer = store::save_sources(&[("acme.wav".into(), tone(80, 220.0))], RATE)
+    let newer = store::save_sources(&[("acme.wav".into(), blob(&tone(80, 220.0)))], RATE)
         .await
         .expect("saved");
     let ids: Vec<String> = store::list().await.into_iter().map(|(id, _)| id).collect();
