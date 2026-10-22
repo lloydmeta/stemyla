@@ -989,12 +989,12 @@ impl StemApp {
             }
             ctx.request_repaint();
             wasm_bindgen_futures::spawn_local(async move {
-                let mut files = Vec::new();
+                let mut read = Vec::new();
                 // The "Reading…" text may still be queued; the result,
                 // applied before the queued status, must not be hidden by it.
                 for f in &chosen {
                     match picker::read(f).await {
-                        Ok(b) => files.push((f.name(), f.clone(), b)),
+                        Ok(b) => read.push((f.name(), f.clone(), b)),
                         Err(e) => {
                             let mut inbox = pending.borrow_mut();
                             inbox.status = None;
@@ -1006,7 +1006,7 @@ impl StemApp {
                     }
                 }
                 pending.borrow_mut().status = None;
-                load_and_keep(files, pending, ctx).await;
+                load_and_keep(read, pending, ctx).await;
             });
         });
     }

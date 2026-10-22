@@ -71,6 +71,10 @@ export async function st_remove(path) {
     return true;
   } catch (e) { return e.name === "NotFoundError"; }
 }
+export async function st_exists(path) {
+  try { await dir(path, false); return true; }
+  catch (e) { return e.name !== "NotFoundError"; }
+}
 export async function st_list(path) {
   try {
     const out = [];
@@ -107,6 +111,9 @@ extern "C" {
     async fn st_remove(path: &str) -> JsValue;
     async fn st_usage() -> JsValue;
     async fn st_list(path: &str) -> JsValue;
+    /// Whether the folder `path` exists (true also when the browser cannot
+    /// tell).
+    async fn st_exists(path: &str) -> JsValue;
     fn save_file(name: &str, bytes: &Uint8Array, mime: &str);
     async fn st_sleep(ms: u32) -> JsValue;
 }
@@ -129,10 +136,14 @@ thread_local! {
 }
 
 /// A new session id: now in milliseconds, or one more than the last id if
-/// that is later.  Two saves never share a folder, so a failed save
-/// removes only its own.
-fn new_id() -> String {
-    let id = (js_sys::Date::now() as u64).max(LAST_ID.get() + 1);
+/// that is later, and never the id of a stored session.  So a save never
+/// shares a folder, and a failed save removes only its own.  (Two tabs that
+/// pick an id at the same moment can still meet.)
+async fn new_id() -> String {
+    let mut id = (js_sys::Date::now() as u64).max(LAST_ID.get() + 1);
+    while st_exists(&format!("{ROOT}/{id}")).await.as_bool() != Some(false) {
+        id += 1;
+    }
     LAST_ID.set(id);
     id.to_string()
 }
@@ -217,9 +228,9 @@ fn file_stem(name: &str) -> String {
 /// Returns its id.  Each file is written as the browser's `Blob`, so the
 /// page keeps no copy of its bytes to save it (MEM-1).  A save that fails
 /// removes what it wrote: the caller gets no id to use, and a session
-/// without `meta` is not listed, so it could not be forgotten.
+/// without `meta` is not listed, so it cannot be forgotten.
 pub async fn save_sources(files: &[(String, web_sys::Blob)], rate: u32) -> Result<String> {
-    let id = new_id();
+    let id = new_id().await;
     let base = format!("{ROOT}/{id}");
     let saved = save_sources_now(&id, &base, files, rate).await;
     if saved.is_err() && st_remove(&base).await.as_bool() != Some(true) {
@@ -520,6 +531,28 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         let (first, second) = (first.expect("saved"), second.expect("saved"));
         assert_ne!(first, second);
         assert_eq!(list().await.len(), 2);
+        st_remove(ROOT).await;
+    }
+
+    /// After a reload the last id is gone, so a clock that went back can
+    /// give a stored session's id.  The save takes the next one, and a
+    /// failure then cannot remove the stored session.
+    #[wasm_bindgen_test]
+    async fn a_save_never_takes_a_stored_session_id() {
+        st_remove(ROOT).await;
+        let stored = "1792640000000";
+        write(&format!("{ROOT}/{stored}/meta"), b"name\tacme\n")
+            .await
+            .expect("written");
+        LAST_ID.set(0);
+        freeze_now(1_792_640_000_000.0);
+        start_spy(&JsValue::UNDEFINED, 0.0);
+        let saved = save_sources(&[("lloyd.wav".into(), blob(&tone(80)))], 8_000).await;
+        let record = stop_spy();
+        thaw_now();
+        assert_eq!(record, "refused");
+        assert!(saved.is_err());
+        assert!(read(&format!("{ROOT}/{stored}/meta")).await.is_some());
         st_remove(ROOT).await;
     }
 

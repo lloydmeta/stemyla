@@ -77,8 +77,8 @@ export function next_fetch_sends_views() {
 }
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // Records what each OPFS write gets, in call order: "blob", "whole" (a
-// typed array that is its whole buffer) or "view".  The same spy is in
-// app/src/store.rs.
+// typed array that is its whole buffer) or "view".  A simpler copy of
+// the spy in app/src/store.rs.
 let record = null;
 let real_write = null;
 export function start_spy() {
