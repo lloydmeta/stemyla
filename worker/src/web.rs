@@ -1604,10 +1604,15 @@ async fn verified_download(expected: Option<&str>) -> Result<ModelFile, String> 
     Ok(ModelFile::Bytes(bytes))
 }
 
+/// Frames of each channel that `mp3` reads from JS at a time: 16 MP3
+/// frames, 72 KB for each channel.
+const MP3_BLOCK: usize = 1152 * 16;
+
 /// Encodes one stem as a 192 kbps MP3 (`{type: "mp3", name, left, right,
 /// rate}`) and sends the file back as `{type: "mp3", name, bytes}`.  Runs
-/// here, not on the page, because the encoder does most of its work in one
-/// final call (seconds for a whole song).
+/// here, not on the page, so the page stays responsive for the seconds a
+/// song takes.  It reads the channels from JS in blocks, so an encode
+/// holds a few times the size of the MP3, not the samples (MEM-1).
 async fn mp3(
     name: Option<String>,
     [left, right]: [Float32Array; 2],
@@ -1615,22 +1620,32 @@ async fn mp3(
 ) -> Result<(), String> {
     let name = name.unwrap_or_else(|| "stem.mp3".into());
     let rate = rate.unwrap_or(44_100);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "TD-14: both channels are copied out of JS, and live through the encode"
-    )]
-    let (l, r) = (left.to_vec(), right.to_vec());
-    let mut pcm = Vec::with_capacity(2 * l.len());
-    for (a, b) in l.iter().zip(&r) {
-        pcm.push(*a);
-        pcm.push(*b);
-    }
+    let frames = left.length().min(right.length()) as usize;
     let mut enc = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig {
         bitrate_kbps: 192,
         vbr_quality: None,
     });
-    enc.push_pcm_f32(&pcm, 2, rate)
-        .map_err(|e| format!("MP3 encoder: {e:?}"))?;
+    let (mut l, mut r) = (vec![0.0; MP3_BLOCK], vec![0.0; MP3_BLOCK]);
+    let mut pcm = Vec::with_capacity(2 * MP3_BLOCK);
+    let mut at = 0;
+    // At least one push, so an unsupported rate fails with no samples too.
+    loop {
+        let n = MP3_BLOCK.min(frames - at);
+        let (start, end) = (at as u32, (at + n) as u32);
+        left.subarray(start, end).copy_to(&mut l[..n]);
+        right.subarray(start, end).copy_to(&mut r[..n]);
+        pcm.clear();
+        for (a, b) in l[..n].iter().zip(&r[..n]) {
+            pcm.push(*a);
+            pcm.push(*b);
+        }
+        enc.push_pcm_f32(&pcm, 2, rate)
+            .map_err(|e| format!("MP3 encoder: {e:?}"))?;
+        at += n;
+        if at == frames {
+            break;
+        }
+    }
     enc.finish();
     let mut out = Vec::new();
     while let Ok(packet) = enc.next_packet() {
