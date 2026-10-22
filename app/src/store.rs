@@ -10,8 +10,10 @@
 //! * `sessions/<id>/src/<n>.<ext>`: the files as dropped.
 //! * `sessions/<id>/stems/<stem>.wav`: separated stems, 16-bit PCM.
 //!
-//! Ids are creation times in milliseconds.  Every dropped song gets its own
-//! session; the Storage menu lists them, opens one or forgets it.
+//! Ids are creation times in milliseconds, made unique within the page: a
+//! second session in the same millisecond takes the next one.  Every
+//! dropped song gets its own session; the Storage menu lists them, opens
+//! one or forgets it.
 
 use crate::store_meta::Meta;
 use anyhow::{Result, anyhow};
@@ -52,7 +54,7 @@ export async function st_write(within, rel, body) {
   } catch (e) {
     if (w) try { await w.abort(); } catch (_) {}
     console.warn("storage write failed", within, rel, e);
-    return false;
+    return (e && e.name) || "Error";
   }
 }
 export async function st_read(path) {
@@ -97,8 +99,8 @@ export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 extern "C" {
     /// Writes `body`, a `Blob` or a typed array (no other type), to
     /// `within/rel`, creating the folders in `rel`; `within` must exist
-    /// already.  True, false, or
-    /// "gone" when `within` does not exist.
+    /// already.  True; "gone" when `within` does not exist; else the name
+    /// of the error, such as "QuotaExceededError".
     async fn st_write(within: &str, rel: &str, body: &JsValue) -> JsValue;
     async fn st_read(path: &str) -> JsValue;
     /// Whether `path` is gone (removed, or never there).
@@ -122,6 +124,17 @@ thread_local! {
     /// Saves in progress per session (a quick second separation can
     /// overlap the first one's save).
     static SAVING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// The last session id made, so the next one is later.
+    static LAST_ID: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A new session id: now in milliseconds, or one more than the last id if
+/// that is later.  Two saves never share a folder, so a failed save
+/// removes only its own.
+fn new_id() -> String {
+    let id = (js_sys::Date::now() as u64).max(LAST_ID.get() + 1);
+    LAST_ID.set(id);
+    id.to_string()
 }
 
 async fn settled(id: &str) {
@@ -148,9 +161,9 @@ async fn write_bytes(within: &str, rel: &str, bytes: &[u8]) -> Result<()> {
     write_within(within, rel, &Uint8Array::from(bytes)).await
 }
 
-/// Writes `body`, a `Blob` or a typed array (no other type), to `within/rel` only if the
-/// folder `within` still exists, so a save into a session forgotten
-/// meanwhile cannot bring it back.
+/// Writes `body`, a `Blob` or a typed array (no other type), to
+/// `within/rel` only if the folder `within` still exists, so a save into a
+/// session forgotten meanwhile cannot bring it back.
 async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
     if CLOSED.get() {
         return Err(anyhow!("browser storage is being reset"));
@@ -161,13 +174,14 @@ async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
     match (written.as_bool(), written.as_string().as_deref()) {
         (Some(true), _) => Ok(()),
         (_, Some("gone")) => Err(anyhow!("{within} is gone (forgotten?)")),
-        _ => Err(anyhow!(
-            "browser storage refused {} (full, or not available)",
+        (_, error) => Err(anyhow!(
+            "browser storage refused {} ({})",
             if within.is_empty() {
                 rel.to_string()
             } else {
                 format!("{within}/{rel}")
-            }
+            },
+            error.unwrap_or("not available")
         )),
     }
 }
@@ -202,14 +216,14 @@ fn file_stem(name: &str) -> String {
 /// Starts a session for files the user dropped and makes it current.
 /// Returns its id.  Each file is written as the browser's `Blob`, so the
 /// page keeps no copy of its bytes to save it (MEM-1).  A save that fails
-/// removes what it wrote, since a session without `meta` is not listed and
-/// cannot be forgotten.
+/// removes what it wrote: the caller gets no id to use, and a session
+/// without `meta` is not listed, so it could not be forgotten.
 pub async fn save_sources(files: &[(String, web_sys::Blob)], rate: u32) -> Result<String> {
-    let id = format!("{}", js_sys::Date::now() as u64);
+    let id = new_id();
     let base = format!("{ROOT}/{id}");
     let saved = save_sources_now(&id, &base, files, rate).await;
-    if saved.is_err() {
-        st_remove(&base).await;
+    if saved.is_err() && st_remove(&base).await.as_bool() != Some(true) {
+        log::warn!("could not remove {base} after a failed save");
     }
     saved.map(|()| id)
 }
@@ -478,8 +492,34 @@ export function lloyd_in_a_larger_buffer(at) {
         let saved = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 8_000).await;
         let record = stop_spy();
         assert_eq!(record, "blob refused");
-        assert!(saved.is_err());
+        let error = saved.expect_err("refused").to_string();
+        assert!(error.ends_with("/meta (QuotaExceededError)"), "{error}");
         assert_eq!(st_list(ROOT).await.unchecked_into::<Array>().length(), 0);
+        st_remove(ROOT).await;
+    }
+
+    #[wasm_bindgen(inline_js = r#"
+let real_now = null;
+export function freeze_now(ms) { real_now = Date.now; Date.now = () => ms; }
+export function thaw_now() { Date.now = real_now; real_now = null; }
+"#)]
+    extern "C" {
+        fn freeze_now(ms: f64);
+        fn thaw_now();
+    }
+
+    /// Two saves in the same millisecond get two sessions, so a failure in
+    /// one could never remove the other's folder.
+    #[wasm_bindgen_test]
+    async fn two_saves_in_one_millisecond_get_two_sessions() {
+        st_remove(ROOT).await;
+        freeze_now(1_792_640_000_000.0);
+        let first = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 8_000).await;
+        let second = save_sources(&[("beachape.wav".into(), blob(&tone(80)))], 8_000).await;
+        thaw_now();
+        let (first, second) = (first.expect("saved"), second.expect("saved"));
+        assert_ne!(first, second);
+        assert_eq!(list().await.len(), 2);
         st_remove(ROOT).await;
     }
 
