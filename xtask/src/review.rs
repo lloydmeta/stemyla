@@ -4,7 +4,9 @@
 //! Each failure exits 3, so a skill that runs the command stops on it.
 
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
@@ -489,13 +491,299 @@ pub fn main(args: &[String]) -> i32 {
 
 /// The seam for tests: runs a subcommand in `dir`, and returns the exit
 /// code and the lines to print.
-pub fn run(
-    _args: &[String],
-    _dir: &Path,
-    _home: &Path,
-    _exe_time: SystemTime,
-) -> (i32, Vec<String>) {
-    (REFUSED, vec![USAGE.to_string()])
+pub fn run(args: &[String], dir: &Path, home: &Path, _exe_time: SystemTime) -> (i32, Vec<String>) {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let outcome = match words.as_slice() {
+        ["check", round] => {
+            parse_round(round).and_then(|round| check(&toplevel(dir)?, home, round))
+        }
+        _ => Ok((REFUSED, vec![USAGE.to_string()])),
+    };
+    outcome.unwrap_or_else(|e| (REFUSED, vec![format!("{e:#}")]))
+}
+
+/// A round is a whole number of 1 or more.
+fn parse_round(text: &str) -> Result<u32> {
+    match text.parse::<u32>() {
+        Ok(round) if round >= 1 => Ok(round),
+        _ => bail!("the round must be a whole number of 1 or more\n{USAGE}"),
+    }
+}
+
+/// The repo of the folder `dir`.
+fn toplevel(dir: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(
+        git(dir, &["rev-parse", "--show-toplevel"])?.trim_end(),
+    ))
+}
+
+/// The state of the repo that a round must not change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct State {
+    /// The merge base; `start` fills it.
+    pub base: String,
+    /// The start of the round's range; `start` fills it.
+    pub since: String,
+    pub head: String,
+    /// The branch name, or `detached`.
+    pub branch: String,
+    /// Unix seconds; `start` fills it.
+    pub started: u64,
+    pub status: Vec<String>,
+    pub stash: Vec<String>,
+    pub branches: Vec<String>,
+    pub tags: Vec<String>,
+    pub remotes: Vec<String>,
+    pub worktrees: Vec<String>,
+    /// A label, and `git hash-object` of its file, or `absent`.
+    pub hashes: BTreeMap<String, String>,
+}
+
+/// The state of the repo at `toplevel` now.  `base`, `since` and `started`
+/// stay empty.
+pub fn take_state(toplevel: &Path, home: &Path) -> Result<State> {
+    let lines = |args: &[&str]| -> Result<Vec<String>> {
+        Ok(git(toplevel, args)?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect())
+    };
+    let branch = git(toplevel, &["branch", "--show-current"])?;
+    let status = git(
+        toplevel,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )?;
+    Ok(State {
+        base: String::new(),
+        since: String::new(),
+        head: git(toplevel, &["rev-parse", "HEAD"])?.trim().to_string(),
+        branch: match branch.trim() {
+            "" => "detached".to_string(),
+            name => name.to_string(),
+        },
+        started: 0,
+        status: status
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        stash: lines(&["stash", "list", "--format=%H"])?,
+        branches: lines(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+        ])?,
+        tags: lines(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/tags",
+        ])?,
+        remotes: lines(&["remote", "-v"])?,
+        worktrees: worktrees(toplevel)?,
+        hashes: hashes(toplevel, home)?,
+    })
+}
+
+/// `git worktree list --porcelain`, one line for each worktree, without
+/// those under `target/review/` of the toplevel or of the main worktree.
+fn worktrees(toplevel: &Path) -> Result<Vec<String>> {
+    let listing = git(toplevel, &["worktree", "list", "--porcelain"])?;
+    let records: Vec<Vec<&str>> = listing
+        .split("\n\n")
+        .map(|record| record.lines().filter(|l| !l.is_empty()).collect())
+        .filter(|record: &Vec<&str>| !record.is_empty())
+        .collect();
+    let path_of = |record: &[&str]| {
+        record
+            .first()
+            .and_then(|line| line.strip_prefix("worktree "))
+            .map(canonical)
+    };
+    let scratch_roots: Vec<PathBuf> = [
+        Some(canonical(toplevel)),
+        records.first().and_then(|r| path_of(r)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|root| root.join("target/review"))
+    .collect();
+    Ok(records
+        .iter()
+        .filter(|record| {
+            !path_of(record)
+                .is_some_and(|path| scratch_roots.iter().any(|root| path.starts_with(root)))
+        })
+        .map(|record| record.join(" "))
+        .collect())
+}
+
+/// The canonical form of a path, or the path itself if it is gone.
+fn canonical(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Each hashed file, by its label.
+pub fn hashed_paths(toplevel: &Path, home: &Path) -> Result<Vec<(String, PathBuf)>> {
+    // A relative path from `git rev-parse` is relative to the toplevel,
+    // where git ran.
+    let git_path =
+        |args: &[&str]| -> Result<PathBuf> { Ok(toplevel.join(git(toplevel, args)?.trim_end())) };
+    let common = git_path(&["rev-parse", "--git-common-dir"])?;
+    let hooks_folder = git_path(&["rev-parse", "--git-path", "hooks"])?;
+    let hooks: Vec<(String, PathBuf)> = match std::fs::read_dir(&hooks_folder) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| {
+                (
+                    format!("hooks/{}", entry.file_name().to_string_lossy()),
+                    entry.path(),
+                )
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Ok([
+        ("config".to_string(), common.join("config")),
+        (
+            "config.worktree".to_string(),
+            git_path(&["rev-parse", "--git-path", "config.worktree"])?,
+        ),
+        (
+            ".claude/settings.local.json".to_string(),
+            toplevel.join(".claude/settings.local.json"),
+        ),
+        (
+            "~/.claude/settings.json".to_string(),
+            home.join(".claude/settings.json"),
+        ),
+    ]
+    .into_iter()
+    .chain(hooks)
+    .collect())
+}
+
+/// `git hash-object --no-filters` of each hashed file, or `absent`.
+fn hashes(toplevel: &Path, home: &Path) -> Result<BTreeMap<String, String>> {
+    let (present, absent): (Vec<_>, Vec<_>) = hashed_paths(toplevel, home)?
+        .into_iter()
+        .partition(|(_, path)| path.is_file());
+    let paths: Vec<String> = present
+        .iter()
+        .map(|(_, path)| path.to_string_lossy().into_owned())
+        .collect();
+    let args: Vec<&str> = ["hash-object", "--no-filters", "--"]
+        .into_iter()
+        .chain(paths.iter().map(String::as_str))
+        .collect();
+    let sums = if paths.is_empty() {
+        String::new()
+    } else {
+        git(toplevel, &args)?
+    };
+    let sums: Vec<&str> = sums.lines().collect();
+    if sums.len() != present.len() {
+        bail!(
+            "git hash-object gave {} sums for {} files",
+            sums.len(),
+            present.len()
+        );
+    }
+    Ok(present
+        .into_iter()
+        .zip(sums)
+        .map(|((label, _), sum)| (label, sum.to_string()))
+        .chain(
+            absent
+                .into_iter()
+                .map(|(label, _)| (label, "absent".to_string())),
+        )
+        .collect())
+}
+
+/// Each change from `old` to `new`, by field.  `base`, `since`, `branch`
+/// and `started` are not compared.
+pub fn changes(old: &State, new: &State) -> Vec<String> {
+    let head = (old.head != new.head).then(|| format!("head: {} -> {}", old.head, new.head));
+    let lists = [
+        ("status", &old.status, &new.status),
+        ("stash", &old.stash, &new.stash),
+        ("branches", &old.branches, &new.branches),
+        ("tags", &old.tags, &new.tags),
+        ("remotes", &old.remotes, &new.remotes),
+        ("worktrees", &old.worktrees, &new.worktrees),
+    ]
+    .into_iter()
+    .flat_map(|(field, before, after)| {
+        let gone = before
+            .iter()
+            .filter(|line| !after.contains(line))
+            .map(move |line| format!("{field}: goes: {line}"));
+        let come = after
+            .iter()
+            .filter(|line| !before.contains(line))
+            .map(move |line| format!("{field}: appears: {line}"));
+        gone.chain(come).collect::<Vec<_>>()
+    });
+    let labels: std::collections::BTreeSet<&String> =
+        old.hashes.keys().chain(new.hashes.keys()).collect();
+    let hashes = labels.into_iter().filter_map(|label| {
+        match (old.hashes.get(label), new.hashes.get(label)) {
+            (Some(before), Some(after)) if before == after => None,
+            (Some(before), Some(after)) => Some(format!("hashes: {label}: {before} -> {after}")),
+            (Some(_), None) => Some(format!("hashes: {label}: goes")),
+            (None, _) => Some(format!("hashes: {label}: appears")),
+        }
+    });
+    head.into_iter().chain(lists).chain(hashes).collect()
+}
+
+/// `target/review/run/<branch>/`, with `/` in the branch as `-`, or
+/// `detached-<short sha>`.
+fn run_folder(toplevel: &Path) -> Result<PathBuf> {
+    let branch = git(toplevel, &["branch", "--show-current"])?;
+    let name = match branch.trim() {
+        "" => format!(
+            "detached-{}",
+            git(toplevel, &["rev-parse", "--short", "HEAD"])?.trim()
+        ),
+        name => name.replace('/', "-"),
+    };
+    Ok(toplevel.join("target/review/run").join(name))
+}
+
+fn state_path(toplevel: &Path, round: u32) -> Result<PathBuf> {
+    Ok(run_folder(toplevel)?
+        .join(round.to_string())
+        .join("state.json"))
+}
+
+fn read_state(path: &Path) -> Result<State> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// `review check <round>`: the changes since the round's record.
+fn check(toplevel: &Path, home: &Path, round: u32) -> Result<(i32, Vec<String>)> {
+    let path = state_path(toplevel, round)?;
+    if !path.exists() {
+        return Ok((
+            REFUSED,
+            vec![format!(
+                "no record for this branch and round ({}); HEAD may have moved, see git reflog",
+                path.display()
+            )],
+        ));
+    }
+    let found = changes(&read_state(&path)?, &take_state(toplevel, home)?);
+    if found.is_empty() {
+        Ok((0, vec!["no change".to_string()]))
+    } else {
+        Ok((REFUSED, found))
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -997,6 +1285,395 @@ mod tests {
         assert_eq!(
             route.reasons("supply-chain-reviewer"),
             ["link is a symlink"]
+        );
+    }
+
+    // The state record: the comparison.
+
+    fn a_state() -> State {
+        State {
+            base: "b".into(),
+            since: "s".into(),
+            head: "h1".into(),
+            branch: "main".into(),
+            started: 1,
+            status: vec!["?? a.txt".into()],
+            stash: vec!["s1".into()],
+            branches: vec!["refs/heads/main h1".into()],
+            tags: vec!["refs/tags/v1 t1".into()],
+            remotes: vec!["origin /x (fetch)".into()],
+            worktrees: vec!["worktree /r HEAD h1 branch refs/heads/main".into()],
+            hashes: BTreeMap::from([
+                ("config".to_string(), "c1".to_string()),
+                ("hooks/pre-commit".to_string(), "p1".to_string()),
+                (
+                    ".claude/settings.local.json".to_string(),
+                    "absent".to_string(),
+                ),
+            ]),
+        }
+    }
+
+    /// Records that differ only in `field` give changes, and each names it.
+    fn assert_changes_name(new: State, field: &str) {
+        let found = changes(&a_state(), &new);
+        assert!(!found.is_empty(), "no change for {field}");
+        assert!(
+            found
+                .iter()
+                .all(|line| line.starts_with(&format!("{field}: "))),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_different_head_is_a_change() {
+        assert_changes_name(
+            State {
+                head: "h2".into(),
+                ..a_state()
+            },
+            "head",
+        );
+    }
+
+    #[test]
+    fn a_different_status_is_a_change() {
+        assert_changes_name(
+            State {
+                status: vec![],
+                ..a_state()
+            },
+            "status",
+        );
+    }
+
+    #[test]
+    fn a_different_stash_is_a_change() {
+        assert_changes_name(
+            State {
+                stash: vec!["s1".into(), "s2".into()],
+                ..a_state()
+            },
+            "stash",
+        );
+    }
+
+    #[test]
+    fn different_branches_are_a_change() {
+        assert_changes_name(
+            State {
+                branches: vec!["refs/heads/main h2".into()],
+                ..a_state()
+            },
+            "branches",
+        );
+    }
+
+    #[test]
+    fn different_tags_are_a_change() {
+        assert_changes_name(
+            State {
+                tags: vec![],
+                ..a_state()
+            },
+            "tags",
+        );
+    }
+
+    #[test]
+    fn different_remotes_are_a_change() {
+        assert_changes_name(
+            State {
+                remotes: vec!["origin /y (fetch)".into()],
+                ..a_state()
+            },
+            "remotes",
+        );
+    }
+
+    #[test]
+    fn different_worktrees_are_a_change() {
+        assert_changes_name(
+            State {
+                worktrees: vec![],
+                ..a_state()
+            },
+            "worktrees",
+        );
+    }
+
+    #[test]
+    fn a_different_hash_is_a_change() {
+        let mut hashes = a_state().hashes;
+        hashes.insert("config".into(), "c2".into());
+        assert_changes_name(
+            State {
+                hashes,
+                ..a_state()
+            },
+            "hashes",
+        );
+    }
+
+    #[test]
+    fn a_hooks_file_that_appears_or_goes_is_a_change() {
+        let mut more = a_state().hashes;
+        more.insert("hooks/post-checkout".into(), "q1".into());
+        assert_changes_name(
+            State {
+                hashes: more,
+                ..a_state()
+            },
+            "hashes",
+        );
+        let mut fewer = a_state().hashes;
+        fewer.remove("hooks/pre-commit");
+        assert_changes_name(
+            State {
+                hashes: fewer,
+                ..a_state()
+            },
+            "hashes",
+        );
+    }
+
+    #[test]
+    fn a_hashed_file_that_comes_from_absent_is_a_change() {
+        let mut hashes = a_state().hashes;
+        hashes.insert(".claude/settings.local.json".into(), "l1".into());
+        let found = changes(
+            &a_state(),
+            &State {
+                hashes,
+                ..a_state()
+            },
+        );
+        assert_eq!(found, ["hashes: .claude/settings.local.json: absent -> l1"]);
+    }
+
+    #[test]
+    fn base_since_branch_and_started_are_not_compared() {
+        let new = State {
+            base: "b2".into(),
+            since: "s2".into(),
+            branch: "other".into(),
+            started: 2,
+            ..a_state()
+        };
+        assert!(changes(&a_state(), &new).is_empty());
+    }
+
+    // The state record: the capture, with real git.
+
+    /// A scratch repo and a scratch home folder, with round 1's record.
+    fn recorded(name: &str) -> (PathBuf, PathBuf) {
+        let dir = scratch(name);
+        let home =
+            std::env::temp_dir().join(format!("xtask-review-home-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let top = toplevel(&dir).unwrap();
+        let state = take_state(&top, &home).unwrap();
+        let path = state_path(&top, 1).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+        (dir, home)
+    }
+
+    fn check_round_1(dir: &Path, home: &Path) -> (i32, Vec<String>) {
+        run(
+            &["check".to_string(), "1".to_string()],
+            dir,
+            home,
+            SystemTime::UNIX_EPOCH,
+        )
+    }
+
+    fn assert_check_names(dir: &Path, home: &Path, prefix: &str) {
+        let (code, lines) = check_round_1(dir, home);
+        assert_eq!(code, 3, "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.starts_with(prefix)),
+            "no line starts with {prefix:?}: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn check_sees_a_new_commit() {
+        let (dir, home) = recorded("cap-head");
+        git_in(
+            &dir,
+            &["commit", "-q", "--no-verify", "--allow-empty", "-m", "x"],
+        );
+        assert_check_names(&dir, &home, "head: ");
+    }
+
+    #[test]
+    fn check_sees_an_untracked_file() {
+        let (dir, home) = recorded("cap-status");
+        write(&dir, "x.txt", "x\n");
+        assert_check_names(&dir, &home, "status: ");
+    }
+
+    #[test]
+    fn check_sees_a_stash() {
+        let (dir, home) = recorded("cap-stash");
+        write(&dir, ".gitignore", "target/\ny\n");
+        git_in(&dir, &["stash", "-q"]);
+        let (code, lines) = check_round_1(&dir, &home);
+        assert_eq!(code, 3);
+        assert!(lines[0].starts_with("stash: "), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.starts_with("status: ")),
+            "the stash leaves the tree clean: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn check_sees_a_tag() {
+        let (dir, home) = recorded("cap-tags");
+        git_in(&dir, &["tag", "t"]);
+        assert_check_names(&dir, &home, "tags: ");
+    }
+
+    #[test]
+    fn check_sees_a_remote() {
+        let (dir, home) = recorded("cap-remotes");
+        git_in(&dir, &["remote", "add", "o", "/x"]);
+        assert_check_names(&dir, &home, "remotes: ");
+    }
+
+    #[test]
+    fn check_sees_a_config_change() {
+        let (dir, home) = recorded("cap-config");
+        git_in(&dir, &["config", "x.y", "z"]);
+        assert_check_names(&dir, &home, "hashes: config: ");
+    }
+
+    #[test]
+    fn check_sees_a_new_hook() {
+        let (dir, home) = recorded("cap-hooks");
+        let hooks = git_in(&dir, &["rev-parse", "--git-path", "hooks"]);
+        let hooks = dir.join(hooks);
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("beachape-hook"), "#!/bin/sh\n").unwrap();
+        assert_check_names(&dir, &home, "hashes: hooks/beachape-hook: ");
+    }
+
+    #[test]
+    fn check_sees_local_claude_settings() {
+        let (dir, home) = recorded("cap-local");
+        write(&dir, ".claude/settings.local.json", "{}\n");
+        assert_check_names(&dir, &home, "hashes: .claude/settings.local.json: ");
+    }
+
+    #[test]
+    fn check_sees_the_home_claude_settings() {
+        let (dir, home) = recorded("cap-home");
+        write(&home, ".claude/settings.json", "{}\n");
+        assert_check_names(&dir, &home, "hashes: ~/.claude/settings.json: ");
+    }
+
+    #[test]
+    fn check_passes_an_unchanged_repo_and_sees_a_branch() {
+        let (dir, home) = recorded("cap-branches");
+        assert_eq!(
+            check_round_1(&dir, &home),
+            (0, vec!["no change".to_string()])
+        );
+        git_in(&dir, &["branch", "x"]);
+        assert_check_names(&dir, &home, "branches: ");
+    }
+
+    #[test]
+    fn check_without_a_record_exits_3() {
+        let dir = scratch("no-record");
+        let (code, lines) = check_round_1(&dir, &dir);
+        assert_eq!(code, 3);
+        assert!(
+            lines[0].starts_with("no record for this branch and round"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_worktree_under_target_review_is_left_out() {
+        let (dir, home) = recorded("cap-wt-in");
+        let inside = dir.join("target/review/m1-x");
+        git_in(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                inside.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            check_round_1(&dir, &home),
+            (0, vec!["no change".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_worktree_elsewhere_is_a_change() {
+        let (dir, home) = recorded("cap-wt-out");
+        let outside = dir.with_extension("wt");
+        let _ = std::fs::remove_dir_all(&outside);
+        git_in(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                outside.to_str().unwrap(),
+            ],
+        );
+        assert_check_names(&dir, &home, "worktrees: ");
+        git_in(
+            &dir,
+            &["worktree", "remove", "--force", outside.to_str().unwrap()],
+        );
+    }
+
+    #[test]
+    fn a_linked_worktree_hashes_the_common_config_and_hooks() {
+        let dir = scratch("linked");
+        let common = dir.join(".git").canonicalize().unwrap();
+        std::fs::create_dir_all(common.join("hooks")).unwrap();
+        std::fs::write(common.join("hooks/beachape-hook"), "#!/bin/sh\n").unwrap();
+        let linked = dir.with_extension("linked");
+        let _ = std::fs::remove_dir_all(&linked);
+        git_in(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let paths: BTreeMap<String, PathBuf> = hashed_paths(&toplevel(&linked).unwrap(), &dir)
+            .unwrap()
+            .into_iter()
+            .collect();
+        let canonical_parent = |label: &str| paths[label].parent().unwrap().canonicalize().unwrap();
+        assert_eq!(canonical_parent("config"), common);
+        assert_eq!(
+            canonical_parent("hooks/beachape-hook"),
+            common.join("hooks")
+        );
+        assert_eq!(
+            canonical_parent("config.worktree"),
+            common.join("worktrees").join(linked.file_name().unwrap())
+        );
+        git_in(
+            &dir,
+            &["worktree", "remove", "--force", linked.to_str().unwrap()],
         );
     }
 

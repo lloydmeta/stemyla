@@ -150,6 +150,18 @@ The route comes from the branch's own `xtask`.  So a branch can change the route
 
 * Fix: review; `reviewer` reads every diff.  Phase 5 routes with the base branch's `xtask`.
 
+### TD-32: `xtask review check` sees only what its record holds
+
+`xtask review check` compares the repo with the state record of a round.  The record holds `HEAD`, the status, the stash, the branches, the tags, the remotes and the worktrees.  It also holds a hash of the git config, the hooks, the local Claude Code settings in the repo and the person's own Claude Code settings in the home folder.  The check does not see other changes, for example:
+
+* a change to an ignored file, or to a file under `target/`;
+* a change to the reflog, the global git config, or the index of another worktree;
+* a change to a file outside the repo, other than the person's own settings.
+
+A change to the person's own settings during a round, by a person or by Claude Code, fails the check.  With a detached `HEAD`, the name of the run folder holds the short SHA.  So after a fix commit, round 2 finds no record.
+
+* Fix: the person examines the change, and starts the round again.  With a detached `HEAD`, start again at round 1.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
