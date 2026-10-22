@@ -74,7 +74,7 @@ Terms are as in the parent plan.  Also:
   * If the sign starts with a letter, a digit or `_`, the character before it must not be one of those.
   * If the sign ends with one, the character after it must not be one.
   * So `into_owned` is not `to_owned`, and `Vec::from_iter` is not `Vec::from`.
-* Output: `Route`, a map from reviewer name to its reasons, in table order.  A reason is given once for each path, and once for each sign and file; repeats of a sign in one file give one reason.  When a path matches two globs of one row, the first glob in row order is the reason.  A `ROUTE_ALL` path gives each reviewer only `<path> changes the review harness`; `reviewer` also keeps `every diff`.  A reason is one of: `every diff`; `<path> (<glob>)`; `<path> changes the review harness`; `<path> is a symlink`; `` `<sign>` in <path> ``.
+* Output: `Route`, a map from reviewer name to its reasons, in table order.  A reason is given once for each path, and once for each sign and file; repeats of a sign in one file give one reason.  When a path matches two globs of one row, the first glob in row order is the reason.  A `ROUTE_ALL` path gives each reviewer only `<path> changes the review harness`; `reviewer` also keeps `every diff`.  A `ROUTE_ALL` file adds no sign reason; a test adds `to_vec` to `xtask/src/review.rs` and expects none.  A reason is one of: `every diff`; `<path> (<glob>)`; `<path> changes the review harness`; `<path> is a symlink`; `` `<sign>` in <path> ``.
 * An empty diff gives an empty route.  A non-empty diff always routes `reviewer`, with the reason `every diff`.
 * `pub fn route(raw: &str, patch: &str) -> Route` is pure.  `pub fn diff_route(toplevel: &Path, from: &str, to: &str) -> Result<Route>` runs the two diffs.
 * Tests, written first.  Each fails with its row, glob, sign or rule removed.  So write each expected case by hand, as a path, a reviewer and a reason.  Do not make the cases from `REVIEWERS`, `ROUTE_ALL` or `SIGNS`.
@@ -94,9 +94,10 @@ Terms are as in the parent plan.  Also:
 
 ### Step 2: the state record and `review check`
 
+* `take_state` leaves `base`, `since` and `started` empty; `start` fills them.
 * `#[derive(Serialize, Deserialize)] pub struct State` with:
   * `base`, `since`, `head` (full SHAs), `branch` (the name, or `detached`), `started` (Unix seconds, for M3's wall time).  `check` does not compare these, but `head`.
-  * `status`: `git status --porcelain=v1 -z`, split.
+  * `status`: `git status --porcelain=v1 -z --untracked-files=normal`, split.  The dirty check of `start` passes `--untracked-files=normal` too, so a person's `status.showUntrackedFiles=no` hides nothing.
   * `stash`: `git stash list --format=%H`.
   * `branches`, `tags`: `git for-each-ref --format=%(refname) %(objectname) refs/heads` and `refs/tags`.
   * `remotes`: `git remote -v`.
@@ -128,7 +129,7 @@ Terms are as in the parent plan.  Also:
   * In a linked worktree of a scratch repo: `config` resolves to the common folder, and `hooks/` to the common hooks folder, not the worktree's folder.  `config.worktree` resolves to the worktree's own folder.
   * `check` on an unchanged scratch repo exits 0; after `git branch x`, it exits 3 and names `branches`.
 * A tech-debt entry names the settings files as prose, not in a code span, since `docs-check` checks a span that looks like a path.
-* Tech debt, in the same commit: a new entry.  M3 adds to this entry, and does not add a second one.  `review check` sees only what the record holds.  A change to `~/.claude/settings.json` during a round, by a person or by Claude Code, fails it.  Fix: the person checks the change and starts the round again.
+* Tech debt, in the same commit: a new entry.  M3 adds to this entry, and does not add a second one.  `review check` sees only what the record holds.  A change to `~/.claude/settings.json` during a round, by a person or by Claude Code, fails it.  Fix: the person checks the change and starts the round again.  Also: with a detached `HEAD`, the run folder name changes after a fix commit, so round 2 finds no record.
 
 ### Step 3: `review start`
 
@@ -170,7 +171,7 @@ Terms are as in the parent plan.  Also:
   3. Write `<round folder>/mutants.diff`: `git diff --no-renames <since> <head> -- *.rs`, with the fixed options above.  `*.rs` is one argument to `Command`, with no quotes.  `--no-renames` shows a renamed file in full, so cargo-mutants sees plain hunks.
   4. Check `cargo mutants --version`.  A failure gives `none`, "cargo-mutants is not installed: cargo install --locked cargo-mutants@27.1.0", and skips the run.
   5. Run, at the toplevel, `cargo mutants --in-diff <mutants.diff> --output <round folder> --copy-vcs=true --gitignore=true --shuffle -j2 --timeout 300 --config <file>`, with `CARGO_TARGET_DIR` removed from the environment.  Its stdout and stderr go to `<round folder>/mutants.log`, so the command prints only its own line.  `<file>` defaults to `<toplevel>/.cargo/mutants.toml`; a relative `--config` is resolved against the current folder.
-  6. The limit: 60 minutes, or `STEMYLA_MUTANTS_MINUTES` (a decimal number of minutes, for tests).  Poll `try_wait` each second.  At the limit, run `kill -TERM <pid>`, wait for the child, and mark the run as stopped by its own limit.  `Child::kill` sends SIGKILL, which leaves children and copies behind.
+  6. The limit: 60 minutes, or `STEMYLA_MUTANTS_MINUTES` (a decimal number of minutes, for tests).  Poll `try_wait` each second.  At the limit, run `kill -TERM <pid>`, and mark the run as stopped by its own limit.  If the child has not ended 60 s later, send `kill -KILL <pid>`, and say so in the line.  `Child::kill` sends SIGKILL, which leaves children and copies behind.
   7. Read `<round folder>/mutants.out/outcomes.json` (`caught`, `missed`, `timeout`, `unviable`) and the length of `mutants.json`, if they exist.
   8. Print one line and write it to `<round folder>/mutants.txt`.  Exit 0, whatever the class.
 * The line: `mutants: <class>: tested <t> (caught <c>, missed <m>, unviable <u>), timeouts <o>, not tested <n>`, then `; <reason>` for `none` and for a stop.  Tested is caught + missed + unviable.  Not tested is the length of `mutants.json` minus tested and timeouts, or 0 without it.
@@ -234,6 +235,7 @@ The binary is `target/debug/xtask` of the main checkout, built from M1's last co
 * Each round starts new reviewer subagents, with the manual recipe of `docs/working-with-agents.md` at `fa41c9f` ("Review a change").  The range is M1's commits: `422ebe3..HEAD`.  The criteria are the parent plan's M1 section.
 * Each reviewer gets the range, the criteria, this plan's path, and the read-only rules.  It makes no edits, no commits and no branch changes.  It tries changes only in a worktree under `target/review/`.
 * The team leader checks each finding before a fix, and sends each real one to the implementer, with a test that fails first.
+* A fix that changes `xtask/src/review.rs` or `.cargo/mutants.toml` runs again the step 6 checks that it affects.  Progress records the new result.
 * A Progress line for each round, committed before the next round starts.
 
 ## Validation and acceptance
@@ -259,6 +261,7 @@ The binary is `target/debug/xtask` of the main checkout, built from M1's last co
 * [x] 2026-10-23: plan review round 2, by one new reviewer.  2 significant should-fix, 2 other should-fix, 6 nits; all checked and fixed.  The significant ones: tests reach a scratch repo through `run(args, dir, home, exe_time)`, not the current folder; the whole-token cases no longer use `include_str!`, which is a sign itself.  Also: `pub` for functions not yet called; one reason per sign and file; cargo-mutants' output goes to `mutants.log`.
 * [x] 2026-10-23: plan review round 3, by one new reviewer.  1 significant should-fix, 3 other should-fix, 4 nits; all checked and fixed.  The significant one: each field of the state record now has a test of its capture with real git, not only of the comparison.  Also: seams for `take_state` and `hashed_paths`; tests of `start`'s output and of `mutants.diff`; `create_buffer_init` named as a gap of the denylist.
 * [x] 2026-10-23: plan review round 4, by one new reviewer.  3 significant should-fix, 1 other should-fix, 4 nits; all checked and fixed.  The significant ones: the output test uses `memory-reviewer`, which has signs; the full case changes a code line, since a comment before the first statement gives no mutant; the copy check names this run's copies only.  Also: one git helper gives every call in a scratch repo an identity, `git stash` included.
+* [x] 2026-10-23: plan review round 5, by one new reviewer.  No blocker and no significant should-fix: the stop rule is met.  1 other should-fix and 5 nits; all fixed.  A review fix to `review.rs` or `.cargo/mutants.toml` runs step 6 again; a `ROUTE_ALL` file adds no sign reason; `git status` shows untracked files whatever the config; a SIGKILL follows 60 s after an ignored SIGTERM.
 * [ ] Step 1: the route.
 * [ ] Step 2: the state record and `review check`.
 * [ ] Step 3: `review start`.
