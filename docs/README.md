@@ -14,10 +14,10 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 ## How work is done
 
 * `working-with-agents.md`: for the person who directs the agent: recipes for common tasks, what a person must still do, and the tools.  Read it first when you start to work here.
-* `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against.
+* `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and phase 2's numbers.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
-* `plans/active/harness-phase-2.md`: phase 2 of that plan: each rule a machine can check becomes a test, a lint or a hook, one PR per milestone.
+* `plans/completed/harness-phase-2.md`: phase 2 of that plan, done on 2026-10-22: each rule a machine can check became a test, a lint or a hook, one PR per milestone.  Its retrospective gives what phase 2 achieved and what it did not.
 * `decisions/0001-harness-in-the-repo.md`: agent knowledge is versioned in the repo, with `CLAUDE.md` as a map; the harness is Claude Code only.
 * `decisions/0002-staged-background-autonomy.md`: agents are to work in the background, up to merging their own PRs, reached in stages with gates.
 * `decisions/0003-required-skips-in-a-test-support-crate.md`: `STEMYLA_REQUIRE` turns a skipped test into a failure, through one helper in the `test-support` crate.

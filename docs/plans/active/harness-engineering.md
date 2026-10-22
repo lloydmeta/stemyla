@@ -120,7 +120,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, review round 3: its findings fixed with tests.
 * [x] 2026-10-19: phase 1, PR #13 merged by the maintainer.
 * [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
-* [ ] Phase 2.
+* [x] 2026-10-22: phase 2.  M1 to M15, M17, M18a and M18b merged as PRs #14 to #32 (#24 is a Dependabot bump); M16 moved to phase 5b.  M19 closes it (`plans/completed/harness-phase-2.md`).  "Prose only" rules: 8 to 2.  Gate met at `cf7437d` (run 39753865469), with the five checks required.
 * [ ] Phase 3.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.

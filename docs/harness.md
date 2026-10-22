@@ -65,6 +65,8 @@ Measured on 2026-10-22 over phase 2's 18 PRs (#14 to #32, without the Dependabot
 * Review: about 26 of 58 implementation review rounds (a recount gave up to 33) found a test that could pass on wrong code (about 35 findings, in 14 of 18 PRs).  The baseline had 17 of 65 review transcripts.  Phase 2's reviewers ran mutants on purpose, so the counts are not like for like.
 * Checks: a new check found one real breach first; the surveys had found the others.
 
+The rest is in `plans/completed/harness-phase-2.md`.
+
 ## Measuring
 
 Per PR, from the PR description and review logs: review rounds, findings confirmed per round, findings that were vacuous tests, CI failures on `main` after merge, and corrections the maintainer had to make.  Per sensor: what it caught.  A component that catches nothing for long enough is a candidate for removal; a failure that recurs gets a new component, ideally a sensor.
