@@ -29,9 +29,15 @@ async function dir(path, create, from) {
 }
 function split(path) {
   const i = path.lastIndexOf("/");
-  return [path.slice(0, i), path.slice(i + 1)];
+  return i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
 }
-export async function st_write(within, rel, bytes) {
+// Safari 27 writes a typed array view's whole buffer, not just the view
+// (`new Uint8Array(16).subarray(4, 8)` writes 16 bytes), so only whole
+// arrays are written: a view is copied out first.
+function whole(bytes) {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+}
+export async function st_write(within, rel, body) {
   try {
     let base;
     try { base = await dir(within, false); }
@@ -39,7 +45,7 @@ export async function st_write(within, rel, bytes) {
     const [d, n] = split("/" + rel);
     const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
     const w = await fh.createWritable();
-    await w.write(bytes);
+    await w.write(body instanceof Blob ? body : whole(body));
     await w.close();
     return true;
   } catch (e) { console.warn("storage write failed", within, rel, e); return false; }
@@ -84,9 +90,10 @@ export function save_file(name, bytes, mime) {
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
-    /// Writes `within/rel`, creating the folders in `rel`; `within` must
-    /// exist already.  True, false, or "gone" when `within` does not exist.
-    async fn st_write(within: &str, rel: &str, bytes: &Uint8Array) -> JsValue;
+    /// Writes `body`, a `Blob` or a typed array, to `within/rel`, creating
+    /// the folders in `rel`; `within` must exist already.  True, false, or
+    /// "gone" when `within` does not exist.
+    async fn st_write(within: &str, rel: &str, body: &JsValue) -> JsValue;
     async fn st_read(path: &str) -> JsValue;
     /// Whether `path` is gone (removed, or never there).
     async fn st_remove(path: &str) -> JsValue;
@@ -128,17 +135,22 @@ pub async fn close() {
 }
 
 async fn write(path: &str, bytes: &[u8]) -> Result<()> {
-    write_within("", path, bytes).await
+    write_bytes("", path, bytes).await
 }
 
-/// Writes `within/rel` only if the folder `within` still exists, so a save
-/// into a session forgotten meanwhile cannot bring it back.
-async fn write_within(within: &str, rel: &str, bytes: &[u8]) -> Result<()> {
+async fn write_bytes(within: &str, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_within(within, rel, &Uint8Array::from(bytes)).await
+}
+
+/// Writes `body`, a `Blob` or a typed array, to `within/rel` only if the
+/// folder `within` still exists, so a save into a session forgotten
+/// meanwhile cannot bring it back.
+async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
     if CLOSED.get() {
         return Err(anyhow!("browser storage is being reset"));
     }
     WRITES.set(WRITES.get() + 1);
-    let written = st_write(within, rel, &Uint8Array::from(bytes)).await;
+    let written = st_write(within, rel, body).await;
     WRITES.set(WRITES.get() - 1);
     match (written.as_bool(), written.as_string().as_deref()) {
         (Some(true), _) => Ok(()),
@@ -234,7 +246,7 @@ async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     ));
     meta.stems.clear();
     for s in stems {
-        write_within(
+        write_bytes(
             &base,
             &format!("stems/{}.wav", file_stem(&s.name)),
             &engine::wav::encode_pcm16(&s.left, &s.right, rate),
@@ -242,7 +254,7 @@ async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
         .await?;
         meta.stems.push(s.name.clone());
     }
-    write_within(&base, "meta", meta.to_text().as_bytes()).await
+    write_bytes(&base, "meta", meta.to_text().as_bytes()).await
 }
 
 pub async fn current() -> Option<String> {
@@ -357,10 +369,63 @@ mod tests {
 
     wasm_bindgen_test_configure!(run_in_browser);
 
+    #[wasm_bindgen(inline_js = r#"
+let record = null;
+let real = null;
+// Records what each OPFS write gets, in call order: "blob", "whole" (a
+// typed array that is its whole buffer) or "view".
+export function start_spy() {
+  const proto = FileSystemWritableFileStream.prototype;
+  real = proto.write;
+  record = [];
+  proto.write = function (data) {
+    if (data instanceof Blob) record.push("blob");
+    else if (ArrayBuffer.isView(data))
+      record.push(data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view");
+    else record.push(typeof data);
+    return real.call(this, data);
+  };
+}
+// Restores `write` and returns the record, joined by spaces.
+export function stop_spy() {
+  FileSystemWritableFileStream.prototype.write = real;
+  return record.join(" ");
+}
+export function lloyd_in_a_larger_buffer() {
+  const b = new Uint8Array(16);
+  b.set(new TextEncoder().encode("lloyd"), 4);
+  return b.subarray(4, 9);
+}
+"#)]
+    extern "C" {
+        fn start_spy();
+        fn stop_spy() -> String;
+        fn lloyd_in_a_larger_buffer() -> Uint8Array;
+    }
+
+    /// MEM-5: a view reaches storage as a whole array.  The spy sees what
+    /// `write` gets, so a view fails this in any browser; a read-back
+    /// alone fails only in Safari (`docs/references/browser-quirks.md`).
+    #[wasm_bindgen_test]
+    async fn a_view_is_written_whole() {
+        st_remove(ROOT).await;
+        start_spy();
+        let written = st_write("", "sessions/v/x", &lloyd_in_a_larger_buffer()).await;
+        let record = stop_spy();
+        assert_eq!(written.as_bool(), Some(true));
+        assert_eq!(record, "whole");
+        assert_eq!(read("sessions/v/x").await.as_deref(), Some(&b"lloyd"[..]));
+        st_remove(ROOT).await;
+    }
+
     #[wasm_bindgen_test]
     async fn a_write_never_brings_back_a_removed_folder() {
+        write("sessions/1/meta", b"name\tacme\n")
+            .await
+            .expect("written");
         st_remove(ROOT).await;
-        let refused = write_within("sessions/42", "stems/bass.wav", &[1, 2, 3]).await;
+        assert!(st_list(ROOT).await.unchecked_into::<Array>().length() == 0);
+        let refused = write_bytes("sessions/42", "stems/bass.wav", &[1, 2, 3]).await;
         assert_eq!(
             refused.expect_err("refused").to_string(),
             "sessions/42 is gone (forgotten?)"
@@ -371,7 +436,7 @@ mod tests {
         write("sessions/42/meta", b"name\tacme\n")
             .await
             .expect("written");
-        write_within("sessions/42", "stems/bass.wav", &[1, 2, 3])
+        write_bytes("sessions/42", "stems/bass.wav", &[1, 2, 3])
             .await
             .expect("written");
         assert_eq!(

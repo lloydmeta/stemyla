@@ -168,12 +168,6 @@ The `Reply::Mp3` arm in `Separator::new` (`app/src/separator.rs`) turns the tran
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.
 
-### TD-17: one OPFS write path is safe only by construction
-
-`app/src/store.rs` passes its argument straight to `write`.  Its one caller passes `Uint8Array::from(bytes)`, a new whole array, so no view reaches it today; but nothing stops a later caller passing one, and no test writes a view through it (MEM-5).
-
-* Fix: a wasm-bindgen test that writes a `subarray` through it and reads back the exact bytes, or copy views as the worker's `whole()` does.
-
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
@@ -209,5 +203,6 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-6: closed by `no_audio_or_weights_are_tracked` and the anchored `.gitignore` (harness phase 2, M8).  The test checks the git index for audio, weights and large files (ASSET-1).
 * TD-9: closed by harness phase 2, M17.  CI's `test` job compares the UI snapshots, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files (VERIFY-1).
 * TD-15: closed by `the_callback_does_not_allocate_after_warm_up` (harness phase 2, M11).  wsola 0.2.0, a warm-up of each stretcher, chipmunk decimation in place and a bound on the playhead's anchors removed the allocations in the audio callback (RT-1).
+* TD-17: closed by `a_view_is_written_whole` (harness phase 2, M18a).  `st_write` copies a view into a whole array, as the worker's `whole()` does (MEM-5).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.

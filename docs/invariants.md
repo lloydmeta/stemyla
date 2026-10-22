@@ -83,8 +83,7 @@ iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memor
 Every OPFS `write` gets a whole typed array or a Blob, never a view into a larger buffer.
 
 * Why: Safari 27 writes a view's whole underlying buffer (`docs/references/browser-quirks.md`).
-* Enforced by: `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks` (CI `browser-tests` job, in Chrome).
-* Gaps: TD-17.
+* Enforced by: `a_view_is_written_whole`, `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks` (CI `browser-tests` job, in Chrome).  Each spies on `write`, so a view fails it in Chrome, not only in Safari.  The spy does not see a new OPFS write that has no spy test of its own.
 
 ## Audio
 
