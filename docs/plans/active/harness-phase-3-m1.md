@@ -21,7 +21,7 @@ The state at the start of M1, on 2026-10-23, at commit `422ebe3` on branch `ai-a
 * The repo sets `extensions.worktreeconfig = true`.  `git rev-parse --git-common-dir` gives `.git` in the main checkout.  `core.hooksPath` is not set.  Git is 2.50.1 (Apple Git-155).
 * cargo-mutants 27.1.0 is installed (`cargo mutants --version`).
 * The maintainer's global git config signs every commit.  A test that commits in a scratch repo passes `-c commit.gpgsign=false`, its own identity, and `--no-verify`.
-* Each scratch repo of a test commits a `.gitignore` with `target/`, as the real repo has.  Else the run folder shows in `git status`, and the next `start` refuses the dirty tree.
+* Each scratch repo of a test commits a `.gitignore` with `target/`, as the real repo has.  Else the run folder shows in `git status`, and the next `start` refuses the dirty tree.  The maintainer's `core.excludesfile` ignores `target/` and `*.log`, so a missing `.gitignore` passes on the Mac and fails in CI.  A test's untracked file has a plain name, such as `x.txt`.
 * No unit test needs cargo-mutants, since CI does not install it.  The tests of `review mutants` call `classify` and the clear step with fake values.
 * `engine/src/live.rs` is behind the `cpal` feature (`engine/src/lib.rs`), and has tests in `mod tests`.  `is_fatal` has three mutants, and its tests check both results.  `nth_start` has one mutant, `Default::default()` of `cpal::StreamInstant`, which has no `Default`, so the mutant is unviable.
 * `ai-agent-harness-phase-2-ms11` is a local branch.  Its diff from `7cd8518` changes `.claude/rules/`, `CLAUDE.md`, `Cargo.lock`, `THIRD-PARTY.md`, `docs/`, `engine/Cargo.toml`, `engine/src/` and `engine/tests/realtime.rs`.
@@ -53,7 +53,9 @@ Terms are as in the parent plan.  Also:
 * Exit codes: 0 for success; 3 for each refusal, each usage error and each error of its own, such as a failed `git`.  A message goes to stderr.  So no failure of `xtask review` exits 1, which a skill could read as a search with no match.
 * Pure functions take text and values, and return values.  Thin wrappers run `git` and `cargo` with `std::process::Command`.
 * The seam for tests: `pub fn run(args: &[String], dir: &Path, home: &Path, exe_time: SystemTime) -> (i32, Vec<String>)`.  It returns the exit code and the lines to print.  `main` passes the current folder, `$HOME` and the binary's time, and prints the lines.  Tests call `run` with a scratch repo, and never change the current folder, since tests run in parallel threads.
-* `run` finds the toplevel with `git rev-parse --show-toplevel` in `dir`.  Each later `git` call runs in the toplevel, so a relative path that `git` gives is relative to the toplevel.  A function that needs the home folder or the binary's time takes it as an argument, so tests pass their own.
+* More seams, `pub` from the step that writes them: `diff_route` (step 1); `take_state(toplevel, home) -> Result<State>` and `hashed_paths(toplevel, home) -> Result<Vec<(String, PathBuf)>>` (step 2).  Step 2's tests write a record with `take_state`, since `start` comes in step 3.
+* Until a step uses them, `run`'s unused parameters are named `_home` and `_exe_time`.  `Reviewer`'s fields are `pub`, for `xtask/tests/rules.rs`.
+* `run` finds the toplevel with `git rev-parse --show-toplevel` in `dir`.  A relative path argument, such as `--config`, resolves against `dir`.  Each later `git` call runs in the toplevel, so a relative path that `git` gives is relative to the toplevel.  A function that needs the home folder or the binary's time takes it as an argument, so tests pass their own.
 * Every `git diff` call passes `--no-ext-diff --no-color --no-textconv --src-prefix=a/ --dst-prefix=b/`, and `git -c core.quotePath=false`.  So a person's `diff.noprefix`, `diff.mnemonicPrefix`, `diff.external` or `core.quotePath` does not change the output.
 
 ### Step 1: the route
@@ -74,7 +76,7 @@ Terms are as in the parent plan.  Also:
   * So `into_owned` is not `to_owned`, and `Vec::from_iter` is not `Vec::from`.
 * Output: `Route`, a map from reviewer name to its reasons, in table order.  A reason is given once for each path, and once for each sign and file; repeats of a sign in one file give one reason.  When a path matches two globs of one row, the first glob in row order is the reason.  A reason is one of: `every diff`; `<path> (<glob>)`; `<path> changes the review harness`; `<path> is a symlink`; `` `<sign>` in <path> ``.
 * An empty diff gives an empty route.  A non-empty diff always routes `reviewer`, with the reason `every diff`.
-* `pub fn route(raw: &str, patch: &str) -> Route` is pure.  `fn diff_route(repo: &Path, from: &str, to: &str) -> Result<Route>` runs the two diffs.
+* `pub fn route(raw: &str, patch: &str) -> Route` is pure.  `pub fn diff_route(toplevel: &Path, from: &str, to: &str) -> Result<Route>` runs the two diffs.
 * Tests, written first.  Each fails with its row, glob, sign or rule removed.  So write each expected case by hand, as a path, a reviewer and a reason.  Do not make the cases from `REVIEWERS`, `ROUTE_ALL` or `SIGNS`.
   * For each include glob of each row, a path that matches it routes that reviewer with that glob as the reason.
   * An excluded path (`docs/plans/active/x.md`, `docs/reviews/x.md`) does not route `docs-reviewer`.
@@ -88,7 +90,7 @@ Terms are as in the parent plan.  Also:
   * Mode `120000`: a symlink added in a scratch repo routes `supply-chain-reviewer`.
   * The patch parse: an added line `++x` in the hunk is an added line, not a header.
   * An empty diff gives an empty route.
-* Tech debt, in the same commit: a new entry for the route's gaps.  The content signs are a short denylist, not a full list.  The route comes from the branch's own `xtask`, so a branch can change it; `review start` warns (step 3), and phase 5 must route with the base branch's `xtask`.  Fix: review, then phase 5.
+* Tech debt, in the same commit: a new entry for the route's gaps.  The content signs are a short denylist, not a full list.  For example, `create_buffer` does not match `create_buffer_init`, which `roformer-gpu/src/lib.rs` calls.  The route comes from the branch's own `xtask`, so a branch can change it; `review start` warns (step 3), and phase 5 must route with the base branch's `xtask`.  Fix: review, then phase 5.
 
 ### Step 2: the state record and `review check`
 
@@ -111,6 +113,16 @@ Terms are as in the parent plan.  Also:
 * Step 2 also writes `fn run_folder(toplevel) -> PathBuf` (the branch name, or `detached-<short sha>`), since `check` needs it.  Step 3 tests it.
 * Tests, written first:
   * For each compared field, two records that differ only in it give one change that names it.  One test per field, so each fails with its field removed.
+  * The capture of each field, in a scratch repo.  Each test takes a record with `take_state`, makes one real change, and expects `check` to exit 3 and name that field:
+    * `head`: `git commit --allow-empty`.
+    * `status`: an untracked `x.txt`.
+    * `stash`: an edit, then `git stash`.
+    * `tags`: `git tag t`.
+    * `remotes`: `git remote add o /x`.
+    * `config`: `git config x.y z`.
+    * `hooks/<name>`: a new file in the hooks folder.
+    * `.claude/settings.local.json`: a new file at the toplevel.
+    * `~/.claude/settings.json`: a write to `<scratch home>/.claude/settings.json`.  The test passes its own home folder, never the real one.
   * A hooks file that appears, and one that goes, each give a change.  So does a hashed file that goes from `absent` to present.
   * In a scratch repo: a worktree added with `git worktree add --detach` under `target/review/` makes no change.  One added elsewhere does.  (Without `--detach`, git makes a branch, and `branches` changes.)
   * In a linked worktree of a scratch repo: `config` resolves to the common folder, and `hooks/` to the common hooks folder, not the worktree's folder.  `config.worktree` resolves to the worktree's own folder.
@@ -146,6 +158,7 @@ Terms are as in the parent plan.  Also:
   * A detached `HEAD` names the folder `detached-<short sha>`; a branch `a/b` names it `a-b`.
   * `warnings`: an older binary warns; a newer one does not; a missing source does not.  Differing blobs warn; equal blobs, and a blob missing on either side, do not.
   * A scratch repo with no `xtask/src/review.rs` exits 0 with no warning.
+  * The output, through `run`: 6 paths for `docs-reviewer` print 5 and `(+1 more)`; a sign reason among them still prints; `route.txt` holds all 7 reasons.  Round 2 with no new commit prints `  no changes` for the `since` range.
   * Round 0 and a word exit 3.
 
 ### Step 4: `review mutants` and `.cargo/mutants.toml`
@@ -178,6 +191,8 @@ Terms are as in the parent plan.  Also:
   * `run_with_limit` with `sh -c 'trap "exit 7" TERM; sleep 30 & wait'` and a limit of 2 s: it ends in under 10 s, as stopped by its own limit, with exit 7.  Exit 7 shows SIGTERM, not SIGKILL.
   * The line's counts: tested is caught + missed + unviable, timeouts are apart, and not tested comes from `mutants.json`.
   * A missing record exits 3.
+  * `mutants.diff`, in a scratch repo.  A commit changes `a.rs` and `b.md`, and renames `c.rs` to `d.rs` with a change.  The diff holds `a.rs`, and `c.rs` and `d.rs` as a deletion and an addition, and not `b.md`.  Write the diff with a `pub fn` that a test calls without cargo-mutants.
+  * The `--config` path: none gives `<toplevel>/.cargo/mutants.toml`; a relative one resolves against `dir`; an absolute one stays.
 * Tech debt, in the same commit: a new entry for cargo-mutants' gaps.  A `wasm32`-only block in a shared function, or a new `wasm32`-only function, shows as a missed mutant until `exclude_re` names it.  A diff of tests only, WGSL or JavaScript gives no mutants.  A stopped run is partial evidence.  Fix: the validator decides each missed mutant (M3); phase 6 reads the log.
 
 ### Step 5: the agent-file test and the docs
@@ -205,7 +220,7 @@ The binary is `target/debug/xtask` of the main checkout, built from M1's last co
 2. The mutants checks, in a worktree `target/review/m1-mutants` on a scratch branch `m1-scratch-mutants` from M1's last commit.  Commits there are signed, with neutral messages.  Each `review start` there warns that the binary is older than `review.rs`; that is expected.
    * Full: change one line inside one small `dsp` function, such as a comment line, and commit.  Run `review start <M1 commit> 1`, then `review mutants 1`.  Pass: the line says `full`.
    * Caught behind `cpal`: change one line inside `is_fatal` in `engine/src/live.rs`, and commit.  Do not use `nth_start`: its one mutant is unviable.  Run `review start <M1 commit> 2`, then `review mutants 2`.  Pass: `mutants.out/caught.txt` names a mutant of that function.
-   * Partial: change a line in several functions of `engine/src/`, enough for more than 10 mutants, and commit.  Run `review start <M1 commit> 3`, then `STEMYLA_MUTANTS_MINUTES=<m> review mutants 3`.  Pick `<m>` above the cold baseline build (about 140 s) and below the whole run, from the first two runs' times.  Pass: the line says `partial` with tested above 0.  Then `pgrep -fl 'cargo-mutants|m1-mutants'` shows no process of the run, and the temp folder holds no `cargo-mutants-*` copy.
+   * Partial: change a line in several functions of `engine/src/`, enough for more than 10 mutants, and commit.  Run `review start <M1 commit> 3`, then `STEMYLA_MUTANTS_MINUTES=<m> review mutants 3`.  Pick `<m>` above the cold baseline build (about 140 s) and below the whole run, from the first two runs' times.  Pass: the line says `partial` with tested above 0.  Then `pgrep -fl 'cargo-mutants|m1-mutants'` shows no process of the run.  In the same shell, `ls "$TMPDIR" | grep cargo-mutants-` shows no copy.
    * Remove the worktree.  Keep the branch until the end of the run; the orchestrator deletes it.
 3. The route measurement, a fact and not a pass or fail:
    * A detached worktree `target/review/m1-measure`.  For each first-parent commit of `main` from `a9ace3a` (#13) to `fa41c9f` (#33): `git checkout --detach <sha>`, then `review start <sha>^ 1`.  Each run gets its own run folder, `detached-<short sha>`.
@@ -240,6 +255,7 @@ The binary is `target/debug/xtask` of the main checkout, built from M1's last co
 * [x] 2026-10-23: milestone plan written by the team leader (`c2d7d84`).
 * [x] 2026-10-23: plan review round 1, by two new reviewers (feasibility, with git and cargo-mutants probes; completeness).  1 significant should-fix, 5 other should-fix, 13 nits; all checked and fixed.  The significant one: `nth_start`'s one mutant is unviable, so step 6 uses `is_fatal`.  Also: scratch repos ignore `target/`; no unit test needs cargo-mutants; cases are written by hand; `git` runs in the toplevel; sign reasons are not capped.
 * [x] 2026-10-23: plan review round 2, by one new reviewer.  2 significant should-fix, 2 other should-fix, 6 nits; all checked and fixed.  The significant ones: tests reach a scratch repo through `run(args, dir, home, exe_time)`, not the current folder; the whole-token cases no longer use `include_str!`, which is a sign itself.  Also: `pub` for functions not yet called; one reason per sign and file; cargo-mutants' output goes to `mutants.log`.
+* [x] 2026-10-23: plan review round 3, by one new reviewer.  1 significant should-fix, 3 other should-fix, 4 nits; all checked and fixed.  The significant one: each field of the state record now has a test of its capture with real git, not only of the comparison.  Also: seams for `take_state` and `hashed_paths`; tests of `start`'s output and of `mutants.diff`; `create_buffer_init` named as a gap of the denylist.
 * [ ] Step 1: the route.
 * [ ] Step 2: the state record and `review check`.
 * [ ] Step 3: `review start`.
