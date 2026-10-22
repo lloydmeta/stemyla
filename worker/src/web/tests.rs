@@ -901,8 +901,8 @@ async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
         )
         .await
         .expect("encoded");
-        let replies = sent("mp3");
-        let bytes = Uint8Array::new(&field(&replies[replies.len() - 1], "bytes")).to_vec();
+        let reply = sent("mp3").pop().expect("an mp3 reply");
+        let bytes = Uint8Array::new(&field(&reply, "bytes")).to_vec();
         assert_eq!(
             bytes,
             encoded_in_one_push(&left, &right),

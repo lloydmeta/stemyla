@@ -460,7 +460,8 @@ export function deliver(worker, data) {
 "#)]
     extern "C" {
         /// Runs `worker`'s `onmessage` on `data` itself, with no
-        /// structured clone, as a transfer gives it.
+        /// structured clone, so the test can compare the array that the
+        /// page keeps with the array sent.
         fn deliver(worker: &Worker, data: &JsValue);
     }
 
