@@ -4,7 +4,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 
 ## Which browser
 
-* Safari is the local default.  `safaridriver` failed every session for part of 2026-10-18 ("The session timed out while connecting to a Safari instance") and worked again later that day.  Try Safari first; if a session times out, use `--browser chrome` and say in the PR that Safari is unverified.
+* Safari is the local default.  `safaridriver` failed every session for part of 2026-10-18 ("The session timed out while connecting to a Safari instance") and worked again later that day.  Try Safari first.  If a session times out, quit Safari and retry: on 2026-10-22, sessions timed out while Safari was open, also outside the sandbox, and worked once it was quit.  If they still time out, use `--browser chrome` and say in the PR that Safari is unverified.
 * A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  End stale sessions before retrying.
 * Chrome needs a Chrome for Testing chromedriver of Chrome's major version, for mac-x64, in `CHROMEDRIVER` ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.
 
