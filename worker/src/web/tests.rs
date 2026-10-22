@@ -829,19 +829,17 @@ const TONE_RATE: u32 = 44_100;
 /// 30 s at 44.1 kHz.
 const TONE_FRAMES: usize = 30 * TONE_RATE as usize;
 
-/// A channel of a sine at `hz`, as the page sends it.
-fn tone(hz: f32) -> Float32Array {
+/// `frames` of a sine at `hz`, as the page sends a channel.
+fn tone(hz: f32, frames: usize) -> Float32Array {
     let step = std::f32::consts::TAU * hz / TONE_RATE as f32;
-    let samples: Vec<f32> = (0..TONE_FRAMES)
-        .map(|i| 0.5 * (step * i as f32).sin())
-        .collect();
+    let samples: Vec<f32> = (0..frames).map(|i| 0.5 * (step * i as f32).sin()).collect();
     Float32Array::from(samples.as_slice())
 }
 
 /// The MP3 of `left` and `right` encoded in one push, as `mp3` did before
-/// it read the channels in blocks.
+/// it read the channels in blocks.  It stops at the shorter channel.
 fn encoded_in_one_push(left: &Float32Array, right: &Float32Array) -> Vec<u8> {
-    let mut pcm = Vec::with_capacity(2 * TONE_FRAMES);
+    let mut pcm = Vec::new();
     for (a, b) in left.to_vec().iter().zip(&right.to_vec()) {
         pcm.push(*a);
         pcm.push(*b);
@@ -862,7 +860,7 @@ fn encoded_in_one_push(left: &Float32Array, right: &Float32Array) -> Vec<u8> {
 #[wasm_bindgen_test]
 async fn an_mp3_is_encoded_in_blocks() {
     fresh().await;
-    let (left, right) = (tone(220.0), tone(330.0));
+    let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
     let before = LIVE.with(Cell::get);
     PEAK.with(|peak| peak.set(before));
     mp3(
@@ -887,6 +885,24 @@ async fn an_mp3_is_encoded_in_blocks() {
         "MEM-1: encoding 30 s held {held} bytes at its peak, more than one channel's \
          {one_channel}.  Fix: read the channels from JS in blocks."
     );
+}
+
+#[wasm_bindgen_test]
+async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
+    fresh().await;
+    // The shorter channel ends inside the second block.
+    let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, MP3_BLOCK + 7));
+    mp3(
+        Some("tone.mp3".into()),
+        [left.clone(), right.clone()],
+        Some(TONE_RATE),
+    )
+    .await
+    .expect("encoded");
+    let replies = sent("mp3");
+    assert_eq!(replies.len(), 1, "one mp3 reply");
+    let bytes = Uint8Array::new(&field(&replies[0], "bytes")).to_vec();
+    assert_eq!(bytes, encoded_in_one_push(&left, &right));
 }
 
 #[wasm_bindgen_test]
