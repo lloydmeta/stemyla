@@ -51,8 +51,8 @@ Each workspace crate depends only on the workspace crates that its row in the la
 WebAssembly memory never shrinks, so a copy costs for the rest of the tab's life.  Stem audio is `engine::Samples` (an immutable `Arc<Vec<f32>>`; cloning shares it), and slices are borrowed.  A new copy of a song- or model-sized buffer needs a stated reason and a test that pins the sharing (for example `Samples::shares`).
 
 * Why: MEM-4.
-* Enforced by: `a_mono_stem_shares_one_buffer_and_clones_share_every_buffer`, `separated_stems_and_the_original_are_shared_not_copied`, and the type: `Samples` has a private field and derefs only to `&[f32]`.  Clippy's `disallowed-methods` (CI `clippy` job, both targets) fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`.  It also fails `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec` in `app`, `stem-worker` and `stem-protocol`.  A needed copy carries an `#[expect]` with its reason.  The `#[expect]`s in `mem1_lint_is_on` and `mem1_lint_is_on_for_js_arrays`, under the clippy steps with `--all-targets`, prove each path.
-* Gaps: TD-12, TD-13, TD-14, TD-26.
+* Enforced by: `a_mono_stem_shares_one_buffer_and_clones_share_every_buffer`, `separated_stems_and_the_original_are_shared_not_copied`, and the type: `Samples` has a private field and derefs only to `&[f32]`.  Clippy's `disallowed-methods` (CI `clippy` job, both targets) fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`.  It also fails `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec` in `app`, `stem-worker` and `stem-protocol`.  A needed copy carries an `#[expect]` with its reason.  The page saves a chosen song from the browser's files, not their bytes.  The `#[expect]`s in `mem1_lint_is_on` and `mem1_lint_is_on_for_js_arrays`, under the clippy steps with `--all-targets`, prove each path.
+* Gaps: TD-13, TD-14, TD-26.
 
 ### MEM-2: JS arrays are transferred between page and worker
 
@@ -83,7 +83,7 @@ iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memor
 Every OPFS `write` gets a whole typed array or a Blob, never a view into a larger buffer.
 
 * Why: Safari 27 writes a view's whole underlying buffer (`docs/references/browser-quirks.md`).
-* Enforced by: `a_view_is_written_whole`, `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks` (CI `browser-tests` job, in Chrome).  Each spies on `write`, so a view fails it in Chrome, not only in Safari.  The spy does not see a new OPFS write that has no spy test of its own.
+* Enforced by: `a_view_is_written_whole`, `sources_are_saved_from_their_files`, `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks` (CI `browser-tests` job, in Chrome).  Each spies on `write`, so a view fails it in Chrome, not only in Safari.  The spy does not see a new OPFS write that has no spy test of its own.
 
 ## Audio
 

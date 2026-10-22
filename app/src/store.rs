@@ -194,15 +194,16 @@ fn file_stem(name: &str) -> String {
 }
 
 /// Starts a session for files the user dropped and makes it current.
-/// Returns its id.
-pub async fn save_sources(files: &[(String, Vec<u8>)], rate: u32) -> Result<String> {
+/// Returns its id.  Each file is written as the browser's `Blob`, so the
+/// page keeps no copy of its bytes to save it (MEM-1).
+pub async fn save_sources(files: &[(String, web_sys::Blob)], rate: u32) -> Result<String> {
     let id = format!("{}", js_sys::Date::now() as u64);
     let base = format!("{ROOT}/{id}");
     let mut meta = Meta {
         rate,
         ..Default::default()
     };
-    for (i, (name, bytes)) in files.iter().enumerate() {
+    for (i, (name, file)) in files.iter().enumerate() {
         let ext = name
             .rsplit('.')
             .next()
@@ -210,7 +211,7 @@ pub async fn save_sources(files: &[(String, Vec<u8>)], rate: u32) -> Result<Stri
             .unwrap_or("bin")
             .to_ascii_lowercase();
         let stored = format!("{i}.{ext}");
-        write(&format!("{base}/src/{stored}"), bytes).await?;
+        write_within("", &format!("{base}/src/{stored}"), file).await?;
         meta.files.push((name.clone(), stored));
     }
     meta.name = files
@@ -415,6 +416,31 @@ export function lloyd_in_a_larger_buffer() {
         assert_eq!(written.as_bool(), Some(true));
         assert_eq!(record, "whole");
         assert_eq!(read("sessions/v/x").await.as_deref(), Some(&b"lloyd"[..]));
+        st_remove(ROOT).await;
+    }
+
+    /// A stereo tone as a WAV file of `frames` frames at 8 kHz.
+    fn tone(frames: usize) -> Vec<u8> {
+        let wave: Vec<f32> = (0..frames).map(|i| 0.25 * (0.3 * i as f32).sin()).collect();
+        engine::wav::encode_pcm16(&wave, &wave, 8_000)
+    }
+
+    /// MEM-1, MEM-5: a chosen file is saved from the browser's file, so the
+    /// page needs no copy of its bytes to save it.
+    #[wasm_bindgen_test]
+    async fn sources_are_saved_from_their_files() {
+        st_remove(ROOT).await;
+        let file = web_sys::Blob::new_with_u8_array_sequence(&Array::of1(&Uint8Array::from(
+            &tone(800)[..],
+        )))
+        .expect("a blob");
+        start_spy();
+        let saved = save_sources(&[("Lloyd - Tune.wav".into(), file)], 8_000).await;
+        let record = stop_spy();
+        let id = saved.expect("saved");
+        assert_eq!(record, "blob whole whole");
+        let (got, song, meta) = restore().await.expect("stored").expect("readable");
+        assert_eq!((got, song.frames, meta.rate), (id, 800, 8_000));
         st_remove(ROOT).await;
     }
 

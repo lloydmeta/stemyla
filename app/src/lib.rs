@@ -214,16 +214,22 @@ const SONG_FILES: &str = ".mp3,.wav";
 
 /// Decodes files the user chose and keeps them in browser storage, so a
 /// reload brings the song back.  The result arrives through the inbox.
+/// Each file comes with its bytes, which the decoder takes, and the
+/// browser's file, which is saved as it is, so the bytes are never copied.
 #[cfg(target_arch = "wasm32")]
 async fn load_and_keep(
-    files: Vec<(String, Vec<u8>)>,
+    chosen: Vec<(String, web_sys::File, Vec<u8>)>,
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: egui::Context,
 ) {
-    let name = files.first().map(|(n, _)| store_meta::file_title(n));
-    let opened = match Song::load_files(files.clone()) {
+    let name = chosen.first().map(|(n, _, _)| store_meta::file_title(n));
+    let (sources, files): (Vec<_>, Vec<_>) = chosen
+        .into_iter()
+        .map(|(name, file, bytes)| ((name.clone(), web_sys::Blob::from(file)), (name, bytes)))
+        .unzip();
+    let opened = match Song::load_files(files) {
         Ok(song) => {
-            let session = match store::save_sources(&files, song.sample_rate).await {
+            let session = match store::save_sources(&sources, song.sample_rate).await {
                 Ok(id) => Some(id),
                 Err(e) => {
                     log::warn!("song not kept in browser storage: {e:#}");
@@ -945,10 +951,15 @@ impl StemApp {
             let ctx = ctx.clone();
             self.status = format!("Reading {} files…", dropped.len());
             wasm_bindgen_futures::spawn_local(async move {
-                let mut files = Vec::new();
+                let mut chosen = Vec::new();
                 for f in &dropped {
-                    match f.bytes_async().await {
-                        Ok(b) => files.push((f.path().to_string_lossy().into_owned(), b)),
+                    let name = f.path().to_string_lossy().into_owned();
+                    let read = match f.web_file() {
+                        Some(file) => f.bytes_async().await.map(|b| (file.clone(), b)),
+                        None => Err(format!("could not read {name}: the browser gave no file")),
+                    };
+                    match read {
+                        Ok((file, b)) => chosen.push((name, file, b)),
                         Err(e) => {
                             pending.borrow_mut().song = Some(Err(anyhow::anyhow!(e)));
                             ctx.request_repaint();
@@ -956,7 +967,7 @@ impl StemApp {
                         }
                     }
                 }
-                load_and_keep(files, pending, ctx).await;
+                load_and_keep(chosen, pending, ctx).await;
             });
         }
     }
@@ -982,7 +993,7 @@ impl StemApp {
                 // applied before the queued status, must not be hidden by it.
                 for f in &chosen {
                     match picker::read(f).await {
-                        Ok(b) => files.push((f.name(), b)),
+                        Ok(b) => files.push((f.name(), f.clone(), b)),
                         Err(e) => {
                             let mut inbox = pending.borrow_mut();
                             inbox.status = None;
