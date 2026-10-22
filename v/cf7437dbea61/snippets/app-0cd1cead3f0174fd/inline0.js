@@ -6,20 +6,31 @@ async function dir(path, create, from) {
 }
 function split(path) {
   const i = path.lastIndexOf("/");
-  return [path.slice(0, i), path.slice(i + 1)];
+  return i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
 }
-export async function st_write(within, rel, bytes) {
+// Safari 27 writes a typed array view's whole buffer, not just the view
+// (`new Uint8Array(16).subarray(4, 8)` writes 16 bytes), so only whole
+// arrays are written: a view is copied out first.
+function whole(bytes) {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
+}
+export async function st_write(within, rel, body) {
+  let w;
   try {
     let base;
     try { base = await dir(within, false); }
     catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
     const [d, n] = split("/" + rel);
     const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
-    const w = await fh.createWritable();
-    await w.write(bytes);
+    w = await fh.createWritable();
+    await w.write(body instanceof Blob ? body : whole(body));
     await w.close();
     return true;
-  } catch (e) { console.warn("storage write failed", within, rel, e); return false; }
+  } catch (e) {
+    if (w) try { await w.abort(); } catch (_) {}
+    console.warn("storage write failed", within, rel, e);
+    return (e && e.name) || "Error";
+  }
 }
 export async function st_read(path) {
   try {
@@ -34,6 +45,10 @@ export async function st_remove(path) {
     await (await dir(d, false)).removeEntry(n, { recursive: true });
     return true;
   } catch (e) { return e.name === "NotFoundError"; }
+}
+export async function st_exists(path) {
+  try { await dir(path, false); return true; }
+  catch (e) { return e.name !== "NotFoundError"; }
 }
 export async function st_list(path) {
   try {
