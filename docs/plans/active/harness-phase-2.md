@@ -1986,6 +1986,23 @@ TD-12:
 * Chosen: (b) and (x), by the maintainer on 2026-10-22.
 * Ask the maintainer before M18a's step 1.  Record the choice in Progress and the Decision log.  If the choice is not (b) and (x), rewrite the design, the steps and the acceptance before step 1.
 
+#### M18b state at the start
+
+On 2026-10-22, at commit `7541152` (M18a merged as PR #31).  M18a did not change the MP3 path, so M18's state holds for TD-13 and TD-14.  More detail:
+
+* TD-14: `mp3` in `worker/src/web.rs` is an `async fn` with no `.await`.  `serve` calls it for `Request::Mp3`.  It makes the encoder after the copies, and passes `rate.unwrap_or(44_100)` to `push_pcm_f32`.
+* TD-13: `App` calls `store::download` in two places in `app/src/lib.rs`: the `Event::Mp3` arm, and the WAV button of a lane's Save menu.  No test calls it.  `Event` has no derives.  `separator.rs` compiles for `wasm32` only, and has no `mod tests`.
+* The worker's browser tests are its `mod tests`, in `worker/src/web/tests.rs` (`run_in_dedicated_worker`).  The file has `SENT`, `sent(kind)` and a module `#![expect]` for MEM-1's lint.  `errors_name_the_request_they_answer` sends an `mp3` request of 4 frames at 96,000 Hz, and expects an error of type `mp3`.  No other test runs `mp3`.
+* No browser test binary has a global allocator.  `engine/tests/realtime.rs` has the native one, which is the model.
+* `app --lib`'s tests run in a page because of the `wasm_bindgen_test_configure!(run_in_browser)` in `store.rs`'s `mod tests`.  It applies to the whole test binary, so a test in `separator.rs` needs no configure of its own.
+* These docs name TD-13 or TD-14: `tech-debt.md` (the two entries), `invariants.md` (MEM-1's `* Gaps:` "TD-13, TD-14, TD-26" and MEM-2's "TD-13, TD-26"), `harness.md` (the `wasm32` clippy row and MEM-1's lint row), `.claude/rules/memory.md` (its last line) and decision 0008.  `docs-check` lets a decision name a closed ID.  The code names them in the two `#[expect]`s.
+* M18a's lessons that apply here: restore a plant with `cp` or `git checkout`, not `mv` (Surprises).  Run Safari again after the review rounds: M18a's round 3 found that Safari had not run the fixes.
+
+Facts checked for M18b:
+
+* rusty_mp3 1.0.0's `push_pcm_f32(&mut self, interleaved: &[f32], channels: u16, sample_rate: u32)` stages and encodes through `push_with`.  Its comment says that a push split at any point gives "byte-identical" output (`src/lib.rs`).
+* rusty_mp3's opt-in lookahead buffers the PCM of every frame.  It is on only if `std::env::var("MP3_RESV_LOOKAHEAD")` succeeds, which on `wasm32-unknown-unknown` it never does.  So the worker's encode holds no PCM beyond one frame.
+
 #### M18 design
 
 The design follows (b) and (x).
@@ -2003,19 +2020,21 @@ M18a, the page's storage:
 
 M18b, the MP3 save:
 
-* TD-14: `mp3` in `worker/src/web.rs` reads the channels in blocks of `MP3_BLOCK` frames, `1152 * 16` (18,432 frames, 72 KB for each channel).  Three buffers of one block, made once, take each block: `left.subarray(at, at + n).copy_to(&mut l[..n])`, the same for `right`, then the interleave into `pcm`, cleared each time.  Each block goes to `push_pcm_f32`.  The frame count is the shorter channel's, as the `zip` gives today.  The loop pushes at least once, so an empty stem with an unsupported rate is still an error.  The `#[expect]` goes.  The doc comment says that the worker encodes so that the page stays responsive, and that an encode holds a few times the size of the MP3.
-* Test `an_mp3_is_encoded_in_blocks`, in `worker/src/web/tests.rs`.  The test binary gets a global allocator that wraps `std::alloc::System` and keeps the live and the peak bytes in thread-local `Cell`s, as `engine/tests/realtime.rs` counts.  It keeps the default `realloc`, so a grow counts the old and the new buffer.  The test makes 30 s of a stereo tone at 44,100 Hz in two `Float32Array`s (1,323,000 frames), and drops its own `Vec`s.  It resets the peak, runs `mp3`, and takes the reply from `SENT`.  Then, outside the measurement, it encodes the same samples in one push, as the old code did.
+* TD-14: `mp3` in `worker/src/web.rs` reads the channels in blocks of `MP3_BLOCK` frames, `1152 * 16` (18,432 frames, 72 KB for each channel).  Three buffers of one block, made once, take each block: `left.subarray(at, at + n).copy_to(&mut l[..n])`, the same for `right`, then the interleave into `pcm`, cleared each time.  Each block goes to `push_pcm_f32`.  The frame count is the shorter channel's, as the `zip` gives today.  The loop pushes at least once, so an empty stem with an unsupported rate is still an error.  The `#[expect]` goes.  `errors_name_the_request_they_answer` also sends an `mp3` request of 0 frames at 96,000 Hz, and expects a second error of type `mp3`.  The doc comment says that the worker encodes so that the page stays responsive, and that an encode holds a few times the size of the MP3.
+* Test `an_mp3_is_encoded_in_blocks`, in `worker/src/web/tests.rs`.  The test binary gets a global allocator that wraps `std::alloc::System` and keeps the live and the peak bytes in thread-local `Cell`s, as `engine/tests/realtime.rs` counts.  It implements only `alloc` and `dealloc`, so the default `realloc` and `alloc_zeroed` call them, and a grow counts the old and the new buffer.  `engine/tests/realtime.rs` overrides both, so do not copy those two.  The test makes 30 s of a stereo tone at 44,100 Hz in two `Float32Array`s (1,323,000 frames), and drops its own `Vec`s.  It calls `fresh()`, sets the peak to the live bytes, runs `mp3`, and asserts that `sent("mp3")` holds exactly one reply.  Then, outside the measurement, it encodes the same samples in one push, as the old code did.
   * The reply's bytes must equal the one-push bytes.
   * The peak, less the live bytes before the call, must be under one channel's bytes: 4 bytes for each frame, 5.3 MB.  The old code's copies alone are 16 bytes for each frame, 21 MB.  Step 4 records both peaks.  Review round 1 measured 23.6 MB before and 2.7 MB after (the MP3 is 0.72 MB), in about 2 s.
   * `mp3` has no `.await` in it, so no other task runs during the measurement.
+  * The allocator is the `#[global_allocator]` of the worker's whole test binary, so every worker test runs through it.  It only counts, and calls `System` for the memory.
+  * `errors_name_the_request_they_answer` keeps showing that an encoder error still reaches the page, as an error of type `mp3`.
 * TD-13: `Event::Mp3 { name: String, bytes: Uint8Array }`.  The `Reply::Mp3` arm moves the array into the event.  `store::download(name, bytes: &Uint8Array, mime)` passes the array to `save_file`.  The WAV caller passes `Uint8Array::from(...)` of `encode_pcm16`'s bytes, as `download` does today inside.  The `#[expect]` goes, so a `to_vec` on the array fails MEM-1's lint again.
-* Test `an_mp3_reply_reaches_the_page_as_sent`, in a new `#[cfg(test)] mod tests` in `separator.rs`, run by `xtask web-test` (`app --lib`).  It makes a `Separator` with `egui::Context::default()`.  It dispatches a `MessageEvent` whose `data` is `Reply::Mp3 { ... }.to_js().0` on the separator's worker, from a JS helper.  `dispatchEvent` runs the `onmessage` handler with the same object, with no structured clone.  The test takes the `Event::Mp3` from `events`, and `js_sys::Object::is` must hold between its `bytes` and the array sent.  A copy, `Uint8Array::from(&bytes.to_vec()[..])`, fails it.  The worker script does not load in the test page.  So an `Event::Stopped` may come too, and the test looks only for `Event::Mp3`.  The test calls `sep.stop()` at its end, so the worker's late error does not reach a dropped closure.
+* Test `an_mp3_reply_reaches_the_page_as_sent`, in a new `#[cfg(test)] mod tests` in `separator.rs`, run by `xtask web-test` (`app --lib`).  It makes a `Separator` with `egui::Context::default()`.  It dispatches a `MessageEvent` whose `data` is `Reply::Mp3 { ... }.to_js().0` on the separator's worker, from a JS helper.  `dispatchEvent` runs the `onmessage` handler with the same object, with no structured clone.  The test takes the `Event::Mp3` from `events`, and `js_sys::Object::is` must hold between its `bytes` and the array sent.  A copy, `Uint8Array::from(&bytes.to_vec()[..])`, fails it.  The worker script does not load in the test page.  The test is synchronous, so no `Event::Stopped` arrives before it reads `events`; it still looks only for `Event::Mp3`.  It calls `sep.stop()` before its asserts, since a failed assert aborts the test.  The module has no `wasm_bindgen_test_configure!`, since the one in `store.rs` applies to the whole binary.
 
 Docs (DOC-1), in the PR that closes each entry:
 
 * `tech-debt.md`: delete TD-12, TD-13, TD-14 and TD-17.  Under `## Closed`:
   * "* TD-12: closed by `sources_are_saved_from_their_files` (harness phase 2, M18a).  The page saves a chosen song from the browser's `File`s and moves the bytes into the decoder, so it no longer copies them.  The test shows that the source reaches storage as the browser's file (MEM-1)."
-  * "* TD-13: closed by `an_mp3_reply_reaches_the_page_as_sent` (harness phase 2, M18b).  `Event::Mp3` keeps the transferred `Uint8Array`, and the download takes it as it is (MEM-1, MEM-2)."
+  * "* TD-13: closed by `an_mp3_reply_reaches_the_page_as_sent` (harness phase 2, M18b).  `Event::Mp3` keeps the transferred `Uint8Array`, and the download takes it as it is, with no copy in wasm memory (MEM-1, MEM-2)."
   * "* TD-14: closed by `an_mp3_is_encoded_in_blocks` (harness phase 2, M18b).  The worker reads the channels from JS in blocks, so an encode holds a few times the size of the MP3, not the PCM (MEM-1)."
   * "* TD-17: closed by `a_view_is_written_whole` (harness phase 2, M18a).  `st_write` copies a view into a whole array, as the worker's `whole()` does (MEM-5)."
   * TD-26's first bullet drops "(TD-12)".
@@ -2024,9 +2043,11 @@ Docs (DOC-1), in the PR that closes each entry:
 * `.claude/rules/memory.md`: the last line becomes "Spy on `write` in a test of an OPFS write, as `a_view_is_written_whole` does.  Chrome writes a view correctly, so only Safari fails a read-back."
 * `docs/references/browser-quirks.md`: the Safari entry's "The code" line adds `st_write` in `app/src/store.rs`, with the same helper.
 * Shared lines between commits.  Each commit passes `docs-check`, so it names only open IDs:
-  * MEM-1's `* Gaps:` line is "TD-13, TD-14, TD-26" after step 2, and "TD-26" after step 5.  MEM-2's is "TD-13, TD-26" until step 5.
-  * `harness.md`'s MEM-1 lint row says "three song-sized copies (TD-13, TD-14 and one closed in M18a) went unnoticed" after step 2.  Step 5 sets the final text.  The `wasm32` row keeps "TD-13 and TD-14" until steps 4 and 5 close them.
-  * `.claude/rules/memory.md`'s last line, after step 1: "Known breaches are TD-12 to TD-14 in `docs/tech-debt.md`; do not copy their pattern.  Spy on `write` in a test of an OPFS write."  After step 2, "TD-13 and TD-14".  Step 5 sets the final text.
+  * Step 4 adds `an_mp3_is_encoded_in_blocks` to MEM-1's `* Enforced by:` line.  Step 5 adds `an_mp3_reply_reaches_the_page_as_sent` to MEM-2's, since `docs-check` fails a test name that does not exist yet.
+  * MEM-1's `* Gaps:` line is "TD-13, TD-14, TD-26" after step 2, "TD-13, TD-26" after step 4, and "TD-26" after step 5.  MEM-2's is "TD-13, TD-26" until step 5.
+  * `harness.md`'s MEM-1 lint row says "three song-sized copies (TD-13, TD-14 and one closed in M18a) went unnoticed" after step 2.  After step 4 it says "three song-sized copies (TD-13 and two closed in M18) went unnoticed".  Step 5 sets the final text.
+  * `harness.md`'s `wasm32` row says "where TD-13 and TD-14 are" until step 4.  After step 4 it says "where TD-13 is, and where one song-sized copy was (closed in M18)".  Step 5 sets the final text.
+  * `.claude/rules/memory.md`'s last line, after step 1: "Known breaches are TD-12 to TD-14 in `docs/tech-debt.md`; do not copy their pattern.  Spy on `write` in a test of an OPFS write."  After step 2, "TD-13 and TD-14".  After step 4: "A known breach is TD-13 in `docs/tech-debt.md`; do not copy its pattern.  Spy on `write` in a test of an OPFS write."  Step 5 sets the final text.
 * `working-with-agents.md`: a changelog line for each PR, with the date of its commit.  No new way of working, so no other change.
 
 Not in M18: the WAV download encodes 16-bit PCM in wasm memory (about 42 MB for 4 minutes) before it copies the file to JS.  It is an encoding, not a copy to share (MEM-1), and MEM-4's work in phase 4 can measure it.  `picker::read` and `bytes_async` copy each chosen file into wasm once, which the decoder needs.  No automated check uses the picker; the e2e scenarios drop files.  So the picker half of TD-12 is checked by hand in Chrome on the Mac, and the PR says so.
@@ -2043,10 +2064,13 @@ M18a:
 
 M18b:
 
-4. TD-14, test first: add `an_mp3_is_encoded_in_blocks` against today's `mp3`.  The bytes are equal, and the peak is over the bound; record the peak.  Change `mp3`; the test passes; record the peak.  Plant: `MP3_BLOCK` of 1,323,000 frames, one block for the whole song.  The bound fails.  Restore it.  Then the docs for TD-14.
+4. TD-14, test first: add `an_mp3_is_encoded_in_blocks` against today's `mp3`.  The bytes are equal, and the peak is over the bound; record the peak.  Change `mp3`; the test passes; record the peak.  Plant: `MP3_BLOCK` of 1,323,000 frames, one block for the whole song.  The bound fails.  Restore it.  Add the 0-frame request to `errors_name_the_request_they_answer`; it passes on the old and the new `mp3`.  Plant: `while at < frames` for the loop that pushes at least once.  The test fails, since a 0-frame request then gets an empty MP3.  Restore it.  Then the docs for TD-14.
 5. TD-13: change `Event::Mp3`, the arm and `store::download`.  Write `an_mp3_reply_reaches_the_page_as_sent`, and plant the copy in the arm (with an `#[expect]`): the test fails.  Restore it; the test passes.  Plant `Uint8Array::from(&bytes.to_vec()[..])` in the arm without the `#[expect]`: the `wasm32` clippy command fails with "use of a disallowed method `js_sys::Uint8Array::to_vec`".  (A bare `bytes.to_vec()` fails the type check first.)  Restore it.  Then the docs for TD-13.
 6. By hand, in Chrome and in Safari: load the demo song, and choose Save, then MP3, on the bass lane.  `afinfo` on the downloaded file must report an MPEG layer 3 file of the song's length.  `afinfo` on the WAV from Save, then WAV, must report 16-bit PCM.  This is evidence for the PR, not acceptance: the tests above are.
 7. Run `xtask web-test --browser safari`, as in step 3.
+8. Run three review rounds, each by a new subagent with fresh context.  Verify each finding, and fix the real ones with tests.  Then run `xtask web-test` in Chrome and in Safari, and `e2e smoke`, `audio-resume` and `storage` in Chrome, on the reviewed code.
+
+In steps 4 and 5, restore each plant with `cp` or `git checkout`, so Cargo rebuilds (Surprises, M18a step 1).
 
 Each PR, after the maintainer asks for a push and the PR (GIT-1): CI's `browser tests (Chrome)` job lists the PR's new tests as `ok`.
 
@@ -2361,6 +2385,9 @@ Each PR, after the maintainer asks for a push and the PR (GIT-1): CI's `browser 
 * [x] 2026-10-22: M18a, after the three review rounds: `xtask web-test` passes all 66 tests in Chrome 155 and in Safari 27.0; the gate and `e2e smoke`, `audio-resume` and `storage` pass in Chrome.
 * [x] 2026-10-22: M18a, three review rounds done and their findings fixed.
 * [x] 2026-10-22: M18a: PR #31 opened.  CI (run 39726513051 at `09b3c5b`): every job passes.  `browser tests (Chrome)` lists `a_view_is_written_whole`, `sources_are_saved_from_their_files`, `a_failed_save_leaves_no_session`, `two_saves_in_one_millisecond_get_two_sessions`, `a_save_never_takes_a_stored_session_id`, `opfs_write_writes_more_than_one_slice` and `a_download_holds_only_the_bytes_of_its_chunks` as `ok` (66 browser tests), and passes `e2e audio-resume`.  The branch was renamed to `ai-agent-harness-phase-2-ms18a` outside the session before the push.
+* [x] 2026-10-22: M18a, PR #31 merged by the maintainer (`7541152`).
+* [x] 2026-10-22: M18b plan refreshed against `7541152` ("M18b state at the start").  Survey of `mp3`, `Event::Mp3`, `store::download` and its callers, the worker's test module, rusty_mp3 1.0.0's push and lookahead, and the docs that name TD-13 or TD-14.  Added: the doc text after step 4, which closes TD-14 while TD-13 is open; the review rounds and the Safari run after them (step 8); restoring plants with `cp`.
+* [x] 2026-10-22: M18b plan review round 1, by one new reviewer who built the whole M18b design in a scratch worktree and ran it in Chrome 155.  `an_mp3_is_encoded_in_blocks`: peak 23,611,905 bytes before (fails, bound 5,292,000), 2,738,817 after, bytes equal (719,900), about 1.9 s; the one-block plant fails.  The copy plant fails `an_mp3_reply_reaches_the_page_as_sent`; the clippy plant fails the `wasm32` step.  All 68 browser tests pass; `docs-check` passes after step 4 and after step 5.  No blockers and no significant should-fix findings; 2 minor should-fix findings and 5 nits, all checked.  Fixed, each real: no test held "pushes at least once" (`while at < frames` passed every test), so `errors_name_the_request_they_answer` sends 0 frames too; the peak reset and `SENT` were not defined.  Nits fixed: which step names which test on an `* Enforced by:` line; `sep.stop()` before the asserts, since the test is synchronous; TD-13's closing text says "no copy in wasm memory", since `new Blob` copies in JS; the allocator implements only `alloc` and `dealloc`.  Not taken: the runner's test order, which M18b's tests do not rely on.  The review stops here, by the stop rule.
 * [ ] M18: TD-12, TD-13, TD-14, TD-17 fixed.
 * [x] 2026-10-19: browser tests are a required check (the maintainer, before PR #14; found by `gh api`).
 * [ ] M19: phase 2 closed.
