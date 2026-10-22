@@ -2081,11 +2081,117 @@ Each PR, after the maintainer asks for a push and the PR (GIT-1): CI's `browser 
 * `git grep -nE 'TD-1[2347]' -- '*.rs'` gives no output, since `docs-check` reads only Markdown.  `docs-check` passes with the four IDs closed.
 * fmt, clippy, the tests and `docs-check` pass.
 
-### M19: close out phase 2
+### M19: close out phase 2 (DOC-1)
 
 * Person step, done: the maintainer made `browser tests (Chrome)` a required check in the `main` ruleset on 2026-10-19.
 * Update the parent plan's progress, the guide's status and changelog ("phase 2"), and `harness.md`.  Count the "prose only" lines in `invariants.md` and record the change from 8.
 * Move this plan to `plans/completed/` and fill its retrospective.
+* Scope, by the rule for proportionate sensors: docs, and two path strings in `xtask/src/rules.rs`.  No new check, no new crate, no decision record and no tech-debt entry.  `docs-check` is the sensor: the move fails it until each current doc names the new path.
+
+#### M19 state at the start
+
+On 2026-10-22, at commit `cf7437d` (M18b merged as PR #32):
+
+* Milestones: M1 to M15, M17, M18a and M18b are merged, as PRs #14 to #32.  PR #24 is a Dependabot bump, not a milestone.  M16 moved to phase 5b.
+* Rules: `grep -c "Enforced by: prose only" docs/invariants.md` gives 2, at MEM-4 and GPU-3.  It gave 8 at `a9ace3a`.  There are 21 rules.
+* Tech debt:
+  * Phase 2 closed 13 entries: TD-1, TD-2, TD-4, TD-5, TD-6, TD-9, TD-12 to TD-15, TD-17, TD-24 and TD-30.
+  * Phase 2 opened 9 entries: TD-22 to TD-30.  At `a9ace3a`, the file had TD-1 to TD-21.
+  * 17 stay open: TD-3, TD-7, TD-8, TD-10, TD-11, TD-16, TD-18 to TD-23 and TD-25 to TD-29.
+* The gate, "CI green on `main` with the new checks required" (parent plan, phase 2), is met at `cf7437d`:
+  * The `main` ruleset (id 24980616) requires `rustfmt`, `clippy`, `test`, `wasm build (trunk)` and `browser tests (Chrome)` (`gh api repos/lloydmeta/stemyla/rulesets/24980616`).
+  * `gh run list --workflow CI --branch main --event push --created '2026-10-19..2026-10-22T09:20:00Z' -L 100` gives 22 runs that passed and none that failed.  The run for `cf7437d` is 39753865469.
+* CI on PRs: `gh run list --workflow CI --event pull_request --created '2026-10-19..2026-10-22T09:20:00Z' -L 300` gives 52 runs that passed and 3 that failed.
+* `docs-check` reads paths in every doc but plans and decisions (`names_current_paths` in `xtask/src/docs.rs`).  It needs each doc under `docs/` in the index (`docs_indexed`).  It fails a closed ID outside plans and decisions.  These lines name `plans/active/harness-phase-2.md`, so the move fails them:
+  * `docs/README.md`, the index line of this plan;
+  * `docs/tech-debt.md`, TD-3's fix, TD-8's first sentence and TD-28's fix.
+* `xtask/src/rules.rs` names `docs/plans/active/harness-phase-2.md` twice: the doc comment of `SETTINGS_KEYS`, and the GIT-1 message of `claude_settings_problems`.  No check reads them, and no test asserts the message.
+* `docs/plans/PLANS.md`: a plan moves to `completed/` when it ends, "after which it is not edited".  So this plan cannot record the merge of M19's PR.  The parent plan records it.
+* `docs/plans/completed/` holds only `.gitkeep`.
+* `docs/harness.md`:
+  * The first paragraph names 5 of the 10 decisions (0001, 0002, 0003, 0005 and 0006).
+  * The components table has a row for each phase 2 sensor but two: CI's `cargo test -p roformer-gpu --lib` and `--doc` (M1), and `browser tests (Chrome)` as a required check.
+  * `## Baseline` gives the numbers before the harness.  Nothing gives phase 2's numbers.
+* `docs/working-with-agents.md`: Status starts "Phase 1 is in place:", and lists phase 1's parts only.  Its last paragraph already names phase 2's deny rules and rustfmt hook.  The changelog has a line for each milestone that changed a person's work.
+* `docs/tech-debt.md`'s first paragraph says "the plan's phase 2 closes most enforcement gaps".
+* The parent plan: Progress has "* [ ] Phase 2."  Phase 2's acceptance is that each mechanical rule names a test or a lint, and that each check fails on a planted breach.  Its "Measured by" is "breaches caught by checks before review" and the "prose only" count.
+* At `cf7437d`, this plan is 2,539 lines and 505,910 bytes.  Claude Code's `Read` tool refuses more than 25,000 tokens at once, so a session reads the plan in parts.
+
+#### M19 design
+
+This plan, before the move:
+
+* Progress: a line for each step, with its date.
+* `## Outcomes and retrospective` replaces "To be written when the plan completes." with five parts.  Each number names its source: a command, a PR or a Progress line.
+  * Achieved: each rule that gained a check, with the check and the Progress line of its planted breach.  GIT-2 and GIT-3 rest on GitHub rulesets, not on a test or a lint; say so.  Also: the "prose only" count, 8 to 2; the entries closed and opened; the gate's evidence at `cf7437d`.
+  * Breaches the checks found: each real breach that a new check found before review, with its ID and its milestone.  A planted breach does not count.  This is phase 2's "Measured by".
+  * Not achieved: each open entry, with the phase that its fix line or the parent plan names, or "none planned".  Also: MEM-4 and GPU-3, which stay prose only until phase 4; M16, moved to phase 5b; the hooks that the maintainer dropped on 2026-10-20.
+  * Measured against `harness.md`'s baseline:
+    * the PRs and their sizes without `docs/plans/`, median and largest;
+    * the plan review rounds and the implementation review rounds of each milestone;
+    * the findings confirmed, and those that were a test that could not fail;
+    * the CI failures on PRs, with their causes, and on `main` after a green PR;
+    * the corrections that the maintainer made, from the Decision log's maintainer entries.  If a count is not possible, say so.
+  * What to do differently: at most five lessons, each with its evidence from Progress, Surprises or the Decision log.  One is this plan's size, from the state above.
+
+Other docs, in the same commit:
+
+* `harness.md`:
+  * The first paragraph names "the records in `decisions/`" in place of the five file names.  So a new decision does not make it wrong.
+  * A components row for M1: "CI runs `cargo test -p roformer-gpu --lib` and `--doc` | sensor, computational | `--exclude roformer-gpu` also dropped the crate's tests that need no GPU, and its doctests, so they never ran in CI | phase 2".
+  * A components row: "`browser tests (Chrome)` is a required check in the `main` ruleset | sensor, on GitHub | a PR could merge while the browser tests failed | phase 2".
+  * A new section `## Phase 2, measured`, after `## Baseline`: three to five headline numbers that compare with the baseline, with the date and the PR range.  The move commit adds the pointer to the plan for the rest.
+  * The rows and the new section name no closed ID, since `docs-check` fails one there.  Write "(closed in M<n>)" as the other rows do.
+* `working-with-agents.md`:
+  * Status starts "Phases 1 and 2 are in place:".  The three phase 1 bullets stay.  A fourth bullet: "Checks that fail a breach of a rule.  Among them: tests in `xtask/tests/rules.rs`, clippy's `disallowed-methods` and `STEMYLA_REQUIRE`.  Also the shader limits test, the UI snapshot comparison and the allocation test of the audio callback.  Most give the rule ID and the fix.  `invariants.md` names the check for each rule, or says "prose only"."  The rest of Status stays.  (The snapshot comparison prints egui_kittest's message, with no rule ID: `app/tests/ui.rs`.)
+* `tech-debt.md`, the first paragraph: "the plan's phase 2 closes most enforcement gaps" becomes "the plan's phase 2 closed most enforcement gaps (`## Closed`)".
+* The parent plan, Surprises: a line on this plan's size, since it shapes phase 3's plan.
+
+The move, in its own commit, after the review rounds.  Each line that names the new folder goes in this commit, so no commit names a folder before the plan is in it:
+
+* `git mv docs/plans/active/harness-phase-2.md docs/plans/completed/harness-phase-2.md`, and `git rm docs/plans/completed/.gitkeep`.
+* `docs/README.md`: the index line names `plans/completed/harness-phase-2.md`, and says that phase 2 is done.  The line for `harness.md` adds "and phase 2's numbers".
+* `docs/harness.md`: `## Phase 2, measured` ends "The rest is in `plans/completed/harness-phase-2.md`."
+* `working-with-agents.md`, a changelog line: "2026-10-2x, phase 2: done.  19 of 21 rules name what enforces them; MEM-4 and GPU-3 stay prose only until phase 4.  The plan is in `plans/completed/`."  The date is the commit's.
+* The parent plan's Progress: "* [ ] Phase 2." becomes "* [x] 2026-10-2x: phase 2.  M1 to M15, M17, M18a and M18b merged as PRs #14 to #32 (#24 is a Dependabot bump); M16 moved to phase 5b.  M19 closes it (`plans/completed/harness-phase-2.md`).  "Prose only" rules: 8 to 2.  Gate met at `cf7437d` (run 39753865469), with the five checks required."
+* `docs/tech-debt.md`: the three lines name `plans/completed/harness-phase-2.md`.
+* `xtask/src/rules.rs`: the doc comment of `SETTINGS_KEYS` and the GIT-1 message name `docs/plans/completed/harness-phase-2.md`.
+* Progress: M19 is ticked, with the `docs-check` failure of step 4.
+* The parent plan's earlier lines and the decisions keep `plans/active/harness-phase-2.md`.  They are records of their time, and `docs-check` does not read their paths.
+* After the move commit, the plan is not edited, but for one case.  Until the PR merges, a fix that CI or the maintainer asks for may edit it in `completed/`.  After the merge, a correction goes in the parent plan.
+
+#### M19 steps
+
+Each step that changes the tree is one signed commit; fmt, every clippy command in `CLAUDE.md`, the tests and `docs-check` pass before it (GIT-2).
+
+1. Survey, by hand or by one new subagent:
+   * Read this plan's Progress, Surprises and Decision log in parts.
+   * Run `gh pr list --state merged -L 40` and `gh pr view` for PRs #14 to #32, and the two `gh run list` commands of the state above.
+   * Read the cause of each failed PR run from Progress, Surprises or the run's log.
+   * Write each number with its source in a scratch file.
+2. Write the Outcomes and the other docs of the design.  Commit.
+3. Run three review rounds, each by a new subagent with fresh context.  Each reviewer checks each number and claim in Outcomes and `## Phase 2, measured` against its source.  It also checks the changed docs against the code.  Verify each finding, and fix the real ones.  Each fix is a text change; `docs-check` covers the paths and the IDs.
+4. The move, test first: run the two `git` commands, then `cargo run -p xtask -- docs-check`.  It must fail with five problems: `plans/active/harness-phase-2.md` in `docs/tech-debt.md` three times and in `docs/README.md` once, and "does not list `plans/completed/harness-phase-2.md`".  Record the message.  Then make the other changes of the move; `docs-check` passes.  Tick M19.  Commit.
+5. When the maintainer asks for a push and the PR (GIT-1): the PR description says what was verified and how, and is passed with `--body-file`.  CI passes.
+
+After the merge, the session that starts phase 3 records the PR and its run on `main` in the parent plan's Progress.
+
+#### M19 acceptance
+
+* After the move and before the fixes, `docs-check` fails with the five problems of step 4.  After the fixes it passes.
+* `ls docs/plans/active` gives `harness-engineering.md` only.
+* `sed -n '/^## Outcomes and retrospective/,$p' docs/plans/completed/harness-phase-2.md | grep -c "To be written"` gives 0.
+* `git grep -n 'active/harness-phase-2' -- ':!docs/plans/' ':!docs/decisions/'` gives no output.
+* `grep -c "Enforced by: prose only" docs/invariants.md` gives 2.
+* The other docs changed, each shown by a command that fails without the change:
+  * `grep -c "phase 2: done" docs/working-with-agents.md` gives 1;
+  * `grep -c "Phases 1 and 2 are in place" docs/working-with-agents.md` gives 1;
+  * `grep -c "^## Phase 2, measured" docs/harness.md` gives 1;
+  * `grep -c 'decisions/0001' docs/harness.md` gives 0, and `grep -c 'roformer-gpu --lib' docs/harness.md` gives 1;
+  * `grep -c "^\* \[x\] .*: phase 2\." docs/plans/active/harness-engineering.md` gives 1;
+  * `grep -c "phase 2 closes" docs/tech-debt.md` gives 0.
+* Each number in Outcomes and in `## Phase 2, measured` names a source, and a review round checked it.
+* fmt, clippy, the tests and `docs-check` pass, and CI passes on the PR.
 
 ## Validation and acceptance
 
@@ -2114,6 +2220,7 @@ Each PR, after the maintainer asks for a push and the PR (GIT-1): CI's `browser 
 * To undo M15, revert its commits.  That removes the hook, the test, the CI component, and the lines in GIT-2, TD-28's fix, `README.md`, `harness.md`, the guide and the parent plan.  `.claude/settings.json` keeps its deny rules.  Keep this plan's living sections, and add a changelog line to the guide that says the hook was reverted.
 * To undo M17, revert its commits.  That puts back `UPDATE_SNAPSHOTS` in CI, TD-9, VERIFY-1's lines, the README text, and the lines in `harness.md`, the guide and the parent plan.  It removes the check, its tests, the upload step and TD-29.  Keep TD-29's ID: add `* TD-29: withdrawn by the revert of M17; TD-9 covers the gap again.` under `## Closed`.  Keep this plan's living sections, and add a changelog line to the guide that says the comparison was reverted.
 * To undo M18a or M18b, revert its commits.  Both edit MEM-1's lines and `## Closed`, so a revert of one alone can conflict there; resolve it by hand.  The revert puts back the copies, the `#[expect]`s, the entries it closed, and the lines in `invariants.md`, `harness.md`, `.claude/rules/memory.md`, `browser-quirks.md` and the guide.  Keep this plan's living sections.
+* To undo M19, revert its commits.  That moves this plan back to `plans/active/`, puts back the paths and two strings in `xtask/src/rules.rs`, and unticks phase 2 in the parent plan.  No check changes.  Resolve a conflict in the parent plan's Progress by hand.
 * Checks read the tree and write nothing, so they can run any number of times.  `the_rustfmt_hook_formats_rust_files` writes only under `CARGO_TARGET_TMPDIR`, and overwrites its files on each run.
 * M11 changes a rule that the maintainer chose on 2026-10-19.  If they reverse it, revert M11's rule text and decision, and keep the test as a measurement, marked in `tech-debt.md`.
 * To resume: read `## Progress`, then `git log --oneline main` to find the last merged milestone.
@@ -2400,8 +2507,13 @@ Each PR, after the maintainer asks for a push and the PR (GIT-1): CI's `browser 
 * [x] 2026-10-22: M18b step 8, Safari: `xtask web-test --browser safari` (Safari 27.0) at `db59bb0` passes all 69 tests, `an_mp3_of_unequal_channels_stops_at_the_shorter` too.  Safari was open, and safaridriver connected all the same.
 * [x] 2026-10-22: M18b step 6, Safari, by the maintainer: the piano stem of a separated song, saved from PR #32's code.  `afinfo` on the MP3: MPG3, 2 channels, 44,100 Hz, 192,000 bit/s, 5,079,364 audio bytes, "estimated duration" 211.640 s.  On the WAV: WAVE, 2 channels, 44,100 Hz, Int16, 9,347,072 frames, 211.952 s.  The 0.31 s gap is `afinfo`'s estimate, not lost audio (Surprises).
 * [x] 2026-10-22: M18b step 6, Chrome, by the maintainer: the same stem saved in Chrome gives the same `afinfo` output as in Safari (MP3: 5,079,364 audio bytes; WAV: 9,347,072 frames).
-* [ ] M18: TD-12, TD-13, TD-14, TD-17 fixed.
+* [x] 2026-10-22: M18b, PR #32 merged by the maintainer (`cf7437d`).
+* [x] 2026-10-22: M18: TD-12, TD-13, TD-14 and TD-17 fixed and closed (PRs #31 and #32).
 * [x] 2026-10-19: browser tests are a required check (the maintainer, before PR #14; found by `gh api`).
+* [x] 2026-10-22: M19 plan written against `cf7437d` ("M19 state at the start").  Survey of the plan's living sections, `invariants.md`, `tech-debt.md`, `harness.md`, the guide, the parent plan, `docs-check`'s path rules, the `main` ruleset, and CI on `main` and on PRs since 2026-10-19.
+* [x] 2026-10-22: M19 plan review round 1, by one new reviewer who ran the move in a scratch worktree: `docs-check` failed with the five problems of step 4, and passed after the fixes.  No blockers; 6 should-fix findings and 8 nits, all checked and fixed.  The should-fix: the M1 row named a closed ID, which `docs-check` fails; `rules.rs` names the plan twice, not once; the "To be written" check matched the plan's own quotes; the gate was already met at `cf7437d`; no rule for a fix after the move; and the acceptance did not check the other docs.
+* [x] 2026-10-22: M19 plan review round 2, by one new reviewer who ran the move and every acceptance command in a scratch worktree.  1 blocker, 2 should-fix findings and 3 nits, all checked and fixed.  The blocker: step 2's pointer in `harness.md` to `plans/completed/` failed `docs-check` before the move ("does not exist"), so each line that names the new folder now goes in the move commit.  The should-fix: the guide's Status bullet said that each check gives the rule ID, which the snapshot comparison does not; the parent plan's line said that M16 merged.
+* [x] 2026-10-22: M19 plan review round 3, by one new reviewer who read the plan as its implementer and as the maintainer.  No blockers; 1 should-fix finding and 5 nits, all checked and fixed.  The should-fix: the guide's Status bullet said that `invariants.md` names a check for each rule, but two say "prose only".  The nits: the `gh run list` commands now have an upper bound, `2026-10-22T09:20:00Z`, so a later run does not change the counts (22 and 0 on `main`, 52 and 3 on PRs, checked again); "Not achieved" allows "none planned"; the undo names the two strings in `rules.rs`; two more acceptance commands for `harness.md`; shorter sentences.  The plan review stops here: the round had no blocker and no significant should-fix.
 * [ ] M19: phase 2 closed.
 
 ## Surprises and discoveries
