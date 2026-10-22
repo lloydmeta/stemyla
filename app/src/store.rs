@@ -402,8 +402,8 @@ pub async fn usage() -> (f64, f64) {
 }
 
 /// Offers `bytes` to the user as a download named `name`.
-pub fn download(name: &str, bytes: &[u8], mime: &str) {
-    save_file(name, &Uint8Array::from(bytes), mime);
+pub fn download(name: &str, bytes: &Uint8Array, mime: &str) {
+    save_file(name, bytes, mime);
 }
 
 /// Browser tests of the private write path (`cargo run -p xtask --

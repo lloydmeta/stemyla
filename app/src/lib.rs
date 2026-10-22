@@ -1488,7 +1488,9 @@ impl StemApp {
                     if ui.button("WAV (16-bit, lossless)").clicked() {
                         store::download(
                             &format!("{base}.wav"),
-                            &engine::wav::encode_pcm16(&s.left, &s.right, song.sample_rate),
+                            &js_sys::Uint8Array::from(
+                                &engine::wav::encode_pcm16(&s.left, &s.right, song.sample_rate)[..],
+                            ),
                             "audio/wav",
                         );
                         ui.close();

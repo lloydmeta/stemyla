@@ -12,7 +12,8 @@
 
 use super::*;
 use js_sys::{Object, Reflect};
-use std::cell::RefCell;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::{Cell, RefCell};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -20,7 +21,39 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 thread_local! {
     /// Every message the worker would have posted to the page.
     pub(super) static SENT: RefCell<Vec<JsValue>> = const { RefCell::new(Vec::new()) };
+    /// Heap bytes allocated and not yet freed.
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    /// The most `LIVE` has been since a test set it.
+    static PEAK: Cell<usize> = const { Cell::new(0) };
 }
+
+/// Keeps `LIVE` and `PEAK` for every test in this binary.  Only `alloc`
+/// and `dealloc` are written, so the default `realloc` holds the old and
+/// the new buffer at once, as `System`'s may.
+struct PeakAllocator;
+
+// SAFETY: every call is forwarded unchanged to `System`; counting touches
+// only `const` thread-locals, which do not allocate.
+unsafe impl GlobalAlloc for PeakAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = LIVE.try_with(|live| {
+            let now = live.get() + layout.size();
+            live.set(now);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+        });
+        // SAFETY: the caller's contract is the same as `System`'s.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(layout.size())));
+        // SAFETY: the caller's contract is the same as `System`'s.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: PeakAllocator = PeakAllocator;
 
 #[wasm_bindgen(inline_js = r#"
 export async function wipe() {
@@ -761,15 +794,18 @@ async fn forget_model_removes_the_stored_model_and_partial_files() {
 #[wasm_bindgen_test]
 async fn errors_name_the_request_they_answer() {
     fresh().await;
-    let samples = Float32Array::new_with_length(4);
-    handle(message(&[
-        ("type", "mp3".into()),
-        ("name", "x.mp3".into()),
-        ("left", samples.clone().into()),
-        ("right", samples.into()),
-        ("rate", 96_000.into()),
-    ]))
-    .await;
+    // 4 frames, then none: an unsupported rate fails either way.
+    for frames in [4, 0] {
+        let samples = Float32Array::new_with_length(frames);
+        handle(message(&[
+            ("type", "mp3".into()),
+            ("name", "x.mp3".into()),
+            ("left", samples.clone().into()),
+            ("right", samples.into()),
+            ("rate", 96_000.into()),
+        ]))
+        .await;
+    }
     let mix = Float32Array::new_with_length(4);
     handle(message(&[
         ("type", "separate".into()),
@@ -782,11 +818,98 @@ async fn errors_name_the_request_they_answer() {
         .iter()
         .map(|e| field(e, "of").as_string().unwrap_or_default())
         .collect();
-    assert_eq!(of, ["mp3", "separate"]);
+    assert_eq!(of, ["mp3", "mp3", "separate"]);
     assert_eq!(
-        field(&errors[1], "text").as_string().as_deref(),
+        field(&errors[2], "text").as_string().as_deref(),
         Some("load the model first")
     );
+}
+
+const TONE_RATE: u32 = 44_100;
+/// 30 s at 44.1 kHz.
+const TONE_FRAMES: usize = 30 * TONE_RATE as usize;
+
+/// `frames` of a sine at `hz`, as the page sends a channel.
+fn tone(hz: f32, frames: usize) -> Float32Array {
+    let step = std::f32::consts::TAU * hz / TONE_RATE as f32;
+    let samples: Vec<f32> = (0..frames).map(|i| 0.5 * (step * i as f32).sin()).collect();
+    Float32Array::from(samples.as_slice())
+}
+
+/// The MP3 of `left` and `right` encoded in one push, as `mp3` did before
+/// it read the channels in blocks.  It stops at the shorter channel.
+fn encoded_in_one_push(left: &Float32Array, right: &Float32Array) -> Vec<u8> {
+    let mut pcm = Vec::new();
+    for (a, b) in left.to_vec().iter().zip(&right.to_vec()) {
+        pcm.push(*a);
+        pcm.push(*b);
+    }
+    let mut enc = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig {
+        bitrate_kbps: 192,
+        vbr_quality: None,
+    });
+    enc.push_pcm_f32(&pcm, 2, TONE_RATE).expect("encoded");
+    enc.finish();
+    let mut out = Vec::new();
+    while let Ok(packet) = enc.next_packet() {
+        out.extend_from_slice(&packet);
+    }
+    out
+}
+
+#[wasm_bindgen_test]
+async fn an_mp3_is_encoded_in_blocks() {
+    fresh().await;
+    let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    mp3(
+        Some("tone.mp3".into()),
+        [left.clone(), right.clone()],
+        Some(TONE_RATE),
+    )
+    .await
+    .expect("encoded");
+    let held = PEAK.with(Cell::get) - before;
+    let replies = sent("mp3");
+    assert_eq!(replies.len(), 1, "one mp3 reply");
+    let bytes = Uint8Array::new(&field(&replies[0], "bytes")).to_vec();
+    assert_eq!(
+        bytes,
+        encoded_in_one_push(&left, &right),
+        "the MP3 is the same as one encoded in one push"
+    );
+    let one_channel = 4 * TONE_FRAMES;
+    assert!(
+        held < one_channel,
+        "MEM-1: encoding 30 s held {held} bytes at its peak, more than one channel's \
+         {one_channel}.  Fix: read the channels from JS in blocks."
+    );
+}
+
+#[wasm_bindgen_test]
+async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
+    fresh().await;
+    // The shorter channel ends inside the second block, on either side.
+    let (long, short) = (TONE_FRAMES, MP3_BLOCK + 7);
+    for (left_frames, right_frames) in [(long, short), (short, long)] {
+        let (left, right) = (tone(220.0, left_frames), tone(330.0, right_frames));
+        mp3(
+            Some("tone.mp3".into()),
+            [left.clone(), right.clone()],
+            Some(TONE_RATE),
+        )
+        .await
+        .expect("encoded");
+        let reply = sent("mp3").pop().expect("an mp3 reply");
+        let bytes = Uint8Array::new(&field(&reply, "bytes")).to_vec();
+        assert_eq!(
+            bytes,
+            encoded_in_one_push(&left, &right),
+            "left {left_frames} frames, right {right_frames}"
+        );
+    }
+    assert_eq!(sent("mp3").len(), 2, "one mp3 reply for each encode");
 }
 
 #[wasm_bindgen_test]
