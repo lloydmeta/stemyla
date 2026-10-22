@@ -1679,6 +1679,36 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
         .collect()
 }
 
+/// VERIFY-1: no build file sets `UPDATE_SNAPSHOTS`, which makes
+/// egui_kittest rewrite a snapshot that does not match and pass.  It skips
+/// comment lines, which start with `#` or `//`.  A line that names the
+/// variable only in a trailing comment, or sets it to `0`, still counts.
+pub fn snapshot_updates(texts: &[(String, String)]) -> Vec<Problem> {
+    texts
+        .iter()
+        .filter(|(file, _)| is_build_file(file))
+        .flat_map(|(file, text)| {
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| {
+                    let code = line.trim_start();
+                    code.contains("UPDATE_SNAPSHOTS")
+                        && !code.starts_with('#')
+                        && !code.starts_with("//")
+                })
+                .map(move |(index, _)| Problem {
+                    rule: "VERIFY-1",
+                    file: file.clone(),
+                    line: Some(index + 1),
+                    message: format!(
+                        "VERIFY-1: {file}:{} names UPDATE_SNAPSHOTS, which makes egui_kittest rewrite a snapshot that does not match, so the test passes.  Fix: remove it.  If a snapshot fails and you did not change the UI, stop and ask the maintainer (TD-29).  To change a snapshot on purpose, run `UPDATE_SNAPSHOTS=1 cargo test -p app --test ui`.  Then commit only the PNGs of the views that you changed.",
+                        index + 1
+                    ),
+                })
+        })
+        .collect()
+}
+
 /// Crates below 1.0 that DEPS-1 counts as settled, not young.  Each date is
 /// the crate's first version on crates.io, two years or more before the
 /// crate was listed.  The check reads only the date's form; a reviewer
@@ -5048,6 +5078,48 @@ mod tracked_tests {
         assert_one_each("ASSET-1", &[("docs/big.txt", over.clone(), None)]);
         assert!(over[0].message.contains("1048577"), "{}", over[0]);
         assert_eq!(assets_in_the_index(&[file(1_048_576)]), []);
+    }
+
+    #[test]
+    fn a_snapshot_update_in_a_build_file_is_named() {
+        let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
+            (
+                ".github/workflows/ci.yml",
+                "jobs:\n  test:\n    env:\n      UPDATE_SNAPSHOTS: \"1\"\n",
+                4,
+            ),
+            (
+                ".github/actions/test/action.yml",
+                "runs:\n  steps:\n    - run: UPDATE_SNAPSHOTS=1 cargo test\n",
+                3,
+            ),
+            (".cargo/config.toml", "[env]\nUPDATE_SNAPSHOTS = \"1\"\n", 2),
+        ]
+        .into_iter()
+        .map(|(file, text, line)| (file, snapshot_updates(&texts(&[(file, text)])), Some(line)))
+        .collect();
+        assert_one_each("VERIFY-1", &cases);
+        let two = snapshot_updates(&texts(&[(
+            ".github/workflows/ci.yml",
+            "env:\n  UPDATE_SNAPSHOTS: \"1\"\nrun: UPDATE_SNAPSHOTS=1 cargo test\n",
+        )]));
+        let lines: Vec<Option<usize>> = two.iter().map(|problem| problem.line).collect();
+        assert_eq!(lines, [Some(2), Some(3)], "{two:#?}");
+        assert_eq!(
+            snapshot_updates(&texts(&[
+                (
+                    ".github/workflows/ci.yml",
+                    "      # UPDATE_SNAPSHOTS made egui_kittest rewrite\n"
+                ),
+                ("app/build.rs", "    // UPDATE_SNAPSHOTS is not set here\n"),
+                ("README.md", "run `UPDATE_SNAPSHOTS=1 cargo test`\n"),
+                (
+                    "app/tests/ui.rs",
+                    "// UPDATE_SNAPSHOTS=1 rewrites\nlet x = \"UPDATE_SNAPSHOTS\";\n"
+                ),
+            ])),
+            []
+        );
     }
 
     #[test]

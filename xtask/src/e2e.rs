@@ -211,8 +211,8 @@ impl Page {
         args.push("--enable-unsafe-swiftshader".into());
         args.push(format!("--window-size={},{}", VIEWPORT.0, VIEWPORT.1));
         let session = Session::new(&driver, o.browser, &args)?;
-        session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
-        let page = Self {
+        let tries = session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
+        let mut page = Self {
             session,
             _driver: driver,
             base,
@@ -222,6 +222,7 @@ impl Page {
             scenario: o.scenario.clone(),
             failures: Vec::new(),
         };
+        page.note(&format!("viewport: {}", tries.join("; ")));
         page.session.goto(&page.url(path))?;
         Ok(page)
     }
