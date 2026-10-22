@@ -62,7 +62,7 @@ Measured on 2026-10-22 over phase 2's 18 PRs (#14 to #32, without the Dependabot
 * Rules: "prose only" fell from 8 to 2 of the 21 rules in `invariants.md`.
 * CI: the 18 runs on `main`, one for each PR, passed.  No run failed on `main` after a green PR.
 * Size: without the plans, the median PR adds 418 lines (#30 adds 402, #17 adds 434), and the largest (#18) adds 2,260.
-* Review: about 35 findings were a test that could pass on wrong code, in 14 of 18 PRs.  The baseline had 17 of 65 review transcripts.
+* Review: 26 of 58 implementation review rounds found a test that could pass on wrong code (about 35 findings, in 14 of 18 PRs).  The baseline had 17 of 65 review transcripts.  Phase 2's reviewers ran mutants on purpose, so the counts are not like for like.
 * Checks: a new check found one real breach first; the surveys had found the others.
 
 ## Measuring
