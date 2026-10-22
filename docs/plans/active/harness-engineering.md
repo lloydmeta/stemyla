@@ -121,6 +121,8 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, PR #13 merged by the maintainer.
 * [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
 * [x] 2026-10-22: phase 2.  M1 to M15, M17, M18a and M18b merged as PRs #14 to #32 (#24 is a Dependabot bump); M16 moved to phase 5b.  M19 closes it (`plans/completed/harness-phase-2.md`).  "Prose only" rules: 8 to 2.  Gate met at `cf7437d` (run 39753865469), with the five checks required.
+* [x] 2026-10-22: M19 merged as PR #33 (`fa41c9f`).  CI run 39766123914 on `main` passed, `publish` included.
+* [x] 2026-10-22: phase 3, execution plan written (`plans/active/harness-phase-3.md`), as one PR with a commit for each milestone.
 * [ ] Phase 3.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
@@ -147,6 +149,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19, maintainer: RT-1 forbids allocation in the audio callback after warm-up (TD-15); `synth`'s file writing moves behind a feature so the app links only song generation (TD-4).
 * 2026-10-19, agent: the two older plans (versioned builds, browser tests in Rust) stay out of the repo; they are implemented, their PRs (#6, #9) describe them, and they hold local paths.
 * 2026-10-20, maintainer: each check is sized to its stakes and to failures seen.  Phase 2 trims M7 to a token scan, M14 to deny rules and M15 to a `rustfmt` hook, and moves the test-count guard to phase 5b.
+* 2026-10-22, maintainer: phase 3 lands as one PR, not one PR for each milestone.  Its parts depend on each other, and none changes code that ships.
 
 ## Outcomes and retrospective
 

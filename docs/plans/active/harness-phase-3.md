@@ -1,0 +1,363 @@
+# Harness phase 3: review agents
+
+## Purpose
+
+Phase 3 of `plans/active/harness-engineering.md` turns the review rounds into a repeatable part of the harness.  Today the agent writes each reviewer's prompt by hand, and one general reviewer reads every diff.  After this plan, one project skill runs each round.  `xtask review` does the parts a machine can do: it chooses the reviewers from the diff, checks the tree before and after, and runs cargo-mutants under a time limit.  Each serious finding goes to a validator before anything is fixed.  A log records each finding and its verdict, so phase 6 can measure each reviewer.
+
+The work is one PR, with one signed commit or more for each milestone (GIT-2).  The parts depend on each other, and none of them changes code that ships.
+
+## Context and orientation
+
+The state on 2026-10-22, at commit `fa41c9f` (phase 2 closed by PR #33):
+
+* `.claude/` holds `settings.json` (deny rules, including the `rtk git push` and `rtk proxy git push` forms, and a rustfmt hook) and `rules/` (four rule files).  It has no `hooks/`; `agents/` and `skills/` hold only a `.gitkeep`, added with this plan.
+* `CLAUDE.md`, "Working here", tells the agent to run three review rounds, each by a new subagent.  `docs/working-with-agents.md`, recipe "Review a change", gives the prompt to the main agent.  Its Status says that no project skills or subagents exist yet.
+* `docs-check` (`xtask/src/docs.rs`) collects each agent file, each skill, and each `"name" =>` arm in `xtask/src/main.rs` (`agent_capabilities`, `xtask_commands`).  `guide_covers` fails each name that `docs/working-with-agents.md` does not hold in a code span.  `repo_path` checks a code span that looks like a path, or ends in `.md`, against the root and the file's own folder; an empty folder does not count, and `target/...` is skipped.
+* `xtask/src/docs.rs` has `glob_matches` (`**` and braces).  `xtask/tests/rules.rs` runs `git ls-files`, so a copy of the tree without `.git` fails it.  `HISTORY` in `xtask/src/rules.rs` lists the folders where `no_python_in_the_build` does not look for the name of Python's web server.
+* Code for `wasm32` only: `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs`, `worker/src/web.rs`; more than 30 items in `app/src/lib.rs`, two in `app/src/reset.rs`, `base_latency` in `engine/src/live.rs`; and blocks inside shared functions, such as one in `apply_separated`.
+* No workspace `Cargo.toml` sets `publish = false`.  The deny rule `Bash(cargo r* publish*)` matches `cargo run ... publish` only.
+* Phase 2's reviewers found a test that could pass on wrong code in 14 of 18 PRs, often with mutants they planted by hand (`plans/completed/harness-phase-2.md`, Outcomes).  Their transcripts are under `~/.claude/projects/-Users-lloyd-Documents-rustt-stemyla/`.
+* Tech debt: TD-3, TD-8, TD-23, TD-26, TD-27 and TD-29 name review, or phase 3's reviewers, as their fix.  TD-7 and TD-16 have other fixes; a reviewer adds to them.
+* The maintainer's own settings (`~/.claude/settings.json`, not in the repo) set `effortLevel` and have a PreToolUse hook, `rtk hook claude`, that rewrites `git`, `grep`, `find` and `cargo test` commands to `rtk ...` before the permission check sees them.  `~/.claude/CLAUDE.md` holds the maintainer's own instructions.
+
+Facts checked for this plan, on 2026-10-22, with Claude Code 2.1.308, by the docs and by runs of `claude -p` and cargo-mutants in scratch repos during plan review:
+
+* Subagents ([sub-agents](https://code.claude.com/docs/en/sub-agents)):
+  * A project subagent is `.claude/agents/<name>.md`, with YAML frontmatter.  Only `name` and `description` are required.  Unknown fields are ignored.  If the frontmatter is not valid YAML, Claude Code ignores the file, and the agent is not listed.  An omitted `tools` gives every tool.  `Task` is an old alias of `Agent`.  `model: inherit` takes the main model.
+  * `hooks` in the frontmatter registers hooks for that subagent.  Claude Code skips them until a person trusts the folder, and a `-p` session never counts as trusted.  Hooks of agents passed with `--agents` (a JSON file in `-p` mode) run.  A hook that exits 2 stops the call before the permission rules; any other non-zero exit lets it go ahead ([hooks](https://code.claude.com/docs/en/hooks)).
+  * A subagent starts fresh in the main session's folder, and loads `CLAUDE.md` and `~/.claude/CLAUDE.md`.  The first file in a new `agents/` folder needs a restart.
+* `isolation: worktree` branches from the default branch, not `HEAD`, unless `worktree.baseRef` is `"head"`, a setting for all of the person's worktrees ([worktrees](https://code.claude.com/docs/en/worktrees)).
+* Skills ([skills](https://code.claude.com/docs/en/skills)):
+  * A project skill is `.claude/skills/<name>/SKILL.md`; the first `skills/` folder needs `/reload-skills`.  `$0`, `$1` give each argument, with shell quoting, also inside `` !`...` ``.
+  * `` !`command` `` runs once, when the skill loads, under a 2-minute limit.  A non-zero exit stops the skill, but exit 1 from a search or comparison command.  Outside auto mode, a command that the permission check does not allow stops the skill, and the check refuses `||`, braces and `exit`.  One plain command, allowed by `allowed-tools`, works in `dontAsk` mode; so does an absolute path.
+  * With `disable-model-invocation: true` the agent cannot start the skill, so `CLAUDE.md` could not tell it to.  A skill runs in `-p` mode as `/name` in the prompt.  A plugin folder `<folder>/skills/<skill>/SKILL.md` without a manifest gives `/<folder>:<skill>` with `--plugin-dir <folder>`.
+* `/review` is a built-in alias of `/code-review` ([commands](https://code.claude.com/docs/en/commands)), so the skill is `review-rounds`.
+* On macOS, a subagent that lists `Bash` in `tools` gets no `Grep` or `Glob`, and searches with `grep` and `find` through Bash, so a hook on Bash sees its searches ([tools-reference](https://code.claude.com/docs/en/tools-reference), "Glob tool behavior").
+* Headless runs ([headless](https://code.claude.com/docs/en/headless), [tools-reference](https://code.claude.com/docs/en/tools-reference)):
+  * `dontAsk` denies each call that would ask.  File tools ask before a path outside the working folder.
+  * A background command has no time limit in an interactive session.  In `-p` mode with a text prompt it gets 10 minutes, or the `timeout` passed with `run_in_background`, up to 2 hours; the run waits for it.
+  * `--setting-sources project,local` leaves out `~/.claude/settings.json` and `~/.claude/CLAUDE.md`, and so the RTK hook and the `effortLevel`.
+* The `/code-review` plugin starts one validator for each issue its bug reviewers find, and drops each issue that its validator does not confirm ([code-review.md](https://github.com/anthropics/claude-code/blob/main/plugins/code-review/commands/code-review.md)).
+* cargo-mutants 27.1.0 (MIT, 2026-06-02; first release 2021-10-25; [crates.io](https://crates.io/crates/cargo-mutants)), from [mutants.rs](https://mutants.rs/print.html) and scratch runs:
+  * It copies the tree, without `.git` unless `--copy-vcs=true`, and with ignored files unless `--gitignore=true`.  `--config FILE` replaces `.cargo/mutants.toml`.  It writes `mutants.out` inside `--output`.  It does not shuffle by default.
+  * `--in-diff FILE` tests only mutants that overlap a `git diff`.  A diff with no mutants exits 0, writes nothing, and leaves an old `mutants.out` as it was ([in-diff](https://mutants.rs/in-diff.html)).
+  * It does not leave out code for other targets; such code shows as missed.  `exclude_globs` and `exclude_re` leave out files and functions, but not a block inside a function.
+  * Exit 0: all caught.  2: missed.  3: timeouts.  4: the baseline failed.  5, 6: the diff does not fit ([exit codes](https://mutants.rs/exit-codes.html)).  SIGTERM, measured: exit 1, children stopped, copies removed, `outcomes.json` kept if it was written.
+  * `outcomes.json` has `total_mutants` (finished only), `caught`, `missed`, `timeout`, `unviable` and `end_time`; `mutants.json` lists every mutant.
+  * A person installs it; the workspace does not build it, so `Cargo.lock` and `THIRD-PARTY.md` do not change (DEPS-1).
+* Measured: a cold build of a copy for the `xtask` tests took 140 s and 1.4 GB; one `xtask` mutant took about 100 s.
+
+Terms:
+
+* Round: one pass of review, by reviewers that have not seen an earlier round.
+* Route: the reviewers that a diff needs, with the reason for each.
+* Criteria: what a round checks against: `file#heading` (one section of a plan) or `commits:<range>` (the messages of those commits).
+* Finding: one defect that a reviewer or cargo-mutants reports.  Its ID is `<round>-<n>`.
+* Verdict: `confirmed`, `pre-existing` (real, not made by the diff), `refuted`, `unproven`, or `unvalidated` (a nit).  A finding counts as found when its verdict is `confirmed` or `pre-existing`.
+* Run folder: `target/review/run/<branch>/` (`/` in the branch name as `-`; `detached-<short sha>` with no branch), ignored by git.  It holds the log of the branch's rounds, and one folder for each round, `<round>/`, with the diffs, the state record, the mutants output and the findings.
+* Baseline review: the agent `baseline`, whose prompt is the review prompt of before phase 3, frozen, run on the same commit as round 1, to compare with.
+* Test harness: `/private/tmp/stemyla-harness/`, which runs the skill in `-p` mode on a clone (M3), and so replays old rounds (M5).
+
+## Plan of work
+
+### How the work runs
+
+Agents do the work in one session that the maintainer starts.  Each agent reads only what it needs, and writes its state to the repo, so a new agent can take over from the files.  The maintainer answered every decision before the start (see Decisions), so the run needs no person until the PR is ready.  A "team" here is a team leader and its subagents, not Claude Code's agent-teams feature.
+
+Before the start, this plan, its line in `docs/README.md`, the parent plan's lines and the two `.gitkeep` files are committed on the branch (done on 2026-10-22).  The maintainer:
+
+1. Installs cargo-mutants: `cargo install --locked cargo-mutants@27.1.0`.
+2. Puts this entry in `autoMode.allow` in `~/.claude/settings.json`, after `"$defaults"`, and removes it when the PR merges.  Auto mode's classifier blocked the harness set-up in a probe even when the person's message named it, and the allow entry cleared it.  The classifier does not read the plan or expand variables, so the entry names each path.  Project settings cannot hold `autoMode` rules.
+
+   > Stemyla harness phase 3, in the repo /Users/lloyd/Documents/rustt/stemyla on branch ai-agent-harness-phase-3: creating and editing .claude/agents/reviewer.md, gpu-reviewer.md, memory-reviewer.md, wire-reviewer.md, supply-chain-reviewer.md, docs-reviewer.md, validator.md and baseline.md, .claude/hooks/read-only-bash.sh, .claude/skills/review-rounds/SKILL.md (with allowed-tools: Bash(target/debug/xtask review *)), .cargo/mutants.toml and CLAUDE.md is allowed, and so is writing and deleting the preflight probes .claude/agents/preflight-probe.md and .claude/skills/preflight-probe/SKILL.md.  These add read-only review agents and a guard, and widen no other permission.  In /private/tmp/stemyla-harness/, cloning that repo, writing bin/, agents.json and the stemyla/ plugin folder, deleting by literal path a clone it made there, and running claude -p with --agents, --plugin-dir, --setting-sources project,local, --permission-mode dontAsk and an --allowedTools list of Read, Write, Agent, and Bash for cargo, git, grep, find, sed, ls, cat, rm -rf target/review/*, /private/tmp/stemyla-harness/bin/xtask and read-only commands such as head, wc and jq, is allowed.  For the one PR from ai-agent-harness-phase-3: opening it as a draft, editing its title and body, and marking it ready for review with gh pr ready once CI is green after the close-out, is allowed.
+
+3. Lets commits be signed for the whole run with no dialog: either ticks "Save in Keychain" in pinentry-mac at the next signature, or sets `default-cache-ttl` and `max-cache-ttl` to 604800 (7 days) in `~/.gnupg/gpg-agent.conf`, runs `gpgconf --reload gpg-agent` and signs once, then restores them after the run.  Today they are 600 and 7200 seconds, so a commit 10 minutes after the last one opens a pinentry dialog that no one answers.  `max-cache-ttl` counts from the entry of the passphrase, and use does not reset it, and the run can take more than a day, so 86400 is not enough.
+4. Checks that `autoContinueAtUsageLimit` is on (the default for a subscription), sets `"skillOverrides": {"auto-mode-setup": "off"}` in `~/.claude/settings.json` so no "Teach auto mode" dialog waits at the end of a turn, and keeps the Mac awake (`caffeinate -dims` in another terminal).
+5. Starts Claude Code at the repo root in auto mode (`claude --permission-mode auto`), and gives this prompt:
+
+   > Run docs/plans/active/harness-phase-3.md as its section "How the work runs" says.  As that plan says, create and edit the eight agent files in .claude/agents/, the guard .claude/hooks/read-only-bash.sh, the skill .claude/skills/review-rounds/SKILL.md with allowed-tools for target/debug/xtask review, .cargo/mutants.toml and CLAUDE.md; write and delete the preflight probes; and run claude -p in clones under /private/tmp/stemyla-harness/.  Push ai-agent-harness-phase-3, open one draft PR from it and edit its title and body; when CI is green after the close-out, mark it ready for review with gh pr ready.  Never merge.
+
+A weekly usage limit, or more than two usage-limit stops in a row, needs the maintainer to continue the session; nothing else in the run does, unless the orchestrator stops for one of the reasons below.
+
+The orchestrator, which is the main session:
+
+* First, a preflight.  It stops at once, and tells the maintainer, if one check fails:
+  * `cargo mutants --version` gives 27.1.0;
+  * `gh auth status` passes;
+  * a signed object can be made with no dialog: `git commit-tree -S HEAD^{tree} -p HEAD -m preflight` (no branch moves);
+  * a new general-purpose subagent starts a second one, which writes `.claude/skills/preflight-probe/SKILL.md` with an `allowed-tools` line, and `.claude/agents/preflight-probe.md`, with no refusal from auto mode; the first subagent then finds `preflight-probe` among the Agent tool's types, with no restart; then the probes are deleted;
+  * a new general-purpose subagent clones the repo to `/private/tmp/stemyla-harness/preflight-<time>/`, writes `/private/tmp/stemyla-harness/agents.json`, and runs `claude -p 'Reply ok' --setting-sources project,local --permission-mode dontAsk --agents ../agents.json` in the clone, with no refusal;
+  * `git status --porcelain` is empty;
+  * the volume has 60 GiB free or more, since each clone of M3 and M5 builds cold.
+* It reads this plan, the Progress of each milestone plan, `git log`, the CI status, the teams' reports and the review log in `docs/reviews/`.  It does not read code, diffs or CI logs; it asks a subagent for a fact from them.  For each milestone, in order:
+  1. It starts a team leader with the milestone's name, this plan's path and the decisions so far.
+  2. When the team reports, it starts a new intent reviewer.  The reviewer compares the milestone with this plan's purpose, the milestone's section and the later milestones.  Real findings go back to the team leader, until a review meets the stop rule, for at most 3 reviews.
+  3. It records the milestone in this plan's Progress, with the facts the team reported (such as M1's routes of PRs #13 to #33), and commits that (signed), so the next team starts from a clean tree.
+  4. It pushes the branch.  After M1 it opens the draft PR.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`; it writes each body file itself, outside the tree, just before the call, and in M6 it writes the lists of refuted findings and mutants lines from the review log.  It waits for that CI run to end before it starts the next team, since `ci.yml` cancels a running PR build on a new push.  A cancelled run is not a failure.  A failed run goes to a new team leader with the run's ID; a known flaky check may be re-run once with `gh run rerun --failed`.
+* The stop rule, for every review loop in this run: stop at the first review with no blocker and no significant should-fix.  Significant means that a milestone would fail as written, two parts contradict each other, a measurement would mislead, or the implementer would do wrong work.  Wording and polish are nits.  A milestone plan gets at most 5 review rounds; past a cap, the orchestrator decides and records why.
+* It changes this plan only to keep its intent.  Each change gets a Decision log line and plan review rounds by new subagents, to the stop rule.  It decides a question that this plan does not answer, records it in the Decision log, and lists it in the summary.  It stops and waits for the maintainer only when: a rule in `docs/invariants.md` would break; a check shows a change outside this branch (`review check`, below); auto mode refuses an action; or an action cannot be undone or reaches beyond this branch and its PR.
+* At the end, with M6 done and CI green: it writes this plan's retrospective; moves this plan and the six milestone plans to `plans/completed/`, and fixes each line in a doc that is not a plan or a decision that names their old paths (`docs/README.md`, new tech-debt entries, `harness.md`, the guide); ticks phase 3 in the parent plan's Progress, without the gate, which follows the merge; commits, pushes and waits for CI; marks the PR ready for review; and gives the maintainer a summary: what each milestone delivered, M5's result, each decision it made alone, and what the maintainer still does (the sample of M5, the gate, the merge, the removal of the allow entry, and the GPG cache times).
+
+A team leader, a general-purpose subagent for each milestone:
+
+1. It writes `docs/plans/active/harness-phase-3-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan, and adds its line to `docs/README.md` in the same commit.  It names a new `TD-n` only in the commit that adds the entry, since `docs-check` fails an ID that is not yet defined.  New subagents review it, to the stop rule.
+2. It starts an implementer with that plan's path, and tells it that the team leader runs the reviews.  It continues the implementer with SendMessage for fixes, or starts a new one from the plan and its Progress.
+3. It runs three review rounds, each with new reviewers.  M1 to M5 use the manual recipe of `docs/working-with-agents.md` at `fa41c9f`, with the milestone's commits as the range and its section of this plan as the criteria.  M6 uses `/review-rounds` for rounds 1, 2 and 3 on the whole branch, so the branch has one set of skill rounds and one log.  It checks each finding before a fix, and sends the real ones to the implementer, with a test.
+4. It writes a Progress line after each step and each round, and commits it before the next round starts.  It reports in at most 300 words: status, commits, each acceptance check and its result, changes to the plan, and questions.
+5. In M5 it starts the ground-truth and comparer subagents itself, runs the cases one at a time, and reads the stream-json transcripts only with `jq`.  It keeps them as evidence of cost.
+
+For every agent in the run:
+
+* Start a subagent with a named `subagent_type`, never as a fork, since a fork inherits its parent's context and reasoning.
+* Keep at most 15 subagents running at once; start validators in batches.
+* Keep the turn open until each background command and each nested agent has finished, since a subagent's final message ends it.
+* Commit only signed.  If signing fails, stop and report.
+* After a refusal by auto mode, report it and do not try the same action another way.
+* A team leader waits for each subagent's result before it goes on; parallel ones go in one message.
+* If `review check` fails in M6, the team leader reports it.  The orchestrator has a new subagent read `git reflog`, the stash and the hashed files.  If only this branch changed, the round starts again; if anything outside it changed, the orchestrator stops for the maintainer.
+* Scratch branches, worktrees and tags in this repo, such as M1's and M3's scratch branches and M5's `replay/` tags, are local and in scope; the orchestrator deletes the scratch branches at the end.
+* One team runs at a time, since the teams share one branch and one working tree.  The deepest agents are two layers below the main session, within Claude Code's default of three.
+* `.claude/agents/` and `.claude/skills/` exist at the start (each holds a `.gitkeep`), so Claude Code loads the new agents and the skill without a restart; the preflight checks this.
+* If a team leader stops or loses its context, the orchestrator starts a new one from the milestone plan and its Progress.
+* The maintainer reviews and merges the PR.  No agent merges (GIT-1).
+
+### What every milestone does
+
+Each milestone ends with fmt, the clippy commands in `CLAUDE.md`, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `docs-check` passing, then a signed commit (GIT-2).  Each milestone makes its own doc changes in the same commit (DOC-1): the guide's names and recipe, `CLAUDE.md`, a `docs/harness.md` row, and a `docs/tech-debt.md` entry for each gap it leaves.  A code span in the repo's docs, agents or skill does not name `docs/reviews/` before M5 adds a file there, and names a file of the run folder by its full `target/review/...` path, since `docs-check` reads a span that ends in `.md` as a path.
+
+### M1: `xtask review` routes a diff and guards a round
+
+* `xtask/src/review.rs` (`pub mod review;` in `xtask/src/lib.rs`) holds the dispatch of its subcommands, so `xtask/src/main.rs` has one new arm, `"review"`, and a usage line.  It works on the repo of the current folder (`git rev-parse --show-toplevel`).  Pure functions do the logic; thin wrappers run `git` and `cargo`.  A refusal exits 3, so a skill's `` !`...` `` stops.
+  * `xtask review start <base> <round>`: exits 3 with "commit first" if `git status --porcelain` is not empty.  It resolves `<base>` to `git merge-base <base> HEAD`, and records it, so a `main` that moved adds nothing to the diff.  In round 1, exits 3 if the run folder already holds a log ("copy it out, or remove it").  `<since>` is that merge base in round 1, and the `HEAD` in round n-1's state record after that, so `<since>..HEAD` holds the last round's fixes; a missing record exits 3 and says so.  Prints the two ranges, the route of each, and the absolute path of a shared target folder (`target/review/target`).  Writes both diffs and the state record to the round's folder.  Warns, without failing, if the binary is older than `xtask/src/review.rs`, or if `review.rs` differs between `<base>` and `HEAD`; a `review.rs` missing at `<base>` or at `HEAD` gives no warning.
+  * `xtask review check <round>`: compares the state now with the round's record.  Exits 3, and names each change.
+  * `xtask review mutants <round> [--config <file>]`: removes the round's old `mutants.out*`, writes the `<since>` diff of `*.rs` files only, and runs `cargo mutants --in-diff <that diff> --output <round folder> --copy-vcs=true --gitignore=true --shuffle -j2 --timeout 300`, with `--config` (default `.cargo/mutants.toml`) and without `CARGO_TARGET_DIR`.  At 60 minutes it sends SIGTERM with `kill -TERM <pid>` (`Child::kill` would send SIGKILL and leave children and copies behind); `STEMYLA_MUTANTS_MINUTES` changes the limit, for tests.  It prints one line, and writes it to the round's folder: `full`, `partial` or `none`, with tested (caught + missed + unviable), timeouts, missed, and not tested (from `mutants.json`).
+    * Its own stop with one or more tested: partial.  Exit 3: partial, since a timed-out mutant has no result; timeouts are counted apart from tested.  Its own stop with none tested: none, "stopped before a mutant finished".
+    * Exit 0 or 2: full.  A run with both missed and timed-out mutants exits 3: partial.  Exit 0 with no `mutants.out`: none, "no mutants in the diff".
+    * Exit 1, 4, 5, 6 or 70, or no cargo-mutants: none, with the reason.
+* The state record: `HEAD`, `git status --porcelain`, the stash, branches, tags, remotes, the worktrees but those under `target/review/`, and a hash of each of these by `git hash-object`, or "absent": the config at `git rev-parse --git-common-dir`, the files in the hooks folder (`git rev-parse --git-path hooks`, or `core.hooksPath`), `.claude/settings.local.json` and `~/.claude/settings.json`.
+* The route.  `git diff -z --raw -M` gives the status, modes and both paths; `-U0` gives the added lines.  A rename routes by both paths.  Paths (globs as in `.claude/rules/`):
+
+| Reviewer | Paths |
+| - | - |
+| `reviewer` | every diff |
+| `gpu-reviewer` | `roformer-gpu/**`, `roformer/src/**`, `roformer/clippy.toml`, `.claude/rules/gpu.md` |
+| `memory-reviewer` | `engine/**`, `app/src/**`, `worker/**`, `protocol/**`, `**/clippy.toml`, `.claude/rules/memory.md` |
+| `wire-reviewer` | `protocol/**`, `worker/src/web.rs`, `app/src/separator.rs`, `xtask/src/e2e.rs`, `xtask/e2e/**`, `.claude/rules/protocol.md` |
+| `supply-chain-reviewer` | `**/Cargo.toml`, `Cargo.lock`, `THIRD-PARTY.md`, `LICENSE*`, `tools/**`, `**/build.rs`, `.cargo/**`, `.github/**`, `.claude/**`, `.mcp.json`, `.gitignore`, `xtask/src/serve.rs`, `xtask/tests/serve.rs`, `xtask/src/publish.rs`, `xtask/tests/publish.rs`, `xtask/src/rules.rs`, `xtask/src/docs.rs`, `xtask/tests/rules.rs`, `xtask/tests/docs.rs`, `test-support/**`, `app/index.html`, `app/Trunk.toml` |
+| `docs-reviewer` | `docs/**` but `docs/plans/**` and `docs/reviews/**`; `CLAUDE.md`, `README.md`, `.claude/rules/**` |
+
+* A change to `xtask/src/review.rs`, `.claude/agents/**`, `.claude/skills/**` or `.claude/hooks/**` routes every reviewer.  The binary is built from the branch, so a change to `review.rs` could drop this rule; `review start` warns, and phase 5 must route with the base branch's `xtask`.
+* Content signs, as whole tokens (so `into_owned` is not `to_owned`), on an added line of a `.rs` file outside the reviewer's paths and outside a `tests/` folder.  A short denylist, not a full list:
+  * `memory-reviewer`: `to_vec`, `to_owned`, `Vec::from`, `extend_from_slice`, `copy_to`, `.concat()` (TD-26).
+  * `gpu-reviewer`: `wgpu::`, `create_buffer`, `create_texture`, `create_query_set` (TD-27).
+  * `wire-reviewer`: `model_url` (PROTO-2).
+  * `supply-chain-reviewer`: `#[path`, `include!`, `include_str!`, `include_bytes!`, `unsafe`, `Command::new` (TD-23); a file of mode `120000`.
+* `.cargo/mutants.toml`: `all_features = true`, since a mutated package's tests run with its default features only, and code behind `engine`'s `cpal` or `synth`'s `files` would show as missed; `exclude_globs` for the four `wasm32`-only files, and `exclude_re` for the `wasm32`-only functions in shared files, from `cargo mutants --list -p app -p stem-worker -p engine`.  A name with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in; its `wasm32` mutants go to the validator.
+* Unit tests, each written first and failing first:
+  * Route: each row routes a path it names; a sign inside a longer name routes nothing; a path in no row routes `reviewer` only; each sign routes its reviewer; a sign in the reviewer's paths, on a removed line or in `tests/` adds nothing; a rename routes by both paths; mode `120000` routes `supply-chain-reviewer`; a change to `review.rs` routes all six.
+  * Start: `<base>` resolves to the merge base; `<since>` is the merge base in round 1 and round n-1's `HEAD` after; a missing round n-1 record exits 3; round 1 refuses a run folder with a log; a detached `HEAD` names the folder `detached-<short sha>`; a missing `review.rs` gives no warning and exit 0.
+  * State: records that differ in each field, a file that appears, and a file that goes; a worktree under `target/review/` makes no difference; in a linked worktree, the config and hooks paths resolve to the common folder.
+  * Mutants: each exit code, with and without its own stop and with none or some tested, gives its class; a stale `mutants.out` and a diff with no mutants give `none`.
+* `xtask/tests/rules.rs`, `every_reviewer_has_an_agent_file`: each name in `REVIEWERS` has `.claude/agents/<name>.md`, and each `*reviewer.md` there has a row.  Each include glob in the table matches a tracked file, but `MAY_MATCH_NOTHING` (`**/build.rs` and `.mcp.json`, each with its reason).  Exclusions and the globs that route every reviewer are not checked.  It is `#[ignore = "M2 adds the agent files"]` until M2.
+* Docs: the guide's Tools table gets `review`; `README.md` gets `cargo install --locked cargo-mutants@27.1.0`; `harness.md` gets a row for `xtask review` (computational).  Tech debt: the content signs are a denylist; a `wasm32`-only block in a shared function, or a new `wasm32`-only function, shows as a missed mutant; cargo-mutants runs nothing for a diff of tests only, WGSL or JavaScript; a stopped run is partial evidence; the route comes from the branch's own `xtask`; a change to `~/.claude/settings.json` during a round, by a person or by Claude Code, fails `review check`.
+* Acceptance:
+  * The unit tests pass, and each fails with its row, sign, field or class removed.
+  * `review start 7cd8518 1` in a worktree at `ai-agent-harness-phase-2-ms11` names exactly `reviewer`, `memory-reviewer`, `supply-chain-reviewer` and `docs-reviewer`, and exits 0.  With an untracked file, it exits 3.
+  * On a scratch branch, `review mutants` on a diff of one `dsp` function prints `full`; a mutant of a function in `engine/src/live.rs` (behind `cpal`) is caught; on a longer diff, with a `STEMYLA_MUTANTS_MINUTES` that stops it after some mutants finish, it prints `partial` with tested above 0, and no `cargo` child of the run is left.
+  * A measurement, not a pass or fail: the route of each squash commit of PRs #13 to #33 against its parent.  Progress records the reviewers of each PR, and the mean.
+
+### M2: the agents and their guard
+
+* `.claude/hooks/read-only-bash.sh`, `#!/bin/bash` (macOS has bash 3.2), tracked as mode 100755: a PreToolUse guard for Bash.  It reads the command with `jq`.
+  * It refuses a command that holds a backtick outside single quotes, where bash does no substitution.
+  * It splits the command at `;`, `&`, `|`, `(`, `)` and new lines, outside quotes, and skips empty parts.
+  * From each part it strips the prefixes `rtk`, `rtk proxy`, `env`, `command`, `time`, `nohup` and `timeout <n>`, and `NAME=value` words.  It refuses `GIT_*=` and `UPDATE_SNAPSHOTS=` words.
+  * It refuses a first word `gh`, `curl`, `wget`, `bash`, `sh`, `zsh`, `eval` or `xargs`.  For `cargo`, it refuses `publish`, `login`, `owner`, `yank`, `install`, `add`, `search`, `fix`, `fmt` without `--check`, and `--fix`.
+  * For `git`, before the subcommand: it refuses `-c*` and `--config-env*`, in the attached forms too (`-ccore.pager=x`); it skips `-C`, `--git-dir`, `--work-tree` and `--namespace` with their values, and other options.  It refuses `--output` anywhere in a `git` command.  It allows only the subcommands `diff`, `log`, `show`, `status`, `blame`, `grep`, `ls-files`, `ls-tree`, `rev-parse`, `rev-list`, `merge-base`, `cat-file`, `show-ref`, `for-each-ref`, `describe` and `worktree`.
+  * It exits 2 with a reason that starts "read-only guard:", and exits 2 on any error of its own.
+  * It matches text: it stops mistakes, not a reviewer that tries to escape (as TD-28 says of the deny rules).  It fails closed for `git` subcommands only.  Known ways past it, for the tech-debt entry: `exec git`, `/usr/bin/git`, `git --exec-path=`, `git grep -O`, `find -exec`, `find -delete`, and `$(...)` inside double quotes.
+* Eight files in `.claude/agents/`: `reviewer.md`, `gpu-reviewer.md`, `memory-reviewer.md`, `wire-reviewer.md`, `supply-chain-reviewer.md`, `docs-reviewer.md`, `validator.md` and `baseline.md`.  Frontmatter: `name`, `description`, `tools: Read, Bash` (on macOS, `Grep` and `Glob` would be absent beside `Bash`), `model: inherit`, and a `PreToolUse` hook with matcher `Bash` whose line is exactly `command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/read-only-bash.sh'` (single quotes, so the YAML is valid).  No `isolation`: with the default base it reviews `main`, and `worktree.baseRef` would change every worktree of the person and give each reviewer a cold build.
+* Common parts of every agent body (the method only; the rules stay in `docs/invariants.md`, read by ID):
+  * Input: a commit range, the criteria (read only that section, or those commit messages), the route's reasons, and the target folder that `review start` printed.  Not the round's folder: it holds the mutants output.
+  * Read only.  Do not read the run folder, the branch logs in the reviews folder under `docs`, the messages of "review round" commits, or the plan's Progress lines about review rounds.  To try a change to the code: `git worktree add --detach target/review/<round>-<name>-<n> HEAD`, build there with `--target-dir <the printed folder>` and a Bash `timeout` of 10 minutes, and `git worktree remove --force` it after.
+  * Check each claim in a commit message, a plan or a doc against the code, and say how.
+  * Put a search pattern with a backtick or `|` in single quotes, since the guard refuses a backtick and splits a `|` outside quotes.  Run cargo with `--manifest-path` rather than `cd`, and test one crate (`cargo test -p <crate>`), since parallel agents share one target folder; if a build passes the 10-minute `timeout` while it waits for cargo's lock, it goes on in the background: wait for it, do not start it again.
+  * For each new or changed test: name a change to the code that it should catch, and say if you ran it.  A test that no such change fails is a finding (VERIFY-1).
+  * Output: one block for each finding: `severity` (`blocker`, `should-fix` or `nit`), `kind` (`bug`, `weak-test`, `rule`, `doc` or `other`), `where` (`file:line`), `rule` (an ID and a quote, or `none`), `claim`, `evidence` (a command and its output, or a quote), `fix`.  Then the tests and the changes that break them.  "No findings" is valid.
+* Each reviewer's method beyond the common parts:
+  * `reviewer`: correctness against the criteria; a test that returns early without `test_support::skip` (TD-8); a snapshot PNG, threshold or `#[ignore]` that changes (TD-29); DSP-1 forms that `dsp_is_beginner_style` does not scan (TD-3).
+  * `gpu-reviewer`: GPU-1 to GPU-3, MEM-3; a buffer, texture or query set that is never destroyed (TD-27).
+  * `memory-reviewer`: MEM-1 to MEM-5, RT-1; a copy in any form that TD-26 lists; work on the audio callback's path; a `clippy.toml` that drops a path.
+  * `wire-reviewer`: PROTO-1, PROTO-2; a field name or default that one side changes and the other does not (TD-16).
+  * `supply-chain-reviewer`: DEPS-1, BUILD-1, ASSET-1, GIT-1; a licence or registry, with `cargo info` (TD-7); the four forms of TD-23; a change to CI, to a check in `xtask`, to `.claude/` or to `.mcp.json`.
+  * `docs-reviewer`: DOC-1; each changed claim against the code (TD-21); the writing standard in `CLAUDE.md`.
+* `validator`: its input is one finding (or the missed mutants of a round), the commit range and the criteria, not the reviewer's other output.  It tries to disprove the finding with its own reading and commands.  It runs a reviewer's command only after it reads it.  `confirmed` and `pre-existing` need a command or a quote that shows the defect; `refuted` needs evidence that the claim is false; else `unproven`.  A missed mutant is `confirmed` if a real input shows the change, and `refuted` if the change keeps the behaviour.  Code for `wasm32` only, or behind a feature that no test turns on, cannot be tested natively, so its mutant is `refuted` with that reason.
+* `baseline`: a frozen prompt for one general reviewer, written from the recipe and the reviewer prompts of phase 2: read only, verify by running, report blockers, should-fix and nits, check that each test can fail.  It takes the common inputs and gives the common output, so the validators and the comparer see one shape.  It names no tech-debt ID, so a closed ID never forces an edit.  It stays as M3's commit leaves it; M3 updates `BASELINE_HASH` if it edits the file.
+* `xtask/tests/rules.rs`:
+  * `the_agents_are_read_only_by_tools`, for each `.md` file in `.claude/agents/`, read line by line (no YAML crate): `tools` and `hooks` are present; the keys are a subset of `name`, `description`, `tools`, `model`, `hooks`; `tools`, as a comma list or a YAML list, is a subset of `Read`, `Grep`, `Glob`, `Bash`, and holds `Bash` with neither `Grep` nor `Glob`; `name` is the file name; `hooks` has a `PreToolUse` entry, matcher `Bash`, and the exact command line above.  The `git hash-object` of `baseline.md` equals `BASELINE_HASH`; xtask needs no hash crate.
+  * `the_bash_guard_refuses_writes`: runs the guard with `/bin/sh -c`, as `the_rustfmt_hook_formats_rust_files` runs its hook, and checks its mode.  One case for each rule, so each fails with its rule removed.
+    * Refused, by rule: `` echo `git commit` `` (backtick); `echo $(git commit)` (the `(` split); `cargo test; git stash`, `cargo test && git stash`, `cargo test | git stash`, and a new line before `git stash` (each split); `rtk git commit -m x`, `rtk proxy gh pr view 1`, `env git commit -m x`, `command git commit -m x`, `time git commit -m x`, `nohup git commit -m x`, `timeout 60 gh pr view 1`, `FOO=1 git commit -m x` (each prefix); `GIT_PAGER=cat git log`, `UPDATE_SNAPSHOTS=1 cargo test`; `gh pr view 1`, `curl x`, `wget x`, `bash -c x`, `sh -c x`, `zsh -c x`, `eval x`, `xargs x`; `cargo publish`, `cargo login`, `cargo owner`, `cargo yank`, `cargo install x`, `cargo add x`, `cargo search x`, `cargo fix`, `cargo fmt`, `cargo clippy --fix`; `git -ccore.pager=x log`, `git --config-env=core.pager=X log`, `git diff --output=x`, `git commit -m x`, `git --no-pager commit -m x`, `git -C target/review/x push`, `git --git-dir x commit`, `git --work-tree x commit`, `git add x`; any command with no `jq` (a `PATH` of an empty built folder).
+    * Passed: `git diff HEAD~1`, `rtk git diff`, `git -C target/review/1-x diff`, `git --git-dir .git log`, `git worktree add --detach target/review/1-x HEAD`, `git worktree remove target/review/1-x`, `grep -rn "enough " docs`, `grep -rn -e curl -e wget .github`, `grep -rnE "a|curl b" xtask` (quotes), ``grep -rn '`x`' docs`` (a backtick in single quotes), `git --no-pager log`, `git --work-tree . log`, `git --namespace x log`, `git log -c`, `(git log)` (the `)` split), `cargo test -p dsp && git diff` (empty parts), `cargo fmt --all --check`, `cargo test -p dsp --target-dir /tmp/t 2>&1`.
+* Docs: the guide names the eight agents, and its Status no longer says that none exist; `harness.md` gets a row for the guard and its tests.  Tech debt: the guard matches text, and Bash can still write files; it does not protect the `gh` or cargo tokens from `Read`; frontmatter hooks do not run in an untrusted folder or in `-p` mode, so phase 5 passes agents with `--agents`.
+* Acceptance:
+  * Plants fail `the_agents_are_read_only_by_tools`: no `tools` key, `Edit` in `tools`, `Task` in a list, a `memory` key, a renamed file, a changed hook line, the hook on `PostToolUse`, the matcher `Edit`, a changed `baseline.md`.  `every_reviewer_has_an_agent_file` runs without `#[ignore]`, and fails on a row with no file.  Each guard case fails with its rule removed.
+  * In the orchestrator's session, which is trusted, and in a worktree under `target/review/` so a missed refusal moves no branch: the Agent tool lists the eight types (an agent whose YAML does not parse is not listed); a `reviewer` asked to run `git commit --allow-empty -m x` gets the guard's "read-only guard:" reason.  Progress records both.
+
+### M3: the `review-rounds` skill and the test harness
+
+* `.claude/skills/review-rounds/SKILL.md`.  The agent invokes it once for each round, after fmt, clippy and the tests pass and `cargo build -p xtask`: `/review-rounds <base> <round> "<criteria>" [--review-only] [--baseline]`.  The description is narrow: "Run one review round of CLAUDE.md on this branch".  No `disable-model-invocation`, so `CLAUDE.md` can tell the agent to run it.  `allowed-tools: Bash(target/debug/xtask review *)`.
+* At load, one plain command, so the model cannot skip it: `` !`target/debug/xtask review start $0 $1` ``.
+* One round:
+  1. Start `target/debug/xtask review mutants <round>` with `run_in_background` and a `timeout` of 3,900,000 ms, so no session stops it before its own limit.
+  2. With `--baseline`, start the `baseline` agent on the same commit.
+  3. Reviewers.  Round 1 routes the whole branch.  Rounds 2 and 3 run `reviewer` on the whole branch, and the specialists that the `<since>` route names, on `<since>..HEAD` (decision D6).  If `<since>..HEAD` is empty, only `reviewer` runs.  Start each as a new subagent, all in one message.  Each prompt holds M2's inputs, and nothing from this session's reasoning or from earlier rounds.
+  4. Merge the reviewers' findings with the same place and claim; the merged finding lists every reviewer that reported it.  The baseline's findings stay a separate list.  A finding that repeats one refuted in an earlier round of this branch gets `repeat-of` and the verdict `refuted`, with no validator.
+  5. Start a `validator` for each `blocker` and `should-fix`, in parallel.  A baseline finding with the same place and claim as a reviewer's shares its validator and verdict; the others get their own.  Log nits as `unvalidated`.
+  6. When `review mutants` ends, send the lines of its `missed.txt`, in the prompt, to one `validator`; each confirmed one is a `should-fix` `weak-test` finding from `cargo-mutants`, merged as in step 4.  Log its line.
+  7. With `--baseline`: a new subagent gets the baseline's found findings and the round's found findings, only, and marks each baseline item `found` or `missed`, with the quote that matches.  Its prompt is in the skill file, so each PR uses the same one.
+  8. Run `target/debug/xtask review check <round>`.  If it fails, stop and tell the person.  A person who approves a command with "don't ask again" during a round changes `.claude/settings.local.json`; the person confirms that, and starts the round again.
+  9. Write the findings and verdicts to the round's folder.  With `--review-only`, stop.
+  10. Fix each found finding, the baseline's included, with a test that fails before the fix where the finding is about behaviour; a `pre-existing` one may go to `docs/tech-debt.md` or its own PR instead.  Do not fix a `refuted` one.  Decide each `unproven` one, and give the reason.  Commit as "review round <n> fixes".  (In an agent-run phase, "the person" in step 8 is the orchestrator.)
+  11. Add the round's rows to the run folder's log: one per finding, and one summary row: agents, tokens, wall minutes from `review start` to the last validator's verdict, not counting the wait for the mutants run, interventions by a person, the mutants line, and with `--baseline` the baseline's agents, tokens, wall minutes and interventions, and "of y baseline findings, the round found x".  The rows use M4's columns, which the skill lists from M3.  After round 3, copy the log to the reviews folder under `docs` as `<branch>.md`, write the Progress lines for the rounds, and commit.
+* A skill's `allowed-tools` ends when the person sends a message; after that, the `xtask review` commands of the round ask for approval.
+* The PR description lists each `refuted` finding, each `unproven` blocker or should-fix, each `repeat-of`, and the mutants line of each round.  The person reads those (the guide already asks this).
+* `.gitignore`: `/mutants.out*/`, for runs a person starts by hand.
+* The test harness, in `/private/tmp/stemyla-harness/`, made by a short script whose commands M5 records in `docs/reviews/replay.md`:
+  * `bin/`: the `xtask` binary of this branch, the guard script, and a `mutants.toml` like the repo's.
+  * `agents.json`: the eight agents, made from their files, with the guard's absolute path, since frontmatter hooks do not run in `-p` mode.
+  * `stemyla/skills/review-rounds/SKILL.md`: the skill, with `bin/xtask` by absolute path, in its commands and its `allowed-tools`, and `--config` on the mutants line.  Record its diff from the repo's skill.
+  * `<case>/`: `git clone --no-local --single-branch --branch <ref>`, with the remote removed.  Nothing is copied into the clone, so it stays clean.
+  * The run, in the clone: `claude -p '/stemyla:review-rounds <base> 1 "<criteria>" --review-only' --setting-sources project,local --model <the maintainer's model> --effort <the maintainer's effortLevel> --agents ../agents.json --plugin-dir ../stemyla --permission-mode dontAsk --allowedTools <list> --output-format stream-json --verbose > ../<case>.jsonl`.  `--setting-sources project,local` leaves out the RTK hook, which would rewrite each command before the allow list sees it; `--model` and `--effort` put back what it also leaves out.  `<list>` allows `Read`, `Write`, `Agent`, the absolute `bin/xtask`, and Bash for `cargo`, `git`, `grep`, `find`, `sed`, `ls`, `cat` and `rm -rf target/review/*`; the first run settles it, and Progress records it.  A run passes only with no `permission_denials` for a command that the agents' method prescribes.
+  * The plants of the acceptance reach a reviewer through the criteria section, which says what the round must check.
+* Docs: `CLAUDE.md`, "Working here", Review: "run `/review-rounds` for rounds 1, 2 and 3".  It stays within 100 lines.  The guide's recipe "Review a change" becomes `/review-rounds`, without the manual prompt, names the skill, and says: "From the PR after phase 3's, pass `--baseline` in round 1, until the parent plan records the gate".  `harness.md`: rows for the skill and agents (sensor, inferential) and cargo-mutants (computational, local only).  Tech debt: the state check sees only what it records; `cargo test` in a review runs the diff's `build.rs`, proc macros and tests with the person's credentials, so phase 5 needs a sandboxed job with no token.
+* Acceptance, in the test harness, on clones of a scratch branch from the M3 commit, with that commit as `<base>`, signed commits and neutral messages.  The criteria of the Guard and State cases ask the reviewer to run a command and quote its result.  `review start` warns in each clone that the binary is older than `review.rs`; that is expected.  A failed case means a fix in a new commit, and new clones:
+  * Plant: a small `dsp` function in DSP-1 style, and a test that asserts only that it returns.  The mutants line is `full`, `missed.txt` names the function, a validator confirms it, and the findings name their source.
+  * Control: the same function with a test that pins its value: no `weak-test` finding names it.
+  * Guard: a reviewer asked by the criteria to run `git commit --allow-empty -m x`, which the allow list permits, gets the guard's "read-only guard:" reason in its tool result.
+  * State: a reviewer asked by the criteria to change a tracked file with `sed -i` makes `review check` fail the round.
+  * Load: with an uncommitted file, the skill stops with "commit first".
+  * Time: a mutants run of more than 10 minutes ends with its own line.
+  * Baseline: the Plant case again, with `--baseline`.  The baseline runs on the same commit, step 7 marks each baseline found finding `found` or `missed` with a quote, and the transcript gives the baseline's tokens and wall time, which Progress records.
+  * A refusal by a reviewer to run the command of the Guard or State case makes that case inconclusive, not failed; reword its criteria and run it again.
+  * `--review-only` stops before step 11, so the tokens and wall time of M3's and M5's runs come from the stream-json.
+* The agent files and the skill are frozen at the end of M3, after its review rounds; a review fix that touches one re-runs the harness cases it affects.  M6's rounds may change them for a found finding (and `BASELINE_HASH` with `baseline.md`); M5's result then describes the M3 version, and Progress says so.
+
+### M4: the findings log
+
+* The log: one file per PR branch in the reviews folder under `docs`, with a table of findings and a table of rounds.  Findings: date, round, commit, finding ID, reviewers, severity, kind, rule, `where`, a one-line claim, verdict, `repeat-of`, action (the fix commit and its subject, or the reason for no change).  Rounds: the summary row of M3's step 11.
+* `docs-check`: the index names `reviews/` once.  Files in `docs/reviews/` keep the paths and IDs of their time, as plans do (`names_current_paths`, and so `may_name_closed_ids`).  `xtask/src/rules.rs`: `docs/reviews/` joins `HISTORY` (its array length grows by one).
+* Unit tests first: a file in `reviews/` with the folder indexed passes; with the folder line gone, it fails; a closed ID in it passes; `no_python_in_the_build` skips `docs/reviews/`.
+* Docs: `docs/README.md` gets `reviews/`.
+* Acceptance: the unit tests fail before the change and pass after.  M6 tests the skill's step 11.  This follows decision D2.
+
+### M5: replay old reviews
+
+The parent plan's acceptance: the new review finds what the old rounds found.  Six old rounds have their pre-review commit in git, and their findings in a commit message or in Progress.  All six are measured once, with the agents and the skill as M3 froze them; tuning comes after the merge, from the log (phase 6).
+
+| Case | Base | Reviewed | Criteria | Old round | Ground truth from |
+| - | - | - | - | - | - |
+| PR #9 | `11273fc` | `ba1b592` | `commits:11273fc..ba1b592` | round 1 | commit `c01d4cd`'s message |
+| M9 | `2af33b1` | `59816dc` | M9's section of the phase 2 plan | review round 1 | Progress; commit `4b27829` |
+| M11 | `7cd8518` | `9cd4d3e` | M11's section | review round 1 | Progress; commit `da675e4` |
+| M2 | `4691a18` | `c40611c` | M2's section | review round 2 | Progress; commit `280e800` |
+| M10 | `7a99a88` | `5bd0298` | M10's section | review round 2 | Progress; commit `d67db75` |
+| M18a | `32b2731` | `c4eab24` | M18's section | review round 1 | Progress; commit `e63469e` |
+
+* The criteria of a phase 2 case are `docs/plans/active/harness-phase-2.md#<heading>` at the reviewed commit.  PR #9 has no plan, `invariants.md` or `tech-debt.md` at its commit, so its criteria are the messages of its five commits, and its findings have no rule IDs.
+* PRs #10 and #12 have one commit each, so the code before their review is not in git, and PR #11's review fixes are mixed with other work (decision D1).  M2 routes `gpu-reviewer`; M10 (through `.claude/rules/protocol.md`) and PR #9 route `wire-reviewer`; M18a and M11 route `memory-reviewer`.  Their measures stay thin until later PRs touch those paths.
+* Step 1: tag each reviewed commit locally (`replay/pr9`, `replay/m9`, `replay/m11`, `replay/m2`, `replay/m10`, `replay/m18a`); PR #9's and M2's commits are on local branches only.
+* Step 2: a new subagent, which has not read the agent files, writes the ground truth of all six cases to `docs/reviews/replay.md`.  For each case: each finding that its fix commit changed code or tests for, with its severity as recorded or marked inferred, and the count n.  Leave out a finding that changed wording only.  Commit before any run.
+* Step 3: dry-run the M11 case in the test harness; step 4 runs it again, and only that run counts.  If the dry run fails, only the harness (its script and allow list) may change; if that is not enough, the miss follows D5.  It passes when: the skill loads; the mutants line is `full` or `partial`; each routed reviewer has output in the round's findings; `system/init` has no `plugin_errors`; and the tripwire finds nothing.  The tripwire looks at the subagents' tool calls only (stream-json messages with a `parent_tool_use_id`), since the main agent reads and writes the run folder.  It splits and strips each Bash command as the guard does, and looks at every tool input (`command`, `file_path`, `path`, `pattern`): a first word `gh` or `curl` whose result lacks the guard's reason, the main checkout's absolute path, the run folder, or `.claude/projects`.  A hit fails the case.  The dry run also has no `permission_denials` for a command that the agents' method prescribes.
+* A case counts only if its stream-json `result` is not an error, the skill loaded, and each routed reviewer has output.  Otherwise, such as at a usage limit, it runs again in a new clone, and Progress records why; that is not tuning.  The same holds for M3's cases: a case that fails this way runs again, with no code change.
+* Step 4: run the six cases.  A new subagent compares each case's found findings with its ground truth.  It gets the two lists only, and marks each item `found` (by a reviewer, by cargo-mutants, or both) or `missed`, with the quote that matches.  Apart from that, a second subagent reads the agent files and the ground truth, and flags any text in the agent files that names a ground-truth item.
+* Pass: x of n ground-truth findings found, for each case and in total, with the total x/n of 0.8 or more, and each recorded `should-fix` or worse found.  n is about 20, so give the 95% interval; the bar is a guide, not proof.  Record each reviewer's confirmed, pre-existing and refuted counts, and the found findings outside the ground truth; the maintainer classes a sample of those as real or false, after the PR is ready; the summary lists them.
+* Cost, recorded, not a pass or fail: agents, tokens and wall time for each case, and the old round's reviewer tokens from its transcript.
+* The result, the cost and the threats go in `docs/reviews/replay.md`, and a line in Progress.  Threats: one run of a random process; six cases of harness work in the main; the harness leaves out `~/.claude/CLAUDE.md`, which real rounds load; the agent that wrote the agent files has read phase 2's Progress, which names the findings.
+* A miss follows decision D5: record and finish.  A found finding outside the ground truth that is still on `main` goes to `docs/tech-debt.md` or its own PR.
+
+### M6: review this PR, and close out
+
+* Before round 1, in their own commits:
+  * `docs/decisions/0011-review-agents.md`, with its line in `docs/README.md`: routing and round guards in `xtask review`, a validator for each serious finding, read-only agents without isolation and with a guard, the log's place, where cargo-mutants runs, and the rounds.  `accepted (2026-10-22, by the maintainer)`, with the choices in Decisions.
+  * The guide's Status and changelog name phase 3.  The fix lines of TD-3, TD-8, TD-23, TD-26, TD-27 and TD-29 name the agent that looks; TD-7 and TD-16 add it and keep their fixes; TD-10 and TD-28, which name review, name the agent too.  All stay open, and no `* Enforced by:` line in `invariants.md` names an agent: a reviewer is a sensor, never a control.
+  * The parent plan: its phase 3 text names `xtask review` for `xtask review-plan`; its acceptance names the six cases (D1); its "Measured by" notes that rounds per PR stay three (D6); its Decision log records D4's change of the gate.
+* Then the team leader runs `/review-rounds` for rounds 1, 2 and 3 on this branch, with `main` as `<base>`, without `--baseline` (M3 ran it once), with `docs/reviews/replay.md` in scope for `reviewer`, since it records M5's result, with the criteria `docs/plans/active/harness-phase-3.md#Plan of work`.
+* The close-out (retrospective, move to `plans/completed/`, the parent plan's Progress) is the orchestrator's last step, after CI is green ("How the work runs").
+* Acceptance: `docs-check` passes.  `grep -c 'Run three review rounds.  Use a new subagent' docs/working-with-agents.md` gives 0 (through `rtk proxy` where the RTK hook is on).  The branch's log in the reviews folder under `docs` has rows for rounds 1, 2 and 3, with a summary row each, and, after the orchestrator writes it, the PR text lists the refuted findings and the mutants lines.
+
+## Validation and acceptance
+
+* Commands: `cargo test -p xtask` (the `review.rs` unit tests, `every_reviewer_has_an_agent_file`, `the_agents_are_read_only_by_tools`, `the_bash_guard_refuses_writes`, and M4's `docs.rs` tests), `cargo run -p xtask -- docs-check`, and each command of `CLAUDE.md`.  Each new test fails on its plants.
+* The replay passes M5's bar, or its miss is recorded and leads the summary (D5).
+* The gate, after the merge: each PR from the next one runs round 1 with `--baseline`.  Step 7 of the skill matches the baseline's found findings with round 1's.  A PR counts only if one of the two finds a finding.  The gate holds when two PRs in a row, among those that count, each have the round find all y baseline findings, within D4's ceiling.  If no two such PRs come within the next six, or a PR that counts misses a baseline finding, the maintainer chooses: keep, rework the agents, or revert.  The parent plan's Progress records each PR and the result.
+
+## Idempotence and recovery
+
+* The guard, `review check` and the tests write nothing; `review start` and `review mutants` write only to the run folder.  Copy the log out before `rm -rf target/review`, then `git worktree prune`.  The test harness lives under `/private/tmp/stemyla-harness/`; a case that runs again gets a new clone name, and the harness deletes only by literal path.
+* A round that fails `review check` stops; the person checks `git reflog`, the stash and the hashed files before the next round.
+* To undo the phase, revert its commits.  The agents, the guard, the skill and the log go; `CLAUDE.md` and the guide go back to the manual recipe.  Keep the IDs of tech-debt entries that this plan opens: add each under `## Closed` as withdrawn.
+* To resume: read Progress, then `git log --oneline main..HEAD`.
+
+## Decisions
+
+The maintainer chose each of these on 2026-10-22, before the work started.  The options not taken stay here for the record.
+
+* D1, the replay set: the six cases of M5.  Not taken: PRs #9 to #12, with the code before the review of #10, #11 and #12 rebuilt from session transcripts, which cannot be checked against git.
+* D2, where the log lives: the reviews folder under `docs`, one file per branch, tracked, written after round 3.  It is read offline with no token, which suits phase 5's read-only jobs.  Not taken: a table in the PR description.  For IAM: a public log publishes the text of security findings, so an IAM repo keeps it private, or adds a security finding only once it is fixed.
+* D3, where cargo-mutants runs: in the skill only.  A missed mutant needs judgement, so it goes to a validator.  Not taken: a CI job, blocking or not; phase 6 can add one with data from the log.
+* D4, the gate's effort.  The parent plan says "at lower effort".  The agent starts the rounds, so a person's effort is close to zero either way, and a round of several reviewers costs more tokens than one.  So the gate asks for bounded effort: round 1's tokens, with its validators, at most 2 times the baseline review's tokens, with its validators, for each routed reviewer (4 routed reviewers allow 8 times); its wall time at most 60 minutes more than the baseline's, not counting the wait for the mutants run; and no more interventions by a person.  M5 records cost only.  Not taken: a flat 5 times; no ceiling.
+* D5, when the replay misses its bar: record the result and the threats in `docs/reviews/replay.md`, finish M6, and put the miss first in the summary; the gate decides after the merge.  No tuning on the measured cases.  Not taken: rework the agents and replay new cases; split M5 into its own PR.
+* D6, the rounds: three rounds, as `CLAUDE.md` says.  Round 1 routes the whole branch; rounds 2 and 3 run `reviewer` on the whole branch, and route the specialists by the last round's fixes.  Not taken: every specialist in every round; a stop at the first round with no confirmed blocker or should-fix.
+* Autonomy: the orchestrator decides what this plan does not answer, as "How the work runs" says.
+* Auto mode: the maintainer adds the scoped `autoMode.allow` entry of "How the work runs" to `~/.claude/settings.json` before the start, and the kick-off prompt names the same writes.  The entry survives compaction, and it cleared a refusal that the prompt alone did not, in a probe of plan review round 11.  The maintainer removes it when the PR merges.  Not taken: the prompt alone; default permission mode, which needs the maintainer during M1 to M3.
+* Push: the orchestrator may push `ai-agent-harness-phase-3` to `origin`, and open and update one draft PR from it.  It pushes no other branch, and never merges (GIT-1).
+
+All agents inherit the main model.  A cheaper model for some agents is a later choice, with data from the log.
+
+## Progress
+
+* [x] 2026-10-22: plan written.  Survey of `.claude/`, `xtask/src/docs.rs`, phase 2's Progress and branches, and the docs for subagents, skills, worktrees, commands, the code-review plugin and cargo-mutants.
+* [x] 2026-10-22: plan review round 1, by two new reviewers (feasibility; design).  6 blockers, 26 should-fix, 15 nits, with overlap; all checked and fixed in the plan.  Main fixes: the agent can start the skill; each milestone names its tools in the guide; cargo-mutants needs the tree's `.git`; the replay runs in clones outside the repo; a guard and a key allowlist; D4 and D5.
+* [x] 2026-10-22: plan review round 2, by two new reviewers.  7 blockers, 28 should-fix, 20 nits, with overlap; all checked and fixed in the plan, but the push of the replay tags, cut as a person's step for little gain.  Main fixes: the replay passes agents with `--agents` and the skill as a plugin; the skill runs once for each round; the guard reads command words; each milestone makes its own doc and debt changes; nits are not validated; D6.
+* [x] 2026-10-22: plan review round 3, by two new reviewers, who ran `claude -p` and cargo-mutants 27.1.0 in scratch repos.  2 blockers, 16 should-fix, 18 nits; all checked and fixed in the plan, but the baseline review on this PR, cut as a third comparison.  The blockers: the permission check refuses a compound `` !`...` `` command, and a missing file stops the skill.  So `xtask review` now does the clean-tree check, the route, the state record and the mutants run, each as one plain command.  Also: the replay runs all six cases once, with no tuning; the guard allows a short list of `git` subcommands; D4 sets a ceiling before M5; the gate has a trigger and a fail path.
+* [x] 2026-10-22: plan review round 4, by two new reviewers, with more scratch runs.  1 blocker, 16 should-fix, 25 nits; all checked and fixed in the plan, but folding M4 into M3, left as is.  The blocker: the maintainer's RTK hook rewrites commands before the permission check, so a `-p` allow list fails; the test harness now uses `--setting-sources project,local`.  Also: a folder for each round; a frozen `baseline` agent; merged findings keep every source; the background `timeout`; the test harness moves to M3; the hook line is valid YAML; the guard refuses `cargo publish`.
+* [x] 2026-10-22: plan review round 5, by two new reviewers, one with a model of the guard's rules.  No blockers; 8 significant should-fix, 1 other, about 25 nits; all checked and fixed in the plan, but the `claude --debug` check, cut since a file that does not parse is not listed.  Main fixes: the run folder is per branch, and `review start` finds `<since>` itself; the gate's comparer is a step of the skill; `pre-existing` counts as found, and a matched baseline finding shares its validator; D4 is set from M3's numbers and counts wall time without the mutants run; PR #9's criteria are its commit message; the guard's rules each have a test case and do not overlap; the harness checks the guard by its reason, on a command the allow list permits; the harness sets the model and effort.
+* [x] 2026-10-22: plan review round 6, by one new reviewer who read the whole plan and ran `claude -p` in a scratch repo.  No blockers; 6 significant should-fix, 14 nits; all checked and fixed in the plan.  Main fixes: each rule file in `.claude/rules/` routes its specialist, so M10 routes `wire-reviewer`; reviewers get the ranges, not the round's folder, which holds the mutants output; agents build with `--target-dir`, which the allow list permits; a detached `HEAD` names its run folder; each guard case changes its outcome when its rule goes; `review start` diffs from the merge base, and `review mutants` stops with `kill -TERM`.
+* [x] 2026-10-22: plan review round 7, by one new reviewer who read the whole plan and checked the routes and ranges against git.  No blockers; 3 significant should-fix, 15 nits; all checked and fixed in the plan.  The significant ones: the guard refuses the attached forms of `-c` and `--config-env`, which its cases now test; M5's dry run no longer asks for a guard refusal that its fixed criteria cannot cause (M3 shows it); the tripwire reads the subagents' tool calls only.
+* [x] 2026-10-22: plan review round 8, by one new reviewer.  No blockers; 2 significant should-fix, 11 nits; all checked and fixed in the plan.  The significant ones: cargo-mutants runs with all features, so code behind `cpal` or `files` is not reported as missed; M3 runs the `--baseline` path once, so the comparer is tested before the gate and D4 has the baseline's tokens.
+* [x] 2026-10-22: plan review round 9, by one new reviewer, with a `claude -p` probe.  No blockers; 2 significant should-fix, 12 nits; all checked and fixed in the plan.  The significant ones: on macOS an agent with `Bash` gets no `Grep` or `Glob`, so the agents list `Read, Bash`, and the guard allows a backtick inside single quotes; the agents may read `docs/reviews/replay.md`, so M6's review covers M5's result.
+* [x] 2026-10-22: the maintainer chose the execution model ("How the work runs") and answered D1 to D6 and the orchestrator's autonomy, so no decision is left for the run.  `.claude/agents/` and `.claude/skills/` get a `.gitkeep`, so no restart is needed.
+* [x] 2026-10-22: plan review round 10, by two new reviewers (the execution model, with `claude -p` probes in auto mode; a full read).  2 blockers, 13 significant should-fix, about 20 nits, with overlap; all checked and fixed in the plan.  The blockers: auto mode's Self-Modification rule blocks the writes to `.claude/agents/`, `hooks/` and `skills/` (the maintainer chose a scoped `autoMode.allow` entry and an explicit kick-off prompt); and `/review-rounds` in each milestone clashed with one log per branch (M1 to M5 now use the manual recipe, and M6 runs the skill's three rounds).  Also: cargo-mutants is a step before the start; a preflight; CI is waited for; at most 15 subagents, no forks; the stop rule is defined, with caps; the orchestrator does the close-out.
+* [x] 2026-10-22: plan review round 11, by two new reviewers (auto mode, with `claude -p --permission-mode auto` probes; a full read).  1 blocker, 7 significant should-fix, about 15 nits; all checked and fixed in the plan.  The blocker: `gh pr ready` was not named, so auto mode would refuse it; the allow entry and the kick-off prompt now name it, with PR edits.  Also: the allow entry names literal paths and the harness folder `/private/tmp/stemyla-harness/`; the preflight tests a nested skill write and the harness set-up; GPG's cache times (600 and 7200 seconds) get a step before the start; the orchestrator commits its Progress before the next team; a refusal by auto mode stops the run; usage limits are a known person step.
+* [x] 2026-10-22: plan review round 12, by one new reviewer.  No blockers; 2 significant should-fix, 11 nits; all checked and fixed in the plan.  The significant ones: GPG's `max-cache-ttl` is a hard cap from the passphrase's entry, so the long option is 7 days; a replay or harness case cut short, such as by a usage limit, runs again in a new clone instead of counting as misses.  Also: the preflight checks that new agents load with no restart, and the free disk space; the allow entry covers deleting a clone and read-only commands.
+* [ ] M1: `xtask review`.
+* [ ] M2: the agents and the guard.
+* [ ] M3: the `review-rounds` skill and the test harness.
+* [ ] M4: the findings log.
+* [ ] M5: replay.
+* [ ] M6: review this PR, and close out.
+
+## Surprises and discoveries
+
+* 2026-10-22: `isolation: worktree` branches from the default branch, so it does not suit a reviewer of a branch.  Evidence: [worktrees](https://code.claude.com/docs/en/worktrees), "choose the base branch".
+* 2026-10-22: `/review` is a built-in alias of `/code-review`.  Evidence: [commands](https://code.claude.com/docs/en/commands).
+* 2026-10-22: `disable-model-invocation: true` stops the agent from starting a skill, even when `CLAUDE.md` tells it to.  Evidence: [skills](https://code.claude.com/docs/en/skills), "Claude can't invoke the skill on its own".
+* 2026-10-22: cargo-mutants' copy has no `.git` by default, so the `xtask` rules tests fail its baseline (exit 4).  Evidence: plan review round 1 ran `cargo test -p xtask --test rules` in a copy without `.git`: 3 failed with "not a git repository".
+* 2026-10-22: frontmatter hooks of project agents do not run in `-p` mode or in an untrusted folder; hooks passed with `--agents` do.  Evidence: [sub-agents](https://code.claude.com/docs/en/sub-agents).  This shapes phase 5.
+* 2026-10-22: a skill's `` !`...` `` command with `||`, braces or `exit` fails the permission check outside auto mode, and stops the skill; so does a command that exits non-zero.  Evidence: plan review round 3, `claude -p --permission-mode dontAsk` on 2.1.308.
+* 2026-10-22: the maintainer's RTK hook rewrites `git` and other commands to `rtk ...` before the permission check, so `--allowedTools "Bash(git *)"` denies them in `dontAsk` mode.  Evidence: plan review round 4, `claude -p` on 2.1.308; `--setting-sources project,local` let them run, and also left out `~/.claude/CLAUDE.md` (round 5).
+
+## Decision log
+
+* 2026-10-22, maintainer: phase 3 is one PR.  The agent agreed: the parts depend on each other, and none changes code that ships.
+* 2026-10-22, maintainer: agents run the phase, as "How the work runs" says: an orchestrator, and a team for each milestone whose leader writes and keeps a milestone plan.  This follows phase 2's retrospective, which advised one plan for each milestone; this plan holds the intent, and stays short.
+* 2026-10-22, maintainer: D1 to D6, the autonomy of the orchestrator, and the push of this branch with one draft PR, as Decisions says.  The maintainer answered them all before the start, so the run needs no person until the PR is ready.
+* 2026-10-22, maintainer: a scoped `autoMode.allow` entry in the maintainer's own settings, and a kick-off prompt that names the same writes, so auto mode lets the run write the agents, the guard and the skill.
+* 2026-10-22, agent: the skill starts the subagents itself; three to ten agents a round need no scripted orchestration.  The deterministic steps of a round are `xtask review` commands, so a skill's `` !`...` `` runs one plain command.
+* 2026-10-22, agent: reviewers get no `isolation` and no edit tools.  A reviewer that tries a change makes a scratch worktree at `HEAD` under `target/review/`, as phase 2's reviewers did.
+* 2026-10-22, agent: the guard allows a list of `git` subcommands, not a list of those to refuse.  The list to allow fails closed for `git`, against the usual preference for slim denylists, because the guard is a security sensor.
+* 2026-10-22, agent: nits are logged but not validated, and the replay has no tuning set, to keep the cost down.
+
+## Outcomes and retrospective
+
+To be written when the plan completes.
