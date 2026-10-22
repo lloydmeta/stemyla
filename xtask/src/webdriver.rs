@@ -423,10 +423,10 @@ fn fit_viewport(
     for _ in 0..3 {
         resize(window)?;
         let now = at_once()?;
-        let after = now;
+        let after = settled()?;
         tries.push(format!(
-            "window {}x{}: viewport {}x{} at once",
-            window.0, window.1, now.0, now.1
+            "window {}x{}: viewport {}x{} at once, {}x{} after two frames",
+            window.0, window.1, now.0, now.1, after.0, after.1
         ));
         if after == target {
             return Ok(tries);
@@ -436,16 +436,11 @@ fn fit_viewport(
             (window.1 + target.1).saturating_sub(after.1),
         );
     }
-    let last = settled()?;
     bail!(
-        "could not size the viewport to {}x{}: {}; then {}x{} after two frames (window {}x{})",
+        "could not size the viewport to {}x{}: {}",
         target.0,
         target.1,
-        tries.join("; "),
-        last.0,
-        last.1,
-        window.0,
-        window.1
+        tries.join("; ")
     )
 }
 
