@@ -351,6 +351,7 @@ impl Session {
     }
 
     /// The viewport once the page knows the window's new size; see `settle`.
+    /// Each read waits two frames, which can block for up to 60 s.
     fn settled_viewport(&self, window: Size) -> Result<Size> {
         settle(window, Instant::now() + SETTLE_TIME, Instant::now, || {
             self.frames(2)?;
@@ -441,8 +442,10 @@ fn settle(
 /// 2026-10-22), so it takes a second resize.  A read at once can still give
 /// the viewport from before the resize, so each try decides on `settled`,
 /// a read once the page knows the window's new size (TD-30).  `at_once` is
-/// only logged, as evidence of the race.  Five tries leave room for a late
-/// settled read, which the next try corrects.
+/// only logged, as evidence of the race.  A settled read that gives the
+/// target is read again at the same window, since a late read can give the
+/// target from before the resize.  Five tries leave room for a late settled
+/// read, which the next try corrects.
 fn fit_viewport(
     target: Size,
     mut resize: impl FnMut(Size) -> Result<()>,
@@ -454,11 +457,21 @@ fn fit_viewport(
     for _ in 0..5 {
         resize(window)?;
         let now = at_once()?;
-        let after = settled(window)?;
-        tries.push(format!(
+        let first = settled(window)?;
+        let line = format!(
             "window {}x{}: viewport {}x{} at once, {}x{} settled",
-            window.0, window.1, now.0, now.1, after.0, after.1
-        ));
+            window.0, window.1, now.0, now.1, first.0, first.1
+        );
+        let again = if first == target {
+            Some(settled(window)?)
+        } else {
+            None
+        };
+        tries.push(match again {
+            Some(again) => format!("{line}, {}x{} again", again.0, again.1),
+            None => line,
+        });
+        let after = again.unwrap_or(first);
         if after == target {
             return Ok(tries);
         }
@@ -482,25 +495,25 @@ mod viewport_tests {
 
     /// A headless Chrome window with 143 pixels of its own UI, whose read at
     /// once still gives the viewport from before the last resize.  The
-    /// settled read with the number `stale_settle` (from 1) gives it too.
+    /// settled reads with the numbers in `stale_settles` (from 1) give it too.
     struct LaggingWindow {
         window: Cell<Size>,
         asked: Cell<Size>,
         before: Cell<Size>,
         settles: Cell<usize>,
         max_height: u32,
-        stale_settle: usize,
+        stale_settles: &'static [usize],
     }
 
     impl LaggingWindow {
-        fn new(max_height: u32, stale_settle: usize) -> Self {
+        fn new(max_height: u32, stale_settles: &'static [usize]) -> Self {
             Self {
                 window: Cell::new((1100, 700)),
                 asked: Cell::new((1100, 700)),
                 before: Cell::new((1100, 557)),
                 settles: Cell::new(0),
                 max_height,
-                stale_settle,
+                stale_settles,
             }
         }
 
@@ -526,7 +539,7 @@ mod viewport_tests {
                         "settle waits for the window it asked for"
                     );
                     self.settles.set(self.settles.get() + 1);
-                    Ok(if self.settles.get() == self.stale_settle {
+                    Ok(if self.stale_settles.contains(&self.settles.get()) {
                         self.before.get()
                     } else {
                         self.viewport()
@@ -576,21 +589,21 @@ mod viewport_tests {
 
     #[test]
     fn the_viewport_fits_despite_a_stale_read_at_once() {
-        let chrome = LaggingWindow::new(u32::MAX, 0);
+        let chrome = LaggingWindow::new(u32::MAX, &[]);
         let tries = chrome.fit().unwrap();
         assert_eq!(chrome.window.get(), (1100, 843), "{tries:?}");
         assert_eq!(
             tries,
             [
                 "window 1100x700: viewport 1100x557 at once, 1100x557 settled",
-                "window 1100x843: viewport 1100x557 at once, 1100x700 settled",
+                "window 1100x843: viewport 1100x557 at once, 1100x700 settled, 1100x700 again",
             ]
         );
     }
 
     #[test]
     fn a_late_settled_read_is_corrected_by_the_next_try() {
-        let chrome = LaggingWindow::new(u32::MAX, 2);
+        let chrome = LaggingWindow::new(u32::MAX, &[2]);
         let tries = chrome.fit().unwrap();
         assert_eq!(chrome.window.get(), (1100, 843), "{tries:?}");
         assert_eq!(
@@ -599,14 +612,30 @@ mod viewport_tests {
                 "window 1100x700: viewport 1100x557 at once, 1100x557 settled",
                 "window 1100x843: viewport 1100x557 at once, 1100x557 settled",
                 "window 1100x986: viewport 1100x700 at once, 1100x843 settled",
-                "window 1100x843: viewport 1100x843 at once, 1100x700 settled",
+                "window 1100x843: viewport 1100x843 at once, 1100x700 settled, 1100x700 again",
+            ]
+        );
+    }
+
+    #[test]
+    fn two_late_settled_reads_do_not_stop_at_a_wrong_size() {
+        let chrome = LaggingWindow::new(u32::MAX, &[2, 3]);
+        let tries = chrome.fit().unwrap();
+        assert_eq!(chrome.window.get(), (1100, 843), "{tries:?}");
+        assert_eq!(
+            tries,
+            [
+                "window 1100x700: viewport 1100x557 at once, 1100x557 settled",
+                "window 1100x843: viewport 1100x557 at once, 1100x557 settled",
+                "window 1100x986: viewport 1100x700 at once, 1100x700 settled, 1100x843 again",
+                "window 1100x843: viewport 1100x843 at once, 1100x700 settled, 1100x700 again",
             ]
         );
     }
 
     #[test]
     fn a_viewport_that_never_fits_names_each_try() {
-        let error = LaggingWindow::new(800, 0).fit().unwrap_err().to_string();
+        let error = LaggingWindow::new(800, &[]).fit().unwrap_err().to_string();
         assert_eq!(
             error,
             "could not size the viewport to 1100x700: \
