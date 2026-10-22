@@ -2,7 +2,7 @@
 
 Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule it concerns, the evidence, and the fix in view.  To close an entry, delete it in the commit that fixes it.  In the same commit, add its ID under `## Closed`, with what closed it.  An ID is never reused.  Plans and decisions may still name a closed ID; `docs-check` fails it in other docs.  Add new entries above `## Closed`.
 
-Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans/active/harness-engineering.md`); the plan's phase 2 closes most enforcement gaps.
+Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans/active/harness-engineering.md`); the plan's phase 2 closed most enforcement gaps (`## Closed`).
 
 ## Enforcement gaps
 

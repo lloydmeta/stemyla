@@ -6,11 +6,12 @@ The agent reads `CLAUDE.md` (the map) and the docs.  This guide is for the perso
 
 ## Status
 
-Phase 1 is in place:
+Phases 1 and 2 are in place:
 
 * The map (`CLAUDE.md`) and the docs under `docs/`, with the rules by ID in `invariants.md`.
 * Rules for parts of the tree in `.claude/rules/`, which load when the agent touches those files.
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
+* Checks that fail a breach of a rule.  Among them: tests in `xtask/tests/rules.rs`, clippy's `disallowed-methods` and `STEMYLA_REQUIRE`.  Also the shader limits test, the UI snapshot comparison and the allocation test of the audio callback.  Most give the rule ID and the fix.  `invariants.md` names the check for each rule, or says "prose only".
 
 The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.  No project skills or project subagents exist yet (phase 3).
 
