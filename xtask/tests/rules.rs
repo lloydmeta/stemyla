@@ -715,7 +715,6 @@ fn the_bash_guard_refuses_writes() {
 /// The route of `xtask review` names only reviewers that exist, and each
 /// path glob matches a file, so a renamed folder cannot drop a reviewer.
 #[test]
-#[ignore = "M2 adds the agent files"]
 fn every_reviewer_has_an_agent_file() {
     use xtask::review::{MAY_MATCH_NOTHING, REVIEWERS};
     let paths: Vec<&str> = tracked_files()
@@ -762,5 +761,62 @@ fn every_reviewer_has_an_agent_file() {
         "{} review route problem(s):\n{}",
         problems.len(),
         problems.join("\n")
+    );
+}
+
+/// The `git hash-object --no-filters` of `.claude/agents/baseline.md`.
+const BASELINE_HASH: &str = "d864078be345a36df81e19814a7304e1e4fdb959";
+
+/// Each agent is read only by its tools and by its hook, and the baseline
+/// review stays as it was frozen.
+#[test]
+fn the_agents_are_read_only_by_tools() {
+    let root = xtask::workspace_root();
+    let folder = root.join(xtask::rules::AGENTS_FOLDER);
+    let agents: Vec<(String, String)> = std::fs::read_dir(&folder)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", folder.display()))
+        .map(|entry| entry.expect("the folder can be listed").file_name())
+        .filter_map(|name| name.to_str().map(str::to_string))
+        .filter(|name| name.ends_with(".md"))
+        .map(|name| {
+            let text = std::fs::read_to_string(folder.join(&name))
+                .unwrap_or_else(|e| panic!("reading {name}: {e}"));
+            (name, text)
+        })
+        .collect();
+    let missing: Vec<String> = ["validator.md", "baseline.md"]
+        .into_iter()
+        .filter(|known| !agents.iter().any(|(name, _)| name == known))
+        .map(|known| {
+            format!(
+                "{}{known} is missing.  Fix: add the agent (harness phase 3, M2).",
+                xtask::rules::AGENTS_FOLDER
+            )
+        })
+        .collect();
+    let problems: Vec<String> = agents
+        .iter()
+        .flat_map(|(name, text)| xtask::rules::agent_problems(name, text))
+        .map(|problem| problem.to_string())
+        .chain(missing)
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "{} agent problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+
+    let baseline = format!("{}baseline.md", xtask::rules::AGENTS_FOLDER);
+    let hashed = std::process::Command::new("git")
+        .args(["hash-object", "--no-filters", &baseline])
+        .current_dir(&root)
+        .output()
+        .expect("git hash-object runs");
+    let hash = String::from_utf8_lossy(&hashed.stdout);
+    assert!(
+        hashed.status.success() && hash.trim() == BASELINE_HASH,
+        "{baseline} has the hash {:?}, not BASELINE_HASH {BASELINE_HASH}.  Fix: baseline.md is frozen from the end of harness phase 3, M3, so M5 compares one prompt.  For a change before then, or for a found finding in M6, update BASELINE_HASH in xtask/tests/rules.rs in the same commit.",
+        hash.trim()
     );
 }

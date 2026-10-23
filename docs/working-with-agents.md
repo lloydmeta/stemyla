@@ -13,7 +13,9 @@ Phases 1 and 2 are in place:
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 * Checks that fail a breach of a rule.  Among them: tests in `xtask/tests/rules.rs`, clippy's `disallowed-methods` and `STEMYLA_REQUIRE`.  Also the shader limits test, the UI snapshot comparison and the allocation test of the audio callback.  Most give the rule ID and the fix.  `invariants.md` names the check for each rule, or says "prose only".
 
-The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.  No project skills or project subagents exist yet (phase 3).
+The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to; the review recipe below is the same thing started by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.
+
+Phase 3 adds eight read-only review agents in `.claude/agents/`: `reviewer`, `gpu-reviewer`, `memory-reviewer`, `wire-reviewer`, `supply-chain-reviewer`, `docs-reviewer`, `validator` and `baseline` (see "Review agents" below).  `xtask review start` routes the six reviewers.  From phase 3's M3, the `review-rounds` skill starts them; until then, the recipe "Review a change" starts reviewers by hand.  No project skills exist yet.
 
 ## Before you start
 
@@ -98,6 +100,21 @@ Deny rules in `.claude/settings.json` refuse a push that names `main` or `gh-pag
 
 The rules match the command text, so they are not a security boundary (TD-28).  They do not see a push that names no branch, such as `git push` while on `main`.  They also refuse a pipeline that starts with a push and names `main` later, such as `git push origin x | grep main`; ask the agent to run the push without the pipe.  The agent pushes other branches when asked.
 
+## Review agents
+
+The agents in `.claude/agents/` review a change, and validate the findings.  Each agent is read only.  It has the tools `Read` and `Bash`, and its hook runs the guard `.claude/hooks/read-only-bash.sh` before each Bash command.  The guard refuses a command that would change the repo, a remote or a published package, such as `git commit`, `git push`, `git stash`, `gh` or `cargo publish`.  The agent sees "read-only guard:" and the reason.  The guard matches text, so it stops mistakes, not an agent that tries to escape (TD-34).  Claude Code runs the hook only in a folder that a person trusts, and not in `-p` mode.
+
+| Agent | When it runs |
+| - | - |
+| `reviewer` | in each review round, on every diff, for correctness against the criteria |
+| `gpu-reviewer` | when `xtask review start` routes it: a change to the GPU kernels, the network or a GPU buffer |
+| `memory-reviewer` | when routed: a change to `engine/`, `app/src/`, `worker/` or `protocol/`, or a copy of a buffer |
+| `wire-reviewer` | when routed: a change to the messages between the page and the worker |
+| `supply-chain-reviewer` | when routed: a change to dependencies, the build, CI, a check in `xtask` or `.claude/` |
+| `docs-reviewer` | when routed: a change to the docs, `CLAUDE.md` or `.claude/rules/` |
+| `validator` | for each blocker and should-fix finding of a round, and for the missed mutants of a round |
+| `baseline` | in round 1 with `--baseline`, on the same commit, to compare with the reviewers; it stays frozen |
+
 ## Before you merge
 
 * CI passes.  Every job but `publish` is a required check on `main`, including `browser tests (Chrome)`.
@@ -148,3 +165,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-22, phase 2: done.  19 of 21 rules name what enforces them; MEM-4 and GPU-3 stay prose only until phase 4.  The plan is in `plans/completed/`.
 * 2026-10-23, phase 3 (M1): `xtask review start <base> <round>` chooses the reviewers from the diff, and writes the diffs, the route and a state record to the run folder under `target/review/run/`.  `xtask review check <round>` names each change since that record, such as a new commit, a stash or a changed hook.  Each failure exits 3, so a skill stops on it.
 * 2026-10-23, phase 3 (M1): `xtask review mutants <round>` runs cargo-mutants on the Rust files of the round's `since` diff, with `.cargo/mutants.toml`, for at most 60 minutes.  It prints one line: `full`, `partial` or `none`, with the counts.  `.cargo/mutants.toml` leaves out the code that compiles for `wasm32` only.  Add a new `wasm32`-only function to its `exclude_re`.
+* 2026-10-23, phase 3 (M2): eight read-only review agents in `.claude/agents/`, with a guard on their Bash commands (see "Review agents").  The guard refuses a commit, a push, a stash, `gh` and a cargo publish, with "read-only guard:" and the reason.  The recipe "Review a change" starts reviewers by hand until M3.

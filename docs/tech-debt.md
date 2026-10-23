@@ -195,6 +195,12 @@ A heredoc body with an apostrophe is refused as an unclosed quote.  But a second
 
 The time of the parse grows with the square of the length of the command.  On 2026-10-23, 10,000 characters took 0.6 s and 50,000 characters took 9.3 s on this Mac.  With `onFailure: block` on the hook, a timeout refuses the call.
 
+The agents in `.claude/agents/` run the guard from a hook in their frontmatter.  `the_agents_are_read_only_by_tools` keeps their tools and that hook.  These are still open:
+
+* The guard does not stop `Read`, or `cat` through Bash, of the `gh` token or the cargo token.
+* Claude Code does not run frontmatter hooks in a folder that a person has not trusted, or in `-p` mode.  So phase 5 passes the agents with `--agents`.
+* The text of an agent is a prompt, not a control.
+
 * Fix: `xtask review check` sees a change to the state that it records (TD-32).  Phase 5 runs the reviewers in a sandbox with no token.
 
 ## Known breaches
