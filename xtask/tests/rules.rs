@@ -304,13 +304,14 @@ fn rustfmt_hook_command(settings: &serde_json::Value) -> String {
         .to_string()
 }
 
-/// Runs the hook as Claude Code does: `sh -c`, the tool call as JSON on
-/// stdin, and `CLAUDE_PROJECT_DIR` set to the project root.  `path`, when
-/// given, replaces `PATH`.
+/// Runs the hook as Claude Code does: `sh -c`, the tool call on stdin, and
+/// `CLAUDE_PROJECT_DIR` set to the project root.  `input` is the JSON of the
+/// tool call, or other text for a test of bad input.  `path`, when given,
+/// replaces `PATH`.
 fn run_hook(
     command: &str,
     project: &std::path::Path,
-    input: &serde_json::Value,
+    input: &str,
     path: Option<&std::path::Path>,
 ) -> std::process::Output {
     use std::io::Write;
@@ -334,7 +335,7 @@ fn run_hook(
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(input.to_string().as_bytes());
+        .write_all(input.as_bytes());
     if let Err(e) = written
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
@@ -385,7 +386,7 @@ fn the_rustfmt_hook_formats_rust_files() {
         std::fs::write(path, UNFORMATTED).expect("the test file can be written");
         let input =
             serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": path } });
-        let output = run_hook(&command, &project, &input, None);
+        let output = run_hook(&command, &project, &input.to_string(), None);
         let text = std::fs::read_to_string(path).expect("the test file can be read");
         assert!(
             output.status.success() && text == *expected,
@@ -395,15 +396,319 @@ fn the_rustfmt_hook_formats_rust_files() {
     }
 
     let input = serde_json::json!({ "tool_name": "Write", "tool_input": {} });
-    let output = run_hook(&command, &project, &input, None);
+    let output = run_hook(&command, &project, &input.to_string(), None);
     assert!(output.status.success(), "{}", left("no file", "", &output));
 
     let lib = project.join("lib.rs");
     let input = serde_json::json!({ "tool_name": "Write", "tool_input": { "file_path": lib } });
-    let output = run_hook(&command, &project, &input, Some(&no_tools));
+    let output = run_hook(&command, &project, &input.to_string(), Some(&no_tools));
     assert!(
         !output.status.success(),
         "GIT-2: the rustfmt hook in .claude/settings.json exits 0 without jq on PATH, so a missing jq is silent.  Fix: keep `|| exit 1` after the jq command substitution."
+    );
+}
+
+/// The guard of the review agents' Bash calls, as their hook names it.
+const GUARD: &str = ".claude/hooks/read-only-bash.sh";
+const GUARD_COMMAND: &str = r#""$CLAUDE_PROJECT_DIR"/.claude/hooks/read-only-bash.sh"#;
+
+/// The labels of the guard's refusals.
+const BACKTICK: &str = "backtick";
+const UNCLOSED: &str = "unclosed quote";
+const VARIABLE: &str = "variable";
+const COMMAND: &str = "command";
+const CARGO_OPTION: &str = "cargo option";
+const CARGO_SUB: &str = "cargo subcommand";
+const GIT_OPTION: &str = "git option";
+const GIT_OUTPUT: &str = "git output";
+const GIT_SUB: &str = "git subcommand";
+const UNREADABLE: &str = "cannot read the command";
+
+/// Commands that the guard refuses, each with the label of its refusal.
+/// Each rule of the guard has a case that gives another result without it.
+const GUARD_REFUSES: &[(&str, &str)] = &[
+    // A backtick outside single quotes.
+    (BACKTICK, "echo `git commit`"),
+    (BACKTICK, "echo \"`git commit`\""),
+    (BACKTICK, r"echo \`git commit\`"),
+    // The split into parts.
+    (GIT_SUB, "echo $(git commit)"),
+    (GIT_SUB, "cargo test; git stash"),
+    (GIT_SUB, "cargo test && git stash"),
+    (GIT_SUB, "cargo test | git stash"),
+    (GIT_SUB, "cargo test\ngit stash"),
+    // A backslash outside quotes, and inside double quotes.
+    (GIT_SUB, r#"echo \"; git commit -m x; echo \""#),
+    (GIT_SUB, r#"echo "\"" ; git commit -m "\"""#),
+    // A backslash before a new line joins the lines.
+    (CARGO_SUB, "cargo pub\\\nlish"),
+    // A comment ends at the new line, joins no line, and starts only at
+    // the start of a word.
+    (GIT_SUB, "git log # x\ngit commit -m x"),
+    (GIT_SUB, "git log # x\\\ngit commit -m x"),
+    (GIT_SUB, "echo a#; git commit -m x"),
+    (GIT_SUB, "echo ''#; git commit -m x"),
+    // A quote that is not closed.
+    (UNCLOSED, "grep -n \"x docs"),
+    // A tab ends a word.
+    (GIT_SUB, "git\tcommit -m x"),
+    // Quote removal and backslash removal.
+    (GIT_SUB, "'git' commit -m x"),
+    (GIT_SUB, "g\"it\" commit -m x"),
+    (CARGO_SUB, "cargo \"publish\""),
+    (GIT_SUB, r"\git commit -m x"),
+    (CARGO_SUB, r"cargo pub\lish"),
+    // Prefixes.
+    (GIT_SUB, "rtk git commit -m x"),
+    (COMMAND, "rtk proxy gh pr view 1"),
+    (GIT_SUB, "env git commit -m x"),
+    (GIT_SUB, "/usr/bin/env git commit -m x"),
+    (GIT_SUB, "command git commit -m x"),
+    (GIT_SUB, "command -p git commit -m x"),
+    (GIT_SUB, "exec git commit -m x"),
+    (GIT_SUB, "time git commit -m x"),
+    (GIT_SUB, "nohup git commit -m x"),
+    (COMMAND, "timeout 60 gh pr view 1"),
+    (GIT_SUB, "FOO=1 git commit -m x"),
+    // Shell words.
+    (GIT_SUB, "! git commit -m x"),
+    (GIT_SUB, "{ git commit -m x; }"),
+    (GIT_SUB, "if git commit -m x; then :; fi"),
+    (GIT_SUB, "if true; then git commit -m x; fi"),
+    (
+        GIT_SUB,
+        "if false; then :; elif git commit -m x; then :; fi",
+    ),
+    (GIT_SUB, "if false; then :; else git commit -m x; fi"),
+    (GIT_SUB, "for f in a; do git add \"$f\"; done"),
+    (GIT_SUB, "while git commit -m x; do :; done"),
+    (GIT_SUB, "until git commit -m x; do :; done"),
+    // Variables.
+    (VARIABLE, "GIT_PAGER=cat git log"),
+    (VARIABLE, "GIT_DIR=/tmp/x git log"),
+    (VARIABLE, "UPDATE_SNAPSHOTS=1 cargo test"),
+    (VARIABLE, "GIT_DIR+=x git log"),
+    (VARIABLE, "export UPDATE_SNAPSHOTS=1; cargo test"),
+    (VARIABLE, "export GIT_EXTERNAL_DIFF=x; git diff"),
+    (VARIABLE, "declare -x GIT_DIR=x"),
+    (VARIABLE, "typeset GIT_DIR=x"),
+    (VARIABLE, "readonly GIT_DIR=x"),
+    (VARIABLE, "local GIT_DIR=x"),
+    // First words.
+    (COMMAND, "gh pr view 1"),
+    (COMMAND, "curl x"),
+    (COMMAND, "wget x"),
+    (COMMAND, "bash -c x"),
+    (COMMAND, "sh -c x"),
+    (COMMAND, "zsh -c x"),
+    (COMMAND, "eval x"),
+    (COMMAND, "xargs x"),
+    (COMMAND, "target/review/target/debug/xtask publish"),
+    (GIT_SUB, "FOO=a/b git commit -m x"),
+    (GIT_SUB, "/usr/bin/git commit -m x"),
+    // Cargo.
+    (CARGO_SUB, "cargo publish"),
+    (CARGO_SUB, "cargo login"),
+    (CARGO_SUB, "cargo owner"),
+    (CARGO_SUB, "cargo yank"),
+    (CARGO_SUB, "cargo install x"),
+    (CARGO_SUB, "cargo uninstall x"),
+    (CARGO_SUB, "cargo add x"),
+    (CARGO_SUB, "cargo remove x"),
+    (CARGO_SUB, "cargo rm x"),
+    (CARGO_SUB, "cargo logout"),
+    (CARGO_SUB, "cargo update"),
+    (CARGO_SUB, "cargo clean"),
+    (CARGO_SUB, "cargo search x"),
+    (CARGO_SUB, "cargo fix"),
+    (CARGO_SUB, "cargo fmt"),
+    (CARGO_SUB, "cargo clippy --fix"),
+    (CARGO_SUB, "cargo -q publish"),
+    (CARGO_SUB, "cargo --color never publish"),
+    (CARGO_SUB, "cargo -Z x publish"),
+    (CARGO_SUB, "cargo -C x publish"),
+    (CARGO_SUB, "cargo +nightly publish"),
+    (CARGO_OPTION, "cargo --config x test"),
+    // Git.
+    (GIT_OPTION, "git -ccore.pager=x log"),
+    (GIT_OPTION, "git -c core.pager=x log"),
+    (GIT_OPTION, "git --config-env=core.pager=X log"),
+    (GIT_OUTPUT, "git diff --output=x"),
+    (GIT_SUB, "git commit -m x"),
+    (GIT_SUB, "git --no-pager commit -m x"),
+    (GIT_SUB, "git -C target/review/x push"),
+    (GIT_SUB, "git --git-dir x commit"),
+    (GIT_SUB, "git --work-tree x commit"),
+    (GIT_SUB, "git --namespace x commit"),
+    (GIT_SUB, "git add x"),
+];
+
+/// Commands that the guard passes.
+const GUARD_PASSES: &[&str] = &[
+    // Git.
+    "git diff HEAD~1",
+    "rtk git diff",
+    "rtk proxy git log",
+    "git -C target/review/1-x diff",
+    "git --git-dir .git log",
+    "git --no-pager log",
+    "git --work-tree . log",
+    "git --namespace x log",
+    "git log -c",
+    "git --version",
+    "git show HEAD",
+    "git status",
+    "git blame README.md",
+    "git grep x",
+    "git ls-files",
+    "git ls-tree HEAD",
+    "git rev-parse HEAD",
+    "git rev-list HEAD",
+    "git merge-base HEAD HEAD",
+    "git cat-file -t HEAD",
+    "git show-ref",
+    "git for-each-ref",
+    "git describe --always",
+    "git lo\\\ng",
+    "git worktree add --detach target/review/1-x HEAD",
+    "git worktree remove --force target/review/1-x",
+    // Quotes, backslashes and comments.
+    "grep -rn \"enough \" docs",
+    "grep -rn -e curl -e wget .github",
+    "grep -rnE \"a|curl b\" xtask",
+    "grep -rnE 'a|curl b' xtask",
+    "grep -rn '`x`' docs",
+    r"grep -rn 'a\' docs",
+    r#"grep -rn "a\"b" docs"#,
+    "grep -n a#b docs",
+    "git log # it's here",
+    // Parts, cargo and the rest.
+    "(git log)",
+    "cargo test -p dsp && git diff",
+    "cargo fmt --all --check",
+    "cargo test -p dsp --target-dir /tmp/t 2>&1",
+    "cargo --color never test -p dsp",
+    "target/debug/xtask docs-check",
+    "for f in a b; do grep -n x \"$f\"; done",
+    "export FOO=1",
+    "",
+];
+
+/// The tool call of a Bash command, as Claude Code sends it to a hook.
+fn bash_call(command: &str) -> String {
+    serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } }).to_string()
+}
+
+/// What is wrong with the guard's result for a case, if anything: a refusal
+/// exits 2 with "read-only guard: <label>:", and a pass exits 0 and writes
+/// nothing.
+fn guard_mismatch(
+    case: &str,
+    expected: Option<&str>,
+    output: &std::process::Output,
+) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let code = output.status.code();
+    let (matches, wanted) = match expected {
+        Some(label) => {
+            let prefix = if label == UNREADABLE {
+                format!("read-only guard: {label}.")
+            } else {
+                format!("read-only guard: {label}:")
+            };
+            (
+                code == Some(2) && stderr.starts_with(&prefix),
+                format!("a refusal with the label `{label}`"),
+            )
+        }
+        None => (code == Some(0) && stderr.is_empty(), "a pass".to_string()),
+    };
+    let code = code.map_or_else(|| "a signal".to_string(), |code| code.to_string());
+    (!matches).then(|| {
+        format!(
+            "{case:?}: expected {wanted}, got exit {code} with {:?}",
+            stderr.trim()
+        )
+    })
+}
+
+#[test]
+fn the_bash_guard_refuses_writes() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = xtask::workspace_root();
+    let staged = std::process::Command::new("git")
+        .args(["ls-files", "-s", GUARD])
+        .current_dir(&root)
+        .output()
+        .expect("git ls-files runs");
+    let staged = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        staged.starts_with("100755 "),
+        "{GUARD} is tracked as {:?}, not as mode 100755.  Fix: run `git add --chmod=+x {GUARD}`; the agents' hook runs it as a program.",
+        staged.trim()
+    );
+    let mode = std::fs::metadata(root.join(GUARD))
+        .unwrap_or_else(|e| panic!("reading {GUARD}: {e}"))
+        .permissions()
+        .mode();
+    assert!(
+        mode & 0o111 != 0,
+        "{GUARD} has no execute bit on disk (mode {mode:o}).  Fix: run `chmod +x {GUARD}`."
+    );
+
+    let no_tools = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("guard without jq");
+    std::fs::create_dir_all(&no_tools).expect("the test folder can be made");
+    let run =
+        |input: &str, path: Option<&std::path::Path>| run_hook(GUARD_COMMAND, &root, input, path);
+
+    let refused = GUARD_REFUSES
+        .iter()
+        .map(|(label, command)| (command.to_string(), bash_call(command), None, Some(*label)));
+    let passed = GUARD_PASSES
+        .iter()
+        .map(|command| (command.to_string(), bash_call(command), None, None));
+    let unreadable = [
+        ("no jq", bash_call("git log"), Some(no_tools.as_path())),
+        ("input that is not JSON", "not json".to_string(), None),
+        (
+            "no command",
+            r#"{"tool_name": "Bash", "tool_input": {}}"#.to_string(),
+            None,
+        ),
+        (
+            "a command that is a number",
+            r#"{"tool_name": "Bash", "tool_input": {"command": 5}}"#.to_string(),
+            None,
+        ),
+    ]
+    .into_iter()
+    .map(|(case, input, path)| (case.to_string(), input, path, Some(UNREADABLE)));
+    let cases: Vec<_> = refused.chain(passed).chain(unreadable).collect();
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(case, input, path, expected)| {
+            guard_mismatch(case, *expected, &run(input, *path))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} guard case(s) failed:\n{}\nFix: {GUARD} must refuse each case with its label, and pass the others (harness phase 3, M2).",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+
+    let shape = "grep -rn '' docs";
+    let long = shape.replace("''", &format!("'{}'", "x".repeat(10_000 - shape.len())));
+    assert_eq!(long.len(), 10_000);
+    let started = std::time::Instant::now();
+    let output = run(&bash_call(&long), None);
+    let took = started.elapsed();
+    let mismatch = guard_mismatch("a search of 10,000 characters", None, &output);
+    assert!(mismatch.is_none(), "{}", mismatch.unwrap_or_default());
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "{GUARD} took {took:?} on a command of 10,000 characters, not less than 5 s.  Fix: keep the parse to one pass, with LC_ALL=C."
     );
 }
 

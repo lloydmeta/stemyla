@@ -172,6 +172,31 @@ A change to the person's own settings during a round, by a person or by Claude C
 
 * Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.
 
+### TD-34: the review agents' guard matches text
+
+`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more.
+
+These pass the guard:
+
+* `git --exec-path=`, and `git grep -O`, which starts a pager program;
+* `find -exec` and `find -delete`;
+* `$(...)` inside double quotes, `$'...'` quoting, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
+* a redirection before the command, such as `2>/dev/null git commit`;
+* a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
+* a prefix option that takes a value, such as `env -u X git commit` or `timeout -s KILL 60 gh`, and `env -S "git commit -m x"`;
+* `rtk` subcommands such as `rtk run` and `rtk err`;
+* other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
+* interpreters, such as `perl -e` and `awk`, and wrappers, such as `sudo` and `nice`;
+* zsh's `=git commit` and `noglob git commit`.  The Bash tool runs the person's shell, which is zsh on macOS.  The parse follows bash and zsh only for the forms that it covers.
+
+Bash can still write files: a redirection, `sed -i`, `tee`, `rm`, `mv`, or a script that a command writes and then runs.  `git worktree add` without `--detach` makes a branch; `xtask review check` sees it.  `git worktree remove --force` of a worktree outside `target/review/` can lose a person's work.
+
+A heredoc body with an apostrophe is refused as an unclosed quote.  But a second `'` later in the command closes the quote, and the guard does not see the lines between.
+
+The time of the parse grows with the square of the length of the command.  On 2026-10-23, 10,000 characters took 0.6 s and 50,000 characters took 9.3 s on this Mac.  With `onFailure: block` on the hook, a timeout refuses the call.
+
+* Fix: `xtask review check` sees a change to the state that it records (TD-32).  Phase 5 runs the reviewers in a sandbox with no token.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
