@@ -1,6 +1,6 @@
 # Docs index
 
-What each doc is for and when to read it.  `CLAUDE.md` at the root is the map loaded into every session; everything here is read on demand.  `cargo run -p xtask -- docs-check` fails when a doc under `docs/` is missing from this list.  One line, `reviews/`, lists each log in the reviews folder.
+What each doc is for and when to read it.  `CLAUDE.md` at the root is the map loaded into every session; everything here is read on demand.  `cargo run -p xtask -- docs-check` fails when a doc under `docs/` is missing from this list.  One line, `reviews/`, lists each log in the reviews folder: the branch logs, and `reviews/replay.md`, the record of harness phase 3's replay of old reviews (M5).
 
 ## Always relevant
 
@@ -34,7 +34,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0008-mem-1-lint-in-each-crate.md`: six crates, each with its own `clippy.toml`, fail `to_vec` on a slice or a JS typed array (MEM-1).
 * `decisions/0009-mem-3-lint-and-private-device.md`: clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer`, and `Gpu`'s device is private (MEM-3).
 * `decisions/0010-git-1-deny-rules.md`: Claude Code deny rules refuse an agent's push that names `main` or `gh-pages`, `xtask publish` and `gh pr merge`; it pushes other branches when asked (GIT-1).
-* `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.
+* `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
 
