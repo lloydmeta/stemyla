@@ -171,6 +171,7 @@ The `review-rounds` skill (harness phase 3, M3) stops a round when `review check
 * cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
+* cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
 
 * Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.
 

@@ -1050,3 +1050,57 @@ fn the_review_skill_starts_with_xtask() {
         problems.join("\n")
     );
 }
+
+/// The tracked files that git's ignore rules match, at the workspace root,
+/// with `extra` passed to git before `ls-files`.
+fn ignored_tracked_files(extra: &[&str]) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(extra)
+        .args(["ls-files", "-ci", "--exclude-standard"])
+        .current_dir(xtask::workspace_root())
+        .output()
+        .expect("git ls-files runs");
+    assert!(
+        out.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// No ignore rule matches a tracked file, here or with a global rule for
+/// `Cargo.lock`, so the copy that cargo-mutants makes keeps each one.
+#[test]
+fn no_tracked_file_is_ignored() {
+    let global = std::env::temp_dir().join(format!("xtask-global-ignore-{}", std::process::id()));
+    std::fs::write(&global, "Cargo.lock\n").expect("the temporary ignore file can be written");
+    let excludes = format!("core.excludesFile={}", global.display());
+    let cases = [
+        (
+            "the ignore rules of this machine",
+            ignored_tracked_files(&[]),
+        ),
+        (
+            "a global ignore rule for Cargo.lock",
+            ignored_tracked_files(&["-c", &excludes]),
+        ),
+    ];
+    let _ = std::fs::remove_file(&global);
+    let problems: Vec<String> = cases
+        .iter()
+        .flat_map(|(rules, files)| {
+            files.iter().map(move |file| {
+                format!("{file} is tracked, and is ignored by {rules}.  cargo-mutants copies the tree with the ignore rules (xtask review mutants passes --gitignore=true), so the copy has no {file}.  Fix: add a `!/{file}` line to .gitignore.")
+            })
+        })
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "{} ignored tracked file(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}

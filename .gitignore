@@ -39,3 +39,8 @@ target/
 !/.claude/
 /.claude/worktrees/
 **/.claude/settings.local.json
+# Cargo.lock is tracked, even where a global gitignore ignores it.
+# cargo-mutants copies the tree with the ignore rules.  Without the lock
+# file, the copy builds with the newest versions, and can fail
+# (no_tracked_file_is_ignored).
+!/Cargo.lock

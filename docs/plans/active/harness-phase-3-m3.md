@@ -317,6 +317,7 @@ The change renames a local variable in one function of `xtask/src/docs.rs`, and 
 
 * 2026-10-23: a skill's `allowed-tools` ends at any new turn, not only at a person's message.  The notice that a background agent ended starts a new turn.  Evidence: plan review round 1, a plugin skill in `claude -p --permission-mode dontAsk`; the same command ran in the skill's turn and was denied after the notice.
 * 2026-10-23: a failed `` !`...` `` command does not make `claude -p` fail.  The `result` is `success` with `num_turns` 0, and the command's stderr is in an `isReplay` message.  Evidence: the same probes.
+* 2026-10-23: `xtask review mutants` (M1) lost `Cargo.lock` in the copy of cargo-mutants on the maintainer's Mac.  `--gitignore=true` also applies the global ignore file, and `~/.gitignore` holds `Cargo.lock`.  Cargo then locked the newest versions, `burn-store` 0.20.1 failed to compile, and the run gave `mutants: none: ... exit 4: the baseline failed`.  Evidence: the Time case in `H/time-1`, its `baseline.log`, and `git ls-files -ci --exclude-standard`, which listed `Cargo.lock`.
 
 ## Decision log
 
@@ -330,6 +331,7 @@ The change renames a local variable in one function of `xtask/src/docs.rs`, and 
 * 2026-10-23, team leader: the State case uses its fallback in run 3, not after it.  Runs 1 and 2 showed that a reviewer keeps its read-only rule against a request in the criteria; the parent plan's `sed -i` request does not reach `review check` that way.  The fallback, a worktree made with a branch, is a step of the reviewer's own method, and still shows that `review check` stops the round.
 * 2026-10-23, team leader: a `dontAsk` denial counts against a case only when the agent did not then run the prescribed command in an allowed form.  The agents often join a prescribed command with a `NAME=value` word, `cd`, `cp` or `awk`; a denial of the whole line, followed by the command alone, costs a turn and loses no check.  State run 3, where the agent gave up, is the case that the rule is for.
 * 2026-10-23, team leader: the skill gets a test of its fixed lines (`the_review_skill_starts_with_xtask`), so a lost `!` line, `allowed-tools` or step fails CI (VERIFY-1).  The harness cases show its behaviour.
+* 2026-10-23, implementer, at the team leader's request: `.gitignore` gets `!/Cargo.lock`, and `no_tracked_file_is_ignored` fails a tracked file that an ignore rule matches, here and with a global rule for `Cargo.lock`, so CI checks it too.  `--gitignore=true` stays, so the copy leaves out ignored audio and weights.  Not taken: `--gitignore=false`, which copies those files.
 
 ## Outcomes and retrospective
 
