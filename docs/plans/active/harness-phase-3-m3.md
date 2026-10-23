@@ -225,6 +225,70 @@ The change renames a local variable in one function of `xtask/src/docs.rs`, and 
 * [x] 2026-10-23: plan review round 4, by one new reviewer.  No blockers; 4 significant should-fix, 4 nits; all checked and fixed in the plan.  The significant ones: the round's wall time takes off the wait for the mutants run, not the validators' time; a fix runs the harness script again; Nested runs on Plant, so a validator always runs; the findings file lists each agent, so a reviewer with no findings shows.
 * [x] 2026-10-23: plan review round 5, by one new reviewer, the cap.  No blockers; 3 significant should-fix, 4 nits; all checked and fixed in the plan.  The significant ones: the skill reads its flags from `$ARGUMENTS`, since Claude Code replaces a placeholder in prose too, and each case checks that `--review-only` stopped the run; costs come from a background or a foreground agent's usage; the report asks the orchestrator to keep M4's and M5's agents from running the skill on this branch.  The cap is reached; the team leader goes on to the implementation.
 * [x] 2026-10-23: step 1, by the implementer: C is `e72f6162e977e7cc3783877a5c4af28817c5d3bb` ("Harness phase 3, M3: add the review-rounds skill").  `the_review_skill_starts_with_xtask`, written first, failed with "reading .claude/skills/review-rounds/SKILL.md: No such file or directory".  With the skill, it passes.  Each plant, undone after, failed it with one problem that names the line or name: the `!` line removed ("no line is exactly ..."); `allowed-tools` changed to `Bash(target/debug/xtask *)` ("the frontmatter has no line ..."); `disable-model-invocation: true` added ("a line is ..."); `3900000` changed to `3600000` ("does not hold `3900000`"); the command of step 8 removed, and also the whole step 8 section ("does not hold `target/debug/xtask review check`"); `` `wire-reviewer` `` without its backticks ("no code span names the agent `wire-reviewer`").  The skill names only `$0`, `$1`, `$2` and `$ARGUMENTS`.  `docs-check` passes; `grep -c 'Run three review rounds.  Use a new subagent' docs/working-with-agents.md` gives 0; `CLAUDE.md` has 87 lines.  New debt: TD-35.  Beyond the plan: the findings file also records each agent's tokens and minutes, and the round's times, read with `jq -n now` (in the allowed list), so step 11 needs no reconstruction after the fixes.
+* [x] 2026-10-23: step 2, by the implementer: `H/bin/make-harness.sh` written and run on `/Users/lloyd/Documents/rustt/stemyla` at C.  It replaced the probe `agents.json`, and left the preflight files.  The script's whole text:
+
+  ```bash
+  #!/bin/bash
+  # Makes the test harness of harness phase 3 (M3) in /private/tmp/stemyla-harness/
+  # from the repo at $1: bin/, agents.json and the stemyla/ plugin folder.
+  # It writes only there and in the repo's target/.
+  set -euo pipefail
+
+  repo="$1"
+  harness=/private/tmp/stemyla-harness
+  bin="$harness/bin"
+  guard="$bin/read-only-bash.sh"
+
+  cargo build -p xtask --manifest-path "$repo/Cargo.toml"
+  mkdir -p "$bin"
+  cp "$repo/target/debug/xtask" "$bin/xtask"
+  cp "$repo/.claude/hooks/read-only-bash.sh" "$guard"
+  chmod 755 "$guard"
+  cp "$repo/.cargo/mutants.toml" "$bin/mutants.toml"
+
+  for file in "$repo"/.claude/agents/*.md; do
+    name="$(basename "$file" .md)"
+    description="$(sed -n 's/^description: //p' "$file" | head -n 1)"
+    prompt="$(awk 'fences == 2 { print } /^---$/ && fences < 2 { fences++ }' "$file")"
+    jq -n --arg name "$name" --arg description "$description" \
+      --arg prompt "$prompt" --arg guard "$guard" \
+      '{($name): {
+          description: $description,
+          tools: ["Read", "Bash"],
+          model: "inherit",
+          prompt: $prompt,
+          hooks: {PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: $guard, onFailure: "block"}]}]}
+        }}'
+  done | jq -s 'add' > "$harness/agents.json"
+
+  skill="$harness/stemyla/skills/review-rounds"
+  mkdir -p "$skill"
+  sed -e "s|target/debug/xtask review mutants \\\$1|$bin/xtask review mutants \$1 --config $bin/mutants.toml|" \
+      -e "s|target/debug/xtask|$bin/xtask|g" \
+      "$repo/.claude/skills/review-rounds/SKILL.md" > "$skill/SKILL.md"
+  ```
+
+  `jq -e '[.[] | .hooks.PreToolUse[].hooks[].onFailure] | length == 8 and all(. == "block")' H/agents.json` printed `true`.  `jq -r 'keys[]' H/agents.json` gave `baseline`, `docs-reviewer`, `gpu-reviewer`, `memory-reviewer`, `reviewer`, `supply-chain-reviewer`, `validator`, `wire-reviewer`.  Each `prompt` equals the lines after the second `---` line of its file (checked with `diff` for `validator`).  The whole diff of `.claude/skills/review-rounds/SKILL.md` and `H/stemyla/skills/review-rounds/SKILL.md`:
+
+  ```diff
+  5c5
+  < allowed-tools: Bash(target/debug/xtask review *)
+  ---
+  > allowed-tools: Bash(/private/tmp/stemyla-harness/bin/xtask review *)
+  7c7
+  < !`target/debug/xtask review start $0 $1`
+  ---
+  > !`/private/tmp/stemyla-harness/bin/xtask review start $0 $1`
+  51c51
+  < target/debug/xtask review mutants $1
+  ---
+  > /private/tmp/stemyla-harness/bin/xtask review mutants $1 --config /private/tmp/stemyla-harness/bin/mutants.toml
+  187c187
+  < target/debug/xtask review check $1
+  ---
+  > /private/tmp/stemyla-harness/bin/xtask review check $1
+  ```
 
 ## Surprises and discoveries
 
