@@ -290,6 +290,12 @@ The change renames a local variable in one function of `xtask/src/docs.rs`, and 
   > /private/tmp/stemyla-harness/bin/xtask review check $1
   ```
 
+* [x] 2026-10-23: step 3, by the implementer: three scratch branches from C, each with one signed commit (parent C), checked in a worktree under `target/review/` that was removed after.  The diff for cargo-mutants was `git diff <C> HEAD -- '*.rs'`, run as `cargo mutants --in-diff <diff> --output <worktree>/target/m3 --gitignore=true -j2 --timeout 300` with the repo's `.cargo/mutants.toml`.
+  * `m3-cases/plant` at `66aaa70c2a2c7a60fbb08990510b384f35ba53ab`, "dsp: add mean_square": `dsp/src/mean_square.rs` (a `for` over a range, 0.0 for no samples) and its module lines in `dsp/src/lib.rs`; the one test `returns` only calls the function.  fmt, `cargo clippy -p dsp --all-targets -- -D warnings` and `cargo test -p dsp` (31 passed) pass.  cargo-mutants: 12 mutants, 12 tested, 12 missed, 0 caught, 0 unviable.
+  * `m3-cases/control` at `16248a4ed295e3ef3773445f371b4b7b8505f5fd`, "dsp: add mean_square": the same function, with the tests `finds_the_mean_of_the_squares` (`[0.5, -1.0]` gives 0.625) and `no_samples_give_zero`.  fmt, clippy for `dsp`, `cargo test -p dsp` (32 passed) and `dsp_is_beginner_style` pass.  cargo-mutants: 12 mutants, 12 caught, 0 missed.
+  * `m3-cases/time` at `9fcfb7478f2740f0f35b24dc2efe66b4d7236d70`, "xtask: rename locals in repo_path": in `repo_path` of `xtask/src/docs.rs`, the second `path` binding becomes `candidate` and `nested` becomes `has_folder` (12 lines).  fmt, `cargo clippy -p xtask --all-targets -- -D warnings` and `cargo test -p xtask` pass.  `cargo mutants --list --in-diff` gives 24 mutants.  Deviation: one renamed local gave at most 18 (`path` alone gave 14), below the plan's 20, so the commit renames two locals, and its message says "locals".
+  * No worktree is left.  `target/review/run/ai-agent-harness-phase-3/` holds a folder `1/` from before M3, and no `log.md`.
+
 ## Surprises and discoveries
 
 * 2026-10-23: a skill's `allowed-tools` ends at any new turn, not only at a person's message.  The notice that a background agent ended starts a new turn.  Evidence: plan review round 1, a plugin skill in `claude -p --permission-mode dontAsk`; the same command ran in the skill's turn and was denied after the notice.
