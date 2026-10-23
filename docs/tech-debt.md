@@ -216,6 +216,12 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 * Fix: phase 5 runs reviews in a sandboxed job with no token.
 
+### TD-36: each review round has an approval, which the log counts as an intervention
+
+The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So `review check` of step 8 asks a person for approval once in each round.  Step 11 counts each approval of a person as an intervention.  The baseline review needs no approval.  So D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions) fails by construction, since it asks for no more interventions by a person.
+
+* Fix: the orchestrator or the maintainer decides how D4 counts this approval.  Not taken in M3: a project allow rule for `Bash(target/debug/xtask review *)`.  That rule widens the permissions of the project and needs a decision record (the Decision log of `plans/active/harness-phase-3-m3.md`).
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults

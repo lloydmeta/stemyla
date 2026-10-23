@@ -976,18 +976,25 @@ const REVIEW_SKILL_FRONTMATTER: &[&str] = &[
 /// stops the skill before the model can skip it.
 const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 
-/// Text that each step of a round needs: the mutants run in the
-/// background for this round, its time limit, the read of its line after
-/// the notice, the `repeat-of` check of the missed mutants, the check of
-/// the state for this round, and the rule for a file that the Write tool
-/// refuses to a subagent.
+/// Text that each step of a round needs: the full reasons from
+/// `route.txt`, the mutants run in the background for this round, its time
+/// limit, the read of its line after the notice, the branch for a refused
+/// mutants run, the `repeat-of` check of the missed mutants, a validator
+/// for each baseline finding that cannot share a verdict, the wait for the
+/// validators before the wait for the mutants run, the check of the state
+/// for this round, and the rule for a file that the Write tool refuses to
+/// a subagent.
 const REVIEW_SKILL_TEXT: &[&str] = &[
+    "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
     "target/debug/xtask review check $1",
     "run_in_background",
     "3900000",
     "Read that file only after the notice has come",
+    "record its error line as the mutants line",
     "Do the `repeat-of` check of step 4",
+    "but not one with `same-as` a finding that has a validator",
+    "Wait for each validator before step 6",
     "do not write it in another way",
 ];
 
@@ -1010,9 +1017,13 @@ fn review_skill_problems(text: &str) -> Vec<String> {
         });
     let invocation_problems = lines
         .iter()
-        .filter(|line| line.trim() == "disable-model-invocation: true")
+        .filter(|line| {
+            line.split_once(':').is_some_and(|(key, value)| {
+                key.trim() == "disable-model-invocation" && value.trim() == "true"
+            })
+        })
         .map(|_| {
-            format!("{REVIEW_SKILL}: a line is `disable-model-invocation: true`.  Fix: remove it, so CLAUDE.md can tell the agent to run the skill.")
+            format!("{REVIEW_SKILL}: a line sets `disable-model-invocation` to `true`.  Fix: remove it, so CLAUDE.md can tell the agent to run the skill.")
         });
     let start_problems = (!lines.contains(&REVIEW_SKILL_START)).then(|| {
         format!("{REVIEW_SKILL}: no line is exactly `{REVIEW_SKILL_START}`.  Fix: put it back, so review start runs when the skill loads, and a refusal stops it.")

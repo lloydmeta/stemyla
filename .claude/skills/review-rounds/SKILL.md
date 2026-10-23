@@ -23,7 +23,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * A refusal of `review start` (exit 3) stops the skill before this text.  Claude Code shows its lines, such as "commit first", in the session.  A `claude -p` run in text mode shows nothing.
 * A `warning:` line of `review start` does not stop the round.  Copy it to the findings file (step 9).
 * `allowed-tools` lets the `xtask review` commands run with no approval only in the turn in which the skill loads.  A new turn ends that permission.  A message of a person starts a new turn.  So does the notice that a background agent or command ended.
-* So `review check` and a late `review mutants` can ask for approval.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
+* The notices of the background reviewers and of the mutants run start new turns.  So `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
@@ -39,7 +39,7 @@ Take each value from the lines of `review start`.  Do not make a path from the b
 * `<since>`: the full SHA on the `since:` line.
 * The branch route: the reviewer lines below the line `branch <base>..<head>:`.
 * The since route: the reviewer lines below the line `since <since>..<head>:`.  The line "no changes" means that the since range is empty.
-* The reasons of a reviewer: the text after its name and the colon on its line of a route.
+* The reasons of a reviewer: the text after its name and the colon on its line of a route, in `<run>/$1/route.txt`.  That file holds the lines of the two routes with all their reasons.  The lines above show at most 5 paths of a reviewer, then "(+n more)".
 
 The round's folder is `<run>/$1`.  `review start` wrote `branch.diff`, `since.diff`, `route.txt` and `state.json` there.  The mutants run writes `mutants.txt` and `mutants.out/` there.  Step 9 writes the findings file `<run>/$1/findings.md`.  The log of the branch is `<run>/log.md`.
 
@@ -53,7 +53,7 @@ Run this command with the Bash tool, with `run_in_background: true` and `timeout
 target/debug/xtask review mutants $1
 ```
 
-The tool result comes at once.  The command stops itself after 60 minutes.  When it ends, it prints one line, and writes the line to `<run>/$1/mutants.txt`.  The notice that the command ended holds the line.  Do not wait for it now.
+The tool result comes at once.  The command stops itself after 60 minutes.  When it ends, it prints one line, and writes the line to `<run>/$1/mutants.txt`.  The notice that the command ended holds the line.  Do not wait for it now.  If the command refuses to run (exit 3), it prints an error line, no `mutants:` line, and no `mutants.txt`.
 
 ### 2. Start the baseline (`--baseline` only)
 
@@ -98,7 +98,7 @@ Each finding of a reviewer is one block with the fields `severity`, `kind`, `whe
 1. Two blocks are the same finding when they have the same `where` and the same claim.  The same `where` is the same file, at the same line or in the same function.  The same claim is the same defect, in other words.
 2. Merge each set of blocks that are the same finding into one finding.  Its sources are each reviewer that reported it.  Its severity is the highest severity of the blocks: `blocker`, then `should-fix`, then `nit`.
 3. Give each finding the ID `$1-<n>`, with `<n>` from 1.
-4. Read `<run>/<n>/findings.md` for each round `<n>` below $1.  Find each finding there with the verdict `refuted`.  If a finding of this round is the same finding as one of them, give it `repeat-of:` and the ID of that finding.  Give it the verdict `refuted`.  It gets no validator.
+4. Read `<run>/<r>/findings.md` for each round `<r>` below $1.  Find each finding there with the verdict `refuted`.  If a finding of this round is the same finding as one of them, give it `repeat-of:` and the ID of that finding.  Give it the verdict `refuted`.  It gets no validator.
 5. Keep the baseline's findings in a separate list.  Merge them only with each other.  Give each the ID `$1-b<n>`, with `<n>` from 1.
 6. If a baseline finding is the same finding as a reviewer's finding, give it `same-as:` and the ID of the reviewer's finding.
 
@@ -107,9 +107,9 @@ Each finding of a reviewer is one block with the fields `severity`, `kind`, `whe
 Start one `validator` for each of these:
 
 * each `blocker` and `should-fix` of the reviewers, with no `repeat-of`;
-* each `blocker` and `should-fix` of the baseline, with no `same-as`.
+* each `blocker` and `should-fix` of the baseline, but not one with `same-as` a finding that has a validator.
 
-A baseline finding with `same-as` gets the verdict of that finding, from its validator.  A `nit` gets the verdict `unvalidated`, with no validator.
+A baseline finding with `same-as` a finding that has a validator gets the verdict of that finding, from its validator.  Each other `nit` gets the verdict `unvalidated`, with no validator.
 
 Start the validators in one message, at most 15 at once.  If there are more than 15, start them in batches of 15.  Start the next batch when each validator of the last batch has ended.  Use the Agent tool, with `subagent_type` set to `validator`.
 
@@ -130,10 +130,12 @@ Target folder: <target>
 
 Each validator gives one block with the fields `id`, `verdict`, `evidence` and `reason`.  Record the verdict of each finding, and its evidence in a few words.  Record the tokens and the duration of each validator from its `<usage>`.
 
+Wait for each validator before step 6.  Step 6 takes its wait for the mutants run off the wall minutes, so that wait must not overlap a validator.
+
 ### 6. Validate the missed mutants
 
 1. If the notice that the mutants command ended has come, the wait for it is 0 seconds.  Else, run `jq -n now`, and record its output as the start of the wait.  Then wait for the notice.  When it comes, run `jq -n now` again, and record the end of the wait.
-2. Read the mutants line in the notice.  If the notice does not show it, read `<run>/$1/mutants.txt`.  Read that file only after the notice has come, because the run writes the file when it ends.  The line starts with `mutants: full:`, `mutants: partial:` or `mutants: none:`.
+2. Read the mutants line in the notice.  If the notice does not show it, read `<run>/$1/mutants.txt`.  Read that file only after the notice has come, because the run writes the file when it ends.  The line starts with `mutants: full:`, `mutants: partial:` or `mutants: none:`.  If the notice shows no `mutants:` line and the file does not exist, the command refused to run.  Then record its error line as the mutants line, and go to item 8.
 3. Read `<run>/$1/mutants.out/missed.txt`.  If the file does not exist or has no lines, go to item 8.
 4. Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.
 5. Do the `repeat-of` check of step 4, item 4, for each of these findings.  A finding with `repeat-of` gets the verdict `refuted`.  Leave its line out of the validator's prompt.  If no line is left, go to item 7.
@@ -260,7 +262,7 @@ of <y> baseline findings, the round found <x>
 
 ### 11. Add the round to the log
 
-The log `<run>/log.md` has two tables.  If the Write tool refuses it, do as "Before the steps" says.  If the file does not exist, write it in this form first:
+The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, and stop.  If the file does not exist, write it in this form first:
 
 ```markdown
 # Review log
@@ -289,7 +291,7 @@ Add one row to the rounds table:
 * Wall minutes: the wall minutes of the findings file.  They run from `review start` to the last verdict, without the wait for the mutants run.
 * Interventions: the number of messages and approvals of a person in the round.
 * Mutants: the mutants line.
-* With `--baseline`: the baseline agents are the baseline and the validators of its findings with no `same-as`.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are those of a person for those agents.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
+* With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are those of a person for those agents.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
 
 After round 3:
 
