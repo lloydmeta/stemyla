@@ -469,6 +469,10 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (GIT_SUB, "time git commit -m x"),
     (GIT_SUB, "nohup git commit -m x"),
     (COMMAND, "timeout 60 gh pr view 1"),
+    (GIT_SUB, "timeout -v 60 git commit -m x"),
+    (GIT_SUB, "timeout --foreground 600 git commit -m x"),
+    (GIT_SUB, "timeout -s KILL 60 git commit -m x"),
+    (GIT_SUB, "rtk -v git commit -m x"),
     (GIT_SUB, "FOO=1 git commit -m x"),
     // Shell words.
     (GIT_SUB, "! git commit -m x"),
@@ -535,11 +539,14 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (CARGO_SUB, "cargo generate-lockfile"),
     (CARGO_SUB, "cargo vendor"),
     (CARGO_OPTION, "cargo --config x test"),
+    (CARGO_OPTION, "cargo test --config x"),
+    (CARGO_OPTION, "cargo --config=x test"),
     // Git.
     (GIT_OPTION, "git -ccore.pager=x log"),
     (GIT_OPTION, "git -c core.pager=x log"),
     (GIT_OPTION, "git --config-env=core.pager=X log"),
     (GIT_OUTPUT, "git diff --output=x"),
+    (GIT_OUTPUT, "git diff --output x"),
     (GIT_SUB, "git commit -m x"),
     (GIT_SUB, "git --no-pager commit -m x"),
     (GIT_SUB, "git -C target/review/x push"),
@@ -864,7 +871,43 @@ fn every_reviewer_has_an_agent_file() {
 }
 
 /// The `git hash-object --no-filters` of `.claude/agents/baseline.md`.
-const BASELINE_HASH: &str = "0c44c0c2b8fb8a7a8ac511e3b01ca65e0516ab54";
+const BASELINE_HASH: &str = "abfa256fe04826fc47165e101c18cbbbf03edac7";
+
+/// Each entry below `folder`, into each subfolder: its path below `folder`,
+/// and its text if it is a file (`None` for a folder).  A symbolic link
+/// counts as what it points to.
+fn walk(folder: &std::path::Path, below: &str) -> Vec<(String, Option<String>)> {
+    let here = folder.join(below);
+    let mut names: Vec<String> = std::fs::read_dir(&here)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", here.display()))
+        .map(|entry| {
+            entry
+                .expect("the folder can be listed")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .flat_map(|name| {
+            let path = if below.is_empty() {
+                name
+            } else {
+                format!("{below}/{name}")
+            };
+            let full = folder.join(&path);
+            if full.is_dir() {
+                [vec![(path.clone(), None)], walk(folder, &path)].concat()
+            } else {
+                let bytes = std::fs::read(&full)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", full.display()));
+                vec![(path, Some(String::from_utf8_lossy(&bytes).into_owned()))]
+            }
+        })
+        .collect()
+}
 
 /// Each agent is read only by its tools and by its hook, and the baseline
 /// review stays as it was frozen.
@@ -872,20 +915,10 @@ const BASELINE_HASH: &str = "0c44c0c2b8fb8a7a8ac511e3b01ca65e0516ab54";
 fn the_agents_are_read_only_by_tools() {
     let root = xtask::workspace_root();
     let folder = root.join(xtask::rules::AGENTS_FOLDER);
-    let agents: Vec<(String, String)> = std::fs::read_dir(&folder)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", folder.display()))
-        .map(|entry| entry.expect("the folder can be listed").file_name())
-        .filter_map(|name| name.to_str().map(str::to_string))
-        .filter(|name| name.ends_with(".md"))
-        .map(|name| {
-            let text = std::fs::read_to_string(folder.join(&name))
-                .unwrap_or_else(|e| panic!("reading {name}: {e}"));
-            (name, text)
-        })
-        .collect();
+    let entries = walk(&folder, "");
     let missing: Vec<String> = ["validator.md", "baseline.md"]
         .into_iter()
-        .filter(|known| !agents.iter().any(|(name, _)| name == known))
+        .filter(|known| !entries.iter().any(|(path, _)| path == known))
         .map(|known| {
             format!(
                 "{}{known} is missing.  Fix: add the agent (harness phase 3, M2).",
@@ -893,12 +926,12 @@ fn the_agents_are_read_only_by_tools() {
             )
         })
         .collect();
-    let problems: Vec<String> = agents
+    let problems: Vec<String> = xtask::rules::agents_folder_problems(&entries)
         .iter()
-        .flat_map(|(name, text)| xtask::rules::agent_problems(name, text))
-        .map(|problem| problem.to_string())
+        .map(ToString::to_string)
         .chain(missing)
         .collect();
+
     assert!(
         problems.is_empty(),
         "{} agent problem(s):\n{}",

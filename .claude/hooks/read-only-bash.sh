@@ -7,6 +7,9 @@
 # For bash 3.2 (macOS): no `declare -A`, no `${x,,}`, no `mapfile`.
 # It uses no external program but jq.
 
+# LC_ALL=C makes each character one byte, so the parse of a long command is
+# fast.  No pattern depends on it: `lower` lists the capital letters, since
+# bash 3.2 with a UTF-8 locale matches small letters with `[A-Z]`.
 export LC_ALL=C
 
 READ_ONLY_ADVICE="This agent is read only.  Do not try another form of the command."
@@ -145,7 +148,7 @@ SMALL_LETTERS=abcdefghijklmnopqrstuvwxyz
 lower() {
   LOWERED=$1
   case $1 in
-    *[A-Z]*) ;;
+    *[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) ;;
     *) return 0 ;;
   esac
   LOWERED=""
@@ -153,7 +156,7 @@ lower() {
   while [ $j -lt ${#1} ]; do
     c=${1:j:1}
     case $c in
-      [A-Z])
+      [ABCDEFGHIJKLMNOPQRSTUVWXYZ])
         before=${CAPITALS%%"$c"*}
         c=${SMALL_LETTERS:${#before}:1}
         ;;
@@ -239,6 +242,16 @@ check_git() {
   esac
 }
 
+# Moves k past the words from k that start with `-`.
+skip_options() {
+  while [ $k -lt $end ]; do
+    case ${WORDS[k]} in
+      -*) k=$((k + 1)) ;;
+      *) break ;;
+    esac
+  done
+}
+
 # Checks the part $1: strips its prefixes, then checks its first word.
 check_part() {
   k=${PART_START[$1]}
@@ -249,11 +262,20 @@ check_part() {
     case $LOWERED in
       rtk)
         k=$((k + 1))
+        skip_options
         if [ $k -lt $end ] && [ "${WORDS[k]}" = proxy ]; then k=$((k + 1)); fi
         continue
         ;;
       timeout)
-        k=$((k + 2))
+        k=$((k + 1))
+        while [ $k -lt $end ]; do
+          case ${WORDS[k]} in
+            -s | -k | --signal | --kill-after) k=$((k + 2)) ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        k=$((k + 1))
         continue
         ;;
       env | command | exec | time | nohup | export | declare | typeset | readonly | local)

@@ -3190,6 +3190,83 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
         .collect()
 }
 
+/// The agents rule for the whole of `.claude/agents/`.  `entries` holds each
+/// entry that a walk finds there, into each subfolder: its path below the
+/// folder, and its text if it is a file (`None` for a folder).  Claude Code
+/// reads the subfolders too, and knows an agent only by its `name`.
+pub fn agents_folder_problems(entries: &[(String, Option<String>)]) -> Vec<Problem> {
+    let problem = |path: &str, what: String, fix: &str| Problem {
+        rule: "agents",
+        file: format!("{AGENTS_FOLDER}{path}"),
+        line: None,
+        message: format!("agents: {AGENTS_FOLDER}{path} {what}.  Fix: {fix}"),
+    };
+    let at_top = |path: &str| !path.contains('/');
+    let not_at_top = entries
+        .iter()
+        .filter(|(path, text)| text.is_none() || !at_top(path))
+        .map(|(path, text)| {
+            problem(
+                path,
+                if text.is_none() { "is a subfolder" } else { "is in a subfolder" }.to_string(),
+                "keep each agent at the top of the folder.  Claude Code reads the subfolders too, but no check reads them.",
+            )
+        });
+    let files: Vec<(&str, &str)> = entries
+        .iter()
+        .filter_map(|(path, text)| text.as_deref().map(|text| (path.as_str(), text)))
+        .collect();
+    let others = files
+        .iter()
+        .filter(|(path, _)| at_top(path) && !path.ends_with(".md") && *path != ".gitkeep")
+        .map(|(path, _)| {
+            problem(
+                path,
+                "is not an agent file".to_string(),
+                "remove it; the folder holds only `<name>.md` agent files and `.gitkeep`.",
+            )
+        });
+    let agents = files
+        .iter()
+        .filter(|(path, _)| at_top(path) && path.ends_with(".md"))
+        .flat_map(|(path, text)| agent_problems(path, text));
+    let names: Vec<(&str, &str)> = files
+        .iter()
+        .filter(|(path, _)| path.ends_with(".md"))
+        .filter_map(|(path, text)| agent_name(text).map(|name| (*path, name)))
+        .collect();
+    let shared = names.iter().enumerate().filter_map(|(i, (path, name))| {
+        names[..i]
+            .iter()
+            .find(|(_, earlier)| earlier == name)
+            .map(|(earlier, _)| {
+                problem(
+                    path,
+                    format!("has the name `{name}`, which {earlier} has too"),
+                    "give each agent its own name.  Claude Code loads one file for a name, in the order that it reads them.",
+                )
+            })
+    });
+    not_at_top
+        .chain(others)
+        .chain(agents)
+        .chain(shared)
+        .collect()
+}
+
+/// The `name` in the frontmatter of an agent file, if it has one.
+fn agent_name(text: &str) -> Option<&str> {
+    let mut lines = text.lines();
+    (lines.next()?.trim_end() == "---")
+        .then(|| {
+            lines
+                .take_while(|line| line.trim_end() != "---")
+                .find_map(|line| line.strip_prefix("name:"))
+                .map(str::trim)
+        })
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6661,5 +6738,91 @@ mod agents_tests {
             "{}",
             problems[0]
         );
+    }
+
+    fn entry(path: &str, text: Option<String>) -> (String, Option<String>) {
+        (path.to_string(), text)
+    }
+
+    /// A good folder: two agents and the `.gitkeep`.
+    fn folder() -> Vec<(String, Option<String>)> {
+        vec![
+            entry("reviewer.md", Some(good())),
+            entry(
+                "validator.md",
+                Some(good().replacen("name: reviewer", "name: validator", 1)),
+            ),
+            entry(".gitkeep", Some(String::new())),
+        ]
+    }
+
+    #[test]
+    fn a_folder_of_read_only_agents_has_no_problem() {
+        assert_eq!(agents_folder_problems(&folder()), []);
+    }
+
+    /// Each plant gives a problem of the agents rule that names it.
+    #[test]
+    fn each_folder_plant_is_named() {
+        let plus = |extra: Vec<(String, Option<String>)>| [folder(), extra].concat();
+        let cases = [
+            (
+                "a subfolder",
+                plus(vec![entry("sub", None)]),
+                "sub is a subfolder",
+            ),
+            (
+                "an agent in a subfolder",
+                plus(vec![
+                    entry("sub", None),
+                    entry(
+                        "sub/writer.md",
+                        Some(good().replacen(
+                            "tools: Read, Bash",
+                            "tools: Read, Edit, Write, Bash",
+                            1,
+                        )),
+                    ),
+                ]),
+                "sub/writer.md is in a subfolder",
+            ),
+            (
+                "a name in a subfolder that an agent has",
+                plus(vec![entry("sub/writer.md", Some(good()))]),
+                "sub/writer.md has the name `reviewer`, which reviewer.md has too",
+            ),
+            (
+                "a file that is not an agent",
+                plus(vec![entry("notes.txt", Some("x".to_string()))]),
+                "notes.txt is not an agent file",
+            ),
+            (
+                "two agents with one name",
+                plus(vec![entry("reviewer2.md", Some(good()))]),
+                "reviewer2.md has the name `reviewer`, which reviewer.md has too",
+            ),
+            (
+                "an agent with a write tool",
+                vec![entry(
+                    "reviewer.md",
+                    Some(good().replacen("tools: Read, Bash", "tools: Read, Edit, Bash", 1)),
+                )],
+                "reviewer.md has `Edit` in `tools`",
+            ),
+        ];
+        for (plant, entries, named) in cases {
+            let problems = agents_folder_problems(&entries);
+            assert!(
+                problems.iter().all(|problem| problem.rule == "agents"),
+                "{plant}: {problems:#?}"
+            );
+            assert!(
+                problems.iter().any(|problem| problem
+                    .message
+                    .starts_with(&format!("agents: {AGENTS_FOLDER}{named}"))
+                    && problem.message.contains("Fix: ")),
+                "{plant}: no problem names {named:?} in {problems:#?}"
+            );
+        }
     }
 }

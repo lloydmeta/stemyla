@@ -38,6 +38,7 @@ You do not get the other output of the reviewer.  Do not look for it.
   2. Change files in the worktree with Bash.
   3. Build with `--manifest-path` in the worktree and `--target-dir target/review/<round>-<name>-<n>/target`.  This build is cold and takes minutes, so give the Bash call a `timeout` of 600000 ms.
   4. Remove the worktree with `git worktree remove --force target/review/<round>-<name>-<n>`.  This also removes its target folder.
+* If `git worktree add` says that the path exists, add 1 to `<n>` and run it again.  Another agent with your name can run at the same time.  Never use or remove a worktree that you did not make.
 * Do not build a changed worktree into the target folder of the input.  Cargo gives a test program the same name in each worktree, so parallel agents would run the test programs of other agents.
 * To test `HEAD` with no change, run cargo in the main checkout with `--target-dir <the target folder of the input>`.  All agents build the same code there.
 * A guard refuses some Bash commands.  Its message starts with "read-only guard:".

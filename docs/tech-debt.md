@@ -174,7 +174,7 @@ A change to the person's own settings during a round, by a person or by Claude C
 
 ### TD-34: the review agents' guard matches text
 
-`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more.
+`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
 
 These pass the guard:
 
@@ -183,7 +183,8 @@ These pass the guard:
 * `$(...)` inside double quotes, `$'...'` quoting, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
 * a redirection before the command, such as `2>/dev/null git commit`;
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
-* a prefix option that takes a value, such as `env -u X git commit` or `timeout -s KILL 60 gh`, and `env -S "git commit -m x"`;
+* a prefix option that takes a value, such as `env -u X git commit` or `exec -a x git commit`, and `env -S "git commit -m x"`;
+* an array element before the command, such as `a[0]=1 git commit -m x`, which bash runs as an assignment and a command;
 * `rtk` subcommands such as `rtk run` and `rtk err`;
 * `cargo new` and `cargo init`, which write a new package;
 * other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
@@ -196,7 +197,7 @@ A heredoc body with an apostrophe is refused as an unclosed quote.  But a second
 
 The time of the parse grows with the square of the length of the command.  On 2026-10-23, 10,000 characters took 0.6 s and 50,000 characters took 9.3 s on this Mac.  With `onFailure: block` on the hook, a timeout refuses the call.
 
-The agents in `.claude/agents/` run the guard from a hook in their frontmatter.  `the_agents_are_read_only_by_tools` keeps their tools and that hook.  These are still open:
+The agents in `.claude/agents/` run the guard from a hook in their frontmatter.  `the_agents_are_read_only_by_tools` keeps their tools and that hook, and fails a subfolder, a file that is not an agent, and a name that two files share.  These are still open:
 
 * The guard does not stop `Read`, or `cat` through Bash, of the `gh` token or the cargo token.
 * Claude Code does not run frontmatter hooks in a folder that a person has not trusted, or in `-p` mode.  So phase 5 passes the agents with `--agents`.
