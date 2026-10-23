@@ -491,9 +491,12 @@ pub fn main(args: &[String]) -> i32 {
 
 /// The seam for tests: runs a subcommand in `dir`, and returns the exit
 /// code and the lines to print.
-pub fn run(args: &[String], dir: &Path, home: &Path, _exe_time: SystemTime) -> (i32, Vec<String>) {
+pub fn run(args: &[String], dir: &Path, home: &Path, exe_time: SystemTime) -> (i32, Vec<String>) {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match words.as_slice() {
+        ["start", base, round] => {
+            parse_round(round).and_then(|round| start(&toplevel(dir)?, home, exe_time, base, round))
+        }
         ["check", round] => {
             parse_round(round).and_then(|round| check(&toplevel(dir)?, home, round))
         }
@@ -764,6 +767,185 @@ fn read_state(path: &Path) -> Result<State> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// `review start <base> <round>`: records the round, and prints its
+/// ranges and routes.
+fn start(
+    toplevel: &Path,
+    home: &Path,
+    exe_time: SystemTime,
+    base_name: &str,
+    round: u32,
+) -> Result<(i32, Vec<String>)> {
+    let dirty = git(
+        toplevel,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?;
+    if !dirty.trim().is_empty() {
+        let first = "commit first: the tree has changes".to_string();
+        return Ok((
+            REFUSED,
+            std::iter::once(first)
+                .chain(dirty.lines().map(ToString::to_string))
+                .collect(),
+        ));
+    }
+    let base = git(toplevel, &["merge-base", base_name, "HEAD"])
+        .with_context(|| format!("no merge base of {base_name} and HEAD"))?
+        .trim()
+        .to_string();
+    let folder = run_folder(toplevel)?;
+    if round == 1 && folder.join("log.md").exists() {
+        return Ok((
+            REFUSED,
+            vec!["the run folder holds a log: copy it out, or remove it".to_string()],
+        ));
+    }
+    let since = if round == 1 {
+        base.clone()
+    } else {
+        let last = folder.join((round - 1).to_string()).join("state.json");
+        if !last.exists() {
+            return Ok((
+                REFUSED,
+                vec![format!(
+                    "no record of round {}: {}",
+                    round - 1,
+                    last.display()
+                )],
+            ));
+        }
+        read_state(&last)?.head
+    };
+    let started = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let state = State {
+        base: base.clone(),
+        since: since.clone(),
+        started,
+        ..take_state(toplevel, home)?
+    };
+    let head = state.head.clone();
+    let branch_route = diff_route(toplevel, &base, &head)?;
+    let since_route = diff_route(toplevel, &since, &head)?;
+    let ranges = |cap: Option<usize>| -> Vec<String> {
+        [
+            (format!("branch {base}..{head}:"), &branch_route),
+            (format!("since {since}..{head}:"), &since_route),
+        ]
+        .into_iter()
+        .flat_map(|(title, route)| std::iter::once(title).chain(route_lines(route, cap)))
+        .collect()
+    };
+
+    let round_folder = folder.join(round.to_string());
+    std::fs::create_dir_all(&round_folder)
+        .with_context(|| format!("making {}", round_folder.display()))?;
+    let save = |name: &str, text: &str| {
+        let path = round_folder.join(name);
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    };
+    save("branch.diff", &git_diff(toplevel, &["-M", &base, &head])?)?;
+    save("since.diff", &git_diff(toplevel, &["-M", &since, &head])?)?;
+    save("route.txt", &(ranges(None).join("\n") + "\n"))?;
+    save("state.json", &serde_json::to_string_pretty(&state)?)?;
+
+    const SOURCE: &str = "xtask/src/review.rs";
+    let source_time = std::fs::metadata(toplevel.join(SOURCE))
+        .and_then(|m| m.modified())
+        .ok();
+    let blob = |rev: &str| {
+        git(
+            toplevel,
+            &["rev-parse", "--verify", "-q", &format!("{rev}:{SOURCE}")],
+        )
+        .ok()
+        .map(|sha| sha.trim().to_string())
+    };
+    let (base_blob, head_blob) = (blob(&base), blob(&head));
+    let lines = [
+        format!("base: {base} (merge base of {base_name} and HEAD)"),
+        format!("since: {since}"),
+        format!("run folder: {}", folder.display()),
+        format!(
+            "target folder: {}",
+            toplevel.join("target/review/target").display()
+        ),
+    ]
+    .into_iter()
+    .chain(ranges(Some(PATH_REASONS_SHOWN)))
+    .chain(warnings(
+        exe_time,
+        source_time,
+        base_blob.as_deref(),
+        head_blob.as_deref(),
+    ))
+    .collect();
+    Ok((0, lines))
+}
+
+/// `review start` prints at most this many path reasons for each reviewer;
+/// `route.txt` holds them all.
+const PATH_REASONS_SHOWN: usize = 5;
+
+/// One line for each reviewer of a route, or `no changes`.  With a cap,
+/// path reasons past it give `(+n more)`; other reasons always show.
+fn route_lines(route: &Route, cap: Option<usize>) -> Vec<String> {
+    if route.is_empty() {
+        return vec!["  no changes".to_string()];
+    }
+    route
+        .0
+        .iter()
+        .map(|(name, reasons)| {
+            let limit = cap.unwrap_or(usize::MAX);
+            let paths = reasons
+                .iter()
+                .filter(|r| matches!(r, Reason::Path { .. }))
+                .count();
+            let hidden = paths.saturating_sub(limit);
+            let mut seen_paths = 0;
+            let mut parts = Vec::new();
+            for reason in reasons {
+                if !matches!(reason, Reason::Path { .. }) {
+                    parts.push(reason.to_string());
+                    continue;
+                }
+                seen_paths += 1;
+                if seen_paths <= limit {
+                    parts.push(reason.to_string());
+                }
+                if seen_paths == limit && hidden > 0 {
+                    parts.push(format!("(+{hidden} more)"));
+                }
+            }
+            format!("  {name}: {}", parts.join("; "))
+        })
+        .collect()
+}
+
+/// The warnings of `review start`, which do not change its exit code.
+pub fn warnings(
+    exe_time: SystemTime,
+    source_time: Option<SystemTime>,
+    base_blob: Option<&str>,
+    head_blob: Option<&str>,
+) -> Vec<String> {
+    let old_binary = source_time.is_some_and(|source| exe_time < source).then(|| {
+        "warning: target/debug/xtask is older than xtask/src/review.rs; run cargo build -p xtask"
+            .to_string()
+    });
+    let changed = match (base_blob, head_blob) {
+        (Some(base), Some(head)) if base != head => Some(
+            "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
+                .to_string(),
+        ),
+        _ => None,
+    };
+    old_binary.into_iter().chain(changed).collect()
 }
 
 /// `review check <round>`: the changes since the round's record.
@@ -1675,6 +1857,262 @@ mod tests {
             &dir,
             &["worktree", "remove", "--force", linked.to_str().unwrap()],
         );
+    }
+
+    // `review start`.
+
+    fn start_in(dir: &Path, base: &str, round: &str) -> (i32, Vec<String>) {
+        run(
+            &["start".to_string(), base.to_string(), round.to_string()],
+            dir,
+            &dir.join("target/no-home"),
+            SystemTime::now(),
+        )
+    }
+
+    fn value_of(lines: &[String], key: &str) -> String {
+        lines
+            .iter()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or_else(|| panic!("no {key:?} line in {lines:?}"))
+            .to_string()
+    }
+
+    fn sha(dir: &Path, rev: &str) -> String {
+        git_in(dir, &["rev-parse", rev])
+    }
+
+    #[test]
+    fn start_resolves_base_to_the_merge_base() {
+        let dir = scratch("start-base");
+        let fork = sha(&dir, "HEAD");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "a.txt", "a\n");
+        commit_all(&dir, "on the branch");
+        git_in(&dir, &["checkout", "-q", "main"]);
+        write(&dir, "b.txt", "b\n");
+        commit_all(&dir, "on main");
+        git_in(&dir, &["checkout", "-q", "feature"]);
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 0, "{lines:?}");
+        assert_eq!(
+            value_of(&lines, "base: "),
+            format!("{fork} (merge base of main and HEAD)")
+        );
+        let folder = PathBuf::from(value_of(&lines, "run folder: "));
+        let diff = std::fs::read_to_string(folder.join("1/branch.diff")).unwrap();
+        assert!(diff.contains("a.txt"), "{diff}");
+        assert!(!diff.contains("b.txt"), "{diff}");
+        let state = read_state(&folder.join("1/state.json")).unwrap();
+        assert_eq!(state.base, fork);
+        assert_eq!(state.head, sha(&dir, "HEAD"));
+    }
+
+    #[test]
+    fn since_is_the_base_then_the_last_rounds_head() {
+        let dir = scratch("start-since");
+        let base = sha(&dir, "HEAD");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "a.txt", "a\n");
+        write(&dir, "b.txt", "only in round 1\n");
+        commit_all(&dir, "one");
+        let first_head = sha(&dir, "HEAD");
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 0, "{lines:?}");
+        assert_eq!(value_of(&lines, "since: "), base);
+        write(&dir, "a.txt", "a fix\n");
+        commit_all(&dir, "fix");
+        let (code, lines) = start_in(&dir, "main", "2");
+        assert_eq!(code, 0, "{lines:?}");
+        assert_eq!(value_of(&lines, "since: "), first_head);
+        let folder = PathBuf::from(value_of(&lines, "run folder: "));
+        let since_diff = std::fs::read_to_string(folder.join("2/since.diff")).unwrap();
+        assert!(since_diff.contains("+a fix"), "{since_diff}");
+        assert!(!since_diff.contains("b.txt"), "{since_diff}");
+    }
+
+    #[test]
+    fn round_2_without_a_round_1_record_exits_3() {
+        let dir = scratch("start-no-1");
+        let (code, lines) = start_in(&dir, "main", "2");
+        assert_eq!(code, 3, "{lines:?}");
+        assert!(lines.join("\n").contains("1/state.json"), "{lines:?}");
+    }
+
+    #[test]
+    fn round_1_refuses_a_run_folder_with_a_log() {
+        let dir = scratch("start-log");
+        let folder = dir.join("target/review/run/main");
+        std::fs::create_dir_all(folder.join("1")).unwrap();
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 0, "a round folder without a log is fine: {lines:?}");
+        std::fs::write(folder.join("log.md"), "# log\n").unwrap();
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 3);
+        assert_eq!(
+            lines,
+            ["the run folder holds a log: copy it out, or remove it"]
+        );
+    }
+
+    #[test]
+    fn a_dirty_tree_exits_3() {
+        let dir = scratch("start-dirty");
+        write(&dir, "x.txt", "x\n");
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 3);
+        assert!(lines[0].starts_with("commit first"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_unknown_base_exits_3() {
+        let dir = scratch("start-unknown");
+        let (code, _) = start_in(&dir, "acme", "1");
+        assert_eq!(code, 3);
+    }
+
+    #[test]
+    fn the_run_folder_is_named_for_the_branch_or_the_commit() {
+        let dir = scratch("start-names");
+        git_in(&dir, &["checkout", "-q", "-b", "a/b"]);
+        let (_, lines) = start_in(&dir, "main", "1");
+        let top = toplevel(&dir).unwrap();
+        assert_eq!(
+            PathBuf::from(value_of(&lines, "run folder: ")),
+            top.join("target/review/run/a-b")
+        );
+        git_in(&dir, &["checkout", "-q", "--detach"]);
+        let short = git_in(&dir, &["rev-parse", "--short", "HEAD"]);
+        let (_, lines) = start_in(&dir, "main", "1");
+        assert_eq!(
+            PathBuf::from(value_of(&lines, "run folder: ")),
+            top.join(format!("target/review/run/detached-{short}"))
+        );
+    }
+
+    #[test]
+    fn an_older_binary_warns() {
+        let now = SystemTime::now();
+        let earlier = now - std::time::Duration::from_secs(60);
+        assert_eq!(
+            warnings(earlier, Some(now), None, None),
+            [
+                "warning: target/debug/xtask is older than xtask/src/review.rs; run cargo build -p xtask"
+            ]
+        );
+        assert!(warnings(now, Some(earlier), None, None).is_empty());
+        assert!(warnings(earlier, None, None, None).is_empty());
+    }
+
+    #[test]
+    fn a_changed_review_rs_warns() {
+        let now = SystemTime::now();
+        assert_eq!(
+            warnings(now, None, Some("b1"), Some("b2")),
+            [
+                "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
+            ]
+        );
+        assert!(warnings(now, None, Some("b1"), Some("b1")).is_empty());
+        assert!(warnings(now, None, None, Some("b2")).is_empty());
+        assert!(warnings(now, None, Some("b1"), None).is_empty());
+    }
+
+    #[test]
+    fn a_repo_without_review_rs_gives_no_warning() {
+        let dir = scratch("start-no-source");
+        let (code, lines) = run(
+            &["start".to_string(), "main".to_string(), "1".to_string()],
+            &dir,
+            &dir.join("target/no-home"),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(code, 0, "{lines:?}");
+        assert!(!lines.iter().any(|l| l.starts_with("warning")), "{lines:?}");
+    }
+
+    #[test]
+    fn start_prints_at_most_5_path_reasons_and_every_sign() {
+        let dir = scratch("start-output");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        for n in 1..=6 {
+            write(&dir, &format!("engine/src/f{n}.rs"), "fn f() {}\n");
+        }
+        write(&dir, "xtask/src/x.rs", "let a = b.to_vec();\n");
+        commit_all(&dir, "six files and a sign");
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 0, "{lines:?}");
+        let memory: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("  memory-reviewer: "))
+            .collect();
+        assert_eq!(memory.len(), 2, "one line for each range: {lines:?}");
+        let shown: Vec<&str> = memory[0]
+            .trim_start_matches("  memory-reviewer: ")
+            .split("; ")
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "engine/src/f1.rs (engine/**)",
+                "engine/src/f2.rs (engine/**)",
+                "engine/src/f3.rs (engine/**)",
+                "engine/src/f4.rs (engine/**)",
+                "engine/src/f5.rs (engine/**)",
+                "(+1 more)",
+                "`to_vec` in xtask/src/x.rs",
+            ]
+        );
+        let folder = PathBuf::from(value_of(&lines, "run folder: "));
+        let route_txt = std::fs::read_to_string(folder.join("1/route.txt")).unwrap();
+        let full = route_txt
+            .lines()
+            .find(|l| l.starts_with("  memory-reviewer: "))
+            .unwrap();
+        assert_eq!(full.split("; ").count(), 7, "{full}");
+        assert!(full.contains("engine/src/f6.rs (engine/**)"), "{full}");
+        let (code, lines) = start_in(&dir, "main", "2");
+        assert_eq!(code, 0, "{lines:?}");
+        let since_at = lines.iter().position(|l| l.starts_with("since ")).unwrap();
+        assert_eq!(lines[since_at + 1], "  no changes", "{lines:?}");
+    }
+
+    #[test]
+    fn start_prints_the_ranges_and_the_target_folder() {
+        let dir = scratch("start-lines");
+        let (code, lines) = start_in(&dir, "main", "1");
+        assert_eq!(code, 0, "{lines:?}");
+        let top = toplevel(&dir).unwrap();
+        let head = sha(&dir, "HEAD");
+        assert_eq!(
+            lines,
+            [
+                format!("base: {head} (merge base of main and HEAD)"),
+                format!("since: {head}"),
+                format!(
+                    "run folder: {}",
+                    top.join("target/review/run/main").display()
+                ),
+                format!(
+                    "target folder: {}",
+                    top.join("target/review/target").display()
+                ),
+                format!("branch {head}..{head}:"),
+                "  no changes".to_string(),
+                format!("since {head}..{head}:"),
+                "  no changes".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_round_that_is_not_a_whole_number_of_1_or_more_exits_3() {
+        let dir = scratch("start-round");
+        for round in ["0", "one", "-1"] {
+            let (code, lines) = start_in(&dir, "main", round);
+            assert_eq!(code, 3, "{round}");
+            assert!(lines.join("\n").contains(USAGE), "{lines:?}");
+        }
     }
 
     // The command.
