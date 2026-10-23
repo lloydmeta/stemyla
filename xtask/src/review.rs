@@ -1102,8 +1102,9 @@ impl std::fmt::Display for Line {
     }
 }
 
-/// Removes the round's old `mutants.out` and `mutants.out.old`, since a
-/// diff with no mutants leaves an old `mutants.out` as it was.
+/// Removes the round's old `mutants.out`, `mutants.out.old` and
+/// `mutants.txt`.  A diff with no mutants leaves an old `mutants.out` as it
+/// was, and an old line would show until the new run ends.
 pub fn clear_old_output(round_folder: &Path) -> Result<()> {
     for old in ["mutants.out", "mutants.out.old"] {
         let path = round_folder.join(old);
@@ -3057,6 +3058,21 @@ mod tests {
             read_counts(&round_folder.join("mutants.out")),
             &format!("mutants: none: {NOTHING}; no mutants in the diff"),
         );
+    }
+
+    #[test]
+    fn the_clear_step_removes_the_old_mutants_line() {
+        let dir = scratch("clear-line");
+        let round_folder = dir.join("target/review/run/main/1");
+        std::fs::create_dir_all(&round_folder).unwrap();
+        let old_line = round_folder.join("mutants.txt");
+        std::fs::write(&old_line, format!("mutants: full: {COUNTED}\n")).unwrap();
+        clear_old_output(&round_folder).unwrap();
+        assert!(
+            !old_line.exists(),
+            "a round started again must not show the line of the last run"
+        );
+        assert!(round_folder.exists());
     }
 
     #[test]

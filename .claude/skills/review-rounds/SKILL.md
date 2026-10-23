@@ -133,15 +133,17 @@ Each validator gives one block with the fields `id`, `verdict`, `evidence` and `
 ### 6. Validate the missed mutants
 
 1. If the notice that the mutants command ended has come, the wait for it is 0 seconds.  Else, run `jq -n now`, and record its output as the start of the wait.  Then wait for the notice.  When it comes, run `jq -n now` again, and record the end of the wait.
-2. Read the mutants line.  The notice holds it.  If you cannot find the notice, read `<run>/$1/mutants.txt`.  The line starts with `mutants: full:`, `mutants: partial:` or `mutants: none:`.
-3. Read `<run>/$1/mutants.out/missed.txt`.  If the file does not exist or has no lines, go to item 5.
-4. Start one `validator` with this prompt template, filled in.  The range is `<since>..HEAD`, because the mutants run tests the since diff:
+2. Read the mutants line in the notice.  If the notice does not show it, read `<run>/$1/mutants.txt`.  Read that file only after the notice has come, because the run writes the file when it ends.  The line starts with `mutants: full:`, `mutants: partial:` or `mutants: none:`.
+3. Read `<run>/$1/mutants.out/missed.txt`.  If the file does not exist or has no lines, go to item 8.
+4. Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.
+5. Do the `repeat-of` check of step 4, item 4, for each of these findings.  A finding with `repeat-of` gets the verdict `refuted`.  Leave its line out of the validator's prompt.  If no line is left, go to item 7.
+6. Start one `validator` with this prompt template, filled in.  The prompt holds each line that has no `repeat-of`.  The range is `<since>..HEAD`, because the mutants run tests the since diff:
 
    ```text
    Validate these missed mutants as your instructions say.  Give one block for each line, with the line as its id.
 
    Missed mutants, from cargo-mutants:
-   <each line of missed.txt>
+   <each line of missed.txt with no repeat-of>
 
    Range: <since>..HEAD
    Criteria: $2
@@ -149,8 +151,9 @@ Each validator gives one block with the fields `id`, `verdict`, `evidence` and `
    Target folder: <target>
    ```
 
-   Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.  Its verdict is the verdict of the validator for that line.  If a finding of a reviewer is the same finding, as in step 4, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
-5. Run `jq -n now`, and record the output as the end of the round.  Run `jq .started <run>/$1/state.json` for the start of the round.
+   The verdict of each of these findings is the verdict of the validator for its line.
+7. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
+8. Run `jq -n now`, and record the output as the end of the round.  Run `jq .started <run>/$1/state.json` for the start of the round.
 
 ### 7. Compare with the baseline (`--baseline` only)
 
@@ -281,7 +284,7 @@ Add one row to the findings table for each finding of the round, the baseline's 
 
 Add one row to the rounds table:
 
-* Agents: the number of agents that the round started, but the baseline and its own validators.  The validators count with the agents that they validate.
+* Agents: the number of agents that the round started, but the baseline and its own validators.  The validators count with the agents that they validate.  Step 7's comparer counts neither with the round nor with the baseline.
 * Tokens: the sum of the tokens of those agents.
 * Wall minutes: the wall minutes of the findings file.  They run from `review start` to the last verdict, without the wait for the mutants run.
 * Interventions: the number of messages and approvals of a person in the round.
