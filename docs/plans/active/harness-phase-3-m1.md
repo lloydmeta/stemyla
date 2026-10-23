@@ -100,6 +100,7 @@ Terms are as in the parent plan.  Also:
   * `status`: `git status --porcelain=v1 -z --untracked-files=normal`, split.  The dirty check of `start` passes `--untracked-files=normal` too, so a person's `status.showUntrackedFiles=no` hides nothing.
   * `stash`: `git stash list --format=%H`.
   * `branches`, `tags`: `git for-each-ref --format=%(refname) %(objectname) refs/heads` and `refs/tags`.
+  * `other_refs` (added by review round 1): every other ref but `refs/stash`, with the same format, such as `refs/remotes/`, notes and replacements.  So a push or a fetch is a change.
   * `remotes`: `git remote -v`.
   * `worktrees`: `git worktree list --porcelain`, one record for each worktree.  Leave out each worktree under `target/review/` of the toplevel, or of the main worktree (the first record).  Compare canonical paths, since macOS's temp folder is a symlink.
   * `hashes`: a map from a label to `git hash-object --no-filters <file>`, or `absent`.  The labels:
@@ -291,6 +292,7 @@ The binary is `target/debug/xtask` of the main checkout, built from M1's last co
 * 2026-10-23, team leader: `review start` prints at most 5 path reasons for each reviewer, and writes all reasons to `route.txt`.  So a long diff gives a short prompt.
 * 2026-10-23, implementer: the line of `review mutants` prints the reason of each class that has one.  So exit 3 prints "; timeouts have no result".  Step 4 gives exit 3 that reason, but printed reasons only for `none` and a stop.
 * 2026-10-23, implementer: if `cargo` does not start, `run_with_limit` reports cargo-mutants as missing, since `RunEnd` has no other way to say that nothing ran.
+* 2026-10-23, implementer (review round 1): `warnings` also takes the path of the binary, so the old-binary warning names the binary that runs (`current_exe`), not always `target/debug/xtask`.  `review mutants` builds its command with the pure `mutants_args` and `mutants_command`, reads its limit with `parse_limit`, and prepares the round with `prepare_mutants`, so tests reach each part without cargo-mutants.
 * 2026-10-23, implementer: the partial check ran round 3 twice.  The first limit, 4 minutes, was above the whole run, so the line said `full`.  The second, 2.5 minutes, is above both the 140 s of the plan and the 77 s baseline measured, and gave `partial`.
 
 ## Outcomes and retrospective

@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
@@ -541,6 +542,10 @@ pub struct State {
     pub stash: Vec<String>,
     pub branches: Vec<String>,
     pub tags: Vec<String>,
+    /// Every other ref but `refs/stash`, such as `refs/remotes/`, notes and
+    /// replacements, with its object.
+    #[serde(default)]
+    pub other_refs: Vec<String>,
     pub remotes: Vec<String>,
     pub worktrees: Vec<String>,
     /// A label, and `git hash-object` of its file, or `absent`.
@@ -587,6 +592,14 @@ pub fn take_state(toplevel: &Path, home: &Path) -> Result<State> {
             "--format=%(refname) %(objectname)",
             "refs/tags",
         ])?,
+        other_refs: lines(&["for-each-ref", "--format=%(refname) %(objectname)"])?
+            .into_iter()
+            .filter(|line| {
+                !(line.starts_with("refs/heads/")
+                    || line.starts_with("refs/tags/")
+                    || line.starts_with("refs/stash "))
+            })
+            .collect(),
         remotes: lines(&["remote", "-v"])?,
         worktrees: worktrees(toplevel)?,
         hashes: hashes(toplevel, home)?,
@@ -720,6 +733,7 @@ pub fn changes(old: &State, new: &State) -> Vec<String> {
         ("stash", &old.stash, &new.stash),
         ("branches", &old.branches, &new.branches),
         ("tags", &old.tags, &new.tags),
+        ("other_refs", &old.other_refs, &new.other_refs),
         ("remotes", &old.remotes, &new.remotes),
         ("worktrees", &old.worktrees, &new.worktrees),
     ]
@@ -883,6 +897,7 @@ fn start(
     .into_iter()
     .chain(ranges(Some(PATH_REASONS_SHOWN)))
     .chain(warnings(
+        &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xtask")),
         exe_time,
         source_time,
         base_blob.as_deref(),
@@ -934,15 +949,20 @@ fn route_lines(route: &Route, cap: Option<usize>) -> Vec<String> {
 
 /// The warnings of `review start`, which do not change its exit code.
 pub fn warnings(
+    exe: &Path,
     exe_time: SystemTime,
     source_time: Option<SystemTime>,
     base_blob: Option<&str>,
     head_blob: Option<&str>,
 ) -> Vec<String> {
-    let old_binary = source_time.is_some_and(|source| exe_time < source).then(|| {
-        "warning: target/debug/xtask is older than xtask/src/review.rs; run cargo build -p xtask"
-            .to_string()
-    });
+    let old_binary = source_time
+        .is_some_and(|source| exe_time < source)
+        .then(|| {
+            format!(
+                "warning: {} is older than xtask/src/review.rs; run cargo build -p xtask",
+                exe.display()
+            )
+        });
     let changed = match (base_blob, head_blob) {
         (Some(base), Some(head)) if base != head => Some(
             "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
@@ -1185,20 +1205,77 @@ fn read_counts(mutants_out: &Path) -> Option<Counts> {
     })
 }
 
-/// The run's limit: 60 minutes, or `STEMYLA_MUTANTS_MINUTES`.
-fn limit() -> Result<Duration> {
-    match std::env::var("STEMYLA_MUTANTS_MINUTES") {
-        Err(_) => Ok(Duration::from_secs(60 * 60)),
-        Ok(text) => match text.trim().parse::<f64>() {
-            Ok(minutes) if minutes.is_finite() && minutes > 0.0 => {
-                Ok(Duration::from_secs_f64(minutes * 60.0))
-            }
-            _ => bail!("STEMYLA_MUTANTS_MINUTES must be a number of minutes above 0, not {text:?}"),
-        },
+/// The run's limit, from `STEMYLA_MUTANTS_MINUTES`: 60 minutes when unset.
+pub fn parse_limit(minutes: Option<&str>) -> Result<Duration> {
+    let Some(text) = minutes else {
+        return Ok(Duration::from_secs(60 * 60));
+    };
+    let limit = text
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|minutes| *minutes > 0.0)
+        .and_then(|minutes| Duration::try_from_secs_f64(minutes * 60.0).ok());
+    match limit {
+        Some(limit) => Ok(limit),
+        None => bail!("STEMYLA_MUTANTS_MINUTES must be a number of minutes above 0, not {text:?}"),
     }
 }
 
 const INSTALL: &str = "cargo-mutants is not installed: cargo install --locked cargo-mutants@27.1.0";
+
+/// The arguments of `cargo` for a round's run.
+pub fn mutants_args(diff: &Path, round_folder: &Path, config: &Path) -> Vec<OsString> {
+    let words = |list: &[&str]| -> Vec<OsString> { list.iter().map(OsString::from).collect() };
+    [
+        words(&["mutants", "--in-diff"]),
+        vec![diff.into()],
+        words(&["--output"]),
+        vec![round_folder.into()],
+        words(&[
+            "--copy-vcs=true",
+            "--gitignore=true",
+            "--shuffle",
+            "-j2",
+            "--timeout",
+            "300",
+            "--config",
+        ]),
+        vec![config.into()],
+    ]
+    .concat()
+}
+
+/// `cargo` with `args`, at the toplevel, without `CARGO_TARGET_DIR`, so
+/// the run builds in its own copies.
+pub fn mutants_command(toplevel: &Path, args: &[OsString]) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args(args)
+        .current_dir(toplevel)
+        .env_remove("CARGO_TARGET_DIR")
+        .stdin(std::process::Stdio::null());
+    command
+}
+
+/// The round's folder, with its old output removed and `mutants.diff`
+/// written from the round's `since` to its `head`; none without a record.
+pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<PathBuf>> {
+    let round_folder = run_folder(toplevel)?.join(round.to_string());
+    let record = round_folder.join("state.json");
+    if !record.exists() {
+        return Ok(None);
+    }
+    let state = read_state(&record)?;
+    clear_old_output(&round_folder)?;
+    write_mutants_diff(
+        toplevel,
+        &state.since,
+        &state.head,
+        &round_folder.join("mutants.diff"),
+    )?;
+    Ok(Some(round_folder))
+}
 
 /// `review mutants <round> [--config <file>]`: runs cargo-mutants on the
 /// round's `since` diff, under the limit, and prints one line.
@@ -1208,22 +1285,16 @@ fn mutants(
     round: u32,
     config: Option<&str>,
 ) -> Result<(i32, Vec<String>)> {
-    let round_folder = run_folder(toplevel)?.join(round.to_string());
-    let record = round_folder.join("state.json");
-    if !record.exists() {
+    let limit = parse_limit(std::env::var("STEMYLA_MUTANTS_MINUTES").ok().as_deref())?;
+    let Some(round_folder) = prepare_mutants(toplevel, round)? else {
         return Ok((
             REFUSED,
             vec![format!(
                 "no record for this branch and round ({}); run review start first",
-                record.display()
+                state_path(toplevel, round)?.display()
             )],
         ));
-    }
-    let state = read_state(&record)?;
-    let limit = limit()?;
-    clear_old_output(&round_folder)?;
-    let diff = round_folder.join("mutants.diff");
-    write_mutants_diff(toplevel, &state.since, &state.head, &diff)?;
+    };
     let installed = Command::new("cargo")
         .args(["mutants", "--version"])
         .current_dir(toplevel)
@@ -1233,28 +1304,13 @@ fn mutants(
         let log_path = round_folder.join("mutants.log");
         let log = std::fs::File::create(&log_path)
             .with_context(|| format!("making {}", log_path.display()))?;
-        let mut command = Command::new("cargo");
-        command
-            .arg("mutants")
-            .arg("--in-diff")
-            .arg(&diff)
-            .arg("--output")
-            .arg(&round_folder)
-            .args([
-                "--copy-vcs=true",
-                "--gitignore=true",
-                "--shuffle",
-                "-j2",
-                "--timeout",
-                "300",
-                "--config",
-            ])
-            .arg(config_path(toplevel, dir, config))
-            .current_dir(toplevel)
-            .env_remove("CARGO_TARGET_DIR")
-            .stdin(std::process::Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log);
+        let args = mutants_args(
+            &round_folder.join("mutants.diff"),
+            &round_folder,
+            &config_path(toplevel, dir, config),
+        );
+        let mut command = mutants_command(toplevel, &args);
+        command.stdout(log.try_clone()?).stderr(log);
         run_with_limit(command, limit)
     } else {
         RunEnd {
@@ -1354,13 +1410,49 @@ mod tests {
         git_in(dir, &["commit", "-q", "--no-verify", "-m", message]);
     }
 
+    /// A folder in the temporary folder, removed when the test ends, also
+    /// when it fails.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("xtask-review-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        /// A path next to the folder, for a worktree; removed with it.
+        fn beside(&self, suffix: &str) -> Scratch {
+            let path = self.0.with_extension(suffix);
+            let _ = std::fs::remove_dir_all(&path);
+            Scratch(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
     /// A scratch repo on `main` with one commit, which ignores `target/`
-    /// as the real repo does.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("xtask-review-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    /// as the real repo does.  Its hooks folder is its own, so a person's
+    /// global `core.hooksPath` never gets a test's hook.
+    fn scratch(name: &str) -> Scratch {
+        let dir = Scratch::new(name);
         git_in(&dir, &["init", "-q", "-b", "main"]);
+        let hooks = dir.join(".git/hooks").canonicalize().unwrap();
+        git_in(&dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
         std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
         commit_all(&dir, "start");
         dir
@@ -1735,6 +1827,14 @@ mod tests {
     }
 
     #[test]
+    fn unquote_reads_octal_and_named_escapes() {
+        assert_eq!(
+            unquote("\"b/caf\\303\\251 \\\"q\\\"\\t.rs\""),
+            "b/café \"q\"\t.rs"
+        );
+    }
+
+    #[test]
     fn an_empty_diff_gives_an_empty_route() {
         assert!(route("", "").is_empty());
     }
@@ -1804,6 +1904,7 @@ mod tests {
             stash: vec!["s1".into()],
             branches: vec!["refs/heads/main h1".into()],
             tags: vec!["refs/tags/v1 t1".into()],
+            other_refs: vec!["refs/remotes/origin/main h1".into()],
             remotes: vec!["origin /x (fetch)".into()],
             worktrees: vec!["worktree /r HEAD h1 branch refs/heads/main".into()],
             hashes: BTreeMap::from([
@@ -1881,6 +1982,17 @@ mod tests {
                 ..a_state()
             },
             "tags",
+        );
+    }
+
+    #[test]
+    fn different_other_refs_are_a_change() {
+        assert_changes_name(
+            State {
+                other_refs: vec!["refs/remotes/origin/main h2".into()],
+                ..a_state()
+            },
+            "other_refs",
         );
     }
 
@@ -1970,12 +2082,9 @@ mod tests {
     // The state record: the capture, with real git.
 
     /// A scratch repo and a scratch home folder, with round 1's record.
-    fn recorded(name: &str) -> (PathBuf, PathBuf) {
+    fn recorded(name: &str) -> (Scratch, Scratch) {
         let dir = scratch(name);
-        let home =
-            std::env::temp_dir().join(format!("xtask-review-home-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
+        let home = Scratch::new(&format!("home-{name}"));
         let top = toplevel(&dir).unwrap();
         let state = take_state(&top, &home).unwrap();
         let path = state_path(&top, 1).unwrap();
@@ -2038,6 +2147,45 @@ mod tests {
         let (dir, home) = recorded("cap-tags");
         git_in(&dir, &["tag", "t"]);
         assert_check_names(&dir, &home, "tags: ");
+    }
+
+    #[test]
+    fn check_sees_a_push() {
+        let (dir, home) = recorded("cap-push");
+        let origin = dir.beside("origin");
+        git_in(&dir, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git_in(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        let top = toplevel(&dir).unwrap();
+        let state = take_state(&top, &home).unwrap();
+        std::fs::write(
+            state_path(&top, 1).unwrap(),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+        git_in(&dir, &["push", "-q", "--no-verify", "origin", "main:acme"]);
+        let (code, lines) = check_round_1(&dir, &home);
+        assert_eq!(code, 3, "{lines:?}");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("other_refs: appears: refs/remotes/origin/acme "),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn other_refs_leave_out_heads_tags_and_the_stash() {
+        let (dir, home) = recorded("cap-other-refs");
+        git_in(&dir, &["update-ref", "refs/notes/commits", "HEAD"]);
+        write(&dir, ".gitignore", "target/\nz\n");
+        git_in(&dir, &["stash", "-q"]);
+        git_in(&dir, &["tag", "t"]);
+        let state = take_state(&toplevel(&dir).unwrap(), &home).unwrap();
+        assert_eq!(state.other_refs.len(), 1, "{:?}", state.other_refs);
+        assert!(
+            state.other_refs[0].starts_with("refs/notes/commits "),
+            "{:?}",
+            state.other_refs
+        );
     }
 
     #[test]
@@ -2123,8 +2271,7 @@ mod tests {
     #[test]
     fn a_worktree_elsewhere_is_a_change() {
         let (dir, home) = recorded("cap-wt-out");
-        let outside = dir.with_extension("wt");
-        let _ = std::fs::remove_dir_all(&outside);
+        let outside = dir.beside("wt");
         git_in(
             &dir,
             &[
@@ -2143,13 +2290,62 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_hooks_path_is_followed() {
+        let dir = scratch("hooks-path");
+        git_in(&dir, &["config", "core.hooksPath", "githooks"]);
+        write(&dir, "githooks/beachape-hook", "#!/bin/sh\n");
+        let paths: BTreeMap<String, PathBuf> = hashed_paths(&toplevel(&dir).unwrap(), &dir)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            paths["hooks/beachape-hook"].canonicalize().unwrap(),
+            dir.join("githooks/beachape-hook").canonicalize().unwrap()
+        );
+        assert!(
+            !paths.keys().any(|label| label.ends_with(".sample")),
+            "the default hooks folder is not read: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_worktree_under_the_main_worktrees_target_review_is_left_out() {
+        let dir = scratch("main-target");
+        let linked = dir.beside("linked-main");
+        git_in(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let top = toplevel(&linked).unwrap();
+        let before = take_state(&top, &dir).unwrap();
+        let inside = dir.join("target/review/m1-x");
+        git_in(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                inside.to_str().unwrap(),
+            ],
+        );
+        let after = take_state(&top, &dir).unwrap();
+        assert_eq!(changes(&before, &after), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_linked_worktree_hashes_the_common_config_and_hooks() {
         let dir = scratch("linked");
         let common = dir.join(".git").canonicalize().unwrap();
         std::fs::create_dir_all(common.join("hooks")).unwrap();
         std::fs::write(common.join("hooks/beachape-hook"), "#!/bin/sh\n").unwrap();
-        let linked = dir.with_extension("linked");
-        let _ = std::fs::remove_dir_all(&linked);
+        let linked = dir.beside("linked");
         git_in(
             &dir,
             &[
@@ -2312,31 +2508,113 @@ mod tests {
     }
 
     #[test]
+    fn start_warns_when_the_branch_changes_review_rs() {
+        let dir = scratch("start-changed-source");
+        write(&dir, "xtask/src/review.rs", "fn a() {}\n");
+        commit_all(&dir, "the route");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "xtask/src/review.rs", "fn b() {}\n");
+        commit_all(&dir, "a new route");
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        let (code, lines) = run(
+            &["start".to_string(), "main".to_string(), "1".to_string()],
+            &dir,
+            &dir.join("target/no-home"),
+            later,
+        );
+        assert_eq!(code, 0, "{lines:?}");
+        let warnings: Vec<&String> = lines.iter().filter(|l| l.starts_with("warning")).collect();
+        assert_eq!(
+            warnings,
+            [
+                "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
+            ]
+        );
+    }
+
+    #[test]
     fn an_older_binary_warns() {
         let now = SystemTime::now();
         let earlier = now - std::time::Duration::from_secs(60);
         assert_eq!(
-            warnings(earlier, Some(now), None, None),
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                earlier,
+                Some(now),
+                None,
+                None
+            ),
             [
-                "warning: target/debug/xtask is older than xtask/src/review.rs; run cargo build -p xtask"
+                "warning: /r/target/debug/xtask is older than xtask/src/review.rs; run cargo build -p xtask"
             ]
         );
-        assert!(warnings(now, Some(earlier), None, None).is_empty());
-        assert!(warnings(earlier, None, None, None).is_empty());
+        assert!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                now,
+                Some(earlier),
+                None,
+                None
+            )
+            .is_empty()
+        );
+        assert!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                earlier,
+                None,
+                None,
+                None
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn a_changed_review_rs_warns() {
         let now = SystemTime::now();
         assert_eq!(
-            warnings(now, None, Some("b1"), Some("b2")),
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                now,
+                None,
+                Some("b1"),
+                Some("b2")
+            ),
             [
                 "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
             ]
         );
-        assert!(warnings(now, None, Some("b1"), Some("b1")).is_empty());
-        assert!(warnings(now, None, None, Some("b2")).is_empty());
-        assert!(warnings(now, None, Some("b1"), None).is_empty());
+        assert!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                now,
+                None,
+                Some("b1"),
+                Some("b1")
+            )
+            .is_empty()
+        );
+        assert!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                now,
+                None,
+                None,
+                Some("b2")
+            )
+            .is_empty()
+        );
+        assert!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                now,
+                None,
+                Some("b1"),
+                None
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2771,6 +3049,78 @@ mod tests {
         assert!(diff.contains("--- /dev/null\n+++ b/src/d.rs"), "{diff}");
         assert!(!diff.contains("b.md"), "{diff}");
         assert!(!diff.contains("rename"), "{diff}");
+    }
+
+    #[test]
+    fn the_limit_is_60_minutes_or_the_variable() {
+        assert_eq!(parse_limit(None).unwrap(), Duration::from_secs(3600));
+        assert_eq!(parse_limit(Some("2.5")).unwrap(), Duration::from_secs(150));
+        for wrong in ["0", "x", "-1", "1e300", "inf", "NaN"] {
+            assert!(parse_limit(Some(wrong)).is_err(), "{wrong}");
+        }
+    }
+
+    #[test]
+    fn the_cargo_mutants_arguments() {
+        let args = mutants_args(
+            Path::new("/r/run/1/mutants.diff"),
+            Path::new("/r/run/1"),
+            Path::new("/r/.cargo/mutants.toml"),
+        );
+        assert_eq!(
+            args,
+            [
+                "mutants",
+                "--in-diff",
+                "/r/run/1/mutants.diff",
+                "--output",
+                "/r/run/1",
+                "--copy-vcs=true",
+                "--gitignore=true",
+                "--shuffle",
+                "-j2",
+                "--timeout",
+                "300",
+                "--config",
+                "/r/.cargo/mutants.toml",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_command_runs_cargo_at_the_toplevel_without_cargo_target_dir() {
+        let args = vec![OsString::from("mutants"), OsString::from("--list")];
+        let command = mutants_command(Path::new("/r"), &args);
+        assert_eq!(command.get_program(), "cargo");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["mutants", "--list"]
+        );
+        assert_eq!(command.get_current_dir(), Some(Path::new("/r")));
+        let envs: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            envs,
+            [(std::ffi::OsStr::new("CARGO_TARGET_DIR"), None)],
+            "CARGO_TARGET_DIR is removed"
+        );
+    }
+
+    #[test]
+    fn the_mutants_diff_starts_at_since() {
+        let dir = scratch("mutants-since");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "a.rs", "fn a() {}\n");
+        commit_all(&dir, "round 1");
+        assert_eq!(start_in(&dir, "main", "1").0, 0);
+        write(&dir, "b.rs", "fn b() {}\n");
+        commit_all(&dir, "a fix");
+        assert_eq!(start_in(&dir, "main", "2").0, 0);
+        let top = toplevel(&dir).unwrap();
+        let round_folder = prepare_mutants(&top, 2).unwrap().unwrap();
+        let diff = std::fs::read_to_string(round_folder.join("mutants.diff")).unwrap();
+        assert!(diff.contains("+++ b/b.rs"), "{diff}");
+        assert!(!diff.contains("a.rs"), "{diff}");
+        assert_eq!(prepare_mutants(&top, 3).unwrap(), None);
     }
 
     #[test]
