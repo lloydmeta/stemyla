@@ -176,11 +176,11 @@ A change to the person's own settings during a round, by a person or by Claude C
 
 `.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
 
-These pass the guard:
+These pass the guard.  Each item gives examples only, and the list is not complete:
 
 * `git --exec-path=`, and `git grep -O`, which starts a pager program;
 * `find -exec` and `find -delete`;
-* `$(...)` inside double quotes, `$'...'` quoting, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
+* `$(...)` inside double quotes, `$'...'` quoting, `$"..."` quoting such as `$"git" commit`, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
 * a redirection before the command, such as `2>/dev/null git commit`;
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
 * a prefix option that takes a value, such as `env -u X git commit` or `exec -a x git commit`, and `env -S "git commit -m x"`;
@@ -189,9 +189,11 @@ These pass the guard:
 * `cargo new` and `cargo init`, which write a new package;
 * other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
 * interpreters, such as `perl -e` and `awk`, and wrappers, such as `sudo` and `nice`;
-* zsh's `=git commit` and `noglob git commit`.  The Bash tool runs the person's shell, which is zsh on macOS.  The parse follows bash and zsh only for the forms that it covers.
+* brace expansion and globs, such as `{git,commit} -m x` and `/usr/bin/gi? commit`;
+* `git worktree prune` and `git worktree move`, since the guard allows each `worktree` subcommand;
+* zsh's `=git commit`, `noglob git commit` and `nocorrect git commit`.  The Bash tool runs the person's shell, which is zsh on macOS.  The parse follows bash and zsh only for the forms that it covers.
 
-Bash can still write files: a redirection, `sed -i`, `tee`, `rm`, `mv`, or a script that a command writes and then runs.  `git worktree add` without `--detach` makes a branch; `xtask review check` sees it.  `git worktree remove --force` of a worktree outside `target/review/` can lose a person's work.
+Bash can still write files, for example by a redirection, `sed -i`, `tee`, `rm`, `mv`, `rustfmt <file>`, or a script that a command writes and then runs.  `git worktree add` without `--detach` makes a branch; `xtask review check` sees it.  `git worktree remove --force` of a worktree outside `target/review/` can lose a person's work.
 
 A heredoc body with an apostrophe is refused as an unclosed quote.  But a second `'` later in the command closes the quote, and the guard does not see the lines between.
 

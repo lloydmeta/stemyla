@@ -448,6 +448,7 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (GIT_SUB, "git log # x\\\ngit commit -m x"),
     (GIT_SUB, "echo a#; git commit -m x"),
     (GIT_SUB, "echo ''#; git commit -m x"),
+    (GIT_SUB, r"echo \a#; git commit -m x"),
     // A quote that is not closed.
     (UNCLOSED, "grep -n \"x docs"),
     // A tab ends a word.
@@ -472,6 +473,9 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (GIT_SUB, "timeout -v 60 git commit -m x"),
     (GIT_SUB, "timeout --foreground 600 git commit -m x"),
     (GIT_SUB, "timeout -s KILL 60 git commit -m x"),
+    (GIT_SUB, "timeout -k 5 60 git commit -m x"),
+    (GIT_SUB, "timeout --signal KILL 60 git commit -m x"),
+    (GIT_SUB, "timeout --kill-after 5 60 git commit -m x"),
     (GIT_SUB, "rtk -v git commit -m x"),
     (GIT_SUB, "FOO=1 git commit -m x"),
     // Shell words.
@@ -655,6 +659,12 @@ fn the_bash_guard_refuses_writes() {
         .output()
         .expect("git ls-files runs");
     let staged = String::from_utf8_lossy(&staged.stdout);
+    let text = std::fs::read_to_string(root.join(GUARD))
+        .unwrap_or_else(|e| panic!("reading {GUARD}: {e}"));
+    assert!(
+        text.lines().any(|line| line == "export LC_ALL=C"),
+        "{GUARD} has no line `export LC_ALL=C`.  Fix: put it back; without it, the parse of a long command takes several times as long."
+    );
     assert!(
         staged.starts_with("100755 "),
         "{GUARD} is tracked as {:?}, not as mode 100755.  Fix: run `git add --chmod=+x {GUARD}`; the agents' hook runs it as a program.",

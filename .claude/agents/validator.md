@@ -67,7 +67,7 @@ You do not get the other output of the reviewer.  Do not look for it.
 Give one block for each finding or mutant line, with these fields:
 
 ```text
-id: the ID of the finding, or the mutant line
+id: the ID that the prompt gives the finding, or the mutant line
 verdict: confirmed, pre-existing, refuted or unproven
 evidence: a command and its output, or a quote
 reason: why the evidence gives this verdict

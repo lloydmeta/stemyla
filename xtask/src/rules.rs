@@ -2955,7 +2955,10 @@ fn description_faults(description: &str) -> Vec<&'static str> {
             description.contains(": ") || description.contains(":\t"),
             "holds a `:` before a space or a tab",
         ),
-        (description.contains(" #"), "holds ` #`"),
+        (
+            description.contains(" #") || description.contains("\t#"),
+            "holds a blank before `#`",
+        ),
         (description.contains(['\'', '"']), "holds a quote"),
         (description.ends_with(':'), "ends with `:`"),
     ]
@@ -3190,6 +3193,10 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
         .collect()
 }
 
+/// Files in `.claude/agents/` that are not agents and that Claude Code does not
+/// load: the file that keeps the folder in git, and the one that Finder makes.
+pub const IGNORED_IN_AGENTS: [&str; 2] = [".gitkeep", ".DS_Store"];
+
 /// The agents rule for the whole of `.claude/agents/`.  `entries` holds each
 /// entry that a walk finds there, into each subfolder: its path below the
 /// folder, and its text if it is a file (`None` for a folder).  Claude Code
@@ -3218,12 +3225,12 @@ pub fn agents_folder_problems(entries: &[(String, Option<String>)]) -> Vec<Probl
         .collect();
     let others = files
         .iter()
-        .filter(|(path, _)| at_top(path) && !path.ends_with(".md") && *path != ".gitkeep")
+        .filter(|(path, _)| at_top(path) && !path.ends_with(".md") && !IGNORED_IN_AGENTS.contains(path))
         .map(|(path, _)| {
             problem(
                 path,
                 "is not an agent file".to_string(),
-                "remove it; the folder holds only `<name>.md` agent files and `.gitkeep`.",
+                "remove it; the folder holds only `<name>.md` agent files, `.gitkeep` and `.DS_Store`.",
             )
         });
     let agents = files
@@ -6635,7 +6642,12 @@ mod agents_tests {
             (
                 "a description with a comment",
                 with("Read only.", "Read only #1."),
-                "has a `description` that holds ` #`",
+                "has a `description` that holds a blank before `#`",
+            ),
+            (
+                "a description with a tab before a comment",
+                with("Read only.", "Read only\t#1."),
+                "has a `description` that holds a blank before `#`",
             ),
             (
                 "a description with a quote",
@@ -6759,6 +6771,8 @@ mod agents_tests {
     #[test]
     fn a_folder_of_read_only_agents_has_no_problem() {
         assert_eq!(agents_folder_problems(&folder()), []);
+        let finder = [folder(), vec![entry(".DS_Store", Some("\0".to_string()))]].concat();
+        assert_eq!(agents_folder_problems(&finder), []);
     }
 
     /// Each plant gives a problem of the agents rule that names it.
