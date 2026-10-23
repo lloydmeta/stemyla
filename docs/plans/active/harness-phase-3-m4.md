@@ -105,9 +105,10 @@ The team leader runs three rounds with the manual recipe of `docs/working-with-a
   * `the_review_skill_starts_with_xtask`: fails; 2 problems, the text does not hold `* late review commands:` or `| Interventions | Late review commands |`.
 * [x] 2026-10-24: step 2, the code.  `INDEXED_BY_FOLDER` in `docs.rs`; `names_current_paths` is false for the reviews folder; `HISTORY` in `rules.rs` has 3 folders.  The closed-ID test is now `closed_ids_are_named_only_in_plans_decisions_and_review_logs`.  All `xtask` lib tests pass.
 * [x] 2026-10-24: step 3, the skill (steps 9 and 11 only), the guide, TD-36, the new TD-38, the docs index, BUILD-1 and tech-debt line 3.  All checks pass; the M4 commit.
-* [ ] Step 4: review rounds 1, 2 and 3.
+* [x] 2026-10-24: step 4, review rounds 1, 2 and 3.
   * [x] 2026-10-24: review round 1: 0 blockers, 1 should-fix (no test held `docs_indexed` to the folder prefix; a mutant passed), 1 nit (separator line not pinned).  Both fixed with tests in the round 1 fix commit.  With the mutant `.any(|folder| listed.contains(*folder))`, `a_review_log_is_not_indexed_without_its_folder` now fails ("a plan is not in it: []"); the mutant was then reverted.
   * [x] 2026-10-24: review round 2: 0 blockers, 1 should-fix (the round 1 separator pin was a substring of the findings-table separator, so it could not fail), 2 nits (step 11 bullet not pinned; guide approval line not limited to the default mode).  All fixed in the round 2 fix commit; the 11-cell mutant now fails.  `the_review_skill_starts_with_xtask` fails with 1 problem on that mutant: the text does not hold the rounds header with its separator.
+  * [x] 2026-10-24: review round 3: 0 blockers, 1 should-fix (the interventions rule of D4's count was not pinned; a mutant passed), 2 nits (tech-debt intro said every entry names a rule; the skill's frozen "Before the steps" line 25 says, with no condition, that `review check` asks for approval, left for M6).  Fixed in the round 3 fix commit, except the frozen line.  With lines 213 and 293 of the skill reverted to count those approvals, `the_review_skill_starts_with_xtask` now fails with 2 problems; the mutant was then reverted.
 
 ## Surprises and discoveries
 
@@ -121,4 +122,8 @@ The team leader runs three rounds with the manual recipe of `docs/working-with-a
 
 ## Outcomes and retrospective
 
-To be written when M4 completes.
+M4 added the reviews folder.  `docs-check` indexes it with one line and treats it as history: its paths, its closed IDs and BUILD-1's server name are not checked.  M4 also changed D4's count: the skill counts the late review commands apart from the interventions.  The skill test pins this count.  TD-36 was reworded, and TD-38 was added.
+
+Not done: the skill's "Before the steps" approval line, which is frozen and goes to M6.  The log does not record the permission mode.
+
+Lesson: each review round found a pin or a test that could not fail.  The implementer can run a mutant for each pin before the commit.  This would have found them earlier.
