@@ -106,6 +106,7 @@ The team leader runs three rounds with the manual recipe of `docs/working-with-a
 * [x] 2026-10-24: step 2, the code.  `INDEXED_BY_FOLDER` in `docs.rs`; `names_current_paths` is false for the reviews folder; `HISTORY` in `rules.rs` has 3 folders.  The closed-ID test is now `closed_ids_are_named_only_in_plans_decisions_and_review_logs`.  All `xtask` lib tests pass.
 * [x] 2026-10-24: step 3, the skill (steps 9 and 11 only), the guide, TD-36, the new TD-38, the docs index, BUILD-1 and tech-debt line 3.  All checks pass; the M4 commit.
 * [ ] Step 4: review rounds 1, 2 and 3.
+  * [x] 2026-10-24: review round 1: 0 blockers, 1 should-fix (no test held `docs_indexed` to the folder prefix; a mutant passed), 1 nit (separator line not pinned).  Both fixed with tests in the round 1 fix commit.  With the mutant `.any(|folder| listed.contains(*folder))`, `a_review_log_is_not_indexed_without_its_folder` now fails ("a plan is not in it: []"); the mutant was then reverted.
 
 ## Surprises and discoveries
 

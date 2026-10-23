@@ -1930,6 +1930,10 @@ mod tests {
         let problems = docs_indexed(&plan, Some("* `plans/`: the plans"));
         assert_eq!(problems.len(), 1, "only the reviews folder: {problems:#?}");
         assert!(problems[0].message.contains("`plans/active/x.md`"));
+
+        let problems = docs_indexed(&plan, Some("* `reviews/`: the review logs"));
+        assert_eq!(problems.len(), 1, "a plan is not in it: {problems:#?}");
+        assert!(problems[0].message.contains("`plans/active/x.md`"));
     }
 
     #[test]

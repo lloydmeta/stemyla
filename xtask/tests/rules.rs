@@ -988,7 +988,8 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// validators before the wait for the mutants run, the check of the state
 /// for this round, the rule for a file that the Write tool refuses to a
 /// subagent, and the count of late review commands in the findings file
-/// and in the log's rounds table, apart from the interventions (D4).
+/// and in the log's rounds table, apart from the interventions (D4).  The
+/// table's separator line has one cell for each column of its header.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1003,6 +1004,7 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "do not write it in another way",
     "* late review commands:",
     "| Interventions | Late review commands |",
+    "| - | - | - | - | - | - | - | - | - | - | - | - |",
 ];
 
 /// The problems of the review skill's text: each names the line or the
