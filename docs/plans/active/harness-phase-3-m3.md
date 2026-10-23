@@ -26,7 +26,7 @@ The state at the start of M3, on 2026-10-23, at commit `e81487f` on branch `ai-a
 * The guide's Status says that "No project skills exist yet", and its recipe "Review a change" holds the manual prompt "Run three review rounds.  Use a new subagent with fresh context for each round. ...".  M6's acceptance needs that prompt gone.  M3's own review rounds use the recipe as it stands at `fa41c9f` (`git show fa41c9f:docs/working-with-agents.md`).
 * Tech debt: the highest ID is TD-34.  TD-32 already says that `review check` sees only what its record holds; M3 adds the skill's side to it.  The new entry about `cargo test` with the person's credentials gets the next free number in the commit that adds it.
 * Claude Code is 2.1.309.  The maintainer's `~/.claude/settings.json` has `"model": "opus"`, `"effortLevel": "xhigh"`, and `"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}`.
-* `/private/tmp/stemyla-harness/` holds the preflight's clone `preflight-20261023065207/`, a probe `agents.json` and `preflight-init.jsonl`.  M3 replaces `agents.json`, and leaves the preflight's files.
+* `/private/tmp/stemyla-harness/` holds the preflight's clone `preflight-20261023065207/`, a probe `agents.json` and `preflight-init.jsonl`.  M3 replaces `agents.json`, and leaves the preflight's files.  Plan review round 1 made and deleted a `probe-skill/` folder there.
 * Facts from the docs, checked on 2026-10-23 ([sub-agents](https://code.claude.com/docs/en/sub-agents), [skills](https://code.claude.com/docs/en/skills), [headless](https://code.claude.com/docs/en/headless)):
   * In `-p` mode, `--agents` takes a path to a JSON file.  Each top-level key is an agent's name.  Its value has `prompt` (the body of the file) and the frontmatter fields, `hooks` among them.  Hooks of agents passed with `--agents` run with no trust step.  An agent from `--agents` takes priority over a project agent of the same name.
   * A skill's `` !`command` `` runs once, when the skill loads.  A non-zero exit stops the skill.  `$0`, `$1`, ... give each argument, with shell quoting; `$ARGUMENTS` gives all of them.
@@ -46,9 +46,10 @@ Terms are as in the parent plan.  Also:
 
 * The team leader wrote this plan and runs its reviews.  It runs the harness cases (step 4) itself, one at a time, and reads each transcript only with `jq`.  It runs the three review rounds (step 5), and commits each Progress line.
 * An implementer does steps 1 to 3.  It writes the test of step 1 first, runs it, and records in Progress that it failed, with the failure in a few words.  It records each plant and its result.  For a fix, the team leader continues it with SendMessage, or starts a new one from this plan and its Progress.
+* The team leader runs the reviews.  No agent of M3 runs `/review-rounds` or `xtask review start` in the main checkout, though `CLAUDE.md` tells it to after C.  A log in `target/review/run/ai-agent-harness-phase-3/` would make `review start` refuse M6's round 1.  At the end of M3, `ls target/review/run/ai-agent-harness-phase-3/log.md` finds no file; Progress records it.
 * Before each commit: `cargo fmt --all --check`, each clippy command in `CLAUDE.md`, `cargo test --workspace --exclude roformer-gpu`, `cargo test -p roformer-gpu --lib` and `cargo run -p xtask -- docs-check` (GIT-2).  Sign each commit with `git commit -S`.  Doc changes go in the same commit (DOC-1).
 * Writing in the skill and the docs follows `CLAUDE.md`, "Working here" (ASD-STE100).
-* In H, the team writes only `bin/`, `agents.json`, the `stemyla/` plugin folder, the case clones and their transcripts.  It deletes only a case clone that it made, by its literal path.  Before each case, it checks that the volume has 30 GiB free or more; if not, it deletes the clone of an earlier case whose result is in Progress.
+* In H, the team writes only `bin/`, `agents.json`, the `stemyla/` plugin folder, the case clones and their transcripts.  (The harness script also builds `xtask` in the repo's own `target/`.)  It deletes only a case clone that it made, by its literal path.  Before each case, it checks that the volume has 30 GiB free or more; if not, it deletes the clone of an earlier case whose result is in Progress.
 * Scratch branches in this repo: `m3-cases/plant`, `m3-cases/control` and `m3-cases/time`.  Progress lists each scratch branch, worktree and case clone left.
 
 ### Step 1: the skill, its test and the docs
@@ -65,20 +66,24 @@ Terms are as in the parent plan.  Also:
   ```
 
   * No `disable-model-invocation`, so `CLAUDE.md` can tell the agent to run it.
-  * The body starts with a line that holds exactly `` !`target/debug/xtask review start $0 $1` ``, so the output of `review start` is in the skill text when it loads, and a refusal (exit 3) stops the skill.  The body then names the arguments: `$0` is `<base>`, `$1` is the round, `$2` is the criteria, and `$ARGUMENTS` holds the flags.
-  * Before the steps, the body says: run the skill after fmt, clippy, the tests and `cargo build -p xtask` pass; a refusal of `review start` stops the round, and the person sees its lines (such as "commit first"); `allowed-tools` ends when the person sends a message, so after that each `xtask review` command asks for approval.
+  * The body starts with a line that holds exactly `` !`target/debug/xtask review start $0 $1` ``, so the output of `review start` is in the skill text when it loads, and a refusal (exit 3) stops the skill.  The body then names the arguments: `$0` is `<base>`, `$1` is the round, `$2` is the criteria, and `$3` and `$4` hold the flags (`$ARGUMENTS` is the whole argument string).
+  * The skill takes each path from the lines of `review start`: the `run folder:` line (an absolute path, with `/` in the branch name as `-`), the `target folder:` line, and the `base:` and `since:` lines.  It never builds the run folder from the branch name.  Below, `<run>` is the `run folder:` path.
+  * Before the steps, the body says:
+    * Run the skill after fmt, clippy, the tests and `cargo build -p xtask` pass.
+    * A refusal of `review start` stops the skill.  Claude Code shows its lines (such as "commit first") in the session; a `-p` run in text mode shows nothing.
+    * `allowed-tools` lasts only for the turn in which the skill loads.  A new turn, such as a person's message or the notice that a background agent or command ended, ends it.  So `review check` and a late `review mutants` can ask for approval.  Approve each one once.  "Don't ask again" changes `.claude/settings.local.json`, and then `review check` fails the round.
 * The steps of the body, as the parent plan's M3 section numbers them, with these details:
-  1. Start `target/debug/xtask review mutants <round>` with Bash, `run_in_background: true` and `timeout: 3900000`.
+  1. Start `target/debug/xtask review mutants <round>` with Bash, `run_in_background: true` and `timeout: 3900000`.  Its tool result comes at once; its line comes in the notice when it ends, or in `<run>/<round>/mutants.txt`.
   2. With `--baseline`, start the `baseline` agent with the range `<base>..HEAD` (the `base` line of `review start`), the criteria, the round and the target folder.
   3. Round 1: each reviewer in the `branch` route, on `<base>..HEAD`.  Rounds 2 and 3: `reviewer` on `<base>..HEAD`, and each other reviewer in the `since` route, on `<since>..HEAD`; if the `since` range is empty, `reviewer` only.  Start every reviewer (and the baseline) in one message, each as a new subagent of its own type (`subagent_type` the reviewer's name).  Each prompt holds only: the range, the criteria, the reasons of the route for that reviewer, the round, and the target folder.  The skill gives the prompt as a template.
-  4. Wait for every reviewer.  Merge findings with the same `where` and claim, and list each reviewer that reported one.  Give each finding the ID `<round>-<n>`.  Read the findings files of the earlier rounds of this branch (`target/review/run/<branch>/<n>/findings.md`); a finding that repeats a `refuted` one there gets `repeat-of: <ID>` and the verdict `refuted`, with no validator.  The baseline's findings stay a separate list, with IDs `<round>-b<n>`.
-  5. Start one `validator` for each `blocker` and `should-fix`, all in one message; at most 15 subagents run at once, so send larger sets in batches.  A baseline finding with the same `where` and claim as a reviewer's shares its validator and verdict.  Each validator prompt holds only: the finding's block and its ID, the range, the criteria, the round and the target folder.  A nit gets the verdict `unvalidated`.
-  6. Wait for the mutants command.  Read its line.  If `target/review/run/<branch>/<round>/mutants.out/missed.txt` has lines, send them to one `validator`, in its prompt.  Each confirmed line is a `should-fix` `weak-test` finding from `cargo-mutants`, merged as in step 4.
+  4. Wait for every reviewer.  Merge findings with the same `where` and claim, and list each reviewer that reported one.  Give each finding the ID `<round>-<n>`.  Read the findings files of the earlier rounds of this branch (`<run>/<n>/findings.md`); a finding that repeats a `refuted` one there gets `repeat-of: <ID>` and the verdict `refuted`, with no validator.  The baseline's findings stay a separate list, with IDs `<round>-b<n>`.
+  5. Start one `validator` for each `blocker` and `should-fix`, all in one message; send at most 15 at once (a choice below Claude Code's limit of 20), and larger sets in batches.  A baseline finding with the same `where` and claim as a reviewer's shares its validator and verdict.  Each validator prompt holds only: the finding's block and its ID, the range, the criteria, the round and the target folder.  A nit gets the verdict `unvalidated`.
+  6. Wait for the mutants command.  Read its line.  If `<run>/<round>/mutants.out/missed.txt` has lines, send them to one `validator`, in its prompt.  Each confirmed line is a `should-fix` `weak-test` finding from `cargo-mutants`, merged as in step 4.
   7. With `--baseline`: one new `general-purpose` subagent gets the found findings of the baseline and of the round (verdict `confirmed` or `pre-existing`), and nothing else.  It marks each baseline finding `found` or `missed`, with the quote of the round's finding that matches.  The skill holds its prompt word for word.
-  8. Run `target/debug/xtask review check <round>`.  If it exits 3, stop, and give the person its lines.  Do not write findings.
-  9. Write `target/review/run/<branch>/<round>/findings.md`: the mutants line, then one block for each finding: ID, sources (reviewers, `cargo-mutants`, `baseline`), severity, kind, `where`, rule, claim, verdict, `repeat-of`, and the validator's evidence in a few words; then the baseline's list and step 7's marks.  With `--review-only`, stop here, and give the person the findings file's path and a summary.
-  10. Fix each found finding, as the parent plan's step 10 says, and commit as "review round <n> fixes".
-  11. Add the round's rows to `target/review/run/<branch>/log.md`, with M4's columns, which the skill lists: findings (date, round, commit, finding ID, reviewers, severity, kind, rule, `where`, a one-line claim, verdict, `repeat-of`, action), and one summary row (round, agents, tokens, wall minutes from `review start` to the last verdict without the wait for the mutants run, interventions by a person, the mutants line, and with `--baseline` the baseline's agents, tokens, wall minutes and interventions, and "of y baseline findings, the round found x").  Tokens come from each agent's result.  After round 3, copy the log to the reviews folder under `docs` as `<branch>.md` (with `/` as `-`), write the Progress lines of the rounds, and commit.
+  8. Run `target/debug/xtask review check <round>`.  If it exits 3, stop, and give the person its lines.  Do not write findings.  If the only change is to `.claude/settings.local.json` from a "don't ask again" approval, the person confirms it and starts the round again.  (In an agent-run phase, "the person" is the orchestrator.)
+  9. Write `<run>/<round>/findings.md`: the mutants line, then one block for each finding: ID, sources (reviewers, `cargo-mutants`, `baseline`), severity, kind, `where`, rule, claim, verdict, `repeat-of`, and the validator's evidence in a few words; then the baseline's list and step 7's marks.  With `--review-only`, stop here, and give the person the findings file's path and a summary.
+  10. Fix each found finding, the baseline's included, with a test that fails before the fix where the finding is about behaviour.  A `pre-existing` one may go to `docs/tech-debt.md` or its own PR.  Do not fix a `refuted` one.  Decide each `unproven` one, and give the reason.  Commit as "review round <n> fixes".  The skill holds this text itself, and does not point to a plan.
+  11. Add the round's rows to `<run>/log.md`, with M4's columns, which the skill lists: findings (date, round, commit, finding ID, reviewers, severity, kind, rule, `where`, a one-line claim, verdict, `repeat-of`, action), and one summary row (round, agents, tokens, wall minutes from `review start` to the last verdict without the wait for the mutants run, interventions by a person, the mutants line, and with `--baseline` the baseline's agents, tokens, wall minutes and interventions, and "of y baseline findings, the round found x").  Tokens come from each agent's `<usage>` (`subagent_tokens`), which comes in the notice when a background agent ends, or in the result of a foreground one.  Tokens and wall minutes count the validators with the agents that they validate.  After round 3, copy the log to the reviews folder under `docs` as `<branch>.md` (with `/` as `-`), write the Progress lines of the rounds, and commit.
 * `the_review_skill_starts_with_xtask` in `xtask/tests/rules.rs`, written first.  It reads `.claude/skills/review-rounds/SKILL.md` line by line, with no YAML crate, and checks:
   * the frontmatter's `name`, `description` and `allowed-tools` lines are exactly as above, and no line is `disable-model-invocation: true`;
   * a line is exactly `` !`target/debug/xtask review start $0 $1` ``;
@@ -89,7 +94,7 @@ Terms are as in the parent plan.  Also:
 * `CLAUDE.md`, "Working here", the Review line: "Review: after implementing, run `/review-rounds` for rounds 1, 2 and 3.  The skill verifies each finding before a fix; fix the real ones with tests."  Shorten it to fit the STE limits.  `CLAUDE.md` stays within 100 lines.
 * `docs/working-with-agents.md`:
   * Status: the paragraph on phase 3 says that the `review-rounds` skill starts the agents, and the line "No project skills exist yet" goes.  The sentence "The agent runs three review rounds after it implements a change, because `CLAUDE.md` tells it to" names `/review-rounds`.
-  * The recipe "Review a change": the prompt becomes "Run `/review-rounds main 1 \"<criteria>\"`, then rounds 2 and 3.", with no manual prompt.  It names the skill and its arguments, says what the agent does (the steps in brief), and what to check: the refuted findings, the unproven blockers and should-fix, each `repeat-of` and each mutants line.  It says: "From the PR after phase 3's, pass `--baseline` in round 1, until the parent plan records the gate."  After this edit, `grep -c 'Run three review rounds.  Use a new subagent' docs/working-with-agents.md` gives 0.
+  * The recipe "Review a change": the prompt becomes "Run `/review-rounds main 1 "<criteria>"`, then rounds 2 and 3.", with no manual prompt.  It names the skill and its arguments, says what the agent does (the steps in brief), and what to check: the refuted findings, the unproven blockers and should-fix, each `repeat-of` and each mutants line.  It says: "From the PR after phase 3's, pass `--baseline` in round 1, until the parent plan records the gate."  It says that the person approves a late `xtask review` command once, not with "don't ask again".  After this edit, `grep -c 'Run three review rounds.  Use a new subagent' docs/working-with-agents.md` gives 0.
   * A changelog line for M3.
 * `docs/harness.md`: a row for the skill and the agents (sensor, inferential; phase 3), with the failure: "the agent wrote each reviewer's prompt by hand, one general reviewer read every diff, and nothing checked a finding before a fix".  A row for cargo-mutants in `xtask review mutants` (sensor, computational, local only; phase 3), with the failure: "phase 2's reviewers planted mutants by hand to find weak tests, in 14 of 18 PRs".  Each row names its debt.
 * `docs/tech-debt.md`:
@@ -100,7 +105,7 @@ Terms are as in the parent plan.  Also:
 
 ### Step 2: the test harness
 
-* The script `H/bin/make-harness.sh`, `#!/bin/bash`, with `set -euo pipefail`.  It takes the repo path as `$1`.  It writes only in H, and it is the record of the commands that M5 copies into the reviews folder under `docs`.  It:
+* The script `H/bin/make-harness.sh`, `#!/bin/bash`, with `set -euo pipefail`.  It takes the repo path as `$1`.  It writes only in H and in the repo's `target/`, and it is the record of the commands that M5 copies into the reviews folder under `docs`.  It:
   1. Runs `cargo build -p xtask --manifest-path "$1/Cargo.toml"`, and copies `$1/target/debug/xtask`, `$1/.claude/hooks/read-only-bash.sh` and `$1/.cargo/mutants.toml` to `H/bin/` (the guard keeps mode 755).
   2. Writes `H/agents.json` with `jq`, from each `$1/.claude/agents/*.md`: the key is the file name without `.md`; `description` from the `description:` line; `tools` `["Read", "Bash"]`; `model` `inherit`; `prompt` the lines after the second `---` line; `hooks` `{"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "/private/tmp/stemyla-harness/bin/read-only-bash.sh", "onFailure": "block"}]}]}`.  The frontmatter has one fixed shape (M2's `agent_problems`), so `sed` reads it.
   3. Writes `H/stemyla/skills/review-rounds/SKILL.md` from the repo's skill with `sed`: each `target/debug/xtask` becomes `/private/tmp/stemyla-harness/bin/xtask`, and the mutants command gets `--config /private/tmp/stemyla-harness/bin/mutants.toml`.  The `allowed-tools` line changes with it.
@@ -115,7 +120,8 @@ Terms are as in the parent plan.  Also:
   claude -p '/stemyla:review-rounds <C> 1 "<criteria>" --review-only' \
     --setting-sources project,local --model claude-opus-5-5 --effort high \
     --agents ../agents.json --plugin-dir ../stemyla --permission-mode dontAsk \
-    --allowedTools <list> --output-format stream-json --verbose > ../<case>-<n>.jsonl
+    --allowedTools <list> --output-format stream-json --verbose \
+    < /dev/null > ../<case>-<n>.jsonl
   ```
 
   * `--effort high` is the maintainer's effort for `claude-opus-5-5` (Decision log).
@@ -127,32 +133,44 @@ Terms are as in the parent plan.  Also:
 * From C, each with one signed commit and a neutral message:
   * `m3-cases/plant`: a new function in `dsp`, in DSP-1 style, in its own file and module, such as `pub fn mean_square(samples: &[f32]) -> f32` (the mean of the squares; 0.0 for no samples), with a `for` over a range, so no loop counter gives a mutant that never ends.  Its one test calls it and asserts only that it returns.  Message: "dsp: add mean_square".
   * `m3-cases/control`: the same function, with a test that pins its value: one input with two or more samples and a sign, and the empty input.  Message as for Plant.
-  * `m3-cases/time`: a change to the body of a function in `xtask/src/docs.rs` that keeps its behaviour, such as a renamed local variable, on enough lines that `cargo mutants --list --in-diff` gives 8 mutants or more.  Message: "xtask: rename a local in <function>".
-* Before the cases, the implementer checks each branch in a worktree under `target/review/`, and records the result: fmt, clippy and `cargo test -p dsp` (or `-p xtask`) pass; on Plant, `cargo mutants --in-diff` misses each viable mutant of the function; on Control, it catches each one.  The worktree is removed after.
+  * `m3-cases/time`: a change to the body of a function in `xtask/src/docs.rs` that keeps its behaviour, such as a renamed local variable, on enough lines that `cargo mutants --list --in-diff` gives 20 mutants or more.  With `-j2`, a cold build of about 140 s and about 100 s for each `xtask` mutant, 20 mutants take more than 12 minutes, so the run stops at the case's limit.  Message: "xtask: rename a local in <function>".
+* Before the cases, the implementer checks each branch in a worktree under `target/review/`, and records the result: fmt, clippy and `cargo test -p dsp` (or `-p xtask`) pass; on Plant, `cargo mutants --in-diff` misses each viable mutant of the function; on Control, it catches each one; on Time, `--list` gives the count.  The worktree is removed after.
 
 ### Step 4: the cases
 
 The team leader runs them one at a time, in this order.  Each has its criteria in "Case criteria" below; the round's criteria are `docs/plans/active/harness-phase-3-m3.md#<heading>`.  `review start` warns in each clone that the binary is older than `xtask/src/review.rs`; that is expected.  Each check reads the transcript with `jq`, and Progress gives the command and its output in a few words.
 
-1. Load: a clone of `m3-cases/control`, with one untracked file `H/load-<n>/untracked.txt`.  Pass: the run ends, no Agent call is in the transcript, and the text that the run shows holds "commit first".  If "commit first" is not in the transcript, the team leader finds where Claude Code puts a failed `` !`...` `` command's output, and the fix may change `xtask review` (a test first) or the skill.
-2. Control, on `m3-cases/control`, criteria "Control case".  Pass: no `permission_denials` for a command that the agents' method prescribes; the mutants line is `full`; the findings file holds no `weak-test` finding that names the function.  This run settles the list.
-3. Guard, on `m3-cases/control`, criteria "Guard case".  Pass: a `tool_result` in a message with a `parent_tool_use_id` (a subagent's) holds "read-only guard:" for `git commit --allow-empty -m x`; `git -C H/guard-<n> log --oneline -1` still shows the Control commit; `review check` says "no change".
-4. State, on `m3-cases/control`, criteria "State case".  Pass: a subagent's `sed -i` ran; the main agent's `xtask review check 1` exited 3 and named the change; the run stopped before step 9, so `findings.md` does not exist in the round's folder.
-5. Plant, on `m3-cases/plant`, criteria "Plant case".  Pass: the mutants line is `full`; `missed.txt` names the function; a validator gives `confirmed` for it; the findings file has a `weak-test` finding with the source `cargo-mutants` (and each reviewer that also reported it).
-6. Baseline, on `m3-cases/plant`, criteria "Plant case", with `--baseline`.  Pass: an Agent call of type `baseline` with the range `<C>..HEAD`; step 7's subagent marks each found baseline finding `found` or `missed` with a quote; Progress records the baseline's tokens and wall time from its Agent result, and the round's.
-7. Time, on `m3-cases/time`, criteria "Time case", with `STEMYLA_MUTANTS_MINUTES=12` in the environment of `claude -p`.  Pass: the mutants command ran for more than 10 minutes (the time between its `tool_use` and its result, or the `started` of `state.json` and the mtime of `mutants.txt`), and its line, `partial` or `full`, is in the transcript and in `mutants.txt`.
+Facts for the checks, from plan review round 1's probes on 2.1.309:
+
+* A failed `` !`...` `` command gives one `user` message with `isReplay: true`, whose content holds `<local-command-stderr>Shell command failed for pattern ...` and the command's stderr (`xtask review` writes a refusal to stderr).  The run's `result` is then `success`, with `num_turns` 0 and an empty `result`.
+* A run with background work gives one `result` message for each turn; the last one counts: `jq -s '[.[] | select(.type == "result")] | last'`.
+* A subagent's tool calls and results carry `parent_tool_use_id`.  A background agent's Agent result is `async_launched`; its usage is in a `system` message with `subtype` `task_notification` and its `tool_use_id`: `usage.total_tokens`, `usage.tool_uses`, `usage.duration_ms`.  A foreground agent's result has `tool_use_result.totalTokens` and `totalDurationMs`.
+* A guard refusal is also listed in `permission_denials`.  Its tool result starts `PreToolUse:Bash hook error:` and holds "read-only guard:".  A denial by `dontAsk` starts `Permission to use Bash has been denied because Claude Code is running in don't ask mode`.  Only the second kind fails a case.
+* A background Bash's tool result comes at once, so its run time comes from files, not from the transcript.
+* `system/init` has `plugin_errors` `null` when there is none: check `(.plugin_errors // []) | length == 0`.
+
+The cases:
+
+1. Load: a clone of `m3-cases/control`, with one untracked file `H/load-<n>/untracked.txt`.  Pass: an `isReplay` message holds `local-command-stderr` and "commit first"; the last `result` has `num_turns` 0; no Agent call is in the transcript; the file is still untracked, and `HEAD` is still the Control commit.
+2. Control, on `m3-cases/control`, criteria "Control case".  Pass: no `dontAsk` denial of a command that the agents' method prescribes; the mutants line is `full` with missed 0; the findings file holds no `weak-test` finding about the function from `cargo-mutants`, and none with a found verdict.  Progress records each other finding about it.  This run settles the list.
+3. Guard, on `m3-cases/control`, criteria "Guard case".  Pass: a tool result with a `parent_tool_use_id` holds "read-only guard:" for `git commit --allow-empty -m x`; `git -C H/guard-<n> log --oneline -1` still shows the Control commit; the main agent's `review check` printed "no change".
+4. State, on `m3-cases/control`, criteria "State case".  Pass: a subagent's `sed -i` ran, and `git -C H/state-<n> status --porcelain` shows `README.md` changed; the main agent's `review check 1` exited 3 and named the change; the run stopped before step 9, so `<run>/1/findings.md` (the `run folder:` path of the transcript) does not exist.
+5. Plant, on `m3-cases/plant`, criteria "Plant case".  Pass: the mutants line is `full` with missed 1 or more; `missed.txt` names the function; a validator gives `confirmed` for it; the findings file has a `weak-test` finding with the source `cargo-mutants` (and each reviewer that also reported it).
+6. Baseline, on `m3-cases/plant`, criteria "Plant case", with `--baseline`.  Pass: an Agent call of type `baseline` with the range `<C>..HEAD`; at least one baseline finding with the verdict `confirmed` or `pre-existing` (else the case is inconclusive, and runs again); step 7's subagent marks each found baseline finding `found` or `missed` with a quote.  Progress records four costs, each as tokens and wall time from the `task_notification` usage: the baseline, the baseline's own validators, the reviewers, and the round's other validators; and the round's wall time from `review start` to the last verdict, without the wait for the mutants run.  D4 uses them.
+7. Time, on `m3-cases/time`, criteria "Time case", with `STEMYLA_MUTANTS_MINUTES=12` in the environment of `claude -p`.  Pass: the line in `<run>/1/mutants.txt` is `partial ...; stopped at the limit`, and the transcript holds it (the main agent reads it after the notice); the time from `started` in `<run>/1/state.json` to the mtime of `mutants.txt` is more than 10 minutes.
 
 Rules for every case:
 
-* A case counts only if its `result` message is not an error, the skill loaded (Load excepted), and each routed reviewer has output.  A case cut short, such as at a usage limit, runs again in a new clone with no code change; Progress records why.
+* A case counts only if its last `result` is not an error, the skill loaded (Load excepted), and each routed reviewer has output.  The skill loaded when no `isReplay` message holds `local-command-stderr`, and `<run>/1/state.json` exists.  A case cut short, such as at a usage limit, runs again in a new clone with no code change; Progress records why.
 * A reviewer's refusal to run the command of Guard or State makes that case inconclusive, not failed.  The team leader rewords its criteria in this plan, commits, moves the scratch branch's base on, and runs it again.
 * A failed case means a fix in a new commit, a new C, the scratch branches made again from it, and new clones of each case that the fix affects.
-* `/stemyla:review-rounds` must load with no `plugin_errors` in `system/init`.
+* `/stemyla:review-rounds` must load with no `plugin_errors` in `system/init`.  The clone also holds the project skill `review-rounds` with the relative `xtask` path; the prompt names the plugin's skill, so that one runs.
+* The harness passes `Bash(/private/tmp/stemyla-harness/bin/xtask *)` in `--allowedTools`, so it does not show that a late `xtask review` command asks for approval in a real session; the skill and the guide say so.
 
 ### Step 5: review rounds 1, 2 and 3
 
 * The manual recipe of `docs/working-with-agents.md` at `fa41c9f`, with M3's commits as the range and the parent plan's M3 section as the criteria.  Each round has new `general-purpose` reviewer subagents.  The team leader checks each finding before a fix, and sends the real ones to the implementer, with a test.
-* A fix that touches the skill or an agent file re-runs the harness cases that it affects, after the round's fixes are committed.
+* A fix that touches the skill or an agent file re-runs the harness cases that it affects, after the round's fixes are committed.  A fix to `baseline.md` updates `BASELINE_HASH` in the same commit.
 * A Progress line after each round and after its fixes, committed before the next round.
 
 ### Case criteria
@@ -193,17 +211,20 @@ The change renames a local variable in one function of `xtask/src/docs.rs`, and 
 
 ## Progress
 
-* [x] 2026-10-23: plan written.
+* [x] 2026-10-23: plan written (`8062e05`).
+* [x] 2026-10-23: plan review round 1, by two new reviewers (intent and design; Claude Code facts, with `claude -p` probes in H).  No blockers; 12 significant should-fix, 9 nits, with overlap; all checked and fixed in the plan.  Main fixes: the skill takes the run folder from `review start`, since `/` in a branch name becomes `-`; `allowed-tools` ends at any new turn, such as a background notice; the checks read the transcript where Claude Code puts each fact (an `isReplay` stderr message for a failed load, `task_notification` usage, the last `result`); the Time diff has 20 mutants or more and must stop at its limit; the Baseline case needs a found baseline finding and records four costs; no agent runs the skill on this branch in M3.
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-10-23: a skill's `allowed-tools` ends at any new turn, not only at a person's message.  The notice that a background agent ended starts a new turn.  Evidence: plan review round 1, a plugin skill in `claude -p --permission-mode dontAsk`; the same command ran in the skill's turn and was denied after the notice.
+* 2026-10-23: a failed `` !`...` `` command does not make `claude -p` fail.  The `result` is `success` with `num_turns` 0, and the command's stderr is in an `isReplay` message.  Evidence: the same probes.
 
 ## Decision log
 
 * 2026-10-23, team leader: the harness passes `--effort high`.  The maintainer's settings give `effortLevel` `xhigh` for all models, and `high` for `claude-opus-5-5` in `modelSettings`.  The parent plan wants what a real session uses, and a real session on `claude-opus-5-5` uses `high`.
 * 2026-10-23, team leader: each case's criteria are a section of this plan, at C.  So the criteria are tracked, the scratch commits hold only the change, and their messages stay neutral.
 * 2026-10-23, team leader: the Time case sets `STEMYLA_MUTANTS_MINUTES=12`, so the run passes 10 minutes and stops at its own limit, not at 60 minutes.
+* 2026-10-23, team leader: a late `xtask review` command in a real session asks for approval once; the skill and the guide say so.  Not taken: a project allow rule for `Bash(target/debug/xtask review *)`, which widens the project's permissions and needs a decision record; M3's scope does not include `.claude/settings.json`.
 * 2026-10-23, team leader: the skill gets a test of its fixed lines (`the_review_skill_starts_with_xtask`), so a lost `!` line, `allowed-tools` or step fails CI (VERIFY-1).  The harness cases show its behaviour.
 
 ## Outcomes and retrospective
