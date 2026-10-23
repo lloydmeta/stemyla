@@ -406,3 +406,56 @@ fn the_rustfmt_hook_formats_rust_files() {
         "GIT-2: the rustfmt hook in .claude/settings.json exits 0 without jq on PATH, so a missing jq is silent.  Fix: keep `|| exit 1` after the jq command substitution."
     );
 }
+
+/// The route of `xtask review` names only reviewers that exist, and each
+/// path glob matches a file, so a renamed folder cannot drop a reviewer.
+#[test]
+#[ignore = "M2 adds the agent files"]
+fn every_reviewer_has_an_agent_file() {
+    use xtask::review::{MAY_MATCH_NOTHING, REVIEWERS};
+    let paths: Vec<&str> = tracked_files()
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    let missing_files = REVIEWERS
+        .iter()
+        .map(|reviewer| format!(".claude/agents/{}.md", reviewer.name))
+        .filter(|file| !paths.contains(&file.as_str()))
+        .map(|file| {
+            format!("{file} is missing.  Fix: add the agent (M2), or remove its row from REVIEWERS in xtask/src/review.rs.")
+        });
+    let missing_rows = paths
+        .iter()
+        .filter_map(|path| path.strip_prefix(".claude/agents/"))
+        .filter_map(|name| name.strip_suffix("reviewer.md").map(|_| name))
+        .filter(|name| {
+            !REVIEWERS
+                .iter()
+                .any(|reviewer| format!("{}.md", reviewer.name) == *name)
+        })
+        .map(|name| {
+            format!(".claude/agents/{name} has no row in REVIEWERS.  Fix: add a row in xtask/src/review.rs, or rename the agent.")
+        });
+    let unmatched_globs = REVIEWERS
+        .iter()
+        .flat_map(|reviewer| reviewer.include.iter().map(move |glob| (reviewer.name, *glob)))
+        .filter(|(_, glob)| !MAY_MATCH_NOTHING.iter().any(|(free, _)| free == glob))
+        .filter(|(_, glob)| {
+            !paths
+                .iter()
+                .any(|path| xtask::docs::glob_matches(glob, path))
+        })
+        .map(|(name, glob)| {
+            format!("`{glob}` of {name} matches no tracked file.  Fix: correct the glob, or add it to MAY_MATCH_NOTHING with a reason.")
+        });
+    let problems: Vec<String> = missing_files
+        .chain(missing_rows)
+        .chain(unmatched_globs)
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "{} review route problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}

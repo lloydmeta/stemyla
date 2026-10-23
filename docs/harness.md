@@ -42,6 +42,7 @@ Two principles shape it:
 | GitHub rulesets: `main` lets the admin role bypass for pull requests only, and `gh-pages history` blocks force pushes and deletion for everyone (GIT-1, GIT-3) | sensor, on GitHub | the admin role, which the agent shares, could push to `main` directly, and nothing stopped a rewrite of `gh-pages`.  Nothing in the repo checks the rulesets (TD-20) | phase 2 |
 | a PostToolUse hook in `.claude/settings.json` runs rustfmt on each `.rs` file in the repo that `Edit` or `Write` changes, kept by `the_rustfmt_hook_formats_rust_files` (GIT-2) | sensor, computational | in 5 of 31 sessions, `cargo fmt --all --check` found a diff before a commit, and the agent ran fmt and the check again.  It sees `Edit` and `Write` only; the `fmt` job is the control | phase 2 |
 | UI snapshots compared in CI's `test` job, and `no_build_file_updates_snapshots` (VERIFY-1) | sensor, computational | `UPDATE_SNAPSHOTS=1` in CI rewrote every snapshot that failed, so CI never compared the UI; the comment said the PNGs could not match, and they did.  A change of 1 colour level passes (TD-29) | phase 2 |
+| `xtask review start`, `check` and `mutants`, with `.cargo/mutants.toml` | sensor, computational | one general reviewer read every diff; a reviewer could change the repo, and no one saw it; reviewers planted mutants by hand.  The route is a short denylist (TD-31), the check sees only its record (TD-32), and cargo-mutants tests only part of a diff (TD-33) | phase 3 |
 
 Planned components, by phase, are in the plan.
 
