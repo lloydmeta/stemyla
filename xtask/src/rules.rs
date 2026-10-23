@@ -2951,7 +2951,10 @@ fn description_faults(description: &str) -> Vec<&'static str> {
             !description.is_empty() && !description.starts_with(|c: char| c.is_ascii_uppercase()),
             "does not start with a capital letter",
         ),
-        (description.contains(": "), "holds `: `"),
+        (
+            description.contains(": ") || description.contains(":\t"),
+            "holds a `:` before a space or a tab",
+        ),
         (description.contains(" #"), "holds ` #`"),
         (description.contains(['\'', '"']), "holds a quote"),
         (description.ends_with(':'), "ends with `:`"),
@@ -3009,6 +3012,22 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
         })
         .collect();
     let find = |key: &str| keys.iter().find(|(_, k, _)| *k == key).copied();
+    // A key line is `key:` at its end, or `key: value`; YAML reads no other form
+    // as a key, and Claude Code does not list the agent.
+    let shapes = frontmatter
+        .iter()
+        .filter(|(_, line)| !line.is_empty() && !nested(line))
+        .filter(|(_, line)| {
+            line.split_once(':')
+                .is_none_or(|(_, value)| !(value.is_empty() || value.starts_with(' ')))
+        })
+        .map(|(number, line)| {
+            problem(
+                Some(*number),
+                format!("has the line `{line}`, which is not `key: value`"),
+                "write each key as `key: value`, with one space after the colon, or as `key:` before a list or a block.",
+            )
+        });
     let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last.";
 
     let unknown = keys
@@ -3157,7 +3176,8 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
                 "copy AGENT_HOOK_BLOCK from xtask/src/rules.rs: the guard on each Bash call, with `onFailure: block`, and no other hook.",
             )
         });
-    unknown
+    shapes
+        .chain(unknown)
         .chain(twice)
         .chain(missing)
         .chain(name)
@@ -6412,7 +6432,14 @@ mod agents_tests {
     fn a_read_only_agent_has_no_problem() {
         let listed = with("tools: Read, Bash\n", "tools:\n  - Read\n  - Bash\n");
         let unindented = with("tools: Read, Bash\n", "tools:\n- Read\n- Bash\n");
-        for case in [good(), listed, unindented, good().replace('\n', "\r\n")] {
+        let blank_line = with("model: inherit\n", "model: inherit\n\n");
+        for case in [
+            good(),
+            listed,
+            unindented,
+            blank_line,
+            good().replace('\n', "\r\n"),
+        ] {
             assert_eq!(agent_problems(FILE, &case), [], "{case}");
         }
     }
@@ -6499,9 +6526,29 @@ mod agents_tests {
                 "has a `description` that is empty",
             ),
             (
+                "a description with a colon and a tab",
+                with("Read only.", "Read only:\tyes."),
+                "has a `description` that holds a `:` before a space or a tab",
+            ),
+            (
+                "no space after the colon of a key",
+                with("name: reviewer", "name:reviewer"),
+                "has the line `name:reviewer`, which is not `key: value`",
+            ),
+            (
+                "no space after the colon of model",
+                with("model: inherit", "model:inherit"),
+                "has the line `model:inherit`, which is not `key: value`",
+            ),
+            (
+                "a line with no colon",
+                with("model: inherit\n", "model: inherit\nplain\n"),
+                "has the line `plain`, which is not `key: value`",
+            ),
+            (
                 "a description with a colon",
                 with("Read only.", "Read only: yes."),
-                "has a `description` that holds `: `",
+                "has a `description` that holds a `:` before a space or a tab",
             ),
             (
                 "a description that ends with a colon",

@@ -506,6 +506,10 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (COMMAND, "target/review/target/debug/xtask publish"),
     (GIT_SUB, "FOO=a/b git commit -m x"),
     (GIT_SUB, "/usr/bin/git commit -m x"),
+    // Letter case: the file system of macOS ignores it.
+    (GIT_SUB, "GIT commit -m x"),
+    (COMMAND, "Gh pr view 1"),
+    (GIT_SUB, "ENV git commit -m x"),
     // Cargo.
     (CARGO_SUB, "cargo publish"),
     (CARGO_SUB, "cargo login"),
@@ -528,6 +532,8 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (CARGO_SUB, "cargo -Z x publish"),
     (CARGO_SUB, "cargo -C x publish"),
     (CARGO_SUB, "cargo +nightly publish"),
+    (CARGO_SUB, "cargo generate-lockfile"),
+    (CARGO_SUB, "cargo vendor"),
     (CARGO_OPTION, "cargo --config x test"),
     // Git.
     (GIT_OPTION, "git -ccore.pager=x log"),
@@ -712,6 +718,99 @@ fn the_bash_guard_refuses_writes() {
     );
 }
 
+/// The advice of a refusal by the guard's parse, and of each other refusal.
+const PARSE_ADVICE: &str = "This is a limit of the guard's parse.  Write the command again without a backtick or an unmatched quote, for example with `sed`.";
+const READ_ONLY_ADVICE: &str = "This agent is read only.  Do not try another form of the command.";
+
+#[test]
+fn the_bash_guard_explains_each_refusal() {
+    let root = xtask::workspace_root();
+    let cases = [
+        (
+            bash_call("echo `git commit`"),
+            format!("read-only guard: backtick: echo `git commit`.  {PARSE_ADVICE}\n"),
+        ),
+        (
+            bash_call("grep -n \"x docs\ngit log"),
+            format!("read-only guard: unclosed quote: grep -n \"x docs git log.  {PARSE_ADVICE}\n"),
+        ),
+        (
+            bash_call("cargo test; git stash"),
+            format!("read-only guard: git subcommand: git stash.  {READ_ONLY_ADVICE}\n"),
+        ),
+        (
+            bash_call("git log\n  git commit -m \"a\nb\" \t"),
+            format!(
+                "read-only guard: git subcommand: git commit -m \"a b\".  {READ_ONLY_ADVICE}\n"
+            ),
+        ),
+        (
+            bash_call("cargo pub\\\nlish"),
+            format!("read-only guard: cargo subcommand: cargo pub\\ lish.  {READ_ONLY_ADVICE}\n"),
+        ),
+        (
+            "not json".to_string(),
+            format!("read-only guard: cannot read the command.  {READ_ONLY_ADVICE}\n"),
+        ),
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|(input, expected)| {
+            let output = run_hook(GUARD_COMMAND, &root, input, None);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            (output.status.code() != Some(2) || stderr != *expected).then(|| {
+                format!(
+                    "{input}: expected exit 2 with {expected:?}, got {:?} with {stderr:?}",
+                    output.status.code()
+                )
+            })
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} refusal line(s) of {GUARD} are wrong:\n{}\nFix: write one line, \"read-only guard: <label>: <text>.  <advice>\", with the refused part as <text>, each new line as a space (harness phase 3, M2).",
+        failures.len(),
+        failures.join("\n")
+    );
+
+    // An error of the guard's own exits 2 with its own line, so that the
+    // call is refused even without `onFailure: block`.
+    let guard = std::fs::read_to_string(root.join(GUARD))
+        .unwrap_or_else(|e| panic!("reading {GUARD}: {e}"));
+    let broken = guard
+        .strip_suffix("\nexit 0\n")
+        .map(|start| format!("{start}\n: \"${{an_unset_name_of_the_test:?}}\"\nexit 0\n"))
+        .unwrap_or_else(|| {
+            panic!("{GUARD} does not end with `exit 0`, where the test puts an error")
+        });
+    let folder = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("broken-guard");
+    std::fs::create_dir_all(&folder).expect("the test folder can be made");
+    let script = folder.join("read-only-bash.sh");
+    std::fs::write(&script, broken).expect("the broken guard can be written");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("the broken guard can be made executable");
+    }
+    let output = run_hook(
+        &format!("'{}'", script.display()),
+        &root,
+        &bash_call("git log"),
+        None,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.code() == Some(2)
+            && stderr.lines().any(|line| {
+                line == format!(
+                    "read-only guard: the guard failed with status 1.  {READ_ONLY_ADVICE}"
+                )
+            }),
+        "{GUARD} with an error of its own gave exit {:?} with {stderr:?}, not exit 2 with \"read-only guard: the guard failed with status 1.\".  Fix: keep the EXIT trap.",
+        output.status.code()
+    );
+}
+
 /// The route of `xtask review` names only reviewers that exist, and each
 /// path glob matches a file, so a renamed folder cannot drop a reviewer.
 #[test]
@@ -765,7 +864,7 @@ fn every_reviewer_has_an_agent_file() {
 }
 
 /// The `git hash-object --no-filters` of `.claude/agents/baseline.md`.
-const BASELINE_HASH: &str = "d864078be345a36df81e19814a7304e1e4fdb959";
+const BASELINE_HASH: &str = "0c44c0c2b8fb8a7a8ac511e3b01ca65e0516ab54";
 
 /// Each agent is read only by its tools and by its hook, and the baseline
 /// review stays as it was frozen.

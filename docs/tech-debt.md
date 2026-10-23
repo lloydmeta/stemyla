@@ -185,6 +185,7 @@ These pass the guard:
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
 * a prefix option that takes a value, such as `env -u X git commit` or `timeout -s KILL 60 gh`, and `env -S "git commit -m x"`;
 * `rtk` subcommands such as `rtk run` and `rtk err`;
+* `cargo new` and `cargo init`, which write a new package;
 * other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
 * interpreters, such as `perl -e` and `awk`, and wrappers, such as `sudo` and `nice`;
 * zsh's `=git commit` and `noglob git commit`.  The Bash tool runs the person's shell, which is zsh on macOS.  The parse follows bash and zsh only for the forms that it covers.

@@ -137,6 +137,32 @@ done
 if [ $state != none ]; then refuse "unclosed quote" "$cmd"; fi
 end_part $n
 
+CAPITALS=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+SMALL_LETTERS=abcdefghijklmnopqrstuvwxyz
+
+# Sets LOWERED to $1 with each capital letter as a small letter.  The file
+# system of macOS ignores letter case, so `GIT` runs git.
+lower() {
+  LOWERED=$1
+  case $1 in
+    *[A-Z]*) ;;
+    *) return 0 ;;
+  esac
+  LOWERED=""
+  local j=0 c before
+  while [ $j -lt ${#1} ]; do
+    c=${1:j:1}
+    case $c in
+      [A-Z])
+        before=${CAPITALS%%"$c"*}
+        c=${SMALL_LETTERS:${#before}:1}
+        ;;
+    esac
+    LOWERED=$LOWERED$c
+    j=$((j + 1))
+  done
+}
+
 # True if word $1 is NAME=value or NAME+=value.  Sets NAME.
 is_assignment() {
   case $1 in
@@ -185,7 +211,7 @@ check_cargo() {
   local sub=""
   if [ $j -lt $end ]; then sub=${WORDS[j]}; fi
   case $sub in
-    publish | login | owner | yank | install | uninstall | add | remove | rm | update | clean | search | fix | logout)
+    publish | login | owner | yank | install | uninstall | add | remove | rm | update | clean | search | fix | logout | generate-lockfile | vendor)
       refuse "cargo subcommand" "$text"
       ;;
     fmt)
@@ -219,7 +245,8 @@ check_part() {
   end=${PART_END[$1]}
   text=${PART_TEXT[$1]}
   while [ $k -lt $end ]; do
-    case ${WORDS[k]##*/} in
+    lower "${WORDS[k]##*/}"
+    case $LOWERED in
       rtk)
         k=$((k + 1))
         if [ $k -lt $end ] && [ "${WORDS[k]}" = proxy ]; then k=$((k + 1)); fi
@@ -254,7 +281,8 @@ check_part() {
     break
   done
   if [ $k -ge $end ]; then return 0; fi
-  case ${WORDS[k]##*/} in
+  lower "${WORDS[k]##*/}"
+  case $LOWERED in
     gh | curl | wget | bash | sh | zsh | eval | xargs) refuse command "$text" ;;
     xtask)
       if has_word publish $((k + 1)) $end; then refuse command "$text"; fi

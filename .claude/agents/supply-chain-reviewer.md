@@ -21,7 +21,8 @@ The prompt gives you:
 * The commit range, such as `<base>..HEAD`.  Read the diff with `git diff <range>`.
 * The criteria.  For `file#heading`, read only that section of the file.  For `commits:<range>`, read only the messages of those commits.
 * The reasons of the route: why `xtask review` chose you for this diff.
-* The target folder: the absolute path that `xtask review start` printed.  Use it for each build.
+* The round number.
+* The target folder: the absolute path that `xtask review start` printed.  Use it to build `HEAD` with no change.
 
 If the prompt does not give one of these, say so in the output, and review with what you have.
 
@@ -33,10 +34,12 @@ If the prompt does not give one of these, say so in the output, and review with 
   * the messages of "review round" commits;
   * the Progress lines of a plan about review rounds.
 * Do not change a file in the main checkout.  To try a change, use a worktree:
-  1. Run `git worktree add --detach target/review/<round>-<name>-<n> HEAD`.  `<round>` is the round that the prompt names, `<name>` is your agent name, and `<n>` counts your worktrees.
+  1. Run `git worktree add --detach target/review/<round>-<name>-<n> HEAD`.  `<round>` is the round number of the input, `<name>` is your agent name, and `<n>` counts your worktrees.
   2. Change files in the worktree with Bash.
-  3. Build with `--manifest-path` in the worktree and `--target-dir <the target folder>`.  Give the Bash call a `timeout` of 600000 ms.
-  4. Remove the worktree with `git worktree remove --force target/review/<round>-<name>-<n>`.
+  3. Build with `--manifest-path` in the worktree and `--target-dir target/review/<round>-<name>-<n>/target`.  This build is cold and takes minutes, so give the Bash call a `timeout` of 600000 ms.
+  4. Remove the worktree with `git worktree remove --force target/review/<round>-<name>-<n>`.  This also removes its target folder.
+* Do not build a changed worktree into the target folder of the input.  Cargo gives a test program the same name in each worktree, so parallel agents would run the test programs of other agents.
+* To test `HEAD` with no change, run cargo in the main checkout with `--target-dir <the target folder of the input>`.  All agents build the same code there.
 * A guard refuses some Bash commands.  Its message starts with "read-only guard:".
   * If it refuses a command because the agent is read only, do not try another form of the command.  Say in the output what you could not check.
   * If it refuses a command for `backtick` or `unclosed quote`, the limit is in the guard's parse.  Write the command again.
