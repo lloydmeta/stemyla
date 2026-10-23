@@ -113,7 +113,7 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 | Command | What it does | Needs |
 | - | - | - |
 | `docs-check` | checks that the map and docs match the code | nothing |
-| `review start`, `review check`, `review mutants` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo for the round; `review check <round>` names each change since that record; `review mutants <round>` runs cargo-mutants on the round's diff for at most 60 minutes | cargo-mutants 27.1.0, for `review mutants` (`README.md`) |
+| `review start`, `review check`, `review mutants` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo for the round; `review check <round>` names each change since that record; `review mutants <round>` runs cargo-mutants on the round's `since` diff for at most 60 minutes | cargo-mutants 27.1.0, for `review mutants` (`README.md`) |
 | `serve` | serves the built page (`serve app/dist --port 8080`) | `trunk build` first |
 | `web-test` | browser tests (wasm-bindgen-test) in Safari or Chrome | wasm-bindgen-cli, a WebDriver |
 | `e2e` | drives the built page over WebDriver (`e2e smoke`, `e2e storage`, ...) | `trunk build`, a WebDriver; some scenarios need a GPU and the model |

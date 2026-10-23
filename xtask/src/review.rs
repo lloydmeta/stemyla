@@ -6,7 +6,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
@@ -493,6 +493,18 @@ pub fn main(args: &[String]) -> i32 {
 /// The seam for tests: runs a subcommand in `dir`, and returns the exit
 /// code and the lines to print.
 pub fn run(args: &[String], dir: &Path, home: &Path, exe_time: SystemTime) -> (i32, Vec<String>) {
+    run_with(args, dir, home, exe_time, OsStr::new("cargo"))
+}
+
+/// [`run`], with the program that runs `cargo mutants`, so a test can pass
+/// a fake one.
+pub fn run_with(
+    args: &[String],
+    dir: &Path,
+    home: &Path,
+    exe_time: SystemTime,
+    cargo: &OsStr,
+) -> (i32, Vec<String>) {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome =
         match words.as_slice() {
@@ -501,11 +513,10 @@ pub fn run(args: &[String], dir: &Path, home: &Path, exe_time: SystemTime) -> (i
             ["check", round] => {
                 parse_round(round).and_then(|round| check(&toplevel(dir)?, home, round))
             }
-            ["mutants", round] => {
-                parse_round(round).and_then(|round| mutants(&toplevel(dir)?, dir, round, None))
-            }
+            ["mutants", round] => parse_round(round)
+                .and_then(|round| mutants(&toplevel(dir)?, dir, round, None, cargo)),
             ["mutants", round, "--config", file] => parse_round(round)
-                .and_then(|round| mutants(&toplevel(dir)?, dir, round, Some(file))),
+                .and_then(|round| mutants(&toplevel(dir)?, dir, round, Some(file), cargo)),
             _ => Ok((REFUSED, vec![USAGE.to_string()])),
         };
     outcome.unwrap_or_else(|e| (REFUSED, vec![format!("{e:#}")]))
@@ -1246,10 +1257,10 @@ pub fn mutants_args(diff: &Path, round_folder: &Path, config: &Path) -> Vec<OsSt
     .concat()
 }
 
-/// `cargo` with `args`, at the toplevel, without `CARGO_TARGET_DIR`, so
-/// the run builds in its own copies.
-pub fn mutants_command(toplevel: &Path, args: &[OsString]) -> Command {
-    let mut command = Command::new("cargo");
+/// `cargo` (or a fake for tests) with `args`, at the toplevel, without
+/// `CARGO_TARGET_DIR`, so the run builds in its own copies.
+pub fn mutants_command(cargo: &OsStr, toplevel: &Path, args: &[OsString]) -> Command {
+    let mut command = Command::new(cargo);
     command
         .args(args)
         .current_dir(toplevel)
@@ -1284,6 +1295,7 @@ fn mutants(
     dir: &Path,
     round: u32,
     config: Option<&str>,
+    cargo: &OsStr,
 ) -> Result<(i32, Vec<String>)> {
     let limit = parse_limit(std::env::var("STEMYLA_MUTANTS_MINUTES").ok().as_deref())?;
     let Some(round_folder) = prepare_mutants(toplevel, round)? else {
@@ -1295,7 +1307,7 @@ fn mutants(
             )],
         ));
     };
-    let installed = Command::new("cargo")
+    let installed = Command::new(cargo)
         .args(["mutants", "--version"])
         .current_dir(toplevel)
         .output()
@@ -1309,7 +1321,7 @@ fn mutants(
             &round_folder,
             &config_path(toplevel, dir, config),
         );
-        let mut command = mutants_command(toplevel, &args);
+        let mut command = mutants_command(cargo, toplevel, &args);
         command.stdout(log.try_clone()?).stderr(log);
         run_with_limit(command, limit)
     } else {
@@ -1451,6 +1463,7 @@ mod tests {
     fn scratch(name: &str) -> Scratch {
         let dir = Scratch::new(name);
         git_in(&dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
         let hooks = dir.join(".git/hooks").canonicalize().unwrap();
         git_in(&dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
         std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
@@ -2423,6 +2436,7 @@ mod tests {
         let state = read_state(&folder.join("1/state.json")).unwrap();
         assert_eq!(state.base, fork);
         assert_eq!(state.head, sha(&dir, "HEAD"));
+        assert!(state.started > 0, "start records its time");
     }
 
     #[test]
@@ -2431,7 +2445,7 @@ mod tests {
         let base = sha(&dir, "HEAD");
         git_in(&dir, &["checkout", "-q", "-b", "feature"]);
         write(&dir, "a.txt", "a\n");
-        write(&dir, "b.txt", "only in round 1\n");
+        write(&dir, "docs/b.md", "only in round 1\n");
         commit_all(&dir, "one");
         let first_head = sha(&dir, "HEAD");
         let (code, lines) = start_in(&dir, "main", "1");
@@ -2445,7 +2459,22 @@ mod tests {
         let folder = PathBuf::from(value_of(&lines, "run folder: "));
         let since_diff = std::fs::read_to_string(folder.join("2/since.diff")).unwrap();
         assert!(since_diff.contains("+a fix"), "{since_diff}");
-        assert!(!since_diff.contains("b.txt"), "{since_diff}");
+        assert!(!since_diff.contains("b.md"), "{since_diff}");
+        let branch_diff = std::fs::read_to_string(folder.join("2/branch.diff")).unwrap();
+        assert!(branch_diff.contains("docs/b.md"), "{branch_diff}");
+        let branch_at = lines.iter().position(|l| l.starts_with("branch ")).unwrap();
+        let since_at = lines.iter().position(|l| l.starts_with("since ")).unwrap();
+        let branch_lines = &lines[branch_at + 1..since_at];
+        assert!(
+            branch_lines.contains(&"  docs-reviewer: docs/b.md (docs/**)".to_string()),
+            "the branch route of round 2 starts at the merge base: {lines:?}"
+        );
+        assert!(
+            !lines[since_at + 1..]
+                .iter()
+                .any(|l| l.starts_with("  docs-reviewer")),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -2470,6 +2499,17 @@ mod tests {
             lines,
             ["the run folder holds a log: copy it out, or remove it"]
         );
+    }
+
+    #[test]
+    fn a_log_does_not_stop_round_2() {
+        let dir = round_1_of_a_rust_change("start-log-2");
+        let folder = toplevel(&dir).unwrap().join("target/review/run/feature");
+        std::fs::write(folder.join("log.md"), "# log\n").unwrap();
+        write(&dir, "a.rs", "fn a() { let _ = 1; }\n");
+        commit_all(&dir, "a fix");
+        let (code, lines) = start_in(&dir, "main", "2");
+        assert_eq!(code, 0, "{lines:?}");
     }
 
     #[test]
@@ -3090,7 +3130,7 @@ mod tests {
     #[test]
     fn the_command_runs_cargo_at_the_toplevel_without_cargo_target_dir() {
         let args = vec![OsString::from("mutants"), OsString::from("--list")];
-        let command = mutants_command(Path::new("/r"), &args);
+        let command = mutants_command(OsStr::new("cargo"), Path::new("/r"), &args);
         assert_eq!(command.get_program(), "cargo");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -3121,6 +3161,125 @@ mod tests {
         assert!(diff.contains("+++ b/b.rs"), "{diff}");
         assert!(!diff.contains("a.rs"), "{diff}");
         assert_eq!(prepare_mutants(&top, 3).unwrap(), None);
+    }
+
+    /// A fake `cargo` in POSIX sh.  `mutants --version` passes.  A run
+    /// writes counts to `<output>/mutants.out`, keeps the `--config` that
+    /// it got in `<output>/config-seen.txt`, and exits 2 (missed mutants).
+    const FAKE_CARGO: &str = r#"#!/bin/sh
+if [ "$2" = "--version" ]; then exit VERSION_EXIT; fi
+out=""
+config=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output) out="$2"; shift ;;
+    --config) config="$2"; shift ;;
+  esac
+  shift
+done
+mkdir -p "$out/mutants.out"
+printf '{"caught": 3, "missed": 2, "timeout": 1, "unviable": 4}' > "$out/mutants.out/outcomes.json"
+printf '[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}]' > "$out/mutants.out/mutants.json"
+printf '%s' "$config" > "$out/config-seen.txt"
+exit 2
+"#;
+
+    /// Writes [`FAKE_CARGO`] to `bin`; its `mutants --version` exits
+    /// `version_exit`.
+    fn fake_cargo(bin: &Path, version_exit: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let cargo = bin.join("cargo");
+        let script = FAKE_CARGO.replace("VERSION_EXIT", &version_exit.to_string());
+        std::fs::write(&cargo, script).unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        cargo
+    }
+
+    /// A scratch repo with a round 1 record of one Rust change.
+    fn round_1_of_a_rust_change(name: &str) -> Scratch {
+        let dir = scratch(name);
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "a.rs", "fn a() {}\n");
+        commit_all(&dir, "round 1");
+        assert_eq!(start_in(&dir, "main", "1").0, 0);
+        dir
+    }
+
+    #[test]
+    fn mutants_runs_the_program_and_saves_its_line() {
+        let dir = round_1_of_a_rust_change("mutants-fake");
+        let bin = Scratch::new("mutants-fake-bin");
+        let cargo = fake_cargo(&bin, 0);
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let round_folder = toplevel(&dir).unwrap().join("target/review/run/feature/1");
+        std::fs::create_dir_all(round_folder.join("mutants.out")).unwrap();
+        std::fs::write(
+            round_folder.join("mutants.out/outcomes.json"),
+            r#"{"caught": 99, "missed": 0, "timeout": 0, "unviable": 0}"#,
+        )
+        .unwrap();
+        let args: Vec<String> = ["mutants", "1", "--config", "x.toml"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let (code, lines) = run_with(&args, &sub, &dir, SystemTime::now(), cargo.as_os_str());
+        let expected = format!("mutants: full: {COUNTED}");
+        assert_eq!((code, lines), (0, vec![expected.clone()]));
+        assert_eq!(
+            std::fs::read_to_string(round_folder.join("mutants.txt")).unwrap(),
+            format!("{expected}\n")
+        );
+        assert_eq!(
+            PathBuf::from(std::fs::read_to_string(round_folder.join("config-seen.txt")).unwrap()),
+            sub.join("x.toml"),
+            "--config reached cargo, resolved against the current folder"
+        );
+    }
+
+    #[test]
+    fn mutants_without_the_program_is_none() {
+        let dir = round_1_of_a_rust_change("mutants-missing");
+        let args = vec!["mutants".to_string(), "1".to_string()];
+        // cargo without cargo-mutants: `cargo mutants --version` fails.
+        let bin = Scratch::new("mutants-missing-bin");
+        let cargo = fake_cargo(&bin, 101);
+        let (code, lines) = run_with(&args, &dir, &dir, SystemTime::now(), cargo.as_os_str());
+        let expected = format!("mutants: none: {NOTHING}; {INSTALL}");
+        assert_eq!((code, lines), (0, vec![expected.clone()]));
+        let round_folder = toplevel(&dir).unwrap().join("target/review/run/feature/1");
+        assert_eq!(
+            std::fs::read_to_string(round_folder.join("mutants.txt")).unwrap(),
+            format!("{expected}\n")
+        );
+        assert!(!round_folder.join("mutants.out").exists(), "nothing ran");
+    }
+
+    #[test]
+    fn prepare_mutants_removes_the_old_output() {
+        let dir = round_1_of_a_rust_change("mutants-clear");
+        let top = toplevel(&dir).unwrap();
+        let round_folder = top.join("target/review/run/feature/1");
+        std::fs::create_dir_all(round_folder.join("mutants.out")).unwrap();
+        std::fs::create_dir_all(round_folder.join("mutants.out.old")).unwrap();
+        assert_eq!(
+            prepare_mutants(&top, 1).unwrap(),
+            Some(round_folder.clone())
+        );
+        assert!(!round_folder.join("mutants.out").exists());
+        assert!(!round_folder.join("mutants.out.old").exists());
+    }
+
+    #[test]
+    fn a_program_that_does_not_start_is_missing() {
+        let command = Command::new("/nonexistent/xtask-review-no-such-program");
+        assert_eq!(
+            run_with_limit(command, Duration::from_secs(1)),
+            RunEnd {
+                missing: true,
+                ..RunEnd::default()
+            }
+        );
     }
 
     #[test]

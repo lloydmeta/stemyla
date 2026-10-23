@@ -154,7 +154,7 @@ The route comes from the branch's own `xtask`.  So a branch can change the route
 
 `xtask review check` compares the repo with the state record of a round.  The record holds `HEAD`, the status, the stash, the branches, the tags, every other ref (such as remote-tracking refs, notes and replacements), the remotes and the worktrees.  It also holds a hash of the git config, the hooks, the local Claude Code settings in the repo and the person's own Claude Code settings in the home folder.  The check does not see other changes, for example:
 
-* a change to an ignored file, or to a file under `target/`;
+* a change to an ignored file other than the local Claude Code settings, or to a file under `target/`;
 * a change to the reflog, the global git config, or the index of another worktree;
 * a change to a file outside the repo, other than the person's own settings.
 
