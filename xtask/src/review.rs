@@ -1471,6 +1471,23 @@ mod tests {
         dir
     }
 
+    /// Sets a person's diff and status options that change git's output,
+    /// so a test fails if the code does not pass its own options.
+    fn hostile_config(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let junk = dir.join(".git/junk-diff.sh");
+        std::fs::write(&junk, "#!/bin/sh\necho junk\n").unwrap();
+        std::fs::set_permissions(&junk, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (key, value) in [
+            ("diff.noprefix", "true"),
+            ("diff.mnemonicPrefix", "true"),
+            ("diff.external", junk.to_str().unwrap()),
+            ("status.showUntrackedFiles", "no"),
+        ] {
+            git_in(dir, &["config", key, value]);
+        }
+    }
+
     fn write(dir: &Path, rel: &str, text: &str) {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1848,6 +1865,42 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_symlink_routes_supply_chain_reviewer() {
+        let raw = format!(":120000 000000 {SHA} {SHA} D\0link\0");
+        assert_eq!(
+            route(&raw, "").reasons("supply-chain-reviewer"),
+            ["link is a symlink"]
+        );
+    }
+
+    #[test]
+    fn a_raw_path_that_starts_with_a_colon_is_a_path() {
+        let raw = format!(
+            ":100644 100644 {SHA} {SHA} M\0:odd.md\0:100644 100644 {SHA} {SHA} R100\0docs/a.md\0:b.md\0:100644 100644 {SHA} {SHA} M\0docs/c.md\0"
+        );
+        assert_eq!(
+            route(&raw, "").reasons("docs-reviewer"),
+            ["docs/a.md (docs/**)", "docs/c.md (docs/**)"]
+        );
+        let paths: Vec<Vec<String>> = parse_raw(&raw).into_iter().map(|e| e.paths).collect();
+        assert_eq!(
+            paths,
+            [
+                vec![":odd.md"],
+                vec!["docs/a.md", ":b.md"],
+                vec!["docs/c.md"]
+            ]
+        );
+    }
+
+    #[test]
+    fn unquote_reads_an_escape_at_either_end() {
+        assert_eq!(unquote("\"\\303\\251x\""), "éx");
+        assert_eq!(unquote("\"\\tx\""), "\tx");
+        assert_eq!(unquote("\"x\\\\\""), "x\\");
+    }
+
+    #[test]
     fn an_empty_diff_gives_an_empty_route() {
         assert!(route("", "").is_empty());
     }
@@ -1857,6 +1910,7 @@ mod tests {
     #[test]
     fn a_rename_routes_by_both_paths() {
         let dir = scratch("rename");
+        hostile_config(&dir);
         let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
         write(&dir, "docs/x.md", &text);
         commit_all(&dir, "doc");
@@ -1878,6 +1932,7 @@ mod tests {
     #[test]
     fn a_sign_in_a_file_with_a_space_or_a_quote_routes() {
         let dir = scratch("space");
+        hostile_config(&dir);
         write(&dir, "xtask/src/a b.rs", "let a = b.to_vec();\n");
         write(&dir, "xtask/src/q\"x.rs", "let a = q.model_url;\n");
         commit_all(&dir, "signs");
@@ -2515,6 +2570,7 @@ mod tests {
     #[test]
     fn a_dirty_tree_exits_3() {
         let dir = scratch("start-dirty");
+        hostile_config(&dir);
         write(&dir, "x.txt", "x\n");
         let (code, lines) = start_in(&dir, "main", "1");
         assert_eq!(code, 3);
@@ -2668,6 +2724,20 @@ mod tests {
         );
         assert_eq!(code, 0, "{lines:?}");
         assert!(!lines.iter().any(|l| l.starts_with("warning")), "{lines:?}");
+    }
+
+    #[test]
+    fn exactly_5_path_reasons_give_no_more() {
+        let raw: String = (1..=5)
+            .map(|n| format!(":100644 100644 {SHA} {SHA} M\0engine/src/f{n}.rs\0"))
+            .collect();
+        let lines = route_lines(&route(&raw, ""), Some(PATH_REASONS_SHOWN));
+        let memory = lines
+            .iter()
+            .find(|l| l.starts_with("  memory-reviewer: "))
+            .unwrap();
+        assert_eq!(memory.split("; ").count(), 5, "{memory}");
+        assert!(!memory.contains("more)"), "{memory}");
     }
 
     #[test]
@@ -2894,6 +2964,25 @@ mod tests {
             end,
             some_counts(),
             &format!("mutants: partial: {COUNTED}; stopped at the limit"),
+        );
+    }
+
+    #[test]
+    fn its_own_stop_with_only_unviable_tested_is_partial() {
+        let end = RunEnd {
+            code: Some(1),
+            own_stop: true,
+            ..RunEnd::default()
+        };
+        let unviable = Some(Counts {
+            unviable: 2,
+            listed: Some(5),
+            ..Counts::default()
+        });
+        assert_line(
+            end,
+            unviable,
+            "mutants: partial: tested 2 (caught 0, missed 0, unviable 2), timeouts 0, not tested 3; stopped at the limit",
         );
     }
 
@@ -3165,7 +3254,8 @@ mod tests {
 
     /// A fake `cargo` in POSIX sh.  `mutants --version` passes.  A run
     /// writes counts to `<output>/mutants.out`, keeps the `--config` that
-    /// it got in `<output>/config-seen.txt`, and exits 2 (missed mutants).
+    /// it got in `<output>/config-seen.txt` and the `--in-diff` in
+    /// `<output>/in-diff-seen.txt`, and exits 2 (missed mutants).
     const FAKE_CARGO: &str = r#"#!/bin/sh
 if [ "$2" = "--version" ]; then exit VERSION_EXIT; fi
 out=""
@@ -3174,6 +3264,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --output) out="$2"; shift ;;
     --config) config="$2"; shift ;;
+    --in-diff) diff="$2"; shift ;;
   esac
   shift
 done
@@ -3181,6 +3272,7 @@ mkdir -p "$out/mutants.out"
 printf '{"caught": 3, "missed": 2, "timeout": 1, "unviable": 4}' > "$out/mutants.out/outcomes.json"
 printf '[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}]' > "$out/mutants.out/mutants.json"
 printf '%s' "$config" > "$out/config-seen.txt"
+printf '%s' "$diff" > "$out/in-diff-seen.txt"
 exit 2
 "#;
 
@@ -3234,6 +3326,11 @@ exit 2
             PathBuf::from(std::fs::read_to_string(round_folder.join("config-seen.txt")).unwrap()),
             sub.join("x.toml"),
             "--config reached cargo, resolved against the current folder"
+        );
+        assert_eq!(
+            PathBuf::from(std::fs::read_to_string(round_folder.join("in-diff-seen.txt")).unwrap()),
+            round_folder.join("mutants.diff"),
+            "the round's mutants.diff reached cargo"
         );
     }
 
