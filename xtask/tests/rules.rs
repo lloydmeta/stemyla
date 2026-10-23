@@ -977,12 +977,14 @@ const REVIEW_SKILL_FRONTMATTER: &[&str] = &[
 const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 
 /// Text that each step of a round needs: the mutants run in the
-/// background, its time limit and the check of the state.
+/// background, its time limit, the check of the state, and the rule for a
+/// file that the Write tool refuses to a subagent.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "target/debug/xtask review mutants",
     "target/debug/xtask review check",
     "run_in_background",
     "3900000",
+    "do not write it in another way",
 ];
 
 /// The problems of the review skill's text: each names the line or the

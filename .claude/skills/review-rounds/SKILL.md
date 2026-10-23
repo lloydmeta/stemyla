@@ -26,6 +26,8 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * So `review check` and a late `review mutants` can ask for approval.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
+* If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
+* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Then the caller decides the next step: step 10, step 11 or the next round.
 
 ## Names
 
@@ -193,7 +195,7 @@ target/debug/xtask review check $1
 
 ### 9. Write the findings
 
-Write `<run>/$1/findings.md` with the Write tool, in this form:
+Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Write tool refuses it, do as "Before the steps" says.
 
 ```markdown
 # Review round $1
@@ -255,7 +257,7 @@ of <y> baseline findings, the round found <x>
 
 ### 11. Add the round to the log
 
-The log `<run>/log.md` has two tables.  If the file does not exist, write it in this form first:
+The log `<run>/log.md` has two tables.  If the Write tool refuses it, do as "Before the steps" says.  If the file does not exist, write it in this form first:
 
 ```markdown
 # Review log
