@@ -13,7 +13,7 @@ Phases 1 and 2 are in place:
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 * Checks that fail a breach of a rule.  Among them: tests in `xtask/tests/rules.rs`, clippy's `disallowed-methods` and `STEMYLA_REQUIRE`.  Also the shader limits test, the UI snapshot comparison and the allocation test of the audio callback.  Most give the rule ID and the fix.  `invariants.md` names the check for each rule, or says "prose only".
 
-The agent runs three review rounds with `/review-rounds` after it implements a change, because `CLAUDE.md` tells it to; the review recipe below starts the same rounds by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.
+The agent runs three review rounds with `/review-rounds` after it implements a change, because `CLAUDE.md` tells it to.  The review recipe below starts the same rounds by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.
 
 Phase 3 adds eight read-only review agents in `.claude/agents/`: `reviewer`, `gpu-reviewer`, `memory-reviewer`, `wire-reviewer`, `supply-chain-reviewer`, `docs-reviewer`, `validator` and `baseline` (see "Review agents" below).  `xtask review start` routes the six reviewers.  The project skill `review-rounds` (`.claude/skills/review-rounds/SKILL.md`) starts the agents in each round, and runs cargo-mutants (see "Review a change").
 
@@ -73,7 +73,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 
 ### Review a change
 
-* Prompt: "Run `/review-rounds main 1 "<criteria>"`, then rounds 2 and 3."
+* Prompt: "Run `cargo build -p xtask`, then `/review-rounds main 1 "<criteria>"`, then rounds 2 and 3."  The skill's first line runs `target/debug/xtask`, which fails with exit 127 if the binary is missing.
 * The skill: `/review-rounds <base> <round> "<criteria>" [--review-only] [--baseline]`.  The criteria are one section of a plan (`file#heading`), or the messages of commits (`commits:<range>`).  `--review-only` stops the round after the findings file.  `--baseline` also runs the frozen `baseline` review, to compare with.
 * The agent, in each round:
   1. `xtask review start` refuses a tree with changes ("commit first"), and chooses the reviewers.
@@ -81,11 +81,12 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
   3. The routed reviewers run in parallel, each as a new subagent.  The agent merges their findings.
   4. A `validator` tries to disprove each blocker and should-fix, and the missed mutants.
   5. `xtask review check` stops the round if the repo changed in a way that a review must not cause.
-  6. The agent writes the findings file in the run folder under `target/review/run/`, fixes each found finding with a test, commits "review round <n> fixes", and adds the round to the log.
+  6. The agent writes the findings file in the run folder under `target/review/run/`.  It fixes each found finding, with a failing test first where the finding is about behaviour.  A `pre-existing` finding can go to `docs/tech-debt.md` or its own PR.  It commits "review round <n> fixes", and adds the round to the log.
 * Check: the refuted findings, the unproven blockers and should-fix, each `repeat-of`, and each mutants line.  The PR description lists them.
 * From the PR after phase 3's, pass `--baseline` in round 1, until the parent plan (`plans/active/harness-phase-3.md`) records the gate.
 * The skill runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So `review check` asks for approval once in each round, and a late `review mutants` can ask too.  Approve each one once, not with "don't ask again".  Step 11 of the skill counts each approval as an intervention (TD-36).  "Don't ask again" changes the local settings file of Claude Code, and `review check` then fails the round.
 * If `review check` names a change, the round stops.  Examine `git reflog`, the stash and the changed files, then start the round again.
+* A branch has one set of rounds and one log, so "the run folder holds a log" from round 1 means that an earlier set ran (TD-37).
 
 ### Record a decision or a gap
 
@@ -176,4 +177,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-23, phase 3 (M1): `xtask review start <base> <round>` chooses the reviewers from the diff, and writes the diffs, the route and a state record to the run folder under `target/review/run/`.  `xtask review check <round>` names each change since that record, such as a new commit, a stash or a changed hook.  Each failure exits 3, so a skill stops on it.
 * 2026-10-23, phase 3 (M1): `xtask review mutants <round>` runs cargo-mutants on the Rust files of the round's `since` diff, with `.cargo/mutants.toml`, for at most 60 minutes.  It prints one line: `full`, `partial` or `none`, with the counts.  `.cargo/mutants.toml` leaves out the code that compiles for `wasm32` only.  Add a new `wasm32`-only function to its `exclude_re`.
 * 2026-10-23, phase 3 (M2): eight read-only review agents in `.claude/agents/`, with a guard on their Bash commands (see "Review agents").  The guard refuses a commit, a push, a stash, `gh` and a cargo publish, with "read-only guard:" and the reason.  The recipe "Review a change" starts reviewers by hand until M3.
-* 2026-10-23, phase 3 (M3): the project skill `review-rounds` runs one review round: `/review-rounds <base> <round> "<criteria>"`.  It starts the routed reviewers and a `validator` for each serious finding, runs cargo-mutants, checks the state of the repo, and writes the findings.  `CLAUDE.md` and the recipe "Review a change" use it for rounds 1, 2 and 3.  Approve `review check` once in each round, and a late `review mutants` once, not with "don't ask again".
+* 2026-10-23, phase 3 (M3): the project skill `review-rounds` runs one review round: `/review-rounds <base> <round> "<criteria>"`.  It starts the routed reviewers and a `validator` for each serious finding, runs cargo-mutants, checks the state of the repo, and writes the findings.  `CLAUDE.md` and the recipe "Review a change" use it for rounds 1, 2 and 3.  Approve `review check` once in each round, and a late `review mutants` once, not with "don't ask again".  Run `cargo build -p xtask` before round 1.  A branch has one set of rounds (TD-37).

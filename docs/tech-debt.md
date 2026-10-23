@@ -222,6 +222,12 @@ The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no appr
 
 * Fix: the orchestrator or the maintainer decides how D4 counts this approval.  Not taken in M3: a project allow rule for `Bash(target/debug/xtask review *)`.  That rule widens the permissions of the project and needs a decision record (the Decision log of `plans/active/harness-phase-3-m3.md`).
 
+### TD-37: a branch has one set of review rounds
+
+`CLAUDE.md` tells the agent to run review rounds 1, 2 and 3 after each change that it implements.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/active/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After round 3" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
+
+* Fix: the orchestrator or the maintainer decides how such a branch keeps the log of each set.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults

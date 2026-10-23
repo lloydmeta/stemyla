@@ -972,6 +972,10 @@ const REVIEW_SKILL_FRONTMATTER: &[&str] = &[
     "allowed-tools: Bash(target/debug/xtask review *)",
 ];
 
+/// The keys of the review skill's frontmatter, each exactly once.  Another
+/// key, such as `context: fork`, changes how Claude Code runs the skill.
+const REVIEW_SKILL_KEYS: &[&str] = &["name", "description", "argument-hint", "allowed-tools"];
+
 /// The line that runs `review start` when the skill loads, so a refusal
 /// stops the skill before the model can skip it.
 const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
@@ -1015,6 +1019,17 @@ fn review_skill_problems(text: &str) -> Vec<String> {
         .map(|wanted| {
             format!("{REVIEW_SKILL}: the frontmatter has no line `{wanted}`.  Fix: put the line back exactly (harness phase 3, M3).")
         });
+    let keys: Vec<&str> = frontmatter
+        .iter()
+        .map(|line| line.split_once(':').map_or(*line, |(key, _)| key).trim())
+        .collect();
+    let keys_are_exact = keys.len() == REVIEW_SKILL_KEYS.len()
+        && REVIEW_SKILL_KEYS
+            .iter()
+            .all(|wanted| keys.iter().filter(|key| *key == wanted).count() == 1);
+    let key_problems = (!keys_are_exact).then(|| {
+        format!("{REVIEW_SKILL}: the frontmatter keys are {keys:?}, not each of {REVIEW_SKILL_KEYS:?} once.  Fix: remove the other keys and lines (harness phase 3, M3).")
+    });
     let invocation_problems = lines
         .iter()
         .filter(|line| {
@@ -1044,6 +1059,7 @@ fn review_skill_problems(text: &str) -> Vec<String> {
             format!("{REVIEW_SKILL}: no code span names the agent `{name}`.  Fix: name it in the step that starts it.")
         });
     frontmatter_problems
+        .chain(key_problems)
         .chain(invocation_problems)
         .chain(start_problems)
         .chain(text_problems)
