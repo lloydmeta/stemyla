@@ -20,6 +20,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/active/harness-phase-3.md`: phase 3 of that plan, in progress: review agents chosen by the diff, a validator for each serious finding, cargo-mutants and a findings log, in one PR.
 * `plans/active/harness-phase-3-m1.md`: M1 of phase 3, in progress: `xtask review` routes a diff to reviewers, guards a round, and runs cargo-mutants.
 * `plans/active/harness-phase-3-m2.md`: M2 of phase 3, in progress: eight read-only review agents, and a guard on their Bash commands.
+* `plans/active/harness-phase-3-m3.md`: M3 of phase 3, in progress: the `review-rounds` skill, which runs one review round, and a test harness that runs it in `claude -p` on a clone.
 * `plans/completed/harness-phase-2.md`: phase 2 of that plan, done on 2026-10-22: each rule a machine can check became a test, a lint or a hook, one PR per milestone.  Its retrospective gives what phase 2 achieved and what it did not.
 * `decisions/0001-harness-in-the-repo.md`: agent knowledge is versioned in the repo, with `CLAUDE.md` as a map; the harness is Claude Code only.
 * `decisions/0002-staged-background-autonomy.md`: agents are to work in the background, up to merging their own PRs, reached in stages with gates.
