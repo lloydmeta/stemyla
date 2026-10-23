@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::docs::glob_matches;
 
@@ -493,15 +493,20 @@ pub fn main(args: &[String]) -> i32 {
 /// code and the lines to print.
 pub fn run(args: &[String], dir: &Path, home: &Path, exe_time: SystemTime) -> (i32, Vec<String>) {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
-    let outcome = match words.as_slice() {
-        ["start", base, round] => {
-            parse_round(round).and_then(|round| start(&toplevel(dir)?, home, exe_time, base, round))
-        }
-        ["check", round] => {
-            parse_round(round).and_then(|round| check(&toplevel(dir)?, home, round))
-        }
-        _ => Ok((REFUSED, vec![USAGE.to_string()])),
-    };
+    let outcome =
+        match words.as_slice() {
+            ["start", base, round] => parse_round(round)
+                .and_then(|round| start(&toplevel(dir)?, home, exe_time, base, round)),
+            ["check", round] => {
+                parse_round(round).and_then(|round| check(&toplevel(dir)?, home, round))
+            }
+            ["mutants", round] => {
+                parse_round(round).and_then(|round| mutants(&toplevel(dir)?, dir, round, None))
+            }
+            ["mutants", round, "--config", file] => parse_round(round)
+                .and_then(|round| mutants(&toplevel(dir)?, dir, round, Some(file))),
+            _ => Ok((REFUSED, vec![USAGE.to_string()])),
+        };
     outcome.unwrap_or_else(|e| (REFUSED, vec![format!("{e:#}")]))
 }
 
@@ -946,6 +951,322 @@ pub fn warnings(
         _ => None,
     };
     old_binary.into_iter().chain(changed).collect()
+}
+
+/// How a cargo-mutants run ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunEnd {
+    /// The exit code, or none after a signal.
+    pub code: Option<i32>,
+    /// The run reached its own time limit, and got SIGTERM.
+    pub own_stop: bool,
+    /// The run ignored SIGTERM, and got SIGKILL.
+    pub killed: bool,
+    /// cargo-mutants is not installed, so nothing ran.
+    pub missing: bool,
+}
+
+/// The results in `mutants.out`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub caught: u64,
+    pub missed: u64,
+    pub timeout: u64,
+    pub unviable: u64,
+    /// The length of `mutants.json`: every mutant, tested or not.
+    pub listed: Option<u64>,
+}
+
+/// How much of the diff the run tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Full,
+    Partial,
+    None,
+}
+
+/// The one line that `review mutants` prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    pub class: Class,
+    pub counts: Counts,
+    pub reason: Option<String>,
+}
+
+/// The class of a run, and why.
+pub fn classify(end: RunEnd, counts: Option<Counts>) -> Line {
+    let counted = counts.unwrap_or_default();
+    let tested = counted.caught + counted.missed + counted.unviable;
+    let (class, reason): (Class, Option<String>) = if end.missing {
+        (Class::None, Some(INSTALL.to_string()))
+    } else if end.own_stop {
+        let kill = if end.killed {
+            "; SIGKILL 60 s after SIGTERM"
+        } else {
+            ""
+        };
+        if tested > 0 {
+            (Class::Partial, Some(format!("stopped at the limit{kill}")))
+        } else {
+            (
+                Class::None,
+                Some(format!("stopped before a mutant finished{kill}")),
+            )
+        }
+    } else {
+        match end.code {
+            Some(0) if counts.is_none() => (Class::None, Some("no mutants in the diff".into())),
+            Some(0 | 2) => (Class::Full, None),
+            Some(3) => (Class::Partial, Some("timeouts have no result".into())),
+            Some(code) => (
+                Class::None,
+                Some(format!("exit {code}: {}", exit_meaning(code))),
+            ),
+            None => (
+                Class::None,
+                Some("stopped by a signal that was not its own".into()),
+            ),
+        }
+    };
+    Line {
+        class,
+        counts: counted,
+        reason,
+    }
+}
+
+/// What an exit code of cargo-mutants that gives `none` means.
+fn exit_meaning(code: i32) -> &'static str {
+    match code {
+        1 => "a usage error, or a stop by a signal that was not its own",
+        4 => "the baseline failed",
+        5 => "the diff does not fit the tree",
+        6 => "the diff cannot be read",
+        70 => "an internal error of cargo-mutants",
+        _ => "a code that cargo-mutants does not document",
+    }
+}
+
+impl std::fmt::Display for Line {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let class = match self.class {
+            Class::Full => "full",
+            Class::Partial => "partial",
+            Class::None => "none",
+        };
+        let c = self.counts;
+        let tested = c.caught + c.missed + c.unviable;
+        let not_tested = c
+            .listed
+            .map_or(0, |listed| listed.saturating_sub(tested + c.timeout));
+        write!(
+            f,
+            "mutants: {class}: tested {tested} (caught {}, missed {}, unviable {}), timeouts {}, not tested {not_tested}",
+            c.caught, c.missed, c.unviable, c.timeout
+        )?;
+        match &self.reason {
+            Some(reason) => write!(f, "; {reason}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Removes the round's old `mutants.out` and `mutants.out.old`, since a
+/// diff with no mutants leaves an old `mutants.out` as it was.
+pub fn clear_old_output(round_folder: &Path) -> Result<()> {
+    for old in ["mutants.out", "mutants.out.old"] {
+        let path = round_folder.join(old);
+        if path.exists() {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes the diff of `*.rs` files from `since` to `head`, with renames
+/// shown as a deletion and an addition.
+pub fn write_mutants_diff(toplevel: &Path, since: &str, head: &str, path: &Path) -> Result<()> {
+    let diff = git_diff(toplevel, &["--no-renames", since, head, "--", "*.rs"])?;
+    std::fs::write(path, diff).with_context(|| format!("writing {}", path.display()))
+}
+
+/// The config file: `--config` resolved against `dir`, or the repo's own.
+pub fn config_path(toplevel: &Path, dir: &Path, arg: Option<&str>) -> PathBuf {
+    match arg {
+        Some(file) => dir.join(file),
+        None => toplevel.join(".cargo/mutants.toml"),
+    }
+}
+
+/// Runs `command` until it ends, or until `limit`; then sends SIGTERM,
+/// and SIGKILL if it has not ended after [`KILL_AFTER`].
+fn run_with_limit(command: Command, limit: Duration) -> RunEnd {
+    run_with_limit_and_grace(command, limit, KILL_AFTER)
+}
+
+const KILL_AFTER: Duration = Duration::from_secs(60);
+
+fn run_with_limit_and_grace(mut command: Command, limit: Duration, grace: Duration) -> RunEnd {
+    let Ok(mut child) = command.spawn() else {
+        return RunEnd {
+            missing: true,
+            ..RunEnd::default()
+        };
+    };
+    let poll = Duration::from_secs(1);
+    let begun = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return RunEnd {
+                    code: status.code(),
+                    ..RunEnd::default()
+                };
+            }
+            Ok(None) if begun.elapsed() < limit => {
+                std::thread::sleep(poll.min(limit.saturating_sub(begun.elapsed())));
+            }
+            _ => break,
+        }
+    }
+    signal(child.id(), "-TERM");
+    let stopped = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return RunEnd {
+                    code: status.code(),
+                    own_stop: true,
+                    ..RunEnd::default()
+                };
+            }
+            Ok(None) if stopped.elapsed() < grace => std::thread::sleep(poll),
+            _ => break,
+        }
+    }
+    signal(child.id(), "-KILL");
+    RunEnd {
+        code: child.wait().ok().and_then(|status| status.code()),
+        own_stop: true,
+        killed: true,
+        missing: false,
+    }
+}
+
+/// Sends a signal with `kill`, since `Child::kill` sends SIGKILL only.
+fn signal(pid: u32, which: &str) {
+    let _ = Command::new("kill")
+        .args([which, &pid.to_string()])
+        .status();
+}
+
+/// The counts in `<round folder>/mutants.out`, if cargo-mutants wrote them.
+fn read_counts(mutants_out: &Path) -> Option<Counts> {
+    let outcomes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mutants_out.join("outcomes.json")).ok()?)
+            .ok()?;
+    let count = |key: &str| {
+        outcomes
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let listed = std::fs::read_to_string(mutants_out.join("mutants.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<serde_json::Value>>(&text).ok())
+        .map(|all| all.len() as u64);
+    Some(Counts {
+        caught: count("caught"),
+        missed: count("missed"),
+        timeout: count("timeout"),
+        unviable: count("unviable"),
+        listed,
+    })
+}
+
+/// The run's limit: 60 minutes, or `STEMYLA_MUTANTS_MINUTES`.
+fn limit() -> Result<Duration> {
+    match std::env::var("STEMYLA_MUTANTS_MINUTES") {
+        Err(_) => Ok(Duration::from_secs(60 * 60)),
+        Ok(text) => match text.trim().parse::<f64>() {
+            Ok(minutes) if minutes.is_finite() && minutes > 0.0 => {
+                Ok(Duration::from_secs_f64(minutes * 60.0))
+            }
+            _ => bail!("STEMYLA_MUTANTS_MINUTES must be a number of minutes above 0, not {text:?}"),
+        },
+    }
+}
+
+const INSTALL: &str = "cargo-mutants is not installed: cargo install --locked cargo-mutants@27.1.0";
+
+/// `review mutants <round> [--config <file>]`: runs cargo-mutants on the
+/// round's `since` diff, under the limit, and prints one line.
+fn mutants(
+    toplevel: &Path,
+    dir: &Path,
+    round: u32,
+    config: Option<&str>,
+) -> Result<(i32, Vec<String>)> {
+    let round_folder = run_folder(toplevel)?.join(round.to_string());
+    let record = round_folder.join("state.json");
+    if !record.exists() {
+        return Ok((
+            REFUSED,
+            vec![format!(
+                "no record for this branch and round ({}); run review start first",
+                record.display()
+            )],
+        ));
+    }
+    let state = read_state(&record)?;
+    let limit = limit()?;
+    clear_old_output(&round_folder)?;
+    let diff = round_folder.join("mutants.diff");
+    write_mutants_diff(toplevel, &state.since, &state.head, &diff)?;
+    let installed = Command::new("cargo")
+        .args(["mutants", "--version"])
+        .current_dir(toplevel)
+        .output()
+        .is_ok_and(|out| out.status.success());
+    let end = if installed {
+        let log_path = round_folder.join("mutants.log");
+        let log = std::fs::File::create(&log_path)
+            .with_context(|| format!("making {}", log_path.display()))?;
+        let mut command = Command::new("cargo");
+        command
+            .arg("mutants")
+            .arg("--in-diff")
+            .arg(&diff)
+            .arg("--output")
+            .arg(&round_folder)
+            .args([
+                "--copy-vcs=true",
+                "--gitignore=true",
+                "--shuffle",
+                "-j2",
+                "--timeout",
+                "300",
+                "--config",
+            ])
+            .arg(config_path(toplevel, dir, config))
+            .current_dir(toplevel)
+            .env_remove("CARGO_TARGET_DIR")
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log);
+        run_with_limit(command, limit)
+    } else {
+        RunEnd {
+            missing: true,
+            ..RunEnd::default()
+        }
+    };
+    let line = classify(end, read_counts(&round_folder.join("mutants.out"))).to_string();
+    let saved = round_folder.join("mutants.txt");
+    std::fs::write(&saved, format!("{line}\n"))
+        .with_context(|| format!("writing {}", saved.display()))?;
+    Ok((0, vec![line]))
 }
 
 /// `review check <round>`: the changes since the round's record.
@@ -2113,6 +2434,361 @@ mod tests {
             assert_eq!(code, 3, "{round}");
             assert!(lines.join("\n").contains(USAGE), "{lines:?}");
         }
+    }
+
+    // `review mutants`.
+
+    fn ended(code: i32) -> RunEnd {
+        RunEnd {
+            code: Some(code),
+            ..RunEnd::default()
+        }
+    }
+
+    fn some_counts() -> Option<Counts> {
+        Some(Counts {
+            caught: 3,
+            missed: 2,
+            timeout: 1,
+            unviable: 4,
+            listed: Some(15),
+        })
+    }
+
+    const COUNTED: &str = "tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5";
+    const NOTHING: &str = "tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0";
+
+    fn assert_line(end: RunEnd, counts: Option<Counts>, expected: &str) {
+        assert_eq!(classify(end, counts).to_string(), expected);
+    }
+
+    #[test]
+    fn exit_0_is_full() {
+        assert_line(
+            ended(0),
+            some_counts(),
+            &format!("mutants: full: {COUNTED}"),
+        );
+    }
+
+    #[test]
+    fn exit_2_is_full() {
+        assert_line(
+            ended(2),
+            some_counts(),
+            &format!("mutants: full: {COUNTED}"),
+        );
+    }
+
+    #[test]
+    fn exit_3_is_partial() {
+        assert_line(
+            ended(3),
+            some_counts(),
+            &format!("mutants: partial: {COUNTED}; timeouts have no result"),
+        );
+    }
+
+    #[test]
+    fn exit_1_is_none() {
+        assert_line(
+            ended(1),
+            None,
+            &format!(
+                "mutants: none: {NOTHING}; exit 1: a usage error, or a stop by a signal that was not its own"
+            ),
+        );
+    }
+
+    #[test]
+    fn exit_4_is_none() {
+        assert_line(
+            ended(4),
+            None,
+            &format!("mutants: none: {NOTHING}; exit 4: the baseline failed"),
+        );
+    }
+
+    #[test]
+    fn exit_5_is_none() {
+        assert_line(
+            ended(5),
+            None,
+            &format!("mutants: none: {NOTHING}; exit 5: the diff does not fit the tree"),
+        );
+    }
+
+    #[test]
+    fn exit_6_is_none() {
+        assert_line(
+            ended(6),
+            None,
+            &format!("mutants: none: {NOTHING}; exit 6: the diff cannot be read"),
+        );
+    }
+
+    #[test]
+    fn exit_70_is_none() {
+        assert_line(
+            ended(70),
+            None,
+            &format!("mutants: none: {NOTHING}; exit 70: an internal error of cargo-mutants"),
+        );
+    }
+
+    #[test]
+    fn another_exit_code_is_none() {
+        assert_line(
+            ended(9),
+            None,
+            &format!(
+                "mutants: none: {NOTHING}; exit 9: a code that cargo-mutants does not document"
+            ),
+        );
+    }
+
+    #[test]
+    fn a_signal_is_none() {
+        assert_line(
+            RunEnd::default(),
+            None,
+            &format!("mutants: none: {NOTHING}; stopped by a signal that was not its own"),
+        );
+    }
+
+    #[test]
+    fn missing_cargo_mutants_is_none() {
+        let end = RunEnd {
+            missing: true,
+            ..RunEnd::default()
+        };
+        assert_line(end, None, &format!("mutants: none: {NOTHING}; {INSTALL}"));
+    }
+
+    #[test]
+    fn its_own_stop_with_some_tested_is_partial() {
+        let end = RunEnd {
+            code: Some(1),
+            own_stop: true,
+            ..RunEnd::default()
+        };
+        assert_line(
+            end,
+            some_counts(),
+            &format!("mutants: partial: {COUNTED}; stopped at the limit"),
+        );
+    }
+
+    #[test]
+    fn its_own_stop_with_none_tested_is_none() {
+        let end = RunEnd {
+            code: Some(1),
+            own_stop: true,
+            ..RunEnd::default()
+        };
+        let only_timeouts = Some(Counts {
+            timeout: 2,
+            listed: Some(7),
+            ..Counts::default()
+        });
+        assert_line(
+            end,
+            only_timeouts,
+            "mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 2, not tested 5; stopped before a mutant finished",
+        );
+    }
+
+    #[test]
+    fn a_kill_after_its_own_stop_is_named() {
+        let end = RunEnd {
+            code: None,
+            own_stop: true,
+            killed: true,
+            ..RunEnd::default()
+        };
+        assert_line(
+            end,
+            some_counts(),
+            &format!(
+                "mutants: partial: {COUNTED}; stopped at the limit; SIGKILL 60 s after SIGTERM"
+            ),
+        );
+    }
+
+    #[test]
+    fn not_tested_is_0_without_mutants_json() {
+        let counts = Some(Counts {
+            caught: 1,
+            listed: None,
+            ..Counts::default()
+        });
+        assert_line(
+            ended(0),
+            counts,
+            "mutants: full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0",
+        );
+    }
+
+    #[test]
+    fn the_clear_step_removes_old_output() {
+        let dir = scratch("clear");
+        let round_folder = dir.join("target/review/run/main/1");
+        for old in ["mutants.out", "mutants.out.old"] {
+            std::fs::create_dir_all(round_folder.join(old)).unwrap();
+            std::fs::write(
+                round_folder.join(old).join("outcomes.json"),
+                r#"{"caught": 5, "missed": 0, "timeout": 0, "unviable": 0}"#,
+            )
+            .unwrap();
+        }
+        clear_old_output(&round_folder).unwrap();
+        assert!(!round_folder.join("mutants.out").exists());
+        assert!(!round_folder.join("mutants.out.old").exists());
+        assert!(round_folder.exists());
+        assert_line(
+            ended(0),
+            read_counts(&round_folder.join("mutants.out")),
+            &format!("mutants: none: {NOTHING}; no mutants in the diff"),
+        );
+    }
+
+    #[test]
+    fn read_counts_reads_outcomes_and_mutants_json() {
+        let dir = scratch("counts");
+        let out = dir.join("mutants.out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("outcomes.json"),
+            r#"{"total_mutants": 10, "caught": 3, "missed": 2, "timeout": 1, "unviable": 4}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            out.join("mutants.json"),
+            format!("[{}]", vec!["{}"; 15].join(",")),
+        )
+        .unwrap();
+        assert_eq!(read_counts(&out), some_counts());
+    }
+
+    #[test]
+    fn the_limit_sends_sigterm_not_sigkill() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap \"exit 7\" TERM; sleep 30 & wait"]);
+        let begun = std::time::Instant::now();
+        let end = run_with_limit(command, Duration::from_secs(2));
+        assert!(
+            begun.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            begun.elapsed()
+        );
+        assert_eq!(
+            end,
+            RunEnd {
+                code: Some(7),
+                own_stop: true,
+                killed: false,
+                missing: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_that_ignores_sigterm_gets_sigkill() {
+        // The shell ends by itself after 30 s, so a run that never sends
+        // SIGKILL fails the wait below and leaves nothing behind.
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "trap \"\" TERM; i=0; while [ $i -lt 30 ]; do sleep 1; i=$((i+1)); done; exit 9",
+        ]);
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let end =
+                run_with_limit_and_grace(command, Duration::from_secs(1), Duration::from_secs(2));
+            let _ = send.send(end);
+        });
+        let end = receive
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the run ends within 15 s");
+        assert_eq!(
+            end,
+            RunEnd {
+                code: None,
+                own_stop: true,
+                killed: true,
+                missing: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_run_that_ends_in_time_is_not_stopped() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 2"]);
+        assert_eq!(run_with_limit(command, Duration::from_secs(5)), ended(2));
+    }
+
+    #[test]
+    fn mutants_without_a_record_exits_3() {
+        let dir = scratch("mutants-no-record");
+        let (code, lines) = run(
+            &["mutants".to_string(), "1".to_string()],
+            &dir,
+            &dir,
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(code, 3);
+        assert!(
+            lines[0].starts_with("no record for this branch and round"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_mutants_diff_holds_rust_files_only_with_renames_in_full() {
+        let dir = scratch("mutants-diff");
+        let body: String = (0..20).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        write(&dir, "a.rs", "fn a() {}\n");
+        write(&dir, "b.md", "# b\n");
+        write(&dir, "src/c.rs", &body);
+        commit_all(&dir, "first");
+        write(&dir, "a.rs", "fn a() { let _ = 1; }\n");
+        write(&dir, "b.md", "# b, changed\n");
+        git_in(&dir, &["mv", "src/c.rs", "src/d.rs"]);
+        write(
+            &dir,
+            "src/d.rs",
+            &body.replace("fn f3() {}", "fn f3() { let _ = 3; }"),
+        );
+        commit_all(&dir, "second");
+        let path = dir.join("target/mutants.diff");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let top = toplevel(&dir).unwrap();
+        write_mutants_diff(&top, &sha(&dir, "HEAD~1"), &sha(&dir, "HEAD"), &path).unwrap();
+        let diff = std::fs::read_to_string(&path).unwrap();
+        assert!(diff.contains("+++ b/a.rs"), "{diff}");
+        assert!(diff.contains("--- a/src/c.rs\n+++ /dev/null"), "{diff}");
+        assert!(diff.contains("--- /dev/null\n+++ b/src/d.rs"), "{diff}");
+        assert!(!diff.contains("b.md"), "{diff}");
+        assert!(!diff.contains("rename"), "{diff}");
+    }
+
+    #[test]
+    fn the_config_path_resolves_against_the_current_folder() {
+        let top = Path::new("/r");
+        let dir = Path::new("/r/sub");
+        assert_eq!(
+            config_path(top, dir, None),
+            PathBuf::from("/r/.cargo/mutants.toml")
+        );
+        assert_eq!(
+            config_path(top, dir, Some("x.toml")),
+            PathBuf::from("/r/sub/x.toml")
+        );
+        assert_eq!(
+            config_path(top, dir, Some("/elsewhere/x.toml")),
+            PathBuf::from("/elsewhere/x.toml")
+        );
     }
 
     // The command.

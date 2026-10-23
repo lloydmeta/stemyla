@@ -113,7 +113,7 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 | Command | What it does | Needs |
 | - | - | - |
 | `docs-check` | checks that the map and docs match the code | nothing |
-| `review start`, `review check` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo for the round; `review check <round>` names each change since that record | nothing |
+| `review start`, `review check`, `review mutants` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo for the round; `review check <round>` names each change since that record; `review mutants <round>` runs cargo-mutants on the round's diff for at most 60 minutes | cargo-mutants 27.1.0, for `review mutants` (`README.md`) |
 | `serve` | serves the built page (`serve app/dist --port 8080`) | `trunk build` first |
 | `web-test` | browser tests (wasm-bindgen-test) in Safari or Chrome | wasm-bindgen-cli, a WebDriver |
 | `e2e` | drives the built page over WebDriver (`e2e smoke`, `e2e storage`, ...) | `trunk build`, a WebDriver; some scenarios need a GPU and the model |
@@ -147,3 +147,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-22, phase 2 (M18b): the worker encodes an MP3 from blocks of the channels, and the page keeps the transferred MP3, so neither copies a song-sized buffer.  `an_mp3_is_encoded_in_blocks` bounds an encode's peak memory with a counting allocator.  The four memory breaches that phase 2 found are closed.
 * 2026-10-22, phase 2: done.  19 of 21 rules name what enforces them; MEM-4 and GPU-3 stay prose only until phase 4.  The plan is in `plans/completed/`.
 * 2026-10-23, phase 3 (M1): `xtask review start <base> <round>` chooses the reviewers from the diff, and writes the diffs, the route and a state record to the run folder under `target/review/run/`.  `xtask review check <round>` names each change since that record, such as a new commit, a stash or a changed hook.  Each failure exits 3, so a skill stops on it.
+* 2026-10-23, phase 3 (M1): `xtask review mutants <round>` runs cargo-mutants on the Rust files of the round's `since` diff, with `.cargo/mutants.toml`, for at most 60 minutes.  It prints one line: `full`, `partial` or `none`, with the counts.  `.cargo/mutants.toml` leaves out the code that compiles for `wasm32` only.  Add a new `wasm32`-only function to its `exclude_re`.

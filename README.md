@@ -47,6 +47,7 @@ Everything is built and served with Rust tools.  What each task needs, beyond a 
 | The comparisons with PyTorch (`roformer`, `roformer-gpu`, `worker-check --reference`) | Fixtures from `tools/roformer_export.py`: Python 3 with `torch`, `numpy`, `pyyaml`, `ml_collections`, `safetensors` and [bs-roformer-infer](https://github.com/openmirlab/bs-roformer-infer) (module `bs_roformer`), plus the PyTorch checkpoint.  Without them those tests skip, and `STEMYLA_REQUIRE=fixtures` makes the `roformer` and `roformer-gpu` tests fail.  This is the only Python in the project, and it never builds or serves the app. |
 | MP3 files from `xtask gen-song` | `ffmpeg` on `PATH` (optional; WAV files are always written). |
 | `xtask publish` | Push access to the repository's `gh-pages` branch (see "Publishing"). |
+| `xtask review mutants` | cargo-mutants 27.1.0: `cargo install --locked cargo-mutants@27.1.0`.  A run copies the tree and builds the copy cold: for the `xtask` tests, about 140 s and 1.4 GB. |
 
 From a fresh clone, the web app:
 

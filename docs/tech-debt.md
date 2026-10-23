@@ -162,6 +162,16 @@ A change to the person's own settings during a round, by a person or by Claude C
 
 * Fix: the person examines the change, and starts the round again.  With a detached `HEAD`, start again at round 1.
 
+### TD-33: `xtask review mutants` tests only part of a diff
+
+`xtask review mutants` runs cargo-mutants on the Rust files of a round's diff.  It does not test some changes, and it reports some mutants that no native test can catch:
+
+* cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
+* A diff of tests only, WGSL or JavaScript gives no mutants.
+* A run that stops at its limit tests only some mutants, so its result is partial evidence.
+
+* Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
