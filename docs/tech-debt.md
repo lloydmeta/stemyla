@@ -160,6 +160,8 @@ The route comes from the branch's own `xtask`.  So a branch can change the route
 
 A change to the person's own settings during a round, by a person or by Claude Code, fails the check.  With a detached `HEAD`, the name of the run folder holds the short SHA.  So after a fix commit, round 2 finds no record.
 
+The `review-rounds` skill (harness phase 3, M3) stops a round when `review check` fails.  But a change that the record does not hold passes the check, and the round goes on.
+
 * Fix: the person examines the change, and starts the round again.  With a detached `HEAD`, start again at round 1.
 
 ### TD-33: `xtask review mutants` tests only part of a diff
@@ -206,6 +208,12 @@ The agents in `.claude/agents/` run the guard from a hook in their frontmatter. 
 * The text of an agent is a prompt, not a control.
 
 * Fix: `xtask review check` sees a change to the state that it records (TD-32).  Phase 5 runs the reviewers in a sandbox with no token.
+
+### TD-35: a review runs the diff's code with the person's credentials
+
+A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review mutants` runs cargo-mutants on it.  Each of them runs the diff's `build.rs`, proc macros and tests as the person.  That code can read the `gh` token and the cargo token, and use the network.  The guard (TD-34) reads only the text of a Bash command, not what the built code does.
+
+* Fix: phase 5 runs reviews in a sandboxed job with no token.
 
 ## Known breaches
 

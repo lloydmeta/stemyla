@@ -962,3 +962,91 @@ fn the_agents_are_read_only_by_tools() {
         hash.trim()
     );
 }
+
+const REVIEW_SKILL: &str = ".claude/skills/review-rounds/SKILL.md";
+
+/// The frontmatter lines of the review skill that must stay as they are.
+const REVIEW_SKILL_FRONTMATTER: &[&str] = &[
+    "name: review-rounds",
+    "description: Run one review round of CLAUDE.md on this branch",
+    "allowed-tools: Bash(target/debug/xtask review *)",
+];
+
+/// The line that runs `review start` when the skill loads, so a refusal
+/// stops the skill before the model can skip it.
+const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
+
+/// Text that each step of a round needs: the mutants run in the
+/// background, its time limit and the check of the state.
+const REVIEW_SKILL_TEXT: &[&str] = &[
+    "target/debug/xtask review mutants",
+    "target/debug/xtask review check",
+    "run_in_background",
+    "3900000",
+];
+
+/// The problems of the review skill's text: each names the line or the
+/// name that it wants.
+fn review_skill_problems(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let frontmatter: &[&str] = match lines.split_first() {
+        Some((&"---", rest)) => rest
+            .iter()
+            .position(|line| *line == "---")
+            .map_or(&[], |end| &rest[..end]),
+        _ => &[],
+    };
+    let frontmatter_problems = REVIEW_SKILL_FRONTMATTER
+        .iter()
+        .filter(|wanted| !frontmatter.contains(wanted))
+        .map(|wanted| {
+            format!("{REVIEW_SKILL}: the frontmatter has no line `{wanted}`.  Fix: put the line back exactly (harness phase 3, M3).")
+        });
+    let invocation_problems = lines
+        .iter()
+        .filter(|line| line.trim() == "disable-model-invocation: true")
+        .map(|_| {
+            format!("{REVIEW_SKILL}: a line is `disable-model-invocation: true`.  Fix: remove it, so CLAUDE.md can tell the agent to run the skill.")
+        });
+    let start_problems = (!lines.contains(&REVIEW_SKILL_START)).then(|| {
+        format!("{REVIEW_SKILL}: no line is exactly `{REVIEW_SKILL_START}`.  Fix: put it back, so review start runs when the skill loads, and a refusal stops it.")
+    });
+    let text_problems = REVIEW_SKILL_TEXT
+        .iter()
+        .filter(|wanted| !text.contains(*wanted))
+        .map(|wanted| {
+            format!("{REVIEW_SKILL}: the text does not hold `{wanted}`.  Fix: put back the step that needs it.")
+        });
+    let spans = xtask::docs::inline_code(text);
+    let agent_problems = xtask::review::REVIEWERS
+        .iter()
+        .map(|reviewer| reviewer.name)
+        .chain(["validator", "baseline"])
+        .filter(|name| !spans.iter().any(|span| span == name))
+        .map(|name| {
+            format!("{REVIEW_SKILL}: no code span names the agent `{name}`.  Fix: name it in the step that starts it.")
+        });
+    frontmatter_problems
+        .chain(invocation_problems)
+        .chain(start_problems)
+        .chain(text_problems)
+        .chain(agent_problems)
+        .collect()
+}
+
+/// The review skill runs `xtask review start` when it loads, and keeps the
+/// steps of a round that a lost line would drop.
+#[test]
+fn the_review_skill_starts_with_xtask() {
+    let path = xtask::workspace_root().join(REVIEW_SKILL);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("reading {REVIEW_SKILL}: {e}.  Fix: restore the skill (harness phase 3, M3).")
+    });
+    let problems = review_skill_problems(&text);
+    assert!(
+        problems.is_empty(),
+        "{} review skill problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}

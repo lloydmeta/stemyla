@@ -1,4 +1,7 @@
 target/
+# cargo-mutants writes mutants.out at the root when a person runs it by hand.
+# xtask review mutants writes into the run folder under target/review/.
+/mutants.out*/
 /app/dist/
 /pages/
 # Audio, stems and model files are never committed: songs are copyrighted,
