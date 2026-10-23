@@ -1113,6 +1113,10 @@ pub fn clear_old_output(round_folder: &Path) -> Result<()> {
                 .with_context(|| format!("removing {}", path.display()))?;
         }
     }
+    let line = round_folder.join("mutants.txt");
+    if line.exists() {
+        std::fs::remove_file(&line).with_context(|| format!("removing {}", line.display()))?;
+    }
     Ok(())
 }
 

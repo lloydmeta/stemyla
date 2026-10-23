@@ -322,6 +322,56 @@ The change renames a local variable in one function of `xtask/src/docs.rs`, and 
 * [x] 2026-10-23: the harness made again at C5 (`fc6c276`): `make-harness.sh` exit 0; the `onFailure` check prints `true`; the skill's diff from the harness copy is the same 4 lines (8 `<` and `>` lines; through `rtk proxy diff`, since the RTK hook's `diff` printed "Files are identical").  Nested runs again on `m3-cases/plant`: the skill under test is the plugin's copy in H, so the scratch branch need not move.  The run's prompt now also tells the top-level agent to write each file that the subagent gives as text, as M6's caller would.
 * [x] 2026-10-23: case Nested passed, run 2 (`H/nested-2/`, the skill of C5).  3 turns, last `result` `success`.  The `general-purpose` subagent loaded `/stemyla:review-rounds` with `Skill`, started a `reviewer` and two `validator`s (each with its `parent_tool_use_id`), waited for the mutants line (`mutants: full: tested 12 (caught 0, missed 12, unviable 0), ...`), and ran `review check 1`.  Its `Write` of `findings.md` was refused again, as expected; it did not write the file another way, and gave the path and the whole text in its answer, stopped at step 9.  The top-level agent wrote the file at its path: it holds the mutants line, the agents and 13 findings with `confirmed` (the reviewer's and the 12 mutants, from the validator of the missed mutants).  `HEAD` unchanged, no `log.md`.
 * [x] 2026-10-23: all eight cases pass: Load (`load-2`), Control (`control-2`), Guard (`guard-1`), State (`state-4`, with its fallback), Plant (`plant-1`), Baseline (`baseline-1`), Time (`time-2`), Nested (`nested-2`).  Next: review rounds 1, 2 and 3 on `e81487f..HEAD`.
+* [x] 2026-10-23: review round 1 fixes, by two implementers (`a95b93a`, "Harness phase 3, M3: review round 1 fixes", and the commit "Harness phase 3, M3: complete the review round 1 fixes").  Round 1 gave 5 nits; the team leader checked each, and all are real.  The old team leader ran out of context during the fixes, and a new team leader started a second implementer.  The two implementers edited the same tree at the same time.  `a95b93a` has edits of both, but not the 4 lines in `clear_old_output` that remove `mutants.txt`, since the second implementer's plant was in place.  So `the_clear_step_removes_the_old_mutants_line` fails at `a95b93a`; the next commit adds the 4 lines, and the test passes.  The fixes:
+  1. `the_review_skill_starts_with_xtask` now needs `target/debug/xtask review mutants $1` and `target/debug/xtask review check $1`.  First failure: the plant that drops `$1` from step 1 failed it ("does not hold `target/debug/xtask review mutants $1`"); so did the same plant on step 8.  Both undone.
+  2. `clear_old_output` in `xtask/src/review.rs` also removes `mutants.txt`.  `the_clear_step_removes_the_old_mutants_line`, written first, failed with "a round started again must not show the line of the last run", and passes after.  Step 6 reads `mutants.txt` only after the notice that the command ended.  No doc outside the plans describes what the clear step removes; the plans stay as records.
+  3. `CLAUDE.md`: "The skill verifies each blocker and should-fix before a fix."  The guide makes no claim about nits.
+  4. Step 6 makes the `cargo-mutants` findings first, does the `repeat-of` check of step 4 for each, and leaves those lines out of the validator's prompt.  The second implementer found that the jump "if no line is left" skipped the merge with the reviewers' findings; the merge is now item 7, and the end of the round item 8.  `REVIEW_SKILL_TEXT` also needs "Read that file only after the notice has come" and "Do the `repeat-of` check of step 4"; each failed on a plant that rewords it (undone).
+  5. Step 11: step 7's comparer counts neither with the round nor with the baseline.  `H/bin/make-harness.sh` now reads `description`, `tools` (a comma list into a JSON array) and `model` from each agent's frontmatter.  It was tested with `harness=` set to a scratch folder: its `agents.json` equals the one in H but for the guard path, and a frontmatter of `tools: Read, Bash, Grep` and `model: sonnet` gives `["Read","Bash","Grep"]` and `sonnet`.  It did not run in H; the team leader runs it.  Its whole text:
+
+  ```bash
+  #!/bin/bash
+  # Makes the test harness of harness phase 3 (M3) in /private/tmp/stemyla-harness/
+  # from the repo at $1: bin/, agents.json and the stemyla/ plugin folder.
+  # It writes only there and in the repo's target/.
+  set -euo pipefail
+
+  repo="$1"
+  harness=/private/tmp/stemyla-harness
+  bin="$harness/bin"
+  guard="$bin/read-only-bash.sh"
+
+  cargo build -p xtask --manifest-path "$repo/Cargo.toml"
+  mkdir -p "$bin"
+  cp "$repo/target/debug/xtask" "$bin/xtask"
+  cp "$repo/.claude/hooks/read-only-bash.sh" "$guard"
+  chmod 755 "$guard"
+  cp "$repo/.cargo/mutants.toml" "$bin/mutants.toml"
+
+  for file in "$repo"/.claude/agents/*.md; do
+    name="$(basename "$file" .md)"
+    frontmatter="$(awk '/^---$/ { fences++; next } fences == 1 { print }' "$file")"
+    field() { printf '%s\n' "$frontmatter" | sed -n "s/^$1: //p" | head -n 1; }
+    prompt="$(awk 'fences == 2 { print } /^---$/ && fences < 2 { fences++ }' "$file")"
+    jq -n --arg name "$name" --arg description "$(field description)" \
+      --arg tools "$(field tools)" --arg model "$(field model)" \
+      --arg prompt "$prompt" --arg guard "$guard" \
+      '{($name): {
+          description: $description,
+          tools: ($tools | split(",") | map(gsub("^ +| +$"; ""))),
+          model: $model,
+          prompt: $prompt,
+          hooks: {PreToolUse: [{matcher: "Bash", hooks: [
+            {type: "command", command: $guard, onFailure: "block"}]}]}
+        }}'
+  done | jq -s 'add' > "$harness/agents.json"
+
+  skill="$harness/stemyla/skills/review-rounds"
+  mkdir -p "$skill"
+  sed -e "s|target/debug/xtask review mutants \\\$1|$bin/xtask review mutants \$1 --config $bin/mutants.toml|" \
+      -e "s|target/debug/xtask|$bin/xtask|g" \
+      "$repo/.claude/skills/review-rounds/SKILL.md" > "$skill/SKILL.md"
+  ```
 
 ## Surprises and discoveries
 
