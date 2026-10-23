@@ -97,9 +97,14 @@ The team leader runs three rounds with the manual recipe of `docs/working-with-a
 * [x] 2026-10-23: plan review round 3: 0 blockers, 1 significant should-fix (the interventions field counts approvals that the agent cannot see; reviewers' approvals undercount, so D4 can pass when it should fail), 3 nits.  Fixed: a new tech-debt entry, and the field counts only approvals the agent sees or the person reports.  The parent-plan wording nit goes to the orchestrator.
 * [x] 2026-10-24: plan review round 4: 0 blockers, 1 significant should-fix (no guide changelog line), 6 nits.  Fixed: the changelog line, the wider debt entry, TD-36's title, the test exception, the Progress steps, and a Surprises line on IDs in a log.  The permission mode is not recorded in the log; the step 11 bullet says the count equals the approvals only in the default mode.
 * [x] 2026-10-24: plan review round 5: 0 blockers, 0 significant should-fix, 6 nits; the stop rule is met.  Four nits fixed (folder-index wording, closed IDs, freeze path for review fixes, the debt entry's rule); the README's replay wording waits for M5; the permission mode stays out of the log.
-* [ ] Step 1: the tests, failing first.
-* [ ] Step 2: the code.
-* [ ] Step 3: the skill and the docs; the M4 commit.
+* [x] 2026-10-24: step 1, the tests, failing first.  Before step 2, `cargo test -p xtask --lib` and `--test rules` gave:
+  * `a_review_log_is_indexed_by_its_folder`: fails; one `index` problem, "does not list `reviews/x.md`".
+  * `a_review_log_is_not_indexed_without_its_folder`: passes, as the plan says (before and after).
+  * `a_review_log_names_the_paths_and_ids_of_its_time`: fails at `assertion failed: !names_current_paths("docs/reviews/x.md")`.
+  * `the_python_server_may_be_named_in_a_review_log`: fails; one BUILD-1 problem, "docs/reviews/x.md:2 names Python's web server".
+  * `the_review_skill_starts_with_xtask`: fails; 2 problems, the text does not hold `* late review commands:` or `| Interventions | Late review commands |`.
+* [x] 2026-10-24: step 2, the code.  `INDEXED_BY_FOLDER` in `docs.rs`; `names_current_paths` is false for the reviews folder; `HISTORY` in `rules.rs` has 3 folders.  The closed-ID test is now `closed_ids_are_named_only_in_plans_decisions_and_review_logs`.  All `xtask` lib tests pass.
+* [x] 2026-10-24: step 3, the skill (steps 9 and 11 only), the guide, TD-36, the new TD-38, the docs index, BUILD-1 and tech-debt line 3.  All checks pass; the M4 commit.
 * [ ] Step 4: review rounds 1, 2 and 3.
 
 ## Surprises and discoveries

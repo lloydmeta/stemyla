@@ -1,6 +1,6 @@
 # Tech debt
 
-Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule it concerns, the evidence, and the fix in view.  To close an entry, delete it in the commit that fixes it.  In the same commit, add its ID under `## Closed`, with what closed it.  An ID is never reused.  Plans and decisions may still name a closed ID; `docs-check` fails it in other docs.  Add new entries above `## Closed`.
+Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule it concerns, the evidence, and the fix in view.  To close an entry, delete it in the commit that fixes it.  In the same commit, add its ID under `## Closed`, with what closed it.  An ID is never reused.  Plans, decisions and review logs may still name a closed ID; `docs-check` fails it in other docs.  Add new entries above `## Closed`.
 
 Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans/active/harness-engineering.md`); the plan's phase 2 closed most enforcement gaps (`## Closed`).
 
@@ -216,17 +216,25 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 * Fix: phase 5 runs reviews in a sandboxed job with no token.
 
-### TD-36: each review round has an approval, which the log counts as an intervention
+### TD-36: in the default permission mode, each review round has an approval that the skill forces
 
-The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So `review check` of step 8 asks a person for approval once in each round.  Step 11 counts each approval of a person as an intervention.  The baseline review needs no approval.  So D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions) fails by construction, since it asks for no more interventions by a person.
+The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review needs no approval.
 
-* Fix: the orchestrator or the maintainer decides how D4 counts this approval.  Not taken in M3: a project allow rule for `Bash(target/debug/xtask review *)`.  That rule widens the permissions of the project and needs a decision record (the Decision log of `plans/active/harness-phase-3-m3.md`).
+Since M4, the log counts these late review commands apart from the interventions, in their own field and cell.  So D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions) does not fail by construction.  The count equals the approvals only in the default permission mode.
+
+* Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/active/harness-phase-3-m3.md`).
 
 ### TD-37: a branch has one set of review rounds
 
 `CLAUDE.md` tells the agent to run review rounds 1, 2 and 3 after each change that it implements.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/active/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After round 3" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
 
 * Fix: the orchestrator or the maintainer decides how such a branch keeps the log of each set.
+
+### TD-38: the review log cannot count a person's approvals
+
+This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  In the default permission mode, a command of a reviewer or a validator can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So the interventions of step 11 of the `review-rounds` skill count only the approvals that the agent sees or that the person reports.  Round 1 runs more agents than the baseline review.  So D4's "no more interventions" can pass when it must fail.
+
+* Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the count.
 
 ## Known breaches
 

@@ -210,7 +210,8 @@ Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Wri
 * flags: <the flags, or none>
 * warnings: <each warning: line of review start, or none>
 * times: started <started>, wait <seconds>, end <end>; wall minutes <(end - started - wait) / 60, to 1 decimal>
-* interventions: <the number of messages and approvals of a person since review start>
+* interventions: <the number of messages of a person since review start, and the approvals of a person that you see or that the person reports, but not an approval of a late review command>
+* late review commands: <the number of `target/debug/xtask review` commands that the skill ran or tried to run after the turn in which it loaded>
 
 ## Agents
 
@@ -274,8 +275,8 @@ The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not wri
 
 ## Rounds
 
-| Round | Agents | Tokens | Wall minutes | Interventions | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline found |
-| - | - | - | - | - | - | - | - | - | - | - |
+| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline found |
+| - | - | - | - | - | - | - | - | - | - | - | - |
 ```
 
 Add one row to the findings table for each finding of the round, the baseline's included:
@@ -289,7 +290,8 @@ Add one row to the rounds table:
 * Agents: the number of agents that the round started, but the baseline and its own validators.  The validators count with the agents that they validate.  Step 7's comparer counts neither with the round nor with the baseline.
 * Tokens: the sum of the tokens of those agents.
 * Wall minutes: the wall minutes of the findings file.  They run from `review start` to the last verdict, without the wait for the mutants run.
-* Interventions: the number of messages and approvals of a person in the round.
+* Interventions: the number of messages of a person in the round, and the approvals of a person that you see or that the person reports.  An approval of a late review command is not an intervention.
+* Late review commands: the field of the findings file.  In the default permission mode, each one asked a person for approval (TD-36).  Only in that mode does the count equal the approvals.
 * Mutants: the mutants line.
 * With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are those of a person for those agents.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
 

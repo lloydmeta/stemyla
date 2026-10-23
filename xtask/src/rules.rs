@@ -1570,7 +1570,7 @@ const PYTHON_WORDS: [&str; 7] = ["python", "python3", "pip", "pip3", "pipx", "uv
 const PYTHON_SERVERS: [&str; 2] = [concat!("http", ".server"), concat!("SimpleHTTP", "Server")];
 
 /// Folders of history, which may quote a breach.
-const HISTORY: [&str; 2] = ["docs/plans/", "docs/decisions/"];
+const HISTORY: [&str; 3] = ["docs/plans/", "docs/decisions/", "docs/reviews/"];
 
 /// The text after the last `.` of the file name, in lower case.
 fn extension(path: &str) -> Option<String> {
@@ -1581,7 +1581,8 @@ fn extension(path: &str) -> Option<String> {
 
 /// BUILD-1: Python appears only in `tools/roformer_export.py`.  It fails a
 /// tracked Python file, a Python word in a build file, and the name of
-/// Python's web server in a tracked text file outside plans and decisions.
+/// Python's web server in a tracked text file outside plans, decisions and
+/// review logs.
 /// `texts` holds the tracked files that read as UTF-8 (`tracked_texts`).
 pub fn python_in_the_build(tracked: &[TrackedFile], texts: &[(String, String)]) -> Vec<Problem> {
     let python_files = tracked
@@ -5377,6 +5378,16 @@ mod tracked_tests {
                     ("xtask/src/serve.rs", "struct SimpleHttpServer;\n")
                 ])
             ),
+            []
+        );
+    }
+
+    #[test]
+    fn the_python_server_may_be_named_in_a_review_log() {
+        let server = concat!("python3 -m http", ".server 8080");
+        let log = format!("Serve it:\n{server}\n");
+        assert_eq!(
+            python_in_the_build(&[], &texts(&[("docs/reviews/x.md", &log)])),
             []
         );
     }

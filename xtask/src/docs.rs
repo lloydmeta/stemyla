@@ -431,10 +431,13 @@ fn strip_line_suffix(span: &str) -> &str {
     }
 }
 
-/// Plans name files they are about to create, and decisions are records of
-/// their time, so only their IDs and structure are checked, not their paths.
+/// Plans name files they are about to create, and decisions and review logs
+/// are records of their time, so only their IDs and structure are checked,
+/// not their paths.
 fn names_current_paths(file: &str) -> bool {
-    !(file.starts_with("docs/plans/") || file.starts_with("docs/decisions/"))
+    !(file.starts_with("docs/plans/")
+        || file.starts_with("docs/decisions/")
+        || file.starts_with("docs/reviews/"))
 }
 
 /// The places a path in `file` may be relative to: the repo root, the file's
@@ -837,7 +840,7 @@ fn ids_defined(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
         .filter(|t| !(ids.closed.contains(*t) && may_name_closed_ids(file)))
         .map(|t| {
             let message = if ids.closed.contains(t) {
-                format!("`{t}` is closed (a bullet under `{CLOSED}`), so nothing here may rely on it.  Fix: remove the reference, or name what closed it; only plans and decisions name closed IDs.")
+                format!("`{t}` is closed (a bullet under `{CLOSED}`), so nothing here may rely on it.  Fix: remove the reference, or name what closed it; only plans, decisions and review logs name closed IDs.")
             } else {
                 format!("`{t}` is not defined in docs/invariants.md or docs/tech-debt.md.  Fix: define it there as `### {t}: ...`, or correct the reference.")
             };
@@ -858,8 +861,8 @@ fn id_references(file: &str, text: &str, ids: &Ids) -> Vec<Problem> {
     }
 }
 
-/// Plans and decisions are records of their time, so they may name an ID
-/// that has since closed.
+/// Plans, decisions and review logs are records of their time, so they may
+/// name an ID that has since closed.
 fn may_name_closed_ids(file: &str) -> bool {
     !names_current_paths(file)
 }
@@ -940,8 +943,14 @@ pub fn enforcing_tests_exist(invariants: &str, tests: &Tests) -> Vec<Problem> {
         .collect()
 }
 
+/// The folders under `docs/` that one index span (`reviews/`) lists as a
+/// whole.  A review log is added each round, so one line covers them all.
+/// Plans and decisions keep one line each, so a plan cannot hide.
+const INDEXED_BY_FOLDER: &[&str] = &["reviews/"];
+
 /// Every doc under `docs/` is listed in `docs/README.md`, the index agents
-/// read to find the rest.
+/// read to find the rest.  A doc in a folder of [`INDEXED_BY_FOLDER`] is
+/// listed when the index has that folder's span.
 fn docs_indexed(markdown: &[(String, String)], index: Option<&str>) -> Vec<Problem> {
     let Some(index) = index else {
         return vec![Problem::new(
@@ -955,7 +964,13 @@ fn docs_indexed(markdown: &[(String, String)], index: Option<&str>) -> Vec<Probl
         .iter()
         .map(|(f, _)| f)
         .filter(|f| f.starts_with("docs/") && *f != "docs/README.md")
-        .filter(|f| !listed.contains(*f) && !listed.contains(&f["docs/".len()..]))
+        .filter(|f| {
+            let in_docs = &f["docs/".len()..];
+            let folder_listed = INDEXED_BY_FOLDER
+                .iter()
+                .any(|folder| in_docs.starts_with(folder) && listed.contains(*folder));
+            !listed.contains(*f) && !listed.contains(in_docs) && !folder_listed
+        })
         .map(|f| {
             Problem::new(
                 "index",
@@ -1510,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_ids_are_named_only_in_plans_and_decisions() {
+    fn closed_ids_are_named_only_in_plans_decisions_and_review_logs() {
         let tech_debt = "## Gaps\n\n### TD-2: open\n\nsee TD-1\n\n## Closed\n\n* TD-1: closed by `a_test`.\n\n## After\n\nTD-1 again\n";
         let ids = defined_ids(&[("docs/tech-debt.md".to_string(), tech_debt.to_string())]);
         assert!(ids.problems.is_empty(), "{:#?}", ids.problems);
@@ -1894,5 +1909,37 @@ mod tests {
         assert_eq!(problems.len(), 1);
         assert!(problems[0].message.contains("`plans/PLANS.md`"));
         assert_eq!(docs_indexed(&markdown, None).len(), 1);
+    }
+
+    #[test]
+    fn a_review_log_is_indexed_by_its_folder() {
+        let markdown = vec![("docs/reviews/x.md".to_string(), String::new())];
+        let problems = docs_indexed(&markdown, Some("* `reviews/`: the review logs"));
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    #[test]
+    fn a_review_log_is_not_indexed_without_its_folder() {
+        let markdown = vec![("docs/reviews/x.md".to_string(), String::new())];
+        let problems = docs_indexed(&markdown, Some("* `plans/`: the plans"));
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert_eq!(problems[0].check, "index");
+        assert!(problems[0].message.contains("`reviews/x.md`"));
+
+        let plan = vec![("docs/plans/active/x.md".to_string(), String::new())];
+        let problems = docs_indexed(&plan, Some("* `plans/`: the plans"));
+        assert_eq!(problems.len(), 1, "only the reviews folder: {problems:#?}");
+        assert!(problems[0].message.contains("`plans/active/x.md`"));
+    }
+
+    #[test]
+    fn a_review_log_names_the_paths_and_ids_of_its_time() {
+        assert!(!names_current_paths("docs/reviews/x.md"));
+        let ids = defined_ids(&[(
+            "docs/tech-debt.md".to_string(),
+            "### TD-2: open\n\n## Closed\n\n* TD-1: closed.\n".to_string(),
+        )]);
+        let problems = id_references("docs/reviews/x.md", "closes TD-1, keeps TD-2", &ids);
+        assert!(problems.is_empty(), "{problems:#?}");
     }
 }
