@@ -146,7 +146,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 Done: every song opens at 44.1 kHz.  A 48 kHz song, and a song at another standard rate from 8 kHz to 384 kHz, separates.  A 44.1 kHz song is not copied or changed.  `e2e separate` passes on a 48 kHz clip in Chrome, and `web-test` passes in Chrome.
 
 Not done:
-* Safari: its WebDriver session failed, so no Safari run is recorded.
+* Safari: done after the review.  Its WebDriver session timed out while Safari was open; once Safari was quit, `web-test` (71 tests) and `e2e separate` passed.
 * wasm32: engine's tests do not run there (TD-51).
 * The review's mutants baseline timed out in rounds 1 and 2, a known debt.  A separate run on `engine/src/resample.rs` covers the new code.
 
