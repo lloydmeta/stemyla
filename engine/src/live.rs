@@ -32,7 +32,7 @@
 //! An output that cannot play the next song ([`Unusable`]) is replaced.  In
 //! the browser each one replaced still keeps its callback: an empty slot,
 //! 64 KiB of scratch and cpal's own buffers (about 100 KiB), but no song.
-//! Separated songs are all at 44.1 kHz, so a new rate is rare, but a slow
+//! Every song is at 44.1 kHz (decision 0012), so a new rate is rare, but a slow
 //! phone can be busy for over 250 ms while it lays out a long song's lanes,
 //! so there an output may be replaced about once a song.
 

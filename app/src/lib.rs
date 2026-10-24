@@ -228,8 +228,15 @@ async fn load_and_keep(
         .into_iter()
         .map(|(name, file, bytes)| ((name.clone(), web_sys::Blob::from(file)), (name, bytes)))
         .unzip();
+    let started = js_sys::Date::now();
     let opened = match Song::load_files(files) {
         Ok(song) => {
+            log::info!(
+                "song: opened at {} Hz in {:.2} s ({} frames)",
+                song.sample_rate,
+                (js_sys::Date::now() - started) / 1000.0,
+                song.frames
+            );
             let session = match store::save_sources(&sources, song.sample_rate).await {
                 Ok(id) => Some(id),
                 Err(e) => {
@@ -387,8 +394,9 @@ impl SeparationJob {
 }
 
 /// The only sample rate the separation model takes, and so its stems' rate.
+/// Every opened song is at this rate already (decision 0012).
 #[cfg(target_arch = "wasm32")]
-const SEPARATION_RATE: u32 = 44_100;
+const SEPARATION_RATE: u32 = engine::resample::SONG_RATE;
 
 impl Default for StemApp {
     fn default() -> Self {

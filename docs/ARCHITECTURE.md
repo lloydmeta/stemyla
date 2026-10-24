@@ -28,7 +28,7 @@ flowchart LR
 ## Crates
 
 * `dsp`: small audio functions (peaks, mixing, median, fades, loop wrapping) written in a deliberately plain style, loops and indexing only, as a first reading exercise.
-* `engine`: decoding (Symphonia), the player and mixer, pitch-preserving time-stretch (WSOLA), the classic drum separation (harmonic/percussive median filtering), and a 16-bit WAV writer.
+* `engine`: decoding (Symphonia), conversion of each song to 44.1 kHz (`engine::resample`, decision 0012), the player and mixer, pitch-preserving time-stretch (WSOLA), the classic drum separation (harmonic/percussive median filtering), and a 16-bit WAV writer.
 * `synth`: the built-in demo song, synthesised so its stems are known exactly.  Its `files` feature adds writers for the song's WAV files and `truth.json`, for tools and tests.
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
@@ -63,6 +63,8 @@ Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No cra
 
 ## From a song to six stems
 
+The model takes only 44.1 kHz.  So `Song::from_audio` converts a song at another common rate, from 8 kHz to 384 kHz, to 44.1 kHz when the page opens it (decision 0012).  The converter is a polyphase windowed-sinc filter with 64 taps at 48 kHz, flat to 20 kHz.  It refuses other rates, because a file's header can state any rate.  A 44.1 kHz song stays as it is, with no copy.
+
 A song is handled in chunks of 13.35 s (588,800 samples), and a new chunk starts every 6.68 s (294,400 samples), so every sample away from the ends lies in two chunks.  A song longer than 13.35 s is first reflect-padded by 6.68 s at each end, so its first and last seconds are covered twice as well.  `Demixer::new` skips that padding for a song of 13.35 s or less, so its first 6.68 s lie in one chunk only, which keeps full weight there because the first chunk has no fade-in.  For each chunk:
 
 1. The STFT, on the CPU, turns each channel into a grid of 1,151 time slices by 1,025 frequency bins.  Each slice is a 2,048-sample (46 ms) Hann window, and the window moves 512 samples (11.6 ms) at a time, so neighbouring slices overlap by 75 %.  Each cell is a complex number: its magnitude is how loud that frequency is in that slice, its phase where it is in its cycle.  The two channels' grids are flattened into the network input, 4,100 numbers per slice.
@@ -73,7 +75,9 @@ Each chunk's six stems are faded in and out over 1.34 s at their edges (no fade-
 
 ```mermaid
 flowchart TD
-  SONG["song, stereo, 44.1 kHz"] --> PAD["reflect-pad by 6.68 s at each end<br/>(songs over 13.35 s only)"]
+  FILE["MP3 or WAV, at a standard rate"] --> CONV["decode, then convert to 44.1 kHz on the page<br/>(Song::from_audio; a 44.1 kHz song stays as it is)"]
+  CONV --> SONG["song, stereo, 44.1 kHz"]
+  SONG --> PAD["reflect-pad by 6.68 s at each end<br/>(songs over 13.35 s only)"]
   PAD --> CUT["13.35 s chunks, a new one every 6.68 s"]
   subgraph chunk["for each chunk"]
     STFT["STFT on the CPU<br/>1,151 slices x 1,025 bins x 2 channels"]

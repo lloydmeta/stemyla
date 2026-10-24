@@ -7,6 +7,7 @@ pub mod hpss;
 pub mod live;
 pub mod params;
 pub mod player;
+pub mod resample;
 pub mod slot;
 pub mod song;
 pub mod stretch;

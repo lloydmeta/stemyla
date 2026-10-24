@@ -1,7 +1,8 @@
 //! A song is a set of equally long stereo stems at one sample rate.
 
 use crate::decode::{Audio, decode_bytes, decode_path};
-use anyhow::{Result, anyhow};
+use crate::resample::{SONG_RATE, to_rate};
+use anyhow::{Context, Result, anyhow};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
@@ -90,28 +91,30 @@ fn rank(name: &str) -> (usize, String) {
 }
 
 impl Song {
-    /// Builds a song from decoded files.  Mono becomes stereo, extra channels
-    /// are dropped, every stem is resampled to the first stem's rate, and
-    /// shorter stems are padded with silence to the longest.
+    /// Builds a song at [`SONG_RATE`] from decoded files (decision 0012).
+    /// Mono becomes stereo and extra channels are dropped.  A stem at
+    /// another rate is converted, and a stem at that rate is kept as it is,
+    /// with no copy.  Shorter stems are padded with silence to the longest.
     pub fn from_audio(mut items: Vec<(String, Audio)>) -> Result<Song> {
         if items.is_empty() {
             return Err(anyhow!("no stems to load"));
         }
         items.sort_by_key(|(n, _)| rank(n));
-        let sample_rate = items[0].1.sample_rate;
         let mut decoded = Vec::with_capacity(items.len());
         for (name, audio) in items {
-            let mut channels = audio.channels.into_iter().take(2).map(|c| {
-                if audio.sample_rate == sample_rate {
-                    c
-                } else {
-                    resample_linear(&c, audio.sample_rate, sample_rate)
-                }
-            });
-            let Some(left) = channels.next() else {
+            let rate = audio.sample_rate;
+            // One channel at a time, so each input is dropped before the
+            // next channel is converted.
+            let mut channels = audio
+                .channels
+                .into_iter()
+                .take(2)
+                .map(|c| to_rate(c, rate, SONG_RATE).with_context(|| format!("stem {name}")));
+            let Some(left) = channels.next().transpose()? else {
                 return Err(anyhow!("stem {name} has no channels"));
             };
-            decoded.push((name, left, channels.next()));
+            let right = channels.next().transpose()?;
+            decoded.push((name, left, right));
         }
         let frames = decoded.iter().map(|(_, l, _)| l.len()).max().unwrap_or(0);
         let padded = |c: Vec<f32>| -> Samples { padded_to(c, frames).into() };
@@ -125,7 +128,7 @@ impl Song {
             })
             .collect();
         Ok(Song {
-            sample_rate,
+            sample_rate: SONG_RATE,
             frames,
             stems,
         })
@@ -188,7 +191,7 @@ impl Song {
 /// `c` padded with silence (or cut) to `frames`, growing by exactly what it
 /// needs: `resize` alone would double a full buffer, briefly holding three
 /// times the channel.
-fn padded_to(mut c: Vec<f32>, frames: usize) -> Vec<f32> {
+pub fn padded_to(mut c: Vec<f32>, frames: usize) -> Vec<f32> {
     c.reserve_exact(frames.saturating_sub(c.len()));
     c.resize(frames, 0.0);
     c
@@ -199,30 +202,6 @@ pub fn stem_name(file_name: &str) -> String {
     let base = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
     let base = base.rsplit_once('.').map_or(base, |(b, _)| b);
     base.to_ascii_lowercase()
-}
-
-/// Linear-interpolation resampler.  Good enough for aligning a stray stem
-/// to the song rate; not used on the playback path.
-pub fn resample_linear(x: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if from == to || x.is_empty() {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "MEM-1: the contract returns a new buffer; Song::from_audio does not call this at the same rate"
-        )]
-        return x.to_vec();
-    }
-    let ratio = from as f64 / to as f64;
-    let n = ((x.len() as f64) / ratio).floor() as usize;
-    (0..n)
-        .map(|i| {
-            let p = i as f64 * ratio;
-            let j = p.floor() as usize;
-            let f = (p - j as f64) as f32;
-            let a = x[j];
-            let b = if j + 1 < x.len() { x[j + 1] } else { a };
-            a + (b - a) * f
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -250,9 +229,9 @@ mod tests {
     fn names_and_order() {
         assert_eq!(stem_name("a/b/Drums.WAV"), "drums");
         let s = Song::from_audio(vec![
-            ("zeta".into(), audio(10, vec![vec![0.0; 3]])),
-            ("bass".into(), audio(10, vec![vec![0.0; 3]])),
-            ("drums".into(), audio(10, vec![vec![0.0; 3]])),
+            ("zeta".into(), audio(SONG_RATE, vec![vec![0.0; 3]])),
+            ("bass".into(), audio(SONG_RATE, vec![vec![0.0; 3]])),
+            ("drums".into(), audio(SONG_RATE, vec![vec![0.0; 3]])),
         ])
         .unwrap();
         let names: Vec<_> = s.stems.iter().map(|s| s.name.as_str()).collect();
@@ -260,27 +239,83 @@ mod tests {
     }
 
     #[test]
-    fn mono_padding_and_resampling() {
+    fn mono_and_padding() {
         let s = Song::from_audio(vec![
             (
                 "drums".into(),
-                audio(100, vec![vec![1.0; 10], vec![0.5; 10]]),
+                audio(SONG_RATE, vec![vec![1.0; 10], vec![0.5; 10]]),
             ),
-            ("bass".into(), audio(50, vec![vec![0.25; 4]])),
+            ("bass".into(), audio(SONG_RATE, vec![vec![0.25; 4]])),
         ])
         .unwrap();
         assert_eq!(s.frames, 10);
         assert_eq!(s.stems[1].left.len(), 10);
-        assert_eq!(s.stems[1].left[..8], [0.25; 8]);
+        assert_eq!(s.stems[1].left[..4], [0.25; 4]);
         assert_eq!(s.stems[1].right[9], 0.0);
         assert_eq!(s.stems[0].right[0], 0.5);
     }
 
     #[test]
+    fn a_48k_wav_opens_at_44k() {
+        let tone: Vec<f32> = (0..48_000)
+            .map(|i| 0.25 * (0.05 * i as f32).sin())
+            .collect();
+        let wav = crate::wav::encode_pcm16(&tone, &tone, 48_000);
+        let s = Song::load_files(vec![("lloyd.wav".into(), wav)]).unwrap();
+        assert_eq!((s.sample_rate, s.frames), (SONG_RATE, 44_100));
+        assert_eq!(s.stems[0].left.len(), 44_100);
+        assert_eq!(s.stems[0].right.len(), 44_100);
+        // Both sides hold the same tone, so both must convert the same way.
+        assert!(s.stems[0].right.as_slice() == s.stems[0].left.as_slice());
+    }
+
+    #[test]
+    fn stems_at_mixed_rates_all_open_at_44k() {
+        let s = Song::from_audio(vec![
+            ("drums".into(), audio(48_000, vec![vec![0.5; 4_800]])),
+            ("bass".into(), audio(22_050, vec![vec![0.25; 2_205]])),
+            ("vocals".into(), audio(SONG_RATE, vec![vec![0.1; 4_410]])),
+        ])
+        .unwrap();
+        assert_eq!((s.sample_rate, s.frames), (SONG_RATE, 4_410));
+        // Away from the edges, a constant converts to the same constant.
+        for (stem, level) in s.stems.iter().zip([0.5, 0.25, 0.1]) {
+            assert_eq!(stem.left.len(), 4_410, "{}", stem.name);
+            assert!((stem.left[2_205] - level).abs() < 1e-6, "{}", stem.name);
+        }
+    }
+
+    #[test]
+    fn a_44k_stem_is_not_copied() {
+        let (left, right) = (vec![0.25, -0.5, 0.75], vec![0.1, 0.2, 0.3]);
+        let at = (left.as_ptr(), right.as_ptr());
+        let s =
+            Song::from_audio(vec![("bass".into(), audio(SONG_RATE, vec![left, right]))]).unwrap();
+        let bass = &s.stems[0];
+        assert_eq!(bass.left.as_slice().as_ptr(), at.0);
+        assert_eq!(bass.right.as_slice().as_ptr(), at.1);
+        assert_eq!(bass.left, vec![0.25, -0.5, 0.75]);
+        assert_eq!(bass.right, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn a_stem_at_an_odd_rate_is_refused() {
+        let e = Song::from_audio(vec![("bass".into(), audio(44_056, vec![vec![0.0; 10]]))])
+            .unwrap_err();
+        assert!(
+            format!("{e:#}").contains("stem bass: songs at 44056 Hz"),
+            "{e:#}"
+        );
+    }
+
+    #[test]
     fn a_mono_stem_shares_one_buffer_and_clones_share_every_buffer() {
         let s = Song::from_audio(vec![
-            ("bass".into(), audio(10, vec![vec![0.25; 4]])),
-            ("drums".into(), audio(10, vec![vec![1.0; 4], vec![0.5; 4]])),
+            ("bass".into(), audio(SONG_RATE, vec![vec![0.25; 4]])),
+            (
+                "drums".into(),
+                audio(SONG_RATE, vec![vec![1.0; 4], vec![0.5; 4]]),
+            ),
         ])
         .unwrap();
         let (drums, bass) = (&s.stems[0], &s.stems[1]);
@@ -325,9 +360,9 @@ mod tests {
             // Padded from 600 samples to 1,003.
             (
                 "bass".into(),
-                audio(10, vec![vec![0.25; 600], vec![0.5; 600]]),
+                audio(SONG_RATE, vec![vec![0.25; 600], vec![0.5; 600]]),
             ),
-            ("drums".into(), audio(10, vec![vec![1.0; 1003]])),
+            ("drums".into(), audio(SONG_RATE, vec![vec![1.0; 1003]])),
         ])
         .unwrap();
         for stem in &s.stems {

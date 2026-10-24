@@ -43,7 +43,7 @@ extern "C" {
     async fn sleep(ms: u32);
 }
 
-const RATE: u32 = 8_000;
+const RATE: u32 = 44_100;
 
 /// A `Blob` holding a copy of `bytes`, as a chosen file is.
 fn blob(bytes: &[u8]) -> web_sys::Blob {
@@ -125,6 +125,67 @@ async fn stems_saved_later_are_restored_with_the_song() {
     assert_eq!(meta.stems, ["bass", "drums"]);
     assert_eq!(names(&song), ["bass", "drums", "original"]);
     assert_eq!(song.frames, 800);
+}
+
+/// Decision 0012: a 48 kHz source opens at 44.1 kHz, and opens again with
+/// the same samples, so the stems separated from it line up with it.
+#[wasm_bindgen_test]
+async fn a_48k_session_reopens_with_its_stems() {
+    wipe().await;
+    let wave: Vec<f32> = (0..4_800).map(|i| 0.25 * (0.05 * i as f32).sin()).collect();
+    let wav = engine::wav::encode_pcm16(&wave, &wave, 48_000);
+    let opened =
+        engine::Song::load_files(vec![("lloyd.wav".into(), wav.clone())]).expect("decoded");
+    assert_eq!((opened.sample_rate, opened.frames), (44_100, 4_410));
+    let id = store::save_sources(&[("lloyd.wav".into(), blob(&wav))], opened.sample_rate)
+        .await
+        .expect("saved");
+    store::save_stems(
+        &id,
+        opened.sample_rate,
+        &[stem("bass", 4_410), stem("drums", 4_410)],
+    )
+    .await
+    .expect("stems saved");
+    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    assert_eq!(meta.rate, 44_100);
+    assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
+    assert_eq!(names(&song), ["bass", "drums", "original"]);
+    for s in &song.stems {
+        assert_eq!((s.left.len(), s.right.len()), (4_410, 4_410), "{}", s.name);
+    }
+    let (original, first) = (&song.stems[2], &opened.stems[0]);
+    assert!(
+        original.left.as_slice() == first.left.as_slice(),
+        "the same samples"
+    );
+    assert!(
+        original.right.as_slice() == first.right.as_slice(),
+        "the same samples"
+    );
+}
+
+/// A session stored before decision 0012 from stems at mixed rates can hold
+/// stems one frame shorter than its source now opens with.  Each lane is
+/// fitted to the source, so the player never reads past a stem's end.
+#[wasm_bindgen_test]
+async fn stems_that_do_not_fit_the_source_are_fitted_to_it() {
+    for frames in [799, 801] {
+        let id = stored_song().await;
+        store::save_stems(&id, RATE, &[stem("bass", frames)])
+            .await
+            .expect("stems saved");
+        let (_, song, _) = store::restore().await.expect("stored").expect("readable");
+        assert_eq!(song.frames, 800);
+        for s in &song.stems {
+            assert_eq!(
+                (s.left.len(), s.right.len()),
+                (800, 800),
+                "{} from {frames}",
+                s.name
+            );
+        }
+    }
 }
 
 #[wasm_bindgen_test]

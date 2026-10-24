@@ -213,3 +213,10 @@ fn folder_loading_matches_the_generator() {
     let (ml, _) = loaded.mix_lane();
     assert_eq!(ml.len(), song.frames);
 }
+
+/// Decision 0012: every song opens at the model's rate, so a separation
+/// never needs another conversion.
+#[test]
+fn the_song_rate_is_the_model_rate() {
+    assert_eq!(engine::resample::SONG_RATE, roformer::SAMPLE_RATE);
+}
