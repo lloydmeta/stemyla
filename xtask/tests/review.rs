@@ -106,3 +106,36 @@ fn a_success_exits_0_on_stdout() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(text(&out.stdout), "no change\n");
 }
+
+/// TD-33: `xtask review mutants` builds with the `mutants` profile, which
+/// must exist and keep debug assertions and overflow checks.  Without them a
+/// mutant that only an overflow panic catches shows as missed.
+#[test]
+fn the_mutants_profile_keeps_debug_assertions_and_overflow_checks() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    let config = read(".cargo/mutants.toml");
+    assert!(
+        config.lines().any(|l| l.trim() == r#"profile = "mutants""#),
+        ".cargo/mutants.toml selects the mutants profile"
+    );
+    let manifest = read("Cargo.toml");
+    let table: Vec<&str> = manifest
+        .lines()
+        .skip_while(|l| l.trim() != "[profile.mutants]")
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    assert!(
+        table.contains(&r#"inherits = "test""#),
+        "[profile.mutants] inherits the test profile: {table:?}"
+    );
+    for key in ["debug-assertions", "overflow-checks"] {
+        assert!(
+            !table.iter().any(|l| l.starts_with(key)),
+            "[profile.mutants] keeps {key} as the test profile has it: {table:?}"
+        );
+    }
+}

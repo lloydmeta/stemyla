@@ -147,9 +147,12 @@ impl Filter {
 
     fn apply(&self, x: &[f32]) -> Result<Vec<f32>> {
         let taps = 2 * self.half;
+        // A refusal here is an error, not a panic in the page.
+        let too_long = "the song is too long to convert at this rate";
         let len = usize::try_from(output_len(x.len() as u64, self.phases, self.step))
-            .context("the song is too long to convert at this rate")?;
-        let mut out = Vec::with_capacity(len);
+            .context(too_long)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(len).context(too_long)?;
         // Input outside the song counts as silence.
         let mut edge = vec![0.0; taps];
         let mut pos = Position { at: 0, phase: 0 };

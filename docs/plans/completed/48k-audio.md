@@ -122,6 +122,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-24: review round 2: 4 should-fix confirmed (the 32-bit test runs only on 64 bits, the output range untested, the tap rounding untested, an old mixed-rate session one frame short) and 8 nits, all fixed in `e9c3aa7`.  TD-51 added.  Mutants: the baseline timed out.
 * [x] 2026-10-24: review round 3: 2 should-fix confirmed (TD-51 named a cover that does not exist, the right channel untested) and 6 nits, all fixed in `e352aee`.  Mutants: 16 tested, 16 caught.
 * [x] 2026-10-24: a separate cargo-mutants run on `engine/src/resample.rs` after round 1 missed 3 mutants, all equivalent (the fast path and the edge path give the same result; `sinc`'s `<` to `<=`).
+* [x] 2026-10-24: Safari, after the review.  Its WebDriver session timed out while Safari was open.  Once Safari was quit, `web-test` gave 70 passes and 1 skip: `an_output_left_behind_by_a_busy_page_is_replaced` skips in a full Safari run (`docs/references/local-browser-testing.md`).  Run alone, it passed.  `e2e separate` passed, with six stems in 3.3 s.
 
 ## Surprises and discoveries
 
@@ -143,10 +144,9 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 
 ## Outcomes and retrospective
 
-Done: every song opens at 44.1 kHz.  A 48 kHz song, and a song at another standard rate from 8 kHz to 384 kHz, separates.  A 44.1 kHz song is not copied or changed.  `e2e separate` passes on a 48 kHz clip in Chrome, and `web-test` passes in Chrome.
+Done: every song opens at 44.1 kHz.  A 48 kHz song, and a song at another standard rate from 8 kHz to 384 kHz, separates.  A 44.1 kHz song is not copied or changed.  `e2e separate` passes on a 48 kHz clip in Chrome and in Safari.  `web-test` passes in Chrome, and in Safari with its one known skip.
 
 Not done:
-* Safari: done after the review.  Its WebDriver session timed out while Safari was open; once Safari was quit, `web-test` (71 tests) and `e2e separate` passed.
 * wasm32: engine's tests do not run there (TD-51).
 * The review's mutants baseline timed out in rounds 1 and 2, a known debt.  A separate run on `engine/src/resample.rs` covers the new code.
 

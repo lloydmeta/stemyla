@@ -270,6 +270,25 @@ mod tests {
     }
 
     #[test]
+    fn each_channel_of_a_48k_stem_converts_on_its_own() {
+        // The right side is the left at half the level.  Halving is exact
+        // in floating point, so the converted right is exactly half the
+        // converted left, and a dropped or unconverted right side differs.
+        let left: Vec<f32> = (0..4_800).map(|i| 0.25 * (0.05 * i as f32).sin()).collect();
+        let right: Vec<f32> = left.iter().map(|v| v * 0.5).collect();
+        let s = Song::from_audio(vec![("bass".into(), audio(48_000, vec![left, right]))]).unwrap();
+        let bass = &s.stems[0];
+        assert_eq!((bass.left.len(), bass.right.len()), (4_410, 4_410));
+        for (l, r) in bass.left.iter().zip(bass.right.iter()) {
+            assert_eq!((l * 0.5).to_bits(), r.to_bits());
+        }
+        assert!(
+            bass.left.iter().any(|v| v.abs() > 0.1),
+            "the left side is not silent"
+        );
+    }
+
+    #[test]
     fn stems_at_mixed_rates_all_open_at_44k() {
         let s = Song::from_audio(vec![
             ("drums".into(), audio(48_000, vec![vec![0.5; 4_800]])),
