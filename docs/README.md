@@ -1,6 +1,6 @@
 # Docs index
 
-What each doc is for and when to read it.  `CLAUDE.md` at the root is the map loaded into every session; everything here is read on demand.  `cargo run -p xtask -- docs-check` fails when a doc under `docs/` is missing from this list.  One line, `reviews/`, lists each log in the reviews folder: the branch logs, and `reviews/replay.md`, the record of harness phase 3's replay of old reviews (M5).
+What each doc is for and when to read it.  `CLAUDE.md` at the root is the map loaded into every session; everything here is read on demand.  `cargo run -p xtask -- docs-check` fails when a doc under `docs/` is missing from this list.  One line, `reviews/`, lists each log in the reviews folder.  These are the branch logs, and `reviews/replay.md`, the record of harness phase 3's replay of old reviews (M5).
 
 ## Always relevant
 

@@ -784,7 +784,7 @@ The verdict counts of each source, summed over the six counted cases.  The count
 
 ## Outside findings
 
-An outside finding is a found finding (`confirmed` or `pre-existing`) that matches no ground-truth item of its case.  There are 62: `pr9` 43, `m9` 1, `m11` 5, `m2` 4, `m10` 7, `m18a` 2.  Each has the severity `should-fix`.  A new checker subagent compared each with `main` at `fa41c9f`.  "(likely)" is the checker's word: it read the code and the tests, but did not run them.  The last column also gives the tech-debt entry, or "own PR" for a finding that the team leader listed for its own PR.
+An outside finding is a found finding (`confirmed` or `pre-existing`) that matches no ground-truth item of its case.  There are 62: `pr9` 43, `m9` 1, `m11` 5, `m2` 4, `m10` 7, `m18a` 2.  Each has the severity `should-fix`.  A new checker subagent compared each with `main` at `fa41c9f`.  Its states: 9 fixed on `main`, 2 gone and 51 still on `main`.  "(likely)" is the checker's word: it read the code and the tests, but did not run them.  The last column also gives the tech-debt entry, or "own PR" for a finding that the team leader listed for its own PR.
 
 Rows of `pr9` mutants that share one state and one reason share one row.  The source of each `pr9` mutant is `cargo-mutants`, and its claim is "no test fails with this mutant".
 
@@ -813,7 +813,7 @@ The maintainer classes a sample of these findings as real or false after the PR 
 | `m11` | 1-14 | should-fix | cargo-mutants | `==` to `!=` in `Player::drop_oldest_anchor_when_full`; the playhead shows the loop start for about 4 callbacks before each wrap. | still on main (likely): the loop tests check only that the playhead stays inside the loop (TD-40) |
 | `m2` | 1-2 | should-fix | reviewer, gpu-reviewer | `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand-copied table, not from `Kernels::new`.  So its doc comment and the docs claim more than it checks. | still on main (in part): `ad1b159` narrowed the claim, but the doc comment still rests on a hand copy (TD-41) |
 | `m2` | 1-4 | should-fix | docs-reviewer, gpu-reviewer | No test covers the count of read-only storage buffers, the y-axis limit, or z in the invocation product. | still on main: no planted shader has one of these (TD-41) |
-| `m2` | 1-6 | should-fix | docs-reviewer | GPU-1 says "The test parses every shader with naga", but both tests check only their own hand lists. | still on main (in part): `every_shader_file_is_checked` (`ad1b159`) covers the files, but GPU-1 still says "every shader", and inline WGSL is not checked (TD-41) |
+| `m2` | 1-6 | should-fix | docs-reviewer | GPU-1 says "The test parses every shader with naga", but both tests check only their own hand lists. | fixed on `main`, `ad1b159`; the rest is 1-2 |
 | `m2` | 1-7 | should-fix | docs-reviewer, reviewer | GPU-1 says that only wgpu checks dispatch counts, but `Rec::push` asserts each one against 65,535. | fixed on main, `ad1b159` |
 | `m10` | 1-1 | should-fix | reviewer, wire-reviewer | A plain Rust literal keeps `\n`, `\t` and `\r` as source text, so `\ntype` reads as `ntype`, and a misspelt type after it passes.  TD-16 does not name the gap. | still on main: `unescape_quotes` keeps `\n`, and TD-16 names only a `\n` after `//` (TD-16 gains a sentence) |
 | `m10` | 1-2 | should-fix | docs-reviewer | TD-16 does not name regex literals, where a quote, `//` or backtick hides the types after it. | fixed on main, `7cd8518` |
@@ -855,4 +855,4 @@ The threats that M5 found:
 * The comparers got each finding's ID, sources, severity, kind, place and claim, with the evidence where it bears on the match.  The team leader made shorter the claims of nits about docs or wording only, which cannot match a code item.  The team leader resolved one match that a comparer was not sure of (`m10-2` against mutant 1-10).
 * The severities of `pr9` and `m2` are inferred, so those items do not enter the should-fix test of the bar.
 * The ground truth is what the old round fixed, so the measure is recall only.  The runs found 62 outside findings, and the maintainer classes a sample of them as real or false.
-* The ground truth can lack a finding of the old round.  `m9`'s fix commit `4b27829` also fixed outside finding 1-1 of `m9` (the `well_formed` guard), but neither its message nor Progress names that change, so the ground truth left it out.  The ground truth was fixed before the runs, and stays as it is.
+* The ground truth can lack a finding of the old round.  `m9`'s fix commit `4b27829` also fixed outside finding 1-1 of `m9` (the `well_formed` guard).  Neither its message nor Progress names that change, so the ground truth left it out.  The ground truth was fixed before the runs, and stays as it is.
