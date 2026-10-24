@@ -20,7 +20,7 @@ The state on 2026-10-24, at commit `62c50ab` on branch `feature/48k-audio`:
 Terms:
 
 * Rate: samples per second for each channel.
-* Standard rate: a rate whose ratio to 44,100, in lowest terms L / M, has L of 441 or less.  This includes 8, 11.025, 12, 16, 22.05, 24, 32, 48, 88.2, 96, 176.4 and 192 kHz.
+* Standard rate: a rate from 8 kHz to 384 kHz whose ratio to 44,100, in lowest terms L / M, has L of 441 or less.  This includes 8, 11.025, 12, 16, 22.05, 24, 32, 48, 88.2, 96, 176.4 and 192 kHz.
 * Tap: one input sample that the filter weights and adds to make one output sample.
 
 ## Design
@@ -35,13 +35,13 @@ file at 44.1 kHz ----------> decode --> the same Vec (no copy) -----> Song at 44
 The resampler (`engine/src/resample.rs`):
 
 * `pub const SONG_RATE: u32 = 44_100`.
-* `pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>>`.  At `from == to` it returns `x` as it is.  Otherwise it makes a new `Vec` and drops `x`.  It refuses a rate outside 8 kHz to 384 kHz, and a rate whose L is more than 441 (review round 1: a header can state any rate, and the table and the output grow with it).
+* `pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>>`.  At `from == to` it returns `x` as it is.  Otherwise it makes a new `Vec` and drops `x`.  It refuses a rate outside 8 kHz to 384 kHz (review round 1).  It also refuses a rate whose L is more than 441.  A header can state any rate, and the table and the output grow with the rate.
 * Rational polyphase with a Blackman-windowed sinc.  For 48 kHz to 44.1 kHz, L = 147 and M = 160.  Output frame `i` reads input frame `j = (i * M) / L` with table row `p = (i * M) % L`.  `Position::next` steps `j` and `p` from one output to the next, and `output_len` computes `ceil(n * L / M)` in `u64`.  So nothing overflows a 32-bit `usize` on wasm32, and the output does not drift.
 * When the rate falls, the cutoff is half the output rate.  The half-width is `32 * from / 48 kHz` input frames, rounded up to an even number and at least 32: 64 taps at 48 kHz, 88 at 64 kHz, 256 at 192 kHz.  So the transition is about 4.1 kHz wide at every input rate.
 * When the rate rises, the stop band starts at half the input rate, so no image of the input's band falls below it.  The half-width is 64 input frames, so the pass band ends at 45.7 % of the input rate, 14.6 kHz from 32 kHz (review round 1).
 * Each table row is scaled to sum to 1.  The inner loop uses four accumulators.  Input outside the song counts as silence.
 
-A scratch prototype (not in the repo) measured this filter on 2026-10-24.  From 48 kHz, the gain is within 0.002 dB up to 20 kHz.  Against an ideal sine, the SNR is 98.5 dB or more up to 18 kHz, 93.5 dB at 19.1 kHz and 89.9 dB at 20 kHz.  It swings by up to 10 dB between tones 500 Hz apart (review round 1, a 500 Hz sweep).  From 16 kHz to 32 kHz, the image of a tone near half the input rate is 60 dB down or more.  A 23 kHz tone becomes a 21.1 kHz alias at -21.4 dB, above hearing.  This is the trade-off of SoX's `rate -a`, which allows aliasing above the pass band.  A 5-minute stereo song took 0.78 s native and 1.33 s in WebAssembly on V8.
+A scratch prototype (not in the repo) measured this filter on 2026-10-24.  From 48 kHz, the gain is within 0.002 dB up to 20 kHz.  Against an ideal sine, the SNR is 98.5 dB or more up to 18 kHz, 93.5 dB at 19.1 kHz and 89.9 dB at 20 kHz.  It swings by up to 13.4 dB between tones 500 Hz apart (review round 1, a 500 Hz sweep).  From 16 kHz to 32 kHz, the image of a tone near half the input rate is 60 dB or more below the input level.  For a tone in the pass band it is 72 dB or more below (review round 2).  A 23 kHz tone becomes a 21.1 kHz alias at -21.4 dB, above hearing.  This is the trade-off of SoX's `rate -a`, which allows aliasing above the pass band.  A 5-minute stereo song took 0.78 s native and 1.33 s in WebAssembly on V8.
 
 Memory (MEM-1, MEM-4): `from_audio` converts one channel at a time and drops its input first.  For a 5-minute 48 kHz song, the peak at open is about 168 MB, against 741 MB when 7 separated lanes show.  The page reuses the space that it frees, so the high-water mark does not change.
 
@@ -68,7 +68,8 @@ Add the module with `to_rate` and `SONG_RATE`.  No caller changes.  Unit tests, 
 * `the_pass_band_is_flat_to_20_khz`: tones every 500 Hz from 100 Hz to 20 kHz at 48 kHz keep their gain within 0.01 dB.  The SNR against an ideal sine is 95 dB or more up to 18 kHz, and 85 dB or more to 20 kHz.
 * `an_alias_stays_above_20_khz`: a 23 kHz tone gives a 21.1 kHz alias at -20 dB or less.
 * `upsampling_from_32k_keeps_a_tone`: frame count, and gain within 0.01 dB and SNR of 95 dB or more for 1, 10 and 14 kHz.
-* `a_rising_rate_makes_no_audible_image`, `a_large_fall_keeps_the_pass_band` (64, 88, 192 and 384 kHz), `input_outside_the_song_counts_as_silence`, `the_output_is_not_delayed`, `the_length_and_the_position_do_not_overflow_32_bits` and `a_rate_outside_8_to_384_khz_is_refused`: added in review round 1.  `the_same_input_gives_the_same_output` was removed, since no change to this deterministic code could make it fail.
+* `a_large_fall_keeps_the_pass_band` (192 kHz) and `every_standard_rate_converts`: in M1.  Review round 1 extended `a_large_fall_keeps_the_pass_band` to 64, 88 and 384 kHz.
+* `a_rising_rate_makes_no_audible_image`, `input_outside_the_song_counts_as_silence`, `the_output_is_not_delayed`, `the_length_and_the_position_do_not_overflow_32_bits` and `a_rate_outside_8_to_384_khz_is_refused`: added in review round 1.  `the_same_input_gives_the_same_output` was removed, since no change to this deterministic code could make it fail.
 * `the_same_rate_is_not_copied`: the output pointer is the input pointer.
 * `an_odd_rate_is_refused`: 44,056 Hz gives an error.
 
@@ -87,7 +88,7 @@ Acceptance: the tests above fail before the change and pass after it, and all th
 
 `app/tests/web.rs`: `a_48k_session_reopens_with_its_stems`.  Store a 48 kHz source, store stems with the frame count of the converted song, and open the session again.  Every lane has the same frame count, and the song is at 44.1 kHz.  Run `cargo run -p xtask -- web-test`.
 
-A session stored before this change cannot hold a 48 kHz source with stems, because the app refused that separation.
+A session stored before this change can hold a source at mixed rates with stems.  The old `from_audio` opened a drop at the first stem's rate, and floored the length of the others.  Such a source now opens one frame longer than its stems.  So `rebuild` fits each stored stem to the source (review round 2, `stems_that_do_not_fit_the_source_are_fitted_to_it`).
 
 ### M4: the end-to-end separation of a 48 kHz clip
 
@@ -116,7 +117,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-24: M1: `engine::resample`, 9 unit tests.  In WebAssembly on V8, `to_rate` converts 5 minutes of 48 kHz stereo in 1.37 s.
 * [x] 2026-10-24: M2: songs open at 44.1 kHz.  On the old `from_audio` (no conversion, the first stem's rate), `a_48k_wav_opens_at_44k`, `stems_at_mixed_rates_all_open_at_44k` and `a_stem_at_an_odd_rate_is_refused` fail; after M2 they pass.  `a_44k_stem_is_not_copied` passes before and after (it guards MEM-1).  The 8 kHz fixtures in `app/tests/web.rs`, `app/tests/web_close.rs` and `app/src/store.rs` are now at 44.1 kHz.  All checks pass, and `web-test` passes in Chrome (69 tests).  Safari refused the WebDriver session ("webdriver POST /session request failed"), so no test ran there.
 * [x] 2026-10-24: M3: `a_48k_session_reopens_with_its_stems` passes in Chrome (`web-test --browser chrome`, 70 tests).  Before M2 it fails its first assertion, as the source opened at 48 kHz.  The reopened original lane has the same samples as the first open.
-* [x] 2026-10-24: M4: `e2e separate --browser chrome` passes on a 2 s 48 kHz clip.  The page logged "song: decoded and converted to 44100 Hz in 0.03 s (88200 frames)", and six stems arrived in 1.7 s (Radeon Pro 5500M), with no page errors.  Safari was not tried, because its WebDriver session failed in M2.
+* [x] 2026-10-24: M4: `e2e separate --browser chrome` passes on a 2 s 48 kHz clip.  The page logged "song: decoded and converted to 44100 Hz in 0.03 s (88200 frames)", and six stems arrived in 1.7 s (Radeon Pro 5500M), with no page errors.  Safari was not tried, because its WebDriver session failed in M2.  After review round 1 renamed the log line, `e2e separate` passed again with "song: opened at 44100 Hz in 0.02 s (88200 frames)".
 * [ ] Review rounds 1, 2 and 3.
 
 ## Surprises and discoveries

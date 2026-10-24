@@ -21,7 +21,7 @@ const RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
 
 /// The most filter phases a conversion may need.  Every standard rate
 /// needs 441 or fewer: 8 kHz to 44.1 kHz needs the most.
-const MAX_PHASES: usize = 441;
+const MAX_PHASES: u64 = 441;
 
 /// Input samples on each side of an output sample at 48 kHz, where the
 /// filter's transition is 5.5 / 64 of 48 kHz, about 4.1 kHz wide.  A
@@ -41,31 +41,32 @@ pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>> {
     if from == to {
         return Ok(x);
     }
-    Ok(Filter::new(from, to)?.apply(&x))
+    Filter::new(from, to)?.apply(&x)
 }
 
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-/// `ceil(frames * phases / step)`, in u64: on wasm32 a usize product
-/// overflows after about 10 minutes at 48 kHz.
-fn output_len(frames: usize, phases: usize, step: usize) -> usize {
-    (frames as u64 * phases as u64).div_ceil(step as u64) as usize
+/// `ceil(frames * phases / step)`.  The arithmetic is in u64, not usize: on
+/// wasm32 a usize product overflows after about 10 minutes at 48 kHz.  The
+/// types hold this on every host, so a native test checks it too.
+fn output_len(frames: u64, phases: u64, step: u64) -> u64 {
+    (frames * phases).div_ceil(step)
 }
 
 /// Where output `i` falls: `phase / phases` of the way past input `at`,
 /// that is `at = i * step / phases` and `phase = i * step % phases`.  Both
-/// are stepped, not computed from `i`, for the same reason as
+/// are stepped in u64, not computed from `i`, for the same reason as
 /// [`output_len`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Position {
-    at: usize,
-    phase: usize,
+    at: u64,
+    phase: u64,
 }
 
 impl Position {
-    fn next(self, phases: usize, step: usize) -> Position {
+    fn next(self, phases: u64, step: u64) -> Position {
         let (at, phase) = (self.at + step / phases, self.phase + step % phases);
         if phase >= phases {
             Position {
@@ -81,9 +82,9 @@ impl Position {
 struct Filter {
     /// `L`: the output steps through this many positions between two
     /// input samples.
-    phases: usize,
+    phases: u64,
     /// `M`: input samples for every `L` output samples.
-    step: usize,
+    step: u64,
     half: usize,
     /// `phases` rows of `2 * half` taps.  Row `p` is the filter for an
     /// output that falls `p / phases` of the way past an input sample.
@@ -99,7 +100,7 @@ impl Filter {
             );
         }
         let g = gcd(from, to);
-        let (phases, step) = ((to / g) as usize, (from / g) as usize);
+        let (phases, step) = (u64::from(to / g), u64::from(from / g));
         ensure!(
             phases <= MAX_PHASES,
             "songs at {from} Hz are not supported; convert them to {to} Hz first"
@@ -111,14 +112,18 @@ impl Filter {
             let half = RISING_HALF_TAPS;
             (half, 1.0 - 5.5 / (2 * half) as f64)
         } else {
-            // The cutoff is half the output rate.  Above it, up to 4.1 kHz
-            // of the input's band folds back, above 20 kHz from 48 kHz.
+            // The cutoff is half the output rate.  The transition is
+            // centred on it, so about 2 kHz of the input's band above it
+            // folds back: from 48 kHz, to between 20 kHz and 22.05 kHz.
             let scaled = (HALF_TAPS as u64 * u64::from(from)).div_ceil(48_000) as usize;
+            // Even, so that the taps are a multiple of 4 for `dot`.
             let half = scaled.next_multiple_of(2).max(HALF_TAPS);
             (half, f64::from(to) / f64::from(from))
         };
         let taps = 2 * half;
-        let mut table = Vec::with_capacity(phases * taps);
+        // `dot` sums four taps at a time and would drop a remainder.
+        assert_eq!(taps % 4, 0, "{taps} taps");
+        let mut table = Vec::with_capacity(phases as usize * taps);
         for p in 0..phases {
             let past = p as f64 / phases as f64;
             let row: Vec<f64> = (0..taps)
@@ -140,16 +145,17 @@ impl Filter {
         })
     }
 
-    fn apply(&self, x: &[f32]) -> Vec<f32> {
+    fn apply(&self, x: &[f32]) -> Result<Vec<f32>> {
         let taps = 2 * self.half;
-        let len = output_len(x.len(), self.phases, self.step);
+        let len = usize::try_from(output_len(x.len() as u64, self.phases, self.step))?;
         let mut out = Vec::with_capacity(len);
         // Input outside the song counts as silence.
         let mut edge = vec![0.0; taps];
         let mut pos = Position { at: 0, phase: 0 };
         for _ in 0..len {
-            let row = &self.table[pos.phase * taps..][..taps];
+            let row = &self.table[pos.phase as usize * taps..][..taps];
             // The first input sample of the window, which may be before 0.
+            // `at` is at most `x.len()`, so it fits an isize.
             let start = pos.at as isize - (self.half as isize - 1);
             let window = match usize::try_from(start) {
                 Ok(s) if s + taps <= x.len() => &x[s..s + taps],
@@ -168,7 +174,7 @@ impl Filter {
             out.push(dot(window, row));
             pos = pos.next(self.phases, self.step);
         }
-        out
+        Ok(out)
     }
 }
 
@@ -371,8 +377,8 @@ mod tests {
             pos = pos.next(phases, step);
             if i % 1_000_003 == 0 || i == 27_562_500 {
                 let want = Position {
-                    at: (i * 160 / 147) as usize,
-                    phase: (i * 160 % 147) as usize,
+                    at: i * 160 / 147,
+                    phase: i * 160 % 147,
                 };
                 assert_eq!(pos, want, "output {i}");
             }
@@ -404,13 +410,15 @@ mod tests {
         // Each of these needs 441 phases or fewer, so only the range
         // refuses them: a tiny rate makes a huge song, a huge rate a huge
         // filter table.
-        for from in [100, 7_000, 400_000, 4_000_000] {
+        for from in [100, 7_000, 7_900, 384_100, 400_000, 4_000_000] {
             let e = to_rate(vec![0.0; 10], from, SONG_RATE).unwrap_err();
             assert!(
                 e.to_string().contains("only 8 kHz to 384 kHz"),
                 "{from} Hz: {e}"
             );
         }
-        assert!(to_rate(vec![0.0; 10], SONG_RATE, 400_000).is_err());
+        // 44.1 kHz to 441 kHz needs 10 phases, so only the range refuses it.
+        let e = to_rate(vec![0.0; 10], SONG_RATE, 441_000).unwrap_err();
+        assert!(e.to_string().contains("only 8 kHz to 384 kHz"), "{e}");
     }
 }

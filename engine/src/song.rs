@@ -191,7 +191,7 @@ impl Song {
 /// `c` padded with silence (or cut) to `frames`, growing by exactly what it
 /// needs: `resize` alone would double a full buffer, briefly holding three
 /// times the channel.
-fn padded_to(mut c: Vec<f32>, frames: usize) -> Vec<f32> {
+pub fn padded_to(mut c: Vec<f32>, frames: usize) -> Vec<f32> {
     c.reserve_exact(frames.saturating_sub(c.len()));
     c.resize(frames, 0.0);
     c

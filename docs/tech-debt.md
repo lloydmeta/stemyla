@@ -364,6 +364,14 @@ The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But aut
 
 * Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.
 
+### TD-51: engine's tests do not run on wasm32
+
+This entry concerns VERIFY-1 for `engine::resample`, which runs on wasm32 in the page.
+
+On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10 minutes of 48 kHz audio.  `output_len` and `Position` work in `u64`, and `the_length_and_the_position_do_not_overflow_32_bits` checks them natively.  But `xtask web-test` runs no engine test on wasm32, so a later `usize` product added inside `Filter::apply` passes every test (48k audio review round 2, finding 2-1).
+
+* Fix: run engine's tests on wasm32, for example under `wasm-bindgen-test-runner` in `xtask web-test`.  Until then, the `memory-reviewer` agent looks for `usize` arithmetic on positions in `engine/src/resample.rs`.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults

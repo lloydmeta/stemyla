@@ -17,6 +17,7 @@
 
 use crate::store_meta::Meta;
 use anyhow::{Result, anyhow};
+use engine::song::padded_to;
 use engine::{Samples, Song, Stem};
 use js_sys::{Array, Uint8Array};
 use std::cell::{Cell, RefCell};
@@ -380,9 +381,13 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
             .await
             .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
         let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
+        // Fitted to the source, so the player never reads past a stem's end.
+        // A session stored before decision 0012 from stems at mixed rates
+        // has stems one frame shorter than its source now opens with.
+        let fitted = |c: Vec<f32>| -> Samples { padded_to(c, source.frames).into() };
         let mut ch = audio.channels.into_iter();
-        let left: Samples = ch.next().unwrap_or_default().into();
-        let right = ch.next().map_or_else(|| left.clone(), Samples::from);
+        let left = fitted(ch.next().unwrap_or_default());
+        let right = ch.next().map_or_else(|| left.clone(), fitted);
         stems.push(Stem {
             name: name.clone(),
             left,

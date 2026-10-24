@@ -165,6 +165,29 @@ async fn a_48k_session_reopens_with_its_stems() {
     );
 }
 
+/// A session stored before decision 0012 from stems at mixed rates holds
+/// stems one frame shorter than its source now opens with.  Each lane is
+/// fitted to the source, so the player never reads past a stem's end.
+#[wasm_bindgen_test]
+async fn stems_that_do_not_fit_the_source_are_fitted_to_it() {
+    for frames in [799, 801] {
+        let id = stored_song().await;
+        store::save_stems(&id, RATE, &[stem("bass", frames)])
+            .await
+            .expect("stems saved");
+        let (_, song, _) = store::restore().await.expect("stored").expect("readable");
+        assert_eq!(song.frames, 800);
+        for s in &song.stems {
+            assert_eq!(
+                (s.left.len(), s.right.len()),
+                (800, 800),
+                "{} from {frames}",
+                s.name
+            );
+        }
+    }
+}
+
 #[wasm_bindgen_test]
 async fn stems_for_a_missing_session_are_refused_and_create_nothing() {
     wipe().await;
