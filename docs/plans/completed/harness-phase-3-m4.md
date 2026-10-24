@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M4 of `plans/active/harness-phase-3.md`.  It gives more detail than the parent plan's M4 section, which stays the criteria.  After M4:
+This is the milestone plan for M4 of `plans/completed/harness-phase-3.md`.  It gives more detail than the parent plan's M4 section, which stays the criteria.  After M4:
 
 * `docs-check` accepts review logs in the reviews folder under `docs`.  One index line, `reviews/`, covers each file there.  A log keeps the paths and closed IDs of its time, as a plan does.
 * `no_python_in_the_build` does not look in the reviews folder for the name of Python's web server, as for plans and decisions.

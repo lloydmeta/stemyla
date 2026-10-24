@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M5 of `plans/active/harness-phase-3.md`.  It gives more detail than the parent plan's M5 section, which stays the criteria.  After M5:
+This is the milestone plan for M5 of `plans/completed/harness-phase-3.md`.  It gives more detail than the parent plan's M5 section, which stays the criteria.  After M5:
 
 * Six old review rounds of this repo have run again in the test harness, with the agents and the skill of this branch.  Each has one counted run, with no tuning (D5).
 * `docs/reviews/replay.md` holds the ground truth of each case, written and committed before any run.  It also holds the result (x of n found, for each case and in total, with a 95% interval), the cost, each reviewer's verdict counts, the found findings outside the ground truth, and the threats.

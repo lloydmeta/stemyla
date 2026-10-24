@@ -6,7 +6,7 @@ Status: accepted (2026-10-22, by the maintainer)
 
 Before phase 3, the agent wrote the prompt of each reviewer by hand (`plans/active/harness-engineering.md`, failure 5).  One general reviewer read every diff.  In 14 of 18 PRs, the reviewers of phase 2 found a test that could pass on wrong code.
 
-Phase 3 (`plans/active/harness-phase-3.md`) is one PR.  The maintainer chose D1 to D6 of that plan on 2026-10-22, before the work started.
+Phase 3 (`plans/completed/harness-phase-3.md`) is one PR.  The maintainer chose D1 to D6 of that plan on 2026-10-22, before the work started.
 
 ## Options
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M2 of `plans/active/harness-phase-3.md`.  It gives more detail than the parent plan's M2 section, which stays the criteria.  After M2:
+This is the milestone plan for M2 of `plans/completed/harness-phase-3.md`.  It gives more detail than the parent plan's M2 section, which stays the criteria.  After M2:
 
 * `.claude/hooks/read-only-bash.sh` refuses the Bash commands of a review agent, by `git`, `cargo`, `gh` and a short list of other commands, that would change the repo, a remote or a published package.  It is a text matcher that stops mistakes; redirections and `sed -i` still pass.
 * `.claude/agents/` holds eight read-only agents: the six reviewers that `xtask review start` routes, the `validator`, and the frozen `baseline`.

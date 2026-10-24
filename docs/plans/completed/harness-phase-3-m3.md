@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M3 of `plans/active/harness-phase-3.md`.  It gives more detail than the parent plan's M3 section, which stays the criteria.  After M3:
+This is the milestone plan for M3 of `plans/completed/harness-phase-3.md`.  It gives more detail than the parent plan's M3 section, which stays the criteria.  After M3:
 
 * `.claude/skills/review-rounds/SKILL.md` runs one review round of `CLAUDE.md` on the branch.  It starts with `xtask review start`, starts the routed reviewers and the validators, runs cargo-mutants in the background, checks the state with `xtask review check`, and writes the findings and the log.
 * `CLAUDE.md` and the guide tell the agent and the person to run `/review-rounds` for rounds 1, 2 and 3.

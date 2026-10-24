@@ -236,21 +236,21 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review runs no `xtask review` command.
 
-Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask (TD-38).  It writes 0, except in a `-p` run where a host or a prompt tool answers prompts.  There it writes the approvals that the run records, or `not counted`.  So the approvals that the skill forces do not fail D4 of `plans/active/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
+Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask (TD-38).  It writes 0, except in a `-p` run where a host or a prompt tool answers prompts.  There it writes the approvals that the run records, or `not counted`.  So the approvals that the skill forces do not fail D4 of `plans/completed/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
 
-* Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/active/harness-phase-3-m3.md`).
+* Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/completed/harness-phase-3-m3.md`).
 
 ### TD-37: a branch has one set of review rounds
 
 This entry concerns no rule.  It concerns the log of the review rounds.
 
-`CLAUDE.md` tells the agent to run review rounds 1, 2 and 3 after each change that it implements.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/active/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After round 3" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
+`CLAUDE.md` tells the agent to run review rounds 1, 2 and 3 after each change that it implements.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/completed/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After round 3" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
 
 * Fix: the orchestrator or the maintainer decides how such a branch keeps the log of each set.
 
 ### TD-38: the review log cannot count a person's approvals
 
-This entry concerns no rule.  It concerns the measure of D4 of `plans/active/harness-phase-3.md`.  In the default permission mode, a command of a reviewer, a validator or the baseline can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So step 11 of the `review-rounds` skill asks the person for the approvals of the round and of the baseline.  In an interactive session, auto mode can also fall back to a prompt that waits for a person.  An orchestrator that runs the skill then logs 0 with the mode, and does not see such an approval.  It marks that 0 as a lower bound.  The log records the approvals as cost, not as interventions.  The counts rest on the person.  A person can miscount, or cannot tell the baseline's approvals from the round's, and then gives one total.  The maintainer reads the counts at the gate.
+This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/harness-phase-3.md`.  In the default permission mode, a command of a reviewer, a validator or the baseline can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So step 11 of the `review-rounds` skill asks the person for the approvals of the round and of the baseline.  In an interactive session, auto mode can also fall back to a prompt that waits for a person.  An orchestrator that runs the skill then logs 0 with the mode, and does not see such an approval.  It marks that 0 as a lower bound.  The log records the approvals as cost, not as interventions.  The counts rest on the person.  A person can miscount, or cannot tell the baseline's approvals from the round's, and then gives one total.  The maintainer reads the counts at the gate.
 
 * Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the counts.
 
@@ -318,7 +318,7 @@ Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
 
 ### TD-44: the review log's tokens are final contexts, not the tokens used
 
-This entry concerns no rule.  It concerns the measure of D4 of `plans/active/harness-phase-3.md`.  The `review-rounds` skill takes each agent's tokens from its `<usage>`, which is the size of the agent's final context.  The Tokens cells of the `## Agents` table and of the rounds table add these figures: "Tokens: the sum of the tokens of those agents".  D4's ratio compares round 1 with the baseline on these sums.
+This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/harness-phase-3.md`.  The `review-rounds` skill takes each agent's tokens from its `<usage>`, which is the size of the agent's final context.  The Tokens cells of the `## Agents` table and of the rounds table add these figures: "Tokens: the sum of the tokens of those agents".  D4's ratio compares round 1 with the baseline on these sums.
 
 The final context of an agent is lower than the tokens that it used, by a ratio that differs by agent.  In M5, that ratio ran from 2.5 to 26.2 in case `m2`, and from 3.7 to 18.4 in case `m18a`.  Reviewers have high ratios, and validators low ones.  So D4's ratio of summed final contexts can misstate the ratio of tokens used by several times, by the mix of agents.
 
@@ -330,15 +330,39 @@ D4's token bar has no reliable measure in the log.  The maintainer decides how t
 
 ### TD-46: in `dontAsk` mode, the agents' probe forms are denied
 
-This entry concerns no rule.  It concerns the headless rounds of phase 5.  In `dontAsk` mode, the harness denied probe commands of the review agents in five forms.  The forms are a heredoc, a multi-line command, `cd`, an env or variable prefix, and a `>` write.  No allow list admits a heredoc, a multi-line command or a `>` write (the Decision log of `plans/active/harness-phase-3-m5.md`).  For `cd` and a variable prefix, no run tried a wider allow list.  In M5 they were 11, 14, 14, 23 and 9 of the 126 denials of the six counted runs.  The evidence is the denial table in `## Threats` of `docs/reviews/replay.md`, and dry run 2 in the Progress of `plans/active/harness-phase-3-m5.md`.
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  In `dontAsk` mode, the harness denied probe commands of the review agents in five forms.  The forms are a heredoc, a multi-line command, `cd`, an env or variable prefix, and a `>` write.  No allow list admits a heredoc, a multi-line command or a `>` write (the Decision log of `plans/completed/harness-phase-3-m5.md`).  For `cd` and a variable prefix, no run tried a wider allow list.  In M5 they were 11, 14, 14, 23 and 9 of the 126 denials of the six counted runs.  The evidence is the denial table in `## Threats` of `docs/reviews/replay.md`, and dry run 2 in the Progress of `plans/completed/harness-phase-3-m5.md`.
 
 * Fix: phase 5 runs the agents in a sandbox where Bash needs no allow list.  Or the agents write each probe in a form that an allow rule admits, such as a one-line `sed`.
 
 ### TD-47: a `-p` session ends while a background agent runs
 
-This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p` session ends when the main agent ends its turn, even while a background validator runs.  In M5, case `m11` run 1 ended with "The mutants validator is running.  After it ends, I will run `review check` and write the findings file."  The validator's notice is `stopped`, and no findings file was written.  The evidence is in `## Threats` of `docs/reviews/replay.md`, and in the Progress of `plans/active/harness-phase-3-m5.md`.
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p` session ends when the main agent ends its turn, even while a background validator runs.  In M5, case `m11` run 1 ended with "The mutants validator is running.  After it ends, I will run `review check` and write the findings file."  The validator's notice is `stopped`, and no findings file was written.  The evidence is in `## Threats` of `docs/reviews/replay.md`, and in the Progress of `plans/completed/harness-phase-3-m5.md`.
 
 * Fix: the main agent waits for every background agent before it ends its turn.
+
+### TD-48: a reviewer of a later round can read the messages of the fix commits
+
+This entry concerns no rule.  It concerns the rule of harness phase 3 that a reviewer does not see the author's reasoning (`plans/active/harness-engineering.md`, phase 3).
+
+In a round above 1, the `review-rounds` skill starts each specialist of the since route on `<since>..HEAD`.  That range holds only the fix commits of the last round.  So `git log` of the range shows the "review round N fixes" messages.  The agent files tell the reviewers not to read these messages.  But the prompt gives only the range, and the guard (TD-34) does not refuse `git log`.  In M6 review round 2, three specialists read these messages and said so in their output.
+
+* Fix: the skill tells each reviewer to read the range with `git diff` and `git show --format=`, which show no message.  Or the guard refuses `git log` without a `--format` option.
+
+### TD-49: a review agent can write files outside the repo
+
+This entry concerns the read-only rule of the review agents.
+
+The guard (TD-34) checks the text of a command, not where the command writes.  `xtask review check` sees only the state of the repo (TD-32).  So a review agent can write a file outside the repo, and no check sees it.  In M6 review round 2, two reviewers wrote copies of the guard to the scratchpad folder of the orchestrator.
+
+* Fix: phase 5 runs the reviewers in a sandbox that can write only to their worktrees under `target/review/`.
+
+### TD-50: a reviewer cannot run a mutant of a harness file in its worktree
+
+This entry concerns VERIFY-1 for the files of the harness, such as the guard and the agent files.
+
+The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But auto mode's classifier can refuse it.  In M6 review round 3, the classifier refused a reviewer's edit of `.claude/hooks/read-only-bash.sh` in its own worktree, with the reason "Self-Modification".  So in auto mode, a reviewer cannot change a harness file to show that a test fails on wrong code.  It reads the harness file and its tests only.  `xtask review mutants` does not test these files either, since cargo-mutants changes only Rust code (TD-33).
+
+* Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.
 
 ## Known breaches
 

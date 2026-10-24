@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for the first bullet of M6 of `plans/active/harness-phase-3.md`, "Before round 1, in their own commits".  The parent plan's M6 section stays the criteria.  This plan does not cover the three `/review-rounds` rounds or the close-out.  The orchestrator does those after this plan is done.
+This is the milestone plan for the first bullet of M6 of `plans/completed/harness-phase-3.md`, "Before round 1, in their own commits".  The parent plan's M6 section stays the criteria.  This plan does not cover the three `/review-rounds` rounds or the close-out.  The orchestrator does those after this plan is done.
 
 After this plan:
 
@@ -66,7 +66,7 @@ Write `docs/decisions/0011-review-agents.md`, and add its line to `docs/README.m
 
 * Title: `# 0011: review agents, routed by xtask review and run by a skill`.
 * `Status: accepted (2026-10-22, by the maintainer)`.
-* Context: before phase 3, the agent wrote each reviewer's prompt by hand (`plans/active/harness-engineering.md`, failure 5), and one general reviewer read every diff.  Phase 2's reviewers found a test that could pass on wrong code in 14 of 18 PRs.  Phase 3 (`plans/active/harness-phase-3.md`) is one PR.  The maintainer chose D1 to D6 on 2026-10-22, before the work started.
+* Context: before phase 3, the agent wrote each reviewer's prompt by hand (`plans/active/harness-engineering.md`, failure 5), and one general reviewer read every diff.  Phase 2's reviewers found a test that could pass on wrong code in 14 of 18 PRs.  Phase 3 (`plans/completed/harness-phase-3.md`) is one PR.  The maintainer chose D1 to D6 on 2026-10-22, before the work started.
 * Options: what was not taken for each part, from the parent plan.  These are a table in the PR description (D2), a CI job for cargo-mutants (D3), and every specialist in every round (D6).  Also PRs #9 to #12 rebuilt from transcripts (D1), a flat 5 times or no ceiling (D4), and tuning on the measured cases (D5).
 * The Decision section says that the maintainer's acceptance covers D1 to D6 and the plan that the maintainer started, not each later choice of an agent.
 * Decision, one bullet for each part:

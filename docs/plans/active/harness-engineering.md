@@ -66,9 +66,9 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 * A project skill runs the rounds: route, review in parallel, validate, fix confirmed findings with tests, repeat with fresh reviewers; it replaces the retyped prompts (failure 5).
 * Every reviewer is read-only, sees the diff and the acceptance criteria but not the author's reasoning (self-preference and sycophancy: [arXiv 2404.13076](https://arxiv.org/abs/2404.13076), [arXiv 2310.13548](https://arxiv.org/abs/2310.13548)), cites a rule ID and quotes it, and must name how to break each new test ("would this test fail if the code were wrong?"), aimed at failure 1.  Reviewer files hold the method; the rules stay in `invariants.md`.  Reviewers also look for a test that returns early without `test_support::skip`, which `every_skip_can_be_required` cannot see (TD-8).
 * Mutation testing of the changed functions with cargo-mutants ([mutants.rs](https://mutants.rs/)) as a computational check for tests that cannot fail.
-* Acceptance: replaying six old review rounds finds the bugs those rounds found.  The cases are PR #9 and phase 2's M2, M9, M10, M11 and M18a (D1 of `plans/active/harness-phase-3.md`, which gives why PRs #10 to #12 are left out); each reviewer's findings are logged with whether they were confirmed.
-* Measured by: confirmed findings per round, false-positive rate per reviewer, rounds per PR, vacuous tests found before merge.  Rounds per PR stay three until a later phase changes the rule (D6 of `plans/active/harness-phase-3.md`).
-* Gate: two consecutive PRs where the routed review finds what manual review would, at lower effort (D4 of `plans/active/harness-phase-3.md` bounds the effort, and counts approvals as cost).
+* Acceptance: replaying six old review rounds finds the bugs those rounds found.  The cases are PR #9 and phase 2's M2, M9, M10, M11 and M18a (D1 of `plans/completed/harness-phase-3.md`, which gives why PRs #10 to #12 are left out); each reviewer's findings are logged with whether they were confirmed.
+* Measured by: confirmed findings per round, false-positive rate per reviewer, rounds per PR, vacuous tests found before merge.  Rounds per PR stay three until a later phase changes the rule (D6 of `plans/completed/harness-phase-3.md`).
+* Gate: two consecutive PRs where the routed review finds what manual review would, at lower effort (D4 of `plans/completed/harness-phase-3.md` bounds the effort, and counts approvals as cost).
 * For IAM: a security reviewer is an extra sensor, never a control: it runs alongside the deterministic checks and a human, and its hit rate is measured like any other test.
 
 ### Phase 4: legibility, the evaluator, and long-running sessions
@@ -122,7 +122,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
 * [x] 2026-10-22: phase 2.  M1 to M15, M17, M18a and M18b merged as PRs #14 to #32 (#24 is a Dependabot bump); M16 moved to phase 5b.  M19 closes it (`plans/completed/harness-phase-2.md`).  "Prose only" rules: 8 to 2.  Gate met at `cf7437d` (run 39753865469), with the five checks required.
 * [x] 2026-10-22: M19 merged as PR #33 (`fa41c9f`).  CI run 39766123914 on `main` passed, `publish` included.
-* [x] 2026-10-22: phase 3, execution plan written (`plans/active/harness-phase-3.md`), as one PR with a commit for each milestone.
+* [x] 2026-10-22: phase 3, execution plan written (`plans/completed/harness-phase-3.md`), as one PR with a commit for each milestone.
 * [x] 2026-10-24: phase 3, built in PR #34 (`plans/completed/harness-phase-3.md`), without the gate.  The replay found 8 of 26 old findings (0.31, 95% interval 0.17 to 0.50), so it misses its bar (D5 of that plan).  The PR's own three rounds ran with the `review-rounds` skill (`docs/reviews/ai-agent-harness-phase-3.md`).
 * [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).
 * [ ] Phase 4.
@@ -151,7 +151,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19, agent: the two older plans (versioned builds, browser tests in Rust) stay out of the repo; they are implemented, their PRs (#6, #9) describe them, and they hold local paths.
 * 2026-10-20, maintainer: each check is sized to its stakes and to failures seen.  Phase 2 trims M7 to a token scan, M14 to deny rules and M15 to a `rustfmt` hook, and moves the test-count guard to phase 5b.
 * 2026-10-22, maintainer: phase 3 lands as one PR, not one PR for each milestone.  Its parts depend on each other, and none changes code that ships.
-* 2026-10-22, maintainer, changed 2026-10-24 by the orchestrator: phase 3's gate asks for bounded effort, not "lower effort" (D4 of `plans/active/harness-phase-3.md`).  The agent starts the rounds, so a person's effort is close to zero either way.  Round 1's tokens are at most 2 times the baseline's for each routed reviewer, its wall time at most 60 minutes more, and a person sends no more messages.  On 2026-10-24 an approval of a tool call became cost, not an intervention, since approvals grow with the route.  The log's token figure is each agent's final context, not the tokens it used (TD-44), so the maintainer decides at the gate how to measure the token bar.
+* 2026-10-22, maintainer, changed 2026-10-24 by the orchestrator: phase 3's gate asks for bounded effort, not "lower effort" (D4 of `plans/completed/harness-phase-3.md`).  The agent starts the rounds, so a person's effort is close to zero either way.  Round 1's tokens are at most 2 times the baseline's for each routed reviewer, its wall time at most 60 minutes more, and a person sends no more messages.  On 2026-10-24 an approval of a tool call became cost, not an intervention, since approvals grow with the route.  The log's token figure is each agent's final context, not the tokens it used (TD-44), so the maintainer decides at the gate how to measure the token bar.
 
 ## Outcomes and retrospective
 

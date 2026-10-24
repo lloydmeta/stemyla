@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M1 of `plans/active/harness-phase-3.md`.  It gives more detail than the parent plan's M1 section, which stays the criteria.  After M1, `xtask review` has three subcommands:
+This is the milestone plan for M1 of `plans/completed/harness-phase-3.md`.  It gives more detail than the parent plan's M1 section, which stays the criteria.  After M1, `xtask review` has three subcommands:
 
 * `start` chooses the reviewers from a diff, records the state of the repo, and refuses a dirty tree.
 * `check` fails when the state changed during a round.
