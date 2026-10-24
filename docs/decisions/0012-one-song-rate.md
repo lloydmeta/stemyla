@@ -15,7 +15,7 @@ The separation model takes only 44.1 kHz (`roformer::SAMPLE_RATE`).  The app ref
 
 ## Decision
 
-`Song::from_audio` converts each stem to `engine::resample::SONG_RATE` (44,100), on the page thread.  The converter is a windowed-sinc resampler in `engine`, with 64 taps at 48 kHz.  It takes every standard rate.  A stem at 44.1 kHz stays as it is, with no copy.  The plan is `plans/active/48k-audio.md`.
+`Song::from_audio` converts each stem to `engine::resample::SONG_RATE` (44,100), on the page thread.  The converter is a windowed-sinc resampler in `engine`, with 64 taps at 48 kHz.  It takes every standard rate.  A stem at 44.1 kHz stays as it is, with no copy.  The plan is `plans/completed/48k-audio.md`.
 
 ## Consequences
 

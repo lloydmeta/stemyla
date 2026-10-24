@@ -118,7 +118,10 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-24: M2: songs open at 44.1 kHz.  On the old `from_audio` (no conversion, the first stem's rate), `a_48k_wav_opens_at_44k`, `stems_at_mixed_rates_all_open_at_44k` and `a_stem_at_an_odd_rate_is_refused` fail; after M2 they pass.  `a_44k_stem_is_not_copied` passes before and after (it guards MEM-1).  The 8 kHz fixtures in `app/tests/web.rs`, `app/tests/web_close.rs` and `app/src/store.rs` are now at 44.1 kHz.  All checks pass, and `web-test` passes in Chrome (69 tests).  Safari refused the WebDriver session ("webdriver POST /session request failed"), so no test ran there.
 * [x] 2026-10-24: M3: `a_48k_session_reopens_with_its_stems` passes in Chrome (`web-test --browser chrome`, 70 tests).  Before M2 it fails its first assertion, as the source opened at 48 kHz.  The reopened original lane has the same samples as the first open.
 * [x] 2026-10-24: M4: `e2e separate --browser chrome` passes on a 2 s 48 kHz clip.  The page logged "song: decoded and converted to 44100 Hz in 0.03 s (88200 frames)", and six stems arrived in 1.7 s (Radeon Pro 5500M), with no page errors.  Safari was not tried, because its WebDriver session failed in M2.  After review round 1 renamed the log line, `e2e separate` passed again with "song: opened at 44100 Hz in 0.02 s (88200 frames)".
-* [ ] Review rounds 1, 2 and 3.
+* [x] 2026-10-24: review round 1: 7 should-fix confirmed (rising-rate images, no 32-bit test, SNR claims, an unbounded rate table, two stale comments, no edge test) and 6 nits, all fixed in `3ac5db4`.  Mutants: the baseline timed out (a known debt).
+* [x] 2026-10-24: review round 2: 4 should-fix confirmed (the 32-bit test runs only on 64 bits, the output range untested, the tap rounding untested, an old mixed-rate session one frame short) and 8 nits, all fixed in `e9c3aa7`.  TD-51 added.  Mutants: the baseline timed out.
+* [x] 2026-10-24: review round 3: 2 should-fix confirmed (TD-51 named a cover that does not exist, the right channel untested) and 6 nits, all fixed in `e352aee`.  Mutants: 16 tested, 16 caught.
+* [x] 2026-10-24: a separate cargo-mutants run on `engine/src/resample.rs` after round 1 missed 3 mutants, all equivalent (the fast path and the edge path give the same result; `sinc`'s `<` to `<=`).
 
 ## Surprises and discoveries
 
@@ -140,4 +143,14 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 
 ## Outcomes and retrospective
 
-Not yet written.
+Done: every song opens at 44.1 kHz.  A 48 kHz song, and a song at another standard rate from 8 kHz to 384 kHz, separates.  A 44.1 kHz song is not copied or changed.  `e2e separate` passes on a 48 kHz clip in Chrome, and `web-test` passes in Chrome.
+
+Not done:
+* Safari: its WebDriver session failed, so no Safari run is recorded.
+* wasm32: engine's tests do not run there (TD-51).
+* The review's mutants baseline timed out in rounds 1 and 2, a known debt.  A separate run on `engine/src/resample.rs` covers the new code.
+
+Lessons:
+* The first design stated the filter only for a falling rate.  Review found that a rising rate leaked images, and a header could state any rate.  Next time, state each input class (falling, rising, out of range) in the design, with a test for each.
+* The tone tests fit any phase, so they could not see a delay.  An impulse test pins the time.
+* A rule that changes the length of a song breaks sessions stored under the old rule.  Check stored data against the new rule before the first commit.

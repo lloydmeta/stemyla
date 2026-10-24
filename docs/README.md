@@ -17,7 +17,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and phase 2's numbers.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
-* `plans/active/48k-audio.md`: songs at 48 kHz and other standard rates convert to 44.1 kHz when they open, so they separate.
+* `plans/completed/48k-audio.md`: done on 2026-10-24: songs at 48 kHz and other standard rates convert to 44.1 kHz when they open, so they separate.
 * `plans/completed/harness-phase-2.md`: phase 2 of that plan, done on 2026-10-22: each rule a machine can check became a test, a lint or a hook, one PR per milestone.  Its retrospective gives what phase 2 achieved and what it did not.
 * `plans/completed/harness-phase-3.md`: phase 3 of that plan, done on 2026-10-24: review agents chosen by the diff, a validator for each serious finding, cargo-mutants and a findings log, in one PR.  Its gate is still open.  Its retrospective gives what phase 3 achieved and what it did not.
 * `plans/completed/harness-phase-3-m1.md`: M1 of phase 3, done: `xtask review` routes a diff to reviewers, guards a round, and runs cargo-mutants.
