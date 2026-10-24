@@ -228,8 +228,15 @@ async fn load_and_keep(
         .into_iter()
         .map(|(name, file, bytes)| ((name.clone(), web_sys::Blob::from(file)), (name, bytes)))
         .unzip();
+    let started = js_sys::Date::now();
     let opened = match Song::load_files(files) {
         Ok(song) => {
+            log::info!(
+                "song: decoded and converted to {} Hz in {:.2} s ({} frames)",
+                song.sample_rate,
+                (js_sys::Date::now() - started) / 1000.0,
+                song.frames
+            );
             let session = match store::save_sources(&sources, song.sample_rate).await {
                 Ok(id) => Some(id),
                 Err(e) => {

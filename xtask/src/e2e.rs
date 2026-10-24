@@ -1039,18 +1039,28 @@ fn selftest(o: &Opts) -> Result<()> {
 }
 
 /// A two-second clip of the synthetic mix as a WAV, for `separate`.
+/// The rate of the `separate` scenario's clip: not the model's, so the page
+/// must convert it before it separates (decision 0012).
+const CLIP_RATE: u32 = 48_000;
+
 fn clip(out: &Path) -> Result<PathBuf> {
     let song = crate::synth::generate();
-    let n = 2 * 44_100;
+    let n = 2 * crate::synth::SAMPLE_RATE as usize;
     let dir = out.join("clip");
     std::fs::create_dir_all(&dir)?;
-    let wav = engine::wav::encode_pcm16(&song.mix.left[..n], &song.mix.right[..n], 44_100);
+    let at_clip_rate =
+        |x: &[f32]| engine::resample::to_rate(x.to_vec(), crate::synth::SAMPLE_RATE, CLIP_RATE);
+    let (left, right) = (
+        at_clip_rate(&song.mix.left[..n])?,
+        at_clip_rate(&song.mix.right[..n])?,
+    );
+    let wav = engine::wav::encode_pcm16(&left, &right, CLIP_RATE);
     std::fs::write(dir.join("clip.wav"), wav)?;
     Ok(dir)
 }
 
-/// Drop a clip and the model, press Separate, and the
-/// six lanes appear; screenshots along the way.
+/// Drop a 48 kHz clip, which opens at 44.1 kHz, and the model, press
+/// Separate, and the six lanes appear; screenshots along the way.
 fn separate(o: &Opts) -> Result<()> {
     let mut mounts = vec![("/test/".to_string(), clip(&o.out)?)];
     let model = weights_mount(o, &mut mounts)?;
@@ -1069,6 +1079,14 @@ fn separate(o: &Opts) -> Result<()> {
     p.screenshot("separate_empty")?;
     let from = p.mark();
     p.drop_files(&[("/test/clip.wav", "clip.wav", "audio/wav")])?;
+    let converted = p.wait_for(from, 60, |l| l.contains("song: decoded and converted"))?;
+    p.note(&format!("opened: {converted:?}"));
+    p.check(
+        converted
+            .as_deref()
+            .is_some_and(|l| l.contains("to 44100 Hz") && l.contains("(88200 frames)")),
+        "the 48 kHz clip opens at 44.1 kHz",
+    );
     let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;
     p.check(kept.is_some(), "the clip opens");
     p.screenshot("separate_song")?;

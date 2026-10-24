@@ -114,7 +114,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-24: M1: `engine::resample`, 9 unit tests.  In WebAssembly on V8, `to_rate` converts 5 minutes of 48 kHz stereo in 1.37 s.
 * [x] 2026-10-24: M2: songs open at 44.1 kHz.  On the old `from_audio` (no conversion, the first stem's rate), `a_48k_wav_opens_at_44k`, `stems_at_mixed_rates_all_open_at_44k` and `a_stem_at_an_odd_rate_is_refused` fail; after M2 they pass.  `a_44k_stem_is_not_copied` passes before and after (it guards MEM-1).  The 8 kHz fixtures in `app/tests/web.rs`, `app/tests/web_close.rs` and `app/src/store.rs` are now at 44.1 kHz.  All checks pass, and `web-test` passes in Chrome (69 tests).  Safari refused the WebDriver session ("webdriver POST /session request failed"), so no test ran there.
 * [x] 2026-10-24: M3: `a_48k_session_reopens_with_its_stems` passes in Chrome (`web-test --browser chrome`, 70 tests).  Before M2 it fails its first assertion, as the source opened at 48 kHz.  The reopened original lane has the same samples as the first open.
-* [ ] M4: the end-to-end separation of a 48 kHz clip.
+* [x] 2026-10-24: M4: `e2e separate --browser chrome` passes on a 2 s 48 kHz clip.  The page logged "song: decoded and converted to 44100 Hz in 0.03 s (88200 frames)", and six stems arrived in 1.7 s (Radeon Pro 5500M), with no page errors.  Safari was not tried, because its WebDriver session failed in M2.
 * [ ] Review rounds 1, 2 and 3.
 
 ## Surprises and discoveries
@@ -132,6 +132,8 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * 2026-10-24, maintainer: the conversion runs on the page thread.
 * 2026-10-24, maintainer, on the agent's recommendation: 64 taps at 48 kHz.  96 taps would put the 23 kHz alias at -36 dB for about 1.5 times the time.
 * 2026-10-24, maintainer: one PR with one commit for each milestone.
+* 2026-10-24, agent: the page logs one time for decoding and conversion together, from `load_and_keep`.  `app` cannot time the two apart without timing inside `engine`, which has no logger.  M1 measured the conversion alone (1.37 s for 5 minutes of 48 kHz stereo).
+* 2026-10-24, agent: the plan moves to `completed/` after the review rounds, not at the end of M4, since the rounds can still change it.
 
 ## Outcomes and retrospective
 
