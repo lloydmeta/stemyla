@@ -209,7 +209,7 @@ names_xtask() {
   local j=$1
   while [ $j -lt $2 ]; do
     case ${WORDS[j]} in
-      xtask | -pxtask | *=xtask | xtask/Cargo.toml | */xtask/Cargo.toml | *=xtask/Cargo.toml | *=*/xtask/Cargo.toml) return 0 ;;
+      xtask | -pxtask | *=xtask | xtask/Cargo.toml | */xtask/Cargo.toml | *=xtask/Cargo.toml) return 0 ;;
     esac
     j=$((j + 1))
   done
