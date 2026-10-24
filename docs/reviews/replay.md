@@ -52,7 +52,7 @@ n = 6.
 | - | - | - | - | - |
 | `2af33b1` | `59816dc` | `4b27829` | review round 1 | `docs/plans/active/harness-phase-2.md#M9: young crates are pinned and the licence list is a test (TD-7, part; DEPS-1, DOC-1; maintainer decision)` |
 
-The Progress records 1 should-fix and 7 nits, all real and fixed.  It names the should-fix and 7 new test cases; `m9-2` to `m9-8` are those 7 cases.  All places are in `xtask/src/rules.rs`.
+The Progress records 1 should-fix and 7 nits, all real and fixed.  It names the should-fix and 7 new test cases; `m9-2` to `m9-8` are assumed to be those 7 cases.  All places are in `xtask/src/rules.rs`.
 
 | ID | Severity | Where | Defect | Evidence |
 | - | - | - | - | - |
@@ -68,6 +68,8 @@ The Progress records 1 should-fix and 7 nits, all real and fixed.  It names the 
 n = 8.
 
 Left out: the DEPS-1 text in `docs/invariants.md` and the TD-7 text (docs only).
+
+Added after the runs: the fix commit `4b27829` has 10 changes, and Progress records 8 findings.  So the match of the 7 nits to `m9-2` to `m9-8` is an assumption (`## Threats`).
 
 ### m11
 
@@ -625,9 +627,9 @@ The comparers were one new general-purpose subagent for each case.  Each got the
 | `m9` | 2/8 | 3/8 |
 | `m11` | 1/1 | 1/1 |
 | `m2` | 3/5 | 3/5 |
-| `m10` | 0/2 | 1/2 |
+| `m10` | 1/2 | 1/2 |
 | `m18a` | 1/4 | 1/4 |
-| Total | 7/26 | 9/26 |
+| Total | 8/26 | 9/26 |
 
 ### pr9: 0/6
 
@@ -683,17 +685,17 @@ The comparer's note: 1-10, a mutant of `WsolaStretcher::warm_up`, does not match
 
 The comparer's note on `m2-3`: 1-4 is in the same loop, but states another defect (read-only buffers, y and z).
 
-### m10: 1/2, or 0/2 without the unvalidated item
+### m10: 1/2
 
 | ID | Result | By | Finding | Quote |
 | - | - | - | - | - |
 | `m10-1` | missed | - | - | - |
-| `m10-2` | found (unvalidated) | reviewer, supply-chain-reviewer | 1-4 (nit) | "No test pins the rule that a `"type": "x"` key counts only in a brace group.  If `in_braces` is replaced with `true`, all 7 proto_tests pass." |
+| `m10-2` | found | cargo-mutants; also the unvalidated nit of reviewer and supply-chain-reviewer | 1-10; 1-4 (nit) | 1-10: "no test fails with this mutant: xtask/src/rules.rs:2624:21: replace && with \|\| in rust_types".  1-4: "No test pins the rule that a `"type": "x"` key counts only in a brace group.  If `in_braces` is replaced with `true`, all 7 proto_tests pass." |
 
 The notes:
 
 * `m10-1`: 1-12 is in `js_included_types`, another function, and states another defect.
-* `m10-2`: the comparer was not sure if mutant 1-10 (`rust_types`, line 2624, `&&` to `||`) is the bracket rule.  The team leader read line 2624 at `5bd0298`.  It is the `==` or `!=` test in `compares`, not the bracket rule or the brace rule, so 1-10 does not match.
+* `m10-2`: the comparer was not sure if mutant 1-10 (`rust_types`, line 2624, `&&` to `||`) is the bracket rule.  The team leader first read line 2624 at `5bd0298` as the `==` or `!=` test in `compares`, and marked no match.  That reading narrowed the written rule after the results were seen.  Step 6.2 says: "A missed mutant matches an item that is a weak test of the same function."  1-10 is in `rust_types`, and `m10-2` is a weak-test item of `rust_types`.  The written rule governs, so 1-10 matches.
 
 ### m18a: 1/4
 
@@ -710,9 +712,10 @@ In `m18a` the harness denied every browser-test run, and only wasm tests in a br
 
 ### Total and bar
 
-* The total, without the `found (unvalidated)` items (the parent plan's count): 7/26 = 0.27, with a 95% Wilson score interval ([Wilson, 1927](https://doi.org/10.1080/01621459.1927.10502953)) of 0.14 to 0.46.
-* The total with the 2 `found (unvalidated)` items (`m9-2`, `m10-2`): 9/26 = 0.35, with an interval of 0.19 to 0.54.  This total is extra information, and the bar does not use it.
-* The bar: a total of 0.8 or more, and each recorded `should-fix` or worse found.  The bar is not met.  The total is 0.27.  Of the recorded should-fix items, `m9-1`, `m11-1` and `m18a-2` are found, and `m10-1`, `m18a-1` and `m18a-3` are missed.  No item is a blocker.
+* The total, without the `found (unvalidated)` items (the parent plan's count): 8/26 = 0.31, with a 95% Wilson score interval ([Wilson, 1927](https://doi.org/10.1080/01621459.1927.10502953)) of 0.17 to 0.50.
+* The total with the `found (unvalidated)` item `m9-2`: 9/26 = 0.35, with an interval of 0.19 to 0.54.  Only `m9-2` is found by an unvalidated nit alone.  This total is extra information, and the bar does not use it.
+* The first reading was 7/26 = 0.27 (0.14 to 0.46), with no match for `m10-2` by cargo-mutants.  It was dropped, since it narrowed the written rule of step 6.2 (the notes of `m10`).
+* The bar: a total of 0.8 or more, and each recorded `should-fix` or worse found.  The bar is not met.  The total is 0.31.  Of the recorded should-fix items, `m9-1`, `m11-1` and `m18a-2` are found, and `m10-1`, `m18a-1` and `m18a-3` are missed.  No item is a blocker.
 * The inferred should-fix items do not enter the bar.  Of these, `pr9-1` to `pr9-4` and `m2-3` are missed, and `m2-1` and `m2-4` are found.
 
 The found items by source.  An item with more than one source counts once for each source:
@@ -725,9 +728,9 @@ The found items by source.  An item with more than one source counts once for ea
 | memory-reviewer | 2 | `m11-1`, `m18a-2` |
 | gpu-reviewer | 1 | `m2-4` |
 | wire-reviewer | 0 | - |
-| cargo-mutants | 0 | - |
+| cargo-mutants | 1 | `m10-2` |
 
-The 2 `found (unvalidated)` items: `m9-2` by reviewer, and `m10-2` by reviewer and supply-chain-reviewer.
+The unvalidated nits that match an item: 1-5 of `m9` (reviewer) finds `m9-2` alone.  1-4 of `m10` (reviewer and supply-chain-reviewer) also matches `m10-2`, which cargo-mutants finds.
 
 Unvalidated nits that match no item are counted, not listed: `pr9` 6, `m9` 7, `m11` 4, `m2` 3, `m10` 5, `m18a` 4, a total of 29.
 
@@ -747,7 +750,7 @@ The counted runs:
 | `m18a` | `replay-m18a-1` | 7 (4, 3) | 972 | 6,266,253 | 87,615 | 5.10 | 23 | 2 | full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0 |
 | Total | | 51 | 13,396 (3.7 h) | 57,244,092 | 740,079 | 44.54 | 126 | 21 | |
 
-Each agent's final context, from its last `task_notification`.  This figure is the size of the agent's last context, not the tokens that it used.  So it is not part of the session tokens.  It is the figure of the skill's `## Agents` table and of D4.  TD-44 records what this means for D4's ratio.
+Each agent's final context, from its last `task_notification`.  This figure is the size of the agent's last context, not the tokens that it used.  So it is not part of the session tokens.  It is the figure of the skill's `## Agents` table and of D4.  The ratio of tokens used to final context differs by agent.  So a sum of final contexts can misstate a ratio of tokens used by several times (TD-44).
 
 * `pr9`: reviewer 115,520; gpu-reviewer 17,035; memory-reviewer 54,269; wire-reviewer 104,501; supply-chain-reviewer 97,524; docs-reviewer 60,035; validators 15,499, 19,670, 10,160 and 59,784.
 * `m9`: reviewer 80,678; memory-reviewer 34,489; supply-chain-reviewer 72,062; docs-reviewer 77,978; validators 22,158, 21,418 and 21,235.
@@ -786,7 +789,7 @@ The verdict counts of each source, summed over the six counted cases.  The count
 
 ## Outside findings
 
-An outside finding is a found finding (`confirmed` or `pre-existing`) that matches no ground-truth item of its case.  There are 62: `pr9` 43, `m9` 1, `m11` 5, `m2` 4, `m10` 7, `m18a` 2.  Each has the severity `should-fix`.  A new checker subagent compared each with `main` at `fa41c9f`.  Its states: 9 fixed on `main`, 2 gone and 51 still on `main`.  "(likely)" is the checker's word: it read the code and the tests, but did not run them.  The last column also gives the tech-debt entry of a finding that is still on `main`.
+An outside finding is a found finding (`confirmed` or `pre-existing`) that matches no ground-truth item of its case.  There are 61: `pr9` 43, `m9` 1, `m11` 5, `m2` 4, `m10` 6, `m18a` 2.  Mutant 1-10 of `m10` matches `m10-2`, so it is not an outside finding.  It is still on `main` (TD-42).  Each has the severity `should-fix`.  A new checker subagent compared each with `main` at `fa41c9f`.  Its states: 9 fixed on `main`, 2 gone and 50 still on `main`.  "(likely)" is the checker's word: it read the code and the tests, but did not run them.  The last column also gives the tech-debt entry of a finding that is still on `main`.
 
 Rows of `pr9` mutants that share one state and one reason share one row.  The source of each `pr9` mutant is `cargo-mutants`, and its claim is "no test fails with this mutant".
 
@@ -794,7 +797,7 @@ The maintainer classes a sample of these findings as real or false after the PR 
 
 | Case | ID | Severity | Source | Claim | Checker's state |
 | - | - | - | - | - | - |
-| `pr9` | 1-1 | should-fix | reviewer, memory-reviewer, supply-chain-reviewer | `sends_json_and_reads_a_sized_reply` still passes when the client reads to the end of the stream, since the fake closes the socket after 30 s. | still on main: the test has a 120 s timeout, so `loop {}` passes (TD-39) |
+| `pr9` | 1-1 | should-fix | reviewer, memory-reviewer, supply-chain-reviewer | `sends_json_and_reads_a_sized_reply` still passes when the client reads to the end of the stream, since the fake closes the socket after 30 s. | still on main: the test has a 120 s timeout.  So a client that reads to the end of the stream passes when the fake closes the socket at 30 s (TD-39) |
 | `pr9` | 1-2 | should-fix, pre-existing | reviewer | The `selftest` scenario does not see a failed model load, so it waits the full 4 hours. | fixed on `main`, `03d3326` |
 | `pr9` | 1-3 | should-fix | docs-reviewer | `docs/ARCHITECTURE.md` calls the WebDriver client "std-only", but it uses serde_json and anyhow. | still on `main`; fixed on this branch by M5 |
 | `pr9` | 1-24, 1-41, 1-48 | should-fix | cargo-mutants | `+` to `*` or `-` in the arithmetic of `Session::set_viewport`. | fixed on `main`, `32b2731`: the arithmetic moved into `fit_viewport`, and `viewport_tests` assert the sizes |
@@ -820,7 +823,6 @@ The maintainer classes a sample of these findings as real or false after the PR 
 | `m10` | 1-1 | should-fix | reviewer, wire-reviewer | A plain Rust literal keeps `\n`, `\t` and `\r` as source text, so `\ntype` reads as `ntype`, and a misspelt type after it passes.  TD-16 does not name the gap. | still on main: `unescape_quotes` keeps `\n`, and TD-16 names only a `\n` after `//` (TD-16 gains a sentence) |
 | `m10` | 1-2 | should-fix | docs-reviewer | TD-16 does not name regex literals, where a quote, `//` or backtick hides the types after it. | fixed on `main`, `7cd8518` |
 | `m10` | 1-3 | should-fix | docs-reviewer | No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses, so a stale check without the Rust half passes. | still on main: `the_script_only_list_is_checked` has no such entry (TD-42) |
-| `m10` | 1-10 | should-fix | cargo-mutants | `&&` to `\|\|` in `rust_types`, line 2624; no test has `<=`. | still on main (likely): no test has `["type"] <=` (TD-42) |
 | `m10` | 1-11 | should-fix | cargo-mutants | The match guard in `rust_type_value` replaced with `true`; `"type": format!("segmnt")` gives a false problem. | still on main (likely): no test has a macro other than `json!` after `"type":` (TD-42) |
 | `m10` | 1-12 | should-fix | cargo-mutants | `!` deleted in `js_included_types`; the first string of an `includes` array is not checked. | still on main (likely): both `includes` cases put the misspelt type second (TD-42) |
 | `m10` | 1-13 | should-fix | cargo-mutants | `+=` to `-=` in `js_tokens`; a newline before `/*` gives the wrong line. | still on main (likely): in a scratch copy, `js_is_lexed` passes with the mutant (TD-42) |
@@ -849,7 +851,7 @@ The five threats of the parent plan:
 
 The threats that M5 found:
 
-* The mutants baseline failed in `m9` and `m2`, and in `m10` run 1.  `classic_drums_beat_the_raw_mix` timed out in the unmutated tree, so no mutant ran there.  The baseline of `m10` run 2 passed.  Of the 13 items of `m9` and `m2`, 10 are weak-test items that a missed mutant could have matched: `m9-1` to `m9-8`, `m2-2` and `m2-3`.  The other three are not weak-test items, so no missed mutant can match them.  `m2-1` and `m2-5` are defects in code.  `m2-4` is a gap in a test's own list of files, which no mutant of a function reaches.  TD-33 records the slow baseline.
+* Of the 8 case runs that were not dry runs, 5 ran `classic_drums_beat_the_raw_mix` in the mutants baseline.  It timed out in the unmutated tree in 3 (`m9`, `m2` and `m10` run 1), so no mutant ran there.  It passed in `pr9` and `m10` run 2.  The baselines of `m11` and `m18a` never ran it.  Of the 13 items of `m9` and `m2`, 10 are weak-test items that a missed mutant could have matched: `m9-1` to `m9-8`, `m2-2` and `m2-3`.  The other three are not weak-test items, so no missed mutant can match them.  `m2-1` and `m2-5` are defects in code.  `m2-4` is a gap in a test's own list of files, which no mutant of a function reaches.  TD-33 records the slow baseline.
 * `pr9` and `m10` stopped the mutants run at the limit of 60 minutes, with 262 and 130 mutants not tested.
 * Two runs ran again: `m11` run 1 (the `-p` session ended while the mutants validator ran) and `m10` run 1 (a usage limit).
 * `dontAsk` denials: 126 over the six counted runs.  The harness denies a command that the allow list does not admit.  A real session asks a person, or auto mode decides.  The team leader found the full command of each denial in the transcript.  Each command counts once, in the first kind of the table that it matches, in the order of the table.
@@ -877,9 +879,10 @@ The threats that M5 found:
 
   So some probes and tests did not run, and the result can be low.
 * The old round's reviewer tokens are not recorded, and auto mode refused the read of the old transcripts.
-* The comparers got each finding's ID, sources, severity, kind, place and claim, with the evidence where it bears on the match.  The team leader made shorter the claims of nits about docs or wording only, which cannot match a code item.  The team leader resolved one match that a comparer was not sure of (`m10-2` against mutant 1-10).
+* The comparers got each finding's ID, sources, severity, kind, place and claim, with the evidence where it bears on the match.  The team leader made shorter the claims of nits about docs or wording only, which cannot match a code item.  A comparer was not sure if mutant 1-10 matches `m10-2`.  The team leader first marked no match, then applied the written rule of step 6.2, so 1-10 matches.
 * The severities of `pr9` and `m2` are inferred, so those items do not enter the should-fix test of the bar.
-* The ground truth is what the old round fixed, so the measure is recall only.  The runs found 62 outside findings, and the maintainer classes a sample of them as real or false.
+* The ground truth is what the old round fixed, so the measure is recall only.  The runs found 61 outside findings, and the maintainer classes a sample of them as real or false.
+* The items of `m9` rest on an assumption.  Progress at `4b27829` records 1 should-fix and 7 nits, but the fix commit has 10 changes.  `m9-2` to `m9-8` assume that the 7 nits are the 7 test cases that the message names.
 * The ground truth can lack a finding of the old round.  The old round's own fix commits fixed three outside findings, so the old round likely found them:
   * `m9` 1-1, the `well_formed` guard, fixed by `4b27829` with a fixture.  Neither the commit message nor Progress names that change.
   * `m10` 1-2, regex literals in TD-16, fixed by `d67db75`.  That fix changed docs only.

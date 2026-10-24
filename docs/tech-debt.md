@@ -172,7 +172,7 @@ The `review-rounds` skill (harness phase 3, M3) stops a round when `review check
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
 * cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
-* The baseline can fail on a slow test.  `classic_drums_beat_the_raw_mix` (`xtask/tests/m8_hpss.rs`) timed out in the unmutated tree in 3 of the 7 case runs of M5 (`docs/reviews/replay.md`).  These were `m9`, `m2` and `m10` run 1.  So no mutant ran, and the line was `none: ...; exit 4: the baseline failed`.
+* The baseline can fail on a slow test.  In M5, 5 of the 8 case runs that were not dry runs had `classic_drums_beat_the_raw_mix` (`xtask/tests/m8_hpss.rs`) in the baseline.  It timed out in the unmutated tree in 3 of them (`m9`, `m2` and `m10` run 1), and passed in 2 (`docs/reviews/replay.md`).  Where it timed out, no mutant ran, and the line was `none: ...; exit 4: the baseline failed`.
 
 * Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.  For a slow test, give the baseline a longer timeout, or leave the slow test out of the mutants run.
 
@@ -239,7 +239,7 @@ This entry concerns no rule.  It concerns the measure of D4 of the parent plan (
 
 ### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 
-Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  No `cargo test` kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
 
 * the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run);
 * the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
@@ -287,7 +287,7 @@ Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
 * Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes (not run).
 * `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.  The checker ran a scratch copy of `js_tokens` with this mutant.
 
-Source: `docs/reviews/replay.md`, case `m10`, findings 1-3, 1-10, 1-11, 1-12 and 1-13.
+Source: `docs/reviews/replay.md`, case `m10`, outside findings 1-3, 1-11, 1-12 and 1-13, and finding 1-10, which matches `m10-2`.
 
 * Fix: add each missing case to the tests in `xtask/src/rules.rs`.
 
@@ -303,9 +303,25 @@ Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
 
 This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  The `review-rounds` skill takes each agent's tokens from its `<usage>`, which is the size of the agent's final context.  The Tokens cells of the `## Agents` table and of the rounds table add these figures: "Tokens: the sum of the tokens of those agents".  D4's ratio compares round 1 with the baseline on these sums.
 
-The ratio compares like with like.  But the final context of a long agent is lower than the tokens that it used.  So the ratio is not a cost in tokens.  The session's `modelUsage` gives the tokens used, in `-p` mode only.  For example, in case `m18a` of `docs/reviews/replay.md`, the session used 6,266,253 tokens.  The final contexts of its seven agents sum to 391,169.
+The final context of an agent is lower than the tokens that it used, by a ratio that differs by agent.  In `docs/reviews/replay.md`, that ratio ran from 2.5 to 26.2 in case `m2`, and from 3.7 to 18.4 in case `m18a`.  Reviewers have high ratios, and validators low ones.  So D4's ratio of summed final contexts can misstate the ratio of tokens used by several times, by the mix of agents.
+
+The session's `modelUsage` gives the tokens used, in `-p` mode only.  For example, the session of `m18a` used 6,266,253 tokens, and its main agent used 758,710 of them.  The final contexts of its seven subagents sum to 391,169.
+
+D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
 
 * Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
+
+### TD-46: in `dontAsk` mode, no allow list admits the agents' probe forms
+
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  The review agents write probe commands in forms that no allow list admits in `dontAsk` mode.  These forms are a heredoc, a multi-line command, `cd`, an env or variable prefix, and a `>` write.  An allow rule matches the prefix of a command, and these forms put another word first, or span lines.  In M5 they were 11, 14, 14, 23 and 9 of the 126 denials of the six counted runs.  The evidence is the denial table in `## Threats` of `docs/reviews/replay.md`, and dry run 2 in the Progress of `plans/active/harness-phase-3-m5.md`.
+
+* Fix: phase 5 runs the agents in a sandbox where Bash needs no allow list.  Or the agents write each probe in a form that an allow rule admits, such as a one-line `sed`.
+
+### TD-47: a `-p` session ends while a background agent runs
+
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p` session ends when the main agent ends its turn, even while a background validator runs.  In M5, case `m11` run 1 ended with "The mutants validator is running.  After it ends, I will run `review check` and write the findings file."  The validator's notice is `stopped`, and no findings file was written.  The evidence is in `## Threats` of `docs/reviews/replay.md`, and in the Progress of `plans/active/harness-phase-3-m5.md`.
+
+* Fix: the main agent waits for every background agent before it ends its turn.
 
 ## Known breaches
 
