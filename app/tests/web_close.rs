@@ -48,7 +48,7 @@ async fn has(path: &str) -> bool {
     exists(path).await.as_bool() == Some(true)
 }
 
-const RATE: u32 = 8_000;
+const RATE: u32 = 44_100;
 
 /// A `Blob` holding a copy of `bytes`, as a chosen file is.
 fn blob(bytes: &[u8]) -> web_sys::Blob {

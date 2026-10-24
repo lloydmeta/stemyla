@@ -500,7 +500,7 @@ export function lloyd_in_a_larger_buffer(at) {
     async fn a_failed_save_leaves_no_session() {
         st_remove(ROOT).await;
         start_spy(&JsValue::UNDEFINED, 1.0);
-        let saved = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 8_000).await;
+        let saved = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 44_100).await;
         let record = stop_spy();
         assert_eq!(record, "blob refused");
         let error = saved.expect_err("refused").to_string();
@@ -525,8 +525,8 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
     async fn two_saves_in_one_millisecond_get_two_sessions() {
         st_remove(ROOT).await;
         freeze_now(1_792_640_000_000.0);
-        let first = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 8_000).await;
-        let second = save_sources(&[("beachape.wav".into(), blob(&tone(80)))], 8_000).await;
+        let first = save_sources(&[("acme.wav".into(), blob(&tone(80)))], 44_100).await;
+        let second = save_sources(&[("beachape.wav".into(), blob(&tone(80)))], 44_100).await;
         thaw_now();
         let (first, second) = (first.expect("saved"), second.expect("saved"));
         assert_ne!(first, second);
@@ -547,7 +547,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         LAST_ID.set(0);
         freeze_now(1_792_640_000_000.0);
         start_spy(&JsValue::UNDEFINED, 0.0);
-        let saved = save_sources(&[("lloyd.wav".into(), blob(&tone(80)))], 8_000).await;
+        let saved = save_sources(&[("lloyd.wav".into(), blob(&tone(80)))], 44_100).await;
         let record = stop_spy();
         thaw_now();
         assert_eq!(record, "refused");
@@ -559,7 +559,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
     /// A stereo tone as a WAV file of `frames` frames at 8 kHz.
     fn tone(frames: usize) -> Vec<u8> {
         let wave: Vec<f32> = (0..frames).map(|i| 0.25 * (0.3 * i as f32).sin()).collect();
-        engine::wav::encode_pcm16(&wave, &wave, 8_000)
+        engine::wav::encode_pcm16(&wave, &wave, 44_100)
     }
 
     /// MEM-1, MEM-5: a chosen file is saved from the browser's file, so the
@@ -569,7 +569,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         st_remove(ROOT).await;
         let file = blob(&tone(800));
         start_spy(&file, f64::INFINITY);
-        let saved = save_sources(&[("Lloyd - Tune.wav".into(), file)], 8_000).await;
+        let saved = save_sources(&[("Lloyd - Tune.wav".into(), file)], 44_100).await;
         let record = stop_spy();
         let id = saved.expect("saved");
         assert_eq!(
@@ -577,7 +577,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             "the file itself, then meta and current"
         );
         let (got, song, meta) = restore().await.expect("stored").expect("readable");
-        assert_eq!((got, song.frames, meta.rate), (id, 800, 8_000));
+        assert_eq!((got, song.frames, meta.rate), (id, 800, 44_100));
         st_remove(ROOT).await;
     }
 

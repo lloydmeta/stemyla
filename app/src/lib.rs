@@ -387,8 +387,9 @@ impl SeparationJob {
 }
 
 /// The only sample rate the separation model takes, and so its stems' rate.
+/// Every opened song is at this rate already (decision 0012).
 #[cfg(target_arch = "wasm32")]
-const SEPARATION_RATE: u32 = 44_100;
+const SEPARATION_RATE: u32 = engine::resample::SONG_RATE;
 
 impl Default for StemApp {
     fn default() -> Self {

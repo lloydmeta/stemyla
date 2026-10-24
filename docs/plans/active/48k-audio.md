@@ -112,7 +112,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-24: design accepted by the maintainer (decision 0012).
 * [x] 2026-10-24: M0: plan and decision 0012.  fmt, clippy, the workspace tests and `docs-check` pass.
 * [x] 2026-10-24: M1: `engine::resample`, 9 unit tests.  In WebAssembly on V8, `to_rate` converts 5 minutes of 48 kHz stereo in 1.37 s.
-* [ ] M2: songs open at 44.1 kHz.
+* [x] 2026-10-24: M2: songs open at 44.1 kHz.  On the old `from_audio` (no conversion, the first stem's rate), `a_48k_wav_opens_at_44k`, `stems_at_mixed_rates_all_open_at_44k` and `a_stem_at_an_odd_rate_is_refused` fail; after M2 they pass.  `a_44k_stem_is_not_copied` passes before and after (it guards MEM-1).  The 8 kHz fixtures in `app/tests/web.rs`, `app/tests/web_close.rs` and `app/src/store.rs` are now at 44.1 kHz.  All checks pass, and `web-test` passes in Chrome (69 tests).  Safari refused the WebDriver session ("webdriver POST /session request failed"), so no test ran there.
 * [ ] M3: a stored 48 kHz session opens again.
 * [ ] M4: the end-to-end separation of a 48 kHz clip.
 * [ ] Review rounds 1, 2 and 3.
