@@ -197,7 +197,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-25: the `flacenc` spike, run early, before M1.  16 bits work; 24 bits do not (see Surprises).  The maintainer chose 16 bits.
 * [x] 2026-10-25: M0: plan and decision 0013.  fmt, the xtask tests and `docs-check` pass.
 * [x] 2026-10-25: M1 and M2, in one commit: engine decodes FLAC, with the decode limit.  Without the `flac` feature, 8 decode tests fail; with the limit turned off, the 3 limit tests fail, and `a_flac_of_unstated_length_stops_at_the_limit` takes 68 s to decode 2.5 GB of silence from an 82 kB file.  After the change, all 84 engine unit tests pass.
-* [ ] M3: the page opens FLAC.
+* [x] 2026-10-25: M3: the page opens FLAC.  `web-test` passes in Safari, with `a_flac_session_reopens_with_its_stems`.  Only the `empty_state` snapshot changed, for the welcome text.  `flacenc` and its dependencies are in the browser-tests table of `THIRD-PARTY.md` until M4.
 * [ ] M4: the worker encodes FLAC.
 * [ ] M5: the page saves FLAC.
 * [ ] M6: end to end, and on real hardware.

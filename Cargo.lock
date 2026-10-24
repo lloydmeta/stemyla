@@ -276,6 +276,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "engine",
+ "flacenc",
  "js-sys",
  "log",
  "stem-protocol",

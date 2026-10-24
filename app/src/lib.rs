@@ -201,16 +201,15 @@ pub fn about_menu(ui: &mut egui::Ui) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3 files), or press Demo song.";
+const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3/FLAC files), or press Demo song.";
 #[cfg(target_arch = "wasm32")]
-const WELCOME: &str =
-    "Press Open song… (or drop a song, or several WAV/MP3 stems, on the page), or press Demo song.";
+const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC stems, on the page), or press Demo song.";
 
 /// What the song picker offers: the formats `engine` decodes, as
 /// extensions, since iOS Safari treats `audio/*` as video (WebKit bug
 /// 242110).
 #[cfg(target_arch = "wasm32")]
-const SONG_FILES: &str = ".mp3,.wav";
+const SONG_FILES: &str = ".mp3,.wav,.flac";
 
 /// Decodes files the user chose and keeps them in browser storage, so a
 /// reload brings the song back.  The result arrives through the inbox.
@@ -1024,7 +1023,7 @@ impl StemApp {
             #[cfg(target_arch = "wasm32")]
             if ui
                 .button("Open song…")
-                .on_hover_text("Choose an MP3 or WAV file, or several stems of one song")
+                .on_hover_text("Choose an MP3, WAV or FLAC file, or several stems of one song")
                 .clicked()
             {
                 let ctx = ui.ctx().clone();

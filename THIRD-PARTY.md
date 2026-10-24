@@ -165,10 +165,25 @@ The test `third_party_lists_what_ships` compares the table with this command's o
 | Crate | Version | Licence | Source |
 | - | - | - | - |
 | async-trait | 0.1.92 | MIT OR Apache-2.0 | https://github.com/dtolnay/async-trait |
+| block-buffer | 0.10.4 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| byteorder | 1.5.0 | Unlicense OR MIT | https://github.com/BurntSushi/byteorder |
 | cast | 0.3.0 | MIT OR Apache-2.0 | https://github.com/japaric/cast.rs |
+| crc | 3.4.0 | MIT OR Apache-2.0 | https://github.com/mrhooray/crc-rs.git |
+| crc-catalog | 2.5.0 | MIT OR Apache-2.0 | https://github.com/akhilles/crc-catalog.git |
+| crypto-common | 0.1.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| digest | 0.10.7 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
+| flacenc | 0.5.1 | Apache-2.0 | https://github.com/yotarok/flacenc-rs/ |
+| generic-array | 0.14.7 | MIT | https://github.com/fizyk20/generic-array.git |
+| hash32 | 0.3.1 | MIT OR Apache-2.0 | https://github.com/japaric/hash32 |
+| heapless | 0.8.0 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
 | libm | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
+| md-5 | 0.10.6 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | nu-ansi-term | 0.50.3 | MIT | https://github.com/nushell/nu-ansi-term |
 | oorandom | 11.1.5 | MIT | https://hg.sr.ht/~icefox/oorandom |
+| rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
+| seq-macro | 0.3.6 | MIT OR Apache-2.0 | https://github.com/dtolnay/seq-macro |
+| stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
+| typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | wasm-bindgen-test | 0.3.79 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
 | wasm-bindgen-test-macro | 0.3.79 | MIT OR Apache-2.0 | https://github.com/wasm-bindgen/wasm-bindgen |
 | wasm-bindgen-test-shared | 0.2.129 | MIT OR Apache-2.0 | https://github.com/rustwasm/wasm-bindgen/tree/master/crates/test-shared |
