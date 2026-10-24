@@ -989,15 +989,17 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// for this round, the rule for a file that the Write tool refuses to a
 /// subagent, and the count of late review commands in the findings file
 /// and in the log's rounds table.  The approvals of the round and of the
-/// baseline are cost, in their own fields and cells (D4).  Step 11 asks the
-/// person for them, with both questions, and waits.  An orchestrator that
-/// runs the round in auto mode or `dontAsk` mode does not ask, writes 0 with
-/// the mode, and does not see an approval of a fallback prompt (TD-38).
-/// Step 11 writes each count back to its field of the findings file, or one
-/// total.  An intervention is a message of a person, but not the message
-/// that gives the approval counts.  The rounds table's
-/// header, its separator line and the end of its block are one entry, so a
-/// separator with fewer cells than the header fails.
+/// baseline are cost, in their own fields and cells (D4).  Step 11 first
+/// gets the approval counts.  A subagent, or a run with no person, does not
+/// ask.  An orchestrator in auto mode or `dontAsk` mode writes 0 with the
+/// mode, and does not see an approval of a fallback prompt (TD-38).  In
+/// another case, step 11 asks the three questions: the round's count and
+/// its window, the baseline's count with `--baseline`, and one total or 0.
+/// Then it waits, and writes each count back to its field of the findings
+/// file.  An intervention is a message of a person, for the round or the
+/// baseline, but not the message that gives the approval counts.
+/// The rounds table's header, its separator line and the end of its block
+/// are one entry, so a separator with fewer cells than the header fails.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1017,19 +1019,25 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "* approvals:",
     "* baseline approvals:",
     "Do not ask yourself.",
-    "If the round ran in auto mode or `dontAsk` mode, write each count as 0 with the mode",
+    "In auto mode or `dontAsk` mode, write each count as 0 with the mode",
     "You do not see an approval of that prompt (TD-38).",
-    "If you are not that orchestrator, ask the person:",
+    "In any other case, ask the person:",
     "Do not count the `baseline` agent and its validators.",
     "How many tool calls did you approve for the `baseline` agent and its validators in that time?",
     "Write the first count in the `approvals` field of `<run>/$1/findings.md`.",
     "Write the second count in its `baseline approvals` field, in place of \"not asked\".",
     "the `baseline approvals` field holds \"in approvals\"",
     "Without `--baseline`, keep \"-\" in the `baseline approvals` field.",
-    "Else ask the maintainer the questions below.",
+    "In another mode, ask the maintainer the questions below.",
     "If you asked, wait for the answer.  Do not guess the counts.",
     "but not the message that gives the approval counts.  An approval is not an intervention.",
-    "* Approvals: the count that the person gave for the round, as cost.",
+    "* Approvals: the count that the person gave for the round, as cost.  It is the field of the findings file.",
+    "First, get the approval counts of the round.  They are cost, not interventions.",
+    "How many tool calls did you approve for the round's agents and for me, from `review start` until the findings file?",
+    "2. With `--baseline`: ",
+    "Give one total if you cannot split them.  In a mode that asks for no approval, each count is 0.",
+    "Their interventions are the messages of a person for those agents.",
+    "If you are a subagent, or no person can answer, as in a `claude -p` run, do not ask.",
     "Baseline approvals: the count that the person gave for the baseline",
     concat!(
         "| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |\n",

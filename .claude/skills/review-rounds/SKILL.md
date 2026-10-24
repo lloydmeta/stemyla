@@ -267,8 +267,12 @@ of <y> baseline findings, the round found <x>
 
 First, get the approval counts of the round.  They are cost, not interventions.
 
-* If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.  If the round ran in auto mode or `dontAsk` mode, write each count as 0 with the mode, for example `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.  In an interactive session, auto mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  Else ask the maintainer the questions below.
-* If you are not that orchestrator, ask the person:
+* If you are a subagent, or no person can answer, as in a `claude -p` run, do not ask.  Leave both approvals fields "not asked".  Stop here, and give the questions below in your final answer.  The caller asks them, and does the rest of this step.
+* If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.
+  * In auto mode or `dontAsk` mode, write each count as 0 with the mode, for example `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.
+  * In an interactive session, auto mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).
+  * In another mode, ask the maintainer the questions below.
+* In any other case, ask the person:
   1. "How many tool calls did you approve for the round's agents and for me, from `review start` until the findings file?  Do not count the `baseline` agent and its validators."
   2. With `--baseline`: "How many tool calls did you approve for the `baseline` agent and its validators in that time?"
   3. Also say: "Give one total if you cannot split them.  In a mode that asks for no approval, each count is 0."
@@ -303,7 +307,7 @@ Add one row to the rounds table:
 * Tokens: the sum of the tokens of those agents.
 * Wall minutes: the wall minutes of the findings file.  They run from `review start` to the last verdict, without the wait for the mutants run.
 * Interventions: the number of messages of a person in the round, but not the message that gives the approval counts.  An approval is not an intervention.
-* Late review commands: the field of the findings file.  In the default permission mode, each one asked a person for approval (TD-36).  Only in that mode does the count equal the approvals.
+* Late review commands: the field of the findings file.  In the default permission mode, each one asked a person for approval (TD-36).  Only in that mode does the count equal the approvals of those commands.
 * Approvals: the count that the person gave for the round, as cost.  It is the field of the findings file.
 * Mutants: the mutants line.
 * With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are the messages of a person for those agents.  Baseline approvals: the count that the person gave for the baseline, or "in approvals" if the person gave one total.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.

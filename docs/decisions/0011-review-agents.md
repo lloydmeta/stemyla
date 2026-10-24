@@ -41,7 +41,7 @@ The acceptance of the maintainer covers D1 to D6 and the plan that the maintaine
   * TD-33: `review mutants` tests only part of a diff.
   * TD-34: the guard matches text.
   * TD-35: a review runs the diff's code with the person's credentials.
-  * TD-36: the skill forces an approval in each round.
+  * TD-36: in the default permission mode, the skill forces an approval in each round.
   * TD-37: a branch has one set of rounds.
   * TD-38: the log cannot count a person's approvals.
   * TD-44: the log's tokens are final contexts.
