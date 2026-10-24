@@ -37,6 +37,14 @@
 | 2026-10-24 | 3 | e9c3aa7 | 3-6 | docs-reviewer | nit | rule | none | docs/tech-debt.md:371 | A TD-51 sentence is over 25 words | unvalidated | none | e352aee review round 3 fixes |
 | 2026-10-24 | 3 | e9c3aa7 | 3-7 | reviewer | nit | doc | MEM-4 | docs/plans/active/48k-audio.md:46 | 168 MB is the conversion peak, not the open peak | unvalidated | none | e352aee review round 3 fixes |
 | 2026-10-24 | 3 | e9c3aa7 | 3-8 | memory-reviewer | nit | other | none | engine/src/resample.rs:150 | Length conversion error has no context | unvalidated | none | e352aee review round 3 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-1 | docs-reviewer, reviewer, memory-reviewer, supply-chain-reviewer | should-fix | doc | DOC-1 | docs/plans/completed/48k-audio.md:146-150 | Safari result under Not done; Done names Chrome only; no Progress line | confirmed | none | cc66701 review round 4 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-2 | docs-reviewer, reviewer | should-fix | doc | VERIFY-1, DOC-1 | docs/tech-debt.md:184 | TD-33 and the plan give no counts for the 98-mutant run | refuted | none | refuted: no sentence is wrong |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-3 | supply-chain-reviewer | should-fix | other | none | .cargo/mutants.toml:3 | A replay on a commit before the profile fails with exit 4 | confirmed | none | cc66701 review round 4 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-4 | supply-chain-reviewer, reviewer | should-fix | weak-test | VERIFY-1 | Cargo.toml:20-23 | No check pins the mutants profile and its checks | confirmed | none | cc66701 review round 4 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-5 | reviewer | nit | doc | VERIFY-1 | docs/plans/completed/48k-audio.md:149 | Safari's 71 likely counts the known skip as a pass | unvalidated | none | cc66701 review round 4 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-6 | reviewer, docs-reviewer | nit | doc | none | docs/tech-debt.md:187 | 'profile' used for two things; config comment has no verb | unvalidated | none | cc66701 review round 4 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-7 | memory-reviewer | nit | other | MEM-4 | engine/src/resample.rs:150 | The too-long context can never fire; with_capacity panics first | unvalidated | none | cc66701 review round 4 fixes |
+| 2026-10-24 | 4 | 6a4dcf2 | 4-8 | docs-reviewer | nit | weak-test | VERIFY-1 | engine/src/song.rs:268 | A right channel dropped only when converting passes every test | unvalidated | none | cc66701 review round 4 fixes |
 
 ## Rounds
 
@@ -45,3 +53,4 @@
 | 1 | 11 | 453812 | 28.2 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 95; exit 4: the baseline failed | - | - | - | - | - | - |
 | 2 | 8 | 402737 | 21.3 | 1 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 32; exit 4: the baseline failed | - | - | - | - | - | - |
 | 3 | 5 | 263235 | 23.8 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 16 (caught 16, missed 0, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 4 | 8 | 358388 | 30.4 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 6 (caught 6, missed 0, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |

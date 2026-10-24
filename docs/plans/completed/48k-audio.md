@@ -123,6 +123,8 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-24: review round 3: 2 should-fix confirmed (TD-51 named a cover that does not exist, the right channel untested) and 6 nits, all fixed in `e352aee`.  Mutants: 16 tested, 16 caught.
 * [x] 2026-10-24: a separate cargo-mutants run on `engine/src/resample.rs` after round 1 missed 3 mutants, all equivalent (the fast path and the edge path give the same result; `sinc`'s `<` to `<=`).
 * [x] 2026-10-24: Safari, after the review.  Its WebDriver session timed out while Safari was open.  Once Safari was quit, `web-test` gave 70 passes and 1 skip: `an_output_left_behind_by_a_busy_page_is_replaced` skips in a full Safari run (`docs/references/local-browser-testing.md`).  Run alone, it passed.  `e2e separate` passed, with six stems in 3.3 s.
+* [x] 2026-10-24: the mutants profile of TD-33, added to this PR at the maintainer's request.  Over the branch's whole diff, the baseline passed and 98 mutants ran in 16 minutes: 88 caught, 8 missed, 2 unviable.  3 missed are the equivalent `resample.rs` mutants above; 5 are in the `clip` and `separate` code of `xtask/src/e2e.rs`, which only `xtask e2e` runs.
+* [x] 2026-10-24: review round 4, on that profile and the Safari record: 3 should-fix confirmed, 1 refuted, and 4 nits, fixed in `cc66701`.  Mutants: 6 tested, 6 caught.
 
 ## Surprises and discoveries
 
