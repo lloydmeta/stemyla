@@ -1,6 +1,6 @@
 # Replay of six old review rounds
 
-This file records M5 of harness phase 3.  M5 runs six old review rounds of this repo again, in a test harness, with the review agents and the `review-rounds` skill of this branch.  It measures how many findings of each old round the new review finds again (x of n).  The criteria are in `docs/plans/active/harness-phase-3.md`, section "M5: replay old reviews" ([link](../plans/active/harness-phase-3.md#m5-replay-old-reviews)).  The milestone plan is `docs/plans/active/harness-phase-3-m5.md`.
+This file records M5 of harness phase 3.  M5 runs six old review rounds of this repo again, in a test harness, with the review agents and the `review-rounds` skill of this branch.  It measures how many findings of each old round the new review finds again (x of n).  The criteria are in `docs/plans/completed/harness-phase-3.md`, section "M5: replay old reviews" ([link](../plans/completed/harness-phase-3.md#m5-replay-old-reviews)).  The milestone plan is `docs/plans/active/harness-phase-3-m5.md`.
 
 The ground truth below was written from git only, before any case run.  The first commit of this file holds it: `git log --reverse --format='%h %cI' -- docs/reviews/replay.md | head -1` gives that commit and its time.  The dry run and the case runs start after that time.
 
