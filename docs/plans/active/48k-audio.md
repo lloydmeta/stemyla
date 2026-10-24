@@ -37,7 +37,7 @@ The resampler (`engine/src/resample.rs`):
 * `pub const SONG_RATE: u32 = 44_100`.
 * `pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>>`.  At `from == to` it returns `x` as it is.  Otherwise it makes a new `Vec` and drops `x`.  It refuses a rate whose L is more than 441.
 * Rational polyphase with a Blackman-windowed sinc.  For 48 kHz to 44.1 kHz, L = 147 and M = 160.  Output frame `i` reads input frame `j = (i * M) / L` and table row `p = (i * M) % L`, in integer arithmetic.  So the output does not drift and has `ceil(n * L / M)` frames.
-* The cutoff is half the lower rate.  The half-width is `32 * max(1, from / to)` input frames, so 64 taps at 48 kHz.  Each table row is scaled to sum to 1.  The inner loop uses four accumulators.  Input outside the song counts as silence.
+* The cutoff is half the lower rate.  The half-width is `32 * max(1, from / to)` input frames, in integer division, so 64 taps at 48 kHz and 256 at 192 kHz.  Each table row is scaled to sum to 1.  The inner loop uses four accumulators.  Input outside the song counts as silence.
 
 A scratch prototype (not in the repo) measured this filter on 2026-10-24.  From 48 kHz, the gain is within 0.002 dB up to 20 kHz.  Against an ideal sine, the SNR is 89.9 dB at 20 kHz and 110 dB or more up to 18 kHz.  A 23 kHz tone becomes a 21.1 kHz alias at -21.4 dB, above hearing.  This is the trade-off of SoX's `rate -a`, which allows aliasing above the pass band.  A 5-minute stereo song took 0.78 s native and 1.33 s in WebAssembly on V8.
 
@@ -111,7 +111,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 
 * [x] 2026-10-24: design accepted by the maintainer (decision 0012).
 * [x] 2026-10-24: M0: plan and decision 0012.  fmt, clippy, the workspace tests and `docs-check` pass.
-* [ ] M1: `engine::resample`.
+* [x] 2026-10-24: M1: `engine::resample`, 9 unit tests.  In WebAssembly on V8, `to_rate` converts 5 minutes of 48 kHz stereo in 1.37 s.
 * [ ] M2: songs open at 44.1 kHz.
 * [ ] M3: a stored 48 kHz session opens again.
 * [ ] M4: the end-to-end separation of a 48 kHz clip.
@@ -121,6 +121,9 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 
 * 2026-10-24: DSP-1 allows only the methods `len`, `push` and `capacity`, so `dsp` cannot calculate `sin` or `cos`.  The resampler goes in `engine`.
 * 2026-10-24: the storage tests in `app/tests/web.rs` store 8 kHz sources with stems of the same frame count.  At 44.1 kHz the source has more frames than the stems, so the fixture changes in M2.
+
+* 2026-10-24, M1: on wasm32 `usize` has 32 bits, so `i * M` overflows after about 7 minutes at 48 kHz.  `apply` steps the input position and the phase instead, and computes the length in `u64`.
+* 2026-10-24, M1: the engine tests in `engine/src/song.rs` use rates such as 10 Hz and 100 Hz.  `to_rate` refuses those, so M2 changes the tests to 44.1 kHz.
 
 ## Decision log
 
