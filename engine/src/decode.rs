@@ -110,12 +110,13 @@ fn channel_with_room_for(frames: usize) -> Vec<f32> {
     channel
 }
 
-/// Appends `src` to `channel`, which may hold at most `most` frames.  Past
-/// its reservation (none, too big to make, or capped by what the file's
-/// bytes could hold) the channel grows by an eighth at a time rather than
-/// doubling, so a song-sized channel never briefly holds three times
-/// itself, and never past `most`; the decoder's `shrink_to_fit` returns
-/// what is left spare.
+/// Appends `src` to `channel`, which may hold at most `most` frames.  The
+/// caller keeps `channel.len() + src.len()` within `most`.  Past its
+/// reservation, the channel grows by an eighth at a time, not by double.
+/// So a song-sized channel never briefly holds three times itself.  It
+/// never grows past `most`.  The decoder's `shrink_to_fit` returns what is
+/// left spare.  The reservation can be none, too big to make, or capped by
+/// what the file's bytes could hold.
 fn append(channel: &mut Vec<f32>, src: &[f32], most: usize) {
     if src.len() > channel.capacity() - channel.len() {
         let room = most.saturating_sub(channel.len()).max(src.len());
@@ -132,10 +133,18 @@ fn too_long(limit: u64) -> anyhow::Error {
     )
 }
 
+/// The channels that a file of `channels` channels counts as against the
+/// limit.  A mono file counts as stereo, because `Song::from_audio` makes
+/// it stereo.  This also keeps the realloc of one channel, which holds the
+/// old and the new buffer, at about 1.5 times the limit, not 2 times.
+fn counted(channels: usize) -> u64 {
+    channels.max(2) as u64
+}
+
 /// Whether `frames` of each of `channels` channels pass `limit` bytes of
 /// `f32`.
 fn passes(limit: u64, channels: usize, frames: u64) -> bool {
-    frames.saturating_mul(4 * channels as u64) > limit
+    frames.saturating_mul(4 * counted(channels)) > limit
 }
 
 /// A file opened for decoding: its reader, the audio track and how many
@@ -150,7 +159,7 @@ struct Opened {
 /// The frames of each of `channels` channels that fit in `limit` bytes of
 /// `f32`.
 fn frames_within(limit: u64, channels: usize) -> usize {
-    usize::try_from(limit / (4 * channels.max(1) as u64)).unwrap_or(usize::MAX)
+    usize::try_from(limit / (4 * counted(channels))).unwrap_or(usize::MAX)
 }
 
 /// Opens `source`.  It refuses a WAV or FLAC whose stated length passes
@@ -266,6 +275,8 @@ fn decode_into_reservation(
                 }
                 let most = frames_within(limit, planes.len());
                 if channels.is_empty() {
+                    // `open` reserved for the stated channels; the planes
+                    // can be more.
                     channels = planes
                         .iter()
                         .map(|_| channel_with_room_for(reserve.min(most)))
@@ -585,7 +596,18 @@ mod tests {
     /// Stereo silence in `blocks` FLAC frames of `block` frames, stating
     /// `stated` frames.
     fn silence(stated: u64, block: usize, blocks: usize) -> Vec<u8> {
-        by_hand(44_100, 16, 2, stated, Blocks::Silence { block, blocks })
+        silence_of(2, stated, block, blocks)
+    }
+
+    /// As `silence`, in `channels` channels.
+    fn silence_of(channels: usize, stated: u64, block: usize, blocks: usize) -> Vec<u8> {
+        by_hand(
+            44_100,
+            16,
+            channels,
+            stated,
+            Blocks::Silence { block, blocks },
+        )
     }
 
     #[test]
@@ -644,20 +666,46 @@ mod tests {
     #[test]
     fn a_flac_of_unstated_length_stops_at_the_limit() {
         const LIMIT: u64 = 64 << 20;
-        let bytes = two_hours_of_silence(0);
-        let before = LIVE.with(Cell::get);
-        PEAK.with(|peak| peak.set(before));
-        let error = decode_within(bytes, "flac", LIMIT).unwrap_err();
-        let held = (PEAK.with(Cell::get) - before) as u64;
+        let blocks = TWO_HOURS.div_ceil(65_535) as usize;
+        for channels in [1, 2] {
+            let bytes = silence_of(channels, 0, 65_535, blocks);
+            let before = LIVE.with(Cell::get);
+            PEAK.with(|peak| peak.set(before));
+            let error = decode_within(bytes, "flac", LIMIT).unwrap_err();
+            let held = (PEAK.with(Cell::get) - before) as u64;
+            assert!(
+                format!("{error:#}").contains("too long to open"),
+                "{error:#}"
+            );
+            // The peak while a channel grows, when a realloc holds the old
+            // and the new buffer.  A mono file counts as stereo, so its one
+            // channel's realloc does not reach twice the limit.
+            // `a_channel_never_grows_past_the_most_it_may_hold` checks the
+            // cap on each channel.
+            assert!(
+                2 * held < 3 * LIMIT,
+                "{channels} channels: decoding past a {LIMIT}-byte limit held {held} bytes at its peak"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mono_file_counts_as_stereo() {
+        let (left, _, _) = stereo_wav();
+        let mono = [left.iter().map(|x| step(*x, 16)).collect::<Vec<i32>>()];
+        let bytes = || by_hand(44_100, 16, 1, FRAMES as u64, Blocks::Verbatim(&mono));
+        // `Song::from_audio` makes a mono file stereo, at 8 bytes a frame.
+        let stereo_bytes = (FRAMES * 8) as u64;
+        assert_eq!(
+            decode_within(bytes(), "flac", stereo_bytes)
+                .unwrap()
+                .frames(),
+            FRAMES
+        );
+        let error = decode_within(bytes(), "flac", stereo_bytes - 1).unwrap_err();
         assert!(
             format!("{error:#}").contains("too long to open"),
             "{error:#}"
-        );
-        // No channel reserves past the limit, but a realloc holds the old
-        // and the new buffer while a channel grows.
-        assert!(
-            2 * held < 3 * LIMIT,
-            "decoding past a {LIMIT}-byte limit held {held} bytes at its peak"
         );
     }
 

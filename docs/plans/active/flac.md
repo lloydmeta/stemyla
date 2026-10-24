@@ -132,6 +132,7 @@ Acceptance: the tests fail before the feature is enabled ("unsupported or unreco
   * `a_wav_past_the_limit_is_refused`: a WAV that states its length, and a streaming WAV, one byte past a small limit.
   * `a_song_at_the_limit_opens`: the same WAVs at the limit.
   * `the_limit_is_1_gib_or_50_minutes_of_stereo`.
+  * Added in review round 2: `a_mono_file_counts_as_stereo`, and a mono case in `a_flac_of_unstated_length_stops_at_the_limit`.
   * Added in review round 1: `a_stated_length_past_the_limit_is_refused_before_it_decodes`, `an_mp3_whose_estimated_length_passes_the_limit_opens`, `an_mp3_that_states_more_than_the_limit_reserves_at_most_the_limit` and `a_channel_never_grows_past_the_most_it_may_hold`.
 
 Acceptance: before the change, the limit tests fail (the decode succeeds).  After the change, every test passes.
@@ -218,7 +219,8 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 
 * 2026-10-25, agent, review round 1: `open` does not refuse an MP3 on its stated length, since Symphonia estimates it without a Xing or VBRI tag.  The decode loop stops an MP3 at the limit.
 * 2026-10-25, agent, review round 1: `append` never grows a channel past the limit.  The realloc peak of about 1.5 times the limit stays, and decision 0013 now states it.
-* 2026-10-25, agent, review round 1: finding 1-9 (no test of the page's handling of `Event::Flac`) is not fixed.  The MP3 path has the same gap, and the separator test covers the event itself.
+* 2026-10-25, agent, review round 1: finding 1-9 (no test of the page's handling of `Event::Flac`) is not fixed.  The MP3 path has the same gap, and the separator test covers the event itself.  Review round 2 recorded it as TD-53.
+* 2026-10-25, agent, review round 2: a mono file counts as stereo against the limit.  `Song::from_audio` makes it stereo, and the realloc of one channel otherwise held 1.9 times the limit.
 
 * 2026-10-25, maintainer: the encoder is `flacenc` =0.5.1, with the encoder in this repo as the fallback.
 * 2026-10-25, maintainer: a saved FLAC has 24 bits for each sample.

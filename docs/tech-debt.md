@@ -376,12 +376,19 @@ On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
 
-This entry concerns DEPS-1: a dependency defect that the code works around.
+This entry concerns DEPS-1.  It is a workaround of a defect in a dependency, which CLAUDE.md asks to record.  It breaks no rule.
 
 `flacenc` 0.5.1 gives the short last block as the minimum block size in STREAMINFO (`update_frame_info`).  RFC 9639 section 8.2 excludes the last block.  Symphonia then reads the stream as variable-blocksize, and refuses every frame.  So four places set the block sizes again after `flacenc`: `flac` in `worker/src/web.rs`, `compressed` in `engine/src/test_flac.rs`, `flac_16` in `xtask/src/e2e.rs` and `flac` in `app/tests/web.rs`.  `flacenc` also has no 5-bit Rice parameters and no escape codes, so it cannot write 24 bits; a saved FLAC has 16 (`plans/active/flac.md`, Surprises).
 
 * Fix: remove the overrides when `flacenc` writes the minimum as RFC 9639 says.  For 24 bits, use an encoder that can write them, such as one in this repo.  Until then, `a_flac_decodes_to_the_stem` fails if the worker's override goes.
 
+### TD-53: the page's save of an encoded stem has no test
+
+This entry concerns VERIFY-1.
+
+The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The arms of `App` that handle them call `store::download` and `store::download_blob`, which make an object URL and click a link.  No test reaches these arms or functions.  The separator tests check that each event keeps the worker's buffer or `Blob` (`an_mp3_reply_reaches_the_page_as_sent`, `a_flac_reply_reaches_the_page_as_sent`), and `e2e flac` checks the worker's file.  The "FLAC encoding" and "MP3 encoding" error labels have no test either.  Source: `plans/active/flac.md`, review rounds 1 and 2 (findings 1-9 and 2-2).
+
+* Fix: a browser test that delivers each event to an `App` and spies on the link that `save_file` or `save_blob` clicks.
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
