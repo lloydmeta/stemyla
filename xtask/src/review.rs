@@ -48,6 +48,7 @@ pub const REVIEWERS: &[Reviewer] = &[
             "roformer/src/**",
             "roformer-gpu/src/**",
             "synth/src/**",
+            "dsp/src/**",
             "**/clippy.toml",
             ".claude/rules/memory.md",
         ],
@@ -1552,6 +1553,7 @@ mod tests {
                 "roformer-gpu/src/**",
             ),
             ("synth/src/lib.rs", "memory-reviewer", "synth/src/**"),
+            ("dsp/src/mix.rs", "memory-reviewer", "dsp/src/**"),
             ("dsp/clippy.toml", "memory-reviewer", "**/clippy.toml"),
             (
                 ".claude/rules/memory.md",
@@ -1683,7 +1685,7 @@ mod tests {
 
     #[test]
     fn a_path_in_no_row_routes_reviewer_only() {
-        let route = route_of_path("dsp/src/lib.rs");
+        let route = route_of_path("xtask/src/metrics.rs");
         assert_eq!(route.reviewers(), ["reviewer"]);
         assert_eq!(route.reasons("reviewer"), ["every diff"]);
     }

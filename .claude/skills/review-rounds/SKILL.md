@@ -265,13 +265,15 @@ of <y> baseline findings, the round found <x>
 
 ### 11. Add the round to the log
 
-First, get the approval counts of the round.  They are cost, not interventions.
+First, get the approval counts of the round.  They are cost, not interventions.  Use the first bullet that applies.  Under the orchestrator bullet, use the first mode bullet that applies, and always the last sub-bullet.
 
 * If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.
-  * In `dontAsk` mode, or in auto mode in a `claude -p` run, write each count as 0 with the mode.  For example, write `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.
-  * In auto mode in an interactive session, the mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  So write `0 (auto mode; a fallback prompt is not counted)`.
-  * In another mode, ask the maintainer the questions below.
-* If you are a subagent, or no person can answer, as in a `claude -p` run, do not ask.  Leave the approvals fields as step 9 wrote them.  Stop here, and give the questions below in your final answer.  The caller asks them, and does the rest of this step.
+  * In a `claude -p` run, in any mode, write each count as 0 with the mode.  For example, write `0 (auto mode)`.  A mode that asks for approval cannot get one in a `-p` run, so its count is 0 too, for example `0 (default mode)`.
+  * In `dontAsk` mode in an interactive session, write each count as `0 (dontAsk mode)`.
+  * In auto mode in an interactive session, the mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  So write each count as `0 (auto mode; a fallback prompt is not counted)`.
+  * In another mode in an interactive session, ask the maintainer the questions below.
+  * Without `--baseline`, keep "-" in the `baseline approvals` field.  This applies in each mode.
+* If you are not the orchestrator, and you are a subagent or no person can answer, as in a `claude -p` run, do not ask.  Leave the approvals fields as step 9 wrote them.  Stop here, and give the questions below in your final answer.  The caller asks them, and does the rest of this step.
 * In any other case, ask the person:
   1. "How many tool calls did you approve for the round's agents and for me, from `review start` until the findings file?  Do not count the `baseline` agent and its validators."
   2. With `--baseline`: "How many tool calls did you approve for the `baseline` agent and its validators in that time?"

@@ -144,11 +144,11 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 
 ### TD-31: the route of `xtask review` is a short denylist, from the branch's own code
 
-This entry concerns no rule.  It concerns which reviewers read a diff, so it touches each rule that a reviewer checks.
+This entry concerns which reviewers read a diff.  So it touches each rule that a reviewer checks, not one rule only.
 
 `xtask/src/review.rs` chooses the reviewers of a diff from its paths and from content signs.  The content signs are a short denylist, not a full list.  A sign matches as a whole token only.  So `create_buffer` does not match `create_buffer_init`, which `roformer-gpu/src/lib.rs` calls.  A sign counts only on an added line of a Rust file outside a `tests` folder and outside the reviewer's own paths.  A copy or a GPU buffer that a macro, an alias or a helper makes routes nothing.
 
-Since M6, review round 1, the paths of `memory-reviewer` include `roformer/src/`, `roformer-gpu/src/` and `synth/src/`.  So a change to the GPU memory budget (MEM-4) or to the model read (MEM-1) routes it.  The check that enforces PROTO-1, `SCRIPT_ONLY_TYPES` in `xtask/src/rules.rs`, routes only `supply-chain-reviewer` and `reviewer`.  Neither agent lists PROTO-1, so no reviewer checks PROTO-1 on a change to that list.
+Since M6, review round 1, the paths of `memory-reviewer` include `roformer/src/`, `roformer-gpu/src/` and `synth/src/`.  So a change to the GPU memory budget (MEM-4) or to the model read (MEM-1) routes it.  Since M6, review round 2, they also include `dsp/src/`.  Its code runs in the audio callback (RT-1) and builds the song-length mix (MEM-4).  `e2e_messages_use_protocol_types` enforces PROTO-1.  A change to its list `SCRIPT_ONLY_TYPES` in `xtask/src/rules.rs` routes only `supply-chain-reviewer` and `reviewer`.  Neither agent lists PROTO-1, so no reviewer checks PROTO-1 on a change to that list.
 
 The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  `xtask review start` warns when the branch changes `xtask/src/review.rs`, and when the binary is older than that file.
 
@@ -178,7 +178,7 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 
 * cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
 * `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
-* `mutants_args` sets no `STEMYLA_REQUIRE`.  So where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
+* `mutants_command` sets no `STEMYLA_REQUIRE`, and passes on the caller's own.  So without it, where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
 * cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
@@ -203,6 +203,7 @@ These pass the guard.  Each item gives examples only, and the list is not comple
 * an array element before the command, such as `a[0]=1 git commit -m x`, which bash runs as an assignment and a command;
 * `rtk` subcommands such as `rtk run` and `rtk err`;
 * `cargo new` and `cargo init`, which write a new package;
+* an xtask command in a form that `names_xtask` does not match, such as `cargo run -p xtask@0.1.0`, `-p path+file:///.../xtask`, `-mxtask/Cargo.toml`, and `cd xtask` before `cargo run`.  The deny rules in `.claude/settings.json` still refuse `cargo r* publish*` (TD-28);
 * other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
 * interpreters, such as `perl -e` and `awk`, and wrappers, such as `sudo` and `nice`;
 * brace expansion and globs, such as `{git,commit} -m x` and `/usr/bin/gi? commit`;
@@ -235,7 +236,7 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review runs no `xtask review` command.
 
-Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in auto mode does not ask, and writes 0 (TD-38).  So the approvals that the skill forces do not fail D4 of `plans/active/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
+Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask, and writes 0 (TD-38).  So the approvals that the skill forces do not fail D4 of `plans/active/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
 
 * Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/active/harness-phase-3-m3.md`).
 
@@ -321,7 +322,7 @@ This entry concerns no rule.  It concerns the measure of D4 of `plans/active/har
 
 The final context of an agent is lower than the tokens that it used, by a ratio that differs by agent.  In M5, that ratio ran from 2.5 to 26.2 in case `m2`, and from 3.7 to 18.4 in case `m18a`.  Reviewers have high ratios, and validators low ones.  So D4's ratio of summed final contexts can misstate the ratio of tokens used by several times, by the mix of agents.
 
-In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For example, the session of `m18a` used 6,266,253 tokens, and its main agent used 758,710 of them.  The final contexts of its seven subagents sum to 391,169.  The source of these figures is `## Cost` of `docs/reviews/replay.md`.  It counts each agent's `message.usage` in the M5 transcripts, once for each message ID.
+In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For example, the session of `m18a` used 6,266,253 tokens, and its main agent used 758,710 of them.  The final contexts of its seven subagents sum to 391,169.  The source of these figures is `## Cost` of `docs/reviews/replay.md`.  The session's 6,266,253 comes from `modelUsage`.  The main agent's 758,710 counts its `message.usage` in the M5 transcript, once for each message ID.  The 391,169 is a sum of final contexts.  For `m2` and `m18a`, the sums of each agent's `message.usage` are about 1% below `modelUsage`.
 
 D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
 
@@ -343,7 +344,7 @@ This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
-`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  An escape other than `\\` and `\"` in a plain Rust literal joins its letter to the next word, such as `\n` or `\t`.  So `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
+`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  A `\'` opens a string.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not.  It looks on each diff that routes it (TD-31).
 
