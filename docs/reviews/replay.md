@@ -10,7 +10,7 @@ How the ground truth was made:
 
 * A ground-truth item is one finding of the old round whose fix commit changed code or tests for it.  Its ID is `<case>-<n>`.
 * The sources are the fix commit's message and diff.  For a phase 2 case, they also include the Progress of `docs/plans/active/harness-phase-2.md` at the fix commit.
-* A finding is left out when its fix changed only docs, comments or wording, or when the old round refuted it or left it with no change.  For `m2` and `m10`, round 1's findings are left out.
+* A finding is left out when its fix changed only docs, comments or wording.  A finding is also left out when the old round refuted it, or left it with no change.  For `m2` and `m10`, round 1's findings are left out.
 * Each line range is at the reviewed commit, which is the fix commit's parent.  A range includes the doc comment of its function.
 * The severity is the one that the old round recorded.  When the old round recorded none, the severity is inferred and marked `(inferred)`.
 * For a weak or missing test, "Where" gives both the function under test and the test.
@@ -793,9 +793,9 @@ The maintainer classes a sample of these findings as real or false after the PR 
 | Case | ID | Severity | Source | Claim | Checker's state |
 | - | - | - | - | - | - |
 | `pr9` | 1-1 | should-fix | reviewer, memory-reviewer, supply-chain-reviewer | `sends_json_and_reads_a_sized_reply` still passes when the client reads to the end of the stream, since the fake closes the socket after 30 s. | still on main: the test has a 120 s timeout, so `loop {}` passes (TD-39) |
-| `pr9` | 1-2 | should-fix, pre-existing | reviewer | The `selftest` scenario does not see a failed model load, so it waits the full 4 hours. | fixed on main, `03d3326` |
-| `pr9` | 1-3 | should-fix | docs-reviewer | `docs/ARCHITECTURE.md` calls the WebDriver client "std-only", but it uses serde_json and anyhow. | still on main (own PR) |
-| `pr9` | 1-24, 1-41, 1-48 | should-fix | cargo-mutants | `+` to `*` or `-` in the arithmetic of `Session::set_viewport`. | fixed on main, `32b2731`: the arithmetic moved into `fit_viewport`, and `viewport_tests` assert the sizes |
+| `pr9` | 1-2 | should-fix, pre-existing | reviewer | The `selftest` scenario does not see a failed model load, so it waits the full 4 hours. | fixed on `main`, `03d3326` |
+| `pr9` | 1-3 | should-fix | docs-reviewer | `docs/ARCHITECTURE.md` calls the WebDriver client "std-only", but it uses serde_json and anyhow. | still on `main`; fixed on this branch by M5 |
+| `pr9` | 1-24, 1-41, 1-48 | should-fix | cargo-mutants | `+` to `*` or `-` in the arithmetic of `Session::set_viewport`. | fixed on `main`, `32b2731`: the arithmetic moved into `fit_viewport`, and `viewport_tests` assert the sizes |
 | `pr9` | 1-17, 1-39 | should-fix | cargo-mutants | `\|\|` to `&&` in the end of the wait in `bench`, line 837. | gone: `03d3326` removed the clause in `bench` |
 | `pr9` | 1-13 | should-fix | cargo-mutants | `Session::set_viewport` replaced with `Ok(())`. | still on main (likely): no test calls the `set_viewport` wrapper (TD-39) |
 | `pr9` | 1-15, 1-16, 1-21, 1-23, 1-28, 1-32, 1-49 | should-fix | cargo-mutants | Mutants of the `Page` methods `wait_for`, `errors`, `idle`, `url`, `finish` and `click`. | still on main (likely): `Page` needs a live browser session (TD-39) |
@@ -805,24 +805,24 @@ The maintainer classes a sample of these findings as real or false after the PR 
 | `pr9` | 1-12, 1-22, 1-31, 1-34 | should-fix | cargo-mutants | Mutants of `Driver::start`, `free_port` and `Session::execute`. | still on main (likely): no test starts a `Driver` or calls `Session::execute` (TD-39) |
 | `pr9` | 1-18, 1-27 | should-fix | cargo-mutants | Mutants of `run` in `xtask/src/web_test.rs`. | still on main (likely): the tests of `xtask/src/web_test.rs` never call `run` (TD-39) |
 | `pr9` | 1-50 | should-fix, pre-existing | cargo-mutants | `run` in `xtask/src/serve.rs` replaced with `Ok(())`. | still on main (likely): `xtask/tests/serve.rs` never calls `run` (TD-39) |
-| `m9` | 1-1 | should-fix | reviewer | No test fails when the `well_formed` guard goes, so a line of `THIRD-PARTY.md` that is not well formed can become a row. | fixed on main, `7a99a88` (from `4b27829`): the fixture `"x v0.1.0 extra\|MIT\|"` kills the mutant |
+| `m9` | 1-1 | should-fix | reviewer | No test fails when the `well_formed` guard goes, so a line of `THIRD-PARTY.md` that is not well formed can become a row. | fixed on `main`, `7a99a88` (from `4b27829`): the fixture `"x v0.1.0 extra\|MIT\|"` kills the mutant |
 | `m11` | 1-1 | should-fix | reviewer, memory-reviewer, docs-reviewer | No test reaches two branches of `app_stretcher_problems`: `"default"` in the features of an `engine =` line, and a manifest with no `engine =` line. | still on main (TD-40) |
-| `m11` | 1-2 | should-fix | docs-reviewer | An agent wrote decision 0007 as accepted by the maintainer, but the maintainer chose only the rule, not the limits of its scope. | still on main: decision 0007 still says "accepted (by the maintainer)" (own PR) |
+| `m11` | 1-2 | should-fix | docs-reviewer | An agent wrote decision 0007 as accepted by the maintainer, but the maintainer chose only the rule, not the limits of its scope. | still on main: decision 0007 still says "accepted (by the maintainer)" (own PR: only the maintainer can set the status of a decision, and the orchestrator's summary names it) |
 | `m11` | 1-8 | should-fix | cargo-mutants | `-` to `+` in `WsolaStretcher::can_pull`; the stretcher's output changes for pushes over 256 frames. | still on main (likely): `a_stretcher_keeps_its_warm_up_promise` counts allocations only, and no test checks the output (TD-40) |
 | `m11` | 1-10 | should-fix | cargo-mutants | `+` to `*` in `WsolaStretcher::warm_up`; the warm-up push becomes 722M frames. | still on main (likely): no test bounds the warm-up size (TD-40) |
 | `m11` | 1-14 | should-fix | cargo-mutants | `==` to `!=` in `Player::drop_oldest_anchor_when_full`; the playhead shows the loop start for about 4 callbacks before each wrap. | still on main (likely): the loop tests check only that the playhead stays inside the loop (TD-40) |
-| `m2` | 1-2 | should-fix | reviewer, gpu-reviewer | `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand-copied table, not from `Kernels::new`.  So its doc comment and the docs claim more than it checks. | still on main (in part): `ad1b159` narrowed the claim, but the doc comment still rests on a hand copy (TD-41) |
+| `m2` | 1-2 | should-fix | reviewer, gpu-reviewer | `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand-copied table, not from `Kernels::new`.  So its doc comment and the docs claim more than it checks. | still on main (in part): `ad1b159` narrowed the claim.  The last sentence of the doc comment, "The entry points that `Kernels::new` names exist.", still claims too much, since the test checks a hand copy of the entry names (TD-41) |
 | `m2` | 1-4 | should-fix | docs-reviewer, gpu-reviewer | No test covers the count of read-only storage buffers, the y-axis limit, or z in the invocation product. | still on main: no planted shader has one of these (TD-41) |
 | `m2` | 1-6 | should-fix | docs-reviewer | GPU-1 says "The test parses every shader with naga", but both tests check only their own hand lists. | fixed on `main`, `ad1b159`; the rest is 1-2 |
-| `m2` | 1-7 | should-fix | docs-reviewer, reviewer | GPU-1 says that only wgpu checks dispatch counts, but `Rec::push` asserts each one against 65,535. | fixed on main, `ad1b159` |
+| `m2` | 1-7 | should-fix | docs-reviewer, reviewer | GPU-1 says that only wgpu checks dispatch counts, but `Rec::push` asserts each one against 65,535. | fixed on `main`, `ad1b159` |
 | `m10` | 1-1 | should-fix | reviewer, wire-reviewer | A plain Rust literal keeps `\n`, `\t` and `\r` as source text, so `\ntype` reads as `ntype`, and a misspelt type after it passes.  TD-16 does not name the gap. | still on main: `unescape_quotes` keeps `\n`, and TD-16 names only a `\n` after `//` (TD-16 gains a sentence) |
-| `m10` | 1-2 | should-fix | docs-reviewer | TD-16 does not name regex literals, where a quote, `//` or backtick hides the types after it. | fixed on main, `7cd8518` |
+| `m10` | 1-2 | should-fix | docs-reviewer | TD-16 does not name regex literals, where a quote, `//` or backtick hides the types after it. | fixed on `main`, `7cd8518` |
 | `m10` | 1-3 | should-fix | docs-reviewer | No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses, so a stale check without the Rust half passes. | still on main: `the_script_only_list_is_checked` has no such entry (TD-42) |
 | `m10` | 1-10 | should-fix | cargo-mutants | `&&` to `\|\|` in `rust_types`, line 2624; no test has `<=`. | still on main (likely): no test has `["type"] <=` (TD-42) |
 | `m10` | 1-11 | should-fix | cargo-mutants | The match guard in `rust_type_value` replaced with `true`; `"type": format!("segmnt")` gives a false problem. | still on main (likely): no test has a macro other than `json!` after `"type":` (TD-42) |
 | `m10` | 1-12 | should-fix | cargo-mutants | `!` deleted in `js_included_types`; the first string of an `includes` array is not checked. | still on main (likely): both `includes` cases put the misspelt type second (TD-42) |
 | `m10` | 1-13 | should-fix | cargo-mutants | `+=` to `-=` in `js_tokens`; a newline before `/*` gives the wrong line. | still on main (likely): in a scratch copy, `js_is_lexed` passes with the mutant (TD-42) |
-| `m18a` | 1-1 | should-fix | docs-reviewer, memory-reviewer | The doc comment of `load_and_keep` says that the bytes are never copied, but the picker copies each chosen file into wasm once. | fixed on main, `7541152` (from `e63469e`) |
+| `m18a` | 1-1 | should-fix | docs-reviewer, memory-reviewer | The doc comment of `load_and_keep` says that the bytes are never copied, but the picker copies each chosen file into wasm once. | fixed on `main`, `7541152` (from `e63469e`) |
 | `m18a` | 1-2 | should-fix, pre-existing | supply-chain-reviewer, docs-reviewer | No automated check runs the file picker path, and no tech-debt entry records that. | still on main: no automated check drives the picker (TD-43) |
 
 ## Flags
@@ -831,7 +831,7 @@ A new flag subagent read `.claude/agents/*.md`, `.claude/skills/review-rounds/SK
 
 * `.claude/agents/wire-reviewer.md:61`: "A field name or a default that one side changes and the other side does not (TD-16)".  The items of `m10` are test gaps in `js_after_typeof` and `rust_types`, not a field mismatch.
 * `.claude/agents/supply-chain-reviewer.md:61`: "The licence and the registry of each new crate.  Check them with `cargo info <crate>` (TD-7)".  `m9-4` is a missing test case, not the licence of a new crate.
-* `.claude/agents/baseline.md:17`, and the same text in the six reviewer files: "For each test, ask: does it fail if the code is wrong?".  This is a general method.
+* `.claude/agents/baseline.md:17`: "For each test, ask: does it fail if the code is wrong?".  The six reviewer files hold, at line 56, "name a change to the code that the test must catch".  Each is a general method, and `baseline` ran in no case.
 
 Caveat: the agents point to tech-debt IDs, and `docs/tech-debt.md` at a reviewed commit is part of the reviewed tree.  The flag subagent did not read it.
 
@@ -839,7 +839,7 @@ Caveat: the agents point to tech-debt IDs, and `docs/tech-debt.md` at a reviewed
 
 The five threats of the parent plan:
 
-* One run of a random process.  Each case ran once, with no tuning (D5).  Another run can find other findings.
+* One run of a random process.  Each case has one counted run, with no tuning (D5).  Another run can find other findings.
 * Six cases, most of them harness work in the main.  n is 26, so the interval is wide.  The GPU, memory and wire reviewers have few items to find.
 * The harness leaves out the person's global `CLAUDE.md` in `~/.claude/`, which real rounds load.  The case command has `--setting-sources project,local`.
 * The agent that wrote the agent files has read phase 2's Progress, which names the findings.  The flag subagent found no text that names an item (`## Flags`).  But the check cannot see a bias that names no item.
@@ -855,4 +855,9 @@ The threats that M5 found:
 * The comparers got each finding's ID, sources, severity, kind, place and claim, with the evidence where it bears on the match.  The team leader made shorter the claims of nits about docs or wording only, which cannot match a code item.  The team leader resolved one match that a comparer was not sure of (`m10-2` against mutant 1-10).
 * The severities of `pr9` and `m2` are inferred, so those items do not enter the should-fix test of the bar.
 * The ground truth is what the old round fixed, so the measure is recall only.  The runs found 62 outside findings, and the maintainer classes a sample of them as real or false.
-* The ground truth can lack a finding of the old round.  `m9`'s fix commit `4b27829` also fixed outside finding 1-1 of `m9` (the `well_formed` guard).  Neither its message nor Progress names that change, so the ground truth left it out.  The ground truth was fixed before the runs, and stays as it is.
+* The ground truth can lack a finding of the old round.  The old round's own fix commits fixed three outside findings, so the old round likely found them:
+  * `m9` 1-1, the `well_formed` guard, fixed by `4b27829` with a fixture.  Neither the commit message nor Progress names that change.
+  * `m10` 1-2, regex literals in TD-16, fixed by `d67db75`.  That fix changed docs only.
+  * `m18a` 1-1, the doc comment of `load_and_keep`, fixed by `e63469e`.  That fix changed docs only.
+
+  By its rules, the ground truth leaves out a fix that changed docs only.  The ground truth was fixed before the runs, and stays as it is.

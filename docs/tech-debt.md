@@ -236,7 +236,7 @@ This entry concerns no rule.  It concerns the measure of D4 of the parent plan (
 
 * Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the count.
 
-### TD-39: xtask's WebDriver client, e2e scenarios and browser runners have no `cargo test` coverage
+### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 
 Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  No `cargo test` kills these mutants:
 
@@ -270,7 +270,7 @@ Source: `docs/reviews/replay.md`, case `m11`, findings 1-1, 1-8, 1-10 and 1-14.
 
 `every_kernel_fits_the_default_limits` and its tests do not cover all of the checker (GPU-1, DOC-1):
 
-* `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new`.  Its doc comment claims more than it checks.
+* `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new`.  The last sentence of its doc comment claims more than it checks: "The entry points that `Kernels::new` names exist."  The test checks a hand copy of the entry names.
 * No test covers the count of read-only storage buffers, the y-axis limit, or a breach of the invocation limit that only z causes.
 
 Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
@@ -296,7 +296,7 @@ Source: `docs/reviews/replay.md`, case `m10`, findings 1-3, 1-10, 1-11, 1-12 and
 
 Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
 
-* Fix: a hand check in Chrome for each PR that changes the picker path, recorded in the PR, until a browser test can set the files.
+* Fix: do a hand check in Chrome for each PR that changes the picker path.  Record it in the PR.  Stop when a browser test can set the files.
 
 ## Known breaches
 
