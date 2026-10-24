@@ -989,17 +989,22 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// for this round, the rule for a file that the Write tool refuses to a
 /// subagent, and the count of late review commands in the findings file
 /// and in the log's rounds table.  The approvals of the round and of the
-/// baseline are cost, in their own fields and cells (D4).  Step 11 first
-/// gets the approval counts.  A subagent, or a run with no person, does not
-/// ask.  An orchestrator in auto mode or `dontAsk` mode writes 0 with the
-/// mode, and does not see an approval of a fallback prompt (TD-38).  In
-/// another case, step 11 asks the three questions: the round's count and
-/// its window, the baseline's count with `--baseline`, and one total or 0.
-/// Then it waits, and writes each count back to its field of the findings
-/// file.  An intervention is a message of a person, for the round or the
-/// baseline, but not the message that gives the approval counts.
-/// The rounds table's header, its separator line and the end of its block
-/// are one entry, so a separator with fewer cells than the header fails.
+/// baseline are cost, in their own fields and cells (D4).  Step 9 writes
+/// them as "not asked", and the baseline's as "-" without `--baseline`.
+/// Step 11 first gets the approval counts.  An orchestrator in auto mode or
+/// `dontAsk` mode writes 0 with the mode, and marks the 0 of an interactive
+/// session, since it does not see an approval of a fallback prompt (TD-38).
+/// A subagent, or a run with no person, does not ask, leaves the fields as
+/// step 9 wrote them, and gives the questions to its caller.  In another
+/// case, step 11 asks the three questions: the round's count and its window,
+/// the baseline's count with `--baseline`, and one total or 0.  Then it
+/// waits, and writes each count back to its field of the findings file.
+/// With one total, the round's count includes the baseline's, and the
+/// baseline's field and cell say so.  An intervention is a message of a
+/// person, for the round or the baseline, but not the message that gives
+/// the approval counts.  The rounds table's header, its separator line and
+/// the end of its block are one entry, so a separator with fewer cells than
+/// the header fails.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1038,6 +1043,14 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "Give one total if you cannot split them.  In a mode that asks for no approval, each count is 0.",
     "Their interventions are the messages of a person for those agents.",
     "If you are a subagent, or no person can answer, as in a `claude -p` run, do not ask.",
+    "* approvals: <not asked.",
+    "Without --baseline, write \"-\">",
+    "Stop here, and give the questions below in your final answer.",
+    "The caller asks them, and does the rest of this step.",
+    "or \"in approvals\" if the person gave one total",
+    "which then includes the baseline's",
+    "write `0 (auto mode; a fallback prompt is not counted)`",
+    "Leave the approvals fields as step 9 wrote them.",
     "Baseline approvals: the count that the person gave for the baseline",
     concat!(
         "| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |\n",

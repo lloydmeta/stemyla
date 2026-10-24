@@ -65,7 +65,7 @@ MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E06
 * Source can reach across crates without a dependency: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
 * A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
 * A symbolic link in a crate's folder can point to another crate's source.
-* Fix: the `supply-chain-reviewer` agent looks for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
+* Fix: the `supply-chain-reviewer` agent looks for all four, on each diff that routes it (TD-31).  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
 
 ### TD-25: RT-1's allocation test runs natively only
 
@@ -221,7 +221,7 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review runs no `xtask review` command.
 
-Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  So the approvals that the skill forces do not fail D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  The count of late review commands equals their approvals only in the default permission mode.
+Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in auto mode does not ask, and writes 0 (TD-38).  So the approvals that the skill forces do not fail D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  The count of late review commands equals their approvals only in the default permission mode.
 
 * Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/active/harness-phase-3-m3.md`).
 
@@ -233,7 +233,7 @@ Since M4, the log counts these late review commands in their own field and cell.
 
 ### TD-38: the review log cannot count a person's approvals
 
-This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  In the default permission mode, a command of a reviewer, a validator or the baseline can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  In an interactive session, auto mode can also fall back to a prompt that waits for a person.  An orchestrator that runs the skill then logs 0 with the mode, and does not see such an approval.  So step 11 of the `review-rounds` skill asks the person for the approvals of the round and of the baseline.  The log records them as cost, not as interventions.  The counts rest on the person.  A person can miscount, or cannot tell the baseline's approvals from the round's, and then gives one total.  The maintainer reads the counts at the gate.
+This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  In the default permission mode, a command of a reviewer, a validator or the baseline can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So step 11 of the `review-rounds` skill asks the person for the approvals of the round and of the baseline.  In an interactive session, auto mode can also fall back to a prompt that waits for a person.  An orchestrator that runs the skill then logs 0 with the mode, and does not see such an approval.  It marks that 0 as a lower bound.  The log records the approvals as cost, not as interventions.  The counts rest on the person.  A person can miscount, or cannot tell the baseline's approvals from the round's, and then gives one total.  The maintainer reads the counts at the gate.
 
 * Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the counts.
 
