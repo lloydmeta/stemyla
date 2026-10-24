@@ -29,7 +29,7 @@ impl Audio {
 
 /// The most decoded samples one file may hold, as `f32` bytes over all its
 /// channels (decision 0013): 50.7 minutes of 44.1 kHz stereo.  A FLAC of
-/// a few kB can state, and hold, hours of silence.
+/// about 80 kB can hold 2 hours of silence.
 pub const MAX_DECODED_BYTES: u64 = 1 << 30;
 
 /// How many times smaller than PCM at its stated bits a FLAC is trusted to
@@ -110,14 +110,16 @@ fn channel_with_room_for(frames: usize) -> Vec<f32> {
     channel
 }
 
-/// Appends `src` to `channel`.  Past its reservation (none, too big to
-/// make, or capped by what the file's bytes could hold) the channel grows by
-/// an eighth at a time rather than doubling, so a song-sized channel never
-/// briefly holds three times itself; the decoder's `shrink_to_fit` returns
+/// Appends `src` to `channel`, which may hold at most `most` frames.  Past
+/// its reservation (none, too big to make, or capped by what the file's
+/// bytes could hold) the channel grows by an eighth at a time rather than
+/// doubling, so a song-sized channel never briefly holds three times
+/// itself, and never past `most`; the decoder's `shrink_to_fit` returns
 /// what is left spare.
-fn append(channel: &mut Vec<f32>, src: &[f32]) {
+fn append(channel: &mut Vec<f32>, src: &[f32], most: usize) {
     if src.len() > channel.capacity() - channel.len() {
-        channel.reserve_exact(src.len().max(channel.len() / 8));
+        let room = most.saturating_sub(channel.len()).max(src.len());
+        channel.reserve_exact(src.len().max(channel.len() / 8).min(room));
     }
     channel.extend_from_slice(src);
 }
@@ -145,8 +147,17 @@ struct Opened {
     reserve: usize,
 }
 
-/// Opens `source`, and refuses it if its stated length passes `limit`
-/// bytes of samples.  The reservation never passes `limit` either.
+/// The frames of each of `channels` channels that fit in `limit` bytes of
+/// `f32`.
+fn frames_within(limit: u64, channels: usize) -> usize {
+    usize::try_from(limit / (4 * channels.max(1) as u64)).unwrap_or(usize::MAX)
+}
+
+/// Opens `source`.  It refuses a WAV or FLAC whose stated length passes
+/// `limit` bytes of samples.  An MP3 states only an estimate without a
+/// Xing or VBRI tag: a quiet start can make it 10 times too long.  So an
+/// MP3 is never refused here; the decoder stops it at the limit.  The
+/// reservation of any file is within `limit`.
 fn open(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<Opened> {
     let byte_len = source.byte_len();
     let mss = MediaSourceStream::new(source, Default::default());
@@ -173,14 +184,16 @@ fn open(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<O
         .clone();
     let track_id = track.id;
     let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
-    if track
-        .num_frames
-        .is_some_and(|frames| passes(limit, channels, frames))
+    let stated_exactly = params.codec != CODEC_ID_MP3;
+    if stated_exactly
+        && track
+            .num_frames
+            .is_some_and(|frames| passes(limit, channels, frames))
     {
         return Err(too_long(limit));
     }
     let most = byte_len.map(|len| most_frames(&params, len));
-    let within_limit = limit / (4 * channels as u64);
+    let within_limit = frames_within(limit, channels) as u64;
     let reserve = frames_to_reserve(track.num_frames, most.map(|m| m.min(within_limit)));
     Ok(Opened {
         format,
@@ -251,14 +264,15 @@ fn decode_into_reservation(
                 if passes(limit, planes.len(), (decoded + packet_frames) as u64) {
                     return Err(too_long(limit));
                 }
+                let most = frames_within(limit, planes.len());
                 if channels.is_empty() {
                     channels = planes
                         .iter()
-                        .map(|_| channel_with_room_for(reserve))
+                        .map(|_| channel_with_room_for(reserve.min(most)))
                         .collect();
                 }
                 for (dst, src) in channels.iter_mut().zip(planes.iter()) {
-                    append(dst, src);
+                    append(dst, src, most);
                 }
             }
             // A corrupt frame is skipped, as players do.
@@ -490,16 +504,16 @@ mod tests {
     #[test]
     fn a_full_channel_grows_by_an_eighth_not_double() {
         let mut channel = vec![0.5; 8000];
-        append(&mut channel, &[0.25; 10]);
+        append(&mut channel, &[0.25; 10], usize::MAX);
         assert_eq!(channel.capacity(), 9000);
         assert_eq!(channel.len(), 8010);
         assert_eq!(channel[7999..8001], [0.5, 0.25]);
         // Within the room it has, it does not grow.
-        append(&mut channel, &[0.25; 990]);
+        append(&mut channel, &[0.25; 990], usize::MAX);
         assert_eq!(channel.capacity(), 9000);
         // A packet bigger than an eighth gets exactly its own room.
         let mut small = vec![0.5; 8];
-        append(&mut small, &[0.25; 1152]);
+        append(&mut small, &[0.25; 1152], usize::MAX);
         assert_eq!(small.capacity(), 1160);
     }
 
@@ -568,7 +582,8 @@ mod tests {
         assert_eq!(reserve_of(bytes, "flac"), FRAMES);
     }
 
-    /// Stereo silence in 4,096-frame blocks, stating `stated` frames.
+    /// Stereo silence in `blocks` FLAC frames of `block` frames, stating
+    /// `stated` frames.
     fn silence(stated: u64, block: usize, blocks: usize) -> Vec<u8> {
         by_hand(44_100, 16, 2, stated, Blocks::Silence { block, blocks })
     }
@@ -605,8 +620,8 @@ mod tests {
     /// Two hours of 44.1 kHz stereo frames.
     const TWO_HOURS: u64 = 2 * 3600 * 44_100;
 
-    /// Two hours of stereo silence in 65,535-frame blocks: about 20 bytes
-    /// each, for 524,280 bytes of `f32`.
+    /// Two hours of stereo silence in FLAC frames of 65,535 frames: about
+    /// 17 bytes each, for 524,280 bytes of `f32`.
     fn two_hours_of_silence(stated: u64) -> Vec<u8> {
         silence(stated, 65_535, TWO_HOURS.div_ceil(65_535) as usize)
     }
@@ -638,10 +653,10 @@ mod tests {
             format!("{error:#}").contains("too long to open"),
             "{error:#}"
         );
-        // The channels grow by an eighth, and a realloc holds the old and
-        // the new buffer: up to about 1.5 times the limit.
+        // No channel reserves past the limit, but a realloc holds the old
+        // and the new buffer while a channel grows.
         assert!(
-            held < 2 * LIMIT,
+            2 * held < 3 * LIMIT,
             "decoding past a {LIMIT}-byte limit held {held} bytes at its peak"
         );
     }
@@ -680,6 +695,69 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// An MPEG-1 Layer III frame of silence at 44.1 kHz stereo: its header,
+    /// then zero side information and data.
+    fn mp3_frame(bitrate_index: u8, bytes: usize) -> Vec<u8> {
+        let mut frame = vec![0; bytes];
+        frame[..4].copy_from_slice(&[0xff, 0xfb, bitrate_index << 4, 0x00]);
+        frame
+    }
+
+    /// 20 quiet frames at 32 kbit/s, then `loud` frames at 320 kbit/s, with
+    /// no Xing or VBRI tag.  Symphonia then estimates the length from the
+    /// first 16 frames, so it states about 10 times the real length.
+    fn quiet_start_mp3(loud: usize) -> Vec<u8> {
+        let quiet = (0..20).flat_map(|_| mp3_frame(1, 104));
+        let loud = (0..loud).flat_map(|_| mp3_frame(14, 1044));
+        quiet.chain(loud).collect()
+    }
+
+    /// 4 MiB: more than the estimated length of `quiet_start_mp3(200)`
+    /// (about 18.7 MB), less than its real length (about 2 MB).
+    const MP3_LIMIT: u64 = 4 << 20;
+
+    #[test]
+    fn an_mp3_whose_estimated_length_passes_the_limit_opens() {
+        let audio = decode_within(quiet_start_mp3(200), "mp3", MP3_LIMIT).unwrap();
+        assert_eq!(audio.frames(), 220 * 1152);
+    }
+
+    #[test]
+    fn an_mp3_that_states_more_than_the_limit_reserves_at_most_the_limit() {
+        let opened = open(
+            Box::new(Cursor::new(quiet_start_mp3(200))),
+            Some("mp3"),
+            MP3_LIMIT,
+        )
+        .unwrap();
+        // Stereo: 8 bytes a frame.
+        assert_eq!(opened.reserve as u64, MP3_LIMIT / 8);
+    }
+
+    #[test]
+    fn a_stated_length_past_the_limit_is_refused_before_it_decodes() {
+        let refused = |bytes: Vec<u8>, ext: &str, limit: u64| {
+            let error = open(Box::new(Cursor::new(bytes)), Some(ext), limit)
+                .err()
+                .expect("refused when it opens");
+            assert!(
+                format!("{error:#}").contains("too long to open"),
+                "{error:#}"
+            );
+        };
+        refused(two_hours_of_silence(TWO_HOURS), "flac", MAX_DECODED_BYTES);
+        let (_, _, wav) = stereo_wav();
+        refused(wav, "wav", (FRAMES * 8 - 1) as u64);
+    }
+
+    #[test]
+    fn a_channel_never_grows_past_the_most_it_may_hold() {
+        let mut channel = vec![0.5; 8000];
+        append(&mut channel, &[0.25; 5], 8010);
+        assert_eq!(channel.capacity(), 8010);
+        assert_eq!(channel.len(), 8005);
     }
 
     #[test]

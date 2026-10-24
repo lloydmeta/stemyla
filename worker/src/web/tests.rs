@@ -993,7 +993,14 @@ async fn a_flac_decodes_to_the_stem() {
     assert!(bytes.len() < TONE_FRAMES * 4, "{} bytes", bytes.len());
     let (rate, channels, verified) = decode_flac(bytes);
     assert_eq!(rate, 48_000);
-    assert_eq!(channels, [as_16_bits(&left), as_16_bits(&right)]);
+    // Against the input, not `pcm16`, so a wrong quantiser fails.
+    for (got, sent) in channels.iter().zip([&left, &right]) {
+        let sent = sent.to_vec();
+        assert_eq!(got.len(), sent.len());
+        for (g, s) in got.iter().zip(&sent) {
+            assert!((g - s).abs() <= 0.5 / 32768.0 + 1e-7, "{g} for {s}");
+        }
+    }
     assert_eq!(verified, Some(true), "the MD5 matches the audio");
     let reply = sent("flac").pop().expect("a flac reply");
     assert_eq!(
@@ -1039,14 +1046,16 @@ async fn a_flac_of_unequal_channels_stops_at_the_shorter() {
 }
 
 #[wasm_bindgen_test]
-async fn a_flac_clips_at_full_scale() {
+async fn a_flac_clips_at_full_scale_and_rounds() {
     fresh().await;
-    let left = Float32Array::from(&[1.5_f32, -1.5, 1.0, -1.0, 0.5][..]);
-    let right = Float32Array::from(&[0.0_f32; 5][..]);
+    let step = 1.0 / 32_768.0;
+    let left = Float32Array::from(&[1.5_f32, -1.5, 1.0, -1.0, 0.5, 0.75 * step, 0.25 * step][..]);
+    let right = Float32Array::from(&[0.0_f32; 7][..]);
     let (_, channels, _) = decode_flac(encode_flac(&left, &right, TONE_RATE).await);
+    // Clipped at full scale, and rounded to the nearest step.
     assert_eq!(
         channels[0],
-        [32_767.0 / 32_768.0, -1.0, 32_767.0 / 32_768.0, -1.0, 0.5]
+        [32_767.0 * step, -1.0, 32_767.0 * step, -1.0, 0.5, step, 0.0]
     );
 }
 

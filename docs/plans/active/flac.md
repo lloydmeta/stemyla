@@ -50,12 +50,12 @@ flowchart LR
 
 Enable Symphonia's `flac` feature in `engine`.  It adds `symphonia-bundle-flac` 0.6.1 (MPL-2.0), from the same repository as the other Symphonia crates.  It reads the native FLAC container (`.flac`).  FLAC in Ogg, Matroska or MP4 is out of scope.
 
-A FLAC file brings a risk that WAV and MP3 do not have: a small file can decode to a very large one.  A FLAC frame of 65,535 frames of silence in stereo takes about 20 bytes: a header of about 10 bytes, two constant subframes of 3 bytes and a CRC-16.  It decodes to 524,280 bytes of `f32`.  That is about 25,000 times its size, so a 1 MB file can state and hold about 25 GB of audio.  WebAssembly on wasm32 has 4 GiB at most, and iOS stops the tab at 2 GB (MEM-4).  Today `append` grows a channel with no limit, so such a file stops the tab.  A crafted file or a damaged one can do this.
+A FLAC file brings a risk that WAV and MP3 do not have: a small file can decode to a very large one.  A FLAC frame of 65,535 frames of silence in stereo takes about 17 bytes.  These are a header of about 9 bytes, two constant subframes of 3 bytes and a CRC-16.  It decodes to 524,280 bytes of `f32`, about 30,000 times its size.  So a 1 MB file can state and hold about 30 GB of audio.  WebAssembly on wasm32 has 4 GiB at most, and iOS stops the tab at 2 GB (MEM-4).  Today `append` grows a channel with no limit, so such a file stops the tab.  A crafted file or a damaged one can do this.
 
 So the decoder gets two guards:
 
 * The reservation: `most_frames` gets a FLAC case.  The stated total of STREAMINFO is trusted up to 16 times what the file's bytes hold as PCM at the stated bits.  The demo song's stems compress 2.2 (the mix) to 11.3 times at 16 bits (M1 measured this).  Past the cap, the channel grows by an eighth, as now.  The reservation is also never more than the decode limit.
-* The decode limit: `decode_into_reservation` stops with "the song is too long to open" when the decoded `f32` of all channels passes `MAX_DECODED_BYTES`.  The value is 1 GiB: 50.7 minutes of 44.1 kHz stereo, or 23.3 minutes of 96 kHz stereo.  The limit is in `engine`, before `from_audio`, so it also guards a long WAV or MP3 (decision 0013).  A file whose STREAMINFO states more than the limit is refused before it decodes.
+* The decode limit: `decode_into_reservation` stops with "the song is too long to open" when the decoded `f32` of all channels passes `MAX_DECODED_BYTES`.  The value is 1 GiB: 50.7 minutes of 44.1 kHz stereo, or 23.3 minutes of 96 kHz stereo.  The limit is in `engine`, before `from_audio`, so it also guards a long WAV or MP3 (decision 0013).  A WAV or FLAC whose header states more than the limit is refused before it decodes.  An MP3 without a Xing or VBRI tag states only an estimate, so it stops while it decodes (review round 1).  No channel grows past the limit, but a realloc can briefly hold about 1.5 times it.
 
 High-resolution FLAC (24-bit, 88.2 to 192 kHz) is common.  Symphonia gives it as `f32`, and `to_rate` converts it to 44.1 kHz (decision 0012).  A FLAC with more than two channels keeps its first two, front left and front right (RFC 9639 section 9.1.3), as a WAV does today.  So a 5.1 mix loses its centre channel.  `Song::from_audio` documents this.  It breaks no rule, so it is not tech debt.
 
@@ -132,6 +132,7 @@ Acceptance: the tests fail before the feature is enabled ("unsupported or unreco
   * `a_wav_past_the_limit_is_refused`: a WAV that states its length, and a streaming WAV, one byte past a small limit.
   * `a_song_at_the_limit_opens`: the same WAVs at the limit.
   * `the_limit_is_1_gib_or_50_minutes_of_stereo`.
+  * Added in review round 1: `a_stated_length_past_the_limit_is_refused_before_it_decodes`, `an_mp3_whose_estimated_length_passes_the_limit_opens`, `an_mp3_that_states_more_than_the_limit_reserves_at_most_the_limit` and `a_channel_never_grows_past_the_most_it_may_hold`.
 
 Acceptance: before the change, the limit tests fail (the decode succeeds).  After the change, every test passes.
 
@@ -155,7 +156,7 @@ Acceptance: `cargo run -p xtask -- web-test` passes with the new test, and the t
   * `a_flac_of_worst_case_signals_is_no_larger_than_pcm`: full-scale noise, a square wave and clipping encode to less than their 16-bit PCM, and decode exactly.
   * `a_flac_is_encoded_in_blocks`: the counting allocator bounds the peak WebAssembly memory to a few blocks, not the stem.
   * `a_flac_of_unequal_channels_stops_at_the_shorter`, as for MP3.
-  * `a_flac_clips_at_full_scale`: +1.5 decodes to the largest 16-bit step.
+  * `a_flac_clips_at_full_scale_and_rounds`: +1.5 decodes to the largest 16-bit step, and 0.75 of a step to one step.
   * `a_flac_of_no_samples_is_refused`.
 * The e2e scripts in `xtask/src/e2e.rs`, if they post an MP3 request (PROTO-1).  `cargo test -p xtask --test rules` passes.
 
@@ -163,7 +164,7 @@ Acceptance: `cargo run -p xtask -- web-test` passes with the new tests.  `a_flac
 
 ### M5: the page saves FLAC
 
-* `app/src/separator.rs`: `encode_flac` and `Event::Flac { name, file }`.  Test `a_flac_reply_reaches_the_page_as_sent`: the page gets the same `Blob` (MEM-2).
+* `app/src/separator.rs`: `encode_flac` and `Event::Flac { name, file }`.  Test `a_flac_reply_reaches_the_page_as_sent`: the page gets the same `Blob` (MEM-1).
 * `app/src/store.rs`: `download_blob`, with an object URL that the page revokes after the click.
 * `app/src/lib.rs`: "FLAC (16-bit, lossless)" in the "Save" menu, between WAV and MP3.  The error label "FLAC encoding".
 * DOC-1: `README.md` (saving a stem), and the message list at the top of `protocol/src/lib.rs`.
@@ -173,7 +174,7 @@ Acceptance: the separator test passes in `web-test`.  The UI snapshots pass, or 
 ### M6: end to end, and on real hardware
 
 * `xtask/src/e2e.rs` `clip`: an option to write the clip as a 16-bit 96 kHz FLAC with `flacenc`.  `cargo run -p xtask -- e2e separate` passes on that clip with 6 stems.
-* `e2e flac`: the release worker encodes a 5-minute stem posted by hand, and the reply is a `Blob` that starts with `fLaC` and is smaller than 16-bit PCM.  Write the time in Progress.  CI runs it in Chrome.
+* `e2e flac`: the release worker encodes a 5-minute stem posted by hand.  The reply is a `Blob` that starts with `fLaC` and is smaller than 16-bit PCM.  Write the time in Progress.  CI runs it in Chrome.
 * A person, on an iPhone: "Open song…" offers a `.flac` file in Files, and a FLAC stem saves.  Write the device and the iOS version in Progress.
 
 ### Review
@@ -198,9 +199,9 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-25: decision points 1, 2 and 3 chosen by the maintainer (decision 0013).
 * [x] 2026-10-25: the `flacenc` spike, run early, before M1.  16 bits work; 24 bits do not (see Surprises).  The maintainer chose 16 bits.
 * [x] 2026-10-25: M0: plan and decision 0013.  fmt, the xtask tests and `docs-check` pass.
-* [x] 2026-10-25: M1 and M2, in one commit: engine decodes FLAC, with the decode limit.  Without the `flac` feature, 8 decode tests fail; with the limit turned off, the 3 limit tests fail, and `a_flac_of_unstated_length_stops_at_the_limit` takes 68 s to decode 2.5 GB of silence from an 82 kB file.  After the change, all 84 engine unit tests pass.
+* [x] 2026-10-25: M1 and M2, in one commit: engine decodes FLAC, with the decode limit.  Without the `flac` feature, 8 decode tests fail.  With the limit turned off, the 3 limit tests fail.  Then `a_flac_of_unstated_length_stops_at_the_limit` takes 68 s to decode 2.5 GB of silence from an 82 kB file.  After the change, all 84 engine unit tests pass.
 * [x] 2026-10-25: M3: the page opens FLAC.  `web-test` passes in Safari, with `a_flac_session_reopens_with_its_stems`.  Only the `empty_state` snapshot changed, for the welcome text.  `flacenc` and its dependencies are in the browser-tests table of `THIRD-PARTY.md` until M4.
-* [x] 2026-10-25: M4 and M5, in one commit: the worker encodes FLAC and the page saves it.  `web-test` passes in Safari: 8 new tests in the worker, 3 in the protocol and 1 in the separator.  With a copy of one whole channel added to `flac`, `a_flac_is_encoded_in_blocks` fails (5.6 MB held at the peak).  `flacenc` builds for `wasm32` with no default features.  The encode time of 5 minutes waits for M6, since the debug build of the tests timed out on it.
+* [x] 2026-10-25: M4 and M5, in one commit: the worker encodes FLAC and the page saves it.  `web-test` passes in Safari: 6 new tests in the worker, 3 in the protocol and 1 in the separator.  With a copy of one whole channel added to `flac`, `a_flac_is_encoded_in_blocks` fails (5.6 MB held at the peak).  `flacenc` builds for `wasm32` with no default features.  The encode time of 5 minutes waits for M6, since the debug build of the tests timed out on it.
 * [x] 2026-10-25: M6: end to end.  The new scenario `e2e flac` posts a 5-minute stereo stem to the release worker by hand.  It passes in Safari (14.7 s to encode) and Chrome (11.3 s), with a file of 8.5 MB against 52.9 MB of 16-bit PCM.  CI runs it in Chrome after `storage`.  `e2e separate --flac` passes in Chrome (6 stems in 1.4 s, Radeon Pro 5500M) and Safari (3.3 s): the 96 kHz FLAC clip opens at 44.1 kHz with 88,200 frames.  `e2e separate` with the WAV clip and `e2e storage` still pass in Chrome.  `web-test` passes in Chrome and Safari.
 * [ ] A person, on an iPhone: "Open song…" offers a `.flac` file, and a FLAC stem saves.
 * [ ] Review rounds 1, 2 and 3.
@@ -210,10 +211,14 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * 2026-10-25: Symphonia 0.6.1 has a `flac` feature, in its default features, which `engine` turns off with `default-features = false`.  So input needs no new top-level crate. Its `flac` feature brings `symphonia-bundle-flac` and `symphonia-common`, both 0.6.1 and MPL-2.0.
 * 2026-10-25: `xtask/src/rules.rs` already lists `flac` in `AUDIO_EXTENSIONS`, so ASSET-1 already covers FLAC files.
 * 2026-10-25, spike: Symphonia refused every file that `flacenc::encode_with_fixed_block_size` wrote ("unexpected end of file").  `flacenc` gives the short last block as the minimum block size in STREAMINFO.  RFC 9639 section 8.2 excludes the last block.  So Symphonia reads the stream as variable-blocksize, and its strict header check rejects each frame, which has a frame number.  With the minimum set to 4,096, every file decodes.
-* 2026-10-25, spike: `flacenc` 0.5.1 cannot write 24 bits.  It has no 5-bit Rice parameters ("5-bit rice coding is not supported currently", `src/constant.rs`) and no escape codes.  At 24 bits, a full-scale square wave encoded to 1,270 times its PCM size, the demo mix to about 9.4 GB from 7.9 MB, and the drums stem did not decode.
+* 2026-10-25, spike: `flacenc` 0.5.1 cannot write 24 bits.  It has no 5-bit Rice parameters ("5-bit rice coding is not supported currently", `src/constant.rs`) and no escape codes.  At 24 bits, a full-scale square wave encoded to 1,270 times its PCM size.  The demo mix encoded to about 9.4 GB from 7.9 MB, and the drums stem did not decode.
 * 2026-10-25, spike: at 16 bits, the demo song's five stems and its mix decode exactly, at 2.2 (the mix) to 11.3 (bass) times smaller than PCM.  Full-scale noise, a square wave, alternate full-scale samples, clipping and impulses also decode exactly, at 0.09 to 0.54 of their PCM size.
 
 ## Decision log
+
+* 2026-10-25, agent, review round 1: `open` does not refuse an MP3 on its stated length, since Symphonia estimates it without a Xing or VBRI tag.  The decode loop stops an MP3 at the limit.
+* 2026-10-25, agent, review round 1: `append` never grows a channel past the limit.  The realloc peak of about 1.5 times the limit stays, and decision 0013 now states it.
+* 2026-10-25, agent, review round 1: finding 1-9 (no test of the page's handling of `Event::Flac`) is not fixed.  The MP3 path has the same gap, and the separator test covers the event itself.
 
 * 2026-10-25, maintainer: the encoder is `flacenc` =0.5.1, with the encoder in this repo as the fallback.
 * 2026-10-25, maintainer: a saved FLAC has 24 bits for each sample.

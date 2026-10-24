@@ -269,7 +269,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` an
 
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume` and `storage`.  A person runs the other scenarios.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.
 
 ### TD-40: gaps in the RT-1 tests
 
@@ -373,6 +373,15 @@ On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10
 * Fix: run engine's tests on wasm32, for example under `wasm-bindgen-test-runner` in `xtask web-test`.  Until then, no check covers this.
 
 ## Known breaches
+
+### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
+
+This entry concerns DEPS-1: a dependency defect that the code works around.
+
+`flacenc` 0.5.1 gives the short last block as the minimum block size in STREAMINFO (`update_frame_info`).  RFC 9639 section 8.2 excludes the last block.  Symphonia then reads the stream as variable-blocksize, and refuses every frame.  So four places set the block sizes again after `flacenc`: `flac` in `worker/src/web.rs`, `compressed` in `engine/src/test_flac.rs`, `flac_16` in `xtask/src/e2e.rs` and `flac` in `app/tests/web.rs`.  `flacenc` also has no 5-bit Rice parameters and no escape codes, so it cannot write 24 bits; a saved FLAC has 16 (`plans/active/flac.md`, Surprises).
+
+* Fix: remove the overrides when `flacenc` writes the minimum as RFC 9639 says.  For 24 bits, use an encoder that can write them, such as one in this repo.  Until then, `a_flac_decodes_to_the_stem` fails if the worker's override goes.
+
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 

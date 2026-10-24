@@ -1,7 +1,7 @@
 //! `xtask e2e <scenario> [options]`: drives the built web app (`app/dist`)
 //! in Safari or Chrome through WebDriver and checks what it does.
 //!
-//! Scenarios (the first three need no model and run in CI):
+//! Scenarios (the first four need no model and run in CI):
 //! * `smoke`: drop generated stems, Play, change the tempo.
 //! * `audio-resume`: a song restored at page load plays after one click,
 //!   with Web Audio behaving as in Safari; stems stored with it come back
@@ -9,11 +9,14 @@
 //! * `storage`: the worker's model storage across messages and workers:
 //!   queue order, the cross-tab lock, stalled downloads, `?model_url=`;
 //!   with `--weights`, also the paths that load a real model (GPU).
+//! * `flac`: the release worker encodes a 5-minute stem as a FLAC; logs
+//!   the time.
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).
 //! * `separate`: drop a clip and the model, Separate, lanes appear
-//!   (`--weights`).
+//!   (`--weights`).  The clip is a 48 kHz WAV, or with `--flac` a 96 kHz
+//!   FLAC.
 //! * `worker-check`: the worker's separation against PyTorch's
 //!   (`--weights`, `--reference` from `tools/roformer_export.py`).
 //!
@@ -22,7 +25,7 @@
 //! `--headed` (Chrome with a window), `--swiftshader` (Chrome's software
 //! WebGPU, for machines without a GPU), `--query Q` (page URL query for
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
-//! `--reference DIR`, `--download`, and click positions `--play-x`,
+//! `--reference DIR`, `--download`, `--flac`, and click positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
 //! Classic WebDriver has no console events and no init scripts, so the
@@ -1227,20 +1230,30 @@ fn flac(o: &Opts) -> Result<()> {
         300,
     )?;
     p.note(&format!("reply: {r}"));
-    let pcm_bytes = u64::from(FLAC_SECONDS) * 44_100 * 4;
-    p.check(r["error"].is_null(), "the worker encodes the stem");
-    p.check(r["name"] == "tone.flac", "the reply keeps the name");
-    p.check(r["media"] == "audio/flac", "the file is audio/flac");
-    p.check(r["head"] == "fLaC", "the file starts with fLaC");
-    p.check(
-        r["size"].as_u64().is_some_and(|s| 0 < s && s < pcm_bytes),
-        &format!("the file is smaller than its {pcm_bytes} bytes of 16-bit PCM"),
-    );
+    for (ok, what) in flac_checks(&r, FLAC_SECONDS) {
+        p.check(ok, &what);
+    }
     p.note(&format!(
         "flac: {FLAC_SECONDS} s of stereo encoded in {} ms",
         r["ms"]
     ));
     p.finish()
+}
+
+/// The checks of the `flac` scenario on the page's summary of the reply,
+/// for a stem of `seconds` of 44.1 kHz stereo: each with what it checks.
+fn flac_checks(r: &Value, seconds: u32) -> [(bool, String); 5] {
+    let pcm_bytes = u64::from(seconds) * 44_100 * 4;
+    [
+        (r["error"].is_null(), "the worker encodes the stem".into()),
+        (r["name"] == "tone.flac", "the reply keeps the name".into()),
+        (r["media"] == "audio/flac", "the file is audio/flac".into()),
+        (r["head"] == "fLaC", "the file starts with fLaC".into()),
+        (
+            r["size"].as_u64().is_some_and(|s| s < pcm_bytes),
+            format!("the file is smaller than its {pcm_bytes} bytes of 16-bit PCM"),
+        ),
+    ]
 }
 
 /// The worker loads the model (from bytes, or with
@@ -1345,6 +1358,58 @@ fn worker_check(o: &Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_flac_clip_decodes_to_its_samples() {
+        let left: Vec<f32> = (0..9_000).map(|i| 0.5 * (0.01 * i as f32).sin()).collect();
+        let right: Vec<f32> = left.iter().map(|x| -x).collect();
+        let bytes = flac_16(&left, &right, 96_000).unwrap();
+        let audio = engine::decode_bytes(bytes, Some("flac")).unwrap();
+        assert_eq!(audio.sample_rate, 96_000);
+        for (got, want) in audio.channels.iter().zip([&left, &right]) {
+            assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert!((g - w).abs() <= 0.5 / 32_768.0 + 1e-7, "{g} for {w}");
+            }
+        }
+    }
+
+    /// The reply of a real run (`target/e2e/flac/flac.log`, 2026-10-25).
+    fn real_reply() -> serde_json::Value {
+        json!({"head": "fLaC", "media": "audio/flac", "ms": 11293, "name": "tone.flac", "size": 8460848})
+    }
+
+    fn passes(r: &serde_json::Value) -> Vec<bool> {
+        flac_checks(r, 300).map(|(ok, _)| ok).to_vec()
+    }
+
+    #[test]
+    fn the_flac_checks_pass_a_real_reply_and_fail_wrong_ones() {
+        assert_eq!(passes(&real_reply()), [true; 5]);
+        let wrong = |field: &str, value: serde_json::Value, check: usize| {
+            let mut r = real_reply();
+            r[field] = value;
+            let mut want = [true; 5];
+            want[check] = false;
+            assert_eq!(passes(&r), want, "{field}");
+        };
+        wrong("error", json!("FLAC encoder: no"), 0);
+        wrong("name", json!("stem.flac"), 1);
+        wrong("media", json!(""), 2);
+        wrong("head", json!("RIFF"), 3);
+        // 300 s of 44.1 kHz 16-bit stereo is 52,920,000 bytes.
+        wrong("size", json!(52_920_000), 4);
+        wrong("size", json!(60_000_000), 4);
+        let mut r = real_reply();
+        r["size"] = json!(52_919_999);
+        assert_eq!(passes(&r), [true; 5]);
+        assert!(
+            flac_checks(&real_reply(), 300)[4]
+                .1
+                .contains("52920000 bytes")
+        );
+    }
+
     use super::*;
 
     fn args(s: &str) -> Vec<String> {
