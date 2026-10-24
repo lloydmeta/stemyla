@@ -6,16 +6,17 @@ The agent reads `CLAUDE.md` (the map) and the docs.  This guide is for the perso
 
 ## Status
 
-Phases 1 and 2 are in place:
+Phases 1, 2 and 3 are in place:
 
 * The map (`CLAUDE.md`) and the docs under `docs/`, with the rules by ID in `invariants.md`.
 * Rules for parts of the tree in `.claude/rules/`, which load when the agent touches those files.
 * `xtask docs-check`, a test that fails when the map or the docs drift from the code.
 * Checks that fail a breach of a rule.  Among them: tests in `xtask/tests/rules.rs`, clippy's `disallowed-methods` and `STEMYLA_REQUIRE`.  Also the shader limits test, the UI snapshot comparison and the allocation test of the audio callback.  Most give the rule ID and the fix.  `invariants.md` names the check for each rule, or says "prose only".
+* Review agents, routed by `xtask review` and run by the project skill `review-rounds`, with a log of each branch's rounds in the reviews folder (decision 0011).
 
 The agent runs three review rounds with `/review-rounds` after it implements a change, because `CLAUDE.md` tells it to.  The review recipe below starts the same rounds by hand.  A person still gives evidence from real hardware, publishes and merges.  The project settings (`.claude/settings.json`) deny `xtask publish`, `gh pr merge` and a push that names `main` or `gh-pages` to the agent.  The project settings also run rustfmt on each `.rs` file in the repo that the agent edits.
 
-Phase 3 adds eight read-only review agents in `.claude/agents/`: `reviewer`, `gpu-reviewer`, `memory-reviewer`, `wire-reviewer`, `supply-chain-reviewer`, `docs-reviewer`, `validator` and `baseline` (see "Review agents" below).  `xtask review start` routes the six reviewers.  The project skill `review-rounds` (`.claude/skills/review-rounds/SKILL.md`) starts the agents in each round, and runs cargo-mutants (see "Review a change").
+Phase 3 added eight read-only review agents in `.claude/agents/`: `reviewer`, `gpu-reviewer`, `memory-reviewer`, `wire-reviewer`, `supply-chain-reviewer`, `docs-reviewer`, `validator` and `baseline` (see "Review agents" below).  `xtask review start` routes the six reviewers.  The project skill `review-rounds` (`.claude/skills/review-rounds/SKILL.md`) starts the agents in each round, and runs cargo-mutants (see "Review a change").
 
 ## Before you start
 
@@ -84,7 +85,8 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
   6. The agent writes the findings file in the run folder under `target/review/run/`.  It fixes each found finding, with a failing test first where the finding is about behaviour.  A `pre-existing` finding can go to `docs/tech-debt.md` or its own PR.  It commits "review round <n> fixes", and adds the round to the log.
 * Check: the refuted findings, the unproven blockers and should-fix, each `repeat-of`, and each mutants line.  The PR description lists them.
 * From the PR after phase 3's, pass `--baseline` in round 1, until the parent plan (`plans/active/harness-phase-3.md`) records the gate.
-* The skill runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` asks for approval once in each round, and a late `review mutants` can ask too.  Approve each one once, not with "don't ask again".  Step 11 of the skill counts these late review commands in their own cell, not as interventions (TD-36).  "Don't ask again" changes the local settings file of Claude Code, and `review check` then fails the round.
+* The skill runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` asks for approval once in each round, and a late `review mutants` can ask too.  Approve each one once, not with "don't ask again".  Step 11 of the skill counts these late review commands in their own cell (TD-36).  "Don't ask again" changes the local settings file of Claude Code, and `review check` then fails the round.
+* In the default permission mode, count the tool calls that you approve in each round.  Count from `review start` until the agent writes the findings file.  In round 1 with `--baseline`, count those for the `baseline` agent and its validators apart.  Give one total if you cannot split them.  Step 11 asks for the counts and waits: give them then (TD-38).  The log records approvals as cost.  An intervention is a message of a person in the round, but not the message with the counts.
 * If `review check` names a change, the round stops.  Examine `git reflog`, the stash and the changed files, then start the round again.
 * A branch has one set of rounds and one log, so "the run folder holds a log" from round 1 means that an earlier set ran (TD-37).
 
@@ -179,3 +181,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-23, phase 3 (M2): eight read-only review agents in `.claude/agents/`, with a guard on their Bash commands (see "Review agents").  The guard refuses a commit, a push, a stash, `gh` and a cargo publish, with "read-only guard:" and the reason.  The recipe "Review a change" starts reviewers by hand until M3.
 * 2026-10-23, phase 3 (M3): the project skill `review-rounds` runs one review round: `/review-rounds <base> <round> "<criteria>"`.  It starts the routed reviewers and a `validator` for each serious finding, runs cargo-mutants, checks the state of the repo, and writes the findings.  `CLAUDE.md` and the recipe "Review a change" use it for rounds 1, 2 and 3.  Approve `review check` once in each round, and a late `review mutants` once, not with "don't ask again".  Run `cargo build -p xtask` before round 1.  A branch has one set of rounds (TD-37).
 * 2026-10-24, phase 3 (M4): `docs-check` accepts review logs in the reviews folder under `docs`.  One index line, `reviews/`, lists each log there.  A log keeps the paths and closed IDs of its time, as a plan does.  Step 11 of `review-rounds` counts the late `xtask review` commands in their own cell, not as interventions (TD-36).  The log cannot count the approvals that the agent does not see (TD-38).
+* 2026-10-24, phase 3 (M6): phase 3 is in place (decision 0011).  Step 11 of `review-rounds` asks for the approvals of the round, and of the baseline apart, and logs them as cost, in their own cells.  An intervention is a message of a person.  In the default permission mode, count your approvals (TD-38).  The tech-debt entries that review covers name the agent that looks.

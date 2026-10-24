@@ -23,7 +23,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * A refusal of `review start` (exit 3) stops the skill before this text.  Claude Code shows its lines, such as "commit first", in the session.  A `claude -p` run in text mode shows nothing.
 * A `warning:` line of `review start` does not stop the round.  Copy it to the findings file (step 9).
 * `allowed-tools` lets the `xtask review` commands run with no approval only in the turn in which the skill loads.  A new turn ends that permission.  A message of a person starts a new turn.  So does the notice that a background agent or command ended.
-* The notices of the background reviewers and of the mutants run start new turns.  So `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
+* The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
@@ -210,8 +210,10 @@ Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Wri
 * flags: <the flags, or none>
 * warnings: <each warning: line of review start, or none>
 * times: started <started>, wait <seconds>, end <end>; wall minutes <(end - started - wait) / 60, to 1 decimal>
-* interventions: <the number of messages of a person since review start, and the approvals of a person that you see or that the person reports, but not an approval of a late review command>
+* interventions: <the number of messages of a person since review start, but not the message that gives the approval counts of step 11.  An approval is not an intervention>
 * late review commands: <the number of `target/debug/xtask review` commands that the skill ran or tried to run after the turn in which it loaded>
+* approvals: <not asked.  Step 11 writes the count that the person gives for the round>
+* baseline approvals: <not asked.  Step 11 writes the count that the person gives for the baseline.  Without --baseline, write "-">
 
 ## Agents
 
@@ -263,6 +265,16 @@ of <y> baseline findings, the round found <x>
 
 ### 11. Add the round to the log
 
+First, get the approval counts of the round.  They are cost, not interventions.
+
+* If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.  The round can run in auto mode or `dontAsk` mode with no person present.  Then write each count as 0 with the mode, for example `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.  Auto mode can fall back to a prompt, but with no person present that prompt stops the session.  Else ask the maintainer the questions below.
+* If you are not that orchestrator, ask the person:
+  1. "How many tool calls did you approve for the round's agents and for me, from `review start` until the findings file?  Do not count the `baseline` agent and its validators."
+  2. With `--baseline`: "How many tool calls did you approve for the `baseline` agent and its validators in that time?"
+  3. Also say: "Give one total if you cannot split them.  In a mode that asks for no approval, each count is 0."
+* If you asked, wait for the answer.  Do not guess the counts.
+* Write the first count in the `approvals` field of `<run>/$1/findings.md`, and the second in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
+
 The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, and stop.  If the file does not exist, write it in this form first:
 
 ```markdown
@@ -275,8 +287,8 @@ The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not wri
 
 ## Rounds
 
-| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline found |
-| - | - | - | - | - | - | - | - | - | - | - | - |
+| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 ```
 
 Add one row to the findings table for each finding of the round, the baseline's included:
@@ -290,10 +302,11 @@ Add one row to the rounds table:
 * Agents: the number of agents that the round started, but the baseline and its own validators.  The validators count with the agents that they validate.  Step 7's comparer counts neither with the round nor with the baseline.
 * Tokens: the sum of the tokens of those agents.
 * Wall minutes: the wall minutes of the findings file.  They run from `review start` to the last verdict, without the wait for the mutants run.
-* Interventions: the number of messages of a person in the round, and the approvals of a person that you see or that the person reports.  An approval of a late review command is not an intervention.
+* Interventions: the number of messages of a person in the round, but not the message that gives the approval counts.  An approval is not an intervention.
 * Late review commands: the field of the findings file.  In the default permission mode, each one asked a person for approval (TD-36).  Only in that mode does the count equal the approvals.
+* Approvals: the count that the person gave for the round, as cost.  It is the field of the findings file.
 * Mutants: the mutants line.
-* With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are those of a person for those agents.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
+* With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are the messages of a person for those agents.  Baseline approvals: the count that the person gave for the baseline, or "in approvals" if the person gave one total.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
 
 After round 3:
 

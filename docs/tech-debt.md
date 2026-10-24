@@ -219,9 +219,9 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 ### TD-36: in the default permission mode, each review round has an approval that the skill forces
 
-The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review needs no approval.
+The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review runs no `xtask review` command.
 
-Since M4, the log counts these late review commands apart from the interventions, in their own field and cell.  So D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions) does not fail by construction.  The count equals the approvals only in the default permission mode.
+Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  So the approvals that the skill forces do not fail D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  The count of late review commands equals their approvals only in the default permission mode.
 
 * Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/active/harness-phase-3-m3.md`).
 
@@ -233,9 +233,9 @@ Since M4, the log counts these late review commands apart from the interventions
 
 ### TD-38: the review log cannot count a person's approvals
 
-This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  In the default permission mode, a command of a reviewer or a validator can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So the interventions of step 11 of the `review-rounds` skill count only the approvals that the agent sees or that the person reports.  Round 1 runs more agents than the baseline review.  So D4's "no more interventions" can pass when it must fail.
+This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  In the default permission mode, a command of a reviewer, a validator or the baseline can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So step 11 of the `review-rounds` skill asks the person for the approvals of the round and of the baseline.  The log records them as cost, not as interventions.  The counts rest on the person.  A person can miscount, or cannot tell the baseline's approvals from the round's, and then gives one total.  The maintainer reads the counts at the gate.
 
-* Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the count.
+* Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the counts.
 
 ### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 

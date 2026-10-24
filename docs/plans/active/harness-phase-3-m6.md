@@ -203,7 +203,7 @@ At the end:
 * [x] 2026-10-24: plan review round 4: 0 blockers, 0 significant should-fix, 1 should-fix (decision 0011 left out TD-46 and TD-47), 6 nits; the stop rule is met.  All fixed in the plan: step 11's wait has a condition and its 0 case names where the mode goes; the Purpose bullet names the four changes to the plan of phases; the index line of 0011 is given.
 * [x] 2026-10-24: the plan and its line in `docs/README.md` committed.
 * [x] 2026-10-24: step 1: decision 0011, with its line in `docs/README.md`.  `docs-check` passes; it reads each TD ID of the record as defined.
-* [ ] Step 2: the skill, its test (failing first), the guide, TD-36 and TD-38.
+* [x] 2026-10-24: step 2: the skill, its test, the guide, TD-36 and TD-38.  Failing first, with only `xtask/tests/rules.rs` changed: `the_review_skill_starts_with_xtask` panicked with "11 review skill problem(s)", one for each new entry.  For example: "the text does not hold `Do not ask yourself.`", and "the text does not hold `* approvals:`".  After the skill change, it passes.  12 mutants of the changed skill, each from a saved copy: a change to the phrase of each of the 11 new entries, and a 13-cell separator.  Each failed the test with "1 review skill problem(s)", which named that entry.  The skill was then copied back, and `git diff` shows only the planned change.
 * [ ] Step 3: the tech-debt fix lines.
 * [ ] Step 4: the plan of phases.
 * [ ] Step 5: review rounds.

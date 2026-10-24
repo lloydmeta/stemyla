@@ -988,10 +988,12 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// validators before the wait for the mutants run, the check of the state
 /// for this round, the rule for a file that the Write tool refuses to a
 /// subagent, and the count of late review commands in the findings file
-/// and in the log's rounds table, apart from the interventions (D4), with
-/// the rule that leaves their approvals out of the interventions.  The
-/// rounds table's header, its separator line and the end of its block are
-/// one entry, so a separator with fewer cells than the header fails.
+/// and in the log's rounds table.  The approvals of the round and of the
+/// baseline are cost, in their own fields and cells (D4).  Step 11 asks the
+/// person for them and waits.  An intervention is a message of a person,
+/// but not the message that gives the approval counts.  The rounds table's
+/// header, its separator line and the end of its block are one entry, so a
+/// separator with fewer cells than the header fails.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1006,11 +1008,19 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "do not write it in another way",
     "* late review commands:",
     "* Late review commands: the field of the findings file.",
-    "but not an approval of a late review command>",
-    "An approval of a late review command is not an intervention.",
+    "So in the default permission mode, `review check` of step 8 asks for approval once in each round.",
+    "but not the message that gives the approval counts of step 11",
+    "* approvals:",
+    "* baseline approvals:",
+    "Do not ask yourself.",
+    "Then write each count as 0 with the mode",
+    "If you asked, wait for the answer.  Do not guess the counts.",
+    "but not the message that gives the approval counts.  An approval is not an intervention.",
+    "* Approvals: the count that the person gave for the round, as cost.",
+    "Baseline approvals: the count that the person gave for the baseline",
     concat!(
-        "| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline found |\n",
-        "| - | - | - | - | - | - | - | - | - | - | - | - |\n",
+        "| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |\n",
+        "| - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n",
         "```",
     ),
 ];
