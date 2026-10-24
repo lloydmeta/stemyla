@@ -2,8 +2,8 @@
 # The read-only guard of the review agents (.claude/agents/), a PreToolUse
 # hook on Bash.  It refuses a command that would change the repo, a remote or
 # a published package, by git, cargo, gh and a short list of other commands.
-# It also refuses `xtask publish` and `xtask review`, which changes the state
-# of a review round, also through `cargo run` of xtask.
+# It refuses `xtask publish`, and `xtask review`, which changes the state of a
+# review round.  It refuses them through `cargo run` of xtask too.
 # It matches text, so it stops mistakes, not an agent that tries to escape.
 # Redirections and `sed -i` still pass.  Known gaps: TD-34 in docs/tech-debt.md.
 # For bash 3.2 (macOS): no `declare -A`, no `${x,,}`, no `mapfile`.

@@ -265,10 +265,10 @@ of <y> baseline findings, the round found <x>
 
 ### 11. Add the round to the log
 
-First, get the approval counts of the round.  They are cost, not interventions.  Use the first bullet that applies.  Under the orchestrator bullet, use the first mode bullet that applies, and always the last sub-bullet.
+First, get the approval counts of the round.  They are cost, not interventions.  Use the first of the next three bullets that applies.  Then do the two bullets after them, unless that bullet tells you to stop.  Under the orchestrator bullet, use the first mode sub-bullet that applies, and always the last sub-bullet.
 
 * If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.
-  * In a `claude -p` run, in any mode, write each count as 0 with the mode.  For example, write `0 (auto mode)`.  A mode that asks for approval cannot get one in a `-p` run, so its count is 0 too, for example `0 (default mode)`.
+  * In a `claude -p` run where nobody answers permission prompts, write each count as 0 with the mode, in any mode.  For example, write `0 (auto mode)`.  A mode that asks for approval gets none in that run, so its count is 0 too, for example `0 (default mode)`.  Where a host or a prompt tool answers prompts (`--permission-prompts host`), write the approvals that it gave, if the run records them.  Otherwise write `not counted` with the reason.
   * In `dontAsk` mode in an interactive session, write each count as `0 (dontAsk mode)`.
   * In auto mode in an interactive session, the mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  So write each count as `0 (auto mode; a fallback prompt is not counted)`.
   * In another mode in an interactive session, ask the maintainer the questions below.
