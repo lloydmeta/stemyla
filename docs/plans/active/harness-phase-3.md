@@ -341,7 +341,7 @@ All agents inherit the main model.  A cheaper model for some agents is a later c
 * [x] 2026-10-24: M6 review round 1 (`/review-rounds main 1`, by the orchestrator, at `c76fdcb`): 6 reviewers on the branch, 6 validators; 6 should-fix confirmed (the guide named the wrong plan for the gate; TD-44 cited a file that lacks its figures; `worker/src/web/tests.rs` routed no `wire-reviewer`; no specialist checked MEM-4 in `roformer*/` and `synth/`; the guard passed `cargo run -p xtask -- publish`; a sign test missed a mutant), 14 nits; fixes in `6eb9858`.  Mutants: `none: ... not tested 381; exit 4: the baseline failed` (TD-33).  12 agents, 939,499 tokens (final contexts, TD-44), 34.0 wall minutes, 0 interventions.  Two validators chose one worktree path; `6eb9858` puts the input's ID in it (Surprises).  The agents, the guard and the skill changed after M5 in these rounds, so M5's result describes them as M3 froze them (`de34663`), with M3's route table.
 * [x] 2026-10-24: M6 review round 2 (at `35b75b8`): `reviewer` on the branch, 5 specialists on the round 1 fixes, 6 validators; 5 should-fix confirmed and 1 pre-existing (untested guard patterns; TD-34 lacked the ways past the new xtask rule; two conflicts in step 11; `dsp/src/` routed no `memory-reviewer`; M5's routes used the old table), 7 nits; fixes in `9a4759f` and `7aa2ac6`.  Mutants: `none: ... no mutants in the diff`.  12 agents, 761,450 tokens, 17.7 wall minutes, 0 interventions.  Three specialists read the fix commit's message and said so; two wrote guard copies to the orchestrator's scratchpad.
 * [x] 2026-10-24: M6 review round 3 (at `7aa2ac6`): `reviewer` on the branch, 5 specialists on the round 2 fixes, 1 validator; 1 should-fix confirmed (step 11's "first bullet" rule skipped the bullets that write the counts), 4 nits; fixes in `38ae612`.  Mutants: `none: ... no mutants in the diff`.  7 agents, 558,788 tokens, 18.5 wall minutes, 0 interventions.  Auto mode refused one reviewer's edit of the guard in its own worktree ("Self-Modification"); it did not try again.  The log is `docs/reviews/ai-agent-harness-phase-3.md`.
-* [ ] M6: review this PR, and close out.
+* [x] 2026-10-24: M6: review this PR, and close out (`71641ee..`, milestone plan `harness-phase-3-m6.md`).  The pre-round commits (4 milestone plan review rounds; 3 manual review rounds): decision 0011 accepted with D1 to D6 and the D4 change; the guide's Status, changelog and recipe; steps 9 and 11 count approvals as cost, pinned by `the_review_skill_starts_with_xtask`, which failed first; the TD fix lines name the agent that looks; the plan of phases names `xtask review`, the six cases and D6, and its Decision log records D4 (`c76fdcb`).  Then the three rounds above.  Acceptance: `docs-check` passes; the grep for the old recipe gives 0; the log has rows and a summary row for rounds 1 to 3.  One intent review met the stop rule; its should-fix items became TD entries, and its close-out notes were followed.  CI green at `83c0dfd`.
 
 ## Surprises and discoveries
 
@@ -379,8 +379,46 @@ All agents inherit the main model.  A cheaper model for some agents is a later c
 * 2026-10-24, orchestrator: D4's forced approvals are the "late review commands" of M4's log, since the agent cannot see an approval; the person gives the count of other approvals (TD-38).
 * 2026-10-24, orchestrator: D4's interventions are a person's messages to the agent during the round; approvals of tool calls are cost, logged apart and read by the maintainer at the gate.  In the default mode each agent's commands can ask for approval (the agents have no allow rules), so a count of approvals grows with the route and would fail D4 by construction.  M6 makes steps 9 and 11 and the guide match, and names the default mode in the skill's line on the approval of `review check`.  This narrows the maintainer's D4; the summary lists it.  The plan review of this change reached its cap of 5 rounds; round 5's one significant finding (step 11 must ask for the counts and wait) is applied without a sixth round, since M6's milestone plan review and review rounds check the skill text that carries it.  Not taken: approvals scaled like tokens, which fails when the baseline has none.  In M6's rounds, an ID in a claim cell of the log must be defined, since `docs-check` fails an undefined one (M4, Surprises).
 * 2026-10-23, orchestrator: no `create_buffer_init` sign.  The tree has no call outside the `gpu-reviewer` paths, and a new call elsewhere needs `use wgpu::util::DeviceExt`, which carries the `wgpu::` sign; TD-31 records the gap.
-* 2026-10-24, orchestrator: after M6 round 1 (findings 1-3 and 1-4), the route table grows.  `wire-reviewer` takes `worker/src/web/**`, the child module that holds PROTO-2's worker test.  `memory-reviewer` takes `roformer/src/**`, `roformer-gpu/src/**` and `synth/src/**`, where the GPU memory budget, the model read and the demo song live (MEM-1, MEM-4).  Not taken: MEM-1 and MEM-4 in `gpu-reviewer`'s list, which changes a frozen agent and leaves `synth/` out; a TD-31 note only, which leaves MEM-4 with no specialist where it matters most.  The cost is one more reviewer on those diffs.  After round 2 (finding 2-5), `memory-reviewer` also takes `dsp/src/**`, whose code runs in the audio callback and builds the song-length mix (RT-1, MEM-4).  M1 and M5 measured their routes on the old table.  Under the new table, M5's `m2` adds `memory-reviewer`, and `m18a` adds `wire-reviewer`.  Item m18a-4 is in `worker/src/web/tests.rs`.  No case touches `dsp/src/`.  The threats of `replay.md` name this.
+* 2026-10-24, orchestrator: after M6 round 1 (findings 1-3 and 1-4), the route table grows.  `wire-reviewer` takes `worker/src/web/**`, the child module that holds PROTO-2's worker test.  `memory-reviewer` takes `roformer/src/**`, `roformer-gpu/src/**` and `synth/src/**`, where the GPU memory budget, the model read and the demo song live (MEM-1, MEM-4).  Not taken: MEM-1 and MEM-4 in `gpu-reviewer`'s list, which changes the method of an agent that M5 measured and leaves `synth/` out; a TD-31 note only, which leaves MEM-4 with no specialist where it matters most.  The cost is one more reviewer on those diffs.  After round 2 (finding 2-5), `memory-reviewer` also takes `dsp/src/**`, whose code runs in the audio callback and builds the song-length mix (RT-1, MEM-4).  M1 and M5 measured their routes on the old table.  Under the new table, M5's `m2` adds `memory-reviewer`, and `m18a` adds `wire-reviewer`.  Item m18a-4 is in `worker/src/web/tests.rs`.  No case touches `dsp/src/`.  The threats of `replay.md` name this.
 
 ## Outcomes and retrospective
 
-To be written when the plan completes.
+Written by the orchestrator on 2026-10-24, at the close-out.
+
+### What the phase delivered
+
+* `xtask review`: the route of a diff to six reviewers, a guard on the state of the repo for each round, and cargo-mutants under a 60-minute limit (M1).
+* Eight read-only agents and a Bash guard with `onFailure: block` (M2).
+* The `review-rounds` skill, which runs one round per call, and a test harness that runs it with `claude -p` in clean clones (M3).
+* The findings log in `docs/reviews/`, one file for each branch (M4).
+* The replay of six old reviews, in `docs/reviews/replay.md` (M5).
+* This PR's own three rounds, run with the skill, and their log in `docs/reviews/ai-agent-harness-phase-3.md` (M6).
+
+### Against the purpose
+
+* The replay misses its bar.  The rounds found 8 of the 26 old findings (0.31, 95% Wilson interval 0.17 to 0.50).  By D5 the miss is recorded, and the gate decides after the merge.  The threats are large: 126 `dontAsk` denials in the harness, a flaky mutants baseline, inferred severities, and a route table that changed after M5.
+* cargo-mutants found one old item, and only by the function-level clause of the match rule.  In M6 it tested no mutant: the baseline timed out in round 1 (TD-33), and rounds 2 and 3 changed no Rust function.
+* In M6 the rounds found 12 serious findings (6, 5 and 1 confirmed or pre-existing, for each round) and 25 nits.  The validators refuted none.  So the rounds converged, but this PR does not test whether a validator rejects a false finding.
+* The specialists found gaps that the general reviewer did not: three holes in the route table, a way past the guard to `xtask publish`, and two conflicts in step 11.  Each round's fixes gave the next round its findings.
+* D4's token bar has no reliable measure.  An agent's token figure is its final context, not the tokens it used (TD-44).  The maintainer decides at the gate how to measure it.
+
+### Cost
+
+* M5: 44.54 USD at list price for the counted runs, and 36.74 USD for the runs that did not count.
+* M6 rounds: 31 agents, 2,259,737 tokens in final contexts (TD-44), 70.2 wall minutes, and no message of a person.
+
+### What went wrong, and what changed
+
+* Two agents edited one tree in M3 (`a95b93a`).  A "completed" status did not mean that the agent had stopped.  Each later brief said "you alone own the tree".
+* The Write tool refuses a subagent's findings file, so the orchestrator ran M6's rounds itself.
+* A usage limit cut short two M5 runs and stopped the first M5 team leader.  Each cut run ran again in a new clone, and a new team leader went on from the last commit.
+* Two validators chose one worktree path in round 1.  The path now holds the input's ID.
+* In rounds 2 and 3, reviewers of the fix commits could not avoid the commit messages, and some agents wrote copies of the guard outside the tree.  Tech debt records both.
+* "The parent plan" named two files in briefs and in the guide.  Round 1 found it.  A brief to a team names each file by its path.
+
+### What the maintainer still does
+
+* Take the M5 sample, decide the gate after the merge, and merge the PR.
+* Put back the `autoMode.allow` entry, the GPG cache times, `skillOverrides` and `caffeinate`, as before the start.
+* Decide whether a project allow rule for `target/debug/xtask review *` is wanted (TD-36).
+* Confirm or reset the status of decision 0007 (TD-45).
