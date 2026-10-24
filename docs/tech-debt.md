@@ -172,8 +172,9 @@ The `review-rounds` skill (harness phase 3, M3) stops a round when `review check
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
 * cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
+* The baseline can fail on a slow test.  `classic_drums_beat_the_raw_mix` (`xtask/tests/m8_hpss.rs`) timed out in the unmutated tree in 3 of the 7 case runs of M5 (`docs/reviews/replay.md`).  These were `m9`, `m2` and `m10` run 1.  So no mutant ran, and the line was `none: ...; exit 4: the baseline failed`.
 
-* Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.
+* Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.  For a slow test, give the baseline a longer timeout, or leave the slow test out of the mutants run.
 
 ### TD-34: the review agents' guard matches text
 
@@ -238,14 +239,14 @@ This entry concerns no rule.  It concerns the measure of D4 of the parent plan (
 
 ### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 
-Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  No `cargo test` kills these mutants:
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  No `cargo test` kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
 
-* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser;
-* the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session;
-* `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls;
-* `query` and `Opts::weights`, which `parses_scenario_and_options` never calls;
-* `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls;
-* a request with no headers in `drip`, since the test always sends a Host header.
+* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run);
+* the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
+* `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls (not run);
+* `query` and `Opts::weights`, which `parses_scenario_and_options` never calls (not run);
+* `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
+* a request with no headers in `drip`, since the test always sends a Host header (not run).
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s.
 
@@ -255,12 +256,12 @@ Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant 
 
 ### TD-40: gaps in the RT-1 tests
 
-The tests of RT-1 count allocations, and do not check all that the stretchers and the player do:
+The tests of RT-1 count allocations, and do not check all that the stretchers and the player do.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
 
 * No test reaches two branches of `app_stretcher_problems`: `"default"` in the features of an `engine =` line, and a manifest with no `engine =` line.
-* `a_stretcher_keeps_its_warm_up_promise` counts allocations only.  No test checks the output of `WsolaStretcher::can_pull` for a push over 256 frames.
-* No test bounds the size of the warm-up push in `WsolaStretcher::warm_up`.
-* The loop tests check only that the playhead stays inside the loop.  A wrong comparison in `Player::drop_oldest_anchor_when_full` shows the loop start before each wrap, and passes.
+* `a_stretcher_keeps_its_warm_up_promise` counts allocations only.  No test checks the output of `WsolaStretcher::can_pull` for a push over 256 frames (not run).
+* No test bounds the size of the warm-up push in `WsolaStretcher::warm_up` (not run).
+* The loop tests check only that the playhead stays inside the loop.  A wrong comparison in `Player::drop_oldest_anchor_when_full` shows the loop start before each wrap, and passes (not run).
 
 Source: `docs/reviews/replay.md`, case `m11`, findings 1-1, 1-8, 1-10 and 1-14.
 
@@ -279,12 +280,12 @@ Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
 
 ### TD-42: weak tests of the e2e message-type scan
 
-`e2e_messages_use_protocol_types` (PROTO-1) has tests that do not fail on some wrong scans:
+`e2e_messages_use_protocol_types` (PROTO-1) has tests that do not fail on some wrong scans.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
 
 * No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses.  So a stale check that reads only the JavaScript passes.
-* No test has `["type"] <=` in Rust, or a macro other than `json!` after `"type":`.
-* Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes.
-* `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.
+* No test has `["type"] <=` in Rust, or a macro other than `json!` after `"type":` (not run).
+* Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes (not run).
+* `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.  The checker ran a scratch copy of `js_tokens` with this mutant.
 
 Source: `docs/reviews/replay.md`, case `m10`, findings 1-3, 1-10, 1-11, 1-12 and 1-13.
 
@@ -298,6 +299,14 @@ Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
 
 * Fix: do a hand check in Chrome for each PR that changes the picker path.  Record it in the PR.  Stop when a browser test can set the files.
 
+### TD-44: the review log's tokens are final contexts, not the tokens used
+
+This entry concerns no rule.  It concerns the measure of D4 of the parent plan (`plans/active/harness-phase-3.md`, Decisions).  The `review-rounds` skill takes each agent's tokens from its `<usage>`, which is the size of the agent's final context.  The Tokens cells of the `## Agents` table and of the rounds table add these figures: "Tokens: the sum of the tokens of those agents".  D4's ratio compares round 1 with the baseline on these sums.
+
+The ratio compares like with like.  But the final context of a long agent is lower than the tokens that it used.  So the ratio is not a cost in tokens.  The session's `modelUsage` gives the tokens used, in `-p` mode only.  For example, in case `m18a` of `docs/reviews/replay.md`, the session used 6,266,253 tokens.  The final contexts of its seven agents sum to 391,169.
+
+* Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
@@ -305,6 +314,14 @@ Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
 `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  A `\n` or `\t` escape in a plain Rust literal joins its letter to the next word.  So `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.
+
+### TD-45: decision 0007 has a status that no person set
+
+Decision 0007 (`decisions/0007-no-allocation-in-the-audio-callback.md`) has the status "accepted (by the maintainer)".  But an agent wrote it, and the limits of its scope are the agent's choices.  `CLAUDE.md`, "Working here", Decisions: agents write a record as `proposed`, and only a person accepts it.
+
+Source: `docs/reviews/replay.md`, case `m11`, finding 1-2.
+
+* Fix: the maintainer confirms the status, or sets it to `proposed`.
 
 ## Legibility for agents
 

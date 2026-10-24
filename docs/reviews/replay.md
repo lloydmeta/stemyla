@@ -706,6 +706,8 @@ The notes:
 
 The comparer's note on `m18a-1`: the unvalidated nit 1-5 (reviewer) states its defect ("A `whole()` that checks only `byteOffset === 0` still passes it").  But a nit cannot match a should-fix item.
 
+In `m18a` the harness denied every browser-test run, and only wasm tests in a browser reach its four items (`## Threats`).
+
 ### Total and bar
 
 * The total, without the `found (unvalidated)` items (the parent plan's count): 7/26 = 0.27, with a 95% Wilson score interval ([Wilson, 1927](https://doi.org/10.1080/01621459.1927.10502953)) of 0.14 to 0.46.
@@ -745,7 +747,7 @@ The counted runs:
 | `m18a` | `replay-m18a-1` | 7 (4, 3) | 972 | 6,266,253 | 87,615 | 5.10 | 23 | 2 | full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0 |
 | Total | | 51 | 13,396 (3.7 h) | 57,244,092 | 740,079 | 44.54 | 126 | 21 | |
 
-Each agent's final context, from its last `task_notification`.  This figure is the size of the agent's last context, not the tokens that it used.  So it is not part of the session tokens.  It is the figure of the skill's `## Agents` table and of D4.
+Each agent's final context, from its last `task_notification`.  This figure is the size of the agent's last context, not the tokens that it used.  So it is not part of the session tokens.  It is the figure of the skill's `## Agents` table and of D4.  TD-44 records what this means for D4's ratio.
 
 * `pr9`: reviewer 115,520; gpu-reviewer 17,035; memory-reviewer 54,269; wire-reviewer 104,501; supply-chain-reviewer 97,524; docs-reviewer 60,035; validators 15,499, 19,670, 10,160 and 59,784.
 * `m9`: reviewer 80,678; memory-reviewer 34,489; supply-chain-reviewer 72,062; docs-reviewer 77,978; validators 22,158, 21,418 and 21,235.
@@ -784,7 +786,7 @@ The verdict counts of each source, summed over the six counted cases.  The count
 
 ## Outside findings
 
-An outside finding is a found finding (`confirmed` or `pre-existing`) that matches no ground-truth item of its case.  There are 62: `pr9` 43, `m9` 1, `m11` 5, `m2` 4, `m10` 7, `m18a` 2.  Each has the severity `should-fix`.  A new checker subagent compared each with `main` at `fa41c9f`.  Its states: 9 fixed on `main`, 2 gone and 51 still on `main`.  "(likely)" is the checker's word: it read the code and the tests, but did not run them.  The last column also gives the tech-debt entry, or "own PR" for a finding that the team leader listed for its own PR.
+An outside finding is a found finding (`confirmed` or `pre-existing`) that matches no ground-truth item of its case.  There are 62: `pr9` 43, `m9` 1, `m11` 5, `m2` 4, `m10` 7, `m18a` 2.  Each has the severity `should-fix`.  A new checker subagent compared each with `main` at `fa41c9f`.  Its states: 9 fixed on `main`, 2 gone and 51 still on `main`.  "(likely)" is the checker's word: it read the code and the tests, but did not run them.  The last column also gives the tech-debt entry of a finding that is still on `main`.
 
 Rows of `pr9` mutants that share one state and one reason share one row.  The source of each `pr9` mutant is `cargo-mutants`, and its claim is "no test fails with this mutant".
 
@@ -807,7 +809,7 @@ The maintainer classes a sample of these findings as real or false after the PR 
 | `pr9` | 1-50 | should-fix, pre-existing | cargo-mutants | `run` in `xtask/src/serve.rs` replaced with `Ok(())`. | still on main (likely): `xtask/tests/serve.rs` never calls `run` (TD-39) |
 | `m9` | 1-1 | should-fix | reviewer | No test fails when the `well_formed` guard goes, so a line of `THIRD-PARTY.md` that is not well formed can become a row. | fixed on `main`, `7a99a88` (from `4b27829`): the fixture `"x v0.1.0 extra\|MIT\|"` kills the mutant |
 | `m11` | 1-1 | should-fix | reviewer, memory-reviewer, docs-reviewer | No test reaches two branches of `app_stretcher_problems`: `"default"` in the features of an `engine =` line, and a manifest with no `engine =` line. | still on main (TD-40) |
-| `m11` | 1-2 | should-fix | docs-reviewer | An agent wrote decision 0007 as accepted by the maintainer, but the maintainer chose only the rule, not the limits of its scope. | still on main: decision 0007 still says "accepted (by the maintainer)" (own PR: only the maintainer can set the status of a decision, and the orchestrator's summary names it) |
+| `m11` | 1-2 | should-fix | docs-reviewer | An agent wrote decision 0007 as accepted by the maintainer, but the maintainer chose only the rule, not the limits of its scope. | still on main: decision 0007 still says "accepted (by the maintainer)" (TD-45: only the maintainer can set the status of a decision, and the orchestrator's summary names it) |
 | `m11` | 1-8 | should-fix | cargo-mutants | `-` to `+` in `WsolaStretcher::can_pull`; the stretcher's output changes for pushes over 256 frames. | still on main (likely): `a_stretcher_keeps_its_warm_up_promise` counts allocations only, and no test checks the output (TD-40) |
 | `m11` | 1-10 | should-fix | cargo-mutants | `+` to `*` in `WsolaStretcher::warm_up`; the warm-up push becomes 722M frames. | still on main (likely): no test bounds the warm-up size (TD-40) |
 | `m11` | 1-14 | should-fix | cargo-mutants | `==` to `!=` in `Player::drop_oldest_anchor_when_full`; the playhead shows the loop start for about 4 callbacks before each wrap. | still on main (likely): the loop tests check only that the playhead stays inside the loop (TD-40) |
@@ -847,10 +849,33 @@ The five threats of the parent plan:
 
 The threats that M5 found:
 
-* The mutants baseline failed in `m9` and `m2`, and in `m10` run 1.  `classic_drums_beat_the_raw_mix` timed out in the unmutated tree, so no mutant ran there.  The baseline of `m10` run 2 passed.
+* The mutants baseline failed in `m9` and `m2`, and in `m10` run 1.  `classic_drums_beat_the_raw_mix` timed out in the unmutated tree, so no mutant ran there.  The baseline of `m10` run 2 passed.  Of the 13 items of `m9` and `m2`, 10 are weak-test items that a missed mutant could have matched: `m9-1` to `m9-8`, `m2-2` and `m2-3`.  The other three are not weak-test items, so no missed mutant can match them.  `m2-1` and `m2-5` are defects in code.  `m2-4` is a gap in a test's own list of files, which no mutant of a function reaches.  TD-33 records the slow baseline.
 * `pr9` and `m10` stopped the mutants run at the limit of 60 minutes, with 262 and 130 mutants not tested.
 * Two runs ran again: `m11` run 1 (the `-p` session ended while the mutants validator ran) and `m10` run 1 (a usage limit).
-* `dontAsk` denials: 126 over the six counted runs.  Dry run 2 showed that the harness denies some prescribed probe writes for their form: a heredoc, a multi-line `sed`, or a `>` write.  A real session asks a person, or auto mode decides.  So some probes did not run, and the result can be low.
+* `dontAsk` denials: 126 over the six counted runs.  The harness denies a command that the allow list does not admit.  A real session asks a person, or auto mode decides.  The team leader found the full command of each denial in the transcript.  Each command counts once, in the first kind of the table that it matches, in the order of the table.
+
+  | Kind | `pr9` | `m9` | `m11` | `m2` | `m10` | `m18a` | Total |
+  | - | - | - | - | - | - | - | - |
+  | heredoc | 1 | 0 | 6 | 0 | 4 | 0 | 11 |
+  | multi-line command (such as `sed -i` with `a\`) | 1 | 3 | 4 | 0 | 6 | 0 | 14 |
+  | `cd` | 2 | 3 | 1 | 5 | 2 | 1 | 14 |
+  | variable or env prefix (`W=... &&`, `f=$(...)`, `CARGO_TARGET_DIR=... cargo`) | 1 | 2 | 10 | 3 | 1 | 6 | 23 |
+  | `>` or `>>` write to a file | 3 | 0 | 2 | 2 | 1 | 1 | 9 |
+  | `which` or `command -v` | 7 | 0 | 0 | 0 | 0 | 2 | 9 |
+  | a path outside the clone (`~/.cargo`, `/Users/`, `find /`) | 0 | 0 | 8 | 1 | 0 | 7 | 16 |
+  | another command not on the list (`awk`, `cp`, `comm`, `printf`, `for`, `sysctl`, `wasm-bindgen-test-runner`, `{ }`) | 6 | 4 | 5 | 5 | 4 | 6 | 30 |
+  | Total | 21 | 12 | 36 | 16 | 18 | 23 | 126 |
+
+  The effect in each case:
+
+  * `pr9`: 7 `which` or `command -v` and one `CARGO_TARGET_DIR=... cargo run -p xtask -- web-test` were denied.  So no reviewer ran the browser tests.  Seven `cargo tree` pipes for the licence list (with `comm`, `awk`, `{ }` or a write) were denied.  Two mutant probes with `cd`, and two validator probes (a heredoc, a multi-line `sed`), were denied.  The items of `pr9` are in the e2e and WebDriver code, which runs only in a browser.
+  * `m9`: 8 mutant or probe commands in worktrees were denied (3 multi-line `sed`, 3 `cd`, 2 `W=` prefixes).  4 reads with `awk` or `for` were denied.
+  * `m11`: 10 writes of probe tests (6 heredocs, 4 multi-line `sed`), 10 commands with a variable prefix and 8 reads of the cargo registry were denied.  The one item of `m11` was found.
+  * `m2`: 5 mutant probes with `cd`, 3 with a variable prefix and 2 shader writes with `printf >` were denied.
+  * `m10`: 10 writes of probe tests to `rules.rs` were denied (4 heredocs, 6 multi-line `sed`).  `m10-1` is a missing test case in `rules.rs`, and was missed.
+  * `m18a`: the harness denied every try to run the browser tests.  These were 2 `which chromedriver wasm-bindgen-test-runner`, a `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=... cargo test`, and 2 `CARGO_TARGET_DIR=... cargo run -p xtask -- web-test`.  They also include a wasm32 `cargo clippy` and an `echo "CHROMEDRIVER=$CHROMEDRIVER"`.  All four items of `m18a` are in JavaScript in `inline_js` blocks, which only wasm tests in a browser check.  `.cargo/mutants.toml` excludes `app/src/store.rs`, which is wasm32 only.  So no reviewer and no mutant could run code that reaches an item of `m18a`.
+
+  So some probes and tests did not run, and the result can be low.
 * The old round's reviewer tokens are not recorded, and auto mode refused the read of the old transcripts.
 * The comparers got each finding's ID, sources, severity, kind, place and claim, with the evidence where it bears on the match.  The team leader made shorter the claims of nits about docs or wording only, which cannot match a code item.  The team leader resolved one match that a comparer was not sure of (`m10-2` against mutant 1-10).
 * The severities of `pr9` and `m2` are inferred, so those items do not enter the should-fix test of the bar.
