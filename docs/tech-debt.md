@@ -236,11 +236,74 @@ This entry concerns no rule.  It concerns the measure of D4 of the parent plan (
 
 * Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the count.
 
+### TD-39: xtask's WebDriver client, e2e scenarios and browser runners have no `cargo test` coverage
+
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  No `cargo test` kills these mutants:
+
+* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser;
+* the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session;
+* `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls;
+* `query` and `Opts::weights`, which `parses_scenario_and_options` never calls;
+* `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls;
+* a request with no headers in `drip`, since the test always sends a Host header.
+
+`sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream, since the fake closes the socket after 30 s, within the test's 120 s.
+
+Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
+
+* Fix: a fake driver for `Driver` and `Session`, a time limit under 30 s on the sized-reply test, and unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume` and `storage`, and a person runs the other scenarios.
+
+### TD-40: gaps in the RT-1 tests
+
+The tests of RT-1 count allocations, and do not check all that the stretchers and the player do:
+
+* No test reaches two branches of `app_stretcher_problems`: `"default"` in the features of an `engine =` line, and a manifest with no `engine =` line.
+* `a_stretcher_keeps_its_warm_up_promise` counts allocations only.  No test checks the output of `WsolaStretcher::can_pull` for a push over 256 frames.
+* No test bounds the size of the warm-up push in `WsolaStretcher::warm_up`.
+* The loop tests check only that the playhead stays inside the loop.  A wrong test in `Player::drop_oldest_anchor_when_full` shows the loop start before each wrap, and passes.
+
+Source: `docs/reviews/replay.md`, case `m11`, findings 1-1, 1-8, 1-10 and 1-14.
+
+* Fix: a breach case for each branch of `app_stretcher_problems`, a check of the stretcher's output and of the warm-up size, and a test of the playhead before a loop wrap.
+
+### TD-41: gaps in the GPU-1 limit checker's tests, and docs that claim more
+
+`every_kernel_fits_the_default_limits` and its tests do not cover all of the checker (GPU-1, DOC-1):
+
+* `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new`.  Its doc comment claims more than it checks.
+* No test covers the count of read-only storage buffers, the y-axis limit, or a breach of the invocation limit that only z causes.
+* GPU-1 says "every shader", but the tests do not check WGSL that is inline in the code.
+
+Source: `docs/reviews/replay.md`, case `m2`, findings 1-2, 1-4 and 1-6.
+
+* Fix: take the pairs from the pipelines that the code makes, add the three missing cases, and check inline WGSL or narrow the claim of GPU-1.
+
+### TD-42: weak tests of the e2e message-type scan
+
+`e2e_messages_use_protocol_types` (PROTO-1) has tests that do not fail on some wrong scans:
+
+* No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses.  So a stale check that reads only the JavaScript passes.
+* No test has `["type"] <=` in Rust, or a macro other than `json!` after `"type":`.
+* Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes.
+* `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.
+
+Source: `docs/reviews/replay.md`, case `m10`, findings 1-3, 1-10, 1-11, 1-12 and 1-13.
+
+* Fix: add each missing case to the tests in `xtask/src/rules.rs`.
+
+### TD-43: the file picker path has no automated check
+
+`pick_song` keeps each chosen `File` and saves it as a Blob, but no automated check runs it (VERIFY-1).  WebDriver cannot drive the browser's file picker.
+
+Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
+
+* Fix: a hand check in Chrome for each PR that changes the picker path, recorded in the PR, until a browser test can set the files.
+
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
-`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
+`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  A `\n` or `\t` escape in a plain Rust literal joins its letter to the next word, so `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.
 
