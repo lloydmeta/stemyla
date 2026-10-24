@@ -132,6 +132,31 @@ fn an_mp3_request_keeps_its_name_and_rate() {
     }
 }
 
+#[wasm_bindgen_test]
+fn a_flac_request_keeps_its_name_and_rate() {
+    let (left, right) = (samples(&[0.1]), samples(&[0.2]));
+    let r = Request::Flac {
+        name: Some("bass.flac".into()),
+        left: left.clone(),
+        right: right.clone(),
+        rate: Some(48_000),
+    };
+    match request_trip(&r, &Settings::default()).request {
+        Request::Flac {
+            name,
+            rate,
+            left: l,
+            right: r,
+        } => {
+            assert_eq!(name.as_deref(), Some("bass.flac"));
+            assert_eq!(rate, Some(48_000));
+            assert_eq!((l.to_vec(), r.to_vec()), (vec![0.1], vec![0.2]));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(left.length() + right.length(), 0, "transferred");
+}
+
 /// As `xtask e2e` writes them by hand.
 #[wasm_bindgen_test]
 fn hand_written_requests_are_read() {
@@ -266,6 +291,28 @@ fn an_mp3_reply_transfers_its_file() {
         other => panic!("{other:?}"),
     }
     assert_eq!(bytes.length(), 0);
+}
+
+/// A `Blob` is not transferable: it crosses as a reference to the same
+/// file, so the reply keeps it whole and the page does not copy it.
+#[wasm_bindgen_test]
+fn a_flac_reply_keeps_its_blob() {
+    let parts = Array::of1(&Uint8Array::from(&b"fLaC"[..]));
+    let file = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+    match reply_trip(&Reply::Flac {
+        name: "bass.flac".into(),
+        file,
+    }) {
+        Reply::Flac { name, file } => assert_eq!((name.as_str(), file.size()), ("bass.flac", 4.0)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_flac_reply_without_a_file_is_refused() {
+    let o = from_json(r#"{"type": "flac", "name": "bass.flac", "file": 1}"#);
+    let e = Reply::from_js(&o).expect_err("refused");
+    assert_eq!(e.kind, "flac");
 }
 
 #[wasm_bindgen_test]

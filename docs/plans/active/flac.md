@@ -147,8 +147,8 @@ Acceptance: `cargo run -p xtask -- web-test` passes with the new test, and the t
 
 ### M4: the worker encodes FLAC
 
-* Confirm that `flacenc` with no default features builds for `wasm32-unknown-unknown`.  Write the encode time of 5 minutes of stereo in Progress.
-* `protocol/src/lib.rs`: `kind::FLAC`, `Request::Flac { name, left, right, rate }` (buffers transferred) and `Reply::Flac { name, file: Blob }`.  Tests in `protocol/tests/web.rs`: `a_flac_request_keeps_its_name_and_rate` and `a_flac_reply_keeps_its_blob`.
+* Confirm that `flacenc` with no default features builds for `wasm32-unknown-unknown`.
+* `protocol/src/lib.rs`: `kind::FLAC`, `Request::Flac { name, left, right, rate }` (buffers transferred) and `Reply::Flac { name, file: Blob }`.  Tests in `protocol/tests/web.rs`: `a_flac_request_keeps_its_name_and_rate`, `a_flac_reply_keeps_its_blob` and `a_flac_reply_without_a_file_is_refused`.
 * `worker/src/web.rs`: `flac`, as in the design.
 * `worker/src/web/tests.rs`:
   * `a_flac_decodes_to_the_stem`: Symphonia decodes the reply's `Blob`.  Every sample is within half a 16-bit step, the rate is the request's rate, and `verify_ok == Some(true)`.
@@ -156,6 +156,7 @@ Acceptance: `cargo run -p xtask -- web-test` passes with the new test, and the t
   * `a_flac_is_encoded_in_blocks`: the counting allocator bounds the peak WebAssembly memory to a few blocks, not the stem.
   * `a_flac_of_unequal_channels_stops_at_the_shorter`, as for MP3.
   * `a_flac_clips_at_full_scale`: +1.5 decodes to the largest 16-bit step.
+  * `a_flac_of_no_samples_is_refused`.
 * The e2e scripts in `xtask/src/e2e.rs`, if they post an MP3 request (PROTO-1).  `cargo test -p xtask --test rules` passes.
 
 Acceptance: `cargo run -p xtask -- web-test` passes with the new tests.  `a_flac_is_encoded_in_blocks` fails against a version of `flac` that encodes the whole stem in one call.
@@ -172,6 +173,7 @@ Acceptance: the separator test passes in `web-test`.  The UI snapshots pass, or 
 ### M6: end to end, and on real hardware
 
 * `xtask/src/e2e.rs` `clip`: an option to write the clip as a 16-bit 96 kHz FLAC with `flacenc`.  `cargo run -p xtask -- e2e separate` passes on that clip with 6 stems.
+* Time the encode of a 5-minute stem in the built page, and write it in Progress.
 * A person, on an iPhone: "Open song…" offers a `.flac` file in Files, and a FLAC stem saves.  Write the device and the iOS version in Progress.
 
 ### Review
@@ -198,8 +200,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-25: M0: plan and decision 0013.  fmt, the xtask tests and `docs-check` pass.
 * [x] 2026-10-25: M1 and M2, in one commit: engine decodes FLAC, with the decode limit.  Without the `flac` feature, 8 decode tests fail; with the limit turned off, the 3 limit tests fail, and `a_flac_of_unstated_length_stops_at_the_limit` takes 68 s to decode 2.5 GB of silence from an 82 kB file.  After the change, all 84 engine unit tests pass.
 * [x] 2026-10-25: M3: the page opens FLAC.  `web-test` passes in Safari, with `a_flac_session_reopens_with_its_stems`.  Only the `empty_state` snapshot changed, for the welcome text.  `flacenc` and its dependencies are in the browser-tests table of `THIRD-PARTY.md` until M4.
-* [ ] M4: the worker encodes FLAC.
-* [ ] M5: the page saves FLAC.
+* [x] 2026-10-25: M4 and M5, in one commit: the worker encodes FLAC and the page saves it.  `web-test` passes in Safari: 8 new tests in the worker, 3 in the protocol and 1 in the separator.  With a copy of one whole channel added to `flac`, `a_flac_is_encoded_in_blocks` fails (5.6 MB held at the peak).  `flacenc` builds for `wasm32` with no default features.  The encode time of 5 minutes waits for M6, since the debug build of the tests timed out on it.
 * [ ] M6: end to end, and on real hardware.
 * [ ] Review rounds 1, 2 and 3.
 
@@ -218,6 +219,8 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * 2026-10-25, maintainer, after the spike: a saved FLAC has 16 bits for each sample, with `flacenc`.  24 bits wait for an encoder that can write them.
 * 2026-10-25, maintainer: the decode limit is 1 GiB of decoded `f32`, for every format (decision 0013).
 
+* 2026-10-25, agent: M4 and M5 are one commit, since the page does not compile until it handles the new reply.
+* 2026-10-25, agent: the worker refuses a stem with no samples, as a FLAC with no frames has no block sizes to state.
 * 2026-10-25, agent: M1 and M2 are one commit, since both change `open` and `decode_into_reservation`.
 * 2026-10-25, agent: the 5.1 gap is not tech debt, since it breaks no rule.  `Song::from_audio` documents it.
 * 2026-10-25, agent: the encode runs in the worker, as the MP3 encode does, so the page stays responsive.

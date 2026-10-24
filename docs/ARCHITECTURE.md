@@ -11,7 +11,7 @@ flowchart LR
     SEP["separator<br/>talks to the worker"]
   end
   subgraph worker["Web Worker (worker crate)"]
-    W["message loop<br/>pacing, self-test, bench, MP3"]
+    W["message loop<br/>pacing, self-test, bench, MP3, FLAC"]
     RF["roformer<br/>STFT, chunking, weights"]
     GPU["roformer-gpu<br/>WGSL kernels on WebGPU"]
   end
@@ -33,7 +33,7 @@ flowchart LR
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
-* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark and MP3 encoding.
+* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3 and FLAC encoding.
 * `stem-protocol` (`protocol/`): the messages between the page and the worker, one encoder and one decoder per message, shared by both sides.
 * `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature or no fixture.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  It is only a dev-dependency.
 * `xtask`: tools run with Cargo: the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`), the review round tools (`review`), publishing, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.

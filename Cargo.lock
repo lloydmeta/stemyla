@@ -7428,6 +7428,7 @@ name = "stem-worker"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "flacenc",
  "half",
  "js-sys",
  "roformer",
@@ -7435,6 +7436,7 @@ dependencies = [
  "rusty_mp3",
  "safetensors 0.7.0",
  "stem-protocol",
+ "symphonia",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

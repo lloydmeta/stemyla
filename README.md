@@ -1,6 +1,6 @@
 # Stemyla
 
-Stemyla splits a song into its instruments, in the browser, on your own GPU.  Drop an MP3, WAV or FLAC, press "Separate 6 stems", and get bass, drums, other, vocals, guitar and piano as separate lanes you can mute, solo, slow down (without changing pitch), loop, and save as WAV or MP3.  Nothing leaves the computer.
+Stemyla splits a song into its instruments, in the browser, on your own GPU.  Drop an MP3, WAV or FLAC, press "Separate 6 stems", and get bass, drums, other, vocals, guitar and piano as separate lanes you can mute, solo, slow down (without changing pitch), loop, and save as WAV, FLAC or MP3.  Nothing leaves the computer.
 
 It is written in Rust and compiled to WebAssembly, including the GPU code: the separation model runs on WebGPU through hand-written WGSL kernels.  It started as a winter-holiday project for learning to build software with AI, and to hear the guitar part of a song on its own.
 
@@ -13,7 +13,7 @@ Open the published page (for example `https://beachape.com/stemyla/`) in a brows
 1. Press **Download model (350 MB)** once.  The page keeps the model in the browser's own storage.
 2. Press **Open song…** and choose an MP3, WAV or FLAC song, drop one on the page, or press **Demo song**.  The page converts a song at a common rate from 8 kHz to 384 kHz, such as 48 kHz, to 44.1 kHz.  On a phone or tablet, **Open song…** is the way in.
 3. Press **Separate 6 stems**.  On a laptop GPU a 3.5-minute song takes about 7 minutes.
-4. Use **Mute** and **Solo** per lane, the tempo slider, and drag across the bar above the lanes to loop a section.  **Save** on a lane downloads it as WAV or MP3.
+4. Use **Mute** and **Solo** per lane, the tempo slider, and drag across the bar above the lanes to loop a section.  **Save** on a lane downloads it as WAV, FLAC or MP3.
 
 Each song you open, and its stems once separated, stays in the browser, so a reload brings it back.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **Reset…** (also offered when the separation worker stops) fetches the app's files again, bypassing the browser cache, or also deletes everything the page keeps, then reloads: use it when a reload does not help.  **About** links to the model, its code and its paper, and shows the build's version.
 

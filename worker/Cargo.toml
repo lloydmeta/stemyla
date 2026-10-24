@@ -18,15 +18,22 @@ safetensors = "0.7.0"
 # MP3 encoder for stem downloads: pure Rust, Apache-2.0.  Pinned: a young
 # crate (first released October 2026), so updates are taken deliberately.
 rusty_mp3 = "=1.0.0"
+# FLAC encoder for stem downloads: pure Rust, Apache-2.0, without its
+# threads (`par`).  Pinned: below 1.0, and its API changes with each minor
+# version (DEPS-1).  It writes 16 bits well, but not 24.
+flacenc = { version = "=0.5.1", default-features = false }
 stem-protocol = { path = "../protocol" }
 js-sys = "0.3.106"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
-web-sys = { version = "0.3.106", features = ["Blob", "DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
+web-sys = { version = "0.3.106", features = ["Blob", "BlobPropertyBag", "DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
 
 # Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.79"
+# Decodes the worker's FLAC in its tests, so a second implementation
+# checks flacenc's output.
+symphonia = { version = "0.6.1", default-features = false, features = ["flac"] }
 
 [lints]
 workspace = true

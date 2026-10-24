@@ -90,7 +90,10 @@ export async function st_usage() {
   } catch (e) { return [0, 0]; }
 }
 export function save_file(name, bytes, mime) {
-  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  save_blob(name, new Blob([bytes], { type: mime }));
+}
+export function save_blob(name, blob) {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
@@ -116,6 +119,7 @@ extern "C" {
     /// tell).
     async fn st_exists(path: &str) -> JsValue;
     fn save_file(name: &str, bytes: &Uint8Array, mime: &str);
+    fn save_blob(name: &str, blob: &web_sys::Blob);
     async fn st_sleep(ms: u32) -> JsValue;
 }
 
@@ -409,6 +413,11 @@ pub async fn usage() -> (f64, f64) {
 /// Offers `bytes` to the user as a download named `name`.
 pub fn download(name: &str, bytes: &Uint8Array, mime: &str) {
     save_file(name, bytes, mime);
+}
+
+/// Offers `blob` as a download named `name`, with no copy of its bytes.
+pub fn download_blob(name: &str, blob: &web_sys::Blob) {
+    save_blob(name, blob);
 }
 
 /// Browser tests of the private write path (`cargo run -p xtask --

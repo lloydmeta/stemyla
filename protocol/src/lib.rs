@@ -18,6 +18,8 @@
 //! * `{type: "bench"}`: time the GPU kernels.
 //! * `{type: "mp3", name, left, right, rate}`: encode one stem (buffers
 //!   transferred).
+//! * `{type: "flac", name, left, right, rate}`: encode one stem as a 16-bit
+//!   FLAC (buffers transferred).
 //!
 //! Replies ([`Reply`], worker to page):
 //! * `{type: "alive"}` once the worker listens.
@@ -34,6 +36,8 @@
 //! * `{type: "status", text}`, `{type: "log", text}`,
 //!   `{type: "selftest", ok, text}`, `{type: "bench", text}`.
 //! * `{type: "mp3", name, bytes}` (buffer transferred).
+//! * `{type: "flac", name, file: Blob}`: a `Blob` crosses as a reference,
+//!   so the file is not copied.
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
@@ -49,6 +53,7 @@ pub mod kind {
     pub const SELFTEST: &str = "selftest";
     pub const BENCH: &str = "bench";
     pub const MP3: &str = "mp3";
+    pub const FLAC: &str = "flac";
     pub const ALIVE: &str = "alive";
     pub const PROGRESS: &str = "progress";
     pub const SEGMENT: &str = "segment";
@@ -269,6 +274,12 @@ pub enum Request {
         right: Float32Array,
         rate: Option<u32>,
     },
+    Flac {
+        name: Option<String>,
+        left: Float32Array,
+        right: Float32Array,
+        rate: Option<u32>,
+    },
 }
 
 /// A request and the settings sent with it.
@@ -301,6 +312,7 @@ impl Request {
             Self::Selftest { .. } => kind::SELFTEST,
             Self::Bench => kind::BENCH,
             Self::Mp3 { .. } => kind::MP3,
+            Self::Flac { .. } => kind::FLAC,
         }
     }
 
@@ -324,6 +336,12 @@ impl Request {
                 }
             }
             Self::Mp3 {
+                name,
+                left,
+                right,
+                rate,
+            }
+            | Self::Flac {
                 name,
                 left,
                 right,
@@ -375,6 +393,15 @@ impl ToWorker {
             kind::MP3 => {
                 let (left, right) = stereo(msg).map_err(bad)?;
                 Request::Mp3 {
+                    name: string(msg, field::NAME),
+                    left,
+                    right,
+                    rate: number(msg, field::RATE).map(|r| r as u32),
+                }
+            }
+            kind::FLAC => {
+                let (left, right) = stereo(msg).map_err(bad)?;
+                Request::Flac {
                     name: string(msg, field::NAME),
                     left,
                     right,
@@ -442,6 +469,10 @@ pub enum Reply {
         name: String,
         bytes: Uint8Array,
     },
+    Flac {
+        name: String,
+        file: Blob,
+    },
 }
 
 impl Reply {
@@ -459,6 +490,7 @@ impl Reply {
             Self::Selftest { .. } => kind::SELFTEST,
             Self::Bench(_) => kind::BENCH,
             Self::Mp3 { .. } => kind::MP3,
+            Self::Flac { .. } => kind::FLAC,
         }
     }
 
@@ -515,6 +547,10 @@ impl Reply {
                 set(&o, field::NAME, name.as_str());
                 set(&o, field::BYTES, bytes);
                 transfer.push(&bytes.buffer());
+            }
+            Self::Flac { name, file } => {
+                set(&o, field::NAME, name.as_str());
+                set(&o, field::FILE, file);
             }
         }
         (o, transfer)
@@ -592,6 +628,12 @@ impl Reply {
                 bytes: get(msg, field::BYTES)
                     .dyn_into()
                     .map_err(|_| bad("no bytes"))?,
+            },
+            kind::FLAC => Self::Flac {
+                name: string(msg, field::NAME).unwrap_or_default(),
+                file: get(msg, field::FILE)
+                    .dyn_into()
+                    .map_err(|_| bad("no file"))?,
             },
             other => return Err(bad(&format!("unknown type {other:?}"))),
         })

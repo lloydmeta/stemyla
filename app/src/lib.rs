@@ -1410,6 +1410,10 @@ impl StemApp {
                     store::download(&name, &bytes, "audio/mpeg");
                     self.status = format!("Saved {name}.");
                 }
+                Event::Flac { name, file } => {
+                    store::download_blob(&name, &file);
+                    self.status = format!("Saved {name}.");
+                }
                 Event::Bench(text) => {
                     log::info!("separator: {text}");
                     self.status = text;
@@ -1440,6 +1444,7 @@ impl StemApp {
                             "Separation"
                         }
                         stem_protocol::kind::MP3 => "MP3 encoding",
+                        stem_protocol::kind::FLAC => "FLAC encoding",
                         stem_protocol::kind::SELFTEST => "Self-test",
                         stem_protocol::kind::BENCH => "Benchmark",
                         _ => "Worker request",
@@ -1500,6 +1505,18 @@ impl StemApp {
                             ),
                             "audio/wav",
                         );
+                        ui.close();
+                    }
+                    if ui.button("FLAC (16-bit, lossless)").clicked() {
+                        if let Some(sep) = &self.separator {
+                            sep.encode_flac(
+                                &format!("{base}.flac"),
+                                &s.left,
+                                &s.right,
+                                song.sample_rate,
+                            );
+                            status = Some(format!("Encoding {base}.flac…"));
+                        }
                         ui.close();
                     }
                     if ui.button("MP3 (192 kbps)").clicked() {

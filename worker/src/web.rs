@@ -472,6 +472,12 @@ async fn serve(request: Request, s: &Settings) -> Result<(), String> {
             right,
             rate,
         } => mp3(name, [left, right], rate).await,
+        Request::Flac {
+            name,
+            left,
+            right,
+            rate,
+        } => flac(name, [left, right], rate),
     }
 }
 
@@ -1653,6 +1659,88 @@ async fn mp3(
     }
     let bytes = Uint8Array::from(out.as_slice());
     send(Reply::Mp3 { name, bytes });
+    Ok(())
+}
+
+/// Frames of each channel in one FLAC frame, and that `flac` reads from JS
+/// at a time.  RFC 9639's streamable subset allows 4,608 at 48 kHz or
+/// less, so every player reads the file.
+const FLAC_BLOCK: usize = 4096;
+
+/// A sample as 16 bits, rounded and clipped at full scale, as
+/// `engine::wav::encode_pcm16` does.
+fn pcm16(x: f32) -> i32 {
+    (x * 32768.0).round().clamp(-32768.0, 32767.0) as i32
+}
+
+/// Encodes one stem as a 16-bit FLAC (`{type: "flac", name, left, right,
+/// rate}`) and sends the file back as `{type: "flac", name, file: Blob}`.
+/// It reads the channels from JS one FLAC frame at a time, and puts each
+/// encoded frame in JS, so WebAssembly memory never holds the samples or
+/// the file (MEM-1, MEM-4).
+fn flac(
+    name: Option<String>,
+    [left, right]: [Float32Array; 2],
+    rate: Option<u32>,
+) -> Result<(), String> {
+    use flacenc::component::{BitRepr, Stream, StreamInfo};
+    use flacenc::error::Verify;
+    use flacenc::source::{Context, Fill, FrameBuf};
+
+    let fail = |e: &dyn std::fmt::Debug| format!("FLAC encoder: {e:?}");
+    let name = name.unwrap_or_else(|| "stem.flac".into());
+    let rate = rate.unwrap_or(44_100) as usize;
+    let frames = left.length().min(right.length()) as usize;
+    if frames == 0 {
+        return Err("FLAC encoder: the stem has no samples".into());
+    }
+    let config = flacenc::config::Encoder::default()
+        .into_verified()
+        .map_err(|e| fail(&e))?;
+    let mut info = StreamInfo::new(rate, 2, 16).map_err(|e| fail(&e))?;
+    let mut block = FrameBuf::with_size(2, FLAC_BLOCK).map_err(|e| fail(&e))?;
+    let mut md5 = Context::new(16, 2);
+    let (mut l, mut r) = (vec![0.0; FLAC_BLOCK], vec![0.0; FLAC_BLOCK]);
+    let mut interleaved = Vec::with_capacity(2 * FLAC_BLOCK);
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    // The first part is the header, written once the frames are known.
+    let parts = js_sys::Array::of1(&JsValue::UNDEFINED);
+    for (number, at) in (0..frames).step_by(FLAC_BLOCK).enumerate() {
+        let n = FLAC_BLOCK.min(frames - at);
+        let (start, end) = (at as u32, (at + n) as u32);
+        left.subarray(start, end).copy_to(&mut l[..n]);
+        right.subarray(start, end).copy_to(&mut r[..n]);
+        interleaved.clear();
+        for (a, b) in l[..n].iter().zip(&r[..n]) {
+            interleaved.push(pcm16(*a));
+            interleaved.push(pcm16(*b));
+        }
+        (&mut block, &mut md5)
+            .fill_interleaved(&interleaved)
+            .map_err(|e| fail(&e))?;
+        let frame = flacenc::encode_fixed_size_frame(&config, &block, number, &info)
+            .map_err(|e| fail(&e))?;
+        info.update_frame_info(&frame);
+        sink.clear();
+        frame.write(&mut sink).map_err(|e| fail(&e))?;
+        parts.push(&Uint8Array::from(sink.as_slice()));
+    }
+    info.set_md5_digest(&md5.md5_digest());
+    // flacenc gives a short last block as the minimum, which RFC 9639 (8.2)
+    // excludes; Symphonia then reads the stream as variable-blocksize, and
+    // refuses every frame.
+    info.set_block_sizes(FLAC_BLOCK, FLAC_BLOCK)
+        .map_err(|e| fail(&e))?;
+    sink.clear();
+    Stream::with_stream_info(info)
+        .write(&mut sink)
+        .map_err(|e| fail(&e))?;
+    parts.set(0, Uint8Array::from(sink.as_slice()).into());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("audio/flac");
+    let file = Blob::new_with_u8_array_sequence_and_options(&parts, &options)
+        .map_err(|e| format!("FLAC file: {e:?}"))?;
+    send(Reply::Flac { name, file });
     Ok(())
 }
 
