@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <!-- Trunk sets href to the public URL (a build's own folder when published), so relative URLs such as the worker's resolve there. -->
-  <base href="/stemyla/v/cf7437dbea61/" />
+  <base href="/stemyla/v/945ffffef6f0/" />
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>[stemyla] Stem explorer</title>
   <link rel="icon" href="data:,">
   
 <script type="module">
-import init, * as bindings from '/stemyla/v/cf7437dbea61/app.js';
-const wasm = await init({ module_or_path: '/stemyla/v/cf7437dbea61/app_bg.wasm' });
+import init, * as bindings from '/stemyla/v/945ffffef6f0/app.js';
+const wasm = await init({ module_or_path: '/stemyla/v/945ffffef6f0/app_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -46,7 +46,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1b1b1b; }
     canvas { width: 100%; height: 100%; display: block; }
   </style>
-<link rel="modulepreload" href="/stemyla/v/cf7437dbea61/app.js" crossorigin="anonymous"><link rel="modulepreload" href="/stemyla/v/cf7437dbea61/snippets/app-0cd1cead3f0174fd/inline0.js" crossorigin="anonymous"><link rel="modulepreload" href="/stemyla/v/cf7437dbea61/snippets/stem-worker-2138b2cf792743e3/inline0.js" crossorigin="anonymous"><link rel="modulepreload" href="/stemyla/v/cf7437dbea61/snippets/app-0cd1cead3f0174fd/inline1.js" crossorigin="anonymous"><link rel="preload" href="/stemyla/v/cf7437dbea61/app_bg.wasm" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/stemyla/v/945ffffef6f0/app.js" crossorigin="anonymous"><link rel="modulepreload" href="/stemyla/v/945ffffef6f0/snippets/stem-worker-2138b2cf792743e3/inline0.js" crossorigin="anonymous"><link rel="modulepreload" href="/stemyla/v/945ffffef6f0/snippets/app-0cd1cead3f0174fd/inline1.js" crossorigin="anonymous"><link rel="modulepreload" href="/stemyla/v/945ffffef6f0/snippets/app-0cd1cead3f0174fd/inline0.js" crossorigin="anonymous"><link rel="preload" href="/stemyla/v/945ffffef6f0/app_bg.wasm" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="stem_explorer"></canvas>
 </body>
