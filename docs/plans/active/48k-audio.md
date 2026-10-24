@@ -28,18 +28,20 @@ Terms:
 Decision 0012 records the choice: every song in the app is at 44.1 kHz.  The conversion is on the page thread, in `Song::from_audio`, where decoding already runs.
 
 ```
-file at any standard rate --> decode --> engine::resample::to_rate --> Song at 44.1 kHz --> (no change after this)
+file at 8 to 384 kHz ------> decode --> engine::resample::to_rate --> Song at 44.1 kHz --> (no change after this)
 file at 44.1 kHz ----------> decode --> the same Vec (no copy) -----> Song at 44.1 kHz
 ```
 
 The resampler (`engine/src/resample.rs`):
 
 * `pub const SONG_RATE: u32 = 44_100`.
-* `pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>>`.  At `from == to` it returns `x` as it is.  Otherwise it makes a new `Vec` and drops `x`.  It refuses a rate whose L is more than 441.
-* Rational polyphase with a Blackman-windowed sinc.  For 48 kHz to 44.1 kHz, L = 147 and M = 160.  Output frame `i` reads input frame `j = (i * M) / L` and table row `p = (i * M) % L`, in integer arithmetic.  So the output does not drift and has `ceil(n * L / M)` frames.
-* The cutoff is half the lower rate.  The half-width is `32 * max(1, from / to)` input frames, in integer division, so 64 taps at 48 kHz and 256 at 192 kHz.  Each table row is scaled to sum to 1.  The inner loop uses four accumulators.  Input outside the song counts as silence.
+* `pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>>`.  At `from == to` it returns `x` as it is.  Otherwise it makes a new `Vec` and drops `x`.  It refuses a rate outside 8 kHz to 384 kHz, and a rate whose L is more than 441 (review round 1: a header can state any rate, and the table and the output grow with it).
+* Rational polyphase with a Blackman-windowed sinc.  For 48 kHz to 44.1 kHz, L = 147 and M = 160.  Output frame `i` reads input frame `j = (i * M) / L` with table row `p = (i * M) % L`.  `Position::next` steps `j` and `p` from one output to the next, and `output_len` computes `ceil(n * L / M)` in `u64`.  So nothing overflows a 32-bit `usize` on wasm32, and the output does not drift.
+* When the rate falls, the cutoff is half the output rate.  The half-width is `32 * from / 48 kHz` input frames, rounded up to an even number and at least 32: 64 taps at 48 kHz, 88 at 64 kHz, 256 at 192 kHz.  So the transition is about 4.1 kHz wide at every input rate.
+* When the rate rises, the stop band starts at half the input rate, so no image of the input's band falls below it.  The half-width is 64 input frames, so the pass band ends at 45.7 % of the input rate, 14.6 kHz from 32 kHz (review round 1).
+* Each table row is scaled to sum to 1.  The inner loop uses four accumulators.  Input outside the song counts as silence.
 
-A scratch prototype (not in the repo) measured this filter on 2026-10-24.  From 48 kHz, the gain is within 0.002 dB up to 20 kHz.  Against an ideal sine, the SNR is 89.9 dB at 20 kHz and 110 dB or more up to 18 kHz.  A 23 kHz tone becomes a 21.1 kHz alias at -21.4 dB, above hearing.  This is the trade-off of SoX's `rate -a`, which allows aliasing above the pass band.  A 5-minute stereo song took 0.78 s native and 1.33 s in WebAssembly on V8.
+A scratch prototype (not in the repo) measured this filter on 2026-10-24.  From 48 kHz, the gain is within 0.002 dB up to 20 kHz.  Against an ideal sine, the SNR is 98.5 dB or more up to 18 kHz, 93.5 dB at 19.1 kHz and 89.9 dB at 20 kHz.  It swings by up to 10 dB between tones 500 Hz apart (review round 1, a 500 Hz sweep).  From 16 kHz to 32 kHz, the image of a tone near half the input rate is 60 dB down or more.  A 23 kHz tone becomes a 21.1 kHz alias at -21.4 dB, above hearing.  This is the trade-off of SoX's `rate -a`, which allows aliasing above the pass band.  A 5-minute stereo song took 0.78 s native and 1.33 s in WebAssembly on V8.
 
 Memory (MEM-1, MEM-4): `from_audio` converts one channel at a time and drops its input first.  For a 5-minute 48 kHz song, the peak at open is about 168 MB, against 741 MB when 7 separated lanes show.  The page reuses the space that it frees, so the high-water mark does not change.
 
@@ -63,10 +65,10 @@ Acceptance: `cargo run -p xtask -- docs-check` passes with the plan and the deci
 Add the module with `to_rate` and `SONG_RATE`.  No caller changes.  Unit tests, in `cargo test -p engine`:
 
 * `a_second_at_48k_is_a_second_at_44k`: 48,000 frames give 44,100.
-* `the_pass_band_is_flat_to_20_khz`: tones from 100 Hz to 20 kHz at 48 kHz keep their gain within 0.01 dB.  The SNR against an ideal sine is 105 dB or more up to 18 kHz, and 85 dB or more at 20 kHz.
+* `the_pass_band_is_flat_to_20_khz`: tones every 500 Hz from 100 Hz to 20 kHz at 48 kHz keep their gain within 0.01 dB.  The SNR against an ideal sine is 95 dB or more up to 18 kHz, and 85 dB or more to 20 kHz.
 * `an_alias_stays_above_20_khz`: a 23 kHz tone gives a 21.1 kHz alias at -20 dB or less.
-* `upsampling_from_32k_keeps_a_tone`: frame count, and SNR of 100 dB or more for 1 kHz.
-* `the_same_input_gives_the_same_output`: two runs are equal bit for bit.
+* `upsampling_from_32k_keeps_a_tone`: frame count, and gain within 0.01 dB and SNR of 95 dB or more for 1, 10 and 14 kHz.
+* `a_rising_rate_makes_no_audible_image`, `a_large_fall_keeps_the_pass_band` (64, 88, 192 and 384 kHz), `input_outside_the_song_counts_as_silence`, `the_output_is_not_delayed`, `the_length_and_the_position_do_not_overflow_32_bits` and `a_rate_outside_8_to_384_khz_is_refused`: added in review round 1.  `the_same_input_gives_the_same_output` was removed, since no change to this deterministic code could make it fail.
 * `the_same_rate_is_not_copied`: the output pointer is the input pointer.
 * `an_odd_rate_is_refused`: 44,056 Hz gives an error.
 
@@ -75,7 +77,7 @@ Add the module with `to_rate` and `SONG_RATE`.  No caller changes.  Unit tests, 
 * `Song::from_audio` converts each stem to `SONG_RATE` with `to_rate`, and still keeps a stem at that rate as it is.  Remove `resample_linear`.
 * `app/src/lib.rs`: `SEPARATION_RATE` becomes `engine::resample::SONG_RATE`.  The guard stays.
 * `xtask/tests/`: `the_song_rate_is_the_model_rate` asserts `SONG_RATE == roformer::SAMPLE_RATE`.
-* Engine tests: a 48 kHz WAV opens as a 44.1 kHz song with 44,100 frames for each second.  Stems at mixed rates all open at 44.1 kHz.  `a_44k_song_is_not_copied` builds an `Audio` at 44.1 kHz and asserts that the stem has the same pointer and the same bits.
+* Engine tests: a 48 kHz WAV opens as a 44.1 kHz song with 44,100 frames for each second.  Stems at mixed rates all open at 44.1 kHz.  `a_44k_stem_is_not_copied` builds an `Audio` at 44.1 kHz and asserts that the stem has the same pointer and the same bits.
 * `app/tests/web.rs`: `RATE` becomes 44,100 and the frame counts change with it, because an 8 kHz source now opens at 44.1 kHz.
 * DOC-1: `README.md` (which songs open), the `engine` line and the flowchart in `docs/ARCHITECTURE.md`.
 
@@ -122,7 +124,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * 2026-10-24: DSP-1 allows only the methods `len`, `push` and `capacity`, so `dsp` cannot calculate `sin` or `cos`.  The resampler goes in `engine`.
 * 2026-10-24: the storage tests in `app/tests/web.rs` store 8 kHz sources with stems of the same frame count.  At 44.1 kHz the source has more frames than the stems, so the fixture changes in M2.
 
-* 2026-10-24, M1: on wasm32 `usize` has 32 bits, so `i * M` overflows after about 7 minutes at 48 kHz.  `apply` steps the input position and the phase instead, and computes the length in `u64`.
+* 2026-10-24, M1: on wasm32 `usize` has 32 bits, so `i * M` overflows after about 10 minutes at 48 kHz (2.5 minutes at 192 kHz).  `apply` steps the input position and the phase instead, and computes the length in `u64`.
 * 2026-10-24, M1: the engine tests in `engine/src/song.rs` use rates such as 10 Hz and 100 Hz.  `to_rate` refuses those, so M2 changes the tests to 44.1 kHz.
 
 ## Decision log

@@ -14,19 +14,29 @@ use std::f64::consts::PI;
 /// model was trained at (`roformer::SAMPLE_RATE`).
 pub const SONG_RATE: u32 = 44_100;
 
+/// The rates `to_rate` takes, in Hz.  A file's header can state any rate,
+/// and the filter table and the output grow with it, so the rest are
+/// refused (MEM-4).
+const RATES: std::ops::RangeInclusive<u32> = 8_000..=384_000;
+
 /// The most filter phases a conversion may need.  Every standard rate
 /// needs 441 or fewer: 8 kHz to 44.1 kHz needs the most.
 const MAX_PHASES: usize = 441;
 
-/// Input samples on each side of an output sample when the rate rises or
-/// falls by less than half.  A larger fall scales it by the whole ratio,
-/// so the filter's transition stays about 4 kHz wide.
+/// Input samples on each side of an output sample at 48 kHz, where the
+/// filter's transition is 5.5 / 64 of 48 kHz, about 4.1 kHz wide.  A
+/// higher input rate takes more taps, so the transition stays as wide.
 const HALF_TAPS: usize = 32;
+
+/// When the rate rises, the input's own band ends at half its rate.  More
+/// taps make the transition below it narrow (4.3 % of the rate).
+const RISING_HALF_TAPS: usize = 64;
 
 /// `x`, sampled at `from` Hz, as samples at `to` Hz.  At the same rate it
 /// returns `x` itself, not a copy (MEM-1).  Otherwise the output has
 /// `ceil(x.len() * to / from)` samples, and `x` is dropped once they are
-/// made.  Rates that need more than [`MAX_PHASES`] phases are refused.
+/// made.  A rate outside 8 kHz to 384 kHz, or one that needs more than
+/// [`MAX_PHASES`] phases, is refused.
 pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>> {
     if from == to {
         return Ok(x);
@@ -36,6 +46,36 @@ pub fn to_rate(x: Vec<f32>, from: u32, to: u32) -> Result<Vec<f32>> {
 
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// `ceil(frames * phases / step)`, in u64: on wasm32 a usize product
+/// overflows after about 10 minutes at 48 kHz.
+fn output_len(frames: usize, phases: usize, step: usize) -> usize {
+    (frames as u64 * phases as u64).div_ceil(step as u64) as usize
+}
+
+/// Where output `i` falls: `phase / phases` of the way past input `at`,
+/// that is `at = i * step / phases` and `phase = i * step % phases`.  Both
+/// are stepped, not computed from `i`, for the same reason as
+/// [`output_len`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Position {
+    at: usize,
+    phase: usize,
+}
+
+impl Position {
+    fn next(self, phases: usize, step: usize) -> Position {
+        let (at, phase) = (self.at + step / phases, self.phase + step % phases);
+        if phase >= phases {
+            Position {
+                at: at + 1,
+                phase: phase - phases,
+            }
+        } else {
+            Position { at, phase }
+        }
+    }
 }
 
 struct Filter {
@@ -52,16 +92,31 @@ struct Filter {
 
 impl Filter {
     fn new(from: u32, to: u32) -> Result<Filter> {
-        ensure!(from > 0 && to > 0, "a sample rate of 0 Hz");
+        for rate in [from, to] {
+            ensure!(
+                RATES.contains(&rate),
+                "songs at {rate} Hz are not supported; only 8 kHz to 384 kHz are"
+            );
+        }
         let g = gcd(from, to);
         let (phases, step) = ((to / g) as usize, (from / g) as usize);
         ensure!(
             phases <= MAX_PHASES,
             "songs at {from} Hz are not supported; convert them to {to} Hz first"
         );
-        let half = HALF_TAPS * (from / to).max(1) as usize;
-        // The cutoff, half the lower rate, as a fraction of `from`.
-        let cutoff = f64::from(from.min(to)) / f64::from(from);
+        let (half, cutoff) = if to > from {
+            // The stop band starts at half the input rate, so no image of
+            // the input's band falls below it.  The cutoff is the middle of
+            // the transition, as a fraction of half the input rate.
+            let half = RISING_HALF_TAPS;
+            (half, 1.0 - 5.5 / (2 * half) as f64)
+        } else {
+            // The cutoff is half the output rate.  Above it, up to 4.1 kHz
+            // of the input's band folds back, above 20 kHz from 48 kHz.
+            let scaled = (HALF_TAPS as u64 * u64::from(from)).div_ceil(48_000) as usize;
+            let half = scaled.next_multiple_of(2).max(HALF_TAPS);
+            (half, f64::from(to) / f64::from(from))
+        };
         let taps = 2 * half;
         let mut table = Vec::with_capacity(phases * taps);
         for p in 0..phases {
@@ -87,17 +142,15 @@ impl Filter {
 
     fn apply(&self, x: &[f32]) -> Vec<f32> {
         let taps = 2 * self.half;
-        // In u64: on wasm32 a usize product overflows within minutes.
-        let len = (x.len() as u64 * self.phases as u64).div_ceil(self.step as u64) as usize;
+        let len = output_len(x.len(), self.phases, self.step);
         let mut out = Vec::with_capacity(len);
+        // Input outside the song counts as silence.
         let mut edge = vec![0.0; taps];
-        // Output i falls `phase / phases` of the way past input `at`.  Both
-        // are stepped, not computed from i, for the same reason.
-        let (mut at, mut phase) = (0, 0);
+        let mut pos = Position { at: 0, phase: 0 };
         for _ in 0..len {
-            let row = &self.table[phase * taps..][..taps];
+            let row = &self.table[pos.phase * taps..][..taps];
             // The first input sample of the window, which may be before 0.
-            let start = at as isize - (self.half as isize - 1);
+            let start = pos.at as isize - (self.half as isize - 1);
             let window = match usize::try_from(start) {
                 Ok(s) if s + taps <= x.len() => &x[s..s + taps],
                 _ => {
@@ -113,12 +166,7 @@ impl Filter {
                 }
             };
             out.push(dot(window, row));
-            at += self.step / self.phases;
-            phase += self.step % self.phases;
-            if phase >= self.phases {
-                phase -= self.phases;
-                at += 1;
-            }
+            pos = pos.next(self.phases, self.step);
         }
         out
     }
@@ -208,14 +256,13 @@ mod tests {
 
     #[test]
     fn the_pass_band_is_flat_to_20_khz() {
-        for (hz, least_snr) in [
-            (100.0, 105.0),
-            (1_000.0, 105.0),
-            (10_000.0, 105.0),
-            (18_000.0, 105.0),
-            (20_000.0, 85.0),
-        ] {
+        // Every 500 Hz, since the SNR swings by up to 10 dB between tones.
+        for hz in (0..40)
+            .map(|k| 100.0 + 500.0 * f64::from(k))
+            .chain([20_000.0])
+        {
             let (gain, snr) = gain_and_snr(&converted(hz, 48_000), hz, SONG_RATE);
+            let least_snr = if hz <= 18_000.0 { 95.0 } else { 85.0 };
             assert!(gain.abs() < 0.01, "{hz} Hz: gain {gain:.4} dB");
             assert!(snr >= least_snr, "{hz} Hz: SNR {snr:.1} dB");
         }
@@ -235,17 +282,42 @@ mod tests {
             to_rate(vec![0.0; 32_000], 32_000, 44_100).unwrap().len(),
             44_100
         );
-        let (gain, snr) = gain_and_snr(&converted(1_000.0, 32_000), 1_000.0, SONG_RATE);
-        assert!(gain.abs() < 0.01, "gain {gain:.4} dB");
-        assert!(snr >= 100.0, "SNR {snr:.1} dB");
+        for hz in [1_000.0, 10_000.0, 14_000.0] {
+            let (gain, snr) = gain_and_snr(&converted(hz, 32_000), hz, SONG_RATE);
+            assert!(gain.abs() < 0.01, "{hz} Hz: gain {gain:.4} dB");
+            assert!(snr >= 95.0, "{hz} Hz: SNR {snr:.1} dB");
+        }
+    }
+
+    #[test]
+    fn a_rising_rate_makes_no_audible_image() {
+        // A tone f below half the input rate has an image at `from - f`,
+        // just above half the input rate, in the audible band.
+        for (from, hz) in [
+            (16_000, 7_800.0),
+            (22_050, 10_800.0),
+            (24_000, 11_800.0),
+            (32_000, 15_500.0),
+        ] {
+            let image = f64::from(from) - hz;
+            let (gain, _) = gain_and_snr(&converted(hz, from), image, SONG_RATE);
+            assert!(
+                gain <= -60.0,
+                "{from} Hz: image at {image} Hz, {gain:.1} dB"
+            );
+        }
     }
 
     #[test]
     fn a_large_fall_keeps_the_pass_band() {
-        // 192 kHz scales the filter by 4, so 18 kHz is still flat.
-        let (gain, snr) = gain_and_snr(&converted(18_000.0, 192_000), 18_000.0, SONG_RATE);
-        assert!(gain.abs() < 0.01, "gain {gain:.4} dB");
-        assert!(snr >= 100.0, "SNR {snr:.1} dB");
+        // The taps grow with the input rate, also for a ratio just under 2.
+        for from in [64_000, 88_000, 192_000, 384_000] {
+            for hz in [18_000.0, 20_000.0] {
+                let (gain, snr) = gain_and_snr(&converted(hz, from), hz, SONG_RATE);
+                assert!(gain.abs() < 0.01, "{from} Hz, {hz} Hz: gain {gain:.4} dB");
+                assert!(snr >= 85.0, "{from} Hz, {hz} Hz: SNR {snr:.1} dB");
+            }
+        }
     }
 
     #[test]
@@ -263,12 +335,48 @@ mod tests {
     }
 
     #[test]
-    fn the_same_input_gives_the_same_output() {
-        let x = tone(440.0, 48_000, 48_000);
-        let a = to_rate(x.clone(), 48_000, SONG_RATE).unwrap();
-        let b = to_rate(x, 48_000, SONG_RATE).unwrap();
+    fn input_outside_the_song_counts_as_silence() {
+        // 640 frames at 48 kHz are 588 at 44.1 kHz, a whole number, so the
+        // padded song's outputs fall on the same phases as the song's.  The
+        // offset keeps the first and last samples away from 0.
+        let x: Vec<f32> = tone(440.0, 48_000, 1_000).iter().map(|v| v + 0.1).collect();
+        let padded: Vec<f32> = [vec![0.0; 640], x.clone(), vec![0.0; 640]].concat();
+        let a = to_rate(x, 48_000, SONG_RATE).unwrap();
+        let b = to_rate(padded, 48_000, SONG_RATE).unwrap();
         let bits = |v: &[f32]| v.iter().map(|s| s.to_bits()).collect::<Vec<_>>();
-        assert_eq!(bits(&a), bits(&b));
+        assert_eq!(bits(&a), bits(&b[588..588 + a.len()]));
+    }
+
+    #[test]
+    fn the_output_is_not_delayed() {
+        // A click 0.02 s in stays 0.02 s in: frame 882 at 44.1 kHz.  The
+        // tone tests cannot see a delay, since a sine fit takes any phase.
+        for from in [32_000, 48_000, 96_000] {
+            let mut x = vec![0.0; from as usize / 10];
+            x[from as usize / 50] = 1.0;
+            let y = to_rate(x, from, SONG_RATE).unwrap();
+            let peak = (0..y.len()).max_by(|&a, &b| y[a].total_cmp(&y[b])).unwrap();
+            assert_eq!(peak, 882, "{from} Hz");
+        }
+    }
+
+    #[test]
+    fn the_length_and_the_position_do_not_overflow_32_bits() {
+        // 30,000,000 frames at 48 kHz, about 10.4 minutes: frames * 147 and
+        // i * 160 are both above 2^32.
+        let (phases, step) = (147, 160);
+        assert_eq!(output_len(30_000_000, phases, step), 27_562_500);
+        let mut pos = Position { at: 0, phase: 0 };
+        for i in 1..=27_562_500_u64 {
+            pos = pos.next(phases, step);
+            if i % 1_000_003 == 0 || i == 27_562_500 {
+                let want = Position {
+                    at: (i * 160 / 147) as usize,
+                    phase: (i * 160 % 147) as usize,
+                };
+                assert_eq!(pos, want, "output {i}");
+            }
+        }
     }
 
     #[test]
@@ -289,5 +397,20 @@ mod tests {
         let e = to_rate(vec![0.0; 10], 44_056, SONG_RATE).unwrap_err();
         assert!(e.to_string().contains("44056 Hz are not supported"), "{e}");
         assert!(to_rate(vec![0.0; 10], 0, SONG_RATE).is_err());
+    }
+
+    #[test]
+    fn a_rate_outside_8_to_384_khz_is_refused() {
+        // Each of these needs 441 phases or fewer, so only the range
+        // refuses them: a tiny rate makes a huge song, a huge rate a huge
+        // filter table.
+        for from in [100, 7_000, 400_000, 4_000_000] {
+            let e = to_rate(vec![0.0; 10], from, SONG_RATE).unwrap_err();
+            assert!(
+                e.to_string().contains("only 8 kHz to 384 kHz"),
+                "{from} Hz: {e}"
+            );
+        }
+        assert!(to_rate(vec![0.0; 10], SONG_RATE, 400_000).is_err());
     }
 }

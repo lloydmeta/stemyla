@@ -63,7 +63,7 @@ Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No cra
 
 ## From a song to six stems
 
-The model takes only 44.1 kHz.  So `Song::from_audio` converts a song at another standard rate to 44.1 kHz when the page opens it (decision 0012).  The converter is a polyphase windowed-sinc filter with 64 taps at 48 kHz, flat to 20 kHz.  A 44.1 kHz song stays as it is, with no copy.
+The model takes only 44.1 kHz.  So `Song::from_audio` converts a song at another common rate, from 8 kHz to 384 kHz, to 44.1 kHz when the page opens it (decision 0012).  The converter is a polyphase windowed-sinc filter with 64 taps at 48 kHz, flat to 20 kHz.  It refuses other rates, because a file's header can state any rate.  A 44.1 kHz song stays as it is, with no copy.
 
 A song is handled in chunks of 13.35 s (588,800 samples), and a new chunk starts every 6.68 s (294,400 samples), so every sample away from the ends lies in two chunks.  A song longer than 13.35 s is first reflect-padded by 6.68 s at each end, so its first and last seconds are covered twice as well.  `Demixer::new` skips that padding for a song of 13.35 s or less, so its first 6.68 s lie in one chunk only, which keeps full weight there because the first chunk has no fade-in.  For each chunk:
 

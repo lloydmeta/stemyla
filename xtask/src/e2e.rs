@@ -1038,11 +1038,11 @@ fn selftest(o: &Opts) -> Result<()> {
     p.finish()
 }
 
-/// A two-second clip of the synthetic mix as a WAV, for `separate`.
 /// The rate of the `separate` scenario's clip: not the model's, so the page
 /// must convert it before it separates (decision 0012).
 const CLIP_RATE: u32 = 48_000;
 
+/// A two-second clip of the synthetic mix as a WAV, for `separate`.
 fn clip(out: &Path) -> Result<PathBuf> {
     let song = crate::synth::generate();
     let n = 2 * crate::synth::SAMPLE_RATE as usize;
@@ -1079,12 +1079,13 @@ fn separate(o: &Opts) -> Result<()> {
     p.screenshot("separate_empty")?;
     let from = p.mark();
     p.drop_files(&[("/test/clip.wav", "clip.wav", "audio/wav")])?;
-    let converted = p.wait_for(from, 60, |l| l.contains("song: decoded and converted"))?;
-    p.note(&format!("opened: {converted:?}"));
+    // At 48 kHz the clip has 96,000 frames; at 44.1 kHz it has 88,200.
+    let opened = p.wait_for(from, 60, |l| l.contains("song: opened"))?;
+    p.note(&format!("opened: {opened:?}"));
     p.check(
-        converted
+        opened
             .as_deref()
-            .is_some_and(|l| l.contains("to 44100 Hz") && l.contains("(88200 frames)")),
+            .is_some_and(|l| l.contains("at 44100 Hz") && l.contains("(88200 frames)")),
         "the 48 kHz clip opens at 44.1 kHz",
     );
     let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;

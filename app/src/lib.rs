@@ -232,7 +232,7 @@ async fn load_and_keep(
     let opened = match Song::load_files(files) {
         Ok(song) => {
             log::info!(
-                "song: decoded and converted to {} Hz in {:.2} s ({} frames)",
+                "song: opened at {} Hz in {:.2} s ({} frames)",
                 song.sample_rate,
                 (js_sys::Date::now() - started) / 1000.0,
                 song.frames

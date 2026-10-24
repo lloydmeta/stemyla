@@ -556,7 +556,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         st_remove(ROOT).await;
     }
 
-    /// A stereo tone as a WAV file of `frames` frames at 8 kHz.
+    /// A stereo tone as a WAV file of `frames` frames at 44.1 kHz.
     fn tone(frames: usize) -> Vec<u8> {
         let wave: Vec<f32> = (0..frames).map(|i| 0.25 * (0.3 * i as f32).sin()).collect();
         engine::wav::encode_pcm16(&wave, &wave, 44_100)
