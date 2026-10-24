@@ -690,12 +690,12 @@ The comparer's note on `m2-3`: 1-4 is in the same loop, but states another defec
 | ID | Result | By | Finding | Quote |
 | - | - | - | - | - |
 | `m10-1` | missed | - | - | - |
-| `m10-2` | found | cargo-mutants; also the unvalidated nit of reviewer and supply-chain-reviewer | 1-10; 1-4 (nit) | 1-10: "no test fails with this mutant: xtask/src/rules.rs:2624:21: replace && with \|\| in rust_types".  1-4: "No test pins the rule that a `"type": "x"` key counts only in a brace group.  If `in_braces` is replaced with `true`, all 7 proto_tests pass." |
+| `m10-2` | found | cargo-mutants (by the function-level clause only; see the notes); also the unvalidated nit of reviewer and supply-chain-reviewer | 1-10; 1-4 (nit) | 1-10: "no test fails with this mutant: xtask/src/rules.rs:2624:21: replace && with \|\| in rust_types".  1-4: "No test pins the rule that a `"type": "x"` key counts only in a brace group.  If `in_braces` is replaced with `true`, all 7 proto_tests pass." |
 
 The notes:
 
 * `m10-1`: 1-12 is in `js_included_types`, another function, and states another defect.
-* `m10-2`: the comparer was not sure if mutant 1-10 (`rust_types`, line 2624, `&&` to `||`) is the bracket rule.  The team leader first read line 2624 at `5bd0298` as the `==` or `!=` test in `compares`, and marked no match.  That reading narrowed the written rule after the results were seen.  Step 6.2 says: "A missed mutant matches an item that is a weak test of the same function."  1-10 is in `rust_types`, and `m10-2` is a weak-test item of `rust_types`.  The written rule governs, so 1-10 matches.
+* `m10-2`: the comparer was not sure if mutant 1-10 (`rust_types`, line 2624, `&&` to `||`) is the bracket rule.  The team leader first read line 2624 at `5bd0298` as the `==` or `!=` test in `compares`, and marked no match.  That reading narrowed the written rule after the results were seen.  Step 6.2 says: "A missed mutant matches an item that is a weak test of the same function."  1-10 is in `rust_types`, and `m10-2` is a weak-test item of `rust_types`.  The written rule governs, so 1-10 matches.  Caveat: 1-10 breaks the `compares` test at line 2624 (`m["type"] <= ...`), a different defect, and `d67db75` adds no `<=` case.  So the match rests only on the function-level clause of step 6.2.
 
 ### m18a: 1/4
 
@@ -728,9 +728,9 @@ The found items by source.  An item with more than one source counts once for ea
 | memory-reviewer | 2 | `m11-1`, `m18a-2` |
 | gpu-reviewer | 1 | `m2-4` |
 | wire-reviewer | 0 | - |
-| cargo-mutants | 1 | `m10-2` |
+| cargo-mutants | 1 | `m10-2` (by the function-level clause of step 6.2 only) |
 
-The unvalidated nits that match an item: 1-5 of `m9` (reviewer) finds `m9-2` alone.  1-4 of `m10` (reviewer and supply-chain-reviewer) also matches `m10-2`, which cargo-mutants finds.
+The unvalidated nits that match an item: 1-5 of `m9` (reviewer) finds `m9-2` alone.  1-4 of `m10` (reviewer and supply-chain-reviewer) also matches `m10-2`, which cargo-mutants finds by the function-level clause of step 6.2 only (the notes of `m10`).
 
 Unvalidated nits that match no item are counted, not listed: `pr9` 6, `m9` 7, `m11` 4, `m2` 3, `m10` 5, `m18a` 4, a total of 29.
 
@@ -875,7 +875,7 @@ The threats that M5 found:
   * `m11`: 10 writes of probe tests (6 heredocs, 4 multi-line `sed`), 10 commands with a variable prefix and 8 reads of the cargo registry were denied.  The one item of `m11` was found.
   * `m2`: 5 mutant probes with `cd`, 3 with a variable prefix and 2 shader writes with `printf >` were denied.
   * `m10`: 10 writes of probe tests to `rules.rs` were denied (4 heredocs, 6 multi-line `sed`).  `m10-1` is a missing test case in `rules.rs`, and was missed.
-  * `m18a`: the harness denied every try to run the browser tests.  These were 2 `which chromedriver wasm-bindgen-test-runner`, a `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=... cargo test`, and 2 `CARGO_TARGET_DIR=... cargo run -p xtask -- web-test`.  They also include a wasm32 `cargo clippy` and an `echo "CHROMEDRIVER=$CHROMEDRIVER"`.  All four items of `m18a` are in JavaScript in `inline_js` blocks, which only wasm tests in a browser check.  `.cargo/mutants.toml` excludes `app/src/store.rs`, which is wasm32 only.  So no reviewer and no mutant could run code that reaches an item of `m18a`.
+  * `m18a`: the harness denied every try to run the browser tests.  These were 2 `which chromedriver wasm-bindgen-test-runner` (one that ran printed "chromedriver not found"), a `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=... cargo test`, and 2 `CARGO_TARGET_DIR=... cargo run -p xtask -- web-test`.  They also include a wasm32 `cargo clippy` and an `echo "CHROMEDRIVER=$CHROMEDRIVER"`.  All four items of `m18a` are in JavaScript in `inline_js` blocks, which only wasm tests in a browser check.  `.cargo/mutants.toml` excludes `app/src/store.rs`, which is wasm32 only.  So no reviewer and no mutant could run code that reaches an item of `m18a`.
 
   So some probes and tests did not run, and the result can be low.
 * The old round's reviewer tokens are not recorded, and auto mode refused the read of the old transcripts.

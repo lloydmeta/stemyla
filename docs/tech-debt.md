@@ -248,7 +248,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` an
 * `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
 * a request with no headers in `drip`, since the test always sends a Host header (not run).
 
-`sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s.
+`sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
 
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
 
@@ -305,15 +305,15 @@ This entry concerns no rule.  It concerns the measure of D4 of the parent plan (
 
 The final context of an agent is lower than the tokens that it used, by a ratio that differs by agent.  In `docs/reviews/replay.md`, that ratio ran from 2.5 to 26.2 in case `m2`, and from 3.7 to 18.4 in case `m18a`.  Reviewers have high ratios, and validators low ones.  So D4's ratio of summed final contexts can misstate the ratio of tokens used by several times, by the mix of agents.
 
-The session's `modelUsage` gives the tokens used, in `-p` mode only.  For example, the session of `m18a` used 6,266,253 tokens, and its main agent used 758,710 of them.  The final contexts of its seven subagents sum to 391,169.
+In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For example, the session of `m18a` used 6,266,253 tokens, and its main agent used 758,710 of them.  The final contexts of its seven subagents sum to 391,169.
 
 D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
 
 * Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
 
-### TD-46: in `dontAsk` mode, no allow list admits the agents' probe forms
+### TD-46: in `dontAsk` mode, the agents' probe forms are denied
 
-This entry concerns no rule.  It concerns the headless rounds of phase 5.  The review agents write probe commands in forms that no allow list admits in `dontAsk` mode.  These forms are a heredoc, a multi-line command, `cd`, an env or variable prefix, and a `>` write.  An allow rule matches the prefix of a command, and these forms put another word first, or span lines.  In M5 they were 11, 14, 14, 23 and 9 of the 126 denials of the six counted runs.  The evidence is the denial table in `## Threats` of `docs/reviews/replay.md`, and dry run 2 in the Progress of `plans/active/harness-phase-3-m5.md`.
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  In `dontAsk` mode, the harness denied probe commands of the review agents in five forms: a heredoc, a multi-line command, `cd`, an env or variable prefix, and a `>` write.  No allow list admits a heredoc, a multi-line command or a `>` write (the Decision log of `plans/active/harness-phase-3-m5.md`).  For `cd` and a variable prefix, no run tried a wider allow list.  In M5 they were 11, 14, 14, 23 and 9 of the 126 denials of the six counted runs.  The evidence is the denial table in `## Threats` of `docs/reviews/replay.md`, and dry run 2 in the Progress of `plans/active/harness-phase-3-m5.md`.
 
 * Fix: phase 5 runs the agents in a sandbox where Bash needs no allow list.  Or the agents write each probe in a form that an allow rule admits, such as a one-line `sed`.
 
@@ -331,9 +331,9 @@ This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.
 
-### TD-45: decision 0007 has a status that no person set
+### TD-45: the status of decision 0007 may not be a person's choice
 
-Decision 0007 (`decisions/0007-no-allocation-in-the-audio-callback.md`) has the status "accepted (by the maintainer)".  But an agent wrote it, and the limits of its scope are the agent's choices.  `CLAUDE.md`, "Working here", Decisions: agents write a record as `proposed`, and only a person accepts it.
+Decision 0007 (`decisions/0007-no-allocation-in-the-audio-callback.md`) has the status "accepted (by the maintainer)", and an agent wrote it.  Finding m11 1-2 claims that the limits of its scope are the agent's choices.  The M11 heading of the phase 2 plan says "maintainer decision, made 2026-10-19".  The maintainer judges.  `CLAUDE.md`, "Working here", Decisions: agents write a record as `proposed`, and only a person accepts it.
 
 Source: `docs/reviews/replay.md`, case `m11`, finding 1-2.
 
