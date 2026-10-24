@@ -201,6 +201,25 @@ refuse_prefix() {
   done
 }
 
+# True if a word from $1 to $2 (exclusive) names the xtask package or binary,
+# as in `-p xtask`, `-pxtask`, `--package=xtask` or `xtask/Cargo.toml`.
+names_xtask() {
+  local j=$1
+  while [ $j -lt $2 ]; do
+    case ${WORDS[j]} in
+      xtask | -pxtask | *=xtask | xtask/Cargo.toml | */xtask/Cargo.toml | *=xtask/Cargo.toml | *=*/xtask/Cargo.toml) return 0 ;;
+    esac
+    j=$((j + 1))
+  done
+  return 1
+}
+
+# Refuses an xtask command that pushes (`publish`) or that changes the state
+# of a review round (`review`), if a word from $1 to $2 (exclusive) is one.
+check_xtask_words() {
+  if has_word publish $1 $2 || has_word review $1 $2; then refuse command "$text"; fi
+}
+
 check_cargo() {
   refuse_prefix "cargo option" --config $((k + 1)) $end
   local j=$((k + 1))
@@ -219,6 +238,9 @@ check_cargo() {
       ;;
     fmt)
       if ! has_word --check $((k + 1)) $end; then refuse "cargo subcommand" "$text"; fi
+      ;;
+    run | r)
+      if names_xtask $((j + 1)) $end; then check_xtask_words $((j + 1)) $end; fi
       ;;
   esac
   if has_word --fix $((k + 1)) $end; then refuse "cargo subcommand" "$text"; fi
@@ -306,9 +328,7 @@ check_part() {
   lower "${WORDS[k]##*/}"
   case $LOWERED in
     gh | curl | wget | bash | sh | zsh | eval | xargs) refuse command "$text" ;;
-    xtask)
-      if has_word publish $((k + 1)) $end; then refuse command "$text"; fi
-      ;;
+    xtask) check_xtask_words $((k + 1)) $end ;;
     cargo) check_cargo ;;
     git) check_git ;;
   esac

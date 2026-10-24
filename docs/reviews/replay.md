@@ -759,6 +759,11 @@ Each agent's final context, from its last `task_notification`.  This figure is t
 * `m10`: reviewer 76,628; wire-reviewer 69,228; supply-chain-reviewer 62,071; docs-reviewer 76,552; validators 24,935, 23,825, 18,321 and 48,454.
 * `m18a`: reviewer 68,527; memory-reviewer 78,774; supply-chain-reviewer 69,675; docs-reviewer 73,272; validators 16,736, 43,748 and 40,437.
 
+The tokens that each agent used, for `m2` and `m18a`, with the ratio to its final context in brackets.  The source is each agent's `message.usage` in `H/replay-m2-1.jsonl` and `H/replay-m18a-1.jsonl`, once for each message ID.  Each figure is the sum of input, output, cache creation and cache read tokens.  `jq` gave them in the fixes of M6, review round 1.
+
+* `m2`: main agent 1,153,467; reviewer 2,101,547 (26.2); gpu-reviewer 2,171,423 (25.8); supply-chain-reviewer 1,025,584 (17.1); docs-reviewer 1,732,993 (23.5); validators 216,221 (8.3), 136,000 (2.7), 80,286 (4.6), 263,280 (10.1), 255,541 (10.9), 366,949 (13.3) and 32,524 (2.5).
+* `m18a`: main agent 758,710; reviewer 953,184 (13.9); memory-reviewer 1,446,154 (18.4); supply-chain-reviewer 1,123,826 (16.1); docs-reviewer 1,278,863 (17.5); validators 61,209 (3.7), 213,059 (4.9) and 345,968 (8.6).
+
 The runs that did not count:
 
 | Run | Agents | Wall time (s) | Session tokens | `total_cost_usd` | Why it did not count |

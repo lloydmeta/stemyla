@@ -268,8 +268,8 @@ of <y> baseline findings, the round found <x>
 First, get the approval counts of the round.  They are cost, not interventions.
 
 * If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.
-  * In auto mode or `dontAsk` mode, write each count as 0 with the mode, for example `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.
-  * In an interactive session, auto mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  So in an interactive session, write `0 (auto mode; a fallback prompt is not counted)`.
+  * In `dontAsk` mode, or in auto mode in a `claude -p` run, write each count as 0 with the mode.  For example, write `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.
+  * In auto mode in an interactive session, the mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  So write `0 (auto mode; a fallback prompt is not counted)`.
   * In another mode, ask the maintainer the questions below.
 * If you are a subagent, or no person can answer, as in a `claude -p` run, do not ask.  Leave the approvals fields as step 9 wrote them.  Stop here, and give the questions below in your final answer.  The caller asks them, and does the rest of this step.
 * In any other case, ask the person:
@@ -317,4 +317,4 @@ After round 3:
 * Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.
 * Write a Progress line for each round in the plan of the work.
 * Run the checks, and commit, signed.
-* Give the person the text for the PR description: each `refuted` finding, each `unproven` blocker or should-fix, each `repeat-of`, and the mutants line of each round.
+* Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, each `repeat-of`, and the mutants line of each round.

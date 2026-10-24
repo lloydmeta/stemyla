@@ -512,6 +512,17 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (COMMAND, "eval x"),
     (COMMAND, "xargs x"),
     (COMMAND, "target/review/target/debug/xtask publish"),
+    (COMMAND, "target/debug/xtask review start HEAD 1"),
+    (COMMAND, "target/debug/xtask review mutants 1"),
+    (COMMAND, "cargo run -p xtask --release -- publish"),
+    (COMMAND, "cargo r -p xtask -- publish"),
+    (COMMAND, "cargo run --package=xtask -- publish"),
+    (COMMAND, "cargo -q run -pxtask -- publish"),
+    (
+        COMMAND,
+        "cargo run --manifest-path xtask/Cargo.toml -- publish",
+    ),
+    (COMMAND, "cargo run -q -p xtask -- review start HEAD 1"),
     (GIT_SUB, "FOO=a/b git commit -m x"),
     (GIT_SUB, "/usr/bin/git commit -m x"),
     // Letter case: the file system of macOS ignores it.
@@ -606,6 +617,9 @@ const GUARD_PASSES: &[&str] = &[
     "cargo test -p dsp --target-dir /tmp/t 2>&1",
     "cargo --color never test -p dsp",
     "target/debug/xtask docs-check",
+    "cargo run -q -p xtask -- docs-check",
+    "cargo run -p app -- publish",
+    "cargo test -p xtask review",
     "for f in a b; do grep -n x \"$f\"; done",
     "export FOO=1",
     "",
@@ -759,6 +773,12 @@ fn the_bash_guard_explains_each_refusal() {
             bash_call("git log\n  git commit -m \"a\nb\" \t"),
             format!(
                 "read-only guard: git subcommand: git commit -m \"a b\".  {READ_ONLY_ADVICE}\n"
+            ),
+        ),
+        (
+            bash_call("cargo run -p xtask --release -- publish"),
+            format!(
+                "read-only guard: command: cargo run -p xtask --release -- publish.  {READ_ONLY_ADVICE}\n"
             ),
         ),
         (
@@ -963,6 +983,32 @@ fn the_agents_are_read_only_by_tools() {
     );
 }
 
+/// The worktree path of a validator holds the ID of its input, so two
+/// validators that run at the same time never choose the same path.
+const VALIDATOR_WORKTREE_TEXT: &[&str] = &[
+    "git worktree add --detach target/review/<round>-validator-<id>-<n> HEAD",
+    "`<id>` is the ID of the finding in the input, such as `1-3`, or `mutants` for the missed mutants.",
+    "--target-dir target/review/<round>-validator-<id>-<n>/target",
+    "git worktree remove --force target/review/<round>-validator-<id>-<n>",
+    "If `git worktree add` fails, do not use that path.",
+];
+
+#[test]
+fn a_validator_worktree_path_holds_the_id_of_its_input() {
+    let file = format!("{}validator.md", xtask::rules::AGENTS_FOLDER);
+    let text = std::fs::read_to_string(xtask::workspace_root().join(&file))
+        .unwrap_or_else(|e| panic!("reading {file}: {e}"));
+    let missing: Vec<&&str> = VALIDATOR_WORKTREE_TEXT
+        .iter()
+        .filter(|wanted| !text.contains(**wanted))
+        .collect();
+    let shared = text.contains("<round>-<name>-<n>");
+    assert!(
+        missing.is_empty() && !shared,
+        "{file} lacks {missing:?}, or holds the path `<round>-<name>-<n>` ({shared}).  Fix: put the ID of the input in each worktree path.  In review round 1 of harness phase 3, M6, two validators chose the same path, and one wrote in the other's worktree."
+    );
+}
+
 const REVIEW_SKILL: &str = ".claude/skills/review-rounds/SKILL.md";
 
 /// The frontmatter lines of the review skill that must stay as they are.
@@ -991,9 +1037,10 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// and in the log's rounds table.  The approvals of the round and of the
 /// baseline are cost, in their own fields and cells (D4).  Step 9 writes
 /// them as "not asked", and the baseline's as "-" without `--baseline`.
-/// Step 11 first gets the approval counts.  An orchestrator in auto mode or
-/// `dontAsk` mode writes 0 with the mode, and marks the 0 of an interactive
-/// session, since it does not see an approval of a fallback prompt (TD-38).
+/// Step 11 first gets the approval counts.  An orchestrator in `dontAsk`
+/// mode, or in auto mode in a `claude -p` run, writes 0 with the mode.  In
+/// auto mode in an interactive session, it marks the 0, since it does not
+/// see an approval of a fallback prompt (TD-38).
 /// A subagent, or a run with no person, does not ask, leaves the fields as
 /// step 9 wrote them, and gives the questions to its caller.  In another
 /// case, step 11 asks the three questions: the round's count and its window,
@@ -1024,7 +1071,8 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "* approvals:",
     "* baseline approvals:",
     "Do not ask yourself.",
-    "In auto mode or `dontAsk` mode, write each count as 0 with the mode",
+    "* In `dontAsk` mode, or in auto mode in a `claude -p` run, write each count as 0 with the mode",
+    "* In auto mode in an interactive session, the mode can fall back to a prompt",
     "You do not see an approval of that prompt (TD-38).",
     "In any other case, ask the person:",
     "Do not count the `baseline` agent and its validators.",

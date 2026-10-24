@@ -45,6 +45,9 @@ pub const REVIEWERS: &[Reviewer] = &[
             "app/src/**",
             "worker/**",
             "protocol/**",
+            "roformer/src/**",
+            "roformer-gpu/src/**",
+            "synth/src/**",
             "**/clippy.toml",
             ".claude/rules/memory.md",
         ],
@@ -55,6 +58,7 @@ pub const REVIEWERS: &[Reviewer] = &[
         include: &[
             "protocol/**",
             "worker/src/web.rs",
+            "worker/src/web/**",
             "app/src/separator.rs",
             "xtask/src/e2e.rs",
             "xtask/e2e/**",
@@ -1541,6 +1545,13 @@ mod tests {
             ("app/src/lib.rs", "memory-reviewer", "app/src/**"),
             ("worker/src/lib.rs", "memory-reviewer", "worker/**"),
             ("protocol/src/lib.rs", "memory-reviewer", "protocol/**"),
+            ("roformer/src/stft.rs", "memory-reviewer", "roformer/src/**"),
+            (
+                "roformer-gpu/src/net.rs",
+                "memory-reviewer",
+                "roformer-gpu/src/**",
+            ),
+            ("synth/src/lib.rs", "memory-reviewer", "synth/src/**"),
             ("dsp/clippy.toml", "memory-reviewer", "**/clippy.toml"),
             (
                 ".claude/rules/memory.md",
@@ -1549,6 +1560,11 @@ mod tests {
             ),
             ("protocol/src/lib.rs", "wire-reviewer", "protocol/**"),
             ("worker/src/web.rs", "wire-reviewer", "worker/src/web.rs"),
+            (
+                "worker/src/web/tests.rs",
+                "wire-reviewer",
+                "worker/src/web/**",
+            ),
             (
                 "app/src/separator.rs",
                 "wire-reviewer",
@@ -1735,6 +1751,7 @@ mod tests {
             ),
             ("a.copy_to(b);", "memory-reviewer", "copy_to"),
             ("let a = [b, c].concat();", "memory-reviewer", ".concat()"),
+            ("let a = parts.concat();", "memory-reviewer", ".concat()"),
             ("let a: wgpu::Device = b;", "gpu-reviewer", "wgpu::"),
             (
                 "let a = d.create_buffer(b);",

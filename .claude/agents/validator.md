@@ -34,11 +34,11 @@ You do not get the other output of the reviewer.  Do not look for it.
   * the messages of "review round" commits;
   * the Progress lines of a plan about review rounds.
 * Do not change a file in the main checkout.  To try a change, use a worktree:
-  1. Run `git worktree add --detach target/review/<round>-<name>-<n> HEAD`.  `<round>` is the round number of the input, `<name>` is your agent name, and `<n>` counts your worktrees.
+  1. Run `git worktree add --detach target/review/<round>-validator-<id>-<n> HEAD`.  `<round>` is the round number of the input.  `<id>` is the ID of the finding in the input, such as `1-3`, or `mutants` for the missed mutants.  `<n>` counts your worktrees, from 1.
   2. Change files in the worktree with Bash.
-  3. Build with `--manifest-path` in the worktree and `--target-dir target/review/<round>-<name>-<n>/target`.  This build is cold and takes minutes, so give the Bash call a `timeout` of 600000 ms.
-  4. Remove the worktree with `git worktree remove --force target/review/<round>-<name>-<n>`.  This also removes its target folder.
-* If `git worktree add` says that the path exists, add 1 to `<n>` and run it again.  Another agent with your name can run at the same time.  Never use or remove a worktree that you did not make.
+  3. Build with `--manifest-path` in the worktree and `--target-dir target/review/<round>-validator-<id>-<n>/target`.  This build is cold and takes minutes, so give the Bash call a `timeout` of 600000 ms.
+  4. Remove the worktree with `git worktree remove --force target/review/<round>-validator-<id>-<n>`.  This also removes its target folder.
+* If `git worktree add` fails, do not use that path.  Add 1 to `<n>`, and run it again.  Many validators run at the same time.  Never use or remove a worktree that you did not make.
 * Do not build a changed worktree into the target folder of the input.  Cargo gives a test program the same name in each worktree, so parallel agents would run the test programs of other agents.
 * To test `HEAD` with no change, run cargo in the main checkout with `--target-dir <the target folder of the input>`.  All agents build the same code there.
 * A guard refuses some Bash commands.  Its message starts with "read-only guard:".
