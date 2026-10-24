@@ -13,6 +13,15 @@ opt-level = 2
 [profile.release]
 debug = 1
 
+# The build of `xtask review mutants` (`.cargo/mutants.toml`).  Without
+# optimisation the DSP tests are slow, and the baseline test run timed out at
+# 300 s (TD-33).  It inherits the test profile, so debug assertions and
+# overflow checks stay on.
+[profile.mutants]
+inherits = "test"
+opt-level = 2
+debug = false
+
 [workspace.lints.clippy]
 # Index loops over several parallel buffers read more clearly in DSP code.
 needless_range_loop = "allow"
