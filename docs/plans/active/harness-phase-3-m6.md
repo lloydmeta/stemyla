@@ -204,7 +204,7 @@ At the end:
 * [x] 2026-10-24: the plan and its line in `docs/README.md` committed.
 * [x] 2026-10-24: step 1: decision 0011, with its line in `docs/README.md`.  `docs-check` passes; it reads each TD ID of the record as defined.
 * [x] 2026-10-24: step 2: the skill, its test, the guide, TD-36 and TD-38.  Failing first, with only `xtask/tests/rules.rs` changed: `the_review_skill_starts_with_xtask` panicked with "11 review skill problem(s)", one for each new entry.  For example: "the text does not hold `Do not ask yourself.`", and "the text does not hold `* approvals:`".  After the skill change, it passes.  12 mutants of the changed skill, each from a saved copy: a change to the phrase of each of the 11 new entries, and a 13-cell separator.  Each failed the test with "1 review skill problem(s)", which named that entry.  The skill was then copied back, and `git diff` shows only the planned change.
-* [ ] Step 3: the tech-debt fix lines.
+* [x] 2026-10-24: step 3: the fix lines of TD-3, TD-7, TD-8, TD-10, TD-16, TD-23, TD-26, TD-27, TD-28 and TD-29 name the agent that looks.  Each entry stays open, with its title and body.  `invariants.md` does not change, and the check of its `* Enforced by:` lines for an agent gives 0.
 * [ ] Step 4: the plan of phases.
 * [ ] Step 5: review rounds.
 

@@ -10,13 +10,13 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 `dsp_is_beginner_style` scans the tokens in `dsp/` for the likely breaches.  It does not read types, so a type outside DSP-1's list passes.  A closure with no arguments (`|| x`) passes, because it has the same tokens as `||`.  A construct that the scan does not look for, such as `match` or `loop`, passes.  A glob import, such as `use std::mem::*`, hides the names that it brings in.  A `-A clippy::all` in `RUSTFLAGS`, in a `config.toml` in `.cargo/`, or in `[workspace.lints]`, passes too, for every crate.
 
-* Fix: review; no check is planned.  `dsp` is small and seldom changes, so a full allowlist costs more than it gains (`plans/completed/harness-phase-2.md`, M7).
+* Fix: review, by the `reviewer` agent, which looks for DSP-1 forms that the scan does not read.  No check is planned.  `dsp` is small and seldom changes, so a full allowlist costs more than it gains (`plans/completed/harness-phase-2.md`, M7).
 
 ### TD-7: no licence policy and no allowlist of registries
 
 `young_crates_are_pinned` and `third_party_lists_what_ships` check the pins and the licence list (DEPS-1).  Nothing fails a licence that is not permissive.  A crate from a registry other than crates.io fails only if it is in a tree of `THIRD-PARTY.md`, since `third_party_lists_what_ships` cannot read its line.  A vendored copy of a crate that is made a workspace crate leaves both checks; only a reviewer sees it.
 
-* Fix: `cargo deny` for licences and registries.  It is a new tool, so vet it first (DEPS-1).
+* Fix: `cargo deny` for licences and registries.  It is a new tool, so vet it first (DEPS-1).  Until then, the `supply-chain-reviewer` agent checks the licence and the registry of each new crate with `cargo info`.
 
 ### TD-8: some evidence runs nowhere, and required skips rest on a person
 
@@ -24,14 +24,14 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 * The PyTorch comparisons run nowhere, because neither CI nor the maintainer's Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
 * GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
-* `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: phase 3's reviewers look for it.
+* `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: the `reviewer` agent looks for it.
 * The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere.  CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
 
 ### TD-10: GPU-3 is not checked
 
 Nothing records which adapter a kernel passed on, and any new `TILES` entry becomes a calibration candidate on every user's GPU.
 
-* Fix: log `isFallbackAdapter` and the adapter name in selftest and e2e results; a GPU reviewer that requires a named real GPU in the PR.
+* Fix: log `isFallbackAdapter` and the adapter name in selftest and e2e results.  Until then, the `gpu-reviewer` agent checks GPU-3 on each diff that routes it.  It reads the diff and the criteria, not the PR description.
 
 ### TD-11: MEM-4 is never asserted
 
@@ -65,7 +65,7 @@ MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E06
 * Source can reach across crates without a dependency: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
 * A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
 * A symbolic link in a crate's folder can point to another crate's source.
-* Fix: phase 3's reviewers look for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
+* Fix: the `supply-chain-reviewer` agent looks for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
 
 ### TD-25: RT-1's allocation test runs natively only
 
@@ -85,7 +85,7 @@ Clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`,
 * crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
 * a path that no longer resolves, except through the canaries, which prove their paths only while the clippy steps keep `--all-targets`.  Nothing fails if the `wasm32` step goes.
 
-* Fix: none planned.  Phase 3's memory reviewer looks for a new copy of any form.
+* Fix: none planned.  The `memory-reviewer` agent looks for a new copy of any form, on each diff that routes it (TD-31).
 
 ### TD-27: MEM-3's lint sees only how `roformer-gpu` makes buffers
 
@@ -101,7 +101,7 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 * other ways in wgpu to make a buffer that do not run on the web today: `create_buffer_from_hal`, `create_blas` and `create_tlas`;
 * a `GpuBuffer` that is kept and never dropped; the tests in `roformer-gpu/tests/memory.rs` measure that on a real GPU only.
 
-* Fix: none planned.  Phase 3's GPU reviewer looks for GPU memory that is not destroyed.
+* Fix: none planned.  The `gpu-reviewer` agent looks for GPU memory that is not destroyed, on each diff that routes it (TD-31).
 
 ### TD-28: GIT-1's deny rules match command text only
 
@@ -124,7 +124,7 @@ They do not see:
 * a mod that answers `tool.check`, which can approve a denied call on a personal account;
 * a cloud session in a project or with several repositories, and a session started with `--setting-sources` without `project`; these read no project permission rules ([settings](https://code.claude.com/docs/en/settings));
 * an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
-* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review sees it.
+* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review, by the `supply-chain-reviewer` agent, sees it.
 
 * Fix: re-run M14's step 3 (`plans/completed/harness-phase-2.md`) after a change to the deny rules, or an upgrade of Claude Code or RTK.  After another change to `.claude/settings.json`, run the 9 commands in M15's step 2.  On GitHub, the `main` ruleset refuses a direct push to `main`, and the `gh-pages history` ruleset refuses a rewrite of `gh-pages` (TD-20).  Nothing on GitHub refuses a fast-forward push to `gh-pages`, a PR merge with the admin override, or `xtask publish`.  Phase 5 adds the agents' own identity.
 
@@ -140,7 +140,7 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 * `env` in a person's own Claude Code settings.  `env` in `.claude/settings.json` fails `claude_settings_hold_the_deny_rules`, which allows only `$schema`, `permissions` and `hooks`;
 * `#[ignore]` on a snapshot test.
 
-* Fix: review; a changed PNG or threshold is a UI change, and the reviewer looks at it.  Phase 3's reviewers check for it.  No check is planned.
+* Fix: review; a changed PNG or threshold is a UI change, and the `reviewer` agent looks at it.  No check is planned.
 
 ### TD-31: the route of `xtask review` is a short denylist, from the branch's own code
 
@@ -329,7 +329,7 @@ This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p
 
 `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  A `\n` or `\t` escape in a plain Rust literal joins its letter to the next word.  So `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
-* Fix: fail decoding on a missing required field; a version in `Alive`.
+* Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not, on each diff that routes it (TD-31).
 
 ### TD-45: the status of decision 0007 may not be a person's choice
 
