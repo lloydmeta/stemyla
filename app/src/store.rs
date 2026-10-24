@@ -383,7 +383,7 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
         let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
         // Fitted to the source, so the player never reads past a stem's end.
         // A session stored before decision 0012 from stems at mixed rates
-        // has stems one frame shorter than its source now opens with.
+        // can hold stems one frame shorter than its source now opens with.
         let fitted = |c: Vec<f32>| -> Samples { padded_to(c, source.frames).into() };
         let mut ch = audio.channels.into_iter();
         let left = fitted(ch.next().unwrap_or_default());

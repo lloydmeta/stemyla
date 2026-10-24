@@ -43,7 +43,7 @@ The resampler (`engine/src/resample.rs`):
 
 A scratch prototype (not in the repo) measured this filter on 2026-10-24.  From 48 kHz, the gain is within 0.002 dB up to 20 kHz.  Against an ideal sine, the SNR is 98.5 dB or more up to 18 kHz, 93.5 dB at 19.1 kHz and 89.9 dB at 20 kHz.  It swings by up to 13.4 dB between tones 500 Hz apart (review round 1, a 500 Hz sweep).  From 16 kHz to 32 kHz, the image of a tone near half the input rate is 60 dB or more below the input level.  For a tone in the pass band it is 72 dB or more below (review round 2).  A 23 kHz tone becomes a 21.1 kHz alias at -21.4 dB, above hearing.  This is the trade-off of SoX's `rate -a`, which allows aliasing above the pass band.  A 5-minute stereo song took 0.78 s native and 1.33 s in WebAssembly on V8.
 
-Memory (MEM-1, MEM-4): `from_audio` converts one channel at a time and drops its input first.  For a 5-minute 48 kHz song, the peak at open is about 168 MB, against 741 MB when 7 separated lanes show.  The page reuses the space that it frees, so the high-water mark does not change.
+Memory (MEM-1, MEM-4): `from_audio` converts one channel at a time and drops its input first.  For a 5-minute 48 kHz song, the peak during conversion is about 168 MB, against 741 MB when 7 separated lanes show.  The page reuses the space that it frees, so the high-water mark does not change.
 
 Not taken:
 
@@ -88,7 +88,7 @@ Acceptance: the tests above fail before the change and pass after it, and all th
 
 `app/tests/web.rs`: `a_48k_session_reopens_with_its_stems`.  Store a 48 kHz source, store stems with the frame count of the converted song, and open the session again.  Every lane has the same frame count, and the song is at 44.1 kHz.  Run `cargo run -p xtask -- web-test`.
 
-A session stored before this change can hold a source at mixed rates with stems.  The old `from_audio` opened a drop at the first stem's rate, and floored the length of the others.  Such a source now opens one frame longer than its stems.  So `rebuild` fits each stored stem to the source (review round 2, `stems_that_do_not_fit_the_source_are_fitted_to_it`).
+A session stored before this change can hold a source at mixed rates with stems.  The old `from_audio` opened a drop at the first stem's rate, and floored the length of the others.  Such a source can now open one frame longer than its stems.  So `rebuild` fits each stored stem to the source (review round 2, `stems_that_do_not_fit_the_source_are_fitted_to_it`).
 
 ### M4: the end-to-end separation of a 48 kHz clip
 

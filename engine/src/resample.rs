@@ -7,7 +7,7 @@
 //! the output can fall on.  From 48 kHz to 44.1 kHz, `L` is 147 and the
 //! input moves 160 samples for every 147 output samples.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::f64::consts::PI;
 
 /// The sample rate of every song in the app: the rate the separation
@@ -147,7 +147,8 @@ impl Filter {
 
     fn apply(&self, x: &[f32]) -> Result<Vec<f32>> {
         let taps = 2 * self.half;
-        let len = usize::try_from(output_len(x.len() as u64, self.phases, self.step))?;
+        let len = usize::try_from(output_len(x.len() as u64, self.phases, self.step))
+            .context("the song is too long to convert at this rate")?;
         let mut out = Vec::with_capacity(len);
         // Input outside the song counts as silence.
         let mut edge = vec![0.0; taps];
@@ -262,7 +263,7 @@ mod tests {
 
     #[test]
     fn the_pass_band_is_flat_to_20_khz() {
-        // Every 500 Hz, since the SNR swings by up to 10 dB between tones.
+        // Every 500 Hz, since the SNR swings by up to 13.4 dB between tones.
         for hz in (0..40)
             .map(|k| 100.0 + 500.0 * f64::from(k))
             .chain([20_000.0])

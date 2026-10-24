@@ -165,7 +165,7 @@ async fn a_48k_session_reopens_with_its_stems() {
     );
 }
 
-/// A session stored before decision 0012 from stems at mixed rates holds
+/// A session stored before decision 0012 from stems at mixed rates can hold
 /// stems one frame shorter than its source now opens with.  Each lane is
 /// fitted to the source, so the player never reads past a stem's end.
 #[wasm_bindgen_test]

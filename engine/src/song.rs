@@ -265,6 +265,8 @@ mod tests {
         assert_eq!((s.sample_rate, s.frames), (SONG_RATE, 44_100));
         assert_eq!(s.stems[0].left.len(), 44_100);
         assert_eq!(s.stems[0].right.len(), 44_100);
+        // Both sides hold the same tone, so both must convert the same way.
+        assert!(s.stems[0].right.as_slice() == s.stems[0].left.as_slice());
     }
 
     #[test]
