@@ -83,5 +83,5 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * Writing: write docs, comments, commit messages and PR descriptions in [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org).  Keep an instruction to 20 words or fewer, and a description to 25 or fewer.  Write one instruction per sentence, in the active voice.  Use the same word for the same thing.  You need not use STE's American English spelling.
 * Plans: work of more than a few steps gets an execution plan in `docs/plans/active/` that follows `docs/plans/PLANS.md`, kept current at every stopping point and moved to `docs/plans/completed/` when done.
 * Decisions: a choice with lasting effect gets a record in `docs/decisions/`; agents write it as `proposed`, and only a person accepts it.
-* Review: after implementing, run three rounds of review, each by a new subagent with fresh context; verify each finding before fixing it, and fix the real ones with tests.
+* Review: after implementing, run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3.  The skill verifies each blocker and should-fix before a fix.  Fix the real ones with tests.
 * Debt: a workaround, a skipped check or a known breach of a rule gets an entry in `docs/tech-debt.md` in the same commit.

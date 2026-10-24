@@ -1,6 +1,6 @@
 # Tech debt
 
-Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule it concerns, the evidence, and the fix in view.  To close an entry, delete it in the commit that fixes it.  In the same commit, add its ID under `## Closed`, with what closed it.  An ID is never reused.  Plans and decisions may still name a closed ID; `docs-check` fails it in other docs.  Add new entries above `## Closed`.
+Known gaps in what enforces the rules, and known breaches of them, by ID.  Each entry names the rule or the measure it concerns, the evidence, and the fix in view.  To close an entry, delete it in the commit that fixes it.  In the same commit, add its ID under `## Closed`, with what closed it.  An ID is never reused.  Plans, decisions and review logs may still name a closed ID; `docs-check` fails it in other docs.  Add new entries above `## Closed`.
 
 Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans/active/harness-engineering.md`); the plan's phase 2 closed most enforcement gaps (`## Closed`).
 
@@ -10,13 +10,13 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 `dsp_is_beginner_style` scans the tokens in `dsp/` for the likely breaches.  It does not read types, so a type outside DSP-1's list passes.  A closure with no arguments (`|| x`) passes, because it has the same tokens as `||`.  A construct that the scan does not look for, such as `match` or `loop`, passes.  A glob import, such as `use std::mem::*`, hides the names that it brings in.  A `-A clippy::all` in `RUSTFLAGS`, in a `config.toml` in `.cargo/`, or in `[workspace.lints]`, passes too, for every crate.
 
-* Fix: review; no check is planned.  `dsp` is small and seldom changes, so a full allowlist costs more than it gains (`plans/completed/harness-phase-2.md`, M7).
+* Fix: review, by the `reviewer` agent, which looks for DSP-1 forms that the scan does not read.  No check is planned.  `dsp` is small and seldom changes, so a full allowlist costs more than it gains (`plans/completed/harness-phase-2.md`, M7).
 
 ### TD-7: no licence policy and no allowlist of registries
 
 `young_crates_are_pinned` and `third_party_lists_what_ships` check the pins and the licence list (DEPS-1).  Nothing fails a licence that is not permissive.  A crate from a registry other than crates.io fails only if it is in a tree of `THIRD-PARTY.md`, since `third_party_lists_what_ships` cannot read its line.  A vendored copy of a crate that is made a workspace crate leaves both checks; only a reviewer sees it.
 
-* Fix: `cargo deny` for licences and registries.  It is a new tool, so vet it first (DEPS-1).
+* Fix: `cargo deny` for licences and registries.  It is a new tool, so vet it first (DEPS-1).  Until then, the `supply-chain-reviewer` agent checks the licence and the registry of each new crate with `cargo info`.
 
 ### TD-8: some evidence runs nowhere, and required skips rest on a person
 
@@ -24,14 +24,14 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 * The PyTorch comparisons run nowhere, because neither CI nor the maintainer's Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
 * GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
-* `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: phase 3's reviewers look for it.
+* `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: the `reviewer` agent looks for it.
 * The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere.  CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
 
 ### TD-10: GPU-3 is not checked
 
 Nothing records which adapter a kernel passed on, and any new `TILES` entry becomes a calibration candidate on every user's GPU.
 
-* Fix: log `isFallbackAdapter` and the adapter name in selftest and e2e results; a GPU reviewer that requires a named real GPU in the PR.
+* Fix: log `isFallbackAdapter` and the adapter name in selftest and e2e results.  Until then, the `gpu-reviewer` agent flags a diff that makes a kernel the default, on each diff that routes it.  It does not confirm the pass on a real GPU.  That evidence is in the PR description, which the agent does not read.
 
 ### TD-11: MEM-4 is never asserted
 
@@ -65,7 +65,7 @@ MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E06
 * Source can reach across crates without a dependency: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
 * A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
 * A symbolic link in a crate's folder can point to another crate's source.
-* Fix: phase 3's reviewers look for all four.  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
+* Fix: the `supply-chain-reviewer` agent looks for all four, on each diff that routes it (TD-31).  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
 
 ### TD-25: RT-1's allocation test runs natively only
 
@@ -85,7 +85,7 @@ Clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`,
 * crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
 * a path that no longer resolves, except through the canaries, which prove their paths only while the clippy steps keep `--all-targets`.  Nothing fails if the `wasm32` step goes.
 
-* Fix: none planned.  Phase 3's memory reviewer looks for a new copy of any form.
+* Fix: none planned.  The `memory-reviewer` agent looks for a new copy of any form, on each diff that routes it (TD-31).
 
 ### TD-27: MEM-3's lint sees only how `roformer-gpu` makes buffers
 
@@ -101,7 +101,7 @@ Clippy fails five ways to make a GPU buffer in `roformer-gpu` outside `GpuBuffer
 * other ways in wgpu to make a buffer that do not run on the web today: `create_buffer_from_hal`, `create_blas` and `create_tlas`;
 * a `GpuBuffer` that is kept and never dropped; the tests in `roformer-gpu/tests/memory.rs` measure that on a real GPU only.
 
-* Fix: none planned.  Phase 3's GPU reviewer looks for GPU memory that is not destroyed.
+* Fix: none planned.  The `gpu-reviewer` agent looks for GPU memory that is not destroyed, on each diff that routes it.  A sign in another crate routes it, except in a `tests` folder (TD-31).
 
 ### TD-28: GIT-1's deny rules match command text only
 
@@ -124,7 +124,7 @@ They do not see:
 * a mod that answers `tool.check`, which can approve a denied call on a personal account;
 * a cloud session in a project or with several repositories, and a session started with `--setting-sources` without `project`; these read no project permission rules ([settings](https://code.claude.com/docs/en/settings));
 * an edit to `.claude/settings.json` during a session, which Claude Code reloads at once;
-* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review sees it.
+* whether Claude Code refuses anything: `claude_settings_hold_the_deny_rules` keeps the rules in the file, and M14's step 3 showed the refusals by hand once; a rule taken out of both the file and `REQUIRED_DENY_RULES` passes every test, and only review, by the `supply-chain-reviewer` agent, sees it.
 
 * Fix: re-run M14's step 3 (`plans/completed/harness-phase-2.md`) after a change to the deny rules, or an upgrade of Claude Code or RTK.  After another change to `.claude/settings.json`, run the 9 commands in M15's step 2.  On GitHub, the `main` ruleset refuses a direct push to `main`, and the `gh-pages history` ruleset refuses a rewrite of `gh-pages` (TD-20).  Nothing on GitHub refuses a fast-forward push to `gh-pages`, a PR merge with the admin override, or `xtask publish`.  Phase 5 adds the agents' own identity.
 
@@ -140,15 +140,245 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 * `env` in a person's own Claude Code settings.  `env` in `.claude/settings.json` fails `claude_settings_hold_the_deny_rules`, which allows only `$schema`, `permissions` and `hooks`;
 * `#[ignore]` on a snapshot test.
 
-* Fix: review; a changed PNG or threshold is a UI change, and the reviewer looks at it.  Phase 3's reviewers check for it.  No check is planned.
+* Fix: review; a changed PNG or threshold is a UI change, and the `reviewer` agent looks at it.  No check is planned.
+
+### TD-31: the route of `xtask review` is a short denylist, from the branch's own code
+
+This entry concerns which reviewers read a diff.  So it touches each rule that a reviewer checks, not one rule only.
+
+`xtask/src/review.rs` chooses the reviewers of a diff from its paths and from content signs.  The content signs are a short denylist, not a full list.  A sign matches as a whole token only.  So `create_buffer` does not match `create_buffer_init`, which `roformer-gpu/src/lib.rs` calls.  A sign counts only on an added line of a Rust file outside a `tests` folder and outside the reviewer's own paths.  A copy or a GPU buffer that a macro, an alias or a helper makes routes nothing.
+
+Since M6, review round 1, the paths of `memory-reviewer` include `roformer/src/`, `roformer-gpu/src/` and `synth/src/`.  So a change to the GPU memory budget (MEM-4) or to the model read (MEM-1) routes it.  Since M6, review round 2, they also include `dsp/src/`.  Its code runs in the audio callback (RT-1) and builds the song-length mix (MEM-4).  `e2e_messages_use_protocol_types` enforces PROTO-1.  A change to its list `SCRIPT_ONLY_TYPES` in `xtask/src/rules.rs` routes only `supply-chain-reviewer` and `reviewer`.  Neither agent lists PROTO-1, so no reviewer checks PROTO-1 on a change to that list.
+
+The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  `xtask review start` warns when the branch changes `xtask/src/review.rs`, and when the binary is older than that file.
+
+* Fix: review; `reviewer` reads every diff.  Phase 5 routes with the base branch's `xtask`.
+
+### TD-32: `xtask review check` sees only what its record holds
+
+This entry concerns no rule.  It concerns the state check of a review round.
+
+`xtask review check` compares the repo with the state record of a round.  The record holds `HEAD`, the status, the stash, the branches and the tags.  It holds every other ref, such as remote-tracking refs, notes and replacements, and the remotes and the worktrees.  It also holds a hash of the git config, the hooks and the local Claude Code settings in the repo.  The hash also covers the person's own Claude Code settings in the home folder.  The check does not see other changes, for example:
+
+* a change to an ignored file other than the local Claude Code settings, or to a file under `target/`;
+* a change to the reflog, the global git config, or the index of another worktree;
+* a change to a file outside the repo, other than the person's own settings.
+
+A change to the person's own settings during a round, by a person or by Claude Code, fails the check.  With a detached `HEAD`, the name of the run folder holds the short SHA.  So after a fix commit, round 2 finds no record.
+
+The `review-rounds` skill (harness phase 3, M3) stops a round when `review check` fails.  But a change that the record does not hold passes the check, and the round goes on.
+
+* Fix: the person examines the change, and starts the round again.  With a detached `HEAD`, start again at round 1.
+
+### TD-33: `xtask review mutants` tests only part of a diff
+
+This entry concerns VERIFY-1, through the mutants run of a review round.
+
+`xtask review mutants` runs cargo-mutants on the Rust files of a round's diff.  It does not test some changes, and it reports some mutants that no native test can catch:
+
+* cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
+* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
+* `mutants_command` sets no `STEMYLA_REQUIRE`, and passes on the caller's own.  So without it, where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
+* A diff of tests only, WGSL or JavaScript gives no mutants.
+* A run that stops at its limit tests only some mutants, so its result is partial evidence.
+* cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
+* The baseline can fail on a slow test.  In M5, 5 of the 8 case runs that were not dry runs had `classic_drums_beat_the_raw_mix` (`xtask/tests/m8_hpss.rs`) in the baseline.  It timed out in the unmutated tree in 3 of them (`m9`, `m2` and `m10` run 1), and passed in 2 (`docs/reviews/replay.md`).  Where it timed out, no mutant ran, and the line was `none: ...; exit 4: the baseline failed`.
+
+* Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.  For a slow test, give the baseline a longer timeout, or leave the slow test out of the mutants run.
+
+### TD-34: the review agents' guard matches text
+
+This entry concerns GIT-1, and the read-only rule of the review agents.
+
+`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
+
+These pass the guard.  Each item gives examples only, and the list is not complete:
+
+* `git --exec-path=`, and `git grep -O`, which starts a pager program;
+* `find -exec` and `find -delete`;
+* `$(...)` inside double quotes, `$'...'` quoting, `$"..."` quoting such as `$"git" commit`, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
+* a redirection before the command, such as `2>/dev/null git commit`;
+* a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
+* a prefix option that takes a value, such as `env -u X git commit` or `exec -a x git commit`, and `env -S "git commit -m x"`;
+* an array element before the command, such as `a[0]=1 git commit -m x`, which bash runs as an assignment and a command;
+* `rtk` subcommands such as `rtk run` and `rtk err`;
+* `cargo new` and `cargo init`, which write a new package;
+* an xtask command in a form that `names_xtask` does not match, such as `cargo run -p xtask@0.1.0`, `-p path+file:///.../xtask`, `-mxtask/Cargo.toml`, and `cd xtask` before `cargo run`.  The deny rules in `.claude/settings.json` still refuse `cargo r* publish*` (TD-28);
+* other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
+* interpreters, such as `perl -e` and `awk`, and wrappers, such as `sudo` and `nice`;
+* brace expansion and globs, such as `{git,commit} -m x` and `/usr/bin/gi? commit`;
+* `git worktree prune` and `git worktree move`, since the guard allows each `worktree` subcommand;
+* zsh's `=git commit`, `noglob git commit` and `nocorrect git commit`.  The Bash tool runs the person's shell, which is zsh on macOS.  The parse follows bash and zsh only for the forms that it covers.
+
+Bash can still write files, for example by a redirection, `sed -i`, `tee`, `rm`, `mv`, `rustfmt <file>`, or a script that a command writes and then runs.  `git worktree add` without `--detach` makes a branch; `xtask review check` sees it.  `git worktree remove --force` of a worktree outside `target/review/` can lose a person's work.
+
+A heredoc body with an apostrophe is refused as an unclosed quote.  But a second `'` later in the command closes the quote, and the guard does not see the lines between.
+
+The time of the parse grows with the square of the length of the command.  On 2026-10-23, 10,000 characters took 0.6 s and 50,000 characters took 9.3 s on this Mac.  With `onFailure: block` on the hook, a timeout refuses the call.
+
+The agents in `.claude/agents/` run the guard from a hook in their frontmatter.  `the_agents_are_read_only_by_tools` keeps their tools and that hook, and fails a subfolder, a file that is not an agent, and a name that two files share.  These are still open:
+
+* The guard does not stop `Read`, or `cat` through Bash, of the `gh` token or the cargo token.
+* Claude Code does not run frontmatter hooks in a folder that a person has not trusted, or in `-p` mode.  So phase 5 passes the agents with `--agents`.
+* The text of an agent is a prompt, not a control.
+
+* Fix: `xtask review check` sees a change to the state that it records (TD-32).  Phase 5 runs the reviewers in a sandbox with no token.
+
+### TD-35: a review runs the diff's code with the person's credentials
+
+This entry concerns no rule.  It concerns the safety of a review round.
+
+A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review mutants` runs cargo-mutants on it.  Each of them runs the diff's `build.rs`, proc macros and tests as the person.  That code can read the `gh` token and the cargo token, and use the network.  The guard (TD-34) reads only the text of a Bash command, not what the built code does.
+
+* Fix: phase 5 runs reviews in a sandboxed job with no token.
+
+### TD-36: in the default permission mode, each review round has an approval that the skill forces
+
+The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review runs no `xtask review` command.
+
+Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask (TD-38).  It writes 0, except in a `-p` run where a host or a prompt tool answers prompts.  There it writes the approvals that the run records, or `not counted`.  So the approvals that the skill forces do not fail D4 of `plans/completed/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
+
+* Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/completed/harness-phase-3-m3.md`).
+
+### TD-37: a branch has one set of review rounds
+
+This entry concerns no rule.  It concerns the log of the review rounds.
+
+`CLAUDE.md` tells the agent to run review rounds 1, 2 and 3 after each change that it implements.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/completed/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After round 3" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
+
+* Fix: the orchestrator or the maintainer decides how such a branch keeps the log of each set.
+
+### TD-38: the review log cannot count a person's approvals
+
+This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/harness-phase-3.md`.  In the default permission mode, a command of a reviewer, a validator or the baseline can ask a person for approval.  The main agent's writes of the findings file and the log can ask too.  The main agent does not see those approvals.  So step 11 of the `review-rounds` skill asks the person for the approvals of the round and of the baseline.  In an interactive session, auto mode can also fall back to a prompt that waits for a person.  An orchestrator that runs the skill then logs 0 with the mode, and does not see such an approval.  It marks that 0 as a lower bound.  The log records the approvals as cost, not as interventions.  The counts rest on the person.  A person can miscount, or cannot tell the baseline's approvals from the round's, and then gives one total.  The maintainer reads the counts at the gate.
+
+* Fix: count the approvals from Claude Code's own record of approvals, if one becomes available.  Until then, the person gives the counts.
+
+### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
+
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+
+* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run);
+* the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
+* `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls (not run);
+* `query` and `Opts::weights`, which `parses_scenario_and_options` never calls (not run);
+* `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
+* a request with no headers in `drip`, since the test always sends a Host header (not run).
+
+`sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
+
+Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
+
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume` and `storage`.  A person runs the other scenarios.
+
+### TD-40: gaps in the RT-1 tests
+
+The tests of RT-1 count allocations, and do not check all that the stretchers and the player do.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+
+* No test reaches two branches of `app_stretcher_problems`: `"default"` in the features of an `engine =` line, and a manifest with no `engine =` line.
+* `a_stretcher_keeps_its_warm_up_promise` counts allocations only.  No test checks the output of `WsolaStretcher::can_pull` for a push over 256 frames (not run).
+* No test bounds the size of the warm-up push in `WsolaStretcher::warm_up` (not run).
+* The loop tests check only that the playhead stays inside the loop.  A wrong comparison in `Player::drop_oldest_anchor_when_full` shows the loop start before each wrap, and passes (not run).
+
+Source: `docs/reviews/replay.md`, case `m11`, findings 1-1, 1-8, 1-10 and 1-14.
+
+* Fix: add a breach case for each branch of `app_stretcher_problems`.  Check the stretcher's output and the warm-up size.  Test the playhead before a loop wrap.
+
+### TD-41: gaps in the GPU-1 limit checker's tests, and docs that claim more
+
+`every_kernel_fits_the_default_limits` and its tests do not cover all of the checker (GPU-1, DOC-1):
+
+* `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new`.  The last sentence of its doc comment claims more than it checks: "The entry points that `Kernels::new` names exist."  The test checks a hand copy of the entry names.
+* No test covers the count of read-only storage buffers, the y-axis limit, or a breach of the invocation limit that only z causes.
+
+Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
+
+* Fix: take the pairs from the pipelines that the code makes, and add the three missing cases.
+
+### TD-42: weak tests of the e2e message-type scan
+
+`e2e_messages_use_protocol_types` (PROTO-1) has tests that do not fail on some wrong scans.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+
+* No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses.  So a stale check that reads only the JavaScript passes.
+* No test has `["type"] <=` in Rust, or a macro other than `json!` after `"type":` (not run).
+* Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes (not run).
+* `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.  The checker ran a scratch copy of `js_tokens` with this mutant.
+
+Source: `docs/reviews/replay.md`, case `m10`, outside findings 1-3, 1-11, 1-12 and 1-13, and finding 1-10, which matches `m10-2`.
+
+* Fix: add each missing case to the tests in `xtask/src/rules.rs`.
+
+### TD-43: the file picker path has no automated check
+
+`pick_song` keeps each chosen `File` and saves it as a Blob, but no automated check runs it (VERIFY-1).  WebDriver cannot drive the browser's file picker.
+
+Source: `docs/reviews/replay.md`, case `m18a`, finding 1-2.
+
+* Fix: do a hand check in Chrome for each PR that changes the picker path.  Record it in the PR.  Stop when a browser test can set the files.
+
+### TD-44: the review log's tokens are final contexts, not the tokens used
+
+This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/harness-phase-3.md`.  The `review-rounds` skill takes each agent's tokens from its `<usage>`, which is the size of the agent's final context.  The Tokens cells of the `## Agents` table and of the rounds table add these figures: "Tokens: the sum of the tokens of those agents".  D4's ratio compares round 1 with the baseline on these sums.
+
+The final context of an agent is lower than the tokens that it used, by a ratio that differs by agent.  In M5, that ratio ran from 2.5 to 26.2 in case `m2`, and from 3.7 to 18.4 in case `m18a`.  Reviewers have high ratios, and validators low ones.  So D4's ratio of summed final contexts can misstate the ratio of tokens used by several times, by the mix of agents.
+
+In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For example, the session of `m18a` used 6,266,253 tokens, and its main agent used 758,710 of them.  The final contexts of its seven subagents sum to 391,169.  The source of these figures is `## Cost` of `docs/reviews/replay.md`.  The session's 6,266,253 comes from `modelUsage`.  The main agent's 758,710 counts its `message.usage` in the M5 transcript, once for each message ID.  The 391,169 is a sum of final contexts.  For `m2` and `m18a`, the sums of each agent's `message.usage` are about 1% below `modelUsage`.
+
+D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
+
+* Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
+
+### TD-46: in `dontAsk` mode, the agents' probe forms are denied
+
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  In `dontAsk` mode, the harness denied probe commands of the review agents in five forms.  The forms are a heredoc, a multi-line command, `cd`, an env or variable prefix, and a `>` write.  No allow list admits a heredoc, a multi-line command or a `>` write (the Decision log of `plans/completed/harness-phase-3-m5.md`).  For `cd` and a variable prefix, no run tried a wider allow list.  In M5 they were 11, 14, 14, 23 and 9 of the 126 denials of the six counted runs.  The evidence is the denial table in `## Threats` of `docs/reviews/replay.md`, and dry run 2 in the Progress of `plans/completed/harness-phase-3-m5.md`.
+
+* Fix: phase 5 runs the agents in a sandbox where Bash needs no allow list.  Or the agents write each probe in a form that an allow rule admits, such as a one-line `sed`.
+
+### TD-47: a `-p` session ends while a background agent runs
+
+This entry concerns no rule.  It concerns the headless rounds of phase 5.  A `-p` session ends when the main agent ends its turn, even while a background validator runs.  In M5, case `m11` run 1 ended with "The mutants validator is running.  After it ends, I will run `review check` and write the findings file."  The validator's notice is `stopped`, and no findings file was written.  The evidence is in `## Threats` of `docs/reviews/replay.md`, and in the Progress of `plans/completed/harness-phase-3-m5.md`.
+
+* Fix: the main agent waits for every background agent before it ends its turn.
+
+### TD-48: a reviewer of a later round can read the messages of the fix commits
+
+This entry concerns no rule.  It concerns the rule of harness phase 3 that a reviewer does not see the author's reasoning (`plans/active/harness-engineering.md`, phase 3).
+
+In a round above 1, the `review-rounds` skill starts each specialist of the since route on `<since>..HEAD`.  That range holds only the fix commits of the last round.  So `git log` of the range shows the "review round N fixes" messages.  The agent files tell the reviewers not to read these messages.  But the prompt gives only the range, and the guard (TD-34) does not refuse `git log`.  In M6 review round 2, three specialists read these messages and said so in their output.
+
+* Fix: the skill tells each reviewer to read the range with `git diff` and `git show --format=`, which show no message.  Or the guard refuses `git log` without a `--format` option.
+
+### TD-49: a review agent can write files outside the repo
+
+This entry concerns the read-only rule of the review agents.
+
+The guard (TD-34) checks the text of a command, not where the command writes.  `xtask review check` sees only the state of the repo (TD-32).  So a review agent can write a file outside the repo, and no check sees it.  In M6 review round 2, two reviewers wrote copies of the guard to the scratchpad folder of the orchestrator.
+
+* Fix: phase 5 runs the reviewers in a sandbox that can write only to their worktrees under `target/review/`.
+
+### TD-50: a reviewer cannot run a mutant of a harness file in its worktree
+
+This entry concerns VERIFY-1 for the files of the harness, such as the guard and the agent files.
+
+The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But auto mode's classifier can refuse it.  In M6 review round 3, the classifier refused a reviewer's edit of `.claude/hooks/read-only-bash.sh` in its own worktree, with the reason "Self-Modification".  So in auto mode, a reviewer cannot change a harness file to show that a test fails on wrong code.  It reads the harness file and its tests only.  `xtask review mutants` does not test these files either, since cargo-mutants changes only Rust code (TD-33).
+
+* Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.
 
 ## Known breaches
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
-`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
+`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
-* Fix: fail decoding on a missing required field; a version in `Alive`.
+* Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not.  It looks on each diff that routes it (TD-31).
+
+### TD-45: the status of decision 0007 may not be a person's choice
+
+Decision 0007 (`decisions/0007-no-allocation-in-the-audio-callback.md`) has the status "accepted (by the maintainer)", and an agent wrote it.  Finding m11 1-2 claims that the limits of its scope are the agent's choices.  The M11 heading of the phase 2 plan says "maintainer decision, made 2026-10-19".  The maintainer judges.  `CLAUDE.md`, "Working here", Decisions: agents write a record as `proposed`, and only a person accepts it.
+
+Source: `docs/reviews/replay.md`, case `m11`, finding 1-2.
+
+* Fix: the maintainer confirms the status, or sets it to `proposed`.
 
 ## Legibility for agents
 

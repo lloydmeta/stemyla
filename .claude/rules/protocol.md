@@ -2,6 +2,7 @@
 paths:
   - "protocol/**"
   - "worker/src/web.rs"
+  - "worker/src/web/**"
   - "app/src/separator.rs"
   - "xtask/src/e2e.rs"
   - "xtask/e2e/**"

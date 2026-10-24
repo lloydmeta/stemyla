@@ -61,14 +61,14 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 
 ### Phase 3: review agents (inferential sensors)
 
-* Adds: project subagents in `.claude/agents/` ([sub-agents](https://code.claude.com/docs/en/sub-agents)): one general reviewer that always runs, and specialists chosen by the paths a diff touches: GPU and WGSL (`roformer-gpu/**`), memory and realtime (`engine/**`, `app/src/**`, `worker/**`), wire format (`protocol/**`, `xtask/src/e2e.rs`, `xtask/e2e/**`), supply chain and security (`Cargo.toml` files, `THIRD-PARTY.md`, `.github/**`, `.claude/**`, `xtask/src/serve.rs`), and docs (`docs/**`, `CLAUDE.md`).  A routing table in `xtask` (`xtask review-plan`) prints which reviewers a diff needs, from paths and from content (a new `to_vec` anywhere triggers the memory reviewer).
+* Adds: project subagents in `.claude/agents/` ([sub-agents](https://code.claude.com/docs/en/sub-agents)): one general reviewer that always runs, and specialists chosen by the paths a diff touches: GPU and WGSL (`roformer-gpu/**`), memory and realtime (`engine/**`, `app/src/**`, `worker/**`), wire format (`protocol/**`, `xtask/src/e2e.rs`, `xtask/e2e/**`), supply chain and security (`Cargo.toml` files, `THIRD-PARTY.md`, `.github/**`, `.claude/**`, `xtask/src/serve.rs`), and docs (`docs/**`, `CLAUDE.md`).  A routing table in `xtask` (`xtask review`) prints which reviewers a diff needs, from paths and from content (a new `to_vec` anywhere triggers the memory reviewer).
 * A validator subagent tries to disprove each finding before anything is fixed, as Claude Code's `/code-review` plugin does ([code-review command](https://github.com/anthropics/claude-code/blob/main/plugins/code-review/commands/code-review.md)).
 * A project skill runs the rounds: route, review in parallel, validate, fix confirmed findings with tests, repeat with fresh reviewers; it replaces the retyped prompts (failure 5).
 * Every reviewer is read-only, sees the diff and the acceptance criteria but not the author's reasoning (self-preference and sycophancy: [arXiv 2404.13076](https://arxiv.org/abs/2404.13076), [arXiv 2310.13548](https://arxiv.org/abs/2310.13548)), cites a rule ID and quotes it, and must name how to break each new test ("would this test fail if the code were wrong?"), aimed at failure 1.  Reviewer files hold the method; the rules stay in `invariants.md`.  Reviewers also look for a test that returns early without `test_support::skip`, which `every_skip_can_be_required` cannot see (TD-8).
 * Mutation testing of the changed functions with cargo-mutants ([mutants.rs](https://mutants.rs/)) as a computational check for tests that cannot fail.
-* Acceptance: replaying the reviews of PRs #9 to #12 finds the bugs their rounds found; each reviewer's findings are logged with whether they were confirmed.
-* Measured by: confirmed findings per round, false-positive rate per reviewer, rounds per PR, vacuous tests found before merge.
-* Gate: two consecutive PRs where the routed review finds what manual review would, at lower effort.
+* Acceptance: replaying six old review rounds finds the bugs those rounds found.  The cases are PR #9 and phase 2's M2, M9, M10, M11 and M18a (D1 of `plans/completed/harness-phase-3.md`, which gives why PRs #10 to #12 are left out); each reviewer's findings are logged with whether they were confirmed.
+* Measured by: confirmed findings per round, false-positive rate per reviewer, rounds per PR, vacuous tests found before merge.  Rounds per PR stay three until a later phase changes the rule (D6 of `plans/completed/harness-phase-3.md`).
+* Gate: two consecutive PRs where the routed review finds what manual review would, at lower effort (D4 of `plans/completed/harness-phase-3.md` bounds the effort, and counts approvals as cost).
 * For IAM: a security reviewer is an extra sensor, never a control: it runs alongside the deterministic checks and a human, and its hit rate is measured like any other test.
 
 ### Phase 4: legibility, the evaluator, and long-running sessions
@@ -121,7 +121,10 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-19: phase 1, PR #13 merged by the maintainer.
 * [x] 2026-10-19: phase 2, execution plan written (`plans/active/harness-phase-2.md`), one milestone per PR.
 * [x] 2026-10-22: phase 2.  M1 to M15, M17, M18a and M18b merged as PRs #14 to #32 (#24 is a Dependabot bump); M16 moved to phase 5b.  M19 closes it (`plans/completed/harness-phase-2.md`).  "Prose only" rules: 8 to 2.  Gate met at `cf7437d` (run 39753865469), with the five checks required.
-* [ ] Phase 3.
+* [x] 2026-10-22: M19 merged as PR #33 (`fa41c9f`).  CI run 39766123914 on `main` passed, `publish` included.
+* [x] 2026-10-22: phase 3, execution plan written (`plans/completed/harness-phase-3.md`), as one PR with a commit for each milestone.
+* [x] 2026-10-24: phase 3, built in PR #34 (`plans/completed/harness-phase-3.md`), without the gate.  The replay found 8 of 26 old findings (0.31, 95% interval 0.17 to 0.50), so it misses its bar (D5 of that plan).  The PR's own three rounds ran with the `review-rounds` skill (`docs/reviews/ai-agent-harness-phase-3.md`).
+* [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
 * [ ] Phase 6.
@@ -147,6 +150,8 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19, maintainer: RT-1 forbids allocation in the audio callback after warm-up (TD-15); `synth`'s file writing moves behind a feature so the app links only song generation (TD-4).
 * 2026-10-19, agent: the two older plans (versioned builds, browser tests in Rust) stay out of the repo; they are implemented, their PRs (#6, #9) describe them, and they hold local paths.
 * 2026-10-20, maintainer: each check is sized to its stakes and to failures seen.  Phase 2 trims M7 to a token scan, M14 to deny rules and M15 to a `rustfmt` hook, and moves the test-count guard to phase 5b.
+* 2026-10-22, maintainer: phase 3 lands as one PR, not one PR for each milestone.  Its parts depend on each other, and none changes code that ships.
+* 2026-10-22, maintainer, changed 2026-10-24 by the orchestrator: phase 3's gate asks for bounded effort, not "lower effort" (D4 of `plans/completed/harness-phase-3.md`).  The agent starts the rounds, so a person's effort is close to zero either way.  Round 1's tokens are at most 2 times the baseline's for each routed reviewer, its wall time at most 60 minutes more, and a person sends no more messages.  On 2026-10-24 an approval of a tool call became cost, not an intervention, since approvals grow with the route.  The log's token figure is each agent's final context, not the tokens it used (TD-44), so the maintainer decides at the gate how to measure the token bar.
 
 ## Outcomes and retrospective
 

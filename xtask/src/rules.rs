@@ -1570,7 +1570,7 @@ const PYTHON_WORDS: [&str; 7] = ["python", "python3", "pip", "pip3", "pipx", "uv
 const PYTHON_SERVERS: [&str; 2] = [concat!("http", ".server"), concat!("SimpleHTTP", "Server")];
 
 /// Folders of history, which may quote a breach.
-const HISTORY: [&str; 2] = ["docs/plans/", "docs/decisions/"];
+const HISTORY: [&str; 3] = ["docs/plans/", "docs/decisions/", "docs/reviews/"];
 
 /// The text after the last `.` of the file name, in lower case.
 fn extension(path: &str) -> Option<String> {
@@ -1581,7 +1581,8 @@ fn extension(path: &str) -> Option<String> {
 
 /// BUILD-1: Python appears only in `tools/roformer_export.py`.  It fails a
 /// tracked Python file, a Python word in a build file, and the name of
-/// Python's web server in a tracked text file outside plans and decisions.
+/// Python's web server in a tracked text file outside plans, decisions and
+/// review logs.
 /// `texts` holds the tracked files that read as UTF-8 (`tracked_texts`).
 pub fn python_in_the_build(tracked: &[TrackedFile], texts: &[(String, String)]) -> Vec<Problem> {
     let python_files = tracked
@@ -2921,6 +2922,357 @@ fn deny_rules(settings: &str) -> Result<BTreeSet<String>, String> {
                 .ok_or_else(|| format!("has `{rule}` in `permissions.deny`, which is not a string"))
         })
         .collect()
+}
+
+/// The folder of the project subagents.
+pub const AGENTS_FOLDER: &str = ".claude/agents/";
+
+/// The end of every agent's frontmatter: the read-only guard on each Bash
+/// call.  `onFailure: block` refuses the call when the guard cannot run.
+pub const AGENT_HOOK_BLOCK: &str = r#"hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/read-only-bash.sh'
+          onFailure: block"#;
+
+/// The keys of an agent's frontmatter, each present once, `hooks` last.
+pub const AGENT_KEYS: [&str; 5] = ["name", "description", "tools", "model", "hooks"];
+
+/// The tools that an agent may have.  None of them writes a file.
+pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "Bash"];
+
+/// What is wrong with an agent's `description`, which must be one plain
+/// YAML scalar.
+fn description_faults(description: &str) -> Vec<&'static str> {
+    [
+        (description.is_empty(), "is empty"),
+        (
+            !description.is_empty() && !description.starts_with(|c: char| c.is_ascii_uppercase()),
+            "does not start with a capital letter",
+        ),
+        (
+            description.contains(": ") || description.contains(":\t"),
+            "holds a `:` before a space or a tab",
+        ),
+        (
+            description.contains(" #") || description.contains("\t#"),
+            "holds a blank before `#`",
+        ),
+        (description.contains(['\'', '"']), "holds a quote"),
+        (description.ends_with(':'), "ends with `:`"),
+    ]
+    .into_iter()
+    .filter_map(|(fault, what)| fault.then_some(what))
+    .collect()
+}
+
+/// The agents rule (harness phase 3, M2): the frontmatter of
+/// `.claude/agents/<file_name>` keeps the agent read only by its tools and
+/// by its hook, and stays plain enough to read line by line.  `text` is the
+/// text of the file.
+pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
+    let file = format!("{AGENTS_FOLDER}{file_name}");
+    let problem = |line: Option<usize>, what: String, fix: &str| Problem {
+        rule: "agents",
+        file: file.clone(),
+        line,
+        message: format!("agents: {file} {what}.  Fix: {fix}"),
+    };
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    if lines.first() != Some(&"---") {
+        return vec![problem(
+            Some(1),
+            "does not start with a `---` line".to_string(),
+            "start the file with its frontmatter, between two `---` lines.",
+        )];
+    }
+    let Some(close) = lines
+        .iter()
+        .skip(1)
+        .position(|line| *line == "---")
+        .map(|i| i + 1)
+    else {
+        return vec![problem(
+            None,
+            "has no `---` line that closes the frontmatter".to_string(),
+            "close the frontmatter with a `---` line; Claude Code does not list an agent whose frontmatter does not parse.",
+        )];
+    };
+    // Each line of the frontmatter, with its line number in the file.
+    let frontmatter: Vec<(usize, &str)> = lines[1..close]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| (i + 2, *line))
+        .collect();
+    let nested = |line: &str| line.starts_with([' ', '\t', '-']);
+    let keys: Vec<(usize, &str, &str)> = frontmatter
+        .iter()
+        .filter(|(_, line)| !line.is_empty() && !nested(line))
+        .map(|(number, line)| {
+            let (key, value) = line.split_once(':').unwrap_or((line, ""));
+            (*number, key, value.trim())
+        })
+        .collect();
+    let find = |key: &str| keys.iter().find(|(_, k, _)| *k == key).copied();
+    // A key line is `key:` at its end, or `key: value`; YAML reads no other form
+    // as a key, and Claude Code does not list the agent.
+    let shapes = frontmatter
+        .iter()
+        .filter(|(_, line)| !line.is_empty() && !nested(line))
+        .filter(|(_, line)| {
+            line.split_once(':')
+                .is_none_or(|(_, value)| !(value.is_empty() || value.starts_with(' ')))
+        })
+        .map(|(number, line)| {
+            problem(
+                Some(*number),
+                format!("has the line `{line}`, which is not `key: value`"),
+                "write each key as `key: value`, with one space after the colon, or as `key:` before a list or a block.",
+            )
+        });
+    let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last.";
+
+    let unknown = keys
+        .iter()
+        .filter(|(_, key, _)| !AGENT_KEYS.contains(key))
+        .map(|(number, key, _)| {
+            problem(
+                Some(*number),
+                format!("has the key `{key}`, which the check does not allow"),
+                keep_the_keys,
+            )
+        });
+    let twice = keys
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, key, _))| keys[..*i].iter().any(|(_, earlier, _)| earlier == key))
+        .map(|(_, (number, key, _))| {
+            problem(
+                Some(*number),
+                format!("has the key `{key}` twice"),
+                keep_the_keys,
+            )
+        });
+    let missing = AGENT_KEYS
+        .iter()
+        .filter(|key| find(key).is_none())
+        .map(|key| problem(None, format!("has no `{key}` key"), keep_the_keys));
+    let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+    let name = find("name")
+        .filter(|(_, _, name)| *name != stem)
+        .map(|(number, _, name)| {
+            problem(
+                Some(number),
+                format!("has the name `{name}`, not `{stem}`"),
+                "give the agent the name of its file; `xtask review` and the guide name each agent by its file.",
+            )
+        });
+    let description = find("description")
+        .into_iter()
+        .flat_map(|(number, _, description)| {
+            description_faults(description)
+                .into_iter()
+                .map(move |fault| (number, fault))
+        })
+        .map(|(number, fault)| {
+            problem(
+                Some(number),
+                format!("has a `description` that {fault}"),
+                "write the description on one line, as a plain YAML scalar: start it with a capital letter, and put no `: `, no ` #`, no quote and no `:` at its end in it.",
+            )
+        });
+    let model = find("model")
+        .filter(|(_, _, model)| *model != "inherit")
+        .map(|(number, _, model)| {
+            problem(
+                Some(number),
+                format!("has `model: {model}`, not `model: inherit`"),
+                "set `model: inherit`; every agent takes the model of the main session.",
+            )
+        });
+    let hooks_line = find("hooks").map(|(number, _, _)| number);
+    let hooks_last = keys
+        .last()
+        .filter(|(_, key, _)| hooks_line.is_some() && *key != "hooks")
+        .map(|(number, key, _)| {
+            problem(
+                Some(*number),
+                format!("has the key `{key}` after `hooks`, but `hooks` must be the last key"),
+                "put `hooks` last; the hook block runs to the closing `---`.",
+            )
+        });
+    let tools = find("tools");
+    // The `- item` lines of a `tools` list, below a `tools:` line with no value.
+    let tool_items: Vec<(usize, &str)> = tools
+        .filter(|(_, _, value)| value.is_empty())
+        .map(|(number, _, _)| {
+            frontmatter
+                .iter()
+                .skip_while(|(n, _)| *n <= number)
+                .map_while(|(n, line)| {
+                    line.trim_start()
+                        .strip_prefix('-')
+                        .map(|item| (*n, item.trim()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let named_tools: Vec<&str> = match tools {
+        Some((_, _, value)) if !value.is_empty() => value
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .collect(),
+        _ => tool_items.iter().map(|(_, tool)| *tool).collect(),
+    };
+    let tool_faults: Vec<String> = tools
+        .map(|_| {
+            let not_read_only = named_tools
+                .iter()
+                .filter(|tool| !READ_ONLY_TOOLS.contains(tool))
+                .map(|tool| format!("has `{tool}` in `tools`, which is not a read-only tool"));
+            let no_bash =
+                (!named_tools.contains(&"Bash")).then(|| "has no `Bash` in `tools`".to_string());
+            let searches = ["Grep", "Glob"]
+                .into_iter()
+                .filter(|tool| named_tools.contains(tool))
+                .map(|tool| format!("has `{tool}` in `tools`, which the guard does not see"));
+            not_read_only.chain(no_bash).chain(searches).collect()
+        })
+        .unwrap_or_default();
+    let tools_line = tools.map(|(number, _, _)| number);
+    let tool_problems = tool_faults.into_iter().map(|what| {
+        problem(
+            tools_line,
+            what,
+            "keep `tools: Read, Bash`; with Bash, the agent searches through Bash, and the guard sees each command.",
+        )
+    });
+    let indented = frontmatter
+        .iter()
+        .filter(|(number, line)| {
+            nested(line)
+                && !tool_items.iter().any(|(item, _)| item == number)
+                && hooks_line.is_none_or(|hooks| *number < hooks)
+        })
+        .map(|(number, _)| {
+            problem(
+                Some(*number),
+                "has an indented line outside the `tools` list and the hook block".to_string(),
+                "write each key on one line; a description that wraps can break the YAML.",
+            )
+        });
+    let hook_block = hooks_line
+        .filter(|hooks| {
+            let block: Vec<&str> = frontmatter
+                .iter()
+                .filter(|(number, _)| number >= hooks)
+                .map(|(_, line)| *line)
+                .collect();
+            block.join("\n") != AGENT_HOOK_BLOCK
+        })
+        .map(|hooks| {
+            problem(
+                Some(hooks),
+                "has a hook block that is not `AGENT_HOOK_BLOCK`".to_string(),
+                "copy AGENT_HOOK_BLOCK from xtask/src/rules.rs: the guard on each Bash call, with `onFailure: block`, and no other hook.",
+            )
+        });
+    shapes
+        .chain(unknown)
+        .chain(twice)
+        .chain(missing)
+        .chain(name)
+        .chain(description)
+        .chain(model)
+        .chain(hooks_last)
+        .chain(tool_problems)
+        .chain(indented)
+        .chain(hook_block)
+        .collect()
+}
+
+/// Files in `.claude/agents/` that are not agents and that Claude Code does not
+/// load: the file that keeps the folder in git, and the one that Finder makes.
+pub const IGNORED_IN_AGENTS: [&str; 2] = [".gitkeep", ".DS_Store"];
+
+/// The agents rule for the whole of `.claude/agents/`.  `entries` holds each
+/// entry that a walk finds there, into each subfolder: its path below the
+/// folder, and its text if it is a file (`None` for a folder).  Claude Code
+/// reads the subfolders too, and knows an agent only by its `name`.
+pub fn agents_folder_problems(entries: &[(String, Option<String>)]) -> Vec<Problem> {
+    let problem = |path: &str, what: String, fix: &str| Problem {
+        rule: "agents",
+        file: format!("{AGENTS_FOLDER}{path}"),
+        line: None,
+        message: format!("agents: {AGENTS_FOLDER}{path} {what}.  Fix: {fix}"),
+    };
+    let at_top = |path: &str| !path.contains('/');
+    let not_at_top = entries
+        .iter()
+        .filter(|(path, text)| text.is_none() || !at_top(path))
+        .map(|(path, text)| {
+            problem(
+                path,
+                if text.is_none() { "is a subfolder" } else { "is in a subfolder" }.to_string(),
+                "keep each agent at the top of the folder.  Claude Code reads the subfolders too, but no check reads them.",
+            )
+        });
+    let files: Vec<(&str, &str)> = entries
+        .iter()
+        .filter_map(|(path, text)| text.as_deref().map(|text| (path.as_str(), text)))
+        .collect();
+    let others = files
+        .iter()
+        .filter(|(path, _)| at_top(path) && !path.ends_with(".md") && !IGNORED_IN_AGENTS.contains(path))
+        .map(|(path, _)| {
+            problem(
+                path,
+                "is not an agent file".to_string(),
+                "remove it; the folder holds only `<name>.md` agent files, `.gitkeep` and `.DS_Store`.",
+            )
+        });
+    let agents = files
+        .iter()
+        .filter(|(path, _)| at_top(path) && path.ends_with(".md"))
+        .flat_map(|(path, text)| agent_problems(path, text));
+    let names: Vec<(&str, &str)> = files
+        .iter()
+        .filter(|(path, _)| path.ends_with(".md"))
+        .filter_map(|(path, text)| agent_name(text).map(|name| (*path, name)))
+        .collect();
+    let shared = names.iter().enumerate().filter_map(|(i, (path, name))| {
+        names[..i]
+            .iter()
+            .find(|(_, earlier)| earlier == name)
+            .map(|(earlier, _)| {
+                problem(
+                    path,
+                    format!("has the name `{name}`, which {earlier} has too"),
+                    "give each agent its own name.  Claude Code loads one file for a name, in the order that it reads them.",
+                )
+            })
+    });
+    not_at_top
+        .chain(others)
+        .chain(agents)
+        .chain(shared)
+        .collect()
+}
+
+/// The `name` in the frontmatter of an agent file, if it has one.
+fn agent_name(text: &str) -> Option<&str> {
+    let mut lines = text.lines();
+    (lines.next()?.trim_end() == "---")
+        .then(|| {
+            lines
+                .take_while(|line| line.trim_end() != "---")
+                .find_map(|line| line.strip_prefix("name:"))
+                .map(str::trim)
+        })
+        .flatten()
 }
 
 #[cfg(test)]
@@ -5031,6 +5383,16 @@ mod tracked_tests {
     }
 
     #[test]
+    fn the_python_server_may_be_named_in_a_review_log() {
+        let server = concat!("python3 -m http", ".server 8080");
+        let log = format!("Serve it:\n{server}\n");
+        assert_eq!(
+            python_in_the_build(&[], &texts(&[("docs/reviews/x.md", &log)])),
+            []
+        );
+    }
+
+    #[test]
     fn assets_are_named() {
         let cases: Vec<(&str, Vec<Problem>, Option<usize>)> = [
             "song.mp3",
@@ -6136,6 +6498,355 @@ mod settings_tests {
                     .starts_with(&format!("GIT-1: {SETTINGS_FILE} {what}")),
                 "{case}: {}",
                 problems[0]
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod agents_tests {
+    use super::*;
+
+    const FILE: &str = "reviewer.md";
+
+    /// A good agent file for `reviewer.md`.
+    fn good() -> String {
+        format!(
+            "---\nname: reviewer\ndescription: Reviews one commit range of this repo in a review round.  Read only.  Use when a review round routes reviewer.\ntools: Read, Bash\nmodel: inherit\n{AGENT_HOOK_BLOCK}\n---\n\nThe body.\n"
+        )
+    }
+
+    /// The good file with `from` replaced by `to`, once.
+    fn with(from: &str, to: &str) -> String {
+        let good = good();
+        assert!(good.contains(from), "the good file has no {from:?}");
+        good.replacen(from, to, 1)
+    }
+
+    #[test]
+    fn a_read_only_agent_has_no_problem() {
+        let listed = with("tools: Read, Bash\n", "tools:\n  - Read\n  - Bash\n");
+        let unindented = with("tools: Read, Bash\n", "tools:\n- Read\n- Bash\n");
+        let blank_line = with("model: inherit\n", "model: inherit\n\n");
+        for case in [
+            good(),
+            listed,
+            unindented,
+            blank_line,
+            good().replace('\n', "\r\n"),
+        ] {
+            assert_eq!(agent_problems(FILE, &case), [], "{case}");
+        }
+    }
+
+    /// Each plant gives a problem of the agents rule for the file, and one
+    /// problem holds the text that names the plant.
+    #[test]
+    fn each_plant_is_named() {
+        let hooks = format!("{AGENT_HOOK_BLOCK}\n");
+        let cases = [
+            ("no hooks key", with(&hooks, ""), "has no `hooks` key"),
+            (
+                "no name key",
+                with("name: reviewer\n", ""),
+                "has no `name` key",
+            ),
+            (
+                "no model key",
+                with("model: inherit\n", ""),
+                "has no `model` key",
+            ),
+            (
+                "a description that wraps",
+                with("Read only.  Use", "Read only.\n  Use"),
+                "has an indented line outside",
+            ),
+            (
+                "no tools key",
+                with("tools: Read, Bash\n", ""),
+                "has no `tools` key",
+            ),
+            (
+                "Edit in tools",
+                with("tools: Read, Bash", "tools: Read, Edit, Bash"),
+                "has `Edit` in `tools`",
+            ),
+            (
+                "Task in a YAML list",
+                with(
+                    "tools: Read, Bash\n",
+                    "tools:\n  - Read\n  - Task\n  - Bash\n",
+                ),
+                "has `Task` in `tools`",
+            ),
+            (
+                "Grep beside Bash",
+                with("tools: Read, Bash", "tools: Read, Grep, Bash"),
+                "has `Grep` in `tools`",
+            ),
+            (
+                "Glob beside Bash",
+                with("tools: Read, Bash", "tools: Read, Glob, Bash"),
+                "has `Glob` in `tools`",
+            ),
+            (
+                "no Bash",
+                with("tools: Read, Bash", "tools: Read"),
+                "has no `Bash` in `tools`",
+            ),
+            (
+                "a memory key",
+                with("model: inherit\n", "model: inherit\nmemory: project\n"),
+                "has the key `memory`",
+            ),
+            (
+                "a key twice",
+                with("model: inherit\n", "model: inherit\nmodel: inherit\n"),
+                "has the key `model` twice",
+            ),
+            (
+                "no description",
+                with(
+                    "description: Reviews one commit range of this repo in a review round.  Read only.  Use when a review round routes reviewer.\n",
+                    "",
+                ),
+                "has no `description` key",
+            ),
+            (
+                "an empty description",
+                with(
+                    "description: Reviews one commit range of this repo in a review round.  Read only.  Use when a review round routes reviewer.\n",
+                    "description:\n",
+                ),
+                "has a `description` that is empty",
+            ),
+            (
+                "a description with a colon and a tab",
+                with("Read only.", "Read only:\tyes."),
+                "has a `description` that holds a `:` before a space or a tab",
+            ),
+            (
+                "no space after the colon of a key",
+                with("name: reviewer", "name:reviewer"),
+                "has the line `name:reviewer`, which is not `key: value`",
+            ),
+            (
+                "no space after the colon of model",
+                with("model: inherit", "model:inherit"),
+                "has the line `model:inherit`, which is not `key: value`",
+            ),
+            (
+                "a line with no colon",
+                with("model: inherit\n", "model: inherit\nplain\n"),
+                "has the line `plain`, which is not `key: value`",
+            ),
+            (
+                "a description with a colon",
+                with("Read only.", "Read only: yes."),
+                "has a `description` that holds a `:` before a space or a tab",
+            ),
+            (
+                "a description that ends with a colon",
+                with("routes reviewer.\n", "routes reviewer:\n"),
+                "has a `description` that ends with `:`",
+            ),
+            (
+                "a description with a comment",
+                with("Read only.", "Read only #1."),
+                "has a `description` that holds a blank before `#`",
+            ),
+            (
+                "a description with a tab before a comment",
+                with("Read only.", "Read only\t#1."),
+                "has a `description` that holds a blank before `#`",
+            ),
+            (
+                "a description with a quote",
+                with("Read only.", "Read 'only'."),
+                "has a `description` that holds a quote",
+            ),
+            (
+                "a description that starts with a small letter",
+                with("description: Reviews", "description: reviews"),
+                "has a `description` that does not start with a capital letter",
+            ),
+            (
+                "another model",
+                with("model: inherit", "model: opus"),
+                "has `model: opus`, not `model: inherit`",
+            ),
+            (
+                "a key after hooks",
+                with(&hooks, &format!("{hooks}color: red\n")),
+                "has the key `color` after `hooks`",
+            ),
+            (
+                "another name",
+                with("name: reviewer", "name: mem-reviewer"),
+                "has the name `mem-reviewer`, not `reviewer`",
+            ),
+            (
+                "double quotes outside the command",
+                with(
+                    r#"command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/read-only-bash.sh'"#,
+                    r#"command: "$CLAUDE_PROJECT_DIR/.claude/hooks/read-only-bash.sh""#,
+                ),
+                "has a hook block that is not",
+            ),
+            (
+                "another path",
+                with("read-only-bash.sh", "other.sh"),
+                "has a hook block that is not",
+            ),
+            (
+                "the hook on PostToolUse",
+                with("PreToolUse", "PostToolUse"),
+                "has a hook block that is not",
+            ),
+            (
+                "the matcher Edit",
+                with("matcher: Bash", "matcher: Edit"),
+                "has a hook block that is not",
+            ),
+            (
+                "no onFailure",
+                with("\n          onFailure: block", ""),
+                "has a hook block that is not",
+            ),
+            (
+                "a second hook",
+                with(
+                    "onFailure: block\n",
+                    "onFailure: block\n        - type: command\n          command: echo\n",
+                ),
+                "has a hook block that is not",
+            ),
+            (
+                "no closing line",
+                with("---\n\nThe body", "\nThe body"),
+                "has no `---` line that closes the frontmatter",
+            ),
+            (
+                "no opening line",
+                good().replacen("---\n", "", 1),
+                "does not start with a `---` line",
+            ),
+        ];
+        for (plant, text, named) in cases {
+            let problems = agent_problems(FILE, &text);
+            assert!(
+                problems.iter().all(|problem| problem.rule == "agents"
+                    && problem.file == ".claude/agents/reviewer.md"),
+                "{plant}: {problems:#?}"
+            );
+            assert!(
+                problems.iter().any(|problem| problem
+                    .message
+                    .starts_with("agents: .claude/agents/reviewer.md ")
+                    && problem.message.contains(named)
+                    && problem.message.contains("Fix: ")),
+                "{plant}: no problem names {named:?} in {problems:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_file_is_named() {
+        let problems = agent_problems("mem-reviewer.md", &good());
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("has the name `reviewer`, not `mem-reviewer`"),
+            "{}",
+            problems[0]
+        );
+    }
+
+    fn entry(path: &str, text: Option<String>) -> (String, Option<String>) {
+        (path.to_string(), text)
+    }
+
+    /// A good folder: two agents and the `.gitkeep`.
+    fn folder() -> Vec<(String, Option<String>)> {
+        vec![
+            entry("reviewer.md", Some(good())),
+            entry(
+                "validator.md",
+                Some(good().replacen("name: reviewer", "name: validator", 1)),
+            ),
+            entry(".gitkeep", Some(String::new())),
+        ]
+    }
+
+    #[test]
+    fn a_folder_of_read_only_agents_has_no_problem() {
+        assert_eq!(agents_folder_problems(&folder()), []);
+        let finder = [folder(), vec![entry(".DS_Store", Some("\0".to_string()))]].concat();
+        assert_eq!(agents_folder_problems(&finder), []);
+    }
+
+    /// Each plant gives a problem of the agents rule that names it.
+    #[test]
+    fn each_folder_plant_is_named() {
+        let plus = |extra: Vec<(String, Option<String>)>| [folder(), extra].concat();
+        let cases = [
+            (
+                "a subfolder",
+                plus(vec![entry("sub", None)]),
+                "sub is a subfolder",
+            ),
+            (
+                "an agent in a subfolder",
+                plus(vec![
+                    entry("sub", None),
+                    entry(
+                        "sub/writer.md",
+                        Some(good().replacen(
+                            "tools: Read, Bash",
+                            "tools: Read, Edit, Write, Bash",
+                            1,
+                        )),
+                    ),
+                ]),
+                "sub/writer.md is in a subfolder",
+            ),
+            (
+                "a name in a subfolder that an agent has",
+                plus(vec![entry("sub/writer.md", Some(good()))]),
+                "sub/writer.md has the name `reviewer`, which reviewer.md has too",
+            ),
+            (
+                "a file that is not an agent",
+                plus(vec![entry("notes.txt", Some("x".to_string()))]),
+                "notes.txt is not an agent file",
+            ),
+            (
+                "two agents with one name",
+                plus(vec![entry("reviewer2.md", Some(good()))]),
+                "reviewer2.md has the name `reviewer`, which reviewer.md has too",
+            ),
+            (
+                "an agent with a write tool",
+                vec![entry(
+                    "reviewer.md",
+                    Some(good().replacen("tools: Read, Bash", "tools: Read, Edit, Bash", 1)),
+                )],
+                "reviewer.md has `Edit` in `tools`",
+            ),
+        ];
+        for (plant, entries, named) in cases {
+            let problems = agents_folder_problems(&entries);
+            assert!(
+                problems.iter().all(|problem| problem.rule == "agents"),
+                "{plant}: {problems:#?}"
+            );
+            assert!(
+                problems.iter().any(|problem| problem
+                    .message
+                    .starts_with(&format!("agents: {AGENTS_FOLDER}{named}"))
+                    && problem.message.contains("Fix: ")),
+                "{plant}: no problem names {named:?} in {problems:#?}"
             );
         }
     }

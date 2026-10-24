@@ -1,0 +1,25 @@
+# cargo-mutants settings for `xtask review mutants` (harness phase 3).
+
+# cargo-mutants tests a mutated package with its default features only.  So
+# code behind engine's `cpal` and synth's `files` would show as missed.
+all_features = true
+
+# These files compile for wasm32 only.  No native test can catch a mutant
+# in them.
+exclude_globs = [
+    "app/src/picker.rs",
+    "app/src/separator.rs",
+    "app/src/store.rs",
+    "worker/src/web.rs",
+]
+
+# Functions that compile for wasm32 only, in files that native code also
+# uses.  cargo-mutants matches each pattern against the names that `--list`
+# shows.  A name that also has a native variant stays in, such as
+# `base_latency` in engine/src/live.rs and `main` in app/src/main.rs.  The
+# validator decides its wasm32 mutants.  A wasm32 block inside a shared
+# function stays in too (TD-33).
+exclude_re = [
+    '(replace|in) (StemApp::)?(refresh_storage|about_menu|load_and_keep|pick_song|separator_controls|storage_menu|reset_dialog|start_reset|poll_separator|start_web)\b',
+    '(replace|in) web::(run|reload)\b',
+]

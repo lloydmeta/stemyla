@@ -1,4 +1,7 @@
 target/
+# cargo-mutants writes mutants.out at the root when a person runs it by hand.
+# xtask review mutants writes into the run folder under target/review/.
+/mutants.out*/
 /app/dist/
 /pages/
 # Audio, stems and model files are never committed: songs are copyrighted,
@@ -36,3 +39,8 @@ target/
 !/.claude/
 /.claude/worktrees/
 **/.claude/settings.local.json
+# Cargo.lock is tracked, even where a global gitignore ignores it.
+# cargo-mutants copies the tree with the ignore rules.  Without the lock
+# file, the copy builds with the newest versions, and can fail
+# (no_tracked_file_is_ignored).
+!/Cargo.lock

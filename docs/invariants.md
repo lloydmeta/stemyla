@@ -11,7 +11,7 @@ Each rule names its enforcement on an `* Enforced by:` line, where a name in a c
 Building and serving the app uses only Cargo, Trunk and `xtask serve`.  Never suggest or add Python or another non-Rust server or build step.  Python appears only in `tools/roformer_export.py`, which generates test fixtures from the PyTorch reference.
 
 * Why: one toolchain to install and audit; the maintainer's choice for this repo.
-* Enforced by: `no_python_in_the_build` (CI `test` job), over the git index.  It fails a tracked Python file other than `tools/roformer_export.py`.  It fails the words `python`, `pip` or `uv` in CI, Trunk, `build.rs` or Cargo's config.  It fails the name of Python's web server in a tracked text file outside plans and decisions.  It does not see Rust code outside `build.rs` that starts Python, or a shell script that runs Python.  It also does not see a script with a shebang and no extension, or a server in another language.
+* Enforced by: `no_python_in_the_build` (CI `test` job), over the git index.  It fails a tracked Python file other than `tools/roformer_export.py`.  It fails the words `python`, `pip` or `uv` in CI, Trunk, `build.rs` or Cargo's config.  It fails the name of Python's web server in a tracked text file outside plans, decisions and review logs.  It does not see Rust code outside `build.rs` that starts Python, or a shell script that runs Python.  It also does not see a script with a shebang and no extension, or a server in another language.
 
 ### ASSET-1: no audio, stems or model weights in the repo
 
@@ -93,7 +93,7 @@ The audio callback reads the player through `engine::slot`'s `try_lock`, renders
 
 * Why: a callback that blocks or frees a song's buffers misses its deadline and is heard as a click; on the web, cpal's callback is never freed, so anything it holds leaks.  An allocator can take a lock or fault a page, so its time has no bound (`decisions/0007-no-allocation-in-the-audio-callback.md`).
 * Enforced by: `replacing_the_player_frees_the_previous_song`; `the_callback_does_not_allocate_after_warm_up`, `a_stretcher_keeps_its_warm_up_promise` and `the_app_ships_only_these_stretchers` (CI `test` job).  The first runs the callback under a counting allocator, through tempo, chipmunk, seek, loop and mix changes, for each stretcher the app ships.  The second checks what `Stretcher::warm_up` promises, at rates from 8 to 192 kHz.  `Player::with_config` and `Varispeed::warm_up` panic on a configuration that the warm-up cannot cover.  The third fails when `app/Cargo.toml` turns on a stretcher that the first does not cover.
-* Gaps: TD-25.
+* Gaps: TD-25, TD-40.
 
 ## GPU
 
@@ -103,6 +103,7 @@ Kernels fit the default limits (`docs/references/webgpu-limits.md`), and the dev
 
 * Why: a kernel that needs more fails on some users' GPUs only.
 * Enforced by: `every_kernel_fits_the_default_limits` (CI `test` job), and wgpu's validation at runtime on a real adapter.  The test parses every shader with naga, generated sources included.  It checks the workgroup size, the invocations and the workgroup storage of each entry point, the storage and uniform buffers, and the bind groups.  `every_layout_matches_its_shaders` checks that the layouts bind what the shaders declare.  Dispatch counts and buffer sizes depend on the data.  `Rec::push` asserts each dispatch count, and only wgpu checks buffer sizes.  `workgroup_memory_within_defaults` also checks the tile sizes against their formula.  `sources_are_complete` makes sure that no generated source has an unfilled placeholder.
+* Gaps: TD-41.
 
 ### GPU-2: a kernel change is checked against the CPU and in a browser
 
@@ -128,7 +129,7 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 
 * Why: the page and the worker are built together but run as separate wasm modules; a mismatch fails at runtime only.
 * Enforced by: `replies_arrive_intact`, `requests_and_their_settings_arrive_intact`, `hand_written_requests_are_read` (CI `browser-tests` job), and `e2e_messages_use_protocol_types` (CI `test` job).  The last compares the message types in `xtask/e2e/*.js` and in the scripts of `xtask/src/e2e.rs` with `stem_protocol::kind`.  It does not read field names.
-* Gaps: TD-16.
+* Gaps: TD-16, TD-42.
 
 ### PROTO-2: a model URL only from the page's own site
 
@@ -145,7 +146,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
-* Gaps: TD-8, TD-19, TD-29.
+* Gaps: TD-8, TD-19, TD-29, TD-39, TD-40, TD-43.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 
@@ -177,4 +178,4 @@ A change that makes `CLAUDE.md`, a doc under `docs/` or a rule in `.claude/rules
 
 * Why: agents act on what the docs say; a stale doc is a wrong instruction.
 * Enforced by: `the_map_and_docs_match_the_code` (CI `test` job), which checks the conventions in `docs/README.md`.
-* Gaps: TD-21.
+* Gaps: TD-21, TD-41.
