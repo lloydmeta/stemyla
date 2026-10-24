@@ -9926,6 +9926,7 @@ dependencies = [
  "burn-store",
  "dsp",
  "engine",
+ "flacenc",
  "half",
  "hound",
  "proc-macro2",

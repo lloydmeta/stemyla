@@ -173,7 +173,7 @@ Acceptance: the separator test passes in `web-test`.  The UI snapshots pass, or 
 ### M6: end to end, and on real hardware
 
 * `xtask/src/e2e.rs` `clip`: an option to write the clip as a 16-bit 96 kHz FLAC with `flacenc`.  `cargo run -p xtask -- e2e separate` passes on that clip with 6 stems.
-* Time the encode of a 5-minute stem in the built page, and write it in Progress.
+* `e2e flac`: the release worker encodes a 5-minute stem posted by hand, and the reply is a `Blob` that starts with `fLaC` and is smaller than 16-bit PCM.  Write the time in Progress.  CI runs it in Chrome.
 * A person, on an iPhone: "Open song…" offers a `.flac` file in Files, and a FLAC stem saves.  Write the device and the iOS version in Progress.
 
 ### Review
@@ -201,7 +201,8 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-25: M1 and M2, in one commit: engine decodes FLAC, with the decode limit.  Without the `flac` feature, 8 decode tests fail; with the limit turned off, the 3 limit tests fail, and `a_flac_of_unstated_length_stops_at_the_limit` takes 68 s to decode 2.5 GB of silence from an 82 kB file.  After the change, all 84 engine unit tests pass.
 * [x] 2026-10-25: M3: the page opens FLAC.  `web-test` passes in Safari, with `a_flac_session_reopens_with_its_stems`.  Only the `empty_state` snapshot changed, for the welcome text.  `flacenc` and its dependencies are in the browser-tests table of `THIRD-PARTY.md` until M4.
 * [x] 2026-10-25: M4 and M5, in one commit: the worker encodes FLAC and the page saves it.  `web-test` passes in Safari: 8 new tests in the worker, 3 in the protocol and 1 in the separator.  With a copy of one whole channel added to `flac`, `a_flac_is_encoded_in_blocks` fails (5.6 MB held at the peak).  `flacenc` builds for `wasm32` with no default features.  The encode time of 5 minutes waits for M6, since the debug build of the tests timed out on it.
-* [ ] M6: end to end, and on real hardware.
+* [x] 2026-10-25: M6: end to end.  The new scenario `e2e flac` posts a 5-minute stereo stem to the release worker by hand.  It passes in Safari (14.7 s to encode) and Chrome (11.3 s), with a file of 8.5 MB against 52.9 MB of 16-bit PCM.  CI runs it in Chrome after `storage`.  `e2e separate --flac` passes in Chrome (6 stems in 1.4 s, Radeon Pro 5500M) and Safari (3.3 s): the 96 kHz FLAC clip opens at 44.1 kHz with 88,200 frames.  `e2e separate` with the WAV clip and `e2e storage` still pass in Chrome.  `web-test` passes in Chrome and Safari.
+* [ ] A person, on an iPhone: "Open song…" offers a `.flac` file, and a FLAC stem saves.
 * [ ] Review rounds 1, 2 and 3.
 
 ## Surprises and discoveries
@@ -219,6 +220,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * 2026-10-25, maintainer, after the spike: a saved FLAC has 16 bits for each sample, with `flacenc`.  24 bits wait for an encoder that can write them.
 * 2026-10-25, maintainer: the decode limit is 1 GiB of decoded `f32`, for every format (decision 0013).
 
+* 2026-10-25, agent: a new e2e scenario, `flac`, times the encode in the release build, since the browser tests run a debug build and timed out on 5 minutes.
 * 2026-10-25, agent: M4 and M5 are one commit, since the page does not compile until it handles the new reply.
 * 2026-10-25, agent: the worker refuses a stem with no samples, as a FLAC with no frames has no block sizes to state.
 * 2026-10-25, agent: M1 and M2 are one commit, since both change `open` and `decode_into_reservation`.

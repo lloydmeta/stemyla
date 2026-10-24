@@ -126,11 +126,11 @@ and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver
 ```bash
 cargo run -p xtask -- web-test                  # browser storage, audio output, the worker (wasm-bindgen-test)
 (cd app && trunk build --release)
-cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage
+cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage, flac
 cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 ```
 
-* `smoke`, `audio-resume` and `storage` need no model.  `bench` needs WebGPU.  `selftest`, `separate` and `worker-check` need the model (`--weights`); `selftest` also the reference files above, and `worker-check` compares with PyTorch only given `--reference` (the outputs of `tools/roformer_export.py`).
+* `smoke`, `audio-resume`, `storage` and `flac` need no model.  `flac` times the worker's encode of a 5-minute stem.  `separate --flac` drops a 96 kHz FLAC clip in place of the 48 kHz WAV.  `bench` needs WebGPU.  `selftest`, `separate` and `worker-check` need the model (`--weights`); `selftest` also the reference files above, and `worker-check` compares with PyTorch only given `--reference` (the outputs of `tools/roformer_export.py`).
 * Logs and screenshots go to `target/e2e/<scenario>`.  `--swiftshader` runs WebGPU in software on a machine without a GPU (slow; a compile check, not a verdict on the kernels).
 
 ## Layout

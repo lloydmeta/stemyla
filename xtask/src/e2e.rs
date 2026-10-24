@@ -66,6 +66,8 @@ pub struct Opts {
     pub selftest_dir: PathBuf,
     pub reference: Option<PathBuf>,
     pub download: bool,
+    /// `separate` drops a 16-bit 96 kHz FLAC clip, not a 48 kHz WAV.
+    pub flac: bool,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
@@ -78,7 +80,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|audio-resume|storage|bench|selftest|separate|worker-check> [options]",
+                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -95,6 +97,7 @@ impl Opts {
             selftest_dir: root.join("third_party/roformer/selftest"),
             reference: None,
             download: false,
+            flac: false,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -124,6 +127,7 @@ impl Opts {
                 "--selftest-dir" => o.selftest_dir = value()?.into(),
                 "--reference" => o.reference = Some(value()?.into()),
                 "--download" => o.download = true,
+                "--flac" => o.flac = true,
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
@@ -160,6 +164,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "smoke" => smoke(&o),
         "audio-resume" => audio_resume(&o),
         "storage" => storage(&o),
+        "flac" => flac(&o),
         "bench" => bench(&o),
         "selftest" => selftest(&o),
         "separate" => separate(&o),
@@ -1038,31 +1043,85 @@ fn selftest(o: &Opts) -> Result<()> {
     p.finish()
 }
 
-/// The rate of the `separate` scenario's clip: not the model's, so the page
-/// must convert it before it separates (decision 0012).
-const CLIP_RATE: u32 = 48_000;
+/// The `separate` scenario's clip: its file, its media type and its rate.
+/// Neither rate is the model's, so the page must convert the clip before
+/// it separates (decision 0012).
+struct Clip {
+    file: &'static str,
+    media_type: &'static str,
+    rate: u32,
+}
 
-/// A two-second clip of the synthetic mix as a WAV, for `separate`.
-fn clip(out: &Path) -> Result<PathBuf> {
+const WAV_CLIP: Clip = Clip {
+    file: "clip.wav",
+    media_type: "audio/wav",
+    rate: 48_000,
+};
+
+const FLAC_CLIP: Clip = Clip {
+    file: "clip.flac",
+    media_type: "audio/flac",
+    rate: 96_000,
+};
+
+/// A two-second clip of the synthetic mix, for `separate`, in the folder it
+/// returns.
+fn clip(out: &Path, clip: &Clip) -> Result<PathBuf> {
     let song = crate::synth::generate();
     let n = 2 * crate::synth::SAMPLE_RATE as usize;
     let dir = out.join("clip");
     std::fs::create_dir_all(&dir)?;
     let at_clip_rate =
-        |x: &[f32]| engine::resample::to_rate(x.to_vec(), crate::synth::SAMPLE_RATE, CLIP_RATE);
+        |x: &[f32]| engine::resample::to_rate(x.to_vec(), crate::synth::SAMPLE_RATE, clip.rate);
     let (left, right) = (
         at_clip_rate(&song.mix.left[..n])?,
         at_clip_rate(&song.mix.right[..n])?,
     );
-    let wav = engine::wav::encode_pcm16(&left, &right, CLIP_RATE);
-    std::fs::write(dir.join("clip.wav"), wav)?;
+    let bytes = if clip.file.ends_with(".flac") {
+        flac_16(&left, &right, clip.rate)?
+    } else {
+        engine::wav::encode_pcm16(&left, &right, clip.rate)
+    };
+    std::fs::write(dir.join(clip.file), bytes)?;
     Ok(dir)
 }
 
-/// Drop a 48 kHz clip, which opens at 44.1 kHz, and the model, press
-/// Separate, and the six lanes appear; screenshots along the way.
+/// A 16-bit stereo FLAC, from `flacenc`.
+fn flac_16(left: &[f32], right: &[f32], rate: u32) -> Result<Vec<u8>> {
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+    const BLOCK: usize = 4096;
+    let q = |x: f32| (x * 32768.0).round().clamp(-32768.0, 32767.0) as i32;
+    let samples: Vec<i32> = left
+        .iter()
+        .zip(right)
+        .flat_map(|(l, r)| [q(*l), q(*r)])
+        .collect();
+    let source = flacenc::source::MemSource::from_samples(&samples, 2, 16, rate as usize);
+    let config = flacenc::config::Encoder::default()
+        .into_verified()
+        .map_err(|e| anyhow::anyhow!("FLAC config: {e:?}"))?;
+    let mut stream = flacenc::encode_with_fixed_block_size(&config, source, BLOCK)
+        .map_err(|e| anyhow::anyhow!("FLAC encoder: {e:?}"))?;
+    // flacenc gives the short last block as the minimum, which RFC 9639
+    // (8.2) excludes, and Symphonia then rejects every frame.
+    stream
+        .stream_info_mut()
+        .set_block_sizes(BLOCK, BLOCK)
+        .map_err(|e| anyhow::anyhow!("FLAC block sizes: {e:?}"))?;
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    stream
+        .write(&mut sink)
+        .map_err(|e| anyhow::anyhow!("FLAC file: {e:?}"))?;
+    Ok(sink.into_inner())
+}
+
+/// Drop a clip (a 48 kHz WAV, or with `--flac` a 96 kHz FLAC), which opens
+/// at 44.1 kHz, and the model, press Separate, and the six lanes appear;
+/// screenshots along the way.
 fn separate(o: &Opts) -> Result<()> {
-    let mut mounts = vec![("/test/".to_string(), clip(&o.out)?)];
+    let c = if o.flac { FLAC_CLIP } else { WAV_CLIP };
+    let mut mounts = vec![("/test/".to_string(), clip(&o.out, &c)?)];
     let model = weights_mount(o, &mut mounts)?;
     let base = start_server(&o.dist, mounts, &["console.js"])?;
     let q = query(o, "chunk=16384&overlap=1&mm=s64");
@@ -1078,15 +1137,15 @@ fn separate(o: &Opts) -> Result<()> {
     p.wait_for(0, 60, |l| l.contains("separator: "))?;
     p.screenshot("separate_empty")?;
     let from = p.mark();
-    p.drop_files(&[("/test/clip.wav", "clip.wav", "audio/wav")])?;
-    // At 48 kHz the clip has 96,000 frames; at 44.1 kHz it has 88,200.
+    p.drop_files(&[(&format!("/test/{}", c.file), c.file, c.media_type)])?;
+    // Two seconds at 44.1 kHz are 88,200 frames.
     let opened = p.wait_for(from, 60, |l| l.contains("song: opened"))?;
     p.note(&format!("opened: {opened:?}"));
     p.check(
         opened
             .as_deref()
             .is_some_and(|l| l.contains("at 44100 Hz") && l.contains("(88200 frames)")),
-        "the 48 kHz clip opens at 44.1 kHz",
+        &format!("the {} Hz clip opens at 44.1 kHz", c.rate),
     );
     let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;
     p.check(kept.is_some(), "the clip opens");
@@ -1130,6 +1189,57 @@ fn separate(o: &Opts) -> Result<()> {
         errors.is_empty(),
         &format!("no page errors ({})", errors.len()),
     );
+    p.finish()
+}
+
+/// Seconds of the stem that `flac` encodes.
+const FLAC_SECONDS: u32 = 300;
+
+/// The release worker encodes a 5-minute stereo stem as a FLAC, from a blank
+/// page that posts the request by hand.  The reply is a `Blob` that starts
+/// with `fLaC` and is smaller than the stem's 16-bit PCM.  Logs the time.
+fn flac(o: &Opts) -> Result<()> {
+    let base = start_server(&o.dist, Vec::new(), &["console.js"])?;
+    let mut p = Page::open(o, base, &[], "__e2e/blank.html")?;
+    let r = in_page(
+        &mut p,
+        "const rate = 44100, n = args[0] * rate;
+        const left = new Float32Array(n), right = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          left[i] = 0.5 * Math.sin(2 * Math.PI * 220 * i / rate);
+          right[i] = 0.5 * Math.sin(2 * Math.PI * 330 * i / rate);
+        }
+        const w = await e2e.start();
+        const t0 = performance.now();
+        const d = await new Promise((resolve) => {
+          w.onmessage = (e) => {
+            if (e.data.type === 'flac' || e.data.type === 'error') resolve(e.data);
+          };
+          w.postMessage({ type: 'flac', name: 'tone.flac', left, right, rate }, [left.buffer, right.buffer]);
+        });
+        const ms = Math.round(performance.now() - t0);
+        w.terminate();
+        if (d.type !== 'flac') return { ms, error: d.text };
+        const head = new Uint8Array(await d.file.slice(0, 4).arrayBuffer());
+        return { ms, name: d.name, size: d.file.size, media: d.file.type,
+          head: String.fromCharCode(...head) };",
+        json!([FLAC_SECONDS]),
+        300,
+    )?;
+    p.note(&format!("reply: {r}"));
+    let pcm_bytes = u64::from(FLAC_SECONDS) * 44_100 * 4;
+    p.check(r["error"].is_null(), "the worker encodes the stem");
+    p.check(r["name"] == "tone.flac", "the reply keeps the name");
+    p.check(r["media"] == "audio/flac", "the file is audio/flac");
+    p.check(r["head"] == "fLaC", "the file starts with fLaC");
+    p.check(
+        r["size"].as_u64().is_some_and(|s| 0 < s && s < pcm_bytes),
+        &format!("the file is smaller than its {pcm_bytes} bytes of 16-bit PCM"),
+    );
+    p.note(&format!(
+        "flac: {FLAC_SECONDS} s of stereo encoded in {} ms",
+        r["ms"]
+    ));
     p.finish()
 }
 
