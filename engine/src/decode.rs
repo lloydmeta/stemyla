@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use std::io::Cursor;
 use std::path::Path;
 use symphonia::core::audio::Channels;
-use symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
+use symphonia::core::codecs::audio::well_known::{CODEC_ID_FLAC, CODEC_ID_MP3};
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
@@ -27,7 +27,17 @@ impl Audio {
     }
 }
 
-/// Decodes a file on disk (WAV or MP3).
+/// The most decoded samples one file may hold, as `f32` bytes over all its
+/// channels (decision 0013): 50.7 minutes of 44.1 kHz stereo.  A FLAC of
+/// a few kB can state, and hold, hours of silence.
+pub const MAX_DECODED_BYTES: u64 = 1 << 30;
+
+/// How many times smaller than PCM at its stated bits a FLAC is trusted to
+/// be, for its reservation.  The demo song's stems are 2.2 to 11.3 times
+/// smaller at 16 bits.
+const FLAC_MOST_RATIO: u64 = 16;
+
+/// Decodes a file on disk (WAV, MP3 or FLAC).
 pub fn decode_path(path: &Path) -> Result<Audio> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
@@ -61,9 +71,11 @@ fn frames_to_reserve(stated: Option<u64>, most: Option<u64>) -> usize {
 /// bitrate file with no length tag, whose length symphonia estimates from
 /// its first frames, which a quiet start makes small) then reserves at most
 /// 1.5 times a 192 kbit/s file, where the smallest legal packet would allow
-/// six times it.  Every other codec here stores each sample in
-/// `bits_per_coded_sample` bits, or in at least a byte (A-law, mu-law and
-/// float WAVs do not state it).
+/// six times it.  A FLAC is reserved for at most `FLAC_MOST_RATIO` times
+/// what its bytes hold as PCM at its stated bits: a constant subframe holds
+/// a whole block in one sample, so its bytes give no real bound.  Every
+/// other codec here stores each sample in `bits_per_coded_sample` bits, or
+/// in at least a byte (A-law, mu-law and float WAVs do not state it).
 fn most_frames(params: &AudioCodecParameters, byte_len: u64) -> u64 {
     if params.codec == CODEC_ID_MP3 {
         // An unknown or impossible rate counts as the highest MP3 has.
@@ -74,9 +86,17 @@ fn most_frames(params: &AudioCodecParameters, byte_len: u64) -> u64 {
         const BYTES_PER_SECOND: u64 = 128_000 / 8;
         return byte_len.saturating_mul(rate) / BYTES_PER_SECOND;
     }
+    let channels = params.channels.as_ref().map_or(1, Channels::count).max(1) as u64;
+    if params.codec == CODEC_ID_FLAC {
+        // FLAC has 4 to 32 bits; an unknown depth counts as the fewest.
+        let bits = params
+            .bits_per_sample
+            .filter(|b| (4..=32).contains(b))
+            .map_or(4, u64::from);
+        return byte_len.saturating_mul(8 * FLAC_MOST_RATIO) / (bits * channels);
+    }
     let bits = params.bits_per_coded_sample.filter(|b| *b > 0).unwrap_or(8);
-    let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
-    byte_len.saturating_mul(8) / (u64::from(bits) * channels as u64)
+    byte_len.saturating_mul(8) / (u64::from(bits) * channels)
 }
 
 /// An empty channel with room for `frames`.  If that much memory is not
@@ -102,6 +122,20 @@ fn append(channel: &mut Vec<f32>, src: &[f32]) {
     channel.extend_from_slice(src);
 }
 
+/// The error for a file whose samples pass `limit` bytes.
+fn too_long(limit: u64) -> anyhow::Error {
+    anyhow!(
+        "the song is too long to open: it decodes to more than {} MiB of samples",
+        limit >> 20
+    )
+}
+
+/// Whether `frames` of each of `channels` channels pass `limit` bytes of
+/// `f32`.
+fn passes(limit: u64, channels: usize, frames: u64) -> bool {
+    frames.saturating_mul(4 * channels as u64) > limit
+}
+
 /// A file opened for decoding: its reader, the audio track and how many
 /// frames to reserve for each channel.
 struct Opened {
@@ -111,7 +145,9 @@ struct Opened {
     reserve: usize,
 }
 
-fn open(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Opened> {
+/// Opens `source`, and refuses it if its stated length passes `limit`
+/// bytes of samples.  The reservation never passes `limit` either.
+fn open(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<Opened> {
     let byte_len = source.byte_len();
     let mss = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
@@ -136,8 +172,16 @@ fn open(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Opened> {
         .ok_or_else(|| anyhow!("track has no audio codec parameters"))?
         .clone();
     let track_id = track.id;
+    let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
+    if track
+        .num_frames
+        .is_some_and(|frames| passes(limit, channels, frames))
+    {
+        return Err(too_long(limit));
+    }
     let most = byte_len.map(|len| most_frames(&params, len));
-    let reserve = frames_to_reserve(track.num_frames, most);
+    let within_limit = limit / (4 * channels as u64);
+    let reserve = frames_to_reserve(track.num_frames, most.map(|m| m.min(within_limit)));
     Ok(Opened {
         format,
         track_id,
@@ -147,7 +191,15 @@ fn open(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Opened> {
 }
 
 fn decode_source(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Audio> {
-    let mut audio = decode_into_reservation(source, ext)?;
+    decode_source_within(source, ext, MAX_DECODED_BYTES)
+}
+
+fn decode_source_within(
+    source: Box<dyn MediaSource>,
+    ext: Option<&str>,
+    limit: u64,
+) -> Result<Audio> {
+    let mut audio = decode_into_reservation(source, ext, limit)?;
     // The stated length can be wrong (an estimate from the bitrate, frames
     // skipped as corrupt), so release whatever the decoding left spare.
     for channel in &mut audio.channels {
@@ -157,14 +209,19 @@ fn decode_source(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Audi
 }
 
 /// Decodes into channels made with room for the file's stated length, and
-/// grown by `append` past it.
-fn decode_into_reservation(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Audio> {
+/// grown by `append` past it.  It stops with an error before the channels
+/// pass `limit` bytes.
+fn decode_into_reservation(
+    source: Box<dyn MediaSource>,
+    ext: Option<&str>,
+    limit: u64,
+) -> Result<Audio> {
     let Opened {
         mut format,
         track_id,
         params,
         reserve,
-    } = open(source, ext)?;
+    } = open(source, ext, limit)?;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|e| anyhow!("no decoder for codec: {e}"))?;
@@ -189,6 +246,11 @@ fn decode_into_reservation(source: Box<dyn MediaSource>, ext: Option<&str>) -> R
                     sample_rate = buf.spec().rate();
                 }
                 buf.copy_to_vecs_planar::<f32>(&mut planes);
+                let decoded = channels.first().map_or(0, Vec::len);
+                let packet_frames = planes.first().map_or(0, Vec::len);
+                if passes(limit, planes.len(), (decoded + packet_frames) as u64) {
+                    return Err(too_long(limit));
+                }
                 if channels.is_empty() {
                     channels = planes
                         .iter()
@@ -216,7 +278,45 @@ fn decode_into_reservation(source: Box<dyn MediaSource>, ext: Option<&str>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_flac::{Blocks, by_hand, compressed, step};
     use crate::wav::encode_pcm16;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Heap bytes this thread allocated and has not freed.
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        /// The most `LIVE` has been since a test set it.
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Keeps `LIVE` and `PEAK` for each thread.  Only `alloc` and `dealloc`
+    /// are written, so the default `realloc` holds the old and the new
+    /// buffer at once, as `System`'s may.
+    struct PeakAllocator;
+
+    // SAFETY: every call is forwarded unchanged to `System`; counting
+    // touches only `const` thread-locals, which do not allocate.
+    unsafe impl GlobalAlloc for PeakAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = LIVE.try_with(|live| {
+                let now = live.get() + layout.size();
+                live.set(now);
+                let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+            });
+            // SAFETY: the caller's contract is the same as `System`'s.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(layout.size())));
+            // SAFETY: the caller's contract is the same as `System`'s.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: PeakAllocator = PeakAllocator;
 
     /// 10,007 frames: not a whole number of 1,152-frame packets, nor near a
     /// power of two.
@@ -234,13 +334,26 @@ mod tests {
     }
 
     fn assert_decodes_exactly(bytes: Vec<u8>, left: &[f32], right: &[f32]) {
-        let audio = decode_bytes(bytes, Some("wav")).unwrap();
+        assert_decodes_as(bytes, Some("wav"), left, right, 16);
+    }
+
+    /// `bytes` decode to `left` and `right` within half a step of `bits`
+    /// bits, with no spare capacity.
+    fn assert_decodes_as(
+        bytes: Vec<u8>,
+        ext: Option<&str>,
+        left: &[f32],
+        right: &[f32],
+        bits: u32,
+    ) {
+        let half_step = 0.5 / (1_u32 << (bits - 1)) as f32;
+        let audio = decode_bytes(bytes, ext).unwrap();
         assert_eq!(audio.channels.len(), 2);
         for (channel, want) in audio.channels.iter().zip([left, right]) {
             assert_eq!(channel.len(), want.len());
             assert_eq!(channel.capacity(), want.len());
             for (got, want) in channel.iter().zip(want) {
-                assert!((got - want).abs() <= 0.5 / 32768.0 + 1e-7);
+                assert!((got - want).abs() <= half_step + 1e-7, "{got} for {want}");
             }
         }
     }
@@ -270,7 +383,11 @@ mod tests {
     }
 
     fn reserve_for(bytes: Vec<u8>) -> usize {
-        open(Box::new(Cursor::new(bytes)), Some("wav"))
+        reserve_of(bytes, "wav")
+    }
+
+    fn reserve_of(bytes: Vec<u8>, ext: &str) -> usize {
+        open(Box::new(Cursor::new(bytes)), Some(ext), MAX_DECODED_BYTES)
             .unwrap()
             .reserve
     }
@@ -292,7 +409,9 @@ mod tests {
     }
 
     fn capacities_before_shrinking(bytes: Vec<u8>) -> Vec<usize> {
-        let audio = decode_into_reservation(Box::new(Cursor::new(bytes)), Some("wav")).unwrap();
+        let audio =
+            decode_into_reservation(Box::new(Cursor::new(bytes)), Some("wav"), MAX_DECODED_BYTES)
+                .unwrap();
         audio.channels.iter().map(Vec::capacity).collect()
     }
 
@@ -388,5 +507,185 @@ mod tests {
     fn a_reservation_too_big_to_make_starts_empty() {
         let channel = channel_with_room_for(usize::MAX);
         assert_eq!(channel.capacity(), 0);
+    }
+
+    #[test]
+    fn a_16_bit_flac_decodes_exactly() {
+        let (left, right, _) = stereo_wav();
+        let bytes = compressed(&left, &right, 44_100);
+        assert_decodes_as(bytes, Some("flac"), &left, &right, 16);
+    }
+
+    /// 24-bit stereo samples, with full scale at both ends, and the same
+    /// as `f32`.
+    fn samples_24() -> (Vec<Vec<i32>>, Vec<f32>, Vec<f32>) {
+        let (mut left, right, _) = stereo_wav();
+        (left[0], left[1]) = (1.0, -1.0);
+        let channels: Vec<Vec<i32>> = [&left, &right]
+            .iter()
+            .map(|c| c.iter().map(|x| step(*x, 24)).collect())
+            .collect();
+        let as_f32 =
+            |c: &[i32]| -> Vec<f32> { c.iter().map(|s| *s as f32 / 8_388_608.0).collect() };
+        let (l, r) = (as_f32(&channels[0]), as_f32(&channels[1]));
+        (channels, l, r)
+    }
+
+    #[test]
+    fn a_24_bit_flac_decodes_exactly() {
+        let (channels, left, right) = samples_24();
+        assert_eq!(channels[0][..2], [8_388_607, -8_388_608]);
+        let bytes = by_hand(96_000, 24, 2, FRAMES as u64, Blocks::Verbatim(&channels));
+        assert_decodes_as(bytes, Some("flac"), &left, &right, 24);
+    }
+
+    #[test]
+    fn a_flac_with_no_extension_is_probed() {
+        let (left, right, _) = stereo_wav();
+        assert_decodes_as(compressed(&left, &right, 44_100), None, &left, &right, 16);
+    }
+
+    #[test]
+    fn a_truncated_flac_decodes_what_is_there() {
+        let (left, right, _) = stereo_wav();
+        let mut bytes = compressed(&left, &right, 44_100);
+        bytes.truncate(bytes.len() * 3 / 5);
+        let audio = decode_bytes(bytes, Some("flac")).unwrap();
+        let frames = audio.frames();
+        assert!(0 < frames && frames < FRAMES, "{frames} frames");
+        for (channel, want) in audio.channels.iter().zip([&left, &right]) {
+            assert_eq!(channel.capacity(), frames);
+            for (got, want) in channel.iter().zip(want.iter()) {
+                assert!((got - want).abs() <= 0.5 / 32768.0 + 1e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn a_flac_reserves_its_length() {
+        let (channels, _, _) = samples_24();
+        let bytes = by_hand(44_100, 24, 2, FRAMES as u64, Blocks::Verbatim(&channels));
+        assert_eq!(reserve_of(bytes, "flac"), FRAMES);
+    }
+
+    /// Stereo silence in 4,096-frame blocks, stating `stated` frames.
+    fn silence(stated: u64, block: usize, blocks: usize) -> Vec<u8> {
+        by_hand(44_100, 16, 2, stated, Blocks::Silence { block, blocks })
+    }
+
+    #[test]
+    fn a_flac_that_states_40_minutes_reserves_at_most_16_times_its_bytes() {
+        let bytes = silence(40 * 60 * 44_100, 4096, 3);
+        let byte_len = bytes.len();
+        // 16 times what 16-bit stereo PCM holds in those bytes.
+        assert_eq!(reserve_of(bytes, "flac"), byte_len * 8 * 16 / (16 * 2));
+    }
+
+    fn flac_at(bits: Option<u32>) -> AudioCodecParameters {
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(CODEC_ID_FLAC)
+            .with_channels(Channels::Discrete(2));
+        if let Some(bits) = bits {
+            params.with_bits_per_sample(bits);
+        }
+        params
+    }
+
+    #[test]
+    fn a_flac_is_reserved_for_16_times_its_pcm() {
+        assert_eq!(most_frames(&flac_at(Some(16)), 1000), 4000);
+        assert_eq!(most_frames(&flac_at(Some(24)), 1200), 3200);
+        // An unknown or impossible depth counts as 4 bits.
+        for bits in [None, Some(0), Some(3), Some(33)] {
+            assert_eq!(most_frames(&flac_at(bits), 1000), 16_000, "{bits:?}");
+        }
+    }
+
+    /// Two hours of 44.1 kHz stereo frames.
+    const TWO_HOURS: u64 = 2 * 3600 * 44_100;
+
+    /// Two hours of stereo silence in 65,535-frame blocks: about 20 bytes
+    /// each, for 524,280 bytes of `f32`.
+    fn two_hours_of_silence(stated: u64) -> Vec<u8> {
+        silence(stated, 65_535, TWO_HOURS.div_ceil(65_535) as usize)
+    }
+
+    #[test]
+    fn a_flac_that_states_more_than_the_limit_is_refused() {
+        let bytes = two_hours_of_silence(TWO_HOURS);
+        assert!(bytes.len() < 100_000, "{} bytes", bytes.len());
+        let error = decode_bytes(bytes, Some("flac")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("too long to open"),
+            "{error:#}"
+        );
+    }
+
+    fn decode_within(bytes: Vec<u8>, ext: &str, limit: u64) -> Result<Audio> {
+        decode_source_within(Box::new(Cursor::new(bytes)), Some(ext), limit)
+    }
+
+    #[test]
+    fn a_flac_of_unstated_length_stops_at_the_limit() {
+        const LIMIT: u64 = 64 << 20;
+        let bytes = two_hours_of_silence(0);
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        let error = decode_within(bytes, "flac", LIMIT).unwrap_err();
+        let held = (PEAK.with(Cell::get) - before) as u64;
+        assert!(
+            format!("{error:#}").contains("too long to open"),
+            "{error:#}"
+        );
+        // The channels grow by an eighth, and a realloc holds the old and
+        // the new buffer: up to about 1.5 times the limit.
+        assert!(
+            held < 2 * LIMIT,
+            "decoding past a {LIMIT}-byte limit held {held} bytes at its peak"
+        );
+    }
+
+    #[test]
+    fn a_wav_past_the_limit_is_refused() {
+        let (_, _, stated) = stereo_wav();
+        let mut streaming = stated.clone();
+        set_u32(&mut streaming, 4, u32::MAX);
+        set_u32(&mut streaming, 40, u32::MAX);
+        let limit = (FRAMES * 8 - 1) as u64;
+        for bytes in [stated, streaming] {
+            let error = decode_within(bytes, "wav", limit).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("too long to open"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_song_at_the_limit_opens() {
+        let (left, right, stated) = stereo_wav();
+        let mut streaming = stated.clone();
+        set_u32(&mut streaming, 4, u32::MAX);
+        set_u32(&mut streaming, 40, u32::MAX);
+        let limit = (FRAMES * 8) as u64;
+        for bytes in [stated, streaming] {
+            let audio = decode_within(bytes, "wav", limit).unwrap();
+            assert_eq!(
+                audio.channels,
+                [left.clone(), right.clone()].map(|c| {
+                    c.iter()
+                        .map(|x| step(*x, 16) as f32 / 32768.0)
+                        .collect::<Vec<f32>>()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn the_limit_is_1_gib_or_50_minutes_of_stereo() {
+        assert_eq!(MAX_DECODED_BYTES, 1 << 30);
+        let minutes = MAX_DECODED_BYTES as f64 / (8.0 * 44_100.0 * 60.0);
+        assert!((minutes - 50.7).abs() < 0.05, "{minutes}");
     }
 }

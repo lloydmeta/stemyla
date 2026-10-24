@@ -2,7 +2,7 @@
 
 The web app (the `app` and `stem-worker` WebAssembly modules) is built from the Rust crates below.  Every one is under a permissive licence or, for some, a choice of licences including a permissive one.  Notes on the ones that need attention:
 
-* Symphonia (`symphonia*`, MPL-2.0) decodes MP3 and WAV.  MPL-2.0 is file-level copyleft; it is used unmodified, and its source is at https://github.com/pdeljanov/Symphonia.
+* Symphonia (`symphonia*`, MPL-2.0) decodes WAV, MP3 and FLAC.  MPL-2.0 is file-level copyleft; it is used unmodified, and its source is at https://github.com/pdeljanov/Symphonia.
 * `epaint_default_fonts` carries egui's bundled fonts: Ubuntu-Light (Ubuntu Font Licence 1.0), Hack and the emoji icon font (MIT), Noto Emoji (OFL-1.1).  Their licence texts are in that crate's `fonts` folder.
 * `self_cell` is offered under Apache-2.0 or GPL-2.0; this project uses it under Apache-2.0.
 * `rusty_mp3` (Apache-2.0) encodes MP3 downloads.
@@ -118,8 +118,10 @@ The test `third_party_lists_what_ships` compares the table with this command's o
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
 | strength_reduce | 0.2.4 | MIT OR Apache-2.0 | http://github.com/ejmahler/strength_reduce |
 | symphonia | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-bundle-flac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-bundle-mp3 | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-codec-pcm | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-common | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-core | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-riff | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-metadata | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
