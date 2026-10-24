@@ -150,6 +150,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19, agent: the two older plans (versioned builds, browser tests in Rust) stay out of the repo; they are implemented, their PRs (#6, #9) describe them, and they hold local paths.
 * 2026-10-20, maintainer: each check is sized to its stakes and to failures seen.  Phase 2 trims M7 to a token scan, M14 to deny rules and M15 to a `rustfmt` hook, and moves the test-count guard to phase 5b.
 * 2026-10-22, maintainer: phase 3 lands as one PR, not one PR for each milestone.  Its parts depend on each other, and none changes code that ships.
+* 2026-10-22, maintainer, changed 2026-10-24 by the orchestrator: phase 3's gate asks for bounded effort, not "lower effort" (D4 of `plans/active/harness-phase-3.md`).  The agent starts the rounds, so a person's effort is close to zero either way.  Round 1's tokens are at most 2 times the baseline's for each routed reviewer, its wall time at most 60 minutes more, and a person sends no more messages.  On 2026-10-24 an approval of a tool call became cost, not an intervention, since approvals grow with the route.  The log's token figure is each agent's final context, not the tokens it used (TD-44), so the maintainer decides at the gate how to measure the token bar.
 
 ## Outcomes and retrospective
 
