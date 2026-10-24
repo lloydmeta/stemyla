@@ -267,13 +267,13 @@ of <y> baseline findings, the round found <x>
 
 First, get the approval counts of the round.  They are cost, not interventions.
 
-* If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.  The round can run in auto mode or `dontAsk` mode with no person present.  Then write each count as 0 with the mode, for example `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.  Auto mode can fall back to a prompt, but with no person present that prompt stops the session.  Else ask the maintainer the questions below.
+* If you are the orchestrator of an agent-run phase, you are "the person" (see "Before the steps").  Do not ask yourself.  If the round ran in auto mode or `dontAsk` mode, write each count as 0 with the mode, for example `0 (auto mode)`.  Without `--baseline`, keep "-" in the `baseline approvals` field.  In an interactive session, auto mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  Else ask the maintainer the questions below.
 * If you are not that orchestrator, ask the person:
   1. "How many tool calls did you approve for the round's agents and for me, from `review start` until the findings file?  Do not count the `baseline` agent and its validators."
   2. With `--baseline`: "How many tool calls did you approve for the `baseline` agent and its validators in that time?"
   3. Also say: "Give one total if you cannot split them.  In a mode that asks for no approval, each count is 0."
 * If you asked, wait for the answer.  Do not guess the counts.
-* Write the first count in the `approvals` field of `<run>/$1/findings.md`, and the second in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
+* Write the first count in the `approvals` field of `<run>/$1/findings.md`.  Write the second count in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
 
 The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, and stop.  If the file does not exist, write it in this form first:
 
