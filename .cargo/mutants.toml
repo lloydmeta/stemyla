@@ -1,5 +1,9 @@
 # cargo-mutants settings for `xtask review mutants` (harness phase 3).
 
+# Use the optimised `mutants` profile of Cargo.toml, so that the baseline
+# test run fits the timeout.
+profile = "mutants"
+
 # cargo-mutants tests a mutated package with its default features only.  So
 # code behind engine's `cpal` and synth's `files` would show as missed.
 all_features = true

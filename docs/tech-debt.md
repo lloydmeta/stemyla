@@ -182,9 +182,9 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
 * cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
-* The baseline can fail on a slow test.  In M5, 5 of the 8 case runs that were not dry runs had `classic_drums_beat_the_raw_mix` (`xtask/tests/m8_hpss.rs`) in the baseline.  It timed out in the unmutated tree in 3 of them (`m9`, `m2` and `m10` run 1), and passed in 2 (`docs/reviews/replay.md`).  Where it timed out, no mutant ran, and the line was `none: ...; exit 4: the baseline failed`.
+* The baseline can fail on a slow test.  In M5, 5 of the 8 case runs that were not dry runs had `classic_drums_beat_the_raw_mix` (`xtask/tests/m8_hpss.rs`) in the baseline.  It timed out in the unmutated tree in 3 of them (`m9`, `m2` and `m10` run 1), and passed in 2 (`docs/reviews/replay.md`).  Where it timed out, no mutant ran, and the line was `none: ...; exit 4: the baseline failed`.  It also failed in rounds 1 and 2 of the 48k audio branch.  Since 2026-10-24 the run builds with the optimised `mutants` profile in `Cargo.toml`.  Then the baseline of that branch's whole diff passed, and 98 mutants ran in 16 minutes.
 
-* Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.  For a slow test, give the baseline a longer timeout, or leave the slow test out of the mutants run.
+* Fix: the validator decides each missed mutant (phase 3, M3).  Phase 6 reads the log.  If a slow test makes the baseline time out again, time the tests under the `mutants` profile first.  A replay of a review on a commit before the profile came in has no `[profile.mutants]`.  So remove the `profile` line from the copied config, for example with `sed '/^profile = /d'`.  Else cargo-mutants stops with "profile `mutants` is not defined", and the line says `exit 4: the baseline failed`.
 
 ### TD-34: the review agents' guard matches text
 
@@ -363,6 +363,14 @@ This entry concerns VERIFY-1 for the files of the harness, such as the guard and
 The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But auto mode's classifier can refuse it.  In M6 review round 3, the classifier refused a reviewer's edit of `.claude/hooks/read-only-bash.sh` in its own worktree, with the reason "Self-Modification".  So in auto mode, a reviewer cannot change a harness file to show that a test fails on wrong code.  It reads the harness file and its tests only.  `xtask review mutants` does not test these files either, since cargo-mutants changes only Rust code (TD-33).
 
 * Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.
+
+### TD-51: engine's tests do not run on wasm32
+
+This entry concerns VERIFY-1 for `engine::resample`, which runs on wasm32 in the page.
+
+On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10 minutes of 48 kHz audio.  `output_len` and `Position` work in `u64`, and `the_length_and_the_position_do_not_overflow_32_bits` checks them natively.  But `xtask web-test` runs no engine test on wasm32.  So a later `usize` product inside `Filter::apply` passes every test (48k audio review round 2, finding 2-1).
+
+* Fix: run engine's tests on wasm32, for example under `wasm-bindgen-test-runner` in `xtask web-test`.  Until then, no check covers this.
 
 ## Known breaches
 
