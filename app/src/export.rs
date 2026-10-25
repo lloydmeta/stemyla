@@ -197,6 +197,13 @@ impl MixFollower {
         self.job.as_ref().map(|(_, job)| job.fraction())
     }
 
+    /// Whether the waveform job keeps a song-sized mid buffer.
+    pub fn holds_mid(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|(_, job)| job.sink().mid.is_some())
+    }
+
     /// Moves the lane towards `heard`, while `more` says there is time.
     /// It continues a job for `heard`, and starts again when `heard`
     /// changes.  It gives the new waveform when it is done.  With `mid`, a
@@ -634,6 +641,24 @@ mod tests {
             .collect();
         assert_eq!(back.mid, Some(mid));
         assert_eq!(follower.follow(&song, &all, true, || true), None);
+    }
+
+    #[test]
+    fn a_mix_follower_drops_its_job_when_the_mix_goes_back() {
+        let song = Arc::new(song(&["bass", "drums", "vocals"], 3 * BLOCK));
+        let all = MixRecipe::new(vec![1.0, 1.0, 1.0]);
+        let no_vocals = MixRecipe::new(vec![1.0, 1.0, 0.0]);
+        let mut follower = MixFollower::new(all.clone());
+        assert_eq!(follower.follow(&song, &no_vocals, true, || false), None);
+        assert!(follower.progress().is_some());
+        assert!(follower.holds_mid());
+        assert_eq!(follower.follow(&song, &all, true, || false), None);
+        assert_eq!(
+            follower.progress(),
+            None,
+            "back to the shown mix drops the job"
+        );
+        assert!(!follower.holds_mid(), "and its mid buffer");
     }
 
     fn run_mix(song: &Arc<Song>, recipe: &MixRecipe) -> Recorder {

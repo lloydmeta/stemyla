@@ -1539,13 +1539,17 @@ impl StemApp {
     /// waveform job, which runs for a few milliseconds in each frame.  With
     /// spectrograms on, the job also makes the spectrogram's input.
     fn follow_mix(&mut self, ctx: &egui::Context) {
+        self.follow_mix_while(ctx, export::time_left(PEAKS_MS));
+    }
+
+    /// [`Self::follow_mix`], while `more` says there is time.
+    fn follow_mix_while(&mut self, ctx: &egui::Context, more: impl FnMut() -> bool) {
         let (Some(song), Some(params), Some(follower)) =
             (&self.song, &self.params, &mut self.mix_follower)
         else {
             return;
         };
         let heard = MixRecipe::as_heard(params);
-        let more = export::time_left(PEAKS_MS);
         let Some(waveform) = follower.follow(song, &heard, self.show_spectrograms, more) else {
             if follower.progress().is_some() {
                 ctx.request_repaint();
@@ -2026,6 +2030,28 @@ pub fn start_web() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mix_lane_keeps_a_mid_buffer_only_with_spectrograms_on() {
+        for spectrograms in [false, true] {
+            let mut app = StemApp {
+                want_device: false,
+                ..StemApp::default()
+            };
+            app.load_demo();
+            app.show_spectrograms = spectrograms;
+            let lead = app.song.as_ref().unwrap().stem_index("lead").unwrap();
+            app.params.as_ref().unwrap().set_muted(lead, true);
+            app.follow_mix_while(&egui::Context::default(), || false);
+            let follower = app.mix_follower.as_ref().unwrap();
+            assert!(follower.progress().is_some(), "a job runs");
+            assert_eq!(
+                follower.holds_mid(),
+                spectrograms,
+                "spectrograms {spectrograms}"
+            );
+        }
+    }
 
     #[test]
     fn follow_mix_makes_the_mix_spectrogram_from_its_own_job() {
