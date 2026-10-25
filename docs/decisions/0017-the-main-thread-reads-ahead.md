@@ -1,6 +1,6 @@
 # 0017: the main thread reads session files ahead of the play head
 
-Status: proposed (2026-10-25, by the agent)
+Status: accepted (2026-10-25, by the maintainer)
 
 ## Context
 
@@ -14,7 +14,7 @@ On the web, cpal calls the audio callback on the page's main thread.  It queues 
 
 ## Decision
 
-Async reads on the main thread fill a read-ahead buffer (proposed).  The buffer holds a few seconds of every stem in front of the play head, and the frames after the loop start.  A seek starts a read at once.  The old audio plays until the new block arrives.  If the callback needs frames that the buffer does not hold, it plays silence and counts an underrun.  M1 of `plans/active/stream-from-storage.md` measures the reads on an iPhone before this decision is accepted.
+Async reads on the main thread fill a read-ahead buffer.  The buffer holds a few seconds of every stem in front of the play head, and the frames after the loop start.  A seek starts a read at once.  The old audio plays until the new block arrives.  If the callback needs frames that the buffer does not hold, it plays silence and counts an underrun.  M1 of `plans/active/stream-from-storage.md` measured the reads on an iPhone 17 Pro on 2026-10-25.  Over four runs of 60 s, at tempo 1 and 1.5, there were no underruns and no late buffers.  The read p99 was 26 ms, and up to 59 ms with a 30 ms block every 3 s.  The seek p99 was 35 ms.
 
 ## Consequences
 
