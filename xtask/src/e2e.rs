@@ -19,6 +19,9 @@
 //!   FLAC.
 //! * `worker-check`: the worker's separation against PyTorch's
 //!   (`--weights`, `--reference` from `tools/roformer_export.py`).
+//! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
+//!   browser, and print the peak memory of each and the difference
+//!   (`--weights`).  M2 of `docs/plans/active/stream-from-storage.md`.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -83,7 +86,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check> [options]",
+                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -172,6 +175,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "selftest" => selftest(&o),
         "separate" => separate(&o),
         "worker-check" => worker_check(&o),
+        "memory-budget" => memory_budget(&o),
         other => bail!("unknown scenario {other}"),
     }
 }
@@ -1195,6 +1199,136 @@ fn separate(o: &Opts) -> Result<()> {
     p.finish()
 }
 
+/// Minutes of the songs that `memory-budget` separates.
+const BUDGET_MINUTES: [u32; 2] = [1, 4];
+
+/// The peak of each part of the tab's memory in one separation, in MB,
+/// from the `memory: ...` lines that the worker and the page log.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MemoryPeak {
+    page_wasm: f64,
+    worker_wasm: f64,
+    gpu_live: f64,
+}
+
+impl MemoryPeak {
+    /// The sum of the parts' peaks: at most the peak of their sum.
+    fn total(&self) -> f64 {
+        self.page_wasm + self.worker_wasm + self.gpu_live
+    }
+}
+
+/// The largest value of each part in the `memory: ...` lines of `log`, or
+/// `None` if a part never appears.
+fn memory_peak(log: &[String]) -> Option<MemoryPeak> {
+    let largest = |key: &str| {
+        log.iter()
+            .filter(|l| l.contains("memory: "))
+            .filter_map(|l| number_after(l, key))
+            .reduce(f64::max)
+    };
+    Some(MemoryPeak {
+        page_wasm: largest("page wasm ")?,
+        worker_wasm: largest("worker wasm ")?,
+        gpu_live: largest("GPU buffers live ")?,
+    })
+}
+
+/// A song of `minutes` at 44.1 kHz: the synthetic mix, repeated, as a
+/// 16-bit WAV in the folder it returns.
+fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
+    let song = crate::synth::generate();
+    let frames = minutes as usize * 60 * crate::synth::SAMPLE_RATE as usize;
+    let repeat = |x: &[f32]| x.iter().copied().cycle().take(frames).collect::<Vec<f32>>();
+    let dir = out.join(format!("song-{minutes}"));
+    std::fs::create_dir_all(&dir)?;
+    let bytes = engine::wav::encode_pcm16(
+        &repeat(&song.mix.left),
+        &repeat(&song.mix.right),
+        crate::synth::SAMPLE_RATE,
+    );
+    std::fs::write(dir.join("song.wav"), bytes)?;
+    Ok(dir)
+}
+
+/// Separates songs of 1 and 4 minutes, each in a new browser, so that each
+/// starts with empty WebAssembly memory.  Prints the peak of page wasm,
+/// worker wasm and GPU live bytes for each, and their difference.  It
+/// asserts no budget yet; M10 of the plan does.
+fn memory_budget(o: &Opts) -> Result<()> {
+    let mut mounts = Vec::new();
+    for minutes in BUDGET_MINUTES {
+        mounts.push((format!("/test/{minutes}/"), long_song(&o.out, minutes)?));
+    }
+    let model = weights_mount(o, &mut mounts)?;
+    let base = start_server(&o.dist, mounts, &["console.js"])?;
+    let q = query(o, "chunk=16384&overlap=1&mm=s64");
+    let mut peaks = Vec::new();
+    for minutes in BUDGET_MINUTES {
+        let mut p = Page::open(
+            o,
+            base.clone(),
+            &[
+                "--enable-unsafe-webgpu",
+                "--autoplay-policy=no-user-gesture-required",
+            ],
+            &format!("index.html?{q}"),
+        )?;
+        p.scenario = format!("memory-budget-{minutes}");
+        p.wait_for(0, 60, |l| l.contains("separator: "))?;
+        let from = p.mark();
+        p.drop_files(&[(
+            &format!("/test/{minutes}/song.wav"),
+            "song.wav",
+            "audio/wav",
+        )])?;
+        let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
+        p.check(kept.is_some(), &format!("the {minutes}-minute song opens"));
+        let from = p.mark();
+        drop_model(&mut p, &model)?;
+        let loaded = p.wait_for(from, 1200, |l| {
+            l.contains("separator: model loaded") || is_page_error(l)
+        })?;
+        p.check(
+            loaded
+                .as_deref()
+                .is_some_and(|l| l.contains("model loaded")),
+            "the model loads",
+        );
+        let from = p.mark();
+        p.click(o.separate_x, "Separate 6 stems")?;
+        let shown = p.wait_for(from, 4 * 3600, |l| {
+            l.contains("memory: page wasm") || is_page_error(l)
+        })?;
+        p.check(
+            shown
+                .as_deref()
+                .is_some_and(|l| l.contains("memory: page wasm")),
+            &format!("the {minutes}-minute song separates"),
+        );
+        let peak = memory_peak(&p.log);
+        p.check(peak.is_some(), "the memory lines");
+        if let Some(peak) = peak {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: page wasm {:.0} MB, worker wasm {:.0} MB, GPU live {:.0} MB, peak {:.0} MB",
+                peak.page_wasm,
+                peak.worker_wasm,
+                peak.gpu_live,
+                peak.total()
+            ));
+            peaks.push((minutes, peak));
+        }
+        p.finish()?;
+    }
+    if let [(short, a), (long, b)] = peaks[..] {
+        println!(
+            "memory-budget: the {long}-minute peak is {:.0} MB above the {short}-minute peak",
+            b.total() - a.total()
+        );
+    }
+    Ok(())
+}
+
 /// Seconds of the stem that `flac` encodes.
 const FLAC_SECONDS: u32 = 300;
 
@@ -1447,6 +1581,32 @@ mod tests {
         .map(str::to_string)
         .to_vec();
         assert_eq!(page_errors(&log), log[2..]);
+    }
+
+    /// The peak of each part, from the worker's lines after the model
+    /// loads and after each chunk, and the page's line at the end.
+    #[test]
+    fn the_memory_peak_takes_each_part_at_its_largest() {
+        let log: Vec<String> = [
+            "[1.0s] separator: memory: worker wasm 57 MB, model on the GPU 699 MB, GPU buffers live 699 MB",
+            "[2.0s] separator: chunk 1/48: 9.9 s; memory: worker wasm 231 MB, model on the GPU 699 MB, chunk buffers 280 MB, GPU buffers live 979 MB",
+            "[3.0s] separator: chunk 2/48: 9.8 s; memory: worker wasm 246 MB, model on the GPU 699 MB, chunk buffers 280 MB, GPU buffers live 979 MB",
+            "[4.0s] song: opened at 44100 Hz (88200 frames)",
+            "[5.0s] separator: memory: page wasm 325 MB with the stems shown",
+        ]
+        .map(String::from)
+        .to_vec();
+        let peak = memory_peak(&log).expect("every part");
+        assert_eq!(
+            peak,
+            MemoryPeak {
+                page_wasm: 325.0,
+                worker_wasm: 246.0,
+                gpu_live: 979.0
+            }
+        );
+        assert_eq!(peak.total(), 1550.0);
+        assert_eq!(memory_peak(&log[..3]), None, "no page line yet");
     }
 
     #[test]

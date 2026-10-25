@@ -212,7 +212,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M1 review round 2: 7 should-fix fixed.  The timer clock follows cpal's slack of one buffer, and the tests check the read, seek, late and concurrent numbers.
 * [x] 2026-10-25: M1 review round 3: 1 blocker and 2 should-fix fixed.  The tests check the p99 text and late buffers without a block, and playback stops when the audio context stops.
 * [x] 2026-10-25: M1 iPhone numbers (build `2baf7ff46c5b`, `st_play=60`): see "Surprises and discoveries".  The maintainer accepted decisions 0016 and 0017.
-* [ ] M2: `e2e memory-budget` measures.
+* [x] 2026-10-25: M2: `e2e memory-budget`.  In Chrome on the Mac (AMD Radeon Pro 5500M, `chunk=16384&overlap=1`): 1 minute 966 MB (page wasm 177, worker wasm 57, GPU live 732); 4 minutes 1558 MB (727, 99, 732).  The 4-minute peak is 592 MB above, about 197 MB per minute.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.
 * [ ] M5: decode from and into storage.
