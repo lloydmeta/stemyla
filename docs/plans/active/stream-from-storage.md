@@ -86,9 +86,65 @@ A 30-minute song has about 272 chunks.  At the iPhone's measured 10.8 to 18.7 s 
 
 ## Plan of work
 
-Each milestone is one PR or less, with fmt, clippy, the tests and `docs-check` before each commit (GIT-2).
+Each milestone is one or more commits on the branch, with fmt, clippy, the tests and `docs-check` before each commit (GIT-2).
 
 Each new OPFS write passes a whole typed array or a Blob (MEM-5).  Each milestone that adds a write path also adds a spy test on that write.  The test fails on a view into a larger buffer.  In the worker, the spy covers `FileSystemSyncAccessHandle.write`.
+
+### How the work runs (M3 to M10)
+
+From M3 on, agents do the work in one session that the maintainer starts.  Each agent reads only what it needs and writes its state to the repo, so a new agent can take over from the files.  The model is `plans/completed/harness-phase-3.md`, "How the work runs".  A "team" is a team leader and its subagents, not Claude Code's agent-teams feature.
+
+All the work goes on the branch `iphone-crashes-2026-10-25`, in PR #39.  There is no other branch or PR.  M0 to M2 are done on it (see Progress).
+
+Before the start, the maintainer:
+
+1. Lets commits be signed with no dialog for the whole run.  Tick "Save in Keychain" in pinentry-mac, or set `default-cache-ttl` and `max-cache-ttl` to 604800 in `~/.gnupg/gpg-agent.conf`, run `gpgconf --reload gpg-agent`, and sign once.  Restore the values after the run.
+2. Keeps the Mac awake (`caffeinate -dims` in another terminal), and keeps `autoContinueAtUsageLimit` on.
+3. Starts Claude Code at the repo root in auto mode (`claude --permission-mode auto`), and gives the prompt at the end of this section.
+
+The orchestrator, which is the main session:
+
+* First, a preflight.  It stops at once, and tells the maintainer, if one check fails:
+  * the branch is `iphone-crashes-2026-10-25`, and `git status --porcelain` is empty;
+  * `gh auth status` passes, and PR #39 is open;
+  * a signed object can be made with no dialog: `git commit-tree -S HEAD^{tree} -p HEAD -m preflight` (no branch moves);
+  * `cargo mutants --version` gives 27.1.0;
+  * the model file and the chromedriver are at the paths in the maintainer's local notes (auto-memory);
+  * `app/dist` builds (`cd app && trunk build --release`).
+* At the start, it asks the maintainer the question of M5's decision point (decision 0019) once, so M5 does not wait.  It records the answer as decision 0019, accepted.
+* It reads this plan, `git log`, the CI status, the teams' reports and `docs/reviews/`.  It does not read code or diffs; it asks a subagent for a fact from them.  For each milestone, in order:
+  1. It starts a team leader with the milestone's name, this plan's path and the decisions so far.
+  2. When the team reports, it starts a new intent reviewer.  The reviewer compares the milestone with this plan's Purpose, the milestone's section and the later milestones.  Real findings go back to the team leader, for at most 3 reviews, to the stop rule.
+  3. It records the milestone in Progress with the facts the team reported, commits that (signed), and pushes the branch.  It updates PR #39's description with `gh pr edit`.  It waits for the CI run to end before the next team starts.
+* The stop rule, for every review loop: stop at the first review with no blocker and no significant should-fix.  Significant means that a milestone would fail as written, two parts contradict each other, a measure would mislead, or the implementer would do wrong work.  Wording and polish are nits.
+* It decides a question that this plan does not answer, records it in the Decision log, and lists it in the PR description.  It stops and waits for the maintainer only when:
+  * a rule in `docs/invariants.md` would break;
+  * a decision point of this plan needs the maintainer: M9's f16 default, and M10's iPhone run;
+  * a step needs a person: publishing (GIT-1) and a run on the iPhone;
+  * auto mode refuses an action (it reports, and does not try the same action another way).
+* At the end, with M10 done and CI green, it writes the retrospective and moves this plan to `plans/completed/`.  It fixes the docs that name the old path, commits, pushes, and marks PR #39 ready.  The maintainer reviews and merges (GIT-1).
+
+A team leader, a general-purpose subagent for each milestone:
+
+1. For M3, M5, M6, M7 and M8, it writes `docs/plans/active/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule, for at most 3 reviews.  M4, M9 and M10 work from their sections here.
+2. It starts an implementer with the milestone plan's path (or this plan's section), and continues it with SendMessage for fixes.
+3. It runs three review rounds with `/review-rounds`.  The base is the commit before the milestone's first commit, and the criteria are the milestone's section.  M3's round 1 passes `--baseline` (the phase 3 gate in `plans/active/harness-engineering.md`).
+4. After round 3, it copies `target/review/run/iphone-crashes-2026-10-25/log.md` to `docs/reviews/iphone-crashes-2026-10-25-m<n>.md`, and removes the run folder.  So the next milestone's round 1 starts with no log (TD-37).
+5. It writes a Progress line after each step and each round, and commits it.  It reports in at most 300 words: status, commits, each acceptance check and its result, changes to the plan, and questions.
+
+For every agent in the run:
+
+* Start a subagent with a named `subagent_type`, never as a fork.  Keep at most 15 subagents running at once.
+* One team runs at a time, since the teams share one branch and one working tree.  The deepest agents are two layers below the main session.
+* Keep the turn open until each background command and each nested agent has finished.
+* Commit only signed.  If signing fails, stop and report.
+* Do not merge, rebase onto another branch, or make another branch or PR.  Push only `iphone-crashes-2026-10-25`.
+* If `review check` fails, stop the round.  A new subagent reads `git reflog`, the stash and the changed files.  If only this branch changed, or only the editor's `vscode-merge-base` line in `.git/config`, the round starts again.  Otherwise the orchestrator stops for the maintainer.
+* Browser tests run in Chrome (`--browser chrome`) with the chromedriver of the local notes; Safari's driver refused sessions on 2026-10-25.
+
+The prompt for the maintainer to start the run:
+
+> Run docs/plans/active/stream-from-storage.md as its section "How the work runs (M3 to M10)" says, from M3, on the branch iphone-crashes-2026-10-25 and PR #39.  Do the preflight first.  Then ask me decision 0019's question once, and run the milestones in order as orchestrator.  Stop only for the reasons that section names.
 
 ### M0: the plan, the decisions and the evidence
 
@@ -212,7 +268,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M1 review round 2: 7 should-fix fixed.  The timer clock follows cpal's slack of one buffer, and the tests check the read, seek, late and concurrent numbers.
 * [x] 2026-10-25: M1 review round 3: 1 blocker and 2 should-fix fixed.  The tests check the p99 text and late buffers without a block, and playback stops when the audio context stops.
 * [x] 2026-10-25: M1 iPhone numbers (build `2baf7ff46c5b`, `st_play=60`): see "Surprises and discoveries".  The maintainer accepted decisions 0016 and 0017.
-* [x] 2026-10-25: M2: `e2e memory-budget`.  In Chrome on the Mac (AMD Radeon Pro 5500M, `chunk=16384&overlap=1`): 1 minute 966 MB (page wasm 177, worker wasm 57, GPU live 732); 4 minutes 1558 MB (727, 99, 732).  The 4-minute peak is 592 MB above, about 197 MB per minute.
+* [x] 2026-10-25: M2: `e2e memory-budget`.  In Chrome on the Mac (AMD Radeon Pro 5500M, `chunk=16384&overlap=1`).  1 minute: 966 MB (page wasm 177, worker wasm 57, GPU live 732).  4 minutes: 1558 MB (727, 99, 732).  The 4-minute peak is 592 MB above, about 197 MB per minute.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.
 * [ ] M5: decode from and into storage.
@@ -241,6 +297,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, maintainer: f16 weights on the GPU join this plan as M9, because they save memory (decision 0018).  This replaces the entry above.
 * 2026-10-25, agent, after review round 1: the encoded source is read in blocks too (M5).  Classic drums, the mix lane's mid and the spectrogram signals move to blocks (M7).  The budget check (now M10) adds an absolute budget.
 * 2026-10-25, maintainer: decisions 0016 and 0017 accepted on the M1 numbers.
+* 2026-10-25, maintainer: all the work goes on `iphone-crashes-2026-10-25` and PR #39.  M2 needs no review rounds.  M3 to M10 run with an orchestrator and a team per milestone ("How the work runs").
 * 2026-10-25, maintainer: no reload check in M1.  Nothing in this plan acts on its result, and M10's iPhone run shows any kill.
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
 * 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
