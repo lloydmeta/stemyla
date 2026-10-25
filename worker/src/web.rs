@@ -1,23 +1,26 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::rc::Rc;
 
 use js_sys::{Float32Array, Uint8Array};
-use roformer::demix::{Demixer, Segment, Stereo};
+use roformer::demix::{Demixer, MixSource, Segment, Stereo};
 use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
 use stem_protocol::{
-    self as protocol, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
+    self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
+mod mix;
 mod stems;
 
+use mix::StoredMix;
 use stems::{StemError, StemWriter};
 
 const CACHE_NAME: &str = "bs_roformer_sw.safetensors";
@@ -462,13 +465,9 @@ async fn serve(request: Request, s: &Settings) -> Result<(), String> {
         Request::Model(source) => with_storage(load_model(source, s)).await,
         Request::Download => with_storage(download(s)).await,
         Request::ForgetModel => with_storage(forget_model()).await,
-        Request::Separate {
-            left,
-            right,
-            session,
-        } => {
+        Request::Separate { mix, session } => {
             let (gpu, net) = loaded()?;
-            run(&gpu, &net, [left, right], session.as_deref(), s).await
+            run(&gpu, &net, mix, session.as_deref(), s).await
         }
         Request::Selftest { base } => selftest(base, s).await,
         Request::Bench => bench(s).await,
@@ -1058,32 +1057,69 @@ fn trace(on: bool, text: &str) {
 async fn run(
     gpu: &Gpu,
     net: &Net,
-    mix: [Float32Array; 2],
+    mix: Mix,
     session: Option<&str>,
     s: &Settings,
 ) -> Result<(), String> {
     let chunk = s.chunk.unwrap_or(CHUNK);
     let overlap = s.overlap.unwrap_or(OVERLAP);
     let t0 = now_s();
-    // The page transferred these and nothing else holds them: dropped once
-    // copied, so the browser can free them while the song is separated.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "MEM-1: the one copy of the transferred mix into wasm memory, for the demixer; the JS arrays drop after"
-    )]
-    let mix = mix.map(|c| c.to_vec());
-    let d = Demixer::new(mix, chunk, overlap, STEMS.len());
     // The report after the song covers this separation only.
     gpu.reset_profile().await?;
-    let mut network = GpuNetwork {
+    let network = |total| GpuNetwork {
         gpu,
         net,
         pace: Pace::new(s),
         job: None,
-        total: d.num_chunks(),
+        total,
         debug: s.debug,
     };
-    separate_song(&mut network, d, session, t0).await
+    separate_mix(mix, session, chunk, overlap, network, t0).await
+}
+
+/// Separates `mix` through the network that `network` makes for the
+/// song's chunks.  A stored mix is read one span at a time.  Arrays are
+/// copied into wasm memory.  A mix file that cannot be opened, or that
+/// does not hold the frames of the request, sends `unstored`.
+async fn separate_mix<N: Network>(
+    mix: Mix,
+    session: Option<&str>,
+    chunk: usize,
+    overlap: usize,
+    network: impl FnOnce(usize) -> N,
+    t0: f64,
+) -> Result<(), String> {
+    log(&format!(
+        "memory: worker wasm {:.0} MB at the separation's start",
+        wasm_mb()
+    ));
+    match mix {
+        Mix::Arrays { left, right } => {
+            // The page transferred these and nothing else holds them:
+            // dropped once copied, so the browser can free them while the
+            // song is separated.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: the one copy of the transferred mix into wasm memory, for the demixer, on the memory path only; the JS arrays drop after"
+            )]
+            let mix = [left, right].map(|c| c.to_vec());
+            let d = Demixer::new(mix, chunk, overlap, STEMS.len());
+            let mut net = network(d.num_chunks());
+            separate_song(&mut net, d, session, t0).await
+        }
+        Mix::Stored { path, frames } => {
+            let source = match StoredMix::open(&path, frames).await {
+                Ok(source) => source,
+                Err(text) => {
+                    send(Reply::Unstored { text });
+                    return Ok(());
+                }
+            };
+            let d = Demixer::new(source, chunk, overlap, STEMS.len());
+            let mut net = network(d.num_chunks());
+            separate_song(&mut net, d, session, t0).await
+        }
+    }
 }
 
 /// The network that separates one chunk at a time: the GPU's in a real
@@ -1161,7 +1197,8 @@ impl Network for GpuNetwork<'_> {
 
 /// Why a separation stopped.
 enum Stop {
-    /// Browser storage refused a stem file: the worker sends `unstored`.
+    /// Browser storage refused a stem file, or could not give the stored
+    /// mix: the worker sends `unstored`.
     Storage(String),
     /// Any other failure: the worker sends `error`.
     Failed(String),
@@ -1179,12 +1216,12 @@ impl From<StemError> for Stop {
 /// Separates the song in `d`, a chunk at a time, through `net`.  With a
 /// `session`, it writes the stems there and sends `stored` after each
 /// segment; else it sends each segment to the page.  Then it sends
-/// `done`.  A storage failure removes the stem files and sends
-/// `unstored`.  Any other failure removes them too, and is returned for
-/// an `error` (D4 of M3).
-async fn separate_song(
+/// `done`.  A storage failure, of a stem file or of the mix, removes the
+/// stem files and sends `unstored`.  Any other failure removes them too,
+/// and is returned for an `error` (D4 of M3).
+async fn separate_song<S: MixSource<Error: Display>>(
     net: &mut impl Network,
-    mut d: Demixer<Stereo>,
+    mut d: Demixer<S>,
     session: Option<&str>,
     t0: f64,
 ) -> Result<(), String> {
@@ -1208,6 +1245,10 @@ async fn separate_song(
     match finished {
         Ok(()) => {
             net.finish();
+            log(&format!(
+                "memory: worker wasm {:.0} MB at the separation's end",
+                wasm_mb()
+            ));
             send(Reply::Done { secs: now_s() - t0 });
             Ok(())
         }
@@ -1227,9 +1268,9 @@ async fn separate_song(
 }
 
 /// The loop of [`separate_song`] over the chunks.
-async fn separate_chunks(
+async fn separate_chunks<S: MixSource<Error: Display>>(
     net: &mut impl Network,
-    d: &mut Demixer<Stereo>,
+    d: &mut Demixer<S>,
     mut writer: Option<&mut StemWriter>,
     t0: f64,
 ) -> Result<(), Stop> {
@@ -1240,7 +1281,7 @@ async fn separate_chunks(
         total: total as u32,
         secs: 0.0,
     });
-    while let Ok(Some(x)) = d.next_input() {
+    while let Some(x) = d.next_input().map_err(|e| Stop::Storage(e.to_string()))? {
         let tc = now_s();
         let out = net.stems(d.chunk_index(), &x).await.map_err(Stop::Failed)?;
         d.accept(&out);

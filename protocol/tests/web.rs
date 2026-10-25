@@ -9,7 +9,7 @@
 )]
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
-use stem_protocol::{Malformed, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker};
+use stem_protocol::{Malformed, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
@@ -26,6 +26,19 @@ export function hand_written_separate() {
   return { type: "separate", left: new Float32Array([0.5]), right: new Float32Array([0.25]),
     session: "sessions/1792640000000", ...opts };
 }
+// A separation of a stored mix, as `xtask e2e stored-stems` writes it.
+export function hand_written_stored_separate() {
+  const opts = { mm: "s64", attn: "split", chunk: 16384, overlap: 2, step_limit: 600 };
+  return { type: "separate", mix: "sessions/1792640000000/mix.f32", frames: 132300,
+    session: "sessions/1792640000000", ...opts };
+}
+// A stored-mix request whose `frames` is the given value, or missing if
+// `undefined`: JSON has no NaN.
+export function stored_separate_with_frames(frames) {
+  const msg = { type: "separate", mix: "sessions/1/mix.f32" };
+  if (frames !== undefined) { msg.frames = frames; }
+  return msg;
+}
 "#)]
 extern "C" {
     /// What the receiving side of `postMessage` gets.
@@ -33,6 +46,8 @@ extern "C" {
     fn blob(bytes: &[u8]) -> web_sys::Blob;
     fn from_json(text: &str) -> JsValue;
     fn hand_written_separate() -> JsValue;
+    fn hand_written_stored_separate() -> JsValue;
+    fn stored_separate_with_frames(frames: JsValue) -> JsValue;
 }
 
 fn samples(v: &[f32]) -> Float32Array {
@@ -105,15 +120,16 @@ fn a_model_arrives_as_the_file_or_the_bytes_it_was_sent_as() {
 fn a_mix_is_transferred_not_copied() {
     let (left, right) = (samples(&[0.5, -0.5]), samples(&[0.25, 0.75]));
     let r = Request::Separate {
-        left: left.clone(),
-        right: right.clone(),
+        mix: Mix::Arrays {
+            left: left.clone(),
+            right: right.clone(),
+        },
         session: None,
     };
     let got = request_trip(&r, &Settings::default());
     match got.request {
         Request::Separate {
-            left: l,
-            right: r,
+            mix: Mix::Arrays { left: l, right: r },
             session,
         } => {
             assert_eq!(l.to_vec(), [0.5, -0.5]);
@@ -130,8 +146,10 @@ fn a_mix_is_transferred_not_copied() {
 fn a_separation_into_storage_names_its_session() {
     let (left, right) = (samples(&[0.5, -0.5]), samples(&[0.25, 0.75]));
     let r = Request::Separate {
-        left: left.clone(),
-        right: right.clone(),
+        mix: Mix::Arrays {
+            left: left.clone(),
+            right: right.clone(),
+        },
         session: Some("sessions/1792640000000".into()),
     };
     let (msg, transfer) = r.to_js(&Settings::default());
@@ -141,8 +159,7 @@ fn a_separation_into_storage_names_its_session() {
         .request
     {
         Request::Separate {
-            left: l,
-            right: r,
+            mix: Mix::Arrays { left: l, right: r },
             session,
         } => {
             assert_eq!(session.as_deref(), Some("sessions/1792640000000"));
@@ -154,6 +171,87 @@ fn a_separation_into_storage_names_its_session() {
         other => panic!("{other:?}"),
     }
     assert_eq!(left.length() + right.length(), 0, "transferred");
+}
+
+#[wasm_bindgen_test]
+fn a_stored_mix_arrives_with_its_path_and_frames() {
+    for session in [Some("sessions/1792640000000".to_string()), None] {
+        let r = Request::Separate {
+            mix: Mix::Stored {
+                path: "sessions/1792640000000/mix.f32".into(),
+                frames: 10_584_000,
+            },
+            session: session.clone(),
+        };
+        let (msg, transfer) = r.to_js(&settings());
+        assert_eq!(transfer.length(), 0, "no samples cross");
+        let got = ToWorker::from_js(&post(&msg, &transfer)).expect("decodes");
+        match got.request {
+            Request::Separate {
+                mix: Mix::Stored { path, frames },
+                session: s,
+            } => {
+                assert_eq!(path, "sessions/1792640000000/mix.f32");
+                assert_eq!(frames, 10_584_000);
+                assert_eq!(s, session);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(got.settings, settings());
+    }
+}
+
+/// TD-16: a separation that does not name exactly one mix, or a stored
+/// mix without whole frames, is refused, not read as a default.
+#[wasm_bindgen_test]
+fn a_separation_must_name_one_mix_with_whole_frames() {
+    let err = |msg: &JsValue| ToWorker::from_js(msg).expect_err("refused");
+    let neither = err(&from_json(
+        r#"{"type": "separate", "session": "sessions/1"}"#,
+    ));
+    assert_eq!(neither.kind, "separate");
+    assert_eq!(neither.text, "left must be a Float32Array");
+    let both = hand_written_separate();
+    let _ = Reflect::set(&both, &"mix".into(), &"sessions/1/mix.f32".into());
+    let _ = Reflect::set(&both, &"frames".into(), &1.0.into());
+    assert_eq!(
+        err(&both).text,
+        "a separation names a stored mix or two arrays, not both"
+    );
+    let one_array = from_json(r#"{"type": "separate", "mix": "sessions/1/mix.f32", "frames": 4}"#);
+    let _ = Reflect::set(&one_array, &"right".into(), &samples(&[0.5]));
+    assert_eq!(
+        err(&one_array).text,
+        "a separation names a stored mix or two arrays, not both"
+    );
+    let not_text = from_json(r#"{"type": "separate", "mix": 5, "frames": 4}"#);
+    assert_eq!(err(&not_text).text, "mix must be a path");
+    for frames in [
+        JsValue::UNDEFINED,
+        JsValue::from_f64(f64::NAN),
+        JsValue::from_f64(-1.0),
+        JsValue::from_f64(1.5),
+        JsValue::from_f64(f64::INFINITY),
+        JsValue::from_str("4"),
+    ] {
+        let e = err(&stored_separate_with_frames(frames.clone()));
+        assert_eq!(e.kind, "separate", "{frames:?}");
+        assert_eq!(
+            e.text, "frames must be a whole number of frames",
+            "{frames:?}"
+        );
+    }
+    let zero = ToWorker::from_js(&stored_separate_with_frames(JsValue::from_f64(0.0)));
+    assert!(
+        matches!(
+            zero.map(|w| w.request),
+            Ok(Request::Separate {
+                mix: Mix::Stored { frames: 0, .. },
+                session: None
+            })
+        ),
+        "0 frames is a whole number"
+    );
 }
 
 #[wasm_bindgen_test]
@@ -254,8 +352,7 @@ fn hand_written_requests_are_read() {
     let separate = ToWorker::from_js(&hand_written_separate()).unwrap();
     match separate.request {
         Request::Separate {
-            left,
-            right,
+            mix: Mix::Arrays { left, right },
             session,
         } => {
             assert_eq!(session.as_deref(), Some("sessions/1792640000000"));
@@ -263,6 +360,19 @@ fn hand_written_requests_are_read() {
         }
         other => panic!("{other:?}"),
     }
+    let stored = ToWorker::from_js(&hand_written_stored_separate()).unwrap();
+    match stored.request {
+        Request::Separate {
+            mix: Mix::Stored { path, frames },
+            session,
+        } => {
+            assert_eq!(path, "sessions/1792640000000/mix.f32");
+            assert_eq!(frames, 132_300);
+            assert_eq!(session.as_deref(), Some("sessions/1792640000000"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(stored.settings.chunk, Some(16384));
     let s = separate.settings;
     assert_eq!((s.chunk, s.overlap), (Some(16384), Some(2)));
     assert_eq!(

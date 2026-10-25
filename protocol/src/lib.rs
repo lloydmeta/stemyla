@@ -12,12 +12,18 @@
 //! * `{type: "download"}`: fetch the model (from `model_url` if set).
 //! * `{type: "forget_model"}`: delete the kept model.
 //! * `{type: "separate", left: Float32Array, right: Float32Array,
-//!   session?: string}`: a 44.1 kHz stereo mix (buffers transferred).
-//!   With `session` (a folder from the root of the browser's private file
-//!   system, such as `"sessions/<id>"`), the worker writes each stem to
-//!   `<session>/stems/<file>.part`, where `<file>` is [`stem_file`] of its
-//!   name (the storage path).  Without it, the worker sends the stems in
-//!   `segment` replies (the memory path).
+//!   session?: string}` or `{type: "separate", mix: string, frames,
+//!   session?: string}`: separate a 44.1 kHz stereo mix ([`Mix`]).  The
+//!   two arrays are the mix (buffers transferred).  Else `mix` is the path
+//!   of a mix file from the root of the browser's private file system,
+//!   such as `"sessions/<id>/mix.f32"`.  The file holds `frames` frames of
+//!   interleaved 32-bit little-endian floats, with no header.  No samples
+//!   cross.  A request with both or neither, or with `frames` that is not
+//!   a whole number of 0 or more, is refused.  With `session` (a folder
+//!   from the same root, such as `"sessions/<id>"`), the worker writes each
+//!   stem to `<session>/stems/<file>.part`, where `<file>` is
+//!   [`stem_file`] of its name (the storage path).  Without it, the worker
+//!   sends the stems in `segment` replies (the memory path).
 //! * `{type: "selftest", base?: string}`: compare GPU results with the CPU
 //!   port's reference files (`xtask roformer-selftest`).
 //! * `{type: "bench"}`: time the GPU kernels.
@@ -38,10 +44,11 @@
 //!   segment on the storage path: each stem's file holds `frames` of the song's
 //!   `len` frames.  `stems` gives the stem names in the worker's order.  No
 //!   samples cross.
-//! * `{type: "unstored", text}`: browser storage could not hold the stems,
-//!   for the reason `text`.  The worker stopped the separation and removed
-//!   its partial stem files.  It ends the request, as `done` and `error`
-//!   do.
+//! * `{type: "unstored", text}`: browser storage failed, for the reason
+//!   `text`.  It could not hold the stems, or could not give the stored
+//!   mix (missing, of the wrong size, or not readable).  The worker
+//!   stopped the separation and removed its partial stem files.  It ends
+//!   the request, as `done` and `error` do.
 //! * `{type: "done", secs}`, or `{type: "error", of, text}` where `of` is
 //!   the request's type; a separation stops with an error as soon as
 //!   WebGPU reports one (an invalid kernel would otherwise produce silent
@@ -100,6 +107,7 @@ mod field {
     pub const STEMS: &str = "stems";
     pub const FRAMES: &str = "frames";
     pub const SESSION: &str = "session";
+    pub const MIX: &str = "mix";
     pub const OF: &str = "of";
     pub const CHUNK: &str = "chunk";
     pub const OVERLAP: &str = "overlap";
@@ -286,6 +294,19 @@ pub enum ModelSource {
     Bytes(Uint8Array),
 }
 
+/// The mix that a separation reads.
+#[derive(Clone, Debug)]
+pub enum Mix {
+    /// Both channels, transferred with the request.
+    Arrays {
+        left: Float32Array,
+        right: Float32Array,
+    },
+    /// A mix file in the browser's private file system: `path` from its
+    /// root, `frames` frames of interleaved 32-bit little-endian floats.
+    Stored { path: String, frames: usize },
+}
+
 /// A request from the page to the worker.
 #[derive(Clone, Debug)]
 pub enum Request {
@@ -295,8 +316,7 @@ pub enum Request {
     Download,
     ForgetModel,
     Separate {
-        left: Float32Array,
-        right: Float32Array,
+        mix: Mix,
         /// The session folder to write the stems to (the storage path), or
         /// `None` to send them to the page (the memory path).
         session: Option<String>,
@@ -366,12 +386,14 @@ impl Request {
                 Some(ModelSource::Bytes(b)) => set(&o, field::BYTES, b),
                 None => {}
             },
-            Self::Separate {
-                left,
-                right,
-                session,
-            } => {
-                put_stereo(&o, &transfer, left, right);
+            Self::Separate { mix, session } => {
+                match mix {
+                    Mix::Arrays { left, right } => put_stereo(&o, &transfer, left, right),
+                    Mix::Stored { path, frames } => {
+                        set(&o, field::MIX, path.as_str());
+                        set(&o, field::FRAMES, *frames as f64);
+                    }
+                }
                 if let Some(s) = session {
                     set(&o, field::SESSION, s.as_str());
                 }
@@ -428,14 +450,10 @@ impl ToWorker {
             }
             kind::DOWNLOAD => Request::Download,
             kind::FORGET_MODEL => Request::ForgetModel,
-            kind::SEPARATE => {
-                let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Separate {
-                    left,
-                    right,
-                    session: string(msg, field::SESSION),
-                }
-            }
+            kind::SEPARATE => Request::Separate {
+                mix: mix(msg).map_err(bad)?,
+                session: string(msg, field::SESSION),
+            },
             kind::SELFTEST => Request::Selftest {
                 base: string(msg, field::BASE),
             },
@@ -507,7 +525,8 @@ pub enum Reply {
         len: usize,
         stems: Vec<String>,
     },
-    /// Browser storage could not hold the stems; the separation stopped.
+    /// Browser storage failed: it could not hold the stems, or could not
+    /// give the stored mix.  The separation stopped.
     Unstored {
         text: String,
     },
@@ -754,6 +773,27 @@ fn put_stereo(o: &Object, transfer: &Array, left: &Float32Array, right: &Float32
     set(o, field::RIGHT, right);
     transfer.push(&left.buffer());
     transfer.push(&right.buffer());
+}
+
+/// The mix of a `separate` request: a stored mix if it has `mix`, else
+/// the two arrays.
+fn mix(msg: &JsValue) -> Result<Mix, String> {
+    let path = get(msg, field::MIX);
+    if path.is_undefined() {
+        let (left, right) = stereo(msg)?;
+        return Ok(Mix::Arrays { left, right });
+    }
+    if !get(msg, field::LEFT).is_undefined() || !get(msg, field::RIGHT).is_undefined() {
+        return Err("a separation names a stored mix or two arrays, not both".into());
+    }
+    let path = path.as_string().ok_or("mix must be a path")?;
+    let frames = number(msg, field::FRAMES)
+        .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0)
+        .ok_or("frames must be a whole number of frames")?;
+    Ok(Mix::Stored {
+        path,
+        frames: frames as usize,
+    })
 }
 
 fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {

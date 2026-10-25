@@ -203,6 +203,26 @@ export function stop_sync_spy() {
   sync_real = null;
   return sync_record.join(" ");
 }
+// Records the bytes of each blob that FileReaderSync reads as an
+// ArrayBuffer, in call order.
+let read_record = null;
+let read_real = null;
+export function start_read_spy() {
+  if (read_real) throw new Error("a spy is already on readAsArrayBuffer");
+  const proto = FileReaderSync.prototype;
+  read_real = proto.readAsArrayBuffer;
+  read_record = [];
+  proto.readAsArrayBuffer = function (blob) {
+    read_record.push(blob.size);
+    return read_real.call(this, blob);
+  };
+}
+// Restores readAsArrayBuffer and returns the bytes of each read.
+export function stop_read_spy() {
+  FileReaderSync.prototype.readAsArrayBuffer = read_real;
+  read_real = null;
+  return read_record;
+}
 // The next fetch answers with one byte, and keeps how it was asked to
 // treat redirects for `last_redirect`.
 let redirect = null;
@@ -258,6 +278,8 @@ extern "C" {
     fn start_sync_spy(fail_at: u32);
     fn stop_sync_spy() -> String;
     fn refuse_sync_handle(n: u32) -> js_sys::Function;
+    fn start_read_spy();
+    fn stop_read_spy() -> Vec<f64>;
 }
 
 /// Writes a file at `path`, with its folders.
@@ -1619,11 +1641,16 @@ const FAKE_FRAMES: usize = 10_000;
 const FAKE_CHUNK: usize = 2048;
 
 fn fake_mix() -> Stereo {
+    mix_of(FAKE_FRAMES)
+}
+
+/// A mix of `frames` frames, the start of every longer one.
+fn mix_of(frames: usize) -> Stereo {
     [
-        (0..FAKE_FRAMES)
+        (0..frames)
             .map(|i| 0.8 * (0.013 * i as f32).sin())
             .collect(),
-        (0..FAKE_FRAMES)
+        (0..frames)
             .map(|i| 0.6 * (0.029 * i as f32).cos())
             .collect(),
     ]
@@ -1893,4 +1920,274 @@ fn mem1_lint_is_on_for_js_arrays() {
     )]
     let floats = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();
     assert_eq!((slice, bytes, floats), (vec![1.0], vec![2], vec![3.0]));
+}
+
+/// The mix file of the session [`SESSION`].
+const MIX_PATH: &str = "sessions/1792640000000/mix.f32";
+
+/// The bytes of a mix file of `mix`: interleaved 32-bit little-endian
+/// floats.
+fn mix_file(mix: &Stereo) -> Vec<u8> {
+    mix[0]
+        .iter()
+        .zip(&mix[1])
+        .flat_map(|(l, r)| [l.to_le_bytes(), r.to_le_bytes()])
+        .flatten()
+        .collect()
+}
+
+fn stored_mix(frames: usize) -> Mix {
+    Mix::Stored {
+        path: MIX_PATH.into(),
+        frames,
+    }
+}
+
+fn mix_arrays(mix: &Stereo) -> Mix {
+    Mix::Arrays {
+        left: Float32Array::from(&mix[0][..]),
+        right: Float32Array::from(&mix[1][..]),
+    }
+}
+
+/// Separates `mix` with the fake network and the fake chunk, as `run`
+/// does with the GPU's.
+async fn fake_separation(mix: Mix, session: Option<&str>) -> Result<(), String> {
+    separate_mix(
+        mix,
+        session,
+        FAKE_CHUNK,
+        2,
+        |_| FakeNetwork { fail_at: None },
+        now_s(),
+    )
+    .await
+}
+
+/// The six `.part` files of [`SESSION`].
+async fn part_files() -> Vec<Option<Vec<u8>>> {
+    let mut out = Vec::new();
+    for name in STEMS {
+        out.push(read_at(&part_path(name)).await);
+    }
+    out
+}
+
+/// The stems of the `segment` replies since the last [`fresh`], put
+/// together: for each stem, its left and right samples.
+fn segment_stems() -> Vec<Stereo> {
+    let mut out: Vec<Stereo> = (0..STEMS.len()).map(|_| [Vec::new(), Vec::new()]).collect();
+    for seg in sent("segment") {
+        let stems = js_sys::Array::from(&field(&seg, "stems"));
+        for (s, whole) in out.iter_mut().enumerate() {
+            let stem = js_sys::Array::from(&stems.get(s as u32));
+            for c in 0..2 {
+                let samples: Float32Array = stem.get(c as u32 + 1).unchecked_into();
+                whole[c].extend(samples.to_vec());
+            }
+        }
+    }
+    out
+}
+
+#[wasm_bindgen_test]
+async fn a_stored_mix_separates_as_the_mix_in_memory() {
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+    fake_separation(stored_mix(FAKE_FRAMES), Some(SESSION))
+        .await
+        .expect("separated from the mix file");
+    let run = fake_run();
+    assert_eq!(reply_types(), whole_run(&run, "stored"));
+    let from_file = part_files().await;
+    assert!(from_file.iter().all(Option::is_some), "six stem files");
+
+    fresh().await;
+    plant_folder(SESSION).await;
+    fake_separation(mix_arrays(&fake_mix()), Some(SESSION))
+        .await
+        .expect("separated from the arrays");
+    assert!(
+        part_files().await == from_file,
+        "the mix file and the arrays give the same stem files"
+    );
+
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+    fake_separation(stored_mix(FAKE_FRAMES), None)
+        .await
+        .expect("separated from the mix file, with no session");
+    assert_eq!(reply_types(), whole_run(&run, "segment"));
+    let got = segment_stems();
+    for (s, (g, w)) in got.iter().zip(&run.stems).enumerate() {
+        for c in 0..2 {
+            assert!(
+                g[c].len() == w[c].len()
+                    && g[c]
+                        .iter()
+                        .zip(&w[c])
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "stem {s} channel {c}: the segments hold the stems of the mix in memory"
+            );
+        }
+    }
+}
+
+/// The peak of the Rust heap above its live bytes at the start, during a
+/// separation of `mix` into [`SESSION`] with the fake network.
+async fn separation_peak(mix: Mix) -> usize {
+    SENT.with_borrow_mut(Vec::clear);
+    let start = LIVE.get();
+    PEAK.set(start);
+    fake_separation(mix, Some(SESSION))
+        .await
+        .expect("separated");
+    PEAK.get() - start
+}
+
+#[wasm_bindgen_test]
+async fn a_stored_mix_keeps_the_worker_memory_flat() {
+    let short = 5_000;
+    let long = 30_000;
+    // One span: at most a chunk of stereo `f32` frames.
+    let span = 8 * FAKE_CHUNK;
+    let chunks = |frames| Demixer::new(mix_of(frames), FAKE_CHUNK, 2, STEMS.len()).num_chunks();
+    assert!(chunks(long) >= 30, "the long mix has about 30 chunks");
+
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&mix_of(short))).await;
+    let short_peak = separation_peak(stored_mix(short)).await;
+
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&mix_of(long))).await;
+    start_read_spy();
+    let long_peak = separation_peak(stored_mix(long)).await;
+    let reads = stop_read_spy();
+    assert_eq!(reply_types().last().map(String::as_str), Some("done"));
+    assert!(
+        long_peak.abs_diff(short_peak) < span,
+        "the peak does not grow with the song: {short_peak} bytes for {short} frames, {long_peak} for {long}"
+    );
+    assert_eq!(
+        reads.len(),
+        chunks(long),
+        "one read of the mix file for each chunk"
+    );
+    assert!(
+        reads.iter().all(|&bytes| bytes <= span as f64),
+        "each read is at most one span: {reads:?}"
+    );
+
+    // The control: the same long mix as arrays is copied into the heap.
+    fresh().await;
+    plant_folder(SESSION).await;
+    let arrays = mix_arrays(&mix_of(long));
+    let arrays_peak = separation_peak(arrays).await;
+    assert!(
+        arrays_peak > short_peak + span,
+        "the arrays of the long mix raise the peak: {arrays_peak} bytes, against {short_peak}"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_missing_mix_file_ends_with_unstored() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let ended = fake_separation(stored_mix(FAKE_FRAMES), Some(SESSION)).await;
+    reply_to(kind::SEPARATE, ended);
+    assert_eq!(reply_types(), ["unstored"], "no error, done or progress");
+    let text = field(&sent("unstored")[0], "text")
+        .as_string()
+        .unwrap_or_default();
+    assert!(text.contains("NotFoundError"), "{text}");
+    assert_eq!(
+        names_in(SESSION).await.as_deref(),
+        Some(""),
+        "no stem file is made"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_mix_file_of_the_wrong_size_ends_with_unstored() {
+    for frames in [FAKE_FRAMES - 1, FAKE_FRAMES + 1] {
+        fresh().await;
+        plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+        let ended = fake_separation(stored_mix(frames), Some(SESSION)).await;
+        reply_to(kind::SEPARATE, ended);
+        assert_eq!(
+            reply_types(),
+            ["unstored"],
+            "{frames}: no error, done or progress"
+        );
+        let text = field(&sent("unstored")[0], "text")
+            .as_string()
+            .unwrap_or_default();
+        assert_eq!(
+            text,
+            format!(
+                "the mix file holds {} bytes, not the {} bytes of {frames} frames",
+                8 * FAKE_FRAMES,
+                8 * frames
+            )
+        );
+        assert_eq!(
+            names_in(SESSION).await.as_deref(),
+            Some("mix.f32"),
+            "{frames}: no stem file is made"
+        );
+    }
+}
+
+/// A source of [`fake_mix`] that fails its read number `fail_at` (from
+/// 1), as a mix file that the browser cannot read.
+struct FailingMix {
+    mix: Stereo,
+    reads: usize,
+    fail_at: usize,
+}
+
+impl MixSource for FailingMix {
+    type Error = String;
+
+    fn frames(&self) -> usize {
+        self.mix.frames()
+    }
+
+    fn read(&mut self, start: usize, end: usize) -> Result<Stereo, String> {
+        self.reads += 1;
+        if self.reads == self.fail_at {
+            return Err(format!(
+                "NotReadableError: read {} refused by the test",
+                self.reads
+            ));
+        }
+        self.mix.read(start, end).map_err(|never| match never {})
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_failed_mix_read_ends_with_unstored() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let source = FailingMix {
+        mix: fake_mix(),
+        reads: 0,
+        fail_at: 2,
+    };
+    let d = Demixer::new(source, FAKE_CHUNK, 2, STEMS.len());
+    let mut net = FakeNetwork { fail_at: None };
+    let ended = separate_song(&mut net, d, Some(SESSION), now_s()).await;
+    reply_to(kind::SEPARATE, ended);
+    let mut want = chunk_replies(&fake_run(), 1, "stored");
+    want.push("unstored".into());
+    assert_eq!(reply_types(), want, "no error, no done");
+    let text = field(&sent("unstored")[0], "text")
+        .as_string()
+        .unwrap_or_default();
+    assert_eq!(text, "NotReadableError: read 2 refused by the test");
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
 }

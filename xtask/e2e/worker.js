@@ -18,6 +18,16 @@ window.e2e = {
     await w.write(new Uint8Array(bytes));
     await w.close();
   },
+  // Writes `bytes` (a Uint8Array) as the file at `path` (such as
+  // "sessions/1/mix.f32"), with its folders.
+  async plant_at(path, bytes) {
+    const parts = path.split("/").filter((s) => s);
+    const name = parts.pop();
+    const d = await e2e.folder(parts.join("/"));
+    const w = await (await d.getFileHandle(name, { create: true })).createWritable();
+    await w.write(bytes);
+    await w.close();
+  },
   // Makes the folder at `path` (such as "sessions/1"), with its parents.
   async folder(path) {
     let d = await navigator.storage.getDirectory();

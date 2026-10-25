@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 use eframe::egui;
 use js_sys::{Float32Array, Uint8Array};
-use stem_protocol::{ModelSource, Reply, Request, SegmentStem, Settings, kind};
+use stem_protocol::{Mix, ModelSource, Reply, Request, SegmentStem, Settings, kind};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
@@ -72,7 +72,8 @@ pub enum Event {
         len: usize,
         secs: f64,
     },
-    /// Browser storage could not hold the stems; the separation stopped.
+    /// Browser storage failed: it could not hold the stems, or could not
+    /// give the stored mix.  The separation stopped.
     Unstored(String),
     Done {
         secs: f64,
@@ -534,8 +535,10 @@ impl Separator {
     /// (`None`, the memory path).  False if it could not be sent.
     pub fn separate(&mut self, left: &[f32], right: &[f32], session: Option<&str>) -> bool {
         let request = Request::Separate {
-            left: Float32Array::from(left),
-            right: Float32Array::from(right),
+            mix: Mix::Arrays {
+                left: Float32Array::from(left),
+                right: Float32Array::from(right),
+            },
             session: session.map(String::from),
         };
         let sent = post(&self.worker, &request, &self.settings);

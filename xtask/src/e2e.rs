@@ -27,8 +27,8 @@
 //!   grew during each separation, and fails if it is more than 4 MB (D9 of
 //!   M3 in `docs/plans/active/stream-from-storage-m3.md`).
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix
-//!   on the memory path, then on the storage path into a session folder
-//!   (`--weights`).  Each stem file equals the memory path's stem as a
+//!   on the memory path, then on the storage path into a session folder,
+//!   from a mix file there (`--weights`).  Each stem file equals the memory path's stem as a
 //!   16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
 //!   checks them against `--hashes`.
 //!
@@ -1552,8 +1552,9 @@ fn stored_stems_checks(
 
 /// One worker, from a blank page, separates 3 seconds of the synthetic
 /// mix with `chunk: 16384, overlap: 2`, so that it sends several segments:
-/// first on the memory path, then on the storage path into a planted
-/// session folder.  The kernels are fixed (`mm: s64, attn: split`), so the
+/// first on the memory path, from two arrays, then on the storage path
+/// into a planted session folder, from the clip planted there as its mix
+/// file (`mix.f32`, interleaved).  The kernels are fixed (`mm: s64, attn: split`), so the
 /// two runs do the same arithmetic.  Each stem file must equal
 /// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.
 /// The storage path must send no `segment` reply, and its last `stored`
@@ -1588,11 +1589,17 @@ fn stored_stems(o: &Opts) -> Result<()> {
           }
         };
         const stored = (d) => out.stored.push({ frames: d.frames, len: d.len, stems: d.stems });
-        await e2e.folder(session);
+        // The mix file: interleaved 32-bit little-endian floats.
+        const mix = new DataView(new ArrayBuffer(8 * n));
+        for (let i = 0; i < n; i++) {
+          mix.setFloat32(8 * i, clip[i], true);
+          mix.setFloat32(8 * i + 4, clip[n + i], true);
+        }
+        await e2e.plant_at(`${session}/mix.f32`, new Uint8Array(mix.buffer));
         const m = await e2e.ask([
           { type: 'model', bytes, ...opts },
           { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), ...opts },
-          { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), session, ...opts },
+          { type: 'separate', mix: `${session}/mix.f32`, frames: n, session, ...opts },
         ], { progress: started, segment: place, stored });
         out.replies = m.replies;
         out.memory = {};
