@@ -64,7 +64,10 @@ export async function st_usage() {
   } catch (e) { return [0, 0]; }
 }
 export function save_file(name, bytes, mime) {
-  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  save_blob(name, new Blob([bytes], { type: mime }));
+}
+export function save_blob(name, blob) {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
