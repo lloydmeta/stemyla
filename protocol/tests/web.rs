@@ -218,12 +218,16 @@ fn a_separation_must_name_one_mix_with_whole_frames() {
         err(&both).text,
         "a separation names a stored mix or two arrays, not both"
     );
-    let one_array = from_json(r#"{"type": "separate", "mix": "sessions/1/mix.f32", "frames": 4}"#);
-    let _ = Reflect::set(&one_array, &"right".into(), &samples(&[0.5]));
-    assert_eq!(
-        err(&one_array).text,
-        "a separation names a stored mix or two arrays, not both"
-    );
+    for channel in ["left", "right"] {
+        let one_array =
+            from_json(r#"{"type": "separate", "mix": "sessions/1/mix.f32", "frames": 4}"#);
+        let _ = Reflect::set(&one_array, &channel.into(), &samples(&[0.5]));
+        assert_eq!(
+            err(&one_array).text,
+            "a separation names a stored mix or two arrays, not both",
+            "a stored mix with {channel} only"
+        );
+    }
     let not_text = from_json(r#"{"type": "separate", "mix": 5, "frames": 4}"#);
     assert_eq!(err(&not_text).text, "mix must be a path");
     for frames in [
@@ -233,11 +237,17 @@ fn a_separation_must_name_one_mix_with_whole_frames() {
         JsValue::from_f64(1.5),
         JsValue::from_f64(f64::INFINITY),
         JsValue::from_str("4"),
+        // Over a wasm32 usize, which `as usize` would saturate.
+        JsValue::from_f64(2f64.powi(33)),
     ] {
         let e = err(&stored_separate_with_frames(frames.clone()));
         assert_eq!(e.kind, "separate", "{frames:?}");
         assert_eq!(
-            e.text, "frames must be a whole number of frames",
+            e.text,
+            format!(
+                "frames must be a whole number of frames, at most {}",
+                usize::MAX
+            ),
             "{frames:?}"
         );
     }

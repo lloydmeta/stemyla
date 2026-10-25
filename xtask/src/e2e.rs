@@ -29,10 +29,10 @@
 //!   `docs/plans/active/stream-from-storage-m3.md`, step 4 of M4).  The
 //!   page's growth includes its write of the mix.  A fallback to the
 //!   memory path fails it.
-//! * `stored-stems`: one worker separates 3 seconds of the synthetic mix
-//!   on the memory path, then on the storage path into a session folder,
-//!   from a mix file there (`--weights`).  Each stem file equals the memory path's stem as a
-//!   16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
+//! * `stored-stems`: one worker separates 3 seconds of the synthetic mix on the
+//!   memory path, then on the storage path into a session folder, from a mix
+//!   file there (`--weights`).  Each stem file equals the memory path's stem as
+//!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
 //!   checks them against `--hashes`.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
@@ -1343,12 +1343,12 @@ fn page_growth(log: &[String]) -> Option<f64> {
 }
 
 /// Separates songs of 1 and 4 minutes, each in a new browser, so that each
-/// starts with empty WebAssembly memory.  Prints the peak of page wasm,
-/// worker wasm and GPU live bytes for each, and their difference.  It also
-/// prints how much the page and the worker grew during each separation,
-/// and fails if either is more than [`MAX_GROWTH_MB`].  It fails if a
-/// separation falls back to the memory path ([`no_fallback_check`]).  It asserts no budget for the peak
-/// yet; M10 of the plan does.
+/// starts with empty WebAssembly memory.  Prints the peak of page wasm, worker
+/// wasm and GPU live bytes for each, and their difference.  It also prints how
+/// much the page and the worker grew during each separation, and fails if
+/// either is more than [`MAX_GROWTH_MB`].  It fails if a separation falls back
+/// to the memory path ([`no_fallback_check`]).  It asserts no budget for the
+/// peak yet; M10 of the plan does.
 fn memory_budget(o: &Opts) -> Result<()> {
     let mut mounts = Vec::new();
     for minutes in BUDGET_MINUTES {
@@ -1595,16 +1595,16 @@ fn stored_stems_checks(
     Ok((checks, got))
 }
 
-/// One worker, from a blank page, separates 3 seconds of the synthetic
-/// mix with `chunk: 16384, overlap: 2`, so that it sends several segments:
-/// first on the memory path, from two arrays, then on the storage path
-/// into a planted session folder, from the clip planted there as its mix
-/// file (`mix.f32`, interleaved).  The kernels are fixed (`mm: s64, attn: split`), so the
-/// two runs do the same arithmetic.  Each stem file must equal
-/// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.
-/// The storage path must send no `segment` reply, and its last `stored`
-/// reply must cover the song.  It prints the SHA-256 of each memory-path
-/// stem as a 16-bit WAV, and checks them against `--hashes`.
+/// One worker, from a blank page, separates 3 seconds of the synthetic mix with
+/// `chunk: 16384, overlap: 2`, so that it sends several segments: first on the
+/// memory path, from two arrays, then on the storage path into a planted
+/// session folder, from the clip planted there as its mix file (`mix.f32`,
+/// interleaved).  The kernels are fixed (`mm: s64, attn: split`), so the two
+/// runs do the same arithmetic.  Each stem file must equal
+/// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.  The
+/// storage path must send no `segment` reply, and its last `stored` reply must
+/// cover the song.  It prints the SHA-256 of each memory-path stem as a 16-bit
+/// WAV, and checks them against `--hashes`.
 fn stored_stems(o: &Opts) -> Result<()> {
     let (clip_dir, frames) = stored_stems_clip(&o.out)?;
     let mut mounts = vec![("/clip/".to_string(), clip_dir)];

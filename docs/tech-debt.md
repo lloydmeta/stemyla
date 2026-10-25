@@ -263,13 +263,14 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` an
 * `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls (not run);
 * `query` and `Opts::weights`, which `parses_scenario_and_options` never calls (not run);
 * `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
-* a request with no headers in `drip`, since the test always sends a Host header (not run).
+* a request with no headers in `drip`, since the test always sends a Host header (not run);
+* `run` in `xtask/src/roformer_cli.rs`, which needs the model weights and an audio file.
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
 
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.  Review round 1 of M4 confirmed four such mutants (findings 1-30, 1-35, 1-41 and 1-53).  Each replaces a body with `Ok(())`: `memory_budget`, `separate` and `stored_stems` in `xtask/src/e2e.rs`, and `run` in `xtask/src/roformer_cli.rs`.  Each needs a GPU, a browser or the weights.
 
 ### TD-40: gaps in the RT-1 tests
 
@@ -399,8 +400,8 @@ This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 mi
 M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation.  The worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
 
 * After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`), so the tab can stop again at each reload.  M6 and M7 remove this.
-* M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path: the page writes the mix to a session file in blocks, and the worker reads it one chunk at a time.  The page still holds the decoded song (M5).  The memory path still sends the mix as two arrays, which the worker copies into its memory.
-* The memory path (a song without a session, too little free space, or storage that refused the stems) still makes six song-length stems.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
+* M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path.  The page writes the mix to a session file in blocks.  The worker reads it one chunk at a time.  The page still holds the decoded song (M5).  The memory path still sends the mix as two arrays, which the worker copies into its memory.
+* The memory path still makes six song-length stems.  It takes a song without a session, or a song when storage has too little free space.  It also takes a song when storage refused the mix or the stems, or the worker cannot read the mix file.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
 * No build between M3 and M7 goes to the published site.  Publishing is a person's step (GIT-1).
 
 * Fix: `plans/active/stream-from-storage.md` moves the song, the mix and the stems to browser storage (decision 0015).  Its M10 asserts that the peak does not grow with the song.

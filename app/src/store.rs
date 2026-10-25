@@ -1252,14 +1252,12 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         st_remove(ROOT).await;
     }
 
-    /// MEM-1, MEM-4: the mix of a 4-minute song of three sources is
-    /// written block by block.  A whole mix would add about 85 MB.  The
-    /// three sources share one buffer, which the test keeps alive.
+    /// MEM-1, MEM-4: the mix of a 4-minute song, of three sources or of
+    /// one lane, is written block by block.  A whole mix would add about
+    /// 85 MB.  The lanes share one buffer, which the test keeps alive.
     #[wasm_bindgen_test]
     async fn the_mix_write_makes_no_song_length_buffer() {
         st_remove(ROOT).await;
-        let id = "1792640000014";
-        plant_session(id, &[]).await;
         let frames = 4 * 60 * 44_100;
         let wave: Samples = (0..frames)
             .map(|i| 0.3 * (0.01 * i as f32).sin())
@@ -1270,22 +1268,41 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             left: wave.clone(),
             right: wave.clone(),
         };
-        let song = Song {
-            sample_rate: 44_100,
-            frames,
-            stems: vec![lane("bass"), lane("drums"), lane("vocals")],
-        };
-        let before = crate::separator::page_wasm_mb();
-        write_mix(id, &song).await.expect("written");
-        let grown = crate::separator::page_wasm_mb() - before;
-        let size = file_size(&mix_path(id)).await;
-        drop(song);
+        let songs = [
+            (
+                "three sources",
+                vec![lane("bass"), lane("drums"), lane("vocals")],
+            ),
+            ("one lane", vec![lane("acme")]),
+        ];
+        let mut results = Vec::new();
+        for (k, (case, stems)) in songs.into_iter().enumerate() {
+            let id = format!("179264000002{k}");
+            plant_session(&id, &[]).await;
+            let song = Song {
+                sample_rate: 44_100,
+                frames,
+                stems,
+            };
+            let before = crate::separator::page_wasm_mb();
+            write_mix(&id, &song).await.expect("written");
+            let grown = crate::separator::page_wasm_mb() - before;
+            let size = file_size(&mix_path(&id)).await;
+            results.push((case, grown, size));
+        }
+        drop(wave);
         st_remove(ROOT).await;
-        assert_eq!(size, Some(8.0 * frames as f64), "the whole mix is written");
-        assert!(
-            grown < 4.0,
-            "MEM-4: the page grew by {grown} MB while it wrote the mix"
-        );
+        for (case, grown, size) in results {
+            assert_eq!(
+                size,
+                Some(8.0 * frames as f64),
+                "{case}: the whole mix is written"
+            );
+            assert!(
+                grown < 4.0,
+                "MEM-4, {case}: the page grew by {grown} MB while it wrote the mix"
+            );
+        }
     }
 
     #[wasm_bindgen_test]

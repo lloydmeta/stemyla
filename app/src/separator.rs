@@ -5,13 +5,13 @@
 //! memory when the model is chosen through the file picker.
 //!
 //! A separation takes one of two paths (M3 of
-//! `plans/active/stream-from-storage.md`).  On the storage path, the
-//! request names the song's session and its mix file (M4), and the worker
-//! writes the stems to the session's files.  On the memory path, the
-//! request carries the mix as two transferred arrays.  Its `stored` replies carry no samples, and `done` gives
-//! [`Event::StemsStored`].  On the memory path, the stems come back after
-//! each chunk as transferred `Float32Array`s holding every stem's finished
-//! samples, put together here (see [`crate::assemble`]).
+//! `plans/active/stream-from-storage.md`).  On the storage path, the request
+//! names the song's session and its mix file (M4), and the worker writes the
+//! stems to the session's files.  Its `stored` replies carry no samples, and
+//! `done` gives [`Event::StemsStored`].  On the memory path, the request
+//! carries the mix as two transferred arrays.  The stems come back after each
+//! chunk as transferred `Float32Array`s holding every stem's finished samples,
+//! put together here (see [`crate::assemble`]).
 //!
 //! Page query parameters, for tests and slow machines: `chunk` (samples per
 //! model call), `overlap` (1 halves the work), `max_elems` (largest

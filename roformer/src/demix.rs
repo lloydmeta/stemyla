@@ -519,8 +519,11 @@ mod tests {
     }
 
     /// Short (unpadded), just over two chunks, and long songs; chunk sizes
-    /// with and without a remainder; overlaps 1 (no padding), 2 and 4.
+    /// with and without a remainder; overlaps 1 (no padding), 2 and 4.  In
+    /// (15, 10, 2) and (5000, 1000, 2), a chunk starts at `border + n`,
+    /// where the right reflection turns.
     const STREAM_CASES: &[(usize, usize, usize)] = &[
+        (15, 10, 2),
         (700, 1000, 2),
         (1000, 1000, 2),
         (2001, 1000, 2),
@@ -630,6 +633,36 @@ mod tests {
                 }
             }
             assert_eq!(reads.len(), chunks, "n={n}: one read for each chunk");
+            let step = chunk / overlap;
+            let border = chunk - step;
+            let padded = n > 2 * border && border > 0;
+            let total = if padded { n + 2 * border } else { n };
+            // The frame of the song at padded index `i`, worked out again.
+            let frame = |i: usize| -> usize {
+                if !padded {
+                    return i;
+                }
+                let j = i as isize - border as isize;
+                let last = n as isize - 1;
+                (if j < 0 {
+                    -j
+                } else if j > last {
+                    2 * last - j
+                } else {
+                    j
+                }) as usize
+            };
+            for (k, &read) in reads.iter().enumerate() {
+                let pos = k * step;
+                let frames: Vec<usize> = (pos..(pos + chunk).min(total)).map(frame).collect();
+                let lo = *frames.iter().min().unwrap();
+                let hi = *frames.iter().max().unwrap() + 1;
+                assert_eq!(
+                    read,
+                    (lo, hi),
+                    "n={n} chunk={chunk} overlap={overlap}: read {k} is the frames that its chunk reads"
+                );
+            }
             for &(start, end) in &reads {
                 assert!(
                     start < end && end <= n,

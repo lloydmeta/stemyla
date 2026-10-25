@@ -19,9 +19,9 @@
 //!   such as `"sessions/<id>/mix.f32"`.  The file holds `frames` frames of
 //!   interleaved 32-bit little-endian floats, with no header.  No samples
 //!   cross.  A request with both or neither, or with `frames` that is not
-//!   a whole number of 0 or more, is refused.  With `session` (a folder
-//!   from the same root, such as `"sessions/<id>"`), the worker writes each
-//!   stem to `<session>/stems/<file>.part`, where `<file>` is
+//!   a whole number from 0 to `usize::MAX`, is refused.  With `session`
+//!   (a folder from the same root, such as `"sessions/<id>"`), the worker
+//!   writes each stem to `<session>/stems/<file>.part`, where `<file>` is
 //!   [`stem_file`] of its name (the storage path).  Without it, the worker
 //!   sends the stems in `segment` replies (the memory path).
 //! * `{type: "selftest", base?: string}`: compare GPU results with the CPU
@@ -787,9 +787,15 @@ fn mix(msg: &JsValue) -> Result<Mix, String> {
         return Err("a separation names a stored mix or two arrays, not both".into());
     }
     let path = path.as_string().ok_or("mix must be a path")?;
+    // Over `usize::MAX`, `as usize` would saturate: on wasm32, 2^32 - 1.
     let frames = number(msg, field::FRAMES)
-        .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0)
-        .ok_or("frames must be a whole number of frames")?;
+        .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0 && *f <= usize::MAX as f64)
+        .ok_or_else(|| {
+            format!(
+                "frames must be a whole number of frames, at most {}",
+                usize::MAX
+            )
+        })?;
     Ok(Mix::Stored {
         path,
         frames: frames as usize,
