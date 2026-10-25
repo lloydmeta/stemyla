@@ -6,8 +6,9 @@
 //!
 //! A separation takes one of two paths (M3 of
 //! `plans/active/stream-from-storage.md`).  On the storage path, the
-//! request names the song's session, and the worker writes the stems to
-//! its files.  Its `stored` replies carry no samples, and `done` gives
+//! request names the song's session and its mix file (M4), and the worker
+//! writes the stems to the session's files.  On the memory path, the
+//! request carries the mix as two transferred arrays.  Its `stored` replies carry no samples, and `done` gives
 //! [`Event::StemsStored`].  On the memory path, the stems come back after
 //! each chunk as transferred `Float32Array`s holding every stem's finished
 //! samples, put together here (see [`crate::assemble`]).
@@ -530,15 +531,12 @@ impl Separator {
         self.selftest_pending = false;
     }
 
-    /// Starts separating a 44.1 kHz stereo mix: into the files of
+    /// Starts separating a 44.1 kHz stereo `mix`: into the files of
     /// `session` (`"sessions/<id>"`, the storage path), or back to the page
     /// (`None`, the memory path).  False if it could not be sent.
-    pub fn separate(&mut self, left: &[f32], right: &[f32], session: Option<&str>) -> bool {
+    pub fn separate(&mut self, mix: Mix, session: Option<&str>) -> bool {
         let request = Request::Separate {
-            mix: Mix::Arrays {
-                left: Float32Array::from(left),
-                right: Float32Array::from(right),
-            },
+            mix,
             session: session.map(String::from),
         };
         let sent = post(&self.worker, &request, &self.settings);
@@ -718,21 +716,53 @@ export function spy_on_post(worker) {
             .collect()
     }
 
+    /// A mix of two arrays, as the memory path sends it.
+    fn arrays(left: &[f32], right: &[f32]) -> Mix {
+        Mix::Arrays {
+            left: Float32Array::from(left),
+            right: Float32Array::from(right),
+        }
+    }
+
+    /// D4 of M4: the storage path names the session's mix file and
+    /// transfers nothing; the memory path transfers its two arrays.
     #[wasm_bindgen_test]
     fn separate_names_the_session_on_the_storage_path() {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let posts = spy_on_post(&sep.worker);
-        assert!(sep.separate(&[0.5, -0.5], &[0.25, 0.75], Some("sessions/1792640000000")));
-        assert!(sep.separate(&[0.5], &[0.25], None));
+        let stored = Mix::Stored {
+            path: "sessions/1792640000000/mix.f32".into(),
+            frames: 88_200,
+        };
+        assert!(sep.separate(stored, Some("sessions/1792640000000")));
+        assert!(sep.separate(arrays(&[0.5], &[0.25]), None));
         sep.stop();
         let sent = posted(&posts);
         assert_eq!(sent.len(), 2, "two messages");
-        for ((request, transfer), want) in sent.iter().zip([Some("sessions/1792640000000"), None]) {
-            match request {
-                Request::Separate { session, .. } => assert_eq!(session.as_deref(), want),
-                other => panic!("{other:?}"),
+        match &sent[0] {
+            (
+                Request::Separate {
+                    mix: Mix::Stored { path, frames },
+                    session,
+                },
+                transfer,
+            ) => {
+                assert_eq!(path, "sessions/1792640000000/mix.f32");
+                assert_eq!(*frames, 88_200);
+                assert_eq!(session.as_deref(), Some("sessions/1792640000000"));
+                assert_eq!(transfer.length(), 0, "no samples cross");
             }
-            assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
+            other => panic!("{other:?}"),
+        }
+        match &sent[1] {
+            (
+                Request::Separate {
+                    mix: Mix::Arrays { .. },
+                    session: None,
+                },
+                transfer,
+            ) => assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred"),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -761,7 +791,7 @@ export function spy_on_post(worker) {
         let len = 10_584_000;
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let _posts = spy_on_post(&sep.worker);
-        assert!(sep.separate(&[0.5], &[0.25], Some("sessions/1792640000000")));
+        assert!(sep.separate(arrays(&[0.5], &[0.25]), Some("sessions/1792640000000")));
         let before = page_wasm_mb();
         for frames in [0, len / 3, 2 * len / 3, len] {
             deliver(&sep.worker, &stored(frames, len));
@@ -780,7 +810,7 @@ export function spy_on_post(worker) {
             _ => None,
         });
         // A second separation whose stems end short of the song.
-        assert!(sep.separate(&[0.5], &[0.25], Some("sessions/1792640000000")));
+        assert!(sep.separate(arrays(&[0.5], &[0.25]), Some("sessions/1792640000000")));
         deliver(&sep.worker, &stored(len - 1, len));
         deliver(&sep.worker, &done());
         let short = sep.take_events().into_iter().find_map(|e| match e {
@@ -840,12 +870,15 @@ export function spy_on_post(worker) {
         let len = 8;
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let _posts = spy_on_post(&sep.worker);
-        assert!(sep.separate(&[0.5; 8], &[0.25; 8], None));
+        assert!(sep.separate(arrays(&[0.5; 8], &[0.25; 8]), None));
         deliver(&sep.worker, &segment(0, 2, len));
         // A gap: it cannot be placed, so the page fails the separation.
         deliver(&sep.worker, &segment(5, 1, len));
         let first = sep.take_events();
-        assert!(sep.separate(&[0.5; 8], &[0.25; 8], Some("sessions/1792640000000")));
+        assert!(sep.separate(
+            arrays(&[0.5; 8], &[0.25; 8]),
+            Some("sessions/1792640000000")
+        ));
         if trailing {
             deliver(&sep.worker, &segment(6, 2, len));
         }
@@ -892,13 +925,16 @@ export function spy_on_post(worker) {
     fn unstored_hands_the_replies_to_the_next_separation() {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let _posts = spy_on_post(&sep.worker);
-        assert!(sep.separate(&[0.5; 4], &[0.25; 4], Some("sessions/1792640000000")));
+        assert!(sep.separate(
+            arrays(&[0.5; 4], &[0.25; 4]),
+            Some("sessions/1792640000000")
+        ));
         let (reply, _) = Reply::Unstored {
             text: "QuotaExceededError: the disk is full".into(),
         }
         .to_js();
         deliver(&sep.worker, &reply);
-        assert!(sep.separate(&[0.5; 4], &[0.25; 4], None));
+        assert!(sep.separate(arrays(&[0.5; 4], &[0.25; 4]), None));
         deliver(&sep.worker, &segment(0, 4, 4));
         deliver(&sep.worker, &done());
         let events = sep.take_events();
@@ -926,7 +962,7 @@ export function spy_on_post(worker) {
     fn unstored_ends_the_separation_with_its_reason() {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let _posts = spy_on_post(&sep.worker);
-        assert!(sep.separate(&[0.5], &[0.25], Some("sessions/1792640000000")));
+        assert!(sep.separate(arrays(&[0.5], &[0.25]), Some("sessions/1792640000000")));
         let (reply, _) = Reply::Unstored {
             text: "QuotaExceededError: the disk is full".into(),
         }

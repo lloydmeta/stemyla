@@ -107,9 +107,13 @@ pub struct Inbox {
     sessions: Option<Vec<(String, store_meta::Meta)>>,
     /// A reset that stopped short of reloading the page: its mode and why.
     reset_failed: Option<(reset::Reset, String)>,
-    /// The browser's free storage for a separation that is starting: the
-    /// serial of the song it was started on, and the free bytes.
-    separation_start: Option<(u64, f64)>,
+    /// What a separation that is starting needs to choose its path: the
+    /// serial of the song it was started on, the free bytes, and the frames
+    /// of the session's usable mix file (D1 of M4).
+    separation_start: Option<(u64, f64, Option<usize>)>,
+    /// The mix write of a starting separation ended (D3 of M4): the serial
+    /// of the song, and why the write failed, if it did.
+    mix_written: Option<(u64, Result<(), String>)>,
     /// A storage-path separation whose stems are in place.
     stored: Option<StoredSeparation>,
 }
@@ -437,6 +441,9 @@ pub enum JobStage {
     /// Separate was pressed; the page waits for the browser's storage
     /// estimate before it chooses the path.
     Starting,
+    /// The page writes the song's mix file to the session (D3 of M4)
+    /// before it posts on the storage path.
+    WritingMix,
     /// The worker writes the stems to the session's files.
     Storage,
     /// The worker sends the stems to the page.
@@ -475,16 +482,25 @@ pub fn storage_needed(frames: usize) -> f64 {
     6.0 * (44.0 + 4.0 * frames as f64) + 16e6
 }
 
-/// The storage path if the song has a session and `free_bytes` holds its
-/// stems; else the memory path if the song is at most `max_memory_frames`
-/// long; else none.
+/// Bytes of browser storage that the storage path needs for a song of
+/// `frames`: its stems, and its mix file unless the session keeps a usable
+/// one (`mix_kept`, D7 of M4).
+pub fn storage_path_needs(frames: usize, mix_kept: bool) -> f64 {
+    let mix = if mix_kept { 0.0 } else { 8.0 * frames as f64 };
+    storage_needed(frames) + mix
+}
+
+/// The storage path if the song has a session and `free_bytes` holds
+/// `needed_bytes` ([`storage_path_needs`]); else the memory path if the
+/// song is at most `max_memory_frames` long; else none.
 pub fn separation_path(
     has_session: bool,
     frames: usize,
     free_bytes: f64,
+    needed_bytes: f64,
     max_memory_frames: usize,
 ) -> SeparationPath {
-    if has_session && free_bytes >= storage_needed(frames) {
+    if has_session && free_bytes >= needed_bytes {
         SeparationPath::Storage
     } else if frames <= max_memory_frames {
         SeparationPath::Memory
@@ -502,7 +518,7 @@ pub fn separate_enabled(separating: bool, reading_stems: bool) -> bool {
 
 /// Whether the Storage menu offers "Forget" for session `id` while `job`
 /// runs: not while a starting or storage-path separation may write into it
-/// (D7 of M3).
+/// (D7 of M3), the page's mix write included.
 pub fn forget_enabled(id: &str, job: Option<&SeparationJob>) -> bool {
     !job.is_some_and(|j| j.session.as_deref() == Some(id) && j.stage != JobStage::Memory)
 }
@@ -1445,7 +1461,8 @@ impl StemApp {
     }
 
     /// Separate was pressed: records the start (D10 of M3), then asks the
-    /// browser for its free storage, which chooses the path when it arrives
+    /// browser for its free storage and the session for its usable mix
+    /// file, which choose the path when they arrive
     /// ([`Self::separation_ready`]).
     #[cfg(target_arch = "wasm32")]
     fn start_separation(&mut self, ctx: &egui::Context) {
@@ -1469,18 +1486,31 @@ impl StemApp {
         self.separating = Some(job);
         self.status = "Starting the separation…".into();
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
+        let session = self.session.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let (used, quota) = store::usage().await;
-            pending.borrow_mut().separation_start = Some((serial, (quota - used).max(0.0)));
+            let mix = match &session {
+                Some(id) => store::stored_mix_frames(id).await,
+                None => None,
+            };
+            pending.borrow_mut().separation_start = Some((serial, (quota - used).max(0.0), mix));
             ctx.request_repaint();
         });
     }
 
-    /// The browser's free storage arrived for the separation started on the
-    /// song `serial`: chooses the path (D2 of M3) and posts the request, if
-    /// that song is still shown.
+    /// The browser's free storage and the session's usable mix file
+    /// (`mix_frames`) arrived for the separation started on the song
+    /// `serial`: chooses the path (D2 of M3, D7 of M4) and posts the
+    /// request, if that song is still shown.  On the storage path, the
+    /// page first writes the mix file if the session has none of the song.
     #[cfg(target_arch = "wasm32")]
-    fn separation_ready(&mut self, serial: u64, free: f64) {
+    fn separation_ready(
+        &mut self,
+        serial: u64,
+        free: f64,
+        mix_frames: Option<usize>,
+        ctx: &egui::Context,
+    ) {
         let starting = self
             .separating
             .as_ref()
@@ -1496,31 +1526,27 @@ impl StemApp {
             return;
         };
         let has_session = self.session.is_some();
+        let mix_kept = has_session && mix_frames == Some(song.frames);
         let reason = if has_session {
+            let mix = if mix_kept {
+                String::new()
+            } else {
+                format!(" and the mix {:.0} MB", 8.0 * song.frames as f64 / 1e6)
+            };
             format!(
-                "browser storage has {:.0} MB free, and the stems need {:.0} MB",
+                "browser storage has {:.0} MB free, and the stems need {:.0} MB{mix}",
                 free / 1e6,
                 storage_needed(song.frames) / 1e6
             )
         } else {
             "this song is not kept in browser storage".into()
         };
-        match separation_path(has_session, song.frames, free, self.memory_limit) {
-            SeparationPath::Storage => self.post_separation(JobStage::Storage, None),
-            SeparationPath::Memory => {
-                // Finding 1-4 of review round 1: storage has no room for
-                // the stems, so the page does not save them, as for D4.
-                let reason = if has_session {
-                    if let Some(job) = &mut self.separating {
-                        job.session = None;
-                        job.keeps_stems = false;
-                    }
-                    format!("{reason}, so the stems will not be kept")
-                } else {
-                    reason
-                };
-                self.post_separation(JobStage::Memory, Some(reason));
-            }
+        let needed = storage_path_needs(song.frames, mix_kept);
+        match separation_path(has_session, song.frames, free, needed, self.memory_limit) {
+            SeparationPath::Storage if mix_kept => self.post_separation(JobStage::Storage, None),
+            SeparationPath::Storage => self.write_mix_first(song, ctx),
+            SeparationPath::Memory if has_session => self.separate_without_storage(&reason),
+            SeparationPath::Memory => self.post_separation(JobStage::Memory, Some(reason)),
             SeparationPath::TooLong => {
                 self.separating = None;
                 self.status = refusal_text(song.frames, self.memory_limit, has_session, &reason);
@@ -1529,33 +1555,125 @@ impl StemApp {
         }
     }
 
+    /// Posts the starting separation of a song with a session on the
+    /// memory path, because browser storage cannot take it for `reason`.
+    /// Finding 1-4 of review round 1 of M3: the page then does not save
+    /// the stems, as for D4 of M3.
+    #[cfg(target_arch = "wasm32")]
+    fn separate_without_storage(&mut self, reason: &str) {
+        if let Some(job) = &mut self.separating {
+            job.session = None;
+            job.keeps_stems = false;
+        }
+        self.post_separation(
+            JobStage::Memory,
+            Some(format!("{reason}, so the stems will not be kept")),
+        );
+    }
+
+    /// Writes the song's mix file to its session (D3 of M4), then posts on
+    /// the storage path ([`Self::mix_written`]).  Separate and the
+    /// session's Forget stay disabled meanwhile.
+    #[cfg(target_arch = "wasm32")]
+    fn write_mix_first(&mut self, song: std::sync::Arc<Song>, ctx: &egui::Context) {
+        let (Some(id), Some(job)) = (self.session.clone(), &mut self.separating) else {
+            self.separating = None;
+            return;
+        };
+        job.stage = JobStage::WritingMix;
+        let serial = job.serial;
+        self.status = "Writing the song's mix to browser storage for the separation…".into();
+        log::info!(
+            "separator: memory: page wasm {:.0} MB before the mix is written",
+            separator::page_wasm_mb()
+        );
+        let (pending, ctx) = (self.pending.clone(), ctx.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let written = store::write_mix(&id, &song)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            pending.borrow_mut().mix_written = Some((serial, written));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The mix write of the separation started on the song `serial` ended:
+    /// posts on the storage path if that song is still shown.  If the
+    /// write failed, the song goes as a song with no room in storage (D7
+    /// of M4).
+    #[cfg(target_arch = "wasm32")]
+    fn mix_written(&mut self, serial: u64, written: Result<(), String>) {
+        let writing = self
+            .separating
+            .as_ref()
+            .is_some_and(|j| j.serial == serial && j.stage == JobStage::WritingMix);
+        if !writing {
+            return;
+        }
+        let Some(frames) = self
+            .song
+            .as_ref()
+            .filter(|_| serial == self.song_serial)
+            .map(|s| s.frames)
+        else {
+            self.separating = None;
+            self.status =
+                "Separation not started: another song was opened meanwhile.  Press Separate again."
+                    .into();
+            return;
+        };
+        let Err(e) = written else {
+            self.post_separation(JobStage::Storage, None);
+            return;
+        };
+        let reason = format!("browser storage could not keep the song's mix ({e})");
+        log::warn!("separator: {reason}");
+        if frames <= self.memory_limit {
+            self.separate_without_storage(&reason);
+        } else {
+            self.separating = None;
+            self.status = refusal_text(frames, self.memory_limit, true, &reason);
+        }
+    }
+
     /// Posts the starting separation on `stage`'s path, for the shown song:
-    /// on the memory path, with `reason` for the status line.
+    /// on the storage path, from the session's mix file (D4 of M4); on the
+    /// memory path, from two arrays, with `reason` for the status line.
     #[cfg(target_arch = "wasm32")]
     fn post_separation(&mut self, stage: JobStage, reason: Option<String>) {
         let (Some(sep), Some(song)) = (&mut self.separator, self.song.clone()) else {
             self.separating = None;
             return;
         };
-        let session = match (stage, &self.session) {
-            (JobStage::Storage, Some(id)) => Some(store::session_folder(id)),
-            _ => None,
-        };
-        let sent = {
-            // Borrowed, not cloned: the worker gets its own copy anyway, and
-            // this thread's WebAssembly memory never shrinks once grown.
-            // The same samples become the "original" lane (see
-            // `with_original`).  A mix made here is freed before the start
-            // line below.
-            let mixed;
-            let (l, r): (&[f32], &[f32]) = match original_lane(&song) {
-                Some(lane) => (&lane.left, &lane.right),
-                None => {
-                    mixed = mix_of_sources(&song);
-                    (&mixed.0, &mixed.1)
-                }
-            };
-            sep.separate(l, r, session.as_deref())
+        let sent = match (stage, &self.session) {
+            (JobStage::Storage, Some(id)) => {
+                // No samples cross: the worker reads the mix file.
+                let mix = stem_protocol::Mix::Stored {
+                    path: store::mix_path(id),
+                    frames: song.frames,
+                };
+                sep.separate(mix, Some(&store::session_folder(id)))
+            }
+            _ => {
+                // Borrowed, not cloned: the worker gets its own copy
+                // anyway, and this thread's WebAssembly memory never
+                // shrinks once grown.  The same samples become the
+                // "original" lane (see `with_original`).  A mix made here
+                // is freed before the start line below.
+                let mixed;
+                let (l, r): (&[f32], &[f32]) = match original_lane(&song) {
+                    Some(lane) => (&lane.left, &lane.right),
+                    None => {
+                        mixed = mix_of_sources(&song);
+                        (&mixed.0, &mixed.1)
+                    }
+                };
+                let mix = stem_protocol::Mix::Arrays {
+                    left: js_sys::Float32Array::from(l),
+                    right: js_sys::Float32Array::from(r),
+                };
+                sep.separate(mix, None)
+            }
         };
         if !sent {
             self.separating = None;
@@ -1586,13 +1704,23 @@ impl StemApp {
     /// not (D4 of M3).
     #[cfg(target_arch = "wasm32")]
     fn separation_unstored(&mut self, text: String) {
-        log::warn!("separator: browser storage could not keep the stems: {text}");
+        log::warn!("separator: browser storage failed: {text}");
         let Some(job) = self.separating.take() else {
             return;
         };
+        if let Some(id) = job.session.clone() {
+            // D6 of M4: the next start writes the mix again.  The removal
+            // counts as a save from here, so the next start waits for it.
+            let removal = store::forget_mix(&id);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = removal.await {
+                    log::warn!("separator: could not remove the mix of session {id}: {e:#}");
+                }
+            });
+        }
         let destination = job.destination(self.song_serial, self.session.as_deref());
         let frames = self.song.as_ref().map_or(0, |s| s.frames);
-        let refused = format!("Browser storage could not keep the stems ({text})");
+        let refused = format!("Browser storage failed ({text})");
         match after_unstored(&destination, frames, self.memory_limit) {
             AfterUnstored::Memory => {
                 // Not saved: storage just refused them (D4).
@@ -1604,7 +1732,7 @@ impl StemApp {
                 self.post_separation(
                     JobStage::Memory,
                     Some(format!(
-                        "browser storage could not keep the stems ({text}), so they will not be kept"
+                        "browser storage failed ({text}), so the stems will not be kept"
                     )),
                 );
             }
@@ -1900,7 +2028,7 @@ impl StemApp {
     /// Applies the results of browser work that arrived since the last
     /// frame.
     #[cfg(target_arch = "wasm32")]
-    fn apply_inbox(&mut self) {
+    fn apply_inbox(&mut self, ctx: &egui::Context) {
         let inbox = std::mem::take(&mut *self.pending.borrow_mut());
         if let Some(r) = inbox.song {
             match r {
@@ -1942,8 +2070,11 @@ impl StemApp {
         if let Some((choice, failure)) = inbox.reset_failed {
             self.reset = ResetStage::Failed(choice, failure);
         }
-        if let Some((serial, free)) = inbox.separation_start {
-            self.separation_ready(serial, free);
+        if let Some((serial, free, mix)) = inbox.separation_start {
+            self.separation_ready(serial, free, mix, ctx);
+        }
+        if let Some((serial, written)) = inbox.mix_written {
+            self.mix_written(serial, written);
         }
         if let Some(stored) = inbox.stored {
             self.reading_stems = false;
@@ -2491,7 +2622,7 @@ impl eframe::App for StemApp {
         #[cfg(target_arch = "wasm32")]
         self.poll_separator(&ctx);
         #[cfg(target_arch = "wasm32")]
-        self.apply_inbox();
+        self.apply_inbox(&ctx);
         let dt = ctx.input(|i| i.stable_dt);
         self.pump_silent(dt);
         self.log_audio_stats(dt);
@@ -2684,36 +2815,69 @@ mod tests {
         assert_eq!(needed, 6.0 * (44.0 + 4.0 * frames as f64) + 16e6);
         // A session with enough space.
         assert_eq!(
-            separation_path(true, frames, needed, limit),
+            separation_path(true, frames, needed, needed, limit),
             SeparationPath::Storage
         );
         // A long song with a session and space has no limit.
         let long = 10 * limit;
         assert_eq!(
-            separation_path(true, long, storage_needed(long), limit),
+            separation_path(
+                true,
+                long,
+                storage_needed(long),
+                storage_needed(long),
+                limit
+            ),
             SeparationPath::Storage
         );
         // A session without enough space.
         assert_eq!(
-            separation_path(true, frames, needed - 1.0, limit),
+            separation_path(true, frames, needed - 1.0, needed, limit),
             SeparationPath::Memory
         );
         // No session.
         assert_eq!(
-            separation_path(false, frames, f64::INFINITY, limit),
+            separation_path(false, frames, f64::INFINITY, needed, limit),
             SeparationPath::Memory
         );
         // At the limit and one frame over it.
         assert_eq!(
-            separation_path(false, limit, 0.0, limit),
+            separation_path(false, limit, 0.0, needed, limit),
             SeparationPath::Memory
         );
         assert_eq!(
-            separation_path(false, limit + 1, 0.0, limit),
+            separation_path(false, limit + 1, 0.0, needed, limit),
             SeparationPath::TooLong
         );
+        let over = storage_needed(limit + 1);
         assert_eq!(
-            separation_path(true, limit + 1, storage_needed(limit + 1) - 1.0, limit),
+            separation_path(true, limit + 1, over - 1.0, over, limit),
+            SeparationPath::TooLong
+        );
+    }
+
+    /// D7 of M4: a song with no usable mix file needs room for one too.
+    #[test]
+    fn the_separation_path_counts_a_missing_mix() {
+        let limit = MEMORY_PATH_MAX_FRAMES;
+        let frames = 30 * 44_100;
+        let stems = storage_needed(frames);
+        assert_eq!(storage_path_needs(frames, true), stems);
+        let with_mix = storage_path_needs(frames, false);
+        assert_eq!(with_mix, stems + 8.0 * frames as f64);
+        assert_eq!(
+            separation_path(true, frames, with_mix, with_mix, limit),
+            SeparationPath::Storage
+        );
+        assert_eq!(
+            separation_path(true, frames, with_mix - 1.0, with_mix, limit),
+            SeparationPath::Memory,
+            "room for the stems, not for the mix"
+        );
+        let long = 10 * limit;
+        let long_needs = storage_path_needs(long, false);
+        assert_eq!(
+            separation_path(true, long, storage_needed(long), long_needs, limit),
             SeparationPath::TooLong
         );
     }
@@ -2812,7 +2976,7 @@ mod tests {
 
     #[test]
     fn forget_is_disabled_for_the_session_being_separated() {
-        for stage in [JobStage::Starting, JobStage::Storage] {
+        for stage in [JobStage::Starting, JobStage::WritingMix, JobStage::Storage] {
             let running = staged("a", stage);
             assert!(!forget_enabled("a", Some(&running)), "{stage:?}");
             assert!(
@@ -2971,10 +3135,26 @@ mod separation_tests {
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen(inline_js = r#"
+// Keeps each message posted, and its transfer list in `posts.transfers`.
 export function spy_on_post(worker) {
   const posts = [];
-  worker.postMessage = (data, transfer) => posts.push(data);
+  posts.transfers = [];
+  worker.postMessage = (data, transfer) => { posts.push(data); posts.transfers.push(transfer || []); };
   return posts;
+}
+export function transfers_of(posts) { return posts.transfers; }
+// Counts the OPFS writes until `writes_counted`.
+let counted = null;
+let real_counted = null;
+export function count_writes() {
+  const proto = FileSystemWritableFileStream.prototype;
+  real_counted = proto.write;
+  counted = 0;
+  proto.write = function (data) { counted++; return real_counted.call(this, data); };
+}
+export function writes_counted() {
+  FileSystemWritableFileStream.prototype.write = real_counted;
+  return counted;
 }
 export function deliver(worker, data) {
   worker.dispatchEvent(new MessageEvent("message", { data }));
@@ -3000,6 +3180,9 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
 "#)]
     extern "C" {
         fn spy_on_post(worker: &web_sys::Worker) -> js_sys::Array;
+        fn transfers_of(posts: &js_sys::Array) -> js_sys::Array;
+        fn count_writes();
+        fn writes_counted() -> u32;
         fn deliver(worker: &web_sys::Worker, data: &JsValue);
         fn stub_estimate(usage: f64, quota: f64);
         fn unstub_estimate();
@@ -3052,10 +3235,14 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         (app, posts, id)
     }
 
-    /// Presses Separate and waits for the browser's estimate.
+    /// Presses Separate and waits for the browser's estimate, and for the
+    /// mix write if the page writes the mix (D3 of M4).
     async fn press_separate(app: &mut StemApp) {
         app.start_separation(&egui::Context::default());
         settle(app).await;
+        if app.separating.as_ref().map(|j| j.stage) == Some(JobStage::WritingMix) {
+            settle(app).await;
+        }
     }
 
     /// Waits for the page's browser work, then applies it.
@@ -3063,11 +3250,47 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         for _ in 0..50 {
             sleep(20).await;
             let pending = app.pending.borrow();
-            if pending.separation_start.is_some() || pending.stored.is_some() {
+            if pending.separation_start.is_some()
+                || pending.stored.is_some()
+                || pending.mix_written.is_some()
+            {
                 break;
             }
         }
-        app.apply_inbox();
+        app.apply_inbox(&egui::Context::default());
+    }
+
+    /// The bytes of the song of [`app_with_a_stored_song`] as a mix file:
+    /// interleaved 32-bit little-endian floats.
+    fn song_mix_file() -> Vec<u8> {
+        tone(FRAMES)
+            .iter()
+            .flat_map(|v| [v.to_le_bytes(), v.to_le_bytes()])
+            .flatten()
+            .collect()
+    }
+
+    /// Session `id`'s `meta`.
+    async fn meta_of(id: &str) -> store_meta::Meta {
+        store::list()
+            .await
+            .into_iter()
+            .find(|(got, _)| got == id)
+            .map(|(_, meta)| meta)
+            .unwrap_or_default()
+    }
+
+    /// Plants a mix file of `bytes` in session `id`, and a `mix` line of
+    /// `frames` in its `meta` if given.
+    async fn plant_mix(id: &str, bytes: &[u8], frames: Option<usize>) {
+        store::test_write(&store::mix_path(id), bytes)
+            .await
+            .expect("planted");
+        let mut meta = meta_of(id).await;
+        meta.mix = frames.map(|f| (f, store_meta::MIX_FORMAT.into()));
+        store::test_write(&format!("sessions/{id}/meta"), meta.to_text().as_bytes())
+            .await
+            .expect("planted");
     }
 
     /// The session of each `separate` request posted.
@@ -3340,19 +3563,157 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
 
     /// The control for the tests below: without it, they would pass for a
     /// song with no session.
+    /// D3 and D4 of M4: the page writes the mix file first, and the
+    /// request names it with the song's frames, with no samples.
     #[wasm_bindgen_test]
     async fn a_song_with_a_session_and_space_takes_the_storage_path() {
         let (mut app, posts, id) = app_with_a_stored_song().await;
-        press_separate(&mut app).await;
+        app.start_separation(&egui::Context::default());
+        settle(&mut app).await;
+        let writing = app.separating.as_ref().map(|j| j.stage);
+        let writing_forget = forget_enabled(&id, app.separating.as_ref());
+        let writing_separate = separate_enabled(app.separating.is_some(), app.reading_stems);
+        let writing_posts = posts.length();
+        settle(&mut app).await;
         let sent = sessions(&posts);
+        let request = posts.get(0);
+        let has_arrays = ["left", "right"].map(|k| {
+            !js_sys::Reflect::get(&request, &k.into())
+                .unwrap_or_default()
+                .is_undefined()
+        });
+        let transfers: js_sys::Array = transfers_of(&posts).get(0).unchecked_into();
+        let mix = match ToWorker::from_js(&request).map(|r| r.request) {
+            Ok(Request::Separate {
+                mix: stem_protocol::Mix::Stored { path, frames },
+                ..
+            }) => Some((path, frames)),
+            _ => None,
+        };
         let stage = app.separating.as_ref().map(|j| j.stage);
         let forget = forget_enabled(&id, app.separating.as_ref());
         let status = app.status.clone();
+        let file = store::test_read(&store::mix_path(&id)).await;
+        let meta = meta_of(&id).await;
         finish(app, &id).await;
+        assert_eq!(writing, Some(JobStage::WritingMix));
+        assert!(!writing_forget, "no Forget while the page writes the mix");
+        assert!(
+            !writing_separate,
+            "no Separate while the page writes the mix"
+        );
+        assert_eq!(writing_posts, 0, "the page posts after the mix write");
         assert_eq!(sent, [Some(format!("sessions/{id}"))]);
+        assert_eq!(mix, Some((format!("sessions/{id}/mix.f32"), FRAMES)));
+        assert_eq!(has_arrays, [false, false], "no left or right");
+        assert_eq!(transfers.length(), 0, "nothing is transferred");
+        assert!(file == Some(song_mix_file()), "the mix file holds the song");
+        assert_eq!(meta.mix, Some((FRAMES, "f32le-1".into())));
         assert_eq!(stage, Some(JobStage::Storage));
         assert!(!forget, "D7: no Forget while the worker writes the session");
         assert!(status.contains("browser storage"), "{status}");
+    }
+
+    /// D7 of M4: a mix that storage refuses sends the song on the memory
+    /// path, without its stems kept.
+    #[wasm_bindgen_test]
+    async fn a_failed_mix_write_takes_the_memory_path() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        refuse_writes();
+        press_separate(&mut app).await;
+        allow_writes();
+        let sent = sessions(&posts);
+        let transfers: js_sys::Array = transfers_of(&posts).get(0).unchecked_into();
+        let job = app
+            .separating
+            .as_ref()
+            .map(|j| (j.stage, j.keeps_stems, j.session.clone()));
+        let status = app.status.clone();
+        let meta = meta_of(&id).await;
+        let file = store::test_read(&store::mix_path(&id)).await;
+        let part = store::test_read(&format!("{}.part", store::mix_path(&id))).await;
+        finish(app, &id).await;
+        assert_eq!(sent, [None], "one request, on the memory path");
+        assert_eq!(transfers.length(), 2, "MEM-2: the two arrays");
+        assert_eq!(job, Some((JobStage::Memory, false, None)), "not saved");
+        assert!(
+            status
+                .starts_with("Separating in memory: browser storage could not keep the song's mix")
+                && status.contains("QuotaExceededError")
+                && status.contains("will not be kept"),
+            "{status}"
+        );
+        assert_eq!(meta.mix, None);
+        assert_eq!((file, part), (None, None), "no mix file is left");
+    }
+
+    /// D2 of M4: a usable mix file of the song is not written again.
+    #[wasm_bindgen_test]
+    async fn a_kept_mix_is_not_written_again() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        let kept = vec![7; 8 * FRAMES];
+        plant_mix(&id, &kept, Some(FRAMES)).await;
+        count_writes();
+        press_separate(&mut app).await;
+        let writes = writes_counted();
+        let sent = sessions(&posts);
+        let stage = app.separating.as_ref().map(|j| j.stage);
+        let file = store::test_read(&store::mix_path(&id)).await;
+        finish(app, &id).await;
+        assert_eq!(writes, 0, "no write");
+        assert!(file == Some(kept), "the kept mix file stays as it was");
+        assert_eq!(sent, [Some(format!("sessions/{id}"))]);
+        assert_eq!(stage, Some(JobStage::Storage));
+    }
+
+    /// D1 of M4: a mix file that `meta` does not name with the song's
+    /// frames, or whose size is not that of its `mix` line, is written
+    /// again.
+    #[wasm_bindgen_test]
+    async fn a_mix_without_its_meta_line_is_written_again() {
+        for (case, bytes, line) in [
+            ("no mix line", 8 * FRAMES, None),
+            (
+                "a mix line of other frames",
+                8 * (FRAMES - 1),
+                Some(FRAMES - 1),
+            ),
+            ("a file of another size", 8 * FRAMES - 8, Some(FRAMES)),
+        ] {
+            let (mut app, posts, id) = app_with_a_stored_song().await;
+            plant_mix(&id, &vec![7; bytes], line).await;
+            press_separate(&mut app).await;
+            let sent = sessions(&posts);
+            let file = store::test_read(&store::mix_path(&id)).await;
+            let meta = meta_of(&id).await;
+            finish(app, &id).await;
+            assert!(file == Some(song_mix_file()), "{case}: written again");
+            assert_eq!(meta.mix, Some((FRAMES, "f32le-1".into())), "{case}");
+            assert_eq!(sent, [Some(format!("sessions/{id}"))], "{case}");
+        }
+    }
+
+    /// D6 of M4: after `unstored`, the next start writes the mix again,
+    /// and the status line says that browser storage failed.
+    #[wasm_bindgen_test]
+    async fn unstored_removes_the_mix_line() {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        press_separate(&mut app).await;
+        let written = meta_of(&id).await.mix;
+        deliver_unstored(&mut app, "NotReadableError: the mix file could not be read");
+        let status = app.status.clone();
+        let usable = store::stored_mix_frames(&id).await;
+        let meta = meta_of(&id).await;
+        let file = store::test_read(&store::mix_path(&id)).await;
+        finish(app, &id).await;
+        assert_eq!(written, Some((FRAMES, "f32le-1".into())), "the control");
+        assert_eq!(usable, None);
+        assert_eq!(meta.mix, None, "no mix line");
+        assert_eq!(file, None, "no mix file");
+        assert!(
+            status.contains("browser storage failed (NotReadableError"),
+            "{status}"
+        );
     }
 
     #[wasm_bindgen_test]

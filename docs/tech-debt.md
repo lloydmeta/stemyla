@@ -399,7 +399,7 @@ This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 mi
 M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation.  The worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
 
 * After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`), so the tab can stop again at each reload.  M6 and M7 remove this.
-* The worker still copies the whole mix into its memory.  M4 removes this.
+* M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path: the page writes the mix to a session file in blocks, and the worker reads it one chunk at a time.  The page still holds the decoded song (M5).  The memory path still sends the mix as two arrays, which the worker copies into its memory.
 * The memory path (a song without a session, too little free space, or storage that refused the stems) still makes six song-length stems.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
 * No build between M3 and M7 goes to the published site.  Publishing is a person's step (GIT-1).
 

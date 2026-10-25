@@ -5,9 +5,16 @@
 //! Layout under the OPFS root:
 //! * `sessions/current`: the id of the session shown last (text).
 //! * `sessions/<id>/meta`: tab-separated lines: `name`, `rate`, one `file`
-//!   line per source file (original name, stored name) and one `stem` line
-//!   per separated stem.
+//!   line per source file (original name, stored name), one `stem` line
+//!   per separated stem, and a `mix` line (frames, format) when `mix.f32`
+//!   is complete.
 //! * `sessions/<id>/src/<n>.<ext>`: the files as dropped.
+//! * `sessions/<id>/mix.f32`: the mix that the worker separates on the
+//!   storage path (M4): raw 32-bit little-endian floats, interleaved
+//!   stereo, no header, at 44.1 kHz.  [`write_mix`] writes it in blocks
+//!   through `mix.f32.part`, and only then writes the `mix` line.  The
+//!   page uses it only when the `mix` line has the song's frames and
+//!   [`MIX_FORMAT`], and the file's size is 8 bytes for each frame.
 //! * `sessions/<id>/stems/<stem>.wav`: separated stems, 16-bit PCM.  The
 //!   file name is `stem_protocol::stem_file` of the stem's name.
 //! * `sessions/<id>/stems/<stem>.wav.part`: a stem that the worker writes
@@ -15,8 +22,9 @@
 //!   [`keep_stored_stems`] moves it onto its `.wav` file.  A separation
 //!   that stopped can leave one; no reader opens it.
 //!
-//! On the storage path, the worker writes the stem files and the page
-//! moves them into place and writes `meta`.  On the memory path, the page
+//! On the storage path, the page writes the mix file before it posts, the
+//! worker reads it and writes the stem files, and the page moves them into
+//! place and writes `meta`.  On the memory path, the page
 //! writes the stems itself ([`save_stems`]).
 //!
 //! Ids are creation times in milliseconds, made unique within the page: a
@@ -24,7 +32,7 @@
 //! dropped song gets its own session; the Storage menu lists them, opens
 //! one or forgets it.
 
-use crate::store_meta::Meta;
+use crate::store_meta::{MIX_FORMAT, Meta};
 use anyhow::{Result, anyhow};
 use engine::song::padded_to;
 use engine::{Samples, Song, Stem};
@@ -123,6 +131,39 @@ export function save_blob(name, blob) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// A writer of `within/rel`, as `st_write` opens it; else "gone" or the
+// name of the error.
+export async function st_open(within, rel) {
+  try {
+    let base;
+    try { base = await dir(within, false); }
+    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
+    const [d, n] = split("/" + rel);
+    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
+    return await fh.createWritable();
+  } catch (e) {
+    console.warn("storage open failed", within, rel, e);
+    return (e && e.name) || "Error";
+  }
+}
+// Writes `bytes` at the writer's position: true, else the error's name.
+export async function st_put(w, bytes) {
+  try { await w.write(whole(bytes)); return true; }
+  catch (e) { console.warn("storage write failed", e); return (e && e.name) || "Error"; }
+}
+export async function st_close(w) {
+  try { await w.close(); return true; }
+  catch (e) { console.warn("storage close failed", e); return (e && e.name) || "Error"; }
+}
+export async function st_abort(w) {
+  try { await w.abort(); } catch (_) {}
+}
+export async function st_size(path) {
+  try {
+    const [d, n] = split(path);
+    return (await (await (await dir(d, false)).getFileHandle(n)).getFile()).size;
+  } catch (e) { return null; }
+}
 "#)]
 extern "C" {
     /// Writes `body`, a `Blob` or a typed array (no other type), to
@@ -144,6 +185,19 @@ extern "C" {
     fn save_file(name: &str, bytes: &Uint8Array, mime: &str);
     fn save_blob(name: &str, blob: &web_sys::Blob);
     async fn st_sleep(ms: u32) -> JsValue;
+    /// A writable stream of `within/rel`, creating the folders in `rel`;
+    /// `within` must exist.  Else "gone" when `within` does not exist, or
+    /// the name of the error.
+    async fn st_open(within: &str, rel: &str) -> JsValue;
+    /// Writes a typed array to the stream `w`: true, else the error's name.
+    async fn st_put(w: &JsValue, bytes: &Uint8Array) -> JsValue;
+    /// Closes the stream `w`, which keeps what it wrote: true, else the
+    /// error's name.
+    async fn st_close(w: &JsValue) -> JsValue;
+    /// Closes the stream `w` and drops what it wrote.
+    async fn st_abort(w: &JsValue);
+    /// The bytes in the file at `path`, or null if it cannot be read.
+    async fn st_size(path: &str) -> JsValue;
 }
 
 const ROOT: &str = "sessions";
@@ -289,20 +343,199 @@ pub fn session_folder(id: &str) -> String {
     format!("{ROOT}/{id}")
 }
 
+/// The frames that [`write_mix`] writes in one block: 1 MiB of the mix
+/// file (D3 of M4).
+pub const MIX_BLOCK_FRAMES: usize = 131_072;
+
+const MIX_FILE: &str = "mix.f32";
+
+/// The mix file of session `id`, from the root of the private file system.
+pub fn mix_path(id: &str) -> String {
+    format!("{}/{MIX_FILE}", session_folder(id))
+}
+
+/// The bytes in the file at `path`, or `None` if there is no such file.
+async fn file_size(path: &str) -> Option<f64> {
+    st_size(path).await.as_f64()
+}
+
+/// The frames of session `id`'s usable mix file (D1 of M4): `meta` has a
+/// `mix` line in [`MIX_FORMAT`], and the file holds 8 bytes for each of
+/// its frames.  It waits for any save into the session first, such as the
+/// removal of a mix by [`forget_mix`].
+pub async fn stored_mix_frames(id: &str) -> Option<usize> {
+    settled(id).await;
+    let base = session_folder(id);
+    let meta = Meta::parse(&String::from_utf8_lossy(
+        &read(&format!("{base}/meta")).await?,
+    ));
+    let frames = meta.usable_mix()?;
+    (file_size(&mix_path(id)).await? == 8.0 * frames as f64).then_some(frames)
+}
+
+/// Writes the mix of `song` to session `id` as its mix file, in blocks of
+/// [`MIX_BLOCK_FRAMES`], each a new whole array (D3 of M4, MEM-5).  A song
+/// of one source lane writes that lane.  A song of several sources writes
+/// the mix of each block, so the page never makes a song-length mix.  It
+/// first removes the `mix` line and any old mix file, and it writes the
+/// `mix` line only for a complete file.  It never makes a forgotten
+/// session folder again.
+pub async fn write_mix(id: &str, song: &Song) -> Result<()> {
+    saving(id, async {
+        if CLOSED.get() {
+            return Err(anyhow!("browser storage is being reset"));
+        }
+        WRITES.set(WRITES.get() + 1);
+        let written = write_mix_now(id, song).await;
+        WRITES.set(WRITES.get() - 1);
+        written
+    })
+    .await
+}
+
+async fn write_mix_now(id: &str, song: &Song) -> Result<()> {
+    let base = session_folder(id);
+    let mut meta = Meta::parse(&String::from_utf8_lossy(
+        &read(&format!("{base}/meta"))
+            .await
+            .ok_or_else(|| anyhow!("session {id} is gone"))?,
+    ));
+    if meta.mix.take().is_some() {
+        write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+    }
+    if st_remove(&mix_path(id)).await.as_bool() != Some(true) {
+        return Err(anyhow!("browser storage could not remove the old mix"));
+    }
+    let part = format!("{MIX_FILE}.part");
+    let w = st_open(&base, &part).await;
+    if w.as_string().as_deref() == Some("gone") {
+        return Err(anyhow!("{base} is gone (forgotten?)"));
+    }
+    if let Some(error) = w.as_string() {
+        return Err(anyhow!("browser storage refused {base}/{part} ({error})"));
+    }
+    if let Err(e) = put_mix_blocks(&w, song).await {
+        st_abort(&w).await;
+        st_remove(&format!("{base}/{part}")).await;
+        return Err(e);
+    }
+    let closed = st_close(&w).await;
+    if closed.as_bool() != Some(true) || !move_file(&base, &part, MIX_FILE).await {
+        st_remove(&format!("{base}/{part}")).await;
+        return Err(anyhow!(
+            "browser storage could not finish the mix ({})",
+            closed.as_string().unwrap_or_else(|| "not moved".into())
+        ));
+    }
+    meta.mix = Some((song.frames, MIX_FORMAT.into()));
+    if let Err(e) = write_bytes(&base, "meta", meta.to_text().as_bytes()).await {
+        st_remove(&mix_path(id)).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Writes the mix of `song` to the stream `w`, one block at a time.
+async fn put_mix_blocks(w: &JsValue, song: &Song) -> Result<()> {
+    let lane = crate::original_lane(song);
+    let sources: Vec<&Stem> = song
+        .stems
+        .iter()
+        .filter(|s| !crate::DERIVED.contains(&s.name.as_str()))
+        .collect();
+    let lefts: Vec<&[f32]> = sources.iter().map(|s| s.left.as_slice()).collect();
+    let rights: Vec<&[f32]> = sources.iter().map(|s| s.right.as_slice()).collect();
+    let volumes = vec![1.0; sources.len()];
+    let mut start = 0;
+    while start < song.frames {
+        if CLOSED.get() {
+            return Err(anyhow!("browser storage is being reset"));
+        }
+        let end = (start + MIX_BLOCK_FRAMES).min(song.frames);
+        let bytes = match lane {
+            Some(lane) => interleave(&lane.left[start..end], &lane.right[start..end]),
+            None => interleave(
+                &dsp::mix_range(&lefts, &volumes, start, end - start),
+                &dsp::mix_range(&rights, &volumes, start, end - start),
+            ),
+        };
+        let put = st_put(w, &Uint8Array::from(&bytes[..])).await;
+        if put.as_bool() != Some(true) {
+            return Err(anyhow!(
+                "browser storage refused the mix ({})",
+                put.as_string().unwrap_or_default()
+            ));
+        }
+        start = end;
+    }
+    Ok(())
+}
+
+/// One block of the mix file: interleaved 32-bit little-endian floats.
+fn interleave(left: &[f32], right: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 * left.len());
+    for (l, r) in left.iter().zip(right) {
+        out.extend_from_slice(&l.to_le_bytes());
+        out.extend_from_slice(&r.to_le_bytes());
+    }
+    out
+}
+
+/// Removes the `mix` line of session `id` and its mix file, after the
+/// worker could not read it (D6 of M4).  So the next start writes the mix
+/// again, and a bad file takes no space.  The removal counts as a save
+/// from this call on, before the future first runs, so a start that reads
+/// `meta` after this call waits for it ([`stored_mix_frames`]).
+pub fn forget_mix(id: &str) -> impl std::future::Future<Output = Result<()>> + 'static {
+    let held = SaveHeld::new(id);
+    let id = id.to_string();
+    async move {
+        let _held = held;
+        let base = session_folder(&id);
+        let mut meta = Meta::parse(&String::from_utf8_lossy(
+            &read(&format!("{base}/meta"))
+                .await
+                .ok_or_else(|| anyhow!("session {id} is gone"))?,
+        ));
+        if meta.mix.take().is_some() {
+            write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+        }
+        if CLOSED.get() || st_remove(&mix_path(&id)).await.as_bool() != Some(true) {
+            return Err(anyhow!("browser storage could not remove the mix"));
+        }
+        Ok(())
+    }
+}
+
+/// A save into a session, counted in `SAVING` from when it is made until
+/// it is dropped.
+struct SaveHeld(String);
+
+impl SaveHeld {
+    fn new(id: &str) -> Self {
+        SAVING.with_borrow_mut(|s| *s.entry(id.to_string()).or_default() += 1);
+        Self(id.to_string())
+    }
+}
+
+impl Drop for SaveHeld {
+    fn drop(&mut self) {
+        SAVING.with_borrow_mut(|s| {
+            if let Some(n) = s.get_mut(&self.0) {
+                *n -= 1;
+                if *n == 0 {
+                    s.remove(&self.0);
+                }
+            }
+        });
+    }
+}
+
 /// Runs `work` on session `id` as a stem save, which [`restore_id`] and
 /// [`forget`] wait for.
 async fn saving<T>(id: &str, work: impl std::future::Future<Output = T>) -> T {
-    SAVING.with_borrow_mut(|s| *s.entry(id.to_string()).or_default() += 1);
-    let done = work.await;
-    SAVING.with_borrow_mut(|s| {
-        if let Some(n) = s.get_mut(id) {
-            *n -= 1;
-            if *n == 0 {
-                s.remove(id);
-            }
-        }
-    });
-    done
+    let _held = SaveHeld::new(id);
+    work.await
 }
 
 /// Adds separated stems to session `id`.
@@ -725,6 +958,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             rate: 44_100,
             files: vec![("acme.wav".into(), "0.wav".into())],
             stems: stems.iter().map(|s| s.to_string()).collect(),
+            mix: None,
         };
         write(&format!("{ROOT}/{id}/meta"), meta.to_text().as_bytes())
             .await
@@ -890,6 +1124,168 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         let error = missing.expect_err("no file").to_string();
         assert!(error.contains("stem drums is missing"), "{error}");
         st_remove(ROOT).await;
+    }
+
+    /// A song of one source lane, `frames` long.
+    fn one_lane(frames: usize) -> Song {
+        let wave = |f: f32| -> Samples {
+            (0..frames)
+                .map(|i| 0.7 * (f * i as f32).sin())
+                .collect::<Vec<f32>>()
+                .into()
+        };
+        Song {
+            sample_rate: 44_100,
+            frames,
+            stems: vec![Stem {
+                name: "acme".into(),
+                left: wave(0.01),
+                right: wave(0.023),
+            }],
+        }
+    }
+
+    /// A song of three source lanes, `frames` long, whose mix clips, and a
+    /// derived lane that the mix leaves out.
+    fn three_sources(frames: usize) -> Song {
+        let lane = |name: &str, k: usize| {
+            let wave = |c: usize| -> Samples {
+                (0..frames)
+                    .map(|i| 0.5 * ((0.004 * (k + 2 * c + 1) as f32) * i as f32).sin())
+                    .collect::<Vec<f32>>()
+                    .into()
+            };
+            Stem {
+                name: name.into(),
+                left: wave(0),
+                right: wave(1),
+            }
+        };
+        Song {
+            sample_rate: 44_100,
+            frames,
+            stems: vec![
+                lane("bass", 0),
+                lane("drums", 1),
+                lane("classic drums", 7),
+                lane("vocals", 2),
+            ],
+        }
+    }
+
+    /// Interleaved 32-bit little-endian floats, as the mix file holds them.
+    fn interleaved(left: &[f32], right: &[f32]) -> Vec<u8> {
+        left.iter()
+            .zip(right)
+            .flat_map(|(l, r)| [l.to_le_bytes(), r.to_le_bytes()])
+            .flatten()
+            .collect()
+    }
+
+    /// MEM-5: each block of the mix, and `meta`, reach storage as a whole
+    /// array.
+    #[wasm_bindgen_test]
+    async fn the_mix_is_written_in_whole_blocks() {
+        st_remove(ROOT).await;
+        let id = "1792640000010";
+        plant_session(id, &[]).await;
+        spy();
+        let written = write_mix(id, &one_lane(MIX_BLOCK_FRAMES + 1000)).await;
+        let record = stop_spy();
+        written.expect("written");
+        assert_eq!(
+            record, "whole whole whole",
+            "two blocks of the mix, then meta"
+        );
+        st_remove(ROOT).await;
+    }
+
+    /// D1 and D3 of M4: the mix file holds the song's one lane, or the mix
+    /// of its sources, interleaved, bit for bit, and `meta` names it.
+    #[wasm_bindgen_test]
+    async fn a_stored_mix_holds_the_song_interleaved() {
+        st_remove(ROOT).await;
+        let frames = MIX_BLOCK_FRAMES + 1000;
+        let lane = one_lane(frames);
+        let sources = three_sources(frames);
+        let (mix_left, mix_right) = crate::mix_of_sources(&sources);
+        assert!(
+            mix_left.iter().any(|v| v.abs() == 1.0),
+            "the mix of the sources clips, so a sum without dsp::mix differs"
+        );
+        for (id, song, want) in [
+            (
+                "1792640000011",
+                &lane,
+                interleaved(&lane.stems[0].left, &lane.stems[0].right),
+            ),
+            (
+                "1792640000012",
+                &sources,
+                interleaved(&mix_left, &mix_right),
+            ),
+        ] {
+            plant_session(id, &["bass"]).await;
+            write_mix(id, song).await.expect("written");
+            let got = read(&mix_path(id)).await.expect("a mix file");
+            assert_eq!(got.len(), 8 * frames, "{id}");
+            assert!(got == want, "{id}: the mix file holds the song interleaved");
+            assert_eq!(
+                read(&format!("{}.part", mix_path(id))).await,
+                None,
+                "{id}: no .part file is left"
+            );
+            let meta = Meta::parse(&String::from_utf8_lossy(
+                &read(&format!("{ROOT}/{id}/meta")).await.expect("meta"),
+            ));
+            assert_eq!(meta.mix, Some((frames, "f32le-1".into())), "{id}");
+            assert_eq!(meta.stems, ["bass"], "{id}: the other lines stay");
+            assert_eq!(stored_mix_frames(id).await, Some(frames), "{id}");
+        }
+        let gone = write_mix("1792640000013", &lane).await;
+        assert!(gone.is_err(), "no session folder");
+        assert_eq!(
+            st_exists(&format!("{ROOT}/1792640000013")).await.as_bool(),
+            Some(false),
+            "a forgotten session does not come back"
+        );
+        st_remove(ROOT).await;
+    }
+
+    /// MEM-1, MEM-4: the mix of a 4-minute song of three sources is
+    /// written block by block.  A whole mix would add about 85 MB.  The
+    /// three sources share one buffer, which the test keeps alive.
+    #[wasm_bindgen_test]
+    async fn the_mix_write_makes_no_song_length_buffer() {
+        st_remove(ROOT).await;
+        let id = "1792640000014";
+        plant_session(id, &[]).await;
+        let frames = 4 * 60 * 44_100;
+        let wave: Samples = (0..frames)
+            .map(|i| 0.3 * (0.01 * i as f32).sin())
+            .collect::<Vec<f32>>()
+            .into();
+        let lane = |name: &str| Stem {
+            name: name.into(),
+            left: wave.clone(),
+            right: wave.clone(),
+        };
+        let song = Song {
+            sample_rate: 44_100,
+            frames,
+            stems: vec![lane("bass"), lane("drums"), lane("vocals")],
+        };
+        let before = crate::separator::page_wasm_mb();
+        write_mix(id, &song).await.expect("written");
+        let grown = crate::separator::page_wasm_mb() - before;
+        let size = file_size(&mix_path(id)).await;
+        drop(song);
+        st_remove(ROOT).await;
+        assert_eq!(size, Some(8.0 * frames as f64), "the whole mix is written");
+        assert!(
+            grown < 4.0,
+            "MEM-4: the page grew by {grown} MB while it wrote the mix"
+        );
     }
 
     #[wasm_bindgen_test]
