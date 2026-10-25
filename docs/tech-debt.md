@@ -177,7 +177,7 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 `xtask review mutants` runs cargo-mutants on the Rust files of a round's diff.  It does not test some changes, and it reports some mutants that no native test can catch:
 
 * cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
-* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
+* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs`, `app/src/streamtest.rs` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
 * `mutants_command` sets no `STEMYLA_REQUIRE`, and passes on the caller's own.  So without it, where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.

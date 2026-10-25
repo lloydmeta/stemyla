@@ -55,11 +55,18 @@ fn holds_skip_words_on_purpose(file: &str) -> bool {
 
 /// Skip messages that cannot go through `test_support::skip`: the file, the
 /// literal, and why.
-const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[(
-    "app/tests/web_output.rs",
-    "skipped: the audio context is suspended",
-    "a wasm test cannot read STEMYLA_REQUIRE; the test asserts that the browser is not Chrome, and CI runs Chrome",
-)];
+const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "app/tests/web_output.rs",
+        "skipped: the audio context is suspended",
+        "a wasm test cannot read STEMYLA_REQUIRE; the test asserts that the browser is not Chrome, and CI runs Chrome",
+    ),
+    (
+        "app/src/streamtest.rs",
+        "skipped: the audio context is suspended",
+        "a wasm test cannot read STEMYLA_REQUIRE; the test asserts the audio clock in Chrome, and CI runs Chrome",
+    ),
+];
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that
 /// `STEMYLA_REQUIRE` can make it a failure.  A problem is a string literal,
@@ -3577,11 +3584,18 @@ mod tests {
 
     #[test]
     fn an_allowlist_entry_whose_literal_is_gone_is_a_problem() {
+        let current: Vec<(String, String)> = SKIP_ALLOWLIST
+            .iter()
+            .map(|(file, literal, _)| {
+                let text = format!("fn f() {{ console_log!(\"{literal}\"); }}");
+                (file.to_string(), text)
+            })
+            .collect();
+        assert_eq!(allowlisted_skips_exist(&current), []);
         let (file, literal, _) = SKIP_ALLOWLIST[0];
-        let current = format!("fn f() {{ console_log!(\"{literal}\"); }}");
-        assert_eq!(allowlisted_skips_exist(&[(file.to_string(), current)]), []);
-        let reworded = "fn f() { console_log!(\"skipped: suspended\"); }".to_string();
-        let problems = allowlisted_skips_exist(&[(file.to_string(), reworded)]);
+        let mut reworded = current.clone();
+        reworded[0].1 = "fn f() { console_log!(\"skipped: suspended\"); }".to_string();
+        let problems = allowlisted_skips_exist(&reworded);
         assert_eq!(
             problems,
             [Problem {
@@ -3595,8 +3609,8 @@ mod tests {
         );
         assert_eq!(
             lines(&allowlisted_skips_exist(&[])),
-            [None],
-            "a file that is not in the tree"
+            vec![None; SKIP_ALLOWLIST.len()],
+            "files that are not in the tree"
         );
     }
 

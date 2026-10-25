@@ -32,19 +32,19 @@ const FILES = [["bass", 4], ["drums", 4], ["other", 4], ["vocals", 4], ["guitar"
 // that cpal has at each 'ended' event.  `read_delay_ms` and
 // `fail_read_at` (the read of each read-ahead buffer that fails, from 1)
 // are for tests.
-export function st_cfg(minutes, play_s, seeks) {
-  return { minutes, play_s, seeks, buffer_s: 10, block_ms: 30, block_every_s: 3, block_bytes: 8 << 20,
+export function st_cfg(minutes, play_s, seeks, max_tempo) {
+  return { minutes, play_s, seeks, max_tempo, buffer_s: 10, block_ms: 30, block_every_s: 3, block_bytes: 8 << 20,
     read_delay_ms: 0, fail_read_at: 0, spy: false };
 }
 
 export function st_cfg_set(cfg, key, value) { cfg[key] = value; }
 
 // The settings in a page address's query, or null without `streamtest`.
-export function st_query_cfg(search) {
+export function st_query_cfg(search, max_tempo) {
   const q = new URLSearchParams(search);
   if (!q.has("streamtest")) return null;
   const num = (k, d) => { const v = parseFloat(q.get(k)); return v > 0 ? v : d; };
-  return st_cfg(num("st_minutes", 30), num("st_play", 300), Math.round(num("st_seeks", 50)));
+  return st_cfg(num("st_minutes", 30), num("st_play", 300), Math.round(num("st_seeks", 50)), max_tempo);
 }
 
 // Made in a tap's handler: Safari starts audio only there.
@@ -163,13 +163,15 @@ class Ahead {
 }
 
 // Plays `seconds` from frame `from` at `tempo`, as cpal's Web Audio host
-// does: two buffers queued, and the next scheduled when one ends, at the
-// end of the one before.  The first starts at now + base latency + one
-// buffer, and the schedule never moves back to the clock.  A buffer whose
-// start has passed is late: it starts at once over the one before, and
-// `live.rs` leaves it silent.  A buffer whose frames the read-ahead buffer
-// does not hold is an underrun.  With `block_ms`, the main thread is busy
-// that long every `block_every_s`.
+// does.  Two buffers are queued, and each 'ended' event schedules the next
+// at the end of the one before.  The first starts at now + base latency +
+// one buffer, and the schedule never moves back to the clock.  A buffer
+// whose start has passed is late: it starts at once.  Of each late pair,
+// `live.rs` fills one and leaves silent the one that would play over it.
+// A buffer whose frames the read-ahead buffer does not hold is an
+// underrun.  With `block_ms`, the main thread is busy that long every
+// `block_every_s`.  Unlike the app's callback, `take` here also starts
+// reads, and it copies no frames.
 async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
   ahead.seek(from);
   await ahead.until(() => ahead.end - ahead.start + RATE > ahead.cap || ahead.end >= ahead.frames);
@@ -215,15 +217,16 @@ async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
       schedule();
     } else {
       // No running audio context: timers stand in for the 'ended' events,
-      // on the same schedule.  Buffer k starts at t0 + k periods, and its
-      // timer is due when buffer k - 2 ends.
+      // on the same schedule.  Buffer k starts at t0 + k periods.  Its
+      // timer is due when buffer k - 2 ends, at t0 + (k - 1) periods.
       const t0 = performance.now() + period * 1000;
       let k = 0;
       const schedule = () => {
         if (!take()) return finish();
         if (performance.now() > t0 + k * period * 1000) late++;
         k++;
-        setTimeout(schedule, Math.max(0, t0 + (k - 1) * period * 1000 - performance.now()));
+        // Buffer k + 1 is next on this chain; buffer k - 1 ends at t0 + k periods.
+        setTimeout(schedule, Math.max(0, t0 + k * period * 1000 - performance.now()));
       };
       schedule();
       schedule();
@@ -273,7 +276,7 @@ async function concurrent(dir, spy) {
   worker.postMessage({ name: "concurrent", chunks: 50, spy });
   const deadline = performance.now() + 15000;
   while (!state.open && !state.error && performance.now() < deadline) await sleep(5);
-  let right = 0, wrong = 0;
+  let right = 0, wrong = 0, failed = 0;
   const errors = new Set(), sizes = [];
   while (state.open && !state.done && !state.error && performance.now() < deadline) {
     try {
@@ -284,6 +287,7 @@ async function concurrent(dir, spy) {
         if (last === ((Math.ceil(f.size / (1 << 20)) - 1) & 255)) right++; else wrong++;
       }
     } catch (e) {
+      failed++;
       errors.add((e && e.name) || String(e));
     }
     await sleep(20);
@@ -291,15 +295,15 @@ async function concurrent(dir, spy) {
   worker.terminate();
   URL.revokeObjectURL(url);
   const grew = sizes.length > 1 && sizes[sizes.length - 1] > sizes[0];
-  return { right, wrong, errors: [...errors].join(",") || "none", grew, bytes: state.bytes || 0,
+  return { right, wrong, failed, errors: [...errors].join(",") || "none", grew, bytes: state.bytes || 0,
     worker: state.error || (state.done ? "done" : "timed out"), record: state.record || "" };
 }
 
 export async function st_run(cfg, audio, line) {
-  await remove_scratch();
-  const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle(SCRATCH, { create: true });
   let ctx = audio || null;
   try {
+    await remove_scratch();
+    const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle(SCRATCH, { create: true });
     const frames = Math.round(cfg.minutes * 60 * RATE);
     const [bytes, secs] = await write_files(dir, frames, cfg.block_bytes);
     line(`write: ${FILES.length} files, ${(bytes / 1e6).toFixed(0)} MB in ${secs.toFixed(1)} s (${(bytes / 1e6 / secs).toFixed(0)} MB/s)`);
@@ -312,14 +316,14 @@ export async function st_run(cfg, audio, line) {
     // Each run starts after the last one's read-ahead, so no run reads
     // what the one before read.  A short file starts again at 0.
     let from = 0;
-    for (const tempo of [1, 1.5]) {
+    for (const tempo of [1, cfg.max_tempo]) {
       for (const block of [0, cfg.block_ms]) {
         if (from + (cfg.play_s * tempo + cfg.buffer_s + 1) * RATE > frames) from = 0;
         const ahead = new Ahead(files, frames, cfg);
         const r = await play(ahead, ctx, from, cfg.play_s, tempo, block, cfg.block_every_s);
         const with_block = block > 0 ? `, ${block} ms block every ${cfg.block_every_s} s, blocks ${r.blocks}` : "";
         line(`playback: tempo ${tempo}${with_block}: underruns ${r.under}, ` +
-          `late buffers ${r.late} (each a silent buffer of ${(r.period * 1000).toFixed(0)} ms), ` +
+          `late buffers ${r.late} (buffers of ${(r.period * 1000).toFixed(0)} ms that started after their time), ` +
           `${r.played.toFixed(1)} s played from ${(from / RATE).toFixed(0)} s, clock ${clock}` +
           (ahead.failed ? `, read error ${ahead.failed}` : ""));
         line(`reads: tempo ${tempo}${with_block}: one second of ${FILES.length} files: ` +
@@ -342,20 +346,22 @@ export async function st_run(cfg, audio, line) {
     line(`seeks: to the first frame of the new position: p50 ${pct(seeks, 0.5)} ms, p99 ${pct(seeks, 0.99)} ms, ${seeks.length} seeks` +
       (ahead.failed ? `, read error ${ahead.failed}` : ""));
     const c = await concurrent(dir, cfg.spy);
-    line(`concurrent: reads of the last byte while a worker writes: ${c.right} right, ${c.wrong} wrong, ` +
-      `errors ${c.errors}, size grew ${c.grew}, worker ${c.worker}, ${(c.bytes / 1e6).toFixed(0)} MB written` +
+    line(`concurrent: reads of the last byte while a worker writes: compared ${c.right + c.wrong} ` +
+      `(right ${c.right}, wrong ${c.wrong}), failed ${c.failed} (${c.errors}), size grew ${c.grew}, ` +
+      `worker ${c.worker}, ${(c.bytes / 1e6).toFixed(0)} MB written` +
       (cfg.spy ? `, worker writes [${c.record}]` : ""));
   } finally {
     if (ctx) await ctx.close().catch(() => {});
-    await remove_scratch();
+    try { await remove_scratch(); }
+    catch (e) { line(`cleanup: the scratch folder stays (${(e && e.name) || e})`); }
   }
   line("done");
 }
 "#)]
 extern "C" {
-    fn st_cfg(minutes: f64, play_s: f64, seeks: u32) -> JsValue;
+    fn st_cfg(minutes: f64, play_s: f64, seeks: u32, max_tempo: f32) -> JsValue;
     fn st_cfg_set(cfg: &JsValue, key: &str, value: JsValue);
-    fn st_query_cfg(search: &str) -> JsValue;
+    fn st_query_cfg(search: &str, max_tempo: f32) -> JsValue;
     fn st_audio() -> JsValue;
     #[wasm_bindgen(catch)]
     async fn st_run(
@@ -378,14 +384,14 @@ impl Settings {
     /// The settings in a page address's query, such as
     /// `?streamtest&st_minutes=5`, or `None` without `streamtest`.
     pub fn from_query(search: &str) -> Option<Self> {
-        let cfg = st_query_cfg(search);
+        let cfg = st_query_cfg(search, engine::params::MAX_TEMPO);
         (!cfg.is_null()).then_some(Self(cfg))
     }
 
     /// Files of `minutes`, `play_s` seconds of each playback run and
     /// `seeks` seeks.
     pub fn new(minutes: f64, play_s: f64, seeks: u32) -> Self {
-        Self(st_cfg(minutes, play_s, seeks))
+        Self(st_cfg(minutes, play_s, seeks, engine::params::MAX_TEMPO))
     }
 
     /// Sets one more field of the settings, such as `buffer_s`.
@@ -453,7 +459,10 @@ pub fn start(
 }
 
 /// Browser tests (`cargo run -p xtask -- web-test`).  `xtask web-test`
-/// starts Chrome with no user-gesture rule for audio, so [`audio`] runs.
+/// starts Chrome with no user-gesture rule for audio, so [`audio`] runs
+/// there.  Safari keeps audio suspended while macOS reports the user idle
+/// (`docs/references/browser-quirks.md`), so the tests check the audio
+/// clock in Chrome only.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +491,7 @@ export function st_spy_off() {
   return record.join(" ");
 }
 export function st_cfg_get(cfg, key) { return cfg[key]; }
+export function st_in_chrome() { return navigator.userAgent.includes("Chrome/"); }
 export async function st_scratch_exists() {
   try { await (await navigator.storage.getDirectory()).getDirectoryHandle("streamtest"); return true; }
   catch (e) { return false; }
@@ -490,8 +500,9 @@ export async function st_scratch_exists() {
     extern "C" {
         fn st_spy_on();
         fn st_spy_off() -> String;
-        async fn st_scratch_exists() -> JsValue;
         fn st_cfg_get(cfg: &JsValue, key: &str) -> JsValue;
+        fn st_in_chrome() -> bool;
+        async fn st_scratch_exists() -> JsValue;
     }
 
     fn field(s: &Settings, key: &str) -> Option<f64> {
@@ -513,26 +524,31 @@ export async function st_scratch_exists() {
     }
 
     /// The number after `label` in `line`, such as 3 in "underruns 3,".
-    fn count(line: &str, label: &str) -> u64 {
+    fn number(line: &str, label: &str) -> f64 {
         let rest = line
             .split(label)
             .nth(1)
             .unwrap_or_else(|| panic!("no {label:?} in {line}"));
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let digits: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
         digits
             .parse()
             .unwrap_or_else(|_| panic!("no number after {label:?} in {line}"))
     }
 
-    /// The spike with a short song, on the audio clock: each measure logs
-    /// its line, fast reads give no underruns, the main-thread block runs,
-    /// every write gets a whole array (MEM-5), and no file is left.
+    /// The spike with a short song: each measure logs its line, fast reads
+    /// give no underruns, a block longer than two buffers makes late
+    /// buffers, every write gets a whole array (MEM-5), and no file is
+    /// left.  Chrome runs it on the audio clock.
     #[wasm_bindgen_test]
     async fn the_spike_logs_each_measure_and_leaves_no_files() {
         // 0.2 minutes: 19 MB in blocks of 1 MiB, so each file has full
         // blocks and a shorter last one.
         let settings = Settings::new(0.2, 1.0, 3)
             .with("block_bytes", 1 << 20)
+            .with("block_ms", 150)
             .with("block_every_s", 0.25)
             .with("spy", true);
         st_spy_on();
@@ -545,29 +561,36 @@ export async function st_scratch_exists() {
         );
         let playback = lines_with(&lines, "playback: tempo ");
         assert_eq!(playback.len(), 4, "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("playback: tempo 1.5")));
         for l in &playback {
-            assert_eq!(count(l, "underruns "), 0, "{l}");
-            assert!(l.contains("clock audio at "), "{l}");
+            assert_eq!(number(l, "underruns "), 0.0, "{l}");
             assert!(
                 !l.contains("read error") && !l.contains(" 0.0 s played"),
                 "{l}"
             );
+            if st_in_chrome() {
+                assert!(
+                    l.contains("clock audio at "),
+                    "web-test runs Chrome with audio allowed: {l}"
+                );
+            } else if l.contains("clock timer") {
+                console_log!("skipped: the audio context is suspended");
+            }
         }
         for l in playback.iter().filter(|l| l.contains(" ms block every ")) {
-            assert!(count(l, "blocks ") > 0, "no block ran: {l}");
+            assert!(number(l, "blocks ") > 0.0, "no block ran: {l}");
+            assert!(number(l, "late buffers ") > 0.0, "{l}");
         }
         assert_eq!(lines_with(&lines, "reads: tempo ").len(), 4, "{lines:#?}");
-        let reads = lines_with(&lines, "reads: tempo 1:")[0];
-        assert!(!reads.contains("p50 -"), "{reads}");
         let seeks = lines_with(&lines, "seeks: ")[0];
         assert!(seeks.ends_with(", 3 seeks"), "{seeks}");
         let concurrent = lines_with(&lines, "concurrent: ")[0];
         assert!(concurrent.contains("worker done"), "{concurrent}");
-        assert_eq!(
-            count(concurrent, "right, "),
-            0,
-            "wrong bytes read: {concurrent}"
+        assert!(
+            number(concurrent, "compared ") + number(concurrent, "failed ") > 0.0,
+            "no read was tried: {concurrent}"
         );
+        assert_eq!(number(concurrent, "wrong "), 0.0, "{concurrent}");
         let worker_writes = concurrent
             .split("worker writes [")
             .nth(1)
@@ -584,26 +607,32 @@ export async function st_scratch_exists() {
         assert_eq!(st_scratch_exists().await.as_bool(), Some(false));
     }
 
-    /// On the timer clock, reads slower than the buffer give underruns, and
-    /// a main-thread block longer than a buffer makes buffers late.
+    /// On the timer clock: reads that take 400 ms show in the read and seek
+    /// times and give underruns, and a block between one and two buffers
+    /// (70 ms) makes buffers late, as on cpal's schedule.
     #[wasm_bindgen_test]
     async fn slow_reads_underrun_and_long_blocks_make_late_buffers() {
         // Each run plays 1.2 s through a buffer of 1 s, so it needs a read.
-        let settings = Settings::new(0.1, 1.2, 1)
+        let settings = Settings::new(0.1, 1.2, 2)
             .with("buffer_s", 1)
             .with("read_delay_ms", 400)
-            .with("block_ms", 150)
+            .with("block_ms", 70)
             .with("block_every_s", 0.2);
         let lines = lines_of(&settings, &JsValue::NULL).await;
         let playback = lines_with(&lines, "playback: tempo ");
         assert_eq!(playback.len(), 4, "{lines:#?}");
         for l in &playback {
             assert!(l.contains("clock timer"), "{l}");
-            assert!(count(l, "underruns ") > 0, "{l}");
+            assert!(number(l, "underruns ") > 0.0, "{l}");
         }
         for l in playback.iter().filter(|l| l.contains(" ms block every ")) {
-            assert!(count(l, "late buffers ") > 0, "{l}");
+            assert!(number(l, "late buffers ") > 0.0, "{l}");
         }
+        for l in lines_with(&lines, "reads: tempo ") {
+            assert!(number(l, "p50 ") >= 400.0, "{l}");
+        }
+        let seeks = lines_with(&lines, "seeks: ")[0];
+        assert!(number(seeks, "p50 ") >= 400.0, "{seeks}");
         assert_eq!(st_scratch_exists().await.as_bool(), Some(false));
     }
 
@@ -621,6 +650,7 @@ export async function st_scratch_exists() {
 
     /// `?streamtest` turns the test on, with defaults that its parameters
     /// change; a value that is not a positive number keeps the default.
+    /// The top tempo is the player's.
     #[wasm_bindgen_test]
     fn the_page_address_sets_the_test() {
         assert!(Settings::from_query("").is_none());
@@ -629,6 +659,10 @@ export async function st_scratch_exists() {
         let got =
             |s: &Settings| ["minutes", "play_s", "seeks"].map(|k| field(s, k).expect("a number"));
         assert_eq!(got(&defaults), [30.0, 300.0, 50.0]);
+        assert_eq!(
+            field(&defaults, "max_tempo"),
+            Some(f64::from(engine::params::MAX_TEMPO))
+        );
         let set =
             Settings::from_query("?streamtest&st_minutes=0.5&st_play=20&st_seeks=7").expect("on");
         assert_eq!(got(&set), [0.5, 20.0, 7.0]);
