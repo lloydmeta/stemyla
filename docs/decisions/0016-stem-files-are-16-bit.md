@@ -4,7 +4,7 @@ Status: proposed (2026-10-25, by the agent)
 
 ## Context
 
-Decision 0015 puts a song's audio in OPFS session files.  `app/src/store.rs` already saves separated stems as 16-bit WAVs, and a restored session plays them.  A 30-minute song has six stereo stems: 1.9 GB at 16 bits, 3.8 GB at 32-bit float.  Playback reads all six stems and the original lane.  The six stems take about 1.1 MB per second at 16 bits, 2.1 MB per second at 32-bit float.  The 32-bit float original lane adds 0.35 MB per second.
+Decision 0015 puts a song's audio in OPFS session files.  `app/src/store.rs` already saves separated stems as 16-bit WAVs, and a restored session plays them.  A 30-minute song has six stereo stems: 1.9 GB at 16 bits, 3.8 GB at 32-bit float.  Playback reads all six stems and the original lane.  The six stems take about 1.1 MB per second at 16 bits, 2.1 MB per second at 32-bit float.  The 32-bit float original lane adds 0.35 MB per second, and a 16-bit classic-drums stem 0.18 MB per second.
 
 ## Options
 

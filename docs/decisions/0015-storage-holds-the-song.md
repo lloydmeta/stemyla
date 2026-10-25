@@ -4,7 +4,7 @@ Status: proposed (2026-10-25, by the agent)
 
 ## Context
 
-On an iPhone 17 Pro, iOS stops a tab at 2048 MB, GPU buffers included (MEM-4).  The page keeps the decoded song, a mix of it and six stems in memory, and the worker keeps a copy of the mix.  Together they grow by about 190 MB per minute of song.  A 5.2-minute song stopped the tab at chunk 2 on 2026-10-25 (`plans/active/stream-from-storage.md`, Context).  The fixed part is about 1720 MB, so the longest song that fits is about 1.7 minutes.
+On an iPhone 17 Pro, iOS stops a tab at 2048 MB, GPU buffers included (MEM-4).  The page keeps the decoded song, a mix of it and six stems in memory, and the worker keeps a copy of the mix.  Together they grow by about 190 MB per minute of song.  A song of about 5.1 minutes stopped the tab at chunk 2 on 2026-10-25 (`plans/active/stream-from-storage.md`, Context).  The fixed part is at most about 1720 MB, so the estimate allows at most about 1.7 minutes.
 
 ## Options
 
