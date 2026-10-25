@@ -18,7 +18,7 @@ Async reads on the main thread fill a read-ahead buffer (proposed).  The buffer 
 
 ## Consequences
 
-* Ten seconds of six stereo stems at 16 bits is about 10 MB.  The buffer is made before playback starts (RT-1).
+* Ten seconds of six 16-bit stems and the 32-bit float original lane is about 14 MB.  The buffer is made before playback starts (RT-1).
 * A main-thread block longer than the queued audio (about 93 ms) is still a gap, as today.  `live.rs` leaves that buffer silent.  Storage adds no new cause of a gap while reads finish within the read-ahead buffer.
 * A seek to an unbuffered position starts after one read.  M1 measures that delay.
 * Moving the callback to an AudioWorklet stays possible.  It would then read from the same buffer.
