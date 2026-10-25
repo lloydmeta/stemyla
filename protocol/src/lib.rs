@@ -32,10 +32,10 @@
 //! * `{type: "download", done, total}` while the model downloads.
 //! * `{type: "progress", done, total, secs}` per chunk.
 //! * `{type: "segment", start, len, stems: [[name, left, right], ...]}`
-//!   after each chunk on the memory path: every stem's finished samples
+//!   after each segment on the memory path: every stem's finished samples
 //!   from `start` on, of a song of `len` samples (buffers transferred).
-//! * `{type: "stored", frames, len, stems: [name, ...]}` after each chunk
-//!   on the storage path: each stem's file holds `frames` of the song's
+//! * `{type: "stored", frames, len, stems: [name, ...]}` after each
+//!   segment on the storage path: each stem's file holds `frames` of the song's
 //!   `len` frames.  `stems` gives the stem names in the worker's order.  No
 //!   samples cross.
 //! * `{type: "unstored", text}`: browser storage could not hold the stems,
@@ -768,6 +768,64 @@ fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each reply's `type`.  `mp3` and `flac` carry JS values, which a
+    /// native test cannot make; the browser tests cover them.
+    #[test]
+    fn each_reply_names_its_type() {
+        let text = || "t".to_string();
+        let kinds: Vec<&str> = [
+            Reply::Alive,
+            Reply::Model {
+                ok: true,
+                loaded: true,
+                stored: true,
+                text: text(),
+            },
+            Reply::Download {
+                done: 1.0,
+                total: 2.0,
+            },
+            Reply::Progress {
+                done: 1,
+                total: 2,
+                secs: 0.5,
+            },
+            Reply::Segment {
+                start: 0,
+                len: 4,
+                stems: Vec::new(),
+            },
+            Reply::Stored {
+                frames: 4,
+                len: 4,
+                stems: Vec::new(),
+            },
+            Reply::Unstored { text: text() },
+            Reply::Done { secs: 1.0 },
+            Reply::Error {
+                of: kind::SEPARATE.into(),
+                text: text(),
+            },
+            Reply::Status(text()),
+            Reply::Log(text()),
+            Reply::Selftest {
+                ok: true,
+                text: text(),
+            },
+            Reply::Bench(text()),
+        ]
+        .iter()
+        .map(Reply::kind)
+        .collect();
+        assert_eq!(
+            kinds,
+            [
+                "alive", "model", "download", "progress", "segment", "stored", "unstored", "done",
+                "error", "status", "log", "selftest", "bench"
+            ]
+        );
+    }
 
     #[test]
     fn a_stem_file_name_keeps_only_safe_characters() {

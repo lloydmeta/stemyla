@@ -269,7 +269,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` an
 
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3): their bodies run only with a GPU and the model, so a mutant that empties a body (`stored_stems -> Ok(())`) survives `cargo test`.
 
 ### TD-40: gaps in the RT-1 tests
 
@@ -390,15 +390,15 @@ The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The
 
 * Fix: a browser test that delivers each event to an `App` and spies on the link that `save_file` or `save_blob` clicks.  A browser test that starts a save on an `App` and steps it to the download or the worker request.  A test of the peak memory of `load_song` while a mix job runs.  A test of `usage`.
 
-### TD-54: a separation of a song over about 1.7 minutes stops the tab on an iPhone
+### TD-54: a song of more than about 1.7 minutes can stop the tab on an iPhone
 
 This entry concerns MEM-4.
 
-On 2026-10-25, a song of about 5.1 minutes stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 650 MB for that song.  The page's song and mix, the worker's mix and the stems grow by about 190 MB per minute of song.  The fixed part is at most about 1720 MB, so at most about 1.7 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
+This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 minutes stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 650 MB for that song.  The page's song and mix, the worker's mix and the stems grow by about 190 MB per minute of song.  The fixed part is at most about 1720 MB, so at most about 1.7 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
 
-M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation: the worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
+M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation.  The worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
 
-* After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit, so on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`), so the tab can stop again at each reload.  M6 and M7 remove this.
+* After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`), so the tab can stop again at each reload.  M6 and M7 remove this.
 * The worker still copies the whole mix into its memory.  M4 removes this.
 * The memory path (a song without a session, too little free space, or storage that refused the stems) still makes six song-length stems.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
 * No build between M3 and M7 goes to the published site.  Publishing is a person's step (GIT-1).

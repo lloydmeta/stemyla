@@ -35,13 +35,23 @@ async function put(h, bytes, at) {
 }
 // The session folder must exist: it is never made here, so a forgotten
 // session does not come back.
+// `ours`: the files that this writer made or holds.  A file that another
+// writer holds is not ours, so a failed open never removes it.
 export async function stems_open(session, files, header) {
   const dir = await (await session_folder(session)).getDirectoryHandle("stems", { create: true });
-  const w = { dir, files, handles: [] };
+  const w = { dir, handles: [], ours: [] };
   try {
     for (const name of files) {
-      const h = await (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle();
+      let fh;
+      try { fh = await dir.getFileHandle(name); }
+      catch (e) {
+        if (e.name !== "NotFoundError") throw e;
+        fh = await dir.getFileHandle(name, { create: true });
+        w.ours.push(name);
+      }
+      const h = await fh.createSyncAccessHandle();
       w.handles.push(h);
+      if (!w.ours.includes(name)) w.ours.push(name);
       await h.truncate(0);
       await put(h, header, 0);
     }
@@ -61,13 +71,13 @@ export async function stems_finish(w, header) {
   }
   for (const h of w.handles) await h.close();
 }
-// Closes each handle and removes each file that this writer opened.
+// Closes each handle and removes each file that this writer made or held.
 export async function stems_abandon(w) {
   for (const h of w.handles) {
     try { await h.close(); } catch (_) {}
   }
-  for (let i = 0; i < w.handles.length; i++) {
-    try { await w.dir.removeEntry(w.files[i]); } catch (_) {}
+  for (const name of w.ours) {
+    try { await w.dir.removeEntry(name); } catch (_) {}
   }
 }
 "#)]
@@ -226,7 +236,9 @@ impl StemWriter {
             .map_err(storage)
     }
 
-    /// Closes each file and removes it.  It removes nothing else.
+    /// Closes each file and removes it.  It removes nothing else.  When
+    /// `open` fails, it removes the files that it made or held, but never
+    /// a file that another writer holds.
     pub(super) async fn abandon(self) {
         stems_abandon(&self.js).await;
     }

@@ -521,6 +521,18 @@ pub fn download_blob(name: &str, blob: &web_sys::Blob) {
     save_blob(name, blob);
 }
 
+/// Writes `bytes` to the file at `path` from the root, for a test.
+#[cfg(test)]
+pub(crate) async fn test_write(path: &str, bytes: &[u8]) -> Result<()> {
+    write(path, bytes).await
+}
+
+/// The bytes of the file at `path` from the root, for a test.
+#[cfg(test)]
+pub(crate) async fn test_read(path: &str) -> Option<Vec<u8>> {
+    read(path).await
+}
+
 /// Browser tests of the private write path (`cargo run -p xtask --
 /// web-test`).  `tests/web.rs` and `tests/web_close.rs` test the public
 /// functions, except `usage`, `download` and `download_blob` (TD-53).

@@ -21,6 +21,15 @@ export async function wipe() {
   const root = await navigator.storage.getDirectory();
   for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
 }
+export async function plant(path, bytes) {
+  let d = await navigator.storage.getDirectory();
+  const parts = path.split("/");
+  const last = parts.pop();
+  for (const p of parts) d = await d.getDirectoryHandle(p, { create: true });
+  const w = await (await d.getFileHandle(last, { create: true })).createWritable();
+  await w.write(bytes);
+  await w.close();
+}
 export async function exists(path) {
   let d = await navigator.storage.getDirectory();
   const parts = path.split("/");
@@ -36,6 +45,9 @@ export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
     async fn wipe();
+    /// Writes `bytes` to the file at `path`, with its folders.
+    #[wasm_bindgen(js_name = plant)]
+    async fn plant_js(path: &str, bytes: &js_sys::Uint8Array);
     /// Whether a file or folder exists at `path` under the OPFS root.
     async fn exists(path: &str) -> JsValue;
     /// Lets tasks spawned earlier run up to their first wait.
@@ -94,6 +106,33 @@ async fn saving(id: &str, stems: Vec<Stem>) -> Rc<RefCell<Option<Result<(), Stri
     });
     tick().await;
     assert!(result.borrow().is_none(), "the save is in progress");
+    result
+}
+
+/// The worker's `.part` file of each stem in `names`, of 800 frames, in
+/// session `id`.
+async fn plant_parts(id: &str, names: &[&str]) {
+    let wave = vec![0.1; 800];
+    let wav = engine::wav::encode_pcm16(&wave, &wave, RATE);
+    for name in names {
+        let path = format!("sessions/{id}/stems/{name}.wav.part");
+        plant_js(&path, &js_sys::Uint8Array::from(wav.as_slice())).await;
+    }
+}
+
+/// Starts `keep_stored_stems` and lets it run up to its first wait, so it
+/// is in progress when the caller goes on.  Whether `meta` names the stems
+/// arrives in the cell.
+async fn keeping(id: &str, names: &[&str]) -> Rc<RefCell<Option<bool>>> {
+    let result = Rc::new(RefCell::new(None));
+    let (id, out) = (id.to_string(), result.clone());
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    wasm_bindgen_futures::spawn_local(async move {
+        let stored = store::keep_stored_stems(&id, &names).await;
+        *out.borrow_mut() = Some(stored.kept.is_ok());
+    });
+    tick().await;
+    assert!(result.borrow().is_none(), "the move is in progress");
     result
 }
 
@@ -271,6 +310,33 @@ async fn forgetting_waits_for_a_save_in_progress_then_removes_the_session() {
     );
     assert!(!has(&format!("sessions/{id}")).await);
     assert_eq!(store::current().await, None, "no longer current");
+}
+
+/// D5 of M3: an open waits for the stored stems to move into place, so it
+/// never reads a half-moved session.
+#[wasm_bindgen_test]
+async fn opening_waits_for_stored_stems_and_shows_them() {
+    let id = stored_song().await;
+    plant_parts(&id, &["bass", "vocals"]).await;
+    let kept = keeping(&id, &["bass", "vocals"]).await;
+    let (_, song, meta) = store::restore_id(&id)
+        .await
+        .expect("stored")
+        .expect("readable");
+    assert_eq!(*kept.borrow(), Some(true), "the move finished first");
+    assert_eq!(meta.stems, ["bass", "vocals"]);
+    assert_eq!(names(&song), ["bass", "vocals", "original"]);
+}
+
+/// D5 of M3: a removal waits for the stored stems to move into place.
+#[wasm_bindgen_test]
+async fn forgetting_waits_for_stored_stems_then_removes_the_session() {
+    let id = stored_song().await;
+    plant_parts(&id, &["bass", "drums"]).await;
+    let kept = keeping(&id, &["bass", "drums"]).await;
+    assert!(store::forget(&id).await, "removed");
+    assert_eq!(*kept.borrow(), Some(true), "the move finished first");
+    assert!(!has(&format!("sessions/{id}")).await);
 }
 
 #[wasm_bindgen_test]

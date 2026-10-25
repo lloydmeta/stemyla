@@ -19,12 +19,18 @@ wasm_bindgen_test_configure!(run_in_browser);
 export function post(msg, transfer) { return structuredClone(msg, { transfer }); }
 export function blob(bytes) { return new Blob([bytes]); }
 export function from_json(text) { return JSON.parse(text); }
+// A storage-path separation, as `xtask e2e stored-stems` writes it.
+export function hand_written_separate() {
+  return { type: "separate", left: new Float32Array([0.5]), right: new Float32Array([0.25]),
+    session: "sessions/1792640000000", mm: "s64", chunk: 16384 };
+}
 "#)]
 extern "C" {
     /// What the receiving side of `postMessage` gets.
     fn post(msg: &Object, transfer: &Array) -> JsValue;
     fn blob(bytes: &[u8]) -> web_sys::Blob;
     fn from_json(text: &str) -> JsValue;
+    fn hand_written_separate() -> JsValue;
 }
 
 fn samples(v: &[f32]) -> Float32Array {
@@ -243,6 +249,19 @@ fn hand_written_requests_are_read() {
     assert_eq!(got.settings.step_limit, Some(600.0));
     let init = ToWorker::from_js(&from_json(r#"{"type": "init", "chunk": "big"}"#)).unwrap();
     assert_eq!(init.settings.chunk, None, "not a number: the default");
+    let separate = ToWorker::from_js(&hand_written_separate()).unwrap();
+    match separate.request {
+        Request::Separate {
+            left,
+            right,
+            session,
+        } => {
+            assert_eq!(session.as_deref(), Some("sessions/1792640000000"));
+            assert_eq!((left.to_vec(), right.to_vec()), (vec![0.5], vec![0.25]));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(separate.settings.chunk, Some(16384));
 }
 
 #[wasm_bindgen_test]

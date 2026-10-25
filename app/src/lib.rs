@@ -493,6 +493,13 @@ pub fn separation_path(
     }
 }
 
+/// Whether the page offers Separate: not while a separation starts
+/// (`separating`, until the worker runs it) or while the page reads the
+/// stems of a storage-path separation back (`reading_stems`, D6 of M3).
+pub fn separate_enabled(separating: bool, reading_stems: bool) -> bool {
+    !separating && !reading_stems
+}
+
 /// Whether the Storage menu offers "Forget" for session `id` while `job`
 /// runs: not while a starting or storage-path separation may write into it
 /// (D7 of M3).
@@ -846,6 +853,9 @@ impl StemApp {
             Some(Err(e)) => {
                 log::error!("separator: could not read the stored stems: {e:#}");
                 self.status = format!("Separated, but could not read the stems back: {e:#}");
+                if let Some(not_kept) = not_kept {
+                    self.status = format!("{}.  {not_kept}", self.status);
+                }
             }
             Some(Ok(stems)) => {
                 let kept_status = not_kept
@@ -1414,7 +1424,7 @@ impl StemApp {
         if self.song.is_none() {
             return;
         }
-        if self.separating.is_some() || self.reading_stems {
+        if !separate_enabled(self.separating.is_some(), self.reading_stems) {
             let why = if self.reading_stems {
                 "Reading the separated stems from browser storage…"
             } else {
@@ -1493,7 +1503,20 @@ impl StemApp {
         };
         match separation_path(has_session, song.frames, free, self.memory_limit) {
             SeparationPath::Storage => self.post_separation(JobStage::Storage, None),
-            SeparationPath::Memory => self.post_separation(JobStage::Memory, Some(reason)),
+            SeparationPath::Memory => {
+                // Finding 1-4 of review round 1: storage has no room for
+                // the stems, so the page does not save them, as for D4.
+                let reason = if has_session {
+                    if let Some(job) = &mut self.separating {
+                        job.session = None;
+                        job.keeps_stems = false;
+                    }
+                    format!("{reason}, so the stems will not be kept")
+                } else {
+                    reason
+                };
+                self.post_separation(JobStage::Memory, Some(reason));
+            }
             SeparationPath::TooLong => {
                 self.separating = None;
                 self.status = format!(
@@ -1844,15 +1867,24 @@ impl StemApp {
         }
     }
 
+    /// Ends the worker at once, and with it any separation, so that Forget
+    /// and Separate come back if a reset fails.
+    #[cfg(target_arch = "wasm32")]
+    fn stop_separation(&mut self) {
+        if let Some(sep) = &mut self.separator {
+            sep.stop();
+        }
+        self.separating = None;
+        self.reading_stems = false;
+    }
+
     /// Stops playback and the worker, then runs the reset; the page reloads
     /// when it succeeds.
     #[cfg(target_arch = "wasm32")]
     fn start_reset(&mut self, ctx: &egui::Context, choice: reset::Reset) {
         self.reset = ResetStage::Running;
         self.output = None;
-        if let Some(sep) = &mut self.separator {
-            sep.stop();
-        }
+        self.stop_separation();
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(failure) = reset::run(choice).await {
@@ -2660,6 +2692,75 @@ mod tests {
     }
 
     #[test]
+    fn a_clock_gives_minutes_and_seconds() {
+        assert_eq!(clock(0), "0:00");
+        assert_eq!(clock(44_099), "0:00", "whole seconds");
+        assert_eq!(clock(100 * 44_100), "1:40");
+        assert_eq!(clock(3_725 * 44_100), "62:05");
+    }
+
+    #[test]
+    fn a_song_too_long_gives_its_length_and_the_limit() {
+        assert_eq!(
+            too_long_text(250 * 44_100, MEMORY_PATH_MAX_FRAMES),
+            "this song is 4:10 long, and without browser storage this page separates songs of up to 1:40"
+        );
+    }
+
+    #[test]
+    fn a_separation_names_its_song() {
+        let named = SeparationJob {
+            name: Some("lloyd - tune".into()),
+            ..job(1, None)
+        };
+        assert_eq!(song_name(&named), "lloyd - tune");
+        assert_eq!(song_name(&job(1, None)), "the separated song");
+    }
+
+    /// A short song shown in a new app, and a job for it that keeps its
+    /// stems or not.
+    fn separated(keeps_stems: bool) -> String {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.open_song(Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("mix", 0.4)],
+        });
+        let job = SeparationJob {
+            keeps_stems,
+            ..app.separation_job().expect("a job")
+        };
+        app.apply_separated(job, vec![stem("bass", 0.1), stem("drums", 0.2)], 3.0);
+        app.status
+    }
+
+    #[test]
+    fn stems_that_are_not_kept_say_so() {
+        let not_kept = separated(false);
+        assert!(
+            not_kept.starts_with("Separated into 2 stems in 3 s.")
+                && not_kept.ends_with("The stems are not kept in this browser."),
+            "{not_kept}"
+        );
+        let kept = separated(true);
+        assert!(!kept.contains("not kept"), "{kept}");
+    }
+
+    #[test]
+    fn separate_waits_for_a_start_and_for_stored_stems() {
+        assert!(separate_enabled(false, false));
+        assert!(!separate_enabled(true, false), "a separation is starting");
+        assert!(
+            !separate_enabled(false, true),
+            "stored stems are being read"
+        );
+        assert!(!separate_enabled(true, true));
+    }
+
+    #[test]
     fn forget_is_disabled_for_the_session_being_separated() {
         for stage in [JobStage::Starting, JobStage::Storage] {
             let running = staged("a", stage);
@@ -2925,6 +3026,181 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
         app.poll_separator(&egui::Context::default());
     }
 
+    /// The stems that the worker writes, in its order.
+    const NAMES: [&str; 6] = ["bass", "drums", "other", "vocals", "guitar", "piano"];
+
+    /// Stem `k`'s samples: a different tone for each stem.
+    fn stem_wave(k: usize) -> Vec<f32> {
+        let f = 0.002 * (k + 1) as f32;
+        (0..FRAMES)
+            .map(|i| 0.1 * (k + 1) as f32 * (f * i as f32).sin())
+            .collect()
+    }
+
+    /// `x` as the 16-bit samples that a stem file holds.
+    fn as_16_bits(x: &[f32]) -> Vec<f32> {
+        x.iter()
+            .map(|v| (v * 32768.0).round().clamp(-32768.0, 32767.0) / 32768.0)
+            .collect()
+    }
+
+    /// The worker's finished `.part` file of each stem in `names`.
+    async fn plant_parts(id: &str, names: &[&str]) {
+        for (k, name) in NAMES.iter().enumerate().filter(|(_, n)| names.contains(n)) {
+            let wave = stem_wave(k);
+            let negated: Vec<f32> = wave.iter().map(|v| -v).collect();
+            let path = format!("sessions/{id}/stems/{name}.wav.part");
+            let wav = engine::wav::encode_pcm16(&wave, &negated, 44_100);
+            store::test_write(&path, &wav).await.expect("planted");
+        }
+    }
+
+    /// The worker's last `stored` reply and its `done`, then a frame.
+    fn deliver_stored_and_done(app: &mut StemApp) {
+        let sep = app.separator.as_ref().expect("a separator");
+        let (stored, _) = Reply::Stored {
+            frames: FRAMES,
+            len: FRAMES,
+            stems: NAMES.iter().map(|n| n.to_string()).collect(),
+        }
+        .to_js();
+        deliver(sep.worker(), &stored);
+        deliver(sep.worker(), &Reply::Done { secs: 2.0 }.to_js().0);
+        app.poll_separator(&egui::Context::default());
+    }
+
+    /// The `stem` lines of session `id`'s `meta`.
+    async fn stem_lines(id: &str) -> Vec<String> {
+        store::list()
+            .await
+            .into_iter()
+            .find(|(got, _)| got == id)
+            .map(|(_, meta)| meta.stems)
+            .unwrap_or_default()
+    }
+
+    /// Findings 1-1 and 1-b3 of review round 1: at `done`, the page moves
+    /// the stem files into place, writes `meta`, and shows the stems that
+    /// it reads back, with Separate disabled until they are read.
+    #[wasm_bindgen_test]
+    async fn stored_stems_are_moved_read_and_shown() {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        plant_parts(&id, &NAMES).await;
+        press_separate(&mut app).await;
+        let stage = app.separating.as_ref().map(|j| j.stage);
+        deliver_stored_and_done(&mut app);
+        let reading = app.reading_stems;
+        let enabled = separate_enabled(app.separating.is_some(), app.reading_stems);
+        settle(&mut app).await;
+        let read = app.reading_stems;
+        let mut files = Vec::new();
+        for name in NAMES {
+            let base = format!("sessions/{id}/stems/{name}.wav");
+            files.push((
+                store::test_read(&base).await.is_some(),
+                store::test_read(&format!("{base}.part")).await.is_some(),
+            ));
+        }
+        let lines = stem_lines(&id).await;
+        let song = app.song.clone().expect("a song");
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(stage, Some(JobStage::Storage));
+        assert!(reading, "the stems are being read");
+        assert!(!enabled, "Separate waits for the read");
+        assert!(!read, "the read ended");
+        assert_eq!(files, [(true, false); 6], "each .part moved onto its .wav");
+        assert_eq!(lines, NAMES);
+        let shown: Vec<&str> = song.stems.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            shown,
+            [
+                "bass", "drums", "other", "vocals", "guitar", "piano", "original"
+            ]
+        );
+        for (k, stem) in song.stems.iter().take(6).enumerate() {
+            let want = as_16_bits(&stem_wave(k));
+            let negated: Vec<f32> = want.iter().map(|v| -v).collect();
+            assert!(*stem.left == want[..], "{}: the 16-bit samples", stem.name);
+            assert!(
+                *stem.right == negated[..],
+                "{}: the 16-bit samples",
+                stem.name
+            );
+        }
+        assert!(status.starts_with("Separated into 6 stems"), "{status}");
+    }
+
+    /// Finding 1-1: the song separated is no longer shown, so the page
+    /// reads no stems, and says where they are kept.
+    #[wasm_bindgen_test]
+    async fn stored_stems_of_a_song_no_longer_shown_are_kept_unread() {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        plant_parts(&id, &NAMES).await;
+        press_separate(&mut app).await;
+        app.open_song(Song {
+            sample_rate: 44_100,
+            frames: FRAMES,
+            stems: vec![Stem {
+                name: "beachape".into(),
+                left: tone(FRAMES).into(),
+                right: tone(FRAMES).into(),
+            }],
+        });
+        app.session = None;
+        deliver_stored_and_done(&mut app);
+        let reading = app.reading_stems;
+        settle(&mut app).await;
+        let lines = stem_lines(&id).await;
+        let shown = app.song.as_ref().map_or(0, |s| s.stems.len());
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert!(!reading, "no read for a song not shown");
+        assert_eq!(lines, NAMES, "kept");
+        assert_eq!(shown, 1, "the shown song is as it was");
+        assert!(status.contains("kept them in this browser"), "{status}");
+    }
+
+    /// Finding 1-1: a stem file that cannot move leaves `meta` without
+    /// `stem` lines, and the status line says that the stems are not kept.
+    #[wasm_bindgen_test]
+    async fn a_stem_that_cannot_move_says_the_stems_are_not_kept() {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        plant_parts(&id, &NAMES[..5]).await;
+        press_separate(&mut app).await;
+        deliver_stored_and_done(&mut app);
+        settle(&mut app).await;
+        let lines = stem_lines(&id).await;
+        let read = app.reading_stems;
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(!read);
+        assert!(
+            status.contains("Stems not kept in browser storage")
+                && status.contains("piano.wav.part"),
+            "{status}"
+        );
+    }
+
+    /// Finding 1-14 of review round 1: a reset stops the worker, so no
+    /// separation runs after it, and Forget and Separate come back if the
+    /// reset fails.
+    #[wasm_bindgen_test]
+    async fn stopping_the_worker_ends_the_separation() {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        press_separate(&mut app).await;
+        let before = forget_enabled(&id, app.separating.as_ref());
+        app.reading_stems = true;
+        app.stop_separation();
+        let forget = forget_enabled(&id, app.separating.as_ref());
+        let separate = separate_enabled(app.separating.is_some(), app.reading_stems);
+        finish(app, &id).await;
+        assert!(!before, "Forget waits while the separation runs");
+        assert!(forget, "Forget comes back");
+        assert!(separate, "Separate comes back");
+    }
+
     /// Ends the test's worker and session.
     async fn finish(mut app: StemApp, id: &str) {
         if let Some(sep) = &mut app.separator {
@@ -3001,6 +3277,10 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
         let (mut short, short_posts, short_id) = app_with_a_stored_song().await;
         press_separate(&mut short).await;
         let short_sent = sessions(&short_posts);
+        let short_job = short
+            .separating
+            .as_ref()
+            .map(|j| (j.stage, j.keeps_stems, j.session.clone()));
         let short_status = short.status.clone();
         finish(short, &short_id).await;
         let (mut long, long_posts, long_id) = app_with_a_stored_song().await;
@@ -3011,6 +3291,12 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
         finish(long, &long_id).await;
         unstub_estimate();
         assert_eq!(short_sent, [None], "the memory path");
+        assert_eq!(
+            short_job,
+            Some((JobStage::Memory, false, None)),
+            "finding 1-4: no save into a full storage"
+        );
+        assert!(short_status.contains("will not be kept"), "{short_status}");
         assert!(
             short_status.contains("Separating in memory: browser storage has 0 MB free"),
             "{short_status}"

@@ -198,10 +198,11 @@ The parent's M3 acceptance, check by check:
   * `e2e memory-budget`: passed, both songs on the storage path.  The page grew by 0 MB during each separation (1 minute: 50 MB at the start and at the end; 4 minutes: 177 MB and 177 MB).  Peaks: 1 minute, page wasm 177 MB, worker wasm 57 MB, GPU live 732 MB, 966 MB in all; 4 minutes, page wasm 686 MB, worker wasm 99 MB, GPU live 732 MB, 1517 MB in all.  The 4-minute peak is 551 MB above the 1-minute peak (M2: 592 MB).  The page's peak comes after the separation, when it reads the six stems back (D6), as TD-54 says.
   * `e2e storage`: passed.
 * [x] 2026-10-25: step 5, the docs.  Commit `ffeb4a8` was step 4.  MEM-5's "Enforced by" names `stem_writes_pass_whole_arrays` (the worker's sync writes) and `stored_stems_replace_the_kept_stems` (the page's `meta` write).  Step 3 already updated `docs/ARCHITECTURE.md` and TD-54, and steps 2 and 4 the README's scenarios.  `docs/working-with-agents.md` lists no scenarios, so it does not change.
+* [x] 2026-10-26: review round 1 fixes, in the commit "review round 1 fixes" after `3d8364a`.  Fixed, each with a test: 1-1 and 1-b3 (three page tests of the storage path's end, and `separate_enabled`), 1-3 (a queue of posted separations; two separator tests), 1-4 (no save into a full storage), 1-b1 (two tests that an open and a removal wait for `keep_stored_stems`), 1-b2 (a refused header write in `finish`), the confirmed missed mutants (native tests of `clock`, `too_long_text`, `song_name`, the "not kept" note, `Reply::kind`, and the `stored-stems` and `memory-budget` checks), and the nits 1-5, 1-6, 1-8, 1-9, 1-10, 1-11, 1-12, 1-14 and 1-b5.  Not changed: 1-2 (the parent plan) and 1-7 (a commit message).  web-test: app lib 36, app web 14, worker 55, protocol 18 passed.  `e2e stored-stems --hashes` passed (the hashes did not change), and `e2e separate` passed on the storage path (page wasm 10 MB at the start and at the end).
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-10-25, step 2: with `mm` set but no `attn`, each new worker calibrates its attention path (`ensure_kernels` in `worker/src/web.rs` calls `choose_kernels` unless both are set).  So two runs of `stored-stems` could do different arithmetic.  With `mm: s64, attn: split`, two runs gave the same six hashes (Progress, step 2).
 
 ## Decision log
 
@@ -218,7 +219,7 @@ None yet.
 * 2026-10-25, implementer, step 1: `StemWriter::open` keeps the song's `len`, so `finish` takes no argument.  A failure is `StemError::Storage` (the browser refused; the worker sends `unstored`) or `StemError::Refused` (a song too long for a WAV, or segments that do not follow on; the worker sends `error`).
 * 2026-10-25, implementer, step 1: when `open` fails part of the way, it closes the handles it took and removes the files it opened.  The caller then has no writer to abandon.
 * 2026-10-25, implementer: a Progress line cannot hold the hash of its own commit.  So each step's line gives the step, and the next step's commit adds the hash.
-* 2026-10-25, implementer, step 2: `stored-stems` fixes the kernels with `mm: s64, attn: split`.  Without `attn`, each worker calibrates its attention path, and two runs could do different arithmetic.  With both set, two runs gave the same hashes.
+* 2026-10-25, implementer, step 2: `stored-stems` fixes the kernels with `mm: s64, attn: split` (see "Surprises and discoveries").
 * 2026-10-25, implementer, step 2: `xtask` takes `sha2` (RustCrypto, first published 2016-05-06, 0.11.1 on 2026-10-12, per crates.io), pinned to the 0.10.9 that `Cargo.lock` already held.  The page sends each stem's floats to the runner as base64 (`e2e.base64`), so JS rounds nothing.
 * 2026-10-25, implementer, step 2: the memory half of `stored-stems` is its own commit, before the wire format changes.
 * 2026-10-25, implementer, step 2: the worker opens the stem writer before the first chunk.  A storage failure at the open sends `unstored`, and a song too long for a WAV sends `error`.  The loop's failures are `Stop::Storage` (`unstored`) and `Stop::Failed` (`error`); both abandon the writer first.
@@ -230,6 +231,9 @@ None yet.
 * 2026-10-25, implementer, step 3: the page logs the end line of D9 at `done` on both paths, before it reads or shows any stems.
 * 2026-10-25, implementer, step 4: the page logs `separator: separating on the storage path` (or `memory`) as it posts a separation.  `e2e separate` checks it, so that scenario fails if the stored clip falls back to the memory path.  `memory-budget` checks the growth of D9 for each song.
 * 2026-10-25, implementer, step 4: `stored-stems` tells the two separations apart by the `progress` reply of 0 chunks that starts each one.  `xtask` does not take `stem-protocol`, so the scenario writes the stem file names as `<name>.wav`, which `stem_file` gives for the six stem names.
+* 2026-10-25, implementer, review round 1 (finding 1-4): when D2 sends a song with a session to the memory path because storage has too little free space, the job keeps no session and does not save its stems, as D4's fallback does.  A save into a full storage could fail part of the way.  The status line says that the stems will not be kept.
+* 2026-10-25, implementer, review round 1 (finding 1-3): the separator keeps a queue of the separations that it posted and the worker has not ended.  The worker runs them in order, and ends each with exactly one `done`, `error` or `unstored`.  So each reply belongs to the oldest one, and a stale reply cannot end a newer separation.  `separate` no longer clears `Assembly`.
+* 2026-10-25, implementer, review round 1: the checks of `stored-stems` and `memory-budget` are pure functions with native tests.  The scenario bodies run only with a GPU and the model, so a mutant that empties them survives `cargo test` (TD-39).
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective

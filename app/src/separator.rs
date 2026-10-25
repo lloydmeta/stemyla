@@ -115,8 +115,10 @@ pub struct Separator {
     _onerror: Closure<dyn FnMut(web_sys::Event)>,
     /// The separation's stems as their segments arrive (memory path).
     assembly: Rc<RefCell<Assembly>>,
-    /// `Some` on the storage path, with the last `stored` reply.
-    storage: Rc<RefCell<Option<StoredSoFar>>>,
+    /// The separations posted and not yet ended, oldest first.  The worker
+    /// runs them in that order, and ends each with one `done`, `error` or
+    /// `unstored`, so each reply belongs to the oldest one.
+    separations: Rc<RefCell<VecDeque<Posted>>>,
     /// Sent with every request but MP3 and FLAC encoding.
     settings: Settings,
     pub model_ready: bool,
@@ -158,6 +160,14 @@ fn url_settings() -> Settings {
 /// The last `stored` reply of a storage-path separation: the frames in
 /// each stem's file, the song's frames and the stem names.
 type StoredSoFar = Option<(usize, usize, Vec<String>)>;
+
+/// A separation posted to the worker.
+enum Posted {
+    /// The stems come back in `segment` replies, into `Assembly`.
+    Memory,
+    /// The worker writes the stems, with the last `stored` reply so far.
+    Storage(StoredSoFar),
+}
 
 /// What `done` means on the storage path: the stems, if the last `stored`
 /// reply covers the whole song.
@@ -250,8 +260,8 @@ impl Separator {
         let events: Rc<RefCell<VecDeque<Event>>> = Default::default();
         let settings = url_settings();
         let assembly: Rc<RefCell<Assembly>> = Default::default();
-        let storage: Rc<RefCell<Option<StoredSoFar>>> = Default::default();
-        let (asm, path) = (assembly.clone(), storage.clone());
+        let separations: Rc<RefCell<VecDeque<Posted>>> = Default::default();
+        let (asm, posted) = (assembly.clone(), separations.clone());
         let (ev, w, init_settings, repaint) = (
             events.clone(),
             worker.clone(),
@@ -309,43 +319,46 @@ impl Separator {
                     })
                 }
                 Reply::Stored { frames, len, stems } => {
-                    if let Some(last) = path.borrow_mut().as_mut() {
+                    if let Some(Posted::Storage(last)) = posted.borrow_mut().front_mut() {
                         *last = Some((frames, len, stems));
                     }
                     None
                 }
-                Reply::Done { secs } if path.borrow().is_some() => {
-                    let last = path.borrow_mut().take().flatten();
-                    Some(stored_at_done(last, secs))
-                }
                 Reply::Done { secs } => {
-                    let done = asm.borrow_mut().done();
-                    match done {
-                        None => None,
-                        Some(Ok(stems)) => {
-                            let mut q = ev.borrow_mut();
-                            for (name, left, right) in stems {
-                                q.push_back(Event::Stem { name, left, right });
+                    let ended = posted.borrow_mut().pop_front();
+                    if let Some(Posted::Storage(last)) = ended {
+                        Some(stored_at_done(last, secs))
+                    } else {
+                        let done = asm.borrow_mut().done();
+                        match done {
+                            None => None,
+                            Some(Ok(stems)) => {
+                                let mut q = ev.borrow_mut();
+                                for (name, left, right) in stems {
+                                    q.push_back(Event::Stem { name, left, right });
+                                }
+                                Some(Event::Done { secs })
                             }
-                            Some(Event::Done { secs })
+                            Some(Err(text)) => Some(Event::Error {
+                                of: kind::SEPARATE.into(),
+                                text,
+                            }),
                         }
-                        Some(Err(text)) => Some(Event::Error {
-                            of: kind::SEPARATE.into(),
-                            text,
-                        }),
                     }
                 }
                 Reply::Unstored { text } => {
-                    path.borrow_mut().take();
+                    posted.borrow_mut().pop_front();
                     Some(Event::Unstored(text))
                 }
+                // An MP3, FLAC or self-test error leaves a running
+                // separation be.
+                Reply::Error { of, text } if of != kind::SEPARATE => {
+                    Some(Event::Error { of, text })
+                }
                 Reply::Error { of, text } => {
-                    // An MP3, FLAC or self-test error leaves a running
-                    // separation be.
-                    if of == kind::SEPARATE {
-                        path.borrow_mut().take();
-                    }
-                    let first = of != kind::SEPARATE || asm.borrow_mut().abandon();
+                    let ended = posted.borrow_mut().pop_front();
+                    let first =
+                        matches!(ended, Some(Posted::Storage(_))) || asm.borrow_mut().abandon();
                     first.then_some(Event::Error { of, text })
                 }
                 Reply::Status(text) => Some(Event::Status(text)),
@@ -369,10 +382,16 @@ impl Separator {
         // An uncaught error does not end the worker by itself, and one that
         // trapped while holding the storage lock would keep every other tab
         // waiting; terminating it releases the lock.
-        let (ev, dead, asm) = (events.clone(), worker.clone(), assembly.clone());
+        let (ev, dead, asm, posted) = (
+            events.clone(),
+            worker.clone(),
+            assembly.clone(),
+            separations.clone(),
+        );
         let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
             dead.terminate();
             asm.borrow_mut().clear();
+            posted.borrow_mut().clear();
             let reason = e
                 .dyn_ref::<web_sys::ErrorEvent>()
                 .map(|e| e.message())
@@ -388,7 +407,7 @@ impl Separator {
             _onmessage: onmessage,
             _onerror: onerror,
             assembly,
-            storage,
+            separations,
             settings,
             model_ready: false,
             model_stored: false,
@@ -446,7 +465,7 @@ impl Separator {
     pub fn stop(&mut self) {
         self.worker.terminate();
         self.assembly.borrow_mut().clear();
-        self.storage.borrow_mut().take();
+        self.separations.borrow_mut().clear();
         self.running = false;
         self.model_loading = false;
         self.stopped
@@ -519,14 +538,14 @@ impl Separator {
             right: Float32Array::from(right),
             session: session.map(String::from),
         };
-        // Before the post: a reply can only come after it.
-        *self.storage.borrow_mut() = session.map(|_| None);
-        self.assembly.borrow_mut().clear();
         let sent = post(&self.worker, &request, &self.settings);
-        if !sent {
-            self.storage.borrow_mut().take();
-        }
         if sent {
+            // Behind any separation that the worker has not ended: its
+            // replies come first.  `Assembly` stays as it is for that one.
+            self.separations.borrow_mut().push_back(match session {
+                Some(_) => Posted::Storage(None),
+                None => Posted::Memory,
+            });
             self.running = true;
             self.progress = (0, 0, 0.0);
             self.stems.clear();
@@ -778,6 +797,90 @@ export function spy_on_post(worker) {
         let (of, text) = short.expect("an error for stems short of the song");
         assert_eq!(of, kind::SEPARATE);
         assert!(text.contains(&format!("{} of {len}", len - 1)), "{text}");
+    }
+
+    /// A `segment` reply of one stem, `n` frames from `start`, of a song
+    /// of `len`.
+    fn segment(start: usize, n: usize, len: usize) -> JsValue {
+        let samples = vec![0.25_f32; n];
+        Reply::Segment {
+            start,
+            len,
+            stems: vec![SegmentStem {
+                name: "bass".into(),
+                left: Float32Array::from(samples.as_slice()),
+                right: Float32Array::from(samples.as_slice()),
+            }],
+        }
+        .to_js()
+        .0
+        .into()
+    }
+
+    fn progress(done: u32) -> JsValue {
+        Reply::Progress {
+            done,
+            total: 4,
+            secs: 0.0,
+        }
+        .to_js()
+        .0
+        .into()
+    }
+
+    /// Finding 1-3 of review round 1: a memory-path separation fails on the
+    /// page, and the user starts a storage-path one before the worker ends
+    /// the first.  The first one's later replies must not end the second.
+    /// `trailing`: whether a segment of the first one arrives after the
+    /// second starts.
+    fn an_old_separation_leaves_the_new_one(trailing: bool) {
+        let len = 8;
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let _posts = spy_on_post(&sep.worker);
+        assert!(sep.separate(&[0.5; 8], &[0.25; 8], None));
+        deliver(&sep.worker, &segment(0, 2, len));
+        // A gap: it cannot be placed, so the page fails the separation.
+        deliver(&sep.worker, &segment(5, 1, len));
+        let first = sep.take_events();
+        assert!(sep.separate(&[0.5; 8], &[0.25; 8], Some("sessions/1792640000000")));
+        if trailing {
+            deliver(&sep.worker, &segment(6, 2, len));
+        }
+        deliver(&sep.worker, &done());
+        deliver(&sep.worker, &progress(0));
+        deliver(&sep.worker, &stored(len, len));
+        deliver(&sep.worker, &done());
+        let second = sep.take_events();
+        sep.stop();
+        let errors = |events: &[Event]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Error { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(errors(&first).len(), 1, "the gap fails the first one");
+        assert_eq!(errors(&second), Vec::<String>::new(), "trailing {trailing}");
+        let stored: Vec<(usize, usize)> = second
+            .iter()
+            .filter_map(|e| match e {
+                Event::StemsStored { frames, len, .. } => Some((*frames, *len)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored, [(len, len)], "trailing {trailing}");
+    }
+
+    #[wasm_bindgen_test]
+    fn an_old_separations_done_does_not_end_the_new_one() {
+        an_old_separation_leaves_the_new_one(false);
+    }
+
+    #[wasm_bindgen_test]
+    fn an_old_separations_segment_does_not_end_the_new_one() {
+        an_old_separation_leaves_the_new_one(true);
     }
 
     #[wasm_bindgen_test]

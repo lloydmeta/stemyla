@@ -1277,6 +1277,22 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
 /// separation (D9 of M3): the tolerance of M10.
 const MAX_PAGE_GROWTH_MB: f64 = 4.0;
 
+/// Whether `line` ends the wait of `memory-budget` for a separation: its
+/// stems are shown, or the page reports an error.
+fn separation_shown(line: &str) -> bool {
+    line.contains("with the stems shown") || is_page_error(line)
+}
+
+/// The check of D9 on the page's growth during a separation.
+fn growth_check(growth: Option<f64>) -> (bool, String) {
+    (
+        growth.is_some_and(|g| g <= MAX_PAGE_GROWTH_MB),
+        format!(
+            "the page grew by {growth:?} MB during the separation, at most {MAX_PAGE_GROWTH_MB} MB"
+        ),
+    )
+}
+
 /// How much the page's WebAssembly memory grew from the start of a
 /// separation to its end, from the page's log lines.
 fn page_growth(log: &[String]) -> Option<f64> {
@@ -1336,9 +1352,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
         );
         let from = p.mark();
         p.click(o.separate_x, "Separate 6 stems")?;
-        let shown = p.wait_for(from, 4 * 3600, |l| {
-            l.contains("with the stems shown") || is_page_error(l)
-        })?;
+        let shown = p.wait_for(from, 4 * 3600, separation_shown)?;
         p.check(
             shown
                 .as_deref()
@@ -1346,12 +1360,8 @@ fn memory_budget(o: &Opts) -> Result<()> {
             &format!("the {minutes}-minute song separates"),
         );
         let growth = page_growth(&p.log[from..]);
-        p.check(
-            growth.is_some_and(|g| g <= MAX_PAGE_GROWTH_MB),
-            &format!(
-                "the page grew by {growth:?} MB during the separation, at most {MAX_PAGE_GROWTH_MB} MB"
-            ),
-        );
+        let (ok, what) = growth_check(growth);
+        p.check(ok, &what);
         if let Some(g) = growth {
             p.note(&format!(
                 "memory-budget: the {minutes}-minute song: page wasm grew by {g:.0} MB during the separation"
@@ -1459,6 +1469,87 @@ fn stem_wavs(stems: &Value, names: &[&str]) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
+/// Checks, each with whether it passed and what it checks.
+type Checks = Vec<(bool, String)>;
+
+/// The checks of `stored-stems` on what its page script returns (`r`),
+/// for a clip of `frames`, and the memory path's SHA-256s.  With `hashes`
+/// (`--hashes`), the SHA-256s must equal them.
+fn stored_stems_checks(
+    r: &Value,
+    frames: usize,
+    hashes: Option<&str>,
+) -> Result<(Checks, Vec<String>)> {
+    let mut checks = vec![
+        (
+            r["replies"][0]["ok"] == json!(true),
+            "the worker loads the model".to_string(),
+        ),
+        (
+            r["replies"][1]["type"] == json!("done"),
+            "the memory path finishes".into(),
+        ),
+        (
+            r["len"] == json!(frames),
+            format!("the song is {frames} frames"),
+        ),
+    ];
+    let segments = r["segments"].as_u64().unwrap_or(0);
+    checks.push((segments > 1, format!("several segments ({segments})")));
+    checks.push((
+        r["replies"][2]["type"] == json!("done"),
+        format!(
+            "the storage path finishes ({})",
+            texts(&json!([r["replies"][2]])).join("")
+        ),
+    ));
+    checks.push((
+        r["storage_segments"] == json!(0),
+        "the storage path sends no segment reply".into(),
+    ));
+    let stored = r["stored"].as_array().cloned().unwrap_or_default();
+    checks.push((
+        stored.len() > 1,
+        format!("a stored reply after each segment ({})", stored.len()),
+    ));
+    let last = stored.last().cloned().unwrap_or(Value::Null);
+    checks.push((
+        last["frames"] == json!(frames) && last["len"] == json!(frames),
+        format!("the last stored reply covers the song ({last})"),
+    ));
+    checks.push((
+        last["stems"] == json!(roformer::STEMS),
+        "the stored replies name the stems in the worker's order".into(),
+    ));
+    let wavs = stem_wavs(&r["memory"], &roformer::STEMS)?;
+    for (name, want) in roformer::STEMS.iter().zip(&wavs) {
+        let got = r["files"][name]
+            .as_str()
+            .map(crate::webdriver::base64_decode)
+            .transpose()?;
+        let first_wrong = got
+            .as_deref()
+            .and_then(|g| g.iter().zip(want).position(|(a, b)| a != b));
+        checks.push((
+            got.as_deref() == Some(want.as_slice()),
+            format!(
+                "the stored {name} equals the memory path's as a 16-bit WAV ({} of {} bytes, first difference at {first_wrong:?})",
+                got.as_ref().map_or(0, Vec::len),
+                want.len()
+            ),
+        ));
+    }
+    let got = stem_hashes(&r["memory"], &roformer::STEMS)?;
+    if let Some(want) = hashes {
+        let want: Vec<&str> = want.split(',').map(str::trim).collect();
+        checks.push((
+            want == got,
+            "the memory path's stems equal the hashes given".into(),
+        ));
+    }
+    Ok((checks, got))
+}
+
 /// One worker, from a blank page, separates 3 seconds of the synthetic
 /// mix with `chunk: 16384, overlap: 2`, so that it sends several segments:
 /// first on the memory path, then on the storage path into a planted
@@ -1523,78 +1614,16 @@ fn stored_stems(o: &Opts) -> Result<()> {
         3600,
     )?;
     p.note(&format!("replies: {:?}", texts(&r["replies"])));
-    p.check(
-        r["replies"][0]["ok"] == json!(true),
-        "the worker loads the model",
-    );
-    p.check(
-        r["replies"][1]["type"] == json!("done"),
-        "the memory path finishes",
-    );
-    p.check(
-        r["len"] == json!(frames),
-        &format!("the song is {frames} frames"),
-    );
-    let segments = r["segments"].as_u64().unwrap_or(0);
-    p.check(segments > 1, &format!("several segments ({segments})"));
-    p.check(
-        r["replies"][2]["type"] == json!("done"),
-        &format!(
-            "the storage path finishes ({})",
-            texts(&json!([r["replies"][2]])).join("")
-        ),
-    );
-    p.check(
-        r["storage_segments"] == json!(0),
-        "the storage path sends no segment reply",
-    );
-    let stored = r["stored"].as_array().cloned().unwrap_or_default();
-    p.check(
-        stored.len() > 1,
-        &format!("a stored reply after each segment ({})", stored.len()),
-    );
-    let last = stored.last().cloned().unwrap_or(Value::Null);
-    p.check(
-        last["frames"] == json!(frames) && last["len"] == json!(frames),
-        &format!("the last stored reply covers the song ({last})"),
-    );
-    p.check(
-        last["stems"] == json!(roformer::STEMS),
-        "the stored replies name the stems in the worker's order",
-    );
-    let wavs = stem_wavs(&r["memory"], &roformer::STEMS)?;
-    for (name, want) in roformer::STEMS.iter().zip(&wavs) {
-        let got = r["files"][name]
-            .as_str()
-            .map(crate::webdriver::base64_decode)
-            .transpose()?;
-        let same = got.as_deref() == Some(want.as_slice());
-        let first_wrong = got
-            .as_deref()
-            .and_then(|g| g.iter().zip(want).position(|(a, b)| a != b));
-        p.check(
-            same,
-            &format!(
-                "the stored {name} equals the memory path's as a 16-bit WAV ({} of {} bytes, first difference at {first_wrong:?})",
-                got.as_ref().map_or(0, Vec::len),
-                want.len()
-            ),
-        );
-    }
-    let hashes = stem_hashes(&r["memory"], &roformer::STEMS)?;
+    let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
     for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
         p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
     }
     p.note(&format!("stored-stems: --hashes {}", hashes.join(",")));
-    match &o.hashes {
-        Some(want) => {
-            let want: Vec<&str> = want.split(',').map(str::trim).collect();
-            p.check(
-                want == hashes,
-                "the memory path's stems equal the hashes given",
-            );
-        }
-        None => p.note("no --hashes: the hashes are not checked"),
+    if o.hashes.is_none() {
+        p.note("no --hashes: the hashes are not checked");
+    }
+    for (ok, what) in checks {
+        p.check(ok, &what);
     }
     p.finish()
 }
@@ -1762,6 +1791,210 @@ fn worker_check(o: &Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Base64 of `bytes`, as the page's `e2e.base64` gives it.
+    fn base64(bytes: &[u8]) -> String {
+        const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    fn floats(v: &[f32]) -> String {
+        base64(&v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())
+    }
+
+    /// Stem `k`'s two channels in the sample result.
+    fn channels(k: usize) -> (Vec<f32>, Vec<f32>) {
+        let left: Vec<f32> = (0..4).map(|i| 0.1 * (k + i) as f32).collect();
+        let right = left.iter().map(|x| -x).collect();
+        (left, right)
+    }
+
+    /// What the page script of `stored-stems` returns when all goes well,
+    /// for a clip of 4 frames.
+    fn stored_stems_reply() -> Value {
+        let mut memory = serde_json::Map::new();
+        let mut files = serde_json::Map::new();
+        for (k, name) in roformer::STEMS.iter().enumerate() {
+            let (l, r) = channels(k);
+            memory.insert(name.to_string(), json!([floats(&l), floats(&r)]));
+            files.insert(
+                name.to_string(),
+                json!(base64(&engine::wav::encode_pcm16(&l, &r, 44_100))),
+            );
+        }
+        let stored =
+            |frames: usize| json!({ "frames": frames, "len": 4, "stems": roformer::STEMS });
+        json!({
+            "replies": [
+                { "type": "model", "ok": true },
+                { "type": "done" },
+                { "type": "done" },
+            ],
+            "len": 4,
+            "segments": 2,
+            "storage_segments": 0,
+            "stored": [stored(2), stored(4)],
+            "memory": memory,
+            "files": files,
+        })
+    }
+
+    /// The names of the checks that fail.
+    fn failing(r: &Value, hashes: Option<&str>) -> Vec<String> {
+        let (checks, _) = stored_stems_checks(r, 4, hashes).unwrap();
+        checks
+            .into_iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, what)| what)
+            .collect()
+    }
+
+    #[test]
+    fn the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones() {
+        let good = stored_stems_reply();
+        let (checks, hashes) = stored_stems_checks(&good, 4, None).unwrap();
+        assert_eq!(checks.len(), 15, "nine checks, and one for each stem");
+        assert_eq!(failing(&good, None), Vec::<String>::new());
+        let all = hashes.join(",");
+        assert_eq!(failing(&good, Some(&all)), Vec::<String>::new());
+        let mut wrong_hashes = hashes.clone();
+        wrong_hashes[5] = "0".repeat(64);
+        assert_eq!(
+            failing(&good, Some(&wrong_hashes.join(","))),
+            ["the memory path's stems equal the hashes given"]
+        );
+        let cases: [(&str, Value, &str); 10] = [
+            ("/replies/0/ok", json!(false), "the worker loads the model"),
+            (
+                "/replies/1/type",
+                json!("error"),
+                "the memory path finishes",
+            ),
+            ("/len", json!(5), "the song is 4 frames"),
+            ("/segments", json!(1), "several segments (1)"),
+            (
+                "/replies/2/type",
+                json!("unstored"),
+                "the storage path finishes",
+            ),
+            (
+                "/storage_segments",
+                json!(1),
+                "the storage path sends no segment reply",
+            ),
+            (
+                "/stored",
+                json!([{ "frames": 4, "len": 4, "stems": roformer::STEMS }]),
+                "a stored reply after each segment (1)",
+            ),
+            (
+                "/stored/1/frames",
+                json!(3),
+                "the last stored reply covers the song",
+            ),
+            (
+                "/stored/1/len",
+                json!(5),
+                "the last stored reply covers the song",
+            ),
+            (
+                "/stored/1/stems",
+                json!(["drums"]),
+                "the stored replies name the stems",
+            ),
+        ];
+        for (at, value, check) in cases {
+            let mut r = good.clone();
+            *r.pointer_mut(at).unwrap() = value;
+            let failed = failing(&r, None);
+            assert!(
+                failed.len() == 1 && failed[0].starts_with(check),
+                "{at}: {failed:?}"
+            );
+        }
+        let mut r = good.clone();
+        let wav = engine::wav::encode_pcm16(&[0.5; 4], &[0.5; 4], 44_100);
+        r["files"]["piano"] = json!(base64(&wav));
+        let failed = failing(&r, None);
+        assert!(
+            failed.len() == 1 && failed[0].starts_with("the stored piano equals"),
+            "{failed:?}"
+        );
+    }
+
+    #[test]
+    fn stem_wavs_and_hashes_are_of_16_bit_wavs() {
+        let stems = json!({ "bass": [floats(&[0.5]), floats(&[-0.25])] });
+        let wavs = stem_wavs(&stems, &["bass"]).unwrap();
+        assert_eq!(wavs, [engine::wav::encode_pcm16(&[0.5], &[-0.25], 44_100)]);
+        assert_eq!(wavs[0].len(), 48);
+        // The WAV of one frame (16384, -8192), from Python's hashlib.
+        assert_eq!(
+            stem_hashes(&stems, &["bass"]).unwrap(),
+            ["eee3c63df7f6248ef5893dfca72b1f3a92f1669294c50384ba94567001a9cd12"]
+        );
+        assert!(stem_wavs(&stems, &["drums"]).is_err(), "no such stem");
+    }
+
+    #[test]
+    fn a_stem_file_name_is_the_name_and_wav() {
+        assert_eq!(stem_protocol_file("bass"), "bass.wav");
+        // `stem_protocol::stem_file` keeps letters as they are, so it
+        // gives the same names for the worker's stems.
+        assert!(
+            roformer::STEMS
+                .iter()
+                .all(|n| n.chars().all(|c| c.is_ascii_lowercase())),
+            "{:?}",
+            roformer::STEMS
+        );
+    }
+
+    #[test]
+    fn the_stored_stems_clip_is_3_seconds_of_the_mix() {
+        let out = std::env::temp_dir().join(format!("stemyla-clip-{}", std::process::id()));
+        let (dir, n) = stored_stems_clip(&out).unwrap();
+        let bytes = std::fs::read(dir.join("clip.f32")).unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+        assert_eq!(n, 3 * 44_100);
+        assert_eq!(bytes.len(), 2 * n * 4, "two channels of f32");
+        let song = crate::synth::generate();
+        let first = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+        let right = f32::from_le_bytes(bytes[4 * n..4 * n + 4].try_into().unwrap());
+        assert_eq!((first, right), (song.mix.left[0], song.mix.right[0]));
+        let last = f32::from_le_bytes(bytes[4 * n - 4..4 * n].try_into().unwrap());
+        assert_eq!(last, song.mix.left[n - 1]);
+    }
+
+    #[test]
+    fn memory_budget_waits_for_the_stems_shown_and_checks_the_growth() {
+        assert!(separation_shown(
+            "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown"
+        ));
+        assert!(separation_shown("[9.5s] console.error: something broke"));
+        assert!(!separation_shown(
+            "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends"
+        ));
+        assert!(growth_check(Some(0.0)).0);
+        assert!(growth_check(Some(4.0)).0, "at the limit");
+        assert!(!growth_check(Some(4.5)).0);
+        assert!(!growth_check(None).0, "no lines");
+        assert!(growth_check(Some(2.0)).1.contains("at most 4 MB"));
+    }
 
     #[test]
     fn the_page_growth_is_the_end_less_the_start() {

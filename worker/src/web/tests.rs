@@ -185,6 +185,19 @@ export function start_sync_spy(fail_at) {
     return sync_real.call(this, data, options);
   };
 }
+// The next `createSyncAccessHandle` call `n` (from 1) is refused, as when
+// another writer holds the file; the returned function restores it.
+export function refuse_sync_handle(n) {
+  const proto = FileSystemFileHandle.prototype;
+  const real = proto.createSyncAccessHandle;
+  let calls = 0;
+  proto.createSyncAccessHandle = function () {
+    calls++;
+    if (calls === n) return Promise.reject(new DOMException("refused by the test", "NoModificationAllowedError"));
+    return real.call(this);
+  };
+  return () => { proto.createSyncAccessHandle = real; };
+}
 export function stop_sync_spy() {
   FileSystemSyncAccessHandle.prototype.write = sync_real;
   sync_real = null;
@@ -244,6 +257,7 @@ extern "C" {
     async fn names_in_js(path: &str) -> JsValue;
     fn start_sync_spy(fail_at: u32);
     fn stop_sync_spy() -> String;
+    fn refuse_sync_handle(n: u32) -> js_sys::Function;
 }
 
 /// Writes a file at `path`, with its folders.
@@ -1421,6 +1435,52 @@ async fn a_refused_stem_write_removes_the_stem_files() {
     again.abandon().await;
 }
 
+/// Finding 1-12 of review round 1: a `.part` file that the open made
+/// goes again when the open fails before it holds the file.
+#[wasm_bindgen_test]
+async fn a_failed_open_removes_the_files_it_made() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let restore = refuse_sync_handle(2);
+    let opened = StemWriter::open(SESSION, &["bass", "drums"], 7).await;
+    restore.call0(&JsValue::NULL).expect("restored");
+    match opened {
+        Err(StemError::Storage(text)) => {
+            assert!(text.starts_with("NoModificationAllowedError"), "{text}")
+        }
+        Err(StemError::Refused(text)) => panic!("refused: {text}"),
+        Ok(_) => panic!("opened"),
+    }
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+}
+
+/// Finding 1-12: a second writer of the same files fails to open, and
+/// leaves the first writer's files as they are.
+#[wasm_bindgen_test]
+async fn a_failed_open_leaves_a_file_that_another_writer_holds() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let first = StemWriter::open(SESSION, &["bass"], 7)
+        .await
+        .expect("opened");
+    let second = StemWriter::open(SESSION, &["bass"], 7).await;
+    assert!(
+        matches!(second, Err(StemError::Storage(ref text)) if text.starts_with("NoModificationAllowedError")),
+        "the file is locked"
+    );
+    let left = names_in(&format!("{SESSION}/stems")).await;
+    first.abandon().await;
+    assert_eq!(
+        left.as_deref(),
+        Some("bass.wav.part"),
+        "the first writer's file stays"
+    );
+}
+
 #[wasm_bindgen_test]
 async fn a_part_file_from_an_earlier_separation_is_replaced() {
     fresh().await;
@@ -1665,6 +1725,44 @@ async fn a_storage_failure_ends_the_separation_with_unstored() {
     let mut want = chunk_replies(&run, first, "stored");
     want.push("unstored".into());
     assert_eq!(reply_types(), want, "no error, no done");
+    let text = field(&sent("unstored")[0], "text")
+        .as_string()
+        .unwrap_or_default();
+    assert!(text.starts_with("QuotaExceededError"), "{text}");
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+}
+
+/// Finding 1-b2 of review round 1: browser storage refuses a header
+/// write of `finish`, after every segment is written.
+#[wasm_bindgen_test]
+async fn a_refused_header_at_the_end_sends_unstored() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let run = fake_run();
+    let segments =
+        run.segment_after.iter().filter(|s| **s).count() + usize::from(run.segment_at_end);
+    // Six headers at the open, six stems for each segment, then the third
+    // of the six headers that `finish` writes.
+    let refused = 6 + 6 * segments + 3;
+    start_sync_spy(refused as u32);
+    let mut net = FakeNetwork { fail_at: None };
+    let ended = separate_song(&mut net, fake_demixer(), Some(SESSION), now_s()).await;
+    let record = stop_sync_spy();
+    assert_eq!(
+        record.split(' ').collect::<Vec<_>>().len(),
+        refused,
+        "every write up to the refused one: {record}"
+    );
+    assert!(record.ends_with("refused"), "{record}");
+    reply_to(kind::SEPARATE, ended);
+    let mut want = whole_run(&run, "stored");
+    want.pop();
+    want.push("unstored".into());
+    assert_eq!(reply_types(), want, "no done, no error");
     let text = field(&sent("unstored")[0], "text")
         .as_string()
         .unwrap_or_default();
