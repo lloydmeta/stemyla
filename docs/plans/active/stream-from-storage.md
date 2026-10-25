@@ -6,7 +6,7 @@ On an iPhone 17 Pro, a separation of a song longer than about 1.7 minutes stops 
 
 Target: a 30-minute song opens, separates, plays and saves on an iPhone 17 Pro, and no step stops the tab.  Its separation takes about 49 to 85 minutes (see "Memory budget").
 
-Decisions 0015, 0016 and 0017 (proposed) and 0018 (accepted) record the design choices.  Out of scope:
+Decision 0015 (proposed) and decisions 0016, 0017 and 0018 (accepted) record the design choices.  Out of scope:
 
 * f16 arithmetic on the GPU (the `shader-f16` feature).  It would change the stems.
 * An AudioWorklet for playback.  The callback stays on the main thread (`engine/src/live.rs`).

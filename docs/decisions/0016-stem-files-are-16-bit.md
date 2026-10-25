@@ -1,6 +1,6 @@
 # 0016: stem files hold 16-bit PCM, and the mix and source files 32-bit float
 
-Status: proposed (2026-10-25, by the agent)
+Status: accepted (2026-10-25, by the maintainer)
 
 ## Context
 
@@ -14,7 +14,7 @@ Decision 0015 puts a song's audio in OPFS session files.  `app/src/store.rs` alr
 
 ## Decision
 
-Stem files hold 16-bit PCM, little-endian, interleaved stereo (proposed).  A stem file is the stem's WAV, as today.  The mix that the worker separates is one file of 32-bit float, so the model's input does not change.  A 30-minute mix takes about 635 MB.  Each decoded source file is also 32-bit float.  For a song of one source file, that file is the mix.  Overviews are separate small files.
+Stem files hold 16-bit PCM, little-endian, interleaved stereo.  A stem file is the stem's WAV, as today.  The mix that the worker separates is one file of 32-bit float, so the model's input does not change.  A 30-minute mix takes about 635 MB.  Each decoded source file is also 32-bit float.  For a song of one source file, that file is the mix.  Overviews are separate small files.
 
 ## Consequences
 
