@@ -4,7 +4,7 @@ Status: accepted (2026-10-25, by the maintainer)
 
 ## Context
 
-The app adds FLAC input (`plans/active/flac.md`).  A FLAC frame of 65,535 frames of silence in stereo takes about 17 bytes, and decodes to 524,280 bytes of `f32` ([RFC 9639](https://www.rfc-editor.org/rfc/rfc9639.html), sections 8.2 and 9.2.3).  So a 1 MB file can hold about 30 GB of audio.  `engine::decode` grew each channel with no limit.  WebAssembly on wasm32 has 4 GiB at most, and iOS stops the tab at 2 GB (MEM-4).  A very long WAV or MP3 also stops the tab, but its file is then as large as its audio.
+The app adds FLAC input (`plans/completed/flac.md`).  A FLAC frame of 65,535 frames of silence in stereo takes about 17 bytes, and decodes to 524,280 bytes of `f32` ([RFC 9639](https://www.rfc-editor.org/rfc/rfc9639.html), sections 8.2 and 9.2.3).  So a 1 MB file can hold about 30 GB of audio.  `engine::decode` grew each channel with no limit.  WebAssembly on wasm32 has 4 GiB at most, and iOS stops the tab at 2 GB (MEM-4).  A very long WAV or MP3 also stops the tab, but its file is then as large as its audio.
 
 ## Options
 

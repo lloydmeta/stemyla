@@ -204,7 +204,7 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * [x] 2026-10-25: M3: the page opens FLAC.  `web-test` passes in Safari, with `a_flac_session_reopens_with_its_stems`.  Only the `empty_state` snapshot changed, for the welcome text.  `flacenc` and its dependencies are in the browser-tests table of `THIRD-PARTY.md` until M4.
 * [x] 2026-10-25: M4 and M5, in one commit: the worker encodes FLAC and the page saves it.  `web-test` passes in Safari: 6 new tests in the worker, 3 in the protocol and 1 in the separator.  With a copy of one whole channel added to `flac`, `a_flac_is_encoded_in_blocks` fails (5.6 MB held at the peak).  `flacenc` builds for `wasm32` with no default features.  The encode time of 5 minutes waits for M6, since the debug build of the tests timed out on it.
 * [x] 2026-10-25: M6: end to end.  The new scenario `e2e flac` posts a 5-minute stereo stem to the release worker by hand.  It passes in Safari (14.7 s to encode) and Chrome (11.3 s), with a file of 8.5 MB against 52.9 MB of 16-bit PCM.  CI runs it in Chrome after `storage`.  `e2e separate --flac` passes in Chrome (6 stems in 1.4 s, Radeon Pro 5500M) and Safari (3.3 s): the 96 kHz FLAC clip opens at 44.1 kHz with 88,200 frames.  `e2e separate` with the WAV clip and `e2e storage` still pass in Chrome.  `web-test` passes in Chrome and Safari.
-* [ ] A person, on an iPhone: "Open song…" offers a `.flac` file, and a FLAC stem saves.
+* [x] 2026-10-25: the maintainer confirmed that FLAC files open, separate and download.  The device was not recorded.
 * [x] 2026-10-25: review round 1, with the baseline: 1 blocker, 7 should-fix and 22 missed mutants confirmed, fixed in `3037b84`.  The blocker: `open` refused an untagged VBR MP3 on its estimated length.  The round found all 4 of the baseline's findings.  Mutants: 76 tested, 33 caught, 34 missed (8 refuted, 4 pre-existing under TD-39).
 * [x] 2026-10-25: review round 2: 3 should-fix confirmed (a mono file's realloc peak of 1.9 times the limit, the untested page save, the browser-only `flac` scenario) and 6 nits, fixed in `6de5f7a`.  TD-53 added.  Mutants: 33 tested, 26 caught, 1 missed (TD-39).
 * [x] 2026-10-25: review round 3: 5 should-fix confirmed and 1 pre-existing, fixed in `e0db6f4`.  The maintainer accepted the mono rule of decision 0013.  Mutants: 13 tested, 12 caught, 3 timeouts.  The log is `docs/reviews/feature-flac.md`.
@@ -240,4 +240,21 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 
 ## Outcomes and retrospective
 
-Not started.
+Done on 2026-10-25:
+
+* A FLAC file opens as a song or as a stem, at any standard rate and at 16 or 24 bits.  `e2e separate --flac` separates a 96 kHz clip in Chrome and Safari.
+* A stem saves as a 16-bit FLAC from the worker, in blocks.  5 minutes of stereo encode in 11 to 15 s, to about a sixth of 16-bit PCM.
+* A decoded file holds at most 1 GiB of samples, in every format, with a mono file counted as two channels (decision 0013).  A small FLAC can no longer stop the tab.
+* The maintainer confirmed the open, separate and download paths by hand.
+
+Not done:
+
+* 24-bit FLAC output: `flacenc` 0.5.1 cannot write it (TD-52).
+* Tests of the page's save of an encoded stem, `encode_mp3` and `store::usage` (TD-53).
+* A 5.1 file keeps only its first two channels, as a WAV does.
+
+To do differently:
+
+* The `flacenc` spike ran before M1, and found both of its defects before any code depended on it.  Run a spike of each new codec or crate first.
+* A guard for every format needs a check against each format's quirks.  The first limit trusted an MP3's estimated length, and review round 1 found that it refused a valid song.
+* Check a claim about memory against the code before it goes in a decision.  Round 2 gave a false reason for the mono rule, and round 3 found it.
