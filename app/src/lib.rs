@@ -1275,7 +1275,10 @@ impl StemApp {
             .clicked()
             && let Some(settings) = streamtest::Settings::from_url()
         {
-            streamtest::start(settings, status.clone(), ui.ctx().clone());
+            // eframe runs a click's frame in the pointer event handler,
+            // where Safari lets audio start.
+            let audio = streamtest::audio();
+            streamtest::start(settings, audio, status.clone(), ui.ctx().clone());
         }
         if let Some(last) = last {
             ui.label(format!("Storage test: {last}"));

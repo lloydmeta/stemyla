@@ -102,11 +102,11 @@ The page gets a query parameter `?streamtest`, beside `?bench` and `?selftest`. 
 
 * the time of each read of one second of all eight files: p50, p99 and the maximum;
 * underruns and late buffers, counted apart, in 5 minutes of playback;
-* the same, with a forced 50 ms block of the main thread every 3 seconds (shorter than cpal's queue);
+* the same, with a forced 30 ms block of the main thread every 3 seconds.  That is shorter than one buffer (about 43 to 46 ms), cpal's slack at each 'ended' event;
 * the time from a seek to an unbuffered position to the first frame of the new position: p50 and p99 of 50 seeks;
 * whether a read of a file succeeds while a worker writes the same file through a sync access handle, and what it returns.
 
-The scratch folder is removed at the end.  The maintainer publishes the build and runs it on the iPhone (GIT-1).  The spike also reloads the page and counts the app's instances in a heap snapshot (see "Surprises and discoveries").
+The scratch folder is removed at the end.  The maintainer publishes the build and runs it on the iPhone (GIT-1).
 
 * Acceptance: a browser test runs `?streamtest` with a short song and checks each log line.  The MEM-5 spy covers the scratch writes.  The iPhone numbers go in "Surprises and discoveries".
 * Decision point for the maintainer: accept or change 0016 and 0017 on these numbers.  The proposed bar: no underrun at either tempo, read p99 under 50 ms, seek p99 under 150 ms.  If concurrent reads fail, a stem plays only after its file is complete.
@@ -208,7 +208,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: review round 2: 6 findings confirmed and fixed, 6 nits fixed.
 * [x] 2026-10-25: review round 3: 4 findings confirmed and fixed, 5 nits fixed.  The amendment of 0018 waits for the maintainer.
 * [x] 2026-10-25: M1 code: `?streamtest` (`app/src/streamtest.rs`) and `the_spike_logs_each_measure_and_leaves_no_files`.  In Chrome on the Mac, a 0.2-minute run gave reads of p50 3.4 ms and p99 4.9 ms, and no underruns.
-* [ ] M1: the iPhone numbers.  The maintainer publishes, opens `?streamtest`, taps "Run storage test", and pastes the `streamtest:` lines.  Then a reload in the same tab and a heap snapshot count the app's instances.
+* [x] 2026-10-25: M1 review round 1: 1 blocker and 7 should-fix fixed.  The audio context starts in the tap, the schedule follows cpal's, and the tests check the counts.
+* [ ] M1: the iPhone numbers.  The maintainer publishes, opens `?streamtest`, taps "Run storage test", and pastes the `streamtest:` lines.
 * [ ] M2: `e2e memory-budget` measures.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.
@@ -222,7 +223,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 ## Surprises and discoveries
 
 * 2026-10-25: Web Inspector's memory timeline showed about 1.06 GB in a run that completed.  It showed about 2.0 GB in a run that iOS killed at 2048 MB.  It does not count all the GPU memory that iOS charges to the tab.  The JetsamEvent report and `idevicesyslog` give the number that counts.
-* 2026-10-25: in one killed run, the heap snapshot held two windows with `window.wasmBindings`.  Each had an app instance: 223 MB of WebAssembly memory and a WebGL2 context.  No other Safari tab was open.  A fresh tab held one.  The cause is not known.  A page kept by a reload is likely.  M1 reloads the page and counts the instances again.
+* 2026-10-25: in one killed run, the heap snapshot held two windows with `window.wasmBindings`.  Each had an app instance: 223 MB of WebAssembly memory and a WebGL2 context.  No other Safari tab was open.  A fresh tab held one.  The cause is not known.  A page kept by a reload is likely.  The plan does not act on it.
 * 2026-10-25: chunk times rose from 10.8 s to 18.7 s over 7 chunks of the demo song on the iPhone (0.58 to 0.40 TFLOP/s).  Heat is the likely cause.  It does not concern memory.
 
 ## Decision log
@@ -231,6 +232,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, agent: f16 weights on the GPU stay out of this plan.  The fixed part fits without them, and the maintainer asked about their risk to separation quality.
 * 2026-10-25, maintainer: f16 weights on the GPU join this plan as M9, because they save memory (decision 0018).  This replaces the entry above.
 * 2026-10-25, agent, after review round 1: the encoded source is read in blocks too (M5).  Classic drums, the mix lane's mid and the spectrogram signals move to blocks (M7).  The budget check (now M10) adds an absolute budget.
+* 2026-10-25, maintainer: no reload check in M1.  Nothing in this plan acts on its result, and M10's iPhone run shows any kill.
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
 * 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
 

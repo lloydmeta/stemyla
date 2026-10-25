@@ -20,6 +20,10 @@ const DRIVER_VARS: [&str; 4] = [
     "MSEDGEDRIVER",
 ];
 
+/// Seconds that the runner gives each test binary, unless the caller sets
+/// `WASM_BINDGEN_TEST_TIMEOUT`.
+const WEB_TEST_TIMEOUT_S: &str = "90";
+
 pub fn run(args: &[String]) -> Result<()> {
     let mut browser = Browser::default_here();
     let mut filter = None;
@@ -70,6 +74,11 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         // It would skip every browser test and report success.
         cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
+        // The runner gives each test binary 20 s by default.  The app's
+        // lib tests take about 25 s, most of it the `?streamtest` runs.
+        if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
+            cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
+        }
         let var = match browser {
             Browser::Chrome => "CHROMEDRIVER",
             Browser::Safari => "SAFARIDRIVER",
