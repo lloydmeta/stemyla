@@ -211,7 +211,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M1 review round 1: 1 blocker and 7 should-fix fixed.  The audio context starts in the tap, the schedule follows cpal's, and the tests check the counts.
 * [x] 2026-10-25: M1 review round 2: 7 should-fix fixed.  The timer clock follows cpal's slack of one buffer, and the tests check the read, seek, late and concurrent numbers.
 * [x] 2026-10-25: M1 review round 3: 1 blocker and 2 should-fix fixed.  The tests check the p99 text and late buffers without a block, and playback stops when the audio context stops.
-* [ ] M1: the iPhone numbers.  The maintainer publishes, opens `?streamtest`, taps "Run storage test", and pastes the `streamtest:` lines.  The default run takes over 20 minutes.  Safari stays in the foreground, with Auto-Lock set to Never and the phone on a charger.
+* [x] 2026-10-25: M1 iPhone numbers (build `2baf7ff46c5b`, `st_play=60`): see "Surprises and discoveries".  The maintainer accepted decisions 0016 and 0017.
 * [ ] M2: `e2e memory-budget` measures.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.
@@ -226,6 +226,12 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 
 * 2026-10-25: Web Inspector's memory timeline showed about 1.06 GB in a run that completed.  It showed about 2.0 GB in a run that iOS killed at 2048 MB.  It does not count all the GPU memory that iOS charges to the tab.  The JetsamEvent report and `idevicesyslog` give the number that counts.
 * 2026-10-25: in one killed run, the heap snapshot held two windows with `window.wasmBindings`.  Each had an app instance: 223 MB of WebAssembly memory and a WebGL2 context.  No other Safari tab was open.  A fresh tab held one.  The cause is not known.  A page kept by a reload is likely.  The plan does not act on it.
+* 2026-10-25, M1 on the iPhone 17 Pro, iOS 26 (build `2baf7ff46c5b`, four runs of 60 s, 2.86 GB of files):
+  * No underruns at tempo 1 or 1.5, with or without a 30 ms block every 3 s.  No late buffers either.
+  * Reads of one second of eight files: p50 22 to 23 ms; p99 26 ms with no block, 52 to 59 ms with blocks.
+  * Seeks: p50 9 ms, p99 35 ms.  Writes: 2.86 GB in 1.9 to 8.4 s.
+  * A file that a worker writes through a sync access handle reads correctly in Safari (26 of 26).  Chrome on the Mac failed 2 of 29 reads with `NotReadableError`, so a stem plays only once its file is complete (M3).
+* 2026-10-25: a first iPhone run with Web Inspector's Timeline recording had 11 to 23 late buffers a minute, with the same reads.  The run without the recording had none, so the recording caused them, not storage.  Late buffers come from a busy main thread; read-ahead does not help them.  Safari on the Mac had 0 to 2 a minute, and Chrome none.
 * 2026-10-25: chunk times rose from 10.8 s to 18.7 s over 7 chunks of the demo song on the iPhone (0.58 to 0.40 TFLOP/s).  Heat is the likely cause.  It does not concern memory.
 
 ## Decision log
@@ -234,6 +240,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, agent: f16 weights on the GPU stay out of this plan.  The fixed part fits without them, and the maintainer asked about their risk to separation quality.
 * 2026-10-25, maintainer: f16 weights on the GPU join this plan as M9, because they save memory (decision 0018).  This replaces the entry above.
 * 2026-10-25, agent, after review round 1: the encoded source is read in blocks too (M5).  Classic drums, the mix lane's mid and the spectrogram signals move to blocks (M7).  The budget check (now M10) adds an absolute budget.
+* 2026-10-25, maintainer: decisions 0016 and 0017 accepted on the M1 numbers.
 * 2026-10-25, maintainer: no reload check in M1.  Nothing in this plan acts on its result, and M10's iPhone run shows any kill.
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
 * 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
