@@ -126,11 +126,11 @@ The orchestrator, which is the main session:
 
 A team leader, a general-purpose subagent for each milestone:
 
-1. For M3, M5, M6, M7 and M8, it writes `docs/plans/active/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule, for at most 3 reviews.  M4, M9 and M10 work from their sections here.
+1. It writes `docs/plans/active/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule, for at most 3 reviews.  It does not edit this plan (see Decision log).
 2. It starts an implementer with the milestone plan's path (or this plan's section), and continues it with SendMessage for fixes.
 3. It runs three review rounds with `/review-rounds`.  The base is the commit before the milestone's first commit, and the criteria are the milestone's section.  M3's round 1 passes `--baseline` (the phase 3 gate in `plans/active/harness-engineering.md`).
 4. After round 3, it copies `target/review/run/iphone-crashes-2026-10-25/log.md` to `docs/reviews/iphone-crashes-2026-10-25-m<n>.md`, and removes the run folder.  So the next milestone's round 1 starts with no log (TD-37).
-5. It writes a Progress line after each step and each round, and commits it.  It reports in at most 300 words: status, commits, each acceptance check and its result, changes to the plan, and questions.
+5. It writes a Progress line in its milestone plan after each step and each round, and commits it.  It reports in at most 300 words: status, commits, each acceptance check and its result, changes to the plan, and questions.
 
 For every agent in the run:
 
@@ -175,7 +175,7 @@ A new e2e scenario separates synthetic songs of 1 and 4 minutes, opened as WAV f
 
 ### M3: the worker writes the stems to storage
 
-`Request::Separate` names the session.  The worker opens one session file per stem with a sync access handle and appends each ready segment.  `Reply::Segment` no longer carries samples.  It says how many frames are stored.  The page stops using `Assembly` for a separation in storage.  The worker writes a 44-byte WAV header with sizes of 0, and sets the RIFF and data sizes after the last segment.  The worker cannot take `engine::wav` (LAYER-1).  The wire format changes with `xtask e2e` in the same commit (PROTO-1).  A stem lane stays empty until its file is complete, unless M1 showed that a file can be read while it is written.
+`Request::Separate` names the session.  The worker opens one session file per stem with a sync access handle and appends each ready segment.  On the storage path, the worker sends `Reply::Stored`, which says how many frames are stored, and no `Reply::Segment`.  `Reply::Segment` keeps its samples for the memory path only (M3 plan, D1).  The page stops using `Assembly` for a separation in storage.  The worker writes a 44-byte WAV header with sizes of 0, and sets the RIFF and data sizes after the last segment.  The worker cannot take `engine::wav` (LAYER-1).  The wire format changes with `xtask e2e` in the same commit (PROTO-1).  A stem lane stays empty until its file is complete, unless M1 showed that a file can be read while it is written.
 
 * If OPFS is unavailable, or a write fails for lack of space, the page tells the user (decision 0015).  It uses today's memory path, with `Assembly`.  It refuses a song longer than the length that fits.  That length comes from M2's measure plus about 950 MB for the parts M2 does not measure (as in M10).
 * Acceptance: a browser test separates a short song and reads the stems back from OPFS.  They equal the stems of `main` bit for bit, after 16-bit rounding.  The MEM-5 spy covers the stem writes.  `e2e memory-budget` shows no page growth during the separation.  A browser test makes OPFS writes fail.  It checks the message, a short song on the memory path, and the refusal of a long song.
@@ -270,7 +270,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M1 iPhone numbers (build `2baf7ff46c5b`, `st_play=60`): see "Surprises and discoveries".  The maintainer accepted decisions 0016 and 0017.
 * [x] 2026-10-25: M2: `e2e memory-budget`.  In Chrome on the Mac (AMD Radeon Pro 5500M, `chunk=16384&overlap=1`).  1 minute: 966 MB (page wasm 177, worker wasm 57, GPU live 732).  4 minutes: 1558 MB (727, 99, 732).  The 4-minute peak is 592 MB above, about 197 MB per minute.
 * [x] 2026-10-25: run of M3 to M10 started.  Preflight passed.  The maintainer accepted decisions 0015 and 0019, and decided M9's default in advance.
-* [ ] M3: stems to storage.
+* [x] 2026-10-26: M3: stems to storage (`2c7440a..e2d554c`, plan `stream-from-storage-m3.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m3.md`).  In Chrome on the Mac (Radeon Pro 5500M), `e2e stored-stems --hashes` passes: the six stem files equal the memory path's stems after 16-bit rounding.  `e2e memory-budget`: the page grows 0 MB during the separation; peaks 966 MB at 1 minute, 1517 MB at 4 minutes.  The MEM-5 spy, the fallback tests and `web-test` (Chrome and Safari) pass.  The memory path refuses a song over 100 s (M3 plan, D3).  Do not publish a build from M3 until M7: after a storage-path separation and on each reload, the page reads the six stems back into memory (TD-54), so a long song can stop the iPhone's tab again and again.
+* [x] 2026-10-26: M3 intent review: 1 significant should-fix (this plan's M3 text contradicted D1), fixed here.
 * [ ] M4: mix from storage.
 * [ ] M5: decode from and into storage.
 * [ ] M6: playback through the read-ahead buffer.
@@ -302,6 +303,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, maintainer: no reload check in M1.  Nothing in this plan acts on its result, and M10's iPhone run shows any kill.
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
 * 2026-10-25, maintainer, at the start of the M3 to M10 run: decision 0015 accepted.  Teams may reword MEM-1 and LAYER-1 as decisions 0015 and 0019 need, in the milestone that needs it, and keep or extend their tests.  Decision 0019 accepted: a new page-side worker crate decodes.  M9 makes f16 the default when the Mac gives the same stems bit for bit and no slower separation.
+* 2026-10-25, maintainer: each milestone works in its own plan file, `plans/active/stream-from-storage-m<n>.md`, M4, M9 and M10 included.  Its Progress, Decision log and surprises go there.  Only the orchestrator edits this plan, with one Progress line for each milestone and the decisions that later milestones need.
+* 2026-10-26, agent (M3): on the storage path the worker sends `stored` and `unstored` replies, and `segment` keeps its samples for the memory path only.  The memory path refuses a song over 100 s on every device, because a page cannot read its memory limit (M3 plan, D1 and D3).
 * 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
 
 ## Outcomes and retrospective
