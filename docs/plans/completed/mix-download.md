@@ -188,7 +188,9 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * [x] 2026-10-25: M3: the web saves.  `web-test` passes in Safari, with 3 new tests in `export` and 2 in `separator`.  With a sink that collects into a `Vec`, `a_mix_export_does_not_grow_wasm_memory` fails: 34.1 MB of growth.  TD-53 now names `save_menu`, `start_save` and `step_save`.
 * [x] 2026-10-25: M4, docs: `README.md` and a "Saving a stem or the mix" section in `docs/ARCHITECTURE.md`.  `docs-check` passes.  `trunk build --release` passes.
 * [x] 2026-10-25: M4, the real page: the maintainer checked it in Safari, and said that it works.
-* [ ] Review rounds 1, 2 and 3.
+* [x] 2026-10-25: review round 1, with the baseline: 7 should-fix and 2 missed mutants confirmed, fixed in `22117c8`.  The main ones: a clip note could reach the wrong file (1-1), and a mix change rebuilt the mix spectrogram from a whole-song mix in one frame (1-2, 1.2 to 1.7 s natively).  The baseline's 1-b2 (4 song-sized buffers) was refuted: a peak allocator measured 3 on both paths.  Of 2 baseline findings, the round found 2.  Mutants: partial, 85 tested, 52 caught, 30 missed (28 refuted: 26 in wasm32-only code, 2 equivalent).
+* [x] 2026-10-25: review round 2: 3 should-fix and 1 missed mutant confirmed, fixed in `09ca025`.  A first run stopped at `review check`, since a fetch moved `origin/gh-pages`; the maintainer restarted it.  Mutants: full, 46 tested, 40 caught, 1 missed.
+* [x] 2026-10-25: review round 3: 3 should-fix weak tests confirmed.  Two have tests in `e414676`.  The third, the order in `load_song`, is in TD-53, since only the web reaches it.  Mutants: full, 8 tested, 7 caught, 0 missed.  The log is `docs/reviews/feature-multi-download.md`.
 
 ## Surprises and discoveries
 
@@ -212,4 +214,19 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 
 ## Outcomes and retrospective
 
-Not done yet.
+Done on 2026-10-25:
+
+* The mix lane has a "Save" menu, as each stem lane has.  It saves the mix as heard (Mute, Solo, volume) as WAV, FLAC or MP3, at 100% tempo (decision 0014).  The maintainer checked it in Safari.
+* The mix lane's subtitle names the stems in the mix, and its waveform and spectrogram follow Mute, Solo and volume, a few ms in each frame.
+* Every save, a stem's too, runs in blocks into JS arrays.  No save makes a song-sized buffer in WebAssembly memory (`a_mix_export_does_not_grow_wasm_memory`, each format).  The single-stem WAV save no longer makes the whole file in WebAssembly memory.
+* The protocol and the worker did not change.
+
+Not done:
+
+* The mix at the chosen tempo, a loop region only, and normalising: see "Not taken".
+* Tests of the web-only Save menus, and of the order in `load_song` (TD-53).
+
+To do differently:
+
+* A design claim about the main thread needs a check of every path that does work there.  The first spectrogram follow mixed the whole song in one frame, and round 1 found it.
+* A test of a seam must observe the seam.  Two rounds found UI tests that passed on the code before the fix, because a later step in the same frame hid the change.
