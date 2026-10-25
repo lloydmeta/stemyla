@@ -6,7 +6,7 @@ On an iPhone 17 Pro, a separation of a song longer than about 1.7 minutes stops 
 
 Target: a 30-minute song opens, separates, plays and saves on an iPhone 17 Pro, and no step stops the tab.  Its separation takes about 49 to 85 minutes (see "Memory budget").
 
-Decision 0015 (proposed) and decisions 0016, 0017 and 0018 (accepted) record the design choices.  Out of scope:
+Decisions 0015 to 0019 (accepted) record the design choices.  Out of scope:
 
 * f16 arithmetic on the GPU (the `shader-f16` feature).  It would change the stems.
 * An AudioWorklet for playback.  The callback stays on the main thread (`engine/src/live.rs`).
@@ -119,7 +119,7 @@ The orchestrator, which is the main session:
 * The stop rule, for every review loop: stop at the first review with no blocker and no significant should-fix.  Significant means that a milestone would fail as written, two parts contradict each other, a measure would mislead, or the implementer would do wrong work.  Wording and polish are nits.
 * It decides a question that this plan does not answer, records it in the Decision log, and lists it in the PR description.  It stops and waits for the maintainer only when:
   * a rule in `docs/invariants.md` would break;
-  * a decision point of this plan needs the maintainer: M9's f16 default, and M10's iPhone run;
+  * a decision point of this plan needs the maintainer: M10's iPhone run (M9's f16 default was decided in advance, see Decision log);
   * a step needs a person: publishing (GIT-1) and a run on the iPhone;
   * auto mode refuses an action (it reports, and does not try the same action another way).
 * At the end, with M10 done and CI green, it writes the retrospective and moves this plan to `plans/completed/`.  It fixes the docs that name the old path, commits, pushes, and marks PR #39 ready.  The maintainer reviews and merges (GIT-1).
@@ -190,7 +190,7 @@ When a song opens, the page writes its mix as a session file.  `Request::Separat
 
 The encoded source is never whole in memory.  A chosen file is saved to OPFS as a `Blob`, as today.  Then a decoder reads it in blocks and writes session files.  On the main thread, OPFS reads are async, and the decoder needs sync reads.  So decoding runs in a worker that reads the `Blob` with `FileReaderSync`.  `stem-worker` cannot take `engine` (LAYER-1), so this is a new worker of the page side.
 
-* Decision point for the maintainer: a new page-side worker crate that takes `engine`, or another way to decode in blocks.  The choice gets decision 0019.
+* Decision 0019 (accepted): a new page-side worker crate that takes `engine` decodes in blocks.
 * `engine::decode` and `Song::from_audio` read from a source of blocks and write blocks to a sink, not a `Vec`.  The resampler of decision 0012 runs in blocks.  The overview of each lane is made in the same pass.
 * A restored session decodes its stored sources the same way (`store::read` stops reading whole files).
 * The decode worker logs its WebAssembly memory in a `memory: ...` line, as the other two do.
@@ -228,7 +228,7 @@ The GPU keeps each weight matrix of an f16 file as f16, two values in each `u32`
 * `?bench` times the kernels before and after.  A browser test checks that Safari and Chrome accept the shaders.
 
 * Acceptance: a test runs each changed kernel with f16 weights and with today's f32 weights on the same GPU.  The outputs match bit for bit.  If an adapter flushes f16 subnormals, the test reports how many values differ, and the maintainer decides.  `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release` and the e2e `selftest` pass against the CPU (GPU-2).  `every_kernel_fits_the_default_limits` passes with the new capability (GPU-1).  A test without the downlevel flag gets the f32 path.  The PR names the adapter of a real GPU, not SwiftShader (GPU-3).  The worker log shows the parameters at about 350 MB.
-* Decision point for the maintainer: make f16 the default after the iPhone and the Mac show the same stems and no slower separation.
+* Decision point, decided in advance by the maintainer: f16 becomes the default when the Mac's GPU gives the same stems bit for bit and `?bench` shows no slower separation.  M10's iPhone run checks the iPhone later.
 
 ### M10: the budget check, and the iPhone evidence
 
@@ -269,6 +269,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M1 review round 3: 1 blocker and 2 should-fix fixed.  The tests check the p99 text and late buffers without a block, and playback stops when the audio context stops.
 * [x] 2026-10-25: M1 iPhone numbers (build `2baf7ff46c5b`, `st_play=60`): see "Surprises and discoveries".  The maintainer accepted decisions 0016 and 0017.
 * [x] 2026-10-25: M2: `e2e memory-budget`.  In Chrome on the Mac (AMD Radeon Pro 5500M, `chunk=16384&overlap=1`).  1 minute: 966 MB (page wasm 177, worker wasm 57, GPU live 732).  4 minutes: 1558 MB (727, 99, 732).  The 4-minute peak is 592 MB above, about 197 MB per minute.
+* [x] 2026-10-25: run of M3 to M10 started.  Preflight passed.  The maintainer accepted decisions 0015 and 0019, and decided M9's default in advance.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.
 * [ ] M5: decode from and into storage.
@@ -300,6 +301,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, maintainer: all the work goes on `iphone-crashes-2026-10-25` and PR #39.  M2 needs no review rounds.  M3 to M10 run with an orchestrator and a team per milestone ("How the work runs").
 * 2026-10-25, maintainer: no reload check in M1.  Nothing in this plan acts on its result, and M10's iPhone run shows any kill.
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
+* 2026-10-25, maintainer, at the start of the M3 to M10 run: decision 0015 accepted.  Teams may reword MEM-1 and LAYER-1 as decisions 0015 and 0019 need, in the milestone that needs it, and keep or extend their tests.  Decision 0019 accepted: a new page-side worker crate decodes.  M9 makes f16 the default when the Mac gives the same stems bit for bit and no slower separation.
 * 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
 
 ## Outcomes and retrospective

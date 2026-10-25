@@ -1,6 +1,6 @@
 # 0015: browser storage holds a song's audio, and memory holds blocks
 
-Status: proposed (2026-10-25, by the agent)
+Status: accepted (2026-10-25, by the maintainer; proposed by the agent)
 
 ## Context
 

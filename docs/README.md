@@ -43,10 +43,11 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0012-one-song-rate.md`: every song in the app is at 44.1 kHz; `Song::from_audio` converts other rates on the page thread.
 * `decisions/0013-decode-limit.md`: a decoded file holds at most 1 GiB of `f32` samples, in every format, so a small FLAC cannot stop the tab.
 * `decisions/0014-save-the-mix-as-heard.md`: the mix lane saves the mix as heard (Mute, Solo, volume), mixed on the page in blocks; the worker encodes as before.
-* `decisions/0015-storage-holds-the-song.md`: proposed: browser storage holds a song's audio, and memory holds blocks, so a long song fits on an iPhone.
+* `decisions/0015-storage-holds-the-song.md`: browser storage holds a song's audio, and memory holds blocks, so a long song fits on an iPhone.
 * `decisions/0016-stem-files-are-16-bit.md`: stem files in browser storage hold 16-bit PCM, and the mix and source files 32-bit float.
 * `decisions/0017-the-main-thread-reads-ahead.md`: async reads on the main thread keep a read-ahead buffer in front of the play head.
 * `decisions/0018-f16-weights-on-the-gpu.md`: the GPU keeps the f16 weight matrices of an f16 model file as f16, and computes in f32.
+* `decisions/0019-a-decode-worker-crate.md`: a page-side worker crate that takes `engine` decodes a song in blocks into browser storage.
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
