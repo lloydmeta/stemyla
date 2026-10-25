@@ -64,6 +64,11 @@ function pct(v, p) {
   const s = [...v].sort((a, b) => a - b);
   return s[Math.max(0, Math.ceil(p * s.length) - 1)].toFixed(1);
 }
+
+// The times of a line: p50, p99 and the maximum.
+export function st_times_text(v) {
+  return `p50 ${pct(v, 0.5)} ms, p99 ${pct(v, 0.99)} ms, max ${pct(v, 1)} ms`;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function remove_scratch() {
@@ -166,8 +171,9 @@ class Ahead {
 // does.  Two buffers are queued, and each 'ended' event schedules the next
 // at the end of the one before.  The first starts at now + base latency +
 // one buffer, and the schedule never moves back to the clock.  A buffer
-// whose start has passed is late: it starts at once.  Of each late pair,
-// `live.rs` fills one and leaves silent the one that would play over it.
+// whose start has passed is late: it starts at once.  The two chains make
+// late buffers two at a time (a late pair).  `live.rs` fills one of each
+// late pair, and leaves silent the one that would play over it.
 // A buffer whose frames the read-ahead buffer does not hold is an
 // underrun.  With `block_ms`, the main thread is busy that long every
 // `block_every_s`.  Unlike the app's callback, `take` here also starts
@@ -175,7 +181,7 @@ class Ahead {
 async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
   ahead.seek(from);
   await ahead.until(() => ahead.end - ahead.start + RATE > ahead.cap || ahead.end >= ahead.frames);
-  let under = 0, late = 0, buffers = 0, blocks = 0, pos = from;
+  let under = 0, late = 0, buffers = 0, blocks = 0, pos = from, interrupted = false;
   const rate = ctx ? ctx.sampleRate : RATE;
   const step = Math.round((FRAMES_PER_BUFFER * RATE * tempo) / rate);
   const period = FRAMES_PER_BUFFER / rate;
@@ -202,8 +208,20 @@ async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
     if (ctx) {
       const silence = ctx.createBuffer(2, FRAMES_PER_BUFFER, rate);
       let t = 0;
+      // iOS can suspend or interrupt the context, and then no 'ended'
+      // event comes.  The run stops and says so.
+      const watch = setInterval(() => {
+        if (ctx.state === "running") return;
+        interrupted = true;
+        clearInterval(watch);
+        done();
+      }, 250);
       const schedule = () => {
-        if (!take()) return finish();
+        if (interrupted) return;
+        if (!take()) {
+          if (live === 1) clearInterval(watch);
+          return finish();
+        }
         if (t === 0) t = ctx.currentTime + (ctx.baseLatency || 0) + period;
         else if (t < ctx.currentTime) late++;
         const src = ctx.createBufferSource();
@@ -233,7 +251,7 @@ async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
     }
   });
   if (blocker !== null) clearInterval(blocker);
-  return { under, late, blocks, played: buffers * period, end: pos, period };
+  return { under, late, blocks, interrupted, played: buffers * period, end: pos, period };
 }
 
 // A worker appends 1 MB every 10 ms to `name` through a sync access
@@ -325,9 +343,10 @@ export async function st_run(cfg, audio, line) {
         line(`playback: tempo ${tempo}${with_block}: underruns ${r.under}, ` +
           `late buffers ${r.late} (buffers of ${(r.period * 1000).toFixed(0)} ms that started after their time), ` +
           `${r.played.toFixed(1)} s played from ${(from / RATE).toFixed(0)} s, clock ${clock}` +
+          (r.interrupted ? `, interrupted (the audio context is ${ctx.state})` : "") +
           (ahead.failed ? `, read error ${ahead.failed}` : ""));
         line(`reads: tempo ${tempo}${with_block}: one second of ${FILES.length} files: ` +
-          `p50 ${pct(ahead.times, 0.5)} ms, p99 ${pct(ahead.times, 0.99)} ms, max ${pct(ahead.times, 1)} ms, ${ahead.times.length} reads`);
+          `${st_times_text(ahead.times)}, ${ahead.times.length} reads`);
         from = r.end + ahead.cap;
       }
     }
@@ -343,7 +362,7 @@ export async function st_run(cfg, audio, line) {
       await ahead.until(() => ahead.end > to);
       if (!ahead.failed) seeks.push(performance.now() - t0);
     }
-    line(`seeks: to the first frame of the new position: p50 ${pct(seeks, 0.5)} ms, p99 ${pct(seeks, 0.99)} ms, ${seeks.length} seeks` +
+    line(`seeks: to the first frame of the new position: ${st_times_text(seeks)}, ${seeks.length} seeks` +
       (ahead.failed ? `, read error ${ahead.failed}` : ""));
     const c = await concurrent(dir, cfg.spy);
     line(`concurrent: reads of the last byte while a worker writes: compared ${c.right + c.wrong} ` +
@@ -363,6 +382,8 @@ extern "C" {
     fn st_cfg_set(cfg: &JsValue, key: &str, value: JsValue);
     fn st_query_cfg(search: &str, max_tempo: f32) -> JsValue;
     fn st_audio() -> JsValue;
+    #[cfg(test)]
+    fn st_times_text(times: &js_sys::Array) -> String;
     #[wasm_bindgen(catch)]
     async fn st_run(
         cfg: &JsValue,
@@ -492,6 +513,7 @@ export function st_spy_off() {
 }
 export function st_cfg_get(cfg, key) { return cfg[key]; }
 export function st_in_chrome() { return navigator.userAgent.includes("Chrome/"); }
+export function st_suspend_later(ctx, ms) { if (ctx) setTimeout(() => ctx.suspend(), ms); }
 export async function st_scratch_exists() {
   try { await (await navigator.storage.getDirectory()).getDirectoryHandle("streamtest"); return true; }
   catch (e) { return false; }
@@ -502,6 +524,7 @@ export async function st_scratch_exists() {
         fn st_spy_off() -> String;
         fn st_cfg_get(cfg: &JsValue, key: &str) -> JsValue;
         fn st_in_chrome() -> bool;
+        fn st_suspend_later(ctx: &JsValue, ms: u32);
         async fn st_scratch_exists() -> JsValue;
     }
 
@@ -577,9 +600,13 @@ export async function st_scratch_exists() {
                 console_log!("skipped: the audio context is suspended");
             }
         }
-        for l in playback.iter().filter(|l| l.contains(" ms block every ")) {
-            assert!(number(l, "blocks ") > 0.0, "no block ran: {l}");
-            assert!(number(l, "late buffers ") > 0.0, "{l}");
+        for l in &playback {
+            if l.contains(" ms block every ") {
+                assert!(number(l, "blocks ") > 0.0, "no block ran: {l}");
+                assert!(number(l, "late buffers ") > 0.0, "{l}");
+            } else {
+                assert_eq!(number(l, "late buffers "), 0.0, "{l}");
+            }
         }
         assert_eq!(lines_with(&lines, "reads: tempo ").len(), 4, "{lines:#?}");
         let seeks = lines_with(&lines, "seeks: ")[0];
@@ -607,8 +634,8 @@ export async function st_scratch_exists() {
         assert_eq!(st_scratch_exists().await.as_bool(), Some(false));
     }
 
-    /// On the timer clock: reads that take 400 ms show in the read and seek
-    /// times and give underruns, and a block between one and two buffers
+    /// On the timer clock, reads that take 400 ms show in the read and seek
+    /// times, and they give underruns.  A block between one and two buffers
     /// (70 ms) makes buffers late, as on cpal's schedule.
     #[wasm_bindgen_test]
     async fn slow_reads_underrun_and_long_blocks_make_late_buffers() {
@@ -625,8 +652,13 @@ export async function st_scratch_exists() {
             assert!(l.contains("clock timer"), "{l}");
             assert!(number(l, "underruns ") > 0.0, "{l}");
         }
-        for l in playback.iter().filter(|l| l.contains(" ms block every ")) {
-            assert!(number(l, "late buffers ") > 0.0, "{l}");
+        for l in &playback {
+            let late = number(l, "late buffers ");
+            if l.contains(" ms block every ") {
+                assert!(late > 0.0, "{l}");
+            } else {
+                assert_eq!(late, 0.0, "{l}");
+            }
         }
         for l in lines_with(&lines, "reads: tempo ") {
             assert!(number(l, "p50 ") >= 400.0, "{l}");
@@ -634,6 +666,57 @@ export async function st_scratch_exists() {
         let seeks = lines_with(&lines, "seeks: ")[0];
         assert!(number(seeks, "p50 ") >= 400.0, "{seeks}");
         assert_eq!(st_scratch_exists().await.as_bool(), Some(false));
+    }
+
+    /// The times of a line are nearest-rank percentiles of the sorted
+    /// numbers, not of the text.
+    #[wasm_bindgen_test]
+    fn times_are_percentiles_of_the_numbers() {
+        let one_to_100: js_sys::Array = (1..=100).map(JsValue::from).collect();
+        assert_eq!(
+            st_times_text(&one_to_100),
+            "p50 50.0 ms, p99 99.0 ms, max 100.0 ms"
+        );
+        let unsorted: js_sys::Array = [100, 9, 20].into_iter().map(JsValue::from).collect();
+        assert_eq!(
+            st_times_text(&unsorted),
+            "p50 20.0 ms, p99 100.0 ms, max 100.0 ms"
+        );
+        assert_eq!(
+            st_times_text(&js_sys::Array::new()),
+            "p50 - ms, p99 - ms, max - ms"
+        );
+    }
+
+    /// When the audio context stops during playback, the run says so and
+    /// goes on to the end, not waiting for 'ended' events.
+    #[wasm_bindgen_test]
+    async fn a_stopped_audio_context_interrupts_the_playback() {
+        let settings = Settings::new(0.2, 3.0, 1);
+        let audio = audio();
+        st_suspend_later(&audio, 1000);
+        let lines = lines_of(&settings, &audio).await;
+        assert_eq!(lines.last().map(String::as_str), Some("done"));
+        let first = lines_with(&lines, "playback: tempo ")[0];
+        if first.contains("clock timer") {
+            assert!(
+                !st_in_chrome(),
+                "web-test runs Chrome with audio allowed: {first}"
+            );
+            console_log!("skipped: the audio context is suspended");
+            return;
+        }
+        assert!(
+            first.contains(", interrupted (the audio context is suspended)"),
+            "{first}"
+        );
+        let played: f64 = first
+            .split(" s played")
+            .next()
+            .and_then(|head| head.rsplit(", ").next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no seconds played in {first}"));
+        assert!(played < 3.0, "the run went on after the stop: {first}");
     }
 
     /// A failed read ends the waits: the run reports it, finishes and

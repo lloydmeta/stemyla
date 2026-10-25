@@ -81,7 +81,7 @@ A 30-minute song has about 272 chunks.  At the iPhone's measured 10.8 to 18.7 s 
 * Session file: one stereo signal of a song in OPFS: a decoded source, the mix or a stem (decision 0016).
 * Read-ahead buffer: memory that holds the next few seconds of every stem in front of the play head (decision 0017).
 * Underrun: the callback needs frames that the read-ahead buffer does not hold.  It plays silence and counts the event.
-* Late buffer: a buffer that starts after its time, because the main thread was busy.  It starts at once.  Of each late pair, `live.rs` fills one and leaves silent the one that would play over it.  This is not an underrun.
+* Late buffer: a buffer that starts after its time, because the main thread was busy.  It starts at once.  cpal's two chains make late buffers two at a time (a late pair).  `live.rs` fills one of each late pair, and leaves silent the one that would play over it.  This is not an underrun.
 * Overview: the peak columns of a lane, made while its session file is written, so the waveform never reads the whole file.
 
 ## Plan of work
@@ -210,7 +210,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M1 code: `?streamtest` (`app/src/streamtest.rs`) and `the_spike_logs_each_measure_and_leaves_no_files`.  In Chrome on the Mac, a 0.2-minute run gave reads of p50 3.4 ms and p99 4.9 ms, and no underruns.
 * [x] 2026-10-25: M1 review round 1: 1 blocker and 7 should-fix fixed.  The audio context starts in the tap, the schedule follows cpal's, and the tests check the counts.
 * [x] 2026-10-25: M1 review round 2: 7 should-fix fixed.  The timer clock follows cpal's slack of one buffer, and the tests check the read, seek, late and concurrent numbers.
-* [ ] M1: the iPhone numbers.  The maintainer publishes, opens `?streamtest`, taps "Run storage test", and pastes the `streamtest:` lines.
+* [x] 2026-10-25: M1 review round 3: 1 blocker and 2 should-fix fixed.  The tests check the p99 text and late buffers without a block, and playback stops when the audio context stops.
+* [ ] M1: the iPhone numbers.  The maintainer publishes, opens `?streamtest`, taps "Run storage test", and pastes the `streamtest:` lines.  The default run takes over 20 minutes.  Safari stays in the foreground, with Auto-Lock set to Never and the phone on a charger.
 * [ ] M2: `e2e memory-budget` measures.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.

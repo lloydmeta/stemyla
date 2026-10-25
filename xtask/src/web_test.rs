@@ -75,8 +75,8 @@ pub fn run(args: &[String]) -> Result<()> {
         // It would skip every browser test and report success.
         cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
         // The runner gives each test binary 20 s by default.  The app's
-        // lib tests take about 16 to 18 s in Chrome on the maintainer's
-        // Mac, most of it the `?streamtest` runs, so 90 s leaves room for
+        // lib tests take about 16 to 19 s in Chrome on the maintainer's
+        // Mac.  Most of it is the `?streamtest` runs.  90 s leaves room for
         // slower machines.
         if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
             cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
