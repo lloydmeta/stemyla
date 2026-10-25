@@ -18,14 +18,14 @@ The state at the start of M3, on 2026-10-25, at commit `2c7440a` on the branch `
 * `worker/src/web.rs`:
   * `run` copies the mix into WebAssembly memory, feeds `Demixer` a chunk at a time, and calls `post_segment` for each ready `Segment` (`roformer/src/demix.rs`, `Segment { start, stems }`, each stem `[left, right]`).  Then it sends `Reply::Done`.
   * `pcm16` rounds a sample to 16 bits as `engine::wav::write_pcm16` does: `(x * 32768.0).round().clamp(-32768.0, 32767.0)`.
-  * The inline JS writes OPFS files through `FileSystemWritableFileStream` (`opfs_write`, `whole`).  No code uses a `FileSystemSyncAccessHandle` yet.
+  * The inline JS writes OPFS files through `FileSystemWritableFileStream` (`opfs_write`, `whole`).  `app/src/streamtest.rs` (M1) already writes through a `FileSystemSyncAccessHandle` in an inline worker, with a spy on `FileSystemSyncAccessHandle.prototype.write`.  Use it as the model.
   * `worker/src/web/tests.rs`: browser tests in a dedicated worker, with no GPU.  `SENT` keeps each reply.  `start_spy` and `stop_spy` spy on `FileSystemWritableFileStream.prototype.write` (MEM-5).
 * `app/src/separator.rs`: `Separator::separate(left, right)` posts the mix.  The `onmessage` closure puts each segment into `Assembly` (`app/src/assemble.rs`) and, at `done`, pushes one `Event::Stem` for each stem.  The tests use `deliver` (a reply to the page with no clone) and `spy_on_post`.
 * `app/src/lib.rs`:
   * The "Separate 6 stems" button takes the original lane (`original_lane`) or `mix_of_sources` and calls `sep.separate`.  `SeparationJob` records the song's serial, session and name.
   * `poll_separator` collects `Event::Stem`s, and at `Event::Done` calls `apply_separated`.  That calls `store::save_stems` (16-bit WAVs and the `stem` lines of `meta`), then shows the stems with `with_original`, or keeps them for a song being opened (`stems_for_opening`).
   * The Storage menu's "Forget" calls `store::forget`.  "Reset…" stops the worker (`Separator::stop`) and then deletes OPFS (`app/src/reset.rs`).
-  * `apply_separated` logs `separator: memory: page wasm N MB with the stems shown`.
+  * `apply_separated` logs `separator: N stems in S s` and `separator: memory: page wasm N MB with the stems shown`.  `e2e separate` waits for the first line, and `e2e memory-budget` for the second.
 * `app/src/store.rs`: `save_sources` makes the session `sessions/<id>` before the song shows, so the page knows the session when the user can press Separate.  The demo song and a song whose save failed have no session.  `save_stems` and `rebuild` hold the stem file names (`file_stem`).  `rebuild` reads a stem WAV whole (`read`) and decodes it (`engine::decode::decode_bytes`), then pads it to the song's frames (`padded_to`).  `SAVING` makes `restore_id` and `forget` wait for a stem save.  `usage` gives the bytes used and the quota (`navigator.storage.estimate()`).
 * `xtask/src/e2e.rs`: `memory_budget` separates songs of 1 and 4 minutes in the app and takes the peak of each part from the `memory: ...` lines.  It waits for the first line with `memory: page wasm`.  `worker_check` posts `separate` by hand.  `xtask/e2e/worker.js` (`e2e.ask`) ends a request at a `model`, `error`, `selftest` or `done` reply.
 * M1 (parent plan, "Surprises and discoveries"): Chrome failed 2 of 29 reads of a file while a worker wrote it through a sync access handle.  So a stem lane stays empty until its file is complete.
@@ -47,7 +47,7 @@ Terms, besides the parent plan's:
 
 The team leader wrote this plan, has it reviewed, runs the review rounds and commits Progress.  One implementer (a `general-purpose` subagent) does steps 1 to 5 and the review fixes.  It starts no other agent.  Before each commit it runs the checks of GIT-2 (`CLAUDE.md`, Commands).  It commits signed (`git commit -S`) with the attribution lines that the team leader gives.  It does not push.
 
-Each commit leaves the docs true (DOC-1).  The wire format changes in one commit with `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` (PROTO-1).  Write each test first and see it fail for the right reason, then write the code.  A test that cannot fail is a finding in review.
+Each commit leaves the docs true (DOC-1): a doc that a step makes wrong changes in that step's commit, not in step 5.  The wire format changes in one commit with `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` (PROTO-1).  Write each test first and see it fail for the right reason, then write the code.  A test that cannot fail is a finding in review.
 
 ### Decisions of this milestone
 
@@ -68,13 +68,14 @@ The parent plan does not settle these points.  The Decision log gives the reason
   * If the separated song is still shown (`StemsGo::Show`) and is at most the limit, the page separates it again on the memory path.
   * If it is longer, the page refuses it, and tells the user to free space in the Storage menu.
   * If another song is shown, the page tells the user to open the song and press Separate again.  It does not separate the shown song.
-* D5, the session's files: the worker writes each stem to `stems/<name>.wav.part`, never to `stems/<name>.wav`.  After `done`, the page moves each `.part` file onto its `.wav` file (as `opfs_commit` of the worker does, with `FileSystemFileHandle.move`), and writes the `stem` lines of `meta`.  It does both inside `SAVING`, so `restore_id` and `forget` wait for them.  So:
+  * The fallback starts the memory path directly.  It does not choose the path again (D2), so a storage that still looks free cannot send the song back to the storage path.
+* D5, the session's files: the worker writes each stem to `stems/<name>.wav.part`, never to `stems/<name>.wav`.  After `done`, the page moves each `.part` file onto its `.wav` file (as `opfs_commit` of the worker does, with `FileSystemFileHandle.move`), and writes the `stem` lines of `meta`.  It does both inside `SAVING`, so `restore_id` and `forget` wait for them.  It writes the new `stem` lines only when every move succeeded.  If a move fails, it writes `meta` with no `stem` lines, so a restore never mixes the stems of two separations.  So:
   * The kept stems of an earlier separation stay until the new stems are complete.  A failed or stopped separation leaves them as they were.
   * No reader opens a file that the worker writes (M1, Chrome).  A stem lane stays empty until its file is complete.
 * D6, the stems that the page shows: after D5, the page reads each stem file into `engine::Samples`, one stem at a time, with the code of `rebuild` (put into one function that both use).  So the shown stems hold the 16-bit samples, as a restored session does (decision 0016).  The Separate button stays disabled until the read ends.
 * D7, Forget during a separation: the Storage menu disables "Forget" for the session of a starting or running storage-path separation, with a hover text that says why.  A pure function decides it, so a native test covers it.  "Reset…" stops the worker first, as today.  If the browser keeps a file locked after that, the reset fails and offers "Try again", as today.
 * D8, the WAV header: the worker writes `engine::wav::header`'s 44-byte layout itself, because it cannot take `engine` (LAYER-1).  It writes the header with sizes of 0 when it opens a file, and the real RIFF and data sizes after the last segment.  A song whose data would not fit a `u32` WAV size is refused before the first chunk.  The e2e check of step 4 compares the files with `engine::wav::encode_pcm16` byte for byte, so it checks the header too.
-* D9, the measure of page growth: the page logs `separator: memory: page wasm N MB as the separation starts` after it posts a separation, and `separator: memory: page wasm N MB as the separation ends` when `done` arrives, before it reads the stems.  `e2e memory-budget` prints the difference for each song and fails if it is more than 4 MB (the tolerance of M10).  The scenario waits for the line `with the stems shown`, not for the first `memory: page wasm` line.  WebAssembly memory never shrinks, so free pages can hide a small allocation.  The check catches song-length buffers such as `Assembly`'s (about 508 MB at 4 minutes).  `stored_replies_make_no_song_length_buffers` covers the rest.
+* D9, the measure of page growth: the page logs `separator: memory: page wasm N MB as the separation starts` after it posts a separation, and `separator: memory: page wasm N MB as the separation ends` when `done` arrives, before it reads the stems.  `e2e memory-budget` prints the difference for each song and fails if it is more than 4 MB (the tolerance of M10).  The scenario waits for the line `with the stems shown`, not for the first `memory: page wasm` line.  WebAssembly memory never shrinks, so free pages can hide a small allocation.  The check catches song-length buffers such as `Assembly`'s (about 508 MB at 4 minutes).  Before the start, the page has freed two song-length stereo buffers (the mix of `load_song` and the button's mix, about 42 MB each at 4 minutes), so an allocation up to about that size shows no growth.  `stored_replies_make_no_song_length_buffers` covers the rest.
 * D10, the start: the start is asynchronous (`store::usage`).  When the user presses Separate, the page records the `SeparationJob` as starting, and disables Separate and the session's Forget.  It posts the request only if the same song (`song_serial`) is still shown when the estimate arrives.  Otherwise it drops the start and says so.
 
 ### Step 1: the stem writer in the worker
@@ -100,7 +101,7 @@ Tests, in `worker/src/web/tests.rs` (no GPU):
 
 * `protocol/src/lib.rs`: D1.  Update the module doc.  Extend `protocol/tests/web.rs`: `separate` with and without `session`, `stored` and `unstored`, each through a structured clone.  A `separate` without a session transfers its two channels, as now.
 * `worker/src/web.rs`: `serve` passes the session to `run`.  `run` sends its output to one of two places: `post_segment` (memory path) or the stem writer (storage path).  On the storage path it opens the writer before the first chunk, and sends `stored` after each `put`.  At the end it calls `finish`, then sends `done`.  A storage failure calls `abandon` and sends `unstored`, not `error`, and no `done`.  Every other failure calls `abandon` before the `error` (D4).
-* Split `run` so that its loop over the chunks takes the network as a parameter: a function from one chunk's input to the stems' output.  The real one runs `Job` on the GPU.  So a test can run the whole loop with a fake network and no GPU, through `Demixer::accept` and `take_ready`.
+* Split `run` so that its loop over the chunks takes the network as a parameter: an async function from one chunk's input to the stems' output.  The real one runs `Job` on the GPU.  The loop function holds the stem writer, `abandon`, and the choice between `unstored` and `error`, so the tests below cover them.  So a test can run the whole loop with a fake network and no GPU, through `Demixer::accept` and `take_ready`.
 * Tests, each with a fake network, asserting the whole reply sequence from `SENT`:
   * `a_storage_failure_ends_the_separation_with_unstored`: the spy refuses a stem write.  The replies end with one `unstored` that names the error, with no `error` and no `done`, and no stem file remains.
   * `a_network_failure_removes_the_part_files`: the fake network fails at the second chunk.  The replies end with one `error`, and no stem file remains.
@@ -112,7 +113,8 @@ Tests, in `worker/src/web/tests.rs` (no GPU):
 * `app/src/separator.rs`: `Separator::separate(left, right, session: Option<&str>)`.  On the storage path, the page keeps `Assembly` empty.  It keeps the last `stored` reply.  At `done`, it sends `Event::StemsStored { names, frames, len, secs }`, or an error if `frames` is not `len`.  `unstored` becomes `Event::Unstored(text)`.  The memory path stays as it is.
 * `app/src/lib.rs`:
   * One function starts a separation, used by the button and by the fallback of D4.  It records the start (D10), makes the mix as the button does today, chooses the path (D2), posts the request, and logs the start line of D9.  The status line says which path, and why when it is the memory path.  A refused song gets a status line that gives its length and the limit.
-  * `Event::StemsStored`: log the end line of D9.  Then, inside `SAVING`, move the `.part` files onto the `.wav` files and write the `stem` lines of `meta` (D5, a new function in `store.rs`).  Then, for `StemsGo::Show` (and a song being opened, as `stems_for_opening` does), read the stems (D6) and show them with `with_original`.  For `StemsGo::Kept`, stop after `meta`.  If the move or `meta` fails, the status line says that the stems are not kept, as for `save_stems` today.
+  * Split `apply_separated` in two parts: the save (`store::save_stems`, memory path only) and the rest (the destination, the show, and the two log lines of "Context and orientation").  Both paths use the second part, so `e2e separate` and `e2e memory-budget` find their lines on both paths, and the storage path writes no WAV twice.
+  * `Event::StemsStored`: log the end line of D9.  Then, inside `SAVING`, move the `.part` files onto the `.wav` files and write the `stem` lines of `meta` (D5, a new function in `store.rs`).  Then, for `StemsGo::Show` (and a song being opened, as `stems_for_opening` does), read the stems (D6) and show them with `with_original`.  Then the second part of `apply_separated` shows them.  For `StemsGo::Kept`, stop after `meta`.  If the move or `meta` fails, the status line says that the stems are not kept, as for `save_stems` today.
   * `Event::Unstored`: D4.
   * The Storage menu: D7.
 * `app/src/store.rs`: the function of D5, and one function that reads a stored stem to its song's frames, used by `rebuild` and by `StemsStored`.  `file_stem` moves to `stem-protocol` (D1).  Update the module doc: the worker writes the stem files on the storage path.
@@ -121,13 +123,13 @@ Tests:
 
 * Native, in `app` (`cargo test`):
   * `the_separation_path_follows_storage_and_length` covers D2.  It covers a session with enough space, a session without enough space, no session, and a song at the limit and one frame over it.
-  * `forget_waits_for_the_separation_of_its_session` covers D7: Forget is disabled for the session of a starting or running storage-path separation, and enabled for other sessions and on the memory path.
+  * `forget_is_disabled_for_the_session_being_separated` covers D7: Forget is disabled for the session of a starting or running storage-path separation, and enabled for other sessions and on the memory path.
   * `an_unstored_separation_goes_to_memory_only_for_the_shown_song` covers D4's three cases.
 * Browser, in `app/src/separator.rs` with `spy_on_post` and `deliver`:
   * `separate_names_the_session_on_the_storage_path`: the request carries `session` and transfers both channels.  Without a session it carries none.
   * `stored_replies_make_no_song_length_buffers`: `stored` replies and `done` give `Event::StemsStored`, and `Assembly` stays empty.  A `done` whose last `stored` frames are less than `len` gives an error.
-* Browser, for the fallback (the parent plan's test that "makes OPFS writes fail"), with a `Separator` whose posts are spied on:
-  * `unstored_separates_a_short_song_in_memory`: after `unstored` for a short song, the status line gives the reason, and the page posts the song again without a session.
+* Browser, for the fallback (the parent plan's test that "makes OPFS writes fail"), in a wasm-only test module of `app/src/lib.rs`.  Each test makes `StemApp::default()` with a `Separator` whose posts are spied on, and a short song.  The worker's script is not in the test page, so its `onerror` pushes `Event::Stopped`: clear `onerror` before the test, or ignore that event.  Test the refusal of a long song through D2's pure function and a stubbed song length, not with a song over 100 seconds.
+  * `unstored_separates_a_short_song_in_memory`: after `unstored` for a short song, with no stub of `navigator.storage.estimate` (so Chrome reports free space), the status line gives the reason, and the page posts exactly one request, without a session.
   * `unstored_refuses_a_long_song`: after `unstored` for a song over the limit, the status line gives the reason and the limit, and the page posts nothing.
   * `a_full_storage_chooses_the_memory_path_before_the_start`: with `navigator.storage.estimate` stubbed to give no free space, a short song posts without a session and a long one is refused, each with its status line.
   * `a_start_for_a_song_no_longer_shown_posts_nothing`: D10.
@@ -150,7 +152,7 @@ Tests:
 
 * `docs/ARCHITECTURE.md`: memory on phones ("Separated stems leave the worker chunk by chunk") and browser storage: the two paths, the stem writer, the limit.
 * `docs/invariants.md`: add the new spy test to MEM-5's "Enforced by" line.  Do not change the text of a rule.  MEM-1 and LAYER-1 need no new words in M3: the page's stems are still `Samples`, and the worker takes no new crate.
-* `docs/tech-debt.md`, TD-54: say what M3 removed (the page's song-length stems during a storage-path separation) and what is left.  The storage path has no length limit, but the page then reads all six stems into memory (D6), and so does each restore.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  M6 and M7 remove this.
+* `docs/tech-debt.md`, TD-54: say what M3 removed (the page's song-length stems during a storage-path separation) and what is left.  The storage path has no length limit, but the page then reads all six stems into memory (D6), and so does each restore.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`) and reads the stems whole again, so the tab can stop at each reload.  M6 and M7 remove this.  No build between M3 and M7 goes to the published site: publishing is a person's step (GIT-1), and the orchestrator says so in the PR description.
 * `README.md` and `docs/working-with-agents.md`: the new e2e scenario, if `docs-check` or their lists of scenarios need it.
 
 ## Validation and acceptance
@@ -173,6 +175,7 @@ The parent's M3 acceptance, check by check:
 
 * [x] 2026-10-25: milestone plan written.
 * [x] 2026-10-25: plan review 1: 5 should-fix fixed (the stem names, the limit's derivation, a testable loop, `.part` files, an asynchronous start), and 5 nits.
+* [x] 2026-10-25: plan review 2: 2 should-fix fixed (the fallback starts the memory path directly; `apply_separated` splits so both paths log the lines of the e2e scenarios), and 8 nits.
 
 ## Surprises and discoveries
 
@@ -187,6 +190,7 @@ None yet.
 * 2026-10-25, team leader: D6.  Until M6, the page reads the stems back to play them.
 * 2026-10-25, team leader: D7.  The spec does not say what `removeEntry` does to a locked file, so "Forget" is disabled for the session being separated.
 * 2026-10-25, team leader: the parent's fallback check is split between the worker's browser tests and the page's browser tests.  A browser test has no GPU, and the e2e scenarios have no way to make one write fail.  The worker's tests run the whole loop with a fake network, so they see the whole reply sequence.
+* 2026-10-25, team leader, after plan review 2: the fallback of D4 starts the memory path directly, so it cannot loop back to storage.  `meta` gets the new `stem` lines only when every move succeeded.
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective
