@@ -14,11 +14,6 @@
 //! a dedicated worker has.  Each write gets a whole new `Uint8Array`, never
 //! a view (MEM-5).
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "run uses the stem writer from step 2 of M3")
-)]
-
 use js_sys::{Array, Uint8Array};
 use roformer::SAMPLE_RATE;
 use roformer::demix::Segment;

@@ -99,17 +99,90 @@ fn a_mix_is_transferred_not_copied() {
     let r = Request::Separate {
         left: left.clone(),
         right: right.clone(),
+        session: None,
     };
     let got = request_trip(&r, &Settings::default());
     match got.request {
-        Request::Separate { left: l, right: r } => {
+        Request::Separate {
+            left: l,
+            right: r,
+            session,
+        } => {
             assert_eq!(l.to_vec(), [0.5, -0.5]);
             assert_eq!(r.to_vec(), [0.25, 0.75]);
+            assert_eq!(session, None, "the memory path");
         }
         other => panic!("{other:?}"),
     }
     assert_eq!(left.length(), 0, "the sender's buffer was transferred");
     assert_eq!(right.length(), 0);
+}
+
+#[wasm_bindgen_test]
+fn a_separation_into_storage_names_its_session() {
+    let (left, right) = (samples(&[0.5, -0.5]), samples(&[0.25, 0.75]));
+    let r = Request::Separate {
+        left: left.clone(),
+        right: right.clone(),
+        session: Some("sessions/1792640000000".into()),
+    };
+    let (msg, transfer) = r.to_js(&Settings::default());
+    assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
+    match ToWorker::from_js(&post(&msg, &transfer))
+        .expect("decodes")
+        .request
+    {
+        Request::Separate {
+            left: l,
+            right: r,
+            session,
+        } => {
+            assert_eq!(session.as_deref(), Some("sessions/1792640000000"));
+            assert_eq!(
+                (l.to_vec(), r.to_vec()),
+                (vec![0.5, -0.5], vec![0.25, 0.75])
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(left.length() + right.length(), 0, "transferred");
+}
+
+#[wasm_bindgen_test]
+fn stored_and_unstored_replies_arrive_intact() {
+    let r = Reply::Stored {
+        frames: 44_100,
+        len: 88_200,
+        stems: vec!["bass".into(), "drums".into()],
+    };
+    let (_, transfer) = r.to_js();
+    assert_eq!(transfer.length(), 0, "no samples cross");
+    match reply_trip(&r) {
+        Reply::Stored { frames, len, stems } => {
+            assert_eq!((frames, len), (44_100, 88_200));
+            assert_eq!(stems, ["bass", "drums"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    match reply_trip(&Reply::Unstored {
+        text: "QuotaExceededError: the disk is full".into(),
+    }) {
+        Reply::Unstored { text } => assert_eq!(text, "QuotaExceededError: the disk is full"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_stored_reply_without_its_counts_is_refused() {
+    for json in [
+        r#"{"type": "stored", "len": 4, "stems": ["bass"]}"#,
+        r#"{"type": "stored", "frames": 4, "stems": ["bass"]}"#,
+        r#"{"type": "stored", "frames": 4, "len": 4}"#,
+        r#"{"type": "stored", "frames": 4, "len": 4, "stems": [1]}"#,
+    ] {
+        let e = Reply::from_js(&from_json(json)).expect_err(json);
+        assert_eq!(e.kind, "stored", "{json}");
+    }
 }
 
 #[wasm_bindgen_test]

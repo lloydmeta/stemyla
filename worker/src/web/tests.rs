@@ -1470,6 +1470,243 @@ async fn a_song_too_long_for_a_wav_is_refused() {
     fits.abandon().await;
 }
 
+/// The stems of the fake network: stem `s` is `0.1 x (s + 1)` of the
+/// left channel and minus that of the right.
+fn fake_stems_of(x: &Stereo) -> Vec<Stereo> {
+    (0..STEMS.len())
+        .map(|s| {
+            let k = 0.1 * (s + 1) as f32;
+            [
+                x[0].iter().map(|v| v * k).collect(),
+                x[1].iter().map(|v| -v * k).collect(),
+            ]
+        })
+        .collect()
+}
+
+/// A network that gives [`fake_stems_of`], and fails at chunk `fail_at`
+/// if set.
+struct FakeNetwork {
+    fail_at: Option<usize>,
+}
+
+impl Network for FakeNetwork {
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+        if self.fail_at == Some(index) {
+            return Err(format!("the fake network failed at chunk {index}"));
+        }
+        Ok(fake_stems_of(x))
+    }
+
+    fn so_far(&self) -> String {
+        "the fake network".into()
+    }
+
+    fn finish(&self) {}
+}
+
+const FAKE_FRAMES: usize = 10_000;
+const FAKE_CHUNK: usize = 2048;
+
+fn fake_mix() -> Stereo {
+    [
+        (0..FAKE_FRAMES)
+            .map(|i| 0.8 * (0.013 * i as f32).sin())
+            .collect(),
+        (0..FAKE_FRAMES)
+            .map(|i| 0.6 * (0.029 * i as f32).cos())
+            .collect(),
+    ]
+}
+
+fn fake_demixer() -> Demixer {
+    Demixer::new(fake_mix(), FAKE_CHUNK, 2, STEMS.len())
+}
+
+/// What a demixer of its own gives with the fake network: the whole
+/// stems, whether each chunk gives a segment, and whether the
+/// `take_ready` after the last chunk does.
+struct FakeRun {
+    stems: Vec<Stereo>,
+    segment_after: Vec<bool>,
+    segment_at_end: bool,
+}
+
+fn fake_run() -> FakeRun {
+    let mut d = fake_demixer();
+    let mut stems: Vec<Stereo> = (0..STEMS.len())
+        .map(|_| [vec![0.0; FAKE_FRAMES], vec![0.0; FAKE_FRAMES]])
+        .collect();
+    let mut place = |seg: Option<Segment>| {
+        let Some(seg) = seg else { return false };
+        for (whole, [l, r]) in stems.iter_mut().zip(&seg.stems) {
+            whole[0][seg.start..seg.start + l.len()].copy_from_slice(l);
+            whole[1][seg.start..seg.start + r.len()].copy_from_slice(r);
+        }
+        true
+    };
+    let mut segment_after = Vec::new();
+    while let Some(x) = d.next_input() {
+        d.accept(&fake_stems_of(&x));
+        segment_after.push(place(d.take_ready()));
+    }
+    let segment_at_end = place(d.take_ready());
+    FakeRun {
+        stems,
+        segment_after,
+        segment_at_end,
+    }
+}
+
+/// The types of the replies sent since the last [`fresh`], without the
+/// log lines.
+fn reply_types() -> Vec<String> {
+    SENT.with_borrow(|s| {
+        s.iter()
+            .filter_map(|m| field(m, "type").as_string())
+            .filter(|t| t != "log")
+            .collect()
+    })
+}
+
+/// The replies of the fake run's first `chunks` chunks: `progress` before
+/// the first, then `per_segment` for each chunk that gives a segment and a
+/// `progress` for each chunk.
+fn chunk_replies(run: &FakeRun, chunks: usize, per_segment: &str) -> Vec<String> {
+    let mut out = vec!["progress".to_string()];
+    for segment in &run.segment_after[..chunks] {
+        if *segment {
+            out.push(per_segment.into());
+        }
+        out.push("progress".into());
+    }
+    out
+}
+
+/// The replies of the whole fake run.
+fn whole_run(run: &FakeRun, per_segment: &str) -> Vec<String> {
+    let mut out = chunk_replies(run, run.segment_after.len(), per_segment);
+    if run.segment_at_end {
+        out.push(per_segment.into());
+    }
+    out.push("done".into());
+    out
+}
+
+#[wasm_bindgen_test]
+async fn a_stored_separation_sends_no_samples() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let mut net = FakeNetwork { fail_at: None };
+    separate_song(&mut net, fake_demixer(), Some(SESSION), now_s())
+        .await
+        .expect("separated");
+    let run = fake_run();
+    assert!(
+        run.segment_after.iter().filter(|s| **s).count() > 1,
+        "the fake run has several segments"
+    );
+    assert_eq!(reply_types(), whole_run(&run, "stored"));
+    let last = sent("stored").pop().expect("stored");
+    assert_eq!(field(&last, "frames").as_f64(), Some(FAKE_FRAMES as f64));
+    assert_eq!(field(&last, "len").as_f64(), Some(FAKE_FRAMES as f64));
+    let names: Vec<String> = js_sys::Array::from(&field(&last, "stems"))
+        .iter()
+        .filter_map(|n| n.as_string())
+        .collect();
+    assert_eq!(names, STEMS);
+    for (name, [left, right]) in STEMS.iter().zip(run.stems) {
+        let frames: Vec<(i16, i16)> = left
+            .iter()
+            .zip(&right)
+            .map(|(l, r)| (pcm16(*l) as i16, pcm16(*r) as i16))
+            .collect();
+        assert!(
+            read_at(&part_path(name)).await == Some(wav_file(&frames)),
+            "{name}: the file holds the fake network's stem, rounded to 16 bits"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_separation_without_a_session_sends_segments() {
+    fresh().await;
+    let mut net = FakeNetwork { fail_at: None };
+    separate_song(&mut net, fake_demixer(), None, now_s())
+        .await
+        .expect("separated");
+    assert_eq!(reply_types(), whole_run(&fake_run(), "segment"));
+    let last = sent("segment").pop().expect("segment");
+    let first = js_sys::Array::from(&js_sys::Array::from(&field(&last, "stems")).get(0));
+    let left: Float32Array = first.get(1).unchecked_into();
+    let end = field(&last, "start").as_f64().unwrap_or(0.0) + left.length() as f64;
+    assert_eq!(end, FAKE_FRAMES as f64, "the segments reach the song's end");
+    assert_eq!(names_in("").await.as_deref(), Some(""), "no file written");
+}
+
+#[wasm_bindgen_test]
+async fn a_storage_failure_ends_the_separation_with_unstored() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    // Six headers, then the six stems of the first segment: the 7th write
+    // is the first segment's first stem.
+    start_sync_spy(7);
+    let mut net = FakeNetwork { fail_at: None };
+    let ended = separate_song(&mut net, fake_demixer(), Some(SESSION), now_s()).await;
+    let record = stop_sync_spy();
+    assert_eq!(record, [["whole"; 6].join(" "), "refused".into()].join(" "));
+    reply_to(kind::SEPARATE, ended);
+    let run = fake_run();
+    let first = run
+        .segment_after
+        .iter()
+        .position(|s| *s)
+        .expect("a segment");
+    let mut want = chunk_replies(&run, first, "stored");
+    want.push("unstored".into());
+    assert_eq!(reply_types(), want, "no error, no done");
+    let text = field(&sent("unstored")[0], "text")
+        .as_string()
+        .unwrap_or_default();
+    assert!(text.starts_with("QuotaExceededError"), "{text}");
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_network_failure_removes_the_part_files() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let run = fake_run();
+    // After a stem file holds a segment.
+    let fail_at = 1 + run
+        .segment_after
+        .iter()
+        .position(|s| *s)
+        .expect("a segment");
+    let mut net = FakeNetwork {
+        fail_at: Some(fail_at),
+    };
+    let ended = separate_song(&mut net, fake_demixer(), Some(SESSION), now_s()).await;
+    reply_to(kind::SEPARATE, ended);
+    let mut want = chunk_replies(&run, fail_at, "stored");
+    want.push("error".into());
+    assert!(want.contains(&"stored".to_string()), "{want:?}");
+    assert_eq!(reply_types(), want, "no unstored, no done");
+    let text = field(&sent("error")[0], "text")
+        .as_string()
+        .unwrap_or_default();
+    assert_eq!(text, format!("the fake network failed at chunk {fail_at}"));
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+}
+
 /// MEM-1: proves each path in this crate's `clippy.toml` (see the `#[expect]`s).
 #[wasm_bindgen_test]
 fn mem1_lint_is_on_for_js_arrays() {

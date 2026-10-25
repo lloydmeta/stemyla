@@ -190,6 +190,7 @@ The parent's M3 acceptance, check by check:
   * vocals `f1b79d872435cdb931306a0c33228905c2d6b3ddfd33e9f1cb55720f52d0b624`
   * guitar `7e5eb334e7dead42ef2f7902c1590b2561347aa7b7f17b817aced81c295127bb`
   * piano `3166e0de310c930f2b40f75c2631e4524b7115c64f90d4ef540102af6da68f90`
+* [x] 2026-10-25: step 2, commit `93fab48` (the memory half of `stored-stems`) and the commit after it.  The wire format of D1, with `xtask/e2e/worker.js`.  The worker's loop takes the network as a parameter (`Network`, `GpuNetwork`, `separate_song`).  `e2e stored-stems --hashes` passes after the change: the six hashes did not change.  `e2e storage` passes.  web-test: worker 52 passed, protocol 18 passed.
 
 ## Surprises and discoveries
 
@@ -213,6 +214,8 @@ None yet.
 * 2026-10-25, implementer, step 2: `stored-stems` fixes the kernels with `mm: s64, attn: split`.  Without `attn`, each worker calibrates its attention path, and two runs could do different arithmetic.  With both set, two runs gave the same hashes.
 * 2026-10-25, implementer, step 2: `xtask` takes `sha2` (RustCrypto, first published 2016-05-06, 0.11.1 on 2026-10-12, per crates.io), pinned to the 0.10.9 that `Cargo.lock` already held.  The page sends each stem's floats to the runner as base64 (`e2e.base64`), so JS rounds nothing.
 * 2026-10-25, implementer, step 2: the memory half of `stored-stems` is its own commit, before the wire format changes.
+* 2026-10-25, implementer, step 2: the worker opens the stem writer before the first chunk.  A storage failure at the open sends `unstored`, and a song too long for a WAV sends `error`.  The loop's failures are `Stop::Storage` (`unstored`) and `Stop::Failed` (`error`); both abandon the writer first.
+* 2026-10-25, implementer, step 2: until step 3, the page treats an `unstored` reply as a failed separation, and ignores `stored`.  The page names no session before step 3, so neither arrives.
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective

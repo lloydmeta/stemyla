@@ -11,8 +11,13 @@
 //!   load a `bs_roformer_sw.*.safetensors` file and keep it.
 //! * `{type: "download"}`: fetch the model (from `model_url` if set).
 //! * `{type: "forget_model"}`: delete the kept model.
-//! * `{type: "separate", left: Float32Array, right: Float32Array}`: a
-//!   44.1 kHz stereo mix (buffers transferred).
+//! * `{type: "separate", left: Float32Array, right: Float32Array,
+//!   session?: string}`: a 44.1 kHz stereo mix (buffers transferred).
+//!   With `session` (a folder from the root of the browser's private file
+//!   system, such as `"sessions/<id>"`), the worker writes each stem to
+//!   `<session>/stems/<file>.part`, where `<file>` is [`stem_file`] of its
+//!   name (the storage path).  Without it, the worker sends the stems in
+//!   `segment` replies (the memory path).
 //! * `{type: "selftest", base?: string}`: compare GPU results with the CPU
 //!   port's reference files (`xtask roformer-selftest`).
 //! * `{type: "bench"}`: time the GPU kernels.
@@ -27,8 +32,16 @@
 //! * `{type: "download", done, total}` while the model downloads.
 //! * `{type: "progress", done, total, secs}` per chunk.
 //! * `{type: "segment", start, len, stems: [[name, left, right], ...]}`
-//!   after each chunk: every stem's finished samples from `start` on, of a
-//!   song of `len` samples (buffers transferred).
+//!   after each chunk on the memory path: every stem's finished samples
+//!   from `start` on, of a song of `len` samples (buffers transferred).
+//! * `{type: "stored", frames, len, stems: [name, ...]}` after each chunk
+//!   on the storage path: each stem's file holds `frames` of the song's
+//!   `len` frames.  `stems` gives the stem names in the worker's order.  No
+//!   samples cross.
+//! * `{type: "unstored", text}`: browser storage could not hold the stems,
+//!   for the reason `text`.  The worker stopped the separation and removed
+//!   its partial stem files.  It ends the request, as `done` and `error`
+//!   do.
 //! * `{type: "done", secs}`, or `{type: "error", of, text}` where `of` is
 //!   the request's type; a separation stops with an error as soon as
 //!   WebGPU reports one (an invalid kernel would otherwise produce silent
@@ -57,6 +70,8 @@ pub mod kind {
     pub const ALIVE: &str = "alive";
     pub const PROGRESS: &str = "progress";
     pub const SEGMENT: &str = "segment";
+    pub const STORED: &str = "stored";
+    pub const UNSTORED: &str = "unstored";
     pub const DONE: &str = "done";
     pub const ERROR: &str = "error";
     pub const STATUS: &str = "status";
@@ -83,6 +98,8 @@ mod field {
     pub const START: &str = "start";
     pub const LEN: &str = "len";
     pub const STEMS: &str = "stems";
+    pub const FRAMES: &str = "frames";
+    pub const SESSION: &str = "session";
     pub const OF: &str = "of";
     pub const CHUNK: &str = "chunk";
     pub const OVERLAP: &str = "overlap";
@@ -280,6 +297,9 @@ pub enum Request {
     Separate {
         left: Float32Array,
         right: Float32Array,
+        /// The session folder to write the stems to (the storage path), or
+        /// `None` to send them to the page (the memory path).
+        session: Option<String>,
     },
     Selftest {
         base: Option<String>,
@@ -346,7 +366,16 @@ impl Request {
                 Some(ModelSource::Bytes(b)) => set(&o, field::BYTES, b),
                 None => {}
             },
-            Self::Separate { left, right } => put_stereo(&o, &transfer, left, right),
+            Self::Separate {
+                left,
+                right,
+                session,
+            } => {
+                put_stereo(&o, &transfer, left, right);
+                if let Some(s) = session {
+                    set(&o, field::SESSION, s.as_str());
+                }
+            }
             Self::Selftest { base } => {
                 if let Some(b) = base {
                     set(&o, field::BASE, b.as_str());
@@ -401,7 +430,11 @@ impl ToWorker {
             kind::FORGET_MODEL => Request::ForgetModel,
             kind::SEPARATE => {
                 let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Separate { left, right }
+                Request::Separate {
+                    left,
+                    right,
+                    session: string(msg, field::SESSION),
+                }
             }
             kind::SELFTEST => Request::Selftest {
                 base: string(msg, field::BASE),
@@ -467,6 +500,17 @@ pub enum Reply {
         len: usize,
         stems: Vec<SegmentStem>,
     },
+    /// Each stem's file holds `frames` of the song's `len` frames;
+    /// `stems` are the stem names in the worker's order.
+    Stored {
+        frames: usize,
+        len: usize,
+        stems: Vec<String>,
+    },
+    /// Browser storage could not hold the stems; the separation stopped.
+    Unstored {
+        text: String,
+    },
     Done {
         secs: f64,
     },
@@ -500,6 +544,8 @@ impl Reply {
             Self::Download { .. } => kind::DOWNLOAD,
             Self::Progress { .. } => kind::PROGRESS,
             Self::Segment { .. } => kind::SEGMENT,
+            Self::Stored { .. } => kind::STORED,
+            Self::Unstored { .. } => kind::UNSTORED,
             Self::Done { .. } => kind::DONE,
             Self::Error { .. } => kind::ERROR,
             Self::Status(_) => kind::STATUS,
@@ -548,6 +594,13 @@ impl Reply {
                 }
                 set(&o, field::STEMS, list);
             }
+            Self::Stored { frames, len, stems } => {
+                set(&o, field::FRAMES, *frames as f64);
+                set(&o, field::LEN, *len as f64);
+                let names: Array = stems.iter().map(|n| JsValue::from_str(n)).collect();
+                set(&o, field::STEMS, names);
+            }
+            Self::Unstored { text } => set(&o, field::TEXT, text.as_str()),
             Self::Done { secs } => set(&o, field::SECS, *secs),
             Self::Error { of, text } => {
                 set(&o, field::OF, of.as_str());
@@ -626,6 +679,23 @@ impl Reply {
                     stems,
                 }
             }
+            kind::STORED => {
+                let frames = number(msg, field::FRAMES).ok_or_else(|| bad("no frames"))?;
+                let len = number(msg, field::LEN).ok_or_else(|| bad("no len"))?;
+                let list: Array = get(msg, field::STEMS)
+                    .dyn_into()
+                    .map_err(|_| bad("no stems"))?;
+                let stems = list
+                    .iter()
+                    .map(|n| n.as_string().ok_or_else(|| bad("a stem name is not text")))
+                    .collect::<Result<_, _>>()?;
+                Self::Stored {
+                    frames: frames as usize,
+                    len: len as usize,
+                    stems,
+                }
+            }
+            kind::UNSTORED => Self::Unstored { text: text() },
             kind::DONE => Self::Done {
                 secs: num(field::SECS),
             },

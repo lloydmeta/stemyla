@@ -281,6 +281,13 @@ impl Separator {
                         }),
                     }
                 }
+                // The page names no session until the storage path of
+                // M3 step 3, so the worker sends neither of these yet.
+                Reply::Stored { .. } => None,
+                Reply::Unstored { text } => asm.borrow_mut().abandon().then_some(Event::Error {
+                    of: kind::SEPARATE.into(),
+                    text,
+                }),
                 Reply::Error { of, text } => {
                     // An MP3, FLAC or self-test error leaves a running
                     // separation be.
@@ -453,6 +460,7 @@ impl Separator {
         let request = Request::Separate {
             left: Float32Array::from(left),
             right: Float32Array::from(right),
+            session: None,
         };
         let sent = post(&self.worker, &request, &self.settings);
         if sent {

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use js_sys::{Float32Array, Uint8Array};
-use roformer::demix::{Demixer, Segment};
+use roformer::demix::{Demixer, Segment, Stereo};
 use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
@@ -18,7 +18,6 @@ use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
 mod stems;
 
-#[cfg(test)]
 use stems::{StemError, StemWriter};
 
 const CACHE_NAME: &str = "bs_roformer_sw.safetensors";
@@ -454,9 +453,7 @@ async fn handle(msg: JsValue) {
             serve(request, &settings).await
         }
     };
-    if let Err(text) = result {
-        send(Reply::Error { of: kind, text });
-    }
+    reply_to(&kind, result);
 }
 
 async fn serve(request: Request, s: &Settings) -> Result<(), String> {
@@ -465,9 +462,13 @@ async fn serve(request: Request, s: &Settings) -> Result<(), String> {
         Request::Model(source) => with_storage(load_model(source, s)).await,
         Request::Download => with_storage(download(s)).await,
         Request::ForgetModel => with_storage(forget_model()).await,
-        Request::Separate { left, right } => {
+        Request::Separate {
+            left,
+            right,
+            session,
+        } => {
             let (gpu, net) = loaded()?;
-            run(&gpu, &net, [left, right], s).await
+            run(&gpu, &net, [left, right], session.as_deref(), s).await
         }
         Request::Selftest { base } => selftest(base, s).await,
         Request::Bench => bench(s).await,
@@ -1052,8 +1053,15 @@ fn trace(on: bool, text: &str) {
     }
 }
 
-async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Result<(), String> {
-    let debug = s.debug;
+/// Separates the mix on the GPU.  With a `session`, the stems go to their
+/// files there (the storage path), else to the page (the memory path).
+async fn run(
+    gpu: &Gpu,
+    net: &Net,
+    mix: [Float32Array; 2],
+    session: Option<&str>,
+    s: &Settings,
+) -> Result<(), String> {
     let chunk = s.chunk.unwrap_or(CHUNK);
     let overlap = s.overlap.unwrap_or(OVERLAP);
     let t0 = now_s();
@@ -1064,65 +1072,187 @@ async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Resu
         reason = "MEM-1: the one copy of the transferred mix into wasm memory, for the demixer; the JS arrays drop after"
     )]
     let mix = mix.map(|c| c.to_vec());
-    let mut d = Demixer::new(mix, chunk, overlap, STEMS.len());
-    let song_len = d.output_len();
+    let d = Demixer::new(mix, chunk, overlap, STEMS.len());
     // The report after the song covers this separation only.
     gpu.reset_profile().await?;
-    let mut pace = Pace::new(s);
+    let mut network = GpuNetwork {
+        gpu,
+        net,
+        pace: Pace::new(s),
+        job: None,
+        total: d.num_chunks(),
+        debug: s.debug,
+    };
+    separate_song(&mut network, d, session, t0).await
+}
+
+/// The network that separates one chunk at a time: the GPU's in a real
+/// separation, a fake one in the tests.
+trait Network {
+    /// The stems of chunk `index`: one stereo pair for each of `STEMS`.
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String>;
+    /// "so far ..." for the log line after each chunk.
+    fn so_far(&self) -> String;
+    /// Logs a summary after the song.
+    fn finish(&self);
+}
+
+/// BS-RoFormer SW on the GPU, one paced step at a time.
+struct GpuNetwork<'a> {
+    gpu: &'a Gpu,
+    net: &'a Net,
+    pace: Pace,
+    /// The GPU buffers of one chunk length, made again when it changes.
+    job: Option<Job<'a>>,
+    /// Chunks in the song.
+    total: usize,
+    debug: bool,
+}
+
+impl Network for GpuNetwork<'_> {
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+        let tc = now_s();
+        let (spec, feats) = analyse(x);
+        let frames = feats.len() / FEATURES;
+        trace(
+            self.debug,
+            &format!("chunk {index}: stft {:.2} s", now_s() - tc),
+        );
+        if self.job.as_ref().is_none_or(|j| j.frames != frames) {
+            // Freed before the next is made: two chunks' buffers (about
+            // 280 MB each) need not be on the GPU at once.
+            drop(self.job.take());
+            self.job = Some(Job::new(self.gpu, self.net, frames));
+            log(&format!(
+                "separating {} chunks; {}",
+                self.total,
+                memory_text(self.net, self.job.as_ref())
+            ));
+        }
+        let j = self.job.as_ref().expect("job");
+        j.set_input(&feats);
+        let mut out = Vec::with_capacity(STEMS.len());
+        for step in j.steps() {
+            self.pace.run(self.gpu, j, &step).await?;
+            if let Step::Mask { last: true, .. } = step {
+                out.push(apply_masks(&spec, &j.mask().await?));
+                trace(
+                    self.debug,
+                    &format!("chunk {index}: mask {} at {:.2} s", out.len(), now_s() - tc),
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    fn so_far(&self) -> String {
+        format!(
+            "so far {}; {}",
+            self.pace.summary(),
+            memory_text(self.net, self.job.as_ref())
+        )
+    }
+
+    fn finish(&self) {
+        log(&format!("separation: {}", self.pace.summary()));
+        log_profile(self.gpu, &self.pace);
+    }
+}
+
+/// Why a separation stopped.
+enum Stop {
+    /// Browser storage refused a stem file: the worker sends `unstored`.
+    Storage(String),
+    /// Any other failure: the worker sends `error`.
+    Failed(String),
+}
+
+impl From<StemError> for Stop {
+    fn from(e: StemError) -> Self {
+        match e {
+            StemError::Storage(text) => Self::Storage(text),
+            StemError::Refused(text) => Self::Failed(text),
+        }
+    }
+}
+
+/// Separates the song in `d`, a chunk at a time, through `net`.  With a
+/// `session`, it writes the stems there and sends `stored` after each
+/// segment; else it sends each segment to the page.  Then it sends
+/// `done`.  A storage failure removes the stem files and sends
+/// `unstored`.  Any other failure removes them too, and is returned for
+/// an `error` (D4 of M3).
+async fn separate_song(
+    net: &mut impl Network,
+    mut d: Demixer,
+    session: Option<&str>,
+    t0: f64,
+) -> Result<(), String> {
+    let song_len = d.output_len();
+    let mut writer = match session {
+        None => None,
+        Some(session) => match StemWriter::open(session, &STEMS, song_len).await {
+            Ok(w) => Some(w),
+            Err(StemError::Storage(text)) => {
+                send(Reply::Unstored { text });
+                return Ok(());
+            }
+            Err(StemError::Refused(text)) => return Err(text),
+        },
+    };
+    let separated = separate_chunks(net, &mut d, writer.as_mut(), t0).await;
+    let finished = match (separated, writer.as_mut()) {
+        (Ok(()), Some(w)) => w.finish().await.map_err(Stop::from),
+        (other, _) => other,
+    };
+    match finished {
+        Ok(()) => {
+            net.finish();
+            send(Reply::Done { secs: now_s() - t0 });
+            Ok(())
+        }
+        Err(stop) => {
+            if let Some(w) = writer {
+                w.abandon().await;
+            }
+            match stop {
+                Stop::Storage(text) => {
+                    send(Reply::Unstored { text });
+                    Ok(())
+                }
+                Stop::Failed(text) => Err(text),
+            }
+        }
+    }
+}
+
+/// The loop of [`separate_song`] over the chunks.
+async fn separate_chunks(
+    net: &mut impl Network,
+    d: &mut Demixer,
+    mut writer: Option<&mut StemWriter>,
+    t0: f64,
+) -> Result<(), Stop> {
+    let song_len = d.output_len();
     let total = d.num_chunks();
     send(Reply::Progress {
         done: 0,
         total: total as u32,
         secs: 0.0,
     });
-    let mut job: Option<Job> = None;
     while let Some(x) = d.next_input() {
         let tc = now_s();
-        let (spec, feats) = analyse(&x);
-        let frames = feats.len() / FEATURES;
-        trace(
-            debug,
-            &format!("chunk {}: stft {:.2} s", d.chunk_index(), now_s() - tc),
-        );
-        if job.as_ref().is_none_or(|j| j.frames != frames) {
-            // Freed before the next is made: two chunks' buffers (about
-            // 280 MB each) need not be on the GPU at once.
-            drop(job.take());
-            job = Some(Job::new(gpu, net, frames));
-            log(&format!(
-                "separating {total} chunks; {}",
-                memory_text(net, job.as_ref())
-            ));
-        }
-        let j = job.as_ref().expect("job");
-        j.set_input(&feats);
-        let mut out = Vec::with_capacity(STEMS.len());
-        for step in j.steps() {
-            pace.run(gpu, j, &step).await?;
-            if let Step::Mask { last: true, .. } = step {
-                out.push(apply_masks(&spec, &j.mask().await?));
-                trace(
-                    debug,
-                    &format!(
-                        "chunk {}: mask {} at {:.2} s",
-                        d.chunk_index(),
-                        out.len(),
-                        now_s() - tc
-                    ),
-                );
-            }
-        }
+        let out = net.stems(d.chunk_index(), &x).await.map_err(Stop::Failed)?;
         d.accept(&out);
         drop(out);
         if let Some(seg) = d.take_ready() {
-            post_segment(seg, song_len);
+            emit(seg, song_len, writer.as_deref_mut()).await?;
         }
         let done = d.chunk_index().min(total) as u32;
         log(&format!(
-            "chunk {done}/{total}: {:.1} s; so far {}; {}",
+            "chunk {done}/{total}: {:.1} s; {}",
             now_s() - tc,
-            pace.summary(),
-            memory_text(net, job.as_ref())
+            net.so_far()
         ));
         send(Reply::Progress {
             done,
@@ -1131,12 +1261,35 @@ async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Resu
         });
     }
     if let Some(seg) = d.take_ready() {
-        post_segment(seg, song_len);
+        emit(seg, song_len, writer).await?;
     }
-    log(&format!("separation: {}", pace.summary()));
-    log_profile(gpu, &pace);
-    send(Reply::Done { secs: now_s() - t0 });
     Ok(())
+}
+
+/// Sends a segment to the page (memory path), or writes it to the stem
+/// files and says how much they hold (storage path).
+async fn emit(seg: Segment, song_len: usize, writer: Option<&mut StemWriter>) -> Result<(), Stop> {
+    let Some(w) = writer else {
+        post_segment(seg, song_len);
+        return Ok(());
+    };
+    w.put(&seg).await?;
+    send(Reply::Stored {
+        frames: w.frames(),
+        len: song_len,
+        stems: STEMS.iter().map(|n| n.to_string()).collect(),
+    });
+    Ok(())
+}
+
+/// Sends `error` for a request of type `kind` that failed.
+fn reply_to(kind: &str, result: Result<(), String>) {
+    if let Err(text) = result {
+        send(Reply::Error {
+            of: kind.into(),
+            text,
+        });
+    }
 }
 
 /// Sends finished samples of every stem to the page, which assembles the
