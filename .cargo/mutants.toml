@@ -30,4 +30,5 @@ exclude_re = [
     '(replace|in) StemApp::(save_menu|start_save|step_save)\b',
     '(replace|in) web::(<impl Sink for Js(Channels|Wav|Sink)>::write|Js(Channels|Wav|Sink)::(new|into_bytes))\b',
     '(replace|in) web_tests::',
+    '(replace|in) separation_tests::',
 ]

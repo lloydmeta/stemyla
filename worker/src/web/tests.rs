@@ -1459,12 +1459,12 @@ async fn a_failed_open_removes_the_files_it_made() {
 }
 
 /// Finding 1-12: a second writer of the same files fails to open, and
-/// leaves the first writer's files as they are.  In Chrome the lock also
-/// refuses the removal, so this test cannot tell the `ours` rule apart
-/// (finding 2-1 of review round 2).  It stays because it checks that a
-/// second writer gets `NoModificationAllowedError`, and it checks the rule
-/// in a browser whose lock allows the removal.
-/// `a_failed_open_keeps_a_file_that_it_did_not_make` checks the rule.
+/// leaves the first writer's file as it is.  Chrome gives the second open
+/// `NoModificationAllowedError` and Safari `InvalidStateError`, so any
+/// storage error passes.  In both, the lock also refuses the removal, so
+/// this test does not tell the `ours` rule apart (finding 2-1);
+/// `a_failed_open_keeps_a_file_that_it_did_not_make` does.  It checks
+/// that a held file stays.
 #[wasm_bindgen_test]
 async fn a_failed_open_leaves_a_file_that_another_writer_holds() {
     fresh().await;
@@ -1473,12 +1473,15 @@ async fn a_failed_open_leaves_a_file_that_another_writer_holds() {
         .await
         .expect("opened");
     let second = StemWriter::open(SESSION, &["bass"], 7).await;
-    assert!(
-        matches!(second, Err(StemError::Storage(ref text)) if text.starts_with("NoModificationAllowedError")),
-        "the file is locked"
-    );
     let left = names_in(&format!("{SESSION}/stems")).await;
+    // Before any assert: a held lock would fail the tests after this one
+    // (finding 3-3 of review round 3).
     first.abandon().await;
+    assert!(
+        matches!(second, Err(StemError::Storage(_))),
+        "the file is locked: {:?}",
+        second.err()
+    );
     assert_eq!(
         left.as_deref(),
         Some("bass.wav.part"),

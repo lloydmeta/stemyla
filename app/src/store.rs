@@ -323,8 +323,8 @@ pub struct StoredStems {
 /// `stem` lines, moves each stem's `.part` file onto its `.wav` file, then
 /// writes the new `stem` lines (D5 of M3).  `meta` names the new stems
 /// only if every file moved; else it names none.  So a restore never
-/// mixes two separations, also when the page stops part of the way.  If
-/// the first write of `meta` fails, nothing moves.
+/// mixes two separations.  This holds also when the page stops part of
+/// the way.  If the first write of `meta` fails, nothing moves.
 pub async fn keep_stored_stems(id: &str, names: &[String]) -> StoredStems {
     saving(id, keep_stored_now(id, names)).await
 }

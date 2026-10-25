@@ -390,7 +390,7 @@ The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The
 
 * Fix: a browser test that delivers each event to an `App` and spies on the link that `save_file` or `save_blob` clicks.  A browser test that starts a save on an `App` and steps it to the download or the worker request.  A test of the peak memory of `load_song` while a mix job runs.  A test of `usage`.
 
-### TD-54: the page holds song-length stems, so a long song can stop the tab on an iPhone
+### TD-54: memory grows with the song, so a long song can stop the tab on an iPhone
 
 This entry concerns MEM-4.
 

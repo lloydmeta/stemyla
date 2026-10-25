@@ -794,8 +794,9 @@ impl StemApp {
             && let Some(id) = job.session.clone()
             && self.opening.as_ref().is_some_and(|(_, o)| *o == id)
         {
-            // The open may have read the session before these stems.
-            let kept = kept_text(&job, n, secs);
+            // The open may have read the session before these stems.  If
+            // they are not kept, a failed open says so (finding 3-9).
+            let kept = note.clone().unwrap_or_else(|| kept_text(&job, n, secs));
             self.stems_for_opening = Some((id, stems, kept));
             self.status = kept_status;
             return;
@@ -1522,10 +1523,7 @@ impl StemApp {
             }
             SeparationPath::TooLong => {
                 self.separating = None;
-                self.status = format!(
-                    "Not separated: {}; {reason}.  Free space in the Storage menu, then press Separate again.",
-                    too_long_text(song.frames, self.memory_limit)
-                );
+                self.status = refusal_text(song.frames, self.memory_limit, has_session, &reason);
                 log::warn!("separator: {}", self.status);
             }
         }
@@ -2554,6 +2552,31 @@ pub fn too_long_text(frames: usize, max_memory_frames: usize) -> String {
     )
 }
 
+/// The status line when the page refuses a song of `frames` before the
+/// start (D2 of M3), for the `reason` that it does not take the storage
+/// path.  `has_session`: whether the song is kept in this browser.
+pub fn refusal_text(
+    frames: usize,
+    max_memory_frames: usize,
+    has_session: bool,
+    reason: &str,
+) -> String {
+    if has_session {
+        format!(
+            "Not separated: {}; {reason}.  Free space in the Storage menu, then press Separate again.",
+            too_long_text(frames, max_memory_frames)
+        )
+    } else {
+        // Only a song opened again gets a session, so free space alone
+        // does not help (finding 3-4 of review round 3).
+        format!(
+            "Not separated: this song is {} long, and it is not kept in this browser.  A song over {} separates only from browser storage: open the file again once storage has room.",
+            clock(frames),
+            clock(max_memory_frames)
+        )
+    }
+}
+
 /// The page's memory when a separation's last reply arrives, before it
 /// reads any stems (D9 of M3).
 #[cfg(target_arch = "wasm32")]
@@ -2709,6 +2732,29 @@ mod tests {
             too_long_text(250 * 44_100, MEMORY_PATH_MAX_FRAMES),
             "this song is 4:10 long, and without browser storage this page separates songs of up to 1:40"
         );
+    }
+
+    /// Finding 3-4 of review round 3: free space does not help a long song
+    /// with no session, so its refusal does not offer it.
+    #[test]
+    fn a_refusal_says_what_can_make_the_song_separate() {
+        let long = 250 * 44_100;
+        let reason = "browser storage has 0 MB free, and the stems need 280 MB";
+        assert_eq!(
+            refusal_text(long, MEMORY_PATH_MAX_FRAMES, true, reason),
+            "Not separated: this song is 4:10 long, and without browser storage this page separates songs of up to 1:40; browser storage has 0 MB free, and the stems need 280 MB.  Free space in the Storage menu, then press Separate again."
+        );
+        let unkept = refusal_text(
+            long,
+            MEMORY_PATH_MAX_FRAMES,
+            false,
+            "this song is not kept in browser storage",
+        );
+        assert_eq!(
+            unkept,
+            "Not separated: this song is 4:10 long, and it is not kept in this browser.  A song over 1:40 separates only from browser storage: open the file again once storage has room."
+        );
+        assert!(!unkept.contains("press Separate again"));
     }
 
     #[test]
@@ -2933,12 +2979,24 @@ export function spy_on_post(worker) {
 export function deliver(worker, data) {
   worker.dispatchEvent(new MessageEvent("message", { data }));
 }
+// On the prototype: Safari ignores a property set on `navigator.storage`.
+let real_estimate = null;
 export function stub_estimate(usage, quota) {
-  navigator.storage.estimate = async () => ({ usage, quota });
+  const proto = StorageManager.prototype;
+  real_estimate = Object.getOwnPropertyDescriptor(proto, "estimate");
+  Object.defineProperty(proto, "estimate", { value: async () => ({ usage, quota }), configurable: true, writable: true });
 }
-export function unstub_estimate() { delete navigator.storage.estimate; }
+export function unstub_estimate() { Object.defineProperty(StorageManager.prototype, "estimate", real_estimate); }
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 export function wav_blob(bytes) { return new Blob([bytes]); }
+// Browser storage refuses every write until `allow_writes`.
+let real_write = null;
+export function refuse_writes() {
+  const proto = FileSystemWritableFileStream.prototype;
+  real_write = proto.write;
+  proto.write = () => Promise.reject(new DOMException("refused by the test", "QuotaExceededError"));
+}
+export function allow_writes() { FileSystemWritableFileStream.prototype.write = real_write; }
 "#)]
     extern "C" {
         fn spy_on_post(worker: &web_sys::Worker) -> js_sys::Array;
@@ -2947,6 +3005,8 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
         fn unstub_estimate();
         async fn sleep(ms: u32);
         fn wav_blob(bytes: &[u8]) -> web_sys::Blob;
+        fn refuse_writes();
+        fn allow_writes();
     }
 
     /// Two seconds: short for the memory path's limit, long for a limit of
@@ -3232,6 +3292,42 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
         finish(app, &id).await;
         assert_eq!(during_read, (0, false), "nothing starts during the read");
         assert_eq!(during_run, (1, first), "one request, and the job stays");
+    }
+
+    /// Finding 3-9 of review round 3: stems that are not kept, for a
+    /// session that is being opened, keep the "not kept" text for a failed
+    /// open.  Here `meta` cannot be written, so no file moves.
+    #[wasm_bindgen_test]
+    async fn stems_not_kept_for_a_song_being_opened_say_so() {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        plant_parts(&id, &NAMES).await;
+        press_separate(&mut app).await;
+        app.open_song(Song {
+            sample_rate: 44_100,
+            frames: FRAMES,
+            stems: vec![Stem {
+                name: "beachape".into(),
+                left: tone(FRAMES).into(),
+                right: tone(FRAMES).into(),
+            }],
+        });
+        app.session = None;
+        app.opening = Some((1, id.clone()));
+        refuse_writes();
+        deliver_stored_and_done(&mut app);
+        settle(&mut app).await;
+        allow_writes();
+        let held = app
+            .stems_for_opening
+            .as_ref()
+            .map(|(held, stems, text)| (held.clone(), stems.len(), text.clone()));
+        finish(app, &id).await;
+        let (held, count, text) = held.expect("stems held for the open");
+        assert_eq!((held, count), (id, 6));
+        assert!(
+            text.starts_with("Stems not kept in browser storage"),
+            "{text}"
+        );
     }
 
     /// Ends the test's worker and session.
