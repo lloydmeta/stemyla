@@ -421,8 +421,8 @@ pub fn download_blob(name: &str, blob: &web_sys::Blob) {
 }
 
 /// Browser tests of the private write path (`cargo run -p xtask --
-/// web-test`); the public functions are tested in `tests/web.rs`, but
-/// `download` and `download_blob` (TD-53).
+/// web-test`).  `tests/web.rs` and `tests/web_close.rs` test the public
+/// functions, except `usage`, `download` and `download_blob` (TD-53).
 #[cfg(test)]
 mod tests {
     use super::*;

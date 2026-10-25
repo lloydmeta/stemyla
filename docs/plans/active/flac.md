@@ -55,7 +55,7 @@ A FLAC file brings a risk that WAV and MP3 do not have: a small file can decode 
 So the decoder gets two guards:
 
 * The reservation: `most_frames` gets a FLAC case.  The stated total of STREAMINFO is trusted up to 16 times what the file's bytes hold as PCM at the stated bits.  The demo song's stems compress 2.2 (the mix) to 11.3 times at 16 bits (M1 measured this).  Past the cap, the channel grows by an eighth, as now.  The reservation is also never more than the decode limit.
-* The decode limit: `decode_into_reservation` stops with "the song is too long to open" when the decoded `f32` of all channels passes `MAX_DECODED_BYTES`.  The value is 1 GiB: 50.7 minutes of 44.1 kHz stereo, or 23.3 minutes of 96 kHz stereo.  The limit is in `engine`, before `from_audio`, so it also guards a long WAV or MP3 (decision 0013).  A WAV or FLAC whose header states more than the limit is refused before it decodes.  An MP3 without a Xing or VBRI tag states only an estimate, so it stops while it decodes (review round 1).  No channel grows past the limit, but a realloc can briefly hold about 1.5 times it.
+* The decode limit: `decode_into_reservation` stops with "the song is too long to open" when the decoded `f32` of all channels passes `MAX_DECODED_BYTES`.  A mono file counts as two channels.  The value is 1 GiB: 50.7 minutes of 44.1 kHz stereo, or 23.3 minutes of 96 kHz stereo.  The limit is in `engine`, before `from_audio`, so it also guards a long WAV or MP3 (decision 0013).  A WAV or FLAC whose header states more than the limit is refused before it decodes.  An MP3 without a Xing or VBRI tag states only an estimate, so it stops while it decodes (review round 1).  No channel grows past the limit, but a realloc can briefly hold about 1.5 times it.
 
 High-resolution FLAC (24-bit, 88.2 to 192 kHz) is common.  Symphonia gives it as `f32`, and `to_rate` converts it to 44.1 kHz (decision 0012).  A FLAC with more than two channels keeps its first two, front left and front right (RFC 9639 section 9.1.3), as a WAV does today.  So a 5.1 mix loses its centre channel.  `Song::from_audio` documents this.  It breaks no rule, so it is not tech debt.
 
@@ -220,7 +220,8 @@ Run `cargo build -p xtask`, then `/review-rounds` for rounds 1, 2 and 3 over the
 * 2026-10-25, agent, review round 1: `open` does not refuse an MP3 on its stated length, since Symphonia estimates it without a Xing or VBRI tag.  The decode loop stops an MP3 at the limit.
 * 2026-10-25, agent, review round 1: `append` never grows a channel past the limit.  The realloc peak of about 1.5 times the limit stays, and decision 0013 now states it.
 * 2026-10-25, agent, review round 1: finding 1-9 (no test of the page's handling of `Event::Flac`) is not fixed.  The MP3 path has the same gap, and the separator test covers the event itself.  Review round 2 recorded it as TD-53.
-* 2026-10-25, agent, review round 2: a mono file counts as stereo against the limit.  `Song::from_audio` makes it stereo, and the realloc of one channel otherwise held 1.9 times the limit.
+* 2026-10-25, agent, review round 2: a mono file counts as stereo against the limit.  The realloc of its one channel otherwise held 1.9 times the limit.
+* 2026-10-25, maintainer, review round 3: a mono file counts as two channels, so it stops at 50.7 minutes of 44.1 kHz audio.  Decision 0013 records the amendment.
 
 * 2026-10-25, maintainer: the encoder is `flacenc` =0.5.1, with the encoder in this repo as the fallback.
 * 2026-10-25, maintainer: a saved FLAC has 24 bits for each sample.

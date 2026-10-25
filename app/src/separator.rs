@@ -464,12 +464,13 @@ impl Separator {
     }
 }
 
-/// Browser tests of the worker's replies (`cargo run -p xtask --
-/// web-test`).  `store.rs` sets the whole binary to run in a page.
+/// Browser tests of the requests to the worker and its replies (`cargo run
+/// -p xtask -- web-test`).  `store.rs` sets the whole binary to run in a
+/// page.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use js_sys::Object;
+    use js_sys::{Object, Reflect};
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen(inline_js = r#"
@@ -509,6 +510,53 @@ export function deliver(worker, data) {
             "MEM-2: the page copied the MP3 that the worker transferred.  \
              Fix: keep the Uint8Array in Event::Mp3."
         );
+    }
+
+    #[wasm_bindgen(inline_js = r#"
+export function spy_on_post(worker) {
+  const posts = [];
+  worker.postMessage = (data, transfer) => posts.push({ data, transfer });
+  return posts;
+}
+"#)]
+    extern "C" {
+        /// Keeps each message that `worker` would post, with its transfer
+        /// list, in place of posting it.
+        fn spy_on_post(worker: &Worker) -> js_sys::Array;
+    }
+
+    #[wasm_bindgen_test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: test code, which reads two samples back"
+    )]
+    fn encode_flac_asks_the_worker_for_a_flac_of_the_stem() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let posts = spy_on_post(&sep.worker);
+        sep.encode_flac("lloyd - bass.flac", &[0.25, -0.5], &[0.125, 0.75], 48_000);
+        sep.stop();
+        assert_eq!(posts.length(), 1, "one message");
+        let post = posts.get(0);
+        let data = Reflect::get(&post, &"data".into()).unwrap();
+        let request = stem_protocol::ToWorker::from_js(&data).expect("a request");
+        match request.request {
+            Request::Flac {
+                name,
+                left,
+                right,
+                rate,
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - bass.flac"));
+                assert_eq!(rate, Some(48_000));
+                assert_eq!(left.to_vec(), [0.25, -0.5]);
+                assert_eq!(right.to_vec(), [0.125, 0.75]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let transfer: js_sys::Array = Reflect::get(&post, &"transfer".into())
+            .unwrap()
+            .unchecked_into();
+        assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
     }
 
     #[wasm_bindgen_test]

@@ -28,7 +28,8 @@ impl Audio {
 }
 
 /// The most decoded samples one file may hold, as `f32` bytes over all its
-/// channels (decision 0013): 50.7 minutes of 44.1 kHz stereo.  A FLAC of
+/// channels, with a mono file counted as two (decision 0013): 50.7 minutes
+/// of 44.1 kHz audio.  A FLAC of
 /// about 80 kB can hold 2 hours of silence.
 pub const MAX_DECODED_BYTES: u64 = 1 << 30;
 
@@ -128,15 +129,17 @@ fn append(channel: &mut Vec<f32>, src: &[f32], most: usize) {
 /// The error for a file whose samples pass `limit` bytes.
 fn too_long(limit: u64) -> anyhow::Error {
     anyhow!(
-        "the song is too long to open: it decodes to more than {} MiB of samples",
+        "the song is too long to open: it passes {} MiB of samples, with mono counted as two channels",
         limit >> 20
     )
 }
 
 /// The channels that a file of `channels` channels counts as against the
-/// limit.  A mono file counts as stereo, because `Song::from_audio` makes
-/// it stereo.  This also keeps the realloc of one channel, which holds the
-/// old and the new buffer, at about 1.5 times the limit, not 2 times.
+/// limit.  A mono file counts as stereo.  Its one channel then holds at
+/// most half the limit, so its realloc, which holds the old and the new
+/// buffer, stays under the limit; counted as one channel, it held 1.9
+/// times.  The mix lane and the separation request also hold two channels
+/// of a mono song.
 fn counted(channels: usize) -> u64 {
     channels.max(2) as u64
 }
@@ -694,7 +697,7 @@ mod tests {
         let (left, _, _) = stereo_wav();
         let mono = [left.iter().map(|x| step(*x, 16)).collect::<Vec<i32>>()];
         let bytes = || by_hand(44_100, 16, 1, FRAMES as u64, Blocks::Verbatim(&mono));
-        // `Song::from_audio` makes a mono file stereo, at 8 bytes a frame.
+        // The limit counts 8 bytes a frame, as for stereo.
         let stereo_bytes = (FRAMES * 8) as u64;
         assert_eq!(
             decode_within(bytes(), "flac", stereo_bytes)
@@ -745,11 +748,15 @@ mod tests {
         }
     }
 
-    /// An MPEG-1 Layer III frame of silence at 44.1 kHz stereo: its header,
-    /// then zero side information and data.
-    fn mp3_frame(bitrate_index: u8, bytes: usize) -> Vec<u8> {
+    /// The channel mode byte of an MP3 frame header: stereo or mono.
+    const STEREO: u8 = 0x00;
+    const MONO: u8 = 0xc0;
+
+    /// An MPEG-1 Layer III frame of silence at 44.1 kHz: its header, then
+    /// zero side information and data.
+    fn mp3_frame(bitrate_index: u8, mode: u8, bytes: usize) -> Vec<u8> {
         let mut frame = vec![0; bytes];
-        frame[..4].copy_from_slice(&[0xff, 0xfb, bitrate_index << 4, 0x00]);
+        frame[..4].copy_from_slice(&[0xff, 0xfb, bitrate_index << 4, mode]);
         frame
     }
 
@@ -757,8 +764,12 @@ mod tests {
     /// no Xing or VBRI tag.  Symphonia then estimates the length from the
     /// first 16 frames, so it states about 10 times the real length.
     fn quiet_start_mp3(loud: usize) -> Vec<u8> {
-        let quiet = (0..20).flat_map(|_| mp3_frame(1, 104));
-        let loud = (0..loud).flat_map(|_| mp3_frame(14, 1044));
+        quiet_start_mp3_in(STEREO, loud)
+    }
+
+    fn quiet_start_mp3_in(mode: u8, loud: usize) -> Vec<u8> {
+        let quiet = (0..20).flat_map(|_| mp3_frame(1, mode, 104));
+        let loud = (0..loud).flat_map(|_| mp3_frame(14, mode, 1044));
         quiet.chain(loud).collect()
     }
 
@@ -774,14 +785,16 @@ mod tests {
 
     #[test]
     fn an_mp3_that_states_more_than_the_limit_reserves_at_most_the_limit() {
-        let opened = open(
-            Box::new(Cursor::new(quiet_start_mp3(200))),
-            Some("mp3"),
-            MP3_LIMIT,
-        )
-        .unwrap();
-        // Stereo: 8 bytes a frame.
-        assert_eq!(opened.reserve as u64, MP3_LIMIT / 8);
+        // 8 bytes a frame, for stereo and for mono, which counts as stereo.
+        for mode in [STEREO, MONO] {
+            let opened = open(
+                Box::new(Cursor::new(quiet_start_mp3_in(mode, 200))),
+                Some("mp3"),
+                MP3_LIMIT,
+            )
+            .unwrap();
+            assert_eq!(opened.reserve as u64, MP3_LIMIT / 8, "mode {mode:#x}");
+        }
     }
 
     #[test]
