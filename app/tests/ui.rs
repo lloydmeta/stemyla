@@ -88,6 +88,110 @@ fn mute_sets_engine_gain_to_zero() {
 }
 
 #[test]
+fn the_mix_lane_follows_mute() {
+    let mut h = harness(true);
+    assert!(h.query_by_label("as heard: all stems").is_some());
+    let song = h.state().song.clone().unwrap();
+    let lead = stem(&h, "lead");
+    h.get_all_by_label("Mute").nth(lead).unwrap().click();
+    h.run();
+    let side = |f: fn(&engine::Stem) -> &[f32]| {
+        let others: Vec<&[f32]> = song
+            .stems
+            .iter()
+            .filter(|s| s.name != "lead")
+            .map(f)
+            .collect();
+        dsp::mix(&others, &vec![1.0; others.len()])
+    };
+    let want = app::lane_columns(&side(|s| &s.left), &side(|s| &s.right));
+    let mix = &h.state().lanes[0];
+    assert_eq!((mix.columns.clone(), mix.scale), want);
+    assert!(
+        h.query_by_label("as heard: all stems except lead")
+            .is_some()
+    );
+
+    // Unmuted, the lane shows the mix of every stem again.
+    h.get_all_by_label("Mute").nth(lead).unwrap().click();
+    h.run();
+    let fresh = harness(true);
+    assert_eq!(h.state().lanes[0].columns, fresh.state().lanes[0].columns);
+}
+
+#[test]
+fn the_mix_lane_spectrogram_follows_mute() {
+    let mut h = harness(true);
+    h.get_by_label("Spectrograms").click();
+    h.run();
+    let before = h.state().lanes[0].spectrogram.as_ref().map(|t| t.id());
+    assert!(before.is_some(), "the mix lane has a spectrogram");
+    let lead = stem(&h, "lead");
+    let stem_before = h.state().lanes[lead + 1]
+        .spectrogram
+        .as_ref()
+        .map(|t| t.id());
+    h.get_all_by_label("Mute").nth(lead).unwrap().click();
+    h.run();
+    let app = h.state();
+    let after = app.lanes[0].spectrogram.as_ref().map(|t| t.id());
+    assert!(after.is_some(), "the mix lane has a spectrogram again");
+    assert_ne!(after, before, "the mix lane's spectrogram is made again");
+    assert_eq!(
+        app.lanes[lead + 1].spectrogram.as_ref().map(|t| t.id()),
+        stem_before,
+        "a stem's spectrogram stays"
+    );
+}
+
+/// The pixels of the mix lane, as drawn.
+fn mix_lane_pixels(h: &mut Harness<'_, StemApp>) -> Vec<[u8; 4]> {
+    let r = h.state().lane_rects[0];
+    let image = h.render().expect("a render");
+    let mut pixels = Vec::new();
+    for y in r.top() as u32..r.bottom() as u32 {
+        for x in r.left() as u32..r.right() as u32 {
+            pixels.push(image.get_pixel(x, y).0);
+        }
+    }
+    pixels
+}
+
+#[test]
+fn the_mix_lane_spectrogram_is_the_mix_as_heard_on_either_path() {
+    let mute_lead = |h: &mut Harness<'_, StemApp>| {
+        let lead = stem(h, "lead");
+        h.get_all_by_label("Mute").nth(lead).unwrap().click();
+        h.run();
+    };
+    let spectrograms = |h: &mut Harness<'_, StemApp>| {
+        h.get_by_label("Spectrograms").click();
+        h.run();
+    };
+    // Spectrograms on, then a mute: the waveform job makes the input.
+    let mut follow = harness(true);
+    spectrograms(&mut follow);
+    mute_lead(&mut follow);
+    // A mute, then spectrograms on: ensure_textures makes the input.
+    let mut later = harness(true);
+    mute_lead(&mut later);
+    spectrograms(&mut later);
+    // No mute: the mix of every stem.
+    let mut all = harness(true);
+    spectrograms(&mut all);
+
+    let follow = mix_lane_pixels(&mut follow);
+    assert!(
+        follow == mix_lane_pixels(&mut later),
+        "the two paths draw the same mix"
+    );
+    assert!(
+        follow != mix_lane_pixels(&mut all),
+        "the mix without lead differs from the mix of every stem"
+    );
+}
+
+#[test]
 fn solo_mutes_the_others() {
     let mut h = harness(true);
     let bass = stem(&h, "bass");

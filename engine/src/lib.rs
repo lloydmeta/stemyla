@@ -5,6 +5,7 @@ pub mod decode;
 pub mod hpss;
 #[cfg(feature = "cpal")]
 pub mod live;
+pub mod mixdown;
 pub mod params;
 pub mod player;
 pub mod resample;

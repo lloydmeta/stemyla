@@ -2,11 +2,14 @@
 //! volume, tempo, a loop region and click-to-seek.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use engine::mixdown::MixRecipe;
 use engine::{Player, PlayerConfig, SharedParams, Song, Stem, StretcherKind};
+use export::MixFollower;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 pub mod assemble;
+pub mod export;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;
 pub mod reset;
@@ -18,8 +21,8 @@ pub mod store;
 pub mod store_meta;
 
 /// Lanes that are not parts of the mix: computed from the others, or the
-/// original recording kept beside its separated stems.  They start muted
-/// and are left out of the mix lane.
+/// original recording kept beside its separated stems.  They start muted,
+/// so the mix lane leaves them out until the user unmutes one.
 pub const DERIVED: [&str; 2] = ["classic drums", "original"];
 
 /// The mix of the original sources: every stem except derived ones, summed
@@ -260,7 +263,13 @@ async fn load_and_keep(
 }
 
 /// Columns of peak data kept per lane; drawing re-aggregates to pixels.
-const COLUMNS: usize = 4096;
+pub(crate) const COLUMNS: usize = 4096;
+/// Milliseconds of each frame that the mix lane's waveform job may take.
+const PEAKS_MS: f64 = 3.0;
+/// Milliseconds of each frame that a save may take.  The page's main
+/// thread also fills the Web Audio buffers.
+#[cfg(target_arch = "wasm32")]
+const SAVE_MS: f64 = 4.0;
 const LANE_HEIGHT: f32 = 64.0;
 const LOOP_BAR_HEIGHT: f32 = 18.0;
 
@@ -301,6 +310,8 @@ pub struct StemApp {
     pub loop_bar_rect: Option<Rect>,
     pub status: String,
     pub output: Option<Output>,
+    /// Keeps the mix lane on the mix as heard.
+    mix_follower: Option<MixFollower>,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
     /// Ask for a real audio device when an output is opened: for the first
@@ -350,6 +361,24 @@ pub struct StemApp {
     stems_for_opening: Option<(String, Vec<Stem>, String)>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
+    /// The save in progress, one at a time.
+    #[cfg(target_arch = "wasm32")]
+    saving: Option<Saving>,
+    /// What to add to "Saved ..." when the worker's file arrives, such as
+    /// that the mix clips.
+    #[cfg(target_arch = "wasm32")]
+    save_notes: export::SaveNotes,
+}
+
+/// A stem or a mix being made into a file (decision 0014).
+#[cfg(target_arch = "wasm32")]
+struct Saving {
+    job: export::ExportJob<export::JsSink>,
+    /// The file's name, with its extension.
+    name: String,
+    rate: u32,
+    /// Whether it is the mix lane's save.
+    mix: bool,
 }
 
 /// A classic-drums job: the serial of the song it started on, and where
@@ -408,6 +437,7 @@ impl Default for StemApp {
             loop_bar_rect: None,
             status: WELCOME.into(),
             output: None,
+            mix_follower: None,
             tempo_pct: 100.0,
             show_spectrograms: false,
             want_device: true,
@@ -440,6 +470,10 @@ impl Default for StemApp {
             stems_for_opening: None,
             #[cfg(target_arch = "wasm32")]
             reset: ResetStage::Closed,
+            #[cfg(target_arch = "wasm32")]
+            saving: None,
+            #[cfg(target_arch = "wasm32")]
+            save_notes: export::SaveNotes::default(),
         }
     }
 }
@@ -624,6 +658,9 @@ impl StemApp {
 
     /// Loads a song: builds lanes, shared params and the output.
     pub fn load_song(&mut self, song: Song) {
+        // The old mix lane's job can hold a song-sized buffer; free it
+        // before the new lanes are made (MEM-4).
+        self.mix_follower = None;
         let song = Arc::new(song);
         let mut lanes = Vec::with_capacity(song.stems.len() + 1);
         let (ml, mr) = mix_of_sources(&song);
@@ -654,6 +691,14 @@ impl StemApp {
             if DERIVED.contains(&s.name.as_str()) {
                 params.set_muted(i, true);
             }
+        }
+        // The mix lane shows every source stem at full volume, which is
+        // what the new params play.
+        self.mix_follower = Some(MixFollower::new(MixRecipe::as_heard(&params)));
+        // A save holds its song; it does not outlive the song's lanes.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.saving = None;
         }
         self.stop_output();
         let player = Player::with_config(
@@ -1408,11 +1453,13 @@ impl StemApp {
                 Event::Log(text) => log::info!("separator: {text}"),
                 Event::Mp3 { name, bytes } => {
                     store::download(&name, &bytes, "audio/mpeg");
-                    self.status = format!("Saved {name}.");
+                    let note = self.save_notes.take(&name);
+                    self.status = format!("Saved {name}.{note}");
                 }
                 Event::Flac { name, file } => {
                     store::download_blob(&name, &file);
-                    self.status = format!("Saved {name}.");
+                    let note = self.save_notes.take(&name);
+                    self.status = format!("Saved {name}.{note}");
                 }
                 Event::Bench(text) => {
                     log::info!("separator: {text}");
@@ -1443,8 +1490,15 @@ impl StemApp {
                             self.separating = None;
                             "Separation"
                         }
-                        stem_protocol::kind::MP3 => "MP3 encoding",
-                        stem_protocol::kind::FLAC => "FLAC encoding",
+                        stem_protocol::kind::MP3 | stem_protocol::kind::FLAC => {
+                            // The failed file's note never gets its reply.
+                            self.save_notes.clear();
+                            if of == stem_protocol::kind::MP3 {
+                                "MP3 encoding"
+                            } else {
+                                "FLAC encoding"
+                            }
+                        }
                         stem_protocol::kind::SELFTEST => "Self-test",
                         stem_protocol::kind::BENCH => "Benchmark",
                         _ => "Worker request",
@@ -1481,74 +1535,213 @@ impl StemApp {
         }
     }
 
+    /// Makes the mix lane show the mix as heard.  A new mix starts a
+    /// waveform job, which runs for a few milliseconds in each frame.  With
+    /// spectrograms on, the job also makes the spectrogram's input.
+    fn follow_mix(&mut self, ctx: &egui::Context) {
+        self.follow_mix_while(ctx, export::time_left(PEAKS_MS));
+    }
+
+    /// [`Self::follow_mix`], while `more` says there is time.
+    fn follow_mix_while(&mut self, ctx: &egui::Context, more: impl FnMut() -> bool) {
+        let (Some(song), Some(params), Some(follower)) =
+            (&self.song, &self.params, &mut self.mix_follower)
+        else {
+            return;
+        };
+        let heard = MixRecipe::as_heard(params);
+        let Some(waveform) = follower.follow(song, &heard, self.show_spectrograms, more) else {
+            if follower.progress().is_some() {
+                ctx.request_repaint();
+            }
+            return;
+        };
+        let rate = song.sample_rate;
+        if let Some(mix) = self.lanes.first_mut().filter(|l| l.stem.is_none()) {
+            (mix.columns, mix.scale) = (waveform.columns, waveform.scale);
+            mix.spectrogram = waveform
+                .mid
+                .filter(|_| self.show_spectrograms)
+                .map(|mid| spectrogram::texture(ctx, &mix.name, &mid, rate));
+        }
+    }
+
+    /// A lane's "Save" menu: of its stem, or of the mix as heard for the
+    /// mix lane.  It gives the format chosen.
+    #[cfg(target_arch = "wasm32")]
+    fn save_menu(
+        &self,
+        ui: &mut egui::Ui,
+        song: &Song,
+        params: &SharedParams,
+        stem: Option<usize>,
+    ) -> Option<export::Format> {
+        let heard = MixRecipe::as_heard(params);
+        let why_not = if self.saving.is_some() {
+            Some("Wait for the save in progress")
+        } else if stem.is_none() && heard.is_silent() {
+            Some("Unmute a stem to save a mix")
+        } else {
+            None
+        };
+        let mut chosen = None;
+        ui.add_enabled_ui(why_not.is_none(), |ui| {
+            ui.menu_button("Save", |ui| {
+                if stem.is_none() {
+                    let names: Vec<&str> = heard
+                        .audible()
+                        .into_iter()
+                        .map(|i| song.stems[i].name.as_str())
+                        .collect();
+                    ui.set_max_width(260.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!(
+                                "Saves what you hear: {}, at their volumes, at 100% tempo.",
+                                names.join(", ")
+                            ))
+                            .small(),
+                        )
+                        .wrap(),
+                    );
+                    ui.separator();
+                }
+                for format in export::Format::ALL {
+                    let can = !format.needs_worker() || self.separator.is_some();
+                    if ui
+                        .add_enabled(can, egui::Button::new(format.label()))
+                        .clicked()
+                    {
+                        chosen = Some(format);
+                        ui.close();
+                    }
+                }
+            });
+        })
+        .response
+        .on_disabled_hover_text(why_not.unwrap_or_default());
+        chosen
+    }
+
+    /// Starts saving a stem, or the mix as heard when `stem` is `None`.
+    /// The save runs in [`Self::step_save`], a few ms in each frame.
+    #[cfg(target_arch = "wasm32")]
+    fn start_save(&mut self, stem: Option<usize>, format: export::Format) {
+        use engine::mixdown::{Mix, Pcm, StemPcm};
+        let (Some(song), Some(params)) = (self.song.clone(), self.params.clone()) else {
+            return;
+        };
+        let base = self.song_name.as_deref().unwrap_or("song");
+        let (source, name): (Box<dyn Pcm>, String) = match stem {
+            Some(i) => {
+                let s = &song.stems[i];
+                (
+                    Box::new(StemPcm::new(s.clone(), song.sample_rate)),
+                    format!("{base} - {}", s.name),
+                )
+            }
+            None => {
+                let recipe = MixRecipe::as_heard(&params);
+                let name = export::mix_file_name(base, &song, &recipe);
+                (Box::new(Mix::new(Arc::clone(&song), &recipe)), name)
+            }
+        };
+        let sink = export::JsSink::new(format, source.frames(), song.sample_rate);
+        self.saving = Some(Saving {
+            job: export::ExportJob::new(source, sink),
+            name: format!("{name}.{}", format.extension()),
+            rate: song.sample_rate,
+            mix: stem.is_none(),
+        });
+    }
+
+    /// Steps the save in progress for a few ms, then hands the file to the
+    /// browser, or the channels to the worker.
+    #[cfg(target_arch = "wasm32")]
+    fn step_save(&mut self, ctx: &egui::Context) {
+        use export::JsSink;
+        let Some(saving) = &mut self.saving else {
+            return;
+        };
+        if !saving.job.run_while(export::time_left(SAVE_MS)) {
+            let doing = if saving.mix { "Mixing" } else { "Preparing" };
+            let pct = 100.0 * saving.job.fraction();
+            self.status = format!("{doing} {}: {pct:.0} %", saving.name);
+            ctx.request_repaint();
+            return;
+        }
+        let Some(Saving {
+            job,
+            name,
+            rate,
+            mix,
+        }) = self.saving.take()
+        else {
+            return;
+        };
+        let note = (mix && job.clipped() > 0).then(|| {
+            format!(
+                "  {} samples of the mix are at full scale, so it may clip; lower the volumes to avoid it.",
+                job.clipped()
+            )
+        });
+        let sep = self.separator.as_ref();
+        self.status = match (job.into_sink(), sep) {
+            (JsSink::Wav(wav), _) => {
+                store::download(&name, &wav.into_bytes(), "audio/wav");
+                format!("Saved {name}.{}", note.unwrap_or_default())
+            }
+            (JsSink::Flac(c), Some(sep)) => {
+                sep.encode_flac(&name, c.left, c.right, rate);
+                self.save_notes.push(&name, note);
+                format!("Encoding {name}…")
+            }
+            (JsSink::Mp3(c), Some(sep)) => {
+                sep.encode_mp3(&name, c.left, c.right, rate);
+                self.save_notes.push(&name, note);
+                format!("Encoding {name}…")
+            }
+            (JsSink::Flac(_) | JsSink::Mp3(_), None) => {
+                format!("Could not save {name}: the encoding worker is not running.")
+            }
+        };
+    }
+
     fn lane_controls(&mut self, ui: &mut egui::Ui, lane: usize) {
         let params = self.params.clone().expect("params");
         let l = &self.lanes[lane];
+        let lane_stem = l.stem;
         ui.set_width(200.0);
+        #[cfg(target_arch = "wasm32")]
+        let mut chosen = None;
         ui.horizontal(|ui| {
             ui.colored_label(l.color, egui::RichText::new(&l.name).strong());
             #[cfg(target_arch = "wasm32")]
-            if let (Some(stem), Some(song)) = (l.stem, self.song.clone()) {
-                let s = &song.stems[stem];
-                let base = format!(
-                    "{} - {}",
-                    self.song_name.as_deref().unwrap_or("song"),
-                    s.name
-                );
-                let mut status = None;
-                ui.menu_button("Save", |ui| {
-                    if ui.button("WAV (16-bit, lossless)").clicked() {
-                        store::download(
-                            &format!("{base}.wav"),
-                            &js_sys::Uint8Array::from(
-                                &engine::wav::encode_pcm16(&s.left, &s.right, song.sample_rate)[..],
-                            ),
-                            "audio/wav",
-                        );
-                        ui.close();
-                    }
-                    if ui.button("FLAC (16-bit, lossless)").clicked() {
-                        if let Some(sep) = &self.separator {
-                            sep.encode_flac(
-                                &format!("{base}.flac"),
-                                &s.left,
-                                &s.right,
-                                song.sample_rate,
-                            );
-                            status = Some(format!("Encoding {base}.flac…"));
-                        }
-                        ui.close();
-                    }
-                    if ui.button("MP3 (192 kbps)").clicked() {
-                        if let Some(sep) = &self.separator {
-                            sep.encode_mp3(
-                                &format!("{base}.mp3"),
-                                &s.left,
-                                &s.right,
-                                song.sample_rate,
-                            );
-                            status = Some(format!("Encoding {base}.mp3…"));
-                        }
-                        ui.close();
-                    }
-                });
-                if let Some(text) = status {
-                    self.status = text;
-                }
+            if let Some(song) = &self.song {
+                chosen = self.save_menu(ui, song, &params, lane_stem);
             }
         });
-        let Some(stem) = l.stem else {
-            ui.small("sum of all stems");
+        #[cfg(target_arch = "wasm32")]
+        if let Some(format) = chosen {
+            self.start_save(lane_stem, format);
+        }
+        let Some(stem) = lane_stem else {
+            if let Some(song) = &self.song {
+                ui.small(export::mix_label(song, &MixRecipe::as_heard(&params)));
+            }
             return;
         };
         ui.horizontal(|ui| {
             let mut m = params.is_muted(stem);
+            let mut changed = false;
             if ui.toggle_value(&mut m, "Mute").changed() {
                 params.set_muted(stem, m);
+                changed = true;
             }
             let mut s = params.is_soloed(stem);
             if ui.toggle_value(&mut s, "Solo").changed() {
                 params.set_soloed(stem, s);
+                changed = true;
             }
             let mut v = params.stems[stem].volume.get();
             if ui
@@ -1556,6 +1749,11 @@ impl StemApp {
                 .changed()
             {
                 params.set_volume(stem, v);
+                changed = true;
+            }
+            // The next frame redraws the mix lane for the new mix.
+            if changed {
+                ui.ctx().request_repaint();
             }
         });
     }
@@ -1777,8 +1975,16 @@ impl eframe::App for StemApp {
         let dt = ctx.input(|i| i.stable_dt);
         self.pump_silent(dt);
         self.log_audio_stats(dt);
+        self.follow_mix(&ctx);
+        #[cfg(target_arch = "wasm32")]
+        self.step_save(&ctx);
         if self.show_spectrograms {
-            spectrogram::ensure_textures(&ctx, &mut self.lanes, self.song.as_deref());
+            spectrogram::ensure_textures(
+                &ctx,
+                &mut self.lanes,
+                self.song.as_ref(),
+                self.mix_follower.as_ref().map(MixFollower::shown),
+            );
         }
 
         egui::Panel::top("transport").show(ui, |ui| {
@@ -1824,6 +2030,47 @@ pub fn start_web() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mix_lane_keeps_a_mid_buffer_only_with_spectrograms_on() {
+        for spectrograms in [false, true] {
+            let mut app = StemApp {
+                want_device: false,
+                ..StemApp::default()
+            };
+            app.load_demo();
+            app.show_spectrograms = spectrograms;
+            let lead = app.song.as_ref().unwrap().stem_index("lead").unwrap();
+            app.params.as_ref().unwrap().set_muted(lead, true);
+            app.follow_mix_while(&egui::Context::default(), || false);
+            let follower = app.mix_follower.as_ref().unwrap();
+            assert!(follower.progress().is_some(), "a job runs");
+            assert_eq!(
+                follower.holds_mid(),
+                spectrograms,
+                "spectrograms {spectrograms}"
+            );
+        }
+    }
+
+    #[test]
+    fn follow_mix_makes_the_mix_spectrogram_from_its_own_job() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.load_demo();
+        app.show_spectrograms = true;
+        assert!(app.lanes[0].spectrogram.is_none());
+        let lead = app.song.as_ref().unwrap().stem_index("lead").unwrap();
+        app.params.as_ref().unwrap().set_muted(lead, true);
+        app.follow_mix(&egui::Context::default());
+        assert!(
+            app.lanes[0].spectrogram.is_some(),
+            "the waveform job gave the spectrogram's input, so no second mix is needed"
+        );
+        assert!(app.lanes.iter().skip(1).all(|l| l.spectrogram.is_none()));
+    }
 
     fn job(serial: u64, session: Option<&str>) -> SeparationJob {
         SeparationJob {

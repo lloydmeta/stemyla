@@ -26,4 +26,7 @@ exclude_globs = [
 exclude_re = [
     '(replace|in) (StemApp::)?(refresh_storage|about_menu|load_and_keep|pick_song|separator_controls|storage_menu|reset_dialog|start_reset|poll_separator|start_web)\b',
     '(replace|in) web::(run|reload)\b',
+    '(replace|in) StemApp::(save_menu|start_save|step_save)\b',
+    '(replace|in) web::(<impl Sink for Js(Channels|Wav|Sink)>::write|Js(Channels|Wav|Sink)::(new|into_bytes))\b',
+    '(replace|in) web_tests::',
 ]
