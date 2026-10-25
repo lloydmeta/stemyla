@@ -8,7 +8,8 @@
 
 use crate::DERIVED;
 use engine::Song;
-use engine::mixdown::{MixRecipe, Pcm};
+use engine::mixdown::{Mix, MixRecipe, Pcm};
+use std::sync::Arc;
 
 /// Frames that a job reads at a time.
 pub const BLOCK: usize = 16_384;
@@ -92,10 +93,23 @@ impl<S: Sink> ExportJob<S> {
 }
 
 /// The waveform of a lane: the lowest and highest sample of both channels
-/// in each column, as [`crate::lane_columns`] gives them.
+/// in each column, as [`crate::lane_columns`] gives them.  With
+/// [`PeaksSink::with_mid`], also the mean of the two channels, which a
+/// spectrogram reads.
 pub struct PeaksSink {
     column: usize,
     columns: Vec<(f32, f32)>,
+    mid: Option<Vec<f32>>,
+}
+
+/// What a [`PeaksSink`] gives at the end.
+#[derive(Debug, PartialEq)]
+pub struct Waveform {
+    pub columns: Vec<(f32, f32)>,
+    /// Makes the loudest column fill the lane.
+    pub scale: f32,
+    /// The mean of the two channels, if it was asked for.
+    pub mid: Option<Vec<f32>>,
 }
 
 impl PeaksSink {
@@ -105,18 +119,31 @@ impl PeaksSink {
         Self {
             column,
             columns: vec![(f32::INFINITY, f32::NEG_INFINITY); frames.div_ceil(column)],
+            mid: None,
         }
     }
 
-    /// The columns, and the scale that makes the loudest fill the lane.
-    pub fn finish(self) -> (Vec<(f32, f32)>, f32) {
+    /// Also keeps the mean of the two channels: one buffer of the song's
+    /// length, the only one that a spectrogram of the mix needs.
+    pub fn with_mid(frames: usize, count: usize) -> Self {
+        Self {
+            mid: Some(vec![0.0; frames]),
+            ..Self::new(frames, count)
+        }
+    }
+
+    pub fn finish(self) -> Waveform {
         let loudest = self
             .columns
             .iter()
             .map(|(lo, hi)| lo.abs().max(hi.abs()))
             .fold(0.0, f32::max);
         let scale = if loudest > 1e-6 { 1.0 / loudest } else { 1.0 };
-        (self.columns, scale)
+        Waveform {
+            columns: self.columns,
+            scale,
+            mid: self.mid,
+        }
     }
 }
 
@@ -127,6 +154,111 @@ impl Sink for PeaksSink {
             *lo = lo.min(*l).min(*r);
             *hi = hi.max(*l).max(*r);
         }
+        if let Some(mid) = &mut self.mid {
+            for (m, (l, r)) in mid[at..at + left.len()]
+                .iter_mut()
+                .zip(left.iter().zip(right))
+            {
+                *m = 0.5 * (l + r);
+            }
+        }
+    }
+}
+
+/// The mean of the two channels of a mix, made block by block, so that the
+/// mix itself is never in memory whole.
+pub fn mix_mid(song: &Arc<Song>, recipe: &MixRecipe, count: usize) -> Vec<f32> {
+    let sink = PeaksSink::with_mid(song.frames, count);
+    let mut job = ExportJob::new(Box::new(Mix::new(Arc::clone(song), recipe)), sink);
+    job.run_while(|| true);
+    job.into_sink().finish().mid.unwrap_or_default()
+}
+
+/// Keeps the mix lane's waveform on the mix as heard.  A new mix starts a
+/// waveform job, which a caller steps for a few ms in each frame.
+pub struct MixFollower {
+    shown: MixRecipe,
+    job: Option<(MixRecipe, ExportJob<PeaksSink>)>,
+}
+
+impl MixFollower {
+    /// For a mix lane that shows `shown`.
+    pub fn new(shown: MixRecipe) -> Self {
+        Self { shown, job: None }
+    }
+
+    /// The mix that the lane shows.
+    pub fn shown(&self) -> &MixRecipe {
+        &self.shown
+    }
+
+    /// The part done of the waveform job, if one runs.
+    pub fn progress(&self) -> Option<f32> {
+        self.job.as_ref().map(|(_, job)| job.fraction())
+    }
+
+    /// Moves the lane towards `heard`, while `more` says there is time.
+    /// It continues a job for `heard`, and starts again when `heard`
+    /// changes.  It gives the new waveform when it is done.  With `mid`, a
+    /// new job also keeps the mean of the channels, for a spectrogram.
+    pub fn follow(
+        &mut self,
+        song: &Arc<Song>,
+        heard: &MixRecipe,
+        mid: bool,
+        more: impl FnMut() -> bool,
+    ) -> Option<Waveform> {
+        if self.shown == *heard {
+            self.job = None;
+            return None;
+        }
+        let (recipe, mut job) = match self.job.take() {
+            Some((recipe, job)) if recipe == *heard => (recipe, job),
+            _ => {
+                let source = Box::new(Mix::new(Arc::clone(song), heard));
+                let sink = if mid {
+                    PeaksSink::with_mid(song.frames, crate::COLUMNS)
+                } else {
+                    PeaksSink::new(song.frames, crate::COLUMNS)
+                };
+                (heard.clone(), ExportJob::new(source, sink))
+            }
+        };
+        if !job.run_while(more) {
+            self.job = Some((recipe, job));
+            return None;
+        }
+        self.shown = recipe;
+        Some(job.into_sink().finish())
+    }
+}
+
+/// Notes for the status line, such as that a mix clips, each for the file
+/// that it is about.  The worker encodes more than one file at a time, so
+/// a note waits for the reply that names its file.
+#[derive(Debug, Default)]
+pub struct SaveNotes(Vec<(String, String)>);
+
+impl SaveNotes {
+    /// Sets the note of `name`, or removes it.
+    pub fn set(&mut self, name: &str, note: Option<String>) {
+        self.0.retain(|(n, _)| n != name);
+        if let Some(note) = note {
+            self.0.push((name.into(), note));
+        }
+    }
+
+    /// Takes the note of `name`, or gives "".
+    pub fn take(&mut self, name: &str) -> String {
+        match self.0.iter().position(|(n, _)| n == name) {
+            Some(i) => self.0.remove(i).1,
+            None => String::new(),
+        }
+    }
+
+    /// Drops every note: after an encode fails, its reply never names it.
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -395,6 +527,10 @@ mod tests {
         assert!(!job.step());
         assert!((job.fraction() - BLOCK as f32 / frames as f32).abs() < 1e-6);
         assert!(!job.run_while(|| false), "one step when there is no time");
+        assert!(
+            (job.fraction() - (2 * BLOCK) as f32 / frames as f32).abs() < 1e-6,
+            "run_while steps once before it asks for time"
+        );
         assert!(job.run_while(|| true));
         assert!(job.step(), "a step after the end does nothing");
         assert_eq!(job.fraction(), 1.0);
@@ -422,6 +558,113 @@ mod tests {
     }
 
     #[test]
+    fn a_job_adds_up_the_clipped_samples_of_every_block() {
+        let frames = 2 * BLOCK + 3;
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+        left[0] = 1.5;
+        right[BLOCK] = -1.0;
+        right[2 * BLOCK + 2] = 2.0;
+        let stem = Stem {
+            name: "bass".into(),
+            left: left.into(),
+            right: right.into(),
+        };
+        let mut job = ExportJob::new(Box::new(StemPcm::new(stem, 44_100)), Recorder::default());
+        assert!(job.run_while(|| true));
+        assert_eq!(job.clipped(), 3);
+    }
+
+    #[test]
+    fn only_wav_is_made_without_the_worker() {
+        assert!(!Format::Wav.needs_worker());
+        assert!(Format::Flac.needs_worker());
+        assert!(Format::Mp3.needs_worker());
+        let extensions: Vec<&str> = Format::ALL.iter().map(|f| f.extension()).collect();
+        assert_eq!(extensions, ["wav", "flac", "mp3"]);
+    }
+
+    #[test]
+    fn a_mix_follower_continues_its_job_and_starts_again_when_the_mix_changes() {
+        let frames = 3 * BLOCK;
+        let song = Arc::new(song(&["bass", "drums", "vocals"], frames));
+        let all = MixRecipe::new(vec![1.0, 1.0, 1.0]);
+        let no_vocals = MixRecipe::new(vec![1.0, 1.0, 0.0]);
+        let no_drums = MixRecipe::new(vec![1.0, 0.0, 1.0]);
+        let mut follower = MixFollower::new(all.clone());
+        assert_eq!(follower.follow(&song, &all, false, || true), None);
+        assert_eq!(follower.progress(), None, "the shown mix needs no job");
+
+        let one = 1.0 / 3.0;
+        assert_eq!(follower.follow(&song, &no_vocals, false, || false), None);
+        assert_eq!(follower.progress(), Some(one));
+        assert_eq!(follower.follow(&song, &no_vocals, false, || false), None);
+        assert_eq!(
+            follower.progress(),
+            Some(2.0 * one),
+            "the same mix continues"
+        );
+        assert_eq!(follower.follow(&song, &no_drums, false, || false), None);
+        assert_eq!(follower.progress(), Some(one), "a new mix starts again");
+
+        let done = follower
+            .follow(&song, &no_drums, true, || true)
+            .expect("the waveform of the new mix");
+        assert_eq!(follower.shown(), &no_drums);
+        assert_eq!(follower.progress(), None);
+        let want = run_mix(&song, &no_drums);
+        assert_eq!(
+            (done.columns, done.scale),
+            crate::lane_columns(&want.left, &want.right)
+        );
+        assert_eq!(done.mid, None, "the job began without the mid signal");
+
+        let back = follower
+            .follow(&song, &all, true, || true)
+            .expect("the waveform of every stem");
+        let want = run_mix(&song, &all);
+        let mid: Vec<f32> = want
+            .left
+            .iter()
+            .zip(&want.right)
+            .map(|(l, r)| 0.5 * (l + r))
+            .collect();
+        assert_eq!(back.mid, Some(mid));
+        assert_eq!(follower.follow(&song, &all, true, || true), None);
+    }
+
+    fn run_mix(song: &Arc<Song>, recipe: &MixRecipe) -> Recorder {
+        let mut job = ExportJob::new(
+            Box::new(Mix::new(Arc::clone(song), recipe)),
+            Recorder::default(),
+        );
+        assert!(job.run_while(|| true));
+        job.into_sink()
+    }
+
+    #[test]
+    fn save_notes_wait_for_their_own_file() {
+        let mut notes = SaveNotes::default();
+        notes.set("lloyd - mix.mp3", Some("  it clips.".into()));
+        notes.set("lloyd - bass.wav", None);
+        assert_eq!(notes.take("lloyd - bass.flac"), "");
+        assert_eq!(notes.take("lloyd - mix.mp3"), "  it clips.");
+        assert_eq!(notes.take("lloyd - mix.mp3"), "", "a note is taken once");
+
+        notes.set("lloyd - mix.flac", Some("  old.".into()));
+        notes.set("lloyd - mix.flac", None);
+        assert_eq!(
+            notes.take("lloyd - mix.flac"),
+            "",
+            "a new save of the file drops its note"
+        );
+
+        notes.set("lloyd - mix.flac", Some("  it clips.".into()));
+        notes.clear();
+        assert_eq!(notes.take("lloyd - mix.flac"), "");
+    }
+
+    #[test]
     fn a_job_of_no_frames_is_done_at_once() {
         let song = Arc::new(song(&["bass"], 0));
         let mut job = ExportJob::new(
@@ -444,12 +687,19 @@ mod tests {
                 job.into_sink()
             }
             let whole = run(&song, &recipe, Recorder::default());
-            let peaks = run(&song, &recipe, PeaksSink::new(frames, crate::COLUMNS));
-            assert_eq!(
-                peaks.finish(),
-                crate::lane_columns(&whole.left, &whole.right),
-                "{frames} frames"
-            );
+            let want = crate::lane_columns(&whole.left, &whole.right);
+            let peaks = run(&song, &recipe, PeaksSink::new(frames, crate::COLUMNS)).finish();
+            assert_eq!((peaks.columns, peaks.scale), want, "{frames} frames");
+            assert_eq!(peaks.mid, None);
+            let with_mid = run(&song, &recipe, PeaksSink::with_mid(frames, crate::COLUMNS));
+            let mid: Vec<f32> = whole
+                .left
+                .iter()
+                .zip(&whole.right)
+                .map(|(l, r)| 0.5 * (l + r))
+                .collect();
+            assert_eq!(with_mid.finish().mid, Some(mid.clone()), "{frames} frames");
+            assert_eq!(mix_mid(&song, &recipe, crate::COLUMNS), mid);
         }
     }
 
@@ -614,13 +864,22 @@ mod web_tests {
     fn a_mix_export_does_not_grow_wasm_memory() {
         // 60 s: 10.6 MB for each channel of the mix.
         let song = song(60 * 44_100);
-        let before = crate::separator::page_wasm_mb();
-        let sink = run(&song, JsChannels::new(song.frames));
-        let grew = crate::separator::page_wasm_mb() - before;
-        assert_eq!(sink.left.length() as usize, song.frames);
-        assert!(
-            grew < 1.0,
-            "MEM-1: the page's WebAssembly memory grew by {grew:.1} MB during the export"
-        );
+        for format in Format::ALL {
+            let before = crate::separator::page_wasm_mb();
+            let sink = run(&song, JsSink::new(format, song.frames, 44_100));
+            let grew = crate::separator::page_wasm_mb() - before;
+            let bytes = match sink {
+                JsSink::Wav(wav) => wav.into_bytes().length() as usize,
+                JsSink::Flac(c) | JsSink::Mp3(c) => 4 * c.left.length() as usize,
+            };
+            assert!(
+                bytes >= 4 * song.frames,
+                "{format:?}: the sink holds the song"
+            );
+            assert!(
+                grew < 1.0,
+                "MEM-1: the page's WebAssembly memory grew by {grew:.1} MB during a {format:?} export"
+            );
+        }
     }
 }

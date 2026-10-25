@@ -28,7 +28,7 @@ flowchart LR
 ## Crates
 
 * `dsp`: small audio functions (peaks, mixing, median, fades, loop wrapping) written in a deliberately plain style, loops and indexing only, as a first reading exercise.
-* `engine`: decoding of WAV, MP3 and FLAC (Symphonia), with at most 1 GiB of samples from each file (decision 0013).  It also converts each song to 44.1 kHz (`engine::resample`, decision 0012).  It has the player and mixer, pitch-preserving time-stretch (WSOLA), the classic drum separation (harmonic/percussive median filtering), a 16-bit WAV writer, and `engine::mixdown`, which reads a stem or a mix of stems one block at a time for a save.
+* `engine`: decoding of WAV, MP3 and FLAC (Symphonia), with at most 1 GiB of samples from each file (decision 0013).  It also converts each song to 44.1 kHz (`engine::resample`, decision 0012).  It has the player and mixer, pitch-preserving time-stretch (WSOLA), the classic drum separation (harmonic/percussive median filtering), and a 16-bit WAV writer.  `engine::mixdown` reads a stem or a mix of stems one block at a time.
 * `synth`: the built-in demo song, synthesised so its stems are known exactly.  Its `files` feature adds writers for the song's WAV files and `truth.json`, for tools and tests.
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
@@ -201,7 +201,7 @@ Any change to the shapes also touches `roformer-gpu/src/bench.rs`, whose kernel 
 
 ## Saving a stem or the mix
 
-Each lane's "Save" menu saves its stem.  The mix lane's menu saves the mix as heard: each stem at its gain after Mute, Solo and volume, summed and clamped to ±1, at 100% tempo (decision 0014).  The mix lane's subtitle names the stems in that mix, and its waveform follows it.
+Each lane's "Save" menu saves its stem.  The mix lane's menu saves the mix as heard, at 100% tempo (decision 0014).  Each stem has its gain after Mute, Solo and volume, and the sum is clamped to ±1.  The mix lane's subtitle names the stems in that mix.  Its waveform and spectrogram follow the mix, through the same blocks (`app::export::MixFollower`).
 
 A save is an `app::export::ExportJob`.  It reads its source (`engine::mixdown::Mix` or `StemPcm`) in blocks of 16,384 frames, and writes each block to a sink.  On the web, the main thread also fills the Web Audio buffers, so the job runs for about 4 ms in each UI frame.  The sinks write into JS arrays, so WebAssembly memory holds only the blocks (MEM-1, MEM-4).  A WAV is made on the page.  The worker encodes FLAC and MP3 from the two transferred `Float32Array`s (MEM-2), with the same messages as for a stem.
 

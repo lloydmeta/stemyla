@@ -120,6 +120,31 @@ fn the_mix_lane_follows_mute() {
 }
 
 #[test]
+fn the_mix_lane_spectrogram_follows_mute() {
+    let mut h = harness(true);
+    h.get_by_label("Spectrograms").click();
+    h.run();
+    let before = h.state().lanes[0].spectrogram.as_ref().map(|t| t.id());
+    assert!(before.is_some(), "the mix lane has a spectrogram");
+    let lead = stem(&h, "lead");
+    let stem_before = h.state().lanes[lead + 1]
+        .spectrogram
+        .as_ref()
+        .map(|t| t.id());
+    h.get_all_by_label("Mute").nth(lead).unwrap().click();
+    h.run();
+    let app = h.state();
+    let after = app.lanes[0].spectrogram.as_ref().map(|t| t.id());
+    assert!(after.is_some(), "the mix lane has a spectrogram again");
+    assert_ne!(after, before, "the mix lane's spectrogram is made again");
+    assert_eq!(
+        app.lanes[lead + 1].spectrogram.as_ref().map(|t| t.id()),
+        stem_before,
+        "a stem's spectrogram stays"
+    );
+}
+
+#[test]
 fn solo_mutes_the_others() {
     let mut h = harness(true);
     let bass = stem(&h, "bass");

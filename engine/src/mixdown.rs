@@ -217,6 +217,23 @@ mod tests {
     }
 
     #[test]
+    fn a_mix_counts_the_samples_at_full_scale_of_both_channels() {
+        let song = Arc::new(Song {
+            sample_rate: 44_100,
+            frames: 2,
+            stems: vec![
+                stem("a", vec![0.9, 0.0], vec![0.9, -0.6]),
+                stem("b", vec![0.9, 0.0], vec![0.9, -0.6]),
+            ],
+        });
+        let mix = Mix::new(song, &MixRecipe::new(vec![1.0, 1.0]));
+        let (l, r, clipped) = read_all(&mix, 2);
+        assert_eq!(l, [1.0, 0.0]);
+        assert_eq!(r, [1.0, -1.0]);
+        assert_eq!(clipped, 3, "one in the left channel and two in the right");
+    }
+
+    #[test]
     fn a_silent_recipe_reads_silence() {
         let mix = Mix::new(song(100), &MixRecipe::new(vec![0.0; 3]));
         let (l, r, clipped) = read_all(&mix, 64);

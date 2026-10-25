@@ -2,9 +2,9 @@
 //! volume, tempo, a loop region and click-to-seek.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use engine::mixdown::{Mix, MixRecipe};
+use engine::mixdown::MixRecipe;
 use engine::{Player, PlayerConfig, SharedParams, Song, Stem, StretcherKind};
-use export::{ExportJob, PeaksSink};
+use export::MixFollower;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -21,8 +21,8 @@ pub mod store;
 pub mod store_meta;
 
 /// Lanes that are not parts of the mix: computed from the others, or the
-/// original recording kept beside its separated stems.  They start muted
-/// and are left out of the mix lane.
+/// original recording kept beside its separated stems.  They start muted,
+/// so the mix lane leaves them out until the user unmutes one.
 pub const DERIVED: [&str; 2] = ["classic drums", "original"];
 
 /// The mix of the original sources: every stem except derived ones, summed
@@ -310,10 +310,8 @@ pub struct StemApp {
     pub loop_bar_rect: Option<Rect>,
     pub status: String,
     pub output: Option<Output>,
-    /// The mix that the mix lane's waveform shows.
-    mix_shown: Option<MixRecipe>,
-    /// The waveform of a new mix as heard, while it is made.
-    peaks_job: Option<(MixRecipe, ExportJob<PeaksSink>)>,
+    /// Keeps the mix lane on the mix as heard.
+    mix_follower: Option<MixFollower>,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
     /// Ask for a real audio device when an output is opened: for the first
@@ -369,13 +367,13 @@ pub struct StemApp {
     /// What to add to "Saved ..." when the worker's file arrives, such as
     /// that the mix clips.
     #[cfg(target_arch = "wasm32")]
-    save_note: Option<String>,
+    save_notes: export::SaveNotes,
 }
 
 /// A stem or a mix being made into a file (decision 0014).
 #[cfg(target_arch = "wasm32")]
 struct Saving {
-    job: ExportJob<export::JsSink>,
+    job: export::ExportJob<export::JsSink>,
     /// The file's name, with its extension.
     name: String,
     rate: u32,
@@ -439,8 +437,7 @@ impl Default for StemApp {
             loop_bar_rect: None,
             status: WELCOME.into(),
             output: None,
-            mix_shown: None,
-            peaks_job: None,
+            mix_follower: None,
             tempo_pct: 100.0,
             show_spectrograms: false,
             want_device: true,
@@ -476,7 +473,7 @@ impl Default for StemApp {
             #[cfg(target_arch = "wasm32")]
             saving: None,
             #[cfg(target_arch = "wasm32")]
-            save_note: None,
+            save_notes: export::SaveNotes::default(),
         }
     }
 }
@@ -694,8 +691,7 @@ impl StemApp {
         }
         // The mix lane shows every source stem at full volume, which is
         // what the new params play.
-        self.mix_shown = Some(MixRecipe::as_heard(&params));
-        self.peaks_job = None;
+        self.mix_follower = Some(MixFollower::new(MixRecipe::as_heard(&params)));
         // A save holds its song; it does not outlive the song's lanes.
         #[cfg(target_arch = "wasm32")]
         {
@@ -1454,12 +1450,12 @@ impl StemApp {
                 Event::Log(text) => log::info!("separator: {text}"),
                 Event::Mp3 { name, bytes } => {
                     store::download(&name, &bytes, "audio/mpeg");
-                    let note = self.save_note.take().unwrap_or_default();
+                    let note = self.save_notes.take(&name);
                     self.status = format!("Saved {name}.{note}");
                 }
                 Event::Flac { name, file } => {
                     store::download_blob(&name, &file);
-                    let note = self.save_note.take().unwrap_or_default();
+                    let note = self.save_notes.take(&name);
                     self.status = format!("Saved {name}.{note}");
                 }
                 Event::Bench(text) => {
@@ -1491,8 +1487,15 @@ impl StemApp {
                             self.separating = None;
                             "Separation"
                         }
-                        stem_protocol::kind::MP3 => "MP3 encoding",
-                        stem_protocol::kind::FLAC => "FLAC encoding",
+                        stem_protocol::kind::MP3 | stem_protocol::kind::FLAC => {
+                            // The failed file's note never gets its reply.
+                            self.save_notes.clear();
+                            if of == stem_protocol::kind::MP3 {
+                                "MP3 encoding"
+                            } else {
+                                "FLAC encoding"
+                            }
+                        }
                         stem_protocol::kind::SELFTEST => "Self-test",
                         stem_protocol::kind::BENCH => "Benchmark",
                         _ => "Worker request",
@@ -1529,36 +1532,31 @@ impl StemApp {
         }
     }
 
-    /// Makes the mix lane's waveform show the mix as heard.  A new mix
-    /// starts a peaks job, which runs for a few milliseconds in each frame.
+    /// Makes the mix lane show the mix as heard.  A new mix starts a
+    /// waveform job, which runs for a few milliseconds in each frame.  With
+    /// spectrograms on, the job also makes the spectrogram's input.
     fn follow_mix(&mut self, ctx: &egui::Context) {
-        let (Some(song), Some(params)) = (&self.song, &self.params) else {
+        let (Some(song), Some(params), Some(follower)) =
+            (&self.song, &self.params, &mut self.mix_follower)
+        else {
             return;
         };
         let heard = MixRecipe::as_heard(params);
-        if self.mix_shown.as_ref() == Some(&heard) {
-            self.peaks_job = None;
-            return;
-        }
-        let job = match self.peaks_job.take() {
-            Some((recipe, job)) if recipe == heard => (recipe, job),
-            _ => {
-                let source = Box::new(Mix::new(Arc::clone(song), &heard));
-                let sink = PeaksSink::new(song.frames, COLUMNS);
-                (heard, ExportJob::new(source, sink))
+        let more = export::time_left(PEAKS_MS);
+        let Some(waveform) = follower.follow(song, &heard, self.show_spectrograms, more) else {
+            if follower.progress().is_some() {
+                ctx.request_repaint();
             }
-        };
-        let (recipe, mut job) = job;
-        if !job.run_while(export::time_left(PEAKS_MS)) {
-            self.peaks_job = Some((recipe, job));
-            ctx.request_repaint();
             return;
-        }
+        };
+        let rate = song.sample_rate;
         if let Some(mix) = self.lanes.first_mut().filter(|l| l.stem.is_none()) {
-            (mix.columns, mix.scale) = job.into_sink().finish();
-            mix.spectrogram = None;
+            (mix.columns, mix.scale) = (waveform.columns, waveform.scale);
+            mix.spectrogram = waveform
+                .mid
+                .filter(|_| self.show_spectrograms)
+                .map(|mid| spectrogram::texture(ctx, &mix.name, &mid, rate));
         }
-        self.mix_shown = Some(recipe);
     }
 
     /// A lane's "Save" menu: of its stem, or of the mix as heard for the
@@ -1622,7 +1620,7 @@ impl StemApp {
     /// The save runs in [`Self::step_save`], a few ms in each frame.
     #[cfg(target_arch = "wasm32")]
     fn start_save(&mut self, stem: Option<usize>, format: export::Format) {
-        use engine::mixdown::{Pcm, StemPcm};
+        use engine::mixdown::{Mix, Pcm, StemPcm};
         let (Some(song), Some(params)) = (self.song.clone(), self.params.clone()) else {
             return;
         };
@@ -1643,7 +1641,7 @@ impl StemApp {
         };
         let sink = export::JsSink::new(format, source.frames(), song.sample_rate);
         self.saving = Some(Saving {
-            job: ExportJob::new(source, sink),
+            job: export::ExportJob::new(source, sink),
             name: format!("{name}.{}", format.extension()),
             rate: song.sample_rate,
             mix: stem.is_none(),
@@ -1674,17 +1672,18 @@ impl StemApp {
         else {
             return;
         };
-        self.save_note = (mix && job.clipped() > 0).then(|| {
+        let note = (mix && job.clipped() > 0).then(|| {
             format!(
                 "  {} samples of the mix are at full scale, so it may clip; lower the volumes to avoid it.",
                 job.clipped()
             )
         });
+        self.save_notes.set(&name, note);
         let sep = self.separator.as_ref();
         self.status = match (job.into_sink(), sep) {
             (JsSink::Wav(wav), _) => {
                 store::download(&name, &wav.into_bytes(), "audio/wav");
-                let note = self.save_note.take().unwrap_or_default();
+                let note = self.save_notes.take(&name);
                 format!("Saved {name}.{note}")
             }
             (JsSink::Flac(c), Some(sep)) => {
@@ -1696,7 +1695,7 @@ impl StemApp {
                 format!("Encoding {name}…")
             }
             (JsSink::Flac(_) | JsSink::Mp3(_), None) => {
-                self.save_note = None;
+                self.save_notes.take(&name);
                 format!("Could not save {name}: the encoding worker is not running.")
             }
         };
@@ -1978,7 +1977,7 @@ impl eframe::App for StemApp {
                 &ctx,
                 &mut self.lanes,
                 self.song.as_ref(),
-                self.mix_shown.as_ref(),
+                self.mix_follower.as_ref().map(MixFollower::shown),
             );
         }
 

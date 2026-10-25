@@ -60,11 +60,14 @@ The pieces, from the bottom layer up:
 2. `engine::mixdown` (new):
    * `MixRecipe`: an immutable `Vec<f32>` of gains, one for each stem.  `MixRecipe::as_heard(&SharedParams)` takes each `effective_gain`.  `audible()` gives the stems with a gain above 0.
    * `trait Pcm { frames, sample_rate, read(at, left, right) -> usize }`.  `read` fills one block and returns the samples at full scale (±1 or beyond).
-   * `Mix { song: Arc<Song>, recipe }` implements `Pcm` with `dsp::mix_range`.  `StemPcm { stem: Stem, rate }` implements it with a copy of the block.  It never clamps.
+   * `Mix { song: Arc<Song>, audible, volumes }` implements `Pcm` with `dsp::mix_range`.  `Mix::new` takes the song and a recipe.  `StemPcm { stem: Stem, rate }` implements it with a copy of the block.  It never clamps.
 3. `engine::wav`: `header(frames, rate) -> [u8; 44]` and `write_pcm16(left, right, out)`.  `encode_pcm16` uses them, and gives the same bytes as before.
 4. `app/src/export.rs` (new):
    * `trait Sink { fn write(&mut self, at: usize, left: &[f32], right: &[f32]) }`.
-   * `ExportJob { source: Box<dyn Pcm>, sink, at, clipped, name, format }`.  `step(max_frames)` reads one block into two reusable buffers and writes it to the sink.  It returns `true` at the end.
+   * `ExportJob { source: Box<dyn Pcm>, sink, at, clipped, left, right }`.  `step()` reads one block of `BLOCK` frames into two reusable buffers and writes it to the sink.  It returns `true` at the end.  `run_while(more)` steps once, then while `more()` says there is time.
+   * `Saving { job, name, rate, mix }` in `app/src/lib.rs` holds the file's name and the job of the save in progress.
+   * `MixFollower` keeps the mix lane on the mix as heard.  It continues its waveform job while the mix stays, and starts again when the mix changes.
+   * `SaveNotes` keeps a note for each file, such as that a mix clips, until the worker's reply names that file.
    * Names and labels: `mix_label(song, recipe)` for the mix lane's subtitle, and `mix_file_name(base, song, recipe)`.
    * On the web: `JsChannels` (two `Float32Array`s of the song's length) and `JsWav` (one `Uint8Array` of 44 + 4 bytes for each frame).  Each writes a block with `subarray(..).copy_from(..)`.
 5. `app/src/lib.rs`:
@@ -147,7 +150,7 @@ Acceptance: the tests pass.  `the_mix_lane_follows_mute` fails before the change
   * `js_channels_hold_the_mix`: the arrays equal `dsp::mix` of the audible stems.
   * `js_wav_is_the_wav_of_the_mix`: the bytes equal `encode_pcm16` of the same mix.
   * `a_mix_export_does_not_grow_wasm_memory`: a 60 s song, then a whole job.  The page's WebAssembly memory grows by less than 1 MB.  It grows by about 21 MB if the job keeps the mix in WebAssembly.
-  * `encode_mp3_asks_the_worker_for_an_mp3`, as for FLAC (TD-53 names its absence).
+  * `encode_mp3_asks_the_worker_for_an_mp3_of_the_arrays`, as for FLAC (TD-53 named its absence).
 * TD-53: add the mix lane's Save menu to the untested items.  A native test cannot reach the wasm-only menu.
 
 Acceptance: `web-test` passes in Safari or Chrome.  `a_mix_export_does_not_grow_wasm_memory` fails with a sink that collects into a `Vec`.
@@ -198,6 +201,8 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * 2026-10-25, agent: every Save uses the export job, a stem's too.  So the WAV save no longer makes the whole file in WebAssembly memory.
 * 2026-10-25, agent: the mix saves at 100% tempo, clamped as playback clamps.
 * 2026-10-25, agent, M2: the mix lane's spectrogram follows the mix too.  It is made again, in one frame, when its mix changes, as every spectrogram is made today.
+* 2026-10-25, agent, review round 1: that one-frame rebuild mixed the whole song on the main thread (1-2).  Now the waveform job also makes the mean of the channels when spectrograms are on, and the spectrogram is made from it at the end.  `spectrogram_db` takes about 1,024 FFTs of 1,024 points, so the end is short.  A spectrogram switched on later is made from `export::mix_mid`, block by block, with one song-sized buffer.
+* 2026-10-25, agent, review round 1: a clip note waits in `SaveNotes` for the reply that names its file (1-1).  A failed MP3 or FLAC encode clears the notes, since its reply never names the file.
 * 2026-10-25, agent, M3: the FLAC and MP3 items are disabled when the page has no worker.  Before, a click did nothing.
 * 2026-10-25, agent, M3: `load_song` drops a save in progress, also when separated stems arrive.  The status line then shows the separation.
 * 2026-10-25, agent, M3: the status names the clipped samples of a mix only.  A stem saves as it is, as before.
