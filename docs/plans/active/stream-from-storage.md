@@ -2,13 +2,13 @@
 
 ## Purpose
 
-On an iPhone 17 Pro, a separation of a song longer than about 2 minutes stops the tab (MEM-4).  The page and the worker keep whole songs in memory, so memory grows with the length of the song.  After this plan, browser storage (OPFS) holds a song's audio.  That is the encoded source, the decoded song, the mix that the worker separates and the six stems.  Memory holds only blocks, a read-ahead buffer and overviews, so the peak does not grow with the song.
+On an iPhone 17 Pro, a separation of a song longer than about 2 minutes stops the tab (MEM-4).  The page and the worker keep whole songs in memory, so memory grows with the length of the song.  After this plan, browser storage (OPFS) holds a song's audio.  That is the encoded source, the decoded song, the mix that the worker separates and the six stems.  Memory holds only blocks, a read-ahead buffer and overviews, so the peak does not grow with the song.  The GPU also keeps the model's weights as f16, which lowers the fixed part by about 350 MB.
 
 Target: a 30-minute song opens, separates, plays and saves on an iPhone 17 Pro, and no step stops the tab.
 
-Decisions 0015, 0016 and 0017 (all proposed) record the design choices.  Out of scope:
+Decisions 0015, 0016 and 0017 (proposed) and 0018 (accepted) record the design choices.  Out of scope:
 
-* f16 weights on the GPU.  They lower the fixed part of the memory by about 350 MB, but not the part that grows with the song.  After this plan, the fixed part fits (see "Memory budget").  A later plan can add them for headroom.
+* f16 arithmetic on the GPU (the `shader-f16` feature).  It would change the stems.
 * An AudioWorklet for playback.  The callback stays on the main thread (`engine/src/live.rs`).
 
 ## Context and orientation
@@ -45,15 +45,16 @@ At 44.1 kHz, a stereo `f32` signal takes 44,100 x 60 x 2 x 4 bytes, about 21 MB 
 * the mix that `load_song` makes on the page (`mix_of_sources`);
 * the worker's copy of the mix.
 
-The fixed part is the total less these copies: 2048 - 3 x 110, about 1720 MB.  The six stems add 127 MB per minute.  These are estimates from one run.  M2 measures them on a computer, and M9 on the iPhone.
+The fixed part is the total less these copies: 2048 - 3 x 110, about 1720 MB.  The six stems add 127 MB per minute.  These are estimates from one run.  M2 measures them on a computer, and M10 on the iPhone.
 
 | Design | Fixed | Per minute | Longest song |
 | - | - | - | - |
 | Now: song, mix and stems in memory | about 1720 MB | about 190 MB | about 1.7 minutes |
 | Stems in storage only | about 1720 MB | about 63 MB | about 5.2 minutes |
-| This plan: all audio in storage | about 1730 MB | a few MB (overviews) | no limit from memory |
+| All audio in storage | about 1730 MB | a few MB (overviews) | no limit from memory |
+| This plan: all audio in storage, f16 weights | about 1380 MB | a few MB (overviews) | no limit from memory |
 
-The fixed part of this plan adds a read-ahead buffer (about 10 MB, decision 0017).  It leaves about 300 MB of margin under 2048 MB.
+The fixed part adds a read-ahead buffer (about 10 MB, decision 0017).  f16 weights take the parameters from 699 MB to about 350 MB (decision 0018).  The plan leaves about 650 MB of margin under 2048 MB.
 
 ### The code today (commit `4a5b356`)
 
@@ -67,6 +68,8 @@ The fixed part of this plan adds a read-ahead buffer (about 10 MB, decision 0017
 * `app/src/separator.rs`: `Separator::separate` sends the whole mix as two `Float32Array`s.  It assembles the replies with `Assembly` (`app/src/assemble.rs`).
 * `worker/src/web.rs`: `run` copies the mix into WebAssembly memory and feeds `Demixer` (`roformer/src/demix.rs`) a chunk at a time.  It posts each ready segment (`post_segment`).  `mp3` and `flac` encode two whole channels from the page.
 * `app/src/store.rs`: song sessions in OPFS.  `save_stems` writes `sessions/<id>/stems/<stem>.wav` as 16-bit WAVs after a separation.  `restore_id` reads a session back into memory.
+* `roformer/src/weights.rs`: the model file is f16 (`bs_roformer_sw.f16.safetensors`).  The loader converts each value to f32.  F32 and BF16 files load too.
+* `roformer-gpu/src/net.rs`: `Net::load_store` uploads the weights as f32, about 699 MB.  `norm` and the band-split `gamma` scale their values at upload, and the weight matrices do not (`stacked` with a scale of 1.0, `tensor`).  The matrix kernels are in `roformer-gpu/src/shaders/`: `matmul.wgsl`, `matmul_vec4.wgsl` and `matmul_interleaved.wgsl`.
 * `app/src/lib.rs`: `load_song` builds the lanes, their peaks (`dsp::peaks`) and spectrograms.  `original_lane` and `mix_of_sources` give the mix to separate.
 
 ### Terms
@@ -127,7 +130,7 @@ When a song opens, the page writes its mix as a session file.  `Request::Separat
 
 The encoded source is never whole in memory.  A chosen file is saved to OPFS as a `Blob`, as today.  Then a decoder reads it in blocks and writes session files.  On the main thread, OPFS reads are async, and the decoder needs sync reads.  So decoding runs in a worker that reads the `Blob` with `FileReaderSync`.  `stem-worker` cannot take `engine` (LAYER-1), so this is a new worker of the page side.
 
-* Decision point for the maintainer: a new page-side worker crate that takes `engine`, or another way to decode in blocks.  The choice gets decision 0018.
+* Decision point for the maintainer: a new page-side worker crate that takes `engine`, or another way to decode in blocks.  The choice gets decision 0019.
 * `engine::decode` and `Song::from_audio` read from a source of blocks and write blocks to a sink, not a `Vec`.  The resampler of decision 0012 runs in blocks.  The overview of each lane is made in the same pass.
 * A restored session decodes its stored sources the same way (`store::read` stops reading whole files).
 * Acceptance: a test decodes a WAV, a FLAC and an MP3 from a block source.  A memory sink and a block sink get the same samples.  A browser test opens a song and finds its session files and overviews in OPFS.  The MEM-5 spy covers the decode writes.  `e2e memory-budget` shows no page growth for a WAV source.
@@ -152,14 +155,21 @@ A trait in `engine` gives the frames of a stem from a position.  `Samples` in me
 
 * Acceptance: the save tests of `app/src/export.rs` and `e2e flac` pass.  The MEM-5 spy covers the WAV, FLAC and MP3 writes.  A browser test saves a 10-minute mix and finds no growth of the JS heap with the length.
 
-### M9: the budget check, and the iPhone evidence
+### M9: f16 weights on the GPU
+
+The GPU keeps each weight matrix of an f16 file as f16, two values in each `u32` (decision 0018).  The matrix kernels unpack them with `unpack2x16float` and compute in f32, as today.  Norms, biases and the scaled values stay f32.  An F32 or BF16 file keeps today's f32 path.  A matrix with an odd number of values gets one value of padding.  `?bench` times the kernels before and after, and calibration chooses as today.
+
+* Acceptance: a test runs each changed kernel with f16 weights and with today's f32 weights on the same GPU.  The outputs match bit for bit.  `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release` and the e2e `selftest` pass against the CPU (GPU-2).  `every_kernel_fits_the_default_limits` passes (GPU-1).  The PR names the adapter of a real GPU, not SwiftShader (GPU-3).  The worker log shows the parameters at about 350 MB.
+* Decision point for the maintainer: make f16 the default after the iPhone and the Mac show the same stems and no slower separation.
+
+### M10: the budget check, and the iPhone evidence
 
 `e2e memory-budget` asserts two things on a computer:
 
 * the 4-minute peak is no more than 32 MB above the 1-minute peak;
-* each peak of page WebAssembly memory, worker WebAssembly memory and GPU live bytes is under 1400 MB.
+* each peak of page WebAssembly memory, worker WebAssembly memory and GPU live bytes is under a budget.  The budget is M2's measured fixed part, less the f16 saving, plus 10%.  It is at most 1100 MB.
 
-The 1400 MB leaves about 650 MB under the iPhone's limit for WebKit, the JS heap and WebGL.  These parts are not measured.  TD-11 and TD-54 close.
+The 1100 MB leaves about 950 MB under the iPhone's limit for WebKit, the JS heap and WebGL.  These parts are not measured.  TD-11 and TD-54 close.
 
 The maintainer publishes, then opens, separates, plays and saves a 30-minute song on the iPhone.  Playback includes a loop and seeks.  `idevicesyslog` shows no `exceeded mem limit` for WebContent.
 
@@ -169,7 +179,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 
 * `cargo fmt --all --check`, the clippy commands of `CLAUDE.md`, `cargo test --workspace --exclude roformer-gpu`, `cargo run -p xtask -- docs-check`.
 * `cargo run -p xtask -- web-test` and `cargo run -p xtask -- e2e memory-budget`.
-* On the iPhone 17 Pro: the 30-minute run of M9, with `idevicesyslog` running.
+* On the iPhone 17 Pro: the 30-minute run of M10, with `idevicesyslog` running.
 
 ## Idempotence and recovery
 
@@ -191,7 +201,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [ ] M6: playback through the read-ahead buffer.
 * [ ] M7: lanes, spectrograms, classic drums and sessions from storage.
 * [ ] M8: saving from and to storage.
-* [ ] M9: budget asserted, iPhone evidence.
+* [ ] M9: f16 weights on the GPU.
+* [ ] M10: budget asserted, iPhone evidence.
 
 ## Surprises and discoveries
 
@@ -203,7 +214,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 
 * 2026-10-25, maintainer: the fix moves song-length audio to storage, not to smaller in-memory formats, because those still break at a longer song.  The target is a 30-minute song.
 * 2026-10-25, agent: f16 weights on the GPU stay out of this plan.  The fixed part fits without them, and the maintainer asked about their risk to separation quality.
-* 2026-10-25, agent, after review round 1: the encoded source is read in blocks too (M5).  Classic drums, the mix lane's mid and the spectrogram signals move to blocks (M7).  M9 adds an absolute budget.
+* 2026-10-25, maintainer: f16 weights on the GPU join this plan as M9, because they save memory (decision 0018).  This replaces the entry above.
+* 2026-10-25, agent, after review round 1: the encoded source is read in blocks too (M5).  Classic drums, the mix lane's mid and the spectrogram signals move to blocks (M7).  The budget check (now M10) adds an absolute budget.
 
 ## Outcomes and retrospective
 
