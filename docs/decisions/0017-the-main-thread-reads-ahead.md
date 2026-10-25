@@ -4,7 +4,7 @@ Status: proposed (2026-10-25, by the agent)
 
 ## Context
 
-On the web, cpal calls the audio callback on the page's main thread and queues about 186 ms of audio (`engine/src/live.rs`).  The callback never waits or allocates (RT-1).  Decision 0015 moves stems to OPFS session files.  On the main thread, OPFS reads are async: sync access handles exist only in dedicated workers ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle/createSyncAccessHandle)).
+On the web, cpal calls the audio callback on the page's main thread.  It queues two buffers of 2,048 frames: about 93 ms, plus the output's latency (`engine/src/live.rs`).  The callback never waits or allocates (RT-1).  Decision 0015 moves stems to OPFS session files.  On the main thread, OPFS reads are async: sync access handles exist only in dedicated workers ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle/createSyncAccessHandle)).
 
 ## Options
 
@@ -19,6 +19,6 @@ Async reads on the main thread fill a read-ahead buffer (proposed).  The buffer 
 ## Consequences
 
 * Ten seconds of six stereo stems at 16 bits is about 10 MB.  The buffer is made before playback starts (RT-1).
-* A main-thread block longer than the queued audio is still a gap, as today.  Storage adds no new cause of a gap while reads finish within the buffer.
+* A main-thread block longer than the queued audio (about 93 ms) is still a gap, as today.  `live.rs` leaves that buffer silent.  Storage adds no new cause of a gap while reads finish within the read-ahead buffer.
 * A seek to an unbuffered position starts after one read.  M1 measures that delay.
 * Moving the callback to an AudioWorklet stays possible.  It would then read from the same buffer.

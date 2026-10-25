@@ -394,7 +394,7 @@ The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The
 
 This entry concerns MEM-4.
 
-On 2026-10-25, a 5.2-minute song stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 660 MB for that song.  The page's song, the worker's mix and the stems grow by about 170 MB per minute of song.  The fixed part is about 1730 MB, so about 1.9 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
+On 2026-10-25, a 5.2-minute song stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 660 MB for that song.  The page's song and mix, the worker's mix and the stems grow by about 190 MB per minute of song.  The fixed part is about 1720 MB, so about 1.7 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
 
 * Fix: `plans/active/stream-from-storage.md` moves the song, the mix and the stems to browser storage (decision 0015).  Its M9 asserts that the peak does not grow with the song.
 
