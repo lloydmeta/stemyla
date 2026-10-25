@@ -56,10 +56,10 @@ Why the page and not the worker:
 
 The pieces, from the bottom layer up:
 
-1. `dsp::mix_range(stems, volumes, start, out) -> usize`, in DSP-1 style.  It sums `out.len()` frames from `start` into `out`, clamps to ±1, and returns the clamped samples.
+1. `dsp::mix_range(stems, volumes, start, length) -> Vec<f32>`, in DSP-1 style.  It sums `length` frames from `start`, and clamps to ±1.  It returns a new block, since DSP-1 has no `&mut [f32]`.
 2. `engine::mixdown` (new):
    * `MixRecipe`: an immutable `Vec<f32>` of gains, one for each stem.  `MixRecipe::as_heard(&SharedParams)` takes each `effective_gain`.  `audible()` gives the stems with a gain above 0.
-   * `trait Pcm { frames, sample_rate, read(at, left, right) -> usize }`.  `read` fills one block and returns the clamped samples.
+   * `trait Pcm { frames, sample_rate, read(at, left, right) -> usize }`.  `read` fills one block and returns the samples at full scale (±1 or beyond).
    * `Mix { song: Arc<Song>, recipe }` implements `Pcm` with `dsp::mix_range`.  `StemPcm { stem: Stem, rate }` implements it with a copy of the block.  It never clamps.
 3. `engine::wav`: `header(frames, rate) -> [u8; 44]` and `write_pcm16(left, right, out)`.  `encode_pcm16` uses them, and gives the same bytes as before.
 4. `app/src/export.rs` (new):
@@ -114,12 +114,13 @@ Acceptance: `cargo run -p xtask -- docs-check` passes with the plan and the deci
 * `engine/src/wav.rs`: `header` and `write_pcm16`; `encode_pcm16` on top of them.
 * Tests in `cargo test -p dsp` and `cargo test -p engine`:
   * `mix_range_matches_mix_at_any_start`: every start and length gives the slice of `dsp::mix`.
-  * `mix_range_counts_clamped_samples`.
+  * `clamps_to_one`, `no_stems_is_silence` and `a_short_stem_panics`.
   * `a_mix_read_in_blocks_equals_dsp_mix`: block sizes 1, 7 and 16,384, and a last short block.
+  * `a_mix_counts_samples_at_full_scale`.
   * `as_heard_follows_mute_solo_and_volume`.
   * `a_stem_pcm_is_the_stem_unclamped`.
-  * `the_demo_mix_without_lead_is_the_sum_of_the_other_stems`: the `synth` song, against `dsp::mix` of its other stems.
   * `encode_pcm16_is_header_then_blocks`: the same bytes as a block-by-block write.
+  * `encode_pcm16_writes_the_bytes_it_wrote_before`: against a copy of the old writer.
 
 Acceptance: the tests pass.  `a_mix_read_in_blocks_equals_dsp_mix` fails if `Mix::read` ignores `at`.
 
@@ -131,6 +132,7 @@ Acceptance: the tests pass.  `a_mix_read_in_blocks_equals_dsp_mix` fails if `Mix
   * `a_job_in_steps_writes_the_whole_mix_once`: a test sink records each `at`.  The frames are contiguous and cover the song.
   * `a_job_counts_clipped_samples`.
   * `mix_labels_and_names`: all, all but one, a few, nothing, and a derived lane.
+  * `the_demo_mix_without_lead_is_the_sum_of_the_other_stems`: the `synth` song, against `dsp::mix` of its other stems.  It is in `app`, since `engine` may not take `synth` (LAYER-1).
   * `the_mix_lane_follows_mute` in `app/tests/ui.rs`: mute "lead", and the mix lane's columns equal the peaks of the other stems.
   * Snapshots: `muted_drums.png` changes (subtitle and waveform).  Update it with `UPDATE_SNAPSHOTS=1 cargo test -p app --test ui`, and look at it.
 
@@ -176,8 +178,8 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 ## Progress
 
 * [x] 2026-10-25: the maintainer chose option C and the page-side mix (decision 0014).
-* [ ] M0: plan and decision 0014.
-* [ ] M1: the mix in blocks.
+* [x] 2026-10-25: M0: plan and decision 0014 (`231255b`).  `docs-check` and the xtask tests pass.
+* [x] 2026-10-25: M1: the mix in blocks.  `cargo test -p dsp` (35) and `cargo test -p engine --lib` (99) pass, with `dsp_is_beginner_style`.
 * [ ] M2: the export job, names and the mix lane.
 * [ ] M3: the web saves.
 * [ ] M4: docs and the real page.
@@ -185,7 +187,8 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-10-25, M1: DSP-1 allows no `&mut [f32]`.  So `dsp::mix_range` returns a new block, and the engine copies it into the caller's buffer.  So `Pcm::read` counts the samples at full scale, not the clamped ones.  A sample of exactly ±1 counts too.
+* 2026-10-25, M1: LAYER-1 forbids `synth` as a dev-dependency of `engine`.  The test of the demo song moves to M2, in `app`.
 
 ## Decision log
 

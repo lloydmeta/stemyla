@@ -27,6 +27,7 @@ mod double_speed;
 mod fade_in;
 mod median;
 mod mix;
+mod mix_range;
 mod peaks;
 mod wrap_loop;
 
@@ -35,5 +36,6 @@ pub use double_speed::double_speed;
 pub use fade_in::fade_in;
 pub use median::median;
 pub use mix::mix;
+pub use mix_range::mix_range;
 pub use peaks::peaks;
 pub use wrap_loop::wrap_loop;
