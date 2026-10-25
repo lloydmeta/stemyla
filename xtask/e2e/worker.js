@@ -18,6 +18,14 @@ window.e2e = {
     await w.write(new Uint8Array(bytes));
     await w.close();
   },
+  // The bytes of a typed array as base64, so they reach the runner as
+  // they are, with no rounding.
+  base64(a) {
+    const b = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    let s = "";
+    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(s);
+  },
   // A started worker, once it says it is alive.
   start() {
     return new Promise((resolve, reject) => {

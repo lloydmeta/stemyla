@@ -182,7 +182,14 @@ The parent's M3 acceptance, check by check:
 * [x] 2026-10-25: plan review 1: 5 should-fix fixed (the stem names, the limit's derivation, a testable loop, `.part` files, an asynchronous start), and 5 nits.
 * [x] 2026-10-25: plan review 2: 2 should-fix fixed (the fallback starts the memory path directly; `apply_separated` splits so both paths log the lines of the e2e scenarios), and 8 nits.
 * [x] 2026-10-25: plan review 3: 4 should-fix fixed (step 1 and clippy, the fallback tests have a session and a control, the growth test measures memory, the memory path's hashes before and after the split), and 5 nits.  The review loop stops at 3 reviews.
-* [x] 2026-10-25: step 1, the stem writer (`worker/src/web/stems.rs`) and `stem_protocol::stem_file`.  The six tests of step 1 pass in Chrome (web-test: worker 48 passed).  `run` does not use the writer yet.
+* [x] 2026-10-25: step 1, the stem writer (`worker/src/web/stems.rs`) and `stem_protocol::stem_file`.  The six tests of step 1 pass in Chrome (web-test: worker 48 passed).  `run` does not use the writer yet.  Commit `a705989`.
+* [x] 2026-10-25: step 2 begins: `e2e stored-stems` with the memory path only, run twice in Chrome on the Mac (AMD Radeon Pro 5500M) at commit `a705989`, before any change to `run`.  Both runs gave the same six SHA-256 hashes of the stems as 16-bit WAVs (17 segments, 132,300 frames):
+  * bass `e41500168c92024ecc32778654fa77e22a630f31200e99965274f6cdd931b028`
+  * drums `9e916ca00e639c59f9eb31e2b6b11d4bdb04c43ebe9a38f7e71564ba79f3a024`
+  * other `619875b264b286dba4c222bbe8e73d9b63909283905522a7c906f718e1d67f69`
+  * vocals `f1b79d872435cdb931306a0c33228905c2d6b3ddfd33e9f1cb55720f52d0b624`
+  * guitar `7e5eb334e7dead42ef2f7902c1590b2561347aa7b7f17b817aced81c295127bb`
+  * piano `3166e0de310c930f2b40f75c2631e4524b7115c64f90d4ef540102af6da68f90`
 
 ## Surprises and discoveries
 
@@ -203,6 +210,9 @@ None yet.
 * 2026-10-25, implementer, step 1: `StemWriter::open` keeps the song's `len`, so `finish` takes no argument.  A failure is `StemError::Storage` (the browser refused; the worker sends `unstored`) or `StemError::Refused` (a song too long for a WAV, or segments that do not follow on; the worker sends `error`).
 * 2026-10-25, implementer, step 1: when `open` fails part of the way, it closes the handles it took and removes the files it opened.  The caller then has no writer to abandon.
 * 2026-10-25, implementer: a Progress line cannot hold the hash of its own commit.  So each step's line gives the step, and the next step's commit adds the hash.
+* 2026-10-25, implementer, step 2: `stored-stems` fixes the kernels with `mm: s64, attn: split`.  Without `attn`, each worker calibrates its attention path, and two runs could do different arithmetic.  With both set, two runs gave the same hashes.
+* 2026-10-25, implementer, step 2: `xtask` takes `sha2` (RustCrypto, first published 2016-05-06, 0.11.1 on 2026-10-12, per crates.io), pinned to the 0.10.9 that `Cargo.lock` already held.  The page sends each stem's floats to the runner as base64 (`e2e.base64`), so JS rounds nothing.
+* 2026-10-25, implementer, step 2: the memory half of `stored-stems` is its own commit, before the wire format changes.
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective

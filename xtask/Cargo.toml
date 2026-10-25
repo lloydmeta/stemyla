@@ -21,6 +21,9 @@ burn = { version = "0.20.1", features = ["ndarray"] }
 burn-store = { version = "=0.20.1", default-features = false, features = ["std", "pytorch"] }
 half = "2.7.1"
 safetensors = "0.7.0"
+# SHA-256 of the stems that `e2e stored-stems` prints.  RustCrypto; pinned
+# to the version that `Cargo.lock` already holds (DEPS-1).
+sha2 = "=0.10.9"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 
 [dev-dependencies]

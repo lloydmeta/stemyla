@@ -22,13 +22,18 @@
 //! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
 //!   browser, and print the peak memory of each and the difference
 //!   (`--weights`).  M2 of `docs/plans/active/stream-from-storage.md`.
+//! * `stored-stems`: one worker separates 3 seconds of the synthetic mix
+//!   and prints the SHA-256 of each stem as a 16-bit WAV (`--weights`).
+//!   With `--hashes`, it checks them.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
 //! `--headed` (Chrome with a window), `--swiftshader` (Chrome's software
 //! WebGPU, for machines without a GPU), `--query Q` (page URL query for
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
-//! `--reference DIR`, `--download`, `--flac`, and click positions `--play-x`,
+//! `--reference DIR`, `--download`, `--flac`, `--hashes H1,...,H6` (the
+//! six SHA-256s of `stored-stems`, in the worker's stem order), and click
+//! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
 //! Classic WebDriver has no console events and no init scripts, so the
@@ -74,6 +79,8 @@ pub struct Opts {
     pub download: bool,
     /// `separate` drops a 16-bit 96 kHz FLAC clip, not a 48 kHz WAV.
     pub flac: bool,
+    /// `stored-stems` checks the stems' SHA-256s against these.
+    pub hashes: Option<String>,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
@@ -86,7 +93,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget> [options]",
+                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -104,6 +111,7 @@ impl Opts {
             reference: None,
             download: false,
             flac: false,
+            hashes: None,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -134,6 +142,7 @@ impl Opts {
                 "--reference" => o.reference = Some(value()?.into()),
                 "--download" => o.download = true,
                 "--flac" => o.flac = true,
+                "--hashes" => o.hashes = Some(value()?),
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
@@ -176,6 +185,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "separate" => separate(&o),
         "worker-check" => worker_check(&o),
         "memory-budget" => memory_budget(&o),
+        "stored-stems" => stored_stems(&o),
         other => bail!("unknown scenario {other}"),
     }
 }
@@ -1329,6 +1339,141 @@ fn memory_budget(o: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// Seconds of the synthetic mix that `stored-stems` separates.
+const STORED_STEMS_SECONDS: usize = 3;
+
+/// The clip of `stored-stems` as 32-bit floats, the left channel and then
+/// the right, in the folder it returns.
+fn stored_stems_clip(out: &Path) -> Result<(PathBuf, usize)> {
+    let song = crate::synth::generate();
+    let n = STORED_STEMS_SECONDS * crate::synth::SAMPLE_RATE as usize;
+    let dir = out.join("clip");
+    std::fs::create_dir_all(&dir)?;
+    let bytes: Vec<u8> = song.mix.left[..n]
+        .iter()
+        .chain(&song.mix.right[..n])
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    std::fs::write(dir.join("clip.f32"), bytes)?;
+    Ok((dir, n))
+}
+
+/// Little-endian 32-bit floats from base64, as `e2e.base64` sends them.
+fn floats_from_base64(text: &str) -> Result<Vec<f32>> {
+    let bytes = crate::webdriver::base64_decode(text)?;
+    if bytes.len() % 4 != 0 {
+        bail!("{} bytes are not whole floats", bytes.len());
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The SHA-256 of each stem in `stems` (`{name: [left, right]}`, each
+/// channel as base64 floats) as a 16-bit WAV, in the order of `names`.
+fn stem_hashes(stems: &Value, names: &[&str]) -> Result<Vec<String>> {
+    names
+        .iter()
+        .map(|name| {
+            let channel = |c: usize| {
+                let text = stems[name][c]
+                    .as_str()
+                    .with_context(|| format!("no stem {name}"))?;
+                floats_from_base64(text)
+            };
+            let (left, right) = (channel(0)?, channel(1)?);
+            Ok(sha256_hex(&engine::wav::encode_pcm16(
+                &left,
+                &right,
+                crate::synth::SAMPLE_RATE,
+            )))
+        })
+        .collect()
+}
+
+/// One worker, from a blank page, separates 3 seconds of the synthetic
+/// mix with `chunk: 16384, overlap: 2`, so that it sends several segments.
+/// The kernels are fixed (`mm: s64, attn: split`), so each run does the
+/// same arithmetic.  It prints the SHA-256 of each stem as a 16-bit WAV
+/// (`engine::wav::encode_pcm16`), and checks them against `--hashes`.
+fn stored_stems(o: &Opts) -> Result<()> {
+    let (clip_dir, frames) = stored_stems_clip(&o.out)?;
+    let mut mounts = vec![("/clip/".to_string(), clip_dir)];
+    let model = weights_mount(o, &mut mounts)?;
+    let base = start_server(&o.dist, mounts, &["console.js"])?;
+    let mut p = Page::open(o, base, &["--enable-unsafe-webgpu"], "__e2e/blank.html")?;
+    let r = in_page(
+        &mut p,
+        "const [model] = args;
+        await e2e.wipe();
+        const clip = new Float32Array(await (await fetch('/clip/clip.f32')).arrayBuffer());
+        const n = clip.length / 2;
+        const bytes = new Uint8Array(await (await fetch(model)).arrayBuffer());
+        const opts = { mm: 's64', attn: 'split', chunk: 16384, overlap: 2, step_limit: 600 };
+        const stems = {};
+        const out = { segments: 0, len: 0 };
+        const place = (d) => {
+          out.segments++;
+          out.len = d.len;
+          for (const [name, l, r] of d.stems) {
+            stems[name] ??= [new Float32Array(d.len), new Float32Array(d.len)];
+            stems[name][0].set(l, d.start);
+            stems[name][1].set(r, d.start);
+          }
+        };
+        const m = await e2e.ask([
+          { type: 'model', bytes, ...opts },
+          { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), ...opts },
+        ], { segment: place });
+        out.replies = m.replies;
+        out.memory = {};
+        for (const [name, [l, r]] of Object.entries(stems)) out.memory[name] = [e2e.base64(l), e2e.base64(r)];
+        return out;",
+        json!([model]),
+        3600,
+    )?;
+    p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    p.check(
+        r["replies"][0]["ok"] == json!(true),
+        "the worker loads the model",
+    );
+    p.check(
+        r["replies"][1]["type"] == json!("done"),
+        "the memory path finishes",
+    );
+    p.check(
+        r["len"] == json!(frames),
+        &format!("the song is {frames} frames"),
+    );
+    let segments = r["segments"].as_u64().unwrap_or(0);
+    p.check(segments > 1, &format!("several segments ({segments})"));
+    let hashes = stem_hashes(&r["memory"], &roformer::STEMS)?;
+    for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
+        p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
+    }
+    p.note(&format!("stored-stems: --hashes {}", hashes.join(",")));
+    match &o.hashes {
+        Some(want) => {
+            let want: Vec<&str> = want.split(',').map(str::trim).collect();
+            p.check(
+                want == hashes,
+                "the memory path's stems equal the hashes given",
+            );
+        }
+        None => p.note("no --hashes: the hashes are not checked"),
+    }
+    p.finish()
+}
+
 /// Seconds of the stem that `flac` encodes.
 const FLAC_SECONDS: u32 = 300;
 
@@ -1492,6 +1637,25 @@ fn worker_check(o: &Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sha256_matches_the_standard_vectors() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn floats_come_back_from_base64_as_sent() {
+        // 1.0 and -0.5 as little-endian f32: 00 00 80 3f, 00 00 00 bf.
+        assert_eq!(floats_from_base64("AACAPwAAAL8=").unwrap(), [1.0, -0.5]);
+        assert!(floats_from_base64("AACA").is_err(), "3 bytes");
+    }
 
     #[test]
     fn the_flac_clip_decodes_to_its_samples() {

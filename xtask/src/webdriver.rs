@@ -388,7 +388,7 @@ impl Drop for Session {
     }
 }
 
-fn base64_decode(s: &str) -> Result<Vec<u8>> {
+pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0);
     for c in s.bytes() {
