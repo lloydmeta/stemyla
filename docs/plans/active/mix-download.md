@@ -182,7 +182,8 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * [x] 2026-10-25: M1: the mix in blocks.  `cargo test -p dsp` (35) and `cargo test -p engine --lib` (99) pass, with `dsp_is_beginner_style`.
 * [x] 2026-10-25: M2: the export job, names and the mix lane.  `cargo test --workspace --exclude roformer-gpu` passes (588).  `the_mix_lane_follows_mute` fails with `follow_mix` turned off.  Four snapshots changed: the subtitle in each, and the mix waveform in `muted_drums`.
 * [x] 2026-10-25: M3: the web saves.  `web-test` passes in Safari, with 3 new tests in `export` and 2 in `separator`.  With a sink that collects into a `Vec`, `a_mix_export_does_not_grow_wasm_memory` fails: 34.1 MB of growth.  TD-53 now names `save_menu`, `start_save` and `step_save`.
-* [ ] M4: docs and the real page.
+* [x] 2026-10-25: M4, docs: `README.md` and a "Saving a stem or the mix" section in `docs/ARCHITECTURE.md`.  `docs-check` passes.  `trunk build --release` passes.
+* [ ] M4, the real page: the agent had no browser tool in this session, so the maintainer saves a mix with vocals muted in each format, and confirms that playback does not stop.
 * [ ] Review rounds 1, 2 and 3.
 
 ## Surprises and discoveries
