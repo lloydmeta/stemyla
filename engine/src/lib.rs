@@ -11,6 +11,8 @@ pub mod resample;
 pub mod slot;
 pub mod song;
 pub mod stretch;
+#[cfg(test)]
+mod test_flac;
 pub mod wav;
 
 pub use decode::{Audio, decode_bytes, decode_path};

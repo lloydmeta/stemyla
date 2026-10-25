@@ -165,6 +165,69 @@ async fn a_48k_session_reopens_with_its_stems() {
     );
 }
 
+/// A 16-bit stereo FLAC of `wave` in both channels, from `flacenc`.
+fn flac(wave: &[f32], rate: u32) -> Vec<u8> {
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+    const BLOCK: usize = 4096;
+    let samples: Vec<i32> = wave
+        .iter()
+        .flat_map(|x| {
+            let s = (x * 32768.0).round() as i32;
+            [s, s]
+        })
+        .collect();
+    let source = flacenc::source::MemSource::from_samples(&samples, 2, 16, rate as usize);
+    let config = flacenc::config::Encoder::default()
+        .into_verified()
+        .expect("the default config");
+    let mut stream =
+        flacenc::encode_with_fixed_block_size(&config, source, BLOCK).expect("encoded");
+    // flacenc gives the short last block as the minimum, which RFC 9639
+    // (8.2) excludes, and Symphonia then rejects every frame.
+    stream
+        .stream_info_mut()
+        .set_block_sizes(BLOCK, BLOCK)
+        .expect("block sizes");
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    stream.write(&mut sink).expect("written");
+    sink.into_inner()
+}
+
+/// A FLAC source is kept as it is (`src/0.flac`) and opens again with its
+/// stems.
+#[wasm_bindgen_test]
+async fn a_flac_session_reopens_with_its_stems() {
+    wipe().await;
+    let wave: Vec<f32> = (0..4_410).map(|i| 0.25 * (0.05 * i as f32).sin()).collect();
+    let bytes = flac(&wave, 44_100);
+    let opened =
+        engine::Song::load_files(vec![("lloyd.flac".into(), bytes.clone())]).expect("decoded");
+    assert_eq!((opened.sample_rate, opened.frames), (44_100, 4_410));
+    let id = store::save_sources(&[("lloyd.flac".into(), blob(&bytes))], opened.sample_rate)
+        .await
+        .expect("saved");
+    store::save_stems(
+        &id,
+        opened.sample_rate,
+        &[stem("bass", 4_410), stem("drums", 4_410)],
+    )
+    .await
+    .expect("stems saved");
+    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    assert_eq!(
+        meta.files,
+        [("lloyd.flac".to_string(), "0.flac".to_string())]
+    );
+    assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
+    assert_eq!(names(&song), ["bass", "drums", "original"]);
+    let (original, first) = (&song.stems[2], &opened.stems[0]);
+    assert!(
+        original.left.as_slice() == first.left.as_slice(),
+        "the same samples"
+    );
+}
+
 /// A session stored before decision 0012 from stems at mixed rates can hold
 /// stems one frame shorter than its source now opens with.  Each lane is
 /// fitted to the source, so the player never reads past a stem's end.

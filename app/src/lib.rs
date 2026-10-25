@@ -201,16 +201,15 @@ pub fn about_menu(ui: &mut egui::Ui) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3 files), or press Demo song.";
+const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3/FLAC files), or press Demo song.";
 #[cfg(target_arch = "wasm32")]
-const WELCOME: &str =
-    "Press Open song… (or drop a song, or several WAV/MP3 stems, on the page), or press Demo song.";
+const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC stems, on the page), or press Demo song.";
 
 /// What the song picker offers: the formats `engine` decodes, as
 /// extensions, since iOS Safari treats `audio/*` as video (WebKit bug
 /// 242110).
 #[cfg(target_arch = "wasm32")]
-const SONG_FILES: &str = ".mp3,.wav";
+const SONG_FILES: &str = ".mp3,.wav,.flac";
 
 /// Decodes files the user chose and keeps them in browser storage, so a
 /// reload brings the song back.  The result arrives through the inbox.
@@ -1024,7 +1023,7 @@ impl StemApp {
             #[cfg(target_arch = "wasm32")]
             if ui
                 .button("Open song…")
-                .on_hover_text("Choose an MP3 or WAV file, or several stems of one song")
+                .on_hover_text("Choose an MP3, WAV or FLAC file, or several stems of one song")
                 .clicked()
             {
                 let ctx = ui.ctx().clone();
@@ -1411,6 +1410,10 @@ impl StemApp {
                     store::download(&name, &bytes, "audio/mpeg");
                     self.status = format!("Saved {name}.");
                 }
+                Event::Flac { name, file } => {
+                    store::download_blob(&name, &file);
+                    self.status = format!("Saved {name}.");
+                }
                 Event::Bench(text) => {
                     log::info!("separator: {text}");
                     self.status = text;
@@ -1441,6 +1444,7 @@ impl StemApp {
                             "Separation"
                         }
                         stem_protocol::kind::MP3 => "MP3 encoding",
+                        stem_protocol::kind::FLAC => "FLAC encoding",
                         stem_protocol::kind::SELFTEST => "Self-test",
                         stem_protocol::kind::BENCH => "Benchmark",
                         _ => "Worker request",
@@ -1501,6 +1505,18 @@ impl StemApp {
                             ),
                             "audio/wav",
                         );
+                        ui.close();
+                    }
+                    if ui.button("FLAC (16-bit, lossless)").clicked() {
+                        if let Some(sep) = &self.separator {
+                            sep.encode_flac(
+                                &format!("{base}.flac"),
+                                &s.left,
+                                &s.right,
+                                song.sample_rate,
+                            );
+                            status = Some(format!("Encoding {base}.flac…"));
+                        }
                         ui.close();
                     }
                     if ui.button("MP3 (192 kbps)").clicked() {

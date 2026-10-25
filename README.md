@@ -1,6 +1,6 @@
 # Stemyla
 
-Stemyla splits a song into its instruments, in the browser, on your own GPU.  Drop an MP3 or WAV, press "Separate 6 stems", and get bass, drums, other, vocals, guitar and piano as separate lanes you can mute, solo, slow down (without changing pitch), loop, and save as WAV or MP3.  Nothing leaves the computer.
+Stemyla splits a song into its instruments, in the browser, on your own GPU.  Drop an MP3, WAV or FLAC, press "Separate 6 stems", and get bass, drums, other, vocals, guitar and piano as separate lanes you can mute, solo, slow down (without changing pitch), loop, and save as WAV, FLAC or MP3.  Nothing leaves the computer.
 
 It is written in Rust and compiled to WebAssembly, including the GPU code: the separation model runs on WebGPU through hand-written WGSL kernels.  It started as a winter-holiday project for learning to build software with AI, and to hear the guitar part of a song on its own.
 
@@ -11,9 +11,9 @@ It is written in Rust and compiled to WebAssembly, including the GPU code: the s
 Open the published page (for example `https://beachape.com/stemyla/`) in a browser with WebGPU: Chrome or Edge on macOS, Windows or ChromeOS, Safari 26, or Firefox 141 and later on Windows ([status by platform](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)).  It has been tested in Chrome on macOS (a Radeon Pro 5500M and an Intel UHD 630); other browsers should work but are untested.
 
 1. Press **Download model (350 MB)** once.  The page keeps the model in the browser's own storage.
-2. Press **Open song…** and choose an MP3 or WAV song, drop one on the page, or press **Demo song**.  The page converts a song at a common rate from 8 kHz to 384 kHz, such as 48 kHz, to 44.1 kHz.  On a phone or tablet, **Open song…** is the way in.
+2. Press **Open song…** and choose an MP3, WAV or FLAC song, drop one on the page, or press **Demo song**.  The page converts a song at a common rate from 8 kHz to 384 kHz, such as 48 kHz, to 44.1 kHz.  On a phone or tablet, **Open song…** is the way in.
 3. Press **Separate 6 stems**.  On a laptop GPU a 3.5-minute song takes about 7 minutes.
-4. Use **Mute** and **Solo** per lane, the tempo slider, and drag across the bar above the lanes to loop a section.  **Save** on a lane downloads it as WAV or MP3.
+4. Use **Mute** and **Solo** per lane, the tempo slider, and drag across the bar above the lanes to loop a section.  **Save** on a lane downloads it as WAV, FLAC or MP3.
 
 Each song you open, and its stems once separated, stays in the browser, so a reload brings it back.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **Reset…** (also offered when the separation worker stops) fetches the app's files again, bypassing the browser cache, or also deletes everything the page keeps, then reloads: use it when a reload does not help.  **About** links to the model, its code and its paper, and shows the build's version.
 
@@ -126,11 +126,11 @@ and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver
 ```bash
 cargo run -p xtask -- web-test                  # browser storage, audio output, the worker (wasm-bindgen-test)
 (cd app && trunk build --release)
-cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage
+cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage, flac
 cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 ```
 
-* `smoke`, `audio-resume` and `storage` need no model.  `bench` needs WebGPU.  `selftest`, `separate` and `worker-check` need the model (`--weights`); `selftest` also the reference files above, and `worker-check` compares with PyTorch only given `--reference` (the outputs of `tools/roformer_export.py`).
+* `smoke`, `audio-resume`, `storage` and `flac` need no model.  `flac` times the worker's encode of a 5-minute stem.  `separate --flac` drops a 96 kHz FLAC clip in place of the 48 kHz WAV.  `bench` needs WebGPU.  `selftest`, `separate` and `worker-check` need the model (`--weights`); `selftest` also the reference files above, and `worker-check` compares with PyTorch only given `--reference` (the outputs of `tools/roformer_export.py`).
 * Logs and screenshots go to `target/e2e/<scenario>`.  `--swiftshader` runs WebGPU in software on a machine without a GPU (slow; a compile check, not a verdict on the kernels).
 
 ## Layout

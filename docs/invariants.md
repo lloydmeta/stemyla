@@ -51,7 +51,7 @@ Each workspace crate depends only on the workspace crates that its row in the la
 WebAssembly memory never shrinks, so a copy costs for the rest of the tab's life.  Stem audio is `engine::Samples` (an immutable `Arc<Vec<f32>>`; cloning shares it), and slices are borrowed.  A new copy of a song- or model-sized buffer needs a stated reason and a test that pins the sharing (for example `Samples::shares`).
 
 * Why: MEM-4.
-* Enforced by: `a_mono_stem_shares_one_buffer_and_clones_share_every_buffer`, `separated_stems_and_the_original_are_shared_not_copied`, and the type: `Samples` has a private field and derefs only to `&[f32]`.  Clippy's `disallowed-methods` (CI `clippy` job, both targets) fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`.  It also fails `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec` in `app`, `stem-worker` and `stem-protocol`.  A needed copy carries an `#[expect]` with its reason.  The page saves a chosen song from the browser's files, not their bytes.  `an_mp3_is_encoded_in_blocks` (CI `browser-tests` job) bounds the peak memory of an MP3 encode.  The `#[expect]`s in `mem1_lint_is_on` and `mem1_lint_is_on_for_js_arrays`, under the clippy steps with `--all-targets`, prove each path.
+* Enforced by: `a_mono_stem_shares_one_buffer_and_clones_share_every_buffer`, `separated_stems_and_the_original_are_shared_not_copied`, and the type: `Samples` has a private field and derefs only to `&[f32]`.  Clippy's `disallowed-methods` (CI `clippy` job, both targets) fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`.  It also fails `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec` in `app`, `stem-worker` and `stem-protocol`.  A needed copy carries an `#[expect]` with its reason.  The page saves a chosen song from the browser's files, not their bytes.  `an_mp3_is_encoded_in_blocks` and `a_flac_is_encoded_in_blocks` (CI `browser-tests` job) bound the peak memory of an MP3 and a FLAC encode.  `a_flac_reply_reaches_the_page_as_sent` checks that the page keeps the worker's FLAC `Blob`.  The `#[expect]`s in `mem1_lint_is_on` and `mem1_lint_is_on_for_js_arrays`, under the clippy steps with `--all-targets`, prove each path.
 * Gaps: TD-26.
 
 ### MEM-2: JS arrays are transferred between page and worker
@@ -146,7 +146,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
-* Gaps: TD-8, TD-19, TD-29, TD-39, TD-40, TD-43, TD-51.
+* Gaps: TD-8, TD-19, TD-29, TD-39, TD-40, TD-43, TD-51, TD-53.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 

@@ -85,6 +85,11 @@ pub enum Event {
         name: String,
         bytes: Uint8Array,
     },
+    /// The encoded file, as the worker sent it.
+    Flac {
+        name: String,
+        file: web_sys::Blob,
+    },
 }
 
 pub struct Separator {
@@ -94,7 +99,7 @@ pub struct Separator {
     _onerror: Closure<dyn FnMut(web_sys::Event)>,
     /// The separation's stems as their segments arrive.
     assembly: Rc<RefCell<Assembly>>,
-    /// Sent with every request but MP3 encoding.
+    /// Sent with every request but MP3 and FLAC encoding.
     settings: Settings,
     pub model_ready: bool,
     /// Whether browser storage holds a model file, usable or not.
@@ -277,7 +282,8 @@ impl Separator {
                     }
                 }
                 Reply::Error { of, text } => {
-                    // An MP3 or self-test error leaves a running separation be.
+                    // An MP3, FLAC or self-test error leaves a running
+                    // separation be.
                     let first = of != kind::SEPARATE || asm.borrow_mut().abandon();
                     first.then_some(Event::Error { of, text })
                 }
@@ -286,6 +292,7 @@ impl Separator {
                 Reply::Selftest { ok, text } => Some(Event::Selftest { ok, text }),
                 Reply::Bench(text) => Some(Event::Bench(text)),
                 Reply::Mp3 { name, bytes } => Some(Event::Mp3 { name, bytes }),
+                Reply::Flac { name, file } => Some(Event::Flac { name, file }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
             if let Some(event) = event {
@@ -404,6 +411,18 @@ impl Separator {
         post(&self.worker, &request, &Settings::default());
     }
 
+    /// Asks the worker to encode one stem as a 16-bit FLAC; the file comes
+    /// back as [`Event::Flac`].
+    pub fn encode_flac(&self, name: &str, left: &[f32], right: &[f32], rate: u32) {
+        let request = Request::Flac {
+            name: Some(name.into()),
+            left: Float32Array::from(left),
+            right: Float32Array::from(right),
+            rate: Some(rate),
+        };
+        post(&self.worker, &request, &Settings::default());
+    }
+
     /// Asks the worker to delete the model from browser storage and drop it.
     pub fn forget_model(&mut self) {
         if post(&self.worker, &Request::ForgetModel, &self.settings) {
@@ -445,12 +464,13 @@ impl Separator {
     }
 }
 
-/// Browser tests of the worker's replies (`cargo run -p xtask --
-/// web-test`).  `store.rs` sets the whole binary to run in a page.
+/// Browser tests of the requests to the worker and its replies (`cargo run
+/// -p xtask -- web-test`).  `store.rs` sets the whole binary to run in a
+/// page.
 #[cfg(test)]
 mod tests {
     use super::*;
-    use js_sys::Object;
+    use js_sys::{Object, Reflect};
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen(inline_js = r#"
@@ -489,6 +509,79 @@ export function deliver(worker, data) {
             Object::is(&bytes, &sent),
             "MEM-2: the page copied the MP3 that the worker transferred.  \
              Fix: keep the Uint8Array in Event::Mp3."
+        );
+    }
+
+    #[wasm_bindgen(inline_js = r#"
+export function spy_on_post(worker) {
+  const posts = [];
+  worker.postMessage = (data, transfer) => posts.push({ data, transfer });
+  return posts;
+}
+"#)]
+    extern "C" {
+        /// Keeps each message that `worker` would post, with its transfer
+        /// list, in place of posting it.
+        fn spy_on_post(worker: &Worker) -> js_sys::Array;
+    }
+
+    #[wasm_bindgen_test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: test code, which reads two samples back"
+    )]
+    fn encode_flac_asks_the_worker_for_a_flac_of_the_stem() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let posts = spy_on_post(&sep.worker);
+        sep.encode_flac("lloyd - bass.flac", &[0.25, -0.5], &[0.125, 0.75], 48_000);
+        sep.stop();
+        assert_eq!(posts.length(), 1, "one message");
+        let post = posts.get(0);
+        let data = Reflect::get(&post, &"data".into()).unwrap();
+        let request = stem_protocol::ToWorker::from_js(&data).expect("a request");
+        match request.request {
+            Request::Flac {
+                name,
+                left,
+                right,
+                rate,
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - bass.flac"));
+                assert_eq!(rate, Some(48_000));
+                assert_eq!(left.to_vec(), [0.25, -0.5]);
+                assert_eq!(right.to_vec(), [0.125, 0.75]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let transfer: js_sys::Array = Reflect::get(&post, &"transfer".into())
+            .unwrap()
+            .unchecked_into();
+        assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
+    }
+
+    #[wasm_bindgen_test]
+    fn a_flac_reply_reaches_the_page_as_sent() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let parts = js_sys::Array::of1(&Uint8Array::from(&b"fLaC"[..]));
+        let sent = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+        let (message, _) = Reply::Flac {
+            name: "bass.flac".into(),
+            file: sent.clone(),
+        }
+        .to_js();
+        deliver(&sep.worker, &message);
+        let flac = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Flac { name, file } => Some((name, file)),
+            _ => None,
+        });
+        // Before any assert: a failed assert aborts the test.
+        sep.stop();
+        let (name, file) = flac.expect("an Event::Flac");
+        assert_eq!(name, "bass.flac");
+        assert!(
+            Object::is(&file, &sent),
+            "MEM-1: the page made a new file from the FLAC that the worker sent.  \
+             Fix: keep the Blob in Event::Flac."
         );
     }
 }

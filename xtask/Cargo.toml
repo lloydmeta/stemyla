@@ -8,6 +8,9 @@ anyhow = "1"
 dsp = { version = "0.1.0", path = "../dsp" }
 engine = { version = "0.1.0", path = "../engine" }
 hound = "3.5.1"
+# Writes the FLAC clip of `e2e separate --flac`.  Pinned: below 1.0, and
+# its API changes with each minor version (DEPS-1).
+flacenc = { version = "=0.5.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 synth = { version = "0.1.0", path = "../synth", features = ["files"] }

@@ -135,6 +135,7 @@ fn content_type(path: &Path) -> &'static str {
         "svg" => "image/svg+xml",
         "wav" => "audio/wav",
         "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
         _ => "application/octet-stream",
     }
 }
@@ -253,4 +254,21 @@ fn handle(mut stream: TcpStream, mounts: &[(String, PathBuf)], tags: &str) -> Re
     }
     stream.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_files_have_their_media_types() {
+        for (file, media_type) in [
+            ("a.wav", "audio/wav"),
+            ("a.mp3", "audio/mpeg"),
+            ("a.flac", "audio/flac"),
+            ("a.ogg", "application/octet-stream"),
+        ] {
+            assert_eq!(content_type(Path::new(file)), media_type, "{file}");
+        }
+    }
 }

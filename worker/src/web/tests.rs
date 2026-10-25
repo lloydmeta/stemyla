@@ -912,6 +912,206 @@ async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
     assert_eq!(sent("mp3").len(), 2, "one mp3 reply for each encode");
 }
 
+/// The bytes of the FLAC that the last `flac` reply carries.
+async fn flac_reply() -> Vec<u8> {
+    let reply = sent("flac").pop().expect("a flac reply");
+    let file: Blob = field(&reply, "file").dyn_into().expect("a Blob");
+    assert_eq!(file.type_(), "audio/flac");
+    let bytes = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+        .await
+        .expect("read");
+    Uint8Array::new(&bytes).to_vec()
+}
+
+/// A FLAC decoded by Symphonia: its rate, its channels, and whether its
+/// MD5 matches the audio.
+fn decode_flac(bytes: Vec<u8>) -> (u32, Vec<Vec<f32>>, Option<bool>) {
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            Hint::new().with_extension("flac"),
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .expect("a FLAC that Symphonia reads");
+    let track = format.default_track(TrackType::Audio).expect("a track");
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .expect("audio")
+        .clone();
+    let options = AudioDecoderOptions::default().verify(true);
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &options)
+        .expect("a decoder");
+    let mut channels: Vec<Vec<f32>> = Vec::new();
+    let mut planes: Vec<Vec<f32>> = Vec::new();
+    while let Ok(Some(packet)) = format.next_packet() {
+        let buf = decoder.decode(&packet).expect("every frame decodes");
+        buf.copy_to_vecs_planar::<f32>(&mut planes);
+        channels.resize(planes.len(), Vec::new());
+        for (c, p) in channels.iter_mut().zip(&planes) {
+            c.extend_from_slice(p);
+        }
+    }
+    let rate = params.sample_rate.expect("a rate");
+    (rate, channels, decoder.finalize().verify_ok)
+}
+
+/// `channel` as the 16-bit samples that a FLAC holds.
+fn as_16_bits(channel: &Float32Array) -> Vec<f32> {
+    channel
+        .to_vec()
+        .iter()
+        .map(|x| pcm16(*x) as f32 / 32768.0)
+        .collect()
+}
+
+async fn encode_flac(left: &Float32Array, right: &Float32Array, rate: u32) -> Vec<u8> {
+    flac(
+        Some("tone.flac".into()),
+        [left.clone(), right.clone()],
+        Some(rate),
+    )
+    .expect("encoded");
+    flac_reply().await
+}
+
+#[wasm_bindgen_test]
+async fn a_flac_decodes_to_the_stem() {
+    fresh().await;
+    let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
+    let bytes = encode_flac(&left, &right, 48_000).await;
+    assert!(bytes.len() < TONE_FRAMES * 4, "{} bytes", bytes.len());
+    let (rate, channels, verified) = decode_flac(bytes);
+    assert_eq!(rate, 48_000);
+    // Against the input, not `pcm16`, so a wrong quantiser fails.
+    for (got, sent) in channels.iter().zip([&left, &right]) {
+        let sent = sent.to_vec();
+        assert_eq!(got.len(), sent.len());
+        for (g, s) in got.iter().zip(&sent) {
+            assert!((g - s).abs() <= 0.5 / 32768.0 + 1e-7, "{g} for {s}");
+        }
+    }
+    assert_eq!(verified, Some(true), "the MD5 matches the audio");
+    let reply = sent("flac").pop().expect("a flac reply");
+    assert_eq!(
+        field(&reply, "name").as_string().as_deref(),
+        Some("tone.flac")
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_flac_is_encoded_in_blocks() {
+    fresh().await;
+    let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    flac(None, [left, right], Some(TONE_RATE)).expect("encoded");
+    let held = PEAK.with(Cell::get) - before;
+    let one_channel = 4 * TONE_FRAMES;
+    assert!(
+        held < one_channel / 10,
+        "MEM-1: encoding 30 s held {held} bytes at its peak, more than a tenth of one \
+         channel's {one_channel}.  Fix: read the channels from JS in blocks, and put each \
+         FLAC frame in JS."
+    );
+    assert_eq!(sent("flac").len(), 1, "one flac reply");
+}
+
+#[wasm_bindgen_test]
+async fn a_flac_of_unequal_channels_stops_at_the_shorter() {
+    fresh().await;
+    // The shorter channel ends inside the second block, on either side.
+    let (long, short) = (3 * FLAC_BLOCK, FLAC_BLOCK + 7);
+    for (left_frames, right_frames) in [(long, short), (short, long)] {
+        let (left, right) = (tone(220.0, left_frames), tone(330.0, right_frames));
+        let (_, channels, verified) = decode_flac(encode_flac(&left, &right, TONE_RATE).await);
+        let shorter = |c: &Float32Array| as_16_bits(&c.subarray(0, short as u32));
+        assert_eq!(
+            channels,
+            [shorter(&left), shorter(&right)],
+            "left {left_frames} frames, right {right_frames}"
+        );
+        assert_eq!(verified, Some(true));
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_flac_clips_at_full_scale_and_rounds() {
+    fresh().await;
+    let step = 1.0 / 32_768.0;
+    let left = Float32Array::from(&[1.5_f32, -1.5, 1.0, -1.0, 0.5, 0.75 * step, 0.25 * step][..]);
+    let right = Float32Array::from(&[0.0_f32; 7][..]);
+    let (_, channels, _) = decode_flac(encode_flac(&left, &right, TONE_RATE).await);
+    // Clipped at full scale, and rounded to the nearest step.
+    assert_eq!(
+        channels[0],
+        [32_767.0 * step, -1.0, 32_767.0 * step, -1.0, 0.5, step, 0.0]
+    );
+}
+
+/// flacenc has no escape codes and Rice parameters of 14 bits at most,
+/// which at 24 bits made a square wave 1,270 times its PCM size.  At 16
+/// bits, signals that are hard to predict still encode smaller than PCM.
+#[wasm_bindgen_test]
+async fn a_flac_of_worst_case_signals_is_no_larger_than_pcm() {
+    fresh().await;
+    let frames = 2 * TONE_RATE as usize;
+    let mut seed = 7_u32;
+    let mut noise = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        seed as f32 / u32::MAX as f32 * 2.0 - 1.0
+    };
+    let signals: [(&str, Vec<f32>); 4] = [
+        ("noise", (0..frames).map(|_| noise()).collect()),
+        (
+            "square",
+            (0..frames)
+                .map(|i| if (i / 50) % 2 == 0 { 1.0 } else { -1.0 })
+                .collect(),
+        ),
+        (
+            "alternate",
+            (0..frames)
+                .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+                .collect(),
+        ),
+        (
+            "clipped",
+            (0..frames)
+                .map(|i| (4.0 * (0.05 * i as f32).sin()).clamp(-1.0, 1.0))
+                .collect(),
+        ),
+    ];
+    for (name, samples) in signals {
+        let left = Float32Array::from(samples.as_slice());
+        let right = Float32Array::from(samples.iter().map(|x| -x).collect::<Vec<f32>>().as_slice());
+        let bytes = encode_flac(&left, &right, TONE_RATE).await;
+        assert!(bytes.len() < frames * 4, "{name}: {} bytes", bytes.len());
+        let (_, channels, verified) = decode_flac(bytes);
+        assert_eq!(channels, [as_16_bits(&left), as_16_bits(&right)], "{name}");
+        assert_eq!(verified, Some(true), "{name}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_flac_of_no_samples_is_refused() {
+    fresh().await;
+    let empty = Float32Array::new_with_length(0);
+    let error = flac(None, [empty.clone(), empty], None).expect_err("refused");
+    assert!(error.contains("no samples"), "{error}");
+    assert!(sent("flac").is_empty());
+}
+
 #[wasm_bindgen_test]
 async fn init_keeps_a_stored_model_that_only_the_gpu_failed_to_load() {
     fresh().await;

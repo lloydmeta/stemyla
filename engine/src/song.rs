@@ -134,7 +134,8 @@ impl Song {
         })
     }
 
-    /// Loads every WAV/MP3 in a folder as a stem (skipping `mix.*`).
+    /// Loads every WAV, MP3 and FLAC in a folder as a stem (skipping
+    /// `mix.*`).
     pub fn load_folder(dir: &Path) -> Result<Song> {
         let mut items = Vec::new();
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
@@ -145,7 +146,7 @@ impl Song {
                 .extension()
                 .and_then(|x| x.to_str())
                 .map(str::to_ascii_lowercase);
-            if !matches!(ext.as_deref(), Some("wav" | "mp3")) {
+            if !matches!(ext.as_deref(), Some("wav" | "mp3" | "flac")) {
                 continue;
             }
             let name = stem_name(&path.to_string_lossy());
@@ -253,6 +254,43 @@ mod tests {
         assert_eq!(s.stems[1].left[..4], [0.25; 4]);
         assert_eq!(s.stems[1].right[9], 0.0);
         assert_eq!(s.stems[0].right[0], 0.5);
+    }
+
+    #[test]
+    fn a_96k_flac_opens_at_44k() {
+        let tone: Vec<f32> = (0..96_000)
+            .map(|i| 0.25 * (0.05 * i as f32).sin())
+            .collect();
+        let flac = crate::test_flac::compressed(&tone, &tone, 96_000);
+        let s = Song::load_files(vec![("lloyd.flac".into(), flac)]).unwrap();
+        assert_eq!((s.sample_rate, s.frames), (SONG_RATE, 44_100));
+    }
+
+    #[test]
+    fn a_folder_with_a_flac_stem_loads_it() {
+        let dir = std::env::temp_dir().join(format!("stemyla-flac-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tone: Vec<f32> = (0..4410).map(|i| 0.25 * (0.05 * i as f32).sin()).collect();
+        let files = [
+            (
+                "bass.flac",
+                crate::test_flac::compressed(&tone, &tone, SONG_RATE),
+            ),
+            (
+                "drums.wav",
+                crate::wav::encode_pcm16(&tone, &tone, SONG_RATE),
+            ),
+            ("notes.txt", b"not audio".into()),
+        ];
+        for (name, bytes) in &files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        let loaded = Song::load_folder(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let s = loaded.unwrap();
+        let names: Vec<_> = s.stems.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["drums", "bass"]);
+        assert_eq!(s.frames, 4410);
     }
 
     #[test]
