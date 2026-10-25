@@ -4,6 +4,8 @@ use crate::Lane;
 use eframe::egui::{self, Color32, ColorImage, TextureOptions};
 use engine::Song;
 use engine::hpss::{HpssConfig, hpss, spectrogram_db};
+use engine::mixdown::{Mix, MixRecipe, Pcm};
+use std::sync::Arc;
 
 const ROWS: usize = 128;
 const MAX_COLS: usize = 1024;
@@ -34,12 +36,23 @@ fn mid(left: &[f32], right: &[f32]) -> Vec<f32> {
 }
 
 /// Creates a spectrogram texture for every lane that lacks one.
-pub fn ensure_textures(ctx: &egui::Context, lanes: &mut [Lane], song: Option<&Song>) {
+/// The mix lane shows `mix`, the mix as heard, or else the sources' mix.
+pub fn ensure_textures(
+    ctx: &egui::Context,
+    lanes: &mut [Lane],
+    song: Option<&Arc<Song>>,
+    mix: Option<&MixRecipe>,
+) {
     let Some(song) = song else { return };
     for lane in lanes.iter_mut().filter(|l| l.spectrogram.is_none()) {
-        let x = match lane.stem {
-            Some(i) => mid(&song.stems[i].left, &song.stems[i].right),
-            None => {
+        let x = match (lane.stem, mix) {
+            (Some(i), _) => mid(&song.stems[i].left, &song.stems[i].right),
+            (None, Some(recipe)) => {
+                let (mut l, mut r) = (vec![0.0; song.frames], vec![0.0; song.frames]);
+                Mix::new(Arc::clone(song), recipe).read(0, &mut l, &mut r);
+                mid(&l, &r)
+            }
+            (None, None) => {
                 let (l, r) = crate::mix_of_sources(song);
                 mid(&l, &r)
             }

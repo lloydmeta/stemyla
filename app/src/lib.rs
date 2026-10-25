@@ -2,11 +2,14 @@
 //! volume, tempo, a loop region and click-to-seek.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use engine::mixdown::{Mix, MixRecipe};
 use engine::{Player, PlayerConfig, SharedParams, Song, Stem, StretcherKind};
+use export::{ExportJob, PeaksSink};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 pub mod assemble;
+pub mod export;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;
 pub mod reset;
@@ -260,7 +263,9 @@ async fn load_and_keep(
 }
 
 /// Columns of peak data kept per lane; drawing re-aggregates to pixels.
-const COLUMNS: usize = 4096;
+pub(crate) const COLUMNS: usize = 4096;
+/// Milliseconds of each frame that the mix lane's waveform job may take.
+const PEAKS_MS: f64 = 3.0;
 const LANE_HEIGHT: f32 = 64.0;
 const LOOP_BAR_HEIGHT: f32 = 18.0;
 
@@ -301,6 +306,10 @@ pub struct StemApp {
     pub loop_bar_rect: Option<Rect>,
     pub status: String,
     pub output: Option<Output>,
+    /// The mix that the mix lane's waveform shows.
+    mix_shown: Option<MixRecipe>,
+    /// The waveform of a new mix as heard, while it is made.
+    peaks_job: Option<(MixRecipe, ExportJob<PeaksSink>)>,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
     /// Ask for a real audio device when an output is opened: for the first
@@ -408,6 +417,8 @@ impl Default for StemApp {
             loop_bar_rect: None,
             status: WELCOME.into(),
             output: None,
+            mix_shown: None,
+            peaks_job: None,
             tempo_pct: 100.0,
             show_spectrograms: false,
             want_device: true,
@@ -655,6 +666,10 @@ impl StemApp {
                 params.set_muted(i, true);
             }
         }
+        // The mix lane shows every source stem at full volume, which is
+        // what the new params play.
+        self.mix_shown = Some(MixRecipe::as_heard(&params));
+        self.peaks_job = None;
         self.stop_output();
         let player = Player::with_config(
             Arc::clone(&song),
@@ -1481,6 +1496,38 @@ impl StemApp {
         }
     }
 
+    /// Makes the mix lane's waveform show the mix as heard.  A new mix
+    /// starts a peaks job, which runs for a few milliseconds in each frame.
+    fn follow_mix(&mut self, ctx: &egui::Context) {
+        let (Some(song), Some(params)) = (&self.song, &self.params) else {
+            return;
+        };
+        let heard = MixRecipe::as_heard(params);
+        if self.mix_shown.as_ref() == Some(&heard) {
+            self.peaks_job = None;
+            return;
+        }
+        let job = match self.peaks_job.take() {
+            Some((recipe, job)) if recipe == heard => (recipe, job),
+            _ => {
+                let source = Box::new(Mix::new(Arc::clone(song), &heard));
+                let sink = PeaksSink::new(song.frames, COLUMNS);
+                (heard, ExportJob::new(source, sink))
+            }
+        };
+        let (recipe, mut job) = job;
+        if !job.run_while(export::time_left(PEAKS_MS)) {
+            self.peaks_job = Some((recipe, job));
+            ctx.request_repaint();
+            return;
+        }
+        if let Some(mix) = self.lanes.first_mut().filter(|l| l.stem.is_none()) {
+            (mix.columns, mix.scale) = job.into_sink().finish();
+            mix.spectrogram = None;
+        }
+        self.mix_shown = Some(recipe);
+    }
+
     fn lane_controls(&mut self, ui: &mut egui::Ui, lane: usize) {
         let params = self.params.clone().expect("params");
         let l = &self.lanes[lane];
@@ -1538,17 +1585,22 @@ impl StemApp {
             }
         });
         let Some(stem) = l.stem else {
-            ui.small("sum of all stems");
+            if let Some(song) = &self.song {
+                ui.small(export::mix_label(song, &MixRecipe::as_heard(&params)));
+            }
             return;
         };
         ui.horizontal(|ui| {
             let mut m = params.is_muted(stem);
+            let mut changed = false;
             if ui.toggle_value(&mut m, "Mute").changed() {
                 params.set_muted(stem, m);
+                changed = true;
             }
             let mut s = params.is_soloed(stem);
             if ui.toggle_value(&mut s, "Solo").changed() {
                 params.set_soloed(stem, s);
+                changed = true;
             }
             let mut v = params.stems[stem].volume.get();
             if ui
@@ -1556,6 +1608,11 @@ impl StemApp {
                 .changed()
             {
                 params.set_volume(stem, v);
+                changed = true;
+            }
+            // The next frame redraws the mix lane for the new mix.
+            if changed {
+                ui.ctx().request_repaint();
             }
         });
     }
@@ -1777,8 +1834,14 @@ impl eframe::App for StemApp {
         let dt = ctx.input(|i| i.stable_dt);
         self.pump_silent(dt);
         self.log_audio_stats(dt);
+        self.follow_mix(&ctx);
         if self.show_spectrograms {
-            spectrogram::ensure_textures(&ctx, &mut self.lanes, self.song.as_deref());
+            spectrogram::ensure_textures(
+                &ctx,
+                &mut self.lanes,
+                self.song.as_ref(),
+                self.mix_shown.as_ref(),
+            );
         }
 
         egui::Panel::top("transport").show(ui, |ui| {

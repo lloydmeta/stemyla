@@ -180,7 +180,7 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * [x] 2026-10-25: the maintainer chose option C and the page-side mix (decision 0014).
 * [x] 2026-10-25: M0: plan and decision 0014 (`231255b`).  `docs-check` and the xtask tests pass.
 * [x] 2026-10-25: M1: the mix in blocks.  `cargo test -p dsp` (35) and `cargo test -p engine --lib` (99) pass, with `dsp_is_beginner_style`.
-* [ ] M2: the export job, names and the mix lane.
+* [x] 2026-10-25: M2: the export job, names and the mix lane.  `cargo test --workspace --exclude roformer-gpu` passes (588).  `the_mix_lane_follows_mute` fails with `follow_mix` turned off.  Four snapshots changed: the subtitle in each, and the mix waveform in `muted_drums`.
 * [ ] M3: the web saves.
 * [ ] M4: docs and the real page.
 * [ ] Review rounds 1, 2 and 3.
@@ -196,6 +196,8 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * 2026-10-25, maintainer: the page mixes in blocks into JS arrays, and the worker encodes as it does today.
 * 2026-10-25, agent: every Save uses the export job, a stem's too.  So the WAV save no longer makes the whole file in WebAssembly memory.
 * 2026-10-25, agent: the mix saves at 100% tempo, clamped as playback clamps.
+* 2026-10-25, agent, M2: the mix lane's spectrogram follows the mix too.  It is made again, in one frame, when its mix changes, as every spectrogram is made today.
+* 2026-10-25, agent, M2: the waveform job runs for 3 ms of each frame on the web.  Natively, it runs to its end in one frame, since native audio has its own thread.
 
 ## Outcomes and retrospective
 

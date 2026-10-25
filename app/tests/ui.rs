@@ -88,6 +88,38 @@ fn mute_sets_engine_gain_to_zero() {
 }
 
 #[test]
+fn the_mix_lane_follows_mute() {
+    let mut h = harness(true);
+    assert!(h.query_by_label("as heard: all stems").is_some());
+    let song = h.state().song.clone().unwrap();
+    let lead = stem(&h, "lead");
+    h.get_all_by_label("Mute").nth(lead).unwrap().click();
+    h.run();
+    let side = |f: fn(&engine::Stem) -> &[f32]| {
+        let others: Vec<&[f32]> = song
+            .stems
+            .iter()
+            .filter(|s| s.name != "lead")
+            .map(f)
+            .collect();
+        dsp::mix(&others, &vec![1.0; others.len()])
+    };
+    let want = app::lane_columns(&side(|s| &s.left), &side(|s| &s.right));
+    let mix = &h.state().lanes[0];
+    assert_eq!((mix.columns.clone(), mix.scale), want);
+    assert!(
+        h.query_by_label("as heard: all stems except lead")
+            .is_some()
+    );
+
+    // Unmuted, the lane shows the mix of every stem again.
+    h.get_all_by_label("Mute").nth(lead).unwrap().click();
+    h.run();
+    let fresh = harness(true);
+    assert_eq!(h.state().lanes[0].columns, fresh.state().lanes[0].columns);
+}
+
+#[test]
 fn solo_mutes_the_others() {
     let mut h = harness(true);
     let bass = stem(&h, "bass");
