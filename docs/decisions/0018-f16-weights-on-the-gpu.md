@@ -25,4 +25,4 @@ The second option.  Only the weight matrices of an f16 file are kept as f16.  No
 * The GPU-1 checker validates with the new capability.  An adapter without `DownlevelFlags::SHADER_F16_IN_F32` keeps the f32 path.
 * Each weight load adds an unpack.  Half the memory traffic may make the kernels faster or slower; `?bench` measures it before the default changes.
 
-Amended on 2026-10-25 by the agent, after review round 2: the Options cited naga 26.0.0, an unused entry in `Cargo.lock` (through `cubecl-wgpu`).  `roformer-gpu` uses naga 30.0.1, which needs a capability for `unpack2x16float`.  The Consequences now name the kernel variants, `CALIBRATION` and the GPU-1 checker.  The decision is unchanged.  The maintainer has not yet accepted this amendment.
+Amended on 2026-10-25 by the agent, after review round 2: the Options cited naga 26.0.0, an unused entry in `Cargo.lock` (through `cubecl-wgpu`).  `roformer-gpu` uses naga 30.0.1, which needs a capability for `unpack2x16float`.  The Consequences now name the kernel variants, `CALIBRATION` and the GPU-1 checker.  The decision is unchanged.  The maintainer accepted this amendment on 2026-10-25.

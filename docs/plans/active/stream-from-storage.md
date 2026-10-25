@@ -206,7 +206,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M0: plan, decisions 0015 to 0017, TD-54, references (commit `4e076dd`).
 * [x] 2026-10-25: review round 1 of M0: 7 findings confirmed and fixed, 5 nits fixed.
 * [x] 2026-10-25: review round 2: 6 findings confirmed and fixed, 6 nits fixed.
-* [x] 2026-10-25: review round 3: 4 findings confirmed and fixed, 5 nits fixed.  The amendment of 0018 waits for the maintainer.
+* [x] 2026-10-25: review round 3: 4 findings confirmed and fixed, 5 nits fixed.  The maintainer accepted the amendment of 0018.
 * [ ] M1: spike on the iPhone.
 * [ ] M2: `e2e memory-budget` measures.
 * [ ] M3: stems to storage.
