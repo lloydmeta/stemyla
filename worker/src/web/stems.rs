@@ -150,7 +150,9 @@ fn storage(e: JsValue) -> StemError {
 impl StemWriter {
     /// Opens the `.part` file of each stem in `names`, in the folder
     /// `session` (`"sessions/<id>"`), for a song of `len` frames.  It
-    /// empties each file, and writes a header with sizes of 0.
+    /// empties each file, and writes a header with sizes of 0.  When it
+    /// fails, it removes the files that it made or held, but never a file
+    /// that another writer holds.
     pub(super) async fn open(session: &str, names: &[&str], len: usize) -> Result<Self, StemError> {
         if len > MAX_WAV_FRAMES {
             return Err(StemError::Refused(format!(
@@ -236,9 +238,7 @@ impl StemWriter {
             .map_err(storage)
     }
 
-    /// Closes each file and removes it.  It removes nothing else.  When
-    /// `open` fails, it removes the files that it made or held, but never
-    /// a file that another writer holds.
+    /// Closes each file and removes it.  It removes nothing else.
     pub(super) async fn abandon(self) {
         stems_abandon(&self.js).await;
     }

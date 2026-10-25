@@ -319,10 +319,12 @@ pub struct StoredStems {
     pub kept: Result<()>,
 }
 
-/// After a storage-path separation of session `id`: moves each stem's
-/// `.part` file onto its `.wav` file, then writes the `stem` lines of
-/// `meta` (D5 of M3).  `meta` names the new stems only if every file
-/// moved; else it names none, so a restore never mixes two separations.
+/// After a storage-path separation of session `id`: writes `meta` with no
+/// `stem` lines, moves each stem's `.part` file onto its `.wav` file, then
+/// writes the new `stem` lines (D5 of M3).  `meta` names the new stems
+/// only if every file moved; else it names none.  So a restore never
+/// mixes two separations, also when the page stops part of the way.  If
+/// the first write of `meta` fails, nothing moves.
 pub async fn keep_stored_stems(id: &str, names: &[String]) -> StoredStems {
     saving(id, keep_stored_now(id, names)).await
 }
@@ -330,6 +332,25 @@ pub async fn keep_stored_stems(id: &str, names: &[String]) -> StoredStems {
 async fn keep_stored_now(id: &str, names: &[String]) -> StoredStems {
     let base = session_folder(id);
     let folder = format!("{base}/stems");
+    let unread = |name: &String| format!("{folder}/{}.part", stem_file(name));
+    // Before the first move: if the page stops between the moves and the
+    // last write of `meta`, a restore finds no stems, never a mix.
+    let mut meta = match read(&format!("{base}/meta")).await {
+        Some(bytes) => Meta::parse(&String::from_utf8_lossy(&bytes)),
+        None => {
+            return StoredStems {
+                paths: names.iter().map(unread).collect(),
+                kept: Err(anyhow!("session {id} is gone")),
+            };
+        }
+    };
+    meta.stems.clear();
+    if let Err(e) = write_bytes(&base, "meta", meta.to_text().as_bytes()).await {
+        return StoredStems {
+            paths: names.iter().map(unread).collect(),
+            kept: Err(e),
+        };
+    }
     let mut paths = Vec::with_capacity(names.len());
     let mut unmoved = Vec::new();
     for name in names {
@@ -342,33 +363,20 @@ async fn keep_stored_now(id: &str, names: &[String]) -> StoredStems {
             unmoved.push(part);
         }
     }
-    let kept = async {
-        let mut meta = Meta::parse(&String::from_utf8_lossy(
-            &read(&format!("{base}/meta"))
-                .await
-                .ok_or_else(|| anyhow!("session {id} is gone"))?,
-        ));
-        meta.stems = if unmoved.is_empty() {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "MEM-1: the stem names, a few bytes"
-            )]
-            let names = names.to_vec();
-            names
-        } else {
-            Vec::new()
-        };
-        write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
-        if unmoved.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "browser storage could not move {} into place",
-                unmoved.join(", ")
-            ))
-        }
-    }
-    .await;
+    let kept = if unmoved.is_empty() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the stem names, a few bytes"
+        )]
+        let names = names.to_vec();
+        meta.stems = names;
+        write_bytes(&base, "meta", meta.to_text().as_bytes()).await
+    } else {
+        Err(anyhow!(
+            "browser storage could not move {} into place",
+            unmoved.join(", ")
+        ))
+    };
     StoredStems { paths, kept }
 }
 
@@ -745,7 +753,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         spy();
         let stored = keep_stored_stems(id, &names).await;
         let record = stop_spy();
-        assert_eq!(record, "whole", "MEM-5: the meta write");
+        assert_eq!(record, "whole whole", "MEM-5: the two meta writes");
         stored.kept.expect("kept");
         assert_eq!(
             stored.paths,
@@ -795,6 +803,70 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         ));
         assert!(meta.stems.is_empty(), "{:?}", meta.stems);
         assert_eq!(meta.files.len(), 1, "the song stays");
+        st_remove(ROOT).await;
+    }
+
+    /// Finding 2-5 of review round 2: when the moves end and `meta` cannot
+    /// name the new stems, `meta` names none, so a restore never mixes two
+    /// separations.  The second write of `meta` is refused.
+    #[wasm_bindgen_test]
+    async fn a_stop_after_the_moves_leaves_no_stem_lines() {
+        st_remove(ROOT).await;
+        let id = "1792640000002";
+        plant_session(id, &["bass"]).await;
+        let stems = format!("{ROOT}/{id}/stems");
+        write(&format!("{stems}/bass.wav"), &[1])
+            .await
+            .expect("written");
+        write(&format!("{stems}/bass.wav.part"), &[2, 2])
+            .await
+            .expect("written");
+        start_spy(&JsValue::UNDEFINED, 1.0);
+        let stored = keep_stored_stems(id, &["bass".to_string()]).await;
+        stop_spy();
+        assert!(stored.kept.is_err(), "not kept");
+        assert_eq!(
+            read(&format!("{stems}/bass.wav")).await,
+            Some(vec![2, 2]),
+            "moved"
+        );
+        let meta = Meta::parse(&String::from_utf8_lossy(
+            &read(&format!("{ROOT}/{id}/meta")).await.expect("meta"),
+        ));
+        assert!(meta.stems.is_empty(), "{:?}", meta.stems);
+        st_remove(ROOT).await;
+    }
+
+    /// Finding 2-5: when `meta` cannot drop the old `stem` lines, nothing
+    /// moves, so the kept stems stay as they were.
+    #[wasm_bindgen_test]
+    async fn a_refused_meta_moves_nothing() {
+        st_remove(ROOT).await;
+        let id = "1792640000003";
+        plant_session(id, &["bass"]).await;
+        let stems = format!("{ROOT}/{id}/stems");
+        write(&format!("{stems}/bass.wav"), &[1])
+            .await
+            .expect("written");
+        write(&format!("{stems}/bass.wav.part"), &[2, 2])
+            .await
+            .expect("written");
+        start_spy(&JsValue::UNDEFINED, 0.0);
+        let stored = keep_stored_stems(id, &["bass".to_string()]).await;
+        let record = stop_spy();
+        assert_eq!(record, "refused", "one write of meta, refused");
+        let error = stored.kept.expect_err("not kept").to_string();
+        assert!(error.contains("QuotaExceededError"), "{error}");
+        assert_eq!(stored.paths, [format!("{stems}/bass.wav.part")]);
+        assert_eq!(read(&format!("{stems}/bass.wav")).await, Some(vec![1]));
+        assert_eq!(
+            read(&format!("{stems}/bass.wav.part")).await,
+            Some(vec![2, 2])
+        );
+        let meta = Meta::parse(&String::from_utf8_lossy(
+            &read(&format!("{ROOT}/{id}/meta")).await.expect("meta"),
+        ));
+        assert_eq!(meta.stems, ["bass"], "the kept stems stay");
         st_remove(ROOT).await;
     }
 

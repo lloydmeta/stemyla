@@ -269,7 +269,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` an
 
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3): their bodies run only with a GPU and the model, so a mutant that empties a body (`stored_stems -> Ok(())`) survives `cargo test`.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.
 
 ### TD-40: gaps in the RT-1 tests
 
@@ -390,7 +390,7 @@ The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The
 
 * Fix: a browser test that delivers each event to an `App` and spies on the link that `save_file` or `save_blob` clicks.  A browser test that starts a save on an `App` and steps it to the download or the worker request.  A test of the peak memory of `load_song` while a mix job runs.  A test of `usage`.
 
-### TD-54: a song of more than about 1.7 minutes can stop the tab on an iPhone
+### TD-54: the page holds song-length stems, so a long song can stop the tab on an iPhone
 
 This entry concerns MEM-4.
 

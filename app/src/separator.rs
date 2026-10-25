@@ -883,6 +883,42 @@ export function spy_on_post(worker) {
         an_old_separation_leaves_the_new_one(true);
     }
 
+    /// Finding 2-4 of review round 2: `unstored` ends its separation, so
+    /// the replies of the memory-path separation after it are its own.
+    #[wasm_bindgen_test]
+    fn unstored_hands_the_replies_to_the_next_separation() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let _posts = spy_on_post(&sep.worker);
+        assert!(sep.separate(&[0.5; 4], &[0.25; 4], Some("sessions/1792640000000")));
+        let (reply, _) = Reply::Unstored {
+            text: "QuotaExceededError: the disk is full".into(),
+        }
+        .to_js();
+        deliver(&sep.worker, &reply);
+        assert!(sep.separate(&[0.5; 4], &[0.25; 4], None));
+        deliver(&sep.worker, &segment(0, 4, 4));
+        deliver(&sep.worker, &done());
+        let events = sep.take_events();
+        let assembled = sep.assembly.borrow().stems.len();
+        sep.stop();
+        let stems: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Stem { name, left, .. } if left.len() == 4 => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let done = events.iter().any(|e| matches!(e, Event::Done { .. }));
+        let errors = events
+            .iter()
+            .filter(|e| matches!(e, Event::Error { .. }))
+            .count();
+        assert_eq!(stems, ["bass"], "one Event::Stem for each stem");
+        assert!(done, "Event::Done");
+        assert_eq!(errors, 0);
+        assert_eq!(assembled, 0, "Assembly gave its stems away");
+    }
+
     #[wasm_bindgen_test]
     fn unstored_ends_the_separation_with_its_reason() {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");

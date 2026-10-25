@@ -19,10 +19,12 @@ wasm_bindgen_test_configure!(run_in_browser);
 export function post(msg, transfer) { return structuredClone(msg, { transfer }); }
 export function blob(bytes) { return new Blob([bytes]); }
 export function from_json(text) { return JSON.parse(text); }
-// A storage-path separation, as `xtask e2e stored-stems` writes it.
+// A storage-path separation, as `xtask e2e stored-stems` writes it: its
+// `opts` and `session`, with short channels.
 export function hand_written_separate() {
+  const opts = { mm: "s64", attn: "split", chunk: 16384, overlap: 2, step_limit: 600 };
   return { type: "separate", left: new Float32Array([0.5]), right: new Float32Array([0.25]),
-    session: "sessions/1792640000000", mm: "s64", chunk: 16384 };
+    session: "sessions/1792640000000", ...opts };
 }
 "#)]
 extern "C" {
@@ -261,7 +263,13 @@ fn hand_written_requests_are_read() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(separate.settings.chunk, Some(16384));
+    let s = separate.settings;
+    assert_eq!((s.chunk, s.overlap), (Some(16384), Some(2)));
+    assert_eq!(
+        (s.mm.as_deref(), s.attn.as_deref()),
+        (Some("s64"), Some("split"))
+    );
+    assert_eq!(s.step_limit, Some(600.0));
 }
 
 #[wasm_bindgen_test]

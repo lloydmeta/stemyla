@@ -1459,7 +1459,12 @@ async fn a_failed_open_removes_the_files_it_made() {
 }
 
 /// Finding 1-12: a second writer of the same files fails to open, and
-/// leaves the first writer's files as they are.
+/// leaves the first writer's files as they are.  In Chrome the lock also
+/// refuses the removal, so this test cannot tell the `ours` rule apart
+/// (finding 2-1 of review round 2).  It stays because it checks that a
+/// second writer gets `NoModificationAllowedError`, and it checks the rule
+/// in a browser whose lock allows the removal.
+/// `a_failed_open_keeps_a_file_that_it_did_not_make` checks the rule.
 #[wasm_bindgen_test]
 async fn a_failed_open_leaves_a_file_that_another_writer_holds() {
     fresh().await;
@@ -1479,6 +1484,48 @@ async fn a_failed_open_leaves_a_file_that_another_writer_holds() {
         Some("bass.wav.part"),
         "the first writer's file stays"
     );
+}
+
+/// Finding 2-1 of review round 2: a `.part` file that the open did not
+/// make, and could not hold, is not the writer's to remove.
+#[wasm_bindgen_test]
+async fn a_failed_open_keeps_a_file_that_it_did_not_make() {
+    fresh().await;
+    plant_at(&part_path("bass"), &[9; 20]).await;
+    let restore = refuse_sync_handle(1);
+    let opened = StemWriter::open(SESSION, &["bass"], 7).await;
+    restore.call0(&JsValue::NULL).expect("restored");
+    assert!(
+        matches!(opened, Err(StemError::Storage(ref text)) if text.starts_with("NoModificationAllowedError")),
+        "the open fails"
+    );
+    assert_eq!(read_at(&part_path("bass")).await, Some(vec![9; 20]));
+}
+
+/// Finding 2-12 of review round 2: `finish` refuses stems shorter than
+/// the song.
+#[wasm_bindgen_test]
+async fn a_writer_with_frames_missing_refuses_to_finish() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let mut w = StemWriter::open(SESSION, &["bass"], 7)
+        .await
+        .expect("opened");
+    w.put(&Segment {
+        start: 0,
+        stems: vec![[vec![0.5; 5], vec![0.5; 5]]],
+    })
+    .await
+    .expect("written");
+    let finished = w.finish().await;
+    w.abandon().await;
+    match finished {
+        Err(StemError::Refused(text)) => {
+            assert_eq!(text, "the stems hold 5 of the song's 7 frames")
+        }
+        Err(StemError::Storage(text)) => panic!("storage: {text}"),
+        Ok(()) => panic!("finished with frames missing"),
+    }
 }
 
 #[wasm_bindgen_test]
@@ -1772,6 +1819,25 @@ async fn a_refused_header_at_the_end_sends_unstored() {
         Some(""),
         "no stem file remains"
     );
+}
+
+/// Finding 2-3 of review round 2: a stem file that cannot open ends the
+/// separation with `unstored` alone, before any chunk.
+#[wasm_bindgen_test]
+async fn a_failed_open_sends_only_unstored() {
+    fresh().await;
+    let mut net = FakeNetwork { fail_at: None };
+    let ended = separate_song(&mut net, fake_demixer(), Some(SESSION), now_s()).await;
+    reply_to(kind::SEPARATE, ended);
+    assert_eq!(reply_types(), ["unstored"], "no error, done or progress");
+    let text = field(&sent("unstored")[0], "text")
+        .as_string()
+        .unwrap_or_default();
+    assert!(
+        text.starts_with("NotFoundError"),
+        "the session is gone: {text}"
+    );
+    assert_eq!(names_in("").await.as_deref(), Some(""), "no file made");
 }
 
 #[wasm_bindgen_test]

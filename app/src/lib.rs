@@ -1448,6 +1448,9 @@ impl StemApp {
     /// ([`Self::separation_ready`]).
     #[cfg(target_arch = "wasm32")]
     fn start_separation(&mut self, ctx: &egui::Context) {
+        if !separate_enabled(self.separating.is_some(), self.reading_stems) {
+            return;
+        }
         let Some(song) = &self.song else {
             return;
         };
@@ -1868,7 +1871,8 @@ impl StemApp {
     }
 
     /// Ends the worker at once, and with it any separation, so that Forget
-    /// and Separate come back if a reset fails.
+    /// comes back if a reset fails.  Separate stays hidden until a reload,
+    /// because the worker stopped (`Separator::stopped`).
     #[cfg(target_arch = "wasm32")]
     fn stop_separation(&mut self) {
         if let Some(sep) = &mut self.separator {
@@ -3184,8 +3188,9 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
     }
 
     /// Finding 1-14 of review round 1: a reset stops the worker, so no
-    /// separation runs after it, and Forget and Separate come back if the
-    /// reset fails.
+    /// separation runs after it, and Forget comes back if the reset fails.
+    /// Separate stays hidden until a reload, because the worker stopped
+    /// (finding 2-10 of review round 2).
     #[wasm_bindgen_test]
     async fn stopping_the_worker_ends_the_separation() {
         let (mut app, _posts, id) = app_with_a_stored_song().await;
@@ -3194,11 +3199,39 @@ export function wav_blob(bytes) { return new Blob([bytes]); }
         app.reading_stems = true;
         app.stop_separation();
         let forget = forget_enabled(&id, app.separating.as_ref());
-        let separate = separate_enabled(app.separating.is_some(), app.reading_stems);
+        let reading = app.reading_stems;
+        let stopped = app.separator.as_ref().and_then(|s| s.stopped.clone());
         finish(app, &id).await;
         assert!(!before, "Forget waits while the separation runs");
         assert!(forget, "Forget comes back");
-        assert!(separate, "Separate comes back");
+        assert!(!reading, "no read goes on");
+        assert_eq!(
+            stopped.as_deref(),
+            Some("stopped for a reset"),
+            "Separate stays hidden until a reload"
+        );
+    }
+
+    /// Finding 2-2 of review round 2: no new separation starts while the
+    /// page reads stored stems back (D6) or while one runs, whatever
+    /// calls the start.
+    #[wasm_bindgen_test]
+    async fn no_separation_starts_during_a_read_or_a_separation() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        app.reading_stems = true;
+        press_separate(&mut app).await;
+        let during_read = (posts.length(), app.separating.is_some());
+        app.reading_stems = false;
+        press_separate(&mut app).await;
+        let first = app.separating.as_ref().map(|j| (j.serial, j.stage));
+        press_separate(&mut app).await;
+        let during_run = (
+            posts.length(),
+            app.separating.as_ref().map(|j| (j.serial, j.stage)),
+        );
+        finish(app, &id).await;
+        assert_eq!(during_read, (0, false), "nothing starts during the read");
+        assert_eq!(during_run, (1, first), "one request, and the job stays");
     }
 
     /// Ends the test's worker and session.

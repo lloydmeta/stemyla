@@ -1930,8 +1930,12 @@ mod tests {
         let wav = engine::wav::encode_pcm16(&[0.5; 4], &[0.5; 4], 44_100);
         r["files"]["piano"] = json!(base64(&wav));
         let failed = failing(&r, None);
+        // The header is the same; the first sample of the right channel is
+        // 0.5, not -0.5, so its high byte (offset 47) differs first.
         assert!(
-            failed.len() == 1 && failed[0].starts_with("the stored piano equals"),
+            failed.len() == 1
+                && failed[0].starts_with("the stored piano equals")
+                && failed[0].ends_with("(60 of 60 bytes, first difference at Some(47))"),
             "{failed:?}"
         );
     }
