@@ -182,6 +182,7 @@ The parent's M3 acceptance, check by check:
 * [x] 2026-10-25: plan review 1: 5 should-fix fixed (the stem names, the limit's derivation, a testable loop, `.part` files, an asynchronous start), and 5 nits.
 * [x] 2026-10-25: plan review 2: 2 should-fix fixed (the fallback starts the memory path directly; `apply_separated` splits so both paths log the lines of the e2e scenarios), and 8 nits.
 * [x] 2026-10-25: plan review 3: 4 should-fix fixed (step 1 and clippy, the fallback tests have a session and a control, the growth test measures memory, the memory path's hashes before and after the split), and 5 nits.  The review loop stops at 3 reviews.
+* [x] 2026-10-25: step 1, the stem writer (`worker/src/web/stems.rs`) and `stem_protocol::stem_file`.  The six tests of step 1 pass in Chrome (web-test: worker 48 passed).  `run` does not use the writer yet.
 
 ## Surprises and discoveries
 
@@ -198,6 +199,10 @@ None yet.
 * 2026-10-25, team leader: the parent's fallback check is split between the worker's browser tests and the page's browser tests.  A browser test has no GPU, and the e2e scenarios have no way to make one write fail.  The worker's tests run the whole loop with a fake network, so they see the whole reply sequence.
 * 2026-10-25, team leader, after plan review 2: the fallback of D4 starts the memory path directly, so it cannot loop back to storage.  `meta` gets the new `stem` lines only when every move succeeded.
 * 2026-10-25, team leader, after plan review 3: the memory path's stems are hashed before step 2 changes the loop, and compared after, because `stored-stems` compares two paths through the same new loop.  The fallback's memory path does not save its stems.  The parent's M3 text says that `segment` no longer carries samples: D1 keeps them for the memory path only.  The maintainer asked that the milestone writes only this plan, so the parent plan does not change here; the orchestrator can record D1 there.
+* 2026-10-25, implementer, step 1: `file_stem` moves to `stem-protocol` as `stem_file` (with `.wav`) in step 1, not step 3.  So the page and the worker use one copy of the name rule from the first commit.  `store.rs` calls it.
+* 2026-10-25, implementer, step 1: `StemWriter::open` keeps the song's `len`, so `finish` takes no argument.  A failure is `StemError::Storage` (the browser refused; the worker sends `unstored`) or `StemError::Refused` (a song too long for a WAV, or segments that do not follow on; the worker sends `error`).
+* 2026-10-25, implementer, step 1: when `open` fails part of the way, it closes the handles it took and removes the files it opened.  The caller then has no writer to abandon.
+* 2026-10-25, implementer: a Progress line cannot hold the hash of its own commit.  So each step's line gives the step, and the next step's commit adds the hash.
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective

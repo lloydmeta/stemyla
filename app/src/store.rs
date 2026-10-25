@@ -22,6 +22,7 @@ use engine::{Samples, Song, Stem};
 use js_sys::{Array, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use stem_protocol::stem_file;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
@@ -216,19 +217,6 @@ async fn read(path: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// A stem name as a file name: letters, digits, spaces and dashes only.
-fn file_stem(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// Starts a session for files the user dropped and makes it current.
 /// Returns its id.  Each file is written as the browser's `Blob`, so the
 /// page keeps no copy of its bytes to save it (MEM-1).  A save that fails
@@ -299,7 +287,7 @@ async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     for s in stems {
         write_bytes(
             &base,
-            &format!("stems/{}.wav", file_stem(&s.name)),
+            &format!("stems/{}", stem_file(&s.name)),
             &engine::wav::encode_pcm16(&s.left, &s.right, rate),
         )
         .await?;
@@ -381,7 +369,7 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     }
     let mut stems = Vec::new();
     for name in &meta.stems {
-        let bytes = read(&format!("{base}/stems/{}.wav", file_stem(name)))
+        let bytes = read(&format!("{base}/stems/{}", stem_file(name)))
             .await
             .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
         let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;

@@ -16,6 +16,11 @@ use stem_protocol::{
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
+mod stems;
+
+#[cfg(test)]
+use stems::{StemError, StemWriter};
+
 const CACHE_NAME: &str = "bs_roformer_sw.safetensors";
 
 /// Where "Download model" fetches the weights: a Hugging Face mirror of

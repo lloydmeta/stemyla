@@ -241,6 +241,23 @@ impl Settings {
     }
 }
 
+/// The file name of the stem `name` in a session's `stems` folder: the
+/// name with letters, digits, spaces and dashes only, then `.wav`.  The
+/// page and the worker both use it, so they agree on the files.
+pub fn stem_file(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{safe}.wav")
+}
+
 /// A model file for the worker to read.
 #[derive(Clone, Debug)]
 pub enum ModelSource {
@@ -681,6 +698,15 @@ fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stem_file_name_keeps_only_safe_characters() {
+        assert_eq!(stem_file("bass"), "bass.wav");
+        assert_eq!(stem_file("classic drums"), "classic drums.wav");
+        assert_eq!(stem_file("lead-vocals"), "lead-vocals.wav");
+        assert_eq!(stem_file("a/b:c.d"), "a_b_c_d.wav");
+        assert_eq!(stem_file("../acme"), "___acme.wav");
+    }
 
     #[test]
     fn the_query_sets_numbers_strings_and_flags() {

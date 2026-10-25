@@ -133,6 +133,63 @@ export function stop_spy() {
   real_write = null;
   return record.join(" ");
 }
+async function folder_at(path, create) {
+  let d = await navigator.storage.getDirectory();
+  for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
+  return d;
+}
+function split_at(path) {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
+}
+export async function plant_folder(path) { await folder_at(path, true); }
+export async function plant_at(path, bytes) {
+  const [d, n] = split_at(path);
+  const w = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createWritable();
+  await w.write(bytes);
+  await w.close();
+}
+// The bytes of the file at `path`, or null if there is none.
+export async function read_at(path) {
+  try {
+    const [d, n] = split_at(path);
+    const f = await (await (await folder_at(d, false)).getFileHandle(n)).getFile();
+    return new Uint8Array(await f.arrayBuffer());
+  } catch (e) { if (e.name === "NotFoundError") return null; throw e; }
+}
+// The names of the entries in the folder `path`, sorted and joined by
+// spaces, or null if there is no such folder.
+export async function names_in(path) {
+  try {
+    const out = [];
+    for await (const name of (await folder_at(path, false)).keys()) out.push(name);
+    return out.sort().join(" ");
+  } catch (e) { if (e.name === "NotFoundError") return null; throw e; }
+}
+// Records what each FileSystemSyncAccessHandle.write gets: "whole" or
+// "view".  Call `fail_at` (from 1; 0 for none) is refused, as a full
+// disk refuses it.
+let sync_record = null;
+let sync_real = null;
+export function start_sync_spy(fail_at) {
+  if (sync_real) throw new Error("a spy is already on the sync write");
+  const proto = FileSystemSyncAccessHandle.prototype;
+  sync_real = proto.write;
+  sync_record = [];
+  proto.write = function (data, options) {
+    if (sync_record.length + 1 === fail_at) {
+      sync_record.push("refused");
+      throw new DOMException("refused by the test", "QuotaExceededError");
+    }
+    sync_record.push(ArrayBuffer.isView(data) && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view");
+    return sync_real.call(this, data, options);
+  };
+}
+export function stop_sync_spy() {
+  FileSystemSyncAccessHandle.prototype.write = sync_real;
+  sync_real = null;
+  return sync_record.join(" ");
+}
 // The next fetch answers with one byte, and keeps how it was asked to
 // treat redirects for `last_redirect`.
 let redirect = null;
@@ -178,6 +235,32 @@ extern "C" {
     fn hide_gpu() -> js_sys::Function;
     fn start_spy();
     fn stop_spy() -> String;
+    async fn plant_folder(path: &str);
+    #[wasm_bindgen(js_name = plant_at)]
+    async fn plant_at_js(path: &str, bytes: &Uint8Array);
+    #[wasm_bindgen(js_name = read_at)]
+    async fn read_at_js(path: &str) -> JsValue;
+    #[wasm_bindgen(js_name = names_in)]
+    async fn names_in_js(path: &str) -> JsValue;
+    fn start_sync_spy(fail_at: u32);
+    fn stop_sync_spy() -> String;
+}
+
+/// Writes a file at `path`, with its folders.
+async fn plant_at(path: &str, bytes: &[u8]) {
+    plant_at_js(path, &Uint8Array::from(bytes)).await;
+}
+
+/// The bytes of the file at `path`, or `None` if there is none.
+async fn read_at(path: &str) -> Option<Vec<u8>> {
+    let got = read_at_js(path).await;
+    (!got.is_null()).then(|| got.unchecked_into::<Uint8Array>().to_vec())
+}
+
+/// The entries of the folder `path`, sorted and joined by spaces, or
+/// `None` if there is no such folder.
+async fn names_in(path: &str) -> Option<String> {
+    names_in_js(path).await.as_string()
 }
 
 /// Writes a file at the root (from a copy: OPFS reads the bytes after
@@ -1162,6 +1245,229 @@ async fn a_failed_load_says_when_it_unloaded_the_model_before_it() {
             .await
             .ends_with("reload the page to load the stored one")
     );
+}
+
+/// A session folder, as the page makes it before the song shows.
+const SESSION: &str = "sessions/1792640000000";
+
+fn part_path(name: &str) -> String {
+    format!("{SESSION}/stems/{name}.wav.part")
+}
+
+/// The 44-byte header of a 16-bit stereo WAV at 44.1 kHz of `frames`
+/// frames, written out field by field.
+fn wav_header(frames: u32) -> Vec<u8> {
+    let data = 4 * frames;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&44_100u32.to_le_bytes());
+    out.extend_from_slice(&176_400u32.to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data.to_le_bytes());
+    out
+}
+
+/// A WAV file of interleaved 16-bit `frames` (left, right).
+fn wav_file(frames: &[(i16, i16)]) -> Vec<u8> {
+    let mut out = wav_header(frames.len() as u32);
+    for (l, r) in frames {
+        out.extend_from_slice(&l.to_le_bytes());
+        out.extend_from_slice(&r.to_le_bytes());
+    }
+    out
+}
+
+const STEP: f32 = 1.0 / 32_768.0;
+
+/// Seven frames of two stems: "bass" holds the rounding and clipping
+/// cases, "drums" a plain half scale.
+fn two_stems() -> [[Vec<f32>; 2]; 2] {
+    [
+        [
+            vec![0.5 * STEP, -0.5 * STEP, 1.0, 1.5, -1.0, 0.25, 0.0],
+            vec![
+                0.0,
+                0.1,
+                -0.1,
+                -1.5,
+                32_767.0 * STEP,
+                0.75 * STEP,
+                -0.75 * STEP,
+            ],
+        ],
+        [vec![0.5; 7], vec![-0.5; 7]],
+    ]
+}
+
+/// The 16-bit frames of [`two_stems`].
+fn two_stems_as_16_bits() -> [Vec<(i16, i16)>; 2] {
+    [
+        vec![
+            (1, 0),
+            (-1, 3277),
+            (32_767, -3277),
+            (32_767, -32_768),
+            (-32_768, 32_767),
+            (8192, 1),
+            (0, -1),
+        ],
+        vec![(16_384, -16_384); 7],
+    ]
+}
+
+/// [`two_stems`] cut into segments at `cuts` (frames 0..3, 3..5, 5..7).
+fn segments_of(stems: &[[Vec<f32>; 2]], cuts: &[(usize, usize)]) -> Vec<Segment> {
+    cuts.iter()
+        .map(|&(from, to)| Segment {
+            start: from,
+            stems: stems
+                .iter()
+                .map(|[l, r]| [l[from..to].to_vec(), r[from..to].to_vec()])
+                .collect(),
+        })
+        .collect()
+}
+
+const CUTS: [(usize, usize); 3] = [(0, 3), (3, 5), (5, 7)];
+
+async fn write_two_stems() -> Result<(), StemError> {
+    let mut w = StemWriter::open(SESSION, &["bass", "drums"], 7).await?;
+    for seg in segments_of(&two_stems(), &CUTS) {
+        w.put(&seg).await?;
+    }
+    assert_eq!(w.frames(), 7, "frames in each file");
+    w.finish().await
+}
+
+#[wasm_bindgen_test]
+async fn stems_are_written_as_16_bit_wavs() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    write_two_stems().await.expect("written");
+    let [bass, drums] = two_stems_as_16_bits();
+    assert_eq!(read_at(&part_path("bass")).await, Some(wav_file(&bass)));
+    assert_eq!(read_at(&part_path("drums")).await, Some(wav_file(&drums)));
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some("bass.wav.part drums.wav.part"),
+        "only the .part files"
+    );
+}
+
+/// MEM-5: every write through a sync access handle gets a whole array.
+#[wasm_bindgen_test]
+async fn stem_writes_pass_whole_arrays() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    start_sync_spy(0);
+    let written = write_two_stems().await;
+    let record = stop_sync_spy();
+    written.expect("written");
+    // Two headers at the start, two stems in each of three segments, and
+    // two headers at the end.
+    assert_eq!(record, ["whole"; 10].join(" "));
+}
+
+#[wasm_bindgen_test]
+async fn a_stem_writer_never_brings_back_a_forgotten_session() {
+    fresh().await;
+    let opened = StemWriter::open(SESSION, &["bass"], 7).await;
+    match opened {
+        Err(StemError::Storage(text)) => assert!(text.contains("NotFoundError"), "{text}"),
+        Err(StemError::Refused(text)) => panic!("refused: {text}"),
+        Ok(_) => panic!("opened a writer in a forgotten session"),
+    }
+    assert_eq!(names_in("").await.as_deref(), Some(""), "nothing made");
+}
+
+#[wasm_bindgen_test]
+async fn a_refused_stem_write_removes_the_stem_files() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    let names = ["bass", "drums"];
+    let mut w = StemWriter::open(SESSION, &names, 7).await.expect("opened");
+    start_sync_spy(3);
+    let mut put = Ok(());
+    for seg in segments_of(&two_stems(), &CUTS) {
+        put = w.put(&seg).await;
+        if put.is_err() {
+            break;
+        }
+    }
+    let record = stop_sync_spy();
+    assert_eq!(record, "whole whole refused");
+    match put {
+        Err(StemError::Storage(text)) => {
+            assert!(text.starts_with("QuotaExceededError"), "{text}")
+        }
+        other => panic!("{:?}", other.err()),
+    }
+    w.abandon().await;
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+    let again = StemWriter::open(SESSION, &names, 7)
+        .await
+        .expect("the handles were closed, so the files open again");
+    again.abandon().await;
+}
+
+#[wasm_bindgen_test]
+async fn a_part_file_from_an_earlier_separation_is_replaced() {
+    fresh().await;
+    plant_at(&part_path("bass"), &[9; 200]).await;
+    let kept = format!("{SESSION}/stems/bass.wav");
+    plant_at(&kept, &[1, 2, 3]).await;
+    let mut w = StemWriter::open(SESSION, &["bass"], 2)
+        .await
+        .expect("opened");
+    w.put(&Segment {
+        start: 0,
+        stems: vec![[vec![0.5, -0.5], vec![0.25, -0.25]]],
+    })
+    .await
+    .expect("written");
+    w.finish().await.expect("finished");
+    assert_eq!(
+        read_at(&part_path("bass")).await,
+        Some(wav_file(&[(16_384, 8192), (-16_384, -8192)]))
+    );
+    assert_eq!(
+        read_at(&kept).await,
+        Some(vec![1, 2, 3]),
+        "kept stem as it was"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn a_song_too_long_for_a_wav_is_refused() {
+    fresh().await;
+    plant_folder(SESSION).await;
+    // 36 + 4 x frames is the RIFF size, a u32.
+    let longest = (u32::MAX as usize - 36) / 4;
+    match StemWriter::open(SESSION, &["bass"], longest + 1).await {
+        Err(StemError::Refused(text)) => assert!(text.contains("too long"), "{text}"),
+        Err(StemError::Storage(text)) => panic!("storage: {text}"),
+        Ok(_) => panic!("opened a writer for a song too long for a WAV"),
+    }
+    assert_eq!(
+        names_in(SESSION).await.as_deref(),
+        Some(""),
+        "no file opened"
+    );
+    let fits = StemWriter::open(SESSION, &["bass"], longest)
+        .await
+        .expect("the longest song opens");
+    fits.abandon().await;
 }
 
 /// MEM-1: proves each path in this crate's `clippy.toml` (see the `#[expect]`s).
