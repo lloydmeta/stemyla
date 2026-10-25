@@ -207,7 +207,8 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: review round 1 of M0: 7 findings confirmed and fixed, 5 nits fixed.
 * [x] 2026-10-25: review round 2: 6 findings confirmed and fixed, 6 nits fixed.
 * [x] 2026-10-25: review round 3: 4 findings confirmed and fixed, 5 nits fixed.  The amendment of 0018 waits for the maintainer.
-* [ ] M1: spike on the iPhone.
+* [x] 2026-10-25: M1 code: `?streamtest` (`app/src/streamtest.rs`) and `the_spike_logs_each_measure_and_leaves_no_files`.  In Chrome on the Mac, a 0.2-minute run gave reads of p50 3.4 ms and p99 4.9 ms, and no underruns.
+* [ ] M1: the iPhone numbers.  The maintainer publishes, opens `?streamtest`, taps "Run storage test", and pastes the `streamtest:` lines.  Then a reload in the same tab and a heap snapshot count the app's instances.
 * [ ] M2: `e2e memory-budget` measures.
 * [ ] M3: stems to storage.
 * [ ] M4: mix from storage.

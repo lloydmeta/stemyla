@@ -19,6 +19,8 @@ pub mod spectrogram;
 #[cfg(target_arch = "wasm32")]
 pub mod store;
 pub mod store_meta;
+#[cfg(target_arch = "wasm32")]
+pub mod streamtest;
 
 /// Lanes that are not parts of the mix: computed from the others, or the
 /// original recording kept beside its separated stems.  They start muted,
@@ -341,6 +343,9 @@ pub struct StemApp {
     /// Songs kept in browser storage (id, meta), newest first.
     #[cfg(target_arch = "wasm32")]
     sessions: Vec<(String, store_meta::Meta)>,
+    /// `?streamtest`: the state of the storage playback test.
+    #[cfg(target_arch = "wasm32")]
+    streamtest: Option<std::rc::Rc<std::cell::RefCell<streamtest::Status>>>,
     /// The stem separation worker (web only).
     #[cfg(target_arch = "wasm32")]
     separator: Option<separator::Separator>,
@@ -459,6 +464,8 @@ impl Default for StemApp {
             #[cfg(target_arch = "wasm32")]
             sessions: Vec::new(),
             #[cfg(target_arch = "wasm32")]
+            streamtest: None,
+            #[cfg(target_arch = "wasm32")]
             separator: None,
             #[cfg(target_arch = "wasm32")]
             separating: None,
@@ -517,6 +524,10 @@ impl StemApp {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         #[allow(unused_mut)]
         let mut app = Self::default();
+        #[cfg(target_arch = "wasm32")]
+        if streamtest::Settings::from_url().is_some() {
+            app.streamtest = Some(Default::default());
+        }
         #[cfg(target_arch = "wasm32")]
         match separator::Separator::new(cc.egui_ctx.clone()) {
             Ok(s) => app.separator = Some(s),
@@ -1083,6 +1094,8 @@ impl StemApp {
             self.storage_menu(ui);
             #[cfg(target_arch = "wasm32")]
             about_menu(ui);
+            #[cfg(target_arch = "wasm32")]
+            self.streamtest_controls(ui);
             let Some(params) = self.params.clone() else {
                 return;
             };
@@ -1241,6 +1254,31 @@ impl StemApp {
             } else {
                 self.status = "Could not reach the separation worker".into();
             }
+        }
+    }
+
+    /// `?streamtest`: the button that starts the storage playback test, and
+    /// its last line.  iOS starts audio only after a tap, so the test waits
+    /// for one.
+    #[cfg(target_arch = "wasm32")]
+    fn streamtest_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(status) = &self.streamtest else {
+            return;
+        };
+        let (running, last) = {
+            let s = status.borrow();
+            (s.running, s.last.clone())
+        };
+        if ui
+            .add_enabled(!running, egui::Button::new("Run storage test"))
+            .on_hover_text("Measures playback from browser storage; the results go to the console")
+            .clicked()
+            && let Some(settings) = streamtest::Settings::from_url()
+        {
+            streamtest::start(settings, status.clone(), ui.ctx().clone());
+        }
+        if let Some(last) = last {
+            ui.label(format!("Storage test: {last}"));
         }
     }
 
