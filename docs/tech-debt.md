@@ -390,6 +390,14 @@ The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The
 
 * Fix: a browser test that delivers each event to an `App` and spies on the link that `save_file` or `save_blob` clicks.  A browser test that starts a save on an `App` and steps it to the download or the worker request.  A test of the peak memory of `load_song` while a mix job runs.  A test of `usage`.
 
+### TD-54: a separation of a song over about 2 minutes stops the tab on an iPhone
+
+This entry concerns MEM-4.
+
+On 2026-10-25, a 5.2-minute song stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 660 MB for that song.  The page's song, the worker's mix and the stems grow by about 170 MB per minute of song.  The fixed part is about 1730 MB, so about 1.9 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
+
+* Fix: `plans/active/stream-from-storage.md` moves the song, the mix and the stems to browser storage (decision 0015).  Its M9 asserts that the peak does not grow with the song.
+
 ### TD-16: the wire format has unchecked field names and silent defaults
 
 `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).

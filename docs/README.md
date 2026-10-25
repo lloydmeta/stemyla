@@ -17,6 +17,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and phase 2's numbers.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/active/stream-from-storage.md`: a song's audio moves to browser storage, so the tab's memory does not grow with the song (MEM-4, TD-54).
 * `plans/completed/mix-download.md`: done on 2026-10-25: the mix lane saves the mix as heard (WAV, FLAC, MP3), mixed on the page in blocks; its waveform and spectrogram follow the mix.
 * `plans/completed/flac.md`: done on 2026-10-25: FLAC files open as songs and stems, a stem saves as a 16-bit FLAC, and a decoded file holds at most 1 GiB of samples.
 * `plans/completed/48k-audio.md`: done on 2026-10-24: songs at 48 kHz and other standard rates convert to 44.1 kHz when they open, so they separate.
@@ -42,6 +43,9 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0012-one-song-rate.md`: every song in the app is at 44.1 kHz; `Song::from_audio` converts other rates on the page thread.
 * `decisions/0013-decode-limit.md`: a decoded file holds at most 1 GiB of `f32` samples, in every format, so a small FLAC cannot stop the tab.
 * `decisions/0014-save-the-mix-as-heard.md`: the mix lane saves the mix as heard (Mute, Solo, volume), mixed on the page in blocks; the worker encodes as before.
+* `decisions/0015-storage-holds-the-song.md`: proposed: browser storage holds a song's audio, and memory holds blocks, so a long song fits on an iPhone.
+* `decisions/0016-stem-files-are-16-bit.md`: proposed: stem files in browser storage hold 16-bit PCM, and the mix file 32-bit float.
+* `decisions/0017-the-main-thread-reads-ahead.md`: proposed: async reads on the main thread keep a read-ahead buffer in front of the play head.
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
@@ -50,7 +54,7 @@ Distilled facts from outside the repo, each with its source and the date it was 
 
 * `references/browser-quirks.md`: Safari, Web Audio and WebGPU behaviour the code works around.
 * `references/webgpu-limits.md`: the WebGPU default limits every kernel must fit (GPU-1).
-* `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures.
+* `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures; reading an iPhone's memory kills.
 
 ## Conventions
 

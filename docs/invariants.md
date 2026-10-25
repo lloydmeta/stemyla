@@ -76,7 +76,7 @@ iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memor
 
 * Why: a tab over the limit is killed with no error the page can catch.
 * Enforced by: prose only.  The worker logs `memory: ...` after every chunk; nothing asserts it.
-* Gaps: TD-11.
+* Gaps: TD-11, TD-54.
 
 ### MEM-5: browser-storage writes pass a whole array
 
