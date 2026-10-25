@@ -51,7 +51,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let t = Instant::now();
     let mut d = Demixer::new(mix, CHUNK, overlap, STEMS.len());
     let total = d.num_chunks();
-    while let Some(x) = d.next_input() {
+    while let Ok(Some(x)) = d.next_input() {
         let tc = Instant::now();
         let i = d.chunk_index();
         let y = separate_chunk(&model, &x);

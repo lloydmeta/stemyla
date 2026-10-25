@@ -1184,7 +1184,7 @@ impl From<StemError> for Stop {
 /// an `error` (D4 of M3).
 async fn separate_song(
     net: &mut impl Network,
-    mut d: Demixer,
+    mut d: Demixer<Stereo>,
     session: Option<&str>,
     t0: f64,
 ) -> Result<(), String> {
@@ -1229,7 +1229,7 @@ async fn separate_song(
 /// The loop of [`separate_song`] over the chunks.
 async fn separate_chunks(
     net: &mut impl Network,
-    d: &mut Demixer,
+    d: &mut Demixer<Stereo>,
     mut writer: Option<&mut StemWriter>,
     t0: f64,
 ) -> Result<(), Stop> {
@@ -1240,7 +1240,7 @@ async fn separate_chunks(
         total: total as u32,
         secs: 0.0,
     });
-    while let Some(x) = d.next_input() {
+    while let Ok(Some(x)) = d.next_input() {
         let tc = now_s();
         let out = net.stems(d.chunk_index(), &x).await.map_err(Stop::Failed)?;
         d.accept(&out);

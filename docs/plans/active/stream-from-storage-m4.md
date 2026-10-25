@@ -125,6 +125,7 @@ The parent's M4 acceptance, check by check:
 * [x] 2026-10-26: plan review 1 (fixes in `13a4426`): 6 should-fix fixed (the worker's growth is measured from the separation's start and by an allocator test, the mix checks run through a function that takes the network, the clip is interleaved, a fallback fails the e2e checks, the page's growth covers the mix write, a `mix` line in `meta`), and 7 nits.
 * [x] 2026-10-26: plan review 2: 3 should-fix fixed (the worker's memory lines have their own words, the decision log says what M5 and M7 must do for a mix of several sources, a bad mix file is written again after `unstored`, with tests), and 8 nits.
 * [x] 2026-10-26: plan review 3: 3 should-fix fixed (a test that the page's mix write makes no song-length buffer, a spy on the worker's reads of the mix file, every decode error of D4 tested), and 6 nits.  The review loop stops at 3 reviews.
+* [x] 2026-10-26: step 1, the block source.  `roformer::demix::MixSource` (D5): `Demixer<S>` reads one span for each chunk, and keeps no whole mix.  A `Stereo` is a source with `Infallible` as its error.  New tests `a_block_source_gives_the_whole_mix_result_exactly` (8 cases, overlap 1 included; each read is inside the song and at most one chunk; one read for each chunk) and `a_failed_read_stops_the_demixer`.  `cargo test -p roformer --lib demix`: 6 passed.  The first test failed when the span was the whole song.  Workspace tests: 623 passed.
 
 ## Surprises and discoveries
 

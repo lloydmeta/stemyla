@@ -1629,7 +1629,7 @@ fn fake_mix() -> Stereo {
     ]
 }
 
-fn fake_demixer() -> Demixer {
+fn fake_demixer() -> Demixer<Stereo> {
     Demixer::new(fake_mix(), FAKE_CHUNK, 2, STEMS.len())
 }
 
@@ -1656,7 +1656,7 @@ fn fake_run() -> FakeRun {
         true
     };
     let mut segment_after = Vec::new();
-    while let Some(x) = d.next_input() {
+    while let Ok(Some(x)) = d.next_input() {
         d.accept(&fake_stems_of(&x));
         segment_after.push(place(d.take_ready()));
     }
