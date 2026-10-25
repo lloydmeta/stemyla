@@ -191,7 +191,12 @@ The parent's M3 acceptance, check by check:
   * guitar `7e5eb334e7dead42ef2f7902c1590b2561347aa7b7f17b817aced81c295127bb`
   * piano `3166e0de310c930f2b40f75c2631e4524b7115c64f90d4ef540102af6da68f90`
 * [x] 2026-10-25: step 2, commit `93fab48` (the memory half of `stored-stems`) and the commit after it.  The wire format of D1, with `xtask/e2e/worker.js`.  The worker's loop takes the network as a parameter (`Network`, `GpuNetwork`, `separate_song`).  `e2e stored-stems --hashes` passes after the change: the six hashes did not change.  `e2e storage` passes.  web-test: worker 52 passed, protocol 18 passed.  Commit `c65582e`.
-* [x] 2026-10-25: step 3, the page.  `e2e stored-stems --hashes` passes after step 3: the six hashes did not change.  `e2e separate` passes, now on the storage path (page wasm 10 MB as the separation starts and 10 MB as it ends, 14 MB with the stems shown).  web-test: app lib 30 passed (11 new).  Each new page test fails when its rule is broken by hand (six mutations, each failed its test).
+* [x] 2026-10-25: step 3, the page.  `e2e stored-stems --hashes` passes after step 3: the six hashes did not change.  `e2e separate` passes, now on the storage path (page wasm 10 MB as the separation starts and 10 MB as it ends, 14 MB with the stems shown).  web-test: app lib 30 passed (11 new).  Each new page test fails when its rule is broken by hand (six mutations, each failed its test).  Commit `1e52430`.
+* [x] 2026-10-25: step 4, the e2e checks, in Chrome on the Mac (AMD Radeon Pro 5500M), at commit `1e52430` with the scenarios of step 4:
+  * `e2e stored-stems --hashes`: passed.  The six `.part` files equal `engine::wav::encode_pcm16` of the memory path's stems, byte for byte (529,244 bytes each).  The storage path sent 17 `stored` replies and no `segment` reply; the last `stored` gave 132,300 of 132,300 frames.  The hashes did not change.
+  * `e2e separate`: passed, on the storage path.  Page wasm 10 MB as the separation starts, 10 MB as it ends, 13 MB with the stems shown.
+  * `e2e memory-budget`: passed, both songs on the storage path.  The page grew by 0 MB during each separation (1 minute: 50 MB at the start and at the end; 4 minutes: 177 MB and 177 MB).  Peaks: 1 minute, page wasm 177 MB, worker wasm 57 MB, GPU live 732 MB, 966 MB in all; 4 minutes, page wasm 686 MB, worker wasm 99 MB, GPU live 732 MB, 1517 MB in all.  The 4-minute peak is 551 MB above the 1-minute peak (M2: 592 MB).  The page's peak comes after the separation, when it reads the six stems back (D6), as TD-54 says.
+  * `e2e storage`: passed.
 
 ## Surprises and discoveries
 
@@ -222,6 +227,8 @@ None yet.
 * 2026-10-25, implementer, step 3: step 3 updates `docs/ARCHITECTURE.md` (memory on phones, browser storage, the diagram) and TD-54, because the page takes the storage path from this commit (DOC-1).  Step 5 adds the test names to MEM-5 and checks the rest.
 * 2026-10-25, implementer, step 3: Separate stays disabled while a separation starts and while the page reads stored stems.  When the read ends, the page decides again where the stems go (`show_separated`), because the user can open another song during the read.  A storage-path separation whose song is neither shown nor being opened reads no stems.
 * 2026-10-25, implementer, step 3: the page logs the end line of D9 at `done` on both paths, before it reads or shows any stems.
+* 2026-10-25, implementer, step 4: the page logs `separator: separating on the storage path` (or `memory`) as it posts a separation.  `e2e separate` checks it, so that scenario fails if the stored clip falls back to the memory path.  `memory-budget` checks the growth of D9 for each song.
+* 2026-10-25, implementer, step 4: `stored-stems` tells the two separations apart by the `progress` reply of 0 chunks that starts each one.  `xtask` does not take `stem-protocol`, so the scenario writes the stem file names as `<name>.wav`, which `stem_file` gives for the six stem names.
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective

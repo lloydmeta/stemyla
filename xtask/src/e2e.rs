@@ -15,16 +15,22 @@
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).
 //! * `separate`: drop a clip and the model, Separate, lanes appear
-//!   (`--weights`).  The clip is a 48 kHz WAV, or with `--flac` a 96 kHz
+//!   (`--weights`).  The clip is kept in browser storage, so it separates
+//!   on the storage path.  The clip is a 48 kHz WAV, or with `--flac` a 96 kHz
 //!   FLAC.
 //! * `worker-check`: the worker's separation against PyTorch's
 //!   (`--weights`, `--reference` from `tools/roformer_export.py`).
 //! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
 //!   browser, and print the peak memory of each and the difference
 //!   (`--weights`).  M2 of `docs/plans/active/stream-from-storage.md`.
+//! * `memory-budget` also prints how much the page's WebAssembly memory
+//!   grew during each separation, and fails if it is more than 4 MB (D9 of
+//!   M3 in `docs/plans/active/stream-from-storage-m3.md`).
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix
-//!   and prints the SHA-256 of each stem as a 16-bit WAV (`--weights`).
-//!   With `--hashes`, it checks them.
+//!   on the memory path, then on the storage path into a session folder
+//!   (`--weights`).  Each stem file equals the memory path's stem as a
+//!   16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
+//!   checks them against `--hashes`.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -1195,6 +1201,12 @@ fn separate(o: &Opts) -> Result<()> {
             .is_some_and(|l| l.contains("separator: 6 stems in")),
         "six stems arrive",
     );
+    p.check(
+        p.log[from..]
+            .iter()
+            .any(|l| l.contains("separator: separating on the storage path")),
+        "the stored clip separates on the storage path",
+    );
     p.idle(2.0)?;
     p.screenshot("separated")?;
     let errors: Vec<String> = p
@@ -1261,10 +1273,27 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// The most that the page's WebAssembly memory may grow during a
+/// separation (D9 of M3): the tolerance of M10.
+const MAX_PAGE_GROWTH_MB: f64 = 4.0;
+
+/// How much the page's WebAssembly memory grew from the start of a
+/// separation to its end, from the page's log lines.
+fn page_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(&format!("as the separation {when}")))
+            .and_then(|l| number_after(l, "page wasm "))
+    };
+    Some(at("ends")? - at("starts")?)
+}
+
 /// Separates songs of 1 and 4 minutes, each in a new browser, so that each
 /// starts with empty WebAssembly memory.  Prints the peak of page wasm,
-/// worker wasm and GPU live bytes for each, and their difference.  It
-/// asserts no budget yet; M10 of the plan does.
+/// worker wasm and GPU live bytes for each, and their difference.  It also
+/// prints how much the page grew during each separation, and fails if it
+/// is more than [`MAX_PAGE_GROWTH_MB`].  It asserts no budget for the peak
+/// yet; M10 of the plan does.
 fn memory_budget(o: &Opts) -> Result<()> {
     let mut mounts = Vec::new();
     for minutes in BUDGET_MINUTES {
@@ -1308,14 +1337,26 @@ fn memory_budget(o: &Opts) -> Result<()> {
         let from = p.mark();
         p.click(o.separate_x, "Separate 6 stems")?;
         let shown = p.wait_for(from, 4 * 3600, |l| {
-            l.contains("memory: page wasm") || is_page_error(l)
+            l.contains("with the stems shown") || is_page_error(l)
         })?;
         p.check(
             shown
                 .as_deref()
-                .is_some_and(|l| l.contains("memory: page wasm")),
+                .is_some_and(|l| l.contains("with the stems shown")),
             &format!("the {minutes}-minute song separates"),
         );
+        let growth = page_growth(&p.log[from..]);
+        p.check(
+            growth.is_some_and(|g| g <= MAX_PAGE_GROWTH_MB),
+            &format!(
+                "the page grew by {growth:?} MB during the separation, at most {MAX_PAGE_GROWTH_MB} MB"
+            ),
+        );
+        if let Some(g) = growth {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: page wasm grew by {g:.0} MB during the separation"
+            ));
+        }
         let peak = memory_peak(&p.log);
         p.check(peak.is_some(), "the memory lines");
         if let Some(peak) = peak {
@@ -1378,9 +1419,27 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The SHA-256 of each stem in `stems` (`{name: [left, right]}`, each
-/// channel as base64 floats) as a 16-bit WAV, in the order of `names`.
+/// The SHA-256 of each stem in `stems` as a 16-bit WAV (see
+/// [`stem_wavs`]), in the order of `names`.
 fn stem_hashes(stems: &Value, names: &[&str]) -> Result<Vec<String>> {
+    Ok(stem_wavs(stems, names)?
+        .iter()
+        .map(|wav| sha256_hex(wav))
+        .collect())
+}
+
+/// The file name of the stem `name`, as `stem_protocol::stem_file` gives
+/// it (`xtask` does not take `stem-protocol`): `bass.wav`.
+fn stem_protocol_file(name: &str) -> String {
+    format!("{name}.wav")
+}
+
+/// The session folder that `stored-stems` plants for the storage path.
+const STORED_STEMS_SESSION: &str = "sessions/1792640000000";
+
+/// The bytes of each stem in `stems` (`{name: [left, right]}`, each
+/// channel as base64 floats) as a 16-bit WAV, in the order of `names`.
+fn stem_wavs(stems: &Value, names: &[&str]) -> Result<Vec<Vec<u8>>> {
     names
         .iter()
         .map(|name| {
@@ -1391,20 +1450,24 @@ fn stem_hashes(stems: &Value, names: &[&str]) -> Result<Vec<String>> {
                 floats_from_base64(text)
             };
             let (left, right) = (channel(0)?, channel(1)?);
-            Ok(sha256_hex(&engine::wav::encode_pcm16(
+            Ok(engine::wav::encode_pcm16(
                 &left,
                 &right,
                 crate::synth::SAMPLE_RATE,
-            )))
+            ))
         })
         .collect()
 }
 
 /// One worker, from a blank page, separates 3 seconds of the synthetic
-/// mix with `chunk: 16384, overlap: 2`, so that it sends several segments.
-/// The kernels are fixed (`mm: s64, attn: split`), so each run does the
-/// same arithmetic.  It prints the SHA-256 of each stem as a 16-bit WAV
-/// (`engine::wav::encode_pcm16`), and checks them against `--hashes`.
+/// mix with `chunk: 16384, overlap: 2`, so that it sends several segments:
+/// first on the memory path, then on the storage path into a planted
+/// session folder.  The kernels are fixed (`mm: s64, attn: split`), so the
+/// two runs do the same arithmetic.  Each stem file must equal
+/// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.
+/// The storage path must send no `segment` reply, and its last `stored`
+/// reply must cover the song.  It prints the SHA-256 of each memory-path
+/// stem as a 16-bit WAV, and checks them against `--hashes`.
 fn stored_stems(o: &Opts) -> Result<()> {
     let (clip_dir, frames) = stored_stems_clip(&o.out)?;
     let mut mounts = vec![("/clip/".to_string(), clip_dir)];
@@ -1413,15 +1476,18 @@ fn stored_stems(o: &Opts) -> Result<()> {
     let mut p = Page::open(o, base, &["--enable-unsafe-webgpu"], "__e2e/blank.html")?;
     let r = in_page(
         &mut p,
-        "const [model] = args;
+        "const [model, session, names] = args;
         await e2e.wipe();
         const clip = new Float32Array(await (await fetch('/clip/clip.f32')).arrayBuffer());
         const n = clip.length / 2;
         const bytes = new Uint8Array(await (await fetch(model)).arrayBuffer());
         const opts = { mm: 's64', attn: 'split', chunk: 16384, overlap: 2, step_limit: 600 };
         const stems = {};
-        const out = { segments: 0, len: 0 };
+        // Each separation starts with a progress reply of 0 chunks done.
+        const out = { segments: 0, storage_segments: 0, len: 0, stored: [], separations: 0 };
+        const started = (d) => { if (d.done === 0) out.separations++; };
         const place = (d) => {
+          if (out.separations > 1) { out.storage_segments++; return; }
           out.segments++;
           out.len = d.len;
           for (const [name, l, r] of d.stems) {
@@ -1430,15 +1496,30 @@ fn stored_stems(o: &Opts) -> Result<()> {
             stems[name][1].set(r, d.start);
           }
         };
+        const stored = (d) => out.stored.push({ frames: d.frames, len: d.len, stems: d.stems });
+        await e2e.folder(session);
         const m = await e2e.ask([
           { type: 'model', bytes, ...opts },
           { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), ...opts },
-        ], { segment: place });
+          { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), session, ...opts },
+        ], { progress: started, segment: place, stored });
         out.replies = m.replies;
         out.memory = {};
         for (const [name, [l, r]] of Object.entries(stems)) out.memory[name] = [e2e.base64(l), e2e.base64(r)];
+        out.files = {};
+        for (const [name, file] of names) {
+          const bytes = await e2e.read(`${session}/stems/${file}.part`);
+          out.files[name] = bytes && e2e.base64(bytes);
+        }
         return out;",
-        json!([model]),
+        json!([
+            model,
+            STORED_STEMS_SESSION,
+            roformer::STEMS
+                .iter()
+                .map(|n| [n.to_string(), stem_protocol_file(n)])
+                .collect::<Vec<_>>()
+        ]),
         3600,
     )?;
     p.note(&format!("replies: {:?}", texts(&r["replies"])));
@@ -1456,6 +1537,50 @@ fn stored_stems(o: &Opts) -> Result<()> {
     );
     let segments = r["segments"].as_u64().unwrap_or(0);
     p.check(segments > 1, &format!("several segments ({segments})"));
+    p.check(
+        r["replies"][2]["type"] == json!("done"),
+        &format!(
+            "the storage path finishes ({})",
+            texts(&json!([r["replies"][2]])).join("")
+        ),
+    );
+    p.check(
+        r["storage_segments"] == json!(0),
+        "the storage path sends no segment reply",
+    );
+    let stored = r["stored"].as_array().cloned().unwrap_or_default();
+    p.check(
+        stored.len() > 1,
+        &format!("a stored reply after each segment ({})", stored.len()),
+    );
+    let last = stored.last().cloned().unwrap_or(Value::Null);
+    p.check(
+        last["frames"] == json!(frames) && last["len"] == json!(frames),
+        &format!("the last stored reply covers the song ({last})"),
+    );
+    p.check(
+        last["stems"] == json!(roformer::STEMS),
+        "the stored replies name the stems in the worker's order",
+    );
+    let wavs = stem_wavs(&r["memory"], &roformer::STEMS)?;
+    for (name, want) in roformer::STEMS.iter().zip(&wavs) {
+        let got = r["files"][name]
+            .as_str()
+            .map(crate::webdriver::base64_decode)
+            .transpose()?;
+        let same = got.as_deref() == Some(want.as_slice());
+        let first_wrong = got
+            .as_deref()
+            .and_then(|g| g.iter().zip(want).position(|(a, b)| a != b));
+        p.check(
+            same,
+            &format!(
+                "the stored {name} equals the memory path's as a 16-bit WAV ({} of {} bytes, first difference at {first_wrong:?})",
+                got.as_ref().map_or(0, Vec::len),
+                want.len()
+            ),
+        );
+    }
     let hashes = stem_hashes(&r["memory"], &roformer::STEMS)?;
     for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
         p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
@@ -1637,6 +1762,20 @@ fn worker_check(o: &Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_page_growth_is_the_end_less_the_start() {
+        let log: Vec<String> = [
+            "[1.0s] console.info: separator: memory: page wasm 300 MB as the separation starts",
+            "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends",
+            "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(page_growth(&log), Some(2.0));
+        assert_eq!(page_growth(&log[1..]), None, "no start");
+        assert_eq!(page_growth(&log[..1]), None, "no end");
+    }
 
     #[test]
     fn sha256_matches_the_standard_vectors() {
