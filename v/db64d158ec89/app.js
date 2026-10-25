@@ -1,4 +1,4 @@
-import { save_file, st_exists, st_list, st_read, st_remove, st_sleep, st_write } from './snippets/app-0cd1cead3f0174fd/inline0.js';
+import { save_blob, save_file, st_exists, st_list, st_read, st_remove, st_sleep, st_write } from './snippets/app-0cd1cead3f0174fd/inline0.js';
 import { absolute, fresh_page, page_url, wipe_opfs } from './snippets/app-0cd1cead3f0174fd/inline1.js';
 import * as import1 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
 import * as import2 from "./snippets/app-0cd1cead3f0174fd/inline1.js"
@@ -869,6 +869,16 @@ function __wbg_get_imports() {
             const ret = arg0.insertBefore(arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_instanceof_Blob_7c6191a4cd5834d3: function(arg0) {
+            let result;
+            try {
+                result = arg0 instanceof Blob;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
         __wbg_instanceof_Document_b2a06e9deaeb61d1: function(arg0) {
             let result;
             try {
@@ -1326,6 +1336,9 @@ function __wbg_get_imports() {
             const ret = arg0.right;
             return ret;
         },
+        __wbg_save_blob_3bf560526f482f72: function(arg0, arg1, arg2) {
+            save_blob(getStringFromWasm0(arg0, arg1), arg2);
+        },
         __wbg_save_file_673dcf2cda411738: function(arg0, arg1, arg2, arg3, arg4) {
             save_file(getStringFromWasm0(arg0, arg1), arg2, getStringFromWasm0(arg3, arg4));
         },
@@ -1632,32 +1645,32 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1050, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1230, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___wasm_bindgen_9c5824b669557ef0___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_9c5824b669557ef0___JsError___true_);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Array<any>")], shim_idx: 683, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Array<any>")], shim_idx: 863, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___js_sys_da03470312feedbf___Array______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 683, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 863, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___js_sys_da03470312feedbf___Array______true__8);
             return ret;
         },
         __wbindgen_generic_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 86, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 89, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___web_sys_4db2ad57e5c17411___features__gen_MessageEvent__MessageEvent______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000005: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 437, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 394, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke_______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 685, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 865, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___core_608f92abc48d28da___result__Result_____wasm_bindgen_9c5824b669557ef0___JsValue___true_);
             return ret;
         },
