@@ -396,6 +396,13 @@ This entry concerns MEM-4.
 
 On 2026-10-25, a song of about 5.1 minutes stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 650 MB for that song.  The page's song and mix, the worker's mix and the stems grow by about 190 MB per minute of song.  The fixed part is at most about 1720 MB, so at most about 1.7 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
 
+M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation: the worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
+
+* After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit, so on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`), so the tab can stop again at each reload.  M6 and M7 remove this.
+* The worker still copies the whole mix into its memory.  M4 removes this.
+* The memory path (a song without a session, too little free space, or storage that refused the stems) still makes six song-length stems.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
+* No build between M3 and M7 goes to the published site.  Publishing is a person's step (GIT-1).
+
 * Fix: `plans/active/stream-from-storage.md` moves the song, the mix and the stems to browser storage (decision 0015).  Its M10 asserts that the peak does not grow with the song.
 
 ### TD-16: the wire format has unchecked field names and silent defaults

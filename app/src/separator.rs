@@ -2,9 +2,15 @@
 //!
 //! The worker is the `stem-worker` crate, built by Trunk next to the app.
 //! It owns the model, so the 350 MB of weights never enter the UI thread's
-//! memory when the model is chosen through the file picker.  Results come
-//! back after each chunk as transferred `Float32Array`s holding every
-//! stem's finished samples, put together here (see [`crate::assemble`]).
+//! memory when the model is chosen through the file picker.
+//!
+//! A separation takes one of two paths (M3 of
+//! `plans/active/stream-from-storage.md`).  On the storage path, the
+//! request names the song's session, and the worker writes the stems to
+//! its files.  Its `stored` replies carry no samples, and `done` gives
+//! [`Event::StemsStored`].  On the memory path, the stems come back after
+//! each chunk as transferred `Float32Array`s holding every stem's finished
+//! samples, put together here (see [`crate::assemble`]).
 //!
 //! Page query parameters, for tests and slow machines: `chunk` (samples per
 //! model call), `overlap` (1 halves the work), `max_elems` (largest
@@ -58,6 +64,16 @@ pub enum Event {
         left: Vec<f32>,
         right: Vec<f32>,
     },
+    /// A storage-path separation ended: each stem's file holds the song's
+    /// `len` frames.  `names` are the stems in the worker's order.
+    StemsStored {
+        names: Vec<String>,
+        frames: usize,
+        len: usize,
+        secs: f64,
+    },
+    /// Browser storage could not hold the stems; the separation stopped.
+    Unstored(String),
     Done {
         secs: f64,
     },
@@ -97,8 +113,10 @@ pub struct Separator {
     events: Rc<RefCell<VecDeque<Event>>>,
     _onmessage: Closure<dyn FnMut(MessageEvent)>,
     _onerror: Closure<dyn FnMut(web_sys::Event)>,
-    /// The separation's stems as their segments arrive.
+    /// The separation's stems as their segments arrive (memory path).
     assembly: Rc<RefCell<Assembly>>,
+    /// `Some` on the storage path, with the last `stored` reply.
+    storage: Rc<RefCell<Option<StoredSoFar>>>,
     /// Sent with every request but MP3 and FLAC encoding.
     settings: Settings,
     pub model_ready: bool,
@@ -135,6 +153,31 @@ fn url_settings() -> Settings {
         .and_then(|w| w.location().href().ok())
         .map(|href| Settings::from_page(&href))
         .unwrap_or_default()
+}
+
+/// The last `stored` reply of a storage-path separation: the frames in
+/// each stem's file, the song's frames and the stem names.
+type StoredSoFar = Option<(usize, usize, Vec<String>)>;
+
+/// What `done` means on the storage path: the stems, if the last `stored`
+/// reply covers the whole song.
+fn stored_at_done(last: StoredSoFar, secs: f64) -> Event {
+    let error = |text: String| Event::Error {
+        of: kind::SEPARATE.into(),
+        text,
+    };
+    match last {
+        Some((frames, len, names)) if frames == len => Event::StemsStored {
+            names,
+            frames,
+            len,
+            secs,
+        },
+        Some((frames, len, _)) => error(format!(
+            "the separation ended with {frames} of {len} frames stored"
+        )),
+        None => error("the separation ended before any stems were stored".into()),
+    }
 }
 
 /// Posts `request`, transferring what it carries; false if it could not
@@ -207,7 +250,8 @@ impl Separator {
         let events: Rc<RefCell<VecDeque<Event>>> = Default::default();
         let settings = url_settings();
         let assembly: Rc<RefCell<Assembly>> = Default::default();
-        let asm = assembly.clone();
+        let storage: Rc<RefCell<Option<StoredSoFar>>> = Default::default();
+        let (asm, path) = (assembly.clone(), storage.clone());
         let (ev, w, init_settings, repaint) = (
             events.clone(),
             worker.clone(),
@@ -264,6 +308,16 @@ impl Separator {
                         text,
                     })
                 }
+                Reply::Stored { frames, len, stems } => {
+                    if let Some(last) = path.borrow_mut().as_mut() {
+                        *last = Some((frames, len, stems));
+                    }
+                    None
+                }
+                Reply::Done { secs } if path.borrow().is_some() => {
+                    let last = path.borrow_mut().take().flatten();
+                    Some(stored_at_done(last, secs))
+                }
                 Reply::Done { secs } => {
                     let done = asm.borrow_mut().done();
                     match done {
@@ -281,16 +335,16 @@ impl Separator {
                         }),
                     }
                 }
-                // The page names no session until the storage path of
-                // M3 step 3, so the worker sends neither of these yet.
-                Reply::Stored { .. } => None,
-                Reply::Unstored { text } => asm.borrow_mut().abandon().then_some(Event::Error {
-                    of: kind::SEPARATE.into(),
-                    text,
-                }),
+                Reply::Unstored { text } => {
+                    path.borrow_mut().take();
+                    Some(Event::Unstored(text))
+                }
                 Reply::Error { of, text } => {
                     // An MP3, FLAC or self-test error leaves a running
                     // separation be.
+                    if of == kind::SEPARATE {
+                        path.borrow_mut().take();
+                    }
                     let first = of != kind::SEPARATE || asm.borrow_mut().abandon();
                     first.then_some(Event::Error { of, text })
                 }
@@ -334,6 +388,7 @@ impl Separator {
             _onmessage: onmessage,
             _onerror: onerror,
             assembly,
+            storage,
             settings,
             model_ready: false,
             model_stored: false,
@@ -391,6 +446,7 @@ impl Separator {
     pub fn stop(&mut self) {
         self.worker.terminate();
         self.assembly.borrow_mut().clear();
+        self.storage.borrow_mut().take();
         self.running = false;
         self.model_loading = false;
         self.stopped
@@ -454,21 +510,37 @@ impl Separator {
         self.selftest_pending = false;
     }
 
-    /// Starts separating a 44.1 kHz stereo mix.
-    /// Sends one song to the worker; false if it could not be sent.
-    pub fn separate(&mut self, left: &[f32], right: &[f32]) -> bool {
+    /// Starts separating a 44.1 kHz stereo mix: into the files of
+    /// `session` (`"sessions/<id>"`, the storage path), or back to the page
+    /// (`None`, the memory path).  False if it could not be sent.
+    pub fn separate(&mut self, left: &[f32], right: &[f32], session: Option<&str>) -> bool {
         let request = Request::Separate {
             left: Float32Array::from(left),
             right: Float32Array::from(right),
-            session: None,
+            session: session.map(String::from),
         };
+        // Before the post: a reply can only come after it.
+        *self.storage.borrow_mut() = session.map(|_| None);
+        self.assembly.borrow_mut().clear();
         let sent = post(&self.worker, &request, &self.settings);
+        if !sent {
+            self.storage.borrow_mut().take();
+        }
         if sent {
             self.running = true;
             self.progress = (0, 0, 0.0);
             self.stems.clear();
         }
         sent
+    }
+}
+
+#[cfg(test)]
+impl Separator {
+    /// The worker, so a test can spy on what the page posts, deliver a
+    /// reply, or clear its `onerror` (the test page has no worker script).
+    pub(crate) fn worker(&self) -> &Worker {
+        &self.worker
     }
 }
 
@@ -607,6 +679,126 @@ export function spy_on_post(worker) {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The `data` of each message posted to `posts`, as a request.
+    fn posted(posts: &js_sys::Array) -> Vec<(Request, js_sys::Array)> {
+        posts
+            .iter()
+            .map(|post| {
+                let data = Reflect::get(&post, &"data".into()).unwrap();
+                let request = stem_protocol::ToWorker::from_js(&data).expect("a request");
+                let transfer = Reflect::get(&post, &"transfer".into())
+                    .unwrap()
+                    .unchecked_into();
+                (request.request, transfer)
+            })
+            .collect()
+    }
+
+    #[wasm_bindgen_test]
+    fn separate_names_the_session_on_the_storage_path() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let posts = spy_on_post(&sep.worker);
+        assert!(sep.separate(&[0.5, -0.5], &[0.25, 0.75], Some("sessions/1792640000000")));
+        assert!(sep.separate(&[0.5], &[0.25], None));
+        sep.stop();
+        let sent = posted(&posts);
+        assert_eq!(sent.len(), 2, "two messages");
+        for ((request, transfer), want) in sent.iter().zip([Some("sessions/1792640000000"), None]) {
+            match request {
+                Request::Separate { session, .. } => assert_eq!(session.as_deref(), want),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
+        }
+    }
+
+    /// A `stored` reply of `frames` of a song of `len`.
+    fn stored(frames: usize, len: usize) -> JsValue {
+        let names = ["bass", "drums", "other", "vocals", "guitar", "piano"];
+        Reply::Stored {
+            frames,
+            len,
+            stems: names.iter().map(|n| n.to_string()).collect(),
+        }
+        .to_js()
+        .0
+        .into()
+    }
+
+    fn done() -> JsValue {
+        Reply::Done { secs: 12.5 }.to_js().0.into()
+    }
+
+    /// MEM-1, MEM-4: on the storage path the page keeps no stem samples
+    /// while the separation runs: `Assembly` would add about 508 MB for a
+    /// song of 4 minutes.
+    #[wasm_bindgen_test]
+    fn stored_replies_make_no_song_length_buffers() {
+        let len = 10_584_000;
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let _posts = spy_on_post(&sep.worker);
+        assert!(sep.separate(&[0.5], &[0.25], Some("sessions/1792640000000")));
+        let before = page_wasm_mb();
+        for frames in [0, len / 3, 2 * len / 3, len] {
+            deliver(&sep.worker, &stored(frames, len));
+        }
+        deliver(&sep.worker, &done());
+        let grown = page_wasm_mb() - before;
+        let events = sep.take_events();
+        let assembled = sep.assembly.borrow().stems.len();
+        let whole = events.iter().find_map(|e| match e {
+            Event::StemsStored {
+                names,
+                frames,
+                len,
+                secs,
+            } => Some((names.clone(), *frames, *len, *secs)),
+            _ => None,
+        });
+        // A second separation whose stems end short of the song.
+        assert!(sep.separate(&[0.5], &[0.25], Some("sessions/1792640000000")));
+        deliver(&sep.worker, &stored(len - 1, len));
+        deliver(&sep.worker, &done());
+        let short = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Error { of, text } => Some((of, text)),
+            _ => None,
+        });
+        sep.stop();
+        let (names, frames, got_len, secs) = whole.expect("an Event::StemsStored");
+        assert_eq!(names.len(), 6);
+        assert_eq!(names[0], "bass");
+        assert_eq!((frames, got_len, secs), (len, len, 12.5));
+        assert_eq!(assembled, 0, "Assembly stays empty");
+        assert!(
+            grown < 1.0,
+            "MEM-4: the page grew by {grown} MB during a stored separation"
+        );
+        let (of, text) = short.expect("an error for stems short of the song");
+        assert_eq!(of, kind::SEPARATE);
+        assert!(text.contains(&format!("{} of {len}", len - 1)), "{text}");
+    }
+
+    #[wasm_bindgen_test]
+    fn unstored_ends_the_separation_with_its_reason() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let _posts = spy_on_post(&sep.worker);
+        assert!(sep.separate(&[0.5], &[0.25], Some("sessions/1792640000000")));
+        let (reply, _) = Reply::Unstored {
+            text: "QuotaExceededError: the disk is full".into(),
+        }
+        .to_js();
+        deliver(&sep.worker, &reply);
+        let unstored = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Unstored(text) => Some(text),
+            _ => None,
+        });
+        sep.stop();
+        assert_eq!(
+            unstored.as_deref(),
+            Some("QuotaExceededError: the disk is full")
+        );
     }
 
     #[wasm_bindgen_test]

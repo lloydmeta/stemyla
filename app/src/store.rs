@@ -8,7 +8,16 @@
 //!   line per source file (original name, stored name) and one `stem` line
 //!   per separated stem.
 //! * `sessions/<id>/src/<n>.<ext>`: the files as dropped.
-//! * `sessions/<id>/stems/<stem>.wav`: separated stems, 16-bit PCM.
+//! * `sessions/<id>/stems/<stem>.wav`: separated stems, 16-bit PCM.  The
+//!   file name is `stem_protocol::stem_file` of the stem's name.
+//! * `sessions/<id>/stems/<stem>.wav.part`: a stem that the worker writes
+//!   as it separates (the storage path of M3).  After the separation,
+//!   [`keep_stored_stems`] moves it onto its `.wav` file.  A separation
+//!   that stopped can leave one; no reader opens it.
+//!
+//! On the storage path, the worker writes the stem files and the page
+//! moves them into place and writes `meta`.  On the memory path, the page
+//! writes the stems itself ([`save_stems`]).
 //!
 //! Ids are creation times in milliseconds, made unique within the page: a
 //! second session in the same millisecond takes the next one.  Every
@@ -73,6 +82,16 @@ export async function st_remove(path) {
     return true;
   } catch (e) { return e.name === "NotFoundError"; }
 }
+export async function st_move(path, from, to) {
+  try {
+    const d = await dir(path, false);
+    await (await d.getFileHandle(from)).move(d, to);
+    return true;
+  } catch (e) {
+    console.warn("storage move failed", path, from, to, e);
+    return false;
+  }
+}
 export async function st_exists(path) {
   try { await dir(path, false); return true; }
   catch (e) { return e.name !== "NotFoundError"; }
@@ -114,6 +133,9 @@ extern "C" {
     async fn st_read(path: &str) -> JsValue;
     /// Whether `path` is gone (removed, or never there).
     async fn st_remove(path: &str) -> JsValue;
+    /// Moves the file `from` onto `to` in the folder `path`, replacing
+    /// `to`; whether it moved.
+    async fn st_move(path: &str, from: &str, to: &str) -> JsValue;
     async fn st_usage() -> JsValue;
     async fn st_list(path: &str) -> JsValue;
     /// Whether the folder `path` exists (true also when the browser cannot
@@ -261,10 +283,17 @@ async fn save_sources_now(
     write(&format!("{ROOT}/current"), id.as_bytes()).await
 }
 
-/// Adds separated stems to session `id`.
-pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
+/// The folder of session `id`, from the root of the private file system,
+/// as the worker's storage path takes it.
+pub fn session_folder(id: &str) -> String {
+    format!("{ROOT}/{id}")
+}
+
+/// Runs `work` on session `id` as a stem save, which [`restore_id`] and
+/// [`forget`] wait for.
+async fn saving<T>(id: &str, work: impl std::future::Future<Output = T>) -> T {
     SAVING.with_borrow_mut(|s| *s.entry(id.to_string()).or_default() += 1);
-    let saved = save_stems_now(id, rate, stems).await;
+    let done = work.await;
     SAVING.with_borrow_mut(|s| {
         if let Some(n) = s.get_mut(id) {
             *n -= 1;
@@ -273,7 +302,105 @@ pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
             }
         }
     });
-    saved
+    done
+}
+
+/// Adds separated stems to session `id`.
+pub async fn save_stems(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
+    saving(id, save_stems_now(id, rate, stems)).await
+}
+
+/// What [`keep_stored_stems`] did.
+pub struct StoredStems {
+    /// Where each stem is to read: its `.wav` file if it moved there, else
+    /// its `.part` file.
+    pub paths: Vec<String>,
+    /// Whether `meta` names the new stems, or why not.
+    pub kept: Result<()>,
+}
+
+/// After a storage-path separation of session `id`: moves each stem's
+/// `.part` file onto its `.wav` file, then writes the `stem` lines of
+/// `meta` (D5 of M3).  `meta` names the new stems only if every file
+/// moved; else it names none, so a restore never mixes two separations.
+pub async fn keep_stored_stems(id: &str, names: &[String]) -> StoredStems {
+    saving(id, keep_stored_now(id, names)).await
+}
+
+async fn keep_stored_now(id: &str, names: &[String]) -> StoredStems {
+    let base = session_folder(id);
+    let folder = format!("{base}/stems");
+    let mut paths = Vec::with_capacity(names.len());
+    let mut unmoved = Vec::new();
+    for name in names {
+        let file = stem_file(name);
+        let part = format!("{file}.part");
+        if move_file(&folder, &part, &file).await {
+            paths.push(format!("{folder}/{file}"));
+        } else {
+            paths.push(format!("{folder}/{part}"));
+            unmoved.push(part);
+        }
+    }
+    let kept = async {
+        let mut meta = Meta::parse(&String::from_utf8_lossy(
+            &read(&format!("{base}/meta"))
+                .await
+                .ok_or_else(|| anyhow!("session {id} is gone"))?,
+        ));
+        meta.stems = if unmoved.is_empty() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: the stem names, a few bytes"
+            )]
+            let names = names.to_vec();
+            names
+        } else {
+            Vec::new()
+        };
+        write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+        if unmoved.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "browser storage could not move {} into place",
+                unmoved.join(", ")
+            ))
+        }
+    }
+    .await;
+    StoredStems { paths, kept }
+}
+
+/// [`st_move`], refused once storage is closed for a reset.
+async fn move_file(folder: &str, from: &str, to: &str) -> bool {
+    if CLOSED.get() {
+        return false;
+    }
+    WRITES.set(WRITES.get() + 1);
+    let moved = st_move(folder, from, to).await.as_bool() == Some(true);
+    WRITES.set(WRITES.get() - 1);
+    moved
+}
+
+/// The stem `name` from the WAV file at `path`, fitted to a song of
+/// `frames`, so the player never reads past a stem's end.
+pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<Stem> {
+    let bytes = read(path)
+        .await
+        .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
+    let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
+    // A session stored before decision 0012 from stems at mixed rates can
+    // hold stems one frame shorter than its source now opens with.
+    let fitted = |c: Vec<f32>| -> Samples { padded_to(c, frames).into() };
+    let mut ch = audio.channels.into_iter();
+    let left = fitted(ch.next().unwrap_or_default());
+    let right = ch.next().map_or_else(|| left.clone(), fitted);
+    Ok(Stem {
+        name: name.into(),
+        left,
+        right,
+    })
 }
 
 async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
@@ -369,22 +496,8 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     }
     let mut stems = Vec::new();
     for name in &meta.stems {
-        let bytes = read(&format!("{base}/stems/{}", stem_file(name)))
-            .await
-            .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
-        let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
-        // Fitted to the source, so the player never reads past a stem's end.
-        // A session stored before decision 0012 from stems at mixed rates
-        // can hold stems one frame shorter than its source now opens with.
-        let fitted = |c: Vec<f32>| -> Samples { padded_to(c, source.frames).into() };
-        let mut ch = audio.channels.into_iter();
-        let left = fitted(ch.next().unwrap_or_default());
-        let right = ch.next().map_or_else(|| left.clone(), fitted);
-        stems.push(Stem {
-            name: name.clone(),
-            left,
-            right,
-        });
+        let path = format!("{base}/stems/{}", stem_file(name));
+        stems.push(read_stem(&path, name, source.frames).await?);
     }
     Ok(crate::with_original(&source, stems))
 }
@@ -581,6 +694,117 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         );
         let (got, song, meta) = restore().await.expect("stored").expect("readable");
         assert_eq!((got, song.frames, meta.rate), (id, 800, 44_100));
+        st_remove(ROOT).await;
+    }
+
+    /// A session `id` with one source file and the `stem` lines of an
+    /// earlier separation.
+    async fn plant_session(id: &str, stems: &[&str]) -> Meta {
+        let meta = Meta {
+            name: "acme".into(),
+            rate: 44_100,
+            files: vec![("acme.wav".into(), "0.wav".into())],
+            stems: stems.iter().map(|s| s.to_string()).collect(),
+        };
+        write(&format!("{ROOT}/{id}/meta"), meta.to_text().as_bytes())
+            .await
+            .expect("written");
+        meta
+    }
+
+    /// D5 of M3: the worker's `.part` files replace the kept stems, and
+    /// `meta` names the new stems, once every file has moved.
+    #[wasm_bindgen_test]
+    async fn stored_stems_replace_the_kept_stems() {
+        st_remove(ROOT).await;
+        let id = "1792640000000";
+        let before = plant_session(id, &["old"]).await;
+        let stems = format!("{ROOT}/{id}/stems");
+        write(&format!("{stems}/bass.wav"), &[1])
+            .await
+            .expect("written");
+        write(&format!("{stems}/bass.wav.part"), &[2, 2])
+            .await
+            .expect("written");
+        write(&format!("{stems}/drums.wav.part"), &[3, 3, 3])
+            .await
+            .expect("written");
+        let names = ["bass".to_string(), "drums".to_string()];
+        spy();
+        let stored = keep_stored_stems(id, &names).await;
+        let record = stop_spy();
+        assert_eq!(record, "whole", "MEM-5: the meta write");
+        stored.kept.expect("kept");
+        assert_eq!(
+            stored.paths,
+            [format!("{stems}/bass.wav"), format!("{stems}/drums.wav")]
+        );
+        assert_eq!(read(&format!("{stems}/bass.wav")).await, Some(vec![2, 2]));
+        assert_eq!(
+            read(&format!("{stems}/drums.wav")).await,
+            Some(vec![3, 3, 3])
+        );
+        for part in ["bass.wav.part", "drums.wav.part"] {
+            assert_eq!(read(&format!("{stems}/{part}")).await, None, "{part}");
+        }
+        let meta = Meta::parse(&String::from_utf8_lossy(
+            &read(&format!("{ROOT}/{id}/meta")).await.expect("meta"),
+        ));
+        assert_eq!(meta.stems, names);
+        assert_eq!((meta.files, meta.name), (before.files, before.name));
+        st_remove(ROOT).await;
+    }
+
+    /// D5 of M3: when a file cannot move, `meta` names no stems, so a
+    /// restore never mixes the stems of two separations.  The page reads
+    /// that stem from its `.part` file.
+    #[wasm_bindgen_test]
+    async fn a_stem_that_cannot_move_leaves_no_stem_lines() {
+        st_remove(ROOT).await;
+        let id = "1792640000001";
+        plant_session(id, &["bass", "drums"]).await;
+        let stems = format!("{ROOT}/{id}/stems");
+        write(&format!("{stems}/bass.wav.part"), &[2, 2])
+            .await
+            .expect("written");
+        let names = ["bass".to_string(), "drums".to_string()];
+        let stored = keep_stored_stems(id, &names).await;
+        let error = stored.kept.expect_err("not kept").to_string();
+        assert!(error.contains("drums.wav.part"), "{error}");
+        assert_eq!(
+            stored.paths,
+            [
+                format!("{stems}/bass.wav"),
+                format!("{stems}/drums.wav.part")
+            ]
+        );
+        let meta = Meta::parse(&String::from_utf8_lossy(
+            &read(&format!("{ROOT}/{id}/meta")).await.expect("meta"),
+        ));
+        assert!(meta.stems.is_empty(), "{:?}", meta.stems);
+        assert_eq!(meta.files.len(), 1, "the song stays");
+        st_remove(ROOT).await;
+    }
+
+    /// D6 of M3: a stored stem reads back as its 16-bit samples, padded to
+    /// the song's frames.
+    #[wasm_bindgen_test]
+    async fn a_stored_stem_reads_back_to_the_song_frames() {
+        st_remove(ROOT).await;
+        let path = format!("{ROOT}/1/stems/bass.wav");
+        let left = [0.5, -0.25, 1.0 / 3.0];
+        let right = [1.5, -1.0, 0.0];
+        write(&path, &engine::wav::encode_pcm16(&left, &right, 44_100))
+            .await
+            .expect("written");
+        let stem = read_stem(&path, "bass", 5).await.expect("read");
+        let step = 1.0 / 32_768.0;
+        assert_eq!(stem.name, "bass");
+        assert_eq!(*stem.left, [0.5, -0.25, 10_923.0 * step, 0.0, 0.0]);
+        assert_eq!(*stem.right, [32_767.0 * step, -1.0, 0.0, 0.0, 0.0]);
+        let missing = read_stem(&format!("{ROOT}/1/stems/drums.wav"), "drums", 5).await;
+        let error = missing.expect_err("no file").to_string();
+        assert!(error.contains("stem drums is missing"), "{error}");
         st_remove(ROOT).await;
     }
 

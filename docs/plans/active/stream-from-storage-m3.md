@@ -190,7 +190,8 @@ The parent's M3 acceptance, check by check:
   * vocals `f1b79d872435cdb931306a0c33228905c2d6b3ddfd33e9f1cb55720f52d0b624`
   * guitar `7e5eb334e7dead42ef2f7902c1590b2561347aa7b7f17b817aced81c295127bb`
   * piano `3166e0de310c930f2b40f75c2631e4524b7115c64f90d4ef540102af6da68f90`
-* [x] 2026-10-25: step 2, commit `93fab48` (the memory half of `stored-stems`) and the commit after it.  The wire format of D1, with `xtask/e2e/worker.js`.  The worker's loop takes the network as a parameter (`Network`, `GpuNetwork`, `separate_song`).  `e2e stored-stems --hashes` passes after the change: the six hashes did not change.  `e2e storage` passes.  web-test: worker 52 passed, protocol 18 passed.
+* [x] 2026-10-25: step 2, commit `93fab48` (the memory half of `stored-stems`) and the commit after it.  The wire format of D1, with `xtask/e2e/worker.js`.  The worker's loop takes the network as a parameter (`Network`, `GpuNetwork`, `separate_song`).  `e2e stored-stems --hashes` passes after the change: the six hashes did not change.  `e2e storage` passes.  web-test: worker 52 passed, protocol 18 passed.  Commit `c65582e`.
+* [x] 2026-10-25: step 3, the page.  `e2e stored-stems --hashes` passes after step 3: the six hashes did not change.  `e2e separate` passes, now on the storage path (page wasm 10 MB as the separation starts and 10 MB as it ends, 14 MB with the stems shown).  web-test: app lib 30 passed (11 new).  Each new page test fails when its rule is broken by hand (six mutations, each failed its test).
 
 ## Surprises and discoveries
 
@@ -216,6 +217,11 @@ None yet.
 * 2026-10-25, implementer, step 2: the memory half of `stored-stems` is its own commit, before the wire format changes.
 * 2026-10-25, implementer, step 2: the worker opens the stem writer before the first chunk.  A storage failure at the open sends `unstored`, and a song too long for a WAV sends `error`.  The loop's failures are `Stop::Storage` (`unstored`) and `Stop::Failed` (`error`); both abandon the writer first.
 * 2026-10-25, implementer, step 2: until step 3, the page treats an `unstored` reply as a failed separation, and ignores `stored`.  The page names no session before step 3, so neither arrives.
+* 2026-10-25, implementer, step 3: the page's fallback tests make a song "too long" with a smaller limit (`StemApp::memory_limit`), not a stubbed song length.  The pure function of D2 takes the limit as a parameter, and its native test checks `MEMORY_PATH_MAX_FRAMES` at the limit and one frame over it.
+* 2026-10-25, implementer, step 3: the fallback of D4 starts a job with no session and `keeps_stems: false`.  So its stems are never saved, and they show only on the song that is still shown (else they are discarded, with a status line that says so).
+* 2026-10-25, implementer, step 3: step 3 updates `docs/ARCHITECTURE.md` (memory on phones, browser storage, the diagram) and TD-54, because the page takes the storage path from this commit (DOC-1).  Step 5 adds the test names to MEM-5 and checks the rest.
+* 2026-10-25, implementer, step 3: Separate stays disabled while a separation starts and while the page reads stored stems.  When the read ends, the page decides again where the stems go (`show_separated`), because the user can open another song during the read.  A storage-path separation whose song is neither shown nor being opened reads no stems.
+* 2026-10-25, implementer, step 3: the page logs the end line of D9 at `done` on both paths, before it reads or shows any stems.
 * 2026-10-25, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as the M1 log did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective
