@@ -399,25 +399,25 @@ impl Separator {
         }
     }
 
-    /// Asks the worker to encode one stem as MP3; the file comes back as
-    /// [`Event::Mp3`].
-    pub fn encode_mp3(&self, name: &str, left: &[f32], right: &[f32], rate: u32) {
+    /// Asks the worker to encode a stem or a mix as MP3; the file comes
+    /// back as [`Event::Mp3`].  Both channels are transferred (MEM-2).
+    pub fn encode_mp3(&self, name: &str, left: Float32Array, right: Float32Array, rate: u32) {
         let request = Request::Mp3 {
             name: Some(name.into()),
-            left: Float32Array::from(left),
-            right: Float32Array::from(right),
+            left,
+            right,
             rate: Some(rate),
         };
         post(&self.worker, &request, &Settings::default());
     }
 
-    /// Asks the worker to encode one stem as a 16-bit FLAC; the file comes
-    /// back as [`Event::Flac`].
-    pub fn encode_flac(&self, name: &str, left: &[f32], right: &[f32], rate: u32) {
+    /// Asks the worker to encode a stem or a mix as a 16-bit FLAC; the file
+    /// comes back as [`Event::Flac`].  Both channels are transferred (MEM-2).
+    pub fn encode_flac(&self, name: &str, left: Float32Array, right: Float32Array, rate: u32) {
         let request = Request::Flac {
             name: Some(name.into()),
-            left: Float32Array::from(left),
-            right: Float32Array::from(right),
+            left,
+            right,
             rate: Some(rate),
         };
         post(&self.worker, &request, &Settings::default());
@@ -525,38 +525,80 @@ export function spy_on_post(worker) {
         fn spy_on_post(worker: &Worker) -> js_sys::Array;
     }
 
-    #[wasm_bindgen_test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "MEM-1: test code, which reads two samples back"
-    )]
-    fn encode_flac_asks_the_worker_for_a_flac_of_the_stem() {
+    /// Posts one encode request through `encode`, and returns the request
+    /// and its transfer list.
+    fn posted_encode(
+        encode: impl FnOnce(&Separator, Float32Array, Float32Array),
+    ) -> (Request, js_sys::Array, Float32Array, Float32Array) {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let posts = spy_on_post(&sep.worker);
-        sep.encode_flac("lloyd - bass.flac", &[0.25, -0.5], &[0.125, 0.75], 48_000);
+        let left = Float32Array::from(&[0.25f32, -0.5][..]);
+        let right = Float32Array::from(&[0.125f32, 0.75][..]);
+        encode(&sep, left.clone(), right.clone());
         sep.stop();
         assert_eq!(posts.length(), 1, "one message");
         let post = posts.get(0);
         let data = Reflect::get(&post, &"data".into()).unwrap();
         let request = stem_protocol::ToWorker::from_js(&data).expect("a request");
-        match request.request {
+        let transfer = Reflect::get(&post, &"transfer".into())
+            .unwrap()
+            .unchecked_into();
+        (request.request, transfer, left, right)
+    }
+
+    /// The request sends the page's arrays themselves, transferred.
+    fn assert_sent_as_they_are(
+        transfer: &js_sys::Array,
+        (left, right): (&Float32Array, &Float32Array),
+        (sent_left, sent_right): (&Float32Array, &Float32Array),
+    ) {
+        assert!(
+            Object::is(sent_left, left) && Object::is(sent_right, right),
+            "MEM-1: the request holds a copy of the channels"
+        );
+        assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
+        assert!(Object::is(&transfer.get(0), &left.buffer()));
+        assert!(Object::is(&transfer.get(1), &right.buffer()));
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_flac_asks_the_worker_for_a_flac_of_the_arrays() {
+        let (request, transfer, left, right) = posted_encode(|sep, l, r| {
+            sep.encode_flac("lloyd - bass.flac", l, r, 48_000);
+        });
+        match request {
             Request::Flac {
                 name,
-                left,
-                right,
+                left: l,
+                right: r,
                 rate,
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - bass.flac"));
                 assert_eq!(rate, Some(48_000));
-                assert_eq!(left.to_vec(), [0.25, -0.5]);
-                assert_eq!(right.to_vec(), [0.125, 0.75]);
+                assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
             }
             other => panic!("{other:?}"),
         }
-        let transfer: js_sys::Array = Reflect::get(&post, &"transfer".into())
-            .unwrap()
-            .unchecked_into();
-        assert_eq!(transfer.length(), 2, "MEM-2: both channels are transferred");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_mp3_asks_the_worker_for_an_mp3_of_the_arrays() {
+        let (request, transfer, left, right) = posted_encode(|sep, l, r| {
+            sep.encode_mp3("lloyd - mix without vocals.mp3", l, r, 44_100);
+        });
+        match request {
+            Request::Mp3 {
+                name,
+                left: l,
+                right: r,
+                rate,
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - mix without vocals.mp3"));
+                assert_eq!(rate, Some(44_100));
+                assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[wasm_bindgen_test]
