@@ -197,6 +197,7 @@ The parent's M3 acceptance, check by check:
   * `e2e separate`: passed, on the storage path.  Page wasm 10 MB as the separation starts, 10 MB as it ends, 13 MB with the stems shown.
   * `e2e memory-budget`: passed, both songs on the storage path.  The page grew by 0 MB during each separation (1 minute: 50 MB at the start and at the end; 4 minutes: 177 MB and 177 MB).  Peaks: 1 minute, page wasm 177 MB, worker wasm 57 MB, GPU live 732 MB, 966 MB in all; 4 minutes, page wasm 686 MB, worker wasm 99 MB, GPU live 732 MB, 1517 MB in all.  The 4-minute peak is 551 MB above the 1-minute peak (M2: 592 MB).  The page's peak comes after the separation, when it reads the six stems back (D6), as TD-54 says.
   * `e2e storage`: passed.
+* [x] 2026-10-25: step 5, the docs.  Commit `ffeb4a8` was step 4.  MEM-5's "Enforced by" names `stem_writes_pass_whole_arrays` (the worker's sync writes) and `stored_stems_replace_the_kept_stems` (the page's `meta` write).  Step 3 already updated `docs/ARCHITECTURE.md` and TD-54, and steps 2 and 4 the README's scenarios.  `docs/working-with-agents.md` lists no scenarios, so it does not change.
 
 ## Surprises and discoveries
 
