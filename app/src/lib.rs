@@ -658,6 +658,9 @@ impl StemApp {
 
     /// Loads a song: builds lanes, shared params and the output.
     pub fn load_song(&mut self, song: Song) {
+        // The old mix lane's job can hold a song-sized buffer; free it
+        // before the new lanes are made (MEM-4).
+        self.mix_follower = None;
         let song = Arc::new(song);
         let mut lanes = Vec::with_capacity(song.stems.len() + 1);
         let (ml, mr) = mix_of_sources(&song);
@@ -1678,24 +1681,23 @@ impl StemApp {
                 job.clipped()
             )
         });
-        self.save_notes.set(&name, note);
         let sep = self.separator.as_ref();
         self.status = match (job.into_sink(), sep) {
             (JsSink::Wav(wav), _) => {
                 store::download(&name, &wav.into_bytes(), "audio/wav");
-                let note = self.save_notes.take(&name);
-                format!("Saved {name}.{note}")
+                format!("Saved {name}.{}", note.unwrap_or_default())
             }
             (JsSink::Flac(c), Some(sep)) => {
                 sep.encode_flac(&name, c.left, c.right, rate);
+                self.save_notes.push(&name, note);
                 format!("Encoding {name}…")
             }
             (JsSink::Mp3(c), Some(sep)) => {
                 sep.encode_mp3(&name, c.left, c.right, rate);
+                self.save_notes.push(&name, note);
                 format!("Encoding {name}…")
             }
             (JsSink::Flac(_) | JsSink::Mp3(_), None) => {
-                self.save_notes.take(&name);
                 format!("Could not save {name}: the encoding worker is not running.")
             }
         };
@@ -2024,6 +2026,25 @@ pub fn start_web() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follow_mix_makes_the_mix_spectrogram_from_its_own_job() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.load_demo();
+        app.show_spectrograms = true;
+        assert!(app.lanes[0].spectrogram.is_none());
+        let lead = app.song.as_ref().unwrap().stem_index("lead").unwrap();
+        app.params.as_ref().unwrap().set_muted(lead, true);
+        app.follow_mix(&egui::Context::default());
+        assert!(
+            app.lanes[0].spectrogram.is_some(),
+            "the waveform job gave the spectrogram's input, so no second mix is needed"
+        );
+        assert!(app.lanes.iter().skip(1).all(|l| l.spectrogram.is_none()));
+    }
 
     fn job(serial: u64, session: Option<&str>) -> SeparationJob {
         SeparationJob {

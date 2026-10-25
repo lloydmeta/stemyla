@@ -212,6 +212,11 @@ impl MixFollower {
             self.job = None;
             return None;
         }
+        // Drop a job for another mix before the new one is made, so that
+        // two song-sized mid buffers are never held at once (MEM-4).
+        if self.job.as_ref().is_some_and(|(recipe, _)| recipe != heard) {
+            self.job = None;
+        }
         let (recipe, mut job) = match self.job.take() {
             Some((recipe, job)) if recipe == *heard => (recipe, job),
             _ => {
@@ -233,25 +238,23 @@ impl MixFollower {
     }
 }
 
-/// Notes for the status line, such as that a mix clips, each for the file
-/// that it is about.  The worker encodes more than one file at a time, so
-/// a note waits for the reply that names its file.
+/// Notes for the status line, such as that a mix clips, one for each file
+/// that the worker encodes.  The worker can hold more than one file, also
+/// two of the same name, and replies in the order of the requests.  So the
+/// notes of a name wait in a queue, and each reply takes the oldest.
 #[derive(Debug, Default)]
-pub struct SaveNotes(Vec<(String, String)>);
+pub struct SaveNotes(Vec<(String, Option<String>)>);
 
 impl SaveNotes {
-    /// Sets the note of `name`, or removes it.
-    pub fn set(&mut self, name: &str, note: Option<String>) {
-        self.0.retain(|(n, _)| n != name);
-        if let Some(note) = note {
-            self.0.push((name.into(), note));
-        }
+    /// Adds the note of a file sent to the worker, or no note.
+    pub fn push(&mut self, name: &str, note: Option<String>) {
+        self.0.push((name.into(), note));
     }
 
-    /// Takes the note of `name`, or gives "".
+    /// Takes the oldest note of `name`, or gives "".
     pub fn take(&mut self, name: &str) -> String {
         match self.0.iter().position(|(n, _)| n == name) {
-            Some(i) => self.0.remove(i).1,
+            Some(i) => self.0.remove(i).1.unwrap_or_default(),
             None => String::new(),
         }
     }
@@ -645,23 +648,37 @@ mod tests {
     #[test]
     fn save_notes_wait_for_their_own_file() {
         let mut notes = SaveNotes::default();
-        notes.set("lloyd - mix.mp3", Some("  it clips.".into()));
-        notes.set("lloyd - bass.wav", None);
-        assert_eq!(notes.take("lloyd - bass.flac"), "");
+        notes.push("lloyd - bass.flac", None);
+        notes.push("lloyd - mix.mp3", Some("  it clips.".into()));
         assert_eq!(notes.take("lloyd - mix.mp3"), "  it clips.");
+        assert_eq!(notes.take("lloyd - bass.flac"), "");
         assert_eq!(notes.take("lloyd - mix.mp3"), "", "a note is taken once");
 
-        notes.set("lloyd - mix.flac", Some("  old.".into()));
-        notes.set("lloyd - mix.flac", None);
+        notes.push("lloyd - mix.flac", Some("  it clips.".into()));
+        notes.push("lloyd - mix.flac", None);
         assert_eq!(
             notes.take("lloyd - mix.flac"),
-            "",
-            "a new save of the file drops its note"
+            "  it clips.",
+            "the first reply of a name gets the first save's note"
         );
+        assert_eq!(notes.take("lloyd - mix.flac"), "");
 
-        notes.set("lloyd - mix.flac", Some("  it clips.".into()));
+        notes.push("lloyd - mix.flac", Some("  it clips.".into()));
         notes.clear();
         assert_eq!(notes.take("lloyd - mix.flac"), "");
+    }
+
+    #[test]
+    fn a_peak_of_exactly_the_threshold_is_silence_as_in_lane_columns() {
+        let (left, right) = ([1e-6_f32, 0.0], [0.0_f32, 0.0]);
+        let mut sink = PeaksSink::new(2, crate::COLUMNS);
+        sink.write(0, &left, &right);
+        let peaks = sink.finish();
+        assert_eq!(peaks.scale, 1.0);
+        assert_eq!(
+            (peaks.columns, peaks.scale),
+            crate::lane_columns(&left, &right)
+        );
     }
 
     #[test]

@@ -79,7 +79,7 @@ The pieces, from the bottom layer up:
    * `load_song` drops the job, so an old song does not stay in memory.
    * When samples clip, the status says how many, and suggests lower volumes.
 6. `app/src/separator.rs`: `encode_mp3` and `encode_flac` take the two `Float32Array`s.  The protocol and the worker do not change (PROTO-1).
-7. The mix lane's subtitle says what it plays: "as heard: all stems", "as heard: all stems except vocals", "as heard: bass, drums" or "as heard: nothing".  Its waveform follows the mix.  A change of the recipe starts a peaks job.  This is the same `ExportJob` with a sink that keeps the minimum and maximum of each column.
+7. The mix lane's subtitle says what it plays: "as heard: all stems", "as heard: all stems except vocals", "as heard: bass, drums" or "as heard: nothing".  Its waveform follows the mix.  A change of the recipe starts a peaks job.  This is the same `ExportJob` with a sink that keeps the minimum and maximum of each column.  With spectrograms on, the sink also keeps the mean of the two channels, one buffer of the song's length, and the mix lane's spectrogram is made from it.
 
 Names: `<song> - mix.<ext>` when every source stem is audible, at any volume, and no derived lane is.  Else `<song> - mix without vocals.<ext>`, or `<song> - mix of bass, drums.<ext>`, whichever lists fewer stems.  A derived lane that is audible makes the list form.
 
@@ -87,7 +87,8 @@ Natively, the app has no Save menu.  A native frame steps a job to its end, so t
 
 ### Memory (MEM-1, MEM-2, MEM-4)
 
-* WebAssembly: two blocks of 16,384 frames for each channel, 256 KB in all.  No buffer of the song's length.
+* WebAssembly, for a save: two blocks of 16,384 frames for each channel, 256 KB in all.  No buffer of the song's length.
+* WebAssembly, for the mix lane with spectrograms on: one buffer of the song's length, the mean of the channels (25.9 MB for a 146.7 s song).  A job for an old mix is dropped before a new one is made, so there is never a second one.
 * JS: the two `Float32Array`s of the mix, 51.8 MB for a 146.7 s song.  A stem save makes the same arrays today.  They are transferred to the worker.
 * The job holds an `Arc<Song>`, not a copy.
 
@@ -186,7 +187,7 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * [x] 2026-10-25: M2: the export job, names and the mix lane.  `cargo test --workspace --exclude roformer-gpu` passes (588).  `the_mix_lane_follows_mute` fails with `follow_mix` turned off.  Four snapshots changed: the subtitle in each, and the mix waveform in `muted_drums`.
 * [x] 2026-10-25: M3: the web saves.  `web-test` passes in Safari, with 3 new tests in `export` and 2 in `separator`.  With a sink that collects into a `Vec`, `a_mix_export_does_not_grow_wasm_memory` fails: 34.1 MB of growth.  TD-53 now names `save_menu`, `start_save` and `step_save`.
 * [x] 2026-10-25: M4, docs: `README.md` and a "Saving a stem or the mix" section in `docs/ARCHITECTURE.md`.  `docs-check` passes.  `trunk build --release` passes.
-* [ ] M4, the real page: the agent had no browser tool in this session, so the maintainer saves a mix with vocals muted in each format, and confirms that playback does not stop.
+* [x] 2026-10-25: M4, the real page: the maintainer checked it in Safari, and said that it works.
 * [ ] Review rounds 1, 2 and 3.
 
 ## Surprises and discoveries
@@ -202,6 +203,7 @@ Run `cargo build -p xtask`, then `/review-rounds main 1 "docs/plans/active/mix-d
 * 2026-10-25, agent: the mix saves at 100% tempo, clamped as playback clamps.
 * 2026-10-25, agent, M2: the mix lane's spectrogram follows the mix too.  It is made again, in one frame, when its mix changes, as every spectrogram is made today.
 * 2026-10-25, agent, review round 1: that one-frame rebuild mixed the whole song on the main thread (1-2).  Now the waveform job also makes the mean of the channels when spectrograms are on, and the spectrogram is made from it at the end.  `spectrogram_db` takes about 1,024 FFTs of 1,024 points, so the end is short.  A spectrogram switched on later is made from `export::mix_mid`, block by block, with one song-sized buffer.
+* 2026-10-25, agent, review round 2: the notes of a name wait in a queue, since the worker can hold two files of the same name, and replies in order (2-6).  The waveform job for an old mix is dropped before a new one is made (2-3).
 * 2026-10-25, agent, review round 1: a clip note waits in `SaveNotes` for the reply that names its file (1-1).  A failed MP3 or FLAC encode clears the notes, since its reply never names the file.
 * 2026-10-25, agent, M3: the FLAC and MP3 items are disabled when the page has no worker.  Before, a click did nothing.
 * 2026-10-25, agent, M3: `load_song` drops a save in progress, also when separated stems arrive.  The status line then shows the separation.
