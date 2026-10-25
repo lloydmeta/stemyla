@@ -206,7 +206,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: M0: plan, decisions 0015 to 0017, TD-54, references (commit `4e076dd`).
 * [x] 2026-10-25: review round 1 of M0: 7 findings confirmed and fixed, 5 nits fixed.
 * [x] 2026-10-25: review round 2: 6 findings confirmed and fixed, 6 nits fixed.
-* [x] 2026-10-25: review round 3: 4 findings confirmed and fixed, 5 nits fixed.  The amendment of 0018 waits for the maintainer.
+* [x] 2026-10-25: review round 3: 4 findings confirmed and fixed, 5 nits fixed.  The maintainer accepted the amendment of 0018.
 * [x] 2026-10-25: M1 code: `?streamtest` (`app/src/streamtest.rs`) and `the_spike_logs_each_measure_and_leaves_no_files`.  In Chrome on the Mac, a 0.2-minute run gave reads of p50 3.4 ms and p99 4.9 ms, and no underruns.
 * [x] 2026-10-25: M1 review round 1: 1 blocker and 7 should-fix fixed.  The audio context starts in the tap, the schedule follows cpal's, and the tests check the counts.
 * [x] 2026-10-25: M1 review round 2: 7 should-fix fixed.  The timer clock follows cpal's slack of one buffer, and the tests check the read, seek, late and concurrent numbers.
