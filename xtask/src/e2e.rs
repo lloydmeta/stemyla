@@ -16,16 +16,19 @@
 //!   (`--weights`, and `xtask roformer-selftest` output).
 //! * `separate`: drop a clip and the model, Separate, lanes appear
 //!   (`--weights`).  The clip is kept in browser storage, so it separates
-//!   on the storage path.  The clip is a 48 kHz WAV, or with `--flac` a 96 kHz
-//!   FLAC.
+//!   on the storage path; a fallback to the memory path fails it.  The clip
+//!   is a 48 kHz WAV, or with `--flac` a 96 kHz FLAC.
 //! * `worker-check`: the worker's separation against PyTorch's
 //!   (`--weights`, `--reference` from `tools/roformer_export.py`).
 //! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
 //!   browser, and print the peak memory of each and the difference
 //!   (`--weights`).  M2 of `docs/plans/active/stream-from-storage.md`.
-//! * `memory-budget` also prints how much the page's WebAssembly memory
-//!   grew during each separation, and fails if it is more than 4 MB (D9 of
-//!   M3 in `docs/plans/active/stream-from-storage-m3.md`).
+//! * `memory-budget` also prints how much the page's and the worker's
+//!   WebAssembly memory grew during each separation, and fails if either
+//!   is more than 4 MB (D9 of M3 in
+//!   `docs/plans/active/stream-from-storage-m3.md`, step 4 of M4).  The
+//!   page's growth includes its write of the mix.  A fallback to the
+//!   memory path fails it.
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix
 //!   on the memory path, then on the storage path into a session folder,
 //!   from a mix file there (`--weights`).  Each stem file equals the memory path's stem as a
@@ -1207,6 +1210,8 @@ fn separate(o: &Opts) -> Result<()> {
             .any(|l| l.contains("separator: separating on the storage path")),
         "the stored clip separates on the storage path",
     );
+    let (ok, what) = no_fallback_check(&p.log[from..]);
+    p.check(ok, &what);
     p.idle(2.0)?;
     p.screenshot("separated")?;
     let errors: Vec<String> = p
@@ -1273,9 +1278,9 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The most that the page's WebAssembly memory may grow during a
-/// separation (D9 of M3): the tolerance of M10.
-const MAX_PAGE_GROWTH_MB: f64 = 4.0;
+/// The most that the page's or the worker's WebAssembly memory may grow
+/// during a separation (D9 of M3, step 4 of M4): the tolerance of M10.
+const MAX_GROWTH_MB: f64 = 4.0;
 
 /// Whether `line` ends the wait of `memory-budget` for a separation: its
 /// stems are shown, or the page reports an error.
@@ -1283,32 +1288,66 @@ fn separation_shown(line: &str) -> bool {
     line.contains("with the stems shown") || is_page_error(line)
 }
 
-/// The check of D9 on the page's growth during a separation.
-fn growth_check(growth: Option<f64>) -> (bool, String) {
+/// The check of D9 of M3 on the growth of `part` (the page or the
+/// worker) during a separation.
+fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
     (
-        growth.is_some_and(|g| g <= MAX_PAGE_GROWTH_MB),
+        growth.is_some_and(|g| g <= MAX_GROWTH_MB),
         format!(
-            "the page grew by {growth:?} MB during the separation, at most {MAX_PAGE_GROWTH_MB} MB"
+            "the {part} grew by {growth:?} MB during the separation, at most {MAX_GROWTH_MB} MB"
         ),
     )
 }
 
+/// How much the worker's WebAssembly memory grew from the start of a
+/// separation to its end, from the worker's log lines.
+fn worker_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(&format!("at the separation's {when}")))
+            .and_then(|l| number_after(l, "worker wasm "))
+    };
+    Some(at("end")? - at("start")?)
+}
+
+/// The page's lines that show a fallback to the memory path.
+const FALLBACK_LINES: [&str; 2] = [
+    "separator: separating on the memory path",
+    "separator: browser storage failed",
+];
+
+/// The check that a separation stayed on the storage path: no line of
+/// [`FALLBACK_LINES`] in `log`.
+fn no_fallback_check(log: &[String]) -> (bool, String) {
+    let found: Vec<&String> = log
+        .iter()
+        .filter(|l| FALLBACK_LINES.iter().any(|f| l.contains(f)))
+        .collect();
+    (
+        found.is_empty(),
+        format!("the separation stays on the storage path (fallback lines: {found:?})"),
+    )
+}
+
 /// How much the page's WebAssembly memory grew from the start of a
-/// separation to its end, from the page's log lines.
+/// separation to its end, from the page's log lines.  The start is the
+/// line before the page writes the mix (step 3 of M4), if it wrote one.
 fn page_growth(log: &[String]) -> Option<f64> {
     let at = |when: &str| {
         log.iter()
-            .find(|l| l.contains(&format!("as the separation {when}")))
+            .find(|l| l.contains(when))
             .and_then(|l| number_after(l, "page wasm "))
     };
-    Some(at("ends")? - at("starts")?)
+    let start = at("before the mix is written").or_else(|| at("as the separation starts"))?;
+    Some(at("as the separation ends")? - start)
 }
 
 /// Separates songs of 1 and 4 minutes, each in a new browser, so that each
 /// starts with empty WebAssembly memory.  Prints the peak of page wasm,
 /// worker wasm and GPU live bytes for each, and their difference.  It also
-/// prints how much the page grew during each separation, and fails if it
-/// is more than [`MAX_PAGE_GROWTH_MB`].  It asserts no budget for the peak
+/// prints how much the page and the worker grew during each separation,
+/// and fails if either is more than [`MAX_GROWTH_MB`].  It fails if a
+/// separation falls back to the memory path ([`no_fallback_check`]).  It asserts no budget for the peak
 /// yet; M10 of the plan does.
 fn memory_budget(o: &Opts) -> Result<()> {
     let mut mounts = Vec::new();
@@ -1359,13 +1398,19 @@ fn memory_budget(o: &Opts) -> Result<()> {
                 .is_some_and(|l| l.contains("with the stems shown")),
             &format!("the {minutes}-minute song separates"),
         );
-        let growth = page_growth(&p.log[from..]);
-        let (ok, what) = growth_check(growth);
+        let (ok, what) = no_fallback_check(&p.log[from..]);
         p.check(ok, &what);
-        if let Some(g) = growth {
-            p.note(&format!(
-                "memory-budget: the {minutes}-minute song: page wasm grew by {g:.0} MB during the separation"
-            ));
+        for (part, growth) in [
+            ("page", page_growth(&p.log[from..])),
+            ("worker", worker_growth(&p.log[from..])),
+        ] {
+            let (ok, what) = growth_check(part, growth);
+            p.check(ok, &what);
+            if let Some(g) = growth {
+                p.note(&format!(
+                    "memory-budget: the {minutes}-minute song: {part} wasm grew by {g:.0} MB during the separation"
+                ));
+            }
         }
         let peak = memory_peak(&p.log);
         p.check(peak.is_some(), "the memory lines");
@@ -2000,11 +2045,78 @@ mod tests {
         assert!(!separation_shown(
             "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends"
         ));
-        assert!(growth_check(Some(0.0)).0);
-        assert!(growth_check(Some(4.0)).0, "at the limit");
-        assert!(!growth_check(Some(4.5)).0);
-        assert!(!growth_check(None).0, "no lines");
-        assert!(growth_check(Some(2.0)).1.contains("at most 4 MB"));
+        assert!(growth_check("page", Some(0.0)).0);
+        assert!(growth_check("page", Some(4.0)).0, "at the limit");
+        assert!(!growth_check("page", Some(4.5)).0);
+        assert!(!growth_check("worker", None).0, "no lines");
+        assert_eq!(
+            growth_check("worker", Some(2.0)).1,
+            "the worker grew by Some(2.0) MB during the separation, at most 4 MB"
+        );
+    }
+
+    /// The page's and the worker's lines of one separation on the storage
+    /// path, in their real order: the worker's end line comes before the
+    /// page's.
+    fn separation_log() -> Vec<String> {
+        [
+            "[1.0s] console.info: separator: memory: page wasm 290 MB before the mix is written",
+            "[2.0s] console.info: separator: separating on the storage path",
+            "[2.0s] console.info: separator: memory: page wasm 300 MB as the separation starts",
+            "[2.1s] console.info: separator: memory: worker wasm 57 MB at the separation's start",
+            "[3.0s] console.info: separator: chunk 1/6: 0.3 s; memory: worker wasm 58 MB, model on the GPU 699 MB",
+            "[8.9s] console.info: separator: memory: worker wasm 60 MB at the separation's end",
+            "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends",
+            "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn the_worker_growth_is_its_end_less_its_start() {
+        let log = separation_log();
+        assert_eq!(worker_growth(&log), Some(3.0));
+        assert_eq!(page_growth(&log), Some(12.0), "from before the mix write");
+        assert_eq!(worker_growth(&log[4..]), None, "no start");
+        assert_eq!(worker_growth(&log[..5]), None, "no end");
+        let pages: Vec<String> = log
+            .iter()
+            .filter(|l| l.contains("page wasm"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            worker_growth(&pages),
+            None,
+            "the page's lines are not the worker's"
+        );
+        let workers: Vec<String> = log
+            .iter()
+            .filter(|l| l.contains("worker wasm"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            page_growth(&workers),
+            None,
+            "the worker's lines are not the page's"
+        );
+    }
+
+    #[test]
+    fn a_fallback_to_the_memory_path_fails_the_checks() {
+        let log = separation_log();
+        let (ok, what) = no_fallback_check(&log);
+        assert!(ok, "{what}");
+        for line in [
+            "[2.0s] console.info: separator: separating on the memory path",
+            "[5.0s] console.warn: separator: browser storage failed: NotReadableError: the mix file could not be read",
+        ] {
+            let mut with = log.clone();
+            with.insert(5, line.to_string());
+            let (ok, what) = no_fallback_check(&with);
+            assert!(!ok, "{line}");
+            assert!(what.contains(line), "{what}");
+        }
     }
 
     #[test]
@@ -2016,7 +2128,7 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        assert_eq!(page_growth(&log), Some(2.0));
+        assert_eq!(page_growth(&log), Some(2.0), "no mix write: from the start");
         assert_eq!(page_growth(&log[1..]), None, "no start");
         assert_eq!(page_growth(&log[..1]), None, "no end");
     }
