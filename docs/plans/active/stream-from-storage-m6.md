@@ -207,7 +207,8 @@ The parent's M6 acceptance, check by check:
   * 2-5 and 2-6: a smoke line of 5 of 6 lanes, and lanes read 5 then 7, must fail the checks.
   * 2-11: `a_restored_session_plays_its_lanes_from_storage` now also checks that stems held for an open play from memory while "original" keeps `mix.f32`, and that a song decoded on the page has no lane files.
   * Docs: 2-3 and 2-4 (the `lanes read K` field in D9 and ARCHITECTURE), 2-8 and 2-14 (TD-39), 2-9 (RT-1's warm-up sentence split, the same meaning), 2-10 (the CI comment, two doc comments rewrapped).
-* [ ] Review rounds 2 and 3, and the review log.
+* [x] 2026-10-27: review round 2 (at `c002083`): 5 reviewers and 5 validators, 700,265 tokens, 59.7 wall minutes.  4 should-fix confirmed (2-1, a held seek near the song's end stopped playback; 2-2, 2-3, 2-5) and 7 nits, all fixed in `064ec8b`.  Mutants: full, 56 tested, 7 missed, all confirmed (6 killed by a new count test, 1 in TD-39; 2 merged into 2-7).  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.
+* [ ] Review round 3, and the review log.
 
 ## Surprises and discoveries
 
