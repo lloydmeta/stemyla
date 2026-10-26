@@ -799,3 +799,77 @@ fn the_lanes_read_since_the_last_count_are_counted() {
     sources[1].read(0, &mut l, &mut r);
     assert_eq!(ahead.take_lanes_read(), 1, "a failed lane read counts");
 }
+
+/// Review round 3 of M6, finding 3-2: the slot that `next_read` gives the
+/// reader no longer holds its old block, so a seek into that block holds
+/// until a fill gives the block again, and nothing plays from a slot that
+/// is being filled.
+#[test]
+fn a_seek_into_a_slot_being_refilled_holds() {
+    let mut pair = Pair::new(
+        lanes(40 * B as usize, 1, 0),
+        StretcherKind::Varispeed,
+        Some((2, 1)),
+    );
+    pair.both(|p| p.playing.store(true, Relaxed));
+    // Past block 1, so all three slots hold blocks.
+    pair.play(100, Reader::KeepUp);
+    // Play on with no reads until the reader would refill a slot that
+    // holds a block.
+    let mut picked = None;
+    for _ in 0..200 {
+        pair.play(1, Reader::Stalled);
+        let before: Vec<u64> = pair
+            .ahead
+            .slots
+            .iter()
+            .map(|s| s.block.load(Relaxed))
+            .collect();
+        if let Some(read) = pair.ahead.next_read() {
+            let old = before[read.slot];
+            if old != NO_BLOCK && old != read.block {
+                picked = Some((read, old));
+                break;
+            }
+        }
+    }
+    let (read, old) = picked.expect("the reader refills a slot that holds a block");
+    let target = old * B + 100;
+    let run = next_run(target, 40 * B, None, 256);
+    let ready = |pair: &Pair| {
+        run.parts()
+            .all(|(s, e)| (s / B..e.div_ceil(B)).all(|b| pair.ahead.holds(b)))
+    };
+    pair.stored_params().request_seek(target);
+    let mut seeked = false;
+    let mut same = true;
+    for step in 0..40 {
+        if step == 1 {
+            // The reader's read of `read.block` ends now.
+            let files = pair.lanes.files.clone();
+            pair.ahead.fill(read, |lanes| {
+                let start = read.first_frame() as usize * 4;
+                let n = (files[0].len() - start).min(lanes[0].len());
+                lanes[0][..n].copy_from_slice(&files[0][start..start + n]);
+                lanes[0][n..].fill(0);
+            });
+        } else if step > 1 {
+            pair.read(Reader::KeepUp);
+        }
+        // The memory player seeks when the stored target's run is ready.
+        if !seeked && ready(&pair) {
+            pair.memory.params().request_seek(target);
+            seeked = true;
+        }
+        let [l, _] = pair.stored.render(pair.callback);
+        let [m, _] = pair.memory.render(pair.callback);
+        same &= l == m;
+    }
+    assert!(seeked, "the target was read");
+    assert_eq!(
+        pair.ahead.underruns(),
+        0,
+        "nothing played from a slot being filled"
+    );
+    assert!(same, "the old position, then the target, as in memory");
+}

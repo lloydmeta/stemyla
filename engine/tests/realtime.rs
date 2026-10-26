@@ -491,6 +491,22 @@ fn stored_phases(rig: &mut Rig) {
             r.fail("loop behind the head", "held no seek".into());
         }
     });
+    rig.phase("seek held at the end", |r| {
+        // The old position reaches the song's end while a seek holds; the
+        // seek then fades out and jumps, in callbacks shorter than its fade
+        // too (review round 3 of M6, finding 3-1).
+        r.params.request_seek(r.frames as u64 - r.seconds(0.05));
+        r.play(0.1);
+        r.params.playing.store(true, Relaxed);
+        r.set_reading(false);
+        r.params.request_seek(r.seconds(5.0));
+        r.play(0.3);
+        r.set_reading(true);
+        r.play(0.5);
+        if !r.params.playing.load(Relaxed) {
+            r.fail("seek held at the end", "stopped at the song's end".into());
+        }
+    });
     rig.phase("lane fails", |r| {
         r.ahead().fail_lane(0);
         r.play(0.5);

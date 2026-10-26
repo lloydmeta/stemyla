@@ -438,12 +438,14 @@ impl Player {
         }
 
         // The stop at the end uses the player's own head, not a target.  A
-        // seek that holds plays silence past the end until its run is
-        // ready (review round 2 of M6, finding 2-1).
+        // seek that holds or fades out toward its target plays silence past
+        // the end until it jumps (review rounds 2 and 3 of M6, findings 2-1
+        // and 3-1).
         let head = self.playhead();
         let shown = self.shown_head();
         p.playhead.store(shown, Relaxed);
-        if p.loop_region().is_none() && head >= self.frames as u64 && self.pending.is_none() {
+        let seeking = self.pending.is_some() || matches!(self.fade, Fade::Out { .. });
+        if p.loop_region().is_none() && head >= self.frames as u64 && !seeking {
             p.playing.store(false, Relaxed);
         }
         self.give_hints();
@@ -1112,11 +1114,16 @@ mod tests {
         /// Plays `callbacks` callbacks of 512 frames on both, and gives
         /// the outputs of the gated player and of the memory one.
         fn play(&mut self, callbacks: usize) -> (Vec<f32>, Vec<f32>) {
+            self.play_frames(callbacks, 512)
+        }
+
+        /// [`Self::play`] with callbacks of `frames` frames.
+        fn play_frames(&mut self, callbacks: usize, frames: usize) -> (Vec<f32>, Vec<f32>) {
             let (mut gated, mut memory) = (Vec::new(), Vec::new());
             for _ in 0..callbacks {
-                let [l, r] = self.gated.render(512);
+                let [l, r] = self.gated.render(frames);
                 gated.extend(l.iter().chain(&r));
-                let [l, r] = self.memory.render(512);
+                let [l, r] = self.memory.render(frames);
                 memory.extend(l.iter().chain(&r));
             }
             (gated, memory)
@@ -1392,17 +1399,28 @@ mod tests {
     /// plays past the end until the target's run is ready.
     #[test]
     fn a_seek_that_holds_at_the_songs_end_plays_on() {
+        // Review round 3 of M6, finding 3-1: callbacks shorter than the
+        // crossfade end while the seek fades out past the end.
+        for frames in [512, 128] {
+            holds_at_the_end(frames);
+        }
+    }
+
+    fn holds_at_the_end(frames: usize) {
         let mut twin = Twin::new();
         let near_end = TWIN_FRAMES as u64 - 3_000;
         twin.both(|p| p.request_seek(near_end));
-        twin.play(1);
+        twin.play_frames(1, frames);
         twin.both(|p| p.playing.store(true, Relaxed));
         twin.lane.window(near_end - 1_000, u64::MAX);
-        twin.play(2);
+        twin.play_frames(2, frames);
         twin.gated_params().request_seek(1_000);
-        for _ in 0..20 {
-            twin.play(1);
-            assert!(twin.gated_params().playing.load(Relaxed), "it plays on");
+        for _ in 0..20 * 512 / frames {
+            twin.play_frames(1, frames);
+            assert!(
+                twin.gated_params().playing.load(Relaxed),
+                "it plays on, {frames}"
+            );
         }
         assert!(
             !twin.memory.params().playing.load(Relaxed),
@@ -1413,11 +1431,11 @@ mod tests {
         twin.lane.open();
         twin.memory.params().playing.store(true, Relaxed);
         twin.memory.params().request_seek(1_000);
-        let (g, m) = twin.play(10);
-        assert_eq!(g, m, "it fades, jumps and plays the target");
+        let (g, m) = twin.play_frames(10 * 512 / frames, frames);
+        assert_eq!(g, m, "it fades, jumps and plays the target, {frames}");
         let head = twin.gated_params().playhead();
-        assert!((1_000..10_000).contains(&head), "playhead {head}");
-        assert!(twin.gated_params().playing.load(Relaxed));
+        assert!((1_000..10_000).contains(&head), "playhead {head}, {frames}");
+        assert!(twin.gated_params().playing.load(Relaxed), "{frames}");
     }
 
     /// Review round 1 of M6, mutant 1-25: with a loop shorter than the

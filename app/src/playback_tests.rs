@@ -535,6 +535,24 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         None,
     );
     let on_the_page_files = on_the_page.files.clone();
+    // The page decodes a song itself when storage fails, and shows it
+    // from memory (review round 3 of M6, finding 3-9).
+    let chosen = vec![("lloyd.wav".to_string(), pb_file(&wav, "lloyd.wav"))];
+    let decoded = open_on_the_page(
+        &chosen,
+        Some(id.clone()),
+        None,
+        0.0,
+        Some("the test".into()),
+    )
+    .await
+    .expect("decoded on the page");
+    app.pending.borrow_mut().song = Some(Ok(decoded));
+    app.apply_inbox(&egui::Context::default());
+    let page_decode = (
+        app.lane_files.iter().all(Option::is_none),
+        app.playback.is_none(),
+    );
     // The demo plays from memory.
     app.load_demo();
     let demo = (
@@ -572,10 +590,19 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         "stems held for an open from memory, \"original\" from mix.f32"
     );
     assert_eq!(on_the_page_files, [None], "a song decoded on the page");
+    assert_eq!(
+        page_decode,
+        (true, true),
+        "shown from memory after a page decode"
+    );
     assert_eq!(demo, (true, true));
 }
 
-#[wasm_bindgen(inline_js = r#"export function dt_blob(bytes) { return new Blob([bytes]); }"#)]
+#[wasm_bindgen(inline_js = r#"
+export function dt_blob(bytes) { return new Blob([bytes]); }
+export function pb_file(bytes, name) { return new File([bytes], name); }
+"#)]
 extern "C" {
     fn dt_blob(bytes: &[u8]) -> web_sys::Blob;
+    fn pb_file(bytes: &[u8], name: &str) -> web_sys::File;
 }

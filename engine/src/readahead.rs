@@ -394,6 +394,10 @@ impl ReadAhead {
     /// The first of the kept wanted blocks that no slot holds, and the slot
     /// to put it in: an empty slot, or else one whose block is not kept.
     /// `None` when there is nothing to read, or no slot to read it into.
+    /// The slot no longer holds its old block from now on, so nothing plays
+    /// from it, and a seek into that block holds, until a fill publishes a
+    /// block there (review round 3 of M6, finding 3-2).  If the read is
+    /// dropped, the slot stays empty.  Not for the callback.
     pub fn next_read(&self) -> Option<BlockRead> {
         let mut kept = self.wanted();
         kept.truncate(self.slots.len());
@@ -404,6 +408,13 @@ impl ReadAhead {
             .iter()
             .position(|s| held(s) == NO_BLOCK)
             .or_else(|| self.slots.iter().position(|s| !kept.contains(&held(s))))?;
+        let chosen = &self.slots[slot];
+        chosen.block.store(NO_BLOCK, Relaxed);
+        chosen
+            .data
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .block = None;
         Some(BlockRead { block, slot })
     }
 

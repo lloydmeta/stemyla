@@ -79,8 +79,8 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
-    # A hung test must not hold the runner for GitHub's 6 h default, such
-    # as an RT-1 test under a blocking lock.  The job takes about 6 minutes
+    # A hung test, such as an RT-1 test under a blocking lock, must not hold
+    # the runner for GitHub's 6 h default.  The job takes about 6 minutes
     # (2026-10-26).
     timeout-minutes: 45
     env:

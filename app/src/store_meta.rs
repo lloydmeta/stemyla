@@ -554,8 +554,8 @@ pub fn wav_data(head: &[u8]) -> Option<(u64, u64)> {
 
 /// The lane file of the stem WAV at `path`, whose first bytes are `head`
 /// and whose size is `file_bytes`, for a song of `frames` (D8).  It gives
-/// one only if the file is complete, with at least the song's frames less
-/// one, and is not a `.part` file, which the next separation writes.
+/// one only if the file is complete: it holds at least the song's frames
+/// less one.  A `.part` file, which the next separation writes, gives none.
 pub fn stem_lane_file(path: &str, head: &[u8], file_bytes: u64, frames: usize) -> Option<LaneFile> {
     if path.ends_with(".part") {
         return None;

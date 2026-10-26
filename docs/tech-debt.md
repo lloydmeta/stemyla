@@ -258,7 +258,7 @@ This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/
 
 Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `xtask/src/serve.rs` and `xtask/src/roformer_cli.rs` runs only against a live browser, a driver or the model weights (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
 
-* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run);
+* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run).  The body of `smoke` is mutant 2-14 of review round 2 of M6; its check of the `playback:` line, `all_from_storage`, has a unit test;
 * the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
 * `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls (not run);
 * `query` and `Opts::weights`, which `parses_scenario_and_options` never calls (not run);
@@ -268,8 +268,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `
 * the body of `e2e decode` and its helper `drop_and_open` (`xtask/src/e2e/decode.rs`), which run only in a browser; review round 1 of M5 found mutants in both that no `cargo test` kills.  Its checks have unit tests.
 * the body of `e2e playback` (`run` in `xtask/src/e2e/playback.rs`), which runs only in a browser.  Its checks, the click positions, the target and the wait have unit tests (review round 1 of M6).
 * `run` in `xtask/src/e2e.rs` and `main` in `app/src/main.rs`, entry points that no test calls (review round 1 of M6, mutants 1-29 and 1-40).
-* `StemApp::log_audio_stats` in `app/src/lib.rs`, which only writes log lines; the app's native tests install no logger to read them.  `e2e smoke` and `e2e playback` read its lines (review round 1 of M6, mutant 1-27).  A browser test could read them with the console logger of `app/src/decode_tests.rs`.
-* the body of `e2e smoke` (`smoke` in `xtask/src/e2e.rs`), which runs only in a browser (review round 2 of M6, mutant 2-14).  Its new check, `all_from_storage`, has a unit test.
+* `StemApp::log_audio_stats` in `app/src/lib.rs`, which only writes log lines; the app's native tests install no logger to read them.  `e2e smoke` and `e2e playback` read its lines (review round 1 of M6, mutant 1-27).  A browser test could read them with the test logger (`TestLog`, `start_log`, `logged`) of `app/src/decode_tests.rs`.
 * `memory_budget` in `xtask/src/e2e.rs` after M5's checks of the open, which needs a GPU and the weights (review round 1 of M5).
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).

@@ -26,4 +26,11 @@ fn live_buffers_and_their_high_water_are_counted() {
     drop(buffer());
     assert_eq!(ReadAhead::take_high_water(), 1, "one at a time");
     assert_eq!(ReadAhead::take_high_water(), 0, "none since");
+    // A buffer alive across a take counts in the next one.
+    let kept = buffer();
+    assert_eq!(ReadAhead::take_high_water(), 1);
+    assert_eq!(ReadAhead::take_high_water(), 1, "it is still alive");
+    drop(kept);
+    assert_eq!(ReadAhead::take_high_water(), 1, "until this take");
+    assert_eq!(ReadAhead::take_high_water(), 0);
 }
