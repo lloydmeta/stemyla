@@ -203,6 +203,8 @@ The parent's M5 acceptance, check by check:
   * Docs: TD-54 (1-9), TD-39 (1-10, and the scenario bodies of the mutants at `decode.rs:330`, `decode.rs:433` and `e2e.rs:1412`), TD-33's list, TD-16 (1-16), ARCHITECTURE (1-12, 1-13, 1-21), the README (1-21), `decoder/clippy.toml` (1-11), the doc of `clamped` (1-19), the count of 1-17.  `.cargo/mutants.toml` excludes the wasm32-only `app/src/decode_tests.rs`, `app/src/decoder/client.rs`, `decoder/src/web.rs` and `decoder/src/web/`, and the new wasm32-only functions of `lib.rs`.  The orchestrator's three edits of `.claude/rules/protocol.md` are in this commit unchanged.
   * Runs: `(cd app && trunk build --release)`; `web-test --browser chrome`: 196 tests pass (app 79, 14, 1 and 4; stem-worker 67; decode-worker 7; stem-protocol 24); `e2e decode --browser chrome` passes (45 checks).
 
+* [x] 2026-10-26: review round 1 (at `754d8be`): 6 reviewers and 11 validators, 1,315,674 tokens, 51.6 wall minutes.  10 should-fix confirmed and fixed in `2cd6801`; 16 nits (13 fixed, 1-18 no change, 1-23 and 1-25 in the Decision log).  Mutants: partial, 189 tested, 61 missed: 7 confirmed (4 fixed with tests, 3 scenario bodies in TD-39), 54 refuted (53 wasm32-only, 1 equivalent).  Approvals: 0 (auto mode; a fallback prompt is not counted).
+
 ## Surprises and discoveries
 
 * 2026-10-26, implementer, step 1: the tests build `engine` at opt-level 0, and the block resampler then converts a minute of 48 kHz stereo in about 8 s.  So `a_block_decode_keeps_its_memory_flat` takes about 33 s natively, and `the_block_resampler_gives_to_rate_exactly` about 7 s.  Their longest input stays as the plan asks.  The web build is optimised, so this does not concern the page.
@@ -252,6 +254,8 @@ The parent's M5 acceptance, check by check:
 * 2026-10-26, implementer, review round 1: the `meta` lock waits by polling every 10 ms, as `settled` does.  It is held only for one read-modify-write: `keep_decoded` and `keep_stored_stems` hold it over their moves, which are short; `write_mix` and `save_stems` do not hold it while they write their files.
 * 2026-10-26, implementer, review round 1: finding 1-25 (the PROTO-1 check reports a problem in `decode.rs` against `lib.rs`, and in a file of `xtask/src/e2e/` against `xtask/src/e2e.rs`, with the line of the joined text) is not fixed: the change would touch every fixture of the check.  Finding 1-18 needs no change.
 * 2026-10-26, implementer, step 3, for step 5: `protocol_kinds` in `xtask/src/rules.rs` reads only the `mod kind` of `protocol/src/lib.rs`.  An e2e script that posts a `decode` request fails `e2e_messages_use_protocol_types` until the check also reads `stem_protocol::decode::kind`.
+
+* 2026-10-26, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as M3 and M4 did.  The team leader acts for the orchestrator in step 11 of the skill.
 
 ## Outcomes and retrospective
 
