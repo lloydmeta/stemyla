@@ -214,6 +214,11 @@ The parent's M6 acceptance, check by check:
   * 3-8: `live_buffers_and_their_high_water_are_counted` keeps a buffer alive across a take: `swap(0)` in `take_high_water` fails it.
   * 3-9: `a_restored_session_plays_its_lanes_from_storage` opens a song decoded on the page (`open_on_the_page`, as when storage fails) through `apply_inbox`: every lane file is `None`, and no buffer is made.
   * Docs: 3-3 (D6), 3-4 and 3-5 (TD-39), 3-6 (the CI comment), 3-7 (two sentences split), and the new phase in RT-1's "Enforced by".
+* [x] 2026-10-27: the acceptance checks on the final code (`817258b`), in Chrome on this Mac (AMD Radeon Pro 5500M), after `(cd app && trunk build --release)`.  All pass:
+  * `web-test --browser chrome`: app 95, 14, 1 and 4; stem-worker 67; decode-worker 8; stem-protocol 24.
+  * `e2e playback` (13 checks).  Its last line: `playback: lanes from storage 7 of 7, read-ahead 24.0 MiB, underruns 0 (callbacks), missed lane frames 0, held 0 frames, failed lanes 0, lanes read 7, reads 32, read p50 2.9 ms, p99 6.1 ms`.  Lanes read: 6 before the click on the Mute of "original", 7 after.
+  * `e2e smoke` (8 checks; 5 of 5 lanes from storage, 30.0 MiB, underruns 0), `decode` (45), `audio-resume` (5), `storage` (11), `flac` (5; 300 s of stereo encoded in 10,868 ms).
+  * With the real weights: `separate` (8 checks: the storage path, no second mix, page wasm 39 MB with the stems shown); `memory-budget` (22 checks): the 1-minute song peaks at page wasm 202 MB, worker wasm 57 MB, decoder wasm 6 MB, GPU live 732 MB, total 997 MB; the 4-minute song at page wasm 710 MB, total 1,505 MB, 508 MB above the 1-minute peak.  Every growth of the open and of the separation is 0 MB.  `stored-stems --hashes` with M3's six hashes (16 checks): each stored stem equals the memory path's, 529,244 of 529,244 bytes.
 * [ ] Review round 3, and the review log.
 
 ## Surprises and discoveries
