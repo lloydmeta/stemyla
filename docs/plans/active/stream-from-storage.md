@@ -80,7 +80,7 @@ A 30-minute song has about 272 chunks.  At the iPhone's measured 10.8 to 18.7 s 
 * Block: a run of frames read or written at one time.
 * Session file: one stereo signal of a song in OPFS: a decoded source, the mix or a stem (decision 0016).
 * Read-ahead buffer: memory that holds the next few seconds of every stem in front of the play head (decision 0017).
-* Underrun: the callback needs frames that the read-ahead buffer does not hold.  It plays silence and counts the event.
+* Underrun: the callback needs frames that the read-ahead buffer does not hold.  It plays silence and counts one underrun for each callback that misses frames.
 * Late buffer: a buffer that starts after its time, because the main thread was busy.  It starts at once.  cpal's two chains make late buffers two at a time (a late pair).  `live.rs` fills one of each late pair, and leaves silent the one that would play over it.  This is not an underrun.
 * Overview: the peak columns of a lane, made in a pass over its session file, in blocks, so the waveform never reads the whole file.
 
@@ -204,7 +204,7 @@ The encoded source is never whole in memory.  A chosen file is saved to OPFS as 
 A trait in `engine` gives the frames of a stem from a position.  `Samples` in memory implements it, and so does a storage-backed source.  The `Player` reads through it.  The storage-backed source copies from the read-ahead buffer only, and counts underruns.  An async reader on the main thread keeps the buffer full in front of the play head (decision 0017).  It also fills the frames after the loop start, and starts a read at once after a seek.  The read-ahead buffer is made before playback starts, so the callback never allocates (RT-1).
 
 * Acceptance: engine tests play a storage-backed source with a fake reader that is slow, stalls or fails.  The output equals the memory source, or is silence with the underrun counted.  After a seek, the old position plays until the new block arrives.  The allocation tests in `engine/tests/realtime.rs` cover the new source (RT-1).  A browser test plays a stored song and counts no underruns.
-* Before playback reads `mix.f32`, no failure removes it.  Today `forget_mix` removes it on `unstored` (M4) and on `decode-unstored` with a kept mix (M5).  For a song of one source, `mix.f32` is the only session file of the source (M5 plan).
+* No failure removes `mix.f32` while the shown song plays from the session or an open reads it.  `forget_mix` waits until then, on `unstored` (M4) and on `decode-unstored` with a kept mix (M5).  For a song of one source, `mix.f32` is the only session file of the source (M6 plan, D10).
 
 ### M7: lanes, spectrograms and classic drums from storage
 
@@ -214,12 +214,14 @@ A trait in `engine` gives the frames of a stem from a position.  `Samples` in me
 * After M5, `write_mix` runs only for a song decoded on the page, the fallback when the decode worker cannot decode it.  It reads the song's samples in memory.  M7 makes that fallback write `mix.f32` without a song-length signal on the page, or limits it to the memory path's length.
 * Fix TD-56 if M7's open path allows it: a late drop or pick can show over a newer song.
 * After every separation on the storage path, the decode worker makes each stem's overview from its WAV, in blocks, as M5 does for the sources.  The request is a new decode message in `stem-protocol` (PROTO-1).  The classic-drums stem gets its overview the same way.  `stem-worker` cannot take `engine::overview` (LAYER-1).
+* When the page drops a song's samples, it keeps the song's lists of lane files, which playback reads (M6).
+* Today, lanes that need more than the read-ahead cap play from memory (`Playback::start`).  When the samples go, every lane plays from storage within the cap.
 * A restored session opens its session files without reading them whole.  A session with stem WAVs but no stem overviews (every session before M7) gets them the same way, once.  A session of M3's or M4's layout decodes its sources as in M5.
 * Acceptance: the UI snapshot tests pass with a storage-backed song.  An HPSS test gives the same output in blocks as whole, within a stated tolerance.  A browser test restores a session of the old layout and finds the page WebAssembly memory under a fixed bound.
 
 ### M8: saving reads from storage and writes to storage
 
-`ExportJob` reads its source through the trait of M6.  A WAV sink writes an OPFS file, and the page downloads that file.  The worker encodes FLAC and MP3 from a session file in blocks and writes an OPFS file.  The page downloads it.
+`ExportJob` reads its source in blocks from the session files, through the trait of M6 or directly.  It does not make a second read-ahead buffer, because only one may live (M6 plan, D9).  A WAV sink writes an OPFS file, and the page downloads that file.  The worker encodes FLAC and MP3 from a session file in blocks and writes an OPFS file.  The page downloads it.
 
 * Acceptance: the save tests of `app/src/export.rs` and `e2e flac` pass.  The MEM-5 spy covers the WAV, FLAC and MP3 writes.  A browser test saves a 10-minute mix and finds no growth of the JS heap with the length.
 
@@ -242,11 +244,11 @@ The GPU keeps each weight matrix of an f16 file as f16, two values in each `u32`
 `e2e memory-budget` asserts two things on a computer:
 
 * the 4-minute peak is no more than 4 MB above the 1-minute peak.  Extrapolated to 30 minutes, that is under 40 MB;
-* each peak of page WebAssembly memory, the two workers' WebAssembly memory and GPU live bytes is under a budget.  The budget is M2's measured fixed part, less the f16 saving, plus 10%.  It is at most 1100 MB.
+* each peak of page WebAssembly memory, the two workers' WebAssembly memory and GPU live bytes is under a budget.  The budget is M2's measured fixed part, less the f16 saving, plus the read-ahead cap (`MAX_READ_AHEAD_BYTES`, 32 MiB) and the decode worker's measured peak, plus 10%.  M2 was measured before both existed.  It is at most 1100 MB.
 
 The 1100 MB leaves about 950 MB under the iPhone's limit for WebKit, the JS heap and WebGL.  These parts are not measured.  TD-11 and TD-54 close.
 
-The maintainer publishes, then opens, separates, plays and saves a 30-minute song on the iPhone.  The song is at 44.1 or 48 kHz, because the decode limit (decision 0013, 1 GiB of 32-bit stereo) refuses a 30-minute song above about 74.6 kHz, so at 88.2 or 96 kHz.  The tab stays in the foreground, with Auto-Lock set to Never and the phone on a charger.  Playback includes a loop and seeks.  `idevicesyslog` shows no `exceeded mem limit` for WebContent.
+The maintainer publishes, then opens, separates, plays and saves a 30-minute song on the iPhone.  The song is at 44.1 or 48 kHz, because the decode limit (decision 0013, 1 GiB of 32-bit stereo) refuses a 30-minute song above about 74.6 kHz, so at 88.2 or 96 kHz.  The tab stays in the foreground, with Auto-Lock set to Never and the phone on a charger.  Playback includes a loop and seeks.  The run records the delay from a seek to its first new frame, p50 and p99, with and without a loop (decision 0017).  `idevicesyslog` shows no `exceeded mem limit` for WebContent.
 
 * Acceptance: `cargo run -p xtask -- e2e memory-budget` passes.  The iPhone log and the Web Inspector peaks are in "Outcomes and retrospective".
 
@@ -281,7 +283,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-26: M3 intent review: 1 significant should-fix (this plan's M3 text contradicted D1), fixed here.
 * [x] 2026-10-26: M4: mix from storage (`f10fbb7..57bb956`, plan `stream-from-storage-m4.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m4.md`).  `Demixer` reads a `MixSource` one span at a time, and gives the same output from a block source as from a whole mix.  The page writes `mix.f32` in whole 1 MiB blocks (MEM-5 spy).  M3's six stem hashes are unchanged.  `e2e memory-budget` in Chrome on the Mac: the page and the worker grow 0 MB during a separation; the worker's peak is 57 MB at 1 and 4 minutes (M3: 99 MB at 4 minutes); peaks 966 MB and 1475 MB.  TD-55: Safari does not see a same-size rewrite of the mix in the same second.  In round 3, auto mode refused a reviewer's `sed` edits for a mutation test in its own worktree; the reviewer did not retry, and no finding depends on them.
 * [x] 2026-10-26: M5: decode from and into storage (`83dfdde..0c78eba`, plan `stream-from-storage-m5.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m5.md`).  The new crate `decode-worker` (`decoder/`, decision 0019) decodes and resamples in blocks into session files, and makes the overviews in a second pass.  Block decode equals whole decode bit for bit for WAV, FLAC and MP3.  `e2e decode` (in CI): the session files and overviews equal the native decode.  A song of one source decodes into `mix.f32`, and Separate writes no second mix.  `e2e memory-budget` in Chrome on the Mac: the page and the decode worker grow 0 MB during the open, and the page and the stem worker 0 MB during the separation.  Peaks 972 MB and 1,481 MB; the decode worker 6 MB.  The 509 MB difference is the page's read-back (TD-54).  M3's stem hashes are unchanged.  TD-56: a late drop or pick can show over a newer song (pre-existing).  The orchestrator applied the edits of `CLAUDE.md` and `.claude/rules/` that the crate needs, and wrote the round 2 and 3 findings files, because the Write tool refuses them to a subagent.
-* [ ] M6: playback through the read-ahead buffer.
+* [x] 2026-10-27: M6: playback through the read-ahead buffer (`6be302b..a422b36`, plan `stream-from-storage-m6.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m6.md`).  The player reads each lane through `StemSource`; stored lanes read from a read-ahead buffer that async reads on the main thread fill (decision 0017).  Engine tests with a slow, stalled or failing reader: the output equals memory bit for bit, or is silence with the underruns counted.  After a seek, the old position plays until its block arrives (engine and browser); with each read delayed 200 ms, seek to sound was about 570 ms.  The RT-1 allocation test plays stored lanes through stall, failed-lane, held-seek, loop and end-of-song phases.  `e2e playback` (in CI): 7 of 7 lanes from storage, 24 MiB read-ahead, 0 underruns, read p99 6.1 ms.  `memory-budget`: peaks 997 MB and 1,505 MB; every growth check 0 MB; M3's stem hashes unchanged.  Three playback bugs from the review rounds (2-1, 3-1, 3-2) are fixed with tests.  CI's `test` job has a 45-minute limit.  TD-57: a moved loop can briefly underrun.
 * [ ] M7: lanes, spectrograms, classic drums and sessions from storage.
 * [ ] M8: saving from and to storage.
 * [ ] M9: f16 weights on the GPU.
@@ -318,6 +320,9 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-26, agent (M5): the overviews come from a second pass over each session file, not from the decode pass.  The decode limit of decision 0013 stays.  M6 changes `forget_mix`, and M7 changes `write_mix` (M5 plan, Decision log).
 * 2026-10-26, agent (orchestrator): the orchestrator makes the edits of `CLAUDE.md` and `.claude/` that an accepted decision needs (DOC-1), because subagents do not edit them on another agent's request.  It writes the files of `review-rounds` that the Write tool refuses to a subagent.
 * 2026-10-26, agent (orchestrator, after M5's intent review): the decode worker makes the stem overviews from the stem WAVs in blocks, after each separation and once for an older session (M7).  It already has `engine::overview` and sync reads, and LAYER-1 keeps `engine` out of `stem-worker`.
+* 2026-10-27, agent (M6): stored lane files travel with the stems, and the player no longer holds `Song`.  A hold (silence after a jump while the new block loads) is not an underrun.  MEM-1 is reworded in M7, when the page drops the samples (M6 plan, Decision log).
+* 2026-10-27, agent (orchestrator, after M6's intent review, from `engine/src/source.rs` `next_run` and `app/src/playback.rs`): a seek waits for the read in flight and up to 2 blocks, 4 with the loop's start, or 6 past the loop's end.  Decision 0017 is amended.  M10 measures the delay on the iPhone, because M1's reads were not of one block.
+* 2026-10-27, agent (orchestrator, after M6's intent review): M10's budget adds the read-ahead cap and the decode worker, which M2 did not measure.  M8 reads the session files in blocks and makes no second read-ahead buffer.
 
 ## Outcomes and retrospective
 

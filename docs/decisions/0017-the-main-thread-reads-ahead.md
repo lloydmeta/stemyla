@@ -20,5 +20,7 @@ Async reads on the main thread fill a read-ahead buffer.  The buffer holds a few
 
 * Ten seconds of eight lanes is about 16 MB: six 16-bit stems, the 32-bit float original and a 16-bit classic-drums stem.  The frames after the loop start add at most the same again, so the buffer is at most about 32 MB.  The buffer is made before playback starts (RT-1).
 * A main-thread block longer than the queued audio (about 93 ms) is still a gap, as today.  `live.rs` leaves that buffer silent.  Storage adds no new cause of a gap while reads finish within the read-ahead buffer.
-* A seek to an unbuffered position starts after one read.  M1 measures that delay.
+* A seek to an unbuffered position starts after its block reads.  M1 measures that delay.
 * Moving the callback to an AudioWorklet stays possible.  It would then read from the same buffer.
+
+Amended on 2026-10-27 by the agent, after M6: a seek to an unbuffered position waits for the read in flight, then for the blocks of the target's run (32,768 frames each).  That is up to 2 blocks, up to 4 when the run needs the loop's start, and up to 6 for a target after the loop's end.  The page sees a seek at the next callback (about 46 ms) and polls every 10 ms.  M1 measured reads of one second of eight files, not of one block, so it gives no seek delay for this design.  As a rough bound, since a block holds less than one second of audio, a seek without a loop takes 3 reads at M1's p99 (about 80 ms) plus up to 56 ms, near M1's bar of 150 ms.  A seek with a loop can pass it.  The old position plays during the wait, so the wait is a delay, not a gap.  M10 measures the seek delay on the iPhone.  The decision is unchanged.
