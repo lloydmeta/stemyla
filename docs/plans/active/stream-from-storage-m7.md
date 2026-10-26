@@ -1,0 +1,239 @@
+# Stream from storage, M7: lanes, spectrograms, classic drums and sessions from storage
+
+## Purpose
+
+This is the milestone plan for M7 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M7 section, which stays the criteria.  After M7, on the storage path, a song's samples are not in the page's memory:
+
+* The page shows a stored song from its session files and overviews.  It never reads a session file whole, and it makes no song-length buffer (TD-54).  It keeps, for each lane, the lane file that playback reads (M6).
+* The mix lane's waveform, the spectrograms and a save read the lanes in blocks, from memory or from storage.
+* Classic drums runs HPSS in blocks in the decode worker, and writes its stem as a session file.  It no longer stops the page while it runs.
+* The decode worker makes the overview of each stem from its WAV in blocks, after each separation on the storage path, and once for an older session.
+* Every stored lane plays from storage within the read-ahead cap.
+* A late drop or pick no longer shows over a newer song (TD-56).
+
+The memory path (no session, or storage unavailable or full) keeps working, with its 100 s limit for a separation (decision 0015, M3).
+
+## Context and orientation
+
+The state at the start of M7, on 2026-10-27, at commit `c4f3d6a` on the branch `iphone-crashes-2026-10-25`.  The parent plan's "The code today" and "Terms", and the plans of M3 to M6 (`stream-from-storage-m3.md` to `-m6.md`, with their decision logs), apply.  These parts concern M7:
+
+* `app/src/lib.rs`:
+  * `StemApp` holds `song: Option<Arc<Song>>` (every lane's samples) and `lane_files: LaneFiles` (M6, D8: the file of each lane that plays from storage, aligned with `song.stems`).
+  * `load_song(song, files)` makes each lane's waveform with `lane_columns` of its samples, and the mix lane's with `lane_columns` of `mix_of_sources(song)`, a song-length mix.  It starts a `MixFollower`, and makes the player's sources (`lane_sources`, `Playback::start`).
+  * `with_original` / `with_original_files` add the "original" lane after a separation: the source's only lane in the mix (`original_lane`), else `mix_of_sources`.
+  * `add_stem` adds a memory lane (classic drums).  `start_classic_drums` runs `spectrogram::classic_drums` (HPSS of `mix_of_sources`, whole) on a thread natively, and on the page thread on the web, where it stops the page.
+  * `follow_mix_while` steps the `MixFollower`.  `start_save` and `step_save` save a stem (`StemPcm`) or the mix as heard (`Mix`) through an `ExportJob` (decision 0014).
+  * `post_separation` sends the memory path the samples of `original_lane`, or of `mix_of_sources`.  `write_mix_first` calls `store::write_mix(id, &song)`.
+  * The open flows (`open_chosen_now`, `open_saved`, `open_on_the_page`, `decode_session`, `restore_stored`, the Storage menu, `load_demo`) end in an `Opened` in the `Inbox`, which `apply_inbox` shows.  Only the Storage menu's open has a token (`opens`, `opening`); TD-56.
+* `app/src/spectrogram.rs`: `ensure_textures` makes a texture for each lane that lacks one, from `lane_signal`: the whole mid (`0.5 x (l + r)`) of a stem, or `export::mix_mid` for the mix lane.  Both are song-length.  `classic_drums` runs HPSS whole on both channels.
+* `app/src/export.rs`: `ExportJob` reads a `Pcm` in blocks of `BLOCK` (16,384) frames into a `Sink`.  `PeaksSink::with_mid` keeps a song-length mid.  `MixFollower` keeps the mix lane on the mix as heard; with spectrograms on, its job keeps a song-length mid.  `mix_mid` makes one.
+* `engine/src/mixdown.rs`: `Pcm`, `Mix` (stems of an `Arc<Song>` at the gains of a `MixRecipe`, summed and clamped with `dsp::mix_range`), `StemPcm`.
+* `engine/src/hpss.rs`: `stft`, `istft`, `median_filters`, `hpss` (one channel, whole) and `spectrogram_db` (one channel, whole: `n_fft` 1,024, `hop` = max(len / 1,024, 256), at most 128 rows).
+* `engine/src/overview.rs`: `COLUMNS`, `column_frames`, `column_count`, `lane_columns` and `OverviewBuilder` (M5).  `engine/src/wav.rs`: `header(frames, rate)` and `write_pcm16`.
+* `engine/src/readahead.rs`: `LaneFormat` (F32 or 16-bit), `pcm16_to_f32`, `ReadAhead::slot_counts` (`None` when even 4 and 2 slots pass `MAX_READ_AHEAD_BYTES`, 32 MiB).
+* `app/src/playback.rs`: `Playback::start` gives `None` when the stored lanes do not fit the read-ahead buffer; the lanes then play from memory.
+* `app/src/store.rs`: the session layout (module doc).  `read_back` reads each source file whole into memory, in 1 MiB blocks (D10 of M5).  `read_stem` reads a stem WAV whole and decodes it.  `stems_of` reads every stem.  `rebuild` (the fallback of `restore_id`) reads and decodes the sources whole.  `write_mix` writes `mix.f32` in blocks from a `Song` in memory.  `keep_stored_stems`, `keep_decoded`, the `meta` lock, `SAVING`, `OpenGuard`, `forget_mix`.
+* `app/src/store_meta.rs`: `Meta`, `Decoded`, `PlannedSource`, `LaneFile` (path, format, data offset, data frames), `source_lane_files`, `mix_lane_file`, `wav_data`, `stem_lane_file`, `session_files` and `complete_frames` (D2 of M5).
+* `decoder/` (`decode-worker`, M5): `pass.rs` runs a decode over a `Session` trait (native tests on memory files, OPFS in the browser), with fixed `Buffers`.  `web.rs` reads with `getFile` and `FileReaderSync`, writes `.decode.part` files through one sync access handle each (MEM-5), and runs one request at a time.  `protocol/src/decode.rs`: the request `decode` and the replies `decode-alive`, `decoded`, `undecodable`, `decode-unstored`, `decode-log`.  `app/src/decoder/client.rs`: the page's client, one future for each request.
+* Tests that read samples which M7 removes: `app/tests/ui.rs` (snapshots `empty_state`, `six_lanes`, `muted_drums`, `loop_region`, `spectrograms_classic_drums`), `app/tests/mix_follower_memory.rs`, `the_mix_lane_signal_is_the_mid_of_the_mix_as_heard`, the browser tests of `app/src/decode_tests.rs` and `app/src/playback_tests.rs` that read a song back (`a_decoded_song_is_read_back_and_shown`, `the_read_back_makes_no_whole_file_buffer`), and the MEM-1 tests `separated_stems_and_the_original_are_shared_not_copied` and `a_mono_stem_shares_one_buffer_and_clones_share_every_buffer`.
+
+Facts from outside the repo, checked on 2026-10-27:
+
+* `Blob.slice(start, end)` makes no copy of the bytes; `arrayBuffer()` on the slice reads only its range ([MDN Blob.slice](https://developer.mozilla.org/en-US/docs/Web/API/Blob/slice)).  M1 and M6 read OPFS files this way on the main thread.
+* `FileReaderSync` is available only in workers ([MDN FileReaderSync](https://developer.mozilla.org/en-US/docs/Web/API/FileReaderSync)); the decode worker reads with it (M5).
+* WebAssembly memory can grow but never shrink ([MDN WebAssembly.Memory.grow](https://developer.mozilla.org/en-US/docs/WebAssembly/Reference/JavaScript_interface/Memory/grow)), so a song-length buffer made once stays in the page's memory (MEM-1, MEM-4).
+
+Terms, besides the parent's and those of M3 to M6:
+
+* Lane audio: what a lane of the shown song plays and is drawn from: samples in memory (a memory lane), or a lane file with its overview (a stored lane).
+* Lane reader: the page-side reader of stored lanes in blocks (D3).  It is not the read-ahead buffer of M6, which is for playback only.
+* Window: the frames that one spectrogram column reads (D5).
+
+## Plan of work
+
+### How the team works
+
+The team leader wrote this plan, has it reviewed, runs the review rounds and commits Progress.  One implementer (a `general-purpose` subagent) does steps 1 to 9 and the review fixes.  It starts no other agent.  Before each commit it runs the checks of GIT-2 (`CLAUDE.md`, Commands), commits signed (`git commit -S`) with the attribution lines that the team leader gives, and does not push.
+
+Each commit leaves the docs true (DOC-1).  Write each test first and see it fail for the right reason, then write the code.  If code comes before its test, show with a mutation that the test fails, and record it in Progress.  A workaround or a known gap gets a `docs/tech-debt.md` entry in the same commit.  The implementer does not edit `CLAUDE.md` or `.claude/`; if a change there is needed, it sends the exact text to the team leader.  Browser tests run in Chrome (`--browser chrome`, with the `CHROMEDRIVER` of the team leader's prompt).
+
+### Decisions of this milestone
+
+* D1, the shown song holds lane audio, not a `Song`.  A new type in `app` (natively compiled, for example `app::song::Shown`) holds the sample rate, the frames and, for each lane, its name and its audio:
+  * a memory lane: two `Samples` (clones share them, MEM-1);
+  * a stored lane: its `LaneFile` (M6, D8) and its overview: the columns and the scale of `lane_columns`, read from an overview file.
+  * The type also holds the overview of the mix lane when it comes from a file (D4).  It gives `frames`, `sample_rate`, `stem_index(name)`, `duration_s()` and the lane names, as `Song` does for the callers and the UI tests.
+  * It replaces `StemApp::song` and `StemApp::lane_files` together, so the lanes drawn, played and saved cannot differ.  `open_song`, `load_song`, `Opened`, `StoredSeparation`, `with_original_files`, `add_stem` and the separation flows take it.  `engine::Song` stays for the memory path and the decode on the page: a `Song` becomes a `Shown` of memory lanes with no copy (a test pins the sharing).
+  * Until step 7, a web lane may carry both its samples and its file (as in M6), so each commit works.  Step 7 removes the samples of every lane that has a file.  After step 7, a lane has samples or a file, never both.
+  * `with_original` gives the "original" lane: the lane audio of the source lane that `original_lane` takes (a memory lane shares its samples; a stored lane takes its file and overview), or, for several sources, the session's usable `mix.f32` with `overviews/mix.f32` (M5, D1: `mix.f32` equals `mix_of_sources` bit for bit).  A memory song of several sources keeps today's `mix_of_sources`.  A stored song of several sources with no usable mix takes the memory-path input of D9 when that path read it, and else has no "original" lane; the status line says so.
+  * Names may change if the implementer finds better ones; the Decision log records it.
+* D2, the read-ahead cap.  A stored song never plays a lane from memory because of the cap.  At an open, before the decode or the read of the lanes, the page checks that the song's lanes fit the read-ahead buffer at its minimum slots (`ReadAhead::slot_counts`).  The lanes counted are each source as an f32 lane, and one 16-bit lane for classic drums.  A separated song (six 16-bit stems, an f32 original, a 16-bit classic drums) always fits.  A song that does not fit (more than about 20 sources) opens on the memory path (decoded on the page, as when storage fails), and the status line says why.  `add_stem` of classic drums is refused with a status line if the lanes would no longer fit.  If `Playback::start` still gives `None` for a stored song, its stored lanes play silence and the status line says so; it never falls back to samples.  A native test covers the check (a pure function).
+* D3, the lane reader.  A trait in `app` (native and web), for example `LaneStore`, starts a read of `frames` frames from frame `first` of a set of lane files, and calls back once with each lane's frames as two `f32` channels, or an error.  The bytes convert as M6 converts them (`f32::from_le_bytes`, or `pcm16_to_f32`), so a stored lane reads the same samples as `read_stem` gave, bit for bit.
+  * On the web, `OpfsStore` reads with `Blob.slice(...).arrayBuffer()` of a `File` from `getFile`, one promise for each lane, as M6's reader does, and asks for a repaint when a read ends.  A read past a file's end gives silence, as in M6.
+  * Natively, `MemoryStore` holds files as bytes in memory, and completes a read at the next poll.  The UI tests and the native unit tests use it.  The native app has no store; a native song is in memory, as today.
+  * A `BlockReader` serves one job.  It holds at most one read in flight and the frames of the last read.  It never reads more than `engine::source::BLOCK_FRAMES` (32,768) frames of a lane at a time: 256 KiB of an f32 lane, 128 KiB of a 16-bit lane.  So the spy of M6's `a_lane_file_is_read_one_block_at_a_time` holds for every reader of the page.  Its buffers are made once, at the block's size.
+  * `engine::mixdown::Pcm` gets `ready(&self, at, frames) -> bool`, true by default.  A source over stored lanes starts its read when it is not ready.  `ExportJob::step` and `run_while` make no progress and return while their source is not ready.  So a job that waits for storage costs nothing in a frame, and the page repaints when the read ends.
+  * A `Pcm` over lane audio, for example `LanesMix` and `LanePcm`, replaces `Mix` and `StemPcm` in `app`.  It reads a memory lane from its samples and a stored lane through its `BlockReader`.  It sums the audible lanes with `dsp::mix_range`, as `Mix::channel` does.  For lanes in memory it gives the bytes of `Mix` and `StemPcm`, bit for bit; for stored lanes it gives the same as for the samples `read_stem` and `read_back` gave.
+  * The memory that the lane reader holds is a fixed number of blocks for each job, not the song.  At most three jobs read at a time: the mix follower, a spectrogram and a save.
+* D4, waveforms.  `load_song` makes no waveform from samples of a stored lane, and no song-length mix.
+  * A memory lane: `lane_columns` of its samples, as today.  A stored lane: its overview (D1).
+  * The mix lane: the song's mix overview (from `overviews/mix.f32` for a song opened from its sources, or the stems' mix overview of D7 for a separated song).  For a song of memory lanes only, `lane_columns` of `mix_of_sources`, as today.  Else (a song with stored mix lanes and no mix overview), the lane starts empty and the `MixFollower` makes it (D6).
+  * An overview file holds, for each column, its minimum and then its maximum, as 32-bit little-endian floats (D1 of M5).  The scale comes from the columns as `lane_columns` computes it (one shared function in `engine::overview`).  A file whose size is not `8 x column_count(frames)` is refused.
+* D5, spectrograms read the windows that they show.  `engine::hpss` gets a column builder: `spectrogram_db` is built on it, and gives the same image.  For each column `c`, the builder names the frames of its window (`c x hop - n_fft` up to `c x hop`, clipped to the signal, zeros outside), and takes the window's mid to make that column.  A `SpectrogramJob` in `app` makes one lane's image: it reads the windows of a run of columns with one `ready`/`read` of a `Pcm` (D3), at most one block of frames, and for a song whose `hop` is more than a block, one window at a time.  It is stepped in frames for a few ms, as `ExportJob` is.  So no lane makes a song-length mid, and a 30-minute lane reads about 1,025 windows of 1,024 frames.
+  * A memory lane's image equals today's `spectrogram_db` of its mid, bit for bit.  A stored lane's equals the memory lane's of the same samples.  The mix lane's image is of the mix as heard (`LanesMix` of the follower's recipe), as today.
+  * `lane_signal` and `mix_mid` go.  The textures are made one lane at a time, in lane order, while spectrograms are on.  When the follower shows a new mix, the mix lane's texture is made again.
+* D6, the `MixFollower` keeps no mid.  It steps an `ExportJob<PeaksSink>` over a `LanesMix` of the heard recipe, and gives only the columns and the scale.  `PeaksSink::with_mid` goes.  The rest of its behaviour (a new recipe drops the old job first, D6 of the mix-download plan) stays.
+* D7, overviews of stems: a new decode request (PROTO-1).  `stem-worker` cannot take `engine` (LAYER-1), so the decode worker makes them, as M5 makes the source overviews.
+  * Request `overviews`: the session folder, the song's frames, and the lanes: for each, its path from the session folder, its format (`f32` or `pcm16`), its data offset and its data frames (the page reads each WAV header, at most 4 KiB, with `stem_lane_file`), and the path of its overview.  Also `mix`: the path of the overview of the clamped sum of the lanes at volume 1 (as `mix_of_sources` sums them), or none.  Reply `overviews-made`, or `decode-unstored` with a text.  Each request ends with exactly one of them.  A missing or wrong field is an error, as for `decode`.
+  * The worker reads each lane in blocks of at most 1 MiB with `FileReaderSync` (never through a sync access handle, so a running separation's reads see no lock), makes each overview with `OverviewBuilder`, and the mix's from the sum of each block, clamped.  It writes each overview as `<path>.decode.part` through one sync access handle, each write a whole new array (MEM-5), and removes its part files when it fails.  Its memory does not grow with the song.
+  * Files: `overviews/stems/<k>.f32` for the stem of the `k`th `stem` line, and `overviews/stems/mix.f32` for the mix lane of the separated song.  The page moves each part onto its name inside `SAVING` and the `meta` lock, then writes a `meta` line, for example `stem-overviews<TAB><frames><TAB>f32le-1<TAB><the stem names>`.  It writes the line only if the `stem` lines still name the same stems.  A stored separation's `keep_stored_stems` and the memory path's `save_stems` remove the line in the same `meta` write that changes the `stem` lines.  The overviews of the stems are complete when the line names the `stem` lines and the song's frames, and each file has the size of D4.
+  * When: after `keep_stored_stems` of every storage-path separation, before the page shows the stems (Separate stays disabled meanwhile, as for the read of the stems in M3, D6); and at an open of a session whose `stem` lines have no complete overviews, once.  The page reads the overview files (at most 32 KiB each), then shows the song.
+  * If the decode worker cannot start, stops, or ends with `decode-unstored`, the page makes the overviews itself through the lane reader (D3) with `OverviewBuilder`, in blocks, and does not save them.  The song then shows as usual.  A browser test covers it.
+* D8, classic drums in blocks.
+  * `engine::hpss` gets a block HPSS of a stereo signal: it reads the input from a source of blocks and writes the percussive part to a sink of blocks, with the overlap that the STFT, the median along time (`harmonic_len` frames) and the overlap-add need.  Its memory is a fixed number of STFT frames, not the song.  `hpss` and the block version must give the same output, within a tolerance that step 1 states: bit for bit if the overlap-add sums in the same order, else at most 1e-6 with the reason recorded.
+  * The input is the mix of the song's lanes that are not derived, at volume 1, clamped, as `mix_of_sources` makes it.
+  * A stored song whose input lanes are all stored: a new decode request `classic` with the session folder, the frames and the input lanes (as in D7).  The worker writes `classic.wav.decode.part` (a 16-bit stereo WAV at 44.1 kHz, decision 0016, with `engine::wav::header` and `write_pcm16`, in blocks), then its overview `overviews/classic.f32.decode.part` from that WAV in blocks (as D7).  Reply `classic-made`, or `decode-unstored`.  The page moves both files into place and adds a stored lane named "classic drums" with its file and overview, through `add_stem`'s rules (it replaces a lane of that name; it starts muted).  It holds the session (an `OpenGuard`, M6, D10) from the request until the lane is shown.
+  * The file is a scratch file of the session: `meta` does not name it, so a restore does not show it (as today, classic drums is not kept), and the next run writes it again.  `forget` removes it with the session.
+  * A song whose input lanes are all in memory (the demo song, a song decoded on the page, the stems of a memory-path separation): the page runs the block HPSS on memory, natively on a thread as today, and on the web on the page thread as today.  The lane is a memory lane.
+  * A song with stored and memory input lanes does not arise (memory lanes of a stored song come only from a memory-path separation, whose stems are all the mix lanes).  If it does, the page refuses with a status line.  A native test covers the choice (a pure function).
+  * While a classic-drums request runs, `classic_running` is true on the web, so the button waits.  A result for a song no longer shown is discarded, as today.  A decode of a new open waits behind a running classic-drums request in the worker's queue; the Decision log records it.
+* D9, the memory path of a stored song.  `post_separation` sends the memory path two arrays.  For a song whose input (`original_lane`, else the mix of its sources) is stored, the page first reads the input through the lane reader into two `Vec`s, in blocks, then posts.  The memory path takes only songs of at most `memory_limit` frames, so the read is bounded.  The read samples also become the "original" lane, as today (D1).  A failed read ends the separation with a status line.
+* D10, `write_mix` reads lane audio.  It writes the mix file from the input of D9, block by block: memory lanes from their samples, stored lanes through the lane reader (async, awaited in the write).  It makes no song-length buffer.  After M5 it runs only for a session with no usable mix, which is the fallback of a song decoded on the page; then every lane is in memory, as today.  It never reads `mix.f32` itself: if the input's file is the session's `mix.f32`, `separation_ready` treats the mix as kept.  A native test covers the choice.
+* D11, an open makes no read-back.  An open of a complete session (D2 of M5), a decode by the decode worker, and a stored separation show the song as stored lanes:
+  * each source lane: its `source_file` and `overviews/<i>.f32`; the mix lane: `overviews/mix.f32`;
+  * each stem: its WAV's lane file from its header (`stem_lane_file`, at most 4 KiB read) and its overview (D7); the "original" lane as D1 says; the mix lane: `overviews/stems/mix.f32`.
+  * `read_back` and `read_stem`'s whole read go, and so does `stems_of`'s.  `rebuild` stays for the memory path (decision 0015): it decodes the sources on the page when storage failed.  A stem file that is not complete (M6, D8: `.part`, or a wrong header) is read whole into memory only on the memory path's rules: a song of at most `memory_limit` frames; else the open fails with a status line.
+  * A session of M3's or M4's layout decodes its sources as in M5, then gets its stem overviews (D7).
+* D12, every open has a token (TD-56).  One counter gives a token to each open: a drop, a pick, a Storage open, the startup restore, Demo and a decode on the page.  `apply_inbox` shows an `Opened` and calls `store::make_current` only if its token is still the newest.  An older open still completes D7 of M5 (its files are kept), but does not show its song or make its session current.  The Storage menu's `opening` takes the same counter.  TD-56 closes.
+* D13, MEM-1 is reworded (the maintainer allows it in this milestone), for example: "On the storage path, a song's audio stays in its session files: the page and the workers read it in blocks, and no song-length buffer of it is made (decision 0015).  Audio in memory (the memory path, the demo song) is `engine::Samples` ...", with the rest of today's text.  Its "Enforced by" keeps today's tests that still apply, replaces those that M7 removes, and adds the tests of steps 6 and 7.  No other rule changes.
+
+### Step 1: block HPSS and the spectrogram's columns (engine)
+
+* D5's column builder and D8's block HPSS, in `engine/src/hpss.rs`, and `Pcm::ready` (D3) in `engine/src/mixdown.rs`.  The overview scale as one function in `engine::overview` (D4).
+* Tests, native (`cargo test -p engine`):
+  * `the_column_builder_gives_spectrogram_db`: for signals of 1,000, 44,100, 300,000 and 2,000,000 frames, the image from the windows equals `spectrogram_db` bit for bit.
+  * `block_hpss_gives_hpss`: noise and a tone with clicks, lengths of 1, 2,047, 2,048, 100,000 and 1,000,003 frames, blocks of several sizes.  The output equals `hpss(..).percussive` of each channel within the tolerance of D8; the test states it.
+  * `a_block_hpss_keeps_its_memory_flat` (with `PeakAllocator`, as `a_block_decode_keeps_its_memory_flat`): the peak above the start differs by less than 1 MiB between a 10-second and a 120-second signal.  A control: `hpss` of the long signal peaks more than that above the short one.
+  * `an_overview_scale_is_the_scale_of_lane_columns`.
+
+### Step 2: the jobs read blocks (app, memory lanes)
+
+* D3's `Pcm` over lane audio (`LanesMix`, `LanePcm`) with memory lanes only, `ExportJob`'s wait, D5's `SpectrogramJob`, D6's `MixFollower` without a mid.  `lane_signal`, `mix_mid` and `PeaksSink::with_mid` go.  Saves use the new sources.  The behaviour of a memory song does not change.
+* Tests, native:
+  * `a_lanes_mix_gives_the_bytes_of_mix` and `a_lane_pcm_gives_the_bytes_of_stem_pcm`, with blocks of several sizes.
+  * `a_job_waits_for_a_source_that_is_not_ready` (a test `Pcm` whose `ready` the test sets): no progress, no busy loop, then the same output.
+  * `a_spectrogram_job_gives_the_whole_image`: for a memory lane, and for the mix as heard, it equals `spectrogram_db` of the mid, bit for bit.
+  * `app/tests/mix_follower_memory.rs`: a mix change, with spectrograms on, holds less than a fixed number of blocks at its peak: no song-sized buffer at all.
+  * The UI tests and snapshots pass unchanged; `the_mix_lane_spectrogram_follows_mute` and `the_mix_lane_spectrogram_is_the_mix_as_heard_on_either_path` change only where they name the removed functions.
+
+### Step 3: the shown song and the lane reader (app, native)
+
+* D1's type in place of `song` and `lane_files`, everywhere.  D3's `LaneStore`, `MemoryStore` and `BlockReader`; the `Pcm` over lane audio reads stored lanes.  D4's waveforms from overviews.  D2's check, as a pure function, and its use in `add_stem`.  On the web, each lane still carries its samples and its file, as in M6, so the page works as before.
+* Tests, native:
+  * `a_song_in_memory_becomes_lanes_with_no_copy` (MEM-1, `Samples::shares` and `handles`).
+  * `a_stored_lane_reads_as_its_samples`: a 16-bit and an f32 lane in a `MemoryStore` read the same samples as `read_stem` and `read_back` would give, bit for bit, for reads across a block's end and past the file's end.
+  * `a_stored_song_mixes_and_saves_as_in_memory`: `LanesMix` and `LanePcm` over stored lanes equal those over the same samples in memory.
+  * `a_stored_lane_draws_from_its_overview` and `a_bad_overview_size_is_refused`.
+  * `the_lanes_must_fit_the_read_ahead` (D2).
+  * `snapshots_of_a_stored_song` in `app/tests/ui.rs`: the demo song as f32 session files with their overviews in a `MemoryStore` (as the decode worker writes them), opened as stored lanes.  `six_lanes`, `muted_drums` and `loop_region` equal the same PNGs as the memory song.  With spectrograms on and a stored classic-drums lane (made in the test by D8's block HPSS, as a 16-bit WAV with its overview), the image equals `spectrograms_classic_drums.png`.  If only the 16-bit rounding of that lane passes the snapshot's threshold, the stored run gets its own PNG for that one snapshot, and the Decision log records the pixel count.
+  * The interaction tests of `app/tests/ui.rs` that change the mix (mute, solo, the mix lane's spectrogram) also run on the stored song.
+
+### Step 4: the decode worker's new requests
+
+* D7 and D8 in `stem-protocol` (`stem_protocol::decode`: the requests `overviews` and `classic`, the replies `overviews-made` and `classic-made`, with their `kind` constants and module doc) and in `decoder/` (`pass.rs` or a new module over the `Session` trait, and `web.rs`).
+* Tests, browser (`protocol/tests/web.rs`): each new message round-trips through a structured clone with an empty transfer list; each missing or wrong field is an error; no new kind is read as a stem worker's message, or the reverse.
+* Tests, native (`cargo test -p decode-worker`, on memory files): `stem_overviews_equal_lane_columns` (six 16-bit WAVs, one frame short and of the song's frames, and the stems' mix, against `lane_columns` and `mix_of_sources`); `a_classic_request_writes_the_block_hpss_as_a_wav` (the WAV decodes to D8's block output rounded to 16 bits, and its overview equals `lane_columns` of the decoded WAV); `a_failed_read_or_write_ends_with_unstored_and_leaves_no_part_file`.
+* Tests, browser (`-p decode-worker --lib`): `decode_writes_pass_whole_arrays` covers both requests (MEM-5); `an_overview_request_keeps_the_worker_memory_flat` and `a_classic_request_keeps_the_worker_memory_flat`, as `a_decode_keeps_the_worker_memory_flat`, with read spies of at most 1 MiB.
+* `xtask/src/rules.rs` and `e2e_messages_use_protocol_types` read the new kinds (PROTO-1).
+
+### Step 5: the page reads stored lanes from OPFS
+
+* D3's `OpfsStore`.  The mix follower, the spectrograms and the saves read stored lanes through it.  D9's read for the memory path, and D10's `write_mix` from lane audio.
+* Tests, browser (`app`, with planted session files in OPFS):
+  * `a_stored_mix_follows_mute_as_in_memory`: the mix lane's columns after a mute equal those of the same song in memory.
+  * `a_stored_spectrogram_equals_the_memory_one`: for a stem and for the mix lane.
+  * `a_save_of_a_stored_lane_equals_the_memory_save`: a WAV of a stem and of the mix as heard, byte for byte.
+  * `the_page_reads_a_lane_one_block_at_a_time` (the spy of M6's test, during a follow, a spectrogram and a save of a 1-minute session): no read larger than one block of its lane.
+  * `the_memory_path_reads_a_stored_input`: an `unstored` for a short stored song posts the input's samples, equal to the file's.
+  * `write_mix_reads_lane_audio_in_blocks`: with M4's spy, whole 1 MiB blocks (MEM-5), and the page's memory grows by less than the song's size.
+
+### Step 6: stem overviews and classic drums on the page
+
+* D7 on the page: the decode client's two requests; after `keep_stored_stems`, the overviews, then the stems show; at an open, the overviews once; the `meta` line and its removal; the fallback through the lane reader.  D8 on the page: the `classic` request, the move, the stored lane, `classic_running`.
+* Tests, native: the `stem-overviews` line reads back and is complete only with the same stems (`store_meta`).
+* Tests, browser (with a fake decode worker, as M5's tests):
+  * `a_stored_separation_asks_for_stem_overviews_then_shows_them`;
+  * `a_session_with_stems_and_no_overviews_gets_them_once`: a second open posts no `overviews` request;
+  * `new_stems_remove_the_stem_overviews_line` (for `keep_stored_stems` and `save_stems`);
+  * `the_page_makes_the_overviews_when_the_worker_cannot`;
+  * `classic_drums_of_a_stored_song_is_a_stored_lane`: the `classic` request, the move, a muted stored lane with its overview; `classic_drums_for_a_song_no_longer_shown_is_discarded`.
+  * MEM-5 spies: the page writes no new OPFS file in this step except `meta`; the worker's writes are covered in step 4.
+
+### Step 7: the page drops the samples
+
+* D11: the open flows, `separation_stored` and `stored_stems_arrived` build stored lanes with no read-back.  `read_back` and the whole reads of `read_stem` and `stems_of` go.  D2 at the open.  After this step a lane with a file has no samples.
+* D13: MEM-1 reworded, in this commit.  TD-54 updated (the page no longer reads a stored song back; what is left: saves keep the file in the JS heap until M8, and the budget is asserted in M10).  `docs/ARCHITECTURE.md` (the pipeline from a song, memory on phones, browser storage) and `store.rs`'s module doc.
+* Tests, browser:
+  * `a_stored_song_is_shown_with_no_samples`: a complete 1-minute session and a 4-minute one; the page's WebAssembly memory grows by at most 4 MB from the open's start to the song shown, for each; spies see no read larger than one block of a lane.  It replaces `the_read_back_makes_no_whole_file_buffer` in MEM-1's "Enforced by".
+  * `a_stored_separation_shows_its_stems_with_no_read`: after `stored` and `done`, the stems show with no read of a stem's data.
+  * `a_song_over_the_read_ahead_cap_opens_in_memory` (D2).
+  * The browser tests of M5 and M6 that read samples back change to check lanes and files, with a reason in the Decision log for each.
+
+### Step 8: every open has a token (TD-56)
+
+* D12.  `docs/tech-debt.md`: TD-56 moves to `## Closed`.
+* Tests, browser: `a_late_drop_does_not_show_over_a_newer_song` (the TD's test: a drop's decode is pending, a Storage open of a complete session shows its song, then the drop's `decoded` arrives; the shown song and `sessions/current` stay the Storage song); the same for a pick and for Demo.
+
+### Step 9: the e2e checks and the docs
+
+* A new scenario `e2e old-session` (`xtask/src/e2e/old_session.rs`), in the `browser-tests` job of `.github/workflows/ci.yml` (no GPU), with a pure function and a native test for each check of the log.  It plants a session of M4's layout (a 16-bit WAV source in `src/`, a `meta` with `file`, `rate` and six `stem` lines, six 16-bit stem WAVs, no `decoded` line), of 1 minute and then of 5 minutes, and reloads for each.  The song restores through the decode worker (M5) and the stem overviews (D7), and the first `playback:` line after Play says `lanes from storage 7 of 7`.  It reads the page's WebAssembly memory when the song is shown (a `memory:` line).  It asserts, for each length, that the page's memory is under the bound `OLD_SESSION_BOUND_MB`, and that the 5-minute value is at most `MAX_GROWTH_MB` (4 MB) above the 1-minute value.
+  * The bound: run the scenario first on `c4f3d6a`, where it must fail (the read-back of seven lanes of 5 minutes is about 740 MB), and then on the new code.  Set `OLD_SESSION_BOUND_MB` to the 1-minute value of the new code, rounded up to the next 8 MB, plus 16 MB, and record the measures and the bound in the Decision log.  The bound covers the fixed part: the app, the read-ahead buffer (24 MiB for this song) and the overviews.
+* `e2e memory-budget` with the real weights: record the peaks; the page's growth after the separation (`with the stems shown`) is now about 0 MB.  If its checks assumed the read-back, they change with a reason.
+* Run in Chrome on the Mac, after `(cd app && trunk build --release)`: `e2e old-session`, `playback`, `smoke`, `decode`, `audio-resume`, `storage`, `flac`, `separate`, `memory-budget`, `stored-stems --hashes` (M3's six hashes), and `web-test`.  Record the numbers in Progress.
+* Docs (in the commit that makes each one wrong, at the latest here): `docs/ARCHITECTURE.md` (lanes, spectrograms, classic drums in the decode worker, the decode messages, the session layout), the README (the scenario list; classic drums no longer stops the page), the doc comment of `xtask/src/e2e.rs`, TD-39's list if the scenario body has no native test, MEM-5's "Enforced by" for the new spy tests, and `docs/references/browser-quirks.md` if a browser surprises.
+
+## Validation and acceptance
+
+The parent's M7 section, item by item:
+
+* "`load_song` builds a lane from its overview, not from samples.  It no longer makes a song-length mix": D4; `a_stored_lane_draws_from_its_overview`, `snapshots_of_a_stored_song`, `a_stored_song_is_shown_with_no_samples`.
+* "A spectrogram reads the blocks that it shows.  `lane_signal`, `MixFollower` and `mix_mid` stop making song-length signals": D5, D6; `the_column_builder_gives_spectrogram_db`, `a_spectrogram_job_gives_the_whole_image`, `a_stored_spectrogram_equals_the_memory_one`, `app/tests/mix_follower_memory.rs`.
+* "Classic drums runs HPSS in blocks with overlap, and writes its stem as a session file": D8; `block_hpss_gives_hpss` (the parent's "HPSS test ... within a stated tolerance"), `a_classic_request_writes_the_block_hpss_as_a_wav`, `classic_drums_of_a_stored_song_is_a_stored_lane`.
+* `write_mix` makes no song-length signal: D10; `write_mix_reads_lane_audio_in_blocks`.
+* TD-56: D12; `a_late_drop_does_not_show_over_a_newer_song`.
+* The stem overviews from the decode worker, a new decode message: D7; step 4's and step 6's tests.
+* The lists of lane files stay when the samples go: D1; `a_restored_session_plays_its_lanes_from_storage` (M6) and `e2e playback` still pass.
+* Every lane plays from storage within the cap: D2; `the_lanes_must_fit_the_read_ahead`, `a_song_over_the_read_ahead_cap_opens_in_memory`.
+* A restored session opens with no whole read; an older session gets its stem overviews once; M3's and M4's layouts decode as in M5: D11, D7; `a_session_with_stems_and_no_overviews_gets_them_once`, `e2e old-session`.
+* "The UI snapshot tests pass with a storage-backed song": `snapshots_of_a_stored_song`.
+* "A browser test restores a session of the old layout and finds the page WebAssembly memory under a fixed bound": `e2e old-session`, with the bound of step 9.
+* MEM-1 reworded: D13.
+* The memory path keeps working: the UI tests on the demo song, `e2e smoke`, the separation tests of M3 (`unstored_separates_a_short_song_in_memory`, `unstored_refuses_a_long_song`).
+* Every check of GIT-2 passes, and `cargo run -p xtask -- web-test --browser chrome`.
+
+## Idempotence and recovery
+
+* Each step is one or more commits that pass every check.  Steps 1 to 6 keep the samples on the page, so the page works as in M6 until step 7.  A step can be reverted alone, from the newest back.
+* M7 adds session files (`overviews/stems/`, `classic.wav`, `overviews/classic.f32`) and one `meta` line.  An older build ignores the line (`Meta::parse` ignores lines it does not know) and the files.  A session of M3 to M6 gets its stem overviews at its next open.  A session that a stopped request leaves with `.decode.part` files is complete only when its line is written, and the next request writes its parts again.
+* To go back to the read-back, revert step 7: the open flows then give each lane its samples and its file, as in M6.
+
+## Progress
+
+* [x] 2026-10-27: milestone plan written.
+
+## Surprises and discoveries
+
+None yet.
+
+## Decision log
+
+* 2026-10-27, team leader: D1, the shown song is a list of lane audio (samples, or a file and an overview), not an `engine::Song` with lane files beside it.  When the samples go, nothing else can hold a stale copy, and the lanes drawn, played and saved come from one list.
+* 2026-10-27, team leader: D3, the saves read stored lanes in M7, through the same lane reader as the mix lane and the spectrograms.  Without it, a save of a stored song would have no samples after step 7.  M8 keeps its own part: the sinks write OPFS files, and the worker encodes from a file.  So the first sentence of the parent's M8 ("`ExportJob` reads its source in blocks from the session files") is done here; the orchestrator can record it.
+* 2026-10-27, team leader: D5 and D6, the mix lane's waveform and the spectrograms read on the page, through async reads and jobs stepped in frames, not in the decode worker.  The saves need the same reader, and the native UI tests can run it with a store in memory.  The stem overviews and classic drums read the whole song, so they run in the decode worker, which reads with `FileReaderSync` off the page thread.
+* 2026-10-27, team leader: D8, classic drums is a scratch session file that `meta` does not name, so a restore does not show it.  Today a reload loses it too, and a lane in `meta` would need rules for the stems it was made from.
+* 2026-10-27, team leader: D2, a song whose lanes do not fit the read-ahead buffer at its minimum slots opens on the memory path, as when storage fails.  This keeps such a song working, and every stored lane plays from storage within the cap.
+* 2026-10-27, team leader: D12, TD-56 is fixed here, because M7 changes every open flow (they carry lane audio), so one counter for every open costs little more.
+
+## Outcomes and retrospective
+
+Not started.

@@ -22,6 +22,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/active/stream-from-storage-m4.md`: M4 of that plan: the page keeps the mix in a session file, and the worker reads it in blocks.
 * `plans/active/stream-from-storage-m5.md`: M5 of that plan: a new decode worker reads a stored song in blocks and writes its session files and overviews.
 * `plans/active/stream-from-storage-m6.md`: M6 of that plan: playback reads stored lanes through a read-ahead buffer that the main thread fills.
+* `plans/active/stream-from-storage-m7.md`: M7 of that plan: the page shows a stored song from its files and overviews, with no read-back; spectrograms, classic drums and saves read blocks.
 * `plans/completed/mix-download.md`: done on 2026-10-25: the mix lane saves the mix as heard (WAV, FLAC, MP3), mixed on the page in blocks; its waveform and spectrogram follow the mix.
 * `plans/completed/flac.md`: done on 2026-10-25: FLAC files open as songs and stems, a stem saves as a 16-bit FLAC, and a decoded file holds at most 1 GiB of samples.
 * `plans/completed/48k-audio.md`: done on 2026-10-24: songs at 48 kHz and other standard rates convert to 44.1 kHz when they open, so they separate.
