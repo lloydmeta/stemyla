@@ -9,6 +9,7 @@
 )]
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+use stem_protocol::decode::{DecodeReply, DecodeRequest, Source};
 use stem_protocol::{Malformed, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
@@ -607,4 +608,211 @@ fn mem1_lint_is_on_for_js_arrays() {
     )]
     let floats = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();
     assert_eq!((slice, bytes, floats), (vec![1.0], vec![2], vec![3.0]));
+}
+
+fn decode_request() -> DecodeRequest {
+    DecodeRequest {
+        session: "sessions/1792640000000".into(),
+        sources: vec![
+            Source {
+                file: "src/0.wav".into(),
+                index: 0,
+                ext: "wav".into(),
+                in_mix: true,
+            },
+            Source {
+                file: "src/1.flac".into(),
+                index: 1,
+                ext: "flac".into(),
+                in_mix: false,
+            },
+        ],
+        mix_frames: Some(132_300),
+    }
+}
+
+fn decode_replies() -> Vec<DecodeReply> {
+    vec![
+        DecodeReply::Alive,
+        DecodeReply::Decoded {
+            frames: 132_300,
+            new_mix: true,
+            channels: vec![2, 1],
+        },
+        DecodeReply::Decoded {
+            frames: 1,
+            new_mix: false,
+            channels: vec![],
+        },
+        DecodeReply::Undecodable {
+            text: "unsupported or unrecognised format".into(),
+        },
+        DecodeReply::Unstored {
+            text: "QuotaExceededError".into(),
+        },
+        DecodeReply::Log("decoder: memory: decoder wasm 2 MB at the decode's start".into()),
+    ]
+}
+
+#[wasm_bindgen_test]
+fn decode_messages_arrive_intact_with_nothing_transferred() {
+    for request in [
+        decode_request(),
+        DecodeRequest {
+            mix_frames: None,
+            ..decode_request()
+        },
+    ] {
+        let (msg, transfer) = request.to_js();
+        assert_eq!(transfer.length(), 0, "no samples cross");
+        assert_eq!(
+            DecodeRequest::from_js(&post(&msg, &transfer)),
+            Ok(request.clone())
+        );
+    }
+    for reply in decode_replies() {
+        let (msg, transfer) = reply.to_js();
+        assert_eq!(transfer.length(), 0, "no samples cross");
+        assert_eq!(
+            DecodeReply::from_js(&post(&msg, &transfer)),
+            Ok(reply.clone())
+        );
+    }
+}
+
+/// `text`, a decode message in JSON, is refused, and the reason names the
+/// field.
+fn refused_request(text: &str, field: &str) {
+    let got = DecodeRequest::from_js(&from_json(text));
+    match got {
+        Err(Malformed { kind, text: why }) => {
+            assert_eq!(kind, "decode", "{text}");
+            assert!(why.contains(field), "{text}: {why}");
+        }
+        Ok(r) => panic!("{text} was read as {r:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_decode_request_with_a_missing_or_wrong_field_is_refused() {
+    let source = r#"{"file": "src/0.wav", "index": 0, "ext": "wav", "in_mix": true}"#;
+    let request = |fields: &str| format!(r#"{{"type": "decode", {fields}}}"#);
+    let with_sources = |sources: &str| {
+        request(&format!(
+            r#""session": "sessions/1", "sources": [{sources}]"#
+        ))
+    };
+    refused_request(&request(&format!(r#""sources": [{source}]"#)), "session");
+    refused_request(
+        &request(&format!(r#""session": 7, "sources": [{source}]"#)),
+        "session",
+    );
+    refused_request(&request(r#""session": "sessions/1""#), "sources");
+    refused_request(
+        &request(r#""session": "sessions/1", "sources": {}"#),
+        "sources",
+    );
+    refused_request(&with_sources("7"), "source");
+    refused_request(
+        &with_sources(&source.replace(r#""file": "src/0.wav", "#, "")),
+        "file",
+    );
+    refused_request(
+        &with_sources(&source.replace(r#""index": 0"#, r#""index": 0.5"#)),
+        "index",
+    );
+    refused_request(
+        &with_sources(&source.replace(r#""index": 0"#, r#""index": -1"#)),
+        "index",
+    );
+    refused_request(
+        &with_sources(&source.replace(r#""index": 0"#, r#""index": 4294967296"#)),
+        "index",
+    );
+    refused_request(
+        &with_sources(&source.replace(r#", "ext": "wav""#, "")),
+        "ext",
+    );
+    refused_request(
+        &with_sources(&source.replace(r#""in_mix": true"#, r#""in_mix": 1"#)),
+        "in_mix",
+    );
+    refused_request(
+        &with_sources(&source.replace(r#", "in_mix": true"#, "")),
+        "in_mix",
+    );
+    for frames in ["-1", "0.5", "\"12\"", "null", "9007199254740993"] {
+        refused_request(
+            &request(&format!(
+                r#""session": "sessions/1", "sources": [{source}], "mix_frames": {frames}"#
+            )),
+            "mix_frames",
+        );
+    }
+    // No sources is a request the page never makes, but it is well formed.
+    assert_eq!(
+        DecodeRequest::from_js(&from_json(&with_sources(""))).map(|r| r.sources.len()),
+        Ok(0)
+    );
+}
+
+/// `text`, a decode reply in JSON, is refused, and the reason names the
+/// field.
+fn refused_reply(text: &str, field: &str) {
+    match DecodeReply::from_js(&from_json(text)) {
+        Err(Malformed { text: why, .. }) => assert!(why.contains(field), "{text}: {why}"),
+        Ok(r) => panic!("{text} was read as {r:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_decode_reply_with_a_missing_or_wrong_field_is_refused() {
+    let decoded = |fields: &str| format!(r#"{{"type": "decoded", {fields}}}"#);
+    refused_reply(&decoded(r#""new_mix": true, "channels": [2]"#), "frames");
+    refused_reply(
+        &decoded(r#""frames": 0.5, "new_mix": true, "channels": [2]"#),
+        "frames",
+    );
+    refused_reply(&decoded(r#""frames": 4, "channels": [2]"#), "new_mix");
+    refused_reply(
+        &decoded(r#""frames": 4, "new_mix": "yes", "channels": [2]"#),
+        "new_mix",
+    );
+    refused_reply(&decoded(r#""frames": 4, "new_mix": true"#), "channels");
+    for channel in ["0", "3", "1.5", "\"2\"", "null"] {
+        refused_reply(
+            &decoded(&format!(
+                r#""frames": 4, "new_mix": true, "channels": [2, {channel}]"#
+            )),
+            "channels",
+        );
+    }
+    for kind in ["undecodable", "decode-unstored", "decode-log"] {
+        refused_reply(&format!(r#"{{"type": "{kind}"}}"#), "text");
+        refused_reply(&format!(r#"{{"type": "{kind}", "text": 7}}"#), "text");
+    }
+}
+
+#[wasm_bindgen_test]
+fn a_message_for_one_worker_is_not_read_as_one_for_the_other() {
+    for reply in decode_replies() {
+        let (msg, transfer) = reply.to_js();
+        let err = Reply::from_js(&post(&msg, &transfer)).expect_err("not a stem worker reply");
+        assert_eq!(err.kind, reply.kind());
+    }
+    let stem_replies = [
+        Reply::Alive,
+        Reply::Unstored { text: "t".into() },
+        Reply::Log("t".into()),
+        Reply::Done { secs: 1.0 },
+    ];
+    for reply in stem_replies {
+        let (msg, transfer) = reply.to_js();
+        let err = DecodeReply::from_js(&post(&msg, &transfer)).expect_err("not a decode reply");
+        assert_eq!(err.kind, reply.kind());
+    }
+    let (msg, transfer) = decode_request().to_js();
+    assert!(ToWorker::from_js(&post(&msg, &transfer)).is_err());
+    let (msg, transfer) = Request::Init.to_js(&Settings::default());
+    assert!(DecodeRequest::from_js(&post(&msg, &transfer)).is_err());
 }

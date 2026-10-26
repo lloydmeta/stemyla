@@ -1,7 +1,8 @@
 //! The messages between the page and its separation worker, written once
 //! for both sides.  On the wire each is a plain JS object whose `type`
 //! names it; the e2e scenarios in `xtask/src/e2e.rs` also post requests by
-//! hand, so the format stays as it is.
+//! hand, so the format stays as it is.  The messages between the page and
+//! its decode worker are in [`decode`].
 //!
 //! Requests ([`Request`], page to worker), each with the page's
 //! [`Settings`]:
@@ -62,6 +63,8 @@
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Blob;
+
+pub mod decode;
 
 /// The `type` of each message.
 pub mod kind {
