@@ -182,7 +182,7 @@ A new e2e scenario separates synthetic songs of 1 and 4 minutes, opened as WAV f
 
 ### M4: the worker reads the mix from storage
 
-When a song opens, the page writes its mix as a session file.  `Request::Separate` names that file instead of carrying two arrays.  `Demixer` takes its input from a source of blocks, not a whole `Vec<f32>`.  It reads one chunk with its overlap at a time.
+When the user presses Separate on the storage path, the page writes the song's mix as a session file, `mix.f32`, if the session has no usable one: one with the song's frames, the `f32le-1` tag and the right size (M4 plan, D1 and D2).  `Request::Separate` names that file.  The memory path still carries two arrays.  `Demixer` takes its input from a source of blocks, not a whole `Vec<f32>`.  It reads one chunk with its overlap at a time.
 
 * Acceptance: `Demixer` tests give the same output from a block source as from a whole mix.  The MEM-5 spy covers the mix write.  `e2e memory-budget` shows no worker growth with the song's length.
 
@@ -193,8 +193,11 @@ The encoded source is never whole in memory.  A chosen file is saved to OPFS as 
 * Decision 0019 (accepted): a new page-side worker crate that takes `engine` decodes in blocks.
 * `engine::decode` and `Song::from_audio` read from a source of blocks and write blocks to a sink, not a `Vec`.  The resampler of decision 0012 runs in blocks.  The overview of each lane is made in the same pass.
 * A restored session decodes its stored sources the same way (`store::read` stops reading whole files).
+* A song of one source decodes into `sessions/<id>/mix.f32`, in M4's format (raw `f32` little-endian, interleaved stereo, 44.1 kHz), and writes M4's `meta` line `mix<TAB><frames><TAB>f32le-1`.  That file is the decoded source and the mix (decision 0016), so Separate finds it and writes no second file.  The original lane of M6 and M7 reads it too.
+* A song of several sources gets its `mix.f32` and its `meta` line from the source session files, in blocks, before M7 removes the samples from the page.  Today the page writes it from the samples in memory (M4 plan, D3).
+* No step rewrites a session's `mix.f32` while a separation names that session.  Safari does not see a rewrite of the same size in the same second (TD-55).
 * The decode worker logs its WebAssembly memory in a `memory: ...` line, as the other two do.
-* Acceptance: a test decodes a WAV, a FLAC and an MP3 from a block source.  A memory sink and a block sink get the same samples.  A browser test opens a song and finds its session files and overviews in OPFS.  The MEM-5 spy covers the decode writes.  `e2e memory-budget` shows no growth of the page or the decode worker for a WAV source.
+* Acceptance: a test decodes a WAV, a FLAC and an MP3 from a block source.  A memory sink and a block sink get the same samples.  A browser test opens a song and finds its session files and overviews in OPFS.  For a song of one source, it finds `mix.f32` and its `meta` line, and Separate then writes no second mix file.  The MEM-5 spy covers the decode writes.  `e2e memory-budget` shows no growth of the page or the decode worker for a WAV source.
 
 ### M6: playback reads storage through the read-ahead buffer
 
@@ -272,7 +275,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-25: run of M3 to M10 started.  Preflight passed.  The maintainer accepted decisions 0015 and 0019, and decided M9's default in advance.
 * [x] 2026-10-26: M3: stems to storage (`2c7440a..e2d554c`, plan `stream-from-storage-m3.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m3.md`).  In Chrome on the Mac (Radeon Pro 5500M), `e2e stored-stems --hashes` passes: the six stem files equal the memory path's stems after 16-bit rounding.  `e2e memory-budget`: the page grows 0 MB during the separation; peaks 966 MB at 1 minute, 1517 MB at 4 minutes.  The MEM-5 spy, the fallback tests and `web-test` (Chrome and Safari) pass.  The memory path refuses a song over 100 s (M3 plan, D3).  Do not publish a build from M3 until M7: after a storage-path separation and on each reload, the page reads the six stems back into memory (TD-54), so a long song can stop the iPhone's tab again and again.
 * [x] 2026-10-26: M3 intent review: 1 significant should-fix (this plan's M3 text contradicted D1), fixed here.
-* [ ] M4: mix from storage.
+* [x] 2026-10-26: M4: mix from storage (`f10fbb7..57bb956`, plan `stream-from-storage-m4.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m4.md`).  `Demixer` reads a `MixSource` one span at a time, and gives the same output from a block source as from a whole mix.  The page writes `mix.f32` in whole 1 MiB blocks (MEM-5 spy).  M3's six stem hashes are unchanged.  `e2e memory-budget` in Chrome on the Mac: the page and the worker grow 0 MB during a separation; the worker's peak is 57 MB at 1 and 4 minutes (M3: 99 MB at 4 minutes); peaks 966 MB and 1475 MB.  TD-55: Safari does not see a same-size rewrite of the mix in the same second.  In round 3, auto mode refused a reviewer's `sed` edits for a mutation test in its own worktree; the reviewer did not retry, and no finding depends on them.
 * [ ] M5: decode from and into storage.
 * [ ] M6: playback through the read-ahead buffer.
 * [ ] M7: lanes, spectrograms, classic drums and sessions from storage.
@@ -302,10 +305,11 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, maintainer: all the work goes on `iphone-crashes-2026-10-25` and PR #39.  M2 needs no review rounds.  M3 to M10 run with an orchestrator and a team per milestone ("How the work runs").
 * 2026-10-25, maintainer: no reload check in M1.  Nothing in this plan acts on its result, and M10's iPhone run shows any kill.
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
+* 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
 * 2026-10-25, maintainer, at the start of the M3 to M10 run: decision 0015 accepted.  Teams may reword MEM-1 and LAYER-1 as decisions 0015 and 0019 need, in the milestone that needs it, and keep or extend their tests.  Decision 0019 accepted: a new page-side worker crate decodes.  M9 makes f16 the default when the Mac gives the same stems bit for bit and no slower separation.
 * 2026-10-25, maintainer: each milestone works in its own plan file, `plans/active/stream-from-storage-m<n>.md`, M4, M9 and M10 included.  Its Progress, Decision log and surprises go there.  Only the orchestrator edits this plan, with one Progress line for each milestone and the decisions that later milestones need.
 * 2026-10-26, agent (M3): on the storage path the worker sends `stored` and `unstored` replies, and `segment` keeps its samples for the memory path only.  The memory path refuses a song over 100 s on every device, because a page cannot read its memory limit (M3 plan, D1 and D3).
-* 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
+* 2026-10-26, agent (M4): the page writes `mix.f32` (raw f32 little-endian, with a `meta` line) when Separate is pressed on the storage path, not when a song opens.  A song never separated costs no storage, and one path covers new songs and M3's sessions.  Every failure of the mix file sends `unstored` (M4 plan, D1 to D7).
 
 ## Outcomes and retrospective
 
