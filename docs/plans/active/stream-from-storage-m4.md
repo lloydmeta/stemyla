@@ -142,6 +142,7 @@ The parent's M4 acceptance, check by check:
   * `e2e separate`: passed, on the storage path with no fallback line.  Page wasm 10 MB before the mix write and as the separation ends, 13 MB with the stems shown; worker wasm 57 MB at the start and the end.
   * `e2e memory-budget`: passed, both songs on the storage path.  The page and the worker grew by 0 MB during each separation.  1 minute: page wasm 177 MB, worker wasm 57 MB, GPU live 732 MB, 966 MB in all.  4 minutes: page wasm 686 MB, worker wasm 57 MB, GPU live 732 MB, 1475 MB in all.  The 4-minute peak is 509 MB above the 1-minute peak.
   * `e2e storage`: passed.
+* [x] 2026-10-26: M4 done.  The three review rounds found 2 confirmed should-fix in round 2 and 3 in round 3, and 1 in round 1 for the parent plan (1-1, for the orchestrator).  Each code finding was fixed with a test (`522a3f0`, `1e5c6a6`, `87b3d30`).  The mutants runs: round 1 full, 158 tested, 67 missed (5 confirmed: one in `Demixer::span`, fixed; four scenario or tool bodies that need a GPU, in TD-39); round 2 full, 7 tested, 6 missed (all refuted: wasm32-only code); round 3 full, 9 tested, 8 missed (all refuted).  The log is `docs/reviews/iphone-crashes-2026-10-25-m4.md`.
 
 ## Surprises and discoveries
 
@@ -161,6 +162,8 @@ The parent's M4 acceptance, check by check:
 * 2026-10-26, implementer, step 2: `separate_mix` takes a function that makes the network from the song's chunks, so `run` makes `GpuNetwork` with `total` from the `Demixer`.  The worker opens the mix file before the stem writer, so a missing file or a wrong size makes no stem file.  A `mix` that is not a string is also a decode error.
 * 2026-10-26, implementer, review round 2: TD-39's source line names review round 1 of M4 and the folder `docs/reviews/`, not the log file.  `docs-check` refuses a path that does not exist yet, and the team leader writes the log after round 3.
 * 2026-10-26, implementer, step 3: `apply_inbox` takes the `egui::Context`, so the mix write can ask for a repaint when it ends.  `write_mix` fails if it cannot remove an old `mix.f32`, so the page takes the memory path then (D7).  The status line of a failed mix write starts "browser storage could not keep the song's mix".  `the_mix_write_makes_no_song_length_buffer` gives the three sources one shared buffer (42 MB, not 254 MB), and reads the file's size, not its bytes, so it leaves no free pages that could hide the growth of a later test.
+* 2026-10-26, team leader: the review rounds record approvals as "0 (auto mode; a fallback prompt is not counted)", as M3's log did.  The team leader acts for the orchestrator in step 11 of the skill.
+* 2026-10-26, team leader, review round 3: auto mode refused the `sed` edits of the docs reviewer's mutant runs in its own worktree.  The reviewer did not try another way, and the round's findings do not depend on those runs.  The orchestrator gets this in the report.
 
 ## Outcomes and retrospective
 
