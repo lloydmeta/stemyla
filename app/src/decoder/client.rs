@@ -14,7 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use stem_protocol::decode::{DecodeReply, DecodeRequest};
+use stem_protocol::decode::{DecodeReply, DecodeRequest, kind};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
@@ -152,8 +152,16 @@ impl DecodeClient {
     fn reply(&self, data: &JsValue) {
         let reply = match DecodeReply::from_js(data) {
             Ok(reply) => reply,
+            // A bad `decode-alive` or log line ends no decode.
+            Err(bad) if [kind::ALIVE, kind::LOG].contains(&bad.kind.as_str()) => {
+                log::warn!("decoder: {}", bad.text);
+                return;
+            }
+            // Any other reply ends a decode, but the client cannot tell
+            // which, so every decode ends, and the worker starts again.
             Err(bad) => {
                 log::warn!("decoder: {}", bad.text);
+                self.stopped(&format!("a reply could not be read: {}", bad.text));
                 return;
             }
         };
@@ -314,6 +322,35 @@ export function client_deliver(worker, data) {
         drop((first, second));
         assert!(!crate::store::decoding("21") && !crate::store::decoding("22"));
         client.stop();
+    }
+
+    /// PROTO-1, D9: a reply that does not decode cannot be matched to a
+    /// decode, so the client stops: every waiting decode ends, and no later
+    /// reply ends the wrong one.
+    #[wasm_bindgen_test]
+    async fn a_reply_that_does_not_decode_ends_every_decode() {
+        let (client, worker, _posts) = client();
+        client_deliver(&worker, &sent(DecodeReply::Alive));
+        let first = client.decode(&request("41"), DecodeGuard::new("41"));
+        let second = client.decode(&request("42"), DecodeGuard::new("42"));
+        let bad = js_sys::Object::new();
+        js_sys::Reflect::set(&bad, &"type".into(), &"decoded".into()).unwrap();
+        client_deliver(&worker, &bad);
+        client_deliver(
+            &worker,
+            &sent(DecodeReply::Undecodable {
+                text: "a later reply".into(),
+            }),
+        );
+        let (first, second) = (first.await, second.await);
+        client.stop();
+        for (n, ended) in [first, second].into_iter().enumerate() {
+            assert!(
+                matches!(&ended, Ended::Stopped(reason) if reason.contains("could not be read")),
+                "decode {n} ends Stopped"
+            );
+        }
+        assert!(!crate::store::decoding("41") && !crate::store::decoding("42"));
     }
 
     /// D9: the worker's `error` event (here: its script does not load)

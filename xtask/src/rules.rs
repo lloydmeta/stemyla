@@ -2724,6 +2724,27 @@ struct ScriptType {
 /// PROTO-1: each message type that the e2e scripts write by hand is in
 /// `stem_protocol::kind`, or `script_only` names it.  `scripts` holds the
 /// `xtask/e2e/*.js` files; `e2e_rust` is the text of `xtask/src/e2e.rs`.
+/// The Rust that `xtask e2e` writes messages in: `xtask/src/e2e.rs` and
+/// every Rust file under `xtask/src/e2e/`, joined.  A problem's line is a
+/// line of the joined text, and its file is `xtask/src/e2e.rs`.
+pub fn e2e_rust_sources(root: &Path) -> Result<String> {
+    let mut text = std::fs::read_to_string(root.join(E2E_RUST))
+        .with_context(|| format!("reading {E2E_RUST}"))?;
+    let folder = root.join(E2E_RUST.trim_end_matches(".rs"));
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .with_context(|| format!("listing {}", folder.display()))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    files.retain(|p| p.extension().is_some_and(|e| e == "rs"));
+    files.sort();
+    for file in files {
+        text.push('\n');
+        text += &std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+    }
+    Ok(text)
+}
+
 pub fn e2e_types_match_the_protocol(
     protocol: &str,
     scripts: &[(String, String)],
@@ -3304,6 +3325,17 @@ fn agent_name(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LAYER-1: the page side and the worker side are the web app, each
+    /// crate once.
+    #[test]
+    fn the_two_sides_are_the_web_app() {
+        let mut sides: Vec<&str> = PAGE_SIDE.iter().copied().chain([WORKER_SIDE]).collect();
+        let mut web_app = WEB_APP.to_vec();
+        sides.sort_unstable();
+        web_app.sort_unstable();
+        assert_eq!(sides, web_app);
+    }
 
     #[test]
     fn each_package_names_its_manifest() {

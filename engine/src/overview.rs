@@ -169,6 +169,32 @@ mod tests {
         }
     }
 
+    /// The scale makes the loudest column fill the lane: 1 / its peak.
+    #[test]
+    fn the_scale_is_one_over_the_loudest_peak() {
+        let left = [0.1, -0.5, 0.2, 0.25];
+        let right = [0.0, 0.125, -0.25, 0.0];
+        let (_, scale) = lane_columns(&left, &right);
+        assert_eq!(scale, 2.0);
+        assert_eq!(built(&left, &right, 3).1, 2.0);
+    }
+
+    /// A -0.0 after a 0.0 in a column keeps 0.0 as its lowest, as
+    /// `dsp::peaks` compares with `<`, and the reverse keeps -0.0.
+    #[test]
+    fn a_signed_zero_keeps_the_first_of_equal_samples() {
+        // 8,192 frames: two in each column.
+        for first in [0.0_f32, -0.0] {
+            let lane: Vec<f32> = (0..8_192)
+                .map(|i| if i % 2 == 0 { first } else { -first })
+                .collect();
+            assert_eq!(column_frames(lane.len()), 2);
+            let want = lane_columns(&lane, &lane);
+            assert!(bits(&built(&lane, &lane, 1)) == bits(&want), "{first}");
+            assert_eq!(want.0[0].0.to_bits(), first.to_bits(), "{first}");
+        }
+    }
+
     #[test]
     fn a_quiet_lane_has_the_scale_of_lane_columns() {
         for level in [0.0, 1e-7, 0.5] {

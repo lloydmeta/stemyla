@@ -973,6 +973,57 @@ mod tests {
         Ok(decoder.frames())
     }
 
+    /// A file of `bytes` whose reads fail from byte `fail_from` on, with an
+    /// error of kind `Other`, as the decode worker's source fails (D7a).
+    struct Failing {
+        bytes: Cursor<Vec<u8>>,
+        fail_from: u64,
+    }
+
+    impl std::io::Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.bytes.position() + buf.len() as u64 > self.fail_from {
+                return Err(std::io::Error::other("NotReadableError"));
+            }
+            self.bytes.read(buf)
+        }
+    }
+
+    impl std::io::Seek for Failing {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.bytes.seek(to)
+        }
+    }
+
+    impl MediaSource for Failing {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.bytes.get_ref().len() as u64)
+        }
+    }
+
+    /// D7a: a read that fails in the middle of a file is an error, never
+    /// the end of the file.
+    #[test]
+    fn a_read_that_fails_is_an_error_not_the_end() {
+        let (_, _, wav) = stereo_wav();
+        let failing = Failing {
+            bytes: Cursor::new(wav),
+            fail_from: 20_000,
+        };
+        let decoder =
+            Decoder::new(Box::new(failing), Some("wav")).expect("the probe reads the start");
+        let ended = every_packet(decoder);
+        let error = ended.expect_err("a failed read is an error");
+        assert!(
+            format!("{error:#}").contains("NotReadableError"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn the_decode_limit_stops_a_block_decode() {
         let within = |bytes: Vec<u8>, ext: &str, limit: u64| {

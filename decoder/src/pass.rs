@@ -454,7 +454,7 @@ async fn decode<S: Session>(
     })
 }
 
-// `dsp::mix`'s clamp to ±1, which keeps a NaN and the sign of 0, as
+/// `dsp::mix`'s clamp to ±1, which keeps a NaN and the sign of 0, as
 /// `f32::clamp` does.
 fn clamped(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)

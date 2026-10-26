@@ -22,12 +22,13 @@ export function dt_deliver(worker, data) {
 export function dt_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 export function dt_file(bytes, name) { return new File([bytes], name); }
 // Counts each read of the bytes of an audio file (a `File` named
-// *.wav, *.mp3 or *.flac), until stopped.  Reads of `meta` do not count.
+// *.wav, *.mp3 or *.flac), and each slice of one, which a read could go
+// through, until stopped.  Reads of `meta` do not count.
 let dt_reads = null;
 let dt_real = null;
 export function dt_start_read_spy() {
   const proto = Blob.prototype;
-  dt_real = ["arrayBuffer", "text", "stream", "bytes"].map((k) => [k, proto[k]]);
+  dt_real = ["arrayBuffer", "text", "stream", "bytes", "slice"].map((k) => [k, proto[k]]);
   dt_reads = 0;
   for (const [k, f] of dt_real) {
     if (f) proto[k] = function (...a) {
@@ -550,8 +551,9 @@ async fn an_incomplete_session_restores_through_a_decode() {
     assert_eq!(meta.mix, Some((frames, store_meta::MIX_FORMAT.into())));
 }
 
-/// D9: a reset ends the decode worker first, so its guard goes and
-/// `store::close` does not wait for the decode.
+/// D9, finding 1-3 of review round 1: the reset path before `reset::run`
+/// ends the decode worker first, so the decode ends, its guard goes, and
+/// `store::close` ends.
 #[wasm_bindgen_test]
 async fn a_reset_during_a_decode_completes() {
     store::test_wipe().await;
@@ -567,15 +569,23 @@ async fn a_reset_during_a_decode_completes() {
         sources: Vec::new(),
         mix_frames: None,
     };
-    let ended = app.decoder.decode(&request, store::DecodeGuard::new(&id));
+    let ended = background(app.decoder.decode(&request, store::DecodeGuard::new(&id)));
     let held = (store::decoding(&id), store::writes_in_progress());
-    app.stop_workers();
-    let after = (store::decoding(&id), store::writes_in_progress());
-    let ended = ended.await;
+    app.prepare_reset();
+    let closed = background(store::close());
+    let mut waited = 0;
+    while closed.borrow().is_none() && waited < 3_000 {
+        dt_sleep(20).await;
+        waited += 20;
+    }
+    let close_ended = closed.borrow().is_some();
+    let decode_ended = ended.borrow().is_some();
+    // Only then storage opens again, so the other tests can write.
+    store::test_reopen();
     store::test_wipe().await;
     assert_eq!(held, (true, 1), "the decode holds a write");
-    assert_eq!(after, (false, 0), "close would not wait");
-    assert!(matches!(ended, decoder::Ended::Stopped(_)));
+    assert!(decode_ended, "the decode ends");
+    assert!(close_ended, "store::close ends");
 }
 
 /// D8: after a decoded song of one source, Separate posts the stored mix
@@ -689,4 +699,59 @@ async fn separate_waits_for_a_decode_of_the_shown_session() {
     store::test_wipe().await;
     assert!(!during, "no separation starts during the decode");
     assert!(after, "it starts once the decode ends");
+}
+
+/// Restores an M4 session of `frames` frames with a usable mix through the
+/// fake worker, which ends the decode with `decode-unstored`.  Gives the
+/// session's `mix` line and `mix.f32` after the restore.
+async fn unstored_with_a_kept_mix(separating: bool) -> (Option<(usize, String)>, Option<Vec<u8>>) {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let frames = 1_500;
+    let id = saved(&vec![wav_file("acme.wav", frames, 0)]).await;
+    let mix = interleaved(&tone(frames, 0), &tone(frames, 9));
+    store::test_write(&store::mix_path(&id), &mix)
+        .await
+        .expect("planted");
+    let mut meta = meta_of(&id).await.expect("meta");
+    meta.mix = Some((frames, store_meta::MIX_FORMAT.into()));
+    store::test_write(&format!("sessions/{id}/meta"), meta.to_text().as_bytes())
+        .await
+        .expect("planted");
+    if separating {
+        store::set_separating(Some(id.clone()));
+    }
+    let client = fake.client.clone();
+    let restore_id = id.clone();
+    let restored = background(async move { restore_stored(&restore_id, &client).await });
+    let req = fake.request(0).await;
+    assert_eq!(req.mix_frames, Some(frames as u64));
+    fake.reply(DecodeReply::Unstored {
+        text: "the sources have 1500 frames, not the kept mix's".into(),
+    });
+    let restored = output(&restored).await.expect("a session");
+    store::set_separating(None);
+    let after = meta_of(&id).await.and_then(|m| m.mix);
+    let file = store::test_read(&store::mix_path(&id)).await;
+    store::test_wipe().await;
+    assert!(restored.is_ok(), "the page decodes the song itself");
+    (after, file)
+}
+
+/// D8, finding 1-4 of review round 1: on `decode-unstored` with a kept
+/// mix, the page removes the `mix` line and `mix.f32`, so the next open
+/// decodes again.
+#[wasm_bindgen_test]
+async fn unstored_with_a_kept_mix_removes_it() {
+    let (line, file) = unstored_with_a_kept_mix(false).await;
+    assert_eq!(line, None, "the mix line goes");
+    assert_eq!(file, None, "mix.f32 goes");
+}
+
+/// D8: a separation that names the session keeps its mix.
+#[wasm_bindgen_test]
+async fn unstored_keeps_a_mix_that_a_separation_uses() {
+    let (line, file) = unstored_with_a_kept_mix(true).await;
+    assert_eq!(line.map(|(f, _)| f), Some(1_500), "the mix line stays");
+    assert_eq!(file.map(|f| f.len()), Some(8 * 1_500), "mix.f32 stays");
 }

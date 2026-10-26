@@ -2294,6 +2294,16 @@ impl StemApp {
         self.session.as_deref().is_some_and(store::decoding)
     }
 
+    /// All of a reset before `reset::run`: the dialog shows its progress,
+    /// playback stops, and both workers end, so `store::close` waits for no
+    /// decode (D9).
+    #[cfg(target_arch = "wasm32")]
+    fn prepare_reset(&mut self) {
+        self.reset = ResetStage::Running;
+        self.output = None;
+        self.stop_workers();
+    }
+
     /// Ends both workers before a reset (D9): first the decode worker, which
     /// drops the guard of each decode, so `store::close` never waits for a
     /// decode, then the separation worker.
@@ -2307,9 +2317,7 @@ impl StemApp {
     /// when it succeeds.
     #[cfg(target_arch = "wasm32")]
     fn start_reset(&mut self, ctx: &egui::Context, choice: reset::Reset) {
-        self.reset = ResetStage::Running;
-        self.output = None;
-        self.stop_workers();
+        self.prepare_reset();
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(failure) = reset::run(choice).await {

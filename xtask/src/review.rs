@@ -66,6 +66,7 @@ pub const REVIEWERS: &[Reviewer] = &[
             "app/src/decoder.rs",
             "app/src/decoder/**",
             "xtask/src/e2e.rs",
+            "xtask/src/e2e/**",
             "xtask/e2e/**",
             ".claude/rules/protocol.md",
         ],
@@ -1587,6 +1588,11 @@ mod tests {
                 "app/src/separator.rs",
             ),
             ("xtask/src/e2e.rs", "wire-reviewer", "xtask/src/e2e.rs"),
+            (
+                "xtask/src/e2e/decode.rs",
+                "wire-reviewer",
+                "xtask/src/e2e/**",
+            ),
             ("xtask/e2e/worker.js", "wire-reviewer", "xtask/e2e/**"),
             (
                 ".claude/rules/protocol.md",

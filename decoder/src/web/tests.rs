@@ -115,7 +115,7 @@ export function start_write_spy() {
   real_write = proto.write;
   writes = [];
   proto.write = function (data, options) {
-    writes.push(ArrayBuffer.isView(data) && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view");
+    writes.push((ArrayBuffer.isView(data) && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view") + ":" + data.byteLength);
     return real_write.call(this, data, options);
   };
 }
@@ -143,6 +143,7 @@ export function start_read_spies() {
     return real_reads[1].call(this, buffer, options);
   };
 }
+export function decoder_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 export function stop_read_spies() {
   FileReaderSync.prototype.readAsArrayBuffer = real_reads[0];
   FileSystemSyncAccessHandle.prototype.read = real_reads[1];
@@ -160,6 +161,7 @@ extern "C" {
     fn stop_write_spy() -> String;
     fn start_read_spies();
     fn stop_read_spies() -> Vec<f64>;
+    async fn decoder_sleep(ms: u32);
 }
 
 const SESSION: &str = "sessions/1792640000000";
@@ -377,9 +379,16 @@ async fn decode_writes_pass_whole_arrays() {
         ),
         "{reply:?}"
     );
-    let calls: Vec<&str> = writes.split(' ').collect();
-    assert!(calls.len() > 2, "more than one write of the mix: {writes}");
-    assert!(calls.iter().all(|call| *call == "whole"), "{writes}");
+    let calls: Vec<(&str, usize)> = writes
+        .split(' ')
+        .filter_map(|call| call.split_once(':'))
+        .map(|(kind, bytes)| (kind, bytes.parse().unwrap_or(0)))
+        .collect();
+    assert!(calls.iter().all(|(kind, _)| *kind == "whole"), "{writes}");
+    // An overview holds at most 32 KiB; the mix of 200,003 frames is two
+    // blocks, so more than one call writes it.
+    let mix_writes = calls.iter().filter(|(_, bytes)| *bytes > 32 << 10).count();
+    assert!(mix_writes >= 2, "more than one write of the mix: {writes}");
 }
 
 /// The peak of the heap above its start while `request` decodes.
@@ -460,4 +469,75 @@ async fn a_malformed_request_ends_with_unstored() {
         matches!(&reply, DecodeReply::Unstored { text } if text.contains("could not be read") && text.contains("session")),
         "{reply:?}"
     );
+}
+
+/// A request for `src/0.wav` of session `id`.
+fn request_of(id: &str) -> DecodeRequest {
+    DecodeRequest {
+        session: format!("sessions/{id}"),
+        ..one_source("wav")
+    }
+}
+
+/// D9: the worker takes the requests one at a time, in the order sent, and
+/// ends each with one reply.
+#[wasm_bindgen_test]
+async fn the_queue_takes_each_request_in_turn() {
+    fresh().await;
+    let sessions = [
+        ("1", wav(2_000, 44_100)),
+        ("2", b"not audio".to_vec()),
+        ("3", wav(3_000, 44_100)),
+    ];
+    for (id, bytes) in &sessions {
+        plant_folder(&format!("sessions/{id}")).await;
+        plant_at(&format!("sessions/{id}/src/0.wav"), bytes).await;
+    }
+    warm_up();
+    for (id, _) in &sessions {
+        let (msg, _) = request_of(id).to_js();
+        enqueue(msg.into());
+    }
+    let ended = |sent: &[JsValue]| {
+        sent.iter()
+            .filter_map(|m| DecodeReply::from_js(m).ok())
+            .filter(|r| !matches!(r, DecodeReply::Log(_) | DecodeReply::Alive))
+            .count()
+    };
+    for _ in 0..250 {
+        if SENT.with_borrow(|sent| ended(sent)) == 3 {
+            break;
+        }
+        decoder_sleep(20).await;
+    }
+    let replies: Vec<DecodeReply> = SENT.with_borrow(|sent| {
+        sent.iter()
+            .filter_map(|m| DecodeReply::from_js(m).ok())
+            .collect()
+    });
+    let kinds: Vec<String> = replies
+        .iter()
+        .map(|r| match r {
+            DecodeReply::Log(text) if text.ends_with("at the decode's start") => "start".into(),
+            DecodeReply::Log(text) if text.ends_with("at the decode's end") => "end".into(),
+            DecodeReply::Decoded { frames, .. } => format!("decoded {frames}"),
+            other => other.kind().to_string(),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "start",
+            "end",
+            "decoded 2000",
+            "start",
+            "end",
+            "undecodable",
+            "start",
+            "end",
+            "decoded 3000"
+        ],
+        "one request at a time, in the order sent"
+    );
+    assert!(!RUNNING.get(), "the queue stops when it is empty");
 }

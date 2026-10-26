@@ -611,6 +611,25 @@ mod tests {
         }
     }
 
+    /// An overview's bytes are its columns of `engine::overview`, each its
+    /// minimum then its maximum as 32-bit little-endian floats.
+    #[test]
+    fn the_expected_overviews_are_the_columns_of_engine() {
+        assert_eq!(
+            column_bytes(&[(-0.5, 0.25), (0.0, 1.0)]),
+            [-0.5f32, 0.25, 0.0, 1.0]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<u8>>()
+        );
+        let bytes = wav(0.2, 0, 44_100);
+        let want = expected(&named(&[("song.wav", bytes.clone())])).unwrap();
+        let audio = engine::decode_bytes(bytes, Some("wav")).unwrap();
+        let (cols, _) = lane_columns(&audio.channels[0], &audio.channels[1]);
+        assert_eq!(cols.len(), engine::overview::column_count(want.frames));
+        assert_eq!(want.overviews["overviews/0.f32"], column_bytes(&cols));
+    }
+
     #[test]
     fn close_samples_pass_and_far_or_short_ones_fail() {
         let want = [0.5, -0.25, 0.125];

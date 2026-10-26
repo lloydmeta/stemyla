@@ -177,7 +177,7 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 `xtask review mutants` runs cargo-mutants on the Rust files of a round's diff.  It does not test some changes, and it reports some mutants that no native test can catch:
 
 * cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
-* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs`, `app/src/streamtest.rs` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
+* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/decode_tests.rs`, `app/src/decoder/client.rs`, `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs`, `app/src/streamtest.rs`, `decoder/src/web.rs`, `decoder/src/web/` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
 * `mutants_command` sets no `STEMYLA_REQUIRE`, and passes on the caller's own.  So without it, where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
@@ -265,6 +265,8 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `
 * `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
 * a request with no headers in `drip`, since the test always sends a Host header (not run);
 * `run` in `xtask/src/roformer_cli.rs`, which needs the model weights and an audio file.
+* the body of `e2e decode` and its helper `drop_and_open` (`xtask/src/e2e/decode.rs`), which run only in a browser; review round 1 of M5 found mutants in both that no `cargo test` kills.  Its checks have unit tests.
+* `memory_budget` in `xtask/src/e2e.rs` after M5's checks of the open, which needs a GPU and the weights (review round 1 of M5).
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
 
@@ -272,7 +274,7 @@ Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant 
 
 Source: review round 1 of M4 on the branch `iphone-crashes-2026-10-25`, findings 1-30, 1-35, 1-41 and 1-53.  Its log goes to `docs/reviews/` after round 3.  Each mutant replaces a body with `Ok(())`: `memory_budget`, `separate` and `stored_stems` in `xtask/src/e2e.rs`, and `run` in `xtask/src/roformer_cli.rs`.  Each needs a GPU, a browser or the weights.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `decode`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.
 
 ### TD-40: gaps in the RT-1 tests
 
@@ -401,7 +403,7 @@ This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 mi
 
 M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation.  The worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
 
-* After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `store::restore`), so the tab can stop again at each reload.  M6 and M7 remove this.
+* After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `restore_stored`, `store::open_stored`), so the tab can stop again at each reload.  M6 and M7 remove this.
 * M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path.  The page writes the mix to a session file in blocks.  The worker reads it one chunk at a time.  Since M5 (2026-10-26), the decode worker decodes a stored song in blocks into session files, so the decode holds no song.  The page still reads the session files back into memory to play and draw the song (D10 of M5), until M6 and M7.  The memory path still sends the mix as two arrays, which the worker copies into its memory.
 * The memory path still makes six song-length stems.  It takes a song without a session, or a song when storage has too little free space.  It also takes a song when storage refused the mix or the stems, or the worker cannot read the mix file.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
 * No build between M3 and M7 goes to the published site.  Publishing is a person's step (GIT-1).
@@ -419,6 +421,8 @@ Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
 `xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
+
+The decode worker's messages (`stem_protocol::decode`, M5) refuse a missing or wrong field, so this entry concerns the stem worker's messages only.  `e2e_messages_use_protocol_types` checks each hand-written type against the union of both workers' kinds, so a decode kind in a script for the stem worker passes (review round 1 of M5, finding 1-16).
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not.  It looks on each diff that routes it (TD-31).
 

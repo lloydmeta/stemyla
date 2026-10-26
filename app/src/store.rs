@@ -255,6 +255,8 @@ thread_local! {
     static MIX_WRITING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
     /// The session of the separation that may read or write its mix.
     static SEPARATING: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Sessions whose `meta` a read-modify-write holds ([`lock_meta`]).
+    static META_HELD: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 /// A new session id: now in milliseconds, or one more than the last id if
@@ -268,6 +270,26 @@ async fn new_id() -> String {
     }
     LAST_ID.set(id);
     id.to_string()
+}
+
+/// The `meta` of a session, held for one read-modify-write, so two writers
+/// never interleave and lose each other's lines (finding 1-5 of M5).
+/// It is not a save: `settled` does not wait for it, so D8a still holds.
+struct MetaLock(String);
+
+/// Waits until no other writer holds the `meta` of session `id`, then
+/// holds it until the lock is dropped.
+async fn lock_meta(id: &str) -> MetaLock {
+    while !META_HELD.with_borrow_mut(|held| held.insert(id.to_string())) {
+        st_sleep(10).await;
+    }
+    MetaLock(id.to_string())
+}
+
+impl Drop for MetaLock {
+    fn drop(&mut self) {
+        META_HELD.with_borrow_mut(|held| held.remove(&self.0));
+    }
 }
 
 async fn settled(id: &str) {
@@ -444,13 +466,12 @@ pub async fn write_mix(id: &str, song: &Song) -> Result<()> {
 
 async fn write_mix_now(id: &str, song: &Song) -> Result<()> {
     let base = session_folder(id);
-    let mut meta = Meta::parse(&String::from_utf8_lossy(
-        &read(&format!("{base}/meta"))
-            .await
-            .ok_or_else(|| anyhow!("session {id} is gone"))?,
-    ));
-    if meta.mix.take().is_some() {
-        write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+    {
+        let _meta = lock_meta(id).await;
+        let mut meta = meta_now(id).await?;
+        if meta.mix.take().is_some() {
+            write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+        }
     }
     if st_remove(&mix_path(id)).await.as_bool() != Some(true) {
         return Err(anyhow!("browser storage could not remove the old mix"));
@@ -478,8 +499,16 @@ async fn write_mix_now(id: &str, song: &Song) -> Result<()> {
             closed.as_string().unwrap_or_else(|| "not moved".into())
         ));
     }
-    meta.mix = Some((song.frames, MIX_FORMAT.into()));
-    if let Err(e) = write_bytes(&base, "meta", meta.to_text().as_bytes()).await {
+    // `meta` again, under its lock: another writer may have changed it
+    // while the mix was written.
+    let written = async {
+        let _meta = lock_meta(id).await;
+        let mut meta = meta_now(id).await?;
+        meta.mix = Some((song.frames, MIX_FORMAT.into()));
+        write_bytes(&base, "meta", meta.to_text().as_bytes()).await
+    }
+    .await;
+    if let Err(e) = written {
         st_remove(&mix_path(id)).await;
         return Err(e);
     }
@@ -543,13 +572,12 @@ pub fn forget_mix(id: &str) -> impl std::future::Future<Output = Result<()>> + '
     async move {
         let _held = held;
         let base = session_folder(&id);
-        let mut meta = Meta::parse(&String::from_utf8_lossy(
-            &read(&format!("{base}/meta"))
-                .await
-                .ok_or_else(|| anyhow!("session {id} is gone"))?,
-        ));
-        if meta.mix.take().is_some() {
-            write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+        {
+            let _meta = lock_meta(&id).await;
+            let mut meta = meta_now(&id).await?;
+            if meta.mix.take().is_some() {
+                write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+            }
         }
         if CLOSED.get() || st_remove(&mix_path(&id)).await.as_bool() != Some(true) {
             return Err(anyhow!("browser storage could not remove the mix"));
@@ -614,6 +642,9 @@ pub async fn keep_stored_stems(id: &str, names: &[String]) -> StoredStems {
 }
 
 async fn keep_stored_now(id: &str, names: &[String]) -> StoredStems {
+    // Held from the first read of `meta` to its last write; the moves are
+    // short.
+    let _meta = lock_meta(id).await;
     let base = session_folder(id);
     let folder = format!("{base}/stems");
     let unread = |name: &String| format!("{folder}/{}.part", stem_file(name));
@@ -697,12 +728,7 @@ pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<Stem> {
 
 async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     let base = format!("{ROOT}/{id}");
-    let mut meta = Meta::parse(&String::from_utf8_lossy(
-        &read(&format!("{base}/meta"))
-            .await
-            .ok_or_else(|| anyhow!("session {id} is gone"))?,
-    ));
-    meta.stems.clear();
+    meta_now(id).await?;
     for s in stems {
         write_bytes(
             &base,
@@ -710,8 +736,12 @@ async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
             &engine::wav::encode_pcm16(&s.left, &s.right, rate),
         )
         .await?;
-        meta.stems.push(s.name.clone());
     }
+    // `meta` again, under its lock: another writer may have changed it
+    // while the stems were written.
+    let _meta = lock_meta(id).await;
+    let mut meta = meta_now(id).await?;
+    meta.stems = stems.iter().map(|s| s.name.clone()).collect();
     write_bytes(&base, "meta", meta.to_text().as_bytes()).await
 }
 
@@ -881,6 +911,7 @@ async fn meta_now(id: &str) -> Result<Meta> {
 /// no other save.
 pub async fn clear_decoded(id: &str) -> Result<()> {
     saving(id, async {
+        let _meta = lock_meta(id).await;
         let mut meta = meta_now(id).await?;
         if meta.decoded.take().is_some() {
             write_bytes(&session_folder(id), "meta", meta.to_text().as_bytes()).await?;
@@ -916,6 +947,8 @@ pub async fn keep_decoded(
     new_mix: bool,
     channels: &[u8],
 ) -> Result<Kept> {
+    // Held from the read of `meta` to its write; the moves are short.
+    let _meta = lock_meta(id).await;
     let base = session_folder(id);
     let mut meta = meta_now(id).await?;
     let files: Vec<String> = crate::store_meta::session_files(frames, sources)
@@ -923,9 +956,12 @@ pub async fn keep_decoded(
         .map(|(file, _)| file)
         .collect();
     let mut moved_mix = false;
-    if new_mix && (meta.mix.is_some() || mix_in_use(id)) {
+    // A usable mix of the song stays; so does a mix that a separation or a
+    // mix write names, usable or not (D8).
+    let usable = usable_mix_frames(id, &meta).await == Some(frames);
+    if new_mix && (usable || mix_in_use(id)) {
         st_remove(&format!("{base}/{MIX_FILE}{DECODE_PART}")).await;
-        if meta.usable_mix() != Some(frames) {
+        if !usable {
             for file in &files {
                 st_remove(&format!("{base}/{file}{DECODE_PART}")).await;
             }
@@ -1153,6 +1189,12 @@ pub(crate) async fn test_write(path: &str, bytes: &[u8]) -> Result<()> {
     write(path, bytes).await
 }
 
+/// Opens storage again after a test closed it with [`close`].
+#[cfg(test)]
+pub(crate) fn test_reopen() {
+    CLOSED.set(false);
+}
+
 /// Removes every stored session, for a test.
 #[cfg(test)]
 pub(crate) async fn test_wipe() {
@@ -1174,6 +1216,41 @@ mod tests {
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
+
+    thread_local! {
+        /// Heap bytes allocated and not yet freed.
+        static LIVE: Cell<usize> = const { Cell::new(0) };
+        /// The most `LIVE` has been since a test set it.
+        static PEAK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Keeps `LIVE` and `PEAK` for every test in this binary.  Only `alloc`
+    /// and `dealloc` are written, so the default `realloc` holds the old
+    /// and the new buffer at once, as `System`'s may.
+    struct PeakAllocator;
+
+    // SAFETY: every call is forwarded unchanged to `System`; counting
+    // touches only `const` thread-locals, which do not allocate.
+    unsafe impl std::alloc::GlobalAlloc for PeakAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let _ = LIVE.try_with(|live| {
+                let now = live.get() + layout.size();
+                live.set(now);
+                let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+            });
+            // SAFETY: the caller's contract is the same as `System`'s.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(layout.size())));
+            // SAFETY: the caller's contract is the same as `System`'s.
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: PeakAllocator = PeakAllocator;
 
     #[wasm_bindgen(inline_js = r#"
 let record = null;
@@ -1986,10 +2063,10 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         assert!(ended, "forget ends once the decode ends");
     }
 
-    /// D10, MEM-1, MEM-4: the read-back of a 2-minute session file adds
-    /// about its two channels to the page's memory, never the file's bytes
-    /// too, and reads at most 1 MiB at a time.  A mono source adds one
-    /// channel, which both sides share.
+    /// D10, MEM-1, MEM-4: the read-back of a 2-minute session file peaks the
+    /// heap at about its two channels, never the file's bytes too, and reads
+    /// at most 1 MiB at a time.  A mono source peaks at one channel, which
+    /// both sides share.
     #[wasm_bindgen_test]
     async fn the_read_back_makes_no_whole_file_buffer() {
         st_remove(ROOT).await;
@@ -2006,9 +2083,12 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
                 channels: vec![(0, if mono { 1 } else { 2 })],
             };
             store_start_read_spy();
-            let before = crate::separator::page_wasm_mb();
+            // The heap's peak, not the wasm memory's growth, which memory
+            // freed by an earlier test would hide (findings 1-6, 1-7).
+            let before = LIVE.with(Cell::get);
+            PEAK.with(|peak| peak.set(before));
             let song = read_back(&id, &sources, &decoded).await.expect("read back");
-            let grown = crate::separator::page_wasm_mb() - before;
+            let grown = (PEAK.with(Cell::get) - before) as f64 / 1e6;
             let reads = store_stop_read_spy();
             let stem = &song.stems[0];
             let shared = stem.left.shares(&stem.right);
@@ -2022,8 +2102,8 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
             let channels = if mono { 1.0 } else { 2.0 };
             assert_eq!(got, frames);
             assert!(
-                grown < channels * channel_mb + 4.0,
-                "mono {mono}: the page grew by {grown} MB for {channels} channels of {channel_mb} MB"
+                grown < channels * channel_mb + 2.0,
+                "mono {mono}: the heap peaked {grown} MB above its start, for {channels} channels of {channel_mb} MB"
             );
             assert!(reads.len() > 10, "mono {mono}: {} reads", reads.len());
             assert!(
@@ -2036,5 +2116,62 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
                 assert_eq!(right, (0.25 * (0.03_f64 * 1000.0).sin()) as f32);
             }
         }
+    }
+
+    /// Finding 1-5 of review round 1: two writers of `meta` on one session
+    /// at once.  The page moves a separation's stems while a decode of the
+    /// same session ends (the Storage menu opens a session during a
+    /// separation).  Each read-modify-write of `meta` waits for the other,
+    /// so both the stem lines and the `decoded` line stay.
+    #[wasm_bindgen_test]
+    async fn two_writers_of_meta_keep_each_others_lines() {
+        st_remove(ROOT).await;
+        let id = "1792640000070";
+        plant_session(id, &[]).await;
+        let frames = 2_000;
+        let sources = sources_of(&["drums"]);
+        plant_parts(id, frames, &sources, true).await;
+        write(&format!("{ROOT}/{id}/stems/bass.wav.part"), &[1, 2])
+            .await
+            .expect("planted");
+        let stems_done = std::rc::Rc::new(Cell::new(false));
+        let flag = stems_done.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let stored = keep_stored_stems("1792640000070", &["bass".to_string()]).await;
+            flag.set(stored.kept.is_ok());
+        });
+        let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
+        let stems_kept = set_within(3_000, &stems_done).await;
+        let meta = meta_now(id).await.expect("meta");
+        st_remove(ROOT).await;
+        assert_eq!(kept.expect("kept"), Kept::Complete);
+        assert!(stems_kept, "the stems are kept");
+        assert_eq!(meta.stems, ["bass"], "the stem lines stay");
+        assert_eq!(
+            meta.decoded.map(|d| d.frames),
+            Some(frames),
+            "the decoded line stays"
+        );
+    }
+
+    /// Finding 1-22 of review round 1: a `mix` line whose file has the
+    /// wrong size is no usable mix, so D7 moves the worker's mix into its
+    /// place, and the session heals.
+    #[wasm_bindgen_test]
+    async fn a_mix_line_with_a_wrong_size_file_is_replaced() {
+        st_remove(ROOT).await;
+        let id = "1792640000071";
+        let frames = 2_000;
+        plant_mix_line(id, frames).await;
+        write(&mix_path(id), &vec![1; 8 * frames - 8])
+            .await
+            .expect("planted");
+        let sources = sources_of(&["drums"]);
+        plant_parts(id, frames, &sources, true).await;
+        let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
+        let mix = read(&mix_path(id)).await;
+        st_remove(ROOT).await;
+        assert_eq!(kept.expect("kept"), Kept::Complete);
+        assert_eq!(mix, Some(vec![7; 8 * frames]), "the worker's mix");
     }
 }

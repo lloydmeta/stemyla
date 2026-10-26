@@ -71,10 +71,14 @@ export function part_write(id, bytes, at) {
   const n = parts.get(id).write(bytes, { at });
   if (n !== bytes.byteLength) throw new Error(`wrote ${n} of ${bytes.byteLength} bytes`);
 }
+// One array for every read of the second pass, so a read makes no garbage;
+// the page copies each read into WebAssembly memory before the next.
+let read_block = new Uint8Array(0);
 export function part_read(id, at, len) {
-  const b = new Uint8Array(len);
+  if (read_block.length < len) read_block = new Uint8Array(len);
+  const b = read_block.subarray(0, len);
   const n = parts.get(id).read(b, { at });
-  if (n !== len) throw new Error(`read ${n} of ${len} bytes`);
+  if (n !== len) throw new Error(`read  of  bytes`);
   return b;
 }
 export async function part_close(id) {
@@ -168,16 +172,19 @@ fn warm_up() {
 pub fn start() {
     console_error_panic_hook::set_once();
     warm_up();
-    let handler = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| {
-        QUEUE.with_borrow_mut(|queue| queue.push_back(e.data()));
-        if !RUNNING.replace(true) {
-            wasm_bindgen_futures::spawn_local(drain());
-        }
-    });
+    let handler = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| enqueue(e.data()));
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     scope.set_onmessage(Some(handler.as_ref().unchecked_ref()));
     handler.forget();
     send(DecodeReply::Alive);
+}
+
+/// Queues the request `msg`, and starts the queue if it is not running.
+fn enqueue(msg: JsValue) {
+    QUEUE.with_borrow_mut(|queue| queue.push_back(msg));
+    if !RUNNING.replace(true) {
+        wasm_bindgen_futures::spawn_local(drain());
+    }
 }
 
 /// Runs the queued requests one at a time, in the order sent.

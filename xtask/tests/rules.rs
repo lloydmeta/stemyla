@@ -226,6 +226,20 @@ fn no_audio_or_weights_are_tracked() {
     );
 }
 
+/// PROTO-1: the check reads the scenarios in `xtask/src/e2e/` too.
+#[test]
+fn the_e2e_check_reads_every_rust_file_of_the_scenarios() {
+    let rust = xtask::rules::e2e_rust_sources(&xtask::workspace_root()).expect("readable");
+    assert!(
+        rust.contains("pub(super) fn run(o: &Opts)"),
+        "xtask/src/e2e/decode.rs is read"
+    );
+    assert!(
+        rust.contains("fn memory_budget(o: &Opts)"),
+        "xtask/src/e2e.rs is read"
+    );
+}
+
 #[test]
 fn e2e_messages_use_protocol_types() {
     let root = xtask::workspace_root();
@@ -248,7 +262,7 @@ fn e2e_messages_use_protocol_types() {
             read("protocol/src/decode.rs")
         ),
         &scripts,
-        &read("xtask/src/e2e.rs"),
+        &xtask::rules::e2e_rust_sources(&root).expect("the scenarios can be read"),
         &xtask::rules::SCRIPT_ONLY_TYPES,
     );
     let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
