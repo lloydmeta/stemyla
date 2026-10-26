@@ -266,6 +266,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `
 * a request with no headers in `drip`, since the test always sends a Host header (not run);
 * `run` in `xtask/src/roformer_cli.rs`, which needs the model weights and an audio file.
 * the body of `e2e decode` and its helper `drop_and_open` (`xtask/src/e2e/decode.rs`), which run only in a browser; review round 1 of M5 found mutants in both that no `cargo test` kills.  Its checks have unit tests.
+* the body of `e2e playback` (`run` in `xtask/src/e2e/playback.rs`), which runs only in a browser.  Its checks have unit tests.
 * `memory_budget` in `xtask/src/e2e.rs` after M5's checks of the open, which needs a GPU and the weights (review round 1 of M5).
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).

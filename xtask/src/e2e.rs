@@ -1,12 +1,16 @@
 //! `xtask e2e <scenario> [options]`: drives the built web app (`app/dist`)
 //! in Safari or Chrome through WebDriver and checks what it does.
 //!
-//! Scenarios (the first five need no model and run in CI):
-//! * `smoke`: drop generated stems, Play, change the tempo.
+//! Scenarios (the first six need no model and run in CI):
+//! * `smoke`: drop generated stems, Play (every lane from browser storage),
+//!   change the tempo.
 //! * `decode`: the decode worker writes the session files of a 44.1 kHz
 //!   WAV, a 48 kHz WAV and the generated stems, equal to the native decode;
 //!   a reload reads a complete session back with no decode, and decodes a
 //!   session of the M4 layout (`e2e/decode.rs`).
+//! * `playback`: a song restored with six stems plays every lane, "original"
+//!   too, from browser storage through the read-ahead buffer, with no
+//!   underrun, after a seek too (M6, `e2e/playback.rs`).
 //! * `audio-resume`: a song restored at page load plays after one click,
 //!   with Web Audio behaving as in Safari; stems stored with it come back
 //!   with it.
@@ -66,10 +70,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod decode;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "step 4 of M6 reads the line in `e2e playback`")
-)]
 mod playback;
 
 /// The viewport the click positions are measured in.
@@ -200,6 +200,7 @@ pub fn run(args: &[String]) -> Result<()> {
     match o.scenario.as_str() {
         "smoke" => smoke(&o),
         "decode" => decode::run(&o),
+        "playback" => playback::run(&o),
         "audio-resume" => audio_resume(&o),
         "storage" => storage(&o),
         "flac" => flac(&o),
@@ -518,6 +519,14 @@ fn smoke(o: &Opts) -> Result<()> {
     p.click(o.play_x, "Play")?;
     let played = p.wait_for(from, 60, played_a_second)?;
     p.check(played.is_some(), "the playhead moves after Play");
+    // M6: every lane of the dropped stems plays from browser storage.
+    let stored = p.wait_for(from, 60, |l| playback::playback_line(l).is_some())?;
+    let line = stored.as_deref().and_then(playback::playback_line);
+    p.check(
+        line.as_ref()
+            .is_some_and(|l| l.lanes == 5 && l.stored == 5 && l.underruns == 0),
+        &format!("every lane plays from storage, with no underrun: {line:?}"),
+    );
     let contexts = p.session.execute(
         "return (window.__e2e_ctxs || []).map((c) => ({ state: c.state, time: c.currentTime }));",
         json!([]),

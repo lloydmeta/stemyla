@@ -233,6 +233,15 @@ flowchart TD
 
 The page mixes, not the worker.  The stems are on the page, and the worker does not keep them.  To mix in the worker, the page would copy every stem to JS.  And `app` and `stem-worker` may share only `stem-protocol` (LAYER-1).
 
+## Playback
+
+The player (`engine::player`) reads every lane at one position, mixes the lanes and stretches the mix once.  It reads each lane through `engine::source::StemSource`.  A lane in memory is a `MemorySource`.  Since M6, a lane that has a complete session file is a `StoredSource`.  It copies frames only from the read-ahead buffer (`engine::readahead::ReadAhead`), so the audio callback never waits for browser storage (RT-1).
+
+* The buffer has 24 slots.  Each slot holds 32,768 frames of every stored lane: 16 slots for the run ahead of the play head and 8 for the loop.  A slot keeps the file's own bytes, so six 16-bit stems and an f32 original take 24 MiB.  The buffer never takes more than 32 MiB, whatever the length of the song.
+* The reader (`app::playback`) is an async task on the main thread of the page.  At the end of each callback, the player tells it where it plays and which seek waits (`engine::source::Hint`).  The reader reads the most wanted block that no slot holds: one block of each lane, each lane on its own promise.
+* A seek whose block is not read yet waits: the old position plays on until the block arrives.  After a jump to a position that is not read yet (a paused seek, a chipmunk change, a new song), the player plays silence and does not move (a hold).  If a block is still missing when the player reads it, the lane plays silence and the buffer counts an underrun.  A lane whose file cannot be read fails: it plays silence, and the page says so.
+* The page logs a `playback:` line every 2 s while it plays: the lanes from storage, the size of the buffer, the underruns, the holds, the failed lanes and the read times.  `xtask e2e playback` checks it.
+
 ## Browser storage
 
 The page uses the browser's private file system (OPFS):
