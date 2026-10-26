@@ -205,6 +205,8 @@ The parent's M5 acceptance, check by check:
 
 * [x] 2026-10-26: review round 1 (at `754d8be`): 6 reviewers and 11 validators, 1,315,674 tokens, 51.6 wall minutes.  10 should-fix confirmed and fixed in `2cd6801`; 16 nits (13 fixed, 1-18 no change, 1-23 and 1-25 in the Decision log).  Mutants: partial, 189 tested, 61 missed: 7 confirmed (4 fixed with tests, 3 scenario bodies in TD-39), 54 refuted (53 wasm32-only, 1 equivalent).  Approvals: 0 (auto mode; a fallback prompt is not counted).
 
+* [ ] 2026-10-26: review round 2 (at `6e57ad8`): 6 reviewers and 10 validators, 907,036 tokens, 28.5 wall minutes.  10 should-fix confirmed (2-1 to 2-10), 7 nits.  Mutants: full, 5 tested, 0 missed.  The team leader stopped after step 9: the Write tool refuses the findings file to a subagent, so the orchestrator writes it and decides the fixes and round 3.
+
 ## Surprises and discoveries
 
 * 2026-10-26, implementer, step 1: the tests build `engine` at opt-level 0, and the block resampler then converts a minute of 48 kHz stereo in about 8 s.  So `a_block_decode_keeps_its_memory_flat` takes about 33 s natively, and `the_block_resampler_gives_to_rate_exactly` about 7 s.  Their longest input stays as the plan asks.  The web build is optimised, so this does not concern the page.
