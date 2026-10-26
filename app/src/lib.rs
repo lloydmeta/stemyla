@@ -1482,7 +1482,7 @@ impl StemApp {
         let Some(Output::Silent(player)) = &mut self.output else {
             return;
         };
-        let sr = player.song().sample_rate as f32;
+        let sr = player.sample_rate() as f32;
         let mut frames = ((dt * sr) as usize).min(sr as usize);
         let (l, r) = &mut self.silent_scratch;
         while frames > 0 {

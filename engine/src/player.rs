@@ -2,16 +2,33 @@
 //! stretch once.
 //!
 //! For every block:
-//! 1. read every stem at the shared position,
+//! 1. read every stem at the shared position, through its [`StemSource`],
 //! 2. multiply each by its (smoothed) gain and add them up,
 //! 3. feed the sum through one stretcher,
 //! 4. apply the master volume and clamp to ±1,
 //! 5. output.
 //!
 //! Because there is only one read position, stems cannot drift apart.
+//!
+//! The player holds its sources, not the [`Song`].  A source can lack the
+//! frames of a position for a time (a lane in a session file, read through
+//! the read-ahead buffer).  So the player plays from a position that it has
+//! not played from yet only when [`next_run`] from there is ready:
+//!
+//! * A seek while playing whose run is not ready holds: the old position
+//!   plays on, the player publishes the target as the playhead, and gives
+//!   [`Hint::Seek`].  When the run is ready, the seek fades out and jumps.
+//! * A loop set behind the head is such a seek, to the position where the
+//!   read wraps.  The player keeps its old loop until it jumps.
+//! * After a jump (a paused seek, a chipmunk change, a new player), the
+//!   player renders silence and does not move until the run is ready (a
+//!   hold).  It counts the frames in [`SharedParams::held_frames`].
+//!
+//! A lane in memory is always ready, so a song in memory never holds.
 
 use crate::params::{MAX_TEMPO, SharedParams};
 use crate::song::Song;
+use crate::source::{Hint, StemSource, loop_in_force, memory_sources, next_run};
 use crate::stretch::{MAX_PUSH_FRAMES, Stretcher, StretcherKind};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -58,14 +75,32 @@ enum Fade {
     },
 }
 
+/// A seek that waits for its run: asked by the user, or the wrap of a loop
+/// set behind the head (`for_loop`, the loop it was made for).
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    target: u64,
+    for_loop: Option<(u64, u64)>,
+    /// Whether it has held for at least one `process`.
+    held: bool,
+}
+
 pub struct Player {
-    song: Arc<Song>,
+    sample_rate: u32,
+    frames: usize,
+    sources: Vec<Arc<dyn StemSource>>,
     params: Arc<SharedParams>,
     stretcher: Box<dyn Stretcher>,
     cfg: PlayerConfig,
 
     /// Next song frame to read (input side of the stretcher).
     pos: u64,
+    /// Whether the player has not read from `pos` since it jumped there.
+    fresh: bool,
+    /// The loop the player plays: the loop of `params`, taken at the start
+    /// of each `process`, unless its change waits as a [`Pending`] seek.
+    looping: Option<(u64, u64)>,
+    pending: Option<Pending>,
     /// Gains actually applied, ramped towards the targets once per hop.
     gains: Vec<f32>,
     /// Crossfade tables: `fin[k] + fout[k] == 1` for every k.
@@ -90,6 +125,11 @@ pub struct Player {
     xf_buf: Vec<usize>,
     chip_l: Vec<f32>,
     chip_r: Vec<f32>,
+    /// One lane's frames at `pos_buf` and at `old_buf`.
+    lane_l: Vec<f32>,
+    lane_r: Vec<f32>,
+    old_l: Vec<f32>,
+    old_r: Vec<f32>,
 }
 
 impl Player {
@@ -98,19 +138,36 @@ impl Player {
         Self::with_config(song, params, stretcher, PlayerConfig::default())
     }
 
-    /// Makes a player, and warms its stretcher up on this thread, so the
-    /// audio callback does not allocate (RT-1).
+    /// Makes a player of the stems of `song` in memory, with no copy.  See
+    /// [`Self::with_sources`].
     pub fn with_config(
         song: Arc<Song>,
         params: Arc<SharedParams>,
-        mut stretcher: Box<dyn Stretcher>,
+        stretcher: Box<dyn Stretcher>,
         cfg: PlayerConfig,
     ) -> Self {
-        assert_eq!(
-            song.stems.len(),
-            params.stems.len(),
-            "params must match stems"
-        );
+        Self::with_sources(
+            song.sample_rate,
+            song.frames,
+            params,
+            stretcher,
+            cfg,
+            memory_sources(&song),
+        )
+    }
+
+    /// Makes a player of one source for each lane, in the order of
+    /// `params`, and warms its stretcher up on this thread, so the audio
+    /// callback does not allocate (RT-1).
+    pub fn with_sources(
+        sample_rate: u32,
+        frames: usize,
+        params: Arc<SharedParams>,
+        mut stretcher: Box<dyn Stretcher>,
+        cfg: PlayerConfig,
+        sources: Vec<Arc<dyn StemSource>>,
+    ) -> Self {
+        assert_eq!(sources.len(), params.stems.len(), "params must match stems");
         // A fade_in of n+1 ones gives 0, 1/(n+1), .., n/(n+1).  Dropping the
         // leading zero leaves a fade-in whose reverse is the matching
         // fade-out: each pair sums to exactly 1, so the level never dips.
@@ -122,7 +179,7 @@ impl Player {
         let fin: Vec<f32> = ramp[1..].to_vec();
         let mut fout = fin.clone();
         fout.reverse();
-        let gains = (0..song.stems.len())
+        let gains = (0..sources.len())
             .map(|i| params.effective_gain(i))
             .collect();
         let max_in = cfg.hop.max(cfg.block * 2);
@@ -132,12 +189,18 @@ impl Player {
             cfg.hop
         );
         stretcher.warm_up(f64::from(MAX_TEMPO), cfg.block);
+        let looping = params.loop_region();
         Self {
-            song,
+            sample_rate,
+            frames,
+            sources,
             params,
             stretcher,
             cfg,
             pos: 0,
+            fresh: true,
+            looping,
+            pending: None,
             gains,
             fin,
             fout,
@@ -155,6 +218,10 @@ impl Player {
             xf_buf: vec![0; max_in],
             chip_l: vec![0.0; cfg.block * 2],
             chip_r: vec![0.0; cfg.block * 2],
+            lane_l: vec![0.0; max_in],
+            lane_r: vec![0.0; max_in],
+            old_l: vec![0.0; max_in],
+            old_r: vec![0.0; max_in],
         }
     }
 
@@ -162,8 +229,13 @@ impl Player {
         &self.params
     }
 
-    pub fn song(&self) -> &Arc<Song> {
-        &self.song
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The song's length in frames.
+    pub fn frames(&self) -> usize {
+        self.frames
     }
 
     pub fn stretcher_name(&self) -> &'static str {
@@ -178,18 +250,116 @@ impl Player {
         [l, r]
     }
 
+    fn hint(&self, hint: Hint) {
+        for source in &self.sources {
+            source.hint(hint);
+        }
+    }
+
+    /// Whether every source holds the next run from `p`, with `looping`.
+    fn run_ready(&self, p: u64, looping: Option<(u64, u64)>) -> bool {
+        let run = next_run(p, self.frames as u64, looping, self.cfg.crossfade as u64);
+        self.sources
+            .iter()
+            .all(|source| run.ready(|from, frames| source.ready(from, frames)))
+    }
+
+    /// Whether the player is in a hold: it has not read from its position
+    /// since a jump, and the run from there is not ready.
+    fn holding(&self) -> bool {
+        self.fresh && !self.run_ready(self.pos, self.looping)
+    }
+
+    /// Where the next read wraps to if the player takes `wanted` now, when
+    /// that is a jump: the read position is at or after the loop's end.
+    fn wrap_target(&self, wanted: Option<(u64, u64)>) -> Option<u64> {
+        let (s, e) = loop_in_force(wanted, self.frames as u64)?;
+        (self.pos >= e).then(|| dsp::wrap_loop(self.pos as usize, s as usize, e as usize) as u64)
+    }
+
+    /// Takes a new seek and a change of the loop, and starts each seek
+    /// whose run is ready.  A seek whose run is not ready waits.
+    fn take_seeks(&mut self, playing: bool) {
+        let p = Arc::clone(&self.params);
+        let wanted = p.loop_region();
+        if let Some(target) = p.take_seek() {
+            self.pending = Some(Pending {
+                target,
+                for_loop: None,
+                held: false,
+            });
+        }
+        if matches!(self.pending, Some(Pending { for_loop: Some(l), .. }) if Some(l) != wanted) {
+            self.pending = None;
+        }
+        let wrap_holds = matches!(
+            self.pending,
+            Some(Pending {
+                for_loop: Some(_),
+                ..
+            })
+        );
+        if wanted != self.looping {
+            match self.wrap_target(wanted) {
+                None => self.looping = wanted,
+                // A held wrap of this loop waits for its own run.
+                Some(_) if wrap_holds => {}
+                Some(target) if self.run_ready(target, wanted) => self.looping = wanted,
+                Some(target) if self.pending.is_none() => {
+                    self.pending = wanted.map(|l| Pending {
+                        target,
+                        for_loop: Some(l),
+                        held: false,
+                    });
+                }
+                // A seek waits, and its jump takes the loop.
+                Some(_) => {}
+            }
+        }
+        let Some(mut pending) = self.pending.take() else {
+            return;
+        };
+        if !playing || self.holding() {
+            self.jump_to(pending.target);
+        } else if self.run_ready(pending.target, wanted) {
+            if self.cfg.crossfade > 0 {
+                self.fade = Fade::Out {
+                    k: 0,
+                    target: pending.target,
+                };
+            } else {
+                self.jump_to(pending.target);
+            }
+        } else {
+            if !pending.held {
+                pending.held = true;
+                p.held_seeks.fetch_add(1, Relaxed);
+            }
+            self.pending = Some(pending);
+        }
+    }
+
+    /// The playhead to publish: the target of a seek that holds, or else
+    /// the player's own.
+    fn shown_head(&mut self) -> u64 {
+        match self.pending {
+            Some(pending) => pending.target,
+            None => self.playhead(),
+        }
+    }
+
     /// Fills both output slices.  This is what the audio callback calls.
     pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         let p = Arc::clone(&self.params);
         let playing = p.playing.load(Relaxed);
+        let heard = self.playhead();
+        self.hint(Hint::Reading {
+            heard,
+            read: self.pos,
+        });
 
-        if let Some(target) = p.take_seek() {
-            if playing && self.cfg.crossfade > 0 {
-                self.fade = Fade::Out { k: 0, target };
-            } else {
-                self.jump_to(target);
-            }
-        }
+        self.take_seeks(playing);
+        self.hint(Hint::Seek(self.pending.map(|pending| pending.target)));
 
         if !playing {
             out_l.fill(0.0);
@@ -208,6 +378,15 @@ impl Player {
             self.chipmunk = chip;
             let here = self.playhead();
             self.jump_to(here);
+        }
+
+        if self.holding() {
+            out_l.fill(0.0);
+            out_r.fill(0.0);
+            p.held_frames.fetch_add(out_l.len() as u64, Relaxed);
+            let head = self.shown_head();
+            p.playhead.store(head, Relaxed);
+            return;
         }
 
         let mut done = 0;
@@ -232,9 +411,11 @@ impl Player {
             out_r[i] = (out_r[i] * master).clamp(-1.0, 1.0);
         }
 
+        // The stop at the end uses the player's own head, not a target.
         let head = self.playhead();
-        p.playhead.store(head, Relaxed);
-        if p.loop_region().is_none() && head >= self.song.frames as u64 {
+        let shown = self.shown_head();
+        p.playhead.store(shown, Relaxed);
+        if p.loop_region().is_none() && head >= self.frames as u64 {
             p.playing.store(false, Relaxed);
         }
     }
@@ -272,9 +453,12 @@ impl Player {
         }
     }
 
-    /// Moves the read position and resets the stretcher.
+    /// Moves the read position, takes the loop of `params`, and resets the
+    /// stretcher.
     fn jump_to(&mut self, target: u64) {
-        self.pos = target.min(self.song.frames as u64);
+        self.pos = target.min(self.frames as u64);
+        self.fresh = true;
+        self.looping = self.params.loop_region();
         self.stretcher.reset();
         self.anchors.clear();
         self.pushed = 0;
@@ -325,25 +509,24 @@ impl Player {
     /// gains (ramped across the block), sums them into `in_l`/`in_r`, and
     /// handles loop wraps with a crossfade.
     fn read_mixed(&mut self, n: usize) {
-        let frames = self.song.frames as u64;
-        let looping = self.params.loop_region();
+        self.fresh = false;
+        let looping = self.looping;
 
         // 1. Work out which song frame each output frame comes from.
         for i in 0..n {
-            if let Some((s, e)) = looping {
-                let e = e.min(frames);
-                if s < e && self.pos >= e {
-                    if self.cfg.crossfade > 0 {
-                        self.xf_old = Some(self.pos);
-                        self.xf_k = 0;
-                    }
-                    self.pos = dsp::wrap_loop(self.pos as usize, s as usize, e as usize) as u64;
-                    self.drop_oldest_anchor_when_full();
-                    self.anchors.push_back(Anchor {
-                        input_index: self.pushed + i as u64,
-                        song_pos: self.pos,
-                    });
+            if let Some((s, e)) = loop_in_force(looping, self.frames as u64)
+                && self.pos >= e
+            {
+                if self.cfg.crossfade > 0 {
+                    self.xf_old = Some(self.pos);
+                    self.xf_k = 0;
                 }
+                self.pos = dsp::wrap_loop(self.pos as usize, s as usize, e as usize) as u64;
+                self.drop_oldest_anchor_when_full();
+                self.anchors.push_back(Anchor {
+                    input_index: self.pushed + i as u64,
+                    song_pos: self.pos,
+                });
             }
             if self.anchors.is_empty() {
                 self.anchors.push_back(Anchor {
@@ -368,33 +551,51 @@ impl Player {
         }
         self.pushed += n as u64;
 
-        // 2. Mix with gains ramped from the current to the target values.
+        // 2. Read each lane with a gain, one run of consecutive frames at a
+        // time, and mix with gains ramped from the current to the target
+        // values.
         self.in_l[..n].fill(0.0);
         self.in_r[..n].fill(0.0);
-        let song = Arc::clone(&self.song);
-        for (si, stem) in song.stems.iter().enumerate() {
+        for (si, source) in self.sources.iter().enumerate() {
             let g0 = self.gains[si];
             let g1 = self.params.effective_gain(si);
             self.gains[si] = g1;
             if g0 == 0.0 && g1 == 0.0 {
                 continue;
             }
+            let mut i = 0;
+            while i < n {
+                let start = i;
+                i += 1;
+                while i < n && self.pos_buf[i] == self.pos_buf[i - 1] + 1 {
+                    i += 1;
+                }
+                source.read(
+                    self.pos_buf[start],
+                    &mut self.lane_l[start..i],
+                    &mut self.lane_r[start..i],
+                );
+            }
+            let mut i = 0;
+            while i < n {
+                let Some(from) = self.old_buf[i] else {
+                    i += 1;
+                    continue;
+                };
+                let start = i;
+                i += 1;
+                while i < n && self.old_buf[i] == Some(from + (i - start) as u64) {
+                    i += 1;
+                }
+                source.read(from, &mut self.old_l[start..i], &mut self.old_r[start..i]);
+            }
             let step = (g1 - g0) / n as f32;
             for i in 0..n {
                 let g = g0 + step * (i + 1) as f32;
-                let p = self.pos_buf[i];
-                let (mut vl, mut vr) = if p < frames {
-                    (stem.left[p as usize], stem.right[p as usize])
-                } else {
-                    (0.0, 0.0)
-                };
-                if let Some(old) = self.old_buf[i] {
+                let (mut vl, mut vr) = (self.lane_l[i], self.lane_r[i]);
+                if self.old_buf[i].is_some() {
                     let k = self.xf_buf[i];
-                    let (ol, or) = if old < frames {
-                        (stem.left[old as usize], stem.right[old as usize])
-                    } else {
-                        (0.0, 0.0)
-                    };
+                    let (ol, or) = (self.old_l[i], self.old_r[i]);
                     vl = vl * self.fin[k] + ol * self.fout[k];
                     vr = vr * self.fin[k] + or * self.fout[k];
                 }
@@ -437,8 +638,11 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::song::Stem;
+    use crate::song::{Samples, Stem};
+    use crate::source::MemorySource;
     use crate::stretch::Varispeed;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
 
     fn song(stems: Vec<(&str, Vec<f32>)>) -> Arc<Song> {
         let frames = stems[0].1.len();
@@ -761,5 +965,350 @@ mod tests {
         let [l, _] = p.render(1_000);
         assert!((l[500] - 1_000.0 / 10_000.0).abs() < 1e-6);
         assert_eq!(p.params.playhead(), 2_000);
+    }
+
+    /// A memory lane whose frames are ready only in `lo..hi`, which the
+    /// test sets.  It counts the frames it gave as 0.0 for want of them,
+    /// and records every hint.
+    struct Gated {
+        inner: MemorySource,
+        lo: AtomicU64,
+        hi: AtomicU64,
+        missed: AtomicU64,
+        hints: Mutex<Vec<Hint>>,
+    }
+
+    impl Gated {
+        fn new(left: Samples, right: Samples) -> Arc<Self> {
+            Arc::new(Self {
+                inner: MemorySource::new(left, right),
+                lo: AtomicU64::new(0),
+                hi: AtomicU64::new(u64::MAX),
+                missed: AtomicU64::new(0),
+                hints: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn window(&self, lo: u64, hi: u64) {
+            self.lo.store(lo, Relaxed);
+            self.hi.store(hi, Relaxed);
+        }
+
+        fn open(&self) {
+            self.window(0, u64::MAX);
+        }
+
+        fn holds(&self, frame: u64) -> bool {
+            (self.lo.load(Relaxed)..self.hi.load(Relaxed)).contains(&frame)
+        }
+
+        fn last_seek_hint(&self) -> Option<Option<u64>> {
+            self.hints
+                .lock()
+                .expect("lock")
+                .iter()
+                .rev()
+                .find_map(|h| match h {
+                    Hint::Seek(t) => Some(*t),
+                    Hint::Reading { .. } => None,
+                })
+        }
+    }
+
+    impl StemSource for Gated {
+        fn read(&self, from: u64, left: &mut [f32], right: &mut [f32]) {
+            self.inner.read(from, left, right);
+            for i in 0..left.len() {
+                if !self.holds(from + i as u64) {
+                    left[i] = 0.0;
+                    right[i] = 0.0;
+                    self.missed.fetch_add(1, Relaxed);
+                }
+            }
+        }
+
+        fn ready(&self, from: u64, frames: usize) -> bool {
+            frames == 0 || (self.holds(from) && self.holds(from + frames as u64 - 1))
+        }
+
+        fn hint(&self, hint: Hint) {
+            self.hints.lock().expect("lock").push(hint);
+        }
+    }
+
+    const TWIN_FRAMES: usize = 400_000;
+
+    /// A player of one gated lane, and a player of the same lane in
+    /// memory, driven with the same controls.
+    struct Twin {
+        lane: Arc<Gated>,
+        gated: Player,
+        memory: Player,
+    }
+
+    impl Twin {
+        fn new() -> Self {
+            let ramp: Vec<f32> = (0..TWIN_FRAMES)
+                .map(|i| i as f32 / TWIN_FRAMES as f32)
+                .collect();
+            let (left, right): (Samples, Samples) = (ramp.into(), noise(TWIN_FRAMES, 9).into());
+            let lane = Gated::new(left.clone(), right.clone());
+            let make = |source: Arc<dyn StemSource>| {
+                Player::with_sources(
+                    44_100,
+                    TWIN_FRAMES,
+                    Arc::new(SharedParams::new(1)),
+                    Box::new(Varispeed::new()),
+                    PlayerConfig::default(),
+                    vec![source],
+                )
+            };
+            Self {
+                gated: make(Arc::clone(&lane) as Arc<dyn StemSource>),
+                memory: make(Arc::new(MemorySource::new(left, right))),
+                lane,
+            }
+        }
+
+        /// Sets the same control on both players.
+        fn both(&self, f: impl Fn(&SharedParams)) {
+            f(self.gated.params());
+            f(self.memory.params());
+        }
+
+        fn gated_params(&self) -> &SharedParams {
+            self.gated.params()
+        }
+
+        /// Plays `callbacks` callbacks of 512 frames on both, and gives
+        /// the outputs of the gated player and of the memory one.
+        fn play(&mut self, callbacks: usize) -> (Vec<f32>, Vec<f32>) {
+            let (mut gated, mut memory) = (Vec::new(), Vec::new());
+            for _ in 0..callbacks {
+                let [l, r] = self.gated.render(512);
+                gated.extend(l.iter().chain(&r));
+                let [l, r] = self.memory.render(512);
+                memory.extend(l.iter().chain(&r));
+            }
+            (gated, memory)
+        }
+
+        /// Plays the gated player only.
+        fn play_gated(&mut self, callbacks: usize) -> Vec<f32> {
+            let mut out = Vec::new();
+            for _ in 0..callbacks {
+                let [l, _] = self.gated.render(512);
+                out.extend(l);
+            }
+            out
+        }
+
+        fn held_frames(&self) -> u64 {
+            self.gated_params().held_frames.load(Relaxed)
+        }
+
+        fn held_seeks(&self) -> u64 {
+            self.gated_params().held_seeks.load(Relaxed)
+        }
+    }
+
+    #[test]
+    fn a_seek_holds_for_its_block_and_the_old_position_plays() {
+        let mut twin = Twin::new();
+        twin.lane.window(0, 100_000);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        let (g, m) = twin.play(20);
+        assert_eq!(g, m);
+        // The gated player holds the seek; the memory player plays on from
+        // the old position too, because it gets no seek yet.
+        twin.gated_params().request_seek(200_000);
+        let (g, m) = twin.play(40);
+        assert_eq!(g, m, "the old position plays while the seek holds");
+        assert_eq!(twin.held_seeks(), 1);
+        assert_eq!(twin.lane.last_seek_hint(), Some(Some(200_000)));
+        assert_eq!(twin.lane.missed.load(Relaxed), 0, "no underrun");
+        // The block arrives: both seek now and play the same.
+        twin.lane.open();
+        twin.memory.params().request_seek(200_000);
+        let (g, m) = twin.play(20);
+        assert_eq!(g, m, "the seek fades out and jumps as in memory");
+        assert_eq!(
+            twin.lane.last_seek_hint(),
+            Some(None),
+            "the hint is cleared"
+        );
+        let head = twin.gated_params().playhead();
+        assert!((200_000..210_000).contains(&head), "playhead {head}");
+        assert_eq!(twin.held_frames(), 0);
+        assert_eq!(twin.lane.missed.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn a_held_seek_shows_its_target() {
+        let mut twin = Twin::new();
+        twin.lane.window(0, 100_000);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.play_gated(10);
+        twin.gated_params().request_seek(300_000);
+        for _ in 0..10 {
+            twin.play_gated(1);
+            assert_eq!(twin.gated_params().playhead(), 300_000);
+        }
+        // A newer seek replaces the held one.
+        twin.gated_params().request_seek(250_000);
+        twin.play_gated(1);
+        assert_eq!(twin.gated_params().playhead(), 250_000);
+        assert_eq!(twin.lane.last_seek_hint(), Some(Some(250_000)));
+        assert!(twin.gated.pos < 100_000, "the player itself has not moved");
+    }
+
+    #[test]
+    fn a_paused_seek_jumps_at_once() {
+        let mut twin = Twin::new();
+        twin.lane.window(0, 100_000);
+        twin.play_gated(1);
+        twin.gated_params().request_seek(300_000);
+        twin.play_gated(1);
+        assert_eq!(twin.gated.pos, 300_000);
+        assert_eq!(twin.gated_params().playhead(), 300_000);
+        assert_eq!(twin.held_seeks(), 0);
+        // A pause turns a held seek into a paused seek.
+        twin.lane.window(0, 100_000);
+        twin.gated.jump_to(0);
+        twin.gated_params().playing.store(true, Relaxed);
+        twin.play_gated(4);
+        twin.gated_params().request_seek(350_000);
+        twin.play_gated(1);
+        assert_eq!(twin.held_seeks(), 1);
+        twin.gated_params().playing.store(false, Relaxed);
+        twin.play_gated(1);
+        assert_eq!(twin.gated.pos, 350_000, "the held seek jumps when paused");
+        assert_eq!(twin.lane.last_seek_hint(), Some(None));
+    }
+
+    #[test]
+    fn a_jump_to_a_position_not_ready_holds_and_counts_no_underrun() {
+        // A paused seek, then Play.
+        let mut twin = Twin::new();
+        twin.lane.window(0, 0);
+        twin.both(|p| p.request_seek(100_000));
+        twin.play(1);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        let held = twin.play_gated(10);
+        assert!(held.iter().all(|v| *v == 0.0), "a hold is silent");
+        assert_eq!(twin.held_frames(), 10 * 512);
+        assert_eq!(twin.gated_params().playhead(), 100_000, "the head waits");
+        twin.lane.open();
+        let (g, m) = twin.play(10);
+        assert_eq!(g, m, "it then plays the target as in memory");
+        assert_eq!(twin.lane.missed.load(Relaxed), 0, "a hold is no underrun");
+        assert_eq!(twin.held_seeks(), 0);
+
+        // A chipmunk change.
+        let mut twin = Twin::new();
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.play(10);
+        twin.lane.window(0, 0);
+        twin.both(|p| p.chipmunk.store(true, Relaxed));
+        let held = twin.play_gated(5);
+        assert!(held.iter().all(|v| *v == 0.0));
+        assert_eq!(twin.held_frames(), 5 * 512);
+        twin.lane.open();
+        let (g, m) = twin.play(10);
+        assert_eq!(g, m);
+        assert_eq!(twin.lane.missed.load(Relaxed), 0);
+
+        // A new player.
+        let mut twin = Twin::new();
+        twin.lane.window(0, 0);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.play_gated(3);
+        assert_eq!(twin.held_frames(), 3 * 512);
+        twin.lane.open();
+        let (g, m) = twin.play(10);
+        assert_eq!(g, m);
+        assert_eq!(twin.lane.missed.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn a_loop_set_behind_the_head_is_a_held_seek() {
+        // Its target is not ready: the old position plays on.
+        let mut twin = Twin::new();
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.play(100);
+        let head = twin.gated.pos;
+        twin.lane.window(head - 1_000, u64::MAX);
+        let (s, e) = (head - 30_000, head - 10_000);
+        twin.gated_params().set_loop(s, e);
+        let target = dsp::wrap_loop(head as usize, s as usize, e as usize) as u64;
+        let (g, m) = twin.play(10);
+        assert_eq!(g, m, "the old position plays on with no loop");
+        assert_eq!(twin.held_seeks(), 1);
+        assert_eq!(twin.lane.last_seek_hint(), Some(Some(target)));
+        assert_eq!(twin.gated_params().playhead(), target);
+        // The target arrives: it fades out, jumps and takes the loop.
+        twin.lane.open();
+        twin.memory.params().request_seek(target);
+        twin.memory.params().set_loop(s, e);
+        let (g, m) = twin.play(100);
+        assert_eq!(g, m);
+        let head = twin.gated_params().playhead();
+        assert!((s..e).contains(&head), "playhead {head} in the loop");
+        assert_eq!(twin.lane.missed.load(Relaxed), 0);
+        assert_eq!(twin.held_frames(), 0);
+
+        // Its target is ready: it wraps at once, with the loop crossfade,
+        // as a memory player does.
+        let mut twin = Twin::new();
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.play(100);
+        let head = twin.gated.pos;
+        twin.both(|p| p.set_loop(head - 30_000, head - 10_000));
+        let (g, m) = twin.play(100);
+        assert_eq!(g, m);
+        assert_eq!(twin.held_seeks(), 0);
+        let (s, e) = (head - 30_000, head - 10_000);
+        let w = dsp::wrap_loop(head as usize, s as usize, e as usize) as u64;
+        let ramp_at = |frame: u64| frame as f32 / TWIN_FRAMES as f32;
+        // The first frame read after the wrap mixes the old and the new.
+        let mut fresh = Twin::new();
+        fresh.gated.jump_to(w);
+        fresh.gated_params().playing.store(true, Relaxed);
+        let jumped = fresh.play_gated(1);
+        assert_ne!(g[..512], jumped[..], "a wrap with the crossfade, not a cut");
+        assert!(g[0] > ramp_at(w), "the old position still sounds");
+    }
+
+    #[test]
+    fn a_loop_that_ends_on_a_read_wraps_with_no_hold() {
+        let mut twin = Twin::new();
+        // 16 hops of 256 frames: a read ends exactly at the loop's end.
+        twin.both(|p| p.set_loop(0, 4_096));
+        twin.lane.window(0, 4_096 + 256);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        let (g, m) = twin.play(40);
+        assert_eq!(g, m, "it wraps with the crossfade, as in memory");
+        assert_eq!(twin.held_frames(), 0);
+        assert_eq!(twin.held_seeks(), 0);
+        assert_eq!(twin.lane.missed.load(Relaxed), 0);
+        assert!(twin.gated_params().playhead() < 4_096);
+    }
+
+    #[test]
+    fn the_player_hints_while_paused() {
+        let mut twin = Twin::new();
+        twin.gated_params().request_seek(1_234);
+        twin.play_gated(1);
+        twin.lane.hints.lock().expect("lock").clear();
+        twin.play_gated(2);
+        let hints = twin.lane.hints.lock().expect("lock").clone();
+        let reading = Hint::Reading {
+            heard: 1_234,
+            read: 1_234,
+        };
+        assert_eq!(
+            hints,
+            [reading, Hint::Seek(None), reading, Hint::Seek(None)]
+        );
     }
 }

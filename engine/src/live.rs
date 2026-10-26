@@ -80,7 +80,7 @@ pub fn probe_default_output() -> Result<String> {
 /// playing `player` into it.  On failure the player comes back with the
 /// error, for the caller to play silently.
 pub fn start(player: Player) -> Result<LiveOutput, (anyhow::Error, Box<Player>)> {
-    match open(player.song().sample_rate) {
+    match open(player.sample_rate()) {
         Ok(out) => {
             drop(out.slot.replace(Some(player)));
             Ok(out)
@@ -231,7 +231,7 @@ impl LiveOutput {
                 Duration::ZERO
             },
         };
-        match check(health, player.song().sample_rate) {
+        match check(health, player.sample_rate()) {
             Ok(()) => Ok(self.slot.replace(Some(player))),
             Err(why) => Err((why, Box::new(player))),
         }

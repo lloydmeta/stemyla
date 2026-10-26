@@ -43,7 +43,7 @@ fn opening_a_song_frees_the_one_it_replaces() {
     app.open_song(song(48_000));
     assert!(second.upgrade().is_none(), "a song at another rate too");
     match &app.output {
-        Some(Output::Silent(player)) => assert_eq!(player.song().sample_rate, 48_000),
+        Some(Output::Silent(player)) => assert_eq!(player.sample_rate(), 48_000),
         _ => panic!("a silent output"),
     }
 }

@@ -13,6 +13,7 @@ pub mod player;
 pub mod resample;
 pub mod slot;
 pub mod song;
+pub mod source;
 pub mod stretch;
 #[cfg(test)]
 mod test_audio;
