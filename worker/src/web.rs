@@ -1195,6 +1195,27 @@ impl Network for GpuNetwork<'_> {
     }
 }
 
+/// The check, after the last chunk, that the song did not change during
+/// the separation (finding 3-3 of review round 3 of M4).
+trait MixCheck {
+    /// `Ok` if the mix is still the one that the separation read; else
+    /// why not, for `unstored`.
+    async fn unchanged(&self) -> Result<(), String>;
+}
+
+/// A mix in memory cannot change.
+impl MixCheck for Stereo {
+    async fn unchanged(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl MixCheck for StoredMix {
+    async fn unchanged(&self) -> Result<(), String> {
+        StoredMix::unchanged(self).await
+    }
+}
+
 /// Why a separation stopped.
 enum Stop {
     /// Browser storage refused a stem file, or could not give the stored
@@ -1216,10 +1237,11 @@ impl From<StemError> for Stop {
 /// Separates the song in `d`, a chunk at a time, through `net`.  With a
 /// `session`, it writes the stems there and sends `stored` after each
 /// segment; else it sends each segment to the page.  Then it sends
-/// `done`.  A storage failure, of a stem file or of the mix, removes the
+/// `done`, if the mix did not change meanwhile.  A storage failure, of a
+/// stem file or of the mix, a changed mix included, removes the
 /// stem files and sends `unstored`.  Any other failure removes them too,
 /// and is returned for an `error` (D4 of M3).
-async fn separate_song<S: MixSource<Error: Display>>(
+async fn separate_song<S: MixSource<Error: Display> + MixCheck>(
     net: &mut impl Network,
     mut d: Demixer<S>,
     session: Option<&str>,
@@ -1237,7 +1259,10 @@ async fn separate_song<S: MixSource<Error: Display>>(
             Err(StemError::Refused(text)) => return Err(text),
         },
     };
-    let separated = separate_chunks(net, &mut d, writer.as_mut(), t0).await;
+    let separated = match separate_chunks(net, &mut d, writer.as_mut(), t0).await {
+        Ok(()) => d.source().unchanged().await.map_err(Stop::Storage),
+        failed => failed,
+    };
     let finished = match (separated, writer.as_mut()) {
         (Ok(()), Some(w)) => w.finish().await.map_err(Stop::from),
         (other, _) => other,

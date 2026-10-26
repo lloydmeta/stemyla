@@ -2161,6 +2161,12 @@ struct FailingMix {
     fail_at: usize,
 }
 
+impl MixCheck for FailingMix {
+    async fn unchanged(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl MixSource for FailingMix {
     type Error = String;
 
@@ -2207,13 +2213,17 @@ async fn a_failed_mix_read_ends_with_unstored() {
     );
 }
 
-/// Finding 2-2 of review round 2 of M4: a mix file that changes or goes
-/// after the open gives an error, not stale samples or a panic.
+/// Finding 2-2 of review round 2 of M4: a read of a mix file that changed
+/// or went after the open does not give the old samples.  Chrome refuses
+/// the read (NotReadableError).  Safari reads the bytes on disk now, at the
+/// old size (`docs/references/browser-quirks.md`).  So the worker also
+/// checks the file at the end (`a_mix_file_changed_during_the_separation_ends_with_unstored`).
 #[wasm_bindgen_test]
-async fn a_mix_file_changed_after_the_open_is_a_read_error() {
+async fn a_mix_file_changed_after_the_open_gives_no_old_samples() {
+    let old = fake_mix();
     for change in ["shortened", "removed"] {
         fresh().await;
-        plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+        plant_at(MIX_PATH, &mix_file(&old)).await;
         let mut source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
             .await
             .expect("opened");
@@ -2222,13 +2232,83 @@ async fn a_mix_file_changed_after_the_open_is_a_read_error() {
         } else {
             assert!(opfs_remove_at(MIX_PATH).await, "removed");
         }
-        let read = source.read(0, FAKE_CHUNK);
-        let error = read.expect_err(change);
+        match source.read(0, FAKE_CHUNK) {
+            Err(error) => assert!(
+                error.starts_with("the mix file could not be read: "),
+                "{change}: {error}"
+            ),
+            Ok(got) => assert!(
+                got[0] != old[0][..FAKE_CHUNK],
+                "{change}: the read gave the old samples"
+            ),
+        }
+    }
+}
+
+/// Finding 3-3 of review round 3 of M4: a mix file written again during
+/// the separation ends it with `unstored` (D6), in Chrome and in Safari.
+/// The second case waits over a second, so that Safari's `lastModified`,
+/// in whole seconds, changes.
+#[wasm_bindgen_test]
+async fn a_mix_file_changed_during_the_separation_ends_with_unstored() {
+    let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
+    for (change, wait_ms, bytes) in [
+        ("written again shorter", 0, vec![0; 16]),
+        ("written again at its size", 1100, mix_file(&other)),
+    ] {
+        fresh().await;
+        plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+        let source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
+            .await
+            .expect("opened");
+        sleep(wait_ms).await;
+        plant_at(MIX_PATH, &bytes).await;
+        let d = Demixer::new(source, FAKE_CHUNK, 2, STEMS.len());
+        let mut net = FakeNetwork { fail_at: None };
+        let ended = separate_song(&mut net, d, Some(SESSION), now_s()).await;
+        reply_to(kind::SEPARATE, ended);
+        let types = reply_types();
+        assert_eq!(
+            types.last().map(String::as_str),
+            Some("unstored"),
+            "{change}: {types:?}"
+        );
         assert!(
-            error.starts_with("the mix file could not be read: "),
-            "{change}: {error}"
+            !types.iter().any(|t| t == "done" || t == "error"),
+            "{change}: {types:?}"
+        );
+        assert_eq!(
+            types.iter().filter(|t| *t == "unstored").count(),
+            1,
+            "{change}"
+        );
+        assert_eq!(
+            names_in(&format!("{SESSION}/stems")).await.as_deref(),
+            Some(""),
+            "{change}: no stem file remains"
         );
     }
+}
+
+/// Finding 3-3: the check after the last chunk sees a mix file written
+/// again at its size, after the last read.  It waits over a second, so
+/// that Safari's `lastModified`, in whole seconds, changes.
+#[wasm_bindgen_test]
+async fn the_end_check_sees_a_mix_file_written_again_at_its_size() {
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+    let source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
+        .await
+        .expect("opened");
+    assert_eq!(source.unchanged().await, Ok(()), "the control");
+    sleep(1100).await;
+    let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
+    plant_at(MIX_PATH, &mix_file(&other)).await;
+    let error = source.unchanged().await.expect_err("changed");
+    assert!(
+        error.starts_with("the mix file changed during the separation: 80000 bytes"),
+        "{error}"
+    );
 }
 
 /// Finding 2-2: a read that gives fewer bytes than its span is an error,

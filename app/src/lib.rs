@@ -3649,9 +3649,9 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert_eq!((file, part), (None, None), "no mix file is left");
     }
 
-    /// D7 of M4: with room for the stems but not for the mix, a song with
-    /// no mix file takes the memory path, and a song with a usable mix
-    /// file takes the storage path.
+    /// D7 of M4: storage has room for the stems, but not for the mix.  A
+    /// song with no mix file takes the memory path.  A song with a usable
+    /// mix file takes the storage path.
     #[wasm_bindgen_test]
     async fn the_free_space_must_hold_a_missing_mix() {
         let free = storage_needed(FRAMES) + 4.0 * FRAMES as f64;
@@ -3685,6 +3685,56 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             "a usable mix file: the storage path"
         );
         assert_eq!(kept_stage, Some(JobStage::Storage));
+    }
+
+    /// Finding 3-1 of review round 3 of M4: a song opened while the page
+    /// writes the mix is not separated, and the status line says why.
+    #[wasm_bindgen_test]
+    async fn a_song_opened_during_the_mix_write_is_not_separated() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        app.start_separation(&egui::Context::default());
+        settle(&mut app).await;
+        let writing = app.separating.as_ref().map(|j| j.stage);
+        app.open_song(Song {
+            sample_rate: 44_100,
+            frames: FRAMES,
+            stems: vec![Stem {
+                name: "beachape".into(),
+                left: tone(FRAMES).into(),
+                right: tone(FRAMES).into(),
+            }],
+        });
+        settle(&mut app).await;
+        let posted = posts.length();
+        let running = app.separating.is_some();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(writing, Some(JobStage::WritingMix));
+        assert_eq!(posted, 0, "nothing posted");
+        assert!(!running);
+        assert!(status.contains("another song was opened"), "{status}");
+    }
+
+    /// Finding 3-2 of review round 3 of M4: a failed mix write of a song
+    /// over the memory path's limit refuses the song (D7).
+    #[wasm_bindgen_test]
+    async fn a_failed_mix_write_refuses_a_long_song() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        app.memory_limit = ONE_SECOND;
+        refuse_writes();
+        press_separate(&mut app).await;
+        allow_writes();
+        let posted = posts.length();
+        let running = app.separating.is_some();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(posted, 0, "nothing posted");
+        assert!(!running);
+        assert!(
+            status.starts_with("Not separated: this song is 0:02 long")
+                && status.contains("browser storage could not keep the song's mix"),
+            "{status}"
+        );
     }
 
     /// D2 of M4: a usable mix file of the song is not written again.

@@ -7,6 +7,14 @@
 //! which takes no lock.  The page does not write the file while a
 //! separation runs.  Each span is read with `FileReaderSync`, so the
 //! demixer's loop needs no `await` to read.
+//!
+//! If the file is written again after the open, Chrome refuses the next
+//! read, but Safari reads the bytes on disk now, at the old size
+//! (`docs/references/browser-quirks.md`).  So after the last chunk, the
+//! worker gets the file again and compares its size and `lastModified`
+//! ([`StoredMix::unchanged`]).  Safari gives `lastModified` in whole
+//! seconds, so it misses a write of the same size in the same second
+//! (TD-55).
 
 use roformer::demix::{MixSource, Stereo};
 use wasm_bindgen::prelude::*;
@@ -35,8 +43,21 @@ const FRAME_BYTES: usize = 8;
 
 /// A mix file, opened and checked against its frames.
 pub(super) struct StoredMix {
+    path: String,
     file: Blob,
     frames: usize,
+    /// The file's size and `lastModified` at the open, kept as numbers:
+    /// Safari's `File` gives the values on disk now, not those at the
+    /// open.
+    opened: (f64, Option<f64>),
+}
+
+/// The size and the `lastModified` of a file.
+fn stamp(file: &Blob) -> (f64, Option<f64>) {
+    let modified = js_sys::Reflect::get(file, &"lastModified".into())
+        .ok()
+        .and_then(|v| v.as_f64());
+    (file.size(), modified)
 }
 
 impl StoredMix {
@@ -54,14 +75,40 @@ impl StoredMix {
                 file.size()
             ));
         }
-        Ok(Self { file, frames })
+        Ok(Self {
+            path: path.into(),
+            opened: stamp(&file),
+            file,
+            frames,
+        })
+    }
+
+    /// Whether the file on disk is still the one opened: the same size and
+    /// `lastModified`.  The error is a text for `unstored`.
+    pub(super) async fn unchanged(&self) -> Result<(), String> {
+        let now = mix_file(&self.path)
+            .await
+            .map_err(|e| format!("the mix file could not be opened again: {}", js_text(&e)))?;
+        let (before, after) = (self.opened, stamp(&now));
+        if before != after {
+            return Err(format!(
+                "the mix file changed during the separation: {} bytes, modified at {:?} ms, then {} bytes at {:?} ms",
+                before.0, before.1, after.0, after.1
+            ));
+        }
+        Ok(())
     }
 
     /// A mix of `frames` frames read from `file`, with no check of its
     /// size, so a test can make a read short.
     #[cfg(test)]
     pub(super) fn unchecked(file: Blob, frames: usize) -> Self {
-        Self { file, frames }
+        Self {
+            path: String::new(),
+            opened: stamp(&file),
+            file,
+            frames,
+        }
     }
 }
 
