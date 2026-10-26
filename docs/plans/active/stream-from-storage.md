@@ -82,7 +82,7 @@ A 30-minute song has about 272 chunks.  At the iPhone's measured 10.8 to 18.7 s 
 * Read-ahead buffer: memory that holds the next few seconds of every stem in front of the play head (decision 0017).
 * Underrun: the callback needs frames that the read-ahead buffer does not hold.  It plays silence and counts the event.
 * Late buffer: a buffer that starts after its time, because the main thread was busy.  It starts at once.  cpal's two chains make late buffers two at a time (a late pair).  `live.rs` fills one of each late pair, and leaves silent the one that would play over it.  This is not an underrun.
-* Overview: the peak columns of a lane, made while its session file is written, so the waveform never reads the whole file.
+* Overview: the peak columns of a lane, made in a pass over its session file, in blocks, so the waveform never reads the whole file.
 
 ## Plan of work
 
@@ -191,7 +191,7 @@ When the user presses Separate on the storage path, the page writes the song's m
 The encoded source is never whole in memory.  A chosen file is saved to OPFS as a `Blob`, as today.  Then a decoder reads it in blocks and writes session files.  On the main thread, OPFS reads are async, and the decoder needs sync reads.  So decoding runs in a worker that reads the `Blob` with `FileReaderSync`.  `stem-worker` cannot take `engine` (LAYER-1), so this is a new worker of the page side.
 
 * Decision 0019 (accepted): a new page-side worker crate that takes `engine` decodes in blocks.
-* `engine::decode` and `Song::from_audio` read from a source of blocks and write blocks to a sink, not a `Vec`.  The resampler of decision 0012 runs in blocks.  The overview of each lane is made in the same pass.
+* `engine::decode` and `Song::from_audio` read from a source of blocks and write blocks to a sink, not a `Vec`.  The resampler of decision 0012 runs in blocks.  The overview of each lane is made in a second pass over its session file, in blocks (M5 plan, D5).
 * A restored session decodes its stored sources the same way (`store::read` stops reading whole files).
 * A song of one source decodes into `sessions/<id>/mix.f32`, in M4's format (raw `f32` little-endian, interleaved stereo, 44.1 kHz), and writes M4's `meta` line `mix<TAB><frames><TAB>f32le-1`.  That file is the decoded source and the mix (decision 0016), so Separate finds it and writes no second file.  The original lane of M6 and M7 reads it too.
 * A song of several sources gets its `mix.f32` and its `meta` line from the source session files, in blocks, before M7 removes the samples from the page.  Today the page writes it from the samples in memory (M4 plan, D3).
@@ -204,13 +204,17 @@ The encoded source is never whole in memory.  A chosen file is saved to OPFS as 
 A trait in `engine` gives the frames of a stem from a position.  `Samples` in memory implements it, and so does a storage-backed source.  The `Player` reads through it.  The storage-backed source copies from the read-ahead buffer only, and counts underruns.  An async reader on the main thread keeps the buffer full in front of the play head (decision 0017).  It also fills the frames after the loop start, and starts a read at once after a seek.  The read-ahead buffer is made before playback starts, so the callback never allocates (RT-1).
 
 * Acceptance: engine tests play a storage-backed source with a fake reader that is slow, stalls or fails.  The output equals the memory source, or is silence with the underrun counted.  After a seek, the old position plays until the new block arrives.  The allocation tests in `engine/tests/realtime.rs` cover the new source (RT-1).  A browser test plays a stored song and counts no underruns.
+* Before playback reads `mix.f32`, no failure removes it.  Today `forget_mix` removes it on `unstored` (M4) and on `decode-unstored` with a kept mix (M5).  For a song of one source, `mix.f32` is the only session file of the source (M5 plan).
 
 ### M7: lanes, spectrograms and classic drums from storage
 
 * `load_song` builds a lane from its overview, not from samples.  It no longer makes a song-length mix.
 * A spectrogram reads the blocks that it shows.  `lane_signal`, `MixFollower` and `mix_mid` stop making song-length signals.
 * Classic drums runs HPSS in blocks with overlap, and writes its stem as a session file.
-* A restored session opens its session files without reading them whole.  An older session has stem WAVs but no overviews.  The page makes its overviews from the WAVs in blocks, once, and decodes its sources as in M5.
+* After M5, `write_mix` runs only for a song decoded on the page, the fallback when the decode worker cannot decode it.  It reads the song's samples in memory.  M7 makes that fallback write `mix.f32` without a song-length signal on the page, or limits it to the memory path's length.
+* Fix TD-56 if M7's open path allows it: a late drop or pick can show over a newer song.
+* After every separation on the storage path, the decode worker makes each stem's overview from its WAV, in blocks, as M5 does for the sources.  The request is a new decode message in `stem-protocol` (PROTO-1).  The classic-drums stem gets its overview the same way.  `stem-worker` cannot take `engine::overview` (LAYER-1).
+* A restored session opens its session files without reading them whole.  A session with stem WAVs but no stem overviews (every session before M7) gets them the same way, once.  A session of M3's or M4's layout decodes its sources as in M5.
 * Acceptance: the UI snapshot tests pass with a storage-backed song.  An HPSS test gives the same output in blocks as whole, within a stated tolerance.  A browser test restores a session of the old layout and finds the page WebAssembly memory under a fixed bound.
 
 ### M8: saving reads from storage and writes to storage
@@ -242,7 +246,7 @@ The GPU keeps each weight matrix of an f16 file as f16, two values in each `u32`
 
 The 1100 MB leaves about 950 MB under the iPhone's limit for WebKit, the JS heap and WebGL.  These parts are not measured.  TD-11 and TD-54 close.
 
-The maintainer publishes, then opens, separates, plays and saves a 30-minute song on the iPhone.  The tab stays in the foreground, with Auto-Lock set to Never and the phone on a charger.  Playback includes a loop and seeks.  `idevicesyslog` shows no `exceeded mem limit` for WebContent.
+The maintainer publishes, then opens, separates, plays and saves a 30-minute song on the iPhone.  The song is at 44.1 or 48 kHz, because the decode limit (decision 0013, 1 GiB of 32-bit stereo) refuses a 30-minute song above about 74.6 kHz, so at 88.2 or 96 kHz.  The tab stays in the foreground, with Auto-Lock set to Never and the phone on a charger.  Playback includes a loop and seeks.  `idevicesyslog` shows no `exceeded mem limit` for WebContent.
 
 * Acceptance: `cargo run -p xtask -- e2e memory-budget` passes.  The iPhone log and the Web Inspector peaks are in "Outcomes and retrospective".
 
@@ -276,7 +280,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-26: M3: stems to storage (`2c7440a..e2d554c`, plan `stream-from-storage-m3.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m3.md`).  In Chrome on the Mac (Radeon Pro 5500M), `e2e stored-stems --hashes` passes: the six stem files equal the memory path's stems after 16-bit rounding.  `e2e memory-budget`: the page grows 0 MB during the separation; peaks 966 MB at 1 minute, 1517 MB at 4 minutes.  The MEM-5 spy, the fallback tests and `web-test` (Chrome and Safari) pass.  The memory path refuses a song over 100 s (M3 plan, D3).  Do not publish a build from M3 until M7: after a storage-path separation and on each reload, the page reads the six stems back into memory (TD-54), so a long song can stop the iPhone's tab again and again.
 * [x] 2026-10-26: M3 intent review: 1 significant should-fix (this plan's M3 text contradicted D1), fixed here.
 * [x] 2026-10-26: M4: mix from storage (`f10fbb7..57bb956`, plan `stream-from-storage-m4.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m4.md`).  `Demixer` reads a `MixSource` one span at a time, and gives the same output from a block source as from a whole mix.  The page writes `mix.f32` in whole 1 MiB blocks (MEM-5 spy).  M3's six stem hashes are unchanged.  `e2e memory-budget` in Chrome on the Mac: the page and the worker grow 0 MB during a separation; the worker's peak is 57 MB at 1 and 4 minutes (M3: 99 MB at 4 minutes); peaks 966 MB and 1475 MB.  TD-55: Safari does not see a same-size rewrite of the mix in the same second.  In round 3, auto mode refused a reviewer's `sed` edits for a mutation test in its own worktree; the reviewer did not retry, and no finding depends on them.
-* [ ] M5: decode from and into storage.
+* [x] 2026-10-26: M5: decode from and into storage (`83dfdde..0c78eba`, plan `stream-from-storage-m5.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m5.md`).  The new crate `decode-worker` (`decoder/`, decision 0019) decodes and resamples in blocks into session files, and makes the overviews in a second pass.  Block decode equals whole decode bit for bit for WAV, FLAC and MP3.  `e2e decode` (in CI): the session files and overviews equal the native decode.  A song of one source decodes into `mix.f32`, and Separate writes no second mix.  `e2e memory-budget` in Chrome on the Mac: the page and the decode worker grow 0 MB during the open, and the page and the stem worker 0 MB during the separation.  Peaks 972 MB and 1,481 MB; the decode worker 6 MB.  The 509 MB difference is the page's read-back (TD-54).  M3's stem hashes are unchanged.  TD-56: a late drop or pick can show over a newer song (pre-existing).  The orchestrator applied the edits of `CLAUDE.md` and `.claude/rules/` that the crate needs, and wrote the round 2 and 3 findings files, because the Write tool refuses them to a subagent.
 * [ ] M6: playback through the read-ahead buffer.
 * [ ] M7: lanes, spectrograms, classic drums and sessions from storage.
 * [ ] M8: saving from and to storage.
@@ -311,6 +315,9 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-26, agent (M3): on the storage path the worker sends `stored` and `unstored` replies, and `segment` keeps its samples for the memory path only.  The memory path refuses a song over 100 s on every device, because a page cannot read its memory limit (M3 plan, D1 and D3).
 * 2026-10-26, agent (M4): the page writes `mix.f32` (raw f32 little-endian, with a `meta` line) when Separate is pressed on the storage path, not when a song opens.  A song never separated costs no storage, and one path covers new songs and M3's sessions.  Every failure of the mix file sends `unstored` (M4 plan, D1 to D7).
 * 2026-10-26, agent (orchestrator): M5 measures growth from the start of the open to the decode's end line, as M3 measured it during the separation.  The read-back for playback and lanes after the decode stays until M6 and M7 remove it, and M10 asserts the whole.  The maintainer asked the orchestrator to decide such questions and not to wait for them.
+* 2026-10-26, agent (M5): the overviews come from a second pass over each session file, not from the decode pass.  The decode limit of decision 0013 stays.  M6 changes `forget_mix`, and M7 changes `write_mix` (M5 plan, Decision log).
+* 2026-10-26, agent (orchestrator): the orchestrator makes the edits of `CLAUDE.md` and `.claude/` that an accepted decision needs (DOC-1), because subagents do not edit them on another agent's request.  It writes the files of `review-rounds` that the Write tool refuses to a subagent.
+* 2026-10-26, agent (orchestrator, after M5's intent review): the decode worker makes the stem overviews from the stem WAVs in blocks, after each separation and once for an older session (M7).  It already has `engine::overview` and sync reads, and LAYER-1 keeps `engine` out of `stem-worker`.
 
 ## Outcomes and retrospective
 
