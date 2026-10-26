@@ -26,8 +26,8 @@
 //!
 //! At the end of each `process`, the player gives its sources
 //! [`Hint::Reading`] and [`Hint::Seek`]: the seek that holds or fades out, or
-//! else the position that it has not played from since a jump.  So the reader reads, between
-//! two callbacks, the run that plays next.
+//! else the position that it has not played from since a jump.  So the
+//! reader reads, between two callbacks, the run that plays next.
 //!
 //! A lane in memory is always ready, so a song in memory never holds.
 
@@ -437,11 +437,13 @@ impl Player {
             out_r[i] = (out_r[i] * master).clamp(-1.0, 1.0);
         }
 
-        // The stop at the end uses the player's own head, not a target.
+        // The stop at the end uses the player's own head, not a target.  A
+        // seek that holds plays silence past the end until its run is
+        // ready (review round 2 of M6, finding 2-1).
         let head = self.playhead();
         let shown = self.shown_head();
         p.playhead.store(shown, Relaxed);
-        if p.loop_region().is_none() && head >= self.frames as u64 {
+        if p.loop_region().is_none() && head >= self.frames as u64 && self.pending.is_none() {
             p.playing.store(false, Relaxed);
         }
         self.give_hints();
@@ -1342,6 +1344,80 @@ mod tests {
         twin.lane.open();
         twin.play_gated(2);
         assert_eq!(twin.lane.last_seek_hint(), Some(None));
+    }
+
+    /// Review round 2 of M6, finding 2-2: a loop set behind the head whose
+    /// wrap holds, then cleared (`moved` false) or moved ahead of the head
+    /// (`moved` true): the held wrap goes, and the head never goes to it.
+    fn a_held_wrap_goes_with_its_loop(moved: bool) {
+        let mut twin = Twin::new();
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.play(100);
+        let head = twin.gated.read_position();
+        twin.lane.window(head - 1_000, u64::MAX);
+        let (s, e) = (head - 30_000, head - 10_000);
+        twin.gated_params().set_loop(s, e);
+        let target = dsp::wrap_loop(head as usize, s as usize, e as usize) as u64;
+        let (g, m) = twin.play(1);
+        assert_eq!(g, m, "the old position plays on");
+        assert_eq!(twin.held_seeks(), 1);
+        if moved {
+            twin.both(|p| p.set_loop(head + 50_000, head + 80_000));
+        } else {
+            twin.gated_params().clear_loop();
+        }
+        twin.play(1);
+        twin.lane.open();
+        for _ in 0..20 {
+            let (g, m) = twin.play(1);
+            assert_eq!(g, m, "no jump to the old wrap");
+            let shown = twin.gated_params().playhead();
+            assert!(shown > head && shown != target, "playhead {shown}");
+        }
+        assert_eq!(twin.lane.last_seek_hint(), Some(None));
+    }
+
+    #[test]
+    fn a_held_wrap_goes_when_its_loop_is_cleared() {
+        a_held_wrap_goes_with_its_loop(false);
+    }
+
+    #[test]
+    fn a_held_wrap_goes_when_its_loop_moves_ahead() {
+        a_held_wrap_goes_with_its_loop(true);
+    }
+
+    /// Review round 2 of M6, finding 2-1: a seek that holds while the old
+    /// position reaches the song's end does not stop playback.  Silence
+    /// plays past the end until the target's run is ready.
+    #[test]
+    fn a_seek_that_holds_at_the_songs_end_plays_on() {
+        let mut twin = Twin::new();
+        let near_end = TWIN_FRAMES as u64 - 3_000;
+        twin.both(|p| p.request_seek(near_end));
+        twin.play(1);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        twin.lane.window(near_end - 1_000, u64::MAX);
+        twin.play(2);
+        twin.gated_params().request_seek(1_000);
+        for _ in 0..20 {
+            twin.play(1);
+            assert!(twin.gated_params().playing.load(Relaxed), "it plays on");
+        }
+        assert!(
+            !twin.memory.params().playing.load(Relaxed),
+            "the control stops"
+        );
+        // The target arrives: both seek from past the end, where only
+        // silence is left.
+        twin.lane.open();
+        twin.memory.params().playing.store(true, Relaxed);
+        twin.memory.params().request_seek(1_000);
+        let (g, m) = twin.play(10);
+        assert_eq!(g, m, "it fades, jumps and plays the target");
+        let head = twin.gated_params().playhead();
+        assert!((1_000..10_000).contains(&head), "playhead {head}");
+        assert!(twin.gated_params().playing.load(Relaxed));
     }
 
     /// Review round 1 of M6, mutant 1-25: with a loop shorter than the

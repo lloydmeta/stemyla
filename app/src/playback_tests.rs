@@ -384,6 +384,8 @@ async fn a_new_song_frees_the_old_read_ahead() {
     let first = app.playback.as_ref().expect("stored lanes").watch();
     pb_test_sleep(50).await;
     assert!(first.reading(), "the reader runs");
+    // Other tests can leave a buffer alive: count from those alive now.
+    let alive = engine::readahead::ReadAhead::live();
     engine::readahead::ReadAhead::take_high_water();
     app.load_song(song, files);
     // Review round 1 of M6, finding 1-6: the old buffer goes before the
@@ -405,7 +407,7 @@ async fn a_new_song_frees_the_old_read_ahead() {
     let none_left = second.ahead.upgrade().is_none() && !second.reading();
     let protected = store::protected(id);
     store::test_remove(&format!("sessions/{id}")).await;
-    assert_eq!(most, 1, "one read-ahead buffer at a time");
+    assert_eq!(most, alive, "one read-ahead buffer at a time");
     assert!(gone, "no strong reference to the first buffer");
     assert!(stopped, "its reader stopped");
     assert!(none_left, "a song from memory frees the second");
@@ -496,6 +498,43 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     // Classic drums, made on the page, play from memory.
     app.add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
     let with_drums = app.lane_files.clone();
+    // Stems held for an open play from memory; "original" keeps its file
+    // (review round 2 of M6, finding 2-11).
+    let (again, _, _) = restore_stored(&id, &decoder)
+        .await
+        .expect("a session")
+        .expect("restored");
+    let held = vec![
+        Stem {
+            name: "vocals".into(),
+            left: vec![0.1; frames].into(),
+            right: vec![0.1; frames].into(),
+        },
+        Stem {
+            name: "bass".into(),
+            left: vec![0.2; frames].into(),
+            right: vec![0.2; frames].into(),
+        },
+    ];
+    app.stems_for_opening = Some((id.clone(), held, "kept".into()));
+    app.pending.borrow_mut().song = Some(Ok(again));
+    app.apply_inbox(&egui::Context::default());
+    let for_opening = app.lane_files.clone();
+    // A song decoded on the page has no lane files.
+    let on_the_page = Opened::in_memory(
+        Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![Stem {
+                name: "lloyd".into(),
+                left: vec![0.1; 4].into(),
+                right: vec![0.1; 4].into(),
+            }],
+        },
+        Some(id.clone()),
+        None,
+    );
+    let on_the_page_files = on_the_page.files.clone();
     // The demo plays from memory.
     app.load_demo();
     let demo = (
@@ -523,6 +562,16 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         "the others keep their files"
     );
     assert_eq!(part_file, None, "a .part stem plays from memory");
+    assert_eq!(
+        for_opening,
+        [
+            None,
+            None,
+            Some(LaneFile::f32(store::mix_path(&id), frames))
+        ],
+        "stems held for an open from memory, \"original\" from mix.f32"
+    );
+    assert_eq!(on_the_page_files, [None], "a song decoded on the page");
     assert_eq!(demo, (true, true));
 }
 

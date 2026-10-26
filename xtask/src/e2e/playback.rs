@@ -356,6 +356,10 @@ mod tests {
             "it played before"
         );
         assert!(!unmuted_lane_plays(None, Some(&read(7)), 7));
+        assert!(
+            !unmuted_lane_plays(Some(&read(5)), Some(&read(7)), 7),
+            "two lanes changed"
+        );
         assert!(!unmuted_lane_plays(Some(&read(6)), None, 7));
         let smoke = PlaybackLine {
             lanes: 5,
@@ -384,6 +388,16 @@ mod tests {
             }),
             5
         ));
+        assert!(
+            !all_from_storage(
+                Some(&PlaybackLine {
+                    lanes: 6,
+                    ..smoke.clone()
+                }),
+                5
+            ),
+            "5 of 6 lanes from storage"
+        );
         assert!(!all_from_storage(None, 5));
     }
 
