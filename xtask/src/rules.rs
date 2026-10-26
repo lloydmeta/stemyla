@@ -236,6 +236,8 @@ fn tree_line(line: &str) -> Option<TreeLine<'_>> {
 fn manifest_of(package: &str) -> String {
     match package {
         "stem-worker" => "worker/Cargo.toml".into(),
+        "decode-worker" => "decoder/Cargo.toml".into(),
+        "stem-protocol" => "protocol/Cargo.toml".into(),
         _ => format!("{package}/Cargo.toml"),
     }
 }
@@ -3285,6 +3287,18 @@ fn agent_name(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_package_names_its_manifest() {
+        for (package, manifest) in [
+            ("app", "app/Cargo.toml"),
+            ("stem-worker", "worker/Cargo.toml"),
+            ("decode-worker", "decoder/Cargo.toml"),
+            ("stem-protocol", "protocol/Cargo.toml"),
+        ] {
+            assert_eq!(manifest_of(package), manifest, "{package}");
+        }
+    }
 
     fn synth_problem(file: &str, package: &str, children: &str) -> Problem {
         Problem {

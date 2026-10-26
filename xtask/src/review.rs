@@ -44,6 +44,7 @@ pub const REVIEWERS: &[Reviewer] = &[
             "engine/**",
             "app/src/**",
             "worker/**",
+            "decoder/**",
             "protocol/**",
             "roformer/src/**",
             "roformer-gpu/src/**",
@@ -60,7 +61,9 @@ pub const REVIEWERS: &[Reviewer] = &[
             "protocol/**",
             "worker/src/web.rs",
             "worker/src/web/**",
+            "decoder/src/**",
             "app/src/separator.rs",
+            "app/src/decoder.rs",
             "xtask/src/e2e.rs",
             "xtask/e2e/**",
             ".claude/rules/protocol.md",
@@ -115,6 +118,15 @@ pub const ROUTE_ALL: &[&str] = &[
 pub const MAY_MATCH_NOTHING: &[(&str, &str)] = &[
     ("**/build.rs", "no crate has a build script yet"),
     (".mcp.json", "the repo has no MCP config yet"),
+    ("decoder/**", "the decode worker crate lands in M5, step 2"),
+    (
+        "decoder/src/**",
+        "the decode worker crate lands in M5, step 2",
+    ),
+    (
+        "app/src/decoder.rs",
+        "the page side of the decode worker lands in M5, step 4",
+    ),
 ];
 
 /// Content signs, by reviewer.  A short denylist, not a full list.
@@ -1552,6 +1564,11 @@ mod tests {
                 "memory-reviewer",
                 "roformer-gpu/src/**",
             ),
+            ("decoder/src/lib.rs", "memory-reviewer", "decoder/**"),
+            ("decoder/clippy.toml", "memory-reviewer", "decoder/**"),
+            ("app/src/decoder.rs", "memory-reviewer", "app/src/**"),
+            ("decoder/src/lib.rs", "wire-reviewer", "decoder/src/**"),
+            ("app/src/decoder.rs", "wire-reviewer", "app/src/decoder.rs"),
             ("synth/src/lib.rs", "memory-reviewer", "synth/src/**"),
             ("dsp/src/mix.rs", "memory-reviewer", "dsp/src/**"),
             ("dsp/clippy.toml", "memory-reviewer", "**/clippy.toml"),
