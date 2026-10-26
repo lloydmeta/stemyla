@@ -6,8 +6,18 @@
 //! * `sessions/current`: the id of the session shown last (text).
 //! * `sessions/<id>/meta`: tab-separated lines: `name`, `rate`, one `file`
 //!   line per source file (original name, stored name), one `stem` line
-//!   per separated stem, and a `mix` line (frames, format) when `mix.f32`
-//!   is complete.
+//!   per separated stem, a `mix` line (frames, format) when `mix.f32` is
+//!   complete, and a `decoded` line (frames, format, the channels of each
+//!   source) when the decode worker's files are complete (D2 of M5).
+//! * `sessions/<id>/decoded/<i>.f32`: source `<i>` decoded at 44.1 kHz, as
+//!   `mix.f32` is, padded to the song's frames.  The source in the mix of a
+//!   song of one source has no file here: `mix.f32` is that source (D1 of
+//!   M5).
+//! * `sessions/<id>/overviews/<i>.f32` and `overviews/mix.f32`: the
+//!   waveform columns of each source lane and of the mix lane, each column
+//!   its minimum and its maximum as 32-bit little-endian floats.
+//! * `<file>.decode.part`: a file of the list above that the decode worker
+//!   wrote.  [`keep_decoded`] moves it onto its name (D7 of M5).
 //! * `sessions/<id>/src/<n>.<ext>`: the files as dropped.
 //! * `sessions/<id>/mix.f32`: the mix that the worker separates on the
 //!   storage path (M4): raw 32-bit little-endian floats, interleaved
@@ -22,6 +32,13 @@
 //!   [`keep_stored_stems`] moves it onto its `.wav` file.  A separation
 //!   that stopped can leave one; no reader opens it.
 //!
+//! To open a song, the page saves the chosen files, and the decode worker
+//! decodes them into the session files in blocks (M5).  The page moves the
+//! files into place and writes `meta` ([`keep_decoded`]), then reads the
+//! files back in blocks ([`read_back`]).  A session whose files are
+//! complete opens with no decode ([`open_stored`]).  When browser storage
+//! fails, the page decodes the sources itself ([`restore_id`]).
+//!
 //! On the storage path, the page writes the mix file before it posts, the
 //! worker reads it and writes the stem files, and the page moves them into
 //! place and writes `meta`.  On the memory path, the page
@@ -32,7 +49,7 @@
 //! dropped song gets its own session; the Storage menu lists them, opens
 //! one or forgets it.
 
-use crate::store_meta::{MIX_FORMAT, Meta};
+use crate::store_meta::{Decoded, MIX_FORMAT, Meta, PlannedSource};
 use anyhow::{Result, anyhow};
 use engine::song::padded_to;
 use engine::{Samples, Song, Stem};
@@ -164,6 +181,18 @@ export async function st_size(path) {
     return (await (await (await dir(d, false)).getFileHandle(n)).getFile()).size;
   } catch (e) { return null; }
 }
+// The file at `path` as a `File`, which holds no bytes until it is read,
+// or null if there is none.
+export async function st_file(path) {
+  try {
+    const [d, n] = split(path);
+    return await (await (await dir(d, false)).getFileHandle(n)).getFile();
+  } catch (e) { return null; }
+}
+// Bytes `start..end` of a `File`: one read of a slice, never the file.
+export async function st_slice(file, start, end) {
+  return new Uint8Array(await file.slice(start, end).arrayBuffer());
+}
 "#)]
 extern "C" {
     /// Writes `body`, a `Blob` or a typed array (no other type), to
@@ -198,6 +227,11 @@ extern "C" {
     async fn st_abort(w: &JsValue);
     /// The bytes in the file at `path`, or null if it cannot be read.
     async fn st_size(path: &str) -> JsValue;
+    /// The file at `path` as a `File`, or null if there is none.
+    async fn st_file(path: &str) -> JsValue;
+    /// Bytes `start..end` of the `File` `file`.
+    #[wasm_bindgen(catch)]
+    async fn st_slice(file: &JsValue, start: f64, end: f64) -> Result<JsValue, JsValue>;
 }
 
 const ROOT: &str = "sessions";
@@ -215,6 +249,12 @@ thread_local! {
     static SAVING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
     /// The last session id made, so the next one is later.
     static LAST_ID: Cell<u64> = const { Cell::new(0) };
+    /// Decodes in progress per session (see [`DecodeGuard`]).
+    static DECODING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// Mix writes in progress per session ([`write_mix`]).
+    static MIX_WRITING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// The session of the separation that may read or write its mix.
+    static SEPARATING: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// A new session id: now in milliseconds, or one more than the last id if
@@ -386,7 +426,16 @@ pub async fn write_mix(id: &str, song: &Song) -> Result<()> {
             return Err(anyhow!("browser storage is being reset"));
         }
         WRITES.set(WRITES.get() + 1);
+        MIX_WRITING.with_borrow_mut(|w| *w.entry(id.to_string()).or_default() += 1);
         let written = write_mix_now(id, song).await;
+        MIX_WRITING.with_borrow_mut(|w| {
+            if let Some(n) = w.get_mut(id) {
+                *n -= 1;
+                if *n == 0 {
+                    w.remove(id);
+                }
+            }
+        });
         WRITES.set(WRITES.get() - 1);
         written
     })
@@ -745,6 +794,340 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     Ok(crate::with_original(&source, stems))
 }
 
+/// The suffix of each file that the decode worker writes.
+const DECODE_PART: &str = ".decode.part";
+
+/// The frames that [`read_back`] reads in one block: 1 MiB of a session
+/// file.
+const READ_BLOCK_FRAMES: usize = 131_072;
+
+/// A decode of session `id` by the decode worker, from the post to the end
+/// of D7 (D9 of `plans/active/stream-from-storage-m5.md`).  It counts as a
+/// save in `SAVING`, so `forget` and a restore wait for it, and as a write
+/// in `WRITES`, so [`close`] waits for it.  A reset ends the decode and
+/// drops the guard first, so it never waits for a long decode.
+pub struct DecodeGuard {
+    _saving: SaveHeld,
+    id: String,
+}
+
+impl DecodeGuard {
+    pub fn new(id: &str) -> Self {
+        WRITES.set(WRITES.get() + 1);
+        DECODING.with_borrow_mut(|d| *d.entry(id.to_string()).or_default() += 1);
+        Self {
+            _saving: SaveHeld::new(id),
+            id: id.to_string(),
+        }
+    }
+}
+
+impl Drop for DecodeGuard {
+    fn drop(&mut self) {
+        WRITES.set(WRITES.get() - 1);
+        DECODING.with_borrow_mut(|d| {
+            if let Some(n) = d.get_mut(&self.id) {
+                *n -= 1;
+                if *n == 0 {
+                    d.remove(&self.id);
+                }
+            }
+        });
+    }
+}
+
+/// Writes in progress, which [`close`] waits for.
+#[cfg(test)]
+#[allow(dead_code, reason = "the reset test in lib.rs reads it")]
+pub(crate) fn writes_in_progress() -> usize {
+    WRITES.get()
+}
+
+/// Whether the decode worker decodes session `id` now.
+pub fn decoding(id: &str) -> bool {
+    DECODING.with_borrow(|d| d.contains_key(id))
+}
+
+/// Whether browser storage is closed for a reset: no decode is posted.
+pub fn is_closed() -> bool {
+    CLOSED.get()
+}
+
+/// Records the session of the separation that may read or write its
+/// `mix.f32` (any stage but the memory path), or none.  The page sets it in
+/// each frame, so D7 can see it (D8).
+pub fn set_separating(id: Option<String>) {
+    SEPARATING.with_borrow_mut(|s| *s = id);
+}
+
+/// Whether a separation or a mix write names session `id` (D8): D7 then
+/// keeps the session's `mix.f32` as it is.
+pub fn mix_in_use(id: &str) -> bool {
+    SEPARATING.with_borrow(|s| s.as_deref() == Some(id))
+        || MIX_WRITING.with_borrow(|w| w.contains_key(id))
+}
+
+/// `meta` of session `id`, read with no wait for the saves into the
+/// session: the caller holds the session's [`DecodeGuard`] (D8a).
+async fn meta_now(id: &str) -> Result<Meta> {
+    let bytes = read(&format!("{}/meta", session_folder(id)))
+        .await
+        .ok_or_else(|| anyhow!("session {id} is gone"))?;
+    Ok(Meta::parse(&String::from_utf8_lossy(&bytes)))
+}
+
+/// Removes the `decoded` line of session `id`, if it has one, before a
+/// decode (D2).  It holds the session as a save meanwhile, and waits for
+/// no other save.
+pub async fn clear_decoded(id: &str) -> Result<()> {
+    saving(id, async {
+        let mut meta = meta_now(id).await?;
+        if meta.decoded.take().is_some() {
+            write_bytes(&session_folder(id), "meta", meta.to_text().as_bytes()).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// What D7 did with the decode worker's files.
+#[derive(Debug, PartialEq)]
+pub enum Kept {
+    /// The session is complete: its files are in place, and `meta` has the
+    /// `decoded` line.
+    Complete,
+    /// A separation or a mix write names the session, and its `mix.f32` is
+    /// not usable now (D8).  The worker's files are removed, and the
+    /// session stays incomplete.
+    MixBusy,
+}
+
+/// D7, after a `decoded` reply for session `id`: moves each part file onto
+/// its name, then writes the `decoded` line, and the `mix` line if a new
+/// `mix.f32` moved into place.  The caller holds the session's
+/// [`DecodeGuard`], so this waits for no other save (D8a).  If a `mix`
+/// line exists now, or a separation or a mix write names the session, the
+/// worker's mix is removed and the session's `mix.f32` stays (D8).  An
+/// error leaves the session incomplete.
+pub async fn keep_decoded(
+    id: &str,
+    sources: &[PlannedSource],
+    frames: usize,
+    new_mix: bool,
+    channels: &[u8],
+) -> Result<Kept> {
+    let base = session_folder(id);
+    let mut meta = meta_now(id).await?;
+    let files: Vec<String> = crate::store_meta::session_files(frames, sources)
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    let mut moved_mix = false;
+    if new_mix && (meta.mix.is_some() || mix_in_use(id)) {
+        st_remove(&format!("{base}/{MIX_FILE}{DECODE_PART}")).await;
+        if meta.usable_mix() != Some(frames) {
+            for file in &files {
+                st_remove(&format!("{base}/{file}{DECODE_PART}")).await;
+            }
+            return Ok(Kept::MixBusy);
+        }
+    } else if new_mix {
+        move_part(&base, MIX_FILE).await?;
+        moved_mix = true;
+    }
+    for file in files.iter().filter(|file| file.as_str() != MIX_FILE) {
+        move_part(&base, file).await?;
+    }
+    meta.decoded = Some(Decoded {
+        frames,
+        format: MIX_FORMAT.into(),
+        channels: sources
+            .iter()
+            .map(|s| s.index)
+            .zip(channels.iter().copied())
+            .collect(),
+    });
+    if moved_mix {
+        meta.mix = Some((frames, MIX_FORMAT.into()));
+    }
+    write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+    Ok(Kept::Complete)
+}
+
+/// Moves `<file>.decode.part` onto `<file>` in the folder `base`.
+async fn move_part(base: &str, file: &str) -> Result<()> {
+    let (folder, name) = match file.rsplit_once('/') {
+        Some((sub, name)) => (format!("{base}/{sub}"), name),
+        None => (base.to_string(), file),
+    };
+    if move_file(&folder, &format!("{name}{DECODE_PART}"), name).await {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "browser storage could not move {base}/{file}{DECODE_PART} into place"
+        ))
+    }
+}
+
+/// D10: the song of complete session `id`, read back from its session
+/// files in blocks of 1 MiB, into two channels made at the song's frames.
+/// It never holds a whole file's bytes.  A mono source reads its left side
+/// only, and shares it as its right side (MEM-1).
+pub async fn read_back(id: &str, sources: &[PlannedSource], decoded: &Decoded) -> Result<Song> {
+    let base = session_folder(id);
+    let one = crate::store_meta::one_source(sources);
+    let frames = decoded.frames;
+    let mut block = vec![0u8; 8 * READ_BLOCK_FRAMES];
+    let mut stems = Vec::with_capacity(sources.len());
+    for source in sources {
+        let path = format!("{base}/{}", crate::store_meta::source_file(source, one));
+        let mono = decoded.channels_of(source.index) == Some(1);
+        let (left, right) = read_channels(&path, frames, mono, &mut block).await?;
+        let left = Samples::from(left);
+        let right = right.map_or_else(|| left.clone(), Samples::from);
+        stems.push(Stem {
+            name: source.name.clone(),
+            left,
+            right,
+        });
+    }
+    Ok(Song {
+        sample_rate: engine::resample::SONG_RATE,
+        frames,
+        stems,
+    })
+}
+
+/// The channels of the session file at `path`, which holds `frames`
+/// frames, read a block at a time through `block`.  `mono`: only the left.
+async fn read_channels(
+    path: &str,
+    frames: usize,
+    mono: bool,
+    block: &mut [u8],
+) -> Result<(Vec<f32>, Option<Vec<f32>>)> {
+    let file = st_file(path).await;
+    if file.is_null() {
+        return Err(anyhow!("{path} is missing from browser storage"));
+    }
+    let size = file.unchecked_ref::<web_sys::Blob>().size();
+    if size != 8.0 * frames as f64 {
+        return Err(anyhow!(
+            "{path} holds {size} bytes, not the {} bytes of {frames} frames",
+            8 * frames
+        ));
+    }
+    let mut left = Vec::with_capacity(frames);
+    let mut right = (!mono).then(|| Vec::with_capacity(frames));
+    let mut start = 0;
+    while start < frames {
+        let end = (start + READ_BLOCK_FRAMES).min(frames);
+        let bytes = st_slice(&file, 8.0 * start as f64, 8.0 * end as f64)
+            .await
+            .map_err(|e| anyhow!("{path} could not be read: {e:?}"))?
+            .unchecked_into::<Uint8Array>();
+        let n = 8 * (end - start);
+        if bytes.length() as usize != n {
+            return Err(anyhow!("{path} gave {} of {n} bytes", bytes.length()));
+        }
+        bytes.copy_to(&mut block[..n]);
+        for frame in block[..n].chunks_exact(8) {
+            left.push(f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]));
+            if let Some(right) = &mut right {
+                right.push(f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]));
+            }
+        }
+        start = end;
+    }
+    Ok((left, right))
+}
+
+/// A stored session, as the page opens it (D11).
+pub enum StoredSong {
+    /// Its session files are complete: read them back (D10).
+    Complete {
+        meta: Meta,
+        sources: Vec<PlannedSource>,
+        decoded: Decoded,
+    },
+    /// The decode worker decodes it first, keeping a usable mix of
+    /// `mix_frames` (D8).
+    NeedsDecode {
+        meta: Meta,
+        sources: Vec<PlannedSource>,
+        mix_frames: Option<usize>,
+    },
+}
+
+/// Session `id`, as the page opens it: complete or not (D2).  `None` when
+/// it has no `meta`.  It waits for the saves into the session first.
+pub async fn open_stored(id: &str) -> Option<Result<StoredSong>> {
+    settled(id).await;
+    let base = session_folder(id);
+    let meta = Meta::parse(&String::from_utf8_lossy(
+        &read(&format!("{base}/meta")).await?,
+    ));
+    let sources = match crate::store_meta::planned_sources(&meta) {
+        Ok(sources) if sources.is_empty() => return Some(Err(anyhow!("no stems to load"))),
+        Ok(sources) => sources,
+        Err(e) => return Some(Err(anyhow!(e))),
+    };
+    let mut sizes = HashMap::new();
+    if let Some(decoded) = &meta.decoded {
+        for (file, _) in crate::store_meta::session_files(decoded.frames, &sources) {
+            if let Some(size) = file_size(&format!("{base}/{file}")).await {
+                sizes.insert(file, size as u64);
+            }
+        }
+    }
+    let complete =
+        crate::store_meta::complete_frames(&meta, &sources, |file| sizes.get(file).copied());
+    Some(Ok(match (complete, meta.decoded.clone()) {
+        (Some(_), Some(decoded)) => StoredSong::Complete {
+            meta,
+            sources,
+            decoded,
+        },
+        _ => {
+            let mix_frames = usable_mix_frames(id, &meta).await;
+            StoredSong::NeedsDecode {
+                meta,
+                sources,
+                mix_frames,
+            }
+        }
+    }))
+}
+
+/// The frames of the usable mix file of session `id`, whose `meta` is
+/// `meta` (D1 of M4): a `mix` line in [`MIX_FORMAT`], and a file of 8 bytes
+/// for each frame.  It waits for no save.
+pub async fn usable_mix_frames(id: &str, meta: &Meta) -> Option<usize> {
+    let frames = meta.usable_mix()?;
+    (file_size(&mix_path(id)).await? == 8.0 * frames as f64).then_some(frames)
+}
+
+/// Makes session `id` the one that a reload restores.
+pub async fn make_current(id: &str) {
+    if write(&format!("{ROOT}/current"), id.as_bytes())
+        .await
+        .is_err()
+    {
+        log::warn!("could not mark session {id} as current");
+    }
+}
+
+/// The separated stems of session `id`, for a song of `frames`, from the
+/// `stem` lines of `meta`.  Each stem WAV is read whole until M7.
+pub async fn stems_of(id: &str, meta: &Meta, frames: usize) -> Result<Vec<Stem>> {
+    let mut stems = Vec::with_capacity(meta.stems.len());
+    for name in &meta.stems {
+        let path = format!("{}/stems/{}", session_folder(id), stem_file(name));
+        stems.push(read_stem(&path, name, frames).await?);
+    }
+    Ok(stems)
+}
+
 /// Bytes used and available to this site, as the browser estimates them.
 pub async fn usage() -> (f64, f64) {
     let v: Array = st_usage().await.unchecked_into();
@@ -768,6 +1151,12 @@ pub fn download_blob(name: &str, blob: &web_sys::Blob) {
 #[cfg(test)]
 pub(crate) async fn test_write(path: &str, bytes: &[u8]) -> Result<()> {
     write(path, bytes).await
+}
+
+/// Removes every stored session, for a test.
+#[cfg(test)]
+pub(crate) async fn test_wipe() {
+    st_remove(ROOT).await;
 }
 
 /// The bytes of the file at `path` from the root, for a test.
@@ -971,6 +1360,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             files: vec![("acme.wav".into(), "0.wav".into())],
             stems: stems.iter().map(|s| s.to_string()).collect(),
             mix: None,
+            decoded: None,
         };
         write(&format!("{ROOT}/{id}/meta"), meta.to_text().as_bytes())
             .await
@@ -1359,5 +1749,292 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             Some(vec![1, 2, 3])
         );
         st_remove(ROOT).await;
+    }
+
+    #[wasm_bindgen(inline_js = r#"
+async function store_folder(path, create) {
+  let d = await navigator.storage.getDirectory();
+  for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
+  return d;
+}
+// A session file of `frames` frames of two tones, made in JS, so the test
+// page's WebAssembly memory does not hold it.  `mono`: both sides alike.
+export async function store_plant_tone(path, frames, mono) {
+  const i = path.lastIndexOf("/");
+  const d = await store_folder(path.slice(0, i), true);
+  const w = await (await d.getFileHandle(path.slice(i + 1), { create: true })).createWritable();
+  const block = 131072;
+  for (let at = 0; at < frames; at += block) {
+    const n = Math.min(block, frames - at);
+    const b = new Float32Array(2 * n);
+    for (let k = 0; k < n; k++) {
+      b[2 * k] = 0.5 * Math.sin(0.01 * (at + k));
+      b[2 * k + 1] = mono ? b[2 * k] : 0.25 * Math.sin(0.03 * (at + k));
+    }
+    await w.write(b);
+  }
+  await w.close();
+}
+// Records the bytes of each `Blob.slice` and `Blob.arrayBuffer`.
+let store_reads = null;
+let store_real = null;
+export function store_start_read_spy() {
+  const proto = Blob.prototype;
+  store_real = [proto.slice, proto.arrayBuffer];
+  store_reads = [];
+  proto.slice = function (start, end) {
+    const s = store_real[0].call(this, start, end);
+    store_reads.push(s.size);
+    return s;
+  };
+  proto.arrayBuffer = function () {
+    store_reads.push(this.size);
+    return store_real[1].call(this);
+  };
+}
+export function store_stop_read_spy() {
+  [Blob.prototype.slice, Blob.prototype.arrayBuffer] = store_real;
+  return store_reads;
+}
+export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+"#)]
+    extern "C" {
+        async fn store_plant_tone(path: &str, frames: u32, mono: bool);
+        fn store_start_read_spy();
+        fn store_stop_read_spy() -> Vec<f64>;
+        async fn store_sleep(ms: u32);
+    }
+
+    /// The sources of a session of `names`, stored as `0.wav`, `1.wav`...
+    fn sources_of(names: &[&str]) -> Vec<PlannedSource> {
+        let meta = Meta {
+            files: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (format!("{n}.wav"), format!("{i}.wav")))
+                .collect(),
+            ..Meta::default()
+        };
+        crate::store_meta::planned_sources(&meta).expect("planned")
+    }
+
+    /// Plants each part file of a decode of `frames` frames of `sources`.
+    async fn plant_parts(id: &str, frames: usize, sources: &[PlannedSource], new_mix: bool) {
+        for (file, size) in crate::store_meta::session_files(frames, sources) {
+            if file == MIX_FILE && !new_mix {
+                continue;
+            }
+            let path = format!("{}/{file}{DECODE_PART}", session_folder(id));
+            write(&path, &vec![7; size as usize])
+                .await
+                .expect("planted");
+        }
+    }
+
+    /// The part files left in session `id`.
+    async fn parts_left(id: &str, frames: usize, sources: &[PlannedSource]) -> Vec<String> {
+        let mut left = Vec::new();
+        for (file, _) in crate::store_meta::session_files(frames, sources) {
+            let path = format!("{}/{file}{DECODE_PART}", session_folder(id));
+            if file_size(&path).await.is_some() {
+                left.push(file);
+            }
+        }
+        left
+    }
+
+    /// Writes `meta` with a usable `mix` line of `frames` for session `id`.
+    async fn plant_mix_line(id: &str, frames: usize) {
+        let mut meta = plant_session(id, &[]).await;
+        meta.mix = Some((frames, MIX_FORMAT.into()));
+        write(&format!("{ROOT}/{id}/meta"), meta.to_text().as_bytes())
+            .await
+            .expect("planted");
+    }
+
+    /// D7: the part files move onto their names, and `meta` gets the
+    /// `decoded` line and the `mix` line of the new mix.
+    #[wasm_bindgen_test]
+    async fn a_decode_is_kept_with_its_decoded_and_mix_lines() {
+        st_remove(ROOT).await;
+        let id = "1792640000040";
+        plant_session(id, &["bass"]).await;
+        let sources = sources_of(&["drums", "classic drums"]);
+        let frames = 5_000;
+        plant_parts(id, frames, &sources, true).await;
+        let kept = keep_decoded(id, &sources, frames, true, &[2, 1]).await;
+        assert_eq!(kept.expect("kept"), Kept::Complete);
+        assert_eq!(parts_left(id, frames, &sources).await, Vec::<String>::new());
+        let meta = meta_now(id).await.expect("meta");
+        assert_eq!(meta.mix, Some((frames, MIX_FORMAT.into())));
+        assert_eq!(
+            meta.decoded,
+            Some(Decoded {
+                frames,
+                format: MIX_FORMAT.into(),
+                channels: vec![(0, 2), (1, 1)],
+            })
+        );
+        assert_eq!(meta.stems, ["bass"], "the other lines stay");
+        assert_eq!(file_size(&mix_path(id)).await, Some(8.0 * frames as f64));
+        st_remove(ROOT).await;
+    }
+
+    /// D8: with a `mix` line now, or a separation or a mix write naming the
+    /// session, D7 removes the worker's mix, and `mix.f32` does not change.
+    /// With no usable mix, the session stays incomplete.
+    #[wasm_bindgen_test]
+    async fn a_mix_in_use_is_not_replaced() {
+        st_remove(ROOT).await;
+        let sources = sources_of(&["drums"]);
+        let frames = 3_000;
+        let kept_mix = vec![3u8; 8 * frames];
+        // A separation names the session, which has no usable mix: the
+        // page reopened it while the separation writes the mix.
+        let id = "1792640000041";
+        plant_session(id, &[]).await;
+        write(&mix_path(id), &kept_mix).await.expect("planted");
+        plant_parts(id, frames, &sources, true).await;
+        set_separating(Some(id.into()));
+        let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
+        set_separating(None);
+        assert_eq!(kept.expect("no error"), Kept::MixBusy);
+        assert_eq!(
+            read(&mix_path(id)).await,
+            Some(kept_mix.clone()),
+            "the mix stays"
+        );
+        assert_eq!(parts_left(id, frames, &sources).await, Vec::<String>::new());
+        assert_eq!(
+            meta_now(id).await.expect("meta").decoded,
+            None,
+            "incomplete"
+        );
+        // A usable `mix` line now: the mix stays, and the session is
+        // complete with it.
+        let id = "1792640000042";
+        plant_mix_line(id, frames).await;
+        write(&mix_path(id), &kept_mix).await.expect("planted");
+        plant_parts(id, frames, &sources, true).await;
+        let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
+        assert_eq!(kept.expect("kept"), Kept::Complete);
+        assert_eq!(read(&mix_path(id)).await, Some(kept_mix), "the mix stays");
+        assert_eq!(parts_left(id, frames, &sources).await, Vec::<String>::new());
+        let meta = meta_now(id).await.expect("meta");
+        assert_eq!(meta.decoded.map(|d| d.frames), Some(frames));
+        assert_eq!(meta.mix, Some((frames, MIX_FORMAT.into())));
+        st_remove(ROOT).await;
+    }
+
+    /// Waits up to `ms` for `done`: whether it was set.
+    async fn set_within(ms: u32, done: &Cell<bool>) -> bool {
+        let mut waited = 0;
+        while !done.get() && waited < ms {
+            store_sleep(20).await;
+            waited += 20;
+        }
+        done.get()
+    }
+
+    /// D8a: D7 runs while the decode's guard holds the session, so it must
+    /// not wait for the session's saves.  With a planted `mix` line, the
+    /// keep path ends.
+    #[wasm_bindgen_test]
+    async fn the_keep_path_does_not_wait_for_its_own_guard() {
+        st_remove(ROOT).await;
+        let id = "1792640000043";
+        let frames = 2_000;
+        plant_mix_line(id, frames).await;
+        write(&mix_path(id), &vec![1; 8 * frames])
+            .await
+            .expect("planted");
+        let sources = sources_of(&["drums"]);
+        plant_parts(id, frames, &sources, true).await;
+        let guard = DecodeGuard::new(id);
+        let done = std::rc::Rc::new(Cell::new(false));
+        let flag = done.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let sources = sources_of(&["drums"]);
+            let kept = keep_decoded("1792640000043", &sources, 2_000, true, &[2]).await;
+            flag.set(kept.is_ok());
+        });
+        let ended = set_within(3_000, &done).await;
+        drop(guard);
+        st_remove(ROOT).await;
+        assert!(ended, "D7 under its own guard ends");
+    }
+
+    /// D9: `forget` waits for a decode of the session to end.
+    #[wasm_bindgen_test]
+    async fn forget_waits_for_a_decode() {
+        st_remove(ROOT).await;
+        let id = "1792640000044";
+        plant_session(id, &[]).await;
+        let guard = DecodeGuard::new(id);
+        let forgotten = std::rc::Rc::new(Cell::new(false));
+        let flag = forgotten.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            flag.set(forget("1792640000044").await);
+        });
+        store_sleep(300).await;
+        let during = forgotten.get();
+        let still_there = read(&format!("{ROOT}/{id}/meta")).await.is_some();
+        drop(guard);
+        let ended = set_within(3_000, &forgotten).await;
+        st_remove(ROOT).await;
+        assert!(!during && still_there, "forget waits while the decode runs");
+        assert!(ended, "forget ends once the decode ends");
+    }
+
+    /// D10, MEM-1, MEM-4: the read-back of a 2-minute session file adds
+    /// about its two channels to the page's memory, never the file's bytes
+    /// too, and reads at most 1 MiB at a time.  A mono source adds one
+    /// channel, which both sides share.
+    #[wasm_bindgen_test]
+    async fn the_read_back_makes_no_whole_file_buffer() {
+        st_remove(ROOT).await;
+        let frames = 2 * 60 * 44_100;
+        let mut results = Vec::new();
+        for (k, mono) in [(0, false), (1, true)] {
+            let id = format!("179264000005{k}");
+            plant_session(&id, &[]).await;
+            store_plant_tone(&mix_path(&id), frames as u32, mono).await;
+            let sources = sources_of(&["drums"]);
+            let decoded = Decoded {
+                frames,
+                format: MIX_FORMAT.into(),
+                channels: vec![(0, if mono { 1 } else { 2 })],
+            };
+            store_start_read_spy();
+            let before = crate::separator::page_wasm_mb();
+            let song = read_back(&id, &sources, &decoded).await.expect("read back");
+            let grown = crate::separator::page_wasm_mb() - before;
+            let reads = store_stop_read_spy();
+            let stem = &song.stems[0];
+            let shared = stem.left.shares(&stem.right);
+            let sample = (stem.left[1000], stem.right[1000]);
+            results.push((mono, grown, reads, shared, sample, song.frames));
+            drop(song);
+        }
+        st_remove(ROOT).await;
+        let channel_mb = 4.0 * frames as f64 / 1e6;
+        for (mono, grown, reads, shared, (left, right), got) in results {
+            let channels = if mono { 1.0 } else { 2.0 };
+            assert_eq!(got, frames);
+            assert!(
+                grown < channels * channel_mb + 4.0,
+                "mono {mono}: the page grew by {grown} MB for {channels} channels of {channel_mb} MB"
+            );
+            assert!(reads.len() > 10, "mono {mono}: {} reads", reads.len());
+            assert!(
+                reads.iter().all(|bytes| *bytes <= (1 << 20) as f64),
+                "mono {mono}: each read is at most 1 MiB: {reads:?}"
+            );
+            assert_eq!(shared, mono, "a mono source shares one buffer");
+            assert_eq!(left, (0.5 * (0.01_f64 * 1000.0).sin()) as f32);
+            if !mono {
+                assert_eq!(right, (0.25 * (0.03_f64 * 1000.0).sin()) as f32);
+            }
+        }
     }
 }

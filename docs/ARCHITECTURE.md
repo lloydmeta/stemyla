@@ -1,6 +1,6 @@
 # How Stemyla works
 
-Stemyla is a Rust workspace compiled to WebAssembly.  The page has two parts: the app on the page's main thread (drawing, playback, storage) and a Web Worker that runs the separation model on the GPU through WebGPU.  Nothing is sent to a server; the only network use is downloading the page and, once, the model.  Terms such as STFT, mask or workgroup are explained under [Vocabulary](#vocabulary).
+Stemyla is a Rust workspace compiled to WebAssembly.  The page has three parts: the app on the page's main thread (drawing, playback, storage), a Web Worker that runs the separation model on the GPU through WebGPU, and a Web Worker that decodes a stored song into session files (the decode worker, decision 0019).  Nothing is sent to a server; the only network use is downloading the page and, once, the model.  Terms such as STFT, mask or workgroup are explained under [Vocabulary](#vocabulary).
 
 ```mermaid
 flowchart LR
@@ -9,6 +9,10 @@ flowchart LR
     ENG["engine<br/>decode, play, stretch, mix"]
     STORE["store<br/>songs and stems in OPFS"]
     SEP["separator<br/>talks to the worker"]
+    DEC["decoder<br/>talks to the decode worker"]
+  end
+  subgraph decoder["Web Worker (decoder crate)"]
+    DW["decode loop<br/>decode, resample, overviews"]
   end
   subgraph worker["Web Worker (worker crate)"]
     W["message loop<br/>pacing, self-test, bench, MP3, FLAC"]
@@ -18,7 +22,10 @@ flowchart LR
   UI --> ENG
   UI --> STORE
   UI --> SEP
+  UI --> DEC
   SEP <-->|postMessage| W
+  DEC <-->|postMessage| DW
+  DW -->|session files, overviews| OPFS
   W --> RF
   W --> GPU
   W -->|model file, stems| OPFS[("browser storage (OPFS)")]
@@ -34,7 +41,7 @@ flowchart LR
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
 * `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3 and FLAC encoding.
-* `decode-worker` (`decoder/`): the page-side Web Worker (decision 0019).  It decodes a song that the page keeps in browser storage, in blocks, with `engine`, and writes the session files and the overviews as `.decode.part` files, in blocks of 1 MiB (`decode_worker::pass`).  It answers each `decode` request of `stem_protocol::decode` with `decoded`, `undecodable` or `decode-unstored`.  Until M5 step 4, the page does not start it.
+* `decode-worker` (`decoder/`): the page-side Web Worker (decision 0019).  It decodes a song that the page keeps in browser storage, in blocks, with `engine`, and writes the session files and the overviews as `.decode.part` files, in blocks of 1 MiB (`decode_worker::pass`).  It answers each `decode` request of `stem_protocol::decode` with `decoded`, `undecodable` or `decode-unstored`.  The page starts it at the first open (`app::decoder`), and reads the session files back to show the song.
 * `stem-protocol` (`protocol/`): the messages between the page and its workers, one encoder and one decoder per message, shared by both sides.
 * `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature or no fixture.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  It is only a dev-dependency.
 * `xtask`: tools run with Cargo: the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`), the review round tools (`review`), publishing, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.

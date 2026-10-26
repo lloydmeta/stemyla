@@ -143,6 +143,8 @@ struct Opened {
     session: Option<String>,
     /// Its name, for downloads and messages.
     name: Option<String>,
+    /// What the status line says after the song opens, if not the usual.
+    note: Option<String>,
 }
 
 /// Where the Reset dialog is.  Web only.
@@ -241,52 +243,318 @@ const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FL
 #[cfg(target_arch = "wasm32")]
 const SONG_FILES: &str = ".mp3,.wav,.flac";
 
-/// Decodes files the user chose and keeps them in browser storage, so a
-/// reload brings the song back.  The result arrives through the inbox.
-/// Each file comes with its bytes, which the decoder takes, and the
-/// browser's file, which is saved as it is.  So the page does not copy the
-/// bytes again to save them.
+/// The status line while the files open: "Opening "<name>"…".
 #[cfg(target_arch = "wasm32")]
-async fn load_and_keep(
-    chosen: Vec<(String, web_sys::File, Vec<u8>)>,
+fn opening_text(chosen: &Chosen) -> String {
+    let name = chosen
+        .first()
+        .map(|(n, _)| store_meta::file_title(n))
+        .unwrap_or_default();
+    format!("Opening \"{name}\"…")
+}
+
+/// The files that the user chose, as the browser gives them: each name and
+/// its `File`, whose bytes the page does not read on the decode path.
+#[cfg(target_arch = "wasm32")]
+type Chosen = Vec<(String, web_sys::File)>;
+
+/// Logs the page's WebAssembly memory at `when` (D12 of
+/// `plans/active/stream-from-storage-m5.md`).
+#[cfg(target_arch = "wasm32")]
+fn log_page_memory(when: &str) {
+    log::info!(
+        "decoder: memory: page wasm {:.0} MB {when}",
+        separator::page_wasm_mb()
+    );
+}
+
+/// Opens the files that the user chose (D9): saves them to a new session
+/// as the browser's files, reads nothing, and asks the decode worker for
+/// the session files.  The page shows the song from them.  If the save
+/// fails, or browser storage fails in the decode, the page reads the files
+/// and decodes them itself, as before M5.  The result arrives through the
+/// inbox.
+#[cfg(target_arch = "wasm32")]
+async fn open_chosen(
+    chosen: Chosen,
+    decoder: decoder::DecodeClient,
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: egui::Context,
 ) {
-    let name = chosen.first().map(|(n, _, _)| store_meta::file_title(n));
-    let (sources, files): (Vec<_>, Vec<_>) = chosen
-        .into_iter()
-        .map(|(name, file, bytes)| ((name.clone(), web_sys::Blob::from(file)), (name, bytes)))
-        .unzip();
+    let opened = open_chosen_now(&chosen, &decoder).await;
+    pending.borrow_mut().song = Some(opened);
+    ctx.request_repaint();
+    refresh_storage(&pending).await;
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn open_chosen_now(
+    chosen: &Chosen,
+    decoder: &decoder::DecodeClient,
+) -> anyhow::Result<Opened> {
+    let name = chosen.first().map(|(n, _)| store_meta::file_title(n));
     let started = js_sys::Date::now();
-    let opened = match Song::load_files(files) {
-        Ok(song) => {
+    // D1: a drop with no source fails before any save or post.
+    let any_source = chosen
+        .iter()
+        .any(|(n, _)| engine::song::is_stem(&engine::song::stem_name(n)));
+    if !any_source {
+        return Err(anyhow::anyhow!("no stems to load"));
+    }
+    let files: Vec<(String, web_sys::Blob)> = chosen
+        .iter()
+        .map(|(n, f)| (n.clone(), web_sys::Blob::from(f.clone())))
+        .collect();
+    let id = match store::save_sources(&files, engine::resample::SONG_RATE).await {
+        Ok(id) => id,
+        Err(e) => {
+            log::warn!("song not kept in browser storage: {e:#}");
+            return open_on_the_page(chosen, None, name, started, None).await;
+        }
+    };
+    let sources = match store::open_stored(&id).await {
+        Some(Ok(store::StoredSong::NeedsDecode { sources, .. })) => sources,
+        other => {
+            let why = match other {
+                Some(Err(e)) => format!("{e:#}"),
+                _ => "the new session could not be read".into(),
+            };
+            return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
+        }
+    };
+    match decode_session(&id, &sources, None, decoder).await {
+        Decode::Song(song) => {
             log::info!(
                 "song: opened at {} Hz in {:.2} s ({} frames)",
                 song.sample_rate,
                 (js_sys::Date::now() - started) / 1000.0,
                 song.frames
             );
-            let session = match store::save_sources(&sources, song.sample_rate).await {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    log::warn!("song not kept in browser storage: {e:#}");
-                    None
-                }
-            };
-            if let Some(id) = &session {
-                log::info!("song kept in browser storage as session {id}");
-            }
+            log::info!("song kept in browser storage as session {id}");
             Ok(Opened {
                 song,
-                session,
+                session: Some(id),
                 name,
+                note: None,
             })
         }
-        Err(e) => Err(e),
+        Decode::Undecodable(text) => {
+            // The guard is dropped, so `forget` does not wait for it.
+            if !store::forget(&id).await {
+                log::warn!("could not remove session {id} after an undecodable song");
+            }
+            Err(anyhow::anyhow!(text))
+        }
+        Decode::OnThePage(why) => {
+            open_on_the_page(chosen, Some(id), name, started, Some(why)).await
+        }
+    }
+}
+
+/// The memory path of D9: reads the chosen files and decodes them on the
+/// page, as before M5.  `why`: the failure of browser storage that sent the
+/// song here, for the status line.
+#[cfg(target_arch = "wasm32")]
+async fn open_on_the_page(
+    chosen: &Chosen,
+    session: Option<String>,
+    name: Option<String>,
+    started: f64,
+    why: Option<String>,
+) -> anyhow::Result<Opened> {
+    log::info!("decoder: decoding on the page");
+    let mut files = Vec::with_capacity(chosen.len());
+    for (n, file) in chosen {
+        let bytes = picker::read(file).await.map_err(|e| anyhow::anyhow!(e))?;
+        files.push((n.clone(), bytes));
+    }
+    let song = Song::load_files(files)?;
+    log::info!(
+        "song: opened at {} Hz in {:.2} s ({} frames)",
+        song.sample_rate,
+        (js_sys::Date::now() - started) / 1000.0,
+        song.frames
+    );
+    if let Some(id) = &session {
+        log::info!("song kept in browser storage as session {id}");
+    }
+    let note = why.map(|why| {
+        log::warn!("decoder: browser storage failed: {why}");
+        format!("Opened on this page: browser storage failed ({why}).")
+    });
+    Ok(Opened {
+        song,
+        session,
+        name,
+        note,
+    })
+}
+
+/// How a decode of a session by the decode worker ended, for the page.
+#[cfg(target_arch = "wasm32")]
+enum Decode {
+    /// The session is complete, and its song read back (D7, D10).
+    Song(Song),
+    /// A source cannot be decoded: the text says why.
+    Undecodable(String),
+    /// Browser storage failed, or the worker did not answer: the page
+    /// decodes the song itself (D9).  The text says why.
+    OnThePage(String),
+}
+
+/// D9: asks the decode worker to decode session `id` from `sources`,
+/// keeping a usable mix of `mix_frames` (D8).  It removes the `decoded`
+/// line first (D2).  The decode's guard holds the session from the post to
+/// the end of D7, and is dropped before this returns.
+#[cfg(target_arch = "wasm32")]
+async fn decode_session(
+    id: &str,
+    sources: &[store_meta::PlannedSource],
+    mix_frames: Option<usize>,
+    decoder: &decoder::DecodeClient,
+) -> Decode {
+    if let Err(e) = store::clear_decoded(id).await {
+        return Decode::OnThePage(format!("{e:#}"));
+    }
+    let request = stem_protocol::decode::DecodeRequest {
+        session: store::session_folder(id),
+        sources: sources
+            .iter()
+            .map(|s| stem_protocol::decode::Source {
+                file: s.file.clone(),
+                index: s.index,
+                ext: s.ext.clone(),
+                in_mix: s.in_mix,
+            })
+            .collect(),
+        mix_frames: mix_frames.map(|f| f as u64),
     };
-    pending.borrow_mut().song = Some(opened);
-    ctx.request_repaint();
-    refresh_storage(&pending).await;
+    let ended = decoder.decode(&request, store::DecodeGuard::new(id)).await;
+    use decoder::Ended;
+    use stem_protocol::decode::DecodeReply;
+    match ended {
+        Ended::Reply(
+            DecodeReply::Decoded {
+                frames,
+                new_mix,
+                channels,
+            },
+            guard,
+        ) => {
+            if channels.len() != sources.len() {
+                return Decode::OnThePage(format!(
+                    "the decode worker gave the channels of {} sources, not {}",
+                    channels.len(),
+                    sources.len()
+                ));
+            }
+            let frames = frames as usize;
+            let kept = store::keep_decoded(id, sources, frames, new_mix, &channels).await;
+            drop(guard);
+            log_page_memory("as the decode ends");
+            match kept {
+                Ok(store::Kept::Complete) => {
+                    let decoded = store_meta::Decoded {
+                        frames,
+                        format: store_meta::MIX_FORMAT.into(),
+                        channels: sources.iter().map(|s| s.index).zip(channels).collect(),
+                    };
+                    match store::read_back(id, sources, &decoded).await {
+                        Ok(song) => Decode::Song(song),
+                        Err(e) => Decode::OnThePage(format!("{e:#}")),
+                    }
+                }
+                Ok(store::Kept::MixBusy) => {
+                    Decode::OnThePage("a separation of this song uses its mix file now".into())
+                }
+                Err(e) => Decode::OnThePage(format!("{e:#}")),
+            }
+        }
+        Ended::Reply(DecodeReply::Undecodable { text }, guard) => {
+            drop(guard);
+            Decode::Undecodable(text)
+        }
+        Ended::Reply(DecodeReply::Unstored { text }, guard) => {
+            drop(guard);
+            // D8: a kept mix of other frames goes, so the next open
+            // decodes again, unless a separation uses it.
+            if mix_frames.is_some() && !store::mix_in_use(id) {
+                let removal = store::forget_mix(id);
+                if let Err(e) = removal.await {
+                    log::warn!("decoder: could not remove the mix of session {id}: {e:#}");
+                }
+            }
+            Decode::OnThePage(text)
+        }
+        Ended::Reply(other, guard) => {
+            drop(guard);
+            Decode::OnThePage(format!("the decode worker replied {}", other.kind()))
+        }
+        Ended::Stopped(reason) => Decode::OnThePage(format!("the decode worker stopped: {reason}")),
+    }
+}
+
+/// D11: session `id` as the page opens it, made current: read back if it
+/// is complete, else decoded by the decode worker first.  If browser
+/// storage fails, the page decodes the stored sources itself
+/// (`store::restore_id`).  `None` when the session has no `meta`.  The
+/// text, if any, says why the song was decoded on the page.
+#[cfg(target_arch = "wasm32")]
+async fn restore_stored(
+    id: &str,
+    decoder: &decoder::DecodeClient,
+) -> Option<anyhow::Result<(Song, store_meta::Meta, Option<String>)>> {
+    let stored = match store::open_stored(id).await? {
+        Ok(stored) => stored,
+        Err(e) => return Some(Err(e)),
+    };
+    let (meta, sources, read_back) = match stored {
+        store::StoredSong::Complete {
+            meta,
+            sources,
+            decoded,
+        } => {
+            log::info!("decoder: read back a complete session");
+            match store::read_back(id, &sources, &decoded).await {
+                Ok(song) => (meta, sources, Some(song)),
+                Err(e) => {
+                    // D10: decode again.
+                    log::warn!("decoder: could not read session {id} back: {e:#}");
+                    (meta, sources, None)
+                }
+            }
+        }
+        store::StoredSong::NeedsDecode { meta, sources, .. } => (meta, sources, None),
+    };
+    let song = match read_back {
+        Some(song) => song,
+        None => {
+            let mix_frames = store::usable_mix_frames(id, &meta).await;
+            match decode_session(id, &sources, mix_frames, decoder).await {
+                Decode::Song(song) => song,
+                Decode::Undecodable(text) => return Some(Err(anyhow::anyhow!(text))),
+                Decode::OnThePage(why) => {
+                    log::info!("decoder: decoding on the page");
+                    log::warn!("decoder: browser storage failed: {why}");
+                    let rebuilt = store::restore_id(id).await?;
+                    return Some(rebuilt.map(|(_, song, meta)| {
+                        let note = format!("decoded on this page: browser storage failed ({why})");
+                        (song, meta, Some(note))
+                    }));
+                }
+            }
+        }
+    };
+    let song = if meta.stems.is_empty() {
+        song
+    } else {
+        match store::stems_of(id, &meta, song.frames).await {
+            Ok(stems) => with_original(&song, stems),
+            Err(e) => return Some(Err(e)),
+        }
+    };
+    store::make_current(id).await;
+    Some(Ok((song, meta, None)))
 }
 
 /// Milliseconds of each frame that the mix lane's waveform job may take.
@@ -372,6 +640,10 @@ pub struct StemApp {
     /// The stem separation worker (web only).
     #[cfg(target_arch = "wasm32")]
     separator: Option<separator::Separator>,
+    /// The decode worker's client (web only), which starts the worker at
+    /// the first decode.
+    #[cfg(target_arch = "wasm32")]
+    decoder: decoder::DecodeClient,
     /// The song the running separation was started on.
     #[cfg(target_arch = "wasm32")]
     separating: Option<SeparationJob>,
@@ -618,6 +890,8 @@ impl Default for StemApp {
             #[cfg(target_arch = "wasm32")]
             separator: None,
             #[cfg(target_arch = "wasm32")]
+            decoder: decoder::DecodeClient::new(decoder::LOADER),
+            #[cfg(target_arch = "wasm32")]
             separating: None,
             #[cfg(target_arch = "wasm32")]
             reading_stems: false,
@@ -670,11 +944,16 @@ impl StemApp {
         {
             // Bring back the song (and stems) kept from the last visit.
             let (pending, ctx) = (app.pending.clone(), cc.egui_ctx.clone());
+            let decoder = app.decoder.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Some(r) = store::restore().await {
+                let restored = match store::current().await {
+                    Some(id) => restore_stored(&id, &decoder).await.map(|r| (id, r)),
+                    None => None,
+                };
+                if let Some((id, r)) = restored {
                     let mut inbox = pending.borrow_mut();
                     match r {
-                        Ok((id, song, meta)) => {
+                        Ok((song, meta, note)) => {
                             let what = if meta.stems.is_empty() {
                                 ""
                             } else {
@@ -683,11 +962,16 @@ impl StemApp {
                             let text =
                                 format!("Restored \"{}\"{what} from this browser.", meta.name);
                             log::info!("{text}");
+                            let text = match note {
+                                Some(note) => format!("{text}  It was {note}."),
+                                None => text,
+                            };
                             inbox.status = Some(text);
                             inbox.song = Some(Ok(Opened {
                                 song,
                                 session: Some(id),
                                 name: Some(meta.name.clone()),
+                                note: None,
                             }));
                         }
                         Err(e) => {
@@ -1208,26 +1492,24 @@ impl StemApp {
             }
             let pending = self.pending.clone();
             let ctx = ctx.clone();
-            self.status = format!("Reading {} files…", dropped.len());
-            wasm_bindgen_futures::spawn_local(async move {
-                let mut chosen = Vec::new();
-                for f in &dropped {
-                    let name = f.path().to_string_lossy().into_owned();
-                    let read = match f.web_file() {
-                        Some(file) => f.bytes_async().await.map(|b| (file.clone(), b)),
-                        None => Err(format!("could not read {name}: the browser gave no file")),
-                    };
-                    match read {
-                        Ok((file, b)) => chosen.push((name, file, b)),
-                        Err(e) => {
-                            pending.borrow_mut().song = Some(Err(anyhow::anyhow!(e)));
-                            ctx.request_repaint();
-                            return;
-                        }
+            // D12: before any read or save.
+            log_page_memory("as the open starts");
+            let mut chosen = Vec::with_capacity(dropped.len());
+            for f in &dropped {
+                let name = f.path().to_string_lossy().into_owned();
+                match f.web_file() {
+                    Some(file) => chosen.push((name, file.clone())),
+                    None => {
+                        self.status = format!(
+                            "Could not load: could not read {name}: the browser gave no file"
+                        );
+                        return;
                     }
                 }
-                load_and_keep(chosen, pending, ctx).await;
-            });
+            }
+            self.status = opening_text(&chosen);
+            let decoder = self.decoder.clone();
+            wasm_bindgen_futures::spawn_local(open_chosen(chosen, decoder, pending, ctx));
         }
     }
 
@@ -1237,34 +1519,27 @@ impl StemApp {
     #[cfg(target_arch = "wasm32")]
     fn pick_song(&mut self, ctx: &egui::Context) {
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
-        picker::pick_files(SONG_FILES, true, move |chosen| {
-            if chosen.is_empty() {
+        let decoder = self.decoder.clone();
+        picker::pick_files(SONG_FILES, true, move |files| {
+            if files.is_empty() {
                 return;
             }
-            {
-                let mut inbox = pending.borrow_mut();
-                inbox.status = Some(format!("Reading {} files…", chosen.len()));
-            }
+            // D12: before any read or save.
+            log_page_memory("as the open starts");
+            let chosen: Chosen = files.into_iter().map(|f| (f.name(), f)).collect();
+            pending.borrow_mut().status = Some(opening_text(&chosen));
             ctx.request_repaint();
             wasm_bindgen_futures::spawn_local(async move {
-                let mut read = Vec::new();
-                // The "Reading…" text may still be queued; the result,
+                // The "Opening…" text may still be queued; the result,
                 // applied before the queued status, must not be hidden by it.
-                for f in &chosen {
-                    match picker::read(f).await {
-                        Ok(b) => read.push((f.name(), f.clone(), b)),
-                        Err(e) => {
-                            let mut inbox = pending.borrow_mut();
-                            inbox.status = None;
-                            inbox.song = Some(Err(anyhow::anyhow!(e)));
-                            drop(inbox);
-                            ctx.request_repaint();
-                            return;
-                        }
-                    }
+                let opened = open_chosen_now(&chosen, &decoder).await;
+                {
+                    let mut inbox = pending.borrow_mut();
+                    inbox.status = None;
+                    inbox.song = Some(opened);
                 }
-                pending.borrow_mut().status = None;
-                load_and_keep(read, pending, ctx).await;
+                ctx.request_repaint();
+                refresh_storage(&pending).await;
             });
         });
     }
@@ -1420,9 +1695,13 @@ impl StemApp {
         if self.song.is_none() {
             return;
         }
-        if !separate_enabled(self.separating.is_some(), self.reading_stems) {
+        if !separate_enabled(self.separating.is_some(), self.reading_stems)
+            || self.shown_session_decoding()
+        {
             let why = if self.reading_stems {
                 "Reading the separated stems from browser storage…"
+            } else if self.separating.is_none() {
+                "Opening the song from browser storage…"
             } else {
                 "Starting the separation…"
             };
@@ -1445,7 +1724,9 @@ impl StemApp {
     /// ([`Self::separation_ready`]).
     #[cfg(target_arch = "wasm32")]
     fn start_separation(&mut self, ctx: &egui::Context) {
-        if !separate_enabled(self.separating.is_some(), self.reading_stems) {
+        if !separate_enabled(self.separating.is_some(), self.reading_stems)
+            || self.shown_session_decoding()
+        {
             return;
         }
         let Some(song) = &self.song else {
@@ -1897,8 +2178,9 @@ impl StemApp {
             self.opens += 1;
             let token = self.opens;
             self.opening = Some((token, id.clone()));
+            let decoder = self.decoder.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let Some(r) = store::restore_id(&id).await else {
+                let Some(r) = restore_stored(&id, &decoder).await else {
                     {
                         let mut inbox = pending.borrow_mut();
                         inbox.song = Some(Err(anyhow::anyhow!(
@@ -1913,13 +2195,17 @@ impl StemApp {
                     let mut inbox = pending.borrow_mut();
                     inbox.open_done = Some(token);
                     match r {
-                        Ok((id, song, meta)) => {
-                            inbox.status =
-                                Some(format!("Opened \"{}\" from this browser.", meta.name));
+                        Ok((song, meta, note)) => {
+                            let text = format!("Opened \"{}\" from this browser.", meta.name);
+                            inbox.status = Some(match note {
+                                Some(note) => format!("{text}  It was {note}."),
+                                None => text,
+                            });
                             inbox.song = Some(Ok(Opened {
                                 song,
-                                session: Some(id),
+                                session: Some(id.clone()),
                                 name: Some(meta.name),
+                                note: None,
                             }));
                         }
                         Err(e) => {
@@ -1989,13 +2275,41 @@ impl StemApp {
         self.reading_stems = false;
     }
 
+    /// Tells the store which session the separation names, so D7 keeps that
+    /// session's `mix.f32` (D8).  The page calls it in each frame.
+    #[cfg(target_arch = "wasm32")]
+    fn publish_separating(&self) {
+        let session = self
+            .separating
+            .as_ref()
+            .filter(|job| job.stage != JobStage::Memory)
+            .and_then(|job| job.session.clone());
+        store::set_separating(session);
+    }
+
+    /// Whether the decode worker decodes the shown song's session now:
+    /// Separate waits for it (D8).
+    #[cfg(target_arch = "wasm32")]
+    fn shown_session_decoding(&self) -> bool {
+        self.session.as_deref().is_some_and(store::decoding)
+    }
+
+    /// Ends both workers before a reset (D9): first the decode worker, which
+    /// drops the guard of each decode, so `store::close` never waits for a
+    /// decode, then the separation worker.
+    #[cfg(target_arch = "wasm32")]
+    fn stop_workers(&mut self) {
+        self.decoder.stop();
+        self.stop_separation();
+    }
+
     /// Stops playback and the worker, then runs the reset; the page reloads
     /// when it succeeds.
     #[cfg(target_arch = "wasm32")]
     fn start_reset(&mut self, ctx: &egui::Context, choice: reset::Reset) {
         self.reset = ResetStage::Running;
         self.output = None;
-        self.stop_separation();
+        self.stop_workers();
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(failure) = reset::run(choice).await {
@@ -2025,6 +2339,9 @@ impl StemApp {
                     self.session = opened.session;
                     self.song_name = opened.name;
                     self.open_song(song);
+                    if let Some(note) = opened.note {
+                        self.status = note;
+                    }
                 }
                 Err(e) => self.status = format!("Could not load: {e:#}"),
             }
@@ -2630,6 +2947,9 @@ impl eframe::App for StemApp {
         if self.is_playing() {
             ctx.request_repaint();
         }
+        // After every change of this frame, before the browser work runs.
+        #[cfg(target_arch = "wasm32")]
+        self.publish_separating();
     }
 }
 
@@ -3895,3 +4215,10 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert!(status.contains("another song was opened"), "{status}");
     }
 }
+
+/// Browser tests of the page's open and restore through the decode worker
+/// (D9 to D12 of `plans/active/stream-from-storage-m5.md`), with a fake
+/// decode worker: a spy keeps what the page posts, and the test plants the
+/// worker's part files and delivers its replies.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod decode_tests;

@@ -87,7 +87,15 @@ const PREFERRED_ORDER: [&str; 10] = [
 /// stems so every lane stays aligned.
 const NOT_STEMS: [&str; 3] = ["mix", "original", "truth"];
 
-fn rank(name: &str) -> (usize, String) {
+/// Whether a file of the stem name `name` (see [`stem_name`]) is a stem:
+/// `mix`, `original` and `truth` are not.
+pub fn is_stem(name: &str) -> bool {
+    !NOT_STEMS.contains(&name)
+}
+
+/// Where a stem of `name` goes in a song: the order of [`Song::from_audio`],
+/// which sorts by it, keeping the order of equal names.
+pub fn rank(name: &str) -> (usize, String) {
     let pos = PREFERRED_ORDER
         .iter()
         .position(|p| *p == name)
@@ -155,7 +163,7 @@ impl Song {
                 continue;
             }
             let name = stem_name(&path.to_string_lossy());
-            if NOT_STEMS.contains(&name.as_str()) {
+            if !is_stem(&name) {
                 continue;
             }
             items.push((name, decode_path(&path)?));
@@ -168,7 +176,7 @@ impl Song {
         let mut items = Vec::new();
         for (file_name, bytes) in files {
             let name = stem_name(&file_name);
-            if NOT_STEMS.contains(&name.as_str()) {
+            if !is_stem(&name) {
                 continue;
             }
             let ext = file_name.rsplit('.').next().map(str::to_ascii_lowercase);
@@ -462,6 +470,16 @@ mod tests {
         let error = decode_into(decoder_of(&bytes, "wav"), &mut sink).expect_err("stopped");
         assert_eq!(format!("{error:#}"), "the sink is full");
         assert_eq!(sink.0, 1);
+    }
+
+    #[test]
+    fn mix_original_and_truth_are_not_stems() {
+        for name in ["mix", "original", "truth"] {
+            assert!(!is_stem(name), "{name}");
+        }
+        for name in ["drums", "classic drums", "lloyd"] {
+            assert!(is_stem(name), "{name}");
+        }
     }
 
     #[test]
