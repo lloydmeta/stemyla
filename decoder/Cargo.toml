@@ -25,6 +25,10 @@ web-sys = { version = "0.3.106", features = ["DedicatedWorkerGlobalScope", "Mess
 # Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.79"
+# Make FLAC and MP3 files for the browser tests, at the pins that
+# `stem-worker` ships (DEPS-1).
+flacenc = { version = "=0.5.1", default-features = false }
+rusty_mp3 = "=1.0.0"
 
 [lints]
 workspace = true
