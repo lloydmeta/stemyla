@@ -199,7 +199,8 @@ The parent's M6 acceptance, check by check:
   * 1-21 and 1-33: an RF64 header and bits per sample 0x0110 in `a_wav_header_gives_its_data_and_frames`; each kills its mutant.  1-25, `a_loop_shorter_than_the_crossfade_reads_the_frames_it_names` mixes each frame from `pos_buf` and `old_buf`: the mutant of the run of `old_buf` fails it.
   * Scenario values in pure functions with tests (1-24, 1-38, 1-26, 1-31, 1-35, 1-28, 1-39): `lane_x`, `target_frames`, `played_for`, `unmuted_lane_plays`, `all_from_storage`.  TD-39 lists 1-27, 1-29 and 1-40.
   * Docs: 1-13, 1-15, 1-16, 1-17, 1-18.  CI's `test` job has `timeout-minutes: 45` (about 6 minutes on 2026-10-26).
-* [ ] Review rounds 1 to 3, and the review log.
+* [x] 2026-10-27: review round 1 (at `119ce9d`): 5 reviewers and 11 validators, 990,671 tokens, 80.0 wall minutes.  10 should-fix confirmed (1-1 to 1-10) and 8 nits, all fixed in `f8d8750`.  Mutants: partial, 173 tested, 22 missed: 13 confirmed (10 killed by new tests, 3 in TD-39), 9 refuted (wasm32-only code, no caller, or equivalent).  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log, because the Write tool refuses them to a subagent.
+* [ ] Review rounds 2 and 3, and the review log.
 
 ## Surprises and discoveries
 
