@@ -14,7 +14,10 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDe
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
-use symphonia::core::io::{MediaSource, MediaSourceStream};
+/// What a [`Decoder`] reads: `Read + Seek + Send + Sync`, with its length
+/// if known.  Re-exported so a caller can give its own source.
+pub use symphonia::core::io::MediaSource;
+use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
 /// Decoded audio: one `Vec<f32>` per channel, all the same length.  The

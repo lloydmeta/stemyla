@@ -9,6 +9,7 @@ description = "Page-side Web Worker that decodes a stored song in blocks into br
 # runs its tests natively.  Only the browser glue is for wasm32.  `engine`
 # comes without its stretchers and without `cpal` (decision 0019).
 [dependencies]
+anyhow = "1"
 dsp = { path = "../dsp" }
 engine = { path = "../engine", default-features = false }
 stem-protocol = { path = "../protocol" }
