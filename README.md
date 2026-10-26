@@ -67,7 +67,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings
 cargo clippy -p app -- -D warnings
 cargo clippy -p app --all-targets -- -D warnings
-cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -108,7 +108,7 @@ cargo clippy --workspace --all-targets
 cargo clippy -p synth --all-targets          # synth without its files feature
 cargo clippy -p app                          # app's lib and binary without any files feature
 cargo clippy -p app --all-targets            # app's tests without the workspace's merged features
-cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets  # the web code, which compiles only for wasm32
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets  # the web code, which compiles only for wasm32
 ```
 
 * `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them, and `STEMYLA_REQUIRE=fixtures` makes them fail).
@@ -125,7 +125,7 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked
 and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver --enable` and Develop > "Allow Remote Automation" in Safari; otherwise, or with `--browser chrome`, a ChromeDriver matching Chrome's major version ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)) in `CHROMEDRIVER` or on `PATH`.  Safari 27.0's safaridriver may fail with "timed out while connecting to a Safari instance"; use `--browser chrome` meanwhile.
 
 ```bash
-cargo run -p xtask -- web-test                  # browser storage, audio output, the worker (wasm-bindgen-test)
+cargo run -p xtask -- web-test                  # browser storage, audio output, the workers (wasm-bindgen-test)
 (cd app && trunk build --release)
 cargo run -p xtask -- e2e smoke                 # the built page over WebDriver; also audio-resume, storage, flac
 cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
@@ -140,12 +140,13 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | - | - |
 | `app/` | the egui app (web and native); `index.html` is Trunk's entry point |
 | `worker/` | the Web Worker that runs separations |
+| `decoder/` | the Web Worker that decodes a stored song in blocks into browser storage (`decode-worker`) |
 | `roformer-gpu/` | the network on WebGPU: WGSL kernels and their driver |
 | `roformer/` | STFT, chunking, weights, and the CPU reference network |
 | `engine/` | decoding, playback, time-stretch, classic drum separation |
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
-| `protocol/` | the messages between the page and the worker (`stem-protocol`) |
+| `protocol/` | the messages between the page and its workers (`stem-protocol`) |
 | `test-support/` | `skip` and `STEMYLA_REQUIRE`, which make a test that cannot run fail where evidence is claimed |
 | `xtask/` | the static server, the browser test runners and other tools |
 | `docs/ARCHITECTURE.md` | how the pieces fit together |

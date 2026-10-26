@@ -1,7 +1,8 @@
 //! `xtask web-test [--browser safari|chrome] [filter]`: the browser tests
-//! of `app` (song sessions in browser storage) and `stem-worker` (model
-//! storage, message handling), compiled for wasm32 and run in a real
-//! browser by `wasm-bindgen-test-runner`.
+//! of `app` (song sessions in browser storage), `stem-worker` (model
+//! storage, message handling), `decode-worker` and `stem-protocol`,
+//! compiled for wasm32 and run in a real browser by
+//! `wasm-bindgen-test-runner`.
 //!
 //! It sets Cargo's runner and the driver through the environment, so no
 //! `.cargo/config.toml` is needed, and it checks that the installed runner
@@ -45,7 +46,7 @@ pub fn run(args: &[String]) -> Result<()> {
     check_runner(&wanted)?;
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
-    let runs: [&[&str]; 3] = [
+    let runs: [&[&str]; 4] = [
         &[
             "-p",
             "app",
@@ -58,6 +59,7 @@ pub fn run(args: &[String]) -> Result<()> {
             "web_output",
         ],
         &["-p", "stem-worker", "--lib"],
+        &["-p", "decode-worker", "--lib"],
         &["-p", "stem-protocol", "--test", "web"],
     ];
     for targets in runs {

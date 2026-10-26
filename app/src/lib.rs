@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
 pub mod assemble;
+pub mod decoder;
 pub mod export;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;

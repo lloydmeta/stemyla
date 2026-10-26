@@ -115,6 +115,9 @@ fn versioned_site_for(root: &Path, public_url: &str, id: &str, version: &str) ->
         "stem-worker.js",
         "stem-worker_bg.wasm",
         "stem-worker_loader.js",
+        "decode-worker.js",
+        "decode-worker_bg.wasm",
+        "decode-worker_loader.js",
     ] {
         std::fs::write(build.join(f), format!("{id} {version}")).unwrap();
     }
@@ -313,7 +316,7 @@ fn keeps_the_newest_three_builds() {
         assert_eq!(ls(&r, "gh-pages", "v/"), folders);
         assert_eq!(
             ls(&r, "gh-pages", "v/0123456789ab/").len(),
-            if n < KEPT_BUILDS { 7 } else { 0 },
+            if n < KEPT_BUILDS { 10 } else { 0 },
             "the oldest build is dropped only once three newer ones exist"
         );
         assert_eq!(ls(&r, "gh-pages", "."), [".nojekyll", "index.html", "v"]);
@@ -810,6 +813,14 @@ fn checks_the_build() {
             .unwrap_err()
             .to_string()
             .contains("stem-worker_bg.wasm")
+    );
+    std::fs::write(build.join("stem-worker_bg.wasm"), "x").unwrap();
+    std::fs::remove_file(build.join("decode-worker_bg.wasm")).unwrap();
+    assert!(
+        check_build(&build, &url)
+            .unwrap_err()
+            .to_string()
+            .contains("decode-worker_bg.wasm")
     );
     let _ = std::fs::remove_dir_all(&root);
 

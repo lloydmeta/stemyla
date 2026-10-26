@@ -122,7 +122,7 @@ The agents in `.claude/agents/` review a change, and validate the findings.  Eac
 | `reviewer` | in each review round, on every diff, for correctness against the criteria |
 | `gpu-reviewer` | when `xtask review start` routes it: a change to the GPU kernels, the network or a GPU buffer |
 | `memory-reviewer` | when routed: a change to `engine/`, `app/src/`, `worker/`, `decoder/`, `protocol/`, `roformer/src/`, `roformer-gpu/src/`, `synth/src/`, `dsp/src/`, a `clippy.toml` or `.claude/rules/memory.md`.  Also one of six copy signs, such as `to_vec`, in other Rust code, except in a `tests` folder (TD-31) |
-| `wire-reviewer` | when routed: a change to the messages between the page and the worker, in `protocol/`, `worker/src/web.rs`, `worker/src/web/`, `decoder/src/`, `app/src/separator.rs`, the page side of the decode worker (M5), the e2e scripts or `.claude/rules/protocol.md`.  Also `model_url` in other Rust code |
+| `wire-reviewer` | when routed: a change to the messages between the page and its workers, in `protocol/`, `worker/src/web.rs`, `worker/src/web/`, `decoder/src/`, `app/src/separator.rs`, `app/src/decoder.rs`, the e2e scripts or `.claude/rules/protocol.md`.  Also `model_url` in other Rust code |
 | `supply-chain-reviewer` | when routed: a change to dependencies, the build, CI, a check in `xtask` or `.claude/` |
 | `docs-reviewer` | when routed: a change to the docs but `docs/plans/` and `docs/reviews/`, or to `CLAUDE.md`, `README.md` or `.claude/rules/` |
 | `validator` | for each blocker and should-fix finding of a round, and for the missed mutants of a round |

@@ -1,0 +1,29 @@
+[package]
+name = "decode-worker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Page-side Web Worker that decodes a stored song in blocks into browser storage, for the web app"
+
+# The pass logic compiles on every target, so `cargo test -p decode-worker`
+# runs its tests natively.  Only the browser glue is for wasm32.  `engine`
+# comes without its stretchers and without `cpal` (decision 0019).
+[dependencies]
+dsp = { path = "../dsp" }
+engine = { path = "../engine", default-features = false }
+stem-protocol = { path = "../protocol" }
+
+# The same versions as `app` and `stem-worker` take (DEPS-1).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = ["DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
+
+# Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.79"
+
+[lints]
+workspace = true

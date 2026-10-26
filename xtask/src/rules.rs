@@ -173,7 +173,13 @@ fn string_value(literal: &Literal) -> Option<String> {
 }
 
 /// The packages of the web app, one WebAssembly module each.
-pub const WEB_APP: [&str; 2] = ["app", "stem-worker"];
+pub const WEB_APP: [&str; 3] = ["app", "decode-worker", "stem-worker"];
+
+/// The shells of the page side: the page and its decode worker.
+pub const PAGE_SIDE: [&str; 2] = ["app", "decode-worker"];
+
+/// The shell of the worker side.
+pub const WORKER_SIDE: &str = "stem-worker";
 
 /// The wasm tree of one package of the web app, as `cargo tree --prefix
 /// depth` prints it: normal edges only, and one package per line.  One run
@@ -1072,8 +1078,10 @@ fn stray_problems(workspace: &Workspace) -> Vec<Problem> {
 }
 
 /// LAYER-1: the page side and the worker side meet only through
-/// `stem-protocol`.  Each side is its shell and every workspace crate that
-/// it reaches through normal edges, for any target.
+/// `stem-protocol`.  Each shell of the page side, and the worker side's
+/// shell, is the shell and every workspace crate that it reaches through
+/// normal edges, for any target.  Two crates of the page side may share
+/// crates.
 pub fn shells_meet_only_through_the_protocol(crates: &[WorkspaceCrate]) -> Vec<Problem> {
     let missing: Vec<Problem> = WEB_APP
         .iter()
@@ -1090,24 +1098,26 @@ pub fn shells_meet_only_through_the_protocol(crates: &[WorkspaceCrate]) -> Vec<P
     if !missing.is_empty() {
         return missing;
     }
-    let [page, worker] = WEB_APP.map(|shell| reached(crates, shell));
-    let shared: Vec<&str> = page
-        .intersection(&worker)
-        .filter(|name| **name != PROTOCOL)
-        .copied()
-        .collect();
-    if shared.is_empty() {
-        return Vec::new();
-    }
-    vec![layer1(
-        "Cargo.toml",
-        format!(
-            "LAYER-1: {} and {} both depend on {}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol.",
-            WEB_APP[0],
-            WEB_APP[1],
-            shared.join(", ")
-        ),
-    )]
+    let worker = reached(crates, WORKER_SIDE);
+    PAGE_SIDE
+        .iter()
+        .filter_map(|page| {
+            let shared: Vec<&str> = reached(crates, page)
+                .intersection(&worker)
+                .filter(|name| **name != PROTOCOL)
+                .copied()
+                .collect();
+            (!shared.is_empty()).then(|| {
+                layer1(
+                    "Cargo.toml",
+                    format!(
+                        "LAYER-1: {page} and {WORKER_SIDE} both depend on {}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol.",
+                        shared.join(", ")
+                    ),
+                )
+            })
+        })
+        .collect()
 }
 
 /// `shell` and every workspace crate that it reaches through normal edges.
@@ -1955,13 +1965,15 @@ const THIRD_PARTY_HEADER: &str = "| Crate | Version | Licence | Source |";
 pub const THIRD_PARTY_EDGES: [&str; 2] = ["normal", "normal,dev"];
 
 /// The args of a command in `THIRD-PARTY.md`, in its order, after `cargo`.
-pub fn third_party_args(edges: &str) -> [&str; 13] {
+pub fn third_party_args(edges: &str) -> [&str; 15] {
     [
         "tree",
         "-p",
         "app",
         "-p",
         "stem-worker",
+        "-p",
+        "decode-worker",
         "--target",
         "wasm32-unknown-unknown",
         "-e",
@@ -3681,6 +3693,7 @@ mod tests {
 | Engine and GPU | `engine` | `dsp` |
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
+| Shells | `decode-worker` | `dsp`, `engine`, `stem-protocol` |
 | Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
 ";
@@ -3739,6 +3752,15 @@ mod tests {
                         ("synth", Normal),
                         ("stem-protocol", Normal),
                         ("synth", Dev),
+                    ],
+                ),
+                krate(
+                    "decode-worker",
+                    "decoder/Cargo.toml",
+                    &[
+                        ("dsp", Normal),
+                        ("engine", Normal),
+                        ("stem-protocol", Normal),
                     ],
                 ),
                 krate("synth", "synth/Cargo.toml", &[]),
@@ -3935,11 +3957,11 @@ mod tests {
         )
     }
 
-    fn shared(names: &str) -> Problem {
+    fn shared(page: &str, names: &str) -> Problem {
         layer1(
             "Cargo.toml",
             format!(
-                "LAYER-1: app and stem-worker both depend on {names}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol."
+                "LAYER-1: {page} and stem-worker both depend on {names}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol."
             ),
         )
     }
@@ -4519,13 +4541,22 @@ mod tests {
     #[test]
     fn a_crate_on_both_sides_is_a_problem() {
         let workspace = with_edges(today(), &[("app", "roformer-gpu", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("roformer, roformer-gpu")]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("app", "roformer, roformer-gpu")],
+        );
     }
 
     #[test]
     fn a_crate_reached_through_another_is_found() {
         let workspace = with_edges(today(), &[("engine", "roformer", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("roformer")]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "roformer"),
+                shared("decode-worker", "roformer"),
+            ],
+        );
     }
 
     #[test]
@@ -4534,24 +4565,77 @@ mod tests {
             without_edge(today(), "stem-worker", "roformer"),
             &[("roformer", "dsp", Kind::Normal)],
         );
-        assert_problems(shells(&workspace), vec![shared("dsp")]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("app", "dsp"), shared("decode-worker", "dsp")],
+        );
     }
 
     #[test]
     fn a_crate_reached_through_stem_protocol_is_found() {
         let workspace = with_edges(today(), &[("stem-protocol", "test-support", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("test-support")]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "test-support"),
+                shared("decode-worker", "test-support"),
+            ],
+        );
     }
 
     #[test]
     fn a_shell_is_in_its_own_set() {
         let workspace = with_edges(today(), &[("stem-worker", "app", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("app, dsp, engine, synth")]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "app, dsp, engine, synth"),
+                shared("decode-worker", "dsp, engine"),
+            ],
+        );
         let workspace = with_edges(today(), &[("app", "stem-worker", Kind::Normal)]);
         assert_problems(
             shells(&workspace),
-            vec![shared("roformer, roformer-gpu, stem-worker")],
+            vec![shared("app", "roformer, roformer-gpu, stem-worker")],
         );
+        let workspace = with_edges(today(), &[("decode-worker", "stem-worker", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared(
+                "decode-worker",
+                "roformer, roformer-gpu, stem-worker",
+            )],
+        );
+    }
+
+    #[test]
+    fn the_decode_worker_and_the_stem_worker_that_share_a_crate_are_a_problem() {
+        let workspace = with_edges(today(), &[("decode-worker", "roformer", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("decode-worker", "roformer")],
+        );
+        let workspace = with_edges(today(), &[("stem-worker", "engine", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "dsp, engine"),
+                shared("decode-worker", "dsp, engine"),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_decode_worker_and_the_app_may_share_engine() {
+        let workspace = today();
+        let takes_engine = |name: &str| {
+            workspace
+                .crates
+                .iter()
+                .any(|c| c.name == name && c.edges.iter().any(|e| e.to == "engine"))
+        };
+        assert!(takes_engine("app") && takes_engine("decode-worker"));
+        assert_problems(shells(&workspace), vec![]);
     }
 
     #[test]
@@ -4561,8 +4645,10 @@ mod tests {
             &[
                 ("app", "roformer", Kind::Dev),
                 ("engine", "roformer", Kind::Dev),
+                ("decode-worker", "roformer", Kind::Dev),
                 ("app", "roformer", Kind::Build),
                 ("engine", "roformer", Kind::Build),
+                ("decode-worker", "roformer", Kind::Build),
             ],
         );
         assert_problems(shells(&workspace), vec![]);
@@ -4576,7 +4662,7 @@ mod tests {
 
     #[test]
     fn a_missing_shell_is_a_problem() {
-        for shell in ["stem-worker", "app"] {
+        for shell in ["stem-worker", "app", "decode-worker"] {
             assert_problems(
                 shells(&without_crate(today(), shell)),
                 vec![layer1(
@@ -5864,8 +5950,8 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
         assert_eq!(
             commands(),
             [
-                "cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
-                "cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
             ]
         );
     }

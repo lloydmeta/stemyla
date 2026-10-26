@@ -118,15 +118,6 @@ pub const ROUTE_ALL: &[&str] = &[
 pub const MAY_MATCH_NOTHING: &[(&str, &str)] = &[
     ("**/build.rs", "no crate has a build script yet"),
     (".mcp.json", "the repo has no MCP config yet"),
-    ("decoder/**", "the decode worker crate lands in M5, step 2"),
-    (
-        "decoder/src/**",
-        "the decode worker crate lands in M5, step 2",
-    ),
-    (
-        "app/src/decoder.rs",
-        "the page side of the decode worker lands in M5, step 4",
-    ),
 ];
 
 /// Content signs, by reviewer.  A short denylist, not a full list.

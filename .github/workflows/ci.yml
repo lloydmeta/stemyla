@@ -63,7 +63,7 @@ jobs:
       # The web code compiles only for wasm32, so the native steps never lint
       # it (MEM-1).  roformer and roformer-gpu have no wasm32-only code, and
       # their dev-dependencies do not build for wasm32.
-      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings
+      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
       # --workspace merges features across crates: xtask turns on synth's
       # files feature for every crate in the build.  These steps check each
       # crate without that merge (LAYER-1, decision 0004).
@@ -136,8 +136,9 @@ jobs:
         with:
           version: ${{ env.TRUNK_VERSION }}
           sha256: ${{ env.TRUNK_SHA256 }}
-      # Builds both the app and the stem-worker (which compiles roformer-gpu
-      # for wasm32), the same build xtask publish performs.
+      # Builds the app, the stem-worker (which compiles roformer-gpu
+      # for wasm32) and the decode-worker, the same build xtask publish
+      # performs.
       - run: trunk build --release
         working-directory: app
 

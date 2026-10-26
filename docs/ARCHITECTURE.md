@@ -34,13 +34,14 @@ flowchart LR
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
 * `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3 and FLAC encoding.
-* `stem-protocol` (`protocol/`): the messages between the page and the worker, one encoder and one decoder per message, shared by both sides.
+* `decode-worker` (`decoder/`): the page-side Web Worker (decision 0019).  It decodes a song that the page keeps in browser storage, in blocks, with `engine`, and writes the session files and the overviews.  Until M5 adds its messages, it starts and logs each message, and answers none.
+* `stem-protocol` (`protocol/`): the messages between the page and its workers, one encoder and one decoder per message, shared by both sides.
 * `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature or no fixture.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  It is only a dev-dependency.
 * `xtask`: tools run with Cargo: the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`), the review round tools (`review`), publishing, model conversion, CPU separation, self-test reference files, the demo song generator, benchmarks.
 
 ### Layers
 
-Each workspace crate depends only on the workspace crates that its row lists, and on `test-support` as a dev-dependency (LAYER-1 in `docs/invariants.md`).  Each listed crate is in a lower layer.  The page side and the worker side meet only through `stem-protocol`.  The workspace crates that `app` and `stem-worker` reach through normal dependencies, for any target, have only `stem-protocol` in common.
+Each workspace crate depends only on the workspace crates that its row lists, and on `test-support` as a dev-dependency (LAYER-1 in `docs/invariants.md`).  Each listed crate is in a lower layer.  The page side (`app` and `decode-worker`) and the worker side (`stem-worker`) meet only through `stem-protocol`.  The workspace crates that `stem-worker` reaches through normal dependencies, for any target, have only `stem-protocol` in common with those that `app` or `decode-worker` reaches.
 
 | Layer | Crate | Depends on |
 | - | - | - |
@@ -52,6 +53,7 @@ Each workspace crate depends only on the workspace crates that its row lists, an
 | Engine and GPU | `engine` | `dsp` |
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
+| Shells | `decode-worker` | `dsp`, `engine`, `stem-protocol` |
 | Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
 
@@ -59,7 +61,7 @@ The rows run from the lowest layer to the highest.  Each row lists every workspa
 
 Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal or build dependency: it is a dev-dependency only, so it never ships.  It takes no workspace crate.
 
-`app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app` and `stem-worker`; LAYER-1).
+`app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app`, `decode-worker` and `stem-worker`; LAYER-1).
 
 ## From a song to six stems
 

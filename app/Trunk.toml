@@ -1,3 +1,4 @@
 [build]
-# The app spawns the worker by a fixed name (stem-worker_loader.js).
+# The app spawns each worker by a fixed name (stem-worker_loader.js,
+# decode-worker_loader.js).
 filehash = false

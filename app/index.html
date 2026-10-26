@@ -10,6 +10,8 @@
   <link data-trunk rel="rust" data-bin="app" data-wasm-opt="z" data-cargo-profile="web-release" data-integrity="none" />
   <!-- Stem separation worker: BS-RoFormer SW on WebGPU (worker/, roformer-gpu/). -->
   <link data-trunk rel="rust" href="../worker/Cargo.toml" data-bin="stem-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-integrity="none" data-wasm-opt="z" data-cargo-profile="web-release" />
+  <!-- Decode worker: decodes a stored song in blocks into browser storage (decoder/, decision 0019). -->
+  <link data-trunk rel="rust" href="../decoder/Cargo.toml" data-bin="decode-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-integrity="none" data-wasm-opt="z" data-cargo-profile="web-release" />
   <!-- Safari puts Web Audio in the "ambient" audio session by default, which
        Silent Mode on an iPhone mutes.  "playback" plays through it, as media
        does.  Set before the app creates its AudioContext, and again on
