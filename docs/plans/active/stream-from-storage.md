@@ -197,7 +197,7 @@ The encoded source is never whole in memory.  A chosen file is saved to OPFS as 
 * A song of several sources gets its `mix.f32` and its `meta` line from the source session files, in blocks, before M7 removes the samples from the page.  Today the page writes it from the samples in memory (M4 plan, D3).
 * No step rewrites a session's `mix.f32` while a separation names that session.  Safari does not see a rewrite of the same size in the same second (TD-55).
 * The decode worker logs its WebAssembly memory in a `memory: ...` line, as the other two do.
-* Acceptance: a test decodes a WAV, a FLAC and an MP3 from a block source.  A memory sink and a block sink get the same samples.  A browser test opens a song and finds its session files and overviews in OPFS.  For a song of one source, it finds `mix.f32` and its `meta` line, and Separate then writes no second mix file.  The MEM-5 spy covers the decode writes.  `e2e memory-budget` shows no growth of the page or the decode worker for a WAV source.
+* Acceptance: a test decodes a WAV, a FLAC and an MP3 from a block source.  A memory sink and a block sink get the same samples.  A browser test opens a song and finds its session files and overviews in OPFS.  For a song of one source, it finds `mix.f32` and its `meta` line, and Separate then writes no second mix file.  The MEM-5 spy covers the decode writes.  `e2e memory-budget` shows no growth of the page or the decode worker for a WAV source, from the start of the open to the decode's end line.  After that line, the page still reads the session files back for playback and lanes until M6 and M7 (TD-54), as after M3's separation.
 
 ### M6: playback reads storage through the read-ahead buffer
 
