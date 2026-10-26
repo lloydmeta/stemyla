@@ -602,6 +602,156 @@ mod tests {
         assert!((1_000..=1_001).contains(&h), "playhead {h}");
     }
 
+    /// 64-bit FNV-1a over the bits of samples: no crate and no libm, so
+    /// the same on every platform.
+    struct Fnv(u64);
+
+    impl Fnv {
+        fn new() -> Self {
+            Self(0xcbf2_9ce4_8422_2325)
+        }
+
+        fn add(&mut self, samples: &[f32]) {
+            for v in samples {
+                for byte in v.to_bits().to_le_bytes() {
+                    self.0 ^= u64::from(byte);
+                    self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+    }
+
+    /// Varispeed that also hashes every frame the player pushes into it.
+    struct Recorder {
+        inner: Varispeed,
+        pushed: Arc<std::sync::Mutex<Fnv>>,
+    }
+
+    impl Stretcher for Recorder {
+        fn name(&self) -> &'static str {
+            "recorder"
+        }
+        fn set_tempo(&mut self, tempo: f64) {
+            self.inner.set_tempo(tempo);
+        }
+        fn push(&mut self, left: &[f32], right: &[f32]) {
+            let mut hash = self.pushed.lock().expect("lock");
+            hash.add(left);
+            hash.add(right);
+            self.inner.push(left, right);
+        }
+        fn can_pull(&mut self, frames: usize) -> bool {
+            self.inner.can_pull(frames)
+        }
+        fn pull(&mut self, left: &mut [f32], right: &mut [f32]) {
+            self.inner.pull(left, right);
+        }
+        fn latency(&self) -> f64 {
+            self.inner.latency()
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn warm_up(&mut self, max_tempo: f64, max_frames: usize) {
+            self.inner.warm_up(max_tempo, max_frames);
+        }
+    }
+
+    /// Plays three stems of noise through every path of the player: the
+    /// hash of what it pushes into the stretcher, and the hash of its
+    /// output through `Varispeed` (chipmunk output included).
+    fn golden_hashes() -> (u64, u64) {
+        let frames = 200_000;
+        let s = song(vec![
+            ("a", noise(frames, 11)),
+            ("b", noise(frames, 12)),
+            ("c", noise(frames, 13)),
+        ]);
+        let params = Arc::new(SharedParams::new(3));
+        let pushed = Arc::new(std::sync::Mutex::new(Fnv::new()));
+        let recorder = Recorder {
+            inner: Varispeed::new(),
+            pushed: Arc::clone(&pushed),
+        };
+        let mut p = Player::with_config(
+            s,
+            Arc::clone(&params),
+            Box::new(recorder),
+            PlayerConfig::default(),
+        );
+        let mut out = Fnv::new();
+        let mut play = |p: &mut Player, callbacks: usize, size: usize| {
+            for _ in 0..callbacks {
+                let [l, r] = p.render(size);
+                out.add(&l);
+                out.add(&r);
+            }
+        };
+        params.playing.store(true, Relaxed);
+        play(&mut p, 10, 1_000);
+        params.set_tempo(0.75);
+        play(&mut p, 10, 777);
+        params.set_tempo(1.5);
+        play(&mut p, 10, 1_024);
+        params.set_tempo(1.0);
+        params.chipmunk.store(true, Relaxed);
+        play(&mut p, 5, 900);
+        params.chipmunk.store(false, Relaxed);
+        play(&mut p, 5, 900);
+        // A loop with a crossfade around the head.
+        let head = params.playhead();
+        params.set_loop(head - 1_000, head + 3_000);
+        play(&mut p, 20, 512);
+        // A loop shorter than a hop.
+        let head = params.playhead();
+        params.set_loop(head, head + 100);
+        play(&mut p, 5, 512);
+        // A loop set behind the head.
+        params.clear_loop();
+        play(&mut p, 5, 512);
+        let head = params.playhead();
+        params.set_loop(head - 20_000, head - 5_000);
+        play(&mut p, 20, 1_000);
+        params.clear_loop();
+        // A seek while playing.
+        params.request_seek(120_000);
+        play(&mut p, 5, 1_000);
+        // A paused seek, then Play.
+        params.playing.store(false, Relaxed);
+        play(&mut p, 1, 500);
+        params.request_seek(60_000);
+        play(&mut p, 1, 500);
+        params.playing.store(true, Relaxed);
+        play(&mut p, 5, 1_000);
+        // Mute and solo.
+        params.set_muted(0, true);
+        play(&mut p, 3, 1_000);
+        params.set_soloed(1, true);
+        play(&mut p, 3, 1_000);
+        params.set_muted(0, false);
+        play(&mut p, 3, 1_000);
+        params.set_soloed(1, false);
+        play(&mut p, 3, 1_000);
+        // On to the end of the song.
+        params.request_seek(frames as u64 - 3_000);
+        play(&mut p, 6, 1_000);
+        assert!(!params.playing.load(Relaxed), "the song ends");
+        let pushed = pushed.lock().expect("lock").0;
+        (pushed, out.0)
+    }
+
+    /// The player's output, bit for bit, as it was before the player read
+    /// its stems through `StemSource` (M6, D2).
+    #[test]
+    fn the_player_output_is_unchanged() {
+        let (pushed, out) = golden_hashes();
+        assert_eq!(
+            (pushed, out),
+            (0xea6e_e1f9_d4b9_abb9, 0x866d_28a2_377d_a34d),
+            "the player's output changed: pushed {pushed:#018x}, output {out:#018x}"
+        );
+    }
+
     #[test]
     fn chipmunk_reads_twice_as_fast() {
         let ramp: Vec<f32> = (0..10_000).map(|i| i as f32 / 10_000.0).collect();
