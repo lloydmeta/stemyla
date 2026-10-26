@@ -6,6 +6,7 @@ paths:
   - "app/src/separator.rs"
   - "decoder/src/**"
   - "app/src/decoder.rs"
+  - "app/src/decoder/**"
   - "xtask/src/e2e.rs"
   - "xtask/e2e/**"
 ---

@@ -181,6 +181,7 @@ jobs:
       - run: trunk build --release
         working-directory: app
       - run: cargo run --locked -p xtask -- e2e smoke --browser chrome
+      - run: cargo run --locked -p xtask -- e2e decode --browser chrome
       - run: cargo run --locked -p xtask -- e2e audio-resume --browser chrome
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome

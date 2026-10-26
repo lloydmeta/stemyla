@@ -2466,15 +2466,16 @@ fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
     tokens
 }
 
-/// The message types in `stem_protocol::kind`: every string in the brace
-/// group after `mod kind`, at the top level of `protocol`.  The error says
+/// The message types in `stem_protocol::kind` and `stem_protocol::decode::kind`:
+/// every string in each brace group after `mod kind`, at the top level of
+/// `protocol` (the text of one file, or of several joined).  The error says
 /// why there is none.
 fn protocol_kinds(protocol: &str) -> std::result::Result<BTreeSet<String>, String> {
     let tokens = TokenStream::from_str(protocol).map_err(|e| format!("does not tokenise: {e}"))?;
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
-    let kind = trees
+    let groups: Vec<TokenStream> = trees
         .windows(3)
-        .find_map(|window| match window {
+        .filter_map(|window| match window {
             [
                 TokenTree::Ident(word),
                 TokenTree::Ident(name),
@@ -2484,9 +2485,13 @@ fn protocol_kinds(protocol: &str) -> std::result::Result<BTreeSet<String>, Strin
             }
             _ => None,
         })
-        .ok_or("has no `mod kind`")?;
-    let kinds: BTreeSet<String> = string_literals(kind)
+        .collect();
+    if groups.is_empty() {
+        return Err("has no `mod kind`".into());
+    }
+    let kinds: BTreeSet<String> = groups
         .into_iter()
+        .flat_map(string_literals)
         .map(|(_, value)| value)
         .collect();
     if kinds.is_empty() {
@@ -6318,6 +6323,20 @@ pub mod kind {
         assert_eq!(
             kinds.into_iter().collect::<Vec<_>>(),
             ["alive", "done", "segment"]
+        );
+    }
+
+    /// The decode worker's messages have a `mod kind` of their own
+    /// (`protocol/src/decode.rs`), read with `lib.rs` after it.
+    #[test]
+    fn every_kind_module_is_read() {
+        let both = format!(
+            "{PROTOCOL}\n/// The decode worker's.\npub mod kind {{\n    pub const DECODED: &str = \"decoded\";\n}}\n"
+        );
+        let kinds = protocol_kinds(&both).expect("the fixture has kinds");
+        assert_eq!(
+            kinds.into_iter().collect::<Vec<_>>(),
+            ["alive", "decoded", "done", "segment"]
         );
     }
 

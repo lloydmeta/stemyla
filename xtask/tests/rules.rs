@@ -240,7 +240,13 @@ fn e2e_messages_use_protocol_types() {
         "the scripts do not include xtask/e2e/worker.js"
     );
     let problems = xtask::rules::e2e_types_match_the_protocol(
-        &read("protocol/src/lib.rs"),
+        // The stem worker's kinds and the decode worker's, each file's own
+        // `mod kind`.
+        &format!(
+            "{}\n{}",
+            read("protocol/src/lib.rs"),
+            read("protocol/src/decode.rs")
+        ),
         &scripts,
         &read("xtask/src/e2e.rs"),
         &xtask::rules::SCRIPT_ONLY_TYPES,

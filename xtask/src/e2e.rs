@@ -1,8 +1,12 @@
 //! `xtask e2e <scenario> [options]`: drives the built web app (`app/dist`)
 //! in Safari or Chrome through WebDriver and checks what it does.
 //!
-//! Scenarios (the first four need no model and run in CI):
+//! Scenarios (the first five need no model and run in CI):
 //! * `smoke`: drop generated stems, Play, change the tempo.
+//! * `decode`: the decode worker writes the session files of a 44.1 kHz
+//!   WAV, a 48 kHz WAV and the generated stems, equal to the native decode;
+//!   a reload reads a complete session back with no decode, and decodes a
+//!   session of the M4 layout (`e2e/decode.rs`).
 //! * `audio-resume`: a song restored at page load plays after one click,
 //!   with Web Audio behaving as in Safari; stems stored with it come back
 //!   with it.
@@ -28,7 +32,9 @@
 //!   is more than 4 MB (D9 of M3 in
 //!   `docs/plans/active/stream-from-storage-m3.md`, step 4 of M4).  The
 //!   page's growth includes its write of the mix.  A fallback to the
-//!   memory path fails it.
+//!   memory path fails it.  It also checks that the page and the decode
+//!   worker grow by at most 4 MB while the song opens, and that Separate
+//!   writes no second mix (M5); `separate` checks that too.
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix on the
 //!   memory path, then on the storage path into a session folder, from a mix
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
@@ -58,6 +64,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod decode;
 
 /// The viewport the click positions are measured in.
 const VIEWPORT: (u32, u32) = (1100, 700);
@@ -102,7 +110,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
+                "usage: xtask e2e <smoke|decode|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -186,6 +194,7 @@ pub fn run(args: &[String]) -> Result<()> {
     std::fs::create_dir_all(&o.out)?;
     match o.scenario.as_str() {
         "smoke" => smoke(&o),
+        "decode" => decode::run(&o),
         "audio-resume" => audio_resume(&o),
         "storage" => storage(&o),
         "flac" => flac(&o),
@@ -1212,6 +1221,8 @@ fn separate(o: &Opts) -> Result<()> {
     );
     let (ok, what) = no_fallback_check(&p.log[from..]);
     p.check(ok, &what);
+    let (ok, what) = no_mix_write_check(&p.log[from..]);
+    p.check(ok, &what);
     p.idle(2.0)?;
     p.screenshot("separated")?;
     let errors: Vec<String> = p
@@ -1235,13 +1246,14 @@ const BUDGET_MINUTES: [u32; 2] = [1, 4];
 struct MemoryPeak {
     page_wasm: f64,
     worker_wasm: f64,
+    decoder_wasm: f64,
     gpu_live: f64,
 }
 
 impl MemoryPeak {
     /// The sum of the parts' peaks: at most the peak of their sum.
     fn total(&self) -> f64 {
-        self.page_wasm + self.worker_wasm + self.gpu_live
+        self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live
     }
 }
 
@@ -1257,6 +1269,7 @@ fn memory_peak(log: &[String]) -> Option<MemoryPeak> {
     Some(MemoryPeak {
         page_wasm: largest("page wasm ")?,
         worker_wasm: largest("worker wasm ")?,
+        decoder_wasm: largest("decoder wasm ")?,
         gpu_live: largest("GPU buffers live ")?,
     })
 }
@@ -1308,6 +1321,52 @@ fn worker_growth(log: &[String]) -> Option<f64> {
             .and_then(|l| number_after(l, "worker wasm "))
     };
     Some(at("end")? - at("start")?)
+}
+
+/// How much the page's WebAssembly memory grew from the start of an open
+/// to the end of its decode (D12 of M5), from the page's log lines.
+fn open_page_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(when))
+            .and_then(|l| number_after(l, "page wasm "))
+    };
+    Some(at("as the decode ends")? - at("as the open starts")?)
+}
+
+/// How much the decode worker's WebAssembly memory grew from the start of
+/// a decode to its end (D12 of M5).
+fn decoder_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(&format!("at the decode's {when}")))
+            .and_then(|l| number_after(l, "decoder wasm "))
+    };
+    Some(at("end")? - at("start")?)
+}
+
+/// The check of M5 on the growth of `part` (the page or the decode worker)
+/// during an open.
+fn open_growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
+    (
+        growth.is_some_and(|g| g <= MAX_GROWTH_MB),
+        format!(
+            "the {part} grew by {growth:?} MB from the open's start to the decode's end, at most {MAX_GROWTH_MB} MB"
+        ),
+    )
+}
+
+/// The page's line before it writes a mix: a song of one source has its
+/// mix from the decode (D1 of M5), so Separate writes no second mix.
+const MIX_WRITE_LINE: &str = "before the mix is written";
+
+/// The check that Separate wrote no mix: no [`MIX_WRITE_LINE`] in `log`.
+fn no_mix_write_check(log: &[String]) -> (bool, String) {
+    let found: Vec<&String> = log.iter().filter(|l| l.contains(MIX_WRITE_LINE)).collect();
+    (
+        found.is_empty(),
+        format!("Separate writes no second mix (lines {MIX_WRITE_LINE:?}: {found:?})"),
+    )
 }
 
 /// The page's lines that show a fallback to the memory path.
@@ -1378,6 +1437,20 @@ fn memory_budget(o: &Opts) -> Result<()> {
         )])?;
         let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
         p.check(kept.is_some(), &format!("the {minutes}-minute song opens"));
+        // D12 of M5: neither the page nor the decode worker grows with the
+        // song while it opens.
+        for (part, growth) in [
+            ("page", open_page_growth(&p.log[from..])),
+            ("decode worker", decoder_growth(&p.log[from..])),
+        ] {
+            let (ok, what) = open_growth_check(part, growth);
+            p.check(ok, &what);
+            if let Some(g) = growth {
+                p.note(&format!(
+                    "memory-budget: the {minutes}-minute song: {part} wasm grew by {g:.0} MB during the open"
+                ));
+            }
+        }
         let from = p.mark();
         drop_model(&mut p, &model)?;
         let loaded = p.wait_for(from, 1200, |l| {
@@ -1400,6 +1473,8 @@ fn memory_budget(o: &Opts) -> Result<()> {
         );
         let (ok, what) = no_fallback_check(&p.log[from..]);
         p.check(ok, &what);
+        let (ok, what) = no_mix_write_check(&p.log[from..]);
+        p.check(ok, &what);
         for (part, growth) in [
             ("page", page_growth(&p.log[from..])),
             ("worker", worker_growth(&p.log[from..])),
@@ -1416,9 +1491,10 @@ fn memory_budget(o: &Opts) -> Result<()> {
         p.check(peak.is_some(), "the memory lines");
         if let Some(peak) = peak {
             p.note(&format!(
-                "memory-budget: the {minutes}-minute song: page wasm {:.0} MB, worker wasm {:.0} MB, GPU live {:.0} MB, peak {:.0} MB",
+                "memory-budget: the {minutes}-minute song: page wasm {:.0} MB, worker wasm {:.0} MB, decoder wasm {:.0} MB, GPU live {:.0} MB, peak {:.0} MB",
                 peak.page_wasm,
                 peak.worker_wasm,
+                peak.decoder_wasm,
                 peak.gpu_live,
                 peak.total()
             ));
@@ -2119,6 +2195,57 @@ mod tests {
         }
     }
 
+    /// The page's and the decode worker's lines of one open of a song
+    /// (D12 of M5), in their real order.
+    fn open_log() -> Vec<String> {
+        [
+            "[1.0s] console.info: [app] decoder: memory: page wasm 8 MB as the open starts",
+            "[1.1s] console.info: [app::decoder::client] decoder: memory: decoder wasm 6 MB at the decode's start",
+            "[2.0s] console.info: [app::decoder::client] decoder: memory: decoder wasm 7 MB at the decode's end",
+            "[2.1s] console.info: [app] decoder: memory: page wasm 9 MB as the decode ends",
+            "[2.2s] console.info: [app] song kept in browser storage as session 1",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn the_open_growths_are_the_end_less_the_start() {
+        let log = open_log();
+        assert_eq!(open_page_growth(&log), Some(1.0));
+        assert_eq!(decoder_growth(&log), Some(1.0));
+        assert_eq!(open_page_growth(&log[1..]), None, "no start");
+        assert_eq!(open_page_growth(&log[..3]), None, "no end");
+        assert_eq!(decoder_growth(&log[2..]), None, "no start");
+        assert_eq!(decoder_growth(&log[..2]), None, "no end");
+        let separation = separation_log();
+        assert_eq!(
+            open_page_growth(&separation),
+            None,
+            "a separation is no open"
+        );
+        assert_eq!(
+            decoder_growth(&separation),
+            None,
+            "the stem worker is not the decode worker"
+        );
+        assert!(open_growth_check("page", Some(4.0)).0, "at the limit");
+        assert!(!open_growth_check("page", Some(4.5)).0);
+        assert!(!open_growth_check("decode worker", None).0, "no lines");
+        assert_eq!(
+            open_growth_check("decode worker", Some(1.0)).1,
+            "the decode worker grew by Some(1.0) MB from the open's start to the decode's end, at most 4 MB"
+        );
+    }
+
+    #[test]
+    fn a_mix_write_fails_the_check() {
+        let (ok, what) = no_mix_write_check(&open_log());
+        assert!(ok, "{what}");
+        let (ok, what) = no_mix_write_check(&separation_log());
+        assert!(!ok && what.contains("before the mix is written"), "{what}");
+    }
+
     #[test]
     fn the_page_growth_is_the_end_less_the_start() {
         let log: Vec<String> = [
@@ -2252,6 +2379,8 @@ mod tests {
             "[3.0s] separator: chunk 2/48: 9.8 s; memory: worker wasm 246 MB, model on the GPU 699 MB, chunk buffers 280 MB, GPU buffers live 979 MB",
             "[4.0s] song: opened at 44100 Hz (88200 frames)",
             "[5.0s] separator: memory: page wasm 325 MB with the stems shown",
+            "[0.5s] decoder: memory: decoder wasm 6 MB at the decode's start",
+            "[0.9s] decoder: memory: decoder wasm 9 MB at the decode's end",
         ]
         .map(String::from)
         .to_vec();
@@ -2261,10 +2390,12 @@ mod tests {
             MemoryPeak {
                 page_wasm: 325.0,
                 worker_wasm: 246.0,
+                decoder_wasm: 9.0,
                 gpu_live: 979.0
             }
         );
-        assert_eq!(peak.total(), 1550.0);
+        assert_eq!(peak.total(), 1559.0);
+        assert_eq!(memory_peak(&log[..5]), None, "no decode worker line");
         assert_eq!(memory_peak(&log[..3]), None, "no page line yet");
     }
 
