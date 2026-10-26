@@ -10,6 +10,7 @@ pub mod mixdown;
 pub mod overview;
 pub mod params;
 pub mod player;
+pub mod readahead;
 pub mod resample;
 pub mod slot;
 pub mod song;

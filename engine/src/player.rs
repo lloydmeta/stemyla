@@ -24,6 +24,11 @@
 //!   player renders silence and does not move until the run is ready (a
 //!   hold).  It counts the frames in [`SharedParams::held_frames`].
 //!
+//! At the end of each `process`, the player gives its sources
+//! [`Hint::Reading`] and [`Hint::Seek`]: the seek that holds, or the position
+//! that it has not played from since a jump.  So the reader reads, between
+//! two callbacks, the run that plays next.
+//!
 //! A lane in memory is always ready, so a song in memory never holds.
 
 use crate::params::{MAX_TEMPO, SharedParams};
@@ -238,6 +243,12 @@ impl Player {
         self.frames
     }
 
+    /// The next song frame to read, for tests.
+    #[cfg(test)]
+    pub(crate) fn read_position(&self) -> u64 {
+        self.pos
+    }
+
     pub fn stretcher_name(&self) -> &'static str {
         self.stretcher.name()
     }
@@ -348,18 +359,27 @@ impl Player {
         }
     }
 
-    /// Fills both output slices.  This is what the audio callback calls.
-    pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
-        let p = Arc::clone(&self.params);
-        let playing = p.playing.load(Relaxed);
+    /// Tells the sources where the player is, at the end of each `process`
+    /// and after any jump in it, so the reader reads between two callbacks
+    /// for the position that plays next.  A position that the player has
+    /// not played from since a jump asks the reader for its run first, as a
+    /// held seek does.
+    fn give_hints(&mut self) {
         let heard = self.playhead();
         self.hint(Hint::Reading {
             heard,
             read: self.pos,
         });
+        let seek = self.pending.map(|pending| pending.target);
+        self.hint(Hint::Seek(seek.or(self.fresh.then_some(self.pos))));
+    }
+
+    /// Fills both output slices.  This is what the audio callback calls.
+    pub fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
+        let p = Arc::clone(&self.params);
+        let playing = p.playing.load(Relaxed);
 
         self.take_seeks(playing);
-        self.hint(Hint::Seek(self.pending.map(|pending| pending.target)));
 
         if !playing {
             out_l.fill(0.0);
@@ -370,6 +390,7 @@ impl Player {
                 }
                 self.fade = Fade::None;
             }
+            self.give_hints();
             return;
         }
 
@@ -386,6 +407,7 @@ impl Player {
             p.held_frames.fetch_add(out_l.len() as u64, Relaxed);
             let head = self.shown_head();
             p.playhead.store(head, Relaxed);
+            self.give_hints();
             return;
         }
 
@@ -418,6 +440,7 @@ impl Player {
         if p.loop_region().is_none() && head >= self.frames as u64 {
             p.playing.store(false, Relaxed);
         }
+        self.give_hints();
     }
 
     fn apply_fade(&mut self, l: &mut [f32], r: &mut [f32]) {
@@ -1183,7 +1206,7 @@ mod tests {
         twin.gated_params().playing.store(false, Relaxed);
         twin.play_gated(1);
         assert_eq!(twin.gated.pos, 350_000, "the held seek jumps when paused");
-        assert_eq!(twin.lane.last_seek_hint(), Some(None));
+        assert_eq!(twin.lane.last_seek_hint(), Some(Some(350_000)));
     }
 
     #[test]
@@ -1295,6 +1318,29 @@ mod tests {
     }
 
     #[test]
+    fn a_jump_hints_its_position_as_a_seek() {
+        let mut twin = Twin::new();
+        twin.lane.window(0, 0);
+        twin.gated_params().request_seek(5_000);
+        twin.play_gated(1);
+        assert_eq!(
+            twin.lane.last_seek_hint(),
+            Some(Some(5_000)),
+            "paused, the reader reads the run of the seek first"
+        );
+        twin.gated_params().playing.store(true, Relaxed);
+        twin.play_gated(1);
+        assert_eq!(
+            twin.lane.last_seek_hint(),
+            Some(Some(5_000)),
+            "the reader reads the run of the hold first"
+        );
+        twin.lane.open();
+        twin.play_gated(2);
+        assert_eq!(twin.lane.last_seek_hint(), Some(None));
+    }
+
+    #[test]
     fn the_player_hints_while_paused() {
         let mut twin = Twin::new();
         twin.gated_params().request_seek(1_234);
@@ -1308,7 +1354,19 @@ mod tests {
         };
         assert_eq!(
             hints,
-            [reading, Hint::Seek(None), reading, Hint::Seek(None)]
+            [
+                reading,
+                Hint::Seek(Some(1_234)),
+                reading,
+                Hint::Seek(Some(1_234))
+            ]
+        );
+        twin.gated_params().playing.store(true, Relaxed);
+        twin.play_gated(2);
+        assert_eq!(
+            twin.lane.last_seek_hint(),
+            Some(None),
+            "it played from there"
         );
     }
 }
