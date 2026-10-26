@@ -559,7 +559,8 @@ async fn a_complete_session_restores_with_no_decode() {
     let restored = restore_stored(&id, &fake.client).await;
     let current = store::current().await;
     store::test_wipe().await;
-    let (song, meta, note) = restored.expect("a session").expect("restored");
+    let (opened, meta, note) = restored.expect("a session").expect("restored");
+    let song = opened.song;
     assert_eq!(fake.posts.length(), posts, "no decode is posted");
     assert_eq!((note, meta.name.as_str()), (None, "acme"));
     assert!(*song.stems[0].left == samples[0].0 && *song.stems[0].right == samples[0].1);
@@ -606,7 +607,7 @@ async fn an_incomplete_session_restores_through_a_decode() {
         Some(frames as u64),
         "the usable mix is named"
     );
-    let (song, ..) = restored;
+    let song = restored.0.song;
     assert!(
         *song.stems[0].left == left && *song.stems[0].right == right,
         "read from the mix"
@@ -802,7 +803,7 @@ async fn separate_writes_no_mix_after_a_decode() {
     };
     app.separator = Some(sep);
     app.session = opened.session.clone();
-    app.open_song(opened.song);
+    app.open_song(opened.song, opened.files);
     dt_count_writes();
     app.start_separation(&egui::Context::default());
     for _ in 0..250 {
@@ -872,7 +873,7 @@ async fn separate_waits_for_a_decode_of_the_shown_session() {
         want_device: false,
         ..StemApp::default()
     };
-    app.open_song(Song {
+    app.open_memory_song(Song {
         sample_rate: 44_100,
         frames: 100,
         stems: vec![Stem {
@@ -897,7 +898,11 @@ async fn separate_waits_for_a_decode_of_the_shown_session() {
 /// Restores an M4 session of `frames` frames with a usable mix through the
 /// fake worker, which ends the decode with `decode-unstored`.  Gives the
 /// session's `mix` line and `mix.f32` after the restore.
-async fn unstored_with_a_kept_mix(separating: bool) -> (Option<(usize, String)>, Option<Vec<u8>>) {
+/// It also gives whether `mix.f32` was there while the open held its guard
+/// (D10 of M6), and waits for a removal that the guard held back.
+async fn unstored_with_a_kept_mix(
+    separating: bool,
+) -> (Option<(usize, String)>, Option<Vec<u8>>, bool) {
     store::test_wipe().await;
     let fake = Fake::new();
     let frames = 1_500;
@@ -923,12 +928,18 @@ async fn unstored_with_a_kept_mix(separating: bool) -> (Option<(usize, String)>,
         text: "the sources have 1500 frames, not the kept mix's".into(),
     });
     let restored = output(&restored).await.expect("a session");
+    let kept_while_open = store::test_read(&store::mix_path(&id)).await.is_some();
+    // The song is shown: the open's guard goes.
+    let ok = restored.is_ok();
+    drop(restored);
+    store::test_settled(&id).await;
     store::set_separating(None);
+    store::test_settled(&id).await;
     let after = meta_of(&id).await.and_then(|m| m.mix);
     let file = store::test_read(&store::mix_path(&id)).await;
     store::test_wipe().await;
-    assert!(restored.is_ok(), "the page decodes the song itself");
-    (after, file)
+    assert!(ok, "the page decodes the song itself");
+    (after, file, kept_while_open)
 }
 
 /// D8, finding 1-4 of review round 1: on `decode-unstored` with a kept
@@ -936,15 +947,68 @@ async fn unstored_with_a_kept_mix(separating: bool) -> (Option<(usize, String)>,
 /// decodes again.
 #[wasm_bindgen_test]
 async fn unstored_with_a_kept_mix_removes_it() {
-    let (line, file) = unstored_with_a_kept_mix(false).await;
+    let (line, file, _) = unstored_with_a_kept_mix(false).await;
     assert_eq!(line, None, "the mix line goes");
     assert_eq!(file, None, "mix.f32 goes");
+}
+
+/// D10 of M6: an `unstored` while an open of the session holds its guard
+/// removes nothing until the open ends.  In `restore_stored`, a decode that
+/// ends with `decode-unstored` keeps the mix until the song is shown.
+#[wasm_bindgen_test]
+async fn an_open_protects_its_session() {
+    let (line, file, kept_while_open) = unstored_with_a_kept_mix(false).await;
+    assert!(
+        kept_while_open,
+        "mix.f32 stays while the open holds its guard"
+    );
+    assert_eq!(
+        (line, file),
+        (None, None),
+        "and goes once the song is shown"
+    );
+
+    // An `unstored` of the separator while an open reads the session.
+    store::test_wipe().await;
+    let frames = 1_500;
+    let id = saved(&vec![wav_file("acme.wav", frames, 0)]).await;
+    let mix = interleaved(&tone(frames, 0), &tone(frames, 9));
+    store::test_write(&store::mix_path(&id), &mix)
+        .await
+        .expect("planted");
+    let mut meta = meta_of(&id).await.expect("meta");
+    meta.mix = Some((frames, store_meta::MIX_FORMAT.into()));
+    store::test_write(&format!("sessions/{id}/meta"), meta.to_text().as_bytes())
+        .await
+        .expect("planted");
+    let guard = store::OpenGuard::new(&id);
+    let protected = store::protected(&id);
+    store::forget_mix(&id).await.expect("no error");
+    let line_while_open = meta_of(&id).await.and_then(|m| m.mix);
+    let file_while_open = store::test_read(&store::mix_path(&id)).await.is_some();
+    let waits = store::mix_removal_waits(&id);
+    drop(guard);
+    store::test_settled(&id).await;
+    let line_after = meta_of(&id).await.and_then(|m| m.mix);
+    let file_after = store::test_read(&store::mix_path(&id)).await;
+    let waits_after = store::mix_removal_waits(&id);
+    store::test_wipe().await;
+    assert!(protected);
+    assert_eq!(
+        line_while_open.map(|(f, _)| f),
+        Some(frames),
+        "the line stays"
+    );
+    assert!(file_while_open, "mix.f32 stays");
+    assert!(waits, "the removal waits");
+    assert_eq!((line_after, file_after), (None, None), "then both go");
+    assert!(!waits_after);
 }
 
 /// D8: a separation that names the session keeps its mix.
 #[wasm_bindgen_test]
 async fn unstored_keeps_a_mix_that_a_separation_uses() {
-    let (line, file) = unstored_with_a_kept_mix(true).await;
+    let (line, file, _) = unstored_with_a_kept_mix(true).await;
     assert_eq!(line.map(|(f, _)| f), Some(1_500), "the mix line stays");
     assert_eq!(file.map(|f| f.len()), Some(8 * 1_500), "mix.f32 stays");
 }

@@ -404,7 +404,7 @@ This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 mi
 M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation.  The worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
 
 * After the separation, the page reads all six stems into memory to show them (D6 of M3), and each restore reads them whole again.  The storage path has no length limit.  So on an iPhone a long song can now separate, and then stop the tab when the page shows its stems.  Each reload restores `sessions/current` (`StemApp::new`, `restore_stored`, `store::open_stored`), so the tab can stop again at each reload.  M6 and M7 remove this.
-* M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path.  The page writes the mix to a session file in blocks.  The worker reads it one chunk at a time.  Since M5 (2026-10-26), the decode worker decodes a stored song in blocks into session files, so the decode holds no song.  The page still reads the session files back into memory to play and draw the song (D10 of M5), until M6 and M7.  The memory path still sends the mix as two arrays, which the worker copies into its memory.
+* M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path.  The page writes the mix to a session file in blocks.  The worker reads it one chunk at a time.  Since M5 (2026-10-26), the decode worker decodes a stored song in blocks into session files, so the decode holds no song.  Since M6 (2026-10-26), the page plays each lane that has a complete session file from browser storage, through a read-ahead buffer of at most 32 MiB (`engine::readahead`, `app::playback`).  It still reads the session files back into memory to draw the lanes, for classic drums and for saves (D10 of M5), until M7 and M8.  The memory path still sends the mix as two arrays, which the worker copies into its memory.
 * The memory path still makes six song-length stems.  It takes a song without a session, or a song when storage has too little free space.  It also takes a song when storage refused the mix or the stems, or the worker cannot read the mix file.  The page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).
 * No build between M3 and M7 goes to the published site.  Publishing is a person's step (GIT-1).
 
@@ -441,6 +441,14 @@ Decision 0007 (`decisions/0007-no-allocation-in-the-audio-callback.md`) has the 
 Source: `docs/reviews/replay.md`, case `m11`, finding 1-2.
 
 * Fix: the maintainer confirms the status, or sets it to `proposed`.
+
+### TD-57: a loop moved behind the head can underrun at the old loop's start
+
+This entry concerns the underrun count of M6 (D4 and D6 of `plans/active/stream-from-storage-m6.md`).
+
+A loop set behind the head is a held seek: the player keeps its old loop until the run of the new loop's wrap is read.  The reader reads ahead along the loop of `SharedParams`, which is the new loop.  So the reader can give the slot of the old loop's start to another block.  If the old loop wraps before the jump, the stored lanes play silence there and count an underrun.  The jump comes after about one block read, so the gap is short.
+
+* Fix: the player gives its own loop with `Hint::Reading`, and `wanted_blocks` follows that loop while a seek holds.
 
 ## Legibility for agents
 

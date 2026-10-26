@@ -23,7 +23,7 @@ const DRIVER_VARS: [&str; 4] = [
 
 /// Seconds that the runner gives each test binary, unless the caller sets
 /// `WASM_BINDGEN_TEST_TIMEOUT`.
-const WEB_TEST_TIMEOUT_S: &str = "90";
+const WEB_TEST_TIMEOUT_S: &str = "180";
 
 pub fn run(args: &[String]) -> Result<()> {
     let mut browser = Browser::default_here();
@@ -77,9 +77,9 @@ pub fn run(args: &[String]) -> Result<()> {
         // It would skip every browser test and report success.
         cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
         // The runner gives each test binary 20 s by default.  The app's
-        // lib tests take about 16 to 19 s in Chrome on the maintainer's
-        // Mac.  Most of it is the `?streamtest` runs.  90 s leaves room for
-        // slower machines.
+        // lib tests take about 65 s in Chrome on the maintainer's Mac: the
+        // `?streamtest` runs, and the stored lanes of M6, which play in real
+        // time.  180 s leaves room for slower machines.
         if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
             cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
         }

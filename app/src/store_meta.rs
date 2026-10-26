@@ -462,3 +462,261 @@ mod title_tests {
         assert_eq!(super::file_title("noext"), "noext");
     }
 }
+
+/// The session file that a stored lane plays from (D8 of
+/// `plans/active/stream-from-storage-m6.md`): its path from the root of
+/// browser storage, its format, and where its frames are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneFile {
+    pub path: String,
+    pub format: engine::readahead::LaneFormat,
+    /// The bytes before the first frame.
+    pub data_offset: u64,
+    /// The frames that the file holds.
+    pub data_frames: u64,
+}
+
+impl LaneFile {
+    /// An f32 session file of `frames` frames, such as `mix.f32`.
+    pub fn f32(path: String, frames: usize) -> Self {
+        Self {
+            path,
+            format: engine::readahead::LaneFormat::F32,
+            data_offset: 0,
+            data_frames: frames as u64,
+        }
+    }
+
+    /// The byte range `(start, end)` of up to `frames` frames from frame
+    /// `first`, within the file's data: empty past its end.
+    pub fn byte_range(&self, first: u64, frames: u64) -> (u64, u64) {
+        let per_frame = self.format.bytes_per_frame() as u64;
+        let start = first.min(self.data_frames);
+        let end = (first + frames).min(self.data_frames);
+        (
+            self.data_offset + start * per_frame,
+            self.data_offset + end * per_frame,
+        )
+    }
+}
+
+/// The lane file of each source of a complete session in the folder
+/// `folder`, in the order of `sources`, for a song of `frames` (D8).
+pub fn source_lane_files(folder: &str, sources: &[PlannedSource], frames: usize) -> Vec<LaneFile> {
+    let one = one_source(sources);
+    sources
+        .iter()
+        .map(|source| LaneFile::f32(format!("{folder}/{}", source_file(source, one)), frames))
+        .collect()
+}
+
+/// The lane file of the mix of a session in `folder` whose usable mix has
+/// `frames` frames: for the "original" lane of a song of several sources.
+pub fn mix_lane_file(folder: &str, frames: usize) -> LaneFile {
+    LaneFile::f32(format!("{folder}/mix.f32"), frames)
+}
+
+/// Where the samples of a WAV file are, from its first bytes `head`: the
+/// offset of its data and its frames.  Only 16-bit stereo PCM at 44.1 kHz
+/// is taken; any other format, or a header past `head`, gives `None`.
+pub fn wav_data(head: &[u8]) -> Option<(u64, u64)> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes([*head.get(at)?, *head.get(at + 1)?]));
+    let u32_at = |at: usize| {
+        Some(u32::from_le_bytes([
+            *head.get(at)?,
+            *head.get(at + 1)?,
+            *head.get(at + 2)?,
+            *head.get(at + 3)?,
+        ]))
+    };
+    if head.get(..4)? != b"RIFF" || head.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let mut at = 12;
+    let mut pcm16 = false;
+    loop {
+        let id = head.get(at..at + 4)?;
+        let size = u32_at(at + 4)? as usize;
+        let body = at + 8;
+        if id == b"fmt " {
+            pcm16 = u16_at(body)? == 1
+                && u16_at(body + 2)? == 2
+                && u32_at(body + 4)? == 44_100
+                && u16_at(body + 12)? == 4
+                && u16_at(body + 14)? == 16;
+        } else if id == b"data" {
+            return pcm16.then_some((body as u64, size as u64 / 4));
+        }
+        // Chunks are padded to an even size.
+        at = body.checked_add(size)?.checked_add(size % 2)?;
+    }
+}
+
+/// The lane file of the stem WAV at `path`, whose first bytes are `head`,
+/// for a song of `frames` (D8): only if its file is complete, with at
+/// least the song's frames less one, and not a `.part` file, which the
+/// next separation writes.
+pub fn stem_lane_file(path: &str, head: &[u8], frames: usize) -> Option<LaneFile> {
+    if path.ends_with(".part") {
+        return None;
+    }
+    let (data_offset, data_frames) = wav_data(head)?;
+    (data_frames + 1 >= frames as u64).then(|| LaneFile {
+        path: path.to_string(),
+        format: engine::readahead::LaneFormat::Pcm16,
+        data_offset,
+        data_frames,
+    })
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+    use engine::readahead::LaneFormat;
+
+    fn source(index: u32, name: &str, in_mix: bool) -> PlannedSource {
+        PlannedSource {
+            index,
+            name: name.into(),
+            file: format!("src/{index}.wav"),
+            ext: "wav".into(),
+            in_mix,
+        }
+    }
+
+    #[test]
+    fn the_lane_files_of_a_session() {
+        let folder = "sessions/42";
+        // One source: its lane plays from `mix.f32`.
+        let one = [source(0, "acme", true)];
+        assert_eq!(
+            source_lane_files(folder, &one, 1_000),
+            [LaneFile::f32("sessions/42/mix.f32".into(), 1_000)]
+        );
+        // Several sources, with a derived source: each from its own file.
+        let several = [
+            source(2, "drums", true),
+            source(0, "bass", true),
+            source(1, "classic drums", false),
+        ];
+        assert_eq!(
+            source_lane_files(folder, &several, 500),
+            [
+                LaneFile::f32("sessions/42/decoded/2.f32".into(), 500),
+                LaneFile::f32("sessions/42/decoded/0.f32".into(), 500),
+                LaneFile::f32("sessions/42/decoded/1.f32".into(), 500),
+            ]
+        );
+        // One source in the mix and a derived source: the one in the mix
+        // plays from `mix.f32`.
+        let derived = [source(0, "vocals", true), source(1, "classic drums", false)];
+        assert_eq!(
+            source_lane_files(folder, &derived, 7),
+            [
+                LaneFile::f32("sessions/42/mix.f32".into(), 7),
+                LaneFile::f32("sessions/42/decoded/1.f32".into(), 7),
+            ]
+        );
+        // The "original" of several sources plays from `mix.f32`.
+        assert_eq!(
+            mix_lane_file(folder, 500),
+            LaneFile::f32("sessions/42/mix.f32".into(), 500)
+        );
+        // A stem from its WAV.
+        let head = engine::wav::header(1_000, 44_100);
+        let path = "sessions/42/stems/vocals.wav".to_string();
+        assert_eq!(
+            stem_lane_file(&path, &head, 1_000),
+            Some(LaneFile {
+                path: path.clone(),
+                format: LaneFormat::Pcm16,
+                data_offset: 44,
+                data_frames: 1_000,
+            })
+        );
+        // One frame short is complete; two are not.
+        assert!(stem_lane_file(&path, &engine::wav::header(999, 44_100), 1_000).is_some());
+        assert!(stem_lane_file(&path, &engine::wav::header(998, 44_100), 1_000).is_none());
+        // A `.part` file is never a lane file.
+        assert!(stem_lane_file(&format!("{path}.part"), &head, 1_000).is_none());
+    }
+
+    #[test]
+    fn a_lane_file_reads_within_its_data() {
+        let wav = LaneFile {
+            path: "sessions/42/stems/bass.wav".into(),
+            format: LaneFormat::Pcm16,
+            data_offset: 44,
+            data_frames: 100,
+        };
+        assert_eq!(wav.byte_range(0, 32), (44, 44 + 128));
+        assert_eq!(
+            wav.byte_range(90, 32),
+            (44 + 360, 44 + 400),
+            "cut at its end"
+        );
+        assert_eq!(
+            wav.byte_range(100, 32),
+            (44 + 400, 44 + 400),
+            "past its end"
+        );
+        assert_eq!(wav.byte_range(500, 32), (44 + 400, 44 + 400));
+        let mix = LaneFile::f32("sessions/42/mix.f32".into(), 10);
+        assert_eq!(mix.byte_range(4, 4), (32, 64));
+    }
+
+    /// A WAV header with a `fmt ` chunk of the given fields, an extra
+    /// chunk before `data`, and `frames` frames of data.
+    fn wav(format: u16, channels: u16, rate: u32, bits: u16, frames: u32) -> Vec<u8> {
+        let block = channels * bits / 8;
+        let mut out = Vec::new();
+        out.extend(b"RIFF");
+        out.extend(0_u32.to_le_bytes());
+        out.extend(b"WAVEfmt ");
+        out.extend(16_u32.to_le_bytes());
+        out.extend(format.to_le_bytes());
+        out.extend(channels.to_le_bytes());
+        out.extend(rate.to_le_bytes());
+        out.extend((rate * u32::from(block)).to_le_bytes());
+        out.extend(block.to_le_bytes());
+        out.extend(bits.to_le_bytes());
+        out.extend(b"LIST");
+        out.extend(3_u32.to_le_bytes());
+        out.extend(b"abc\0");
+        out.extend(b"data");
+        out.extend((frames * u32::from(block)).to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn a_wav_header_gives_its_data_and_frames() {
+        // The header that `engine::wav` writes.
+        assert_eq!(
+            wav_data(&engine::wav::header(1_234, 44_100)),
+            Some((44, 1_234))
+        );
+        // A chunk before `data`, padded to an even size, is skipped.
+        assert_eq!(wav_data(&wav(1, 2, 44_100, 16, 77)), Some((56, 77)));
+        // Other formats are refused.
+        for other in [
+            wav(3, 2, 44_100, 32, 10),
+            wav(1, 1, 44_100, 16, 10),
+            wav(1, 2, 48_000, 16, 10),
+            wav(1, 2, 44_100, 24, 10),
+        ] {
+            assert_eq!(wav_data(&other), None);
+        }
+        // A header cut short, or no RIFF at all.
+        let full = engine::wav::header(10, 44_100);
+        assert_eq!(wav_data(&full[..40]), None);
+        assert_eq!(
+            wav_data(b"not a wav file at all, but long enough to read"),
+            None
+        );
+        // A stem one frame short of the song is a lane file; a 48 kHz one
+        // is not.
+        let path = "sessions/1/stems/bass.wav";
+        assert!(stem_lane_file(path, &engine::wav::header(99, 44_100), 100).is_some());
+        assert!(stem_lane_file(path, &engine::wav::header(100, 48_000), 100).is_none());
+    }
+}

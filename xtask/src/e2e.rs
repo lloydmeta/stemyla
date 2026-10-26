@@ -66,6 +66,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod decode;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "step 4 of M6 reads the line in `e2e playback`")
+)]
+mod playback;
 
 /// The viewport the click positions are measured in.
 const VIEWPORT: (u32, u32) = (1100, 700);

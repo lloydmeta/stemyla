@@ -62,12 +62,12 @@ fn clock(app: &StemApp) -> std::time::Duration {
 #[wasm_bindgen_test]
 async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
     let mut app = StemApp::default();
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     assert_eq!(live_rate(&app), Some(44_100), "{}", app.status);
     let opened = engine::live::opened();
     let first = Arc::downgrade(app.song.as_ref().expect("a song"));
 
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     assert!(first.upgrade().is_none(), "the first song is freed");
     assert_eq!(engine::live::opened(), opened, "the same output plays it");
     assert_eq!(live_rate(&app), Some(44_100));
@@ -77,7 +77,7 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
     assert!(callbacks(&app) > 0, "the kept output renders the new song");
 
     let second = Arc::downgrade(app.song.as_ref().expect("a song"));
-    app.open_song(song(48_000));
+    app.open_memory_song(song(48_000));
     assert!(second.upgrade().is_none(), "the second song is freed");
     assert_eq!(
         engine::live::opened(),
@@ -101,7 +101,7 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
 #[wasm_bindgen_test]
 async fn an_output_left_behind_by_a_busy_page_is_replaced() {
     let mut app = StemApp::default();
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     sleep(300).await;
     if clock(&app).is_zero() {
         assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
@@ -111,7 +111,7 @@ async fn an_output_left_behind_by_a_busy_page_is_replaced() {
     let opened = engine::live::opened();
     let first = Arc::downgrade(app.song.as_ref().expect("a song"));
     busy(600);
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     assert_eq!(
         engine::live::opened(),
         opened + 1,
@@ -124,7 +124,7 @@ async fn an_output_left_behind_by_a_busy_page_is_replaced() {
         !clock(&app).is_zero(),
         "the new output runs, so it can be on time"
     );
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     assert_eq!(
         engine::live::opened(),
         opened + 1,
@@ -139,7 +139,7 @@ async fn an_output_left_behind_by_a_busy_page_is_replaced() {
 #[wasm_bindgen_test]
 async fn buffers_left_late_by_a_busy_page_play_once_not_doubled() {
     let mut app = StemApp::default();
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     sleep(300).await;
     if clock(&app).is_zero() {
         assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
@@ -165,7 +165,7 @@ async fn buffers_left_late_by_a_busy_page_play_once_not_doubled() {
 #[wasm_bindgen_test]
 async fn a_page_too_busy_for_the_schedule_to_catch_up_still_plays() {
     let mut app = StemApp::default();
-    app.open_song(song(44_100));
+    app.open_memory_song(song(44_100));
     sleep(300).await;
     if clock(&app).is_zero() {
         assert!(!in_chrome(), "web-test runs Chrome with audio allowed");

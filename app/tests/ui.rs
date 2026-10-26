@@ -494,7 +494,7 @@ fn render_folder() {
             let mut app = StemApp::new(cc);
             app.want_device = false;
             app.show_spectrograms = spectro;
-            app.open_song(song);
+            app.open_memory_song(song);
             app
         });
     h.run();

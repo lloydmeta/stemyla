@@ -44,12 +44,19 @@
 //! place and writes `meta`.  On the memory path, the page
 //! writes the stems itself ([`save_stems`]).
 //!
+//! Since M6, the shown song plays each lane that has a complete session
+//! file from that file: [`read_back`] and [`read_stem`] give the lane file
+//! with the lane (D8 of `plans/active/stream-from-storage-m6.md`).  While
+//! the shown song plays from a session ([`set_playing`]), or an open reads
+//! it ([`OpenGuard`]), the session is [`protected`]: [`forget_mix`] removes
+//! nothing until it is not (D10).
+//!
 //! Ids are creation times in milliseconds, made unique within the page: a
 //! second session in the same millisecond takes the next one.  Every
 //! dropped song gets its own session; the Storage menu lists them, opens
 //! one or forgets it.
 
-use crate::store_meta::{Decoded, MIX_FORMAT, Meta, PlannedSource};
+use crate::store_meta::{Decoded, LaneFile, MIX_FORMAT, Meta, PlannedSource};
 use anyhow::{Result, anyhow};
 use engine::song::padded_to;
 use engine::{Samples, Song, Stem};
@@ -257,6 +264,13 @@ thread_local! {
     static SEPARATING: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Sessions whose `meta` a read-modify-write holds ([`lock_meta`]).
     static META_HELD: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// The session that the shown song plays a lane from (D10 of M6).
+    static PLAYING: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Opens in progress per session, each with an [`OpenGuard`].
+    static OPENING: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// Sessions whose mix removal waits until no playback, open,
+    /// separation or mix write needs the mix ([`forget_mix`]).
+    static DEFERRED: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 /// A new session id: now in milliseconds, or one more than the last id if
@@ -561,6 +575,11 @@ fn interleave(left: &[f32], right: &[f32]) -> Vec<u8> {
 /// again, and a bad file takes no space.  The removal counts as a save
 /// from this call on, before the future first runs, so a start that reads
 /// `meta` after this call waits for it ([`stored_mix_frames`]).
+///
+/// D10 of M6: while the session is [`protected`], or a separation or a
+/// mix write names it ([`mix_in_use`]), it removes nothing.  The removal
+/// waits, and runs once neither holds.  A separation that posts the mix
+/// cancels it ([`keep_mix`]).
 pub fn forget_mix(id: &str) -> impl std::future::Future<Output = Result<()>> + 'static {
     let held = SaveHeld::new(id);
     let id = id.to_string();
@@ -569,6 +588,12 @@ pub fn forget_mix(id: &str) -> impl std::future::Future<Output = Result<()>> + '
         let base = session_folder(&id);
         {
             let _meta = lock_meta(&id).await;
+            if protected(&id) || mix_in_use(&id) {
+                log::info!("store: the mix of session {id} is kept while playback reads it");
+                DEFERRED.with_borrow_mut(|d| d.insert(id.clone()));
+                return Ok(());
+            }
+            DEFERRED.with_borrow_mut(|d| d.remove(&id));
             let mut meta = meta_now(&id).await?;
             if meta.mix.take().is_some() {
                 write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
@@ -702,11 +727,13 @@ async fn move_file(folder: &str, from: &str, to: &str) -> bool {
 }
 
 /// The stem `name` from the WAV file at `path`, fitted to a song of
-/// `frames`, so the player never reads past a stem's end.
-pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<Stem> {
+/// `frames`, so the player never reads past a stem's end, with its lane
+/// file if the file is complete (D8 of M6).
+pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<(Stem, Option<LaneFile>)> {
     let bytes = read(path)
         .await
         .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
+    let file = crate::store_meta::stem_lane_file(path, &bytes[..bytes.len().min(4_096)], frames);
     let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
     // A session stored before decision 0012 from stems at mixed rates can
     // hold stems one frame shorter than its source now opens with.
@@ -714,11 +741,12 @@ pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<Stem> {
     let mut ch = audio.channels.into_iter();
     let left = fitted(ch.next().unwrap_or_default());
     let right = ch.next().map_or_else(|| left.clone(), fitted);
-    Ok(Stem {
+    let stem = Stem {
         name: name.into(),
         left,
         right,
-    })
+    };
+    Ok((stem, file))
 }
 
 async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
@@ -814,7 +842,7 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     let mut stems = Vec::new();
     for name in &meta.stems {
         let path = format!("{base}/stems/{}", stem_file(name));
-        stems.push(read_stem(&path, name, source.frames).await?);
+        stems.push(read_stem(&path, name, source.frames).await?.0);
     }
     Ok(crate::with_original(&source, stems))
 }
@@ -883,6 +911,7 @@ pub fn is_closed() -> bool {
 /// each frame, so D7 can see it (D8).
 pub fn set_separating(id: Option<String>) {
     SEPARATING.with_borrow_mut(|s| *s = id);
+    run_deferred();
 }
 
 /// Whether a separation or a mix write names session `id` (D8): D7 then
@@ -890,6 +919,76 @@ pub fn set_separating(id: Option<String>) {
 pub fn mix_in_use(id: &str) -> bool {
     SEPARATING.with_borrow(|s| s.as_deref() == Some(id))
         || MIX_WRITING.with_borrow(|w| w.contains_key(id))
+}
+
+/// Records the session that the shown song plays a lane from, or none
+/// (D10 of M6).  `load_song` sets it.
+pub fn set_playing(id: Option<String>) {
+    PLAYING.with_borrow_mut(|p| *p = id);
+    run_deferred();
+}
+
+/// Whether no failure may remove a file of session `id` now: the shown
+/// song plays from it, or an open reads it (D10 of M6).
+pub fn protected(id: &str) -> bool {
+    PLAYING.with_borrow(|p| p.as_deref() == Some(id)) || OPENING.with_borrow(|o| o.contains_key(id))
+}
+
+/// An open of session `id`, which protects the session from when the open
+/// starts until the song is shown or the open ends (D10 of M6).
+pub struct OpenGuard(String);
+
+impl OpenGuard {
+    pub fn new(id: &str) -> Self {
+        OPENING.with_borrow_mut(|o| *o.entry(id.to_string()).or_default() += 1);
+        Self(id.to_string())
+    }
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        OPENING.with_borrow_mut(|o| {
+            if let Some(n) = o.get_mut(&self.0) {
+                *n -= 1;
+                if *n == 0 {
+                    o.remove(&self.0);
+                }
+            }
+        });
+        run_deferred();
+    }
+}
+
+/// Cancels a mix removal that waits for session `id`: a separation posts
+/// that mix, so the worker reads it (D10 of M6).
+pub fn keep_mix(id: &str) {
+    DEFERRED.with_borrow_mut(|d| d.remove(id));
+}
+
+/// Whether a mix removal waits for session `id`, for a test.
+#[cfg(test)]
+pub(crate) fn mix_removal_waits(id: &str) -> bool {
+    DEFERRED.with_borrow(|d| d.contains(id))
+}
+
+/// Runs each mix removal that waited, once its session is neither
+/// protected nor named by a separation or a mix write.
+fn run_deferred() {
+    let ready: Vec<String> = DEFERRED.with_borrow(|d| {
+        d.iter()
+            .filter(|id| !protected(id) && !mix_in_use(id))
+            .cloned()
+            .collect()
+    });
+    for id in ready {
+        DEFERRED.with_borrow_mut(|d| d.remove(&id));
+        let removal = forget_mix(&id);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = removal.await {
+                log::warn!("store: could not remove the mix of session {id}: {e:#}");
+            }
+        });
+    }
 }
 
 /// `meta` of session `id`, read with no wait for the saves into the
@@ -1004,8 +1103,13 @@ async fn move_part(base: &str, file: &str) -> Result<()> {
 /// D10: the song of complete session `id`, read back from its session
 /// files in blocks of 1 MiB, into two channels made at the song's frames.
 /// It never holds a whole file's bytes.  A mono source reads its left side
-/// only, and shares it as its right side (MEM-1).
-pub async fn read_back(id: &str, sources: &[PlannedSource], decoded: &Decoded) -> Result<Song> {
+/// only, and shares it as its right side (MEM-1).  It gives the lane file of
+/// each source with the song (D8 of M6): each file was complete when read.
+pub async fn read_back(
+    id: &str,
+    sources: &[PlannedSource],
+    decoded: &Decoded,
+) -> Result<(Song, Vec<LaneFile>)> {
     let base = session_folder(id);
     let one = crate::store_meta::one_source(sources);
     let frames = decoded.frames;
@@ -1023,11 +1127,13 @@ pub async fn read_back(id: &str, sources: &[PlannedSource], decoded: &Decoded) -
             right,
         });
     }
-    Ok(Song {
+    let song = Song {
         sample_rate: engine::resample::SONG_RATE,
         frames,
         stems,
-    })
+    };
+    let files = crate::store_meta::source_lane_files(&base, sources, frames);
+    Ok((song, files))
 }
 
 /// The channels of the session file at `path`, which holds `frames`
@@ -1165,14 +1271,42 @@ pub(crate) fn test_made_current() -> Option<String> {
 }
 
 /// The separated stems of session `id`, for a song of `frames`, from the
-/// `stem` lines of `meta`.  Each stem WAV is read whole until M7.
-pub async fn stems_of(id: &str, meta: &Meta, frames: usize) -> Result<Vec<Stem>> {
+/// `stem` lines of `meta`, with the lane file of each.  Each stem WAV is
+/// read whole until M7.
+pub async fn stems_of(
+    id: &str,
+    meta: &Meta,
+    frames: usize,
+) -> Result<(Vec<Stem>, Vec<Option<LaneFile>>)> {
     let mut stems = Vec::with_capacity(meta.stems.len());
+    let mut files = Vec::with_capacity(meta.stems.len());
     for name in &meta.stems {
         let path = format!("{}/stems/{}", session_folder(id), stem_file(name));
-        stems.push(read_stem(&path, name, frames).await?);
+        let (stem, file) = read_stem(&path, name, frames).await?;
+        stems.push(stem);
+        files.push(file);
     }
-    Ok(stems)
+    Ok((stems, files))
+}
+
+/// The lane file of the usable mix of session `id`, if it has the song's
+/// `frames`: the "original" lane of a song of several sources (D8 of M6).
+pub async fn mix_lane(id: &str, meta: &Meta, frames: usize) -> Option<LaneFile> {
+    (usable_mix_frames(id, meta).await? == frames)
+        .then(|| crate::store_meta::mix_lane_file(&session_folder(id), frames))
+}
+
+/// [`mix_lane`], with `meta` read now.
+pub async fn mix_lane_now(id: &str, frames: usize) -> Option<LaneFile> {
+    let meta = meta_now(id).await.ok()?;
+    mix_lane(id, &meta, frames).await
+}
+
+/// The file at `path` as a `File`, which holds no bytes until it is read:
+/// the reader of a stored lane gets it once, and again after a read fails.
+pub async fn file_handle(path: &str) -> Option<web_sys::File> {
+    let file = st_file(path).await;
+    (!file.is_null()).then(|| file.unchecked_into())
 }
 
 /// Bytes used and available to this site, as the browser estimates them.
@@ -1204,6 +1338,19 @@ pub(crate) async fn test_write(path: &str, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 pub(crate) fn test_reopen() {
     CLOSED.set(false);
+}
+
+/// Removes the file at `path` from the root, for a test.
+#[cfg(test)]
+pub(crate) async fn test_remove(path: &str) -> bool {
+    st_remove(path).await.as_bool() == Some(true)
+}
+
+/// Waits until no save into session `id` runs, a mix removal included, for
+/// a test.
+#[cfg(test)]
+pub(crate) async fn test_settled(id: &str) {
+    settled(id).await;
 }
 
 /// Removes every stored session, for a test.
@@ -1604,7 +1751,8 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         write(&path, &engine::wav::encode_pcm16(&left, &right, 44_100))
             .await
             .expect("written");
-        let stem = read_stem(&path, "bass", 5).await.expect("read");
+        let (stem, file) = read_stem(&path, "bass", 5).await.expect("read");
+        assert!(file.is_none(), "a stem of 3 frames is no lane file of 5");
         let step = 1.0 / 32_768.0;
         assert_eq!(stem.name, "bass");
         assert_eq!(*stem.left, [0.5, -0.25, 10_923.0 * step, 0.0, 0.0]);
@@ -2097,7 +2245,7 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
             // freed by an earlier test would hide (findings 1-6, 1-7).
             let before = LIVE.with(Cell::get);
             PEAK.with(|peak| peak.set(before));
-            let song = read_back(&id, &sources, &decoded).await.expect("read back");
+            let (song, _) = read_back(&id, &sources, &decoded).await.expect("read back");
             let grown = (PEAK.with(Cell::get) - before) as f64 / 1e6;
             let reads = store_stop_read_spy();
             let stem = &song.stems[0];
