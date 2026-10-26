@@ -272,8 +272,9 @@ fn log_page_memory(when: &str) {
 /// as the browser's files, reads nothing, and asks the decode worker for
 /// the session files.  The page shows the song from them.  If the save
 /// fails, or browser storage fails in the decode, the page reads the files
-/// and decodes them itself, as before M5.  The result arrives through the
-/// inbox.
+/// and decodes them itself, as before M5.  The new session becomes current
+/// once the song opens; a song that does not open forgets it.  The result
+/// arrives through the inbox.
 #[cfg(target_arch = "wasm32")]
 async fn open_chosen(
     chosen: Chosen,
@@ -312,6 +313,32 @@ async fn open_chosen_now(
             return open_on_the_page(chosen, None, name, started, None).await;
         }
     };
+    let opened = open_saved(chosen, &id, name, started, decoder).await;
+    // D9: the new session becomes current only once its song opens, so a
+    // reload until then restores the song on screen.
+    match &opened {
+        Ok(_) => store::make_current(&id).await,
+        // The guard is dropped, so `forget` does not wait for it.
+        Err(_) => {
+            if !store::forget(&id).await {
+                log::warn!("could not remove session {id} after a song that did not open");
+            }
+        }
+    }
+    opened
+}
+
+/// Opens the chosen files, saved as session `id`, through the decode
+/// worker, or on the page if browser storage fails.
+#[cfg(target_arch = "wasm32")]
+async fn open_saved(
+    chosen: &Chosen,
+    id: &str,
+    name: Option<String>,
+    started: f64,
+    decoder: &decoder::DecodeClient,
+) -> anyhow::Result<Opened> {
+    let id = id.to_string();
     let sources = match store::open_stored(&id).await {
         Some(Ok(store::StoredSong::NeedsDecode { sources, .. })) => sources,
         other => {
@@ -338,13 +365,7 @@ async fn open_chosen_now(
                 note: None,
             })
         }
-        Decode::Undecodable(text) => {
-            // The guard is dropped, so `forget` does not wait for it.
-            if !store::forget(&id).await {
-                log::warn!("could not remove session {id} after an undecodable song");
-            }
-            Err(anyhow::anyhow!(text))
-        }
+        Decode::Undecodable(text) => Err(anyhow::anyhow!(text)),
         Decode::OnThePage(why) => {
             open_on_the_page(chosen, Some(id), name, started, Some(why)).await
         }

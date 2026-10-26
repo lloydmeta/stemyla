@@ -389,10 +389,20 @@ async fn a_derived_source_stays_out_of_the_mix() {
     );
 }
 
+/// A session of the song on screen, made current, as a reload restores it.
+async fn a_current_session() -> String {
+    let before = saved(&vec![wav_file("acme.wav", 100, 3)]).await;
+    store::make_current(&before).await;
+    before
+}
+
+/// D9, finding 2-3 of review round 2: an undecodable new song forgets its
+/// session, and the session of the song on screen stays current.
 #[wasm_bindgen_test]
 async fn undecodable_shows_the_error_and_forgets_the_session() {
     store::test_wipe().await;
     let fake = Fake::new();
+    let before = a_current_session().await;
     let chosen = vec![wav_file("lloyd.wav", 100, 0)];
     let client = fake.client.clone();
     let opened = background(async move { open_chosen_now(&chosen, &client).await });
@@ -402,6 +412,7 @@ async fn undecodable_shows_the_error_and_forgets_the_session() {
     });
     let opened = output(&opened).await;
     let kept = meta_of(&id_of(&req.session)).await;
+    let current = store::current().await;
     store::test_wipe().await;
     let error = opened.err().map(|e| format!("{e:#}"));
     assert_eq!(
@@ -409,6 +420,58 @@ async fn undecodable_shows_the_error_and_forgets_the_session() {
         Some("unsupported or unrecognised format: lloyd")
     );
     assert_eq!(kept, None, "the new session is forgotten");
+    assert_eq!(current, Some(before), "sessions/current is unchanged");
+}
+
+/// D9, finding 2-3: a new song that the page then cannot decode either
+/// forgets its session, and `sessions/current` is unchanged.
+#[wasm_bindgen_test]
+async fn a_failed_page_decode_forgets_the_new_session() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let before = a_current_session().await;
+    let chosen = vec![("lloyd.wav".to_string(), dt_file(&[1; 64], "lloyd.wav"))];
+    let client = fake.client.clone();
+    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let req = fake.request(0).await;
+    fake.reply(DecodeReply::Unstored {
+        text: "QuotaExceededError: the disk is full".into(),
+    });
+    let opened = output(&opened).await;
+    let kept = meta_of(&id_of(&req.session)).await;
+    let current = store::current().await;
+    store::test_wipe().await;
+    assert!(opened.is_err(), "the page cannot decode it");
+    assert_eq!(kept, None, "the new session is forgotten");
+    assert_eq!(current, Some(before), "sessions/current is unchanged");
+}
+
+/// D9, finding 2-3: a new session becomes current only once its song
+/// opens, so a reload during the decode restores the song on screen.
+#[wasm_bindgen_test]
+async fn a_new_session_becomes_current_once_its_song_opens() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let before = a_current_session().await;
+    let client = fake.client.clone();
+    let chosen = vec![wav_file("lloyd.wav", 100, 0)];
+    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let req = fake.request(0).await;
+    let during = store::current().await;
+    let frames = 1_000;
+    let samples = planted(&req, frames, &[false]);
+    plant_parts(&req, frames, &samples, true).await;
+    fake.reply(DecodeReply::Decoded {
+        frames: frames as u64,
+        new_mix: true,
+        channels: vec![2],
+    });
+    let opened = output(&opened).await;
+    let after = store::current().await;
+    store::test_wipe().await;
+    assert!(opened.is_ok(), "opened");
+    assert_eq!(during, Some(before), "not current during the decode");
+    assert_eq!(after, Some(id_of(&req.session)), "current once it opens");
 }
 
 #[wasm_bindgen_test]
@@ -424,8 +487,10 @@ async fn unstored_decodes_on_the_page_and_keeps_the_session() {
     });
     let opened = output(&opened).await.expect("opened on the page");
     let kept = meta_of(&id_of(&req.session)).await;
+    let current = store::current().await;
     store::test_wipe().await;
     assert_eq!(opened.song.frames, 1_234);
+    assert_eq!(current, Some(id_of(&req.session)), "made current");
     assert_eq!(
         opened.session,
         Some(id_of(&req.session)),

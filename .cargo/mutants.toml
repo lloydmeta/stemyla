@@ -29,7 +29,7 @@ exclude_globs = [
 # validator decides its wasm32 mutants.  A wasm32 block inside a shared
 # function stays in too (TD-33).
 exclude_re = [
-    '(replace|in) (StemApp::)?(refresh_storage|about_menu|open_chosen|open_chosen_now|open_on_the_page|decode_session|restore_stored|log_page_memory|opening_text|pick_song|separator_controls|storage_menu|streamtest_controls|reset_dialog|start_reset|prepare_reset|stop_workers|publish_separating|shown_session_decoding|poll_separator|start_web)\b',
+    '(replace|in) (StemApp::)?(refresh_storage|about_menu|open_chosen|open_chosen_now|open_saved|open_on_the_page|decode_session|restore_stored|log_page_memory|opening_text|pick_song|separator_controls|storage_menu|streamtest_controls|reset_dialog|start_reset|prepare_reset|stop_workers|publish_separating|shown_session_decoding|poll_separator|start_web)\b',
     '(replace|in) web::(run|reload)\b',
     '(replace|in) StemApp::(save_menu|start_save|step_save)\b',
     '(replace|in) web::(<impl Sink for Js(Channels|Wav|Sink)>::write|Js(Channels|Wav|Sink)::(new|into_bytes))\b',

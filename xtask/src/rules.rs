@@ -2721,34 +2721,54 @@ struct ScriptType {
     value: String,
 }
 
-/// PROTO-1: each message type that the e2e scripts write by hand is in
-/// `stem_protocol::kind`, or `script_only` names it.  `scripts` holds the
-/// `xtask/e2e/*.js` files; `e2e_rust` is the text of `xtask/src/e2e.rs`.
-/// The Rust that `xtask e2e` writes messages in: `xtask/src/e2e.rs` and
-/// every Rust file under `xtask/src/e2e/`, joined.  A problem's line is a
-/// line of the joined text, and its file is `xtask/src/e2e.rs`.
-pub fn e2e_rust_sources(root: &Path) -> Result<String> {
-    let mut text = std::fs::read_to_string(root.join(E2E_RUST))
-        .with_context(|| format!("reading {E2E_RUST}"))?;
-    let folder = root.join(E2E_RUST.trim_end_matches(".rs"));
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)
-        .with_context(|| format!("listing {}", folder.display()))?
-        .map(|entry| entry.map(|e| e.path()))
-        .collect::<std::io::Result<_>>()?;
-    files.retain(|p| p.extension().is_some_and(|e| e == "rs"));
-    files.sort();
-    for file in files {
-        text.push('\n');
-        text += &std::fs::read_to_string(&file)
-            .with_context(|| format!("reading {}", file.display()))?;
-    }
-    Ok(text)
+/// The Rust that `xtask e2e` writes messages in, as (path from the root,
+/// text): `xtask/src/e2e.rs`, then every Rust file under `xtask/src/e2e/`
+/// and its folders, in path order.
+pub fn e2e_rust_sources(root: &Path) -> Result<Vec<(String, String)>> {
+    let read = |path: &Path| {
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+    };
+    let mut paths = Vec::new();
+    rust_files_below(&root.join(E2E_RUST.trim_end_matches(".rs")), &mut paths)?;
+    paths.sort();
+    std::iter::once(root.join(E2E_RUST))
+        .chain(paths)
+        .map(|path| {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let name = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            Ok((name, read(&path)?))
+        })
+        .collect()
 }
 
+/// Adds each `.rs` file in `folder` and its folders to `out`.
+fn rust_files_below(folder: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(folder).with_context(|| format!("listing {}", folder.display()))?
+    {
+        let path = entry?.path();
+        if path.is_dir() {
+            rust_files_below(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// PROTO-1: each message type that the e2e scripts write by hand is in
+/// `stem_protocol::kind` or `stem_protocol::decode::kind` (`protocol`
+/// holds both files), or `script_only` names it.  `scripts` holds the
+/// `xtask/e2e/*.js` files; `e2e_rust` holds the files of
+/// [`e2e_rust_sources`].  Each problem names its own file and line.
 pub fn e2e_types_match_the_protocol(
     protocol: &str,
     scripts: &[(String, String)],
-    e2e_rust: &str,
+    e2e_rust: &[(String, String)],
     script_only: &[(&str, &str)],
 ) -> Vec<Problem> {
     let kinds = match protocol_kinds(protocol) {
@@ -2784,32 +2804,31 @@ pub fn e2e_types_match_the_protocol(
             ),
         )
     };
-    let e2e_tokens = TokenStream::from_str(e2e_rust);
-    let rust_was_read = e2e_tokens.is_ok();
-    let (in_rust, rust_problems): (Vec<ScriptType>, Vec<Problem>) = match e2e_tokens {
-        Err(e) => (
-            Vec::new(),
-            vec![proto1(
-                E2E_RUST,
+    // Each file is tokenised on its own, so each problem has its own line.
+    let mut in_rust: Vec<ScriptType> = Vec::new();
+    let mut rust_problems: Vec<Problem> = Vec::new();
+    for (file, text) in e2e_rust {
+        match TokenStream::from_str(text) {
+            Err(e) => rust_problems.push(proto1(
+                file,
                 None,
-                format!(
-                    "PROTO-1: {E2E_RUST} does not tokenise: {e}.  Fix: make the file valid Rust."
-                ),
-            )],
-        ),
-        Ok(tokens) => {
-            let found: Vec<ScriptType> = rust_types(tokens, false)
-                .into_iter()
-                .map(|(line, value)| ScriptType {
-                    file: E2E_RUST.into(),
-                    line,
-                    value,
-                })
-                .collect();
-            let empty = found.is_empty().then(|| no_type(E2E_RUST, "its scripts"));
-            (found, empty.into_iter().collect())
+                format!("PROTO-1: {file} does not tokenise: {e}.  Fix: make the file valid Rust."),
+            )),
+            Ok(tokens) => {
+                in_rust.extend(rust_types(tokens, false).into_iter().map(|(line, value)| {
+                    ScriptType {
+                        file: file.clone(),
+                        line,
+                        value,
+                    }
+                }))
+            }
         }
-    };
+    }
+    let rust_was_read = rust_problems.is_empty();
+    if rust_was_read && in_rust.is_empty() {
+        rust_problems.push(no_type(E2E_RUST, "its scripts"));
+    }
     let js_problems = in_js
         .is_empty()
         .then(|| no_type(E2E_SCRIPTS, "its `*.js` files"));
@@ -6313,9 +6332,31 @@ pub mod kind {
         e2e_types_match_the_protocol(
             PROTOCOL,
             &[(WORKER_JS.to_string(), js.to_string())],
-            rust,
+            &[(E2E_RUST.to_string(), rust.to_string())],
             script_only,
         )
+    }
+
+    /// Finding 2-9 of review round 2: a bad type in a second Rust file is
+    /// reported at that file and its own line.
+    #[test]
+    fn a_bad_type_in_a_second_file_names_that_file_and_line() {
+        const DECODE_RS: &str = "xtask/src/e2e/decode.rs";
+        let rust = [
+            (E2E_RUST.to_string(), format!("{RUST_OK}\nfn a() {{}}\n")),
+            (
+                DECODE_RS.to_string(),
+                "fn f() {}\nfn g() {\n    in_page(\"return e2e.ask([{ type: 'segmnt' }]);\");\n}"
+                    .to_string(),
+            ),
+        ];
+        let problems = e2e_types_match_the_protocol(
+            PROTOCOL,
+            &[(WORKER_JS.to_string(), JS_OK.to_string())],
+            &rust,
+            &[],
+        );
+        assert_one_each("PROTO-1", &[(DECODE_RS, problems, Some(3))]);
     }
 
     fn values(tokens: &[(usize, JsToken)]) -> Vec<(usize, &JsToken)> {
@@ -6521,7 +6562,7 @@ fn f() {
             e2e_types_match_the_protocol(
                 protocol,
                 &[(WORKER_JS.to_string(), JS_OK.to_string())],
-                RUST_OK,
+                &[(E2E_RUST.to_string(), RUST_OK.to_string())],
                 &[],
             )
         };
@@ -6539,7 +6580,12 @@ fn f() {
                 (E2E_SCRIPTS, check("const a = 1;", RUST_OK, &[]), None),
                 (
                     E2E_SCRIPTS,
-                    e2e_types_match_the_protocol(PROTOCOL, &[], RUST_OK, &[]),
+                    e2e_types_match_the_protocol(
+                        PROTOCOL,
+                        &[],
+                        &[(E2E_RUST.to_string(), RUST_OK.to_string())],
+                        &[],
+                    ),
                     None,
                 ),
                 (E2E_RUST, check(JS_OK, "fn f() {}", &[]), None),

@@ -125,23 +125,46 @@ export function stop_write_spy() {
   return writes.join(" ");
 }
 // Records the bytes of each read: FileReaderSync.readAsArrayBuffer of a
-// blob, and FileSystemSyncAccessHandle.read into a buffer.
+// blob, and FileSystemSyncAccessHandle.read into a buffer.  For each
+// sync read, `sync_reads` also records "whole" or "view", its bytes, and
+// which ArrayBuffer it got (#0 is the first that a read got).
 let reads = null;
 let real_reads = null;
+let sync_reads = null;
 export function start_read_spies() {
   if (real_reads) throw new Error("the read spies are already on");
   const file = FileReaderSync.prototype;
   const sync = FileSystemSyncAccessHandle.prototype;
   real_reads = [file.readAsArrayBuffer, sync.read];
   reads = [];
+  sync_reads = [];
+  const buffers = [];
   file.readAsArrayBuffer = function (blob) {
     reads.push(blob.size);
     return real_reads[0].call(this, blob);
   };
   sync.read = function (buffer, options) {
     reads.push(buffer.byteLength);
+    const whole = ArrayBuffer.isView(buffer) && buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength;
+    const backing = ArrayBuffer.isView(buffer) ? buffer.buffer : buffer;
+    if (!buffers.includes(backing)) buffers.push(backing);
+    sync_reads.push((whole ? "whole" : "view") + ":" + buffer.byteLength + ":#" + buffers.indexOf(backing));
     return real_reads[1].call(this, buffer, options);
   };
+}
+export function sync_read_calls() {
+  return sync_reads.join(" ");
+}
+// Makes each FileSystemSyncAccessHandle.read read no bytes, until stopped.
+let real_read = null;
+export function start_short_reads() {
+  if (real_read) throw new Error("short reads are already on");
+  real_read = FileSystemSyncAccessHandle.prototype.read;
+  FileSystemSyncAccessHandle.prototype.read = function () { return 0; };
+}
+export function stop_short_reads() {
+  FileSystemSyncAccessHandle.prototype.read = real_read;
+  real_read = null;
 }
 export function decoder_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 export function stop_read_spies() {
@@ -161,6 +184,9 @@ extern "C" {
     fn stop_write_spy() -> String;
     fn start_read_spies();
     fn stop_read_spies() -> Vec<f64>;
+    fn sync_read_calls() -> String;
+    fn start_short_reads();
+    fn stop_short_reads();
     async fn decoder_sleep(ms: u32);
 }
 
@@ -428,6 +454,25 @@ async fn a_decode_keeps_the_worker_memory_flat() {
         reads.iter().all(|bytes| *bytes <= MIB as f64),
         "each read is at most 1 MiB: {reads:?}"
     );
+    // Findings 2-10 and 2-13 of review round 2: each read of the second
+    // pass gets a whole array, and the reads of a whole block share one,
+    // so a read makes no garbage.
+    let sync = sync_read_calls();
+    let calls: Vec<(&str, &str, &str)> = sync
+        .split(' ')
+        .filter_map(|call| {
+            let mut parts = call.splitn(3, ':');
+            Some((parts.next()?, parts.next()?, parts.next()?))
+        })
+        .collect();
+    assert!(calls.iter().all(|(kind, _, _)| *kind == "whole"), "{sync}");
+    let blocks: Vec<&str> = calls
+        .iter()
+        .filter(|(_, bytes, _)| *bytes == MIB.to_string())
+        .map(|(_, _, buffer)| *buffer)
+        .collect();
+    assert!(blocks.len() >= 6, "the reads of whole blocks: {sync}");
+    assert!(blocks.iter().all(|b| *b == blocks[0]), "one array: {sync}");
 
     // The control: a whole decode of the long file holds it.
     let before = LIVE.with(Cell::get);
@@ -456,6 +501,27 @@ async fn a_removed_source_ends_with_unstored() {
         files_below(SESSION).await.as_string().unwrap_or_default(),
         "",
         "no part file is left, and the source is gone"
+    );
+}
+
+/// Finding 2-1 of review round 2: a short read of a session file ends with
+/// `decode-unstored`, whose text gives the bytes read and the bytes asked
+/// for, and leaves no part file.
+#[wasm_bindgen_test]
+async fn a_short_read_ends_with_unstored_and_its_sizes() {
+    fresh().await;
+    plant_at(&format!("{SESSION}/src/0.wav"), &wav(2_000, 44_100)).await;
+    start_short_reads();
+    let reply = decode(&one_source("wav")).await;
+    stop_short_reads();
+    assert!(
+        matches!(&reply, DecodeReply::Unstored { text } if text.contains("read 0 of 16000 bytes")),
+        "{reply:?}"
+    );
+    assert_eq!(
+        files_below(SESSION).await.as_string().unwrap_or_default(),
+        "src/0.wav",
+        "no part file is left"
     );
 }
 

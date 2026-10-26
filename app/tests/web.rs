@@ -84,15 +84,22 @@ async fn has(path: &str) -> bool {
     exists(path).await.as_bool() == Some(true)
 }
 
+/// Saves `files` as a new session and makes it current, as the page does
+/// once the song opens (D9 of M5); returns its id.
+async fn saved_and_current(files: &[(String, web_sys::Blob)], rate: u32) -> String {
+    let id = store::save_sources(files, rate).await.expect("saved");
+    store::make_current(&id).await;
+    id
+}
+
 /// A stored song of one WAV file, made current; returns its id.
 async fn stored_song() -> String {
     wipe().await;
-    store::save_sources(
+    saved_and_current(
         &[("Lloyd - Tune.wav".into(), blob(&tone(800, 440.0)))],
         RATE,
     )
     .await
-    .expect("saved")
 }
 
 /// Starts `save_stems` and lets it run up to its first wait, so it is in
@@ -176,9 +183,7 @@ async fn a_48k_session_reopens_with_its_stems() {
     let opened =
         engine::Song::load_files(vec![("lloyd.wav".into(), wav.clone())]).expect("decoded");
     assert_eq!((opened.sample_rate, opened.frames), (44_100, 4_410));
-    let id = store::save_sources(&[("lloyd.wav".into(), blob(&wav))], opened.sample_rate)
-        .await
-        .expect("saved");
+    let id = saved_and_current(&[("lloyd.wav".into(), blob(&wav))], opened.sample_rate).await;
     store::save_stems(
         &id,
         opened.sample_rate,
@@ -243,9 +248,7 @@ async fn a_flac_session_reopens_with_its_stems() {
     let opened =
         engine::Song::load_files(vec![("lloyd.flac".into(), bytes.clone())]).expect("decoded");
     assert_eq!((opened.sample_rate, opened.frames), (44_100, 4_410));
-    let id = store::save_sources(&[("lloyd.flac".into(), blob(&bytes))], opened.sample_rate)
-        .await
-        .expect("saved");
+    let id = saved_and_current(&[("lloyd.flac".into(), blob(&bytes))], opened.sample_rate).await;
     store::save_stems(
         &id,
         opened.sample_rate,
@@ -379,9 +382,7 @@ async fn sessions_are_listed_newest_first() {
     let older = stored_song().await;
     // Ids are creation times in milliseconds.
     sleep(5).await;
-    let newer = store::save_sources(&[("acme.wav".into(), blob(&tone(80, 220.0)))], RATE)
-        .await
-        .expect("saved");
+    let newer = saved_and_current(&[("acme.wav".into(), blob(&tone(80, 220.0)))], RATE).await;
     let ids: Vec<String> = store::list().await.into_iter().map(|(id, _)| id).collect();
     assert_eq!(ids, [newer.clone(), older]);
     assert_eq!(store::current().await, Some(newer));

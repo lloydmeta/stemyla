@@ -355,27 +355,23 @@ async fn read(path: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Starts a session for files the user dropped and makes it current.
-/// Returns its id.  Each file is written as the browser's `Blob`, so the
+/// Starts a session for files the user dropped, and returns its id.  It
+/// does not make the session current: the page does that once the song
+/// opens (D9, [`make_current`]).  Each file is written as the browser's `Blob`, so the
 /// page keeps no copy of its bytes to save it (MEM-1).  A save that fails
 /// removes what it wrote: the caller gets no id to use, and a session
 /// without `meta` is not listed, so it cannot be forgotten.
 pub async fn save_sources(files: &[(String, web_sys::Blob)], rate: u32) -> Result<String> {
     let id = new_id().await;
     let base = format!("{ROOT}/{id}");
-    let saved = save_sources_now(&id, &base, files, rate).await;
+    let saved = save_sources_now(&base, files, rate).await;
     if saved.is_err() && st_remove(&base).await.as_bool() != Some(true) {
         log::warn!("could not remove {base} after a failed save");
     }
     saved.map(|()| id)
 }
 
-async fn save_sources_now(
-    id: &str,
-    base: &str,
-    files: &[(String, web_sys::Blob)],
-    rate: u32,
-) -> Result<()> {
+async fn save_sources_now(base: &str, files: &[(String, web_sys::Blob)], rate: u32) -> Result<()> {
     let mut meta = Meta {
         rate,
         ..Default::default()
@@ -395,8 +391,7 @@ async fn save_sources_now(
         .first()
         .map(|(n, _)| crate::store_meta::file_title(n))
         .unwrap_or_default();
-    write(&format!("{base}/meta"), meta.to_text().as_bytes()).await?;
-    write(&format!("{ROOT}/current"), id.as_bytes()).await
+    write(&format!("{base}/meta"), meta.to_text().as_bytes()).await
 }
 
 /// The folder of session `id`, from the root of the private file system,
@@ -936,10 +931,11 @@ pub enum Kept {
 /// D7, after a `decoded` reply for session `id`: moves each part file onto
 /// its name, then writes the `decoded` line, and the `mix` line if a new
 /// `mix.f32` moved into place.  The caller holds the session's
-/// [`DecodeGuard`], so this waits for no other save (D8a).  If a `mix`
-/// line exists now, or a separation or a mix write names the session, the
-/// worker's mix is removed and the session's `mix.f32` stays (D8).  An
-/// error leaves the session incomplete.
+/// [`DecodeGuard`], so this waits for no other save (D8a).  If the session
+/// has a usable mix of the song's frames now ([`usable_mix_frames`]), or a
+/// separation or a mix write names the session, the worker's mix is
+/// removed and the session's `mix.f32` stays (D8).  Otherwise the worker's
+/// mix takes its place.  An error leaves the session incomplete.
 pub async fn keep_decoded(
     id: &str,
     sources: &[PlannedSource],
@@ -1419,11 +1415,10 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         let saved = save_sources(&[("Lloyd - Tune.wav".into(), file)], 44_100).await;
         let record = stop_spy();
         let id = saved.expect("saved");
-        assert_eq!(
-            record, "same whole whole",
-            "the file itself, then meta and current"
-        );
-        let (got, song, meta) = restore().await.expect("stored").expect("readable");
+        assert_eq!(record, "same whole", "the file itself, then meta");
+        // D9: the page makes the session current once its song opens.
+        assert_eq!(current().await, None, "the save makes no session current");
+        let (got, song, meta) = restore_id(&id).await.expect("stored").expect("readable");
         assert_eq!((got, song.frames, meta.rate), (id, 800, 44_100));
         st_remove(ROOT).await;
     }
@@ -2152,6 +2147,44 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
             Some(frames),
             "the decoded line stays"
         );
+    }
+
+    /// Finding 2-15 of review round 2: `save_stems` writes `meta` under its
+    /// lock too, so a decode that ends while the stems are saved keeps
+    /// the stem lines, and the save keeps the `decoded` line.
+    #[wasm_bindgen_test]
+    async fn saved_stems_and_a_kept_decode_keep_each_others_lines() {
+        for delay in [0, 5, 20] {
+            st_remove(ROOT).await;
+            let id = "1792640000072";
+            plant_session(id, &[]).await;
+            let frames = 2_000;
+            let sources = sources_of(&["drums"]);
+            plant_parts(id, frames, &sources, true).await;
+            let saved = std::rc::Rc::new(Cell::new(false));
+            let flag = saved.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let stem = Stem {
+                    name: "bass".into(),
+                    left: vec![0.25; 4_000].into(),
+                    right: vec![-0.25; 4_000].into(),
+                };
+                flag.set(save_stems("1792640000072", 44_100, &[stem]).await.is_ok());
+            });
+            st_sleep(delay).await;
+            let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
+            let stems_saved = set_within(3_000, &saved).await;
+            let meta = meta_now(id).await.expect("meta");
+            st_remove(ROOT).await;
+            assert_eq!(kept.expect("kept"), Kept::Complete, "delay {delay}");
+            assert!(stems_saved, "delay {delay}: the stems are saved");
+            assert_eq!(meta.stems, ["bass"], "delay {delay}: the stem lines stay");
+            assert_eq!(
+                meta.decoded.map(|d| d.frames),
+                Some(frames),
+                "delay {delay}: the decoded line stays"
+            );
+        }
     }
 
     /// Finding 1-22 of review round 1: a `mix` line whose file has the

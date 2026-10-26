@@ -37,6 +37,8 @@ struct Memory {
     fail_reads: Option<(String, u64)>,
     /// The write that fails, counted from 1 over every part file.
     fail_write: Option<usize>,
+    /// Each close of a part file fails.
+    fail_close: bool,
     writes: Rc<Cell<usize>>,
     /// The size of each write, in order.
     write_sizes: Rc<RefCell<Vec<usize>>>,
@@ -156,6 +158,9 @@ impl Session for Memory {
     }
 
     async fn close(&mut self, _: MemoryPart) -> Result<(), String> {
+        if self.fail_close {
+            return Err("InvalidStateError: refused by the test".into());
+        }
         Ok(())
     }
 
@@ -616,6 +621,20 @@ fn a_failed_write_ends_with_unstored_and_leaves_no_part_file() {
         );
         no_part_is_left(&memory, &format!("write {fail}"));
     }
+}
+
+/// Finding 2-4 of review round 2: a part file that does not close ends a
+/// decode that worked with `decode-unstored`, and leaves no part file.
+#[test]
+fn a_failed_close_ends_with_unstored_and_leaves_no_part_file() {
+    let mut memory = session_of(&[wav(&[tone(3_000, 0.5, 0)], 44_100, false)]);
+    memory.fail_close = true;
+    let reply = memory.run(&request(vec![source(0, true)], None));
+    assert!(
+        is_unstored(&reply, "could not be closed") && is_unstored(&reply, "InvalidStateError"),
+        "{reply:?}"
+    );
+    no_part_is_left(&memory, "a failed close");
 }
 
 #[test]

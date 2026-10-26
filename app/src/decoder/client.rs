@@ -353,6 +353,34 @@ export function client_deliver(worker, data) {
         assert!(!crate::store::decoding("41") && !crate::store::decoding("42"));
     }
 
+    /// Finding 2-2 of review round 2: a `decode-log` with no `text` ends no
+    /// decode, and the worker stays; the next reply ends the decode.
+    #[wasm_bindgen_test]
+    async fn a_bad_log_line_ends_no_decode() {
+        let (client, worker, _posts) = client();
+        client_deliver(&worker, &sent(DecodeReply::Alive));
+        let ended = client.decode(&request("43"), DecodeGuard::new("43"));
+        let bad = js_sys::Object::new();
+        js_sys::Reflect::set(&bad, &"type".into(), &kind::LOG.into()).unwrap();
+        client_deliver(&worker, &bad);
+        client_deliver(
+            &worker,
+            &sent(DecodeReply::Undecodable {
+                text: "acme.wav is no audio".into(),
+            }),
+        );
+        let ended = ended.await;
+        let same = client
+            .worker()
+            .is_ok_and(|now| js_sys::Object::is(&now, &worker));
+        client.stop();
+        assert!(
+            matches!(&ended, Ended::Reply(DecodeReply::Undecodable { text }, _) if text == "acme.wav is no audio"),
+            "the decode ends with the reply, not Stopped"
+        );
+        assert!(same, "the worker is not terminated");
+    }
+
     /// D9: the worker's `error` event (here: its script does not load)
     /// ends every decode posted and drops its guard, and the next decode
     /// starts a new worker.  After a reset, no decode is posted.

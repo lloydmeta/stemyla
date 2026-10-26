@@ -226,17 +226,52 @@ fn no_audio_or_weights_are_tracked() {
     );
 }
 
-/// PROTO-1: the check reads the scenarios in `xtask/src/e2e/` too.
+/// PROTO-1: the check reads the scenarios in `xtask/src/e2e/` too, each
+/// under its own path.
 #[test]
 fn the_e2e_check_reads_every_rust_file_of_the_scenarios() {
     let rust = xtask::rules::e2e_rust_sources(&xtask::workspace_root()).expect("readable");
+    let text_of = |name: &str| {
+        rust.iter()
+            .find(|(file, _)| file == name)
+            .map(|(_, text)| text.as_str())
+            .unwrap_or_default()
+    };
     assert!(
-        rust.contains("pub(super) fn run(o: &Opts)"),
+        text_of("xtask/src/e2e/decode.rs").contains("pub(super) fn run(o: &Opts)"),
         "xtask/src/e2e/decode.rs is read"
     );
     assert!(
-        rust.contains("fn memory_budget(o: &Opts)"),
+        text_of("xtask/src/e2e.rs").contains("fn memory_budget(o: &Opts)"),
         "xtask/src/e2e.rs is read"
+    );
+}
+
+/// Finding 2-16 of review round 2: a Rust file in a folder under
+/// `xtask/src/e2e/` is read too.
+#[test]
+fn the_e2e_check_reads_the_folders_under_the_scenarios() {
+    let root = std::env::temp_dir().join(format!("xtask-e2e-sources-{}", std::process::id()));
+    let nested = root.join("xtask/src/e2e/deep");
+    std::fs::create_dir_all(&nested).expect("made");
+    std::fs::write(root.join("xtask/src/e2e.rs"), "fn a() {}").expect("written");
+    std::fs::write(root.join("xtask/src/e2e/b.rs"), "fn b() {}").expect("written");
+    std::fs::write(nested.join("c.rs"), "fn c() {}").expect("written");
+    std::fs::write(nested.join("notes.txt"), "not Rust").expect("written");
+    let read = xtask::rules::e2e_rust_sources(&root);
+    std::fs::remove_dir_all(&root).expect("removed");
+    let names: Vec<String> = read
+        .expect("readable")
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "xtask/src/e2e.rs",
+            "xtask/src/e2e/b.rs",
+            "xtask/src/e2e/deep/c.rs"
+        ]
     );
 }
 
