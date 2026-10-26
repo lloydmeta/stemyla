@@ -310,6 +310,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, maintainer: each milestone works in its own plan file, `plans/active/stream-from-storage-m<n>.md`, M4, M9 and M10 included.  Its Progress, Decision log and surprises go there.  Only the orchestrator edits this plan, with one Progress line for each milestone and the decisions that later milestones need.
 * 2026-10-26, agent (M3): on the storage path the worker sends `stored` and `unstored` replies, and `segment` keeps its samples for the memory path only.  The memory path refuses a song over 100 s on every device, because a page cannot read its memory limit (M3 plan, D1 and D3).
 * 2026-10-26, agent (M4): the page writes `mix.f32` (raw f32 little-endian, with a `meta` line) when Separate is pressed on the storage path, not when a song opens.  A song never separated costs no storage, and one path covers new songs and M3's sessions.  Every failure of the mix file sends `unstored` (M4 plan, D1 to D7).
+* 2026-10-26, agent (orchestrator): M5 measures growth from the start of the open to the decode's end line, as M3 measured it during the separation.  The read-back for playback and lanes after the decode stays until M6 and M7 remove it, and M10 asserts the whole.  The maintainer asked the orchestrator to decide such questions and not to wait for them.
 
 ## Outcomes and retrospective
 
