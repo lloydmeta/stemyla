@@ -205,7 +205,7 @@ The parent's M5 acceptance, check by check:
 
 * [x] 2026-10-26: review round 1 (at `754d8be`): 6 reviewers and 11 validators, 1,315,674 tokens, 51.6 wall minutes.  10 should-fix confirmed and fixed in `2cd6801`; 16 nits (13 fixed, 1-18 no change, 1-23 and 1-25 in the Decision log).  Mutants: partial, 189 tested, 61 missed: 7 confirmed (4 fixed with tests, 3 scenario bodies in TD-39), 54 refuted (53 wasm32-only, 1 equivalent).  Approvals: 0 (auto mode; a fallback prompt is not counted).
 
-* [ ] 2026-10-26: review round 2 (at `6e57ad8`): 6 reviewers and 10 validators, 907,036 tokens, 28.5 wall minutes.  10 should-fix confirmed (2-1 to 2-10), 7 nits.  Mutants: full, 5 tested, 0 missed.  
+* [x] 2026-10-26: review round 2 (at `6e57ad8`): 6 reviewers and 10 validators, 907,036 tokens, 28.5 wall minutes.  10 should-fix confirmed (2-1 to 2-10) and 7 nits, all fixed in `32493f7`.  Mutants: full, 5 tested, 0 missed.  The Write tool refused the findings file to the team leader (a subagent), so the orchestrator wrote it; the round then went on from step 10.
 * [x] 2026-10-26: review round 2 fixes (after commit `6d5353e`; findings in `target/review/run/iphone-crashes-2026-10-25/2/findings.md`).  How each test failed first:
   * 2-1, `a_short_read_ends_with_unstored_and_its_sizes` (a spy makes each sync read read no bytes): it fails on the round 1 text `read  of  bytes`.  The text is `read ${n} of ${len} bytes` again.
   * 2-2, `a_bad_log_line_ends_no_decode`: it fails on the mutant with no guard for `decode-alive` and `decode-log`.
