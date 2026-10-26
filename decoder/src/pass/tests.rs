@@ -450,7 +450,8 @@ fn a_usable_mix_is_not_written_again() {
     // for the source in the mix, so a read of it would fail.  The second
     // case is a mono mix of M4: each frame's sides are equal.
     for (mono, channels) in [(false, 2), (true, 1)] {
-        let left = tone(6_000, 0.5, 0);
+        // Above 1.0, so the mix lane's overview is of the clamped mix.
+        let left = tone(6_000, 1.5, 0);
         let right = if mono {
             left.clone()
         } else {
@@ -494,6 +495,14 @@ fn a_usable_mix_is_not_written_again() {
         assert!(memory.part("decoded/1.f32") == padded);
         let (cols, _) = lane_columns(&left, &right);
         assert!(memory.part("overviews/0.f32") == overview_bytes(&cols));
+        // Finding 3-4 of review round 3: the mix lane is the kept mix,
+        // clamped as `dsp::mix` clamps.
+        let clamp = |side: &[f32]| -> Vec<f32> { side.iter().map(|x| clamped(*x)).collect() };
+        let (mix_cols, _) = lane_columns(&clamp(&left), &clamp(&right));
+        assert!(
+            memory.part("overviews/mix.f32") == overview_bytes(&mix_cols),
+            "mono: {mono}: the mix overview"
+        );
     }
     // A song of several sources decodes its sources and writes no mix.
     let wavs = [
@@ -516,6 +525,43 @@ fn a_usable_mix_is_not_written_again() {
     );
     assert!(memory.file(&format!("mix.f32{PART}")).is_none());
     assert_eq!(memory.file("mix.f32"), Some(vec![7; 8 * 5_000]));
+    // Finding 3-4: each overview is of its source padded to 5,000 frames,
+    // and the mix lane's is of their mix, not of the kept `mix.f32`.
+    let padded: Vec<(Vec<f32>, Vec<f32>)> = wavs
+        .iter()
+        .map(|w| {
+            let song = song_of(std::slice::from_ref(w));
+            let stem = &song.stems[0];
+            let mut left: Vec<f32> = stem.left.iter().copied().collect();
+            let mut right: Vec<f32> = stem.right.iter().copied().collect();
+            left.resize(5_000, 0.0);
+            right.resize(5_000, 0.0);
+            (left, right)
+        })
+        .collect();
+    let mix_side = |right: bool| -> Vec<f32> {
+        (0..5_000)
+            .map(|i| {
+                let mut sum = 0.0;
+                for (l, r) in &padded {
+                    sum += if right { r[i] } else { l[i] };
+                }
+                clamped(sum)
+            })
+            .collect()
+    };
+    for (i, (left, right)) in padded.iter().enumerate() {
+        let (cols, _) = lane_columns(left, right);
+        assert!(
+            memory.part(&format!("overviews/{i}.f32")) == overview_bytes(&cols),
+            "the overview of source {i}"
+        );
+    }
+    let (cols, _) = lane_columns(&mix_side(false), &mix_side(true));
+    assert!(
+        memory.part("overviews/mix.f32") == overview_bytes(&cols),
+        "the mix overview"
+    );
 }
 
 /// No part file of the decode is left.

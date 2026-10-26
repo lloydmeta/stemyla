@@ -2764,7 +2764,9 @@ fn rust_files_below(folder: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// `stem_protocol::kind` or `stem_protocol::decode::kind` (`protocol`
 /// holds both files), or `script_only` names it.  `scripts` holds the
 /// `xtask/e2e/*.js` files; `e2e_rust` holds the files of
-/// [`e2e_rust_sources`].  Each problem names its own file and line.
+/// [`e2e_rust_sources`].  Each problem in an e2e script names its own file
+/// and line.  A problem in `protocol` names `protocol/src/lib.rs`, with no
+/// line, also for `protocol/src/decode.rs` (finding 1-25).
 pub fn e2e_types_match_the_protocol(
     protocol: &str,
     scripts: &[(String, String)],
@@ -6357,6 +6359,24 @@ pub mod kind {
             &[],
         );
         assert_one_each("PROTO-1", &[(DECODE_RS, problems, Some(3))]);
+    }
+
+    /// Finding 3-5 of review round 3: a second Rust file that does not
+    /// tokenise is reported at that file, with no line.
+    #[test]
+    fn a_second_file_that_does_not_tokenise_names_that_file() {
+        const DECODE_RS: &str = "xtask/src/e2e/decode.rs";
+        let rust = [
+            (E2E_RUST.to_string(), RUST_OK.to_string()),
+            (DECODE_RS.to_string(), "fn f() {".to_string()),
+        ];
+        let problems = e2e_types_match_the_protocol(
+            PROTOCOL,
+            &[(WORKER_JS.to_string(), JS_OK.to_string())],
+            &rust,
+            &[],
+        );
+        assert_one_each("PROTO-1", &[(DECODE_RS, problems, None)]);
     }
 
     fn values(tokens: &[(usize, JsToken)]) -> Vec<(usize, &JsToken)> {

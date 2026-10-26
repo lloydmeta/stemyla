@@ -116,6 +116,11 @@ impl DecodeClient {
         self.stopped("stopped for a reset");
     }
 
+    /// Whether [`DecodeClient::stop`] closed the client for a reset.
+    pub fn is_closed(&self) -> bool {
+        self.0.borrow().closed
+    }
+
     /// The worker, started if it is not running.
     pub fn worker(&self) -> Result<Worker, String> {
         if let Some(worker) = &self.0.borrow().worker {

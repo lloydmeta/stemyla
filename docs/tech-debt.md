@@ -418,6 +418,14 @@ Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 
 
 * Fix: a hash of the mix, kept in `meta` and checked by the worker as it reads, or a lock on the file during the separation.  Only a fault in the page can write the file at that time.
 
+### TD-56: a late open of a drop or a pick shows over a newer song
+
+D9 of M5 says that an older open completes its session but does not show its song.  Only the Storage menu's open has a token (`opens`).  A drop or a pick has none.  So a drop whose decode is slow can end after a newer open, such as a Storage open, Demo or a drop on the memory path.  Then the page shows the older song over the newer one, and makes its session current.  The gap is older than M5, which makes the decode longer.
+
+Source: review round 3 of M5 on the branch `iphone-crashes-2026-10-25`, finding 3-2.  The decision log of `plans/active/stream-from-storage-m5.md` says why M5 does not fix it.
+
+* Fix: give every open (drop, pick, Storage, startup restore, Demo) a token from one counter.  Show a result, and call `store::make_current`, only if its token is still the newest; still complete D7 for an older open.  A browser test: a drop's decode is pending, a Storage open of a complete session shows its song, then the drop's `decoded` arrives; the shown song and `sessions/current` stay the Storage song.
+
 ### TD-16: the wire format has unchecked field names and silent defaults
 
 `xtask/e2e/worker.js`, and the scripts in `xtask/src/e2e.rs` and in the Rust files under `xtask/src/e2e/`, repeat field names by hand.  Nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js`, `xtask/src/e2e.rs` and the Rust files under `xtask/src/e2e/`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).

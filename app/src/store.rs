@@ -1141,12 +1141,27 @@ pub async fn usable_mix_frames(id: &str, meta: &Meta) -> Option<usize> {
 
 /// Makes session `id` the one that a reload restores.
 pub async fn make_current(id: &str) {
-    if write(&format!("{ROOT}/current"), id.as_bytes())
-        .await
-        .is_err()
-    {
+    let written = write(&format!("{ROOT}/current"), id.as_bytes()).await;
+    if written.is_err() {
         log::warn!("could not mark session {id} as current");
     }
+    #[cfg(test)]
+    if written.is_ok() {
+        MADE_CURRENT.with_borrow_mut(|made| *made = Some(id.to_string()));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The session that [`make_current`] wrote last, for a test.
+    static MADE_CURRENT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The session that [`make_current`] wrote last, which a test reads at a
+/// log line, where it cannot wait for browser storage.
+#[cfg(test)]
+pub(crate) fn test_made_current() -> Option<String> {
+    MADE_CURRENT.with_borrow(Clone::clone)
 }
 
 /// The separated stems of session `id`, for a song of `frames`, from the

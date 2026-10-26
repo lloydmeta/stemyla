@@ -71,11 +71,11 @@ export function part_write(id, bytes, at) {
   const n = parts.get(id).write(bytes, { at });
   if (n !== bytes.byteLength) throw new Error(`wrote ${n} of ${bytes.byteLength} bytes`);
 }
-// One array for every read of a whole block in the second pass, so those
-// reads make no garbage; the decode worker copies each read into
-// WebAssembly memory before the next.  A shorter read, at the end of a
-// file, gets a new array.  Each read gets a whole array, never a view, as
-// each write does (MEM-5).
+// The reads of whole blocks in the second pass share one array, so they
+// make no garbage.  The decode worker copies each read into WebAssembly
+// memory before the next.  A shorter read, at the end of a file, gets a
+// new array.  Each read gets a whole array, never a view, as each write
+// does (MEM-5).
 let read_block = new Uint8Array(0);
 export function part_read(id, at, len) {
   if (read_block.length < len) read_block = new Uint8Array(len);

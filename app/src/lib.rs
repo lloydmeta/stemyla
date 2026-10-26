@@ -308,6 +308,9 @@ async fn open_chosen_now(
         .collect();
     let id = match store::save_sources(&files, engine::resample::SONG_RATE).await {
         Ok(id) => id,
+        Err(e) if resetting(decoder) => {
+            return Err(e.context("browser storage is being reset"));
+        }
         Err(e) => {
             log::warn!("song not kept in browser storage: {e:#}");
             return open_on_the_page(chosen, None, name, started, None).await;
@@ -315,9 +318,15 @@ async fn open_chosen_now(
     };
     let opened = open_saved(chosen, &id, name, started, decoder).await;
     // D9: the new session becomes current only once its song opens, so a
-    // reload until then restores the song on screen.
+    // reload until then restores the song on screen.  D12: the "kept" line
+    // comes only then, so an e2e check that reloads at it finds the song.
     match &opened {
-        Ok(_) => store::make_current(&id).await,
+        Ok(_) => {
+            store::make_current(&id).await;
+            log::info!("song kept in browser storage as session {id}");
+        }
+        // The reset removes every session.
+        Err(_) if store::is_closed() => {}
         // The guard is dropped, so `forget` does not wait for it.
         Err(_) => {
             if !store::forget(&id).await {
@@ -326,6 +335,14 @@ async fn open_chosen_now(
         }
     }
     opened
+}
+
+/// Whether a reset runs: the decode client or browser storage is closed.
+/// An open or a restore then ends with an error; the page does not decode
+/// the song itself (D9, finding 3-3 of M5).
+#[cfg(target_arch = "wasm32")]
+fn resetting(decoder: &decoder::DecodeClient) -> bool {
+    decoder.is_closed() || store::is_closed()
 }
 
 /// Opens the chosen files, saved as session `id`, through the decode
@@ -346,6 +363,9 @@ async fn open_saved(
                 Some(Err(e)) => format!("{e:#}"),
                 _ => "the new session could not be read".into(),
             };
+            if resetting(decoder) {
+                return Err(anyhow::anyhow!("browser storage is being reset ({why})"));
+            }
             return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
         }
     };
@@ -357,7 +377,6 @@ async fn open_saved(
                 (js_sys::Date::now() - started) / 1000.0,
                 song.frames
             );
-            log::info!("song kept in browser storage as session {id}");
             Ok(Opened {
                 song,
                 session: Some(id),
@@ -365,7 +384,10 @@ async fn open_saved(
                 note: None,
             })
         }
-        Decode::Undecodable(text) => Err(anyhow::anyhow!(text)),
+        Decode::Undecodable(text) | Decode::Reset(text) => Err(anyhow::anyhow!(text)),
+        Decode::OnThePage(why) if resetting(decoder) => {
+            Err(anyhow::anyhow!("browser storage is being reset ({why})"))
+        }
         Decode::OnThePage(why) => {
             open_on_the_page(chosen, Some(id), name, started, Some(why)).await
         }
@@ -396,9 +418,6 @@ async fn open_on_the_page(
         (js_sys::Date::now() - started) / 1000.0,
         song.frames
     );
-    if let Some(id) = &session {
-        log::info!("song kept in browser storage as session {id}");
-    }
     let note = why.map(|why| {
         log::warn!("decoder: browser storage failed: {why}");
         format!("Opened on this page: browser storage failed ({why}).")
@@ -421,6 +440,9 @@ enum Decode {
     /// Browser storage failed, or the worker did not answer: the page
     /// decodes the song itself (D9).  The text says why.
     OnThePage(String),
+    /// A reset stopped the decode: the open or restore ends with this
+    /// error, and the page decodes nothing.
+    Reset(String),
 }
 
 /// D9: asks the decode worker to decode session `id` from `sources`,
@@ -511,6 +533,9 @@ async fn decode_session(
             drop(guard);
             Decode::OnThePage(format!("the decode worker replied {}", other.kind()))
         }
+        Ended::Stopped(reason) if resetting(decoder) => {
+            Decode::Reset(format!("browser storage is being reset ({reason})"))
+        }
         Ended::Stopped(reason) => Decode::OnThePage(format!("the decode worker stopped: {reason}")),
     }
 }
@@ -553,7 +578,12 @@ async fn restore_stored(
             let mix_frames = store::usable_mix_frames(id, &meta).await;
             match decode_session(id, &sources, mix_frames, decoder).await {
                 Decode::Song(song) => song,
-                Decode::Undecodable(text) => return Some(Err(anyhow::anyhow!(text))),
+                Decode::Undecodable(text) | Decode::Reset(text) => {
+                    return Some(Err(anyhow::anyhow!(text)));
+                }
+                Decode::OnThePage(_) if resetting(decoder) => {
+                    return Some(Err(anyhow::anyhow!("browser storage is being reset")));
+                }
                 Decode::OnThePage(why) => {
                     log::info!("decoder: decoding on the page");
                     log::warn!("decoder: browser storage failed: {why}");

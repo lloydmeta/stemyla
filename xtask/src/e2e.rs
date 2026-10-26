@@ -1356,6 +1356,17 @@ fn open_growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
     )
 }
 
+/// The check of M5 that the decode worker decoded the song of an open, and
+/// the page did not (D9, finding 3-12): no line of `log` says that the page
+/// decodes on its main thread.
+fn open_on_the_worker_check(log: &[String]) -> (bool, String) {
+    (
+        !log.iter()
+            .any(|l| l.contains("decoder: decoding on the page")),
+        "the decode worker decoded the song: no \"decoder: decoding on the page\" line".into(),
+    )
+}
+
 /// The page's line before it writes a mix: a song of one source has its
 /// mix from the decode (D1 of M5), so Separate writes no second mix.
 const MIX_WRITE_LINE: &str = "before the mix is written";
@@ -1437,6 +1448,8 @@ fn memory_budget(o: &Opts) -> Result<()> {
         )])?;
         let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
         p.check(kept.is_some(), &format!("the {minutes}-minute song opens"));
+        let (ok, what) = open_on_the_worker_check(&p.log[from..]);
+        p.check(ok, &what);
         // D12 of M5: neither the page nor the decode worker grows with the
         // song while it opens.
         for (part, growth) in [
@@ -2228,6 +2241,16 @@ mod tests {
             decoder_growth(&separation),
             None,
             "the stem worker is not the decode worker"
+        );
+        assert!(open_on_the_worker_check(&log).0, "the worker decoded it");
+        let mut on_the_page = log.clone();
+        on_the_page.insert(
+            3,
+            "[2.05s] console.info: [app] decoder: decoding on the page".into(),
+        );
+        assert!(
+            !open_on_the_worker_check(&on_the_page).0,
+            "the page decoded it"
         );
         assert!(open_growth_check("page", Some(4.0)).0, "at the limit");
         assert!(!open_growth_check("page", Some(4.5)).0);

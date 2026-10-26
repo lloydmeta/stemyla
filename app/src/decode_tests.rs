@@ -653,6 +653,134 @@ async fn a_reset_during_a_decode_completes() {
     assert!(close_ended, "store::close ends");
 }
 
+/// Keeps each log line of the page, with the session that
+/// `store::make_current` had made current when the line was logged.
+struct TestLog;
+
+thread_local! {
+    static LINES: RefCell<Vec<(String, Option<String>)>> = const { RefCell::new(Vec::new()) };
+}
+
+impl log::Log for TestLog {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let line = record.args().to_string();
+        LINES.with_borrow_mut(|lines| lines.push((line, store::test_made_current())));
+    }
+
+    fn flush(&self) {}
+}
+
+static TEST_LOG: TestLog = TestLog;
+
+/// Starts to keep the log lines, from none.
+fn start_log() {
+    if log::set_logger(&TEST_LOG).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+    LINES.with_borrow_mut(Vec::clear);
+}
+
+/// The lines kept since [`start_log`] that hold `text`.
+fn logged(text: &str) -> Vec<(String, Option<String>)> {
+    LINES.with_borrow(|lines| {
+        lines
+            .iter()
+            .filter(|(line, _)| line.contains(text))
+            .cloned()
+            .collect()
+    })
+}
+
+/// D12, finding 3-1 of review round 3: the page logs "song kept in browser
+/// storage" only once `sessions/current` names the session, so an e2e
+/// check can reload at that line.  Through the decode worker, and on the
+/// page.
+#[wasm_bindgen_test]
+async fn the_kept_line_comes_once_the_session_is_current() {
+    for unstored in [false, true] {
+        store::test_wipe().await;
+        let fake = Fake::new();
+        start_log();
+        let client = fake.client.clone();
+        let chosen = vec![wav_file("lloyd.wav", 1_000, 0)];
+        let opened = background(async move { open_chosen_now(&chosen, &client).await });
+        let req = fake.request(0).await;
+        if unstored {
+            fake.reply(DecodeReply::Unstored {
+                text: "QuotaExceededError: the disk is full".into(),
+            });
+        } else {
+            let samples = planted(&req, 1_000, &[false]);
+            plant_parts(&req, 1_000, &samples, true).await;
+            fake.reply(DecodeReply::Decoded {
+                frames: 1_000,
+                new_mix: true,
+                channels: vec![2],
+            });
+        }
+        let opened = output(&opened).await;
+        let lines = logged("song kept in browser storage");
+        store::test_wipe().await;
+        let id = id_of(&req.session);
+        assert!(opened.is_ok(), "unstored {unstored}: opened");
+        assert_eq!(
+            lines,
+            [(
+                format!("song kept in browser storage as session {id}"),
+                Some(id.clone())
+            )],
+            "unstored {unstored}"
+        );
+    }
+}
+
+/// D9, finding 3-3 of review round 3: a reset during an open or a restore
+/// ends it with an error.  The page reads no file and decodes nothing on
+/// its main thread while browser storage is reset.
+#[wasm_bindgen_test]
+async fn a_reset_ends_an_open_and_a_restore_with_no_page_decode() {
+    store::test_wipe().await;
+    start_log();
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    let fake = Fake::new();
+    app.decoder = fake.client.clone();
+    let client = fake.client.clone();
+    let chosen = vec![wav_file("lloyd.wav", 100, 0)];
+    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    fake.request(0).await;
+    dt_start_read_spy();
+    app.prepare_reset();
+    let opened = output(&opened).await;
+    let open_reads = dt_stop_read_spy();
+
+    let id = saved(&vec![wav_file("acme.wav", 100, 0)]).await;
+    let fake = Fake::new();
+    app.decoder = fake.client.clone();
+    let client = fake.client.clone();
+    let restored = background(async move { restore_stored(&id, &client).await });
+    fake.request(0).await;
+    dt_start_read_spy();
+    app.prepare_reset();
+    let restored = output(&restored).await;
+    let restore_reads = dt_stop_read_spy();
+    let page_lines = logged("decoder: decoding on the page");
+    store::test_wipe().await;
+    assert!(opened.is_err(), "the open ends with an error");
+    assert!(
+        matches!(restored, Some(Err(_))),
+        "the restore ends with an error"
+    );
+    assert_eq!((open_reads, restore_reads), (0, 0), "no file is read");
+    assert_eq!(page_lines, [], "no decode on the page");
+}
+
 /// D8: after a decoded song of one source, Separate posts the stored mix
 /// and writes no mix file.
 #[wasm_bindgen_test]
