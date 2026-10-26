@@ -239,6 +239,7 @@ fn a_separation_must_name_one_mix_with_whole_frames() {
         JsValue::from_str("4"),
         // Over a wasm32 usize, which `as usize` would saturate.
         JsValue::from_f64(2f64.powi(33)),
+        JsValue::from_f64(usize::MAX as f64 + 1.0),
     ] {
         let e = err(&stored_separate_with_frames(frames.clone()));
         assert_eq!(e.kind, "separate", "{frames:?}");
@@ -251,6 +252,22 @@ fn a_separation_must_name_one_mix_with_whole_frames() {
             "{frames:?}"
         );
     }
+    let most = ToWorker::from_js(&stored_separate_with_frames(JsValue::from_f64(
+        usize::MAX as f64,
+    )));
+    assert!(
+        matches!(
+            most.map(|w| w.request),
+            Ok(Request::Separate {
+                mix: Mix::Stored {
+                    frames: usize::MAX,
+                    ..
+                },
+                ..
+            })
+        ),
+        "usize::MAX frames is the most"
+    );
     let zero = ToWorker::from_js(&stored_separate_with_frames(JsValue::from_f64(0.0)));
     assert!(
         matches!(

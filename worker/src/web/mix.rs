@@ -56,6 +56,13 @@ impl StoredMix {
         }
         Ok(Self { file, frames })
     }
+
+    /// A mix of `frames` frames read from `file`, with no check of its
+    /// size, so a test can make a read short.
+    #[cfg(test)]
+    pub(super) fn unchecked(file: Blob, frames: usize) -> Self {
+        Self { file, frames }
+    }
 }
 
 impl MixSource for StoredMix {

@@ -520,8 +520,8 @@ mod tests {
 
     /// Short (unpadded), just over two chunks, and long songs; chunk sizes
     /// with and without a remainder; overlaps 1 (no padding), 2 and 4.  In
-    /// (15, 10, 2) and (5000, 1000, 2), a chunk starts at `border + n`,
-    /// where the right reflection turns.
+    /// (15, 10, 2) and (5000, 1000, 2), a chunk starts at `border + n`, one
+    /// frame after the right reflection turns at `border + n - 1`.
     const STREAM_CASES: &[(usize, usize, usize)] = &[
         (15, 10, 2),
         (700, 1000, 2),

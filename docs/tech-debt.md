@@ -256,7 +256,7 @@ This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/
 
 ### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 
-Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `xtask/src/serve.rs` and `xtask/src/roformer_cli.rs` runs only against a live browser, a driver or the model weights (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
 
 * the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run);
 * the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
@@ -270,7 +270,9 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` an
 
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.  Review round 1 of M4 confirmed four such mutants (findings 1-30, 1-35, 1-41 and 1-53).  Each replaces a body with `Ok(())`: `memory_budget`, `separate` and `stored_stems` in `xtask/src/e2e.rs`, and `run` in `xtask/src/roformer_cli.rs`.  Each needs a GPU, a browser or the weights.
+Source: review round 1 of M4 on the branch `iphone-crashes-2026-10-25`, findings 1-30, 1-35, 1-41 and 1-53.  Its log goes to `docs/reviews/` after round 3.  Each mutant replaces a body with `Ok(())`: `memory_budget`, `separate` and `stored_stems` in `xtask/src/e2e.rs`, and `run` in `xtask/src/roformer_cli.rs`.  Each needs a GPU, a browser or the weights.
+
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.
 
 ### TD-40: gaps in the RT-1 tests
 

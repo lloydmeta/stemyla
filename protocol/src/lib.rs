@@ -788,8 +788,11 @@ fn mix(msg: &JsValue) -> Result<Mix, String> {
     }
     let path = path.as_string().ok_or("mix must be a path")?;
     // Over `usize::MAX`, `as usize` would saturate: on wasm32, 2^32 - 1.
+    // `usize::MAX as f64` rounds up to 2^64 on a 64-bit target, so the
+    // bound is the first power of two over `usize::MAX`, which is exact.
+    let limit = 2f64.powi(usize::BITS as i32);
     let frames = number(msg, field::FRAMES)
-        .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0 && *f <= usize::MAX as f64)
+        .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0 && *f < limit)
         .ok_or_else(|| {
             format!(
                 "frames must be a whole number of frames, at most {}",

@@ -412,6 +412,8 @@ async fn write_mix_now(id: &str, song: &Song) -> Result<()> {
         return Err(anyhow!("{base} is gone (forgotten?)"));
     }
     if let Some(error) = w.as_string() {
+        // The open can make the file before the stream fails.
+        st_remove(&format!("{base}/{part}")).await;
         return Err(anyhow!("browser storage refused {base}/{part} ({error})"));
     }
     if let Err(e) = put_mix_blocks(&w, song).await {
@@ -815,6 +817,15 @@ export function stop_spy() {
   real = null;
   return record.join(" ");
 }
+// The next `createWritable` is refused, after the file is made.
+export function refuse_next_writable() {
+  const proto = FileSystemFileHandle.prototype;
+  const real = proto.createWritable;
+  proto.createWritable = function () {
+    proto.createWritable = real;
+    return Promise.reject(new DOMException("refused by the test", "NoModificationAllowedError"));
+  };
+}
 // "lloyd" at `at` in a buffer of 16 bytes, as a view of 5 bytes.
 export function lloyd_in_a_larger_buffer(at) {
   const b = new Uint8Array(16);
@@ -826,6 +837,7 @@ export function lloyd_in_a_larger_buffer(at) {
         fn start_spy(expected: &JsValue, fail_from: f64);
         fn stop_spy() -> String;
         fn lloyd_in_a_larger_buffer(at: u32) -> Uint8Array;
+        fn refuse_next_writable();
     }
 
     /// Records every write, refusing none.
@@ -1250,6 +1262,22 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             "a forgotten session does not come back"
         );
         st_remove(ROOT).await;
+    }
+
+    /// Finding 2-3 of review round 2 of M4: a mix write whose stream
+    /// cannot open leaves no `.part` file.
+    #[wasm_bindgen_test]
+    async fn a_refused_mix_stream_leaves_no_part_file() {
+        st_remove(ROOT).await;
+        let id = "1792640000030";
+        plant_session(id, &[]).await;
+        refuse_next_writable();
+        let written = write_mix(id, &one_lane(1000)).await;
+        let error = written.expect_err("refused").to_string();
+        let part = file_size(&format!("{}.part", mix_path(id))).await;
+        st_remove(ROOT).await;
+        assert!(error.contains("NoModificationAllowedError"), "{error}");
+        assert_eq!(part, None, "no .part file is left");
     }
 
     /// MEM-1, MEM-4: the mix of a 4-minute song, of three sources or of

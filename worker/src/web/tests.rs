@@ -143,6 +143,14 @@ function split_at(path) {
   return i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
 }
 export async function plant_folder(path) { await folder_at(path, true); }
+// Removes the file at `path`: whether it is gone.
+export async function remove_at(path) {
+  try {
+    const [d, n] = split_at(path);
+    await (await folder_at(d, false)).removeEntry(n);
+    return true;
+  } catch (e) { return e.name === "NotFoundError"; }
+}
 export async function plant_at(path, bytes) {
   const [d, n] = split_at(path);
   const w = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createWritable();
@@ -269,6 +277,8 @@ extern "C" {
     fn start_spy();
     fn stop_spy() -> String;
     async fn plant_folder(path: &str);
+    #[wasm_bindgen(js_name = remove_at)]
+    async fn remove_at_js(path: &str) -> JsValue;
     #[wasm_bindgen(js_name = plant_at)]
     async fn plant_at_js(path: &str, bytes: &Uint8Array);
     #[wasm_bindgen(js_name = read_at)]
@@ -285,6 +295,11 @@ extern "C" {
 /// Writes a file at `path`, with its folders.
 async fn plant_at(path: &str, bytes: &[u8]) {
     plant_at_js(path, &Uint8Array::from(bytes)).await;
+}
+
+/// Whether the file at `path` is gone after its removal.
+async fn opfs_remove_at(path: &str) -> bool {
+    remove_at_js(path).await.as_bool() == Some(true)
 }
 
 /// The bytes of the file at `path`, or `None` if there is none.
@@ -2185,6 +2200,59 @@ async fn a_failed_mix_read_ends_with_unstored() {
         .as_string()
         .unwrap_or_default();
     assert_eq!(text, "NotReadableError: read 2 refused by the test");
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+}
+
+/// Finding 2-2 of review round 2 of M4: a mix file that changes or goes
+/// after the open gives an error, not stale samples or a panic.
+#[wasm_bindgen_test]
+async fn a_mix_file_changed_after_the_open_is_a_read_error() {
+    for change in ["shortened", "removed"] {
+        fresh().await;
+        plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+        let mut source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
+            .await
+            .expect("opened");
+        if change == "shortened" {
+            plant_at(MIX_PATH, &[0; 16]).await;
+        } else {
+            assert!(opfs_remove_at(MIX_PATH).await, "removed");
+        }
+        let read = source.read(0, FAKE_CHUNK);
+        let error = read.expect_err(change);
+        assert!(
+            error.starts_with("the mix file could not be read: "),
+            "{change}: {error}"
+        );
+    }
+}
+
+/// Finding 2-2: a read that gives fewer bytes than its span is an error,
+/// and the separation ends with `unstored`.
+#[wasm_bindgen_test]
+async fn a_short_read_of_the_mix_is_an_error() {
+    let bytes = mix_file(&fake_mix());
+    let mut short = StoredMix::unchecked(blob(&bytes[..8 * 100]), FAKE_FRAMES);
+    assert_eq!(
+        short.read(50, 150).expect_err("short"),
+        "the mix file gave 400 bytes of frames 50 to 150, not 800"
+    );
+    fresh().await;
+    plant_folder(SESSION).await;
+    let source = StoredMix::unchecked(blob(&bytes[..8 * 100]), FAKE_FRAMES);
+    let d = Demixer::new(source, FAKE_CHUNK, 2, STEMS.len());
+    let mut net = FakeNetwork { fail_at: None };
+    let ended = separate_song(&mut net, d, Some(SESSION), now_s()).await;
+    reply_to(kind::SEPARATE, ended);
+    assert_eq!(
+        reply_types(),
+        ["progress", "unstored"],
+        "the first read fails"
+    );
     assert_eq!(
         names_in(&format!("{SESSION}/stems")).await.as_deref(),
         Some(""),

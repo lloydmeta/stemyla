@@ -1699,9 +1699,11 @@ impl StemApp {
         };
     }
 
-    /// Browser storage refused the stems of the running separation: the
-    /// shown song separates again in memory if it fits, and is refused if
-    /// not (D4 of M3).
+    /// Browser storage failed during the running separation: it refused
+    /// the stems, or could not give the stored mix.  The page removes the
+    /// session's `mix` line and mix file (D6 of M4).  The shown song
+    /// separates again in memory if it fits, and is refused if not (D4 of
+    /// M3).
     #[cfg(target_arch = "wasm32")]
     fn separation_unstored(&mut self, text: String) {
         log::warn!("separator: browser storage failed: {text}");
@@ -3645,6 +3647,44 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         );
         assert_eq!(meta.mix, None);
         assert_eq!((file, part), (None, None), "no mix file is left");
+    }
+
+    /// D7 of M4: with room for the stems but not for the mix, a song with
+    /// no mix file takes the memory path, and a song with a usable mix
+    /// file takes the storage path.
+    #[wasm_bindgen_test]
+    async fn the_free_space_must_hold_a_missing_mix() {
+        let free = storage_needed(FRAMES) + 4.0 * FRAMES as f64;
+        assert!(
+            free < storage_path_needs(FRAMES, false),
+            "no room for the mix"
+        );
+        stub_estimate(0.0, free);
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        press_separate(&mut app).await;
+        let sent = sessions(&posts);
+        let status = app.status.clone();
+        finish(app, &id).await;
+        let (mut kept, kept_posts, kept_id) = app_with_a_stored_song().await;
+        plant_mix(&kept_id, &song_mix_file(), Some(FRAMES)).await;
+        press_separate(&mut kept).await;
+        let kept_sent = sessions(&kept_posts);
+        let kept_stage = kept.separating.as_ref().map(|j| j.stage);
+        finish(kept, &kept_id).await;
+        unstub_estimate();
+        assert_eq!(sent, [None], "no mix file: the memory path");
+        assert!(
+            status.starts_with("Separating in memory: browser storage has")
+                && status.contains("and the mix 1 MB")
+                && status.contains("will not be kept"),
+            "{status}"
+        );
+        assert_eq!(
+            kept_sent,
+            [Some(format!("sessions/{kept_id}"))],
+            "a usable mix file: the storage path"
+        );
+        assert_eq!(kept_stage, Some(JobStage::Storage));
     }
 
     /// D2 of M4: a usable mix file of the song is not written again.
