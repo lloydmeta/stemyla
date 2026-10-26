@@ -17,12 +17,14 @@ use std::sync::Arc;
 /// The frames of every stored lane that the reader reads together.
 pub const BLOCK_FRAMES: u64 = 32_768;
 
-/// What the player tells its sources at the start of each `process`.
+/// What the player tells its sources at the end of each `process`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hint {
     /// The player's own audible position, and its read position.
     Reading { heard: u64, read: u64 },
-    /// The target of a seek that holds, or none.
+    /// The run that the reader reads first: the target of a seek that holds
+    /// or fades out, or the position that the player has not played from
+    /// since a jump; or none.
     Seek(Option<u64>),
 }
 
@@ -184,8 +186,16 @@ mod tests {
                 },
             ],
         };
+        let handles = |song: &Song| -> Vec<usize> {
+            song.stems
+                .iter()
+                .flat_map(|s| [s.left.handles(), s.right.handles()])
+                .collect()
+        };
+        assert_eq!(handles(&song), [1; 4]);
         let sources = memory_sources(&song);
         assert_eq!(sources.len(), 2);
+        assert_eq!(handles(&song), [2; 4], "MEM-1: each source shares its stem");
         for (stem, source) in song.stems.iter().zip(&sources) {
             let (mut l, mut r) = ([9.0; 3], [9.0; 3]);
             source.read(2, &mut l, &mut r);
@@ -233,6 +243,10 @@ mod tests {
         // Before the loop, reaching its end: the loop's first block too.
         let run = next_run(100, frames, Some((200, 300)), 256);
         assert_eq!(run.0, [(100, 100 + B), (200, 556), (0, 0)]);
+        // Before the loop, reaching it, with a loop that holds more than a
+        // block after its start: the wrap reads one block from its start.
+        let run = next_run(B - 50, frames, Some((B - 10, 2 * B - 50)), 256);
+        assert_eq!(run.0, [(B - 50, 2 * B - 50), (B - 10, 2 * B - 10), (0, 0)]);
         // Before the loop, not reaching it.
         let run = next_run(0, frames, Some((2 * B, 3 * B)), 256);
         assert_eq!(run.0, [(0, B), (0, 0), (0, 0)]);

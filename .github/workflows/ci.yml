@@ -79,6 +79,10 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    # About 6 minutes (2026-10-26).  A test that hangs, such as an RT-1
+    # test under a blocking lock, must not hold the runner for GitHub's
+    # 6 h default.
+    timeout-minutes: 45
     env:
       # egui_kittest renders through wgpu; on a headless runner the only
       # adapter is Mesa's software Vulkan (lavapipe).  The snapshot PNGs

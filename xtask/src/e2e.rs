@@ -523,8 +523,7 @@ fn smoke(o: &Opts) -> Result<()> {
     let stored = p.wait_for(from, 60, |l| playback::playback_line(l).is_some())?;
     let line = stored.as_deref().and_then(playback::playback_line);
     p.check(
-        line.as_ref()
-            .is_some_and(|l| l.lanes == 5 && l.stored == 5 && l.underruns == 0),
+        playback::all_from_storage(line.as_ref(), 5),
         &format!("every lane plays from storage, with no underrun: {line:?}"),
     );
     let contexts = p.session.execute(

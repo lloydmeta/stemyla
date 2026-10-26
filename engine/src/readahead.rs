@@ -22,7 +22,7 @@ use crate::params::SharedParams;
 use crate::player::PlayerConfig;
 use crate::source::{BLOCK_FRAMES, Hint, StemSource, loop_in_force, next_run};
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// The most bytes that the slots of one [`ReadAhead`] take.
@@ -35,6 +35,11 @@ pub const MIN_AHEAD_SLOTS: usize = 4;
 pub const MIN_LOOP_SLOTS: usize = 2;
 
 const NO_BLOCK: u64 = u64::MAX;
+
+/// The read-ahead buffers alive now, and the most alive at once since
+/// [`ReadAhead::take_high_water`] (for a test of the page, D9 of M6).
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
 
 /// The format of a lane file's samples: interleaved stereo, little-endian.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +203,8 @@ pub struct ReadAhead {
     loop_slots: usize,
     slots: Vec<Slot>,
     failed: Vec<AtomicBool>,
+    /// The lanes that the player read since [`Self::take_lanes_read`].
+    read_lanes: Vec<AtomicBool>,
     // Hints from the player.
     heard: AtomicU64,
     read: AtomicU64,
@@ -247,6 +254,8 @@ impl ReadAhead {
         loop_slots: usize,
     ) -> Self {
         assert!(ahead > 0, "at least one slot ahead");
+        let alive = LIVE.fetch_add(1, Relaxed) + 1;
+        HIGH_WATER.fetch_max(alive, Relaxed);
         let slots = (0..ahead + loop_slots)
             .map(|_| Slot {
                 block: AtomicU64::new(NO_BLOCK),
@@ -265,6 +274,7 @@ impl ReadAhead {
             loop_slots,
             slots,
             failed: lanes.iter().map(|_| AtomicBool::new(false)).collect(),
+            read_lanes: lanes.iter().map(|_| AtomicBool::new(false)).collect(),
             heard: AtomicU64::new(0),
             read: AtomicU64::new(0),
             seek: AtomicU64::new(NO_BLOCK),
@@ -303,6 +313,26 @@ impl ReadAhead {
     /// The bytes of all the slots.
     pub fn bytes(&self) -> usize {
         self.slots.len() * self.formats.iter().map(|f| f.block_bytes()).sum::<usize>()
+    }
+
+    /// The read-ahead buffers alive now.
+    pub fn live() -> usize {
+        LIVE.load(Relaxed)
+    }
+
+    /// The most read-ahead buffers alive at once since the last call; the
+    /// next count starts from those alive now.
+    pub fn take_high_water() -> usize {
+        HIGH_WATER.swap(LIVE.load(Relaxed), Relaxed)
+    }
+
+    /// The stored lanes that the player read since the last call: the
+    /// lanes that play, not muted.
+    pub fn take_lanes_read(&self) -> usize {
+        self.read_lanes
+            .iter()
+            .filter(|lane| lane.swap(false, Relaxed))
+            .count()
     }
 
     /// The `process` calls that missed frames of a lane.
@@ -413,6 +443,7 @@ impl ReadAhead {
 
     /// The callback's read of one lane (RT-1: no wait, no allocation).
     fn read(&self, lane: usize, from: u64, left: &mut [f32], right: &mut [f32]) {
+        self.read_lanes[lane].store(true, Relaxed);
         left.fill(0.0);
         right.fill(0.0);
         if self.is_failed(lane) {
@@ -462,6 +493,12 @@ impl ReadAhead {
             return true;
         }
         (from / BLOCK_FRAMES..end.div_ceil(BLOCK_FRAMES)).all(|block| self.holds(block))
+    }
+}
+
+impl Drop for ReadAhead {
+    fn drop(&mut self) {
+        LIVE.fetch_sub(1, Relaxed);
     }
 }
 

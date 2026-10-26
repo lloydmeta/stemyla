@@ -83,7 +83,12 @@ async fn planted(id: &str, frames: usize, stems: usize) -> (Song, LaneFiles) {
         let path = format!("{folder}/stems/{name}.wav");
         let wav = engine::wav::encode_pcm16(&left, &right, 44_100);
         store::test_write(&path, &wav).await.expect("planted");
-        files.push(store_meta::stem_lane_file(&path, &wav[..44], frames));
+        files.push(store_meta::stem_lane_file(
+            &path,
+            &wav[..44],
+            wav.len() as u64,
+            frames,
+        ));
         song_stems.push(Stem {
             name: name.to_string(),
             left: left.into(),
@@ -379,7 +384,11 @@ async fn a_new_song_frees_the_old_read_ahead() {
     let first = app.playback.as_ref().expect("stored lanes").watch();
     pb_test_sleep(50).await;
     assert!(first.reading(), "the reader runs");
+    engine::readahead::ReadAhead::take_high_water();
     app.load_song(song, files);
+    // Review round 1 of M6, finding 1-6: the old buffer goes before the
+    // new one is made, so two never live at once.
+    let most = engine::readahead::ReadAhead::take_high_water();
     pb_test_sleep(50).await;
     let second = app.playback.as_ref().expect("stored lanes").watch();
     let (gone, stopped) = (first.ahead.upgrade().is_none(), !first.reading());
@@ -396,6 +405,7 @@ async fn a_new_song_frees_the_old_read_ahead() {
     let none_left = second.ahead.upgrade().is_none() && !second.reading();
     let protected = store::protected(id);
     store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(most, 1, "one read-ahead buffer at a time");
     assert!(gone, "no strong reference to the first buffer");
     assert!(stopped, "its reader stopped");
     assert!(none_left, "a song from memory frees the second");

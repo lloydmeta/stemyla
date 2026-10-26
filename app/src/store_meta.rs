@@ -552,15 +552,17 @@ pub fn wav_data(head: &[u8]) -> Option<(u64, u64)> {
     }
 }
 
-/// The lane file of the stem WAV at `path`, whose first bytes are `head`,
-/// for a song of `frames` (D8): only if its file is complete, with at
+/// The lane file of the stem WAV at `path`, whose first bytes are `head`
+/// and whose size is `file_bytes`, for a song of `frames` (D8): only if its file is complete, with at
 /// least the song's frames less one, and not a `.part` file, which the
 /// next separation writes.
-pub fn stem_lane_file(path: &str, head: &[u8], frames: usize) -> Option<LaneFile> {
+pub fn stem_lane_file(path: &str, head: &[u8], file_bytes: u64, frames: usize) -> Option<LaneFile> {
     if path.ends_with(".part") {
         return None;
     }
-    let (data_offset, data_frames) = wav_data(head)?;
+    let (data_offset, header_frames) = wav_data(head)?;
+    // A file cut short holds only the frames that it has.
+    let data_frames = header_frames.min(file_bytes.saturating_sub(data_offset) / 4);
     (data_frames + 1 >= frames as u64).then(|| LaneFile {
         path: path.to_string(),
         format: engine::readahead::LaneFormat::Pcm16,
@@ -626,7 +628,7 @@ mod lane_tests {
         let head = engine::wav::header(1_000, 44_100);
         let path = "sessions/42/stems/vocals.wav".to_string();
         assert_eq!(
-            stem_lane_file(&path, &head, 1_000),
+            stem_lane_file(&path, &head, 44 + 4 * 1_000, 1_000),
             Some(LaneFile {
                 path: path.clone(),
                 format: LaneFormat::Pcm16,
@@ -635,10 +637,26 @@ mod lane_tests {
             })
         );
         // One frame short is complete; two are not.
-        assert!(stem_lane_file(&path, &engine::wav::header(999, 44_100), 1_000).is_some());
-        assert!(stem_lane_file(&path, &engine::wav::header(998, 44_100), 1_000).is_none());
+        assert!(
+            stem_lane_file(
+                &path,
+                &engine::wav::header(999, 44_100),
+                44 + 4 * 999,
+                1_000
+            )
+            .is_some()
+        );
+        assert!(
+            stem_lane_file(
+                &path,
+                &engine::wav::header(998, 44_100),
+                44 + 4 * 998,
+                1_000
+            )
+            .is_none()
+        );
         // A `.part` file is never a lane file.
-        assert!(stem_lane_file(&format!("{path}.part"), &head, 1_000).is_none());
+        assert!(stem_lane_file(&format!("{path}.part"), &head, 44 + 4 * 1_000, 1_000).is_none());
     }
 
     #[test]
@@ -688,6 +706,23 @@ mod lane_tests {
         out
     }
 
+    /// Review round 1 of M6, finding 1-11: a WAV whose file ends before
+    /// its header says holds only the frames in the file.
+    #[test]
+    fn a_cut_wav_holds_only_the_frames_in_its_file() {
+        let path = "sessions/1/stems/bass.wav";
+        let head = engine::wav::header(1_000, 44_100);
+        let whole = stem_lane_file(path, &head, 44 + 4 * 1_000, 1_000);
+        assert_eq!(whole.map(|f| f.data_frames), Some(1_000));
+        let short = stem_lane_file(path, &head, 44 + 4 * 999, 1_000);
+        assert_eq!(short.map(|f| f.data_frames), Some(999), "one frame short");
+        assert_eq!(
+            stem_lane_file(path, &head, 44 + 4 * 500, 1_000),
+            None,
+            "cut"
+        );
+    }
+
     #[test]
     fn a_wav_header_gives_its_data_and_frames() {
         // The header that `engine::wav` writes.
@@ -706,6 +741,14 @@ mod lane_tests {
         ] {
             assert_eq!(wav_data(&other), None);
         }
+        // Mutants 1-21 and 1-33 of review round 1 of M6: an RF64 header,
+        // and a field whose high byte is not 0.
+        let mut rf64 = engine::wav::header(10, 44_100);
+        rf64[..4].copy_from_slice(b"RF64");
+        assert_eq!(wav_data(&rf64), None);
+        let mut bits = engine::wav::header(10, 44_100);
+        bits[35] = 1;
+        assert_eq!(wav_data(&bits), None, "bits per sample 0x0110");
         // A header cut short, or no RIFF at all.
         let full = engine::wav::header(10, 44_100);
         assert_eq!(wav_data(&full[..40]), None);
@@ -716,7 +759,9 @@ mod lane_tests {
         // A stem one frame short of the song is a lane file; a 48 kHz one
         // is not.
         let path = "sessions/1/stems/bass.wav";
-        assert!(stem_lane_file(path, &engine::wav::header(99, 44_100), 100).is_some());
-        assert!(stem_lane_file(path, &engine::wav::header(100, 48_000), 100).is_none());
+        assert!(stem_lane_file(path, &engine::wav::header(99, 44_100), 44 + 4 * 99, 100).is_some());
+        assert!(
+            stem_lane_file(path, &engine::wav::header(100, 48_000), 44 + 4 * 100, 100).is_none()
+        );
     }
 }

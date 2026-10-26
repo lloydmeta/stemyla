@@ -513,6 +513,14 @@ fn the_wanted_blocks_follow_the_head_the_loop_and_a_seek() {
         ..want
     };
     assert_eq!(wanted_blocks(&held), [1, 2, 3]);
+    // A run ahead that reaches the loop's end goes on from its start.
+    let round = Want {
+        heard: 3 * B,
+        looping: Some((0, 4 * B)),
+        loop_slots: 1,
+        ..want
+    };
+    assert_eq!(wanted_blocks(&round), [3, 4, 0, 1]);
     // A loop end within the crossfade of a block's end takes in the next
     // block.
     let edge = Want {
@@ -698,13 +706,23 @@ fn a_held_slot_never_blocks_the_callback() {
     let slot = ahead.held_slot(0).expect("held");
     let held = slot.data.lock().expect("lock");
     // The slot's lock is held, and its number still says block 0: the
-    // read returns at once with silence and counts the frames.
+    // read, on another thread as the audio callback is, returns at once
+    // with silence and counts the frames.
     source.hint(Hint::Reading { heard: 0, read: 0 });
-    source.read(0, &mut l, &mut r);
-    assert!(l.iter().chain(&r).all(|v| *v == 0.0));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let audio = Arc::clone(source);
+    let thread = std::thread::spawn(move || {
+        let (mut l, mut r) = (vec![9.0; 64], vec![9.0; 64]);
+        audio.read(0, &mut l, &mut r);
+        tx.send((l, r))
+    });
+    let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+    drop(held);
+    thread.join().expect("joined").expect("sent");
+    let (l2, r2) = got.expect("the read returns while the slot is held");
+    assert!(l2.iter().chain(&r2).all(|v| *v == 0.0));
     assert_eq!(ahead.underruns(), 1);
     assert_eq!(ahead.missed_lane_frames(), 64);
-    drop(held);
     source.read(0, &mut l, &mut r);
     assert!(
         l.iter().any(|v| *v != 0.0),
@@ -728,6 +746,20 @@ fn a_block_that_fill_writes_is_not_read() {
         assert_eq!(l, [0.0; 4]);
     });
     assert!(source.ready(0, 10));
+    // The slot of block 0 takes block 1: while `fill` writes it, the slot
+    // holds neither.
+    let slot = ahead
+        .slots
+        .iter()
+        .position(|s| s.block.load(Relaxed) == 0)
+        .expect("block 0 is held");
+    ahead.fill(BlockRead { block: 1, slot }, |lanes| {
+        lanes[0].fill(2);
+        assert!(!ahead.holds(0), "block 0 is no longer held");
+        assert!(!source.ready(0, 10));
+        assert!(!ahead.holds(1));
+    });
+    assert!(source.ready(B, 10) && !source.ready(0, 10));
 }
 
 #[test]
@@ -745,4 +777,25 @@ fn a_slot_whose_block_changed_is_not_read() {
     source.read(0, &mut l, &mut r);
     assert_eq!(l, [0.0; 4]);
     assert_eq!(ahead.missed_lane_frames(), 4);
+}
+
+/// Review round 1 of M6, finding 1-10: the buffer counts the lanes that
+/// the player read since the last count, so the page can show that a
+/// lane it unmuted plays.
+#[test]
+fn the_lanes_read_since_the_last_count_are_counted() {
+    let all = lanes(4 * B as usize, 2, 1);
+    let params = Arc::new(SharedParams::new(3));
+    let ahead = Arc::new(ReadAhead::new(&all.formats, 4 * B, params).expect("fits"));
+    let sources = ahead.sources();
+    assert_eq!(ahead.take_lanes_read(), 0);
+    let (mut l, mut r) = ([0.0; 8], [0.0; 8]);
+    sources[0].read(0, &mut l, &mut r);
+    sources[2].read(0, &mut l, &mut r);
+    sources[2].read(8, &mut l, &mut r);
+    assert_eq!(ahead.take_lanes_read(), 2);
+    assert_eq!(ahead.take_lanes_read(), 0, "counted once");
+    ahead.fail_lane(1);
+    sources[1].read(0, &mut l, &mut r);
+    assert_eq!(ahead.take_lanes_read(), 1, "a failed lane read counts");
 }

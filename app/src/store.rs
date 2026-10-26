@@ -589,7 +589,9 @@ pub fn forget_mix(id: &str) -> impl std::future::Future<Output = Result<()>> + '
         {
             let _meta = lock_meta(&id).await;
             if protected(&id) || mix_in_use(&id) {
-                log::info!("store: the mix of session {id} is kept while playback reads it");
+                log::info!(
+                    "store: the mix of session {id} is kept while a song plays from it, an open reads it, or a separation or a mix write uses it"
+                );
                 DEFERRED.with_borrow_mut(|d| d.insert(id.clone()));
                 return Ok(());
             }
@@ -733,7 +735,8 @@ pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<(Stem, O
     let bytes = read(path)
         .await
         .ok_or_else(|| anyhow!("stem {name} is missing from browser storage"))?;
-    let file = crate::store_meta::stem_lane_file(path, &bytes[..bytes.len().min(4_096)], frames);
+    let head = &bytes[..bytes.len().min(4_096)];
+    let file = crate::store_meta::stem_lane_file(path, head, bytes.len() as u64, frames);
     let audio = engine::decode::decode_bytes(bytes, Some("wav"))?;
     // A session stored before decision 0012 from stems at mixed rates can
     // hold stems one frame shorter than its source now opens with.

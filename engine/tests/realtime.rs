@@ -329,7 +329,7 @@ impl Rig {
         steps(self);
         if self.counts != Counts::default() {
             self.problems.push(format!(
-                "RT-1: the audio callback allocated or freed memory after warm-up: {}, phase \"{name}\": {} allocations, {} frees.  Fix: size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse a buffer.  Do not allocate in `Player::process` or below.",
+                "RT-1: the audio callback allocated or freed memory after warm-up: {}, phase \"{name}\": {} allocations, {} frees.  Fix: size the buffer in `Player::with_sources`, `ReadAhead::new` or `Stretcher::warm_up`, or reuse a buffer.  Do not allocate in `Player::process` or below.",
                 self.label, self.counts.allocations, self.counts.frees
             ));
         }

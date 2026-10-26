@@ -25,8 +25,8 @@
 //!   hold).  It counts the frames in [`SharedParams::held_frames`].
 //!
 //! At the end of each `process`, the player gives its sources
-//! [`Hint::Reading`] and [`Hint::Seek`]: the seek that holds, or the position
-//! that it has not played from since a jump.  So the reader reads, between
+//! [`Hint::Reading`] and [`Hint::Seek`]: the seek that holds or fades out, or
+//! else the position that it has not played from since a jump.  So the reader reads, between
 //! two callbacks, the run that plays next.
 //!
 //! A lane in memory is always ready, so a song in memory never holds.
@@ -361,16 +361,20 @@ impl Player {
 
     /// Tells the sources where the player is, at the end of each `process`
     /// and after any jump in it, so the reader reads between two callbacks
-    /// for the position that plays next.  A position that the player has
-    /// not played from since a jump asks the reader for its run first, as a
-    /// held seek does.
+    /// for the position that plays next.  A seek that holds or fades out, or
+    /// else a position that the player has not played from since a jump,
+    /// asks the reader for its run first.
     fn give_hints(&mut self) {
         let heard = self.playhead();
         self.hint(Hint::Reading {
             heard,
             read: self.pos,
         });
-        let seek = self.pending.map(|pending| pending.target);
+        let fading = match self.fade {
+            Fade::Out { target, .. } => Some(target),
+            _ => None,
+        };
+        let seek = self.pending.map(|pending| pending.target).or(fading);
         self.hint(Hint::Seek(seek.or(self.fresh.then_some(self.pos))));
     }
 
@@ -1338,6 +1342,72 @@ mod tests {
         twin.lane.open();
         twin.play_gated(2);
         assert_eq!(twin.lane.last_seek_hint(), Some(None));
+    }
+
+    /// Review round 1 of M6, mutant 1-25: with a loop shorter than the
+    /// crossfade, the run reads give each frame what `pos_buf` and `old_buf`
+    /// name, mixed frame by frame.
+    #[test]
+    fn a_loop_shorter_than_the_crossfade_reads_the_frames_it_names() {
+        let ramp: Vec<f32> = (0..20_000).map(|i| i as f32 / 20_000.0).collect();
+        let mut p = player(song(vec![("a", ramp.clone())]), 256);
+        p.params.set_loop(1_000, 1_002);
+        p.looping = p.params.loop_region();
+        p.pos = 990;
+        let mut olds = 0;
+        for _ in 0..20 {
+            p.read_mixed(256);
+            for i in 0..256 {
+                let mut v = ramp[p.pos_buf[i] as usize];
+                if let Some(old) = p.old_buf[i] {
+                    let k = p.xf_buf[i];
+                    v = v * p.fin[k] + ramp[old as usize] * p.fout[k];
+                    olds += 1;
+                }
+                assert_eq!(p.in_l[i].to_bits(), v.to_bits(), "frame {i}");
+            }
+        }
+        assert!(olds > 1_000, "the crossfade ran: {olds} frames");
+    }
+
+    /// Review round 1 of M6, finding 1-4: a seek that comes during a hold
+    /// jumps at once, with no fade, as a paused seek does.
+    #[test]
+    fn a_seek_during_a_hold_jumps_at_once() {
+        let mut twin = Twin::new();
+        twin.lane.window(100_000, 200_000);
+        // The memory player seeks while paused, so it jumps with no fade.
+        twin.memory.params().request_seek(150_000);
+        twin.memory.render(512);
+        twin.both(|p| p.playing.store(true, Relaxed));
+        let held = twin.play_gated(1);
+        assert!(held.iter().all(|v| *v == 0.0), "it holds at 0");
+        twin.gated_params().request_seek(150_000);
+        let (g, m) = twin.play(4);
+        assert_eq!(g, m, "it plays the target at once");
+        assert_eq!(twin.held_seeks(), 0);
+        assert_eq!(twin.held_frames(), 512);
+        assert_eq!(twin.lane.missed.load(Relaxed), 0);
+    }
+
+    /// Review round 1 of M6, finding 1-12: while a seek fades out, the
+    /// reader is told its target, so the target keeps its slot.
+    #[test]
+    fn a_seek_hints_its_target_while_it_fades_out() {
+        let mut twin = Twin::new();
+        twin.gated_params().playing.store(true, Relaxed);
+        twin.play_gated(2);
+        twin.gated_params().request_seek(300_000);
+        for _ in 0..3 {
+            twin.gated.render(64);
+            assert_eq!(twin.lane.last_seek_hint(), Some(Some(300_000)));
+        }
+        twin.play_gated(2);
+        assert_eq!(
+            twin.lane.last_seek_hint(),
+            Some(None),
+            "it played the target"
+        );
     }
 
     #[test]

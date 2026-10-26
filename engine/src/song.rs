@@ -24,6 +24,11 @@ impl Samples {
         &self.0
     }
 
+    /// How many `Samples` share this buffer, `self` included.
+    pub fn handles(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// Whether `self` and `other` are the same buffer, not just equal.
     pub fn shares(&self, other: &Samples) -> bool {
         Arc::ptr_eq(&self.0, &other.0)

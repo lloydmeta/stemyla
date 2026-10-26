@@ -17,6 +17,9 @@ pub(super) struct PlaybackLine {
     pub missed_lane_frames: u64,
     pub held_frames: u64,
     pub failed_lanes: u64,
+    /// The stored lanes that the player read in the last interval: those
+    /// that play.
+    pub lanes_read: u64,
     pub reads: u64,
     pub p50_ms: f64,
     pub p99_ms: f64,
@@ -34,6 +37,7 @@ pub(super) fn playback_line(line: &str) -> Option<PlaybackLine> {
         missed_lane_frames: count("missed lane frames ")?,
         held_frames: count("held ")?,
         failed_lanes: count("failed lanes ")?,
+        lanes_read: count("lanes read ")?,
         reads: count("reads ")?,
         p50_ms: number_after(line, "read p50 ")?,
         p99_ms: number_after(line, "p99 ")?,
@@ -118,20 +122,17 @@ pub(super) fn run(o: &Opts) -> Result<()> {
 
     let played_from = p.mark();
     p.click(o.play_x, "Play")?;
-    let eight = p.wait_for(played_from, 60, |l| {
-        super::audio_stats(&[l.to_string()], 0)
-            .first()
-            .is_some_and(|(_, head)| *head >= 8.0 * RATE)
-    })?;
+    let eight = p.wait_for(played_from, 60, |l| played_for(l, 8.0))?;
     p.check(eight.is_some(), "it plays 8 s");
     // A click on the bass lane seeks to about 3 s.
-    let x = LANE_LEFT + (LANE_RIGHT - LANE_LEFT) * SEEK_S / 30.0;
+    let x = lane_x(SEEK_S);
     let seek_from = p.mark();
     p.note(&format!(
         "click the bass lane at ({x:.0}, {BASS_Y}) to seek to about {SEEK_S} s"
     ));
     p.session.click(x, BASS_Y)?;
     p.idle(1.0)?;
+    let mute_from = p.mark();
     p.note(&format!(
         "click the Mute of the original lane at {ORIGINAL_MUTE:?}"
     ));
@@ -143,7 +144,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         .map(|(_, head)| head)
         .collect();
     p.check(
-        passes_the_target(&heads, SEEK_S * RATE),
+        passes_the_target(&heads, target_frames(SEEK_S)),
         &format!("the playhead passes the seek target: {heads:?}"),
     );
     let lines: Vec<PlaybackLine> = p.log[played_from..]
@@ -159,6 +160,22 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     for (ok, what) in playback_checks(&lines, 7) {
         p.check(ok, &what);
     }
+    let before = p.log[played_from..mute_from]
+        .iter()
+        .filter_map(|l| playback_line(l))
+        .next_back();
+    let after = p.log[mute_from..]
+        .iter()
+        .filter_map(|l| playback_line(l))
+        .next_back();
+    p.check(
+        unmuted_lane_plays(before.as_ref(), after.as_ref(), 7),
+        &format!(
+            "the click on its Mute makes the original lane play: lanes read {:?}, then {:?}",
+            before.map(|l| l.lanes_read),
+            after.map(|l| l.lanes_read)
+        ),
+    );
     let errors = p.errors();
     p.check(
         errors.is_empty(),
@@ -176,6 +193,41 @@ const BASS_Y: f64 = 200.0;
 /// The Mute of "original", the last lane.
 const ORIGINAL_MUTE: (f64, f64) = (27.0, 601.0);
 const SEEK_S: f64 = 3.0;
+
+/// The x of the waveforms at `seconds` into the 30-second song.
+fn lane_x(seconds: f64) -> f64 {
+    LANE_LEFT + (LANE_RIGHT - LANE_LEFT) * seconds / 30.0
+}
+
+/// `seconds` of the song in frames.
+fn target_frames(seconds: f64) -> f64 {
+    seconds * RATE
+}
+
+/// Whether `line` is an "audio stats" line with the playhead at least
+/// `seconds` into the song.
+fn played_for(line: &str, seconds: f64) -> bool {
+    super::audio_stats(&[line.to_string()], 0)
+        .first()
+        .is_some_and(|(_, head)| *head >= target_frames(seconds))
+}
+
+/// Whether a song of `lanes` lanes, all from storage, played one lane
+/// fewer before the click on a Mute (`before`) than after it (`after`).
+fn unmuted_lane_plays(
+    before: Option<&PlaybackLine>,
+    after: Option<&PlaybackLine>,
+    lanes: u64,
+) -> bool {
+    before.is_some_and(|l| l.lanes_read + 1 == lanes)
+        && after.is_some_and(|l| l.lanes_read == lanes)
+}
+
+/// The check of `e2e smoke`: a `playback:` line in which all `lanes`
+/// lanes play from storage, with no underrun.
+pub(super) fn all_from_storage(line: Option<&PlaybackLine>, lanes: u64) -> bool {
+    line.is_some_and(|l| l.lanes == lanes && l.stored == lanes && l.underruns == 0)
+}
 
 /// Whether the playheads after a seek to `target` land within 3 s of it
 /// (a stats line comes each 2 s) and then pass it by at least 1 s: it played from there.
@@ -228,7 +280,7 @@ mod tests {
 
     #[test]
     fn a_playback_line_gives_its_numbers() {
-        let line = "[9.1s] console.info: [app] app/src/lib.rs:1500: playback: lanes from storage 7 of 7, read-ahead 24.0 MiB, underruns 0 (callbacks), missed lane frames 0, held 2048 frames, failed lanes 0, reads 31, read p50 3.5 ms, p99 12.0 ms";
+        let line = "[9.1s] console.info: [app] app/src/lib.rs:1500: playback: lanes from storage 7 of 7, read-ahead 24.0 MiB, underruns 0 (callbacks), missed lane frames 0, held 2048 frames, failed lanes 0, lanes read 6, reads 31, read p50 3.5 ms, p99 12.0 ms";
         assert_eq!(
             playback_line(line),
             Some(PlaybackLine {
@@ -239,12 +291,13 @@ mod tests {
                 missed_lane_frames: 0,
                 held_frames: 2048,
                 failed_lanes: 0,
+                lanes_read: 6,
                 reads: 31,
                 p50_ms: 3.5,
                 p99_ms: 12.0,
             })
         );
-        let some = "playback: lanes from storage 6 of 8, read-ahead 23.5 MiB, underruns 3 (callbacks), missed lane frames 1200, held 0 frames, failed lanes 1, reads 0, read p50 0.0 ms, p99 0.0 ms";
+        let some = "playback: lanes from storage 6 of 8, read-ahead 23.5 MiB, underruns 3 (callbacks), missed lane frames 1200, held 0 frames, failed lanes 1, lanes read 5, reads 0, read p50 0.0 ms, p99 0.0 ms";
         let got = playback_line(some).expect("a line");
         assert_eq!((got.stored, got.lanes, got.underruns), (6, 8, 3));
         assert_eq!((got.missed_lane_frames, got.failed_lanes), (1200, 1));
@@ -264,10 +317,74 @@ mod tests {
             missed_lane_frames: 0,
             held_frames: 0,
             failed_lanes: failed,
+            lanes_read: 7,
             reads: 3,
             p50_ms: 1.0,
             p99_ms: 2.0,
         }
+    }
+
+    #[test]
+    fn the_scenario_clicks_and_waits_where_the_song_is() {
+        assert_eq!(lane_x(0.0), LANE_LEFT);
+        assert_eq!(lane_x(30.0), LANE_RIGHT);
+        assert_eq!(lane_x(3.0), LANE_LEFT + 87.3);
+        assert_eq!(target_frames(3.0), 132_300.0);
+        let stats = |head: u64| {
+            format!(
+                "audio stats: 43 callbacks of 2048 frames (46.44 ms budget), engine mean 1.0 ms (2.0%), max so far 2.0 ms (4.0%), tempo 1.00, playhead {head}"
+            )
+        };
+        assert!(played_for(&stats(352_800), 8.0));
+        assert!(!played_for(&stats(352_799), 8.0));
+        assert!(!played_for("playback: lanes from storage 7 of 7", 0.0));
+    }
+
+    #[test]
+    fn the_unmute_and_smoke_checks_read_the_line() {
+        let read = |n: u64| PlaybackLine {
+            lanes_read: n,
+            ..line(7, 0, 0, 24.0)
+        };
+        assert!(unmuted_lane_plays(Some(&read(6)), Some(&read(7)), 7));
+        assert!(
+            !unmuted_lane_plays(Some(&read(6)), Some(&read(6)), 7),
+            "the click missed"
+        );
+        assert!(
+            !unmuted_lane_plays(Some(&read(7)), Some(&read(7)), 7),
+            "it played before"
+        );
+        assert!(!unmuted_lane_plays(None, Some(&read(7)), 7));
+        assert!(!unmuted_lane_plays(Some(&read(6)), None, 7));
+        let smoke = PlaybackLine {
+            lanes: 5,
+            ..line(5, 0, 0, 30.0)
+        };
+        assert!(all_from_storage(Some(&smoke), 5));
+        assert!(!all_from_storage(
+            Some(&PlaybackLine {
+                stored: 4,
+                ..smoke.clone()
+            }),
+            5
+        ));
+        assert!(!all_from_storage(
+            Some(&PlaybackLine {
+                lanes: 6,
+                stored: 6,
+                ..smoke.clone()
+            }),
+            5
+        ));
+        assert!(!all_from_storage(
+            Some(&PlaybackLine {
+                underruns: 1,
+                ..smoke.clone()
+            }),
+            5
+        ));
+        assert!(!all_from_storage(None, 5));
     }
 
     fn failing(lines: &[PlaybackLine]) -> usize {
@@ -295,6 +412,13 @@ mod tests {
         let mut big = good.clone();
         big[1].read_ahead_mib = 33.0;
         assert_eq!(failing(&big), 1);
+        // Review round 1 of M6, finding 1-9.
+        let mut lanes = good.clone();
+        lanes[0].lanes = 8;
+        assert_eq!(failing(&lanes), 1, "7 of 8 lanes from storage");
+        let mut empty = good.clone();
+        empty[0].read_ahead_mib = 0.0;
+        assert_eq!(failing(&empty), 1, "no read-ahead");
         let mut none_read = good;
         none_read[2].reads = 0;
         assert_eq!(failing(&none_read), 1);
@@ -316,5 +440,14 @@ mod tests {
             "it did not play on"
         );
         assert!(!passes_the_target(&[], target));
+        // Review round 1 of M6, finding 1-9.
+        assert!(
+            !passes_the_target(&[0.1 * RATE, 1.5 * RATE], target),
+            "landed near 0"
+        );
+        assert!(
+            !passes_the_target(&[3.2 * RATE, 14.0 * RATE], target),
+            "landed, then jumped past the target and 10 s"
+        );
     }
 }

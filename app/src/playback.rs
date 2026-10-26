@@ -195,9 +195,10 @@ impl Playback {
 }
 
 /// The `playback:` line that the page logs every 2 s while it plays (D9),
-/// for a song with `lanes` lanes.
+/// for a song with `lanes` lanes.  "lanes read" counts the stored lanes
+/// that the player read since the last line: those that play.
 pub fn line(playback: Option<&Playback>, lanes: usize, held_frames: u64) -> String {
-    let (stored, mib, underruns, missed, failed, reads, p50, p99) = match playback {
+    let (stored, mib, underruns, missed, failed, read_lanes, reads, p50, p99) = match playback {
         Some(p) => {
             let stats = p.stats.borrow();
             (
@@ -206,15 +207,16 @@ pub fn line(playback: Option<&Playback>, lanes: usize, held_frames: u64) -> Stri
                 p.ahead.underruns(),
                 p.ahead.missed_lane_frames(),
                 p.ahead.failed_lanes(),
+                p.ahead.take_lanes_read(),
                 stats.reads,
                 stats.percentile(0.5),
                 stats.percentile(0.99),
             )
         }
-        None => (0, 0.0, 0, 0, 0, 0, 0.0, 0.0),
+        None => (0, 0.0, 0, 0, 0, 0, 0, 0.0, 0.0),
     };
     format!(
-        "playback: lanes from storage {stored} of {lanes}, read-ahead {mib:.1} MiB, underruns {underruns} (callbacks), missed lane frames {missed}, held {held_frames} frames, failed lanes {failed}, reads {reads}, read p50 {p50:.1} ms, p99 {p99:.1} ms"
+        "playback: lanes from storage {stored} of {lanes}, read-ahead {mib:.1} MiB, underruns {underruns} (callbacks), missed lane frames {missed}, held {held_frames} frames, failed lanes {failed}, lanes read {read_lanes}, reads {reads}, read p50 {p50:.1} ms, p99 {p99:.1} ms"
     )
 }
 
