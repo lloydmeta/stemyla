@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use engine::mixdown::MixRecipe;
+use engine::overview::lane_columns;
 use engine::{Player, PlayerConfig, SharedParams, Song, Stem, StretcherKind};
 use export::MixFollower;
 use std::sync::Arc;
@@ -287,8 +288,6 @@ async fn load_and_keep(
     refresh_storage(&pending).await;
 }
 
-/// Columns of peak data kept per lane; drawing re-aggregates to pixels.
-pub(crate) const COLUMNS: usize = 4096;
 /// Milliseconds of each frame that the mix lane's waveform job may take.
 const PEAKS_MS: f64 = 3.0;
 /// Milliseconds of each frame that a save may take.  The page's main
@@ -649,27 +648,6 @@ pub fn stem_color(name: &str) -> Color32 {
         "other" | "harmonic" => Color32::from_rgb(90, 200, 200),
         _ => Color32::from_rgb(180, 180, 180),
     }
-}
-
-/// Peak columns for a stereo signal: `dsp::peaks` on each channel, then the
-/// lower minimum and higher maximum of the two.
-pub fn lane_columns(left: &[f32], right: &[f32]) -> (Vec<(f32, f32)>, f32) {
-    let block = left.len().div_ceil(COLUMNS).max(1);
-    let pl = dsp::peaks(left, block);
-    let pr = dsp::peaks(right, block);
-    let cols: Vec<(f32, f32)> = pl
-        .iter()
-        .zip(&pr)
-        .map(|(a, b)| (a.0.min(b.0), a.1.max(b.1)))
-        .collect();
-    let magnitudes: Vec<f32> = cols.iter().map(|(lo, hi)| lo.abs().max(hi.abs())).collect();
-    let loudest = if magnitudes.is_empty() {
-        0.0
-    } else {
-        dsp::biggest(&magnitudes)
-    };
-    let scale = if loudest > 1e-6 { 1.0 / loudest } else { 1.0 };
-    (cols, scale)
 }
 
 impl StemApp {

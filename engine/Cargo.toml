@@ -22,6 +22,9 @@ js-sys = { version = "0.3.106", optional = true }
 # API changes with each minor version (DEPS-1).
 [dev-dependencies]
 flacenc = { version = "=0.5.1", default-features = false }
+# Makes MP3 files with sound in them for the decoder's tests.  The same
+# exact pin as `worker/Cargo.toml` (DEPS-1).
+rusty_mp3 = "=1.0.0"
 
 [features]
 default = ["stretch-timestretch", "stretch-wsola", "stretch-cute"]

@@ -9,6 +9,7 @@
 use crate::DERIVED;
 use engine::Song;
 use engine::mixdown::{Mix, MixRecipe, Pcm};
+use engine::overview::COLUMNS;
 use std::sync::Arc;
 
 /// Frames that a job reads at a time.
@@ -93,7 +94,7 @@ impl<S: Sink> ExportJob<S> {
 }
 
 /// The waveform of a lane: the lowest and highest sample of both channels
-/// in each column, as [`crate::lane_columns`] gives them.  With
+/// in each column, as [`engine::overview::lane_columns`] gives them.  With
 /// [`PeaksSink::with_mid`], also the mean of the two channels, which a
 /// spectrogram reads.
 pub struct PeaksSink {
@@ -229,9 +230,9 @@ impl MixFollower {
             _ => {
                 let source = Box::new(Mix::new(Arc::clone(song), heard));
                 let sink = if mid {
-                    PeaksSink::with_mid(song.frames, crate::COLUMNS)
+                    PeaksSink::with_mid(song.frames, COLUMNS)
                 } else {
-                    PeaksSink::new(song.frames, crate::COLUMNS)
+                    PeaksSink::new(song.frames, COLUMNS)
                 };
                 (heard.clone(), ExportJob::new(source, sink))
             }
@@ -482,6 +483,7 @@ mod tests {
     use super::*;
     use engine::Stem;
     use engine::mixdown::{Mix, StemPcm};
+    use engine::overview::lane_columns;
     use std::sync::Arc;
 
     fn song(names: &[&str], frames: usize) -> Song {
@@ -625,7 +627,7 @@ mod tests {
         let want = run_mix(&song, &no_drums);
         assert_eq!(
             (done.columns, done.scale),
-            crate::lane_columns(&want.left, &want.right)
+            lane_columns(&want.left, &want.right)
         );
         assert_eq!(done.mid, None, "the job began without the mid signal");
 
@@ -696,14 +698,11 @@ mod tests {
     #[test]
     fn a_peak_of_exactly_the_threshold_is_silence_as_in_lane_columns() {
         let (left, right) = ([1e-6_f32, 0.0], [0.0_f32, 0.0]);
-        let mut sink = PeaksSink::new(2, crate::COLUMNS);
+        let mut sink = PeaksSink::new(2, COLUMNS);
         sink.write(0, &left, &right);
         let peaks = sink.finish();
         assert_eq!(peaks.scale, 1.0);
-        assert_eq!(
-            (peaks.columns, peaks.scale),
-            crate::lane_columns(&left, &right)
-        );
+        assert_eq!((peaks.columns, peaks.scale), lane_columns(&left, &right));
     }
 
     #[test]
@@ -729,11 +728,11 @@ mod tests {
                 job.into_sink()
             }
             let whole = run(&song, &recipe, Recorder::default());
-            let want = crate::lane_columns(&whole.left, &whole.right);
-            let peaks = run(&song, &recipe, PeaksSink::new(frames, crate::COLUMNS)).finish();
+            let want = lane_columns(&whole.left, &whole.right);
+            let peaks = run(&song, &recipe, PeaksSink::new(frames, COLUMNS)).finish();
             assert_eq!((peaks.columns, peaks.scale), want, "{frames} frames");
             assert_eq!(peaks.mid, None);
-            let with_mid = run(&song, &recipe, PeaksSink::with_mid(frames, crate::COLUMNS));
+            let with_mid = run(&song, &recipe, PeaksSink::with_mid(frames, COLUMNS));
             let mid: Vec<f32> = whole
                 .left
                 .iter()
@@ -741,7 +740,7 @@ mod tests {
                 .map(|(l, r)| 0.5 * (l + r))
                 .collect();
             assert_eq!(with_mid.finish().mid, Some(mid.clone()), "{frames} frames");
-            assert_eq!(mix_mid(&song, &recipe, crate::COLUMNS), mid);
+            assert_eq!(mix_mid(&song, &recipe, COLUMNS), mid);
         }
     }
 

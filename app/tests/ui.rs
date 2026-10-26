@@ -104,7 +104,7 @@ fn the_mix_lane_follows_mute() {
             .collect();
         dsp::mix(&others, &vec![1.0; others.len()])
     };
-    let want = app::lane_columns(&side(|s| &s.left), &side(|s| &s.right));
+    let want = engine::overview::lane_columns(&side(|s| &s.left), &side(|s| &s.right));
     let mix = &h.state().lanes[0];
     assert_eq!((mix.columns.clone(), mix.scale), want);
     assert!(

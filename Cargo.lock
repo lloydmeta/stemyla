@@ -3006,6 +3006,7 @@ dependencies = [
  "flacenc",
  "js-sys",
  "realfft",
+ "rusty_mp3",
  "symphonia",
  "timestretch",
  "web-time",

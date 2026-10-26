@@ -56,7 +56,7 @@ pub fn ensure_textures(
 pub fn lane_signal(song: &Arc<Song>, stem: Option<usize>, mix: Option<&MixRecipe>) -> Vec<f32> {
     match (stem, mix) {
         (Some(i), _) => mid(&song.stems[i].left, &song.stems[i].right),
-        (None, Some(recipe)) => crate::export::mix_mid(song, recipe, crate::COLUMNS),
+        (None, Some(recipe)) => crate::export::mix_mid(song, recipe, engine::overview::COLUMNS),
         (None, None) => {
             let (l, r) = crate::mix_of_sources(song);
             mid(&l, &r)

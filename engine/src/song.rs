@@ -1,7 +1,12 @@
 //! A song is a set of equally long stereo stems at one sample rate.
+//!
+//! [`Song::from_audio`] makes a song from whole decoded files.
+//! [`decode_into`] decodes one source in blocks into a [`FrameSink`], and
+//! gives the samples of that source's stem, bit for bit, so a caller need
+//! not hold the song.
 
-use crate::decode::{Audio, decode_bytes, decode_path};
-use crate::resample::{SONG_RATE, to_rate};
+use crate::decode::{Audio, Decoder, decode_bytes, decode_path};
+use crate::resample::{Resampler, SONG_RATE, to_rate};
 use anyhow::{Context, Result, anyhow};
 use std::ops::Deref;
 use std::path::Path;
@@ -189,6 +194,75 @@ impl Song {
     }
 }
 
+/// Takes the frames of a decoded source in blocks, as two channels at
+/// [`SONG_RATE`].
+pub trait FrameSink {
+    /// Takes the next block.  `left` and `right` have the same length.  A
+    /// mono source gives the same slice as both.  An error stops the
+    /// decode.
+    fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()>;
+}
+
+/// What [`decode_into`] gave its sink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodedSource {
+    /// The frames at [`SONG_RATE`].
+    pub frames: usize,
+    /// The channels of the source that the song keeps: 1 or 2.
+    pub channels: usize,
+}
+
+/// Decodes one source into `sink`, block by block, as one stem of
+/// [`Song::from_audio`]: at most two channels, a mono source on both sides,
+/// and the rate converted to [`SONG_RATE`].  The sink gets the samples of
+/// that stem, bit for bit, with no padding.  It holds no more than a packet
+/// and a filter window, so its memory does not grow with the source.
+pub fn decode_into(mut decoder: Decoder, sink: &mut dyn FrameSink) -> Result<DecodedSource> {
+    // A converter for the left side, and one for the right of a source of
+    // two channels or more, made at the first packet that has a channel,
+    // as `decode_bytes` makes its channels.
+    let mut sides: Option<(Resampler, Option<Resampler>)> = None;
+    let mut frames = 0;
+    while let Some(packet) = decoder.next_packet()? {
+        let planes = packet.planes;
+        if sides.is_none() && !planes.is_empty() {
+            let new = || Resampler::new(packet.sample_rate, SONG_RATE);
+            sides = Some((new()?, if planes.len() > 1 { Some(new()?) } else { None }));
+        }
+        let Some((left, right)) = &mut sides else {
+            continue;
+        };
+        if right.is_some() && planes.len() < 2 {
+            return Err(anyhow!("the channels of the file changed while it decoded"));
+        }
+        let left_block = left.push(&planes[0]);
+        let right_block = match right {
+            Some(right) => right.push(&planes[1]),
+            None => left_block,
+        };
+        frames += put(sink, left_block, right_block)?;
+    }
+    let Some((mut left, mut right)) = sides.filter(|_| decoder.frames() > 0) else {
+        return Err(anyhow!("file decoded to no audio"));
+    };
+    let left_block = left.finish();
+    let right_block = match &mut right {
+        Some(right) => right.finish(),
+        None => left_block,
+    };
+    frames += put(sink, left_block, right_block)?;
+    let channels = if right.is_some() { 2 } else { 1 };
+    Ok(DecodedSource { frames, channels })
+}
+
+/// Gives `sink` a block, if it has frames, and returns its frames.
+fn put(sink: &mut dyn FrameSink, left: &[f32], right: &[f32]) -> Result<usize> {
+    if !left.is_empty() {
+        sink.put(left, right)?;
+    }
+    Ok(left.len())
+}
+
 /// `c` padded with silence (or cut) to `frames`, growing by exactly what it
 /// needs: `resize` alone would double a full buffer, briefly holding three
 /// times the channel.
@@ -224,6 +298,170 @@ mod tests {
             sample_rate: rate,
             channels: chans,
         }
+    }
+
+    /// Keeps every block, joined: the samples of the stem.
+    #[derive(Default)]
+    struct MemorySink {
+        left: Vec<f32>,
+        right: Vec<f32>,
+    }
+
+    impl FrameSink for MemorySink {
+        fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()> {
+            self.left.extend_from_slice(left);
+            self.right.extend_from_slice(right);
+            Ok(())
+        }
+    }
+
+    /// Keeps each block on its own.
+    #[derive(Default)]
+    struct BlockSink(Vec<(Vec<f32>, Vec<f32>)>);
+
+    impl FrameSink for BlockSink {
+        fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()> {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: the test keeps each small block to compare it"
+            )]
+            self.0.push((left.to_vec(), right.to_vec()));
+            Ok(())
+        }
+    }
+
+    fn bits(samples: &[f32]) -> Vec<u32> {
+        samples.iter().map(|s| s.to_bits()).collect()
+    }
+
+    fn decoder_of(bytes: &[u8], ext: &str) -> Decoder {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the test decodes one small file more than once"
+        )]
+        let source = Box::new(std::io::Cursor::new(bytes.to_vec()));
+        Decoder::new(source, Some(ext)).unwrap()
+    }
+
+    /// The test files: a 16-bit WAV, a float WAV, a FLAC and an MP3 of
+    /// `channels` tones at `rate`.
+    fn files(channels: usize, rate: u32) -> Vec<(&'static str, Vec<u8>)> {
+        use crate::test_audio::{WavSamples, flac, mp3, tone, wav};
+        // Not a whole number of packets of any of the formats.
+        let frames = 10_007;
+        let tones: Vec<Vec<f32>> = (0..channels).map(|c| tone(c, frames, rate)).collect();
+        let mut files = vec![
+            ("wav", wav(&tones, rate, WavSamples::Pcm16)),
+            ("wav", wav(&tones, rate, WavSamples::Float)),
+        ];
+        if channels <= 2 {
+            files.push(("flac", flac(&tones, rate)));
+            files.push(("mp3", mp3(&tones, rate)));
+        }
+        files
+    }
+
+    #[test]
+    fn a_block_decode_gives_the_whole_decode() {
+        for rate in [SONG_RATE, 48_000] {
+            for channels in [1, 2, 3] {
+                for (ext, bytes) in files(channels, rate) {
+                    let case = format!("{ext}, {channels} channels at {rate} Hz");
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "MEM-1: the test decodes one small file more than once"
+                    )]
+                    let whole = decode_bytes(bytes.to_vec(), Some(ext)).unwrap();
+                    let song = Song::from_audio(vec![("bass".into(), whole.clone())]).unwrap();
+                    let stem = &song.stems[0];
+
+                    let mut memory = MemorySink::default();
+                    let decoded = decode_into(decoder_of(&bytes, ext), &mut memory).unwrap();
+                    let kept = channels.min(2);
+                    assert_eq!(
+                        decoded,
+                        DecodedSource {
+                            frames: song.frames,
+                            channels: kept
+                        },
+                        "{case}"
+                    );
+                    assert!(bits(&memory.left) == bits(&stem.left), "{case}: left");
+                    assert!(bits(&memory.right) == bits(&stem.right), "{case}: right");
+                    if rate == SONG_RATE {
+                        let right = &whole.channels[kept - 1];
+                        assert!(bits(&memory.left) == bits(&whole.channels[0]), "{case}");
+                        assert!(bits(&memory.right) == bits(right), "{case}");
+                    }
+
+                    let mut blocks = BlockSink::default();
+                    decode_into(decoder_of(&bytes, ext), &mut blocks).unwrap();
+                    assert!(blocks.0.len() > 1, "{case}: {} blocks", blocks.0.len());
+                    let mut joined = MemorySink::default();
+                    for (left, right) in &blocks.0 {
+                        assert_eq!(left.len(), right.len(), "{case}");
+                        joined.put(left, right).unwrap();
+                    }
+                    assert!(bits(&joined.left) == bits(&stem.left), "{case}: blocks");
+                    assert!(bits(&joined.right) == bits(&stem.right), "{case}: blocks");
+
+                    // The decoder's packets are the whole decode's channels.
+                    let mut decoder = decoder_of(&bytes, ext);
+                    let mut planes = vec![Vec::new(); whole.channels.len()];
+                    while let Some(packet) = decoder.next_packet().unwrap() {
+                        assert_eq!(packet.sample_rate, whole.sample_rate, "{case}");
+                        for (all, plane) in planes.iter_mut().zip(packet.planes) {
+                            all.extend_from_slice(plane);
+                        }
+                    }
+                    assert_eq!(decoder.frames(), whole.frames() as u64, "{case}");
+                    for (all, want) in planes.iter().zip(&whole.channels) {
+                        assert!(bits(all) == bits(want), "{case}: packets");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_decode_of_no_audio_is_refused() {
+        // A WAV with a header and no samples.
+        let bytes = crate::test_audio::wav(&[Vec::new(), Vec::new()], SONG_RATE, {
+            crate::test_audio::WavSamples::Pcm16
+        });
+        let whole = decode_bytes(bytes.clone(), Some("wav")).unwrap_err();
+        let error = decode_into(decoder_of(&bytes, "wav"), &mut MemorySink::default())
+            .expect_err("refused");
+        assert_eq!(format!("{error:#}"), format!("{whole:#}"));
+    }
+
+    #[test]
+    fn a_block_decode_at_an_odd_rate_is_refused() {
+        let tones = [crate::test_audio::tone(0, 1_000, 44_056)];
+        let bytes = crate::test_audio::wav(&tones, 44_056, crate::test_audio::WavSamples::Pcm16);
+        let mut sink = MemorySink::default();
+        let error = decode_into(decoder_of(&bytes, "wav"), &mut sink).expect_err("refused");
+        assert!(
+            format!("{error:#}").contains("songs at 44056 Hz are not supported"),
+            "{error:#}"
+        );
+        assert!(sink.left.is_empty());
+    }
+
+    #[test]
+    fn a_failing_sink_stops_the_decode() {
+        struct Full(usize);
+        impl FrameSink for Full {
+            fn put(&mut self, _: &[f32], _: &[f32]) -> Result<()> {
+                self.0 += 1;
+                Err(anyhow!("the sink is full"))
+            }
+        }
+        let (_, bytes) = files(2, SONG_RATE).remove(0);
+        let mut sink = Full(0);
+        let error = decode_into(decoder_of(&bytes, "wav"), &mut sink).expect_err("stopped");
+        assert_eq!(format!("{error:#}"), "the sink is full");
+        assert_eq!(sink.0, 1);
     }
 
     #[test]
