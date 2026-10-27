@@ -296,6 +296,8 @@ The parent's M7 section, item by item:
   * 3-8: `Inbox::status_of_open` sets or clears the status only for the newest open; `open_picked`, the startup restore and the Storage open use it.  `only_the_newest_open_sets_the_status` (browser) failed first against a stub that did nothing.
   * 3-4 to 3-7: text.  `web-test --browser chrome`: 249 tests pass.
 
+* [x] 2026-10-28: review round 3 (at `20672b0`): 5 reviewers and 4 validators, 721,147 tokens, 49.8 wall minutes.  2 should-fix confirmed (3-1, a classic-drums lane that arrived later dropped a save; 3-2) and 1 pre-existing (3-3), and 5 nits, all fixed in `cb13653`.  Mutants: full, 15 tested, 1 missed (3-9, `run` of `e2e old-session`), confirmed and now killed by a native test.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 4 checks these fixes (the stop rule).
+
 ## Surprises and discoveries
 
 None yet.
