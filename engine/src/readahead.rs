@@ -111,8 +111,9 @@ struct SlotData {
 }
 
 struct Slot {
-    /// The block that the slot holds, or `NO_BLOCK`.  `fill` clears it
-    /// first and writes it last.
+    /// The block that the slot holds, or `NO_BLOCK`.  `next_read` clears
+    /// it when it chooses the slot.  `fill` clears it first and writes it
+    /// last.
     block: AtomicU64,
     data: Mutex<SlotData>,
 }

@@ -126,6 +126,9 @@ pub struct HeldStems {
     pub mix_overview: Option<std::rc::Rc<lanes::Overview>>,
     /// What to say if the open does not show them.
     pub kept: String,
+    /// Why storage does not keep them, if it does not: the status line says
+    /// so when the open shows them (finding 4-2 of review round 4 of M3).
+    pub not_kept: Option<String>,
 }
 
 /// The memory path's input of a song when it is all in memory.
@@ -669,7 +672,7 @@ async fn open_chosen_now(
     let id = match store::save_sources(&files, engine::resample::SONG_RATE).await {
         Ok(id) => id,
         Err(e) if resetting(decoder) => {
-            return Err(e.context("browser storage is being reset"));
+            return Err(e.context("a reset stopped the open"));
         }
         Err(e) => {
             log::warn!("song not kept in browser storage: {e:#}");
@@ -773,7 +776,7 @@ async fn open_saved(
                 _ => "the new session could not be read".into(),
             };
             if resetting(decoder) {
-                return Err(anyhow::anyhow!("browser storage is being reset ({why})"));
+                return Err(anyhow::anyhow!("a reset stopped the open ({why})"));
             }
             let why = format!("browser storage failed ({why})");
             return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
@@ -799,7 +802,7 @@ async fn open_saved(
         }
         Decode::Undecodable(text) | Decode::Reset(text) => Err(anyhow::anyhow!(text)),
         Decode::OnThePage(why) if resetting(decoder) => {
-            Err(anyhow::anyhow!("browser storage is being reset ({why})"))
+            Err(anyhow::anyhow!("a reset stopped the decode ({why})"))
         }
         Decode::OnThePage(why) => {
             let why = format!("browser storage failed ({why})");
@@ -948,7 +951,7 @@ async fn decode_session(
             Decode::OnThePage(format!("the decode worker replied {}", other.kind()))
         }
         Ended::Stopped(reason) if resetting(decoder) => {
-            Decode::Reset(format!("browser storage is being reset ({reason})"))
+            Decode::Reset(format!("a reset stopped the decode ({reason})"))
         }
         Ended::Stopped(reason) => Decode::OnThePage(format!("the decode worker stopped: {reason}")),
     }
@@ -1015,7 +1018,7 @@ async fn restore_stored(
                     return Some(Err(anyhow::anyhow!(text)));
                 }
                 Decode::OnThePage(_) if resetting(decoder) => {
-                    return Some(Err(anyhow::anyhow!("browser storage is being reset")));
+                    return Some(Err(anyhow::anyhow!("a reset stopped the decode")));
                 }
                 Decode::OnThePage(why) => {
                     log::warn!("decoder: browser storage failed: {why}");
@@ -1667,6 +1670,7 @@ impl StemApp {
                 stems,
                 mix_overview,
                 kept,
+                not_kept: note,
             });
             self.status = kept_status;
             return;
@@ -3462,6 +3466,7 @@ impl StemApp {
                                 with_original_files(&song, held.stems, mix);
                             song.mix_overview = held.mix_overview;
                             song_notes.extend(original_note);
+                            song_notes.extend(held.not_kept);
                             song
                         }
                         None => song,
@@ -3476,8 +3481,8 @@ impl StemApp {
                     // so an e2e check that reloads at it finds the song.
                     if let Some(id) = self.session.clone() {
                         wasm_bindgen_futures::spawn_local(async move {
-                            store::make_current(&id).await;
-                            if new_session {
+                            let current = store::make_current(&id).await;
+                            if new_session && current {
                                 log::info!("song kept in browser storage as session {id}");
                             }
                         });
@@ -3499,8 +3504,8 @@ impl StemApp {
             && self.opening.as_ref().is_some_and(|(t, _)| *t == token)
         {
             self.opening = None;
-            // Held stems this open did not show (it failed) are kept in
-            // storage all the same.
+            // Held stems that this open did not show (it failed): say
+            // whether storage keeps them.
             if let Some(held) = self.stems_for_opening.take() {
                 self.status = held.kept;
             }
@@ -6000,11 +6005,9 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert_eq!(during_run, (1, first), "one request, and the job stays");
     }
 
-    /// Finding 3-9 of review round 3: stems that are not kept, for a
-    /// session that is being opened, keep the "not kept" text for a failed
-    /// open.  Here `meta` cannot be written, so no file moves.
-    #[wasm_bindgen_test]
-    async fn stems_not_kept_for_a_song_being_opened_say_so() {
+    /// A shown song, while the open of its session `id` holds stems that
+    /// storage does not keep: `meta` cannot be written, so no file moves.
+    async fn app_holding_stems_not_kept() -> (StemApp, String) {
         let (mut app, _posts, id) = app_with_a_stored_song().await;
         plant_parts(&id, &NAMES).await;
         press_separate(&mut app).await;
@@ -6023,6 +6026,15 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         deliver_stored_and_done(&mut app);
         settle(&mut app).await;
         allow_writes();
+        (app, id)
+    }
+
+    /// Finding 3-9 of review round 3: stems that are not kept, for a
+    /// session that is being opened, keep the "not kept" text for a failed
+    /// open.
+    #[wasm_bindgen_test]
+    async fn stems_not_kept_for_a_song_being_opened_say_so() {
+        let (app, id) = app_holding_stems_not_kept().await;
         let held = app
             .stems_for_opening
             .as_ref()
@@ -6034,6 +6046,41 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             text.starts_with("Stems not kept in browser storage"),
             "{text}"
         );
+    }
+
+    /// Finding 4-2 of review round 4 of M3: an open of the session that
+    /// shows the held stems also says that storage does not keep them.
+    #[wasm_bindgen_test]
+    async fn an_open_that_shows_stems_not_kept_says_so() {
+        let (mut app, id) = app_holding_stems_not_kept().await;
+        let opened = Opened::in_memory(
+            Song {
+                sample_rate: 44_100,
+                frames: FRAMES,
+                stems: vec![Stem {
+                    name: "acme".into(),
+                    left: tone(FRAMES).into(),
+                    right: tone(FRAMES).into(),
+                }],
+            },
+            Some(id.clone()),
+            Some("acme".into()),
+        );
+        {
+            let mut pending = app.pending.borrow_mut();
+            pending.song = Some((app.opens.get(), Ok(opened)));
+            pending.open_done = Some(1);
+        }
+        app.apply_inbox(&egui::Context::default());
+        let lanes = app.song.as_ref().map(|s| s.lanes.len());
+        let held = app.stems_for_opening.is_some();
+        let status = app.status.clone();
+        // The open makes the session current: let that write end first.
+        sleep(100).await;
+        finish(app, &id).await;
+        assert_eq!(lanes, Some(7), "the source and the six held stems");
+        assert!(!held);
+        assert!(status.contains("not kept"), "{status}");
     }
 
     /// Ends the test's worker and session.
@@ -6391,6 +6438,24 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             status.contains("0:02 long") && status.contains("up to 0:01"),
             "the length and the limit: {status}"
         );
+    }
+
+    /// Finding 4-1 of review round 4 of M3: a long song with no session
+    /// tells the user to open the file again, not to free space.
+    #[wasm_bindgen_test]
+    async fn a_long_song_with_no_session_says_open_the_file_again() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        app.memory_limit = ONE_SECOND;
+        app.session = None;
+        press_separate(&mut app).await;
+        let posted = posts.length();
+        let running = app.separating.is_some();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(posted, 0, "nothing posted");
+        assert!(!running);
+        assert!(status.contains("open the file again"), "{status}");
+        assert!(!status.contains("Free space"), "{status}");
     }
 
     #[wasm_bindgen_test]

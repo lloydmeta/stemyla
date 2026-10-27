@@ -426,7 +426,7 @@ async fn a_derived_source_stays_out_of_the_mix() {
 /// A session of the song on screen, made current, as a reload restores it.
 async fn a_current_session() -> String {
     let before = saved(&vec![wav_file("acme.wav", 100, 3)]).await;
-    store::make_current(&before).await;
+    assert!(store::make_current(&before).await, "made current");
     before
 }
 
@@ -787,6 +787,35 @@ async fn the_kept_line_comes_once_the_session_is_current() {
     }
 }
 
+/// Finding 4-2 of review round 4 of M5: when `sessions/current` cannot be
+/// written, the page does not log that the song is kept (D12).
+#[wasm_bindgen_test]
+async fn no_kept_line_when_the_session_cannot_be_made_current() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    start_log();
+    let client = fake.client.clone();
+    let chosen = vec![wav_file("lloyd.wav", 1_000, 0)];
+    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let req = fake.request(0).await;
+    let samples = planted(&req, 1_000, &[false]);
+    plant_parts(&req, 1_000, &samples, true).await;
+    fake.reply(DecodeReply::Decoded {
+        frames: 1_000,
+        new_mix: true,
+        channels: vec![2],
+    });
+    let opened = output(&opened).await.expect("opened");
+    dt_refuse_writes();
+    show_as_newest(opened).await;
+    dt_allow_writes();
+    let lines = logged("song kept in browser storage");
+    let warnings = logged("could not mark session");
+    store::test_wipe().await;
+    assert_eq!(warnings.len(), 1, "the write failed");
+    assert_eq!(lines, [], "no kept line");
+}
+
 /// D9, finding 3-3 of review round 3: a reset during an open or a restore
 /// ends it with an error.  The page reads no file and decodes nothing on
 /// its main thread while browser storage is reset.
@@ -828,6 +857,128 @@ async fn a_reset_ends_an_open_and_a_restore_with_no_page_decode() {
     );
     assert_eq!((open_reads, restore_reads), (0, 0), "no file is read");
     assert_eq!(page_lines, [], "no decode on the page");
+}
+
+/// The error of `opened`, the files read and the "decoding on the page"
+/// lines since `start`, then storage opens again for the other tests.
+async fn reset_outcome<T>(opened: anyhow::Result<T>) -> (String, u32, usize) {
+    let reads = dt_stop_read_spy();
+    store::test_reopen();
+    let page_lines = logged("decoder: decoding on the page").len();
+    store::test_wipe().await;
+    let error = opened.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    (error, reads, page_lines)
+}
+
+/// Finding 4-1 of review round 4 of M5: a reset that closes storage
+/// before the save ends the open with an error, with no page decode.
+#[wasm_bindgen_test]
+async fn a_reset_during_the_save_ends_the_open_with_no_page_decode() {
+    store::test_wipe().await;
+    start_log();
+    let fake = Fake::new();
+    let chosen = vec![wav_file("lloyd.wav", 100, 0)];
+    store::close().await;
+    dt_start_read_spy();
+    let opened = open_chosen_now(&chosen, &fake.client).await;
+    let (error, reads, page_lines) = reset_outcome(opened).await;
+    assert!(error.starts_with("a reset stopped the open"), "{error}");
+    assert_eq!((reads, page_lines), (0, 0), "no file read, no page decode");
+}
+
+/// Finding 4-1 of review round 4 of M5: during a reset, a session that the
+/// open cannot read ends the open with an error, with no page decode.
+#[wasm_bindgen_test]
+async fn a_session_not_read_during_a_reset_ends_the_open_with_no_page_decode() {
+    store::test_wipe().await;
+    start_log();
+    let fake = Fake::new();
+    fake.client.stop();
+    let chosen = vec![wav_file("lloyd.wav", 100, 0)];
+    dt_start_read_spy();
+    let opened = open_saved(&chosen, "1792640000001", None, 0.0, &fake.client).await;
+    let (error, reads, page_lines) = reset_outcome(opened).await;
+    assert!(error.starts_with("a reset stopped the open"), "{error}");
+    assert_eq!((reads, page_lines), (0, 0), "no file read, no page decode");
+}
+
+/// Finding 4-1 of review round 4 of M5: a decode that a reset stops is a
+/// reset, not a cause to decode on the page.
+#[wasm_bindgen_test]
+async fn a_decode_that_a_reset_stops_is_a_reset() {
+    store::test_wipe().await;
+    let id = saved(&vec![wav_file("acme.wav", 100, 0)]).await;
+    let sources = match store::open_stored(&id).await {
+        Some(Ok(store::StoredSong::NeedsDecode { sources, .. })) => sources,
+        _ => panic!("a session that needs a decode"),
+    };
+    let fake = Fake::new();
+    let client = fake.client.clone();
+    let ended = background(async move { decode_session(&id, &sources, None, &client).await });
+    fake.request(0).await;
+    fake.client.stop();
+    let ended = output(&ended).await;
+    store::test_wipe().await;
+    match ended {
+        Decode::Reset(text) => assert!(text.starts_with("a reset stopped the decode"), "{text}"),
+        Decode::OnThePage(text) => panic!("on the page: {text}"),
+        _ => panic!("not a reset"),
+    }
+}
+
+/// Session `id`, saved from "acme.wav", with a `decoded` line whose files
+/// are not there: its decode must first remove that line (D2 of M5).
+async fn session_with_a_stale_decoded_line() -> (String, Chosen) {
+    let chosen = vec![wav_file("acme.wav", 100, 0)];
+    let id = saved(&chosen).await;
+    let mut meta = meta_of(&id).await.expect("a meta");
+    meta.decoded = Some(store_meta::Decoded {
+        frames: 100,
+        format: store_meta::MIX_FORMAT.into(),
+        channels: vec![(0, 2)],
+    });
+    store::test_write(&format!("sessions/{id}/meta"), meta.to_text().as_bytes())
+        .await
+        .expect("planted");
+    (id, chosen)
+}
+
+/// Finding 4-1 of review round 4 of M5: during a reset, a cause other
+/// than a stopped decode (here `clear_decoded` fails, as storage is
+/// closed while the decode client is open) ends an open and a restore
+/// with an error, with no page decode.
+#[wasm_bindgen_test]
+async fn another_page_decode_cause_during_a_reset_ends_with_an_error() {
+    store::test_wipe().await;
+    start_log();
+    let fake = Fake::new();
+    let (id, chosen) = session_with_a_stale_decoded_line().await;
+    store::close().await;
+    dt_start_read_spy();
+    let opened = open_saved(&chosen, &id, None, 0.0, &fake.client).await;
+    let (open_error, open_reads, open_lines) = reset_outcome(opened).await;
+
+    start_log();
+    let (id, _) = session_with_a_stale_decoded_line().await;
+    store::close().await;
+    dt_start_read_spy();
+    let restored = restore_stored(&id, &fake.client).await.expect("a session");
+    let (restore_error, restore_reads, restore_lines) = reset_outcome(restored).await;
+    let posted = fake.posts.length();
+    assert!(
+        open_error.starts_with("a reset stopped the decode"),
+        "{open_error}"
+    );
+    assert!(
+        restore_error.starts_with("a reset stopped the decode"),
+        "{restore_error}"
+    );
+    assert_eq!(
+        (open_reads, open_lines, restore_reads, restore_lines),
+        (0, 0, 0, 0),
+        "no file read, no page decode"
+    );
+    assert_eq!(posted, 0, "no decode is posted");
 }
 
 /// D8: after a decoded song of one source, Separate posts the stored mix

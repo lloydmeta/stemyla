@@ -1721,8 +1721,9 @@ pub async fn usable_mix_frames(id: &str, meta: &Meta) -> Option<usize> {
     (file_size(&mix_path(id)).await? == 8.0 * frames as f64).then_some(frames)
 }
 
-/// Makes session `id` the one that a reload restores.
-pub async fn make_current(id: &str) {
+/// Makes session `id` the one that a reload restores.  It returns whether
+/// it wrote `sessions/current` (finding 4-2 of review round 4 of M5).
+pub async fn make_current(id: &str) -> bool {
     let written = write(&format!("{ROOT}/current"), id.as_bytes()).await;
     if written.is_err() {
         log::warn!("could not mark session {id} as current");
@@ -1731,6 +1732,7 @@ pub async fn make_current(id: &str) {
     if written.is_ok() {
         MADE_CURRENT.with_borrow_mut(|made| *made = Some(id.to_string()));
     }
+    written.is_ok()
 }
 
 #[cfg(test)]

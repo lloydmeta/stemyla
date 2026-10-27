@@ -422,7 +422,7 @@ M3 of that plan (2026-10-25) removed the page's song-length stems during a stora
 
 The page never writes `mix.f32` while a separation runs (D6 of M4).  The worker checks this too.  After the last chunk, it compares the file's size and `lastModified` with their values at the open.  Chrome also refuses any read after a write.  Safari reads the bytes on disk now, and gives `lastModified` in whole seconds (`references/browser-quirks.md`).  So in Safari, a write of the same size in the same second as the open is not seen.  The stems then come from mixed samples.
 
-Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 3-3.  `a_mix_file_changed_during_the_separation_ends_with_unstored` and `the_end_check_sees_a_mix_file_written_again_at_its_size` cover the cases that the check sees.
+Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 3-3.  `the_end_check_sees_a_mix_file_written_again_at_its_size` tests the check alone.  `a_mix_file_written_again_after_the_last_read_ends_with_unstored` reaches the check through a separation, in Chrome too (finding 4-1 of review round 4 of M4).  The write comes over a second after the open, so Safari can also see it.  A write that makes the file shorter fails a read first (`a_mix_file_changed_during_the_separation_ends_with_unstored`).
 
 * Fix: a hash of the mix, kept in `meta` and checked by the worker as it reads, or a lock on the file during the separation.  Only a fault in the page can write the file at that time.
 

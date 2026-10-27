@@ -537,6 +537,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         stems: memory_lanes(held),
         mix_overview: Some(held_mix.clone()),
         kept: "kept".into(),
+        not_kept: None,
     });
     app.pending.borrow_mut().song = Some((app.opens.get(), Ok(again)));
     app.apply_inbox(&egui::Context::default());

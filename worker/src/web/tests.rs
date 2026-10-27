@@ -1497,8 +1497,9 @@ async fn a_failed_open_removes_the_files_it_made() {
 
 /// Finding 1-12: a second writer of the same files fails to open, and
 /// leaves the first writer's file as it is.  Chrome gives the second open
-/// `NoModificationAllowedError` and Safari `InvalidStateError`, so any
-/// storage error passes.  In both, the lock also refuses the removal, so
+/// `NoModificationAllowedError` and Safari `InvalidStateError`, so only
+/// these two pass (finding 4-4 of review round 4 of M3).  In both, the
+/// lock also refuses the removal, so
 /// this test does not tell the `ours` rule apart (finding 2-1);
 /// `a_failed_open_keeps_a_file_that_it_did_not_make` does.  It checks
 /// that a held file stays.
@@ -1515,7 +1516,9 @@ async fn a_failed_open_leaves_a_file_that_another_writer_holds() {
     // (finding 3-3 of review round 3).
     first.abandon().await;
     assert!(
-        matches!(second, Err(StemError::Storage(_))),
+        matches!(&second, Err(StemError::Storage(text))
+            if text.starts_with("NoModificationAllowedError")
+                || text.starts_with("InvalidStateError")),
         "the file is locked: {:?}",
         second.err()
     );
@@ -2217,7 +2220,7 @@ async fn a_failed_mix_read_ends_with_unstored() {
 /// or went after the open does not give the old samples.  Chrome refuses
 /// the read (NotReadableError).  Safari reads the bytes on disk now, at the
 /// old size (`docs/references/browser-quirks.md`).  So the worker also
-/// checks the file at the end (`a_mix_file_changed_during_the_separation_ends_with_unstored`).
+/// checks the file at the end (`a_mix_file_written_again_after_the_last_read_ends_with_unstored`).
 #[wasm_bindgen_test]
 async fn a_mix_file_changed_after_the_open_gives_no_old_samples() {
     let old = fake_mix();
@@ -2245,49 +2248,101 @@ async fn a_mix_file_changed_after_the_open_gives_no_old_samples() {
     }
 }
 
-/// Finding 3-3 of review round 3 of M4: a mix file written again during
-/// the separation ends it with `unstored` (D6), in Chrome and in Safari.
-/// The second case waits over a second, so that Safari's `lastModified`,
-/// in whole seconds, changes.
+/// Finding 3-3 of review round 3 of M4: a mix file written again shorter
+/// during the separation ends it with `unstored` (D6), in Chrome and in
+/// Safari.  A read fails, so this case does not reach the end check;
+/// `a_mix_file_written_again_after_the_last_read_ends_with_unstored` does.
 #[wasm_bindgen_test]
 async fn a_mix_file_changed_during_the_separation_ends_with_unstored() {
-    let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
-    for (change, wait_ms, bytes) in [
-        ("written again shorter", 0, vec![0; 16]),
-        ("written again at its size", 1100, mix_file(&other)),
-    ] {
-        fresh().await;
-        plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
-        let source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
-            .await
-            .expect("opened");
-        sleep(wait_ms).await;
-        plant_at(MIX_PATH, &bytes).await;
-        let d = Demixer::new(source, FAKE_CHUNK, 2, STEMS.len());
-        let mut net = FakeNetwork { fail_at: None };
-        let ended = separate_song(&mut net, d, Some(SESSION), now_s()).await;
-        reply_to(kind::SEPARATE, ended);
-        let types = reply_types();
-        assert_eq!(
-            types.last().map(String::as_str),
-            Some("unstored"),
-            "{change}: {types:?}"
-        );
-        assert!(
-            !types.iter().any(|t| t == "done" || t == "error"),
-            "{change}: {types:?}"
-        );
-        assert_eq!(
-            types.iter().filter(|t| *t == "unstored").count(),
-            1,
-            "{change}"
-        );
-        assert_eq!(
-            names_in(&format!("{SESSION}/stems")).await.as_deref(),
-            Some(""),
-            "{change}: no stem file remains"
-        );
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+    let source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
+        .await
+        .expect("opened");
+    plant_at(MIX_PATH, &[0; 16]).await;
+    let d = Demixer::new(source, FAKE_CHUNK, 2, STEMS.len());
+    let mut net = FakeNetwork { fail_at: None };
+    let ended = separate_song(&mut net, d, Some(SESSION), now_s()).await;
+    reply_to(kind::SEPARATE, ended);
+    assert_unstored_alone().await;
+}
+
+/// Asserts that the separation's replies end with one `unstored`, with
+/// no `done` and no `error`, and that no stem file remains.
+async fn assert_unstored_alone() {
+    let types = reply_types();
+    assert_eq!(
+        types.last().map(String::as_str),
+        Some("unstored"),
+        "{types:?}"
+    );
+    assert!(
+        !types.iter().any(|t| t == "done" || t == "error"),
+        "{types:?}"
+    );
+    assert_eq!(types.iter().filter(|t| *t == "unstored").count(), 1);
+    assert_eq!(
+        names_in(&format!("{SESSION}/stems")).await.as_deref(),
+        Some(""),
+        "no stem file remains"
+    );
+}
+
+/// The fake network, which writes the mix file again at its size during
+/// chunk `last`, after the separation's last read of it.
+struct RewritingNetwork {
+    last: usize,
+    calls: usize,
+}
+
+impl Network for RewritingNetwork {
+    async fn stems(&mut self, _index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+        self.calls += 1;
+        if self.calls == self.last {
+            // Over a second, so that Safari's `lastModified`, in whole
+            // seconds, changes.
+            sleep(1100).await;
+            let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
+            plant_at(MIX_PATH, &mix_file(&other)).await;
+        }
+        Ok(fake_stems_of(x))
     }
+
+    fn so_far(&self) -> String {
+        "the rewriting network".into()
+    }
+
+    fn finish(&self) {}
+}
+
+/// Finding 4-1 of review round 4 of M4: the check after the last chunk
+/// (D6) sees a mix file written again at its size after the last read.
+/// The separation then ends with `unstored`, in Chrome and in Safari.
+#[wasm_bindgen_test]
+async fn a_mix_file_written_again_after_the_last_read_ends_with_unstored() {
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&fake_mix())).await;
+    let source = StoredMix::open(MIX_PATH, FAKE_FRAMES)
+        .await
+        .expect("opened");
+    let d = Demixer::new(source, FAKE_CHUNK, 2, STEMS.len());
+    let mut net = RewritingNetwork {
+        last: d.num_chunks(),
+        calls: 0,
+    };
+    let ended = separate_song(&mut net, d, Some(SESSION), now_s()).await;
+    reply_to(kind::SEPARATE, ended);
+    assert_eq!(net.calls, net.last, "every chunk ran");
+    let unstored = sent("unstored");
+    let text = unstored
+        .first()
+        .map(|reply| field(reply, "text").as_string().unwrap_or_default())
+        .unwrap_or_default();
+    assert!(
+        text.starts_with("the mix file changed during the separation"),
+        "the end check: {text}"
+    );
+    assert_unstored_alone().await;
 }
 
 /// Finding 3-3: the check after the last chunk sees a mix file written

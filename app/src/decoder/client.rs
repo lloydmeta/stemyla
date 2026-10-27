@@ -97,7 +97,7 @@ impl DecodeClient {
     ) -> Pin<Box<dyn Future<Output = Ended>>> {
         if self.0.borrow().closed || crate::store::is_closed() {
             return Box::pin(std::future::ready(Ended::Stopped(
-                "browser storage is being reset".into(),
+                "a reset stopped the decode worker".into(),
             )));
         }
         let worker = match self.worker() {
