@@ -338,6 +338,8 @@ The parent's M7 section, item by item:
 * [x] 2026-10-28: review round 8 (at `893a98c`): 4 reviewers and 2 validators, 528,102 tokens, 42.8 wall minutes.  No blocker and no significant should-fix: 1 pre-existing should-fix (8-1, a second page attempt at stem overviews on a double failure) and 5 nits, all fixed in `8030869`; the missed mutant is refuted (wasm32 only).  By the stop rule this is the last round.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.
 * [x] 2026-10-28: M7 done.  The review log of rounds 1 to 8 is `docs/reviews/iphone-crashes-2026-10-25-m7.md`, and the run folder is removed.  Eight rounds confirmed 12, 7 (6 and the mutants), 3, 3, 3, 2, 2 and 0 significant findings; each was fixed with a test that failed first or a mutation that it kills.  The acceptance checks on the final code are the Progress line of commit `1604966`.
 
+* [x] 2026-10-28: intent review fixes (docs).  TD-58 now covers every open that decodes on the page (`open_on_the_page`, `on_the_page_of`), with its triggers, and names the catch-up team after M7 for the fix; MEM-1 and MEM-4 already list it under Gaps.  TD-54 says that the 100 s limit holds for a separation only, gives what a save keeps until M8, and says that since M7 publishing no longer has the read-back risk.
+
 ## Surprises and discoveries
 
 None yet.
