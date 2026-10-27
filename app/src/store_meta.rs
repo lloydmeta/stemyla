@@ -22,6 +22,44 @@ pub struct Meta {
     /// The `decoded` line: the session files of the decode worker are
     /// complete (D2 of `plans/active/stream-from-storage-m5.md`).
     pub decoded: Option<Decoded>,
+    /// The `stems-generation` line: one more for each change of the `stem`
+    /// lines, so two separations, whose stems have the same names, differ
+    /// (D7 of `plans/active/stream-from-storage-m7.md`).  0 when there is
+    /// no line.
+    pub stems_generation: u64,
+    /// The `stem-overviews` line: the overview files of the stems are
+    /// complete, for these frames and this generation of the stems.
+    pub stem_overviews: Option<StemOverviews>,
+}
+
+/// The `stem-overviews` line of `meta` (D7 of the M7 plan).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StemOverviews {
+    pub frames: usize,
+    pub format: String,
+    pub generation: u64,
+}
+
+/// The overview file of the stem of the `k`th `stem` line, from the
+/// session folder.
+pub fn stem_overview_file(k: usize) -> String {
+    format!("overviews/stems/{k}.f32")
+}
+
+/// The overview file of the mix of the stems, from the session folder.
+pub const STEM_MIX_OVERVIEW: &str = "overviews/stems/mix.f32";
+
+/// The part file that the decode worker writes for `file`, an overview of
+/// the stems of `generation`.  Two requests for one session never share
+/// a part file.
+pub fn stem_overview_part(file: &str, generation: u64) -> String {
+    format!("{file}.{generation}.decode.part")
+}
+
+/// The bytes of an overview file of a lane of `frames` frames: 8 for each
+/// column (D4 of the M7 plan).
+pub fn overview_bytes(frames: usize) -> u64 {
+    8 * engine::overview::column_count(frames) as u64
 }
 
 /// The `decoded` line: the song's frames, the format of its session files
@@ -221,7 +259,34 @@ impl Meta {
         if let Some(decoded) = &self.decoded {
             s += &decoded.to_line();
         }
+        if self.stems_generation > 0 {
+            s += &format!("stems-generation\t{}\n", self.stems_generation);
+        }
+        if let Some(o) = &self.stem_overviews {
+            s += &format!(
+                "stem-overviews\t{}\t{}\t{}\n",
+                o.frames,
+                clean(&o.format),
+                o.generation
+            );
+        }
         s
+    }
+
+    /// New stems: the generation goes up, and the stem overviews, which
+    /// were of the old stems, are no longer named (D7 of the M7 plan).
+    pub fn new_stems(&mut self) {
+        self.stems_generation += 1;
+        self.stem_overviews = None;
+    }
+
+    /// Whether the `stem-overviews` line names the stems of now, a song of
+    /// `frames` frames, and [`MIX_FORMAT`].  The files' sizes are checked
+    /// apart.
+    pub fn stem_overviews_for(&self, frames: usize) -> bool {
+        self.stem_overviews.as_ref().is_some_and(|o| {
+            o.frames == frames && o.format == MIX_FORMAT && o.generation == self.stems_generation
+        })
     }
 
     /// The frames of the mix file, if `meta` names one in [`MIX_FORMAT`].
@@ -247,6 +312,16 @@ impl Meta {
                 ["decoded", frames, format, channels] => {
                     m.decoded = Decoded::parse(frames, format, channels);
                 }
+                ["stems-generation", n] => m.stems_generation = n.parse().unwrap_or(0),
+                ["stem-overviews", frames, format, generation] => {
+                    m.stem_overviews = frames.parse().ok().zip(generation.parse().ok()).map(
+                        |(frames, generation)| StemOverviews {
+                            frames,
+                            format: format.to_string(),
+                            generation,
+                        },
+                    );
+                }
                 _ => {}
             }
         }
@@ -262,6 +337,54 @@ fn clean(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D7 of the M7 plan: the `stems-generation` and `stem-overviews` lines
+    /// read back, and the overviews are complete only for the stems of
+    /// now and the song's frames.
+    #[test]
+    fn stem_overviews_name_one_generation_of_the_stems() {
+        let mut m = Meta {
+            name: "lloyd".into(),
+            stems: vec!["bass".into(), "drums".into()],
+            ..Meta::default()
+        };
+        assert!(!m.stem_overviews_for(100), "no line");
+        m.new_stems();
+        assert_eq!((m.stems_generation, m.stem_overviews.clone()), (1, None));
+        m.stem_overviews = Some(StemOverviews {
+            frames: 100,
+            format: MIX_FORMAT.into(),
+            generation: 1,
+        });
+        let back = Meta::parse(&m.to_text());
+        assert_eq!(back, m, "the lines read back");
+        assert!(back.stem_overviews_for(100));
+        assert!(!back.stem_overviews_for(99), "other frames");
+        let mut newer = back.clone();
+        newer.new_stems();
+        assert_eq!(
+            (newer.stems_generation, newer.stem_overviews.clone()),
+            (2, None)
+        );
+        let mut stale = newer.clone();
+        stale.stem_overviews = back.stem_overviews.clone();
+        assert!(
+            !stale.stem_overviews_for(100),
+            "the overviews of older stems"
+        );
+        let mut other = back.clone();
+        other.stem_overviews.as_mut().unwrap().format = "f32le-2".into();
+        assert!(!other.stem_overviews_for(100), "another format");
+        // A `meta` of an older build has neither line.
+        let old = Meta::parse("name\tacme\nrate\t44100\nstem\tbass\n");
+        assert_eq!((old.stems_generation, old.stem_overviews), (0, None));
+        assert_eq!(stem_overview_file(3), "overviews/stems/3.f32");
+        assert_eq!(
+            stem_overview_part(STEM_MIX_OVERVIEW, 2),
+            "overviews/stems/mix.f32.2.decode.part"
+        );
+        assert_eq!(overview_bytes(4_097), 8 * 2_049);
+    }
 
     /// A session of `sources` sources and `stems` stem lines.
     fn session_of(sources: usize, stems: usize) -> Meta {
@@ -315,6 +438,7 @@ mod tests {
             stems: vec!["guitar".into(), "classic drums".into()],
             mix: None,
             decoded: None,
+            ..Meta::default()
         };
         let back = Meta::parse(&m.to_text());
         assert_eq!(back.name, "song name");

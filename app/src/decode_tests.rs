@@ -1012,3 +1012,277 @@ async fn unstored_keeps_a_mix_that_a_separation_uses() {
     assert_eq!(line.map(|(f, _)| f), Some(1_500), "the mix line stays");
     assert_eq!(file.map(|f| f.len()), Some(8 * 1_500), "mix.f32 stays");
 }
+
+/// Stem `k`'s samples: a tone already on the 16-bit grid, so a stem WAV
+/// holds it exactly.
+fn stem_side(frames: usize, k: usize) -> Vec<f32> {
+    tone(frames, k)
+        .iter()
+        .map(|v| (v * 32_768.0).round() / 32_768.0)
+        .collect()
+}
+
+/// A session with three stems of `frames` frames, saved as WAVs and named
+/// in `meta`: its id, the stem names and the sides of each stem.
+async fn session_with_stems(frames: usize) -> (String, Vec<String>, Vec<(Vec<f32>, Vec<f32>)>) {
+    store::test_wipe().await;
+    let (name, file) = wav_file("acme.wav", frames, 0);
+    let id = store::save_sources(&[(name, file.into())], 44_100)
+        .await
+        .expect("a session");
+    let names: Vec<String> = ["bass", "drums", "vocals"].map(String::from).into();
+    let sides: Vec<(Vec<f32>, Vec<f32>)> = (0..names.len())
+        .map(|k| (stem_side(frames, k), stem_side(frames, k + 4)))
+        .collect();
+    let stems: Vec<Stem> = names
+        .iter()
+        .zip(&sides)
+        .map(|(name, (l, r))| Stem {
+            name: name.clone(),
+            left: l.clone().into(),
+            right: r.clone().into(),
+        })
+        .collect();
+    store::save_stems(&id, 44_100, &stems).await.expect("saved");
+    (id, names, sides)
+}
+
+/// The overview file bytes of two sides.
+fn overview_file_of(left: &[f32], right: &[f32]) -> Vec<u8> {
+    let (columns, _) = engine::overview::lane_columns(left, right);
+    columns
+        .iter()
+        .flat_map(|(lo, hi)| [lo.to_le_bytes(), hi.to_le_bytes()])
+        .flatten()
+        .collect()
+}
+
+/// The overviews of `sides` and of their mix at volume 1, as
+/// `lane_columns` makes them.
+fn want_overviews(sides: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<u8>> {
+    let ones = vec![1.0; sides.len()];
+    let lefts: Vec<&[f32]> = sides.iter().map(|(l, _)| l.as_slice()).collect();
+    let rights: Vec<&[f32]> = sides.iter().map(|(_, r)| r.as_slice()).collect();
+    let (ml, mr) = (dsp::mix(&lefts, &ones), dsp::mix(&rights, &ones));
+    sides
+        .iter()
+        .map(|(l, r)| overview_file_of(l, r))
+        .chain([overview_file_of(&ml, &mr)])
+        .collect()
+}
+
+/// The bytes of an overview, as its file holds it.
+fn bytes_of(overview: &lanes::Overview) -> Vec<u8> {
+    overview
+        .columns
+        .iter()
+        .flat_map(|(lo, hi)| [lo.to_le_bytes(), hi.to_le_bytes()])
+        .flatten()
+        .collect()
+}
+
+fn set_bytes(set: &store::StemOverviewSet) -> Vec<Vec<u8>> {
+    set.lanes
+        .iter()
+        .chain([&set.mix])
+        .map(|o| bytes_of(o))
+        .collect()
+}
+
+impl Fake {
+    /// The `n`th request posted, an `overviews` request.
+    async fn overviews(&self, n: u32) -> stem_protocol::decode::OverviewsRequest {
+        for _ in 0..250 {
+            if self.posts.length() > n {
+                break;
+            }
+            dt_sleep(20).await;
+        }
+        assert!(self.posts.length() > n, "no request {n} was posted");
+        match stem_protocol::decode::WorkerRequest::from_js(&self.posts.get(n)) {
+            Ok(stem_protocol::decode::WorkerRequest::Overviews(req)) => req,
+            other => panic!("not an overviews request: {other:?}"),
+        }
+    }
+}
+
+/// Plants the part files of `req`, as the worker writes them.
+async fn plant_overview_parts(req: &stem_protocol::decode::OverviewsRequest, files: &[Vec<u8>]) {
+    let paths = req
+        .lanes
+        .iter()
+        .map(|l| &l.overview)
+        .chain(req.mix.as_ref());
+    for (path, bytes) in paths.zip(files) {
+        store::test_write(&format!("{}/{path}", req.session), bytes)
+            .await
+            .expect("planted");
+    }
+}
+
+/// D7 of the M7 plan: the first call asks the decode worker for the
+/// overviews of the stems, moves them into place and writes the
+/// `stem-overviews` line (its only write: MEM-5); a second call reads them
+/// and posts no request.
+#[wasm_bindgen_test]
+async fn a_session_with_stems_and_no_overviews_gets_them_once() {
+    let frames = 50_000;
+    let (id, names, sides) = session_with_stems(frames).await;
+    let want = want_overviews(&sides);
+    let fake = Fake::new();
+    let client = fake.client.clone();
+    let first = {
+        let id = id.clone();
+        background(async move { store::stem_overviews(&id, frames, &client).await })
+    };
+    let req = fake.overviews(0).await;
+    plant_overview_parts(&req, &want).await;
+    dt_count_writes();
+    fake.reply(DecodeReply::OverviewsMade);
+    let first = output(&first).await.expect("the overviews");
+    let writes = dt_writes_counted();
+    let second = store::stem_overviews(&id, frames, &fake.client)
+        .await
+        .expect("the overviews");
+    let posts = fake.posts.length();
+    let meta = meta_of(&id).await.expect("a meta");
+    let parts = store::test_read(&format!("sessions/{id}/{}", req.lanes[0].overview)).await;
+    store::test_wipe().await;
+    assert_eq!(req.lanes.len(), names.len());
+    assert_eq!(req.lanes[1].lane.path, "stems/drums.wav");
+    assert_eq!(req.lanes[1].overview, "overviews/stems/1.f32.1.decode.part");
+    assert_eq!(
+        req.mix.as_deref(),
+        Some("overviews/stems/mix.f32.1.decode.part")
+    );
+    assert!(
+        set_bytes(&first) == want,
+        "the overviews of the stems and their mix"
+    );
+    assert!(set_bytes(&second) == want);
+    assert_eq!(posts, 1, "a second call posts no request");
+    assert_eq!(writes, 1, "the page writes only meta");
+    assert!(meta.stem_overviews_for(frames), "{meta:?}");
+    assert_eq!(parts, None, "the part files moved");
+}
+
+/// D7: new stems, from `keep_stored_stems` or `save_stems`, raise the
+/// stems generation and remove the `stem-overviews` line.
+#[wasm_bindgen_test]
+async fn new_stems_remove_the_stem_overviews_line() {
+    let frames = 20_000;
+    let (id, names, sides) = session_with_stems(frames).await;
+    let fake = Fake::new();
+    let client = fake.client.clone();
+    let made = {
+        let id = id.clone();
+        background(async move { store::stem_overviews(&id, frames, &client).await })
+    };
+    let req = fake.overviews(0).await;
+    plant_overview_parts(&req, &want_overviews(&sides)).await;
+    fake.reply(DecodeReply::OverviewsMade);
+    output(&made).await.expect("the overviews");
+    let before = meta_of(&id).await.expect("a meta");
+    for name in &names {
+        let wav = store::test_read(&format!("sessions/{id}/stems/{name}.wav"))
+            .await
+            .expect("a stem");
+        store::test_write(&format!("sessions/{id}/stems/{name}.wav.part"), &wav)
+            .await
+            .expect("planted");
+    }
+    store::keep_stored_stems(&id, &names)
+        .await
+        .kept
+        .expect("kept");
+    let kept = meta_of(&id).await.expect("a meta");
+    let stems: Vec<Stem> = names
+        .iter()
+        .zip(&sides)
+        .map(|(name, (l, r))| Stem {
+            name: name.clone(),
+            left: l.clone().into(),
+            right: r.clone().into(),
+        })
+        .collect();
+    store::save_stems(&id, 44_100, &stems).await.expect("saved");
+    let saved = meta_of(&id).await.expect("a meta");
+    store::test_wipe().await;
+    assert!(before.stem_overviews_for(frames), "{before:?}");
+    assert_eq!(
+        (kept.stems_generation, kept.stem_overviews),
+        (before.stems_generation + 1, None),
+        "keep_stored_stems"
+    );
+    assert_eq!(
+        (saved.stems_generation, saved.stem_overviews),
+        (kept.stems_generation + 1, None),
+        "save_stems"
+    );
+}
+
+/// D7: an `overviews` request starts, new stems move in, then
+/// `overviews-made` arrives.  The page writes no `stem-overviews` line,
+/// and removes the part files.
+#[wasm_bindgen_test]
+async fn overviews_of_older_stems_are_not_kept() {
+    let frames = 20_000;
+    let (id, names, sides) = session_with_stems(frames).await;
+    let fake = Fake::new();
+    let client = fake.client.clone();
+    let made = {
+        let id = id.clone();
+        background(async move { store::stem_overviews(&id, frames, &client).await })
+    };
+    let req = fake.overviews(0).await;
+    plant_overview_parts(&req, &want_overviews(&sides)).await;
+    for name in &names {
+        let wav = store::test_read(&format!("sessions/{id}/stems/{name}.wav"))
+            .await
+            .expect("a stem");
+        store::test_write(&format!("sessions/{id}/stems/{name}.wav.part"), &wav)
+            .await
+            .expect("planted");
+    }
+    store::keep_stored_stems(&id, &names)
+        .await
+        .kept
+        .expect("kept");
+    fake.reply(DecodeReply::OverviewsMade);
+    let got = output(&made).await;
+    let meta = meta_of(&id).await.expect("a meta");
+    let mut left = Vec::new();
+    for lane in req
+        .lanes
+        .iter()
+        .map(|l| &l.overview)
+        .chain(req.mix.as_ref())
+    {
+        left.extend(
+            store::test_read(&format!("sessions/{id}/{lane}"))
+                .await
+                .map(|_| lane.clone()),
+        );
+    }
+    let moved = store::test_read(&format!("sessions/{id}/overviews/stems/0.f32")).await;
+    store::test_wipe().await;
+    assert!(got.is_none(), "no overviews of older stems");
+    assert_eq!(meta.stem_overviews, None, "{meta:?}");
+    assert_eq!(left, Vec::<String>::new(), "the part files go");
+    assert_eq!(moved, None, "nothing moved into place");
+}
+
+/// D7: when the decode worker cannot start, the page makes the overviews
+/// through the lane reader, and does not save them.
+#[wasm_bindgen_test]
+async fn the_page_makes_the_overviews_when_the_worker_cannot() {
+    let frames = 50_000;
+    let (id, _, sides) = session_with_stems(frames).await;
+    let failing = decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let got = store::stem_overviews(&id, frames, &failing).await;
+    let meta = meta_of(&id).await.expect("a meta");
+    store::test_wipe().await;
+    let got = got.expect("the page made them");
+    assert!(set_bytes(&got) == want_overviews(&sides));
+    assert_eq!(meta.stem_overviews, None, "not saved");
+}

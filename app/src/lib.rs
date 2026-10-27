@@ -309,6 +309,8 @@ struct StoredSeparation {
     count: usize,
     /// Why `meta` does not name the stems, if it does not.
     not_kept: Option<String>,
+    /// The overviews of the stems and of their mix (D7 of the M7 plan).
+    overviews: Option<store::StemOverviewSet>,
     /// Protects the session until the stems are shown (D10 of M6).
     _guard: Option<store::OpenGuard>,
 }
@@ -812,8 +814,14 @@ async fn restore_stored(
     let song = if meta.stems.is_empty() {
         song
     } else {
+        // D7 of the M7 plan: the overviews of the stems, made once.
+        let overviews = store::stem_overviews(id, song.frames, decoder).await;
         match store::stems_of(id, &meta, song.frames).await {
-            Ok((stems, stem_files)) => with_original_files(&song, stems, stem_files, mix.clone()),
+            Ok((stems, stem_files)) => {
+                let mut song = with_original_files(&song, stems, stem_files, mix.clone());
+                song.mix_overview = overviews.map(|o| o.mix);
+                song
+            }
             Err(e) => return Some(Err(e)),
         }
     };
@@ -1364,7 +1372,7 @@ impl StemApp {
         let note =
             (!job.keeps_stems).then(|| "The stems are not kept in this browser.".to_string());
         let files = vec![None; stems.len()];
-        self.show_separated(job, (stems, files), None, secs, kept_status, note);
+        self.show_separated(job, (stems, files), (None, None), secs, kept_status, note);
     }
 
     /// Shows separated stems on the song they belong to, if it is shown.
@@ -1374,7 +1382,10 @@ impl StemApp {
         &mut self,
         job: SeparationJob,
         (stems, stem_files): (Vec<Stem>, LaneFiles),
-        mix: Option<store_meta::LaneFile>,
+        (mix, mix_overview): (
+            Option<store_meta::LaneFile>,
+            Option<std::rc::Rc<lanes::Overview>>,
+        ),
         secs: f64,
         kept_status: String,
         note: Option<String>,
@@ -1419,7 +1430,9 @@ impl StemApp {
             }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
-        let separated = with_original_files(&song, stems, stem_files, mix);
+        let mut separated = with_original_files(&song, stems, stem_files, mix);
+        // The stems' mix overview (D7 of the M7 plan).
+        separated.mix_overview = mix_overview;
         self.load_song(separated);
         if let (Some(h), Some(p)) = (head, &self.params) {
             p.request_seek(h);
@@ -1446,6 +1459,7 @@ impl StemApp {
             secs,
             count,
             not_kept,
+            overviews,
             _guard,
         } = stored;
         match stems {
@@ -1463,7 +1477,8 @@ impl StemApp {
                 let kept_status = not_kept
                     .clone()
                     .unwrap_or_else(|| kept_text(&job, stems.0.len(), secs));
-                self.show_separated(job, stems, mix, secs, kept_status, not_kept);
+                let mix_overview = overviews.map(|o| o.mix);
+                self.show_separated(job, stems, (mix, mix_overview), secs, kept_status, not_kept);
             }
         }
     }
@@ -2607,10 +2622,17 @@ impl StemApp {
         self.reading_stems = read;
         self.status = format!("Separated in {secs:.0} s; putting the stems in place…");
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
+        let decoder = self.decoder.clone();
         // D10 of M6: the read protects the session until the stems show.
         let guard = read.then(|| store::OpenGuard::new(&id));
         wasm_bindgen_futures::spawn_local(async move {
             let stored = store::keep_stored_stems(&id, &names).await;
+            // D7 of the M7 plan: the overviews of the new stems, before the
+            // stems show.
+            let overviews = match &stored.kept {
+                Ok(()) => store::stem_overviews(&id, len, &decoder).await,
+                Err(_) => None,
+            };
             let not_kept = stored
                 .kept
                 .err()
@@ -2652,6 +2674,7 @@ impl StemApp {
                 secs,
                 count: names.len(),
                 not_kept,
+                overviews,
                 _guard: guard,
             });
             ctx.request_repaint();
@@ -4745,6 +4768,91 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             .find(|(got, _)| got == id)
             .map(|(_, meta)| meta.stems)
             .unwrap_or_default()
+    }
+
+    /// D7 of the M7 plan: after a storage-path separation, the page asks
+    /// the decode worker for the overviews of the new stems, and shows the
+    /// stems only once they are in place, with the stems' mix overview.
+    #[wasm_bindgen_test]
+    async fn a_stored_separation_asks_for_stem_overviews_then_shows_them() {
+        use stem_protocol::decode::{DecodeReply, WorkerRequest};
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        let client = decoder::DecodeClient::new("./no-such-decode-worker.js");
+        let worker = client.worker().expect("a worker");
+        worker.set_onerror(None);
+        let requests = spy_on_post(&worker);
+        deliver(&worker, &DecodeReply::Alive.to_js().0);
+        app.decoder = client;
+        plant_parts(&id, &NAMES).await;
+        press_separate(&mut app).await;
+        deliver_stored_and_done(&mut app);
+        for _ in 0..250 {
+            if requests.length() > 0 {
+                break;
+            }
+            sleep(20).await;
+        }
+        let req = match WorkerRequest::from_js(&requests.get(0)) {
+            Ok(WorkerRequest::Overviews(req)) => req,
+            other => panic!("not an overviews request: {other:?}"),
+        };
+        let lanes_before = app.lanes.len();
+        let reading = app.reading_stems;
+        // The worker's part files: the overview of each stem, then of their
+        // mix, as `lane_columns` makes them.
+        let sides: Vec<(Vec<f32>, Vec<f32>)> = (0..NAMES.len())
+            .map(|k| {
+                let wave = as_16_bits(&stem_wave(k));
+                let negated: Vec<f32> = wave.iter().map(|v| -v).collect();
+                (wave, negated)
+            })
+            .collect();
+        let ones = vec![1.0; sides.len()];
+        let lefts: Vec<&[f32]> = sides.iter().map(|(l, _)| l.as_slice()).collect();
+        let rights: Vec<&[f32]> = sides.iter().map(|(_, r)| r.as_slice()).collect();
+        let (ml, mr) = (dsp::mix(&lefts, &ones), dsp::mix(&rights, &ones));
+        let file_of = |columns: &[(f32, f32)]| -> Vec<u8> {
+            columns
+                .iter()
+                .flat_map(|(lo, hi)| [lo.to_le_bytes(), hi.to_le_bytes()])
+                .flatten()
+                .collect()
+        };
+        let mix_columns = lane_columns(&ml, &mr);
+        let mut files: Vec<Vec<u8>> = sides
+            .iter()
+            .map(|(l, r)| file_of(&lane_columns(l, r).0))
+            .collect();
+        files.push(file_of(&mix_columns.0));
+        let paths = req
+            .lanes
+            .iter()
+            .map(|l| &l.overview)
+            .chain(req.mix.as_ref());
+        for (path, bytes) in paths.zip(&files) {
+            store::test_write(&format!("{}/{path}", req.session), bytes)
+                .await
+                .expect("planted");
+        }
+        deliver(&worker, &DecodeReply::OverviewsMade.to_js().0);
+        settle(&mut app).await;
+        let shown = app.lanes.len();
+        let mix_overview = app
+            .song
+            .as_ref()
+            .and_then(|s| s.mix_overview.clone())
+            .map(|o| (o.columns.clone(), o.scale));
+        let meta = meta_of(&id).await;
+        finish(app, &id).await;
+        assert_eq!(req.lanes.len(), NAMES.len());
+        assert!(reading, "the stems wait for their overviews");
+        assert_eq!(
+            lanes_before, 2,
+            "the stems are not shown before their overviews"
+        );
+        assert_eq!(shown, 1 + NAMES.len() + 1, "the stems and the original");
+        assert_eq!(mix_overview, Some(mix_columns), "the stems' mix overview");
+        assert!(meta.stem_overviews_for(FRAMES), "{meta:?}");
     }
 
     /// Findings 1-1 and 1-b3 of review round 1: at `done`, the page moves

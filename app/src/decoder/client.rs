@@ -14,16 +14,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use stem_protocol::decode::{DecodeReply, DecodeRequest, kind};
+use stem_protocol::decode::{DecodeReply, DecodeRequest, WorkerRequest, kind};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
 use crate::store::DecodeGuard;
 
-/// How a decode ended.
+/// How a request ended.
 pub enum Ended {
-    /// The worker's reply: `decoded`, `undecodable` or `decode-unstored`,
-    /// with the decode's guard, which the page holds until the end of D7.
+    /// The worker's reply: `decoded`, `undecodable` or `decode-unstored`
+    /// for a decode, `overviews-made`, `classic-made` or `decode-unstored`
+    /// for the others, with the request's guard, which the page holds
+    /// until the end of the move of its files.
     Reply(DecodeReply, DecodeGuard),
     /// The worker could not start, or stopped, or a reset ended it.
     Stopped(String),
@@ -74,6 +76,25 @@ impl DecodeClient {
         request: &DecodeRequest,
         guard: DecodeGuard,
     ) -> Pin<Box<dyn Future<Output = Ended>>> {
+        self.post(request.to_js().0, guard)
+    }
+
+    /// [`DecodeClient::decode`] of any request: `overviews` and `classic`
+    /// too (D7 and D8 of the M7 plan).  The worker ends them in the order
+    /// posted, as it ends decodes.
+    pub fn request(
+        &self,
+        request: &WorkerRequest,
+        guard: DecodeGuard,
+    ) -> Pin<Box<dyn Future<Output = Ended>>> {
+        self.post(request.to_js().0, guard)
+    }
+
+    fn post(
+        &self,
+        msg: js_sys::Object,
+        guard: DecodeGuard,
+    ) -> Pin<Box<dyn Future<Output = Ended>>> {
         if self.0.borrow().closed || crate::store::is_closed() {
             return Box::pin(std::future::ready(Ended::Stopped(
                 "browser storage is being reset".into(),
@@ -86,7 +107,6 @@ impl DecodeClient {
         let mut resolve = None;
         let promise = js_sys::Promise::new(&mut |done, _| resolve = Some(done));
         let ended = Rc::new(RefCell::new(None));
-        let (msg, _) = request.to_js();
         {
             let mut inner = self.0.borrow_mut();
             inner.waiting.push_back(Waiting {

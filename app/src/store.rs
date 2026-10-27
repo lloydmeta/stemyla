@@ -8,7 +8,10 @@
 //!   line per source file (original name, stored name), one `stem` line
 //!   per separated stem, a `mix` line (frames, format) when `mix.f32` is
 //!   complete, and a `decoded` line (frames, format, the channels of each
-//!   source) when the decode worker's files are complete (D2 of M5).
+//!   source) when the decode worker's files are complete (D2 of M5).  A
+//!   `stems-generation` line counts the changes of the `stem` lines, and a
+//!   `stem-overviews` line (frames, format, generation) names complete
+//!   overviews of the stems of that generation (D7 of M7).
 //! * `sessions/<id>/decoded/<i>.f32`: source `<i>` decoded at 44.1 kHz, as
 //!   `mix.f32` is, padded to the song's frames.  The source in the mix of a
 //!   song of one source has no file here: `mix.f32` is that source (D1 of
@@ -16,8 +19,12 @@
 //! * `sessions/<id>/overviews/<i>.f32` and `overviews/mix.f32`: the
 //!   waveform columns of each source lane and of the mix lane, each column
 //!   its minimum and its maximum as 32-bit little-endian floats.
+//! * `sessions/<id>/overviews/stems/<k>.f32` and `overviews/stems/mix.f32`:
+//!   the waveform columns of the stem of the `k`th `stem` line and of the
+//!   stems' mix, in the same layout ([`stem_overviews`], D7 of M7).
 //! * `<file>.decode.part`: a file of the list above that the decode worker
-//!   wrote.  [`keep_decoded`] moves it onto its name (D7 of M5).
+//!   wrote.  [`keep_decoded`] moves it onto its name (D7 of M5).  An
+//!   overview of the stems is `<file>.<generation>.decode.part`.
 //! * `sessions/<id>/src/<n>.<ext>`: the files as dropped.
 //! * `sessions/<id>/mix.f32`: the mix that the worker separates on the
 //!   storage path (M4): raw 32-bit little-endian floats, interleaved
@@ -687,6 +694,8 @@ async fn keep_stored_now(id: &str, names: &[String]) -> StoredStems {
         }
     };
     meta.stems.clear();
+    // D7 of the M7 plan: new stems, so the overviews of the old ones go.
+    meta.new_stems();
     if let Err(e) = write_bytes(&base, "meta", meta.to_text().as_bytes()).await {
         return StoredStems {
             paths: names.iter().map(unread).collect(),
@@ -759,7 +768,14 @@ pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<(Stem, O
 
 async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     let base = format!("{ROOT}/{id}");
-    meta_now(id).await?;
+    // D7 of the M7 plan: before the first stem write, the generation goes
+    // up and the overviews of the old stems are no longer named.
+    {
+        let _meta = lock_meta(id).await;
+        let mut meta = meta_now(id).await?;
+        meta.new_stems();
+        write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
+    }
     for s in stems {
         write_bytes(
             &base,
@@ -857,6 +873,275 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
 
 /// The suffix of each file that the decode worker writes.
 const DECODE_PART: &str = ".decode.part";
+
+/// The overviews of a session's stems, in the order of its `stem` lines,
+/// and of their mix (D7 of the M7 plan).
+pub struct StemOverviewSet {
+    pub lanes: Vec<std::rc::Rc<crate::lanes::Overview>>,
+    pub mix: std::rc::Rc<crate::lanes::Overview>,
+}
+
+/// The first bytes of the file at `path`, at most `most`, and its size.
+async fn head_of(path: &str, most: u64) -> Option<(Vec<u8>, u64)> {
+    let file = file_handle(path).await?;
+    let size = file.size() as u64;
+    let bytes: Uint8Array = st_slice(&file, 0.0, size.min(most) as f64)
+        .await
+        .ok()?
+        .unchecked_into();
+    let mut head = vec![0; bytes.length() as usize];
+    bytes.copy_to(&mut head);
+    Some((head, size))
+}
+
+/// The lane file of each stem of `meta` in session `id`, from its WAV's
+/// header (at most 4 KiB read): `None` for a stem whose file is not
+/// complete (D8 of M6).
+pub async fn stem_lane_files(id: &str, meta: &Meta, frames: usize) -> Vec<Option<LaneFile>> {
+    let mut files = Vec::with_capacity(meta.stems.len());
+    for name in &meta.stems {
+        let path = format!("{}/stems/{}", session_folder(id), stem_file(name));
+        let file = match head_of(&path, 4_096).await {
+            Some((head, size)) => crate::store_meta::stem_lane_file(&path, &head, size, frames),
+            None => None,
+        };
+        files.push(file);
+    }
+    files
+}
+
+/// The overview files of `count` stems, then of their mix, from the
+/// session folder.
+fn stem_overview_files(count: usize) -> Vec<String> {
+    (0..count)
+        .map(crate::store_meta::stem_overview_file)
+        .chain([crate::store_meta::STEM_MIX_OVERVIEW.to_string()])
+        .collect()
+}
+
+/// The stem overviews of session `id`, for a song of `frames` frames,
+/// made once (D7 of the M7 plan).  When `meta` names complete overviews of
+/// the stems of now, the page reads them (at most 32 KiB each).  Else the
+/// decode worker makes them from the stem WAVs, in blocks, and the page
+/// moves them into place and writes the `stem-overviews` line, if the
+/// stems did not change meanwhile.  If the worker cannot make them, the
+/// page makes them through the lane reader, in blocks, and does not save
+/// them.  `None` for a session with no stems, or a stem that is not
+/// complete.
+pub async fn stem_overviews(
+    id: &str,
+    frames: usize,
+    decoder: &crate::decoder::DecodeClient,
+) -> Option<StemOverviewSet> {
+    use stem_protocol::decode::{
+        DecodeReply, LaneEncoding, LaneRef, OverviewLane, OverviewsRequest, WorkerRequest,
+    };
+    if CLOSED.get() {
+        return None;
+    }
+    let meta = meta_now(id).await.ok()?;
+    if meta.stems.is_empty() {
+        return None;
+    }
+    let base = session_folder(id);
+    let overview_files = stem_overview_files(meta.stems.len());
+    if stem_overviews_complete(&base, &meta, frames, &overview_files).await
+        && let Some(set) = read_stem_overviews(&base, &overview_files, frames).await
+    {
+        return Some(set);
+    }
+    let files: Vec<LaneFile> = stem_lane_files(id, &meta, frames)
+        .await
+        .into_iter()
+        .collect::<Option<_>>()?;
+    let generation = meta.stems_generation;
+    let part = |file: &str| crate::store_meta::stem_overview_part(file, generation);
+    let lanes = files
+        .iter()
+        .zip(&overview_files)
+        .map(|(file, overview)| OverviewLane {
+            lane: LaneRef {
+                path: file.path[base.len() + 1..].to_string(),
+                encoding: match file.format {
+                    engine::readahead::LaneFormat::F32 => LaneEncoding::F32,
+                    engine::readahead::LaneFormat::Pcm16 => LaneEncoding::Pcm16,
+                },
+                data_offset: file.data_offset,
+                data_frames: file.data_frames,
+            },
+            overview: part(overview),
+        })
+        .collect();
+    let request = WorkerRequest::Overviews(OverviewsRequest {
+        session: base.clone(),
+        frames: frames as u64,
+        lanes,
+        mix: overview_files.last().map(|mix| part(mix)),
+    });
+    let why = match decoder.request(&request, DecodeGuard::new(id)).await {
+        crate::decoder::Ended::Reply(DecodeReply::OverviewsMade, guard) => {
+            let kept = keep_stem_overviews(id, &meta.stems, generation, frames).await;
+            drop(guard);
+            if !kept {
+                log::info!("decoder: the stems changed while their overviews were made");
+                return None;
+            }
+            if let Some(set) = read_stem_overviews(&base, &overview_files, frames).await {
+                return Some(set);
+            }
+            "the overview files could not be read".to_string()
+        }
+        crate::decoder::Ended::Reply(DecodeReply::Unstored { text }, guard) => {
+            drop(guard);
+            text
+        }
+        crate::decoder::Ended::Reply(other, guard) => {
+            drop(guard);
+            format!("the decode worker replied {}", other.kind())
+        }
+        crate::decoder::Ended::Stopped(why) => why,
+    };
+    if CLOSED.get() {
+        return None;
+    }
+    log::warn!("decoder: the page makes the stem overviews: {why}");
+    overviews_on_the_page(&files, frames).await
+}
+
+/// Whether `meta` names complete overviews of its stems for `frames`, and
+/// each file has the size of D4 of the M7 plan.
+async fn stem_overviews_complete(base: &str, meta: &Meta, frames: usize, files: &[String]) -> bool {
+    if !meta.stem_overviews_for(frames) {
+        return false;
+    }
+    let want = crate::store_meta::overview_bytes(frames) as f64;
+    for file in files {
+        if file_size(&format!("{base}/{file}")).await != Some(want) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reads the overview files `files` of the session folder `base`.
+async fn read_stem_overviews(
+    base: &str,
+    files: &[String],
+    frames: usize,
+) -> Option<StemOverviewSet> {
+    let mut overviews = Vec::with_capacity(files.len());
+    for file in files {
+        let bytes = read(&format!("{base}/{file}")).await?;
+        match crate::lanes::Overview::from_file(&bytes, frames) {
+            Ok(overview) => overviews.push(std::rc::Rc::new(overview)),
+            Err(e) => {
+                log::warn!("decoder: {base}/{file}: {e}");
+                return None;
+            }
+        }
+    }
+    let mix = overviews.pop()?;
+    Some(StemOverviewSet {
+        lanes: overviews,
+        mix,
+    })
+}
+
+/// Moves the decode worker's overview files of the stems of `generation`
+/// onto their names, and writes the `stem-overviews` line, under the
+/// `meta` lock.  If the stems changed meanwhile (another generation, or
+/// other names), it removes the part files instead, and gives false.
+async fn keep_stem_overviews(id: &str, names: &[String], generation: u64, frames: usize) -> bool {
+    saving(id, async {
+        let _meta = lock_meta(id).await;
+        let base = session_folder(id);
+        let folder = format!("{base}/overviews/stems");
+        let files = stem_overview_files(names.len());
+        let name_of = |file: &str| file.rsplit('/').next().unwrap_or(file).to_string();
+        let parts: Vec<(String, String)> = files
+            .iter()
+            .map(|file| {
+                let part = crate::store_meta::stem_overview_part(file, generation);
+                (name_of(&part), name_of(file))
+            })
+            .collect();
+        let remove_parts = || async {
+            for (part, _) in &parts {
+                st_remove(&format!("{folder}/{part}")).await;
+            }
+        };
+        let Ok(mut meta) = meta_now(id).await else {
+            remove_parts().await;
+            return false;
+        };
+        if meta.stems_generation != generation || meta.stems != names {
+            remove_parts().await;
+            return false;
+        }
+        for (part, name) in &parts {
+            if !move_file(&folder, part, name).await {
+                remove_parts().await;
+                return false;
+            }
+        }
+        meta.stem_overviews = Some(crate::store_meta::StemOverviews {
+            frames,
+            format: MIX_FORMAT.into(),
+            generation,
+        });
+        write_bytes(&base, "meta", meta.to_text().as_bytes())
+            .await
+            .is_ok()
+    })
+    .await
+}
+
+/// D7 of the M7 plan, when the decode worker cannot: the page makes the
+/// overviews of the stems in `files`, and of their mix at volume 1,
+/// through the lane reader, a block at a time.  It does not save them.
+async fn overviews_on_the_page(files: &[LaneFile], frames: usize) -> Option<StemOverviewSet> {
+    use crate::export::{ExportJob, PeaksSink};
+    use crate::lanes::{LaneAudio, LanePcm, LanesMix, Overview};
+    use engine::mixdown::{MixRecipe, Pcm};
+    let store: std::rc::Rc<dyn crate::lane_store::LaneStore> =
+        std::rc::Rc::new(crate::lane_store::OpfsStore::new(None));
+    let lanes: Vec<LaneAudio> = files
+        .iter()
+        .map(|file| LaneAudio::Stored {
+            file: file.clone(),
+            overview: std::rc::Rc::new(Overview {
+                columns: Vec::new(),
+                scale: 1.0,
+            }),
+            store: std::rc::Rc::clone(&store),
+        })
+        .collect();
+    let overview_of = |pcm: Box<dyn Pcm>| async move {
+        let mut job = ExportJob::new(pcm, PeaksSink::new(frames, engine::overview::COLUMNS));
+        while !job.run_while(crate::export::time_left(4.0)) {
+            st_sleep(1).await;
+        }
+        if let Some(e) = job.failed() {
+            log::warn!("decoder: a stem could not be read for its overview: {e}");
+            return None;
+        }
+        let waveform = job.into_sink().finish();
+        Some(std::rc::Rc::new(Overview {
+            columns: waveform.columns,
+            scale: waveform.scale,
+        }))
+    };
+    let mut overviews = Vec::with_capacity(lanes.len());
+    for lane in &lanes {
+        overviews.push(overview_of(Box::new(LanePcm::new(lane.clone(), frames, 44_100))).await?);
+    }
+    let all = MixRecipe::new(vec![1.0; lanes.len()]);
+    let mix = overview_of(Box::new(LanesMix::new(&lanes, frames, 44_100, &all))).await?;
+    Some(StemOverviewSet {
+        lanes: overviews,
+        mix,
+    })
+}
 
 /// The frames that [`read_back`] reads in one block: 1 MiB of a session
 /// file.
@@ -1603,6 +1888,7 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             stems: stems.iter().map(|s| s.to_string()).collect(),
             mix: None,
             decoded: None,
+            ..Meta::default()
         };
         write(&format!("{ROOT}/{id}/meta"), meta.to_text().as_bytes())
             .await
