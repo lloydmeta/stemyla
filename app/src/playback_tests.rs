@@ -1070,34 +1070,44 @@ async fn a_lane_added_during_a_save_keeps_the_save() {
     );
 }
 
-/// Finding 4-1 of review round 4 of M7: a save whose read of browser
-/// storage fails makes no file and no encode request, and says why.  The
-/// FLAC save has no worker, so a save that goes on says that the worker
-/// is not running.
+/// Findings 4-1, 5-1 and 5-5 of review rounds 4 and 5 of M7: a save whose
+/// read of browser storage fails stops within a few frames, makes no file
+/// and no encode request, and says why.  A FLAC save has no worker here,
+/// so one that went on would say that the worker is not running.  A WAV
+/// save that went on would say "Saved".
 #[wasm_bindgen_test]
 async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
     let id = "m7-save-read-fails";
-    let (song, files) = planted(id, SECOND, 2).await;
+    let (song, files) = planted(id, 30 * SECOND, 2).await;
     let (mut app, _) = showing(id, song, files);
     app.separator = None;
     assert!(store::test_remove(&format!("sessions/{id}/stems/drums.wav")).await);
-    app.start_save(Some(1), export::Format::Flac);
     let ctx = egui::Context::default();
-    for _ in 0..2_000 {
-        if app.saving.is_none() {
-            break;
+    let mut ends = Vec::new();
+    for format in [export::Format::Flac, export::Format::Wav] {
+        app.start_save(Some(1), format);
+        let mut frames = 0;
+        while app.saving.is_some() && frames < 2_000 {
+            app.step_save(&ctx);
+            pb_test_sleep(5).await;
+            frames += 1;
         }
-        app.step_save(&ctx);
-        pb_test_sleep(5).await;
+        ends.push((format, frames, app.saving.is_none(), app.status.clone()));
     }
-    let (ended, status) = (app.saving.is_none(), app.status.clone());
     app.load_demo();
     store::test_remove(&format!("sessions/{id}")).await;
-    assert!(ended, "the save ended");
-    assert!(
-        status.starts_with("Could not save ")
-            && status.contains("could not be read from browser storage")
-            && !status.contains("worker"),
-        "{status}"
-    );
+    for (format, frames, ended, status) in ends {
+        assert!(ended, "{format:?}: the save ended");
+        assert!(
+            frames <= 10,
+            "{format:?}: it stops at the failure: {frames} frames"
+        );
+        assert!(
+            status.starts_with("Could not save ")
+                && status.contains("could not be read from browser storage")
+                && !status.contains("worker")
+                && !status.contains("Saved"),
+            "{format:?}: {status}"
+        );
+    }
 }

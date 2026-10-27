@@ -3827,7 +3827,7 @@ impl StemApp {
         };
         let sink = export::JsSink::new(format, source.frames(), song.sample_rate);
         self.saving = Some(Saving {
-            job: export::ExportJob::new(source, sink),
+            job: export::ExportJob::new(source, sink).stopping_at_a_failure(),
             name: format!("{name}.{}", format.extension()),
             rate: song.sample_rate,
             mix: stem.is_none(),

@@ -791,6 +791,58 @@ pub(crate) mod tests {
         assert!(got.0 == want.0 && got.1 == want.1);
     }
 
+    /// Finding 5-1 of review round 5 of M7: a job that stops at a failure
+    /// ends within a step of the first failed read, with no more reads
+    /// and no more frames written.  A job that does not stop goes on to
+    /// the end, with a read for each block.
+    #[test]
+    fn a_job_that_stops_at_a_failure_ends_at_the_first_failed_read() {
+        use crate::export::{BLOCK, ExportJob};
+        let frames = 20 * BLOCK;
+        let store = MemoryStore::new();
+        let missing = LaneAudio::Stored {
+            file: LaneFile::f32("acme/missing.f32".into(), frames),
+            overview: Rc::new(Overview {
+                columns: Vec::new(),
+                scale: 1.0,
+            }),
+            store: Rc::clone(&store) as Rc<dyn LaneStore>,
+        };
+        // Each frame: one step, then the read in flight ends.
+        let frames_to_end = |stops: bool| {
+            store.hold(true);
+            let before = store.requests();
+            let job = ExportJob::new(
+                Box::new(LanePcm::new(missing.clone(), frames, 44_100)),
+                Kept::default(),
+            );
+            let mut job = if stops {
+                job.stopping_at_a_failure()
+            } else {
+                job
+            };
+            let mut count = 0;
+            while !job.run_while(|| false) && count < 1_000 {
+                store.release();
+                count += 1;
+            }
+            let reads = store.requests() - before;
+            let written = job.sink().0.len();
+            (count, reads, written, job.failed())
+        };
+        let (count, reads, written, failed) = frames_to_end(true);
+        assert!(count <= 2, "it ends at the failure: {count} frames");
+        assert_eq!(reads, 1, "one read");
+        assert!(written <= BLOCK, "no more frames written: {written}");
+        assert_eq!(failed.as_deref(), Some("no file acme/missing.f32"));
+        let (count, reads, written, _) = frames_to_end(false);
+        assert!(
+            count >= 20 && reads >= 20,
+            "it goes on: {count} frames, {reads} reads"
+        );
+        assert_eq!(written, frames);
+    }
+
     /// The bytes of an overview file, as the decode worker writes one (D1
     /// of M5): each column's minimum, then its maximum, as f32.
     pub(crate) fn overview_file(columns: &[(f32, f32)]) -> Vec<u8> {

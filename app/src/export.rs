@@ -27,6 +27,8 @@ pub struct ExportJob<S: Sink> {
     clipped: usize,
     /// The last step found the source not ready.
     waiting: bool,
+    /// The job ends at the first failed read ([`Self::stopping_at_a_failure`]).
+    stops_at_a_failure: bool,
     left: Vec<f32>,
     right: Vec<f32>,
 }
@@ -40,14 +42,20 @@ impl<S: Sink> ExportJob<S> {
             at: 0,
             clipped: 0,
             waiting: false,
+            stops_at_a_failure: false,
             left: vec![0.0; block],
             right: vec![0.0; block],
         }
     }
 
-    /// Reads and writes the next block.  True when the source is done.
-    /// When the source is not ready, it does nothing and waits.
+    /// Reads and writes the next block.  True when the source is done,
+    /// or when a read failed and the job stops at a failure.  When the
+    /// source is not ready, it does nothing and waits.
     pub fn step(&mut self) -> bool {
+        if self.stops_at_a_failure && self.source.failed().is_some() {
+            self.waiting = false;
+            return true;
+        }
         let n = self.left.len().min(self.source.frames() - self.at);
         self.waiting = n > 0 && !self.source.ready(self.at, n);
         if n > 0 && !self.waiting {
@@ -87,6 +95,15 @@ impl<S: Sink> ExportJob<S> {
             0 => 1.0,
             frames => self.at as f32 / frames as f32,
         }
+    }
+
+    /// The job ends at the first failed read of its source's storage, so
+    /// that its caller can give up (finding 5-1 of review round 5 of M7).
+    /// Else a failed read gives silence and the job goes on, as the mix
+    /// lane's waveform needs.
+    pub fn stopping_at_a_failure(mut self) -> Self {
+        self.stops_at_a_failure = true;
+        self
     }
 
     /// Why a read of the source's storage failed, if one did.

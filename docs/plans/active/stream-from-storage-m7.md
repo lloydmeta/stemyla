@@ -304,6 +304,10 @@ The parent's M7 section, item by item:
   * 4-6, 4-7: text.  `web-test --browser chrome`: 250 tests pass.
 
 * [x] 2026-10-28: review round 4 (at `8e6d245`): 5 reviewers and 4 validators, 652,442 tokens, 40.7 wall minutes.  3 should-fix confirmed (4-1, a save whose storage read failed wrote silence and said "Saved"; 4-2 and 4-3, the new test of the mutants exclusions was too loose) and 1 pre-existing (4-4), and 3 nits, all fixed in `91ceb7a` (the exclusion test was removed).  Mutants: full, 2 tested, 0 missed.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 5 checks these fixes.
+* [x] 2026-10-28: review round 5 fixes.  Each ID, and how its test failed first or which mutant it kills:
+  * 5-1: `ExportJob::stopping_at_a_failure` ends a job at the first failed read; `start_save` uses it.  `a_job_that_stops_at_a_failure_ends_at_the_first_failed_read` (native) failed first against a stub: 39 frames, not at most 2.  The mutant that drops the call in `start_save` fails `a_save_whose_read_fails_says_so_and_makes_no_file`, which now saves 30 s and must end within 10 frames.
+  * 5-5: that browser test saves as FLAC and as WAV, and the status must not say "Saved".  The mutant that skips the check for a WAV fails it.
+  * 5-2, 5-3, 5-4: TD-33 and TD-53.  5-6, 5-7: text and a Decision log entry.  `web-test --browser chrome`: 250 tests pass.
 
 ## Surprises and discoveries
 
@@ -373,6 +377,8 @@ None yet.
 * 2026-10-27, implementer, review round 3, finding 3-1: `add_lane` keeps a save in progress, and does not stop it.  The save's job holds clones of the lanes' audio, so the lanes that it reads stay valid when a lane is added or replaced.  Classic drums now end in a later frame on the web, so a stop would lose a save that the user started with no reason.
 * 2026-10-28, implementer, review round 4, finding 4-1: this supersedes "the saves show silence for that read" of step 5b, for saves.  A save whose read of browser storage fails makes no file and no encode request.  The status line says "Could not save {name}: the song could not be read from browser storage ({e})."  The spectrograms and the mix lane's waveform still show silence for a failed read.
 * 2026-10-28, implementer, review round 4, findings 4-2 and 4-3: `xtask/tests/mutants_excludes.rs` (review round 3, finding 3-3) is removed, as the orchestrator chose for a guard that is not small.  An exact check of `exclude_re` needs a regex matcher, and xtask takes no regex crate (DEPS-1).  Each review round's mutants run lists a wasm32-only function that `exclude_re` misses, and its validators refute those mutants, as finding 3-3 showed.  So a missing exclusion costs a validator's time, not a missed defect.
+* 2026-10-28, implementer, review round 5, finding 5-7: this corrects the second entry of step 6a.  If the stems change while the worker makes their overviews, `stem_overviews` gives none.  On an open, `stem_lanes` then makes the overviews on the page (D7's fallback), and the stems show with them.  After a separation of a song that is not shown, the page makes none, and the next open asks again.
+* 2026-10-28, implementer, review round 5, finding 5-1: only a save stops at the first failed read (`ExportJob::stopping_at_a_failure`).  The mix lane's follower goes on, so its waveform shows silence for the failed reads only.  The memory path's input and classic drums' input are at most `MEMORY_PATH_MAX_FRAMES` long and end with an error after their read, so they keep the old behaviour.
 
 ## Outcomes and retrospective
 
