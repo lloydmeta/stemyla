@@ -1471,9 +1471,11 @@ fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
 
 /// Separates songs of 1 and 4 minutes, each in a new browser, so that each
 /// starts with empty WebAssembly memory.  Prints the peak of page wasm,
-/// worker wasm and GPU live bytes for each, and their difference.  It also
-/// prints how much the page and the worker grew during each separation.
-/// It fails:
+/// worker wasm, decoder wasm and GPU live bytes for each, and their
+/// difference.  It also prints how much the page and the worker grew during
+/// each separation.  It fails if the song does not open, the model does not
+/// load, the song does not separate, or the memory lines are missing.  The
+/// growth and path checks fail it too:
 /// * if the page or the worker grows by more than [`MAX_GROWTH_MB`] during
 ///   a separation ([`growth_check`]);
 /// * if the page or the decode worker grows by more than that during the

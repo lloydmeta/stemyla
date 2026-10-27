@@ -1329,13 +1329,14 @@ async fn meta_names_no_stems_while_new_stems_are_written() {
     let frames = 2_000;
     let (id, names, _) = session_with_stems(frames).await;
     let before = meta_of(&id).await.expect("a meta").stems_generation;
-    let long = 60 * 44_100;
+    // One shared buffer for the six channels (MEM-1).
+    let channel: engine::Samples = vec![0.1; 60 * 44_100].into();
     let stems: Vec<Stem> = names
         .iter()
         .map(|name| Stem {
             name: name.clone(),
-            left: vec![0.1; long].into(),
-            right: vec![0.1; long].into(),
+            left: channel.clone(),
+            right: channel.clone(),
         })
         .collect();
     let saving = {
@@ -1577,6 +1578,36 @@ async fn a_stem_with_no_overview_stays_a_stored_lane() {
         );
     }
     assert!(mix.is_none(), "no overview of the mix");
+}
+
+/// Finding 7-1 of review round 7 of M7: the page's overview fallback stops
+/// at the first failed read.  The song is 20 blocks long.  The first
+/// stem's file goes after its header is read, so each of its reads fails.
+#[wasm_bindgen_test]
+async fn the_page_overviews_stop_at_the_first_failed_read() {
+    let frames = 20 * crate::export::BLOCK;
+    let (id, names, _) = session_with_stems(frames).await;
+    let fake = Fake::new();
+    let paths = store::stem_paths(&id, &names);
+    let opened = {
+        let (id, names, paths) = (id.clone(), names.clone(), paths.clone());
+        let client = fake.client.clone();
+        background(
+            async move { store::stem_lanes(&id, &names, &paths, frames, &client, frames).await },
+        )
+    };
+    fake.overviews(0).await;
+    let removed = store::test_remove(&paths[0]).await;
+    let before = crate::lane_store::reads_for_test();
+    fake.reply(DecodeReply::Unstored {
+        text: "no overviews".into(),
+    });
+    let got = output(&opened).await;
+    let reads = crate::lane_store::reads_for_test() - before;
+    store::test_wipe().await;
+    assert!(removed, "the first stem's file goes");
+    assert!(got.is_ok(), "the stems open");
+    assert!(reads <= 3, "it stops at the failure: {reads} reads");
 }
 
 /// Waits for an open's result to reach the inbox, applies it, and waits

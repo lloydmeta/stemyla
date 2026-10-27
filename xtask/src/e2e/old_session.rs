@@ -18,6 +18,11 @@
 //! logs no memory line there.  The memory of each length must be under
 //! [`OLD_SESSION_BOUND_MB`], and the 5-minute value at most
 //! [`MAX_GROWTH_MB`] above the 1-minute value.
+//!
+//! The log of each restore must show that the decode worker made the stem
+//! overviews, and that the page made none and decoded nothing.  A second
+//! restore of the 5-minute session must ask for no stem overviews (D7:
+//! once).
 
 use super::playback::{PlaybackLine, playback_line};
 use super::{MAX_GROWTH_MB, Opts, Page, in_page};
@@ -148,6 +153,47 @@ pub(super) fn old_session_checks(restores: &[Restore], bound: f64) -> Vec<(bool,
     checks
 }
 
+/// The page's line when it makes the stem overviews itself (D7's fallback).
+const PAGE_OVERVIEWS: &str = "decoder: the page makes the stem overviews";
+/// The decode worker's line at the end of an `overviews` request.
+const WORKER_OVERVIEWS_END: &str = "at the end of the overviews request";
+/// The decode worker's line at the start of an `overviews` request.
+const WORKER_OVERVIEWS_START: &str = "at the start of the overviews request";
+/// The page's line when it decodes a song itself.
+const ON_THE_PAGE: &str = "decoder: decoding on the page";
+
+/// The checks of the log of one restore (finding 7-2 of review round 7 of
+/// M7): the decode worker made the stem overviews, and the page made none
+/// and decoded nothing.
+pub(super) fn restore_log_checks(seconds: u32, log: &[String]) -> Vec<(bool, String)> {
+    let has = |text: &str| log.iter().any(|l| l.contains(text));
+    vec![
+        (
+            has(WORKER_OVERVIEWS_END),
+            format!(
+                "{seconds} s: the decode worker made the stem overviews ({WORKER_OVERVIEWS_END:?})"
+            ),
+        ),
+        (
+            !has(PAGE_OVERVIEWS),
+            format!("{seconds} s: the page made no stem overviews (no {PAGE_OVERVIEWS:?})"),
+        ),
+        (
+            !has(ON_THE_PAGE),
+            format!("{seconds} s: the page decoded nothing (no {ON_THE_PAGE:?})"),
+        ),
+    ]
+}
+
+/// The check of a second restore of one session: it asks for no stem
+/// overviews, because the first restore kept them (D7: once).
+pub(super) fn overviews_once_check(log: &[String]) -> (bool, String) {
+    (
+        !log.iter().any(|l| l.contains(WORKER_OVERVIEWS_START)),
+        format!("a second restore asks for no stem overviews (no {WORKER_OVERVIEWS_START:?})"),
+    )
+}
+
 /// `xtask e2e old-session`.
 pub(super) fn run(o: &Opts) -> Result<()> {
     let base = super::start_server(&o.dist, Vec::new(), &["console.js", "audio_contexts.js"])?;
@@ -188,12 +234,25 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             "old-session: the {seconds}-second song: page memory {at_first:?} MB after the first playback line, {after_play:?} MB 2 s later"
         ));
         p.click(o.play_x, "Pause")?;
+        for (ok, what) in restore_log_checks(seconds, &p.log[from..]) {
+            p.check(ok, &what);
+        }
         restores.push(Restore {
             seconds,
             first_line,
             memory_mb,
         });
     }
+    // D7: the 5-minute session got its stem overviews once.
+    p.reload()?;
+    let from = p.mark();
+    let again = p.wait_for(from, 900, |l| {
+        l.contains("and its separated stems from this browser")
+    })?;
+    p.check(again.is_some(), "the 5-minute song restores again");
+    p.idle(2.0)?;
+    let (ok, what) = overviews_once_check(&p.log[from..]);
+    p.check(ok, &what);
     for (ok, what) in old_session_checks(&restores, OLD_SESSION_BOUND_MB) {
         p.check(ok, &what);
     }
@@ -238,6 +297,43 @@ mod tests {
             .iter()
             .filter(|(ok, _)| !ok)
             .count()
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Finding 7-2 of review round 7 of M7.
+    #[test]
+    fn the_restore_log_shows_the_worker_made_the_overviews() {
+        let failing = |log: &[String]| {
+            restore_log_checks(60, log)
+                .iter()
+                .filter(|(ok, _)| !ok)
+                .count()
+        };
+        let start = "[1.0s] console.info: [app::decoder::client] decoder: memory: decoder wasm 6 MB at the start of the overviews request";
+        let end = "[1.4s] console.info: [app::decoder::client] decoder: memory: decoder wasm 6 MB at the end of the overviews request";
+        let good = lines(&[start, end]);
+        assert_eq!(restore_log_checks(60, &good).len(), 3);
+        assert_eq!(failing(&good), 0);
+        assert_eq!(failing(&lines(&[start])), 1, "no end line");
+        let fallback = lines(&[
+            start,
+            end,
+            "[1.5s] console.warn: [app::store] decoder: the page makes the stem overviews: acme",
+        ]);
+        assert_eq!(failing(&fallback), 1);
+        let on_the_page = lines(&[
+            end,
+            "[1.0s] console.info: [app] decoder: decoding on the page",
+        ]);
+        assert_eq!(failing(&on_the_page), 1);
+        assert!(overviews_once_check(&lines(&["[1.0s] reload"])).0);
+        assert!(
+            !overviews_once_check(&lines(&[start, end])).0,
+            "a second request"
+        );
     }
 
     /// Finding 2-3 of review round 2 of M7.

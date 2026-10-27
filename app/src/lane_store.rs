@@ -128,6 +128,8 @@ impl LaneStore for MemoryStore {
 
 #[cfg(target_arch = "wasm32")]
 pub use web::OpfsStore;
+#[cfg(all(test, target_arch = "wasm32"))]
+pub use web::reads_for_test;
 
 /// The lane store of browser storage.  Web only.
 #[cfg(target_arch = "wasm32")]
@@ -175,8 +177,22 @@ export async function ls_read(files, ranges) {
         }
     }
 
+    #[cfg(test)]
+    thread_local! {
+        static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The reads that every `OpfsStore` of this thread started, for tests
+    /// that count them.
+    #[cfg(test)]
+    pub fn reads_for_test() -> usize {
+        READS.get()
+    }
+
     impl LaneStore for OpfsStore {
         fn read(&self, ranges: Vec<ByteRange>, done: ReadDone) {
+            #[cfg(test)]
+            READS.set(READS.get() + 1);
             let (ctx, files) = (self.ctx.clone(), Rc::clone(&self.files));
             wasm_bindgen_futures::spawn_local(async move {
                 let mut result = read_ranges(&files, &ranges).await;
