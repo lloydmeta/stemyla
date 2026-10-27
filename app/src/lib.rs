@@ -439,6 +439,16 @@ impl Inbox {
             self.song = Some((token, song));
         }
     }
+
+    /// Sets the status line of open `token` to `status` (`None` clears
+    /// it), only if `token` is the newest open, `newest` (findings 2-17
+    /// and 3-8 of review rounds 2 and 3 of M7).  An older open leaves the
+    /// newer open's text.
+    fn status_of_open(&mut self, token: u64, newest: u64, status: Option<String>) {
+        if token == newest {
+            self.status = status;
+        }
+    }
 }
 
 /// A storage-path separation after [`store::keep_stored_stems`].  Web only.
@@ -709,9 +719,7 @@ fn open_picked(
         let opened = open_chosen_now(&chosen, &decoder).await;
         {
             let mut inbox = pending.borrow_mut();
-            if opens.get() == token {
-                inbox.status = None;
-            }
+            inbox.status_of_open(token, opens.get(), None);
             inbox.put_song(token, opened);
         }
         ctx.request_repaint();
@@ -1526,17 +1534,13 @@ impl StemApp {
                                 Some(note) => format!("{text}  It was {note}."),
                                 None => text,
                             };
-                            if opens.get() == token {
-                                inbox.status = Some(text);
-                            }
+                            inbox.status_of_open(token, opens.get(), Some(text));
                             inbox.put_song(token, Ok(opened));
                         }
                         Err(e) => {
                             log::warn!("could not restore the stored song: {e:#}");
-                            if opens.get() == token {
-                                inbox.status =
-                                    Some(format!("Could not restore the stored song: {e:#}"));
-                            }
+                            let text = format!("Could not restore the stored song: {e:#}");
+                            inbox.status_of_open(token, opens.get(), Some(text));
                         }
                     }
                 }
@@ -1814,6 +1818,7 @@ impl StemApp {
             MixFollower::unshown()
         });
         // A save holds its song; it does not outlive the song's lanes.
+        // `add_lane` keeps it, because the other lanes stay.
         #[cfg(target_arch = "wasm32")]
         {
             self.saving = None;
@@ -2003,7 +2008,7 @@ impl StemApp {
     /// [`Self::add_stem`] of any lane audio, such as a stored lane of
     /// classic drums (D8 of the M7 plan).  A stored lane is refused, with
     /// a status line, if the stored lanes would no longer fit the
-    /// read-ahead buffer (D2).
+    /// read-ahead buffer (D2).  A save in progress goes on.
     pub fn add_lane(&mut self, name: &str, audio: LaneAudio) {
         if let Some(song) = &self.song {
             let mut lanes: Vec<ShownLane> = song
@@ -2035,7 +2040,16 @@ impl StemApp {
                 lanes,
                 mix_overview: song.mix_overview.clone(),
             };
+            // A save in progress goes on: its job holds clones of the
+            // lanes, so it stays valid (finding 3-1 of review round 3 of
+            // M7).
+            #[cfg(target_arch = "wasm32")]
+            let saving = self.saving.take();
             self.load_song(shown);
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.saving = saving;
+            }
         }
     }
 
@@ -2483,12 +2497,11 @@ impl StemApp {
                 match r {
                     Ok((opened, meta, note)) => {
                         let text = format!("Opened \"{}\" from this browser.", meta.name);
-                        if opens.get() == token {
-                            inbox.status = Some(match note {
-                                Some(note) => format!("{text}  It was {note}."),
-                                None => text,
-                            });
-                        }
+                        let text = match note {
+                            Some(note) => format!("{text}  It was {note}."),
+                            None => text,
+                        };
+                        inbox.status_of_open(token, opens.get(), Some(text));
                         inbox.put_song(token, Ok(opened));
                     }
                     Err(e) => {

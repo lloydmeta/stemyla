@@ -1687,6 +1687,36 @@ async fn a_late_drop_does_not_show_over_demo() {
     assert_eq!(current, Some(before), "current does not change");
 }
 
+/// Findings 2-17 and 3-8 of review rounds 2 and 3 of M7: only the newest
+/// open sets or clears the inbox status.
+#[wasm_bindgen_test]
+fn only_the_newest_open_sets_the_status() {
+    let mut inbox = Inbox {
+        status: Some("Opening acme…".into()),
+        ..Inbox::default()
+    };
+    inbox.status_of_open(1, 2, None);
+    assert_eq!(
+        inbox.status.as_deref(),
+        Some("Opening acme…"),
+        "an older clear"
+    );
+    inbox.status_of_open(2, 2, Some("Restored \"lloyd\" from this browser.".into()));
+    assert_eq!(
+        inbox.status.as_deref(),
+        Some("Restored \"lloyd\" from this browser."),
+        "the newest sets"
+    );
+    inbox.status_of_open(1, 2, Some("Could not restore the stored song".into()));
+    assert_eq!(
+        inbox.status.as_deref(),
+        Some("Restored \"lloyd\" from this browser."),
+        "an older error"
+    );
+    inbox.status_of_open(2, 2, None);
+    assert_eq!(inbox.status, None, "the newest clears");
+}
+
 /// D12: two results that reach the inbox before one frame: the newer
 /// shows, in either order.
 #[wasm_bindgen_test]

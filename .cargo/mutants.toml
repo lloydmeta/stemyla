@@ -25,16 +25,18 @@ exclude_globs = [
 ]
 
 # Functions that compile for wasm32 only, in files that native code also
-# uses.  cargo-mutants matches each pattern against the names that `--list`
+# uses.  `xtask/tests/mutants_excludes.rs` checks that the list names each
+# one of `app/src/lib.rs`.  cargo-mutants matches each pattern against the names that `--list`
 # shows.  A name that also has a native variant stays in, such as
 # `base_latency` in engine/src/live.rs and `main` in app/src/main.rs.  The
 # validator decides its wasm32 mutants.  A wasm32 block inside a shared
 # function stays in too (TD-33).
 exclude_re = [
-    '(replace|in) (StemApp::)?(refresh_storage|about_menu|open_chosen|open_chosen_now|open_saved|resetting|open_on_the_page|decode_session|restore_stored|log_page_memory|opening_text|pick_song|separator_controls|storage_menu|streamtest_controls|reset_dialog|start_reset|prepare_reset|stop_workers|publish_separating|shown_session_decoding|poll_separator|start_web|open_files|open_from_storage|open_picked|next_open|next_token|too_many_lanes|on_the_page_of|classic_in_the_worker|classic_read_first|classic_arrived|read_memory_input|memory_input_read|plays_silent|apply_inbox|post_separation|stored_stems_arrived)\b',
+    '(replace|in) (StemApp::)?(refresh_storage|about_menu|open_chosen|open_chosen_now|open_saved|resetting|open_on_the_page|decode_session|restore_stored|log_page_memory|opening_text|pick_song|separator_controls|storage_menu|streamtest_controls|reset_dialog|start_reset|prepare_reset|stop_workers|publish_separating|shown_session_decoding|poll_separator|start_web|open_files|open_from_storage|open_picked|next_open|next_token|too_many_lanes|on_the_page_of|classic_in_the_worker|classic_read_first|classic_arrived|read_memory_input|memory_input_read|plays_silent|apply_inbox|post_separation|stored_stems_arrived|start_separation|separation_ready|separate_without_storage|write_mix_first|mix_written|separation_posted|separation_unstored|separation_stored|stop_separation|kept_text|log_separation_end)\b',
     '(replace|in) web::(run|reload)\b',
     '(replace|in) StemApp::(save_menu|start_save|step_save)\b',
     '(replace|in) Opened::in_memory\b',
+    '(replace|in) Inbox::',
     '(replace|in) web::(<impl Sink for Js(Channels|Wav|Sink)>::write|Js(Channels|Wav|Sink)::(new|into_bytes))\b',
     '(replace|in) web_tests::',
     '(replace|in) separation_tests::',

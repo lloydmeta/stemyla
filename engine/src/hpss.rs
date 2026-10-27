@@ -889,8 +889,9 @@ mod tests {
     fn a_block_hpss_keeps_its_memory_flat() {
         const MIB: usize = 1 << 20;
         // The block HPSS of 3 s and of 12 s peak equal (finding 2-1 of
-        // review round 2 of M7).  A song-length 16-bit buffer of 12 s is
-        // more than 1 MB, so a bound of 1 MiB would let one pass.
+        // review round 2 of M7).  A song-length mono 16-bit buffer makes
+        // the two peaks differ by 9 s of it, 793,800 bytes, which is under
+        // 1 MiB, so a bound of 1 MiB would let one pass.
         const FLAT: usize = 64 * 1024;
         // 3 s is 4.04 blocks of 32,768 frames, and 12 s is 16.15: each ends
         // in a part of a block.

@@ -653,7 +653,9 @@ fn decode_replies() -> Vec<DecodeReply> {
         DecodeReply::Unstored {
             text: "QuotaExceededError".into(),
         },
-        DecodeReply::Log("decoder: memory: decoder wasm 2 MB at the decode's start".into()),
+        DecodeReply::Log(
+            "decoder: memory: decoder wasm 2 MB at the start of the decode request".into(),
+        ),
     ]
 }
 

@@ -1035,3 +1035,37 @@ extern "C" {
     fn dt_blob(bytes: &[u8]) -> web_sys::Blob;
     fn pb_file(bytes: &[u8], name: &str) -> web_sys::File;
 }
+
+/// Finding 3-1 of review round 3 of M7: a lane that arrives during a save,
+/// such as classic drums from the decode worker, keeps the save.  The job
+/// holds clones of the lanes, so it stays valid.  A FLAC save with no
+/// worker runs its whole job, then says that the worker is not running.
+#[wasm_bindgen_test]
+async fn a_lane_added_during_a_save_keeps_the_save() {
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    app.load_demo();
+    app.separator = None;
+    app.start_save(None, export::Format::Flac);
+    let started = app.saving.is_some();
+    let frames = app.song.as_ref().expect("a song").frames;
+    app.add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
+    let kept = app.saving.is_some();
+    let ctx = egui::Context::default();
+    for _ in 0..10_000 {
+        if app.saving.is_none() {
+            break;
+        }
+        app.step_save(&ctx);
+    }
+    let status = app.status.clone();
+    app.load_demo();
+    assert!(started, "the save started");
+    assert!(kept, "the save is kept");
+    assert!(
+        status.contains(".flac") && status.contains("encoding worker is not running"),
+        "the save ran to its end: {status}"
+    );
+}
