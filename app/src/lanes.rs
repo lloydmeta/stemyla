@@ -28,6 +28,31 @@ pub struct Overview {
     pub scale: f32,
 }
 
+impl Overview {
+    /// The overview in an overview file of a lane of `frames` frames: each
+    /// column's minimum, then its maximum, as 32-bit little-endian floats
+    /// (D1 of M5).  The scale comes from the columns, as `lane_columns`
+    /// makes it.  A file of another size than 8 bytes for each column is
+    /// refused (D4 of the M7 plan).
+    pub fn from_file(bytes: &[u8], frames: usize) -> Result<Overview, String> {
+        let want = 8 * engine::overview::column_count(frames);
+        if bytes.len() != want {
+            return Err(format!(
+                "an overview of {} bytes, not {want}, for {frames} frames",
+                bytes.len()
+            ));
+        }
+        let f32_at = |at: usize| {
+            f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        let columns: Vec<(f32, f32)> = (0..want / 8)
+            .map(|c| (f32_at(8 * c), f32_at(8 * c + 4)))
+            .collect();
+        let scale = engine::overview::overview_scale(&columns);
+        Ok(Overview { columns, scale })
+    }
+}
+
 /// What a lane plays and is drawn from.
 #[derive(Clone)]
 pub enum LaneAudio {
@@ -109,6 +134,9 @@ pub struct Shown {
     pub sample_rate: u32,
     pub frames: usize,
     pub lanes: Vec<ShownLane>,
+    /// The mix lane's overview, when it comes from a file: the session's
+    /// `overviews/mix.f32`, or the stems' mix overview (D4).
+    pub mix_overview: Option<Rc<Overview>>,
 }
 
 impl Shown {
@@ -127,6 +155,7 @@ impl Shown {
         Self {
             sample_rate: song.sample_rate,
             frames: song.frames,
+            mix_overview: None,
             lanes: song
                 .stems
                 .into_iter()
@@ -382,7 +411,7 @@ impl Pcm for LanePcm {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::lane_store::MemoryStore;
     use engine::Song;
@@ -719,6 +748,42 @@ mod tests {
         assert!(want.run_while(|| true));
         let want = want.into_sink();
         assert!(got.0 == want.0 && got.1 == want.1);
+    }
+
+    /// The bytes of an overview file, as the decode worker writes one (D1
+    /// of M5): each column's minimum, then its maximum, as f32.
+    pub(crate) fn overview_file(columns: &[(f32, f32)]) -> Vec<u8> {
+        columns
+            .iter()
+            .flat_map(|(lo, hi)| [lo.to_le_bytes(), hi.to_le_bytes()])
+            .flatten()
+            .collect()
+    }
+
+    /// D4 of the M7 plan: an overview file gives the columns of
+    /// `lane_columns` and their scale.  A file whose size is not 8 bytes
+    /// for each column of the lane's frames is refused.
+    #[test]
+    fn a_bad_overview_size_is_refused() {
+        for frames in [1, 4_096, 4_097, 1_000_003] {
+            let song = song(frames);
+            let (left, right) = (&song.stems[2].left, &song.stems[2].right);
+            let (columns, scale) = engine::overview::lane_columns(left, right);
+            let file = overview_file(&columns);
+            let got = Overview::from_file(&file, frames).expect("an overview");
+            assert_eq!(got.columns, columns, "{frames} frames");
+            assert_eq!(got.scale.to_bits(), scale.to_bits(), "{frames} frames");
+            let short = &file[..file.len() - 8];
+            assert!(
+                Overview::from_file(short, frames).is_err(),
+                "a column short"
+            );
+            let mut long = file.clone();
+            long.extend_from_slice(&[0; 8]);
+            assert!(Overview::from_file(&long, frames).is_err(), "a column more");
+            assert!(Overview::from_file(&file[..file.len() - 1], frames).is_err());
+        }
+        assert!(Overview::from_file(&[], 0).is_ok_and(|o| o.columns.is_empty()));
     }
 
     #[test]

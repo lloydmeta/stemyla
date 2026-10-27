@@ -152,19 +152,31 @@ impl Sink for PeaksSink {
 /// holds only its block and the columns (D6 of the M7 plan); a spectrogram
 /// of the mix reads its own windows (`spectrogram::SpectrogramJob`).
 pub struct MixFollower {
-    shown: MixRecipe,
+    shown: Option<MixRecipe>,
     job: Option<(MixRecipe, ExportJob<PeaksSink>)>,
 }
 
 impl MixFollower {
     /// For a mix lane that shows `shown`.
     pub fn new(shown: MixRecipe) -> Self {
-        Self { shown, job: None }
+        Self {
+            shown: Some(shown),
+            job: None,
+        }
     }
 
-    /// The mix that the lane shows.
-    pub fn shown(&self) -> &MixRecipe {
-        &self.shown
+    /// For a mix lane that shows no mix yet: its first `follow` makes the
+    /// lane (D4 of the M7 plan).
+    pub fn unshown() -> Self {
+        Self {
+            shown: None,
+            job: None,
+        }
+    }
+
+    /// The mix that the lane shows, if it shows one.
+    pub fn shown(&self) -> Option<&MixRecipe> {
+        self.shown.as_ref()
     }
 
     /// The part done of the waveform job, if one runs.
@@ -182,7 +194,7 @@ impl MixFollower {
         source: impl FnOnce(&MixRecipe) -> Box<dyn Pcm>,
         more: impl FnMut() -> bool,
     ) -> Option<Waveform> {
-        if self.shown == *heard {
+        if self.shown.as_ref() == Some(heard) {
             self.job = None;
             return None;
         }
@@ -203,7 +215,7 @@ impl MixFollower {
             self.job = Some((recipe, job));
             return None;
         }
-        self.shown = recipe;
+        self.shown = Some(recipe);
         Some(job.into_sink().finish())
     }
 
@@ -666,7 +678,7 @@ mod tests {
         let done = follower
             .follow(&no_drums, mix_of(&song), || true)
             .expect("the waveform of the new mix");
-        assert_eq!(follower.shown(), &no_drums);
+        assert_eq!(follower.shown(), Some(&no_drums));
         assert_eq!(follower.progress(), None);
         let want = run_mix(&song, &no_drums);
         assert_eq!(

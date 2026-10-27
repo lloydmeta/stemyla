@@ -68,7 +68,7 @@ fn a_mix_change_with_spectrograms_on_holds_no_song_sized_buffer() {
     let waveform = follower.follow(&no_bass, mix_of, || true);
     assert!(waveform.is_some(), "the new mix is shown");
     // With spectrograms on, the mix lane's spectrogram is made again.
-    let mut spectrogram = SpectrogramJob::new(mix_of(follower.shown()));
+    let mut spectrogram = SpectrogramJob::new(mix_of(follower.shown().expect("a mix")));
     assert!(spectrogram.run_while(|| true));
     let image = spectrogram.finish();
     let grew = PEAK.load(Relaxed) - before;

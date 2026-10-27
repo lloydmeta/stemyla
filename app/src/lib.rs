@@ -1399,13 +1399,19 @@ impl StemApp {
         self.lanes_generation += 1;
         let song = std::rc::Rc::new(song);
         let mut lanes = Vec::with_capacity(song.lanes.len() + 1);
-        let (cols, scale) = match sources_in_memory(&song) {
-            Some(sources) => {
+        // D4 of the M7 plan: the mix lane draws the mix of the sources in
+        // memory, or the song's mix overview.  With neither, it starts
+        // empty, and the follower makes it.
+        let mix = match (sources_in_memory(&song), &song.mix_overview) {
+            (Some(sources), _) => {
                 let (ml, mr) = mix_of_sources(&sources);
-                lane_columns(&ml, &mr)
+                Some(lane_columns(&ml, &mr))
             }
-            None => (Vec::new(), 1.0),
+            (None, Some(overview)) => Some((overview.columns.clone(), overview.scale)),
+            (None, None) => None,
         };
+        let mix_shown = mix.is_some();
+        let (cols, scale) = mix.unwrap_or((Vec::new(), 1.0));
         lanes.push(Lane {
             name: "mix".into(),
             stem: None,
@@ -1415,9 +1421,13 @@ impl StemApp {
             spectrogram: None,
         });
         for (i, lane) in song.lanes.iter().enumerate() {
-            let (cols, scale) = match lane.audio.samples() {
-                Some((left, right)) => lane_columns(left, right),
-                None => (Vec::new(), 1.0),
+            // Until step 7, a lane with samples and a file draws from its
+            // samples; a stored lane draws from its overview (D4).
+            let (cols, scale) = match &lane.audio {
+                LaneAudio::Memory { left, right } | LaneAudio::ReadBack { left, right, .. } => {
+                    lane_columns(left, right)
+                }
+                LaneAudio::Stored { overview, .. } => (overview.columns.clone(), overview.scale),
             };
             lanes.push(Lane {
                 name: lane.name.clone(),
@@ -1437,8 +1447,12 @@ impl StemApp {
             }
         }
         // The mix lane shows every source stem at full volume, which is
-        // what the new params play.
-        self.mix_follower = Some(MixFollower::new(MixRecipe::as_heard(&params)));
+        // what the new params play.  An empty mix lane shows no mix yet.
+        self.mix_follower = Some(if mix_shown {
+            MixFollower::new(MixRecipe::as_heard(&params))
+        } else {
+            MixFollower::unshown()
+        });
         // A save holds its song; it does not outlive the song's lanes.
         #[cfg(target_arch = "wasm32")]
         {
@@ -1610,6 +1624,16 @@ impl StemApp {
     /// It replaces a lane of the same name.  The new lane plays from memory
     /// (D8 of M6), and each other lane keeps its audio and its file.
     pub fn add_stem(&mut self, name: &str, left: Vec<f32>, right: Vec<f32>) {
+        let audio = LaneAudio::Memory {
+            left: left.into(),
+            right: right.into(),
+        };
+        self.add_lane(name, audio);
+    }
+
+    /// [`Self::add_stem`] of any lane audio, such as a stored lane of
+    /// classic drums (D8 of the M7 plan).
+    pub fn add_lane(&mut self, name: &str, audio: LaneAudio) {
         if let Some(song) = &self.song {
             let mut lanes: Vec<ShownLane> = song
                 .lanes
@@ -1619,15 +1643,13 @@ impl StemApp {
                 .collect();
             lanes.push(ShownLane {
                 name: name.into(),
-                audio: LaneAudio::Memory {
-                    left: left.into(),
-                    right: right.into(),
-                },
+                audio,
             });
             let shown = Shown {
                 sample_rate: song.sample_rate,
                 frames: song.frames,
                 lanes,
+                mix_overview: song.mix_overview.clone(),
             };
             self.load_song(shown);
         }
@@ -2973,7 +2995,7 @@ impl StemApp {
                     &audio,
                     song.frames,
                     song.sample_rate,
-                    follower.shown(),
+                    follower.shown()?,
                 )),
             })
         };
@@ -3557,6 +3579,7 @@ mod tests {
         let shown = Shown {
             sample_rate: 44_100,
             frames: 4,
+            mix_overview: None,
             lanes: vec![
                 ShownLane {
                     name: "bass".into(),
@@ -3587,6 +3610,93 @@ mod tests {
             app.lane_files()[0].as_ref().map(|f| f.path.as_str()),
             Some("acme/0.f32")
         );
+    }
+
+    /// The demo song as stored lanes in a store in memory, each an f32
+    /// file with its overview, as the decode worker writes them, and the
+    /// mix overview if `mix` is true.
+    fn stored_demo(mix: bool) -> (Song, Shown) {
+        let song = {
+            let mut app = StemApp {
+                want_device: false,
+                ..StemApp::default()
+            };
+            app.load_demo();
+            app.song
+                .as_ref()
+                .expect("a song")
+                .as_song()
+                .expect("in memory")
+        };
+        let store = lane_store::MemoryStore::new();
+        let lanes = song
+            .stems
+            .iter()
+            .map(|s| ShownLane {
+                name: s.name.clone(),
+                audio: lanes::tests::stored_f32(
+                    &store,
+                    &format!("demo/{}.f32", s.name),
+                    &s.left,
+                    &s.right,
+                ),
+            })
+            .collect();
+        let (ml, mr) = mix_of_sources(&song);
+        let (columns, scale) = lane_columns(&ml, &mr);
+        let shown = Shown {
+            sample_rate: song.sample_rate,
+            frames: song.frames,
+            lanes,
+            mix_overview: mix.then(|| std::rc::Rc::new(lanes::Overview { columns, scale })),
+        };
+        (song, shown)
+    }
+
+    fn app_showing(song: Shown) -> StemApp {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.open_song(song);
+        app
+    }
+
+    /// D4 of the M7 plan: a stored lane draws from its overview, and the
+    /// mix lane from the song's mix overview.
+    #[test]
+    fn a_stored_lane_draws_from_its_overview() {
+        let (song, shown) = stored_demo(true);
+        let app = app_showing(shown);
+        for (k, stem) in song.stems.iter().enumerate() {
+            let lane = &app.lanes[k + 1];
+            assert_eq!(lane.name, stem.name);
+            assert_eq!(
+                (lane.columns.clone(), lane.scale),
+                lane_columns(&stem.left, &stem.right)
+            );
+        }
+        let (ml, mr) = mix_of_sources(&song);
+        let mix = &app.lanes[0];
+        assert_eq!((mix.columns.clone(), mix.scale), lane_columns(&ml, &mr));
+        assert!(
+            app.mix_follower
+                .as_ref()
+                .is_some_and(|f| f.shown().is_some())
+        );
+    }
+
+    /// D4: a stored song with no mix overview starts with an empty mix
+    /// lane, and the follower makes it in one frame, natively.
+    #[test]
+    fn a_mix_lane_with_no_overview_is_made_by_the_follower() {
+        let (song, shown) = stored_demo(false);
+        let mut app = app_showing(shown);
+        assert!(app.lanes[0].columns.is_empty(), "no mix to draw yet");
+        app.follow_mix_while(&egui::Context::default(), export::time_left(PEAKS_MS));
+        let (ml, mr) = mix_of_sources(&song);
+        let mix = &app.lanes[0];
+        assert_eq!((mix.columns.clone(), mix.scale), lane_columns(&ml, &mr));
     }
 
     #[test]
