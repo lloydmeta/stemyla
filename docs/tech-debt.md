@@ -257,29 +257,24 @@ This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/
 
 ### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 
-Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `xtask/src/serve.rs` and `xtask/src/roformer_cli.rs` runs only against a live browser, a driver or the model weights (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `xtask/src/serve.rs` and `xtask/src/roformer_cli.rs` runs only against a live browser, a driver or the model weights (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only.
 
-* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run).  The body of `smoke` is mutant 2-14 of review round 2 of M6; its check of the `playback:` line, `all_from_storage`, has a unit test;
+Part B of `plans/active/stream-from-storage-catchup.md` (2026-10-28) handled the deferred rows of M3 to M6.  `xtask/tests/e2e_cli.rs` runs `e2e smoke`, `separate`, `memory-budget`, `stored-stems` and `old-session` with a `CHROMEDRIVER` that is not a file.  Each run must fail on the driver, before a browser starts.  So a scenario body or an e2e `run` that returns `Ok(())` fails a test.  The 4-hour wait for the model is the constant `MODEL_RUN_SECS`, with a test.  The waits of `e2e decode` and the model wait of `memory-budget` use `holds_or_error`, with a test.  `roformer_refuses_bad_input_before_the_model` runs `xtask roformer`.  `StemApp::audio_stats_lines` and `StemApp::open_folder` have native tests.  What is left, each with its reason:
+
+* the scenario bodies after the driver starts, such as `storage`, `smoke`, `bench`, `separate`, `decode` (with `drop_and_open`), `playback`, `old-session`, `memory-budget` and `stored-stems`: their steps and waits need a browser (not run).  CI's `browser-tests` job runs `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage` and `flac`.  `separate`, `memory-budget`, `stored-stems`, `bench`, `selftest` and `worker-check` also need a GPU and the model, which CI does not have, so a person runs them.  Their checks are pure functions with unit tests (`all_from_storage`, `stored_stems_checks`, `flac_checks`, the growth checks, `old_session_checks` and others).  For example, deleting the `!` of the last `if !ok` in `memory_budget` still survives `cargo test`;
 * the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
-* `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls (not run);
-* `query` and `Opts::weights`, which `parses_scenario_and_options` never calls (not run);
+* `Driver::start` after the driver is found, `free_port`, `Session::execute` and the `set_viewport` wrapper, which need a driver (not run);
+* `query`, which `parses_scenario_and_options` never calls (not run);
 * `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
 * a request with no headers in `drip`, since the test always sends a Host header (not run);
-* `run` in `xtask/src/roformer_cli.rs`, which needs the model weights and an audio file.
-* the body of `e2e decode` and its helper `drop_and_open` (`xtask/src/e2e/decode.rs`), which run only in a browser; review round 1 of M5 found mutants in both that no `cargo test` kills.  Its checks have unit tests.
-* the body of `e2e playback` (`run` in `xtask/src/e2e/playback.rs`), which runs only in a browser.  Its checks, the click positions, the target and the wait have unit tests (review round 1 of M6).
-* the body of `e2e old-session` (`run` in `xtask/src/e2e/old_session.rs`) and the wait of `memory-budget` for the stems shown, which run only in a browser.  Their checks, the conversion of the memory read to MB and the choice of the larger read have unit tests (M7).  `old_session_with_no_driver_fails_before_a_browser_starts` (`xtask/tests/e2e_cli.rs`) runs `e2e old-session` with no driver, so a `run` that does nothing fails it (finding 3-9 of review round 3 of M7).
-* `run` in `xtask/src/e2e.rs` and `main` in `app/src/main.rs`, entry points that no test calls (review round 1 of M6, mutants 1-29 and 1-40).
-* `StemApp::log_audio_stats` in `app/src/lib.rs`, which only writes log lines; the app's native tests install no logger to read them.  `e2e smoke` and `e2e playback` read its lines (review round 1 of M6, mutant 1-27).  A browser test could read them with the test logger (`TestLog`, `start_log`, `logged`) of `app/src/decode_tests.rs`.
-* `memory_budget` in `xtask/src/e2e.rs` after M5's checks of the open, which needs a GPU and the weights (review round 1 of M5).
+* `run` in `xtask/src/roformer_cli.rs` after the model loads: the separation needs the model weights, which CI does not have.  Its refusals of bad input have a test;
+* `main` in `app/src/main.rs` (native): `eframe::run_native` needs a window, and no test can open one.  Its folder argument is `StemApp::open_folder`, which has a test.  So a `main` that returns `Ok(())`, or that deletes the `viewport` field, survives `cargo test`.
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
 
-Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
+Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.  The review logs of M3 to M6 of the branch `iphone-crashes-2026-10-25` (`docs/reviews/iphone-crashes-2026-10-25-m3.md` to `-m6.md`), with a `catch-up` row for each deferred finding.
 
-Source: review round 1 of M4 on the branch `iphone-crashes-2026-10-25`, findings 1-30, 1-35, 1-41 and 1-53.  Its log goes to `docs/reviews/` after round 3.  Each mutant replaces a body with `Ok(())`: `memory_budget`, `separate` and `stored_stems` in `xtask/src/e2e.rs`, and `run` in `xtask/src/roformer_cli.rs`.  Each needs a GPU, a browser or the weights.
-
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `decode`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.  The same holds for the checks of `stored-stems` and `memory-budget` (M3).  Their bodies run only with a GPU and the model.  So a mutant that empties `stored_stems` or `memory_budget`, or changes a time limit there, survives `cargo test`.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
 
 ### TD-40: gaps in the RT-1 tests
 

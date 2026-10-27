@@ -85,6 +85,9 @@ mod playback;
 const VIEWPORT: (u32, u32) = (1100, 700);
 /// The top bar's buttons sit on this line.
 const BAR_Y: f64 = 15.0;
+/// The longest wait, in seconds, for a run of the model on the GPU: 4
+/// hours, for a slow GPU or SwiftShader.
+const MODEL_RUN_SECS: u64 = 4 * 3600;
 
 const SWIFTSHADER: [&str; 7] = [
     "--enable-unsafe-webgpu",
@@ -446,6 +449,12 @@ fn is_page_error(line: &str) -> bool {
     line.contains("PAGE ERROR")
         || line.contains("console.error:")
         || line.contains("console.warn: ERROR:")
+}
+
+/// Whether `line` ends a wait for `text`: it holds `text`, or the page
+/// reports an error.
+fn holds_or_error(line: &str, text: &str) -> bool {
+    line.contains(text) || is_page_error(line)
 }
 
 /// The number after `key` in `line` ("playhead 1234" -> 1234).
@@ -1024,7 +1033,7 @@ fn bench(o: &Opts) -> Result<()> {
         &format!("index.html?{q}"),
     )?;
     // Any error ends the wait (no WebGPU adapter, say), not only the verdict.
-    let verdict = p.wait_for(0, 4 * 3600, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
         l.contains("bench finished") || l.contains("WebGPU error") || is_page_error(l)
     })?;
     p.note(&format!("verdict: {verdict:?}"));
@@ -1084,7 +1093,7 @@ fn selftest(o: &Opts) -> Result<()> {
     drop_model(&mut p, &model)?;
     // A model that does not load never starts the self-test, so its
     // message ends the wait too.
-    let verdict = p.wait_for(0, 4 * 3600, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
         l.contains("selftest passed")
             || l.contains("selftest FAILED")
             || l.contains("could not be loaded")
@@ -1227,7 +1236,7 @@ fn separate(o: &Opts) -> Result<()> {
     p.screenshot("separate_model")?;
     let from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
-    let done = p.wait_for(from, 4 * 3600, |l| {
+    let done = p.wait_for(from, MODEL_RUN_SECS, |l| {
         (l.contains("separator: ") && l.contains(" stems in ")) || is_page_error(l)
     })?;
     p.note(&format!("separated: {done:?}"));
@@ -1536,9 +1545,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
         }
         let from = p.mark();
         drop_model(&mut p, &model)?;
-        let loaded = p.wait_for(from, 1200, |l| {
-            l.contains("separator: model loaded") || is_page_error(l)
-        })?;
+        let loaded = p.wait_for(from, 1200, |l| holds_or_error(l, "separator: model loaded"))?;
         p.check(
             loaded
                 .as_deref()
@@ -1547,7 +1554,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
         );
         let from = p.mark();
         p.click(o.separate_x, "Separate 6 stems")?;
-        let shown = p.wait_for(from, 4 * 3600, separation_shown)?;
+        let shown = p.wait_for(from, MODEL_RUN_SECS, separation_shown)?;
         p.check(
             shown
                 .as_deref()
@@ -1979,7 +1986,7 @@ fn worker_check(o: &Opts) -> Result<()> {
         r.files = c.files;
         return r;",
         json!([model, o.download, o.reference.is_some()]),
-        4 * 3600,
+        MODEL_RUN_SECS,
     )?;
     let text = serde_json::to_string_pretty(&r)?;
     p.note(&text);
@@ -2504,6 +2511,19 @@ mod tests {
         assert_eq!(page_errors(&log), log[2..]);
     }
 
+    /// Findings 1-29 and 1-72 of review round 1 of M5: a wait ends on its
+    /// line or on a page error, not only on a line that is both.
+    #[test]
+    fn a_wait_ends_on_its_line_or_a_page_error() {
+        let want = "song kept in browser storage as session";
+        assert!(holds_or_error(
+            "song kept in browser storage as session 1",
+            want
+        ));
+        assert!(holds_or_error("PAGE ERROR: x is not defined", want));
+        assert!(!holds_or_error("console.info: fine", want));
+    }
+
     /// The peak of each part, from the worker's lines after the model
     /// loads and after each chunk, and the page's line at the end.
     #[test]
@@ -2543,6 +2563,13 @@ mod tests {
         let log = vec!["audio stats: no callbacks yet".to_string(), l.to_string()];
         assert_eq!(audio_stats(&log, 0), [(0.75, 88_200.0)]);
         assert!(audio_stats(&log, 2).is_empty());
+    }
+
+    /// Findings 1-47, 1-103, 2-30 and 2-58 of review rounds 1 and 2 of
+    /// M3: a wait for the model was 4 hours in `memory_budget` with no test.
+    #[test]
+    fn a_run_of_the_model_may_take_four_hours() {
+        assert_eq!(MODEL_RUN_SECS, 14_400);
     }
 
     #[test]

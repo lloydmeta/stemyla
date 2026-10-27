@@ -10,7 +10,7 @@
 //! fails on a line `decoder: decoding on the page`, and no `.part` file may
 //! be left.
 
-use super::{Checks, Opts, Page, in_page, is_page_error};
+use super::{Checks, Opts, Page, holds_or_error, in_page};
 use anyhow::Result;
 use engine::overview::lane_columns;
 use engine::song::{Song, is_stem, rank, stem_name};
@@ -328,7 +328,7 @@ fn drop_and_open(p: &mut Page, files: &[(&str, &str)], what: &str) -> Result<()>
     let from = p.mark();
     p.drop_files(&drop)?;
     let kept = p.wait_for(from, 120, |l| {
-        l.contains("song kept in browser storage as session") || is_page_error(l)
+        holds_or_error(l, "song kept in browser storage as session")
     })?;
     p.check(
         kept.as_deref()
@@ -431,7 +431,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     // A reload restores the last song with no decode.
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 120, |l| l.contains("Restored \"") || is_page_error(l))?;
+    let restored = p.wait_for(from, 120, |l| holds_or_error(l, "Restored \""))?;
     p.check(restored.is_some(), "the reload restores the last song");
     p.idle(1.0)?;
     let checks = stored_open_checks(&p.log[from..]);
@@ -442,9 +442,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     in_page(&mut p, PLANT_M4, json!(["1792640009999"]), 60)?;
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 120, |l| {
-        l.contains("Restored \"m4\"") || is_page_error(l)
-    })?;
+    let restored = p.wait_for(from, 120, |l| holds_or_error(l, "Restored \"m4\""))?;
     p.check(
         restored.is_some(),
         "the reload restores the session of the M4 layout",

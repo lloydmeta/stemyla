@@ -1964,6 +1964,16 @@ impl StemApp {
         Output::Silent(Box::new(player))
     }
 
+    /// Loads every stem in `dir`, or says in the status line why it cannot
+    /// (the native app's folder argument).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_folder(&mut self, dir: &std::path::Path) {
+        match Song::load_folder(dir) {
+            Ok(s) => self.open_memory_song(s),
+            Err(e) => self.status = format!("Could not load {}: {e:#}", dir.display()),
+        }
+    }
+
     /// Loads stems from in-memory files (a multi-file drop).
     pub fn load_files(&mut self, files: Vec<(String, Vec<u8>)>) {
         match Song::load_files(files) {
@@ -2327,20 +2337,21 @@ impl StemApp {
             .is_some_and(|p| p.playing.load(Relaxed))
     }
 
-    /// Every 2 s while playing, logs the audio callback cost (to the browser
-    /// console on the web).  This is how the in-browser engine cost is
-    /// measured.
-    fn log_audio_stats(&mut self, dt: f32) {
+    /// Every 2 s while playing, the lines that log the audio callback cost
+    /// (to the browser console on the web).  This is how the in-browser
+    /// engine cost is measured.  `e2e smoke` and `e2e playback` read them.
+    fn audio_stats_lines(&mut self, dt: f32) -> Vec<String> {
         self.stats_timer -= dt;
         if self.stats_timer > 0.0 || !self.is_playing() {
-            return;
+            return Vec::new();
         }
         self.stats_timer = 2.0;
-        let Some(p) = &self.params else { return };
+        let Some(p) = &self.params else {
+            return Vec::new();
+        };
         let n = p.callbacks.load(Relaxed);
         if n == 0 {
-            log::info!("audio stats: no callbacks yet");
-            return;
+            return vec!["audio stats: no callbacks yet".to_string()];
         }
         let sr = self.song.as_ref().map_or(44_100, |s| s.sample_rate) as f64;
         let frames = p.last_callback_frames.load(Relaxed) as f64;
@@ -2349,13 +2360,13 @@ impl StemApp {
         let (n0, t0) = self.stats_prev;
         self.stats_prev = (n, total);
         if n <= n0 {
-            return;
+            return Vec::new();
         }
         // Mean over the callbacks since the previous line, so silent
         // callbacks before Play do not dilute it.
         let mean_ms = (total - t0) as f64 / (n - n0) as f64 / 1e6;
         let max_ms = p.max_callback_ns.load(Relaxed) as f64 / 1e6;
-        log::info!(
+        let stats = format!(
             "audio stats: {} callbacks of {frames} frames ({budget_ms:.2} ms budget), engine mean {mean_ms:.3} ms ({:.1}%), max so far {max_ms:.3} ms ({:.1}%), tempo {:.2}, playhead {}",
             n - n0,
             mean_ms / budget_ms * 100.0,
@@ -2367,8 +2378,10 @@ impl StemApp {
         {
             let lanes = self.song.as_ref().map_or(0, |s| s.lanes.len());
             let held = p.held_frames.load(Relaxed);
-            log::info!("{}", playback::line(self.playback.as_ref(), lanes, held));
+            vec![stats, playback::line(self.playback.as_ref(), lanes, held)]
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        vec![stats]
     }
 
     /// Advances the silent output by the frame time so the playhead moves.
@@ -4134,7 +4147,9 @@ impl eframe::App for StemApp {
         self.apply_inbox(&ctx);
         let dt = ctx.input(|i| i.stable_dt);
         self.pump_silent(dt);
-        self.log_audio_stats(dt);
+        for line in self.audio_stats_lines(dt) {
+            log::info!("{line}");
+        }
         self.follow_mix(&ctx);
         #[cfg(target_arch = "wasm32")]
         self.step_save(&ctx);
@@ -4284,6 +4299,86 @@ mod tests {
         assert!(after[0].is_some());
         assert_ne!(after[0], before[0], "the mix lane's is made again");
         assert_eq!(after[1..], before[1..], "a stem's stays");
+    }
+
+    /// Finding 1-27 of review round 1 of M6: every 2 s while playing, one
+    /// line of the callbacks since the last line.  `e2e smoke` and `e2e
+    /// playback` read it.
+    #[test]
+    fn the_audio_stats_line_comes_every_2_s_while_playing() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.load_demo();
+        let p = Arc::clone(app.params.as_ref().unwrap());
+        assert_eq!(app.song.as_ref().unwrap().sample_rate, 44_100);
+        assert!(app.audio_stats_lines(2.5).is_empty(), "not while stopped");
+        p.playing.store(true, Relaxed);
+        assert_eq!(
+            app.audio_stats_lines(2.5),
+            ["audio stats: no callbacks yet"],
+            "the timer ran out while stopped"
+        );
+        p.callbacks.store(10, Relaxed);
+        p.total_callback_ns.store(10_000_000, Relaxed);
+        p.max_callback_ns.store(2_000_000, Relaxed);
+        p.last_callback_frames.store(2048, Relaxed);
+        assert!(app.audio_stats_lines(1.5).is_empty(), "not before 2 s");
+        let lines = app.audio_stats_lines(0.5);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0],
+            format!(
+                "audio stats: 10 callbacks of 2048 frames (46.44 ms budget), engine mean 1.000 ms (2.2%), max so far 2.000 ms (4.3%), tempo 1.00, playhead {}",
+                p.playhead()
+            )
+        );
+        assert!(
+            app.audio_stats_lines(2.0).is_empty(),
+            "no line with no new callbacks"
+        );
+        p.callbacks.store(15, Relaxed);
+        p.total_callback_ns.store(25_000_000, Relaxed);
+        let lines = app.audio_stats_lines(2.0);
+        assert!(
+            lines[0].starts_with("audio stats: 5 callbacks of 2048 frames (46.44 ms budget), engine mean 3.000 ms (6.5%)"),
+            "the mean is of the new callbacks only: {lines:?}"
+        );
+    }
+
+    /// Finding 1-40 of review round 1 of M6: the native app's folder
+    /// argument opens its stems, or says why not.  `main` itself needs a
+    /// window.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_folder_opens_its_stems_or_says_why_not() {
+        let dir = std::env::temp_dir().join(format!("app-open-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["bass", "drums"] {
+            let wav = engine::wav::encode_pcm16(&[0.0; 441], &[0.0; 441], 44_100);
+            std::fs::write(dir.join(format!("{name}.wav")), wav).unwrap();
+        }
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.open_folder(&dir.join("no-such-folder"));
+        assert!(
+            app.status.starts_with(&format!(
+                "Could not load {}: ",
+                dir.join("no-such-folder").display()
+            )),
+            "{}",
+            app.status
+        );
+        app.open_folder(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let song = app.song.as_ref().expect("the folder opens");
+        let mut names: Vec<&str> = song.lanes.iter().map(|l| l.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["bass", "drums"]);
     }
 
     /// D1 of the M7 plan: classic drums that end after new lanes of the

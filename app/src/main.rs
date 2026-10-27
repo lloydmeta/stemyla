@@ -11,10 +11,7 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             let mut app = app::StemApp::new(cc);
             if let Some(dir) = folder {
-                match engine::Song::load_folder(std::path::Path::new(&dir)) {
-                    Ok(s) => app.open_memory_song(s),
-                    Err(e) => app.status = format!("Could not load {dir}: {e:#}"),
-                }
+                app.open_folder(std::path::Path::new(&dir));
             }
             Ok(Box::new(app))
         }),
