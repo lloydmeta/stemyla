@@ -7,7 +7,7 @@
 use crate::Lane;
 use eframe::egui::{self, Color32, ColorImage, TextureOptions};
 use engine::Song;
-use engine::hpss::{HpssConfig, SpectrogramColumns, hpss};
+use engine::hpss::{BlockHpss, HpssConfig, SpectrogramColumns};
 use engine::mixdown::Pcm;
 
 const ROWS: usize = 128;
@@ -258,8 +258,28 @@ impl SpectrogramJob {
 /// HPSS on the song's mix (both channels): returns the percussive part.
 pub fn classic_drums(song: &Song) -> (Vec<f32>, Vec<f32>) {
     let (l, r) = crate::mix_of_sources(song);
-    let cfg = HpssConfig::default();
-    (hpss(&l, &cfg).percussive, hpss(&r, &cfg).percussive)
+    percussive(&l, &r)
+}
+
+/// The percussive part of a stereo signal in memory, with D8's block HPSS
+/// (D8 of the M7 plan), which gives `hpss`'s output bit for bit.
+pub fn percussive(left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let mut block = BlockHpss::new(left.len(), &HpssConfig::default());
+    let (mut l, mut r) = (
+        Vec::with_capacity(left.len()),
+        Vec::with_capacity(left.len()),
+    );
+    let mut sink = |a: &[f32], b: &[f32]| -> Result<(), std::convert::Infallible> {
+        l.extend_from_slice(a);
+        r.extend_from_slice(b);
+        Ok(())
+    };
+    let chunk = engine::source::BLOCK_FRAMES as usize;
+    for (a, b) in left.chunks(chunk).zip(right.chunks(chunk)) {
+        let Ok(()) = block.put(a, b, &mut sink);
+    }
+    let Ok(()) = block.finish(&mut sink);
+    (l, r)
 }
 
 #[cfg(test)]

@@ -124,6 +124,42 @@ pub fn input_is_the_mix_file(song: &Shown, mix_path: &str) -> bool {
         .is_some_and(|file| file.path == mix_path)
 }
 
+/// How classic drums of a song is made (D8 of the M7 plan).
+#[derive(Debug, PartialEq)]
+pub enum ClassicRoute {
+    /// Every input lane has a session file: the decode worker reads them,
+    /// and writes a stored lane.
+    Worker(Vec<store_meta::LaneFile>),
+    /// Every input lane is in memory: the page runs the block HPSS.
+    Memory,
+    /// Some input lanes have a file and some are in memory, and the song
+    /// fits the memory path: the page reads the stored ones first.
+    ReadFirst,
+    /// As `ReadFirst`, but the song is longer than the memory path takes.
+    TooLong,
+}
+
+/// The route of classic drums of `song`, whose input is its lanes that are
+/// not derived (D8 of the M7 plan).  `memory_limit` is the longest song
+/// that the memory path takes.
+pub fn classic_route(song: &Shown, memory_limit: usize) -> ClassicRoute {
+    let files: Vec<Option<&store_meta::LaneFile>> = song
+        .lanes
+        .iter()
+        .filter(|lane| !DERIVED.contains(&lane.name.as_str()))
+        .map(|lane| lane.audio.file())
+        .collect();
+    if files.iter().all(Option::is_none) {
+        ClassicRoute::Memory
+    } else if files.iter().all(Option::is_some) {
+        ClassicRoute::Worker(files.into_iter().flatten().cloned().collect())
+    } else if song.frames <= memory_limit {
+        ClassicRoute::ReadFirst
+    } else {
+        ClassicRoute::TooLong
+    }
+}
+
 /// The audio of `song`'s lanes for a job: the lanes with a file read it
 /// through `store`, when there is one (D3 and D1 of the M7 plan).
 fn job_audio(
@@ -281,6 +317,27 @@ pub struct Inbox {
     /// The memory path's input, read from browser storage (D9 of the M7
     /// plan).
     memory_input: Option<MemoryInput>,
+    /// Classic drums of the song `serial`, made in the decode worker or
+    /// from a read of browser storage (D8 of the M7 plan).
+    classic: Option<ClassicMade>,
+}
+
+/// Classic drums that arrived for the song `serial` and the lanes of
+/// `generation`.  Web only.
+#[cfg(target_arch = "wasm32")]
+struct ClassicMade {
+    serial: u64,
+    generation: u64,
+    made: Result<ClassicLane, String>,
+    /// Protects the session until the lane shows (D10 of M6).
+    _open: Option<store::OpenGuard>,
+}
+
+/// The lane of classic drums: a stored WAV with its overview, or samples.
+#[cfg(target_arch = "wasm32")]
+enum ClassicLane {
+    Stored((store_meta::LaneFile, lanes::Overview)),
+    Memory((Vec<f32>, Vec<f32>)),
 }
 
 /// The memory path's input of the song `serial`, read from browser
@@ -913,6 +970,10 @@ pub struct StemApp {
     /// A classic-drums job running on another thread (native only).
     #[cfg(not(target_arch = "wasm32"))]
     classic_job: Option<ClassicJob>,
+    /// The song serial and lanes generation of classic drums that the page
+    /// waits for (web only, D8 of the M7 plan).
+    #[cfg(target_arch = "wasm32")]
+    classic_request: Option<(u64, u64)>,
     #[cfg(target_arch = "wasm32")]
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     /// The read-ahead buffer and reader of the shown song's stored lanes.
@@ -1182,6 +1243,8 @@ impl Default for StemApp {
             stats_prev: (0, 0),
             #[cfg(not(target_arch = "wasm32"))]
             classic_job: None,
+            #[cfg(target_arch = "wasm32")]
+            classic_request: None,
             #[cfg(target_arch = "wasm32")]
             pending: Default::default(),
             #[cfg(target_arch = "wasm32")]
@@ -1774,11 +1837,38 @@ impl StemApp {
     /// Starts HPSS on the mix.  Natively it runs on a thread and the lane
     /// appears when it finishes; on the web it blocks the page while it runs.
     pub fn start_classic_drums(&mut self) {
-        let Some(shown) = &self.song else {
+        let Some(shown) = self.song.clone() else {
             return;
         };
-        let Some(song) = sources_in_memory(shown) else {
-            self.status = "Classic drums needs the song's lanes in memory".into();
+        // D8 of the M7 plan: a separation and classic drums exclude each
+        // other, so the worker never reads stems that a separation moves.
+        if self.classic_running() || self.separation_running() {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let limit = self.memory_limit;
+        #[cfg(not(target_arch = "wasm32"))]
+        let limit = MEMORY_PATH_MAX_FRAMES;
+        match classic_route(&shown, limit) {
+            ClassicRoute::Memory => {}
+            #[cfg(target_arch = "wasm32")]
+            ClassicRoute::Worker(inputs) => return self.classic_in_the_worker(&shown, &inputs),
+            #[cfg(target_arch = "wasm32")]
+            ClassicRoute::ReadFirst => return self.classic_read_first(&shown),
+            ClassicRoute::TooLong => {
+                self.status = format!(
+                    "Classic drums not made: part of this song is in browser storage and part in memory, and it is longer than {}",
+                    clock(limit)
+                );
+                return;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            ClassicRoute::Worker(_) | ClassicRoute::ReadFirst => {
+                self.status = "Classic drums of stored lanes runs in the browser".into();
+                return;
+            }
+        }
+        let Some(song) = sources_in_memory(&shown) else {
             return;
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -1808,7 +1898,160 @@ impl StemApp {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            self.classic_request.is_some()
+        }
+    }
+
+    /// True while a separation starts or runs, or its stems are read.
+    pub fn separation_running(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.separating.is_some() || self.reading_stems
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
             false
+        }
+    }
+
+    /// Classic drums of a song whose input lanes all have a session file:
+    /// the decode worker writes them as a stored lane (D8 of the M7 plan).
+    /// The session is protected from the request until the lane shows.
+    #[cfg(target_arch = "wasm32")]
+    fn classic_in_the_worker(&mut self, song: &Shown, inputs: &[store_meta::LaneFile]) {
+        let Some(id) = self.session.clone() else {
+            self.status = "Classic drums not made: the song is not kept in this browser".into();
+            return;
+        };
+        let (serial, generation, frames) = (self.song_serial, self.lanes_generation, song.frames);
+        self.classic_request = Some((serial, generation));
+        self.status = "Separating classic drums…".into();
+        let request = store::classic_request(&id, frames, inputs);
+        let open = store::OpenGuard::new(&id);
+        let guard = store::DecodeGuard::new(&id);
+        let (pending, ctx, decoder) =
+            (self.pending.clone(), self.ctx.clone(), self.decoder.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            use stem_protocol::decode::DecodeReply;
+            let made = match decoder.request(&request, guard).await {
+                decoder::Ended::Reply(DecodeReply::ClassicMade, guard) => {
+                    let kept = store::keep_classic(&id, frames).await;
+                    drop(guard);
+                    kept.map(ClassicLane::Stored).map_err(|e| format!("{e:#}"))
+                }
+                decoder::Ended::Reply(DecodeReply::Unstored { text }, _) => Err(text),
+                decoder::Ended::Reply(other, _) => {
+                    Err(format!("the decode worker replied {}", other.kind()))
+                }
+                decoder::Ended::Stopped(why) => Err(why),
+            };
+            pending.borrow_mut().classic = Some(ClassicMade {
+                serial,
+                generation,
+                made,
+                _open: Some(open),
+            });
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Classic drums of a song whose input lanes are partly in browser
+    /// storage: the page reads their mix first, a block at a time, into
+    /// memory (the song fits the memory path), then runs the block HPSS on
+    /// it (D8 of the M7 plan).
+    #[cfg(target_arch = "wasm32")]
+    fn classic_read_first(&mut self, song: &Shown) {
+        let (serial, generation) = (self.song_serial, self.lanes_generation);
+        self.classic_request = Some((serial, generation));
+        self.status = "Reading the song from browser storage for classic drums…".into();
+        let gains: Vec<f32> = song
+            .lanes
+            .iter()
+            .map(|lane| {
+                if DERIVED.contains(&lane.name.as_str()) {
+                    0.0
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let input = lanes::LanesMix::new(
+            &job_audio(song, &self.lane_store),
+            song.frames,
+            song.sample_rate,
+            &MixRecipe::new(gains),
+        );
+        let (pending, ctx, frames) = (self.pending.clone(), self.ctx.clone(), song.frames);
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut job = export::ExportJob::new(Box::new(input), export::VecSink::new(frames));
+            while !job.run_while(export::time_left(SAVE_MS)) {
+                store::sleep(1).await;
+            }
+            let made = match job.failed() {
+                Some(e) => Err(e),
+                None => {
+                    let mix = job.into_sink();
+                    Ok(ClassicLane::Memory(spectrogram::percussive(
+                        &mix.left, &mix.right,
+                    )))
+                }
+            };
+            pending.borrow_mut().classic = Some(ClassicMade {
+                serial,
+                generation,
+                made,
+                _open: None,
+            });
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Classic drums arrived: adds the lane, if its song is still shown and
+    /// the lanes did not change; else discards it (D1 and D8 of the M7
+    /// plan).
+    #[cfg(target_arch = "wasm32")]
+    fn classic_arrived(&mut self, made: ClassicMade) {
+        self.classic_request = None;
+        if made.serial != self.song_serial {
+            self.status =
+                "Classic drums finished for a song that is no longer open; discarded".into();
+            return;
+        }
+        if made.generation != self.lanes_generation {
+            self.status =
+                "Classic drums finished for lanes that changed meanwhile; discarded".into();
+            return;
+        }
+        let audio = match made.made {
+            Ok(ClassicLane::Stored((file, overview))) => {
+                let Some(store) = self.lane_store.clone() else {
+                    return;
+                };
+                LaneAudio::Stored {
+                    file,
+                    overview: std::rc::Rc::new(overview),
+                    store,
+                }
+            }
+            Ok(ClassicLane::Memory((left, right))) => LaneAudio::Memory {
+                left: left.into(),
+                right: right.into(),
+            },
+            Err(e) => {
+                log::warn!("classic drums failed: {e}");
+                self.status = format!("Classic drums failed: {e}");
+                return;
+            }
+        };
+        // Keep the transport where it was.
+        let head = self.params.as_ref().map(|p| p.playhead());
+        self.add_lane("classic drums", audio);
+        if let (Some(h), Some(p)) = (head, &self.params) {
+            p.request_seek(h);
         }
     }
 
@@ -2068,7 +2311,10 @@ impl StemApp {
                 .is_some_and(|s| s.stem_index("classic drums").is_some());
             if !has_classic
                 && ui
-                    .add_enabled(!self.classic_running(), egui::Button::new("Classic drums"))
+                    .add_enabled(
+                        !self.classic_running() && !self.separation_running(),
+                        egui::Button::new("Classic drums"),
+                    )
                     .clicked()
             {
                 self.start_classic_drums();
@@ -2167,8 +2413,11 @@ impl StemApp {
         }
         if !separate_enabled(self.separating.is_some(), self.reading_stems)
             || self.shown_session_decoding()
+            || self.classic_running()
         {
-            let why = if self.reading_stems {
+            let why = if self.classic_running() {
+                "Making classic drums…"
+            } else if self.reading_stems {
                 "Reading the separated stems from browser storage…"
             } else if self.separating.is_none() {
                 "Opening the song from browser storage…"
@@ -2196,6 +2445,7 @@ impl StemApp {
     fn start_separation(&mut self, ctx: &egui::Context) {
         if !separate_enabled(self.separating.is_some(), self.reading_stems)
             || self.shown_session_decoding()
+            || self.classic_running()
         {
             return;
         }
@@ -3003,6 +3253,9 @@ impl StemApp {
         }
         if let Some(input) = inbox.memory_input {
             self.memory_input_read(input);
+        }
+        if let Some(made) = inbox.classic {
+            self.classic_arrived(made);
         }
         if let Some(stored) = inbox.stored {
             self.reading_stems = false;
@@ -4077,6 +4330,47 @@ mod tests {
         assert!(!input_is_the_mix_file(&shown, mix));
     }
 
+    /// D8 of the M7 plan: classic drums goes to the decode worker when
+    /// every input lane has a file, stays on the page when every input lane
+    /// is in memory, and reads the stored lanes first, or refuses, when
+    /// they are mixed.  Derived lanes are not input.
+    #[test]
+    fn the_classic_drums_route_follows_where_the_input_lanes_are() {
+        let song = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![
+                stem("bass", 0.25),
+                stem("drums", 0.5),
+                stem("original", 0.1),
+            ],
+        };
+        let route = |files: Vec<Option<store_meta::LaneFile>>, limit: usize| {
+            classic_route(&Shown::with_files(song.clone(), files), limit)
+        };
+        assert_eq!(route(vec![None, None, None], 4), ClassicRoute::Memory);
+        assert_eq!(
+            route(vec![None, None, file("s/mix.f32")], 4),
+            ClassicRoute::Memory,
+            "the original is not input"
+        );
+        let stored = vec![file("s/stems/bass.wav"), file("s/stems/drums.wav"), None];
+        assert_eq!(
+            route(stored, 4),
+            ClassicRoute::Worker(vec![
+                store_meta::LaneFile::f32("s/stems/bass.wav".into(), 4),
+                store_meta::LaneFile::f32("s/stems/drums.wav".into(), 4),
+            ])
+        );
+        let mixed = || vec![file("s/stems/bass.wav"), None, None];
+        assert_eq!(route(mixed(), 4), ClassicRoute::ReadFirst);
+        assert_eq!(
+            route(mixed(), 3),
+            ClassicRoute::TooLong,
+            "over the memory path's limit"
+        );
+    }
+
     #[test]
     fn spectrograms_off_make_no_texture() {
         let mut app = StemApp {
@@ -4853,6 +5147,228 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert_eq!(shown, 1 + NAMES.len() + 1, "the stems and the original");
         assert_eq!(mix_overview, Some(mix_columns), "the stems' mix overview");
         assert!(meta.stem_overviews_for(FRAMES), "{meta:?}");
+    }
+
+    /// A page showing a song whose lane plays from a session file, with a
+    /// fake decode worker that said `decode-alive`: the page, its session,
+    /// the worker and the posts to it.
+    async fn app_with_a_stored_lane() -> (StemApp, String, web_sys::Worker, js_sys::Array) {
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        let path = format!("sessions/{id}/decoded/9.f32");
+        let bytes: Vec<u8> = tone(FRAMES)
+            .iter()
+            .flat_map(|v| [v.to_le_bytes(), v.to_le_bytes()])
+            .flatten()
+            .collect();
+        store::test_write(&path, &bytes).await.expect("planted");
+        let song = app
+            .song
+            .as_ref()
+            .and_then(|s| s.as_song())
+            .expect("in memory");
+        app.load_song(Shown::with_files(
+            song,
+            vec![Some(store_meta::LaneFile::f32(path, FRAMES))],
+        ));
+        let client = decoder::DecodeClient::new("./no-such-decode-worker.js");
+        let worker = client.worker().expect("a worker");
+        worker.set_onerror(None);
+        let requests = spy_on_post(&worker);
+        deliver(
+            &worker,
+            &stem_protocol::decode::DecodeReply::Alive.to_js().0,
+        );
+        app.decoder = client;
+        (app, id, worker, requests)
+    }
+
+    /// The first request posted to the decode worker, a `classic` one.
+    async fn classic_request_of(requests: &js_sys::Array) -> stem_protocol::decode::ClassicRequest {
+        for _ in 0..250 {
+            if requests.length() > 0 {
+                break;
+            }
+            sleep(20).await;
+        }
+        match stem_protocol::decode::WorkerRequest::from_js(&requests.get(0)) {
+            Ok(stem_protocol::decode::WorkerRequest::Classic(req)) => req,
+            other => panic!("not a classic request: {other:?}"),
+        }
+    }
+
+    /// Plants the part files of `req` as the worker writes them, and gives
+    /// the overview's columns.
+    async fn plant_classic(req: &stem_protocol::decode::ClassicRequest) -> Vec<(f32, f32)> {
+        let side: Vec<f32> = tone(FRAMES).iter().map(|v| 0.5 * v).collect();
+        let wav = engine::wav::encode_pcm16(&side, &side, 44_100);
+        let decoded = engine::decode::decode_bytes(wav.clone(), Some("wav")).expect("a WAV");
+        let (columns, _) = lane_columns(&decoded.channels[0], &decoded.channels[1]);
+        let overview: Vec<u8> = columns
+            .iter()
+            .flat_map(|(lo, hi)| [lo.to_le_bytes(), hi.to_le_bytes()])
+            .flatten()
+            .collect();
+        store::test_write(&format!("{}/{}", req.session, req.wav), &wav)
+            .await
+            .expect("planted");
+        store::test_write(&format!("{}/{}", req.session, req.overview), &overview)
+            .await
+            .expect("planted");
+        columns
+    }
+
+    /// Waits for classic drums to arrive, then applies it.
+    async fn classic_arrives(app: &mut StemApp) {
+        for _ in 0..250 {
+            sleep(20).await;
+            if app.pending.borrow().classic.is_some() {
+                break;
+            }
+        }
+        app.apply_inbox(&egui::Context::default());
+    }
+
+    fn has_classic(app: &StemApp) -> bool {
+        app.song
+            .as_ref()
+            .is_some_and(|s| s.stem_index("classic drums").is_some())
+    }
+
+    /// D8 of the M7 plan: classic drums of a song whose lanes are stored
+    /// is a `classic` request of the decode worker.  The page moves its
+    /// files into place, and adds a muted stored lane with its overview.
+    #[wasm_bindgen_test]
+    async fn classic_drums_of_a_stored_song_is_a_stored_lane() {
+        let (mut app, id, worker, requests) = app_with_a_stored_lane().await;
+        app.start_classic_drums();
+        let running = app.classic_running();
+        let req = classic_request_of(&requests).await;
+        let columns = plant_classic(&req).await;
+        deliver(
+            &worker,
+            &stem_protocol::decode::DecodeReply::ClassicMade.to_js().0,
+        );
+        classic_arrives(&mut app).await;
+        let song = app.song.clone().expect("a song");
+        let lane = song.lanes.last().expect("a lane").clone();
+        let muted = app
+            .params
+            .as_ref()
+            .is_some_and(|p| p.is_muted(song.lanes.len() - 1));
+        let part = store::test_read(&format!("sessions/{id}/classic.wav.decode.part")).await;
+        let meta = meta_of(&id).await;
+        let still_running = app.classic_running();
+        finish(app, &id).await;
+        assert!(running, "the button waits");
+        assert!(!still_running);
+        assert_eq!(req.lanes.len(), 1);
+        assert_eq!(req.lanes[0].path, "decoded/9.f32");
+        assert_eq!(req.wav, "classic.wav.decode.part");
+        assert_eq!(req.overview, "overviews/classic.f32.decode.part");
+        assert_eq!(lane.name, "classic drums");
+        match &lane.audio {
+            LaneAudio::Stored { file, overview, .. } => {
+                assert_eq!(file.path, format!("sessions/{id}/classic.wav"));
+                assert_eq!(file.format, engine::readahead::LaneFormat::Pcm16);
+                assert_eq!(overview.columns, columns);
+            }
+            _ => panic!("not a stored lane"),
+        }
+        assert!(muted, "a derived lane starts muted");
+        assert_eq!(part, None, "the part file moved");
+        assert!(meta.stems.is_empty(), "meta does not name classic drums");
+    }
+
+    #[wasm_bindgen_test]
+    async fn classic_drums_for_a_song_no_longer_shown_is_discarded() {
+        let (mut app, id, worker, requests) = app_with_a_stored_lane().await;
+        app.start_classic_drums();
+        let req = classic_request_of(&requests).await;
+        plant_classic(&req).await;
+        app.load_demo();
+        deliver(
+            &worker,
+            &stem_protocol::decode::DecodeReply::ClassicMade.to_js().0,
+        );
+        classic_arrives(&mut app).await;
+        let (added, status) = (has_classic(&app), app.status.clone());
+        finish(app, &id).await;
+        assert!(!added);
+        assert!(status.contains("no longer open"), "{status}");
+    }
+
+    /// D1 of the M7 plan: new lanes of the same song (new stems) change
+    /// the lanes generation, so classic drums of the old lanes is
+    /// discarded.
+    #[wasm_bindgen_test]
+    async fn classic_drums_after_new_stems_is_discarded() {
+        let (mut app, id, worker, requests) = app_with_a_stored_lane().await;
+        app.start_classic_drums();
+        let req = classic_request_of(&requests).await;
+        plant_classic(&req).await;
+        app.add_stem("vocals", vec![0.1; FRAMES], vec![0.1; FRAMES]);
+        deliver(
+            &worker,
+            &stem_protocol::decode::DecodeReply::ClassicMade.to_js().0,
+        );
+        classic_arrives(&mut app).await;
+        let (added, status) = (has_classic(&app), app.status.clone());
+        finish(app, &id).await;
+        assert!(!added);
+        assert!(status.contains("changed"), "{status}");
+    }
+
+    /// D8 of the M7 plan: while classic drums runs, Separate does nothing,
+    /// and while a separation runs, Classic drums does nothing.
+    #[wasm_bindgen_test]
+    async fn separate_and_classic_drums_exclude_each_other() {
+        let (mut app, id, worker, requests) = app_with_a_stored_lane().await;
+        app.start_classic_drums();
+        let req = classic_request_of(&requests).await;
+        app.start_separation(&egui::Context::default());
+        let separating_during_classic = app.separating.is_some();
+        plant_classic(&req).await;
+        deliver(
+            &worker,
+            &stem_protocol::decode::DecodeReply::ClassicMade.to_js().0,
+        );
+        classic_arrives(&mut app).await;
+        // A separation starts; Classic drums now does nothing.
+        app.start_separation(&egui::Context::default());
+        let separating = app.separating.is_some();
+        let before = requests.length();
+        app.start_classic_drums();
+        let classic_during_separation = app.classic_running();
+        let after = requests.length();
+        finish(app, &id).await;
+        assert!(
+            !separating_during_classic,
+            "Separate waits for classic drums"
+        );
+        assert!(separating, "a separation starts after it");
+        assert!(
+            !classic_during_separation,
+            "classic drums waits for the separation"
+        );
+        assert_eq!(after, before, "no request during the separation");
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_failed_classic_request_adds_no_lane() {
+        let (mut app, id, worker, requests) = app_with_a_stored_lane().await;
+        app.start_classic_drums();
+        classic_request_of(&requests).await;
+        let unstored = stem_protocol::decode::DecodeReply::Unstored {
+            text: "QuotaExceededError: the disk is full".into(),
+        };
+        deliver(&worker, &unstored.to_js().0);
+        classic_arrives(&mut app).await;
+        let (added, status, running) =
+            (has_classic(&app), app.status.clone(), app.classic_running());
+        finish(app, &id).await;
+        assert!(!added);
+        assert!(!running);
+        assert!(status.contains("QuotaExceededError"), "{status}");
     }
 
     /// Findings 1-1 and 1-b3 of review round 1: at `done`, the page moves

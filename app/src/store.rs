@@ -22,6 +22,9 @@
 //! * `sessions/<id>/overviews/stems/<k>.f32` and `overviews/stems/mix.f32`:
 //!   the waveform columns of the stem of the `k`th `stem` line and of the
 //!   stems' mix, in the same layout ([`stem_overviews`], D7 of M7).
+//! * `sessions/<id>/classic.wav` and `overviews/classic.f32`: classic drums
+//!   of the song as a 16-bit WAV, and its overview ([`keep_classic`], D8 of
+//!   M7).  `meta` does not name them: they are scratch files.
 //! * `<file>.decode.part`: a file of the list above that the decode worker
 //!   wrote.  [`keep_decoded`] moves it onto its name (D7 of M5).  An
 //!   overview of the stems is `<file>.<generation>.decode.part`.
@@ -933,9 +936,7 @@ pub async fn stem_overviews(
     frames: usize,
     decoder: &crate::decoder::DecodeClient,
 ) -> Option<StemOverviewSet> {
-    use stem_protocol::decode::{
-        DecodeReply, LaneEncoding, LaneRef, OverviewLane, OverviewsRequest, WorkerRequest,
-    };
+    use stem_protocol::decode::{DecodeReply, OverviewLane, OverviewsRequest, WorkerRequest};
     if CLOSED.get() {
         return None;
     }
@@ -960,15 +961,7 @@ pub async fn stem_overviews(
         .iter()
         .zip(&overview_files)
         .map(|(file, overview)| OverviewLane {
-            lane: LaneRef {
-                path: file.path[base.len() + 1..].to_string(),
-                encoding: match file.format {
-                    engine::readahead::LaneFormat::F32 => LaneEncoding::F32,
-                    engine::readahead::LaneFormat::Pcm16 => LaneEncoding::Pcm16,
-                },
-                data_offset: file.data_offset,
-                data_frames: file.data_frames,
-            },
+            lane: lane_ref(&base, file),
             overview: part(overview),
         })
         .collect();
@@ -1092,6 +1085,89 @@ async fn keep_stem_overviews(id: &str, names: &[String], generation: u64, frames
         write_bytes(&base, "meta", meta.to_text().as_bytes())
             .await
             .is_ok()
+    })
+    .await
+}
+
+/// The classic-drums WAV of a session, from its folder: a scratch file
+/// that `meta` does not name (D8 of the M7 plan).
+const CLASSIC_WAV: &str = "classic.wav";
+/// The overview of the classic-drums WAV, from the session folder.
+const CLASSIC_OVERVIEW: &str = "overviews/classic.f32";
+
+/// The lane of a lane file, for a request of the decode worker: its path
+/// from the session folder `base`.
+fn lane_ref(base: &str, file: &LaneFile) -> stem_protocol::decode::LaneRef {
+    use stem_protocol::decode::LaneEncoding;
+    stem_protocol::decode::LaneRef {
+        path: file
+            .path
+            .strip_prefix(&format!("{base}/"))
+            .unwrap_or(&file.path)
+            .to_string(),
+        encoding: match file.format {
+            engine::readahead::LaneFormat::F32 => LaneEncoding::F32,
+            engine::readahead::LaneFormat::Pcm16 => LaneEncoding::Pcm16,
+        },
+        data_offset: file.data_offset,
+        data_frames: file.data_frames,
+    }
+}
+
+/// The `classic` request of session `id` for a song of `frames` frames,
+/// whose input lanes are `inputs` (D8 of the M7 plan).
+pub fn classic_request(
+    id: &str,
+    frames: usize,
+    inputs: &[LaneFile],
+) -> stem_protocol::decode::WorkerRequest {
+    let base = session_folder(id);
+    stem_protocol::decode::WorkerRequest::Classic(stem_protocol::decode::ClassicRequest {
+        session: base.clone(),
+        frames: frames as u64,
+        lanes: inputs.iter().map(|file| lane_ref(&base, file)).collect(),
+        wav: format!("{CLASSIC_WAV}{DECODE_PART}"),
+        overview: format!("{CLASSIC_OVERVIEW}{DECODE_PART}"),
+    })
+}
+
+/// After `classic-made`: moves the decode worker's WAV and overview of
+/// classic drums onto their names in session `id`, and gives the lane
+/// file of the WAV, from its header, and its overview (D8 of the M7
+/// plan).
+pub async fn keep_classic(id: &str, frames: usize) -> Result<(LaneFile, crate::lanes::Overview)> {
+    saving(id, async {
+        let base = session_folder(id);
+        let overview_folder = format!("{base}/overviews");
+        let overview_name = CLASSIC_OVERVIEW
+            .rsplit('/')
+            .next()
+            .unwrap_or(CLASSIC_OVERVIEW);
+        let moved = move_file(&base, &format!("{CLASSIC_WAV}{DECODE_PART}"), CLASSIC_WAV).await
+            && move_file(
+                &overview_folder,
+                &format!("{overview_name}{DECODE_PART}"),
+                overview_name,
+            )
+            .await;
+        if !moved {
+            st_remove(&format!("{base}/{CLASSIC_WAV}{DECODE_PART}")).await;
+            st_remove(&format!("{base}/{CLASSIC_OVERVIEW}{DECODE_PART}")).await;
+            return Err(anyhow!(
+                "browser storage could not move the classic drums into place"
+            ));
+        }
+        let path = format!("{base}/{CLASSIC_WAV}");
+        let (head, size) = head_of(&path, 4_096)
+            .await
+            .ok_or_else(|| anyhow!("the classic drums are missing"))?;
+        let file = crate::store_meta::stem_lane_file(&path, &head, size, frames)
+            .ok_or_else(|| anyhow!("the classic drums are not a complete WAV"))?;
+        let bytes = read(&format!("{base}/{CLASSIC_OVERVIEW}"))
+            .await
+            .ok_or_else(|| anyhow!("the overview of the classic drums is missing"))?;
+        let overview = crate::lanes::Overview::from_file(&bytes, frames).map_err(|e| anyhow!(e))?;
+        Ok((file, overview))
     })
     .await
 }

@@ -108,6 +108,30 @@ impl<S: Sink> ExportJob<S> {
     }
 }
 
+/// Both channels in memory, for a source of at most the memory path's
+/// length: the input of classic drums that the page reads first (D8 of
+/// the M7 plan).
+pub struct VecSink {
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+}
+
+impl VecSink {
+    pub fn new(frames: usize) -> Self {
+        Self {
+            left: vec![0.0; frames],
+            right: vec![0.0; frames],
+        }
+    }
+}
+
+impl Sink for VecSink {
+    fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
+        self.left[at..at + left.len()].copy_from_slice(left);
+        self.right[at..at + right.len()].copy_from_slice(right);
+    }
+}
+
 /// The waveform of a lane: the lowest and highest sample of both channels
 /// in each column, as [`engine::overview::lane_columns`] gives them.
 pub struct PeaksSink {
