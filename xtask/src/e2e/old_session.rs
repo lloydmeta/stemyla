@@ -9,8 +9,9 @@
 //! through the decode worker (M5) and the stem overviews (D7 of M7).  The
 //! first `playback:` line after Play must say `lanes from storage 7 of 7`.
 //!
-//! After that line, the driver reads the page's WebAssembly memory with a
-//! script, `(await window.wasmBindings.default()).memory.buffer.byteLength`:
+//! After that line, and again after about 2 s of play, the driver reads
+//! the page's WebAssembly memory with a script, and keeps the larger value.
+//! The script is `(await window.wasmBindings.default()).memory.buffer.byteLength`.
 //! Trunk's loader keeps the app's JS bindings in `window.wasmBindings`, and
 //! their `default` (wasm-bindgen's `init`) gives the exports that it made
 //! once, with `memory`.  So the same check runs on an older build, which
@@ -19,7 +20,7 @@
 //! [`MAX_GROWTH_MB`] above the 1-minute value.
 
 use super::playback::{PlaybackLine, playback_line};
-use super::{Opts, Page, in_page};
+use super::{MAX_GROWTH_MB, Opts, Page, in_page};
 use anyhow::Result;
 use serde_json::json;
 use std::time::Duration;
@@ -31,9 +32,6 @@ use std::time::Duration;
 /// code measured 40.2 MB for 1 minute and 40.3 MB for 5 minutes in Chrome
 /// on 2026-10-27, so 48 + 16.
 pub(super) const OLD_SESSION_BOUND_MB: f64 = 64.0;
-
-/// The most that the 5-minute value may be above the 1-minute value, in MB.
-pub(super) const MAX_GROWTH_MB: f64 = 4.0;
 
 /// The lengths of the two sessions, in seconds.
 const SECONDS: [u32; 2] = [60, 300];
@@ -85,6 +83,14 @@ const PLANT: &str = "const [id, seconds, stems] = args;
 const MEMORY: &str = "const done = arguments[arguments.length - 1];
     (async () => (await window.wasmBindings.default()).memory.buffer.byteLength)()
       .then(done, (e) => done(`error: ${e}`));";
+
+/// The page's WebAssembly memory in MB, read with [`MEMORY`].
+fn page_memory_mb(p: &mut Page) -> Result<Option<f64>> {
+    let bytes = p
+        .session
+        .execute_async(MEMORY, json!([]), Duration::from_secs(30))?;
+    Ok(bytes.as_f64().map(|b| b / 1e6))
+}
 
 /// What one restore gave: the first `playback:` line after Play, and the
 /// page's WebAssembly memory after it, in MB.
@@ -165,12 +171,13 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         p.click(o.play_x, "Play")?;
         let first = p.wait_for(played, 60, |l| playback_line(l).is_some())?;
         let first_line = first.as_deref().and_then(playback_line);
-        let bytes = p
-            .session
-            .execute_async(MEMORY, json!([]), Duration::from_secs(30))?;
-        let memory_mb = bytes.as_f64().map(|b| b / 1e6);
+        let at_first = page_memory_mb(&mut p)?;
+        p.idle(2.0)?;
+        let after_play = page_memory_mb(&mut p)?;
+        // Finding 1-13 of review round 1 of M7: the larger of two reads.
+        let memory_mb = at_first.zip(after_play).map(|(a, b)| a.max(b));
         p.note(&format!(
-            "old-session: the {seconds}-second song: page memory {memory_mb:?} MB after the first playback line"
+            "old-session: the {seconds}-second song: page memory {at_first:?} MB after the first playback line, {after_play:?} MB 2 s later"
         ));
         p.click(o.play_x, "Pause")?;
         restores.push(Restore {
@@ -263,6 +270,17 @@ mod tests {
             1,
             "one restore: no growth"
         );
+        // Finding 1-9 of review round 1 of M7: 6 of 6 and 7 of 8 lanes from
+        // storage fail.
+        let lanes = |stored: u64, lanes: u64| Restore {
+            first_line: Some(PlaybackLine {
+                lanes,
+                ..line(stored)
+            }),
+            ..restore(300, stored, 60.0)
+        };
+        assert_eq!(failing(&[restore(60, 7, 60.0), lanes(6, 6)]), 1, "6 of 6");
+        assert_eq!(failing(&[restore(60, 7, 60.0), lanes(7, 8)]), 1, "7 of 8");
         // The control on an older build: the read-back of seven lanes of 5
         // minutes is about 740 MB.
         assert_eq!(failing(&[restore(60, 7, 200.0), restore(300, 7, 900.0)]), 3);

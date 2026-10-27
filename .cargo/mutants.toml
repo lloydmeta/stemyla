@@ -31,7 +31,7 @@ exclude_globs = [
 # validator decides its wasm32 mutants.  A wasm32 block inside a shared
 # function stays in too (TD-33).
 exclude_re = [
-    '(replace|in) (StemApp::)?(refresh_storage|about_menu|open_chosen|open_chosen_now|open_saved|resetting|open_on_the_page|decode_session|restore_stored|log_page_memory|opening_text|pick_song|separator_controls|storage_menu|streamtest_controls|reset_dialog|start_reset|prepare_reset|stop_workers|publish_separating|shown_session_decoding|poll_separator|start_web|open_files|open_from_storage|open_picked|next_open|next_token|too_many_lanes|on_the_page_of)\b',
+    '(replace|in) (StemApp::)?(refresh_storage|about_menu|open_chosen|open_chosen_now|open_saved|resetting|open_on_the_page|decode_session|restore_stored|log_page_memory|opening_text|pick_song|separator_controls|storage_menu|streamtest_controls|reset_dialog|start_reset|prepare_reset|stop_workers|publish_separating|shown_session_decoding|poll_separator|start_web|open_files|open_from_storage|open_picked|next_open|next_token|too_many_lanes|on_the_page_of|classic_in_the_worker|classic_read_first|classic_arrived|read_memory_input|memory_input_read|plays_silent)\b',
     '(replace|in) web::(run|reload)\b',
     '(replace|in) StemApp::(save_menu|start_save|step_save)\b',
     '(replace|in) Opened::in_memory\b',

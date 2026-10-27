@@ -136,8 +136,9 @@ impl Playback {
     /// Makes the read-ahead buffer of the lanes of `files` that are `Some`,
     /// and starts its reader.  Gives the buffer and one source for each
     /// lane, `None` for a memory lane.  `None` when there is no stored lane,
-    /// or the stored lanes need more than `MAX_READ_AHEAD_BYTES`: every
-    /// lane then plays from memory.
+    /// or the stored lanes need more than `MAX_READ_AHEAD_BYTES`: a memory
+    /// lane then plays from memory, and a stored lane plays silence (D2 of
+    /// the M7 plan).
     pub fn start(
         files: &[Option<LaneFile>],
         names: &[String],
@@ -161,7 +162,7 @@ impl Playback {
         let formats: Vec<_> = stored.iter().map(|(f, _)| f.format).collect();
         let Some(ahead) = ReadAhead::new(&formats, frames as u64, params) else {
             log::warn!(
-                "playback: {} stored lanes need more than the read-ahead buffer holds; they play from memory",
+                "playback: {} stored lanes need more than the read-ahead buffer holds; they play silence",
                 stored.len()
             );
             return None;

@@ -1447,6 +1447,46 @@ async fn an_incomplete_stem_is_read_whole_only_on_the_memory_path() {
     );
 }
 
+/// Review round 1 of M7, finding 1-2: when the overviews of complete stem
+/// WAVs cannot be made, the stems stay stored lanes, with empty overviews.
+/// They are not read whole.  Here the decode worker replies `unstored`, and
+/// the page's own read fails, because the first stem's file goes.
+#[wasm_bindgen_test]
+async fn a_stem_with_no_overview_stays_a_stored_lane() {
+    let frames = 2_000;
+    let (id, names, _) = session_with_stems(frames).await;
+    let fake = Fake::new();
+    let paths = store::stem_paths(&id, &names);
+    let opened = {
+        let (id, names, paths) = (id.clone(), names.clone(), paths.clone());
+        let client = fake.client.clone();
+        background(
+            async move { store::stem_lanes(&id, &names, &paths, frames, &client, frames).await },
+        )
+    };
+    fake.overviews(0).await;
+    let removed = store::test_remove(&paths[0]).await;
+    fake.reply(DecodeReply::Unstored {
+        text: "no overviews".into(),
+    });
+    let got = output(&opened).await;
+    store::test_wipe().await;
+    assert!(removed, "the first stem's file goes");
+    let (lanes, mix) = got.expect("the stems open");
+    assert_eq!(lanes.len(), 3);
+    for lane in &lanes {
+        assert!(
+            matches!(
+                &lane.audio,
+                crate::lanes::LaneAudio::Stored { overview, .. } if overview.columns.is_empty()
+            ),
+            "{} is a stored lane with an empty overview",
+            lane.name
+        );
+    }
+    assert!(mix.is_none(), "no overview of the mix");
+}
+
 /// Waits for an open's result to reach the inbox, applies it, and waits
 /// for the page to make its session current if it shows.
 async fn apply_the_open(app: &mut StemApp) {

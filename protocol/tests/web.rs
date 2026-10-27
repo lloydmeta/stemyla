@@ -936,7 +936,10 @@ fn an_overviews_or_classic_request_with_a_missing_or_wrong_field_is_refused() {
             "lanes",
         ),
         (ok_overviews("7"), "lane"),
-        (ok_overviews(lane), "overview"),
+        // Each reason starts with "overviews message: ", so the check
+        // names the field's own phrase (finding 1-15 of review round 1 of
+        // M7).
+        (ok_overviews(lane), "overview must be text"),
         (
             ok_overviews(&with_overview.replace(r#""path": "stems/bass.wav", "#, "")),
             "path",

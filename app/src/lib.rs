@@ -115,6 +115,53 @@ pub fn separation_input(
     }
 }
 
+/// Stems that arrived while their song was being opened (finding 3-9 of
+/// review round 3 of M6).
+#[cfg(target_arch = "wasm32")]
+pub struct HeldStems {
+    /// The session of the song.
+    pub session: String,
+    pub stems: Vec<ShownLane>,
+    /// The overview of the stems' mix (D7 of the M7 plan).
+    pub mix_overview: Option<std::rc::Rc<lanes::Overview>>,
+    /// What to say if the open does not show them.
+    pub kept: String,
+}
+
+/// The memory path's input of a song when it is all in memory.
+pub enum InputInMemory<'a> {
+    /// The samples of the lane that holds the original recording, shared.
+    Original(&'a [f32], &'a [f32]),
+    /// The mix of the sources, as `mix_of_sources` makes it.
+    Mixed(Vec<f32>, Vec<f32>),
+}
+
+impl InputInMemory<'_> {
+    /// The left and the right channel.
+    pub fn channels(&self) -> (&[f32], &[f32]) {
+        match self {
+            Self::Original(left, right) => (left, right),
+            Self::Mixed(left, right) => (left, right),
+        }
+    }
+}
+
+/// The memory path's input of `song` from its lanes in memory (review
+/// round 1 of M7, finding 1-1).  The other lanes can be stored.  `None`
+/// when a lane of the input is stored: then the page reads it first.
+pub fn input_in_memory(song: &Shown) -> Option<InputInMemory<'_>> {
+    match original_index_of(&song.names()) {
+        Some(i) => {
+            let (left, right) = song.lanes[i].audio.samples()?;
+            Some(InputInMemory::Original(left, right))
+        }
+        None => {
+            let (left, right) = mix_of_sources(&sources_in_memory(song)?);
+            Some(InputInMemory::Mixed(left, right))
+        }
+    }
+}
+
 /// Whether the memory path's input of `song` is the session file at
 /// `mix_path` (D10 of the M7 plan): then the session's mix is kept, and
 /// `write_mix` never reads the file that it writes.
@@ -243,17 +290,28 @@ pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
 /// for a lane that plays from memory (D8 of M6).
 pub type LaneFiles = Vec<Option<store_meta::LaneFile>>;
 
+/// The status line's note when the stored lanes of the shown song play
+/// silence (D2 of the M7 plan).
+pub const PLAYS_SILENT: &str =
+    "Its stored lanes play silent: they do not fit the read-ahead buffer.";
+
+/// Why a stored song of several sources has no "original" lane after a
+/// separation (D1 of the M7 plan).
+pub const NO_ORIGINAL: &str =
+    "No \"original\" lane: the mix of the song's sources is not in browser storage.";
+
 /// [`with_original`] of a shown song: the stem lanes, then the "original"
 /// lane (D1 of the M7 plan).  It takes the audio of the source lane that
 /// holds the original, or, for several sources, their mix: in memory when
 /// the sources are, else `mix`, the session's usable mix file, with the
 /// song's mix overview (`overviews/mix.f32`, which M5 makes of the same
-/// mix).  With neither, the song has no "original" lane.
+/// mix).  With neither, the song has no "original" lane, and the note says
+/// why, for the status line (finding 1-10 of review round 1 of M7).
 pub fn with_original_files(
     source: &Shown,
     stems: Vec<ShownLane>,
     mix: Option<store_meta::LaneFile>,
-) -> Shown {
+) -> (Shown, Option<String>) {
     let original = match original_index_of(&source.names()) {
         Some(i) => Some(source.lanes[i].audio.clone()),
         None => match sources_in_memory(source) {
@@ -274,6 +332,7 @@ pub fn with_original_files(
             },
         },
     };
+    let note = original.is_none().then(|| NO_ORIGINAL.to_string());
     let mut lanes = stems;
     if let Some(audio) = original {
         lanes.push(ShownLane {
@@ -281,12 +340,13 @@ pub fn with_original_files(
             audio,
         });
     }
-    Shown {
+    let song = Shown {
         sample_rate: source.sample_rate,
         frames: source.frames,
         lanes,
         mix_overview: None,
-    }
+    };
+    (song, note)
 }
 
 /// Lanes in memory of `stems`, which share their samples (MEM-1).
@@ -957,8 +1017,8 @@ async fn restore_stored(
         }
     };
     let mix = store::mix_lane(id, &meta, source.frames).await;
-    let song = if meta.stems.is_empty() {
-        source
+    let (song, original_note) = if meta.stems.is_empty() {
+        (source, None)
     } else {
         // D11 of the M7 plan: the stems as stored lanes, with the overviews
         // of D7, made once.
@@ -966,9 +1026,9 @@ async fn restore_stored(
         let limit = MEMORY_PATH_MAX_FRAMES;
         match store::stem_lanes(id, &meta.stems, &paths, source.frames, decoder, limit).await {
             Ok((stems, mix_overview)) => {
-                let mut song = with_original_files(&source, stems, mix.clone());
+                let (mut song, note) = with_original_files(&source, stems, mix.clone());
                 song.mix_overview = mix_overview;
-                song
+                (song, note)
             }
             Err(e) => return Some(Err(e)),
         }
@@ -978,7 +1038,7 @@ async fn restore_stored(
         mix,
         session: Some(id.to_string()),
         name: Some(meta.name.clone()),
-        note: None,
+        note: original_note,
         guard: Some(guard),
         new_session: false,
     };
@@ -1132,11 +1192,10 @@ pub struct StemApp {
     /// and becomes current.
     #[cfg(target_arch = "wasm32")]
     opens: std::rc::Rc<std::cell::Cell<u64>>,
-    /// Stems that arrived while their song was being opened (and so may be
-    /// missing from what the open read): the session, the stems, and what
-    /// to say if the open does not show them.
+    /// Stems that arrived while their song was being opened, and so may be
+    /// missing from what the open read.
     #[cfg(target_arch = "wasm32")]
-    stems_for_opening: Option<(String, Vec<ShownLane>, String)>,
+    stems_for_opening: Option<HeldStems>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
     /// The save in progress, one at a time.
@@ -1589,7 +1648,12 @@ impl StemApp {
             // The open may have read the session before these stems.  If
             // they are not kept, a failed open says so (finding 3-9).
             let kept = note.clone().unwrap_or_else(|| kept_text(&job, n, secs));
-            self.stems_for_opening = Some((id, stems, kept));
+            self.stems_for_opening = Some(HeldStems {
+                session: id,
+                stems,
+                mix_overview,
+                kept,
+            });
             self.status = kept_status;
             return;
         }
@@ -1613,7 +1677,7 @@ impl StemApp {
             }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
-        let mut separated = with_original_files(&song, stems, mix);
+        let (mut separated, original_note) = with_original_files(&song, stems, mix);
         // The stems' mix overview (D7 of the M7 plan).
         separated.mix_overview = mix_overview;
         self.load_song(separated);
@@ -1621,7 +1685,7 @@ impl StemApp {
             p.request_seek(h);
         }
         self.status = format!("Separated into {n} stems in {secs:.0} s.  {}", self.status);
-        if let Some(note) = note {
+        for note in [note, original_note].into_iter().flatten() {
             self.status = format!("{}  {note}", self.status);
         }
         #[cfg(target_arch = "wasm32")]
@@ -1649,8 +1713,8 @@ impl StemApp {
                 self.status = not_kept.unwrap_or_else(|| kept_text(&job, count, secs));
             }
             Some(Err(e)) => {
-                log::error!("separator: could not read the stored stems: {e:#}");
-                self.status = format!("Separated, but could not read the stems back: {e:#}");
+                log::error!("separator: could not open the stored stems: {e:#}");
+                self.status = format!("Separated, but could not open the stems: {e:#}");
                 if let Some(not_kept) = not_kept {
                     self.status = format!("{}.  {not_kept}", self.status);
                 }
@@ -1759,19 +1823,13 @@ impl StemApp {
             song.duration_s(),
             song.sample_rate
         );
+        self.song = Some(song);
         // D2 of the M7 plan: with no read-ahead buffer, a stored lane plays
         // silence, never samples; the status line says so.
         #[cfg(target_arch = "wasm32")]
-        if self.playback.is_none()
-            && song
-                .lanes
-                .iter()
-                .any(|lane| matches!(lane.audio, LaneAudio::Stored { .. }))
-        {
-            self.status
-                .push_str(".  Its stored lanes play silent: they do not fit the read-ahead buffer");
+        if self.plays_silent() {
+            self.status = format!("{}.  {PLAYS_SILENT}", self.status);
         }
-        self.song = Some(song);
         self.params = Some(params);
         self.play_on_output(player);
     }
@@ -2424,6 +2482,19 @@ impl StemApp {
         });
     }
 
+    /// Whether the shown song has stored lanes and there is no read-ahead
+    /// buffer, so they play silence (D2 of the M7 plan).  Natively, no
+    /// stored lane plays, so the status line does not say it.
+    #[cfg(target_arch = "wasm32")]
+    fn plays_silent(&self) -> bool {
+        self.playback.is_none()
+            && self.song.as_ref().is_some_and(|song| {
+                song.lanes
+                    .iter()
+                    .any(|lane| matches!(lane.audio, LaneAudio::Stored { .. }))
+            })
+    }
+
     /// A token for a new open: one more than the last (D12 of the M7
     /// plan).  Every older open is then stale.
     #[cfg(target_arch = "wasm32")]
@@ -2852,20 +2923,14 @@ impl StemApp {
                 // anyway, and this thread's WebAssembly memory never
                 // shrinks once grown.  The same samples become the
                 // "original" lane (see `with_original`).  A mix made here
-                // is freed before the start line below.
-                let Some(song) = song.as_song() else {
+                // is freed before the start line below.  The stems can be
+                // stored lanes (finding 1-1 of review round 1 of M7).
+                let Some(input) = input_in_memory(&song) else {
                     self.separating = None;
                     self.status = "Separation not started: the song is not in memory".into();
                     return;
                 };
-                let mixed;
-                let (l, r): (&[f32], &[f32]) = match original_lane(&song) {
-                    Some(lane) => (&lane.left, &lane.right),
-                    None => {
-                        mixed = mix_of_sources(&song);
-                        (&mixed.0, &mixed.1)
-                    }
-                };
+                let (l, r) = input.channels();
                 let mix = stem_protocol::Mix::Arrays {
                     left: js_sys::Float32Array::from(l),
                     right: js_sys::Float32Array::from(r),
@@ -3038,8 +3103,8 @@ impl StemApp {
     }
 
     /// A storage-path separation ended: moves its files into place and
-    /// writes `meta` (D5 of M3), then reads the stems for a song shown or
-    /// being opened (D6).
+    /// writes `meta` (D5 of M3), then shows the stems as stored lanes, for
+    /// a song shown or being opened (D6 of M3, D11 of the M7 plan).
     #[cfg(target_arch = "wasm32")]
     fn separation_stored(
         &mut self,
@@ -3324,6 +3389,11 @@ impl StemApp {
     #[cfg(target_arch = "wasm32")]
     fn apply_inbox(&mut self, ctx: &egui::Context) {
         let inbox = std::mem::take(&mut *self.pending.borrow_mut());
+        // What the status line says after a song shows, after the inbox's
+        // status: the open's notes, and the note of D2 (finding 1-11 of
+        // review round 1 of M7).
+        let mut song_notes: Vec<String> = Vec::new();
+        let mut shown_silent = false;
         if let Some((token, r)) = inbox.song {
             // D12 of the M7 plan: only the newest open shows its song and
             // makes its session current.  An older one completed its files
@@ -3339,10 +3409,9 @@ impl StemApp {
             match r {
                 Err(None) => {}
                 Ok(opened) => {
-                    let holds_these = self
-                        .stems_for_opening
-                        .as_ref()
-                        .is_some_and(|(id, ..)| opened.session.as_deref() == Some(id.as_str()));
+                    let holds_these = self.stems_for_opening.as_ref().is_some_and(|held| {
+                        opened.session.as_deref() == Some(held.session.as_str())
+                    });
                     let Opened {
                         song,
                         mix,
@@ -3355,7 +3424,13 @@ impl StemApp {
                     // Stems held for this open: as they arrived (D11 of the
                     // M7 plan).
                     let song = match self.stems_for_opening.take_if(|_| holds_these) {
-                        Some((_, stems, _)) => with_original_files(&song, stems, mix),
+                        Some(held) => {
+                            let (mut song, original_note) =
+                                with_original_files(&song, held.stems, mix);
+                            song.mix_overview = held.mix_overview;
+                            song_notes.extend(original_note);
+                            song
+                        }
                         None => song,
                     };
                     self.session = session;
@@ -3374,15 +3449,18 @@ impl StemApp {
                             }
                         });
                     }
-                    if let Some(note) = note {
-                        self.status = note;
-                    }
+                    song_notes.splice(0..0, note);
+                    shown_silent = self.plays_silent();
                 }
                 Err(Some(e)) => self.status = format!("Could not load: {e:#}"),
             }
         }
-        if let Some(text) = inbox.status {
-            self.status = text;
+        let parts: Vec<String> = inbox.status.into_iter().chain(song_notes).collect();
+        if !parts.is_empty() {
+            self.status = parts.join("  ");
+            if shown_silent {
+                self.status = format!("{}  {PLAYS_SILENT}", self.status);
+            }
         }
         if let Some(token) = inbox.open_done
             && self.opening.as_ref().is_some_and(|(t, _)| *t == token)
@@ -3390,8 +3468,8 @@ impl StemApp {
             self.opening = None;
             // Held stems this open did not show (it failed) are kept in
             // storage all the same.
-            if let Some((.., kept)) = self.stems_for_opening.take() {
-                self.status = kept;
+            if let Some(held) = self.stems_for_opening.take() {
+                self.status = held.kept;
             }
         }
         if let Some(u) = inbox.usage {
@@ -4164,29 +4242,30 @@ mod tests {
     /// D1 of the M7 plan: classic drums that end after new lanes of the
     /// same song (new stems) are discarded, as for another song.
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn classic_drums_for_lanes_that_changed_are_discarded() {
         let mut app = StemApp {
             want_device: false,
             ..StemApp::default()
         };
         app.load_demo();
-        app.start_classic_drums();
+        // A job that has ended, with no HPSS run (finding 1-12 of review
+        // round 1 of M7): its lane waits in the channel.
+        let frames = app.song.as_ref().expect("a song").frames;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((vec![0.0; frames], vec![0.0; frames]))
+            .expect("sent");
+        app.classic_job = Some((app.song_serial, app.lanes_generation, rx));
         assert!(app.classic_running());
         let job = app.separation_job().expect("a job");
-        let frames = app.song.as_ref().expect("a song").frames;
         let stems = vec![Stem {
             name: "bass".into(),
             left: vec![0.1; frames].into(),
             right: vec![0.1; frames].into(),
         }];
         app.apply_separated(job, stems, 1.0);
-        let ctx = egui::Context::default();
-        let start = std::time::Instant::now();
-        while app.classic_running() {
-            assert!(start.elapsed().as_secs() < 120, "classic drums never ended");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            app.poll_jobs(&ctx);
-        }
+        app.poll_jobs(&egui::Context::default());
+        assert!(!app.classic_running(), "the job ended");
         let song = app.song.as_ref().expect("a song");
         assert_eq!(song.stem_index("classic drums"), None, "no lane added");
         assert!(app.status.contains("changed"), "status: {}", app.status);
@@ -4491,6 +4570,47 @@ mod tests {
     /// every input lane has a file, stays on the page when every input lane
     /// is in memory, and reads the stored lanes first, or refuses, when
     /// they are mixed.  Derived lanes are not input.
+    /// Review round 1 of M7, finding 1-1: the memory path takes its input
+    /// from the lanes in memory, also when the stems are stored.
+    #[test]
+    fn the_memory_input_comes_from_the_lanes_in_memory() {
+        let song = |stems: Vec<Stem>| Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems,
+        };
+        let rebuilt = with_test_files(
+            song(vec![
+                stem("bass", 0.25),
+                stem("drums", 0.5),
+                stem("original", 0.1),
+            ]),
+            vec![file("s/stems/bass.wav"), file("s/stems/drums.wav"), None],
+        );
+        let input = input_in_memory(&rebuilt).expect("the original is in memory");
+        let (left, right) = input.channels();
+        let (want_left, want_right) = rebuilt.lanes[2].audio.samples().expect("samples");
+        assert!(matches!(input, InputInMemory::Original(..)));
+        assert_eq!(left.as_ptr(), want_left.as_ptr(), "shared, not copied");
+        assert_eq!(right.as_ptr(), want_right.as_ptr());
+        let sources = with_test_files(
+            song(vec![stem("bass", 0.25), stem("drums", 0.5)]),
+            vec![None, None],
+        );
+        let input = input_in_memory(&sources).expect("the sources are in memory");
+        assert_eq!(input.channels(), (&[0.75; 4][..], &[-0.75; 4][..]));
+        let half = with_test_files(
+            song(vec![stem("bass", 0.25), stem("drums", 0.5)]),
+            vec![file("s/stems/bass.wav"), None],
+        );
+        assert!(input_in_memory(&half).is_none(), "a source is stored");
+        let stored_original = with_test_files(
+            song(vec![stem("bass", 0.25), stem("original", 0.1)]),
+            vec![None, file("s/mix.f32")],
+        );
+        assert!(input_in_memory(&stored_original).is_none());
+    }
+
     #[test]
     fn the_classic_drums_route_follows_where_the_input_lanes_are() {
         let song = Song {
@@ -4908,7 +5028,8 @@ mod tests {
             stems: vec![stem("acme", 0.25), stem("classic drums", 0.5)],
         };
         let one = with_test_files(one, vec![file("s/mix.f32"), None]);
-        let song = with_original_files(&one, stems(), file("s/other.f32"));
+        let (song, note) = with_original_files(&one, stems(), file("s/other.f32"));
+        assert_eq!(note, None);
         assert_eq!(song.names(), ["vocals", "bass", "original"]);
         assert_eq!(
             song.files(),
@@ -4927,7 +5048,8 @@ mod tests {
             columns: vec![(-0.5, 0.75); 4],
             scale: 1.0,
         }));
-        let with_mix = with_original_files(&stored, stems(), file("s/mix.f32"));
+        let (with_mix, note) = with_original_files(&stored, stems(), file("s/mix.f32"));
+        assert_eq!(note, None);
         assert_eq!(
             with_mix.files(),
             [file("s/stems/vocals.wav"), None, file("s/mix.f32")]
@@ -4938,19 +5060,26 @@ mod tests {
             }
             LaneAudio::Memory { .. } => panic!("the original plays from the mix file"),
         }
-        let no_mix = with_original_files(&stored, stems(), None);
+        let (no_mix, note) = with_original_files(&stored, stems(), None);
         assert_eq!(
             no_mix.names(),
             ["vocals", "bass"],
             "no usable mix: no original"
         );
+        assert_eq!(
+            note.as_deref(),
+            Some(NO_ORIGINAL),
+            "the status line says why"
+        );
         // Several sources in memory: their mix, in memory.
-        let memory = with_original_files(&Shown::in_memory(several()), stems(), file("s/mix.f32"));
+        let (memory, note) =
+            with_original_files(&Shown::in_memory(several()), stems(), file("s/mix.f32"));
+        assert_eq!(note, None);
         assert_eq!(memory.files(), [file("s/stems/vocals.wav"), None, None]);
         let (left, _) = memory.lanes[2].audio.samples().expect("in memory");
         assert_eq!(**left, mix_of_sources(&several()).0);
         // A separated song separated again: "original" keeps its file.
-        let again = with_original_files(&with_mix, stems(), None);
+        let (again, _) = with_original_files(&with_mix, stems(), None);
         assert_eq!(again.files()[2], file("s/mix.f32"));
     }
 
@@ -5648,8 +5777,8 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
     }
 
     /// Findings 1-1 and 1-b3 of review round 1: at `done`, the page moves
-    /// the stem files into place, writes `meta`, and shows the stems that
-    /// it reads back, with Separate disabled until they are read.
+    /// the stem files into place, writes `meta`, and shows the stems as
+    /// stored lanes, with Separate disabled until they show.
     #[wasm_bindgen_test]
     async fn stored_stems_are_moved_read_and_shown() {
         let (mut app, _posts, id) = app_with_a_stored_song().await;
@@ -5830,7 +5959,7 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         let held = app
             .stems_for_opening
             .as_ref()
-            .map(|(held, stems, text)| (held.clone(), stems.len(), text.clone()));
+            .map(|held| (held.session.clone(), held.stems.len(), held.kept.clone()));
         finish(app, &id).await;
         let (held, count, text) = held.expect("stems held for the open");
         assert_eq!((held, count), (id, 6));

@@ -528,10 +528,21 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
             right: vec![0.2; frames].into(),
         },
     ];
-    app.stems_for_opening = Some((id.clone(), memory_lanes(held), "kept".into()));
+    let held_mix = std::rc::Rc::new(lanes::Overview {
+        columns: vec![(-0.25, 0.5); 3],
+        scale: 2.0,
+    });
+    app.stems_for_opening = Some(crate::HeldStems {
+        session: id.clone(),
+        stems: memory_lanes(held),
+        mix_overview: Some(held_mix.clone()),
+        kept: "kept".into(),
+    });
     app.pending.borrow_mut().song = Some((app.opens.get(), Ok(again)));
     app.apply_inbox(&egui::Context::default());
     let for_opening = app.lane_files();
+    // Finding 1-28 of review round 1 of M7: the held stems' mix overview.
+    let shown_mix = app.song.as_ref().and_then(|s| s.mix_overview.clone());
     // A song decoded on the page has no lane files.
     let on_the_page = Opened::in_memory(
         Song {
@@ -592,6 +603,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         "the others keep their files"
     );
     assert_eq!(part_file, None, "a .part stem plays from memory");
+    assert_eq!(shown_mix, Some(held_mix), "the held stems' mix overview");
     assert_eq!(
         for_opening,
         [
@@ -952,8 +964,37 @@ async fn a_stored_song_with_no_read_ahead_plays_silence_and_says_so() {
     let (mut l, mut r) = (vec![1.0; CALLBACK], vec![1.0; CALLBACK]);
     stored_player(&mut app).process(&mut l, &mut r);
     let protected = store::protected(id);
+    // Finding 1-11 of review round 1 of M7: a Storage open or the startup
+    // restore shows the song through `apply_inbox`, with an inbox status
+    // and a note.  The status line keeps the note of D2.
+    let shown = lanes::Shown::clone(app.song.as_ref().expect("a song"));
+    let token = app.next_open();
+    {
+        let mut inbox = app.pending.borrow_mut();
+        inbox.status = Some("Restored \"lloyd\" from this browser.".into());
+        inbox.put_song(
+            token,
+            Ok(Opened {
+                song: shown,
+                mix: None,
+                session: None,
+                name: Some("lloyd".into()),
+                note: Some("acme".into()),
+                guard: None,
+                new_session: false,
+            }),
+        );
+    }
+    playback::refuse_for_test(true);
+    app.apply_inbox(&egui::Context::default());
+    playback::refuse_for_test(false);
+    let restored = app.status.clone();
     app.load_demo();
     store::test_remove(&format!("sessions/{id}")).await;
+    assert!(
+        restored.starts_with("Restored \"lloyd\"") && restored.contains("play silent"),
+        "{restored}"
+    );
     assert!(no_buffer, "no read-ahead buffer");
     assert!(no_samples, "no lane has samples");
     assert!(

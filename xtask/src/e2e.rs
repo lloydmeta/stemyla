@@ -1316,7 +1316,7 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
 
 /// The most that the page's or the worker's WebAssembly memory may grow
 /// during a separation (D9 of M3, step 4 of M4): the tolerance of M10.
-const MAX_GROWTH_MB: f64 = 4.0;
+pub(super) const MAX_GROWTH_MB: f64 = 4.0;
 
 /// Whether `line` ends the wait of `memory-budget` for a separation: its
 /// stems are shown, or the page reports an error.

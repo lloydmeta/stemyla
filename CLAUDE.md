@@ -13,7 +13,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `roformer/`: STFT, chunking, weights, and the CPU reference network (Burn, ndarray).
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
 * `worker/`: the Web Worker that runs separations (package `stem-worker`).
-* `decoder/`: the page-side Web Worker that decodes a song in blocks into browser storage (package `decode-worker`, decision 0019).
+* `decoder/`: the page-side Web Worker that decodes a song in blocks into browser storage, and makes stem overviews and classic drums (package `decode-worker`, decision 0019).
 * `protocol/`: the messages between the page and its two workers (package `stem-protocol`).
 * `test-support/`: `skip`, which fails a test that cannot run when `STEMYLA_REQUIRE` asks for evidence; a dev-dependency only.
 * `xtask/`: the static server, the browser test runners (`web-test`, `e2e`), `docs-check`, `publish` and other tools.

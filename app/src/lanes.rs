@@ -611,8 +611,8 @@ pub(crate) mod tests {
     const BLOCKS: [usize; 4] = [1, 1_000, 16_384, 32_768];
 
     /// D3 of the M7 plan: a stored lane reads the samples that `read_stem`
-    /// and `read_back` gave, bit for bit: a 16-bit WAV through
-    /// `decode_bytes` and `padded_to`, and an f32 file as it is.  The reads
+    /// gives for a 16-bit WAV, bit for bit (through `decode_bytes` and
+    /// `padded_to`), and an f32 file as it is.  The reads
     /// cross the end of a block and the end of the file, and none is more
     /// than a block.
     #[test]

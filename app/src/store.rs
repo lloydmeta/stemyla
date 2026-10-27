@@ -1511,7 +1511,8 @@ async fn read_overview(path: &str, frames: usize) -> Result<std::rc::Rc<crate::l
 /// The stems `names` of session `id`, at `paths`, for a song of `frames`
 /// frames, as lanes (D11 of the M7 plan), and the overview of their mix
 /// when every stem is complete.  A complete stem WAV is a stored lane: its
-/// header (at most 4 KiB read) and its overview (D7).  A stem whose file is
+/// header (at most 4 KiB read) and its overview (D7), or an empty overview
+/// when none can be made.  A stem whose file is
 /// not complete (`.part`, or a wrong header) is read whole into memory
 /// only on the memory path's rules: a song of at most `limit` frames; else
 /// it is an error.
@@ -1571,19 +1572,27 @@ pub async fn stem_lanes(
     let mut lanes = Vec::with_capacity(names.len());
     for (((name, path), file), overview) in names.iter().zip(paths).zip(files).zip(overviews) {
         let audio = match (file, overview) {
-            (Some(file), Some(overview)) => LaneAudio::Stored {
+            // With no overview, the lane's waveform is empty: nothing draws
+            // it, and the mix lane's follower reads its blocks (finding 1-2
+            // of review round 1 of M7).
+            (Some(file), overview) => LaneAudio::Stored {
                 file,
-                overview,
+                overview: overview.unwrap_or_else(|| {
+                    std::rc::Rc::new(crate::lanes::Overview {
+                        columns: Vec::new(),
+                        scale: 1.0,
+                    })
+                }),
                 store: std::rc::Rc::clone(&store),
             },
-            _ if frames <= limit => {
+            (None, _) if frames <= limit => {
                 let (stem, _) = read_stem(path, name, frames).await?;
                 LaneAudio::Memory {
                     left: stem.left,
                     right: stem.right,
                 }
             }
-            _ => {
+            (None, _) => {
                 return Err(anyhow!(
                     "the stem {name} is not complete in browser storage, and the song is too long to read it into memory"
                 ));
@@ -2419,8 +2428,6 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         );
     }
 
-    /// MEM-5: each block of the mix, and `meta`, reach storage as a whole
-    /// array.
     /// The memory path's input of `song` in memory, as `write_mix` takes it.
     fn input_of(song: &Song) -> Box<dyn engine::mixdown::Pcm> {
         let shown = crate::lanes::Shown::in_memory(song.clone());
@@ -2428,6 +2435,8 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         crate::separation_input(&shown, audio).0
     }
 
+    /// MEM-5: each block of the mix, and `meta`, reach storage as a whole
+    /// array.
     #[wasm_bindgen_test]
     async fn the_mix_is_written_in_whole_blocks() {
         st_remove(ROOT).await;

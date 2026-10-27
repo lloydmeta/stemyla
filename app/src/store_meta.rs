@@ -50,8 +50,10 @@ pub fn stem_overview_file(k: usize) -> String {
 pub const STEM_MIX_OVERVIEW: &str = "overviews/stems/mix.f32";
 
 /// The part file that the decode worker writes for `file`, an overview of
-/// the stems of `generation`.  Two requests for one session never share
-/// a part file.
+/// the stems of `generation`.  Two requests for different generations of
+/// one session never share a part file.  Two requests of one generation
+/// can: they write the same bytes, and an overview file of the wrong size
+/// is refused (D4 of the M7 plan).
 pub fn stem_overview_part(file: &str, generation: u64) -> String {
     format!("{file}.{generation}.decode.part")
 }

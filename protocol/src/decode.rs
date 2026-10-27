@@ -45,8 +45,8 @@
 //! A `decode` request ends with exactly one of `decoded`, `undecodable`
 //! and `decode-unstored`.  An `overviews` request ends with exactly one
 //! of `overviews-made` and `decode-unstored`, and a `classic` request
-//! with exactly one of `classic-made` and `decode-unstored`.  A missing or wrong field is an error, never a
-//! default (TD-16).
+//! with exactly one of `classic-made` and `decode-unstored`.  A missing
+//! or wrong field is an error, never a default (TD-16).
 
 use js_sys::{Array, Object};
 use wasm_bindgen::JsValue;

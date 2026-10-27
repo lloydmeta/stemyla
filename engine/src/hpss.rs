@@ -839,7 +839,9 @@ mod tests {
     /// FFT, median and mask with the same operations.
     ///
     /// The `engine` crate builds without optimisation in tests, so each
-    /// case runs on its own thread.
+    /// case runs on its own thread.  100,000 frames is more than three
+    /// blocks of 32,768 frames, so no longer case is necessary (finding of
+    /// the mutants baseline in review round 1 of M7).
     #[test]
     fn block_hpss_gives_hpss() {
         let case = |frames: usize, tone: bool| {
@@ -873,7 +875,7 @@ mod tests {
             }
         };
         std::thread::scope(|scope| {
-            for frames in [1, 2_047, 2_048, 100_000, 400_003] {
+            for frames in [1, 2_047, 2_048, 100_000] {
                 for tone in [false, true] {
                     scope.spawn(move || case(frames, tone));
                 }
@@ -886,7 +888,8 @@ mod tests {
     #[test]
     fn a_block_hpss_keeps_its_memory_flat() {
         const MIB: usize = 1 << 20;
-        let (short, long) = (10 * 44_100, 40 * 44_100);
+        // 3 s is four blocks of 32,768 frames, and 12 s is sixteen.
+        let (short, long) = (3 * 44_100, 12 * 44_100);
         let blocks = |frames: usize| {
             let (left, right) = (noise(frames, 3), noise(frames, 4));
             crate::test_alloc::peak_of(|| {

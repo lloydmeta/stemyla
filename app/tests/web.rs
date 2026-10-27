@@ -160,7 +160,7 @@ async fn shown_with_stems(id: &str, song: engine::Song, meta: &store_meta::Meta)
     )
     .await
     .expect("the stems");
-    app::with_original_files(&lanes::Shown::in_memory(song), stems, None)
+    app::with_original_files(&lanes::Shown::in_memory(song), stems, None).0
 }
 
 #[wasm_bindgen_test]
