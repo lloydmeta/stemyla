@@ -266,6 +266,8 @@ The parent's M7 section, item by item:
   * The mutants baseline: the round's run timed out because its machine was loaded (the `engine` library took 89 s there, 9 to 12 s here).  The same test command (`cargo test --profile=mutants` for `app`, `decode-worker`, `engine`, `stem-protocol` and `xtask`, `--all-features`), on this Mac with no other load: before, 103.7 s wall, 388.5 s user and 56.3 s system; after, 94.3 s wall, 363.2 s user and 59.4 s system.  The cuts: `block_hpss_gives_hpss` drops its case of 400,003 frames (2.4 to 0.8 s), `a_block_hpss_keeps_its_memory_flat` measures 3 s and 12 s, not 10 s and 40 s (4.9 to 1.5 s; the block peaks stay equal, and the control 11.9 MB against 47.0 MB), and 1-12.  The largest CPU user is `engine/tests/realtime.rs` (134 s of CPU in 11 s), which M7 did not change.  The UI tests of M7 on the stored path take about 11 s of CPU; they are the acceptance tests of D4 to D6, so they stay.
   * Runs after `(cd app && trunk build --release)`: `e2e old-session` (three runs), `smoke`, `decode`, `playback`, `audio-resume` and `storage` pass in Chrome; `web-test --browser chrome`: 245 tests pass.  `old-session` measured 37.0, 40.2 and 40.4 MB for 1 minute, and 40.1, 40.2 and 40.4 MB for 5 minutes.  So one run grew by 3.1 MB, under the limit of 4 MB but near it.  If CI fails on the growth, look at the 1-minute value first.
 
+* [x] 2026-10-28: review round 1 (at `db45675`): 5 reviewers and 12 validators, 1,177,828 tokens, 51.3 wall minutes.  12 confirmed (2 blockers and 10 should-fix: 1-1 to 1-12) and 16 nits; all fixed in `ff9c50e` but 1-25 (a past commit message).  Mutants: none, the baseline timed out at 300 s while the reviewers ran tests on the same Mac.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows, because the Write tool refuses them to a subagent.
+
 ## Surprises and discoveries
 
 None yet.
@@ -326,6 +328,8 @@ None yet.
 * 2026-10-27, implementer, step 9: the scenario reads the memory once, after the first `playback:` line, and does not wait for a quiet page.  The read-ahead buffer exists then, and the memory of WebAssembly never shrinks, so a later read can only be equal or larger.
 * 2026-10-27, implementer, review round 1, finding 1-16: the part files keep their names, and the claim is weakened.  The decode worker runs its requests one at a time.  Two requests of one generation write the same bytes, and an overview file of the wrong size is refused (D4).  Parts unique per request would need a new name and cleanup for a case that gives the same result.
 * 2026-10-27, implementer, review round 1, finding 1-2: a stored stem with no overview draws no waveform.  The mix lane's follower makes the mix, as for a song with no mix overview.
+* 2026-10-28, team leader (the orchestrator, for the maintainer): the review rounds go on to the stop rule, not to 3: a round with confirmed blockers or significant should-fix gets a next round that checks its fixes.  The log goes to `docs/reviews/` after the last round.
+* 2026-10-28, team leader: from round 2, the mutants run starts first, and the reviewers start once its baseline test run has passed, so the baseline runs on an unloaded Mac (round 1's baseline timed out under the reviewers' load).
 
 ## Outcomes and retrospective
 
