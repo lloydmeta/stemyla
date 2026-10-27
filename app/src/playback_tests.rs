@@ -1069,3 +1069,35 @@ async fn a_lane_added_during_a_save_keeps_the_save() {
         "the save ran to its end: {status}"
     );
 }
+
+/// Finding 4-1 of review round 4 of M7: a save whose read of browser
+/// storage fails makes no file and no encode request, and says why.  The
+/// FLAC save has no worker, so a save that goes on says that the worker
+/// is not running.
+#[wasm_bindgen_test]
+async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
+    let id = "m7-save-read-fails";
+    let (song, files) = planted(id, SECOND, 2).await;
+    let (mut app, _) = showing(id, song, files);
+    app.separator = None;
+    assert!(store::test_remove(&format!("sessions/{id}/stems/drums.wav")).await);
+    app.start_save(Some(1), export::Format::Flac);
+    let ctx = egui::Context::default();
+    for _ in 0..2_000 {
+        if app.saving.is_none() {
+            break;
+        }
+        app.step_save(&ctx);
+        pb_test_sleep(5).await;
+    }
+    let (ended, status) = (app.saving.is_none(), app.status.clone());
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(ended, "the save ended");
+    assert!(
+        status.starts_with("Could not save ")
+            && status.contains("could not be read from browser storage")
+            && !status.contains("worker"),
+        "{status}"
+    );
+}

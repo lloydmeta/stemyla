@@ -5,8 +5,8 @@ use std::process::Command;
 
 /// Finding 3-9 of review round 3 of M7: `e2e old-session` with a
 /// `CHROMEDRIVER` that is not a file ends with an error, not a pass.  It
-/// needs no browser and no network: the scenario's server binds a local
-/// port, then the driver fails to start.
+/// needs no browser and no internet: the server binds a port on this
+/// machine, then the driver fails to start.
 #[test]
 fn old_session_with_no_driver_fails_before_a_browser_starts() {
     let dir = std::env::temp_dir().join(format!("xtask-e2e-cli-{}", std::process::id()));

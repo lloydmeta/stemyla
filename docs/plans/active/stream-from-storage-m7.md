@@ -297,6 +297,11 @@ The parent's M7 section, item by item:
   * 3-4 to 3-7: text.  `web-test --browser chrome`: 249 tests pass.
 
 * [x] 2026-10-28: review round 3 (at `20672b0`): 5 reviewers and 4 validators, 721,147 tokens, 49.8 wall minutes.  2 should-fix confirmed (3-1, a classic-drums lane that arrived later dropped a save; 3-2) and 1 pre-existing (3-3), and 5 nits, all fixed in `cb13653`.  Mutants: full, 15 tested, 1 missed (3-9, `run` of `e2e old-session`), confirmed and now killed by a native test.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 4 checks these fixes (the stop rule).
+* [x] 2026-10-28: review round 4 fixes.  Each ID, and how its test failed first or which mutant it kills:
+  * 4-1: `step_save` reads `ExportJob::failed()` when the job ends.  After a failed read, it makes no file and no encode request, and says "Could not save {name}: the song could not be read from browser storage ({e})."  `a_save_whose_read_fails_says_so_and_makes_no_file` (browser) failed first: "Could not save song - drums.flac: the encoding worker is not running."  A Decision log entry supersedes step 5b's for saves.
+  * 4-2, 4-3: `xtask/tests/mutants_excludes.rs` is removed (see the Decision log).  A version that scanned the wasm32-only `impl` blocks and matched each name against its own `exclude_re` entries killed all five mutations of the round, but it needed a matcher of about 150 lines, because xtask takes no regex crate (DEPS-1).  That is not a small, exact guard of a config file.
+  * 4-4, 4-5: the comment of `exclude_re` and TD-33 say that cargo-mutants 27.1.0 keeps the struct-field mutants of an excluded function (`cargo mutants --list` gives "delete field note from struct Opened expression in open_on_the_page"), and that the validator refutes them.  The workspace takes no `mutants` crate, so no `#[mutants::skip]`.
+  * 4-6, 4-7: text.  `web-test --browser chrome`: 250 tests pass.
 
 ## Surprises and discoveries
 
@@ -364,6 +369,8 @@ None yet.
 * 2026-10-27, implementer, review round 2, finding 2-3: this supersedes "the scenario reads the memory once" of step 9.  Since review round 1 (finding 1-13), `e2e old-session` reads the page's memory after the first `playback:` line and again 2 s later, and checks the larger read (`larger_read`).  A missing read fails the checks.
 * 2026-10-27, implementer, review round 3, finding 3-2: this supersedes the text of the memory log lines in the entry of step 4.  Since review round 2, the decode worker logs `decoder: memory: decoder wasm N MB at the start of the {kind} request` and `... at the end of the {kind} request`, for `decode` too.
 * 2026-10-27, implementer, review round 3, finding 3-1: `add_lane` keeps a save in progress, and does not stop it.  The save's job holds clones of the lanes' audio, so the lanes that it reads stay valid when a lane is added or replaced.  Classic drums now end in a later frame on the web, so a stop would lose a save that the user started with no reason.
+* 2026-10-28, implementer, review round 4, finding 4-1: this supersedes "the saves show silence for that read" of step 5b, for saves.  A save whose read of browser storage fails makes no file and no encode request.  The status line says "Could not save {name}: the song could not be read from browser storage ({e})."  The spectrograms and the mix lane's waveform still show silence for a failed read.
+* 2026-10-28, implementer, review round 4, findings 4-2 and 4-3: `xtask/tests/mutants_excludes.rs` (review round 3, finding 3-3) is removed, as the orchestrator chose for a guard that is not small.  An exact check of `exclude_re` needs a regex matcher, and xtask takes no regex crate (DEPS-1).  Each review round's mutants run lists a wasm32-only function that `exclude_re` misses, and its validators refute those mutants, as finding 3-3 showed.  So a missing exclusion costs a validator's time, not a missed defect.
 
 ## Outcomes and retrospective
 

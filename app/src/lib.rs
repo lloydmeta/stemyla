@@ -3862,6 +3862,15 @@ impl StemApp {
         else {
             return;
         };
+        // A failed read gave silence: no file and no encode request
+        // (finding 4-1 of review round 4 of M7).
+        if let Some(e) = job.failed() {
+            log::warn!("save: {name}: a read of browser storage failed: {e}");
+            self.status = format!(
+                "Could not save {name}: the song could not be read from browser storage ({e})."
+            );
+            return;
+        }
         let note = (mix && job.clipped() > 0).then(|| {
             format!(
                 "  {} samples of the mix are at full scale, so it may clip; lower the volumes to avoid it.",
