@@ -321,6 +321,8 @@ The parent's M7 section, item by item:
   * 7-2: `e2e old-session` checks the log of each restore (`restore_log_checks`): the decode worker's "at the end of the overviews request", and no "decoder: the page makes the stem overviews" and no "decoder: decoding on the page".  A second reload of the 5-minute session must log no "at the start of the overviews request" (`overviews_once_check`, D7: once).  `the_restore_log_shows_the_worker_made_the_overviews` failed first against stubs.  After `(cd app && trunk build --release)`, `e2e old-session` passes in Chrome in about 25 s, with 40.4 MB for 1 and for 5 minutes.  The control: a build of `c352052` whose decode worker replies `decode-unstored` to each `overviews` request (a worktree under the scratchpad, removed after) fails it on "the page made no stem overviews" for both songs, and on the second restore.  The real build passes it.
   * 7-3, 7-4, 7-5: text, MEM-1's exception for classic drums, and a Decision log entry.  `web-test --browser chrome`: 252 tests pass.
 
+* [x] 2026-10-28: review round 7 (at `fc6badf`): 4 reviewers and 2 validators, 521,129 tokens, 39.2 wall minutes.  2 should-fix confirmed, both weak tests (7-1, the page's overview stop was tested only at its helper; 7-2, `e2e old-session` could not tell the worker's stem overviews from the page's fallback), and 3 nits, all fixed in `95747b1`.  A build whose decode worker refuses `overviews` now fails `e2e old-session`.  Mutants: full, 4 tested, all unviable.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 8 checks these fixes.
+
 ## Surprises and discoveries
 
 None yet.
