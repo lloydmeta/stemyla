@@ -303,6 +303,8 @@ The parent's M7 section, item by item:
   * 4-4, 4-5: the comment of `exclude_re` and TD-33 say that cargo-mutants 27.1.0 keeps the struct-field mutants of an excluded function (`cargo mutants --list` gives "delete field note from struct Opened expression in open_on_the_page"), and that the validator refutes them.  The workspace takes no `mutants` crate, so no `#[mutants::skip]`.
   * 4-6, 4-7: text.  `web-test --browser chrome`: 250 tests pass.
 
+* [x] 2026-10-28: review round 4 (at `8e6d245`): 5 reviewers and 4 validators, 652,442 tokens, 40.7 wall minutes.  3 should-fix confirmed (4-1, a save whose storage read failed wrote silence and said "Saved"; 4-2 and 4-3, the new test of the mutants exclusions was too loose) and 1 pre-existing (4-4), and 3 nits, all fixed in `91ceb7a` (the exclusion test was removed).  Mutants: full, 2 tested, 0 missed.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 5 checks these fixes.
+
 ## Surprises and discoveries
 
 None yet.
