@@ -6,7 +6,7 @@
 //!   change the tempo.
 //! * `decode`: the decode worker writes the session files of a 44.1 kHz
 //!   WAV, a 48 kHz WAV and the generated stems, equal to the native decode;
-//!   a reload reads a complete session back with no decode, and decodes a
+//!   a reload opens a complete session as stored lanes with no decode, and decodes a
 //!   session of the M4 layout (`e2e/decode.rs`).
 //! * `playback`: a song restored with six stems plays every lane, "original"
 //!   too, from browser storage through the read-ahead buffer, with no

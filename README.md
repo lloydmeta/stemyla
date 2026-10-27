@@ -140,7 +140,7 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | - | - |
 | `app/` | the egui app (web and native); `index.html` is Trunk's entry point |
 | `worker/` | the Web Worker that runs separations |
-| `decoder/` | the Web Worker that decodes a stored song in blocks into browser storage (`decode-worker`) |
+| `decoder/` | the Web Worker that decodes a stored song in blocks into browser storage, and makes the overviews of its stems and its classic drums (`decode-worker`) |
 | `roformer-gpu/` | the network on WebGPU: WGSL kernels and their driver |
 | `roformer/` | STFT, chunking, weights, and the CPU reference network |
 | `engine/` | decoding, playback, time-stretch, classic drum separation |

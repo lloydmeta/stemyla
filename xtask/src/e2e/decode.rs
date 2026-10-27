@@ -5,7 +5,7 @@
 //! It drops a 44.1 kHz WAV of one source, a 48 kHz WAV of one source and
 //! the synthetic stems, and checks each session's files against the native
 //! `engine` decode of the same bytes.  It reloads to restore the last song
-//! with no decode, then plants a session of the M4 layout (no `decoded`
+//! with no decode, as stored lanes, then plants a session of the M4 layout (no `decoded`
 //! line) and reloads to restore it through the decode worker.  Every case
 //! fails on a line `decoder: decoding on the page`, and no `.part` file may
 //! be left.
@@ -25,8 +25,9 @@ const DERIVED: [&str; 2] = ["classic drums", "original"];
 /// The page's line when it decodes a song itself (D9, D11).
 const ON_THE_PAGE: &str = "decoder: decoding on the page";
 
-/// The page's line when it restores a complete session with no decode.
-const READ_BACK: &str = "decoder: read back a complete session";
+/// The page's line when it restores a complete session with no decode: as
+/// stored lanes, with no read-back (step 7 of the M7 plan).
+const STORED_OPEN: &str = "decoder: a complete session opens as stored lanes";
 
 /// The decode worker's line as a decode starts.
 const DECODE_START: &str = "at the decode's start";
@@ -121,7 +122,7 @@ fn column_bytes(cols: &[(f32, f32)]) -> Vec<u8> {
         .collect()
 }
 
-/// The checks on the session that the page read back (`got`: `files`, a
+/// The checks on the session files that the page reads (`got`: `files`, a
 /// list of `[path, size]` in the session folder, `hashes` and `overviews`
 /// by path, and `meta`) against `want`.
 pub(super) fn session_checks(got: &Value, want: &Expected) -> Checks {
@@ -217,13 +218,13 @@ pub(super) fn never_on_the_page_check(log: &[String]) -> (bool, String) {
     )
 }
 
-/// After a reload of a complete session: the page read it back, and the
-/// decode worker did not start a decode.
-pub(super) fn read_back_checks(log: &[String]) -> Checks {
+/// After a reload of a complete session: the page opened it as stored
+/// lanes, and the decode worker did not start a decode.
+pub(super) fn stored_open_checks(log: &[String]) -> Checks {
     vec![
         (
-            log.iter().any(|l| l.contains(READ_BACK)),
-            format!("the page logs {READ_BACK:?}"),
+            log.iter().any(|l| l.contains(STORED_OPEN)),
+            format!("the page logs {STORED_OPEN:?}"),
         ),
         (
             !log.iter().any(|l| l.contains(DECODE_START)),
@@ -433,7 +434,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     let restored = p.wait_for(from, 120, |l| l.contains("Restored \"") || is_page_error(l))?;
     p.check(restored.is_some(), "the reload restores the last song");
     p.idle(1.0)?;
-    let checks = read_back_checks(&p.log[from..]);
+    let checks = stored_open_checks(&p.log[from..]);
     check_all(&mut p, checks);
 
     // A session of the M4 layout restores through the decode worker, and
@@ -660,9 +661,9 @@ mod tests {
     }
 
     #[test]
-    fn the_log_checks_tell_a_read_back_from_a_decode() {
-        let read_back = lines(&[
-            "[1.0s] console.info: [app] decoder: read back a complete session",
+    fn the_log_checks_tell_a_stored_open_from_a_decode() {
+        let stored = lines(&[
+            "[1.0s] console.info: [app] decoder: a complete session opens as stored lanes",
             "[1.1s] console.info: [app] Restored \"song\" from this browser.",
         ]);
         let decoded = lines(&[
@@ -670,9 +671,9 @@ mod tests {
             "[1.4s] console.info: decoder: memory: decoder wasm 6 MB at the decode's end",
             "[1.5s] console.info: [app] Restored \"song\" from this browser.",
         ]);
-        assert_eq!(failing(&read_back_checks(&read_back)), Vec::<String>::new());
+        assert_eq!(failing(&stored_open_checks(&stored)), Vec::<String>::new());
         assert!(
-            !failing(&read_back_checks(&decoded)).is_empty(),
+            !failing(&stored_open_checks(&decoded)).is_empty(),
             "a decode ran"
         );
         assert_eq!(
@@ -680,7 +681,7 @@ mod tests {
             Vec::<String>::new()
         );
         assert!(
-            !failing(&decoded_again_checks(&read_back)).is_empty(),
+            !failing(&decoded_again_checks(&stored)).is_empty(),
             "no decode"
         );
         assert!(never_on_the_page_check(&decoded).0);
@@ -690,8 +691,8 @@ mod tests {
         assert!(!ok && what.contains("decoding on the page"), "{what}");
         assert!(!failing(&decoded_again_checks(&on_page)).is_empty());
         assert!(
-            !failing(&read_back_checks(
-                &[read_back.clone(), on_page.clone()].concat()
+            !failing(&stored_open_checks(
+                &[stored.clone(), on_page.clone()].concat()
             ))
             .is_empty()
         );
