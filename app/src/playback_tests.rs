@@ -126,7 +126,7 @@ fn showing(id: &str, song: Song, files: LaneFiles) -> (StemApp, Player) {
     };
     app.session = Some(id.to_string());
     let memory_song = Arc::new(song.clone());
-    app.open_song(song, files);
+    app.open_song(lanes::Shown::with_files(song, files));
     let params = Arc::new(SharedParams::new(memory_song.stems.len()));
     let stored = app.params.as_ref().expect("params");
     for i in 0..memory_song.stems.len() {
@@ -300,7 +300,7 @@ async fn a_lane_file_is_read_one_block_at_a_time() {
     };
     app.session = Some(id.to_string());
     pb_spy_slices();
-    app.open_song(song, files);
+    app.open_song(lanes::Shown::with_files(song, files));
     app.params
         .as_ref()
         .expect("params")
@@ -387,7 +387,7 @@ async fn a_new_song_frees_the_old_read_ahead() {
     // Other tests can leave a buffer alive: count from those alive now.
     let alive = engine::readahead::ReadAhead::live();
     engine::readahead::ReadAhead::take_high_water();
-    app.load_song(song, files);
+    app.load_song(lanes::Shown::with_files(song, files));
     // Review round 1 of M6, finding 1-6: the old buffer goes before the
     // new one is made, so two never live at once.
     let most = engine::readahead::ReadAhead::take_high_water();
@@ -483,21 +483,21 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         .await
         .expect("a session")
         .expect("restored");
-    let names: Vec<String> = opened.song.stems.iter().map(|s| s.name.clone()).collect();
-    let all_stored = opened.files.iter().all(Option::is_some);
-    let original_file = opened.files.last().cloned().flatten();
-    let original = opened.song.stems.last().expect("an original").clone();
+    let names: Vec<String> = opened.song.names().into_iter().map(String::from).collect();
+    let all_stored = opened.song.files().iter().all(Option::is_some);
+    let original_file = opened.song.files().last().cloned().flatten();
+    let original = opened.song.as_song().stems.pop().expect("an original");
     let (_, part_file) = store::read_stem(&part, "bass", frames).await.expect("read");
     let mut app = StemApp {
         want_device: false,
         ..StemApp::default()
     };
     app.session = Some(id.clone());
-    app.open_song(opened.song, opened.files);
+    app.open_song(opened.song);
     let playback = app.playback.as_ref().map(|p| (p.stored, p.lanes));
     // Classic drums, made on the page, play from memory.
     app.add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
-    let with_drums = app.lane_files.clone();
+    let with_drums = app.lane_files();
     // Stems held for an open play from memory; "original" keeps its file
     // (review round 2 of M6, finding 2-11).
     let (again, _, _) = restore_stored(&id, &decoder)
@@ -519,7 +519,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     app.stems_for_opening = Some((id.clone(), held, "kept".into()));
     app.pending.borrow_mut().song = Some(Ok(again));
     app.apply_inbox(&egui::Context::default());
-    let for_opening = app.lane_files.clone();
+    let for_opening = app.lane_files();
     // A song decoded on the page has no lane files.
     let on_the_page = Opened::in_memory(
         Song {
@@ -534,7 +534,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         Some(id.clone()),
         None,
     );
-    let on_the_page_files = on_the_page.files.clone();
+    let on_the_page_files = on_the_page.song.files();
     // The page decodes a song itself when storage fails, and shows it
     // from memory (review round 3 of M6, finding 3-9).
     let chosen = vec![("lloyd.wav".to_string(), pb_file(&wav, "lloyd.wav"))];
@@ -550,13 +550,13 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     app.pending.borrow_mut().song = Some(Ok(decoded));
     app.apply_inbox(&egui::Context::default());
     let page_decode = (
-        app.lane_files.iter().all(Option::is_none),
+        app.lane_files().iter().all(Option::is_none),
         app.playback.is_none(),
     );
     // The demo plays from memory.
     app.load_demo();
     let demo = (
-        app.lane_files.iter().all(Option::is_none),
+        app.lane_files().iter().all(Option::is_none),
         app.playback.is_none(),
     );
     store::test_wipe().await;
@@ -596,6 +596,46 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         "shown from memory after a page decode"
     );
     assert_eq!(demo, (true, true));
+}
+
+/// D1 of the M7 plan: the shown song's session stays protected while a
+/// lane plays from a session file, also when its lanes do not fit the
+/// read-ahead buffer and no buffer is made.  A song with no lane file
+/// protects nothing.
+#[wasm_bindgen_test]
+fn a_song_with_stored_lanes_protects_its_session_with_no_read_ahead_buffer() {
+    let id = "m7-protected";
+    // 22 f32 lanes need more than 32 MiB at 4 and 2 slots.
+    let lanes = 22;
+    let frames = 4;
+    let song = || Song {
+        sample_rate: 44_100,
+        frames,
+        stems: (0..lanes)
+            .map(|k| Stem {
+                name: format!("acme {k}"),
+                left: vec![0.1; frames].into(),
+                right: vec![0.1; frames].into(),
+            })
+            .collect(),
+    };
+    let files: LaneFiles = (0..lanes)
+        .map(|k| Some(LaneFile::f32(format!("{id}/decoded/{k}.f32"), frames)))
+        .collect();
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    app.session = Some(id.to_string());
+    app.open_song(lanes::Shown::with_files(song(), files));
+    let no_buffer = app.playback.is_none();
+    let with_files = store::protected(id);
+    app.open_song(lanes::Shown::in_memory(song()));
+    let in_memory = store::protected(id);
+    app.load_demo();
+    assert!(no_buffer, "the lanes do not fit the read-ahead buffer");
+    assert!(with_files, "the session of stored lanes is protected");
+    assert!(!in_memory, "a song in memory protects nothing");
 }
 
 #[wasm_bindgen(inline_js = r#"

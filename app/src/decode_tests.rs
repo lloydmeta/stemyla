@@ -335,7 +335,7 @@ async fn a_decoded_song_is_read_back_and_shown() {
             left_over.extend(store::test_read(&path).await.map(|_| path));
         }
         store::test_wipe().await;
-        let song = &opened.song;
+        let song = &opened.song.as_song();
         let got: Vec<&str> = song.stems.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(got, names);
         assert_eq!(
@@ -379,7 +379,7 @@ async fn a_derived_source_stays_out_of_the_mix() {
         [(1, true), (0, false)],
         "drums first, classic drums out of the mix"
     );
-    let song = opened.expect("opened").song;
+    let song = opened.expect("opened").song.as_song();
     assert_eq!(song.stems[0].name, "drums");
     assert_eq!(song.stems[1].name, "classic drums");
     assert_eq!(
@@ -560,7 +560,7 @@ async fn a_complete_session_restores_with_no_decode() {
     let current = store::current().await;
     store::test_wipe().await;
     let (opened, meta, note) = restored.expect("a session").expect("restored");
-    let song = opened.song;
+    let song = opened.song.as_song();
     assert_eq!(fake.posts.length(), posts, "no decode is posted");
     assert_eq!((note, meta.name.as_str()), (None, "acme"));
     assert!(*song.stems[0].left == samples[0].0 && *song.stems[0].right == samples[0].1);
@@ -607,7 +607,7 @@ async fn an_incomplete_session_restores_through_a_decode() {
         Some(frames as u64),
         "the usable mix is named"
     );
-    let song = restored.0.song;
+    let song = restored.0.song.as_song();
     assert!(
         *song.stems[0].left == left && *song.stems[0].right == right,
         "read from the mix"
@@ -803,7 +803,7 @@ async fn separate_writes_no_mix_after_a_decode() {
     };
     app.separator = Some(sep);
     app.session = opened.session.clone();
-    app.open_song(opened.song, opened.files);
+    app.open_song(opened.song);
     dt_count_writes();
     app.start_separation(&egui::Context::default());
     for _ in 0..250 {

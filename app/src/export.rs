@@ -7,7 +7,6 @@
 //! WebAssembly memory (MEM-1, MEM-4).
 
 use crate::DERIVED;
-use engine::Song;
 use engine::mixdown::{MixRecipe, Pcm};
 use engine::overview::COLUMNS;
 
@@ -400,17 +399,12 @@ enum Contents {
     Of(Vec<String>),
 }
 
-fn contents(song: &Song, recipe: &MixRecipe) -> Contents {
-    let audible: Vec<&str> = recipe
-        .audible()
-        .into_iter()
-        .map(|i| song.stems[i].name.as_str())
-        .collect();
+fn contents(names: &[&str], recipe: &MixRecipe) -> Contents {
+    let audible: Vec<&str> = recipe.audible().into_iter().map(|i| names[i]).collect();
     let derived = |name: &&str| DERIVED.contains(name);
-    let missing: Vec<&str> = song
-        .stems
+    let missing: Vec<&str> = names
         .iter()
-        .map(|s| s.name.as_str())
+        .copied()
         .filter(|name| !derived(name) && !audible.contains(name))
         .collect();
     let owned = |names: Vec<&str>| names.into_iter().map(String::from).collect();
@@ -427,9 +421,9 @@ fn contents(song: &Song, recipe: &MixRecipe) -> Contents {
     }
 }
 
-/// The subtitle of the mix lane: what it plays.
-pub fn mix_label(song: &Song, recipe: &MixRecipe) -> String {
-    match contents(song, recipe) {
+/// The subtitle of the mix lane: what it plays, of the lanes `names`.
+pub fn mix_label(names: &[&str], recipe: &MixRecipe) -> String {
+    match contents(names, recipe) {
         Contents::Nothing => "as heard: nothing".into(),
         Contents::All => "as heard: all stems".into(),
         Contents::Without(names) => format!("as heard: all stems except {}", names.join(", ")),
@@ -437,9 +431,9 @@ pub fn mix_label(song: &Song, recipe: &MixRecipe) -> String {
     }
 }
 
-/// The name of a saved mix, without its extension.
-pub fn mix_file_name(base: &str, song: &Song, recipe: &MixRecipe) -> String {
-    match contents(song, recipe) {
+/// The name of a saved mix of the lanes `names`, without its extension.
+pub fn mix_file_name(base: &str, names: &[&str], recipe: &MixRecipe) -> String {
+    match contents(names, recipe) {
         Contents::Nothing | Contents::All => format!("{base} - mix"),
         Contents::Without(names) => format!("{base} - mix without {}", names.join(", ")),
         Contents::Of(names) => format!("{base} - mix of {}", names.join(", ")),
@@ -449,9 +443,9 @@ pub fn mix_file_name(base: &str, song: &Song, recipe: &MixRecipe) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::Stem;
     use engine::mixdown::{Mix, StemPcm};
     use engine::overview::lane_columns;
+    use engine::{Song, Stem};
     use std::sync::Arc;
 
     fn song(names: &[&str], frames: usize) -> Song {
@@ -783,7 +777,11 @@ mod tests {
         let s = song(&["bass", "drums", "other", "vocals", "original"], 1);
         let case = |gains: [f32; 5]| {
             let r = MixRecipe::new(gains.into());
-            (mix_label(&s, &r), mix_file_name(&s.stems[0].name, &s, &r))
+            let names: Vec<&str> = s.stems.iter().map(|s| s.name.as_str()).collect();
+            (
+                mix_label(&names, &r),
+                mix_file_name(&s.stems[0].name, &names, &r),
+            )
         };
         assert_eq!(
             case([1.0, 0.5, 1.0, 1.0, 0.0]),
@@ -859,7 +857,10 @@ mod tests {
             .map(|(_, st)| st.left.as_slice())
             .collect();
         assert_eq!(job.sink().left, dsp::mix(&others, &vec![1.0; others.len()]));
-        assert_eq!(mix_label(&song, &recipe), "as heard: all stems except lead");
+        assert_eq!(
+            mix_label(&names, &recipe),
+            "as heard: all stems except lead"
+        );
     }
 }
 
@@ -867,8 +868,8 @@ mod tests {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod web_tests {
     use super::*;
-    use engine::Stem;
     use engine::mixdown::Mix;
+    use engine::{Song, Stem};
     use std::sync::Arc;
     use wasm_bindgen_test::*;
 

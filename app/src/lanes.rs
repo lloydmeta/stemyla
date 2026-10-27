@@ -1,12 +1,19 @@
 //! Lane audio: what a lane of the shown song plays and is drawn from, and
 //! the sources that read it in blocks (D1 and D3 of the M7 plan).
 //!
-//! A lane's audio is samples in memory.  The jobs of the page (the mix
-//! lane's waveform, a spectrogram, a save) read it through a [`Pcm`]:
-//! [`LanesMix`] for a mix of lanes, [`LanePcm`] for one lane.
+//! The shown song is a [`Shown`]: the audio of each lane, not an
+//! `engine::Song` with lane files beside it.  So the lanes drawn, played
+//! and saved cannot differ.  A lane's audio is samples in memory.  Until
+//! step 7 of the M7 plan, a lane on the web can also keep the file that
+//! its samples were read from (M6), which playback reads.
+//!
+//! The jobs of the page (the mix lane's waveform, a spectrogram, a save)
+//! read the lanes through a [`Pcm`]: [`LanesMix`] for a mix of lanes,
+//! [`LanePcm`] for one lane.
 
+use crate::store_meta::LaneFile;
 use engine::mixdown::{MixRecipe, Pcm, at_full_scale};
-use engine::{Samples, Stem};
+use engine::{Samples, Song, Stem};
 use std::borrow::Cow;
 
 /// What a lane plays and is drawn from.
@@ -14,9 +21,24 @@ use std::borrow::Cow;
 pub enum LaneAudio {
     /// Samples in memory, shared with the song, not copied (MEM-1).
     Memory { left: Samples, right: Samples },
+    /// Samples read back whole from a lane file, with that file, which
+    /// playback reads (M6).  Step 7 of the M7 plan removes it.
+    ReadBack {
+        left: Samples,
+        right: Samples,
+        file: LaneFile,
+    },
 }
 
 impl LaneAudio {
+    /// Samples in memory, with the file they were read from, if any.
+    pub fn with_file(left: Samples, right: Samples, file: Option<LaneFile>) -> Self {
+        match file {
+            Some(file) => LaneAudio::ReadBack { left, right, file },
+            None => LaneAudio::Memory { left, right },
+        }
+    }
+
     /// The audio of a stem in memory.  It shares the stem's samples.
     pub fn of_stem(stem: &Stem) -> Self {
         LaneAudio::Memory {
@@ -25,11 +47,28 @@ impl LaneAudio {
         }
     }
 
+    /// The samples of the lane, if they are in memory.
+    pub fn samples(&self) -> Option<(&Samples, &Samples)> {
+        match self {
+            LaneAudio::Memory { left, right } | LaneAudio::ReadBack { left, right, .. } => {
+                Some((left, right))
+            }
+        }
+    }
+
+    /// The lane file that the lane plays from, if it has one.
+    pub fn file(&self) -> Option<&LaneFile> {
+        match self {
+            LaneAudio::Memory { .. } => None,
+            LaneAudio::ReadBack { file, .. } => Some(file),
+        }
+    }
+
     /// The frames from `at` of each side.  A lane in memory lends its
     /// samples.  Frames past the lane's end are silence.
     fn frames(&self, at: usize, frames: usize) -> (Cow<'_, [f32]>, Cow<'_, [f32]>) {
         match self {
-            LaneAudio::Memory { left, right } => {
+            LaneAudio::Memory { left, right } | LaneAudio::ReadBack { left, right, .. } => {
                 (part_of(left, at, frames), part_of(right, at, frames))
             }
         }
@@ -46,6 +85,105 @@ fn part_of(samples: &[f32], at: usize, frames: usize) -> Cow<'_, [f32]> {
     part.extend_from_slice(have);
     part.resize(frames, 0.0);
     Cow::Owned(part)
+}
+
+/// One lane of the shown song: its name and its audio.
+#[derive(Clone)]
+pub struct ShownLane {
+    pub name: String,
+    pub audio: LaneAudio,
+}
+
+/// The shown song (D1 of the M7 plan): its rate, its frames and the audio
+/// of each lane, in order.
+pub struct Shown {
+    pub sample_rate: u32,
+    pub frames: usize,
+    pub lanes: Vec<ShownLane>,
+}
+
+impl Shown {
+    /// A song in memory: each stem becomes a lane that shares its samples
+    /// (MEM-1).
+    pub fn in_memory(song: Song) -> Self {
+        let files = vec![None; song.stems.len()];
+        Self::with_files(song, files)
+    }
+
+    /// A song read back from its lane files: each stem with the file it
+    /// was read from, `None` for a lane that plays from memory (D8 of M6).
+    /// Its samples move into the lanes, with no copy.
+    pub fn with_files(song: Song, files: Vec<Option<LaneFile>>) -> Self {
+        assert_eq!(files.len(), song.stems.len(), "a lane file for each lane");
+        Self {
+            sample_rate: song.sample_rate,
+            frames: song.frames,
+            lanes: song
+                .stems
+                .into_iter()
+                .zip(files)
+                .map(|(stem, file)| ShownLane {
+                    name: stem.name,
+                    audio: LaneAudio::with_file(stem.left, stem.right, file),
+                })
+                .collect(),
+        }
+    }
+
+    /// The names of the lanes, in order.
+    pub fn names(&self) -> Vec<&str> {
+        self.lanes.iter().map(|l| l.name.as_str()).collect()
+    }
+
+    /// The index of the lane `name`.
+    pub fn stem_index(&self, name: &str) -> Option<usize> {
+        self.lanes.iter().position(|l| l.name == name)
+    }
+
+    pub fn duration_s(&self) -> f64 {
+        self.frames as f64 / self.sample_rate as f64
+    }
+
+    /// The audio of each lane, in order.
+    pub fn audio(&self) -> Vec<LaneAudio> {
+        self.lanes.iter().map(|l| l.audio.clone()).collect()
+    }
+
+    /// The lane file of each lane, `None` for a lane that plays from
+    /// memory (D8 of M6).
+    pub fn files(&self) -> Vec<Option<LaneFile>> {
+        self.lanes.iter().map(|l| l.audio.file().cloned()).collect()
+    }
+
+    /// Whether a lane plays from a session file, so the session is
+    /// protected while the song is shown (D1 of the M7 plan).
+    pub fn has_stored_lane(&self) -> bool {
+        self.lanes.iter().any(|l| l.audio.file().is_some())
+    }
+
+    /// The song as an `engine::Song` whose stems share the lanes' samples
+    /// (MEM-1), for the work that reads a whole song in memory: the memory
+    /// path of a separation, the mix file of a song decoded on the page,
+    /// and classic drums.  Every lane has samples until step 7 of the M7
+    /// plan.
+    pub fn as_song(&self) -> Song {
+        Song {
+            sample_rate: self.sample_rate,
+            frames: self.frames,
+            stems: self
+                .lanes
+                .iter()
+                .map(|lane| {
+                    let (left, right) = lane.audio.samples().expect("samples in memory");
+                    Stem {
+                        name: lane.name.clone(),
+                        left: left.clone(),
+                        right: right.clone(),
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Lanes at the gains of a recipe, summed and clamped to ±1 with
@@ -236,9 +374,37 @@ mod tests {
     #[test]
     fn lane_audio_shares_the_samples_of_its_stem() {
         let song = song(10);
-        let LaneAudio::Memory { left, right } = LaneAudio::of_stem(&song.stems[0]);
+        let audio = LaneAudio::of_stem(&song.stems[0]);
+        let (left, right) = audio.samples().expect("samples");
         assert!(left.shares(&song.stems[0].left));
         assert!(right.shares(&song.stems[0].right));
+    }
+
+    /// MEM-1: a song in memory becomes lanes that share its samples.  The
+    /// count of handles shows that no buffer is copied.
+    #[test]
+    fn a_song_in_memory_becomes_lanes_with_no_copy() {
+        // The clone shares the samples, and the `Arc` goes at the end of
+        // the statement, so `song` holds the only handles.
+        let song = Song::clone(&song(1_000));
+        let kept: Vec<(Samples, Samples)> = song
+            .stems
+            .iter()
+            .map(|s| (s.left.clone(), s.right.clone()))
+            .collect();
+        let names: Vec<String> = song.stems.iter().map(|s| s.name.clone()).collect();
+        let shown = Shown::in_memory(song);
+        assert_eq!((shown.sample_rate, shown.frames), (48_000, 1_000));
+        assert_eq!(shown.names(), names);
+        for ((left, right), lane) in kept.iter().zip(&shown.lanes) {
+            let (l, r) = lane.audio.samples().expect("samples in memory");
+            assert!(l.shares(left) && r.shares(right), "{}", lane.name);
+            assert_eq!((left.handles(), right.handles()), (2, 2), "{}", lane.name);
+            assert_eq!(lane.audio.file(), None);
+        }
+        assert_eq!(shown.stem_index("drums"), Some(1));
+        assert_eq!(shown.stem_index("lloyd"), None);
+        assert_eq!(shown.duration_s(), 1_000.0 / 48_000.0);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! browser.  `engine::slot`'s tests cover the swap itself.
 #![cfg(not(target_arch = "wasm32"))]
 
+use app::lanes::Shown;
 use app::{Output, StemApp};
 use engine::{Song, Stem};
 use std::sync::Arc;
@@ -51,9 +52,9 @@ fn opening_a_song_frees_the_one_it_replaces() {
 #[test]
 fn reloading_the_shown_song_frees_the_previous_copy() {
     let mut app = silent_app();
-    app.load_song(song(44_100), vec![None]);
+    app.load_song(Shown::in_memory(song(44_100)));
     let before = Arc::downgrade(app.song.as_ref().expect("a song"));
-    app.load_song(song(44_100), vec![None]);
+    app.load_song(Shown::in_memory(song(44_100)));
     assert!(before.upgrade().is_none());
     assert!(app.song.is_some());
 }

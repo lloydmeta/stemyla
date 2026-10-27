@@ -91,7 +91,7 @@ fn mute_sets_engine_gain_to_zero() {
 fn the_mix_lane_follows_mute() {
     let mut h = harness(true);
     assert!(h.query_by_label("as heard: all stems").is_some());
-    let song = h.state().song.clone().unwrap();
+    let song = h.state().song.as_ref().unwrap().as_song();
     let lead = stem(&h, "lead");
     h.get_all_by_label("Mute").nth(lead).unwrap().click();
     h.run();
@@ -198,7 +198,16 @@ fn solo_mutes_the_others() {
     let params = h.state().params.clone().unwrap();
     h.get_all_by_label("Solo").nth(bass).unwrap().click();
     h.run();
-    for (i, s) in h.state().song.clone().unwrap().stems.iter().enumerate() {
+    for (i, s) in h
+        .state()
+        .song
+        .as_ref()
+        .unwrap()
+        .as_song()
+        .stems
+        .iter()
+        .enumerate()
+    {
         let g = params.effective_gain(i);
         if i == bass {
             assert_eq!(g, 1.0, "{}", s.name);
