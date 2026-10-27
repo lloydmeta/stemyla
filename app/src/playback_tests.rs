@@ -45,6 +45,11 @@ extern "C" {
 }
 
 const SECOND: usize = 44_100;
+
+/// A store of browser storage, for lanes that a test plants.
+fn opfs() -> std::rc::Rc<dyn lane_store::LaneStore> {
+    std::rc::Rc::new(lane_store::OpfsStore::new(None))
+}
 const NAMES: [&str; 6] = ["bass", "drums", "other", "vocals", "guitar", "piano"];
 /// The callback of the page's Web Audio output: 2,048 frames each 46 ms.
 const CALLBACK: usize = 2_048;
@@ -126,7 +131,7 @@ fn showing(id: &str, song: Song, files: LaneFiles) -> (StemApp, Player) {
     };
     app.session = Some(id.to_string());
     let memory_song = Arc::new(song.clone());
-    app.open_song(lanes::Shown::with_files(song, files));
+    app.open_song(lanes::Shown::with_files(song, files, &opfs()));
     let params = Arc::new(SharedParams::new(memory_song.stems.len()));
     let stored = app.params.as_ref().expect("params");
     for i in 0..memory_song.stems.len() {
@@ -300,7 +305,7 @@ async fn a_lane_file_is_read_one_block_at_a_time() {
     };
     app.session = Some(id.to_string());
     pb_spy_slices();
-    app.open_song(lanes::Shown::with_files(song, files));
+    app.open_song(lanes::Shown::with_files(song, files, &opfs()));
     app.params
         .as_ref()
         .expect("params")
@@ -387,7 +392,7 @@ async fn a_new_song_frees_the_old_read_ahead() {
     // Other tests can leave a buffer alive: count from those alive now.
     let alive = engine::readahead::ReadAhead::live();
     engine::readahead::ReadAhead::take_high_water();
-    app.load_song(lanes::Shown::with_files(song, files));
+    app.load_song(lanes::Shown::with_files(song, files, &opfs()));
     // Review round 1 of M6, finding 1-6: the old buffer goes before the
     // new one is made, so two never live at once.
     let most = engine::readahead::ReadAhead::take_high_water();
@@ -486,13 +491,14 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     let names: Vec<String> = opened.song.names().into_iter().map(String::from).collect();
     let all_stored = opened.song.files().iter().all(Option::is_some);
     let original_file = opened.song.files().last().cloned().flatten();
-    let original = opened
-        .song
-        .as_song()
-        .expect("in memory")
-        .stems
-        .pop()
-        .expect("an original");
+    // D11 of the M7 plan: the original is a stored lane; the lane reader
+    // reads its samples.
+    let original_lane = opened.song.lanes.last().expect("an original").audio.clone();
+    let original = run_export(export::ExportJob::new(
+        Box::new(lanes::LanePcm::new(original_lane, frames, 44_100)),
+        export::VecSink::new(frames),
+    ))
+    .await;
     let (_, part_file) = store::read_stem(&part, "bass", frames).await.expect("read");
     let mut app = StemApp {
         want_device: false,
@@ -522,7 +528,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
             right: vec![0.2; frames].into(),
         },
     ];
-    app.stems_for_opening = Some((id.clone(), held, "kept".into()));
+    app.stems_for_opening = Some((id.clone(), memory_lanes(held), "kept".into()));
     app.pending.borrow_mut().song = Some(Ok(again));
     app.apply_inbox(&egui::Context::default());
     let for_opening = app.lane_files();
@@ -576,8 +582,8 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     );
     // The memory "original" of two sources, `mix_of_sources`, equals what
     // `mix.f32` holds, which the stored lane plays.
-    assert_eq!(*original.left, mix_left[..]);
-    assert_eq!(*original.right, mix_right[..]);
+    assert_eq!(original.left, mix_left);
+    assert_eq!(original.right, mix_right);
     assert_eq!(playback, Some((7, 7)));
     assert_eq!(with_drums.len(), 8);
     assert_eq!(with_drums.last(), Some(&None), "classic drums from memory");
@@ -633,7 +639,7 @@ fn a_song_with_stored_lanes_protects_its_session_with_no_read_ahead_buffer() {
         ..StemApp::default()
     };
     app.session = Some(id.to_string());
-    app.open_song(lanes::Shown::with_files(song(), files));
+    app.open_song(lanes::Shown::with_files(song(), files, &opfs()));
     let no_buffer = app.playback.is_none();
     let with_files = store::protected(id);
     app.open_song(lanes::Shown::in_memory(song()));
@@ -724,6 +730,9 @@ async fn a_stored_mix_follows_mute_as_in_memory() {
     let (mut stored, _) = showing(id, song.clone(), files);
     let store = counting();
     stored.lane_store = Some(std::rc::Rc::clone(&store) as std::rc::Rc<dyn lane_store::LaneStore>);
+    // The lanes take the page's store when they are shown.
+    let shown = lanes::Shown::clone(stored.song.as_ref().expect("a song"));
+    stored.load_song(shown);
     let mut memory = memory_page(song);
     for app in [&mut stored, &mut memory] {
         app.params.as_ref().expect("params").set_muted(1, true);
@@ -749,10 +758,7 @@ async fn a_stored_spectrogram_equals_the_memory_one() {
     let frames = 3 * SECOND;
     let (song, files) = planted(id, frames, 6).await;
     let store: std::rc::Rc<dyn lane_store::LaneStore> = counting();
-    let mut stored = lanes::reading_files(
-        lanes::Shown::with_files(song.clone(), files).audio(),
-        &store,
-    );
+    let mut stored = lanes::Shown::with_files(song.clone(), files, &store).audio();
     let mut memory = lanes::Shown::in_memory(song).audio();
     let (left, right) = (stem_wave(frames, 3), stem_wave(frames, 4));
     let path = format!("sessions/{id}/stems/lloyd.wav");
@@ -813,10 +819,7 @@ async fn a_save_of_a_stored_lane_equals_the_memory_save() {
     let frames = 2 * export::BLOCK + 77;
     let (song, files) = planted(id, frames, 6).await;
     let store: std::rc::Rc<dyn lane_store::LaneStore> = counting();
-    let stored = lanes::reading_files(
-        lanes::Shown::with_files(song.clone(), files).audio(),
-        &store,
-    );
+    let stored = lanes::Shown::with_files(song.clone(), files, &store).audio();
     let memory = lanes::Shown::in_memory(song).audio();
     let recipe = MixRecipe::new(vec![1.0, 0.0, 0.5, 1.0, 1.5, 1.0, 0.0]);
     let wav = |pcm: Box<dyn engine::mixdown::Pcm>| async move {
@@ -863,6 +866,9 @@ async fn the_page_reads_a_lane_one_block_at_a_time() {
     let (mut app, _) = showing(id, song, files);
     let store = counting();
     app.lane_store = Some(std::rc::Rc::clone(&store) as std::rc::Rc<dyn lane_store::LaneStore>);
+    // The lanes take the page's store when they are shown.
+    let shown = lanes::Shown::clone(app.song.as_ref().expect("a song"));
+    app.load_song(shown);
     pb_spy_slices();
     app.params.as_ref().expect("params").set_muted(0, true);
     follow_to_the_end(&mut app).await;
@@ -876,7 +882,7 @@ async fn the_page_reads_a_lane_one_block_at_a_time() {
         pb_test_sleep(1).await;
     }
     let all_made = app.lanes.iter().all(|l| l.spectrogram.is_some());
-    let audio = job_audio(app.song.as_ref().expect("a song"), &app.lane_store);
+    let audio = app.song.as_ref().expect("a song").audio();
     let save = export::ExportJob::new(
         Box::new(lanes::LanePcm::new(audio[1].clone(), frames, 44_100)),
         export::JsWav::new(frames, 44_100),
@@ -919,6 +925,63 @@ async fn the_page_reads_a_lane_one_block_at_a_time() {
     }
     assert!(seen > 100, "{seen} reads");
     assert!(store.largest.get() as usize <= 8 * BLOCK_FRAMES as usize);
+}
+
+/// D2 of the M7 plan: with no read-ahead buffer (`Playback::start`
+/// refused, as over the cap), a stored song's lanes play silence, never
+/// samples, no lane has samples, and the status line says so.  The session
+/// stays protected (D1).
+#[wasm_bindgen_test]
+async fn a_stored_song_with_no_read_ahead_plays_silence_and_says_so() {
+    let id = "m7-silent";
+    let (song, files) = planted(id, SECOND, 6).await;
+    playback::refuse_for_test(true);
+    let (mut app, _) = showing(id, song, files);
+    playback::refuse_for_test(false);
+    let no_buffer = app.playback.is_none();
+    let no_samples = app
+        .song
+        .as_ref()
+        .is_some_and(|s| s.lanes.iter().all(|l| l.audio.samples().is_none()));
+    let status = app.status.clone();
+    app.params
+        .as_ref()
+        .expect("params")
+        .playing
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let (mut l, mut r) = (vec![1.0; CALLBACK], vec![1.0; CALLBACK]);
+    stored_player(&mut app).process(&mut l, &mut r);
+    let protected = store::protected(id);
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(no_buffer, "no read-ahead buffer");
+    assert!(no_samples, "no lane has samples");
+    assert!(
+        l.iter().chain(&r).all(|v| *v == 0.0),
+        "the stored lanes play silence"
+    );
+    assert!(status.contains("play silent"), "{status}");
+    assert!(protected, "the session stays protected");
+}
+
+/// D1 of the M7 plan (a test of step 5): with no read-ahead buffer, the
+/// shown stored song's session is still protected, so `forget_mix`
+/// removes nothing while a job may read the mix file.
+#[wasm_bindgen_test]
+async fn a_protected_session_keeps_its_mix_while_a_job_reads_it() {
+    let id = "m7-protected-mix";
+    let (song, files) = planted(id, SECOND, 6).await;
+    playback::refuse_for_test(true);
+    let (mut app, _) = showing(id, song, files);
+    playback::refuse_for_test(false);
+    let no_buffer = app.playback.is_none();
+    let removal = store::forget_mix(id).await;
+    let kept = store::test_read(&store::mix_path(id)).await.is_some();
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(no_buffer);
+    assert!(removal.is_ok(), "{removal:?}");
+    assert!(kept, "the mix file stays while the song shows");
 }
 
 #[wasm_bindgen(inline_js = r#"

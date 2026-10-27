@@ -44,10 +44,13 @@
 //!
 //! To open a song, the page saves the chosen files, and the decode worker
 //! decodes them into the session files in blocks (M5).  The page moves the
-//! files into place and writes `meta` ([`keep_decoded`]), then reads the
-//! files back in blocks ([`read_back`]).  A session whose files are
-//! complete opens with no decode ([`open_stored`]).  When browser storage
-//! fails, the page decodes the sources itself ([`restore_id`]).
+//! files into place and writes `meta` ([`keep_decoded`]), then shows the
+//! song as stored lanes: the session files with their overviews, of which
+//! it reads only the overviews ([`stored_sources`], [`stem_lanes`], D11 of
+//! M7).  A session whose files are complete opens with no decode
+//! ([`open_stored`]).  When browser storage fails, the page decodes the
+//! sources itself ([`restore_id`]), and the stems are stored lanes all the
+//! same.
 //!
 //! On the storage path, the page writes the mix file before it posts, the
 //! worker reads it and writes the stem files, and the page moves them into
@@ -55,8 +58,10 @@
 //! writes the stems itself ([`save_stems`]).
 //!
 //! Since M6, the shown song plays each lane that has a complete session
-//! file from that file: [`read_back`] and [`read_stem`] give the lane file
-//! with the lane (D8 of `plans/active/stream-from-storage-m6.md`).  While
+//! file from that file (D8 of `plans/active/stream-from-storage-m6.md`);
+//! since M7, such a lane has no samples in memory.  [`read_stem`] reads a
+//! stem whole only when its file is not complete, on the memory path's
+//! rules.  While
 //! the shown song plays from a session ([`set_playing`]), or an open reads
 //! it ([`OpenGuard`]), the session is [`protected`]: [`forget_mix`] removes
 //! nothing until it is not (D10).
@@ -854,6 +859,9 @@ pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
     Some(r)
 }
 
+/// The sources of a session, decoded on the page: the memory path, when
+/// browser storage failed (decision 0015).  The stems are not read here:
+/// the open shows them as stored lanes (D11 of the M7 plan).
 async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
     let mut files = Vec::new();
     for (orig, stored) in &meta.files {
@@ -862,16 +870,7 @@ async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
             .ok_or_else(|| anyhow!("{orig} is missing from browser storage"))?;
         files.push((orig.clone(), bytes));
     }
-    let source = Song::load_files(files)?;
-    if meta.stems.is_empty() {
-        return Ok(source);
-    }
-    let mut stems = Vec::new();
-    for name in &meta.stems {
-        let path = format!("{base}/stems/{}", stem_file(name));
-        stems.push(read_stem(&path, name, source.frames).await?.0);
-    }
-    Ok(crate::with_original(&source, stems))
+    Song::load_files(files)
 }
 
 /// The suffix of each file that the decode worker writes.
@@ -1219,10 +1218,6 @@ async fn overviews_on_the_page(files: &[LaneFile], frames: usize) -> Option<Stem
     })
 }
 
-/// The frames that [`read_back`] reads in one block: 1 MiB of a session
-/// file.
-const READ_BLOCK_FRAMES: usize = 131_072;
-
 /// A decode of session `id` by the decode worker, from the post to the end
 /// of D7 (D9 of `plans/active/stream-from-storage-m5.md`).  It counts as a
 /// save in `SAVING`, so `forget` and a restore wait for it, and as a write
@@ -1469,84 +1464,148 @@ async fn move_part(base: &str, file: &str) -> Result<()> {
     }
 }
 
-/// D10: the song of complete session `id`, read back from its session
-/// files in blocks of 1 MiB, into two channels made at the song's frames.
-/// It never holds a whole file's bytes.  A mono source reads its left side
-/// only, and shares it as its right side (MEM-1).  It gives the lane file of
-/// each source with the song (D8 of M6): each file was complete when read.
-pub async fn read_back(
+/// D11 of the M7 plan: the song of complete session `id` as stored lanes:
+/// each source's session file with its overview (`overviews/<i>.f32`), and
+/// the mix lane's overview.  It reads only the overviews, at most 32 KiB
+/// each, and no session file: the jobs and playback read them in blocks.
+pub async fn stored_sources(
     id: &str,
     sources: &[PlannedSource],
     decoded: &Decoded,
-) -> Result<(Song, Vec<LaneFile>)> {
+) -> Result<crate::lanes::Shown> {
+    use crate::lanes::{LaneAudio, ShownLane};
     let base = session_folder(id);
-    let one = crate::store_meta::one_source(sources);
     let frames = decoded.frames;
-    let mut block = vec![0u8; 8 * READ_BLOCK_FRAMES];
-    let mut stems = Vec::with_capacity(sources.len());
-    for source in sources {
-        let path = format!("{base}/{}", crate::store_meta::source_file(source, one));
-        let mono = decoded.channels_of(source.index) == Some(1);
-        let (left, right) = read_channels(&path, frames, mono, &mut block).await?;
-        let left = Samples::from(left);
-        let right = right.map_or_else(|| left.clone(), Samples::from);
-        stems.push(Stem {
+    let files = crate::store_meta::source_lane_files(&base, sources, frames);
+    let store: std::rc::Rc<dyn crate::lane_store::LaneStore> =
+        std::rc::Rc::new(crate::lane_store::OpfsStore::new(None));
+    let mut lanes = Vec::with_capacity(sources.len());
+    for (source, file) in sources.iter().zip(files) {
+        let overview =
+            read_overview(&format!("{base}/overviews/{}.f32", source.index), frames).await?;
+        lanes.push(ShownLane {
             name: source.name.clone(),
-            left,
-            right,
+            audio: LaneAudio::Stored {
+                file,
+                overview,
+                store: std::rc::Rc::clone(&store),
+            },
         });
     }
-    let song = Song {
+    let mix = read_overview(&format!("{base}/overviews/mix.f32"), frames).await?;
+    Ok(crate::lanes::Shown {
         sample_rate: engine::resample::SONG_RATE,
         frames,
-        stems,
-    };
-    let files = crate::store_meta::source_lane_files(&base, sources, frames);
-    Ok((song, files))
+        lanes,
+        mix_overview: Some(mix),
+    })
 }
 
-/// The channels of the session file at `path`, which holds `frames`
-/// frames, read a block at a time through `block`.  `mono`: only the left.
-async fn read_channels(
-    path: &str,
+/// The overview file at `path`, of a lane of `frames` frames.
+async fn read_overview(path: &str, frames: usize) -> Result<std::rc::Rc<crate::lanes::Overview>> {
+    let bytes = read(path)
+        .await
+        .ok_or_else(|| anyhow!("{path} is missing from browser storage"))?;
+    let overview =
+        crate::lanes::Overview::from_file(&bytes, frames).map_err(|e| anyhow!("{path}: {e}"))?;
+    Ok(std::rc::Rc::new(overview))
+}
+
+/// The stems `names` of session `id`, at `paths`, for a song of `frames`
+/// frames, as lanes (D11 of the M7 plan), and the overview of their mix
+/// when every stem is complete.  A complete stem WAV is a stored lane: its
+/// header (at most 4 KiB read) and its overview (D7).  A stem whose file is
+/// not complete (`.part`, or a wrong header) is read whole into memory
+/// only on the memory path's rules: a song of at most `limit` frames; else
+/// it is an error.
+pub async fn stem_lanes(
+    id: &str,
+    names: &[String],
+    paths: &[String],
     frames: usize,
-    mono: bool,
-    block: &mut [u8],
-) -> Result<(Vec<f32>, Option<Vec<f32>>)> {
-    let file = st_file(path).await;
-    if file.is_null() {
-        return Err(anyhow!("{path} is missing from browser storage"));
+    decoder: &crate::decoder::DecodeClient,
+    limit: usize,
+) -> Result<(
+    Vec<crate::lanes::ShownLane>,
+    Option<std::rc::Rc<crate::lanes::Overview>>,
+)> {
+    use crate::lanes::{LaneAudio, ShownLane};
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        files.push(match head_of(path, 4_096).await {
+            Some((head, size)) => crate::store_meta::stem_lane_file(path, &head, size, frames),
+            None => None,
+        });
     }
-    let size = file.unchecked_ref::<web_sys::Blob>().size();
-    if size != 8.0 * frames as f64 {
-        return Err(anyhow!(
-            "{path} holds {size} bytes, not the {} bytes of {frames} frames",
-            8 * frames
-        ));
-    }
-    let mut left = Vec::with_capacity(frames);
-    let mut right = (!mono).then(|| Vec::with_capacity(frames));
-    let mut start = 0;
-    while start < frames {
-        let end = (start + READ_BLOCK_FRAMES).min(frames);
-        let bytes = st_slice(&file, 8.0 * start as f64, 8.0 * end as f64)
-            .await
-            .map_err(|e| anyhow!("{path} could not be read: {e:?}"))?
-            .unchecked_into::<Uint8Array>();
-        let n = 8 * (end - start);
-        if bytes.length() as usize != n {
-            return Err(anyhow!("{path} gave {} of {n} bytes", bytes.length()));
+    let complete = files.iter().all(Option::is_some);
+    let set = if complete {
+        stem_overviews(id, frames, decoder).await
+    } else {
+        None
+    };
+    let (overviews, mix) = match set {
+        Some(set) if set.lanes.len() == names.len() => (
+            set.lanes.into_iter().map(Some).collect::<Vec<_>>(),
+            Some(set.mix),
+        ),
+        _ => {
+            // The overviews of the complete stems, made on the page; their
+            // mix's only when every stem is complete.
+            let stored: Vec<LaneFile> = files.iter().flatten().cloned().collect();
+            let made = if stored.is_empty() {
+                None
+            } else {
+                overviews_on_the_page(&stored, frames).await
+            };
+            let mix = made
+                .as_ref()
+                .filter(|_| complete)
+                .map(|set| std::rc::Rc::clone(&set.mix));
+            let mut lanes = made.map(|set| set.lanes.into_iter());
+            let overviews = files
+                .iter()
+                .map(|file| file.as_ref().and_then(|_| lanes.as_mut()?.next()))
+                .collect();
+            (overviews, mix)
         }
-        bytes.copy_to(&mut block[..n]);
-        for frame in block[..n].chunks_exact(8) {
-            left.push(f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]));
-            if let Some(right) = &mut right {
-                right.push(f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]));
+    };
+    let store: std::rc::Rc<dyn crate::lane_store::LaneStore> =
+        std::rc::Rc::new(crate::lane_store::OpfsStore::new(None));
+    let mut lanes = Vec::with_capacity(names.len());
+    for (((name, path), file), overview) in names.iter().zip(paths).zip(files).zip(overviews) {
+        let audio = match (file, overview) {
+            (Some(file), Some(overview)) => LaneAudio::Stored {
+                file,
+                overview,
+                store: std::rc::Rc::clone(&store),
+            },
+            _ if frames <= limit => {
+                let (stem, _) = read_stem(path, name, frames).await?;
+                LaneAudio::Memory {
+                    left: stem.left,
+                    right: stem.right,
+                }
             }
-        }
-        start = end;
+            _ => {
+                return Err(anyhow!(
+                    "the stem {name} is not complete in browser storage, and the song is too long to read it into memory"
+                ));
+            }
+        };
+        lanes.push(ShownLane {
+            name: name.clone(),
+            audio,
+        });
     }
-    Ok((left, right))
+    Ok((lanes, mix))
+}
+
+/// The paths of the stem WAVs of `names` in session `id`.
+pub fn stem_paths(id: &str, names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .map(|name| format!("{}/stems/{}", session_folder(id), stem_file(name)))
+        .collect()
 }
 
 /// A stored session, as the page opens it (D11).
@@ -1637,25 +1696,6 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn test_made_current() -> Option<String> {
     MADE_CURRENT.with_borrow(Clone::clone)
-}
-
-/// The separated stems of session `id`, for a song of `frames`, from the
-/// `stem` lines of `meta`, with the lane file of each.  Each stem WAV is
-/// read whole until M7.
-pub async fn stems_of(
-    id: &str,
-    meta: &Meta,
-    frames: usize,
-) -> Result<(Vec<Stem>, Vec<Option<LaneFile>>)> {
-    let mut stems = Vec::with_capacity(meta.stems.len());
-    let mut files = Vec::with_capacity(meta.stems.len());
-    for name in &meta.stems {
-        let path = format!("{}/stems/{}", session_folder(id), stem_file(name));
-        let (stem, file) = read_stem(&path, name, frames).await?;
-        stems.push(stem);
-        files.push(file);
-    }
-    Ok((stems, files))
 }
 
 /// The lane file of the usable mix of session `id`, if it has the song's
@@ -2189,6 +2229,127 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             .collect()
     }
 
+    /// The stems of a planted separated session.
+    const STEM_NAMES: [&str; 6] = ["bass", "drums", "other", "vocals", "guitar", "piano"];
+
+    /// A complete session `id` of a separated song of `seconds`: one
+    /// source in `mix.f32`, six stem WAVs, and every overview, made in JS or
+    /// small, with `meta` naming them complete.  Its frames.
+    async fn plant_separated(id: &str, seconds: usize) -> usize {
+        let frames = seconds * 44_100;
+        let base = format!("{ROOT}/{id}");
+        store_plant_tone(&format!("{base}/mix.f32"), frames as u32, false).await;
+        let overview = vec![0u8; crate::store_meta::overview_bytes(frames) as usize];
+        for file in ["overviews/0.f32", "overviews/mix.f32"] {
+            write(&format!("{base}/{file}"), &overview)
+                .await
+                .expect("planted");
+        }
+        for (k, name) in STEM_NAMES.iter().enumerate() {
+            store_plant_wav(&format!("{base}/stems/{}", stem_file(name)), frames as u32).await;
+            let file = crate::store_meta::stem_overview_file(k);
+            write(&format!("{base}/{file}"), &overview)
+                .await
+                .expect("planted");
+        }
+        let mix = crate::store_meta::STEM_MIX_OVERVIEW;
+        write(&format!("{base}/{mix}"), &overview)
+            .await
+            .expect("planted");
+        let meta = Meta {
+            name: "acme".into(),
+            rate: 44_100,
+            files: vec![("acme.wav".into(), "0.wav".into())],
+            stems: STEM_NAMES.iter().map(|n| n.to_string()).collect(),
+            mix: Some((frames, MIX_FORMAT.into())),
+            decoded: Some(Decoded {
+                frames,
+                format: MIX_FORMAT.into(),
+                channels: vec![(0, 2)],
+            }),
+            stems_generation: 1,
+            stem_overviews: Some(crate::store_meta::StemOverviews {
+                frames,
+                format: MIX_FORMAT.into(),
+                generation: 1,
+            }),
+        };
+        write(&format!("{base}/meta"), meta.to_text().as_bytes())
+            .await
+            .expect("planted");
+        frames
+    }
+
+    /// D11 of the M7 plan, MEM-1, MEM-4: a complete session of 1 minute,
+    /// then of 4 minutes, opens as stored lanes with no samples.  The
+    /// read-ahead buffer is made at once (24 MiB for seven lanes), and the
+    /// browser tests share one WebAssembly memory, so each open's heap peak
+    /// above its start is measured: the 4-minute open's is at most 4 MB
+    /// above the 1-minute open's.  No read is larger than a block of a
+    /// lane.  It replaces `the_read_back_makes_no_whole_file_buffer`.
+    #[wasm_bindgen_test]
+    async fn a_stored_song_is_shown_with_no_samples() {
+        const MB: f64 = 1e6;
+        st_remove(ROOT).await;
+        let client = crate::decoder::DecodeClient::new("./no-such-decode-worker.js");
+        let mut opens = Vec::new();
+        store_start_read_spy();
+        for (id, seconds) in [("1792640000040", 60), ("1792640000041", 240)] {
+            let frames = plant_separated(id, seconds).await;
+            let before = LIVE.with(Cell::get);
+            PEAK.with(|peak| peak.set(before));
+            let (opened, _, note) = crate::restore_stored(id, &client)
+                .await
+                .expect("a session")
+                .expect("opened");
+            let mut app = crate::StemApp {
+                want_device: false,
+                ..crate::StemApp::default()
+            };
+            app.session = Some(id.to_string());
+            app.open_song(opened.song);
+            let peak = (PEAK.with(Cell::get) - before) as f64 / MB;
+            let song = app.song.clone().expect("a song");
+            let no_samples = song.lanes.iter().all(|l| l.audio.samples().is_none());
+            let stored = app.playback.as_ref().map(|p| (p.stored, p.lanes));
+            app.load_demo();
+            opens.push((
+                seconds,
+                frames,
+                peak,
+                no_samples,
+                stored,
+                note,
+                song.names().len(),
+            ));
+        }
+        let reads = store_stop_read_spy();
+        st_remove(ROOT).await;
+        for (seconds, _, peak, no_samples, stored, note, lanes) in &opens {
+            println!("open of {seconds} s: the heap peaked {peak:.1} MB above its start");
+            assert!(no_samples, "{seconds} s: no lane has samples");
+            assert_eq!(
+                *stored,
+                Some((7, 7)),
+                "{seconds} s: every lane plays from storage"
+            );
+            assert_eq!(*note, None, "{seconds} s: not decoded on the page");
+            assert_eq!(*lanes, 7, "{seconds} s: six stems and the original");
+        }
+        let (short, long) = (opens[0].2, opens[1].2);
+        assert!(
+            long <= short + 4.0,
+            "MEM-1: the 4-minute open peaked {long:.1} MB, the 1-minute one {short:.1} MB"
+        );
+        let block = (8 * engine::source::BLOCK_FRAMES) as f64;
+        assert!(reads.len() > 10, "{} reads", reads.len());
+        assert!(
+            reads.iter().all(|bytes| *bytes <= block),
+            "no read larger than a block of a lane: {:?}",
+            reads.iter().copied().fold(0.0, f64::max)
+        );
+    }
+
     /// D10 of the M7 plan: `write_mix` reads stored lanes through the lane
     /// reader, a block of a lane at a time, writes each block of the mix
     /// as a whole array of 1 MiB (MEM-5), and its heap peak stays under
@@ -2459,6 +2620,32 @@ export async function store_plant_tone(path, frames, mono) {
   }
   await w.close();
 }
+// A 16-bit stereo WAV at 44.1 kHz of `frames` frames of a tone, made in
+// JS, so the test page's WebAssembly memory does not hold it.
+export async function store_plant_wav(path, frames) {
+  const i = path.lastIndexOf("/");
+  const d = await store_folder(path.slice(0, i), true);
+  const w = await (await d.getFileHandle(path.slice(i + 1), { create: true })).createWritable();
+  const head = new DataView(new ArrayBuffer(44));
+  const text = (at, s) => { for (let k = 0; k < 4; k++) head.setUint8(at + k, s.charCodeAt(k)); };
+  text(0, "RIFF"); head.setUint32(4, 36 + 4 * frames, true); text(8, "WAVE");
+  text(12, "fmt "); head.setUint32(16, 16, true); head.setUint16(20, 1, true);
+  head.setUint16(22, 2, true); head.setUint32(24, 44100, true); head.setUint32(28, 4 * 44100, true);
+  head.setUint16(32, 4, true); head.setUint16(34, 16, true);
+  text(36, "data"); head.setUint32(40, 4 * frames, true);
+  await w.write(new Uint8Array(head.buffer));
+  const block = 131072;
+  for (let at = 0; at < frames; at += block) {
+    const n = Math.min(block, frames - at);
+    const b = new Int16Array(2 * n);
+    for (let k = 0; k < n; k++) {
+      b[2 * k] = Math.round(8000 * Math.sin(0.02 * (at + k)));
+      b[2 * k + 1] = -b[2 * k];
+    }
+    await w.write(b);
+  }
+  await w.close();
+}
 // Records the bytes of each `Blob.slice` and `Blob.arrayBuffer`.
 let store_reads = null;
 let store_real = null;
@@ -2484,6 +2671,7 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
 "#)]
     extern "C" {
         async fn store_plant_tone(path: &str, frames: u32, mono: bool);
+        async fn store_plant_wav(path: &str, frames: u32);
         fn store_start_read_spy();
         fn store_stop_read_spy() -> Vec<f64>;
         async fn store_sleep(ms: u32);
@@ -2668,61 +2856,6 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         st_remove(ROOT).await;
         assert!(!during && still_there, "forget waits while the decode runs");
         assert!(ended, "forget ends once the decode ends");
-    }
-
-    /// D10, MEM-1, MEM-4: the read-back of a 2-minute session file peaks the
-    /// heap at about its two channels, never the file's bytes too, and reads
-    /// at most 1 MiB at a time.  A mono source peaks at one channel, which
-    /// both sides share.
-    #[wasm_bindgen_test]
-    async fn the_read_back_makes_no_whole_file_buffer() {
-        st_remove(ROOT).await;
-        let frames = 2 * 60 * 44_100;
-        let mut results = Vec::new();
-        for (k, mono) in [(0, false), (1, true)] {
-            let id = format!("179264000005{k}");
-            plant_session(&id, &[]).await;
-            store_plant_tone(&mix_path(&id), frames as u32, mono).await;
-            let sources = sources_of(&["drums"]);
-            let decoded = Decoded {
-                frames,
-                format: MIX_FORMAT.into(),
-                channels: vec![(0, if mono { 1 } else { 2 })],
-            };
-            store_start_read_spy();
-            // The heap's peak, not the wasm memory's growth, which memory
-            // freed by an earlier test would hide (findings 1-6, 1-7).
-            let before = LIVE.with(Cell::get);
-            PEAK.with(|peak| peak.set(before));
-            let (song, _) = read_back(&id, &sources, &decoded).await.expect("read back");
-            let grown = (PEAK.with(Cell::get) - before) as f64 / 1e6;
-            let reads = store_stop_read_spy();
-            let stem = &song.stems[0];
-            let shared = stem.left.shares(&stem.right);
-            let sample = (stem.left[1000], stem.right[1000]);
-            results.push((mono, grown, reads, shared, sample, song.frames));
-            drop(song);
-        }
-        st_remove(ROOT).await;
-        let channel_mb = 4.0 * frames as f64 / 1e6;
-        for (mono, grown, reads, shared, (left, right), got) in results {
-            let channels = if mono { 1.0 } else { 2.0 };
-            assert_eq!(got, frames);
-            assert!(
-                grown < channels * channel_mb + 2.0,
-                "mono {mono}: the heap peaked {grown} MB above its start, for {channels} channels of {channel_mb} MB"
-            );
-            assert!(reads.len() > 10, "mono {mono}: {} reads", reads.len());
-            assert!(
-                reads.iter().all(|bytes| *bytes <= (1 << 20) as f64),
-                "mono {mono}: each read is at most 1 MiB: {reads:?}"
-            );
-            assert_eq!(shared, mono, "a mono source shares one buffer");
-            assert_eq!(left, (0.5 * (0.01_f64 * 1000.0).sin()) as f32);
-            if !mono {
-                assert_eq!(right, (0.25 * (0.03_f64 * 1000.0).sin()) as f32);
-            }
-        }
     }
 
     /// Finding 1-5 of review round 1: two writers of `meta` on one session

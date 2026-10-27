@@ -48,6 +48,19 @@ extern "C" {
     fn pb_now() -> f64;
 }
 
+#[cfg(test)]
+thread_local! {
+    /// [`Playback::start`] gives `None`, as for lanes over the read-ahead
+    /// cap, while a test sets this.
+    static REFUSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Makes [`Playback::start`] give `None` while `refused`, for a test.
+#[cfg(test)]
+pub fn refuse_for_test(refused: bool) {
+    REFUSED.set(refused);
+}
+
 /// One source for each lane of a song, `None` for a lane in memory.
 pub type LaneSources = Vec<Option<Arc<dyn StemSource>>>;
 
@@ -133,6 +146,10 @@ impl Playback {
         pending: Rc<RefCell<Inbox>>,
         ctx: Option<egui::Context>,
     ) -> Option<(Self, LaneSources)> {
+        #[cfg(test)]
+        if REFUSED.get() {
+            return None;
+        }
         let stored: Vec<(LaneFile, String)> = files
             .iter()
             .zip(names)

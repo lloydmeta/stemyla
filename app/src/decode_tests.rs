@@ -115,6 +115,18 @@ impl Fake {
     }
 }
 
+/// The samples of lane `k` of `song`, read through the lane reader, as the
+/// page reads a stored lane (D3 of the M7 plan).
+async fn samples_of(song: &lanes::Shown, k: usize) -> (Vec<f32>, Vec<f32>) {
+    let pcm = lanes::LanePcm::new(song.lanes[k].audio.clone(), song.frames, song.sample_rate);
+    let mut job = export::ExportJob::new(Box::new(pcm), export::VecSink::new(song.frames));
+    while !job.run_while(|| true) {
+        dt_sleep(1).await;
+    }
+    let sink = job.into_sink();
+    (sink.left, sink.right)
+}
+
 /// Runs `work` in the background; its output arrives in the cell.
 fn background<T: 'static>(work: impl Future<Output = T> + 'static) -> Rc<RefCell<Option<T>>> {
     let out = Rc::new(RefCell::new(None));
@@ -334,23 +346,31 @@ async fn a_decoded_song_is_read_back_and_shown() {
             let path = format!("{}/decoded/{}.f32.decode.part", req.session, s.index);
             left_over.extend(store::test_read(&path).await.map(|_| path));
         }
+        let song = &opened.song;
+        let mut read = Vec::new();
+        for k in 0..song.lanes.len() {
+            read.push(samples_of(song, k).await);
+        }
         store::test_wipe().await;
-        let song = &opened.song.as_song().expect("in memory");
-        let got: Vec<&str> = song.stems.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(got, names);
+        assert_eq!(song.names(), names);
         assert_eq!(
             (song.frames, opened.session.as_deref()),
             (frames, Some(id.as_str()))
         );
-        for ((stem, (left, right)), mono) in song.stems.iter().zip(&samples).zip(&mono) {
-            assert!(*stem.left == **left, "{}: left", stem.name);
-            assert!(*stem.right == **right, "{}: right", stem.name);
-            assert_eq!(
-                stem.left.shares(&stem.right),
-                *mono,
-                "{}: shared",
-                stem.name
-            );
+        // D11 of the M7 plan: each lane is its session file, with no
+        // samples in memory, and reads the decoded samples.
+        assert!(
+            song.lanes.iter().all(|l| l.audio.samples().is_none()),
+            "no samples"
+        );
+        assert!(
+            song.lanes.iter().all(|l| l.audio.file().is_some()),
+            "each a file"
+        );
+        assert!(song.mix_overview.is_some(), "the mix overview");
+        for ((name, (left, right)), got) in names.iter().zip(&samples).zip(&read) {
+            assert!(got.0 == *left, "{name}: left");
+            assert!(got.1 == *right, "{name}: right");
         }
         let decoded = meta.decoded.expect("the decoded line");
         assert_eq!(decoded.frames, frames);
@@ -379,9 +399,8 @@ async fn a_derived_source_stays_out_of_the_mix() {
         [(1, true), (0, false)],
         "drums first, classic drums out of the mix"
     );
-    let song = opened.expect("opened").song.as_song().expect("in memory");
-    assert_eq!(song.stems[0].name, "drums");
-    assert_eq!(song.stems[1].name, "classic drums");
+    let song = opened.expect("opened").song;
+    assert_eq!(song.names(), ["drums", "classic drums"]);
     assert_eq!(
         mix,
         Some(interleaved(&samples[0].0, &samples[0].1)),
@@ -558,12 +577,16 @@ async fn a_complete_session_restores_with_no_decode() {
     let posts = fake.posts.length();
     let restored = restore_stored(&id, &fake.client).await;
     let current = store::current().await;
-    store::test_wipe().await;
     let (opened, meta, note) = restored.expect("a session").expect("restored");
-    let song = opened.song.as_song().expect("in memory");
+    let read = samples_of(&opened.song, 0).await;
+    store::test_wipe().await;
     assert_eq!(fake.posts.length(), posts, "no decode is posted");
     assert_eq!((note, meta.name.as_str()), (None, "acme"));
-    assert!(*song.stems[0].left == samples[0].0 && *song.stems[0].right == samples[0].1);
+    assert!(
+        opened.song.lanes[0].audio.samples().is_none(),
+        "a stored lane"
+    );
+    assert!(read.0 == samples[0].0 && read.1 == samples[0].1);
     assert_eq!(current, Some(id), "made current");
 }
 
@@ -601,17 +624,14 @@ async fn an_incomplete_session_restores_through_a_decode() {
         .expect("restored");
     let meta = meta_of(&id).await.expect("meta");
     let kept_mix = store::test_read(&store::mix_path(&id)).await;
+    let read = samples_of(&restored.0.song, 0).await;
     store::test_wipe().await;
     assert_eq!(
         req.mix_frames,
         Some(frames as u64),
         "the usable mix is named"
     );
-    let song = restored.0.song.as_song().expect("in memory");
-    assert!(
-        *song.stems[0].left == left && *song.stems[0].right == right,
-        "read from the mix"
-    );
+    assert!(read.0 == left && read.1 == right, "read from the mix");
     assert_eq!(kept_mix, Some(mix), "the mix stays");
     assert_eq!(meta.decoded.map(|d| d.frames), Some(frames), "now complete");
     assert_eq!(meta.mix, Some((frames, store_meta::MIX_FORMAT.into())));
@@ -1285,4 +1305,116 @@ async fn the_page_makes_the_overviews_when_the_worker_cannot() {
     let got = got.expect("the page made them");
     assert!(set_bytes(&got) == want_overviews(&sides));
     assert_eq!(meta.stem_overviews, None, "not saved");
+}
+
+/// D11 of the M7 plan: when the decode worker fails over to the page,
+/// `rebuild` decodes only the sources on the page; complete stem WAVs show
+/// as stored lanes with no samples.
+#[wasm_bindgen_test]
+async fn rebuild_shows_complete_stems_as_stored_lanes() {
+    store::test_wipe().await;
+    let frames = 3_000;
+    let id = saved(&vec![wav_file("acme.wav", frames, 0)]).await;
+    let stems: Vec<Stem> = ["bass", "drums"]
+        .iter()
+        .enumerate()
+        .map(|(k, name)| Stem {
+            name: name.to_string(),
+            left: stem_side(frames, k).into(),
+            right: stem_side(frames, k + 4).into(),
+        })
+        .collect();
+    store::save_stems(&id, 44_100, &stems).await.expect("saved");
+    let failing = decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let (opened, _, note) = restore_stored(&id, &failing)
+        .await
+        .expect("a session")
+        .expect("opened");
+    store::test_wipe().await;
+    let song = &opened.song;
+    assert!(
+        note.as_deref()
+            .is_some_and(|n| n.contains("decoded on this page")),
+        "{note:?}"
+    );
+    assert_eq!(song.names(), ["bass", "drums", "original"]);
+    for lane in &song.lanes[..2] {
+        assert!(lane.audio.samples().is_none(), "{}: no samples", lane.name);
+        let file = lane.audio.file().expect("a stored stem");
+        assert!(
+            file.path.ends_with(&format!("stems/{}.wav", lane.name)),
+            "{}",
+            file.path
+        );
+    }
+    assert!(
+        song.lanes[2].audio.samples().is_some(),
+        "the source, decoded on the page"
+    );
+}
+
+/// D2 of the M7 plan: a song whose lanes do not fit the read-ahead buffer
+/// at its minimum slots (21 sources, no stems) opens on the memory path,
+/// decoded on the page, and the note says why.
+#[wasm_bindgen_test]
+async fn a_song_over_the_read_ahead_cap_opens_in_memory() {
+    store::test_wipe().await;
+    let chosen: Chosen = (0..21)
+        .map(|k| wav_file(&format!("lloyd {k}.wav"), 100, k))
+        .collect();
+    let id = saved(&chosen).await;
+    let fake = Fake::new();
+    let (opened, _, note) = restore_stored(&id, &fake.client)
+        .await
+        .expect("a session")
+        .expect("opened");
+    let posts = fake.posts.length();
+    store::test_wipe().await;
+    let song = &opened.song;
+    assert_eq!(posts, 0, "no decode is posted");
+    assert_eq!(song.lanes.len(), 21);
+    assert!(
+        song.lanes.iter().all(|l| l.audio.samples().is_some()),
+        "in memory"
+    );
+    assert!(
+        note.as_deref()
+            .is_some_and(|n| n.contains("do not fit the read-ahead buffer")),
+        "{note:?}"
+    );
+}
+
+/// D11 of the M7 plan and MEM-1's exception: a stem whose file is not
+/// complete (a `.part`) is read whole into memory only for a song of at
+/// most the memory path's frames; for a longer song, the open fails.
+#[wasm_bindgen_test]
+async fn an_incomplete_stem_is_read_whole_only_on_the_memory_path() {
+    store::test_wipe().await;
+    let frames = 2_000;
+    let id = saved(&vec![wav_file("acme.wav", frames, 0)]).await;
+    let (left, right) = (stem_side(frames, 0), stem_side(frames, 4));
+    let path = format!("sessions/{id}/stems/bass.wav.part");
+    store::test_write(&path, &engine::wav::encode_pcm16(&left, &right, 44_100))
+        .await
+        .expect("planted");
+    let failing = decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let (names, paths) = (vec!["bass".to_string()], vec![path]);
+    let fits = store::stem_lanes(&id, &names, &paths, frames, &failing, frames).await;
+    let long = store::stem_lanes(&id, &names, &paths, frames, &failing, frames - 1).await;
+    store::test_wipe().await;
+    let (lanes, mix) = fits.expect("read into memory");
+    let (got_left, got_right) = lanes[0].audio.samples().expect("in memory");
+    assert!(
+        **got_left == left && **got_right == right,
+        "the stem's samples"
+    );
+    assert!(
+        mix.is_none(),
+        "no overview of a mix with a stem not complete"
+    );
+    let error = long.err().map(|e| format!("{e:#}"));
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("not complete")),
+        "{error:?}"
+    );
 }

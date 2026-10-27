@@ -160,18 +160,6 @@ pub fn classic_route(song: &Shown, memory_limit: usize) -> ClassicRoute {
     }
 }
 
-/// The audio of `song`'s lanes for a job: the lanes with a file read it
-/// through `store`, when there is one (D3 and D1 of the M7 plan).
-fn job_audio(
-    song: &Shown,
-    store: &Option<std::rc::Rc<dyn lane_store::LaneStore>>,
-) -> Vec<LaneAudio> {
-    match store {
-        Some(store) => lanes::reading_files(song.audio(), store),
-        None => song.audio(),
-    }
-}
-
 /// One source for each lane of `song`, for the lanes that the read-ahead
 /// buffer does not play: a lane in memory shares its samples (MEM-1), and
 /// a stored lane plays silence; it never falls back to samples (D2 of the
@@ -255,39 +243,64 @@ pub fn with_original(source: &Song, mut stems: Vec<Stem>) -> Song {
 /// for a lane that plays from memory (D8 of M6).
 pub type LaneFiles = Vec<Option<store_meta::LaneFile>>;
 
-/// [`with_original`] of a shown song: the stems, each with its file in
-/// `stem_files`, then the "original" lane.  It takes the audio of the
-/// source lane that holds the original, with its file, or the mix of the
-/// sources, with `mix`, the session's usable mix file (D8 of M6).  A song
-/// of several sources that are not all in memory gets no "original" lane
-/// (D1 of the M7 plan; step 7 gives it the session's mix).
+/// [`with_original`] of a shown song: the stem lanes, then the "original"
+/// lane (D1 of the M7 plan).  It takes the audio of the source lane that
+/// holds the original, or, for several sources, their mix: in memory when
+/// the sources are, else `mix`, the session's usable mix file, with the
+/// song's mix overview (`overviews/mix.f32`, which M5 makes of the same
+/// mix).  With neither, the song has no "original" lane.
 pub fn with_original_files(
     source: &Shown,
-    stems: Vec<Stem>,
-    stem_files: LaneFiles,
+    stems: Vec<ShownLane>,
     mix: Option<store_meta::LaneFile>,
 ) -> Shown {
-    assert_eq!(stem_files.len(), stems.len(), "a lane file for each stem");
     let original = match original_index_of(&source.names()) {
         Some(i) => Some(source.lanes[i].audio.clone()),
-        None => sources_in_memory(source).map(|sources| {
-            let (left, right) = mix_of_sources(&sources);
-            LaneAudio::with_file(left.into(), right.into(), mix)
-        }),
+        None => match sources_in_memory(source) {
+            Some(sources) => {
+                let (left, right) = mix_of_sources(&sources);
+                Some(LaneAudio::Memory {
+                    left: left.into(),
+                    right: right.into(),
+                })
+            }
+            None => match (mix, &source.mix_overview, source.store()) {
+                (Some(file), Some(overview), Some(store)) => Some(LaneAudio::Stored {
+                    file,
+                    overview: std::rc::Rc::clone(overview),
+                    store,
+                }),
+                _ => None,
+            },
+        },
     };
-    let song = Song {
-        sample_rate: source.sample_rate,
-        frames: source.frames,
-        stems,
-    };
-    let mut shown = Shown::with_files(song, stem_files);
+    let mut lanes = stems;
     if let Some(audio) = original {
-        shown.lanes.push(ShownLane {
+        lanes.push(ShownLane {
             name: "original".into(),
             audio,
         });
     }
-    shown
+    Shown {
+        sample_rate: source.sample_rate,
+        frames: source.frames,
+        lanes,
+        mix_overview: None,
+    }
+}
+
+/// Lanes in memory of `stems`, which share their samples (MEM-1).
+pub fn memory_lanes(stems: Vec<Stem>) -> Vec<ShownLane> {
+    stems
+        .into_iter()
+        .map(|stem| ShownLane {
+            name: stem.name,
+            audio: LaneAudio::Memory {
+                left: stem.left,
+                right: stem.right,
+            },
+        })
+        .collect()
 }
 
 /// Results of browser work (reading files, browser storage) for the UI
@@ -351,14 +364,17 @@ struct MemoryInput {
     read: Result<export::JsChannels, String>,
 }
 
+/// The stems of a separation as lanes, and the overview of their mix.
+#[cfg(target_arch = "wasm32")]
+type StemLanes = (Vec<ShownLane>, Option<std::rc::Rc<lanes::Overview>>);
+
 /// A storage-path separation after [`store::keep_stored_stems`].  Web only.
 #[cfg(target_arch = "wasm32")]
 struct StoredSeparation {
     job: SeparationJob,
-    /// The stems read back, or `None` when its song is neither shown nor
-    /// being opened.
-    /// Each with its lane file (D8 of M6).
-    stems: Option<anyhow::Result<(Vec<Stem>, LaneFiles)>>,
+    /// The stems as lanes (D11 of the M7 plan), with the overview of their
+    /// mix, or `None` when its song is neither shown nor being opened.
+    stems: Option<anyhow::Result<StemLanes>>,
     /// The session's usable mix, for the "original" of several sources.
     mix: Option<store_meta::LaneFile>,
     secs: f64,
@@ -366,8 +382,6 @@ struct StoredSeparation {
     count: usize,
     /// Why `meta` does not name the stems, if it does not.
     not_kept: Option<String>,
-    /// The overviews of the stems and of their mix (D7 of the M7 plan).
-    overviews: Option<store::StemOverviewSet>,
     /// Protects the session until the stems are shown (D10 of M6).
     _guard: Option<store::OpenGuard>,
 }
@@ -618,6 +632,14 @@ async fn open_saved(
     // reads it, until the song is shown.
     let guard = store::OpenGuard::new(&id);
     let sources = match store::open_stored(&id).await {
+        // D2 of the M7 plan: lanes that do not fit the read-ahead buffer
+        // open on the memory path.
+        Some(Ok(store::StoredSong::NeedsDecode { meta, .. }))
+            if !store_meta::fits_read_ahead(&store_meta::open_formats(&meta)) =>
+        {
+            let why = too_many_lanes(&meta);
+            return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
+        }
         Some(Ok(store::StoredSong::NeedsDecode { sources, .. })) => sources,
         other => {
             let why = match other {
@@ -631,7 +653,7 @@ async fn open_saved(
         }
     };
     match decode_session(&id, &sources, None, decoder).await {
-        Decode::Song(song, files) => {
+        Decode::Song(song) => {
             log::info!(
                 "song: opened at {} Hz in {:.2} s ({} frames)",
                 song.sample_rate,
@@ -639,7 +661,7 @@ async fn open_saved(
                 song.frames
             );
             Ok(Opened {
-                song: Shown::with_files(song, files.into_iter().map(Some).collect()),
+                song,
                 mix: None,
                 session: Some(id),
                 name,
@@ -694,9 +716,9 @@ async fn open_on_the_page(
 /// How a decode of a session by the decode worker ended, for the page.
 #[cfg(target_arch = "wasm32")]
 enum Decode {
-    /// The session is complete, and its song read back (D7, D10), with
-    /// the lane file of each source (D8 of M6).
-    Song(Song, Vec<store_meta::LaneFile>),
+    /// The session is complete, and its song is shown as stored lanes,
+    /// with no read of a session file (D11 of the M7 plan).
+    Song(Shown),
     /// A source cannot be decoded: the text says why.
     Undecodable(String),
     /// Browser storage failed, or the worker did not answer: the page
@@ -764,8 +786,8 @@ async fn decode_session(
                         format: store_meta::MIX_FORMAT.into(),
                         channels: sources.iter().map(|s| s.index).zip(channels).collect(),
                     };
-                    match store::read_back(id, sources, &decoded).await {
-                        Ok((song, files)) => Decode::Song(song, files),
+                    match store::stored_sources(id, sources, &decoded).await {
+                        Ok(song) => Decode::Song(song),
                         Err(e) => Decode::OnThePage(format!("{e:#}")),
                     }
                 }
@@ -802,8 +824,9 @@ async fn decode_session(
     }
 }
 
-/// D11: session `id` as the page opens it, made current: read back if it
-/// is complete, else decoded by the decode worker first.  If browser
+/// D11: session `id` as the page opens it, made current: shown as stored
+/// lanes if it is complete, else decoded by the decode worker first (D11
+/// of the M7 plan).  If browser
 /// storage fails, the page decodes the stored sources itself
 /// (`store::restore_id`).  `None` when the session has no `meta`.  The
 /// text, if any, says why the song was decoded on the page.  The song comes
@@ -819,30 +842,45 @@ async fn restore_stored(
         Ok(stored) => stored,
         Err(e) => return Some(Err(e)),
     };
-    let (meta, sources, read_back) = match stored {
+    let (meta, sources, source) = match stored {
         store::StoredSong::Complete {
             meta,
             sources,
             decoded,
         } => {
-            log::info!("decoder: read back a complete session");
-            match store::read_back(id, &sources, &decoded).await {
-                Ok(read) => (meta, sources, Some(read)),
+            log::info!("decoder: a complete session opens as stored lanes");
+            match store::stored_sources(id, &sources, &decoded).await {
+                Ok(song) => (meta, sources, Some(song)),
                 Err(e) => {
-                    // D10: decode again.
-                    log::warn!("decoder: could not read session {id} back: {e:#}");
+                    // D10 of M5: decode again.
+                    log::warn!("decoder: could not open session {id}: {e:#}");
                     (meta, sources, None)
                 }
             }
         }
         store::StoredSong::NeedsDecode { meta, sources, .. } => (meta, sources, None),
     };
-    let (song, files) = match read_back {
-        Some(read) => read,
-        None => {
+    let mut note = None;
+    // D2 of the M7 plan: lanes that do not fit the read-ahead buffer open
+    // on the memory path, decoded on the page.
+    let on_the_page = if !store_meta::fits_read_ahead(&store_meta::open_formats(&meta)) {
+        Some(too_many_lanes(&meta))
+    } else {
+        None
+    };
+    let source = match (source, on_the_page) {
+        (Some(song), None) => song,
+        (_, Some(why)) => match on_the_page_of(id, &why).await? {
+            Ok(song) => {
+                note = Some(format!("decoded on this page: {why}"));
+                song
+            }
+            Err(e) => return Some(Err(e)),
+        },
+        (None, None) => {
             let mix_frames = store::usable_mix_frames(id, &meta).await;
             match decode_session(id, &sources, mix_frames, decoder).await {
-                Decode::Song(song, files) => (song, files),
+                Decode::Song(song) => song,
                 Decode::Undecodable(text) | Decode::Reset(text) => {
                     return Some(Err(anyhow::anyhow!(text)));
                 }
@@ -850,39 +888,40 @@ async fn restore_stored(
                     return Some(Err(anyhow::anyhow!("browser storage is being reset")));
                 }
                 Decode::OnThePage(why) => {
-                    log::info!("decoder: decoding on the page");
                     log::warn!("decoder: browser storage failed: {why}");
-                    let rebuilt = store::restore_id(id).await?;
-                    return Some(rebuilt.map(|(_, song, meta)| {
-                        let note = format!("decoded on this page: browser storage failed ({why})");
-                        let opened = Opened {
-                            guard: Some(guard),
-                            ..Opened::in_memory(song, Some(id.to_string()), Some(meta.name.clone()))
-                        };
-                        (opened, meta, Some(note))
-                    }));
+                    match on_the_page_of(id, &why).await? {
+                        Ok(song) => {
+                            note = Some(format!(
+                                "decoded on this page: browser storage failed ({why})"
+                            ));
+                            song
+                        }
+                        Err(e) => return Some(Err(e)),
+                    }
                 }
             }
         }
     };
-    let files: LaneFiles = files.into_iter().map(Some).collect();
-    let mix = store::mix_lane(id, &meta, song.frames).await;
-    let song = Shown::with_files(song, files);
+    let mix = store::mix_lane(id, &meta, source.frames).await;
     let song = if meta.stems.is_empty() {
-        song
+        source
     } else {
-        // D7 of the M7 plan: the overviews of the stems, made once.
-        let overviews = store::stem_overviews(id, song.frames, decoder).await;
-        match store::stems_of(id, &meta, song.frames).await {
-            Ok((stems, stem_files)) => {
-                let mut song = with_original_files(&song, stems, stem_files, mix.clone());
-                song.mix_overview = overviews.map(|o| o.mix);
+        // D11 of the M7 plan: the stems as stored lanes, with the overviews
+        // of D7, made once.
+        let paths = store::stem_paths(id, &meta.stems);
+        let limit = MEMORY_PATH_MAX_FRAMES;
+        match store::stem_lanes(id, &meta.stems, &paths, source.frames, decoder, limit).await {
+            Ok((stems, mix_overview)) => {
+                let mut song = with_original_files(&source, stems, mix.clone());
+                song.mix_overview = mix_overview;
                 song
             }
             Err(e) => return Some(Err(e)),
         }
     };
-    store::make_current(id).await;
+    if note.is_none() {
+        store::make_current(id).await;
+    }
     let opened = Opened {
         song,
         mix,
@@ -891,7 +930,24 @@ async fn restore_stored(
         note: None,
         guard: Some(guard),
     };
-    Some(Ok((opened, meta, None)))
+    Some(Ok((opened, meta, note)))
+}
+
+/// The sources of session `id` decoded on the page (the memory path,
+/// decision 0015), because of `why`.  `None` when the session is gone.
+#[cfg(target_arch = "wasm32")]
+async fn on_the_page_of(id: &str, why: &str) -> Option<anyhow::Result<Shown>> {
+    log::info!("decoder: decoding on the page: {why}");
+    let rebuilt = store::restore_id(id).await?;
+    Some(rebuilt.map(|(_, song, _)| Shown::in_memory(song)))
+}
+
+/// Why a song of `meta` opens on the memory path: its lanes do not fit
+/// the read-ahead buffer (D2 of the M7 plan).
+#[cfg(target_arch = "wasm32")]
+fn too_many_lanes(meta: &store_meta::Meta) -> String {
+    let lanes = store_meta::open_formats(meta).len() - 1;
+    format!("its {lanes} lanes do not fit the read-ahead buffer, so it plays from memory")
 }
 
 /// Milliseconds of each frame that the mix lane's waveform job may take.
@@ -1026,7 +1082,7 @@ pub struct StemApp {
     /// missing from what the open read): the session, the stems, and what
     /// to say if the open does not show them.
     #[cfg(target_arch = "wasm32")]
-    stems_for_opening: Option<(String, Vec<Stem>, String)>,
+    stems_for_opening: Option<(String, Vec<ShownLane>, String)>,
     #[cfg(target_arch = "wasm32")]
     reset: ResetStage,
     /// The save in progress, one at a time.
@@ -1434,8 +1490,14 @@ impl StemApp {
         );
         let note =
             (!job.keeps_stems).then(|| "The stems are not kept in this browser.".to_string());
-        let files = vec![None; stems.len()];
-        self.show_separated(job, (stems, files), (None, None), secs, kept_status, note);
+        self.show_separated(
+            job,
+            memory_lanes(stems),
+            (None, None),
+            secs,
+            kept_status,
+            note,
+        );
     }
 
     /// Shows separated stems on the song they belong to, if it is shown.
@@ -1444,7 +1506,7 @@ impl StemApp {
     fn show_separated(
         &mut self,
         job: SeparationJob,
-        (stems, stem_files): (Vec<Stem>, LaneFiles),
+        stems: Vec<ShownLane>,
         (mix, mix_overview): (
             Option<store_meta::LaneFile>,
             Option<std::rc::Rc<lanes::Overview>>,
@@ -1493,7 +1555,7 @@ impl StemApp {
             }
         };
         let head = self.params.as_ref().map(|p| p.playhead());
-        let mut separated = with_original_files(&song, stems, stem_files, mix);
+        let mut separated = with_original_files(&song, stems, mix);
         // The stems' mix overview (D7 of the M7 plan).
         separated.mix_overview = mix_overview;
         self.load_song(separated);
@@ -1511,8 +1573,8 @@ impl StemApp {
         );
     }
 
-    /// The stems of a storage-path separation are in place, and read back
-    /// for a song shown or being opened.
+    /// The stems of a storage-path separation are in place, as stored
+    /// lanes for a song shown or being opened (D11 of the M7 plan).
     #[cfg(target_arch = "wasm32")]
     fn stored_stems_arrived(&mut self, stored: StoredSeparation) {
         let StoredSeparation {
@@ -1522,7 +1584,6 @@ impl StemApp {
             secs,
             count,
             not_kept,
-            overviews,
             _guard,
         } = stored;
         match stems {
@@ -1536,11 +1597,10 @@ impl StemApp {
                     self.status = format!("{}.  {not_kept}", self.status);
                 }
             }
-            Some(Ok(stems)) => {
+            Some(Ok((stems, mix_overview))) => {
                 let kept_status = not_kept
                     .clone()
-                    .unwrap_or_else(|| kept_text(&job, stems.0.len(), secs));
-                let mix_overview = overviews.map(|o| o.mix);
+                    .unwrap_or_else(|| kept_text(&job, stems.len(), secs));
                 self.show_separated(job, stems, (mix, mix_overview), secs, kept_status, not_kept);
             }
         }
@@ -1561,6 +1621,12 @@ impl StemApp {
             self.playback = None;
         }
         self.lanes_generation += 1;
+        let mut song = song;
+        // The stored lanes read through the page's store, which asks for a
+        // repaint when a read ends.
+        if let Some(store) = &self.lane_store {
+            song.set_store(store);
+        }
         let song = std::rc::Rc::new(song);
         let mut lanes = Vec::with_capacity(song.lanes.len() + 1);
         // D4 of the M7 plan: the mix lane draws the mix of the sources in
@@ -1585,12 +1651,10 @@ impl StemApp {
             spectrogram: None,
         });
         for (i, lane) in song.lanes.iter().enumerate() {
-            // Until step 7, a lane with samples and a file draws from its
-            // samples; a stored lane draws from its overview (D4).
+            // A lane in memory draws from its samples, a stored lane from
+            // its overview (D4).
             let (cols, scale) = match &lane.audio {
-                LaneAudio::Memory { left, right } | LaneAudio::ReadBack { left, right, .. } => {
-                    lane_columns(left, right)
-                }
+                LaneAudio::Memory { left, right } => lane_columns(left, right),
                 LaneAudio::Stored { overview, .. } => (overview.columns.clone(), overview.scale),
             };
             lanes.push(Lane {
@@ -1637,6 +1701,18 @@ impl StemApp {
             song.duration_s(),
             song.sample_rate
         );
+        // D2 of the M7 plan: with no read-ahead buffer, a stored lane plays
+        // silence, never samples; the status line says so.
+        #[cfg(target_arch = "wasm32")]
+        if self.playback.is_none()
+            && song
+                .lanes
+                .iter()
+                .any(|lane| matches!(lane.audio, LaneAudio::Stored { .. }))
+        {
+            self.status
+                .push_str(".  Its stored lanes play silent: they do not fit the read-ahead buffer");
+        }
         self.song = Some(song);
         self.params = Some(params);
         self.play_on_output(player);
@@ -1978,7 +2054,7 @@ impl StemApp {
             })
             .collect();
         let input = lanes::LanesMix::new(
-            &job_audio(song, &self.lane_store),
+            &song.audio(),
             song.frames,
             song.sample_rate,
             &MixRecipe::new(gains),
@@ -2530,7 +2606,7 @@ impl StemApp {
         match separation_path(has_session, song.frames, free, needed, self.memory_limit) {
             SeparationPath::Storage if mix_kept => self.post_separation(JobStage::Storage, None),
             SeparationPath::Storage => {
-                let (input, _) = separation_input(&song, job_audio(&song, &self.lane_store));
+                let (input, _) = separation_input(&song, song.audio());
                 self.write_mix_first(input, ctx);
             }
             SeparationPath::Memory if has_session => self.separate_without_storage(&reason),
@@ -2636,7 +2712,7 @@ impl StemApp {
         let to_storage = stage == JobStage::Storage && self.session.is_some();
         if !to_storage {
             // D9 of the M7 plan: an input in browser storage is read first.
-            let (input, from_storage) = separation_input(&song, job_audio(&song, &self.lane_store));
+            let (input, from_storage) = separation_input(&song, song.audio());
             if from_storage {
                 self.read_memory_input(input, stage, reason);
                 return;
@@ -2872,44 +2948,25 @@ impl StemApp {
         self.reading_stems = read;
         self.status = format!("Separated in {secs:.0} s; putting the stems in place…");
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
-        let decoder = self.decoder.clone();
+        let (decoder, limit) = (self.decoder.clone(), self.memory_limit);
         // D10 of M6: the read protects the session until the stems show.
         let guard = read.then(|| store::OpenGuard::new(&id));
         wasm_bindgen_futures::spawn_local(async move {
             let stored = store::keep_stored_stems(&id, &names).await;
-            // D7 of the M7 plan: the overviews of the new stems, before the
-            // stems show.
-            let overviews = match &stored.kept {
-                Ok(()) => store::stem_overviews(&id, len, &decoder).await,
-                Err(_) => None,
-            };
+            let kept = stored.kept.is_ok();
             let not_kept = stored
                 .kept
                 .err()
                 .map(|e| format!("Stems not kept in browser storage: {e:#}"));
+            // D11 of the M7 plan: the stems show as stored lanes, read only
+            // in their headers, with the overviews of D7, made before they
+            // show.  A song not shown gets its overviews all the same.
             let stems = if read {
-                let mut stems = Vec::with_capacity(names.len());
-                let mut files = Vec::with_capacity(names.len());
-                let mut failed = None;
-                // One stem at a time, each read whole and decoded.  A stem
-                // read from its `.part` file plays from memory (D8 of M6).
-                for (name, path) in names.iter().zip(&stored.paths) {
-                    match store::read_stem(path, name, len).await {
-                        Ok((stem, file)) => {
-                            stems.push(stem);
-                            files.push(file);
-                        }
-                        Err(e) => {
-                            failed = Some(e);
-                            break;
-                        }
-                    }
-                }
-                Some(match failed {
-                    Some(e) => Err(e),
-                    None => Ok((stems, files)),
-                })
+                Some(store::stem_lanes(&id, &names, &stored.paths, len, &decoder, limit).await)
             } else {
+                if kept {
+                    store::stem_overviews(&id, len, &decoder).await;
+                }
                 None
             };
             let mix = if read {
@@ -2924,7 +2981,6 @@ impl StemApp {
                 secs,
                 count: names.len(),
                 not_kept,
-                overviews,
                 _guard: guard,
             });
             ctx.request_repaint();
@@ -3203,12 +3259,10 @@ impl StemApp {
                         note,
                         guard,
                     } = opened;
-                    // Stems held for this open play from memory (D8).
+                    // Stems held for this open: as they arrived (D11 of the
+                    // M7 plan).
                     let song = match self.stems_for_opening.take_if(|_| holds_these) {
-                        Some((_, stems, _)) => {
-                            let stem_files = vec![None; stems.len()];
-                            with_original_files(&song, stems, stem_files, mix)
-                        }
+                        Some((_, stems, _)) => with_original_files(&song, stems, mix),
                         None => song,
                     };
                     self.session = session;
@@ -3424,10 +3478,9 @@ impl StemApp {
             return;
         };
         let heard = MixRecipe::as_heard(params);
-        let store = &self.lane_store;
         let mix_of = |recipe: &MixRecipe| -> Box<dyn engine::mixdown::Pcm> {
             Box::new(lanes::LanesMix::new(
-                &job_audio(song, store),
+                &song.audio(),
                 song.frames,
                 song.sample_rate,
                 recipe,
@@ -3458,7 +3511,7 @@ impl StemApp {
             self.spectrograms = spectrogram::Spectrograms::default();
             return;
         }
-        let audio = job_audio(song, &self.lane_store);
+        let audio = song.audio();
         let source = |lane: &Lane| -> Option<Box<dyn engine::mixdown::Pcm>> {
             Some(match lane.stem {
                 Some(i) => Box::new(lanes::LanePcm::new(
@@ -3543,7 +3596,7 @@ impl StemApp {
             return;
         };
         let base = self.song_name.as_deref().unwrap_or("song");
-        let audio = job_audio(&song, &self.lane_store);
+        let audio = song.audio();
         let (frames, rate) = (song.frames, song.sample_rate);
         let (source, name): (Box<dyn Pcm>, String) = match stem {
             Some(i) => (
@@ -4314,10 +4367,10 @@ mod tests {
             stems: vec![stem("acme", 0.25), stem("classic drums", 0.5)],
         };
         let mix = "sessions/1/mix.f32";
-        let from_mix = Shown::with_files(song.clone(), vec![file(mix), None]);
+        let from_mix = with_test_files(song.clone(), vec![file(mix), None]);
         assert!(input_is_the_mix_file(&from_mix, mix));
         let from_source =
-            Shown::with_files(song.clone(), vec![file("sessions/1/decoded/0.f32"), None]);
+            with_test_files(song.clone(), vec![file("sessions/1/decoded/0.f32"), None]);
         assert!(!input_is_the_mix_file(&from_source, mix));
         assert!(!input_is_the_mix_file(&Shown::in_memory(song), mix));
         // Several sources: the input is their mix, never one file.
@@ -4326,7 +4379,7 @@ mod tests {
             frames: 4,
             stems: vec![stem("bass", 0.25), stem("drums", 0.5)],
         };
-        let shown = Shown::with_files(several, vec![file(mix), file("sessions/1/decoded/1.f32")]);
+        let shown = with_test_files(several, vec![file(mix), file("sessions/1/decoded/1.f32")]);
         assert!(!input_is_the_mix_file(&shown, mix));
     }
 
@@ -4346,7 +4399,7 @@ mod tests {
             ],
         };
         let route = |files: Vec<Option<store_meta::LaneFile>>, limit: usize| {
-            classic_route(&Shown::with_files(song.clone(), files), limit)
+            classic_route(&with_test_files(song.clone(), files), limit)
         };
         assert_eq!(route(vec![None, None, None], 4), ClassicRoute::Memory);
         assert_eq!(
@@ -4691,6 +4744,12 @@ mod tests {
         assert!(!original.left.shares(&source.stems[0].left));
     }
 
+    /// [`Shown::with_files`] with a store in memory.
+    fn with_test_files(song: Song, files: Vec<Option<store_meta::LaneFile>>) -> Shown {
+        let store: std::rc::Rc<dyn lane_store::LaneStore> = lane_store::MemoryStore::new();
+        Shown::with_files(song, files, &store)
+    }
+
     fn file(path: &str) -> Option<store_meta::LaneFile> {
         Some(store_meta::LaneFile::f32(path.into(), 4))
     }
@@ -4714,7 +4773,7 @@ mod tests {
             ],
         };
         let files = vec![file("s/a.f32"), file("s/b.f32"), file("s/c.f32")];
-        app.open_song(Shown::with_files(song, files));
+        app.open_song(with_test_files(song, files));
         app.add_stem("classic drums", vec![0.5; 4], vec![0.5; 4]);
         let song = app.song.as_ref().expect("a song");
         assert_eq!(song.names(), ["bass", "drums", "classic drums"]);
@@ -4725,64 +4784,70 @@ mod tests {
         );
     }
 
-    /// D8 of M6: each lane keeps the file it was read from, and "original"
-    /// plays from the file of the samples it takes.
+    /// D8 of M6 and D1 of the M7 plan: each lane keeps its file, and
+    /// "original" is the lane of the one source, or the mix of several:
+    /// in memory when they are, else the session's mix file.
     #[test]
     fn the_original_lane_plays_from_the_file_of_its_samples() {
+        let stems = || {
+            let song = Song {
+                sample_rate: 44_100,
+                frames: 4,
+                stems: vec![stem("vocals", 0.1), stem("bass", 0.2)],
+            };
+            with_test_files(song, vec![file("s/stems/vocals.wav"), None]).lanes
+        };
         // One source: the original is that lane, with its file.
         let one = Song {
             sample_rate: 44_100,
             frames: 4,
             stems: vec![stem("acme", 0.25), stem("classic drums", 0.5)],
         };
-        let stems = vec![stem("vocals", 0.1), stem("bass", 0.2)];
-        let left_of_one = one.stems[0].left.clone();
-        let one = Shown::with_files(one, vec![file("s/mix.f32"), None]);
-        let song = with_original_files(
-            &one,
-            stems.clone(),
-            vec![file("s/stems/vocals.wav"), None],
-            file("s/other.f32"),
-        );
+        let one = with_test_files(one, vec![file("s/mix.f32"), None]);
+        let song = with_original_files(&one, stems(), file("s/other.f32"));
         assert_eq!(song.names(), ["vocals", "bass", "original"]);
         assert_eq!(
             song.files(),
             [file("s/stems/vocals.wav"), None, file("s/mix.f32")]
         );
-        let (original, _) = song.lanes[2].audio.samples().expect("samples");
-        assert!(original.shares(&left_of_one));
-        // Several sources: the original is the mix file, if there is one.
-        let several = Song {
+        // Several stored sources: the original is the mix file, with the
+        // song's mix overview; with no usable mix, there is none.
+        let several = || Song {
             sample_rate: 44_100,
             frames: 4,
             stems: vec![stem("bass", 0.25), stem("drums", 0.5)],
         };
         let sources = vec![file("s/decoded/0.f32"), file("s/decoded/1.f32")];
-        let several = Shown::with_files(several, sources);
-        let files =
-            with_original_files(&several, stems.clone(), vec![None, None], file("s/mix.f32"))
-                .files();
-        assert_eq!(files, [None, None, file("s/mix.f32")]);
-        let files = with_original_files(&several, stems.clone(), vec![None, None], None).files();
-        assert_eq!(files, [None, None, None], "no usable mix: from memory");
-        // A separated song separated again: "original" keeps its file.
-        let separated =
-            with_original_files(&several, stems.clone(), vec![None, None], file("s/mix.f32"));
-        let files = with_original_files(
-            &separated,
-            stems,
-            vec![file("s/stems/vocals.wav"), file("s/stems/bass.wav")],
-            None,
-        )
-        .files();
+        let mut stored = with_test_files(several(), sources);
+        stored.mix_overview = Some(std::rc::Rc::new(lanes::Overview {
+            columns: vec![(-0.5, 0.75); 4],
+            scale: 1.0,
+        }));
+        let with_mix = with_original_files(&stored, stems(), file("s/mix.f32"));
         assert_eq!(
-            files,
-            [
-                file("s/stems/vocals.wav"),
-                file("s/stems/bass.wav"),
-                file("s/mix.f32")
-            ]
+            with_mix.files(),
+            [file("s/stems/vocals.wav"), None, file("s/mix.f32")]
         );
+        match &with_mix.lanes[2].audio {
+            LaneAudio::Stored { overview, .. } => {
+                assert_eq!(overview.columns, vec![(-0.5, 0.75); 4])
+            }
+            LaneAudio::Memory { .. } => panic!("the original plays from the mix file"),
+        }
+        let no_mix = with_original_files(&stored, stems(), None);
+        assert_eq!(
+            no_mix.names(),
+            ["vocals", "bass"],
+            "no usable mix: no original"
+        );
+        // Several sources in memory: their mix, in memory.
+        let memory = with_original_files(&Shown::in_memory(several()), stems(), file("s/mix.f32"));
+        assert_eq!(memory.files(), [file("s/stems/vocals.wav"), None, None]);
+        let (left, _) = memory.lanes[2].audio.samples().expect("in memory");
+        assert_eq!(**left, mix_of_sources(&several()).0);
+        // A separated song separated again: "original" keeps its file.
+        let again = with_original_files(&with_mix, stems(), None);
+        assert_eq!(again.files()[2], file("s/mix.f32"));
     }
 
     #[test]
@@ -4840,6 +4905,29 @@ export function spy_on_post(worker) {
   return posts;
 }
 export function transfers_of(posts) { return posts.transfers; }
+// Records the bytes of each slice and each whole read of a WAV file
+// (`*.wav` or `*.wav.part`), until stopped.
+let wav_reads = null;
+let wav_real = null;
+export function start_wav_read_spy() {
+  const proto = Blob.prototype;
+  wav_real = [proto.slice, proto.arrayBuffer];
+  wav_reads = [];
+  const wav = (b) => /\.wav(\.part)?$/.test(b.name || "");
+  proto.slice = function () {
+    const s = wav_real[0].apply(this, arguments);
+    if (wav(this)) wav_reads.push(s.size);
+    return s;
+  };
+  proto.arrayBuffer = function () {
+    if (wav(this)) wav_reads.push(this.size);
+    return wav_real[1].call(this);
+  };
+}
+export function stop_wav_read_spy() {
+  [Blob.prototype.slice, Blob.prototype.arrayBuffer] = wav_real;
+  return wav_reads;
+}
 // Counts the OPFS writes until `writes_counted`.
 let counted = null;
 let real_counted = null;
@@ -4878,6 +4966,8 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
     extern "C" {
         fn spy_on_post(worker: &web_sys::Worker) -> js_sys::Array;
         fn transfers_of(posts: &js_sys::Array) -> js_sys::Array;
+        fn start_wav_read_spy();
+        fn stop_wav_read_spy() -> Vec<f64>;
         fn count_writes();
         fn writes_counted() -> u32;
         fn deliver(worker: &web_sys::Worker, data: &JsValue);
@@ -4930,6 +5020,17 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         app.session = Some(id.clone());
         app.song_name = Some("acme".into());
         (app, posts, id)
+    }
+
+    /// The samples of lane `k` of `song`, read through the lane reader.
+    async fn lane_samples(song: &Shown, k: usize) -> (Vec<f32>, Vec<f32>) {
+        let pcm = lanes::LanePcm::new(song.lanes[k].audio.clone(), song.frames, song.sample_rate);
+        let mut job = export::ExportJob::new(Box::new(pcm), export::VecSink::new(song.frames));
+        while !job.run_while(|| true) {
+            sleep(1).await;
+        }
+        let sink = job.into_sink();
+        (sink.left, sink.right)
     }
 
     /// Presses Separate and waits for the browser's estimate, and for the
@@ -5166,9 +5267,12 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             .as_ref()
             .and_then(|s| s.as_song())
             .expect("in memory");
+        let store: std::rc::Rc<dyn lane_store::LaneStore> =
+            std::rc::Rc::new(lane_store::OpfsStore::new(None));
         app.load_song(Shown::with_files(
             song,
             vec![Some(store_meta::LaneFile::f32(path, FRAMES))],
+            &store,
         ));
         let client = decoder::DecodeClient::new("./no-such-decode-worker.js");
         let worker = client.worker().expect("a worker");
@@ -5371,6 +5475,74 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert!(status.contains("QuotaExceededError"), "{status}");
     }
 
+    /// D11 of the M7 plan: after `stored` and `done`, the stems show as
+    /// stored lanes with no read of a stem's data: the page reads only each
+    /// WAV's header (at most 4 KiB), and the decode worker makes the
+    /// overviews.
+    #[wasm_bindgen_test]
+    async fn a_stored_separation_shows_its_stems_with_no_read() {
+        use stem_protocol::decode::{DecodeReply, WorkerRequest};
+        let (mut app, _posts, id) = app_with_a_stored_song().await;
+        let client = decoder::DecodeClient::new("./no-such-decode-worker.js");
+        let worker = client.worker().expect("a worker");
+        worker.set_onerror(None);
+        let requests = spy_on_post(&worker);
+        deliver(&worker, &DecodeReply::Alive.to_js().0);
+        app.decoder = client;
+        plant_parts(&id, &NAMES).await;
+        press_separate(&mut app).await;
+        start_wav_read_spy();
+        deliver_stored_and_done(&mut app);
+        for _ in 0..250 {
+            if requests.length() > 0 {
+                break;
+            }
+            sleep(20).await;
+        }
+        let req = match WorkerRequest::from_js(&requests.get(0)) {
+            Ok(WorkerRequest::Overviews(req)) => req,
+            other => panic!("not an overviews request: {other:?}"),
+        };
+        let overview = vec![0u8; store_meta::overview_bytes(FRAMES) as usize];
+        let paths = req
+            .lanes
+            .iter()
+            .map(|l| &l.overview)
+            .chain(req.mix.as_ref());
+        for path in paths {
+            store::test_write(&format!("{}/{path}", req.session), &overview)
+                .await
+                .expect("planted");
+        }
+        deliver(&worker, &DecodeReply::OverviewsMade.to_js().0);
+        for _ in 0..250 {
+            sleep(20).await;
+            if app.pending.borrow().stored.is_some() {
+                break;
+            }
+        }
+        // Before the stems show: the reader of the read-ahead buffer then
+        // reads them in blocks, as playback does.
+        let reads = stop_wav_read_spy();
+        app.apply_inbox(&egui::Context::default());
+        let song = app.song.clone().expect("a song");
+        finish(app, &id).await;
+        assert_eq!(
+            song.lanes.len(),
+            NAMES.len() + 1,
+            "the stems and the original"
+        );
+        for lane in &song.lanes[..NAMES.len()] {
+            assert!(lane.audio.samples().is_none(), "{}: no samples", lane.name);
+            assert!(lane.audio.file().is_some(), "{}: a stored lane", lane.name);
+        }
+        assert!(!reads.is_empty(), "the headers are read");
+        assert!(
+            reads.iter().all(|bytes| *bytes <= 4_096.0),
+            "no read of a stem's data: {reads:?}"
+        );
+    }
+
     /// Findings 1-1 and 1-b3 of review round 1: at `done`, the page moves
     /// the stem files into place, writes `meta`, and shows the stems that
     /// it reads back, with Separate disabled until they are read.
@@ -5394,12 +5566,13 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             ));
         }
         let lines = stem_lines(&id).await;
-        let song = app
-            .song
-            .as_ref()
-            .expect("a song")
-            .as_song()
-            .expect("in memory");
+        let song = app.song.clone().expect("a song");
+        // D11 of the M7 plan: the stems are stored lanes; the lane reader
+        // reads their samples.
+        let mut stem_samples = Vec::new();
+        for k in 0..6 {
+            stem_samples.push(lane_samples(&song, k).await);
+        }
         let status = app.status.clone();
         finish(app, &id).await;
         assert_eq!(stage, Some(JobStage::Storage));
@@ -5408,22 +5581,22 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert!(!read, "the read ended");
         assert_eq!(files, [(true, false); 6], "each .part moved onto its .wav");
         assert_eq!(lines, NAMES);
-        let shown: Vec<&str> = song.stems.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
-            shown,
+            song.names(),
             [
                 "bass", "drums", "other", "vocals", "guitar", "piano", "original"
             ]
         );
-        for (k, stem) in song.stems.iter().take(6).enumerate() {
+        for (k, (left, right)) in stem_samples.iter().enumerate() {
+            let name = NAMES[k];
+            assert!(
+                song.lanes[k].audio.samples().is_none(),
+                "{name}: no samples"
+            );
             let want = as_16_bits(&stem_wave(k));
             let negated: Vec<f32> = want.iter().map(|v| -v).collect();
-            assert!(*stem.left == want[..], "{}: the 16-bit samples", stem.name);
-            assert!(
-                *stem.right == negated[..],
-                "{}: the 16-bit samples",
-                stem.name
-            );
+            assert!(*left == want, "{name}: the 16-bit samples");
+            assert!(*right == negated, "{name}: the 16-bit samples");
         }
         assert!(status.starts_with("Separated into 6 stems"), "{status}");
     }
@@ -5859,7 +6032,12 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             .and_then(|s| s.as_song())
             .expect("in memory");
         let file = store_meta::LaneFile::f32(path, FRAMES);
-        app.load_song(Shown::with_files(song, vec![Some(file)]));
+        app.load_song(Shown::with_files(
+            song,
+            vec![Some(file)],
+            &(std::rc::Rc::new(lane_store::OpfsStore::new(None))
+                as std::rc::Rc<dyn lane_store::LaneStore>),
+        ));
         press_separate(&mut app).await;
         posts.set_length(0);
         deliver_unstored(&mut app, "QuotaExceededError: the disk is full");
@@ -5993,7 +6171,12 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             .as_song()
             .expect("in memory");
         let file = store_meta::LaneFile::f32(store::mix_path(&id), FRAMES);
-        app.load_song(Shown::with_files(song, vec![Some(file)]));
+        app.load_song(Shown::with_files(
+            song,
+            vec![Some(file)],
+            &(std::rc::Rc::new(lane_store::OpfsStore::new(None))
+                as std::rc::Rc<dyn lane_store::LaneStore>),
+        ));
         (app, posts, id)
     }
 

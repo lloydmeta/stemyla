@@ -5,8 +5,8 @@
 //! `engine::Song` with lane files beside it.  So the lanes drawn, played
 //! and saved cannot differ.  A lane's audio is samples in memory, or a
 //! stored lane: a lane file with its overview, read in blocks through a
-//! [`LaneStore`].  Until step 7 of the M7 plan, a lane on the web can also
-//! keep samples and the file that they were read from (M6).
+//! [`LaneStore`].  A lane has samples or a file, never both (step 7 of the
+//! M7 plan).
 //!
 //! The jobs of the page (the mix lane's waveform, a spectrogram, a save)
 //! read the lanes through a [`Pcm`]: [`LanesMix`] for a mix of lanes,
@@ -58,13 +58,6 @@ impl Overview {
 pub enum LaneAudio {
     /// Samples in memory, shared with the song, not copied (MEM-1).
     Memory { left: Samples, right: Samples },
-    /// Samples read back whole from a lane file, with that file, which
-    /// playback reads (M6).  Step 7 of the M7 plan removes it.
-    ReadBack {
-        left: Samples,
-        right: Samples,
-        file: LaneFile,
-    },
     /// A lane file, read in blocks from `store`, and its overview.
     Stored {
         file: LaneFile,
@@ -74,14 +67,6 @@ pub enum LaneAudio {
 }
 
 impl LaneAudio {
-    /// Samples in memory, with the file they were read from, if any.
-    pub fn with_file(left: Samples, right: Samples, file: Option<LaneFile>) -> Self {
-        match file {
-            Some(file) => LaneAudio::ReadBack { left, right, file },
-            None => LaneAudio::Memory { left, right },
-        }
-    }
-
     /// The audio of a stem in memory.  It shares the stem's samples.
     pub fn of_stem(stem: &Stem) -> Self {
         LaneAudio::Memory {
@@ -93,9 +78,7 @@ impl LaneAudio {
     /// The samples of the lane, if they are in memory.
     pub fn samples(&self) -> Option<(&Samples, &Samples)> {
         match self {
-            LaneAudio::Memory { left, right } | LaneAudio::ReadBack { left, right, .. } => {
-                Some((left, right))
-            }
+            LaneAudio::Memory { left, right } => Some((left, right)),
             LaneAudio::Stored { .. } => None,
         }
     }
@@ -104,7 +87,7 @@ impl LaneAudio {
     pub fn file(&self) -> Option<&LaneFile> {
         match self {
             LaneAudio::Memory { .. } => None,
-            LaneAudio::ReadBack { file, .. } | LaneAudio::Stored { file, .. } => Some(file),
+            LaneAudio::Stored { file, .. } => Some(file),
         }
     }
 }
@@ -121,27 +104,6 @@ fn part_of(samples: &[f32], at: usize, frames: usize) -> Cow<'_, [f32]> {
     Cow::Owned(part)
 }
 
-/// The audio of `lanes` for a job: until step 7 of the M7 plan, a lane
-/// with samples and a file (`ReadBack`) reads its file through `store`, as
-/// a stored lane does, so the page's reads of storage are tested before
-/// the samples go.  Its overview is not drawn, so it is empty here.
-pub fn reading_files(lanes: Vec<LaneAudio>, store: &Rc<dyn LaneStore>) -> Vec<LaneAudio> {
-    lanes
-        .into_iter()
-        .map(|lane| match lane {
-            LaneAudio::ReadBack { file, .. } => LaneAudio::Stored {
-                file,
-                overview: Rc::new(Overview {
-                    columns: Vec::new(),
-                    scale: 1.0,
-                }),
-                store: Rc::clone(store),
-            },
-            other => other,
-        })
-        .collect()
-}
-
 /// One lane of the shown song: its name and its audio.
 #[derive(Clone)]
 pub struct ShownLane {
@@ -150,7 +112,8 @@ pub struct ShownLane {
 }
 
 /// The shown song (D1 of the M7 plan): its rate, its frames and the audio
-/// of each lane, in order.
+/// of each lane, in order.  A clone shares every lane's samples and store.
+#[derive(Clone)]
 pub struct Shown {
     pub sample_rate: u32,
     pub frames: usize,
@@ -164,14 +127,30 @@ impl Shown {
     /// A song in memory: each stem becomes a lane that shares its samples
     /// (MEM-1).
     pub fn in_memory(song: Song) -> Self {
-        let files = vec![None; song.stems.len()];
-        Self::with_files(song, files)
+        Self {
+            sample_rate: song.sample_rate,
+            frames: song.frames,
+            mix_overview: None,
+            lanes: song
+                .stems
+                .into_iter()
+                .map(|stem| ShownLane {
+                    name: stem.name,
+                    audio: LaneAudio::Memory {
+                        left: stem.left,
+                        right: stem.right,
+                    },
+                })
+                .collect(),
+        }
     }
 
-    /// A song read back from its lane files: each stem with the file it
-    /// was read from, `None` for a lane that plays from memory (D8 of M6).
-    /// Its samples move into the lanes, with no copy.
-    pub fn with_files(song: Song, files: Vec<Option<LaneFile>>) -> Self {
+    /// A song whose stems with a file in `files` are stored lanes of
+    /// `store`, drawn from the overview of their samples, and the others
+    /// lanes in memory.  The samples of a stored lane are dropped: a lane
+    /// has samples or a file, never both.  For tests, and for songs that a
+    /// test plants as files.
+    pub fn with_files(song: Song, files: Vec<Option<LaneFile>>, store: &Rc<dyn LaneStore>) -> Self {
         assert_eq!(files.len(), song.stems.len(), "a lane file for each lane");
         Self {
             sample_rate: song.sample_rate,
@@ -182,10 +161,42 @@ impl Shown {
                 .into_iter()
                 .zip(files)
                 .map(|(stem, file)| ShownLane {
+                    audio: match file {
+                        Some(file) => {
+                            let (columns, scale) =
+                                engine::overview::lane_columns(&stem.left, &stem.right);
+                            LaneAudio::Stored {
+                                file,
+                                overview: Rc::new(Overview { columns, scale }),
+                                store: Rc::clone(store),
+                            }
+                        }
+                        None => LaneAudio::Memory {
+                            left: stem.left,
+                            right: stem.right,
+                        },
+                    },
                     name: stem.name,
-                    audio: LaneAudio::with_file(stem.left, stem.right, file),
                 })
                 .collect(),
+        }
+    }
+
+    /// The store of the song's stored lanes, if it has one.
+    pub fn store(&self) -> Option<Rc<dyn LaneStore>> {
+        self.lanes.iter().find_map(|lane| match &lane.audio {
+            LaneAudio::Stored { store, .. } => Some(Rc::clone(store)),
+            LaneAudio::Memory { .. } => None,
+        })
+    }
+
+    /// Makes every stored lane read through `store`: the page's store,
+    /// which asks for a repaint when a read ends.
+    pub fn set_store(&mut self, store: &Rc<dyn LaneStore>) {
+        for lane in &mut self.lanes {
+            if let LaneAudio::Stored { store: own, .. } = &mut lane.audio {
+                *own = Rc::clone(store);
+            }
         }
     }
 
@@ -271,9 +282,7 @@ impl LaneReads {
         let parts = lanes
             .into_iter()
             .map(|lane| match lane {
-                LaneAudio::Memory { left, right } | LaneAudio::ReadBack { left, right, .. } => {
-                    Part::Memory(left, right)
-                }
+                LaneAudio::Memory { left, right } => Part::Memory(left, right),
                 LaneAudio::Stored {
                     file, store: from, ..
                 } => {

@@ -7,7 +7,7 @@
 //! the page, so its test lives in `web_close.rs`.
 #![cfg(target_arch = "wasm32")]
 
-use app::store;
+use app::{lanes, store, store_meta};
 use engine::Stem;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -143,8 +143,24 @@ async fn keeping(id: &str, names: &[&str]) -> Rc<RefCell<Option<bool>>> {
     result
 }
 
-fn names(song: &engine::Song) -> Vec<&str> {
-    song.stems.iter().map(|s| s.name.as_str()).collect()
+/// The song of session `id` as the page shows it (D11 of the M7 plan):
+/// `song`, its sources decoded on the page, with the stems of `meta` as
+/// lanes and the "original".  The decode worker cannot start here, so the
+/// page makes the stem overviews.
+async fn shown_with_stems(id: &str, song: engine::Song, meta: &store_meta::Meta) -> lanes::Shown {
+    let client = app::decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let paths = store::stem_paths(id, &meta.stems);
+    let (stems, _) = store::stem_lanes(
+        id,
+        &meta.stems,
+        &paths,
+        song.frames,
+        &client,
+        app::MEMORY_PATH_MAX_FRAMES,
+    )
+    .await
+    .expect("the stems");
+    app::with_original_files(&lanes::Shown::in_memory(song), stems, None)
 }
 
 #[wasm_bindgen_test]
@@ -169,8 +185,13 @@ async fn stems_saved_later_are_restored_with_the_song() {
         .expect("stems saved");
     let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
     assert_eq!(meta.stems, ["bass", "drums"]);
-    assert_eq!(names(&song), ["bass", "drums", "original"]);
     assert_eq!(song.frames, 800);
+    let shown = shown_with_stems(&id, song, &meta).await;
+    assert_eq!(shown.names(), ["bass", "drums", "original"]);
+    assert!(
+        shown.lanes[..2].iter().all(|l| l.audio.file().is_some()),
+        "stored stems"
+    );
 }
 
 /// Decision 0012: a 48 kHz source opens at 44.1 kHz, and opens again with
@@ -194,11 +215,12 @@ async fn a_48k_session_reopens_with_its_stems() {
     let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
     assert_eq!(meta.rate, 44_100);
     assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
-    assert_eq!(names(&song), ["bass", "drums", "original"]);
     for s in &song.stems {
         assert_eq!((s.left.len(), s.right.len()), (4_410, 4_410), "{}", s.name);
     }
-    let (original, first) = (&song.stems[2], &opened.stems[0]);
+    let (original, first) = (&song.stems[0], &opened.stems[0]);
+    let shown = shown_with_stems(&id, song.clone(), &meta).await;
+    assert_eq!(shown.names(), ["bass", "drums", "original"]);
     assert!(
         original.left.as_slice() == first.left.as_slice(),
         "the same samples"
@@ -262,8 +284,9 @@ async fn a_flac_session_reopens_with_its_stems() {
         [("lloyd.flac".to_string(), "0.flac".to_string())]
     );
     assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
-    assert_eq!(names(&song), ["bass", "drums", "original"]);
-    let (original, first) = (&song.stems[2], &opened.stems[0]);
+    let (original, first) = (&song.stems[0], &opened.stems[0]);
+    let shown = shown_with_stems(&id, song.clone(), &meta).await;
+    assert_eq!(shown.names(), ["bass", "drums", "original"]);
     assert!(
         original.left.as_slice() == first.left.as_slice(),
         "the same samples"
@@ -280,16 +303,15 @@ async fn stems_that_do_not_fit_the_source_are_fitted_to_it() {
         store::save_stems(&id, RATE, &[stem("bass", frames)])
             .await
             .expect("stems saved");
-        let (_, song, _) = store::restore().await.expect("stored").expect("readable");
+        let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
         assert_eq!(song.frames, 800);
-        for s in &song.stems {
-            assert_eq!(
-                (s.left.len(), s.right.len()),
-                (800, 800),
-                "{} from {frames}",
-                s.name
-            );
-        }
+        // D11 of the M7 plan: a stem WAV one frame short or long is a
+        // stored lane of the song's frames; the lane reader gives silence
+        // past its end.
+        let shown = shown_with_stems(&id, song, &meta).await;
+        let file = shown.lanes[0].audio.file().expect("a stored stem");
+        assert_eq!(file.data_frames, frames as u64, "from {frames}");
+        assert_eq!(shown.frames, 800);
     }
 }
 
@@ -328,7 +350,8 @@ async fn opening_waits_for_stored_stems_and_shows_them() {
         .expect("readable");
     assert_eq!(*kept.borrow(), Some(true), "the move finished first");
     assert_eq!(meta.stems, ["bass", "vocals"]);
-    assert_eq!(names(&song), ["bass", "vocals", "original"]);
+    let shown = shown_with_stems(&id, song, &meta).await;
+    assert_eq!(shown.names(), ["bass", "vocals", "original"]);
 }
 
 /// D5 of M3: a removal waits for the stored stems to move into place.
@@ -358,7 +381,8 @@ async fn opening_waits_for_a_save_in_progress_and_shows_its_stems() {
         .expect("readable");
     assert_eq!(*save.borrow(), Some(Ok(())));
     assert_eq!(meta.stems, ["vocals"]);
-    assert_eq!(names(&song), ["vocals", "original"]);
+    let shown = shown_with_stems(&id, song, &meta).await;
+    assert_eq!(shown.names(), ["vocals", "original"]);
 }
 
 #[wasm_bindgen_test]
