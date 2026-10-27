@@ -1,7 +1,7 @@
 //! `xtask e2e <scenario> [options]`: drives the built web app (`app/dist`)
 //! in Safari or Chrome through WebDriver and checks what it does.
 //!
-//! Scenarios (the first six need no model and run in CI):
+//! Scenarios (the first seven need no model and run in CI):
 //! * `smoke`: drop generated stems, Play (every lane from browser storage),
 //!   change the tempo.
 //! * `decode`: the decode worker writes the session files of a 44.1 kHz
@@ -11,6 +11,11 @@
 //! * `playback`: a song restored with six stems plays every lane, "original"
 //!   too, from browser storage through the read-ahead buffer, with no
 //!   underrun, after a seek too (M6, `e2e/playback.rs`).
+//! * `old-session`: a session of M4's layout, of 1 minute and then of 5
+//!   minutes, restores through the decode worker and the stem overviews,
+//!   plays its 7 lanes from storage, and the page's WebAssembly memory
+//!   stays under a fixed bound and does not grow with the song (M7,
+//!   `e2e/old_session.rs`).
 //! * `audio-resume`: a song restored at page load plays after one click,
 //!   with Web Audio behaving as in Safari; stems stored with it come back
 //!   with it.
@@ -38,7 +43,10 @@
 //!   page's growth includes its write of the mix.  A fallback to the
 //!   memory path fails it.  It also checks that the page and the decode
 //!   worker grow by at most 4 MB while the song opens, and that Separate
-//!   writes no second mix (M5); `separate` checks that too.
+//!   writes no second mix (M5); `separate` checks that too.  Since M7, the
+//!   page's growth from the separation's end to the stems shown must be at
+//!   most 4 MB more for the 4-minute song than for the 1-minute song: the
+//!   stems show as stored lanes, with no read-back.
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix on the
 //!   memory path, then on the storage path into a session folder, from a mix
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
@@ -70,6 +78,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod decode;
+mod old_session;
 mod playback;
 
 /// The viewport the click positions are measured in.
@@ -115,7 +124,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|decode|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
+                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -201,6 +210,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "smoke" => smoke(&o),
         "decode" => decode::run(&o),
         "playback" => playback::run(&o),
+        "old-session" => old_session::run(&o),
         "audio-resume" => audio_resume(&o),
         "storage" => storage(&o),
         "flac" => flac(&o),
@@ -1425,6 +1435,32 @@ fn page_growth(log: &[String]) -> Option<f64> {
     Some(at("as the separation ends")? - start)
 }
 
+/// How much the page's WebAssembly memory grew from the end of a
+/// separation to the stems shown, from the page's log lines (step 9 of
+/// the M7 plan).  The stems show as stored lanes, so the growth is the
+/// read-ahead buffer and the overviews, not the song.
+fn shown_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(when))
+            .and_then(|l| number_after(l, "page wasm "))
+    };
+    Some(at("with the stems shown")? - at("as the separation ends")?)
+}
+
+/// The check of M7 on the growths of [`shown_growth`]: the long song's is
+/// at most [`MAX_GROWTH_MB`] above the short song's.  Each holds about 18
+/// MiB of a larger read-ahead buffer, seven lanes after one, whatever the
+/// song's length.
+fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
+    (
+        short.zip(long).is_some_and(|(s, l)| l <= s + MAX_GROWTH_MB),
+        format!(
+            "the page grows by {long:?} MB to show the stems of the long song, and by {short:?} MB for the short one: at most {MAX_GROWTH_MB} MB more"
+        ),
+    )
+}
+
 /// Separates songs of 1 and 4 minutes, each in a new browser, so that each
 /// starts with empty WebAssembly memory.  Prints the peak of page wasm, worker
 /// wasm and GPU live bytes for each, and their difference.  It also prints how
@@ -1441,6 +1477,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
     let base = start_server(&o.dist, mounts, &["console.js"])?;
     let q = query(o, "chunk=16384&overlap=1&mm=s64");
     let mut peaks = Vec::new();
+    let mut shown_growths = Vec::new();
     for minutes in BUDGET_MINUTES {
         let mut p = Page::open(
             o,
@@ -1513,6 +1550,11 @@ fn memory_budget(o: &Opts) -> Result<()> {
                 ));
             }
         }
+        let growth = shown_growth(&p.log[from..]);
+        p.note(&format!(
+            "memory-budget: the {minutes}-minute song: page wasm grew by {growth:?} MB to show the stems"
+        ));
+        shown_growths.push(growth);
         let peak = memory_peak(&p.log);
         p.check(peak.is_some(), "the memory lines");
         if let Some(peak) = peak {
@@ -1533,6 +1575,16 @@ fn memory_budget(o: &Opts) -> Result<()> {
             "memory-budget: the {long}-minute peak is {:.0} MB above the {short}-minute peak",
             b.total() - a.total()
         );
+    }
+    // M7: the stems show with no read-back, so showing them does not grow
+    // with the song.
+    let (ok, what) = shown_growth_check(
+        shown_growths.first().copied().flatten(),
+        shown_growths.last().copied().flatten(),
+    );
+    println!("memory-budget: {} {what}", if ok { "ok:" } else { "FAIL:" });
+    if !ok {
+        bail!("memory-budget FAILED: {what}");
     }
     Ok(())
 }
@@ -2136,6 +2188,33 @@ mod tests {
         assert_eq!((first, right), (song.mix.left[0], song.mix.right[0]));
         let last = f32::from_le_bytes(bytes[4 * n - 4..4 * n].try_into().unwrap());
         assert_eq!(last, song.mix.left[n - 1]);
+    }
+
+    #[test]
+    fn showing_the_stems_does_not_grow_with_the_song() {
+        let log = |ends: f64, shown: f64| {
+            vec![
+                format!(
+                    "[9.0s] console.info: separator: memory: page wasm {ends} MB as the separation ends"
+                ),
+                format!(
+                    "[9.5s] console.info: separator: memory: page wasm {shown} MB with the stems shown"
+                ),
+            ]
+        };
+        let (short, long) = (
+            shown_growth(&log(300.0, 320.0)),
+            shown_growth(&log(302.0, 324.0)),
+        );
+        assert_eq!((short, long), (Some(20.0), Some(22.0)));
+        assert!(shown_growth_check(short, long).0);
+        // The read-back of the stems of 4 minutes: about 600 MB more.
+        let read_back = shown_growth(&log(302.0, 922.0));
+        assert!(!shown_growth_check(short, read_back).0);
+        assert!(!shown_growth_check(short, Some(24.1)).0, "over 4 MB more");
+        assert!(!shown_growth_check(None, long).0);
+        assert!(!shown_growth_check(short, None).0);
+        assert_eq!(shown_growth(&log(300.0, 320.0)[..1]), None, "no shown line");
     }
 
     #[test]

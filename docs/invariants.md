@@ -75,7 +75,7 @@ Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when
 iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memory is free, and counts its GPU buffers.  The parameters take about 700 MB on the GPU and one chunk's activations about 280 MB, so everything else stays small.  `docs/ARCHITECTURE.md` (memory on phones) has the design.
 
 * Why: a tab over the limit is killed with no error the page can catch.
-* Enforced by: prose only.  The worker logs `memory: ...` after every chunk; nothing asserts it.
+* Enforced by: prose only.  The worker logs `memory: ...` after every chunk; nothing asserts it.  Since M7, `xtask e2e old-session` (in CI) asserts a part: after the restore of a session of the M4 layout, the page's WebAssembly memory stays under a fixed bound and does not grow with the song.
 * Gaps: TD-11, TD-54, TD-58.
 
 ### MEM-5: browser-storage writes pass a whole array
