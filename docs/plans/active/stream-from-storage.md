@@ -114,7 +114,7 @@ The orchestrator, which is the main session:
 * At the start, it asks the maintainer the question of M5's decision point (decision 0019) once, so M5 does not wait.  It records the answer as decision 0019, accepted.
 * It reads this plan, `git log`, the CI status, the teams' reports and `docs/reviews/`.  It does not read code or diffs; it asks a subagent for a fact from them.  For each milestone, in order:
   1. It starts a team leader with the milestone's name, this plan's path and the decisions so far.
-  2. When the team reports, it starts a new intent reviewer.  The reviewer compares the milestone with this plan's Purpose, the milestone's section and the later milestones.  Real findings go back to the team leader, for at most 3 reviews, to the stop rule.
+  2. When the team reports, it starts a new intent reviewer.  The reviewer compares the milestone with this plan's Purpose, the milestone's section and the later milestones.  Real findings go back to the team leader, to the stop rule.
   3. It records the milestone in Progress with the facts the team reported, commits that (signed), and pushes the branch.  It updates PR #39's description with `gh pr edit`.  It waits for the CI run to end before the next team starts.
 * The stop rule, for every review loop: stop at the first review with no blocker and no significant should-fix.  Significant means that a milestone would fail as written, two parts contradict each other, a measure would mislead, or the implementer would do wrong work.  Wording and polish are nits.
 * It decides a question that this plan does not answer, records it in the Decision log, and lists it in the PR description.  It stops and waits for the maintainer only when:
@@ -126,10 +126,10 @@ The orchestrator, which is the main session:
 
 A team leader, a general-purpose subagent for each milestone:
 
-1. It writes `docs/plans/active/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule, for at most 3 reviews.  It does not edit this plan (see Decision log).
+1. It writes `docs/plans/active/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule.  It does not edit this plan (see Decision log).
 2. It starts an implementer with the milestone plan's path (or this plan's section), and continues it with SendMessage for fixes.
-3. It runs three review rounds with `/review-rounds`.  The base is the commit before the milestone's first commit, and the criteria are the milestone's section.  M3's round 1 passes `--baseline` (the phase 3 gate in `plans/active/harness-engineering.md`).
-4. After round 3, it copies `target/review/run/iphone-crashes-2026-10-25/log.md` to `docs/reviews/iphone-crashes-2026-10-25-m<n>.md`, and removes the run folder.  So the next milestone's round 1 starts with no log (TD-37).
+3. It runs review rounds with `/review-rounds` to the stop rule: at least rounds 1, 2 and 3, and more until a round has no blocker and no significant should-fix.  It fixes each confirmed blocker and significant should-fix with a test.  It does not leave one as debt when a browser test on this Mac can check it.  The base is the commit before the milestone's first commit, and the criteria are the milestone's section.  M3's round 1 passes `--baseline` (the phase 3 gate in `plans/active/harness-engineering.md`).
+4. After the last round, it copies `target/review/run/iphone-crashes-2026-10-25/log.md` to `docs/reviews/iphone-crashes-2026-10-25-m<n>.md`, and removes the run folder.  So the next milestone's round 1 starts with no log (TD-37).
 5. It writes a Progress line in its milestone plan after each step and each round, and commits it.  It reports in at most 300 words: status, commits, each acceptance check and its result, changes to the plan, and questions.
 
 For every agent in the run:
@@ -323,6 +323,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-27, agent (M6): stored lane files travel with the stems, and the player no longer holds `Song`.  A hold (silence after a jump while the new block loads) is not an underrun.  MEM-1 is reworded in M7, when the page drops the samples (M6 plan, Decision log).
 * 2026-10-27, agent (orchestrator, after M6's intent review, from `engine/src/source.rs` `next_run` and `app/src/playback.rs`): a seek waits for the read in flight and up to 2 blocks, 4 with the loop's start, or 6 past the loop's end.  Decision 0017 is amended.  M10 measures the delay on the iPhone, because M1's reads were not of one block.
 * 2026-10-27, agent (orchestrator, after M6's intent review): M10's budget adds the read-ahead cap and the decode worker, which M2 did not measure.  M8 reads the session files in blocks and makes no second read-ahead buffer.
+* 2026-10-27, maintainer (during M7): review rounds continue past round 3 until a round has no blocker and no significant should-fix.  A confirmed blocker or significant should-fix that an earlier round skipped gets a fix.  So M7 runs more rounds when it needs them.  After M7, a catch-up team runs a further round on each of M3 to M6, since each round 3 had confirmed fixes that no round checked.  It also fixes the confirmed should-fix that those milestones left as TD-39 or TD-56, or records why a fix cannot be checked.
 
 ## Outcomes and retrospective
 
