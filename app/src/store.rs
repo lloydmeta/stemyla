@@ -777,10 +777,14 @@ pub async fn read_stem(path: &str, name: &str, frames: usize) -> Result<(Stem, O
 async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
     let base = format!("{ROOT}/{id}");
     // D7 of the M7 plan: before the first stem write, the generation goes
-    // up and the overviews of the old stems are no longer named.
+    // up and the overviews of the old stems are no longer named.  `meta`
+    // names no stems until the last write, as in `keep_stored_now`, so an
+    // `overviews` request meanwhile gives none (finding 6-1 of review round
+    // 6 of M7).
     {
         let _meta = lock_meta(id).await;
         let mut meta = meta_now(id).await?;
+        meta.stems.clear();
         meta.new_stems();
         write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
     }
@@ -1172,7 +1176,6 @@ pub async fn keep_classic(id: &str, frames: usize) -> Result<(LaneFile, crate::l
 /// overviews of the stems in `files`, and of their mix at volume 1,
 /// through the lane reader, a block at a time.  It does not save them.
 async fn overviews_on_the_page(files: &[LaneFile], frames: usize) -> Option<StemOverviewSet> {
-    use crate::export::{ExportJob, PeaksSink};
     use crate::lanes::{LaneAudio, LanePcm, LanesMix, Overview};
     use engine::mixdown::{MixRecipe, Pcm};
     let store: std::rc::Rc<dyn crate::lane_store::LaneStore> =
@@ -1189,7 +1192,7 @@ async fn overviews_on_the_page(files: &[LaneFile], frames: usize) -> Option<Stem
         })
         .collect();
     let overview_of = |pcm: Box<dyn Pcm>| async move {
-        let mut job = ExportJob::new(pcm, PeaksSink::new(frames, engine::overview::COLUMNS));
+        let mut job = crate::export::overview_job(pcm, frames);
         while !job.run_while(crate::export::time_left(4.0)) {
             st_sleep(1).await;
         }

@@ -843,6 +843,33 @@ pub(crate) mod tests {
         assert_eq!(written, frames);
     }
 
+    /// Finding 6-2 of review round 6 of M7: the job that makes an overview
+    /// on the page ends within a step of the first failed read.
+    #[test]
+    fn an_overview_job_ends_at_the_first_failed_read() {
+        let frames = 20 * crate::export::BLOCK;
+        let store = MemoryStore::new();
+        let missing = LaneAudio::Stored {
+            file: LaneFile::f32("acme/missing.f32".into(), frames),
+            overview: Rc::new(Overview {
+                columns: Vec::new(),
+                scale: 1.0,
+            }),
+            store: Rc::clone(&store) as Rc<dyn LaneStore>,
+        };
+        store.hold(true);
+        let mut job =
+            crate::export::overview_job(Box::new(LanePcm::new(missing, frames, 44_100)), frames);
+        let mut count = 0;
+        while !job.run_while(|| false) && count < 1_000 {
+            store.release();
+            count += 1;
+        }
+        assert!(count <= 2, "it ends at the failure: {count} frames");
+        assert_eq!(store.requests(), 1, "one read");
+        assert_eq!(job.failed().as_deref(), Some("no file acme/missing.f32"));
+    }
+
     /// The bytes of an overview file, as the decode worker writes one (D1
     /// of M5): each column's minimum, then its maximum, as f32.
     pub(crate) fn overview_file(columns: &[(f32, f32)]) -> Vec<u8> {

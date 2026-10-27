@@ -48,8 +48,8 @@ impl<S: Sink> ExportJob<S> {
         }
     }
 
-    /// Reads and writes the next block.  True when the source is done,
-    /// or when a read failed and the job stops at a failure.  When the
+    /// Reads and writes the next block.  True when the source is done, or
+    /// when a job that stops at a failure meets a failed read.  When the
     /// source is not ready, it does nothing and waits.
     pub fn step(&mut self) -> bool {
         if self.stops_at_a_failure && self.source.failed().is_some() {
@@ -162,6 +162,14 @@ pub struct Waveform {
     pub columns: Vec<(f32, f32)>,
     /// Makes the loudest column fill the lane.
     pub scale: f32,
+}
+
+/// The job that makes the overview of a lane or of a mix of `frames`
+/// frames on the page (D7 of the M7 plan).  It stops at the first failed
+/// read, so the page gives up at once (finding 6-2 of review round 6 of
+/// M7).
+pub fn overview_job(pcm: Box<dyn Pcm>, frames: usize) -> ExportJob<PeaksSink> {
+    ExportJob::new(pcm, PeaksSink::new(frames, COLUMNS)).stopping_at_a_failure()
 }
 
 impl PeaksSink {

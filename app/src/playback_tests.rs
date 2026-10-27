@@ -1070,11 +1070,11 @@ async fn a_lane_added_during_a_save_keeps_the_save() {
     );
 }
 
-/// Findings 4-1, 5-1 and 5-5 of review rounds 4 and 5 of M7: a save whose
-/// read of browser storage fails stops within a few frames, makes no file
-/// and no encode request, and says why.  A FLAC save has no worker here,
-/// so one that went on would say that the worker is not running.  A WAV
-/// save that went on would say "Saved".
+/// Findings 4-1, 5-1 and 5-5 of review rounds 4 and 5 of M7.  A save
+/// whose read of browser storage fails stops within a few frames.  It
+/// makes no file and no encode request, and says why.  A FLAC save has no
+/// worker here.  So a FLAC save that went on would say that the worker is
+/// not running.  A WAV save that went on would say "Saved".
 #[wasm_bindgen_test]
 async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
     let id = "m7-save-read-fails";

@@ -1470,18 +1470,22 @@ fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
 }
 
 /// Separates songs of 1 and 4 minutes, each in a new browser, so that each
-/// starts with empty WebAssembly memory.  Prints the peak of page wasm, worker
-/// wasm and GPU live bytes for each, and their difference.  It also prints how
-/// much the page and the worker grew during each separation, and fails if
-/// either is more than [`MAX_GROWTH_MB`].  It fails if the page or the decode
-/// worker grows by more than that during the open ([`open_growth_check`]), or
-/// if the page decodes the song on the main thread
-/// ([`open_on_the_worker_check`]).  It fails if Separate writes a second mix
-/// ([`no_mix_write_check`]).  It
-/// fails if the 4-minute song's growth to show the stems is more than that
-/// above the 1-minute song's ([`shown_growth_check`]).  It fails if a
-/// separation falls back to the memory path ([`no_fallback_check`]).  It
-/// asserts no budget for the peak yet; M10 of the plan does.
+/// starts with empty WebAssembly memory.  Prints the peak of page wasm,
+/// worker wasm and GPU live bytes for each, and their difference.  It also
+/// prints how much the page and the worker grew during each separation.
+/// It fails:
+/// * if the page or the worker grows by more than [`MAX_GROWTH_MB`] during
+///   a separation ([`growth_check`]);
+/// * if the page or the decode worker grows by more than that during the
+///   open ([`open_growth_check`]);
+/// * if the page decodes the song on the main thread
+///   ([`open_on_the_worker_check`]);
+/// * if Separate writes a second mix ([`no_mix_write_check`]);
+/// * if the 4-minute song's growth to show the stems is more than that
+///   above the 1-minute song's ([`shown_growth_check`]);
+/// * if a separation falls back to the memory path ([`no_fallback_check`]).
+///
+/// It asserts no budget for the peak yet; M10 of the plan does.
 fn memory_budget(o: &Opts) -> Result<()> {
     let mut mounts = Vec::new();
     for minutes in BUDGET_MINUTES {

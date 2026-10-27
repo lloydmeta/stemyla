@@ -1320,6 +1320,50 @@ async fn overviews_of_older_stems_are_not_kept() {
     assert_eq!(moved, None, "nothing moved into place");
 }
 
+/// Finding 6-1 of review round 6 of M7: while `save_stems` writes new
+/// stems, `meta` names no stems.  So an `overviews` request in that window
+/// gives none, and cannot keep overviews of old and new stem WAVs as one
+/// set.  The stems are long, so that the window lasts.
+#[wasm_bindgen_test]
+async fn meta_names_no_stems_while_new_stems_are_written() {
+    let frames = 2_000;
+    let (id, names, _) = session_with_stems(frames).await;
+    let before = meta_of(&id).await.expect("a meta").stems_generation;
+    let long = 60 * 44_100;
+    let stems: Vec<Stem> = names
+        .iter()
+        .map(|name| Stem {
+            name: name.clone(),
+            left: vec![0.1; long].into(),
+            right: vec![0.1; long].into(),
+        })
+        .collect();
+    let saving = {
+        let id = id.clone();
+        background(async move { store::save_stems(&id, 44_100, &stems).await })
+    };
+    let mut window = None;
+    for _ in 0..5_000 {
+        if saving.borrow().is_some() {
+            break;
+        }
+        let text = store::test_read(&format!("sessions/{id}/meta"))
+            .await
+            .unwrap_or_default();
+        let meta = store_meta::Meta::parse(&String::from_utf8_lossy(&text));
+        if meta.stems_generation > before {
+            window = Some((meta, saving.borrow().is_none()));
+            break;
+        }
+        dt_sleep(1).await;
+    }
+    output(&saving).await.expect("saved");
+    store::test_wipe().await;
+    let (meta, in_the_window) = window.expect("the first meta write was seen");
+    assert!(in_the_window, "seen before the stems were all written");
+    assert_eq!(meta.stems, Vec::<String>::new(), "no stems named");
+}
+
 /// D7: when the decode worker cannot start, the page makes the overviews
 /// through the lane reader, and does not save them.
 #[wasm_bindgen_test]
