@@ -71,6 +71,8 @@
 | 2026-10-27 | 3 | 6de5204 | 3-7 | docs-reviewer | nit | doc | none | app/src/store_meta.rs:556 | two sentences over 25 words | unvalidated | none | 817258b review round 3 fixes |
 | 2026-10-27 | 3 | 6de5204 | 3-8 | supply-chain-reviewer, memory-reviewer | nit | weak-test | VERIFY-1 | engine/tests/readahead_count.rs:16 | `take_high_water` with `swap(0)` passes | unvalidated | none | 817258b review round 3 fixes |
 | 2026-10-27 | 3 | 6de5204 | 3-9 | memory-reviewer | nit | weak-test | VERIFY-1 | app/src/playback_tests.rs:525 | the page-decode check tests a constructor only | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-28 | 4 | 817258b | 4-1 | reviewer | nit | doc | DOC-1 | docs/plans/active/stream-from-storage-m6.md:69, 71; engine/src/readahead.rs:114 | the docs say only fill clears the block number; since 3-2 next_read clears it first | unvalidated | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 817258b | 4-2 | reviewer | nit | doc | DOC-1 | docs/ARCHITECTURE.md:247 | the list of the playback line leaves out the missed lane frames | unvalidated | none | 51e9a5e catch-up round 4 fixes |
 
 ## Rounds
 
@@ -79,3 +81,4 @@
 | 1 | 16 | 990,671 | 80.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: partial: tested 173 (caught 147, missed 22, unviable 4), timeouts 1, not tested 310; stopped at the limit | - | - | - | - | - | - |
 | 2 | 10 | 700,265 | 59.7 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 56 (caught 46, missed 7, unviable 3), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 3 | 7 | 477,013 | 30.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 4 (caught 4, missed 0, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 4 | 1 | 79,248 | 14.4 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |

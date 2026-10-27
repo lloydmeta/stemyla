@@ -118,6 +118,8 @@
 | 2026-10-26 | 3 | 8f34eea | 3-11 | reviewer | nit | doc | none | app/src/store.rs:966 | keep_decoded moves the new mix before it removes the old mix line | unvalidated | none | not changed (Decision log: the one meta write is safe) |
 | 2026-10-26 | 3 | 8f34eea | 3-12 | reviewer | nit | weak-test | none | xtask/src/e2e.rs:1438 | memory-budget does not fail on a decode on the page | unvalidated | none | 05905c2 review round 3 fixes |
 | 2026-10-26 | 3 | 8f34eea | 3-13 | wire-reviewer | nit | doc | DOC-1 | docs/invariants.md:128 | PROTO-1 lists only worker.js and e2e.rs as hand-written places | unvalidated | none | not changed (the line is still true: xtask/src/e2e/decode.rs writes no message) |
+| 2026-10-28 | 4 | 05905c2 | 4-1 | reviewer | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:671, 775, 801, 950, 1017 | the reset guards have one test, which fails only when both layers go, and 671 and 775 have none; four new tests in app/src/decode_tests.rs, each fails with its guard off | confirmed | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 05905c2 | 4-2 | reviewer | nit | bug | none | app/src/store.rs (make_current); app/src/lib.rs:3479-3481 | the kept line logs when sessions/current was not written, and the reset text is wrong for Refresh files; make_current returns bool, tested by no_kept_line_when_the_session_cannot_be_made_current | unvalidated | none | 51e9a5e catch-up round 4 fixes |
 
 ## Rounds
 
@@ -126,3 +128,4 @@
 | 1 | 17 | 1315674 | 51.6 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: partial: tested 189 (caught 116, missed 61, unviable 12), timeouts 2, not tested 475; stopped at the limit | - | - | - | - | - | - |
 | 2 | 16 | 907036 | 28.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 5 (caught 3, missed 0, unviable 2), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 3 | 10 | 722697 | 31.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 10 (caught 9, missed 0, unviable 1), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 4 | 2 | 166249 | 49.9 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |

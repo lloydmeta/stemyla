@@ -222,6 +222,10 @@
 | 2026-10-26 | 3 | da811b7 | 3-11 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:1451 | no test fails with this mutant: app/src/lib.rs:1451:9: replace StemApp::start_separation with () | refuted | 1-110 | refuted |
 | 2026-10-26 | 3 | da811b7 | 3-12 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:3196 | no test fails with this mutant: app/src/lib.rs:3196:9: replace separation_tests::stopping_the_worker_ends_the_separation with () | refuted | 2-54 | refuted |
 | 2026-10-26 | 3 | da811b7 | 3-13 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:3220 | no test fails with this mutant: app/src/lib.rs:3220:9: replace separation_tests::no_separation_starts_during_a_read_or_a_separation with () | refuted | none | refuted |
+| 2026-10-28 | 4 | 860cb04 | 4-1 | reviewer | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:2833 (separation_ready) | no test drives a long song with no session through separation_ready, so passing true to refusal_text fails no test; fixed by a_long_song_with_no_session_says_open_the_file_again | confirmed | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 860cb04 | 4-2 | reviewer | should-fix | bug | none | app/src/lib.rs:3459-3470, 3500-3505 (apply_inbox) | a successful open of the session that shows held stems drops their "not kept" note, against D5; fixed by HeldStems::not_kept and an_open_that_shows_stems_not_kept_says_so | pre-existing | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 860cb04 | 4-3 | reviewer | nit | doc | none | app/src/lib.rs:3502-3503 | the comment says held stems are kept in storage after a failed open, which is wrong since 3-9 | unvalidated | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 860cb04 | 4-4 | reviewer | nit | weak-test | VERIFY-1 | worker/src/web/tests.rs:1517-1521 (a_failed_open_leaves_a_file_that_another_writer_holds) | the assert accepts any storage error, not only the two lock errors | unvalidated | none | 51e9a5e catch-up round 4 fixes |
 
 ## Rounds
 
@@ -230,3 +234,4 @@
 | 1 | 10 | 857561 | 35.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: partial: tested 177 (caught 41, missed 128, unviable 8), timeouts 0, not tested 33; stopped at the limit | 4 | 248143 | 24.7 | 0 | 0 (auto mode; a fallback prompt is not counted) | of 3 baseline findings, the round found 1 |
 | 2 | 10 | 740709 | 48.2 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 76 (caught 30, missed 46, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 3 | 9 | 533798 | 26.9 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 4 (caught 0, missed 4, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 4 | 3 | 174216 | 47.5 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |

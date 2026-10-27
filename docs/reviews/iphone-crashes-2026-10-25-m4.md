@@ -117,6 +117,8 @@
 | 2026-10-26 | 3 | 1e5c6a6 | 3-12 | cargo-mutants | should-fix | weak-test | VERIFY-1 | protocol/src/lib.rs:795 | no test fails with this mutant: protocol/src/lib.rs:795:48: replace && with \|\| in mix | refuted | none | refuted |
 | 2026-10-26 | 3 | 1e5c6a6 | 3-13 | cargo-mutants | should-fix | weak-test | VERIFY-1 | protocol/src/lib.rs:795 | no test fails with this mutant: protocol/src/lib.rs:795:74: replace < with == in mix | refuted | none | refuted |
 | 2026-10-26 | 3 | 1e5c6a6 | 3-14 | cargo-mutants | should-fix | weak-test | VERIFY-1 | protocol/src/lib.rs:795 | no test fails with this mutant: protocol/src/lib.rs:795:61: replace == with != in mix | refuted | none | refuted |
+| 2026-10-28 | 4 | 87b3d30 | 4-1 | reviewer | should-fix | weak-test | VERIFY-1 | worker/src/web.rs:1263 (separate_song) | in Chrome no test reaches the end check d.source().unchanged(), so Stop::Failed or no check fails no test; fixed by a_mix_file_written_again_after_the_last_read_ends_with_unstored, and TD-55 corrected | confirmed | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 87b3d30 | 4-2 | reviewer | nit | weak-test | VERIFY-1 | worker/src/web/tests.rs:2250-2257 | the case "written again at its size" never reaches the end check in either browser; removed | unvalidated | none | 51e9a5e catch-up round 4 fixes |
 
 ## Rounds
 
@@ -125,3 +127,4 @@
 | 1 | 7 | 634169 | 35.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 158 (caught 78, missed 67, unviable 13), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 2 | 8 | 529737 | 29.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 7 (caught 0, missed 6, unviable 1), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 3 | 9 | 451465 | 17.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 9 (caught 0, missed 8, unviable 1), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 4 | 2 | 133631 | 46.4 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |

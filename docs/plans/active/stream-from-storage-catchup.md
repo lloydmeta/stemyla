@@ -124,6 +124,7 @@ After A to F, `cargo build -p xtask`, then `/review-rounds` with the base `d4209
 * [x] 2026-10-28: plan review round 5: 2 should-fix (D3 counts only the lanes in memory, and the list of checks was not complete) and 2 nits, fixed.
 * [x] 2026-10-28: plan review round 6: no blocker and no significant should-fix (the stop rule); 4 nits fixed.
 * [ ] A: round 4 of M3 to M6, and round 5 if needed.
+  * 2026-10-28: round 4 fixes in `51e9a5e`, and the round 4 rows in the logs of M3 to M6.  Each test failed first: M3 4-1 with `true` to `refusal_text`; M3 4-2 before the fix; M4 4-1 with `Stop::Failed` and with no end check; M5 4-1 with each of the five guards off (each fails one test); M5 4-2 before the fix.  web-test in Chrome: app lib 137, worker 68, all passed.  Workspace tests: 778 passed.
 * [ ] B: the deferred should-fix.
 * [ ] C: the page-decode limit (TD-58).
 * [ ] D: `mutants::skip`.
