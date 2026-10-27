@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering::Relaxed;
 pub mod assemble;
 pub mod decoder;
 pub mod export;
+pub mod lanes;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;
 #[cfg(target_arch = "wasm32")]
@@ -46,6 +47,11 @@ pub fn mix_of_sources(song: &Song) -> (Vec<f32>, Vec<f32>) {
     let lefts: Vec<&[f32]> = src.iter().map(|s| s.left.as_slice()).collect();
     let rights: Vec<&[f32]> = src.iter().map(|s| s.right.as_slice()).collect();
     (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
+}
+
+/// The audio of each lane of `song`, sharing its samples (MEM-1).
+fn lane_audio(song: &Song) -> Vec<lanes::LaneAudio> {
+    song.stems.iter().map(lanes::LaneAudio::of_stem).collect()
 }
 
 /// The lane that already holds a song's original recording: its "original"
@@ -696,6 +702,8 @@ async fn restore_stored(
 
 /// Milliseconds of each frame that the mix lane's waveform job may take.
 const PEAKS_MS: f64 = 3.0;
+/// Milliseconds of each frame that the spectrogram jobs may take.
+const SPECTROGRAM_MS: f64 = 4.0;
 /// Milliseconds of each frame that a save may take.  The page's main
 /// thread also fills the Web Audio buffers.
 #[cfg(target_arch = "wasm32")]
@@ -745,6 +753,8 @@ pub struct StemApp {
     pub output: Option<Output>,
     /// Keeps the mix lane on the mix as heard.
     mix_follower: Option<MixFollower>,
+    /// Makes the lanes' spectrograms, while they are on.
+    spectrograms: spectrogram::Spectrograms,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
     /// Ask for a real audio device when an output is opened: for the first
@@ -1014,6 +1024,7 @@ impl Default for StemApp {
             status: WELCOME.into(),
             output: None,
             mix_follower: None,
+            spectrograms: spectrogram::Spectrograms::default(),
             tempo_pct: 100.0,
             show_spectrograms: false,
             want_device: true,
@@ -1317,11 +1328,11 @@ impl StemApp {
     /// storage through the read-ahead buffer.
     pub fn load_song(&mut self, song: Song, files: LaneFiles) {
         assert_eq!(files.len(), song.stems.len(), "a lane file for each lane");
-        // The old mix lane's job can hold a song-sized buffer; free it
-        // before the new lanes are made (MEM-4).  The old player and the
-        // old reader go first too, so two read-ahead buffers never live at
-        // once (D9 of M6).
+        // The old lanes' jobs go before the new lanes are made.  The old
+        // player and the old reader go first too, so two read-ahead
+        // buffers never live at once (D9 of M6).
         self.mix_follower = None;
+        self.spectrograms = spectrogram::Spectrograms::default();
         self.stop_output();
         #[cfg(target_arch = "wasm32")]
         {
@@ -2818,8 +2829,8 @@ impl StemApp {
     }
 
     /// Makes the mix lane show the mix as heard.  A new mix starts a
-    /// waveform job, which runs for a few milliseconds in each frame.  With
-    /// spectrograms on, the job also makes the spectrogram's input.
+    /// waveform job, which runs for a few milliseconds in each frame.  The
+    /// mix lane's spectrogram is then made again (D6 of the M7 plan).
     fn follow_mix(&mut self, ctx: &egui::Context) {
         self.follow_mix_while(ctx, export::time_left(PEAKS_MS));
     }
@@ -2832,20 +2843,56 @@ impl StemApp {
             return;
         };
         let heard = MixRecipe::as_heard(params);
-        let Some(waveform) = follower.follow(song, &heard, self.show_spectrograms, more) else {
-            if follower.progress().is_some() {
+        let mix_of = |recipe: &MixRecipe| -> Box<dyn engine::mixdown::Pcm> {
+            Box::new(lanes::LanesMix::new(
+                &lane_audio(song),
+                song.frames,
+                song.sample_rate,
+                recipe,
+            ))
+        };
+        let Some(waveform) = follower.follow(&heard, mix_of, more) else {
+            // A source that waits asks for a repaint when its read ends.
+            if follower.progress().is_some() && !follower.is_waiting() {
                 ctx.request_repaint();
             }
             return;
         };
-        let rate = song.sample_rate;
         if let Some(mix) = self.lanes.first_mut().filter(|l| l.stem.is_none()) {
             (mix.columns, mix.scale) = (waveform.columns, waveform.scale);
-            mix.spectrogram = waveform
-                .mid
-                .filter(|_| self.show_spectrograms)
-                .map(|mid| spectrogram::texture(ctx, &mix.name, &mid, rate));
+            mix.spectrogram = None;
+            self.spectrograms.forget(0);
         }
+    }
+
+    /// Makes the spectrogram of each lane that lacks one, while
+    /// spectrograms are on and `more` says there is time (D5 of the M7
+    /// plan).  The mix lane shows the mix that its waveform shows.
+    fn step_spectrograms(&mut self, ctx: &egui::Context, more: impl FnMut() -> bool) {
+        let (Some(song), Some(follower)) = (&self.song, &self.mix_follower) else {
+            return;
+        };
+        if !self.show_spectrograms {
+            self.spectrograms = spectrogram::Spectrograms::default();
+            return;
+        }
+        let audio = lane_audio(song);
+        let source = |lane: &Lane| -> Option<Box<dyn engine::mixdown::Pcm>> {
+            Some(match lane.stem {
+                Some(i) => Box::new(lanes::LanePcm::new(
+                    audio[i].clone(),
+                    song.frames,
+                    song.sample_rate,
+                )),
+                None => Box::new(lanes::LanesMix::new(
+                    &audio,
+                    song.frames,
+                    song.sample_rate,
+                    follower.shown(),
+                )),
+            })
+        };
+        self.spectrograms.step(ctx, &mut self.lanes, source, more);
     }
 
     /// A lane's "Save" menu: of its stem, or of the mix as heard for the
@@ -2909,23 +2956,25 @@ impl StemApp {
     /// The save runs in [`Self::step_save`], a few ms in each frame.
     #[cfg(target_arch = "wasm32")]
     fn start_save(&mut self, stem: Option<usize>, format: export::Format) {
-        use engine::mixdown::{Mix, Pcm, StemPcm};
+        use engine::mixdown::Pcm;
         let (Some(song), Some(params)) = (self.song.clone(), self.params.clone()) else {
             return;
         };
         let base = self.song_name.as_deref().unwrap_or("song");
+        let audio = lane_audio(&song);
+        let (frames, rate) = (song.frames, song.sample_rate);
         let (source, name): (Box<dyn Pcm>, String) = match stem {
-            Some(i) => {
-                let s = &song.stems[i];
-                (
-                    Box::new(StemPcm::new(s.clone(), song.sample_rate)),
-                    format!("{base} - {}", s.name),
-                )
-            }
+            Some(i) => (
+                Box::new(lanes::LanePcm::new(audio[i].clone(), frames, rate)),
+                format!("{base} - {}", song.stems[i].name),
+            ),
             None => {
                 let recipe = MixRecipe::as_heard(&params);
                 let name = export::mix_file_name(base, &song, &recipe);
-                (Box::new(Mix::new(Arc::clone(&song), &recipe)), name)
+                (
+                    Box::new(lanes::LanesMix::new(&audio, frames, rate, &recipe)),
+                    name,
+                )
             }
         };
         let sink = export::JsSink::new(format, source.frames(), song.sample_rate);
@@ -3218,14 +3267,7 @@ impl eframe::App for StemApp {
         self.follow_mix(&ctx);
         #[cfg(target_arch = "wasm32")]
         self.step_save(&ctx);
-        if self.show_spectrograms {
-            spectrogram::ensure_textures(
-                &ctx,
-                &mut self.lanes,
-                self.song.as_ref(),
-                self.mix_follower.as_ref().map(MixFollower::shown),
-            );
-        }
+        self.step_spectrograms(&ctx, export::time_left(SPECTROGRAM_MS));
 
         egui::Panel::top("transport").show(ui, |ui| {
             ui.add_space(4.0);
@@ -3341,44 +3383,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_mix_lane_keeps_a_mid_buffer_only_with_spectrograms_on() {
-        for spectrograms in [false, true] {
-            let mut app = StemApp {
-                want_device: false,
-                ..StemApp::default()
-            };
-            app.load_demo();
-            app.show_spectrograms = spectrograms;
-            let lead = app.song.as_ref().unwrap().stem_index("lead").unwrap();
-            app.params.as_ref().unwrap().set_muted(lead, true);
-            app.follow_mix_while(&egui::Context::default(), || false);
-            let follower = app.mix_follower.as_ref().unwrap();
-            assert!(follower.progress().is_some(), "a job runs");
-            assert_eq!(
-                follower.holds_mid(),
-                spectrograms,
-                "spectrograms {spectrograms}"
-            );
-        }
-    }
-
-    #[test]
-    fn follow_mix_makes_the_mix_spectrogram_from_its_own_job() {
+    fn a_new_mix_makes_the_mix_lane_spectrogram_again() {
         let mut app = StemApp {
             want_device: false,
             ..StemApp::default()
         };
         app.load_demo();
         app.show_spectrograms = true;
-        assert!(app.lanes[0].spectrogram.is_none());
+        let ctx = egui::Context::default();
+        app.step_spectrograms(&ctx, || true);
+        let ids = |app: &StemApp| -> Vec<Option<egui::TextureId>> {
+            app.lanes
+                .iter()
+                .map(|l| l.spectrogram.as_ref().map(|t| t.id()))
+                .collect()
+        };
+        let before = ids(&app);
+        assert!(
+            before.iter().all(Option::is_some),
+            "every lane in one frame"
+        );
+
         let lead = app.song.as_ref().unwrap().stem_index("lead").unwrap();
         app.params.as_ref().unwrap().set_muted(lead, true);
-        app.follow_mix(&egui::Context::default());
-        assert!(
-            app.lanes[0].spectrogram.is_some(),
-            "the waveform job gave the spectrogram's input, so no second mix is needed"
-        );
-        assert!(app.lanes.iter().skip(1).all(|l| l.spectrogram.is_none()));
+        app.follow_mix_while(&ctx, || true);
+        assert!(app.lanes[0].spectrogram.is_none(), "the mix lane's goes");
+        app.step_spectrograms(&ctx, || true);
+        let after = ids(&app);
+        assert!(after[0].is_some());
+        assert_ne!(after[0], before[0], "the mix lane's is made again");
+        assert_eq!(after[1..], before[1..], "a stem's stays");
+    }
+
+    #[test]
+    fn spectrograms_off_make_no_texture() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.load_demo();
+        app.step_spectrograms(&egui::Context::default(), || true);
+        assert!(app.lanes.iter().all(|l| l.spectrogram.is_none()));
     }
 
     fn job(serial: u64, session: Option<&str>) -> SeparationJob {

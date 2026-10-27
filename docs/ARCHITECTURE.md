@@ -212,14 +212,14 @@ Any change to the shapes also touches `roformer-gpu/src/bench.rs`, whose kernel 
 
 ## Saving a stem or the mix
 
-Each lane's "Save" menu saves its stem.  The mix lane's menu saves the mix as heard, at 100% tempo (decision 0014).  Each stem has its gain after Mute, Solo and volume, and the sum is clamped to ±1.  The mix lane's subtitle names the stems in that mix.  Its waveform and spectrogram follow the mix, through the same blocks (`app::export::MixFollower`).
+Each lane's "Save" menu saves its stem.  The mix lane's menu saves the mix as heard, at 100% tempo (decision 0014).  Each stem has its gain after Mute, Solo and volume, and the sum is clamped to ±1.  The mix lane's subtitle names the stems in that mix.  Its waveform follows the mix in blocks (`app::export::MixFollower`).  Its spectrogram reads only the frames that its columns show (`app::spectrogram::SpectrogramJob`), so no lane makes a song-length signal.
 
-A save is an `app::export::ExportJob`.  It reads its source (`engine::mixdown::Mix` or `StemPcm`) in blocks of 16,384 frames, and writes each block to a sink.  On the web, the main thread also fills the Web Audio buffers, so the job runs for about 4 ms in each UI frame.  The sinks write into JS arrays, so WebAssembly memory holds only the blocks (MEM-1, MEM-4).  A WAV is made on the page.  The worker encodes FLAC and MP3 from the two transferred `Float32Array`s (MEM-2), with the same messages as for a stem.
+A save is an `app::export::ExportJob`.  It reads its source (`app::lanes::LanesMix` or `LanePcm`, over the audio of the lanes) in blocks of 16,384 frames, and writes each block to a sink.  On the web, the main thread also fills the Web Audio buffers, so the job runs for about 4 ms in each UI frame.  The sinks write into JS arrays, so WebAssembly memory holds only the blocks (MEM-1, MEM-4).  A WAV is made on the page.  The worker encodes FLAC and MP3 from the two transferred `Float32Array`s (MEM-2), with the same messages as for a stem.
 
 ```mermaid
 flowchart TD
   subgraph page["page (main thread)"]
-    CLICK["Save > format"] --> SRC["source: Mix (MixRecipe::as_heard) or StemPcm<br/>shares the song's engine::Samples"]
+    CLICK["Save > format"] --> SRC["source: LanesMix (MixRecipe::as_heard) or LanePcm<br/>shares the lanes' engine::Samples"]
     SRC --> JOB["ExportJob: a block at a time, about 4 ms in each frame"]
     JOB -->|WAV| U8["JsWav: Uint8Array"] --> DL["store::download"]
     JOB -->|"FLAC, MP3"| F32["JsChannels: two Float32Arrays"]

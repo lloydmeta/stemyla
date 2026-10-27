@@ -150,7 +150,8 @@ impl Pcm for StemPcm {
     }
 }
 
-fn at_full_scale(samples: &[f32]) -> usize {
+/// The samples at full scale: ±1 or beyond.
+pub fn at_full_scale(samples: &[f32]) -> usize {
     samples.iter().filter(|s| s.abs() >= 1.0).count()
 }
 

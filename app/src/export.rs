@@ -8,9 +8,8 @@
 
 use crate::DERIVED;
 use engine::Song;
-use engine::mixdown::{Mix, MixRecipe, Pcm};
+use engine::mixdown::{MixRecipe, Pcm};
 use engine::overview::COLUMNS;
-use std::sync::Arc;
 
 /// Frames that a job reads at a time.
 pub const BLOCK: usize = 16_384;
@@ -27,6 +26,8 @@ pub struct ExportJob<S: Sink> {
     sink: S,
     at: usize,
     clipped: usize,
+    /// The last step found the source not ready.
+    waiting: bool,
     left: Vec<f32>,
     right: Vec<f32>,
 }
@@ -39,15 +40,18 @@ impl<S: Sink> ExportJob<S> {
             sink,
             at: 0,
             clipped: 0,
+            waiting: false,
             left: vec![0.0; block],
             right: vec![0.0; block],
         }
     }
 
     /// Reads and writes the next block.  True when the source is done.
+    /// When the source is not ready, it does nothing and waits.
     pub fn step(&mut self) -> bool {
         let n = self.left.len().min(self.source.frames() - self.at);
-        if n > 0 {
+        self.waiting = n > 0 && !self.source.ready(self.at, n);
+        if n > 0 && !self.waiting {
             let (left, right) = (&mut self.left[..n], &mut self.right[..n]);
             self.clipped += self.source.read(self.at, left, right);
             self.sink.write(self.at, left, right);
@@ -57,14 +61,21 @@ impl<S: Sink> ExportJob<S> {
     }
 
     /// Steps while `more` says there is time left, and at least once.  True
-    /// when the source is done.
+    /// when the source is done.  It returns at once while the source is not
+    /// ready, so a job that waits for storage costs nothing in a frame.
     pub fn run_while(&mut self, mut more: impl FnMut() -> bool) -> bool {
         while !self.step() {
-            if !more() {
+            if self.waiting || !more() {
                 return false;
             }
         }
         true
+    }
+
+    /// Whether the last step found the source not ready.  A source that
+    /// reads storage asks for a repaint when its read ends.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting
     }
 
     pub fn is_done(&self) -> bool {
@@ -94,13 +105,10 @@ impl<S: Sink> ExportJob<S> {
 }
 
 /// The waveform of a lane: the lowest and highest sample of both channels
-/// in each column, as [`engine::overview::lane_columns`] gives them.  With
-/// [`PeaksSink::with_mid`], also the mean of the two channels, which a
-/// spectrogram reads.
+/// in each column, as [`engine::overview::lane_columns`] gives them.
 pub struct PeaksSink {
     column: usize,
     columns: Vec<(f32, f32)>,
-    mid: Option<Vec<f32>>,
 }
 
 /// What a [`PeaksSink`] gives at the end.
@@ -109,8 +117,6 @@ pub struct Waveform {
     pub columns: Vec<(f32, f32)>,
     /// Makes the loudest column fill the lane.
     pub scale: f32,
-    /// The mean of the two channels, if it was asked for.
-    pub mid: Option<Vec<f32>>,
 }
 
 impl PeaksSink {
@@ -120,30 +126,14 @@ impl PeaksSink {
         Self {
             column,
             columns: vec![(f32::INFINITY, f32::NEG_INFINITY); frames.div_ceil(column)],
-            mid: None,
-        }
-    }
-
-    /// Also keeps the mean of the two channels: one buffer of the song's
-    /// length, the only one that a spectrogram of the mix needs.
-    pub fn with_mid(frames: usize, count: usize) -> Self {
-        Self {
-            mid: Some(vec![0.0; frames]),
-            ..Self::new(frames, count)
         }
     }
 
     pub fn finish(self) -> Waveform {
-        let loudest = self
-            .columns
-            .iter()
-            .map(|(lo, hi)| lo.abs().max(hi.abs()))
-            .fold(0.0, f32::max);
-        let scale = if loudest > 1e-6 { 1.0 / loudest } else { 1.0 };
+        let scale = engine::overview::overview_scale(&self.columns);
         Waveform {
             columns: self.columns,
             scale,
-            mid: self.mid,
         }
     }
 }
@@ -155,28 +145,13 @@ impl Sink for PeaksSink {
             *lo = lo.min(*l).min(*r);
             *hi = hi.max(*l).max(*r);
         }
-        if let Some(mid) = &mut self.mid {
-            for (m, (l, r)) in mid[at..at + left.len()]
-                .iter_mut()
-                .zip(left.iter().zip(right))
-            {
-                *m = 0.5 * (l + r);
-            }
-        }
     }
 }
 
-/// The mean of the two channels of a mix, made block by block, so that the
-/// mix itself is never in memory whole.
-pub fn mix_mid(song: &Arc<Song>, recipe: &MixRecipe, count: usize) -> Vec<f32> {
-    let sink = PeaksSink::with_mid(song.frames, count);
-    let mut job = ExportJob::new(Box::new(Mix::new(Arc::clone(song), recipe)), sink);
-    job.run_while(|| true);
-    job.into_sink().finish().mid.unwrap_or_default()
-}
-
 /// Keeps the mix lane's waveform on the mix as heard.  A new mix starts a
-/// waveform job, which a caller steps for a few ms in each frame.
+/// waveform job, which a caller steps for a few ms in each frame.  The job
+/// holds only its block and the columns (D6 of the M7 plan); a spectrogram
+/// of the mix reads its own windows (`spectrogram::SpectrogramJob`).
 pub struct MixFollower {
     shown: MixRecipe,
     job: Option<(MixRecipe, ExportJob<PeaksSink>)>,
@@ -198,22 +173,14 @@ impl MixFollower {
         self.job.as_ref().map(|(_, job)| job.fraction())
     }
 
-    /// Whether the waveform job keeps a song-sized mid buffer.
-    pub fn holds_mid(&self) -> bool {
-        self.job
-            .as_ref()
-            .is_some_and(|(_, job)| job.sink().mid.is_some())
-    }
-
     /// Moves the lane towards `heard`, while `more` says there is time.
     /// It continues a job for `heard`, and starts again when `heard`
-    /// changes.  It gives the new waveform when it is done.  With `mid`, a
-    /// new job also keeps the mean of the channels, for a spectrogram.
+    /// changes; `source` gives the audio of a mix, for a new job.  It gives
+    /// the new waveform when it is done.
     pub fn follow(
         &mut self,
-        song: &Arc<Song>,
         heard: &MixRecipe,
-        mid: bool,
+        source: impl FnOnce(&MixRecipe) -> Box<dyn Pcm>,
         more: impl FnMut() -> bool,
     ) -> Option<Waveform> {
         if self.shown == *heard {
@@ -221,19 +188,15 @@ impl MixFollower {
             return None;
         }
         // Drop a job for another mix before the new one is made, so that
-        // two song-sized mid buffers are never held at once (MEM-4).
+        // two jobs never read at once.
         if self.job.as_ref().is_some_and(|(recipe, _)| recipe != heard) {
             self.job = None;
         }
         let (recipe, mut job) = match self.job.take() {
             Some((recipe, job)) if recipe == *heard => (recipe, job),
             _ => {
-                let source = Box::new(Mix::new(Arc::clone(song), heard));
-                let sink = if mid {
-                    PeaksSink::with_mid(song.frames, COLUMNS)
-                } else {
-                    PeaksSink::new(song.frames, COLUMNS)
-                };
+                let source = source(heard);
+                let sink = PeaksSink::new(source.frames(), COLUMNS);
                 (heard.clone(), ExportJob::new(source, sink))
             }
         };
@@ -243,6 +206,11 @@ impl MixFollower {
         }
         self.shown = recipe;
         Some(job.into_sink().finish())
+    }
+
+    /// Whether the waveform job waits for its source.
+    pub fn is_waiting(&self) -> bool {
+        self.job.as_ref().is_some_and(|(_, job)| job.is_waiting())
     }
 }
 
@@ -587,6 +555,83 @@ mod tests {
         assert_eq!(job.clipped(), 3);
     }
 
+    /// A source whose frames are ready only when the test says so.  It
+    /// counts how often a job asks.
+    struct Held {
+        inner: Mix,
+        ready: std::cell::Cell<bool>,
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl Pcm for Held {
+        fn frames(&self) -> usize {
+            self.inner.frames()
+        }
+        fn sample_rate(&self) -> u32 {
+            self.inner.sample_rate()
+        }
+        fn read(&self, at: usize, left: &mut [f32], right: &mut [f32]) -> usize {
+            assert!(self.ready.get(), "a job reads only frames that are ready");
+            self.inner.read(at, left, right)
+        }
+        fn ready(&self, _: usize, _: usize) -> bool {
+            self.asked.set(self.asked.get() + 1);
+            self.ready.get()
+        }
+    }
+
+    #[test]
+    fn a_job_waits_for_a_source_that_is_not_ready() {
+        let frames = 2 * BLOCK + 5;
+        let song = Arc::new(song(&["bass", "drums"], frames));
+        let recipe = MixRecipe::new(vec![1.0, 0.5]);
+        let held = std::rc::Rc::new(Held {
+            inner: Mix::new(Arc::clone(&song), &recipe),
+            ready: std::cell::Cell::new(false),
+            asked: std::cell::Cell::new(0),
+        });
+        struct Shared(std::rc::Rc<Held>);
+        impl Pcm for Shared {
+            fn frames(&self) -> usize {
+                self.0.frames()
+            }
+            fn sample_rate(&self) -> u32 {
+                self.0.sample_rate()
+            }
+            fn read(&self, at: usize, left: &mut [f32], right: &mut [f32]) -> usize {
+                self.0.read(at, left, right)
+            }
+            fn ready(&self, at: usize, frames: usize) -> bool {
+                self.0.ready(at, frames)
+            }
+        }
+        let mut job = ExportJob::new(Box::new(Shared(held.clone())), Recorder::default());
+        let mut asked_for_time = 0;
+        let more = || {
+            asked_for_time += 1;
+            true
+        };
+        assert!(!job.run_while(more), "a job that waits is not done");
+        assert_eq!(
+            held.asked.get(),
+            1,
+            "it asks once and returns: no busy loop"
+        );
+        assert_eq!(asked_for_time, 0, "it does not ask for time while it waits");
+        assert!(job.is_waiting());
+        assert_eq!(job.fraction(), 0.0, "no progress");
+        assert!(!job.step(), "a step waits too");
+        assert!(job.sink().starts.is_empty());
+
+        held.ready.set(true);
+        assert!(job.run_while(|| true));
+        assert!(!job.is_waiting());
+        let want = run_mix(&song, &recipe);
+        let rec = job.into_sink();
+        assert_eq!(rec.starts, [0, BLOCK, 2 * BLOCK]);
+        assert_eq!((rec.left, rec.right), (want.left, want.right));
+    }
+
     #[test]
     fn only_wav_is_made_without_the_worker() {
         assert!(!Format::Wav.needs_worker());
@@ -594,6 +639,11 @@ mod tests {
         assert!(Format::Mp3.needs_worker());
         let extensions: Vec<&str> = Format::ALL.iter().map(|f| f.extension()).collect();
         assert_eq!(extensions, ["wav", "flac", "mp3"]);
+    }
+
+    /// The mixes of `song`, for a follower's new jobs.
+    fn mix_of(song: &Arc<Song>) -> impl FnOnce(&MixRecipe) -> Box<dyn Pcm> + '_ {
+        |recipe| Box::new(Mix::new(Arc::clone(song), recipe))
     }
 
     #[test]
@@ -604,23 +654,23 @@ mod tests {
         let no_vocals = MixRecipe::new(vec![1.0, 1.0, 0.0]);
         let no_drums = MixRecipe::new(vec![1.0, 0.0, 1.0]);
         let mut follower = MixFollower::new(all.clone());
-        assert_eq!(follower.follow(&song, &all, false, || true), None);
+        assert_eq!(follower.follow(&all, mix_of(&song), || true), None);
         assert_eq!(follower.progress(), None, "the shown mix needs no job");
 
         let one = 1.0 / 3.0;
-        assert_eq!(follower.follow(&song, &no_vocals, false, || false), None);
+        assert_eq!(follower.follow(&no_vocals, mix_of(&song), || false), None);
         assert_eq!(follower.progress(), Some(one));
-        assert_eq!(follower.follow(&song, &no_vocals, false, || false), None);
+        assert_eq!(follower.follow(&no_vocals, mix_of(&song), || false), None);
         assert_eq!(
             follower.progress(),
             Some(2.0 * one),
             "the same mix continues"
         );
-        assert_eq!(follower.follow(&song, &no_drums, false, || false), None);
+        assert_eq!(follower.follow(&no_drums, mix_of(&song), || false), None);
         assert_eq!(follower.progress(), Some(one), "a new mix starts again");
 
         let done = follower
-            .follow(&song, &no_drums, true, || true)
+            .follow(&no_drums, mix_of(&song), || true)
             .expect("the waveform of the new mix");
         assert_eq!(follower.shown(), &no_drums);
         assert_eq!(follower.progress(), None);
@@ -629,20 +679,16 @@ mod tests {
             (done.columns, done.scale),
             lane_columns(&want.left, &want.right)
         );
-        assert_eq!(done.mid, None, "the job began without the mid signal");
 
         let back = follower
-            .follow(&song, &all, true, || true)
+            .follow(&all, mix_of(&song), || true)
             .expect("the waveform of every stem");
         let want = run_mix(&song, &all);
-        let mid: Vec<f32> = want
-            .left
-            .iter()
-            .zip(&want.right)
-            .map(|(l, r)| 0.5 * (l + r))
-            .collect();
-        assert_eq!(back.mid, Some(mid));
-        assert_eq!(follower.follow(&song, &all, true, || true), None);
+        assert_eq!(
+            (back.columns, back.scale),
+            lane_columns(&want.left, &want.right)
+        );
+        assert_eq!(follower.follow(&all, mix_of(&song), || true), None);
     }
 
     #[test]
@@ -651,16 +697,14 @@ mod tests {
         let all = MixRecipe::new(vec![1.0, 1.0, 1.0]);
         let no_vocals = MixRecipe::new(vec![1.0, 1.0, 0.0]);
         let mut follower = MixFollower::new(all.clone());
-        assert_eq!(follower.follow(&song, &no_vocals, true, || false), None);
+        assert_eq!(follower.follow(&no_vocals, mix_of(&song), || false), None);
         assert!(follower.progress().is_some());
-        assert!(follower.holds_mid());
-        assert_eq!(follower.follow(&song, &all, true, || false), None);
+        assert_eq!(follower.follow(&all, mix_of(&song), || false), None);
         assert_eq!(
             follower.progress(),
             None,
             "back to the shown mix drops the job"
         );
-        assert!(!follower.holds_mid(), "and its mid buffer");
     }
 
     fn run_mix(song: &Arc<Song>, recipe: &MixRecipe) -> Recorder {
@@ -731,16 +775,6 @@ mod tests {
             let want = lane_columns(&whole.left, &whole.right);
             let peaks = run(&song, &recipe, PeaksSink::new(frames, COLUMNS)).finish();
             assert_eq!((peaks.columns, peaks.scale), want, "{frames} frames");
-            assert_eq!(peaks.mid, None);
-            let with_mid = run(&song, &recipe, PeaksSink::with_mid(frames, COLUMNS));
-            let mid: Vec<f32> = whole
-                .left
-                .iter()
-                .zip(&whole.right)
-                .map(|(l, r)| 0.5 * (l + r))
-                .collect();
-            assert_eq!(with_mid.finish().mid, Some(mid.clone()), "{frames} frames");
-            assert_eq!(mix_mid(&song, &recipe, COLUMNS), mid);
         }
     }
 
