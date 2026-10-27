@@ -293,6 +293,8 @@ struct ReaderState {
     held: Held,
     /// A read has started and has not ended.
     in_flight: bool,
+    /// Why the first read that failed failed.
+    failed: Option<String>,
 }
 
 /// Reads the stored lanes of one job in blocks (D3 of the M7 plan).
@@ -323,6 +325,7 @@ impl BlockReader {
             state: Rc::new(RefCell::new(ReaderState {
                 held,
                 in_flight: false,
+                failed: None,
             })),
         }
     }
@@ -349,6 +352,11 @@ impl BlockReader {
         self.start(ranges);
         // A store in memory completes the read at once.
         self.state.borrow().held.holds(ranges)
+    }
+
+    /// Why a read failed, if one did.  The reader gave silence for it.
+    pub fn failed(&self) -> Option<String> {
+        self.state.borrow().failed.clone()
     }
 
     /// The frames of the last read.
@@ -384,6 +392,9 @@ impl BlockReader {
             Box::new(move |result| {
                 let mut state = state.borrow_mut();
                 state.in_flight = false;
+                if let Err(e) = &result {
+                    state.failed.get_or_insert_with(|| e.clone());
+                }
                 fill(&mut state.held, &formats, ranges, result);
             }),
         );
@@ -473,11 +484,13 @@ mod tests {
         let store = MemoryStore::new();
         let file = LaneFile::f32("acme/missing.f32".into(), 1_000);
         let reader = BlockReader::new(Rc::clone(&store) as Rc<dyn LaneStore>, vec![file], 1_000);
+        assert_eq!(reader.failed(), None);
         assert!(reader.ready(&[(0, 10)]));
         assert_eq!(
             reader.held().frames(0, 0, 10),
             (&[0.0; 10][..], &[0.0; 10][..])
         );
+        assert_eq!(reader.failed().as_deref(), Some("no file acme/missing.f32"));
     }
 
     #[test]

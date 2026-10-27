@@ -89,6 +89,11 @@ impl<S: Sink> ExportJob<S> {
         }
     }
 
+    /// Why a read of the source's storage failed, if one did.
+    pub fn failed(&self) -> Option<String> {
+        self.source.failed()
+    }
+
     /// Samples at full scale so far.
     pub fn clipped(&self) -> usize {
         self.clipped

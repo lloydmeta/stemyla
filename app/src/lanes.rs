@@ -297,6 +297,10 @@ impl LaneReads {
         self.reader.as_ref().is_none_or(|r| r.ready(ranges))
     }
 
+    fn failed(&self) -> Option<String> {
+        self.reader.as_ref().and_then(BlockReader::failed)
+    }
+
     /// Gives `f` the `frames` frames from `at` of each lane, which are
     /// ready.  Frames past a lane's end are silence.
     fn with_parts<R>(
@@ -384,6 +388,10 @@ impl Pcm for LanesMix {
     fn ready_ranges(&self, ranges: &[(usize, usize)]) -> bool {
         self.audible.ready_ranges(ranges)
     }
+
+    fn failed(&self) -> Option<String> {
+        self.audible.failed()
+    }
 }
 
 /// One lane as it is: not scaled and not clamped, as
@@ -428,6 +436,10 @@ impl Pcm for LanePcm {
 
     fn ready_ranges(&self, ranges: &[(usize, usize)]) -> bool {
         self.lane.ready_ranges(ranges)
+    }
+
+    fn failed(&self) -> Option<String> {
+        self.lane.failed()
     }
 }
 

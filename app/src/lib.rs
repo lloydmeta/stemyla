@@ -75,6 +75,55 @@ fn sources_in_memory(song: &Shown) -> Option<Song> {
     })
 }
 
+/// The memory path's input of `song` (D9 of the M7 plan): the lane that
+/// holds the original recording, as it is, else the mix of its sources at
+/// volume 1, clamped, as `mix_of_sources` makes it.  It reads `audio`, the
+/// lanes as a job reads them, and says whether it reads browser storage.
+pub fn separation_input(
+    song: &Shown,
+    audio: Vec<LaneAudio>,
+) -> (Box<dyn engine::mixdown::Pcm>, bool) {
+    let (frames, rate) = (song.frames, song.sample_rate);
+    match original_index_of(&song.names()) {
+        Some(i) => {
+            let lane = audio[i].clone();
+            let stored = lane.samples().is_none();
+            (Box::new(lanes::LanePcm::new(lane, frames, rate)), stored)
+        }
+        None => {
+            let gains: Vec<f32> = song
+                .lanes
+                .iter()
+                .map(|lane| {
+                    if DERIVED.contains(&lane.name.as_str()) {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            let stored = audio
+                .iter()
+                .zip(&gains)
+                .any(|(lane, gain)| *gain > 0.0 && lane.samples().is_none());
+            let recipe = MixRecipe::new(gains);
+            (
+                Box::new(lanes::LanesMix::new(&audio, frames, rate, &recipe)),
+                stored,
+            )
+        }
+    }
+}
+
+/// Whether the memory path's input of `song` is the session file at
+/// `mix_path` (D10 of the M7 plan): then the session's mix is kept, and
+/// `write_mix` never reads the file that it writes.
+pub fn input_is_the_mix_file(song: &Shown, mix_path: &str) -> bool {
+    original_index_of(&song.names())
+        .and_then(|i| song.lanes[i].audio.file())
+        .is_some_and(|file| file.path == mix_path)
+}
+
 /// The audio of `song`'s lanes for a job: the lanes with a file read it
 /// through `store`, when there is one (D3 and D1 of the M7 plan).
 fn job_audio(
@@ -229,6 +278,20 @@ pub struct Inbox {
     mix_written: Option<(u64, Result<(), String>)>,
     /// A storage-path separation whose stems are in place.
     stored: Option<StoredSeparation>,
+    /// The memory path's input, read from browser storage (D9 of the M7
+    /// plan).
+    memory_input: Option<MemoryInput>,
+}
+
+/// The memory path's input of the song `serial`, read from browser
+/// storage into two JS arrays, for the separation started on `stage` with
+/// `reason`.  Web only.
+#[cfg(target_arch = "wasm32")]
+struct MemoryInput {
+    serial: u64,
+    stage: JobStage,
+    reason: Option<String>,
+    read: Result<export::JsChannels, String>,
 }
 
 /// A storage-path separation after [`store::keep_stored_stems`].  Web only.
@@ -2178,7 +2241,12 @@ impl StemApp {
             return;
         };
         let has_session = self.session.is_some();
-        let mix_kept = has_session && mix_frames == Some(song.frames);
+        // D10 of the M7 plan: an input that is the mix file is kept.
+        let input_is_mix = self
+            .session
+            .as_deref()
+            .is_some_and(|id| input_is_the_mix_file(&song, &store::mix_path(id)));
+        let mix_kept = has_session && (mix_frames == Some(song.frames) || input_is_mix);
         let reason = if has_session {
             let mix = if mix_kept {
                 String::new()
@@ -2196,13 +2264,10 @@ impl StemApp {
         let needed = storage_path_needs(song.frames, mix_kept);
         match separation_path(has_session, song.frames, free, needed, self.memory_limit) {
             SeparationPath::Storage if mix_kept => self.post_separation(JobStage::Storage, None),
-            SeparationPath::Storage => match song.as_song() {
-                Some(song) => self.write_mix_first(Arc::new(song), ctx),
-                None => {
-                    self.separating = None;
-                    self.status = "Separation not started: the song is not in memory".into();
-                }
-            },
+            SeparationPath::Storage => {
+                let (input, _) = separation_input(&song, job_audio(&song, &self.lane_store));
+                self.write_mix_first(input, ctx);
+            }
             SeparationPath::Memory if has_session => self.separate_without_storage(&reason),
             SeparationPath::Memory => self.post_separation(JobStage::Memory, Some(reason)),
             SeparationPath::TooLong => {
@@ -2233,7 +2298,7 @@ impl StemApp {
     /// the storage path ([`Self::mix_written`]).  Separate and the
     /// session's Forget stay disabled meanwhile.
     #[cfg(target_arch = "wasm32")]
-    fn write_mix_first(&mut self, song: std::sync::Arc<Song>, ctx: &egui::Context) {
+    fn write_mix_first(&mut self, input: Box<dyn engine::mixdown::Pcm>, ctx: &egui::Context) {
         let (Some(id), Some(job)) = (self.session.clone(), &mut self.separating) else {
             self.separating = None;
             return;
@@ -2247,7 +2312,7 @@ impl StemApp {
         );
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
-            let written = store::write_mix(&id, &song)
+            let written = store::write_mix(&id, input)
                 .await
                 .map_err(|e| format!("{e:#}"));
             pending.borrow_mut().mix_written = Some((serial, written));
@@ -2299,7 +2364,20 @@ impl StemApp {
     /// memory path, from two arrays, with `reason` for the status line.
     #[cfg(target_arch = "wasm32")]
     fn post_separation(&mut self, stage: JobStage, reason: Option<String>) {
-        let (Some(sep), Some(song)) = (&mut self.separator, self.song.clone()) else {
+        let Some(song) = self.song.clone() else {
+            self.separating = None;
+            return;
+        };
+        let to_storage = stage == JobStage::Storage && self.session.is_some();
+        if !to_storage {
+            // D9 of the M7 plan: an input in browser storage is read first.
+            let (input, from_storage) = separation_input(&song, job_audio(&song, &self.lane_store));
+            if from_storage {
+                self.read_memory_input(input, stage, reason);
+                return;
+            }
+        }
+        let Some(sep) = &mut self.separator else {
             self.separating = None;
             return;
         };
@@ -2340,6 +2418,85 @@ impl StemApp {
                 sep.separate(mix, None)
             }
         };
+        self.separation_posted(sent, stage, reason);
+    }
+
+    /// Reads the memory path's input from browser storage, a block at a
+    /// time, into two JS arrays, then posts it (D9 of the M7 plan).  The
+    /// song is at most `memory_limit` frames long, so the arrays are
+    /// bounded, and they are outside WebAssembly memory.
+    #[cfg(target_arch = "wasm32")]
+    fn read_memory_input(
+        &mut self,
+        input: Box<dyn engine::mixdown::Pcm>,
+        stage: JobStage,
+        reason: Option<String>,
+    ) {
+        let Some(serial) = self.separating.as_ref().map(|j| j.serial) else {
+            return;
+        };
+        self.status = "Reading the song from browser storage for the separation…".into();
+        let (pending, ctx) = (self.pending.clone(), self.ctx.clone());
+        let frames = input.frames();
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut job = export::ExportJob::new(input, export::JsChannels::new(frames));
+            while !job.run_while(export::time_left(SAVE_MS)) {
+                store::sleep(1).await;
+            }
+            let read = match job.failed() {
+                Some(e) => Err(e),
+                None => Ok(job.into_sink()),
+            };
+            pending.borrow_mut().memory_input = Some(MemoryInput {
+                serial,
+                stage,
+                reason,
+                read,
+            });
+            if let Some(ctx) = ctx {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// The memory path's input arrived: posts it, if the separation that
+    /// asked for it still waits for it.
+    #[cfg(target_arch = "wasm32")]
+    fn memory_input_read(&mut self, input: MemoryInput) {
+        let waiting = input.serial == self.song_serial
+            && self
+                .separating
+                .as_ref()
+                .is_some_and(|j| j.serial == input.serial);
+        if !waiting {
+            return;
+        }
+        let channels = match input.read {
+            Ok(channels) => channels,
+            Err(e) => {
+                self.separating = None;
+                self.status = format!(
+                    "Separation not started: the song could not be read from browser storage ({e})"
+                );
+                return;
+            }
+        };
+        let Some(sep) = &mut self.separator else {
+            self.separating = None;
+            return;
+        };
+        let mix = stem_protocol::Mix::Arrays {
+            left: channels.left,
+            right: channels.right,
+        };
+        let sent = sep.separate(mix, None);
+        self.separation_posted(sent, input.stage, input.reason);
+    }
+
+    /// After the post of a separation on `stage`'s path: its stage, its log
+    /// lines and the status line.
+    #[cfg(target_arch = "wasm32")]
+    fn separation_posted(&mut self, sent: bool, stage: JobStage, reason: Option<String>) {
         if !sent {
             self.separating = None;
             self.status = "Could not reach the separation worker".into();
@@ -2820,6 +2977,9 @@ impl StemApp {
         }
         if let Some((serial, written)) = inbox.mix_written {
             self.mix_written(serial, written);
+        }
+        if let Some(input) = inbox.memory_input {
+            self.memory_input_read(input);
         }
         if let Some(stored) = inbox.stored {
             self.reading_stems = false;
@@ -3798,6 +3958,102 @@ mod tests {
         assert_eq!(app.lanes.len(), 24);
     }
 
+    /// The samples of `pcm`, read whole: each read is ready at once.
+    fn read_whole(pcm: &dyn engine::mixdown::Pcm) -> (Vec<f32>, Vec<f32>) {
+        let (mut l, mut r) = (vec![0.0; pcm.frames()], vec![0.0; pcm.frames()]);
+        assert!(pcm.ready(0, pcm.frames()));
+        pcm.read(0, &mut l, &mut r);
+        (l, r)
+    }
+
+    /// D9 of the M7 plan: the memory path's input is the lane that holds
+    /// the original, as it is, else the mix of the sources, as
+    /// `mix_of_sources` makes it.  It reads storage only when a lane that
+    /// it takes is stored.
+    #[test]
+    fn the_memory_path_input_is_the_original_or_the_mix_of_the_sources() {
+        let loud = |name: &str, level: f32| Stem {
+            name: name.into(),
+            left: vec![level, -level, 0.5, 0.25].into(),
+            right: vec![0.5, level, -level, 0.0].into(),
+        };
+        // One source, louder than full scale, and classic drums.
+        let one = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![loud("acme", 1.5), loud("classic drums", 0.75)],
+        };
+        let shown = Shown::in_memory(one.clone());
+        let (input, stored) = separation_input(&shown, shown.audio());
+        assert!(!stored);
+        assert_eq!(
+            read_whole(input.as_ref()),
+            (
+                one.stems[0].left.as_slice().to_owned(),
+                one.stems[0].right.as_slice().to_owned()
+            )
+        );
+        // Several sources: their mix, clamped.
+        let several = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![
+                loud("bass", 0.75),
+                loud("drums", 0.5),
+                loud("classic drums", 0.9),
+            ],
+        };
+        let shown = Shown::in_memory(several.clone());
+        let (input, stored) = separation_input(&shown, shown.audio());
+        assert!(!stored);
+        assert_eq!(read_whole(input.as_ref()), mix_of_sources(&several));
+        // A stored source reads storage; a stored derived lane does not.
+        let store = lane_store::MemoryStore::new();
+        let stored_lane = |path: &str| LaneAudio::Stored {
+            file: store_meta::LaneFile::f32(path.into(), 4),
+            overview: std::rc::Rc::new(lanes::Overview {
+                columns: vec![(0.0, 0.0); 4],
+                scale: 1.0,
+            }),
+            store: std::rc::Rc::clone(&store) as std::rc::Rc<dyn lane_store::LaneStore>,
+        };
+        let mut audio = shown.audio();
+        audio[2] = stored_lane("s/classic.wav");
+        assert!(
+            !separation_input(&shown, audio.clone()).1,
+            "classic drums is not in the mix"
+        );
+        audio[1] = stored_lane("s/decoded/1.f32");
+        assert!(separation_input(&shown, audio).1, "a stored source");
+    }
+
+    /// D10 of the M7 plan: when the memory path's input is the session's
+    /// mix file, the mix is kept, so `write_mix` never reads the file it
+    /// writes.
+    #[test]
+    fn the_mix_is_kept_when_the_input_is_the_mix_file() {
+        let song = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("acme", 0.25), stem("classic drums", 0.5)],
+        };
+        let mix = "sessions/1/mix.f32";
+        let from_mix = Shown::with_files(song.clone(), vec![file(mix), None]);
+        assert!(input_is_the_mix_file(&from_mix, mix));
+        let from_source =
+            Shown::with_files(song.clone(), vec![file("sessions/1/decoded/0.f32"), None]);
+        assert!(!input_is_the_mix_file(&from_source, mix));
+        assert!(!input_is_the_mix_file(&Shown::in_memory(song), mix));
+        // Several sources: the input is their mix, never one file.
+        let several = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("bass", 0.25), stem("drums", 0.5)],
+        };
+        let shown = Shown::with_files(several, vec![file(mix), file("sessions/1/decoded/1.f32")]);
+        assert!(!input_is_the_mix_file(&shown, mix));
+    }
+
     #[test]
     fn spectrograms_off_make_no_texture() {
         let mut app = StemApp {
@@ -4377,6 +4633,7 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             if pending.separation_start.is_some()
                 || pending.stored.is_some()
                 || pending.mix_written.is_some()
+                || pending.memory_input.is_some()
             {
                 break;
             }
@@ -4955,6 +5212,62 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             status.contains("QuotaExceededError: the disk is full"),
             "{status}"
         );
+    }
+
+    /// D9 of the M7 plan: on the memory path, a song whose input is in
+    /// browser storage posts the input read from its file.  The file holds
+    /// other samples than the page's memory, so the post shows which were
+    /// read.
+    #[wasm_bindgen_test]
+    async fn the_memory_path_reads_a_stored_input() {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        let path = format!("sessions/{id}/decoded/9.f32");
+        let file_side: Vec<f32> = tone(FRAMES).iter().map(|v| -0.5 * v).collect();
+        let bytes: Vec<u8> = file_side
+            .iter()
+            .flat_map(|v| [v.to_le_bytes(), v.to_le_bytes()])
+            .flatten()
+            .collect();
+        store::test_write(&path, &bytes).await.expect("planted");
+        let song = app
+            .song
+            .as_ref()
+            .and_then(|s| s.as_song())
+            .expect("in memory");
+        let file = store_meta::LaneFile::f32(path, FRAMES);
+        app.load_song(Shown::with_files(song, vec![Some(file)]));
+        press_separate(&mut app).await;
+        posts.set_length(0);
+        deliver_unstored(&mut app, "QuotaExceededError: the disk is full");
+        settle(&mut app).await;
+        let posted: Vec<(Vec<f32>, Vec<f32>)> = posts
+            .iter()
+            .map(
+                |data| match ToWorker::from_js(&data).expect("a request").request {
+                    Request::Separate {
+                        mix: stem_protocol::Mix::Arrays { left, right },
+                        session: None,
+                    } => {
+                        let (mut l, mut r) = (
+                            vec![0.0; left.length() as usize],
+                            vec![0.0; right.length() as usize],
+                        );
+                        left.copy_to(&mut l);
+                        right.copy_to(&mut r);
+                        (l, r)
+                    }
+                    other => panic!("not a separation in memory: {other:?}"),
+                },
+            )
+            .collect();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(posted.len(), 1, "one request, on the memory path");
+        assert!(
+            posted[0].0 == file_side && posted[0].1 == file_side,
+            "the file's samples"
+        );
+        assert!(status.contains("Separating in memory"), "{status}");
     }
 
     #[wasm_bindgen_test]

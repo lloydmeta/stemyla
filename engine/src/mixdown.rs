@@ -68,6 +68,12 @@ pub trait Pcm {
     fn ready_ranges(&self, ranges: &[(usize, usize)]) -> bool {
         ranges.iter().all(|&(at, frames)| self.ready(at, frames))
     }
+
+    /// Why a read of storage failed, if one did: the source then gave
+    /// silence for it.  Audio in memory never fails.
+    fn failed(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A song's stems at the gains of a recipe, summed and clamped to ±1, as
