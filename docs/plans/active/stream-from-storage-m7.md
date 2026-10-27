@@ -309,6 +309,8 @@ The parent's M7 section, item by item:
   * 5-5: that browser test saves as FLAC and as WAV, and the status must not say "Saved".  The mutant that skips the check for a WAV fails it.
   * 5-2, 5-3, 5-4: TD-33 and TD-53.  5-6, 5-7: text and a Decision log entry.  `web-test --browser chrome`: 250 tests pass.
 
+* [x] 2026-10-28: review round 5 (at `0a3e70a`): 5 reviewers and 4 validators, 594,815 tokens, 29.4 wall minutes.  3 should-fix confirmed (5-1, a failed save read to the song's end before it stopped; 5-2 and 5-4, tech-debt text) and 1 pre-existing (5-3), and 3 nits, all fixed in `d850a58`.  Mutants: none in the diff.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 6 checks these fixes.
+
 ## Surprises and discoveries
 
 None yet.
