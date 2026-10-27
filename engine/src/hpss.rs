@@ -857,10 +857,10 @@ mod tests {
             let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
             let want_l = bits(&hpss(&left, &cfg).percussive);
             let want_r = bits(&hpss(&right, &cfg).percussive);
-            let blocks: &[usize] = match frames {
-                0..=2_048 => &[1, 511, 4_096, 32_768],
-                2_049..=100_000 => &[511, 32_768],
-                _ => &[32_768],
+            let blocks: &[usize] = if frames <= 2_048 {
+                &[1, 511, 4_096, 32_768]
+            } else {
+                &[511, 32_768]
             };
             for &block in blocks {
                 let (l, r) = block_percussive(&left, &right, block);
@@ -888,7 +888,12 @@ mod tests {
     #[test]
     fn a_block_hpss_keeps_its_memory_flat() {
         const MIB: usize = 1 << 20;
-        // 3 s is four blocks of 32,768 frames, and 12 s is sixteen.
+        // The block HPSS of 3 s and of 12 s peak equal (finding 2-1 of
+        // review round 2 of M7).  A song-length 16-bit buffer of 12 s is
+        // more than 1 MB, so a bound of 1 MiB would let one pass.
+        const FLAT: usize = 64 * 1024;
+        // 3 s is 4.04 blocks of 32,768 frames, and 12 s is 16.15: each ends
+        // in a part of a block.
         let (short, long) = (3 * 44_100, 12 * 44_100);
         let blocks = |frames: usize| {
             let (left, right) = (noise(frames, 3), noise(frames, 4));
@@ -933,8 +938,8 @@ mod tests {
         );
         assert_eq!((short_frames, long_frames), (short, long));
         assert!(
-            long_peak.abs_diff(short_peak) < MIB,
-            "10 s peaks {short_peak} bytes, 40 s peaks {long_peak} bytes"
+            long_peak.abs_diff(short_peak) < FLAT,
+            "3 s peaks {short_peak} bytes, 12 s peaks {long_peak} bytes"
         );
         assert!(
             whole_long > whole_short + MIB,

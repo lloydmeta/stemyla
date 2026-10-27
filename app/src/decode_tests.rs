@@ -1412,6 +1412,54 @@ async fn a_song_over_the_read_ahead_cap_opens_in_memory() {
     );
 }
 
+/// D2 of the M7 plan on the drop and pick path (finding 2-6 of review
+/// round 2): 21 sources do not fit the read-ahead buffer, so the open
+/// decodes them on the page.  No decode is posted, every lane has samples,
+/// and the note says why.
+#[wasm_bindgen_test]
+async fn a_drop_over_the_read_ahead_cap_opens_in_memory() {
+    store::test_wipe().await;
+    let chosen: Chosen = (0..21)
+        .map(|k| wav_file(&format!("lloyd {k}.wav"), 100, k))
+        .collect();
+    let fake = Fake::new();
+    let opened = {
+        let client = fake.client.clone();
+        background(async move { open_chosen_now(&chosen, &client).await })
+    };
+    // A decode that is posted waits for a reply: stop at the first post.
+    for _ in 0..250 {
+        if opened.borrow().is_some() || fake.posts.length() > 0 {
+            break;
+        }
+        dt_sleep(20).await;
+    }
+    let posts = fake.posts.length();
+    assert_eq!(posts, 0, "no decode is posted");
+    let opened = output(&opened).await;
+    store::test_wipe().await;
+    let opened = opened.expect("opened");
+    assert_eq!(opened.song.lanes.len(), 21);
+    assert!(
+        opened
+            .song
+            .lanes
+            .iter()
+            .all(|l| l.audio.samples().is_some()),
+        "in memory"
+    );
+    assert!(
+        opened
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("do not fit the read-ahead buffer")
+                && n.starts_with("Decoded on this page: ")
+                && !n.contains("browser storage failed")),
+        "{:?}",
+        opened.note
+    );
+}
+
 /// D11 of the M7 plan and MEM-1's exception: a stem whose file is not
 /// complete (a `.part`) is read whole into memory only for a song of at
 /// most the memory path's frames; for a longer song, the open fails.
@@ -1561,6 +1609,54 @@ async fn a_late_drop_does_not_show_over_a_newer_song() {
         assert_eq!(current, Some(stored_id), "pick {pick}: it stays current");
         assert!(late_kept, "pick {pick}: the late open's session is kept");
     }
+}
+
+/// Finding 2-17 of review round 2 of M7: an older pick that ends does not
+/// clear the "Opening…" text that a newer pick queued.
+#[wasm_bindgen_test]
+async fn an_older_pick_does_not_clear_the_text_of_a_newer_one() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    let (ctx, opens) = (egui::Context::default(), app.opens.clone());
+    let client = fake.client.clone();
+    open_picked(
+        vec![wav_file("lloyd.wav", 100, 1)],
+        &client,
+        &app.pending,
+        &ctx,
+        &opens,
+    );
+    fake.request(0).await;
+    let newer = vec![wav_file("acme.wav", 100, 2)];
+    let opening = opening_text(&newer);
+    open_picked(newer, &client, &app.pending, &ctx, &opens);
+    decode_ends(&fake, 0).await;
+    for _ in 0..250 {
+        if app.pending.borrow().song.is_some() {
+            break;
+        }
+        dt_sleep(20).await;
+    }
+    let status = app.pending.borrow().status.clone();
+    // The newer pick's decode ends too, so that no write stays held for
+    // the next tests.
+    fake.request(1).await;
+    decode_ends(&fake, 1).await;
+    for _ in 0..250 {
+        if store::writes_in_progress() == 0 {
+            break;
+        }
+        dt_sleep(20).await;
+    }
+    let writes = store::writes_in_progress();
+    drop(app);
+    store::test_wipe().await;
+    assert_eq!(status, Some(opening), "the newer pick's text stays");
+    assert_eq!(writes, 0, "no write stays held");
 }
 
 /// D12: Demo takes a token, so a drop that ends after it does not

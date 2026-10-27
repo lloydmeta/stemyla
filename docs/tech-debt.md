@@ -267,7 +267,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `
 * `run` in `xtask/src/roformer_cli.rs`, which needs the model weights and an audio file.
 * the body of `e2e decode` and its helper `drop_and_open` (`xtask/src/e2e/decode.rs`), which run only in a browser; review round 1 of M5 found mutants in both that no `cargo test` kills.  Its checks have unit tests.
 * the body of `e2e playback` (`run` in `xtask/src/e2e/playback.rs`), which runs only in a browser.  Its checks, the click positions, the target and the wait have unit tests (review round 1 of M6).
-* the body of `e2e old-session` (`run` in `xtask/src/e2e/old_session.rs`) and the wait of `memory-budget` for the stems shown, which run only in a browser.  Their checks have unit tests (M7).
+* the body of `e2e old-session` (`run` in `xtask/src/e2e/old_session.rs`) and the wait of `memory-budget` for the stems shown, which run only in a browser.  Their checks, the conversion of the memory read to MB and the choice of the larger read have unit tests (M7).  A mutant that replaces `run` with `Ok(())` lives in `cargo test` (mutant 2-27 of review round 2 of M7).
 * `run` in `xtask/src/e2e.rs` and `main` in `app/src/main.rs`, entry points that no test calls (review round 1 of M6, mutants 1-29 and 1-40).
 * `StemApp::log_audio_stats` in `app/src/lib.rs`, which only writes log lines; the app's native tests install no logger to read them.  `e2e smoke` and `e2e playback` read its lines (review round 1 of M6, mutant 1-27).  A browser test could read them with the test logger (`TestLog`, `start_log`, `logged`) of `app/src/decode_tests.rs`.
 * `memory_budget` in `xtask/src/e2e.rs` after M5's checks of the open, which needs a GPU and the weights (review round 1 of M5).
@@ -401,7 +401,7 @@ The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The
 
 ### TD-54: memory grows with the song, so a long song can stop the tab on an iPhone
 
-This entry concerns MEM-4.
+This entry concerns MEM-1 and MEM-4.
 
 This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 minutes stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 650 MB for that song.  The page's song and mix, the worker's mix and the stems grow by about 190 MB per minute of song.  The fixed part is at most about 1720 MB, so at most about 1.7 minutes fit.  The 30-second demo song separates.  Source: `plans/active/stream-from-storage.md` (Context).
 
@@ -448,7 +448,7 @@ A loop set behind the head is a held seek: the player keeps its old loop until t
 
 ### TD-58: a stored song whose lanes do not fit the read-ahead buffer decodes on the page
 
-This entry concerns MEM-4.
+This entry concerns MEM-1 and MEM-4.
 
 D2 of `plans/active/stream-from-storage-m7.md` sends a stored song whose lanes do not fit the read-ahead buffer at its minimum slots to the memory path, where the page decodes it.  Such a song has more than about 20 sources and no `stem` lines.  `store_meta::open_formats` and `store_meta::fits_read_ahead` make the choice (step 3d of that plan), and the open flows use it from step 7.  A song decoded on the page has no length limit but `engine::decode::MAX_DECODED_BYTES` (decision 0013).  So a long song of that kind can stop the tab on an iPhone.
 

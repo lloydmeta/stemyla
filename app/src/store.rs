@@ -1512,10 +1512,9 @@ async fn read_overview(path: &str, frames: usize) -> Result<std::rc::Rc<crate::l
 /// frames, as lanes (D11 of the M7 plan), and the overview of their mix
 /// when every stem is complete.  A complete stem WAV is a stored lane: its
 /// header (at most 4 KiB read) and its overview (D7), or an empty overview
-/// when none can be made.  A stem whose file is
-/// not complete (`.part`, or a wrong header) is read whole into memory
-/// only on the memory path's rules: a song of at most `limit` frames; else
-/// it is an error.
+/// when none can be made.  A stem whose file is not complete (`.part`, or
+/// a wrong header) is read whole into memory only on the memory path's
+/// rules: a song of at most `limit` frames; else it is an error.
 pub async fn stem_lanes(
     id: &str,
     names: &[String],
@@ -1616,7 +1615,8 @@ pub fn stem_paths(id: &str, names: &[String]) -> Vec<String> {
 
 /// A stored session, as the page opens it (D11).
 pub enum StoredSong {
-    /// Its session files are complete: read them back (D10).
+    /// Its session files are complete: the page shows them as stored lanes
+    /// (D11 of the M7 plan).
     Complete {
         meta: Meta,
         sources: Vec<PlannedSource>,

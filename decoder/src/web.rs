@@ -216,7 +216,7 @@ async fn handle(msg: &JsValue) -> DecodeReply {
     let mut bufs = BUFFERS.with_borrow_mut(Option::take).unwrap_or_default();
     let kind = req.kind();
     log(format!(
-        "decoder: memory: decoder wasm {:.0} MB at the {kind}'s start",
+        "decoder: memory: decoder wasm {:.0} MB at the start of the {kind} request",
         wasm_mb()
     ));
     let reply = match &req {
@@ -242,7 +242,7 @@ async fn handle(msg: &JsValue) -> DecodeReply {
     files_forget();
     BUFFERS.with_borrow_mut(|slot| *slot = Some(bufs));
     log(format!(
-        "decoder: memory: decoder wasm {:.0} MB at the {kind}'s end",
+        "decoder: memory: decoder wasm {:.0} MB at the end of the {kind} request",
         wasm_mb()
     ));
     reply

@@ -30,7 +30,7 @@ const ON_THE_PAGE: &str = "decoder: decoding on the page";
 const STORED_OPEN: &str = "decoder: a complete session opens as stored lanes";
 
 /// The decode worker's line as a decode starts.
-const DECODE_START: &str = "at the decode's start";
+const DECODE_START: &str = "at the start of the decode request";
 
 /// The session files of a song as the decode worker writes them, from the
 /// native decode of the same files.
@@ -667,8 +667,8 @@ mod tests {
             "[1.1s] console.info: [app] Restored \"song\" from this browser.",
         ]);
         let decoded = lines(&[
-            "[1.0s] console.info: decoder: memory: decoder wasm 6 MB at the decode's start",
-            "[1.4s] console.info: decoder: memory: decoder wasm 6 MB at the decode's end",
+            "[1.0s] console.info: decoder: memory: decoder wasm 6 MB at the start of the decode request",
+            "[1.4s] console.info: decoder: memory: decoder wasm 6 MB at the end of the decode request",
             "[1.5s] console.info: [app] Restored \"song\" from this browser.",
         ]);
         assert_eq!(failing(&stored_open_checks(&stored)), Vec::<String>::new());

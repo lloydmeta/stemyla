@@ -991,9 +991,11 @@ async fn a_stored_song_with_no_read_ahead_plays_silence_and_says_so() {
     let restored = app.status.clone();
     app.load_demo();
     store::test_remove(&format!("sessions/{id}")).await;
-    assert!(
-        restored.starts_with("Restored \"lloyd\"") && restored.contains("play silent"),
-        "{restored}"
+    // Finding 2-4 of review round 2 of M7: the inbox status, the open's
+    // note, then the note of D2, in that order.
+    assert_eq!(
+        restored,
+        format!("Restored \"lloyd\" from this browser.  acme  {PLAYS_SILENT}")
     );
     assert!(no_buffer, "no read-ahead buffer");
     assert!(no_samples, "no lane has samples");

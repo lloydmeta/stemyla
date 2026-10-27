@@ -84,16 +84,25 @@ const MEMORY: &str = "const done = arguments[arguments.length - 1];
     (async () => (await window.wasmBindings.default()).memory.buffer.byteLength)()
       .then(done, (e) => done(`error: ${e}`));";
 
-/// The page's WebAssembly memory in MB, read with [`MEMORY`].
-fn page_memory_mb(p: &mut Page) -> Result<Option<f64>> {
-    let bytes = p
-        .session
-        .execute_async(MEMORY, json!([]), Duration::from_secs(30))?;
-    Ok(bytes.as_f64().map(|b| b / 1e6))
+/// The page's WebAssembly memory in MB, from the reply of [`MEMORY`] (a
+/// number of bytes).  `None` for any other reply, such as an error text.
+pub(super) fn memory_mb(reply: &serde_json::Value) -> Option<f64> {
+    reply.as_f64().map(|bytes| bytes / 1e6)
 }
 
+/// The memory of a restore: the larger of the read after the first
+/// `playback:` line and the read 2 s later (finding 1-13 of review round 1
+/// of M7).  `None` when a read is missing, so the checks fail.
+pub(super) fn larger_read(first: Option<f64>, later: Option<f64>) -> Option<f64> {
+    first.zip(later).map(|(first, later)| first.max(later))
+}
+
+/// How long the driver waits for [`MEMORY`].
+const MEMORY_WAIT: Duration = Duration::from_secs(30);
+
 /// What one restore gave: the first `playback:` line after Play, and the
-/// page's WebAssembly memory after it, in MB.
+/// page's WebAssembly memory, in MB: the larger of two reads
+/// ([`larger_read`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Restore {
     pub seconds: u32,
@@ -171,11 +180,10 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         p.click(o.play_x, "Play")?;
         let first = p.wait_for(played, 60, |l| playback_line(l).is_some())?;
         let first_line = first.as_deref().and_then(playback_line);
-        let at_first = page_memory_mb(&mut p)?;
+        let at_first = memory_mb(&p.session.execute_async(MEMORY, json!([]), MEMORY_WAIT)?);
         p.idle(2.0)?;
-        let after_play = page_memory_mb(&mut p)?;
-        // Finding 1-13 of review round 1 of M7: the larger of two reads.
-        let memory_mb = at_first.zip(after_play).map(|(a, b)| a.max(b));
+        let after_play = memory_mb(&p.session.execute_async(MEMORY, json!([]), MEMORY_WAIT)?);
+        let memory_mb = larger_read(at_first, after_play);
         p.note(&format!(
             "old-session: the {seconds}-second song: page memory {at_first:?} MB after the first playback line, {after_play:?} MB 2 s later"
         ));
@@ -230,6 +238,19 @@ mod tests {
             .iter()
             .filter(|(ok, _)| !ok)
             .count()
+    }
+
+    /// Finding 2-3 of review round 2 of M7.
+    #[test]
+    fn the_memory_reads_give_megabytes_and_the_larger_read() {
+        assert_eq!(memory_mb(&json!(613 * 65_536)), Some(40.173568));
+        assert_eq!(memory_mb(&json!(0)), Some(0.0));
+        assert_eq!(memory_mb(&json!("error: TypeError")), None);
+        assert_eq!(memory_mb(&serde_json::Value::Null), None);
+        assert_eq!(larger_read(Some(37.0), Some(40.2)), Some(40.2));
+        assert_eq!(larger_read(Some(40.4), Some(40.2)), Some(40.4));
+        assert_eq!(larger_read(None, Some(40.2)), None, "a missing read");
+        assert_eq!(larger_read(Some(40.2), None), None, "a missing read");
     }
 
     #[test]

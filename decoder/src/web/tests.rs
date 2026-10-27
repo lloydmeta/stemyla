@@ -382,8 +382,8 @@ async fn a_wav_a_flac_and_an_mp3_decode_into_session_files() {
         assert!(
             lines.len() == 2
                 && lines[0].starts_with("decoder: memory: decoder wasm ")
-                && lines[0].ends_with(" MB at the decode's start")
-                && lines[1].ends_with(" MB at the decode's end"),
+                && lines[0].ends_with(" MB at the start of the decode request")
+                && lines[1].ends_with(" MB at the end of the decode request"),
             "{ext}: {lines:?}"
         );
     }
@@ -744,8 +744,12 @@ async fn the_queue_takes_each_request_in_turn() {
     let kinds: Vec<String> = replies
         .iter()
         .map(|r| match r {
-            DecodeReply::Log(text) if text.ends_with("at the decode's start") => "start".into(),
-            DecodeReply::Log(text) if text.ends_with("at the decode's end") => "end".into(),
+            DecodeReply::Log(text) if text.ends_with("at the start of the decode request") => {
+                "start".into()
+            }
+            DecodeReply::Log(text) if text.ends_with("at the end of the decode request") => {
+                "end".into()
+            }
             DecodeReply::Decoded { frames, .. } => format!("decoded {frames}"),
             other => other.kind().to_string(),
         })

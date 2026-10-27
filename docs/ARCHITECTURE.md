@@ -235,7 +235,7 @@ flowchart TD
   ENC -->|"Reply::Flac or Mp3"| DL2["store::download_blob or download"]
 ```
 
-The page mixes, not the worker.  On the memory path, the stems are on the page, and the worker does not keep them.  To mix in the worker, the page would copy every stem to JS.  On the storage path, the page reads the stem files in blocks.  The stem worker cannot take `engine`, which mixes them: `app` and `stem-worker` may share only `stem-protocol` (LAYER-1).  M8 of `plans/active/stream-from-storage.md` moves the sinks.
+The page mixes, not the worker.  On the memory path, the stems are on the page, and the worker does not keep them.  To mix in the worker, the page would copy every stem to JS.  On the storage path, the page reads the stem files in blocks.  `stem-worker` cannot take `engine`, which mixes them: `app` and `stem-worker` may share only `stem-protocol` (LAYER-1).  M8 of `plans/active/stream-from-storage.md` writes the saved files to browser storage.
 
 ## Playback
 

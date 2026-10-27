@@ -1314,8 +1314,16 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The most that the page's or the worker's WebAssembly memory may grow
-/// during a separation (D9 of M3, step 4 of M4): the tolerance of M10.
+/// The tolerance of M10 for memory that must not grow with the song, in
+/// MB.  The checks that use it:
+/// * the page's and the worker's growth during a separation (D9 of M3,
+///   step 4 of M4: [`growth_check`]);
+/// * the page's and the decode worker's growth during an open (D12 of M5:
+///   [`open_growth_check`]);
+/// * the page's growth to show the stems, the 4-minute song against the
+///   1-minute song (M7: [`shown_growth_check`]);
+/// * the page's memory after the restore of the 5-minute session against
+///   the 1-minute session (M7: `old_session::old_session_checks`).
 pub(super) const MAX_GROWTH_MB: f64 = 4.0;
 
 /// Whether `line` ends the wait of `memory-budget` for a separation: its
@@ -1362,7 +1370,7 @@ fn open_page_growth(log: &[String]) -> Option<f64> {
 fn decoder_growth(log: &[String]) -> Option<f64> {
     let at = |when: &str| {
         log.iter()
-            .find(|l| l.contains(&format!("at the decode's {when}")))
+            .find(|l| l.contains(&format!("at the {when} of the decode request")))
             .and_then(|l| number_after(l, "decoder wasm "))
     };
     Some(at("end")? - at("start")?)
@@ -2305,8 +2313,8 @@ mod tests {
     fn open_log() -> Vec<String> {
         [
             "[1.0s] console.info: [app] decoder: memory: page wasm 8 MB as the open starts",
-            "[1.1s] console.info: [app::decoder::client] decoder: memory: decoder wasm 6 MB at the decode's start",
-            "[2.0s] console.info: [app::decoder::client] decoder: memory: decoder wasm 7 MB at the decode's end",
+            "[1.1s] console.info: [app::decoder::client] decoder: memory: decoder wasm 6 MB at the start of the decode request",
+            "[2.0s] console.info: [app::decoder::client] decoder: memory: decoder wasm 7 MB at the end of the decode request",
             "[2.1s] console.info: [app] decoder: memory: page wasm 9 MB as the decode ends",
             "[2.2s] console.info: [app] song kept in browser storage as session 1",
         ]
@@ -2494,8 +2502,8 @@ mod tests {
             "[3.0s] separator: chunk 2/48: 9.8 s; memory: worker wasm 246 MB, model on the GPU 699 MB, chunk buffers 280 MB, GPU buffers live 979 MB",
             "[4.0s] song: opened at 44100 Hz (88200 frames)",
             "[5.0s] separator: memory: page wasm 325 MB with the stems shown",
-            "[0.5s] decoder: memory: decoder wasm 6 MB at the decode's start",
-            "[0.9s] decoder: memory: decoder wasm 9 MB at the decode's end",
+            "[0.5s] decoder: memory: decoder wasm 6 MB at the start of the decode request",
+            "[0.9s] decoder: memory: decoder wasm 9 MB at the end of the decode request",
         ]
         .map(String::from)
         .to_vec();

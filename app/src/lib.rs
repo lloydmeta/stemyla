@@ -692,7 +692,7 @@ fn open_picked(
     decoder: &decoder::DecodeClient,
     pending: &std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: &egui::Context,
-    opens: &std::cell::Cell<u64>,
+    opens: &std::rc::Rc<std::cell::Cell<u64>>,
 ) {
     let token = next_token(opens);
     // D12 of M5: before any read or save.
@@ -700,13 +700,18 @@ fn open_picked(
     pending.borrow_mut().status = Some(opening_text(&chosen));
     ctx.request_repaint();
     let (decoder, pending, ctx) = (decoder.clone(), pending.clone(), ctx.clone());
+    let opens = std::rc::Rc::clone(opens);
     wasm_bindgen_futures::spawn_local(async move {
         // The "Opening…" text may still be queued; the result, applied
-        // before the queued status, must not be hidden by it.
+        // before the queued status, must not be hidden by it.  Only the
+        // newest open clears it: a newer open's text stays (finding 2-17
+        // of review round 2 of M7).
         let opened = open_chosen_now(&chosen, &decoder).await;
         {
             let mut inbox = pending.borrow_mut();
-            inbox.status = None;
+            if opens.get() == token {
+                inbox.status = None;
+            }
             inbox.put_song(token, opened);
         }
         ctx.request_repaint();
@@ -762,6 +767,7 @@ async fn open_saved(
             if resetting(decoder) {
                 return Err(anyhow::anyhow!("browser storage is being reset ({why})"));
             }
+            let why = format!("browser storage failed ({why})");
             return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
         }
     };
@@ -788,14 +794,16 @@ async fn open_saved(
             Err(anyhow::anyhow!("browser storage is being reset ({why})"))
         }
         Decode::OnThePage(why) => {
+            let why = format!("browser storage failed ({why})");
             open_on_the_page(chosen, Some(id), name, started, Some(why)).await
         }
     }
 }
 
 /// The memory path of D9: reads the chosen files and decodes them on the
-/// page, as before M5.  `why`: the failure of browser storage that sent the
-/// song here, for the status line.
+/// page, as before M5.  `why`: what sent the song here, for the status
+/// line: a failure of browser storage, or lanes that do not fit the
+/// read-ahead buffer (D2 of the M7 plan, finding 2-15 of review round 2).
 #[cfg(target_arch = "wasm32")]
 async fn open_on_the_page(
     chosen: &Chosen,
@@ -818,8 +826,8 @@ async fn open_on_the_page(
         song.frames
     );
     let note = why.map(|why| {
-        log::warn!("decoder: browser storage failed: {why}");
-        format!("Opened on this page: browser storage failed ({why}).")
+        log::warn!("decoder: decoded on this page: {why}");
+        format!("Decoded on this page: {why}.")
     });
     Ok(Opened {
         note,
@@ -1525,8 +1533,10 @@ impl StemApp {
                         }
                         Err(e) => {
                             log::warn!("could not restore the stored song: {e:#}");
-                            inbox.status =
-                                Some(format!("Could not restore the stored song: {e:#}"));
+                            if opens.get() == token {
+                                inbox.status =
+                                    Some(format!("Could not restore the stored song: {e:#}"));
+                            }
                         }
                     }
                 }
@@ -2029,8 +2039,16 @@ impl StemApp {
         }
     }
 
-    /// Starts HPSS on the mix.  Natively it runs on a thread and the lane
-    /// appears when it finishes; on the web it blocks the page while it runs.
+    /// Starts classic drums: HPSS of the mix of the sources.  It takes one
+    /// of three routes (`classic_route`, D8 of the M7 plan):
+    /// * Every input lane has a session file: the decode worker makes it as
+    ///   a session file, and its lane is a stored lane.
+    /// * Every input lane is in memory: the page runs the block HPSS.  On
+    ///   the web, the page stops while it runs.  Natively, it runs on a
+    ///   thread, and the lane appears when it ends.
+    /// * Some input lanes are stored and some are in memory: for a song of
+    ///   at most `MEMORY_PATH_MAX_FRAMES` frames, the page first reads the
+    ///   stored lanes into memory.  A longer song is refused.
     pub fn start_classic_drums(&mut self) {
         let Some(shown) = self.song.clone() else {
             return;
@@ -4566,10 +4584,31 @@ mod tests {
         assert!(!input_is_the_mix_file(&shown, mix));
     }
 
-    /// D8 of the M7 plan: classic drums goes to the decode worker when
-    /// every input lane has a file, stays on the page when every input lane
-    /// is in memory, and reads the stored lanes first, or refuses, when
-    /// they are mixed.  Derived lanes are not input.
+    /// Finding 2-4 of review round 2 of M7: separated stems of a stored
+    /// song of several sources with no usable mix show with no "original"
+    /// lane, and the status line says why.
+    #[test]
+    fn stems_of_a_stored_song_with_no_mix_say_why_there_is_no_original() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        let song = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: vec![stem("bass", 0.25), stem("drums", 0.5)],
+        };
+        app.open_song(with_test_files(
+            song,
+            vec![file("s/decoded/0.f32"), file("s/decoded/1.f32")],
+        ));
+        let job = app.separation_job().expect("a job");
+        app.apply_separated(job, vec![stem("vocals", 0.1)], 1.0);
+        let names = app.song.as_ref().map(|s| s.names().join(","));
+        assert_eq!(names.as_deref(), Some("vocals"), "no original");
+        assert!(app.status.ends_with(NO_ORIGINAL), "{}", app.status);
+    }
+
     /// Review round 1 of M7, finding 1-1: the memory path takes its input
     /// from the lanes in memory, also when the stems are stored.
     #[test]
@@ -4611,6 +4650,10 @@ mod tests {
         assert!(input_in_memory(&stored_original).is_none());
     }
 
+    /// D8 of the M7 plan: classic drums goes to the decode worker when
+    /// every input lane has a file, stays on the page when every input lane
+    /// is in memory, and reads the stored lanes first, or refuses, when
+    /// they are mixed.  Derived lanes are not input.
     #[test]
     fn the_classic_drums_route_follows_where_the_input_lanes_are() {
         let song = Song {

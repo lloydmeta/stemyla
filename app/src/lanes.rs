@@ -612,9 +612,8 @@ pub(crate) mod tests {
 
     /// D3 of the M7 plan: a stored lane reads the samples that `read_stem`
     /// gives for a 16-bit WAV, bit for bit (through `decode_bytes` and
-    /// `padded_to`), and an f32 file as it is.  The reads
-    /// cross the end of a block and the end of the file, and none is more
-    /// than a block.
+    /// `padded_to`), and an f32 file as it is.  The reads cross the end of
+    /// a block and the end of the file, and none is more than a block.
     #[test]
     fn a_stored_lane_reads_as_its_samples() {
         let frames = 70_001;
