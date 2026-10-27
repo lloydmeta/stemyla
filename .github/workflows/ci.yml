@@ -49,7 +49,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # A new key, so the cache saves the wasm32 output too: rust-cache
           # saves only when the key it restored does not match exactly.
@@ -94,7 +94,7 @@ jobs:
           # .claude/settings.json, which needs rustfmt (and jq, which the
           # runner has).
           components: rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install ALSA headers and software Vulkan (lavapipe)
         run: |
           sudo apt-get update
@@ -131,7 +131,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: ./.github/actions/setup-trunk
         with:
           version: ${{ env.TRUNK_VERSION }}
@@ -158,7 +158,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: wasm32-unknown-unknown
       # Also caches ~/.cargo/bin, so wasm-bindgen-cli is built once per version.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # wasm-bindgen-test-runner must equal the wasm-bindgen in Cargo.lock,
       # so the version comes from there and cannot drift.
       - name: Install wasm-bindgen-test-runner at the lockfile's wasm-bindgen version
@@ -214,7 +214,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: ./.github/actions/setup-trunk
         with:
           version: ${{ env.TRUNK_VERSION }}
