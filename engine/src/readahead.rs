@@ -70,6 +70,22 @@ pub fn pcm16_to_f32(sample: i16) -> f32 {
     f32::from(sample) / 32_768.0
 }
 
+/// Decodes the whole frames at the start of `bytes`, a run of a lane file
+/// in `format`, into `left` and `right`, as the read-ahead buffer converts
+/// them.  Gives the frames decoded: at most `left.len()`.
+pub fn decode_frames(
+    format: LaneFormat,
+    bytes: &[u8],
+    left: &mut [f32],
+    right: &mut [f32],
+) -> usize {
+    let frames = (bytes.len() / format.bytes_per_frame()).min(left.len());
+    for k in 0..frames {
+        (left[k], right[k]) = frame_at(format, bytes, k);
+    }
+    frames
+}
+
 /// The frame `k` of a block of bytes, as `(left, right)`.
 fn frame_at(format: LaneFormat, bytes: &[u8], k: usize) -> (f32, f32) {
     match format {

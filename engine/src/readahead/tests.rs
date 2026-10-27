@@ -873,3 +873,29 @@ fn a_seek_into_a_slot_being_refilled_holds() {
     );
     assert!(same, "the old position, then the target, as in memory");
 }
+
+/// `decode_frames` converts as the read-ahead buffer does, and stops at
+/// the whole frames of its bytes or the length of its output.
+#[test]
+fn decode_frames_converts_whole_frames_as_the_buffer_does() {
+    let mut f32_bytes = Vec::new();
+    for v in [0.5f32, -0.25, 1.5, -2.0] {
+        f32_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    f32_bytes.push(7); // part of a frame
+    let (mut l, mut r) = ([9.0f32; 3], [9.0f32; 3]);
+    assert_eq!(
+        decode_frames(LaneFormat::F32, &f32_bytes, &mut l, &mut r),
+        2
+    );
+    assert_eq!((l, r), ([0.5, 1.5, 9.0], [-0.25, -2.0, 9.0]));
+
+    let mut pcm16 = Vec::new();
+    for v in [16_384i16, -32_768, 1, -1, 3, 4] {
+        pcm16.extend_from_slice(&v.to_le_bytes());
+    }
+    let (mut l, mut r) = ([9.0f32; 2], [9.0f32; 2]);
+    assert_eq!(decode_frames(LaneFormat::Pcm16, &pcm16, &mut l, &mut r), 2);
+    assert_eq!(l, [0.5, pcm16_to_f32(1)]);
+    assert_eq!(r, [-1.0, pcm16_to_f32(-1)]);
+}

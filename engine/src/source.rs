@@ -83,6 +83,23 @@ impl StemSource for MemorySource {
     fn hint(&self, _hint: Hint) {}
 }
 
+/// A lane that plays silence: a stored lane when no read-ahead buffer
+/// holds it (D2 of the M7 plan).  It never falls back to samples.
+pub struct SilentSource;
+
+impl StemSource for SilentSource {
+    fn read(&self, _from: u64, left: &mut [f32], right: &mut [f32]) {
+        left.fill(0.0);
+        right.fill(0.0);
+    }
+
+    fn ready(&self, _from: u64, _frames: usize) -> bool {
+        true
+    }
+
+    fn hint(&self, _hint: Hint) {}
+}
+
 /// One memory source for each stem of `song`, in its order, with no copy.
 pub fn memory_sources(song: &Song) -> Vec<Arc<dyn StemSource>> {
     song.stems
@@ -167,6 +184,14 @@ pub fn next_run(p: u64, frames: u64, looping: Option<(u64, u64)>, xf: u64) -> Ru
 mod tests {
     use super::*;
     use crate::song::Stem;
+
+    #[test]
+    fn a_silent_source_reads_silence() {
+        let (mut l, mut r) = ([0.5f32; 4], [-0.5f32; 4]);
+        assert!(SilentSource.ready(0, 4));
+        SilentSource.read(3, &mut l, &mut r);
+        assert_eq!((l, r), ([0.0; 4], [0.0; 4]));
+    }
 
     #[test]
     fn memory_sources_share_the_stems() {

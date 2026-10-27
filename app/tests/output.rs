@@ -8,7 +8,7 @@
 use app::lanes::Shown;
 use app::{Output, StemApp};
 use engine::{Song, Stem};
-use std::sync::Arc;
+use std::rc::Rc;
 
 fn song(rate: u32) -> Song {
     let frames = rate as usize / 10;
@@ -35,12 +35,12 @@ fn opening_a_song_frees_the_one_it_replaces() {
     let mut app = silent_app();
     app.open_memory_song(song(44_100));
     assert!(matches!(app.output, Some(Output::Silent(_))));
-    let first = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let first = Rc::downgrade(app.song.as_ref().expect("a song"));
 
     app.open_memory_song(song(44_100));
     assert!(first.upgrade().is_none(), "the first song is freed");
 
-    let second = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let second = Rc::downgrade(app.song.as_ref().expect("a song"));
     app.open_memory_song(song(48_000));
     assert!(second.upgrade().is_none(), "a song at another rate too");
     match &app.output {
@@ -53,7 +53,7 @@ fn opening_a_song_frees_the_one_it_replaces() {
 fn reloading_the_shown_song_frees_the_previous_copy() {
     let mut app = silent_app();
     app.load_song(Shown::in_memory(song(44_100)));
-    let before = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let before = Rc::downgrade(app.song.as_ref().expect("a song"));
     app.load_song(Shown::in_memory(song(44_100)));
     assert!(before.upgrade().is_none());
     assert!(app.song.is_some());

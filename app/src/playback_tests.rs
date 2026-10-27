@@ -486,7 +486,13 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     let names: Vec<String> = opened.song.names().into_iter().map(String::from).collect();
     let all_stored = opened.song.files().iter().all(Option::is_some);
     let original_file = opened.song.files().last().cloned().flatten();
-    let original = opened.song.as_song().stems.pop().expect("an original");
+    let original = opened
+        .song
+        .as_song()
+        .expect("in memory")
+        .stems
+        .pop()
+        .expect("an original");
     let (_, part_file) = store::read_stem(&part, "bass", frames).await.expect("read");
     let mut app = StemApp {
         want_device: false,

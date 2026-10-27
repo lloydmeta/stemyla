@@ -5,7 +5,7 @@
 
 use app::{Output, StemApp};
 use engine::{Song, Stem};
-use std::sync::Arc;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
@@ -65,7 +65,7 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
     app.open_memory_song(song(44_100));
     assert_eq!(live_rate(&app), Some(44_100), "{}", app.status);
     let opened = engine::live::opened();
-    let first = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let first = Rc::downgrade(app.song.as_ref().expect("a song"));
 
     app.open_memory_song(song(44_100));
     assert!(first.upgrade().is_none(), "the first song is freed");
@@ -76,7 +76,7 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
     sleep(300).await;
     assert!(callbacks(&app) > 0, "the kept output renders the new song");
 
-    let second = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let second = Rc::downgrade(app.song.as_ref().expect("a song"));
     app.open_memory_song(song(48_000));
     assert!(second.upgrade().is_none(), "the second song is freed");
     assert_eq!(
@@ -86,7 +86,7 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
     );
     assert_eq!(live_rate(&app), Some(48_000));
 
-    let third = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let third = Rc::downgrade(app.song.as_ref().expect("a song"));
     app.song = None;
     app.output = None;
     assert!(
@@ -109,7 +109,7 @@ async fn an_output_left_behind_by_a_busy_page_is_replaced() {
         return;
     }
     let opened = engine::live::opened();
-    let first = Arc::downgrade(app.song.as_ref().expect("a song"));
+    let first = Rc::downgrade(app.song.as_ref().expect("a song"));
     busy(600);
     app.open_memory_song(song(44_100));
     assert_eq!(

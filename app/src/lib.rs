@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering::Relaxed;
 pub mod assemble;
 pub mod decoder;
 pub mod export;
+pub mod lane_store;
 pub mod lanes;
 #[cfg(target_arch = "wasm32")]
 pub mod picker;
@@ -48,6 +49,49 @@ pub fn mix_of_sources(song: &Song) -> (Vec<f32>, Vec<f32>) {
     let lefts: Vec<&[f32]> = src.iter().map(|s| s.left.as_slice()).collect();
     let rights: Vec<&[f32]> = src.iter().map(|s| s.right.as_slice()).collect();
     (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
+}
+
+/// The lanes of `song` that are not derived, as a song that shares their
+/// samples (MEM-1): the input of `mix_of_sources` and of classic drums.
+/// `None` when one of them has no samples in memory.
+fn sources_in_memory(song: &Shown) -> Option<Song> {
+    let stems = song
+        .lanes
+        .iter()
+        .filter(|lane| !DERIVED.contains(&lane.name.as_str()))
+        .map(|lane| {
+            let (left, right) = lane.audio.samples()?;
+            Some(Stem {
+                name: lane.name.clone(),
+                left: left.clone(),
+                right: right.clone(),
+            })
+        })
+        .collect::<Option<Vec<Stem>>>()?;
+    Some(Song {
+        sample_rate: song.sample_rate,
+        frames: song.frames,
+        stems,
+    })
+}
+
+/// One source for each lane of `song`, for the lanes that the read-ahead
+/// buffer does not play: a lane in memory shares its samples (MEM-1), and
+/// a stored lane plays silence; it never falls back to samples (D2 of the
+/// M7 plan).
+fn memory_or_silent_sources(song: &Shown) -> Vec<Arc<dyn engine::source::StemSource>> {
+    song.lanes
+        .iter()
+        .map(|lane| -> Arc<dyn engine::source::StemSource> {
+            match lane.audio.samples() {
+                Some((left, right)) => Arc::new(engine::source::MemorySource::new(
+                    left.clone(),
+                    right.clone(),
+                )),
+                None => Arc::new(engine::source::SilentSource),
+            }
+        })
+        .collect()
 }
 
 /// The lane that already holds a song's original recording: its "original"
@@ -117,7 +161,9 @@ pub type LaneFiles = Vec<Option<store_meta::LaneFile>>;
 /// [`with_original`] of a shown song: the stems, each with its file in
 /// `stem_files`, then the "original" lane.  It takes the audio of the
 /// source lane that holds the original, with its file, or the mix of the
-/// sources, with `mix`, the session's usable mix file (D8 of M6).
+/// sources, with `mix`, the session's usable mix file (D8 of M6).  A song
+/// of several sources that are not all in memory gets no "original" lane
+/// (D1 of the M7 plan; step 7 gives it the session's mix).
 pub fn with_original_files(
     source: &Shown,
     stems: Vec<Stem>,
@@ -126,11 +172,11 @@ pub fn with_original_files(
 ) -> Shown {
     assert_eq!(stem_files.len(), stems.len(), "a lane file for each stem");
     let original = match original_index_of(&source.names()) {
-        Some(i) => source.lanes[i].audio.clone(),
-        None => {
-            let (left, right) = mix_of_sources(&source.as_song());
+        Some(i) => Some(source.lanes[i].audio.clone()),
+        None => sources_in_memory(source).map(|sources| {
+            let (left, right) = mix_of_sources(&sources);
             LaneAudio::with_file(left.into(), right.into(), mix)
-        }
+        }),
     };
     let song = Song {
         sample_rate: source.sample_rate,
@@ -138,10 +184,12 @@ pub fn with_original_files(
         stems,
     };
     let mut shown = Shown::with_files(song, stem_files);
-    shown.lanes.push(ShownLane {
-        name: "original".into(),
-        audio: original,
-    });
+    if let Some(audio) = original {
+        shown.lanes.push(ShownLane {
+            name: "original".into(),
+            audio,
+        });
+    }
     shown
 }
 
@@ -744,7 +792,7 @@ pub enum Output {
 
 pub struct StemApp {
     /// The shown song: the audio of each lane (D1 of the M7 plan).
-    pub song: Option<Arc<Shown>>,
+    pub song: Option<std::rc::Rc<Shown>>,
     /// Counts the songs opened (not lanes added to the shown one), so work
     /// that finishes later can tell whether its song is still the one shown.
     song_serial: u64,
@@ -1349,10 +1397,15 @@ impl StemApp {
             self.playback = None;
         }
         self.lanes_generation += 1;
-        let song = Arc::new(song);
+        let song = std::rc::Rc::new(song);
         let mut lanes = Vec::with_capacity(song.lanes.len() + 1);
-        let (ml, mr) = mix_of_sources(&song.as_song());
-        let (cols, scale) = lane_columns(&ml, &mr);
+        let (cols, scale) = match sources_in_memory(&song) {
+            Some(sources) => {
+                let (ml, mr) = mix_of_sources(&sources);
+                lane_columns(&ml, &mr)
+            }
+            None => (Vec::new(), 1.0),
+        };
         lanes.push(Lane {
             name: "mix".into(),
             stem: None,
@@ -1362,8 +1415,10 @@ impl StemApp {
             spectrogram: None,
         });
         for (i, lane) in song.lanes.iter().enumerate() {
-            let (left, right) = lane.audio.samples().expect("samples in memory");
-            let (cols, scale) = lane_columns(left, right);
+            let (cols, scale) = match lane.audio.samples() {
+                Some((left, right)) => lane_columns(left, right),
+                None => (Vec::new(), 1.0),
+            };
             lanes.push(Lane {
                 name: lane.name.clone(),
                 stem: Some(i),
@@ -1420,7 +1475,7 @@ impl StemApp {
         song: &Shown,
         params: &Arc<SharedParams>,
     ) -> Vec<Arc<dyn engine::source::StemSource>> {
-        let memory = engine::source::memory_sources(&song.as_song());
+        let memory = memory_or_silent_sources(song);
         #[cfg(target_arch = "wasm32")]
         {
             let names: Vec<String> = song.lanes.iter().map(|l| l.name.clone()).collect();
@@ -1581,7 +1636,11 @@ impl StemApp {
     /// Starts HPSS on the mix.  Natively it runs on a thread and the lane
     /// appears when it finishes; on the web it blocks the page while it runs.
     pub fn start_classic_drums(&mut self) {
-        let Some(song) = self.song.as_ref().map(|s| s.as_song()) else {
+        let Some(shown) = &self.song else {
+            return;
+        };
+        let Some(song) = sources_in_memory(shown) else {
+            self.status = "Classic drums needs the song's lanes in memory".into();
             return;
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -2077,7 +2136,13 @@ impl StemApp {
         let needed = storage_path_needs(song.frames, mix_kept);
         match separation_path(has_session, song.frames, free, needed, self.memory_limit) {
             SeparationPath::Storage if mix_kept => self.post_separation(JobStage::Storage, None),
-            SeparationPath::Storage => self.write_mix_first(Arc::new(song.as_song()), ctx),
+            SeparationPath::Storage => match song.as_song() {
+                Some(song) => self.write_mix_first(Arc::new(song), ctx),
+                None => {
+                    self.separating = None;
+                    self.status = "Separation not started: the song is not in memory".into();
+                }
+            },
             SeparationPath::Memory if has_session => self.separate_without_storage(&reason),
             SeparationPath::Memory => self.post_separation(JobStage::Memory, Some(reason)),
             SeparationPath::TooLong => {
@@ -2195,7 +2260,11 @@ impl StemApp {
                 // shrinks once grown.  The same samples become the
                 // "original" lane (see `with_original`).  A mix made here
                 // is freed before the start line below.
-                let song = song.as_song();
+                let Some(song) = song.as_song() else {
+                    self.separating = None;
+                    self.status = "Separation not started: the song is not in memory".into();
+                    return;
+                };
                 let mixed;
                 let (l, r): (&[f32], &[f32]) = match original_lane(&song) {
                     Some(lane) => (&lane.left, &lane.right),
@@ -3465,6 +3534,61 @@ mod tests {
         assert!(app.status.contains("changed"), "status: {}", app.status);
     }
 
+    /// D2 of the M7 plan: a stored lane that the read-ahead buffer does
+    /// not play plays silence; it never falls back to samples.  A lane in
+    /// memory shares its samples.  Natively, a stored song opens and its
+    /// stored lanes play silence.
+    #[test]
+    fn a_stored_lane_with_no_read_ahead_plays_silence() {
+        let store = lane_store::MemoryStore::new();
+        store.put("acme/0.f32", vec![0; 4 * 8]);
+        let stored = LaneAudio::Stored {
+            file: store_meta::LaneFile::f32("acme/0.f32".into(), 4),
+            overview: std::rc::Rc::new(lanes::Overview {
+                columns: vec![(-0.5, 0.5); 4],
+                scale: 2.0,
+            }),
+            store: store as std::rc::Rc<dyn lane_store::LaneStore>,
+        };
+        let memory = LaneAudio::Memory {
+            left: vec![0.5; 4].into(),
+            right: vec![0.25; 4].into(),
+        };
+        let shown = Shown {
+            sample_rate: 44_100,
+            frames: 4,
+            lanes: vec![
+                ShownLane {
+                    name: "bass".into(),
+                    audio: stored,
+                },
+                ShownLane {
+                    name: "drums".into(),
+                    audio: memory,
+                },
+            ],
+        };
+        let sources = memory_or_silent_sources(&shown);
+        let read = |k: usize| {
+            let (mut l, mut r) = ([9.0f32; 4], [9.0f32; 4]);
+            sources[k].read(0, &mut l, &mut r);
+            (l, r)
+        };
+        assert_eq!(read(0), ([0.0; 4], [0.0; 4]), "the stored lane is silent");
+        assert_eq!(read(1), ([0.5; 4], [0.25; 4]), "the lane in memory plays");
+
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.open_song(shown);
+        assert_eq!(app.lanes.len(), 3, "the mix lane and two lanes");
+        assert_eq!(
+            app.lane_files()[0].as_ref().map(|f| f.path.as_str()),
+            Some("acme/0.f32")
+        );
+    }
+
     #[test]
     fn spectrograms_off_make_no_texture() {
         let mut app = StemApp {
@@ -4180,7 +4304,12 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
             ));
         }
         let lines = stem_lines(&id).await;
-        let song = app.song.as_ref().expect("a song").as_song();
+        let song = app
+            .song
+            .as_ref()
+            .expect("a song")
+            .as_song()
+            .expect("in memory");
         let status = app.status.clone();
         finish(app, &id).await;
         assert_eq!(stage, Some(JobStage::Storage));
@@ -4711,7 +4840,12 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         let (mut app, posts, id) = app_with_a_stored_song().await;
         app.memory_limit = ONE_SECOND;
         plant_mix(&id, &song_mix_file(), Some(FRAMES)).await;
-        let song = app.song.as_ref().expect("a song").as_song();
+        let song = app
+            .song
+            .as_ref()
+            .expect("a song")
+            .as_song()
+            .expect("in memory");
         let file = store_meta::LaneFile::f32(store::mix_path(&id), FRAMES);
         app.load_song(Shown::with_files(song, vec![Some(file)]));
         (app, posts, id)
