@@ -335,6 +335,9 @@ The parent's M7 section, item by item:
   * With the real weights: `separate` (56 s), and `stored-stems --hashes` with M3's six hashes (18 s).
   * `memory-budget` (243 s): the 1-minute and the 4-minute songs each peak at 828 MB (page wasm 33 MB, worker wasm 57 MB, decoder wasm 6 MB, GPU live 732 MB), 0 MB apart.  The page and the decode worker grow by 0 MB during each open, and the page and the worker by 0 MB during each separation.  The page grows by 18 MB to show the stems of each song.
 
+* [x] 2026-10-28: review round 8 (at `893a98c`): 4 reviewers and 2 validators, 528,102 tokens, 42.8 wall minutes.  No blocker and no significant should-fix: 1 pre-existing should-fix (8-1, a second page attempt at stem overviews on a double failure) and 5 nits, all fixed in `8030869`; the missed mutant is refuted (wasm32 only).  By the stop rule this is the last round.  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.
+* [x] 2026-10-28: M7 done.  The review log of rounds 1 to 8 is `docs/reviews/iphone-crashes-2026-10-25-m7.md`, and the run folder is removed.  Eight rounds confirmed 12, 7 (6 and the mutants), 3, 3, 3, 2, 2 and 0 significant findings; each was fixed with a test that failed first or a mutation that it kills.  The acceptance checks on the final code are the Progress line of commit `1604966`.
+
 ## Surprises and discoveries
 
 None yet.
