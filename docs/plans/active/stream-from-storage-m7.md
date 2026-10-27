@@ -282,6 +282,8 @@ The parent's M7 section, item by item:
   * `an_older_pick_does_not_clear_the_text_of_a_newer_one` first left the newer pick's decode open, which held a write, and `a_reset_during_a_decode_completes` failed after it.  The test now ends that decode and checks that no write stays held.
   * Runs after `(cd app && trunk build --release)`: `e2e decode`, `old-session` (40.2 MB for 5 minutes), `smoke`, `playback` and `memory-budget` pass in Chrome.  `memory-budget`: both songs peak at 828 MB, and the page grows by 18 MB to show the stems of each.  `web-test --browser chrome`: 247 tests pass.
 
+* [x] 2026-10-28: review round 2 (at `8b77dac`): 5 reviewers and 7 validators, 909,011 tokens, 56.5 wall minutes.  6 should-fix confirmed (2-1 to 2-6) and 11 nits, all fixed in `c89c618`.  Mutants: full, 35 tested, 12 missed: 7 confirmed (6 killed by new native tests of `memory_mb` and `larger_read`; `run` of `e2e old-session` stays browser only, run by CI's `browser-tests` job, TD-39), 5 refuted (wasm32-only code, now excluded).  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.
+
 ## Surprises and discoveries
 
 None yet.
