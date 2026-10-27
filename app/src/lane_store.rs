@@ -12,6 +12,11 @@
 //! [`MemoryStore`] holds files as bytes in memory, for the native tests.
 //! By default it completes a read at once, inside the call that starts it,
 //! so a native job never waits.  A test can hold its reads back.
+//!
+//! On the web, `OpfsStore` reads browser storage with
+//! `Blob.slice(...).arrayBuffer()` of a `File` from `getFile`, one promise
+//! for each range, as M6's reader does, and asks for a repaint when a read
+//! ends.
 
 use crate::store_meta::LaneFile;
 use engine::readahead::decode_frames;
@@ -118,6 +123,131 @@ impl LaneStore for MemoryStore {
         } else {
             done(self.bytes_of(&ranges));
         }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use web::OpfsStore;
+
+/// The lane store of browser storage.  Web only.
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use super::{ByteRange, LaneStore, ReadDone, ReadResult};
+    use eframe::egui;
+    use js_sys::{Array, Uint8Array};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(inline_js = r#"
+// Reads `ranges[2i]..ranges[2i + 1]` of each `File` of `files` (null: no
+// read), each on its own promise, so one bad file does not lose the
+// others'.  Gives a Uint8Array, null, or the error's text for each.
+export async function ls_read(files, ranges) {
+  const got = await Promise.allSettled(files.map((f, i) =>
+    f ? f.slice(ranges[2 * i], ranges[2 * i + 1]).arrayBuffer() : Promise.resolve(null)));
+  return got.map((r) => r.status === "fulfilled"
+    ? (r.value ? new Uint8Array(r.value) : null)
+    : String((r.reason && r.reason.name) || r.reason));
+}
+"#)]
+    extern "C" {
+        async fn ls_read(files: &Array, ranges: &[f64]) -> JsValue;
+    }
+
+    /// The lane files of browser storage, read in ranges (D3 of the M7
+    /// plan).  It keeps each `File` it gets, and gets it again after a
+    /// read fails, as M6's reader does: a file that moved, such as a stem
+    /// that a new separation replaces, is read anew.
+    pub struct OpfsStore {
+        ctx: Option<egui::Context>,
+        files: Rc<RefCell<HashMap<String, web_sys::File>>>,
+    }
+
+    impl OpfsStore {
+        /// A store that asks `ctx` for a repaint when a read ends.
+        pub fn new(ctx: Option<egui::Context>) -> Self {
+            Self {
+                ctx,
+                files: Rc::default(),
+            }
+        }
+    }
+
+    impl LaneStore for OpfsStore {
+        fn read(&self, ranges: Vec<ByteRange>, done: ReadDone) {
+            let (ctx, files) = (self.ctx.clone(), Rc::clone(&self.files));
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut result = read_ranges(&files, &ranges).await;
+                if result.is_err() {
+                    // Get each file again, and read once more.
+                    files.borrow_mut().clear();
+                    result = read_ranges(&files, &ranges).await;
+                }
+                done(result);
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
+            });
+        }
+    }
+
+    async fn read_ranges(
+        files: &Rc<RefCell<HashMap<String, web_sys::File>>>,
+        ranges: &[ByteRange],
+    ) -> ReadResult {
+        let list = Array::new();
+        let mut flat = Vec::with_capacity(2 * ranges.len());
+        for range in ranges {
+            if range.start < range.end {
+                let cached = files.borrow().get(&range.path).cloned();
+                let file = match cached {
+                    Some(file) => file,
+                    None => {
+                        let file =
+                            crate::store::file_handle(&range.path)
+                                .await
+                                .ok_or_else(|| {
+                                    format!("{} is missing from browser storage", range.path)
+                                })?;
+                        files.borrow_mut().insert(range.path.clone(), file.clone());
+                        file
+                    }
+                };
+                list.push(&file);
+            } else {
+                list.push(&JsValue::NULL);
+            }
+            flat.push(range.start as f64);
+            flat.push(range.end as f64);
+        }
+        let got: Array = ls_read(&list, &flat).await.unchecked_into();
+        ranges
+            .iter()
+            .enumerate()
+            .map(|(k, range)| {
+                if range.start >= range.end {
+                    return Ok(Vec::new());
+                }
+                let result = got.get(k as u32);
+                if let Some(why) = result.as_string() {
+                    return Err(format!("{}: {why}", range.path));
+                }
+                let bytes: Uint8Array = result.unchecked_into();
+                let expected = (range.end - range.start) as usize;
+                if bytes.length() as usize != expected {
+                    return Err(format!(
+                        "{}: read {} of {expected} bytes",
+                        range.path,
+                        bytes.length()
+                    ));
+                }
+                let mut out = vec![0; expected];
+                bytes.copy_to(&mut out);
+                Ok(out)
+            })
+            .collect()
     }
 }
 

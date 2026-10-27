@@ -644,6 +644,283 @@ fn a_song_with_stored_lanes_protects_its_session_with_no_read_ahead_buffer() {
     assert!(!in_memory, "a song in memory protects nothing");
 }
 
+/// A lane store that counts the requests of the jobs and their largest
+/// range, around the store of browser storage.
+struct Counting {
+    inner: lane_store::OpfsStore,
+    requests: std::cell::Cell<usize>,
+    largest: std::cell::Cell<u64>,
+}
+
+impl lane_store::LaneStore for Counting {
+    fn read(&self, ranges: Vec<lane_store::ByteRange>, done: lane_store::ReadDone) {
+        self.requests.set(self.requests.get() + 1);
+        let largest = ranges.iter().map(|r| r.end - r.start).max().unwrap_or(0);
+        self.largest.set(self.largest.get().max(largest));
+        self.inner.read(ranges, done);
+    }
+}
+
+fn counting() -> std::rc::Rc<Counting> {
+    std::rc::Rc::new(Counting {
+        inner: lane_store::OpfsStore::new(None),
+        requests: std::cell::Cell::new(0),
+        largest: std::cell::Cell::new(0),
+    })
+}
+
+/// A page with no audio device that shows `song` in memory.
+fn memory_page(song: Song) -> StemApp {
+    let mut app = StemApp {
+        want_device: false,
+        lane_store: None,
+        ..StemApp::default()
+    };
+    app.open_memory_song(song);
+    app
+}
+
+/// Steps the mix follower in frames until it shows the mix as heard.
+async fn follow_to_the_end(app: &mut StemApp) {
+    let ctx = egui::Context::default();
+    for _ in 0..5_000 {
+        app.follow_mix_while(&ctx, || true);
+        if app
+            .mix_follower
+            .as_ref()
+            .is_some_and(|f| f.progress().is_none())
+        {
+            return;
+        }
+        pb_test_sleep(1).await;
+    }
+    panic!("the mix lane never showed the new mix");
+}
+
+/// Runs a save job in frames, waiting for its reads.
+async fn run_export<S: export::Sink>(mut job: export::ExportJob<S>) -> S {
+    while !job.run_while(|| true) {
+        pb_test_sleep(1).await;
+    }
+    job.into_sink()
+}
+
+/// The image of a spectrogram job over `pcm`, run in frames.
+async fn run_spectrogram(pcm: Box<dyn engine::mixdown::Pcm>) -> Vec<u32> {
+    let mut job = spectrogram::SpectrogramJob::new(pcm);
+    while !job.run_while(|| true) {
+        pb_test_sleep(1).await;
+    }
+    job.finish().0.iter().map(|v| v.to_bits()).collect()
+}
+
+/// D3 of the M7 plan: with lanes that have files, the mix lane after a
+/// mute reads the files, and shows the columns of the same song in
+/// memory.
+#[wasm_bindgen_test]
+async fn a_stored_mix_follows_mute_as_in_memory() {
+    let id = "m7-follow";
+    let (song, files) = planted(id, 3 * SECOND, 6).await;
+    let (mut stored, _) = showing(id, song.clone(), files);
+    let store = counting();
+    stored.lane_store = Some(std::rc::Rc::clone(&store) as std::rc::Rc<dyn lane_store::LaneStore>);
+    let mut memory = memory_page(song);
+    for app in [&mut stored, &mut memory] {
+        app.params.as_ref().expect("params").set_muted(1, true);
+        follow_to_the_end(app).await;
+    }
+    let (got, want) = (&stored.lanes[0], &memory.lanes[0]);
+    let same = (got.columns.clone(), got.scale) == (want.columns.clone(), want.scale);
+    let requests = store.requests.get();
+    stored.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(requests > 0, "the mix read the lane files");
+    assert!(same, "the columns of the mix in memory");
+}
+
+/// D5: a spectrogram of a stem and of the mix as heard, read from the
+/// files, equals the one of the same samples in memory, bit for bit.  The
+/// planted stems have a mid of 0 (their sides are opposite), so the test
+/// adds a 16-bit stem whose sides differ, and the f32 "original" is in the
+/// mix.
+#[wasm_bindgen_test]
+async fn a_stored_spectrogram_equals_the_memory_one() {
+    let id = "m7-spectrogram";
+    let frames = 3 * SECOND;
+    let (song, files) = planted(id, frames, 6).await;
+    let store: std::rc::Rc<dyn lane_store::LaneStore> = counting();
+    let mut stored = lanes::reading_files(
+        lanes::Shown::with_files(song.clone(), files).audio(),
+        &store,
+    );
+    let mut memory = lanes::Shown::in_memory(song).audio();
+    let (left, right) = (stem_wave(frames, 3), stem_wave(frames, 4));
+    let path = format!("sessions/{id}/stems/lloyd.wav");
+    let wav = engine::wav::encode_pcm16(&left, &right, 44_100);
+    store::test_write(&path, &wav).await.expect("planted");
+    let file =
+        store_meta::stem_lane_file(&path, &wav[..44], wav.len() as u64, frames).expect("a stem");
+    stored.push(lanes::LaneAudio::Stored {
+        file,
+        overview: std::rc::Rc::new(lanes::Overview {
+            columns: Vec::new(),
+            scale: 1.0,
+        }),
+        store: std::rc::Rc::clone(&store),
+    });
+    memory.push(lanes::LaneAudio::Memory {
+        left: left.into(),
+        right: right.into(),
+    });
+    assert!(
+        stored.iter().all(|lane| lane.samples().is_none()),
+        "read from the files"
+    );
+    let stem = |lanes: &[lanes::LaneAudio]| -> Box<dyn engine::mixdown::Pcm> {
+        Box::new(lanes::LanePcm::new(lanes[7].clone(), frames, 44_100))
+    };
+    let recipe = MixRecipe::new(vec![1.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.75]);
+    let mix = |lanes: &[lanes::LaneAudio]| -> Box<dyn engine::mixdown::Pcm> {
+        Box::new(lanes::LanesMix::new(lanes, frames, 44_100, &recipe))
+    };
+    let silent = run_spectrogram(Box::new(lanes::LanePcm::new(
+        lanes::LaneAudio::Memory {
+            left: vec![0.0; frames].into(),
+            right: vec![0.0; frames].into(),
+        },
+        frames,
+        44_100,
+    )))
+    .await;
+    let stem_image = run_spectrogram(stem(&stored)).await;
+    let stem_same = stem_image == run_spectrogram(stem(&memory)).await;
+    let mix_image = run_spectrogram(mix(&stored)).await;
+    let mix_same = mix_image == run_spectrogram(mix(&memory)).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(
+        stem_image != silent && mix_image != silent,
+        "images with sound"
+    );
+    assert!(stem_same, "the spectrogram of a stem");
+    assert!(mix_same, "the spectrogram of the mix as heard");
+}
+
+/// D3: a WAV of a stem, and of the mix as heard, read from the files,
+/// equals the one of the same samples in memory, byte for byte.
+#[wasm_bindgen_test]
+async fn a_save_of_a_stored_lane_equals_the_memory_save() {
+    let id = "m7-save";
+    let frames = 2 * export::BLOCK + 77;
+    let (song, files) = planted(id, frames, 6).await;
+    let store: std::rc::Rc<dyn lane_store::LaneStore> = counting();
+    let stored = lanes::reading_files(
+        lanes::Shown::with_files(song.clone(), files).audio(),
+        &store,
+    );
+    let memory = lanes::Shown::in_memory(song).audio();
+    let recipe = MixRecipe::new(vec![1.0, 0.0, 0.5, 1.0, 1.5, 1.0, 0.0]);
+    let wav = |pcm: Box<dyn engine::mixdown::Pcm>| async move {
+        let job = export::ExportJob::new(pcm, export::JsWav::new(frames, 44_100));
+        let bytes = run_export(job).await.into_bytes();
+        let mut out = vec![0; bytes.length() as usize];
+        bytes.copy_to(&mut out);
+        out
+    };
+    let stem_same = wav(Box::new(lanes::LanePcm::new(
+        stored[3].clone(),
+        frames,
+        44_100,
+    )))
+    .await
+        == wav(Box::new(lanes::LanePcm::new(
+            memory[3].clone(),
+            frames,
+            44_100,
+        )))
+        .await;
+    let mix_same = wav(Box::new(lanes::LanesMix::new(
+        &stored, frames, 44_100, &recipe,
+    )))
+    .await
+        == wav(Box::new(lanes::LanesMix::new(
+            &memory, frames, 44_100, &recipe,
+        )))
+        .await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(stem_same, "the WAV of a stem");
+    assert!(mix_same, "the WAV of the mix as heard");
+}
+
+/// D3 and D5: during a follow, the spectrograms and a save of a 1-minute
+/// session, no read of a lane file is more than a block of that lane, and
+/// a spectrogram of a lane whose `hop` is over `n_fft` makes one request
+/// for each 32 columns.
+#[wasm_bindgen_test]
+async fn the_page_reads_a_lane_one_block_at_a_time() {
+    let id = "m7-blocks";
+    let frames = 60 * SECOND;
+    let (song, files) = planted(id, frames, 6).await;
+    let (mut app, _) = showing(id, song, files);
+    let store = counting();
+    app.lane_store = Some(std::rc::Rc::clone(&store) as std::rc::Rc<dyn lane_store::LaneStore>);
+    pb_spy_slices();
+    app.params.as_ref().expect("params").set_muted(0, true);
+    follow_to_the_end(&mut app).await;
+    app.show_spectrograms = true;
+    let ctx = egui::Context::default();
+    for _ in 0..20_000 {
+        app.step_spectrograms(&ctx, || true);
+        if app.lanes.iter().all(|l| l.spectrogram.is_some()) {
+            break;
+        }
+        pb_test_sleep(1).await;
+    }
+    let all_made = app.lanes.iter().all(|l| l.spectrogram.is_some());
+    let audio = job_audio(app.song.as_ref().expect("a song"), &app.lane_store);
+    let save = export::ExportJob::new(
+        Box::new(lanes::LanePcm::new(audio[1].clone(), frames, 44_100)),
+        export::JsWav::new(frames, 44_100),
+    );
+    run_export(save).await;
+    // One lane's spectrogram alone, to count its requests.
+    let before = store.requests.get();
+    let columns = engine::hpss::SpectrogramColumns::new(frames, 44_100, 8_000.0, 128, 1_024);
+    let hop_over_fft = columns.hop() > 1_024;
+    run_spectrogram(Box::new(lanes::LanePcm::new(
+        audio[1].clone(),
+        frames,
+        44_100,
+    )))
+    .await;
+    let requests = store.requests.get() - before;
+    let slices = pb_slices();
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(all_made, "every spectrogram");
+    assert!(hop_over_fft);
+    assert_eq!(
+        requests,
+        columns.columns().div_ceil(32),
+        "one request for each 32 columns"
+    );
+    let block = |name: &str| if name.ends_with(".wav") { 4 } else { 8 } * BLOCK_FRAMES as usize;
+    let mut seen = 0;
+    for slice in slices.iter() {
+        let pair: js_sys::Array = slice.unchecked_into();
+        let (name, bytes) = (
+            pair.get(0).as_string().unwrap_or_default(),
+            pair.get(1).as_f64().unwrap_or(0.0),
+        );
+        assert!(
+            bytes as usize <= block(&name),
+            "{name}: a read of {bytes} bytes"
+        );
+        seen += 1;
+    }
+    assert!(seen > 100, "{seen} reads");
+    assert!(store.largest.get() as usize <= 8 * BLOCK_FRAMES as usize);
+}
+
 #[wasm_bindgen(inline_js = r#"
 export function dt_blob(bytes) { return new Blob([bytes]); }
 export function pb_file(bytes, name) { return new File([bytes], name); }

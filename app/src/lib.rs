@@ -75,6 +75,18 @@ fn sources_in_memory(song: &Shown) -> Option<Song> {
     })
 }
 
+/// The audio of `song`'s lanes for a job: the lanes with a file read it
+/// through `store`, when there is one (D3 and D1 of the M7 plan).
+fn job_audio(
+    song: &Shown,
+    store: &Option<std::rc::Rc<dyn lane_store::LaneStore>>,
+) -> Vec<LaneAudio> {
+    match store {
+        Some(store) => lanes::reading_files(song.audio(), store),
+        None => song.audio(),
+    }
+}
+
 /// One source for each lane of `song`, for the lanes that the read-ahead
 /// buffer does not play: a lane in memory shares its samples (MEM-1), and
 /// a stored lane plays silence; it never falls back to samples (D2 of the
@@ -811,6 +823,10 @@ pub struct StemApp {
     mix_follower: Option<MixFollower>,
     /// Makes the lanes' spectrograms, while they are on.
     spectrograms: spectrogram::Spectrograms,
+    /// Where the jobs read the lanes that have a file (D3 of the M7 plan):
+    /// browser storage on the web, none natively, where a song is in
+    /// memory.
+    pub lane_store: Option<std::rc::Rc<dyn lane_store::LaneStore>>,
     pub tempo_pct: f32,
     pub show_spectrograms: bool,
     /// Ask for a real audio device when an output is opened: for the first
@@ -1081,6 +1097,10 @@ impl Default for StemApp {
             output: None,
             mix_follower: None,
             spectrograms: spectrogram::Spectrograms::default(),
+            #[cfg(target_arch = "wasm32")]
+            lane_store: Some(std::rc::Rc::new(lane_store::OpfsStore::new(None))),
+            #[cfg(not(target_arch = "wasm32"))]
+            lane_store: None,
             tempo_pct: 100.0,
             show_spectrograms: false,
             want_device: true,
@@ -1154,6 +1174,9 @@ impl StemApp {
         #[cfg(target_arch = "wasm32")]
         {
             app.ctx = Some(cc.egui_ctx.clone());
+            app.lane_store = Some(std::rc::Rc::new(lane_store::OpfsStore::new(Some(
+                cc.egui_ctx.clone(),
+            ))));
         }
         #[cfg(target_arch = "wasm32")]
         if streamtest::Settings::from_url().is_some() {
@@ -2965,9 +2988,10 @@ impl StemApp {
             return;
         };
         let heard = MixRecipe::as_heard(params);
+        let store = &self.lane_store;
         let mix_of = |recipe: &MixRecipe| -> Box<dyn engine::mixdown::Pcm> {
             Box::new(lanes::LanesMix::new(
-                &song.audio(),
+                &job_audio(song, store),
                 song.frames,
                 song.sample_rate,
                 recipe,
@@ -2998,7 +3022,7 @@ impl StemApp {
             self.spectrograms = spectrogram::Spectrograms::default();
             return;
         }
-        let audio = song.audio();
+        let audio = job_audio(song, &self.lane_store);
         let source = |lane: &Lane| -> Option<Box<dyn engine::mixdown::Pcm>> {
             Some(match lane.stem {
                 Some(i) => Box::new(lanes::LanePcm::new(
@@ -3083,7 +3107,7 @@ impl StemApp {
             return;
         };
         let base = self.song_name.as_deref().unwrap_or("song");
-        let audio = song.audio();
+        let audio = job_audio(&song, &self.lane_store);
         let (frames, rate) = (song.frames, song.sample_rate);
         let (source, name): (Box<dyn Pcm>, String) = match stem {
             Some(i) => (
@@ -3120,7 +3144,11 @@ impl StemApp {
             let doing = if saving.mix { "Mixing" } else { "Preparing" };
             let pct = 100.0 * saving.job.fraction();
             self.status = format!("{doing} {}: {pct:.0} %", saving.name);
-            ctx.request_repaint();
+            // A save that waits for storage gets a repaint when its read
+            // ends.
+            if !saving.job.is_waiting() {
+                ctx.request_repaint();
+            }
             return;
         }
         let Some(Saving {

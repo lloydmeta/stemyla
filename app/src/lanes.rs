@@ -121,6 +121,27 @@ fn part_of(samples: &[f32], at: usize, frames: usize) -> Cow<'_, [f32]> {
     Cow::Owned(part)
 }
 
+/// The audio of `lanes` for a job: until step 7 of the M7 plan, a lane
+/// with samples and a file (`ReadBack`) reads its file through `store`, as
+/// a stored lane does, so the page's reads of storage are tested before
+/// the samples go.  Its overview is not drawn, so it is empty here.
+pub fn reading_files(lanes: Vec<LaneAudio>, store: &Rc<dyn LaneStore>) -> Vec<LaneAudio> {
+    lanes
+        .into_iter()
+        .map(|lane| match lane {
+            LaneAudio::ReadBack { file, .. } => LaneAudio::Stored {
+                file,
+                overview: Rc::new(Overview {
+                    columns: Vec::new(),
+                    scale: 1.0,
+                }),
+                store: Rc::clone(store),
+            },
+            other => other,
+        })
+        .collect()
+}
+
 /// One lane of the shown song: its name and its audio.
 #[derive(Clone)]
 pub struct ShownLane {
