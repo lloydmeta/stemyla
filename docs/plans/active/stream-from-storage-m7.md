@@ -315,6 +315,8 @@ The parent's M7 section, item by item:
   * 6-2: `export::overview_job` makes the page's overview jobs, and they stop at the first failed read.  `an_overview_job_ends_at_the_first_failed_read` (native) failed first against the helper with no stop.
   * 6-3 to 6-5: text, and the 5-1 and 5-7 Decision log entries.  `web-test --browser chrome`: 251 tests pass.
 
+* [x] 2026-10-28: review round 6 (at `f6131c3`): 4 reviewers and 2 validators, 413,425 tokens, 37.6 wall minutes.  2 should-fix confirmed (6-1, `save_stems` kept the old stem lines under a new generation, so stale stem overviews could be kept; 6-2, the page's overview fallback read to the end after a failed read) and 3 nits, all fixed in `c352052`.  Mutants: partial, 3 tested, 0 missed, 1 timeout (`ExportJob::step` -> false hangs a test under the mutant only).  Approvals: 0 (auto mode; a fallback prompt is not counted).  The orchestrator wrote the findings file and the log rows.  A round 7 checks these fixes.
+
 ## Surprises and discoveries
 
 None yet.
