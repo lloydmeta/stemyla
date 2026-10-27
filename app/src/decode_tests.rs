@@ -127,6 +127,21 @@ async fn samples_of(song: &lanes::Shown, k: usize) -> (Vec<f32>, Vec<f32>) {
     (sink.left, sink.right)
 }
 
+/// Shows `opened` on a page as its newest open, as `apply_inbox` does, and
+/// waits until the page has made its session current (D12 of the M7
+/// plan).
+async fn show_as_newest(opened: Opened) {
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    let token = app.next_open();
+    app.pending.borrow_mut().put_song(token, Ok(opened));
+    app.apply_inbox(&egui::Context::default());
+    dt_sleep(200).await;
+    app.load_demo();
+}
+
 /// Runs `work` in the background; its output arrives in the cell.
 fn background<T: 'static>(work: impl Future<Output = T> + 'static) -> Rc<RefCell<Option<T>>> {
     let out = Rc::new(RefCell::new(None));
@@ -485,12 +500,18 @@ async fn a_new_session_becomes_current_once_its_song_opens() {
         new_mix: true,
         channels: vec![2],
     });
-    let opened = output(&opened).await;
+    let opened = output(&opened).await.expect("opened");
+    let opened_not_shown = store::current().await;
+    show_as_newest(opened).await;
     let after = store::current().await;
     store::test_wipe().await;
-    assert!(opened.is_ok(), "opened");
-    assert_eq!(during, Some(before), "not current during the decode");
-    assert_eq!(after, Some(id_of(&req.session)), "current once it opens");
+    assert_eq!(
+        during,
+        Some(before.clone()),
+        "not current during the decode"
+    );
+    assert_eq!(opened_not_shown, Some(before), "not current until it shows");
+    assert_eq!(after, Some(id_of(&req.session)), "current once it shows");
 }
 
 #[wasm_bindgen_test]
@@ -506,17 +527,20 @@ async fn unstored_decodes_on_the_page_and_keeps_the_session() {
     });
     let opened = output(&opened).await.expect("opened on the page");
     let kept = meta_of(&id_of(&req.session)).await;
+    let (frames, session, note) = (
+        opened.song.frames,
+        opened.session.clone(),
+        opened.note.clone(),
+    );
+    show_as_newest(opened).await;
     let current = store::current().await;
     store::test_wipe().await;
-    assert_eq!(opened.song.frames, 1_234);
+    let opened = (session, note);
+    assert_eq!(frames, 1_234);
     assert_eq!(current, Some(id_of(&req.session)), "made current");
-    assert_eq!(
-        opened.session,
-        Some(id_of(&req.session)),
-        "the session stays"
-    );
+    assert_eq!(opened.0, Some(id_of(&req.session)), "the session stays");
     assert!(kept.is_some(), "its files stay");
-    let note = opened.note.unwrap_or_default();
+    let note = opened.1.unwrap_or_default();
     assert!(
         note.contains("browser storage failed") && note.contains("disk is full"),
         "{note}"
@@ -576,16 +600,15 @@ async fn a_complete_session_restores_with_no_decode() {
     let id = id_of(&req.session);
     let posts = fake.posts.length();
     let restored = restore_stored(&id, &fake.client).await;
-    let current = store::current().await;
     let (opened, meta, note) = restored.expect("a session").expect("restored");
     let read = samples_of(&opened.song, 0).await;
+    let stored_lane = opened.song.lanes[0].audio.samples().is_none();
+    show_as_newest(opened).await;
+    let current = store::current().await;
     store::test_wipe().await;
     assert_eq!(fake.posts.length(), posts, "no decode is posted");
     assert_eq!((note, meta.name.as_str()), (None, "acme"));
-    assert!(
-        opened.song.lanes[0].audio.samples().is_none(),
-        "a stored lane"
-    );
+    assert!(stored_lane, "a stored lane");
     assert!(read.0 == samples[0].0 && read.1 == samples[0].1);
     assert_eq!(current, Some(id), "made current");
 }
@@ -743,11 +766,16 @@ async fn the_kept_line_comes_once_the_session_is_current() {
                 channels: vec![2],
             });
         }
-        let opened = output(&opened).await;
+        let opened = output(&opened).await.expect("opened");
+        let before_shown = logged("song kept in browser storage");
+        show_as_newest(opened).await;
         let lines = logged("song kept in browser storage");
         store::test_wipe().await;
         let id = id_of(&req.session);
-        assert!(opened.is_ok(), "unstored {unstored}: opened");
+        assert!(
+            before_shown.is_empty(),
+            "unstored {unstored}: not before it shows"
+        );
         assert_eq!(
             lines,
             [(
@@ -1417,4 +1445,177 @@ async fn an_incomplete_stem_is_read_whole_only_on_the_memory_path() {
         error.as_deref().is_some_and(|e| e.contains("not complete")),
         "{error:?}"
     );
+}
+
+/// Waits for an open's result to reach the inbox, applies it, and waits
+/// for the page to make its session current if it shows.
+async fn apply_the_open(app: &mut StemApp) {
+    for _ in 0..250 {
+        if app.pending.borrow().song.is_some() {
+            break;
+        }
+        dt_sleep(20).await;
+    }
+    assert!(app.pending.borrow().song.is_some(), "an open ended");
+    app.apply_inbox(&egui::Context::default());
+    dt_sleep(200).await;
+}
+
+/// The decode of a late open ends: the worker's files, then `decoded`.
+async fn decode_ends(fake: &Fake, n: u32) {
+    let req = fake.request(n).await;
+    let frames = 1_000;
+    plant_parts(&req, frames, &planted(&req, frames, &[false]), true).await;
+    fake.reply(DecodeReply::Decoded {
+        frames: frames as u64,
+        new_mix: true,
+        channels: vec![2],
+    });
+}
+
+/// D12 of the M7 plan: a drop's or a pick's decode is pending, a
+/// Storage open of a complete session shows its song, then the decode
+/// ends.  The shown song and `sessions/current` stay the Storage song.
+#[wasm_bindgen_test]
+async fn a_late_drop_does_not_show_over_a_newer_song() {
+    for pick in [false, true] {
+        store::test_wipe().await;
+        let fake = Fake::new();
+        let (stored, req, _) =
+            open_decoded(&fake, vec![wav_file("acme.wav", 100, 0)], 2_000, &[false]).await;
+        drop(stored.expect("opened"));
+        let stored_id = id_of(&req.session);
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.decoder = fake.client.clone();
+        let ctx = egui::Context::default();
+        let chosen = vec![wav_file("lloyd.wav", 100, 1)];
+        if pick {
+            let opens = app.opens.clone();
+            open_picked(chosen, &app.decoder, &app.pending, &ctx, &opens);
+        } else {
+            app.open_files(chosen, &ctx);
+        }
+        let late = fake.request(1).await;
+        app.open_from_storage(stored_id.clone());
+        apply_the_open(&mut app).await;
+        let shown_first = app.session.clone();
+        decode_ends(&fake, 1).await;
+        apply_the_open(&mut app).await;
+        let (shown, current) = (app.session.clone(), store::current().await);
+        let late_kept = meta_of(&id_of(&late.session)).await.is_some();
+        app.load_demo();
+        store::test_wipe().await;
+        assert_eq!(
+            shown_first,
+            Some(stored_id.clone()),
+            "pick {pick}: the Storage song shows"
+        );
+        assert_eq!(
+            shown,
+            Some(stored_id.clone()),
+            "pick {pick}: it stays shown"
+        );
+        assert_eq!(current, Some(stored_id), "pick {pick}: it stays current");
+        assert!(late_kept, "pick {pick}: the late open's session is kept");
+    }
+}
+
+/// D12: Demo takes a token, so a drop that ends after it does not
+/// show over it, nor become current.
+#[wasm_bindgen_test]
+async fn a_late_drop_does_not_show_over_demo() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let before = a_current_session().await;
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    app.decoder = fake.client.clone();
+    app.open_files(
+        vec![wav_file("lloyd.wav", 100, 1)],
+        &egui::Context::default(),
+    );
+    fake.request(0).await;
+    app.load_demo();
+    decode_ends(&fake, 0).await;
+    apply_the_open(&mut app).await;
+    let (shown, names) = (app.session.clone(), app.lanes.len());
+    let current = store::current().await;
+    store::test_wipe().await;
+    assert_eq!(shown, None, "the demo has no session");
+    assert_eq!(names, 6, "the demo's lanes");
+    assert_eq!(current, Some(before), "current does not change");
+}
+
+/// D12: two results that reach the inbox before one frame: the newer
+/// shows, in either order.
+#[wasm_bindgen_test]
+async fn two_opens_that_end_in_one_frame_show_the_newer() {
+    let song = |name: &str| {
+        Opened::in_memory(
+            Song {
+                sample_rate: 44_100,
+                frames: 4,
+                stems: vec![Stem {
+                    name: name.into(),
+                    left: vec![0.1; 4].into(),
+                    right: vec![0.1; 4].into(),
+                }],
+            },
+            None,
+            None,
+        )
+    };
+    for newer_first in [true, false] {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        let older = app.next_open();
+        let newer = app.next_open();
+        {
+            let mut inbox = app.pending.borrow_mut();
+            if newer_first {
+                inbox.put_song(newer, Ok(song("lloyd")));
+                inbox.put_song(older, Ok(song("acme")));
+            } else {
+                inbox.put_song(older, Ok(song("acme")));
+                inbox.put_song(newer, Ok(song("lloyd")));
+            }
+        }
+        app.apply_inbox(&egui::Context::default());
+        let names = app.song.as_ref().map(|s| s.names().join(","));
+        assert_eq!(
+            names.as_deref(),
+            Some("lloyd"),
+            "newer first: {newer_first}"
+        );
+    }
+}
+
+/// D12: a Storage open that the decode worker fails over to the page
+/// (`store::restore_id`) ends after a newer open (Demo): it does not make
+/// its session current.
+#[wasm_bindgen_test]
+async fn a_stale_restore_on_the_page_does_not_make_its_session_current() {
+    store::test_wipe().await;
+    let before = a_current_session().await;
+    let incomplete = saved(&vec![wav_file("lloyd.wav", 100, 2)]).await;
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    app.decoder = decoder::DecodeClient::new("./no-such-decode-worker.js");
+    app.open_from_storage(incomplete.clone());
+    app.load_demo();
+    apply_the_open(&mut app).await;
+    let shown = app.session.clone();
+    let current = store::current().await;
+    store::test_wipe().await;
+    assert_eq!(shown, None, "the demo stays");
+    assert_eq!(current, Some(before), "the stale restore is not current");
 }

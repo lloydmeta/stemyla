@@ -838,7 +838,9 @@ pub async fn restore() -> Option<Result<(String, Song, Meta)>> {
     restore_id(&current().await?).await
 }
 
-/// Session `id` as a song, made current.
+/// Session `id`'s sources as a song, decoded on the page (the memory path).
+/// It does not make the session current: the page does, when the song
+/// shows (D12 of the M7 plan).
 pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
     settled(id).await;
     let id = id.to_string();
@@ -846,16 +848,11 @@ pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
     let meta = Meta::parse(&String::from_utf8_lossy(
         &read(&format!("{base}/meta")).await?,
     ));
+    // D12 of the M7 plan: the page makes the session current only when
+    // its song shows, for the newest open.
     let r = rebuild(&base, &meta)
         .await
         .map(|song| (id.clone(), song, meta));
-    if r.is_ok()
-        && write(&format!("{ROOT}/current"), id.as_bytes())
-            .await
-            .is_err()
-    {
-        log::warn!("could not mark session {id} as current");
-    }
     Some(r)
 }
 

@@ -308,7 +308,8 @@ pub fn memory_lanes(stems: Vec<Stem>) -> Vec<ShownLane> {
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 pub struct Inbox {
-    song: Option<anyhow::Result<Opened>>,
+    /// The result of an open, with its token (D12 of the M7 plan).
+    song: Option<(u64, anyhow::Result<Opened>)>,
     /// The token of a Storage open that has finished, with or without a song.
     open_done: Option<u64>,
     status: Option<String>,
@@ -368,6 +369,18 @@ struct MemoryInput {
 #[cfg(target_arch = "wasm32")]
 type StemLanes = (Vec<ShownLane>, Option<std::rc::Rc<lanes::Overview>>);
 
+#[cfg(target_arch = "wasm32")]
+impl Inbox {
+    /// Keeps the result of the open `token`, unless the inbox holds the
+    /// result of a newer open: two results that end in one frame show the
+    /// newer (D12 of the M7 plan).
+    fn put_song(&mut self, token: u64, song: anyhow::Result<Opened>) {
+        if self.song.as_ref().is_none_or(|(held, _)| token >= *held) {
+            self.song = Some((token, song));
+        }
+    }
+}
+
 /// A storage-path separation after [`store::keep_stored_stems`].  Web only.
 #[cfg(target_arch = "wasm32")]
 struct StoredSeparation {
@@ -402,6 +415,9 @@ struct Opened {
     note: Option<String>,
     /// Protects the session until the song is shown (D10 of M6).
     guard: Option<store::OpenGuard>,
+    /// A session made for this open: the page logs that it is kept once it
+    /// is current (D12 of M5).
+    new_session: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -415,6 +431,7 @@ impl Opened {
             name,
             note: None,
             guard: None,
+            new_session: false,
         }
     }
 }
@@ -553,9 +570,10 @@ async fn open_chosen(
     decoder: decoder::DecodeClient,
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: egui::Context,
+    token: u64,
 ) {
     let opened = open_chosen_now(&chosen, &decoder).await;
-    pending.borrow_mut().song = Some(opened);
+    pending.borrow_mut().put_song(token, opened);
     ctx.request_repaint();
     refresh_storage(&pending).await;
 }
@@ -588,15 +606,12 @@ async fn open_chosen_now(
             return open_on_the_page(chosen, None, name, started, None).await;
         }
     };
-    let opened = open_saved(chosen, &id, name, started, decoder).await;
-    // D9: the new session becomes current only once its song opens, so a
-    // reload until then restores the song on screen.  D12: the "kept" line
-    // comes only then, so an e2e check that reloads at it finds the song.
-    match &opened {
-        Ok(_) => {
-            store::make_current(&id).await;
-            log::info!("song kept in browser storage as session {id}");
-        }
+    let mut opened = open_saved(chosen, &id, name, started, decoder).await;
+    // D9: the new session becomes current only once its song shows (D12 of
+    // the M7 plan: `apply_inbox`, for the newest open), so a reload until
+    // then restores the song on screen.
+    match &mut opened {
+        Ok(opened) => opened.new_session = true,
         // The reset removes every session.
         Err(_) if store::is_closed() => {}
         // The guard is dropped, so `forget` does not wait for it.
@@ -607,6 +622,44 @@ async fn open_chosen_now(
         }
     }
     opened
+}
+
+/// Opens the files of a pick, with the pick's token, taken once files are
+/// chosen (D12 of the M7 plan).
+#[cfg(target_arch = "wasm32")]
+fn open_picked(
+    chosen: Chosen,
+    decoder: &decoder::DecodeClient,
+    pending: &std::rc::Rc<std::cell::RefCell<Inbox>>,
+    ctx: &egui::Context,
+    opens: &std::cell::Cell<u64>,
+) {
+    let token = next_token(opens);
+    // D12 of M5: before any read or save.
+    log_page_memory("as the open starts");
+    pending.borrow_mut().status = Some(opening_text(&chosen));
+    ctx.request_repaint();
+    let (decoder, pending, ctx) = (decoder.clone(), pending.clone(), ctx.clone());
+    wasm_bindgen_futures::spawn_local(async move {
+        // The "Opening…" text may still be queued; the result, applied
+        // before the queued status, must not be hidden by it.
+        let opened = open_chosen_now(&chosen, &decoder).await;
+        {
+            let mut inbox = pending.borrow_mut();
+            inbox.status = None;
+            inbox.put_song(token, opened);
+        }
+        ctx.request_repaint();
+        refresh_storage(&pending).await;
+    });
+}
+
+/// The next token of `opens`: one more than the last (D12 of the M7 plan).
+#[cfg(target_arch = "wasm32")]
+fn next_token(opens: &std::cell::Cell<u64>) -> u64 {
+    let token = opens.get() + 1;
+    opens.set(token);
+    token
 }
 
 /// Whether a reset runs: the decode client or browser storage is closed.
@@ -667,6 +720,7 @@ async fn open_saved(
                 name,
                 note: None,
                 guard: Some(guard),
+                new_session: false,
             })
         }
         Decode::Undecodable(text) | Decode::Reset(text) => Err(anyhow::anyhow!(text)),
@@ -824,7 +878,7 @@ async fn decode_session(
     }
 }
 
-/// D11: session `id` as the page opens it, made current: shown as stored
+/// D11: session `id` as the page opens it: shown as stored
 /// lanes if it is complete, else decoded by the decode worker first (D11
 /// of the M7 plan).  If browser
 /// storage fails, the page decodes the stored sources itself
@@ -919,9 +973,6 @@ async fn restore_stored(
             Err(e) => return Some(Err(e)),
         }
     };
-    if note.is_none() {
-        store::make_current(id).await;
-    }
     let opened = Opened {
         song,
         mix,
@@ -929,6 +980,7 @@ async fn restore_stored(
         name: Some(meta.name.clone()),
         note: None,
         guard: Some(guard),
+        new_session: false,
     };
     Some(Ok((opened, meta, note)))
 }
@@ -1075,9 +1127,11 @@ pub struct StemApp {
     /// the session it opens.
     #[cfg(target_arch = "wasm32")]
     opening: Option<(u64, String)>,
-    /// Tokens handed to Storage opens so far.
+    /// The token of the newest open: a drop, a pick, a Storage open, the
+    /// startup restore or Demo (D12 of the M7 plan).  Only its result shows
+    /// and becomes current.
     #[cfg(target_arch = "wasm32")]
-    opens: u64,
+    opens: std::rc::Rc<std::cell::Cell<u64>>,
     /// Stems that arrived while their song was being opened (and so may be
     /// missing from what the open read): the session, the stems, and what
     /// to say if the open does not show them.
@@ -1330,7 +1384,7 @@ impl Default for StemApp {
             #[cfg(target_arch = "wasm32")]
             opening: None,
             #[cfg(target_arch = "wasm32")]
-            opens: 0,
+            opens: std::rc::Rc::default(),
             #[cfg(target_arch = "wasm32")]
             stems_for_opening: None,
             #[cfg(target_arch = "wasm32")]
@@ -1382,6 +1436,8 @@ impl StemApp {
             // Bring back the song (and stems) kept from the last visit.
             let (pending, ctx) = (app.pending.clone(), cc.egui_ctx.clone());
             let decoder = app.decoder.clone();
+            let token = app.next_open();
+            let opens = app.opens.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let restored = match store::current().await {
                     Some(id) => restore_stored(&id, &decoder).await.map(|r| (id, r)),
@@ -1403,8 +1459,10 @@ impl StemApp {
                                 Some(note) => format!("{text}  It was {note}."),
                                 None => text,
                             };
-                            inbox.status = Some(text);
-                            inbox.song = Some(Ok(opened));
+                            if opens.get() == token {
+                                inbox.status = Some(text);
+                            }
+                            inbox.put_song(token, Ok(opened));
                         }
                         Err(e) => {
                             log::warn!("could not restore the stored song: {e:#}");
@@ -1842,6 +1900,9 @@ impl StemApp {
         {
             self.session = None;
             self.song_name = None;
+            // D12 of the M7 plan: Demo opens at once, so every older open
+            // is stale.
+            self.next_open();
         }
         let s = synth::generate();
         let song = Song {
@@ -2296,10 +2357,78 @@ impl StemApp {
                     }
                 }
             }
-            self.status = opening_text(&chosen);
-            let decoder = self.decoder.clone();
-            wasm_bindgen_futures::spawn_local(open_chosen(chosen, decoder, pending, ctx));
+            let _ = pending;
+            self.open_files(chosen, &ctx);
         }
+    }
+
+    /// Opens the chosen files of a drop, with a token of its own (D12 of
+    /// the M7 plan).
+    #[cfg(target_arch = "wasm32")]
+    fn open_files(&mut self, chosen: Chosen, ctx: &egui::Context) {
+        self.status = opening_text(&chosen);
+        let token = self.next_open();
+        let (decoder, pending) = (self.decoder.clone(), self.pending.clone());
+        wasm_bindgen_futures::spawn_local(open_chosen(
+            chosen,
+            decoder,
+            pending,
+            ctx.clone(),
+            token,
+        ));
+    }
+
+    /// Opens the stored session `id` from the Storage menu, with a token
+    /// of its own (D12 of the M7 plan).
+    #[cfg(target_arch = "wasm32")]
+    fn open_from_storage(&mut self, id: String) {
+        self.status = "Opening the stored song…".into();
+        let token = self.next_open();
+        self.opening = Some((token, id.clone()));
+        let (pending, opens) = (self.pending.clone(), self.opens.clone());
+
+        let decoder = self.decoder.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let Some(r) = restore_stored(&id, &decoder).await else {
+                {
+                    let mut inbox = pending.borrow_mut();
+                    inbox.put_song(
+                        token,
+                        Err(anyhow::anyhow!("that song is no longer in browser storage")),
+                    );
+                    inbox.open_done = Some(token);
+                }
+                refresh_storage(&pending).await;
+                return;
+            };
+            {
+                let mut inbox = pending.borrow_mut();
+                inbox.open_done = Some(token);
+                match r {
+                    Ok((opened, meta, note)) => {
+                        let text = format!("Opened \"{}\" from this browser.", meta.name);
+                        if opens.get() == token {
+                            inbox.status = Some(match note {
+                                Some(note) => format!("{text}  It was {note}."),
+                                None => text,
+                            });
+                        }
+                        inbox.put_song(token, Ok(opened));
+                    }
+                    Err(e) => {
+                        inbox.put_song(token, Err(e.context("could not open the stored song")));
+                    }
+                }
+            }
+            refresh_storage(&pending).await;
+        });
+    }
+
+    /// A token for a new open: one more than the last (D12 of the M7
+    /// plan).  Every older open is then stale.
+    #[cfg(target_arch = "wasm32")]
+    fn next_open(&self) -> u64 {
+        next_token(&self.opens)
     }
 
     /// "Open song…": the browser's file picker, the way to load a song on
@@ -2308,28 +2437,13 @@ impl StemApp {
     #[cfg(target_arch = "wasm32")]
     fn pick_song(&mut self, ctx: &egui::Context) {
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
-        let decoder = self.decoder.clone();
+        let (decoder, opens) = (self.decoder.clone(), self.opens.clone());
         picker::pick_files(SONG_FILES, true, move |files| {
             if files.is_empty() {
                 return;
             }
-            // D12: before any read or save.
-            log_page_memory("as the open starts");
             let chosen: Chosen = files.into_iter().map(|f| (f.name(), f)).collect();
-            pending.borrow_mut().status = Some(opening_text(&chosen));
-            ctx.request_repaint();
-            wasm_bindgen_futures::spawn_local(async move {
-                // The "Opening…" text may still be queued; the result,
-                // applied before the queued status, must not be hidden by it.
-                let opened = open_chosen_now(&chosen, &decoder).await;
-                {
-                    let mut inbox = pending.borrow_mut();
-                    inbox.status = None;
-                    inbox.song = Some(opened);
-                }
-                ctx.request_repaint();
-                refresh_storage(&pending).await;
-            });
+            open_picked(chosen, &decoder, &pending, &ctx, &opens);
         });
     }
 
@@ -3090,42 +3204,8 @@ impl StemApp {
         });
         let pending = self.pending.clone();
         if let Some(id) = open {
-            self.status = "Opening the stored song…".into();
-            self.opens += 1;
-            let token = self.opens;
-            self.opening = Some((token, id.clone()));
-            let decoder = self.decoder.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let Some(r) = restore_stored(&id, &decoder).await else {
-                    {
-                        let mut inbox = pending.borrow_mut();
-                        inbox.song = Some(Err(anyhow::anyhow!(
-                            "that song is no longer in browser storage"
-                        )));
-                        inbox.open_done = Some(token);
-                    }
-                    refresh_storage(&pending).await;
-                    return;
-                };
-                {
-                    let mut inbox = pending.borrow_mut();
-                    inbox.open_done = Some(token);
-                    match r {
-                        Ok((opened, meta, note)) => {
-                            let text = format!("Opened \"{}\" from this browser.", meta.name);
-                            inbox.status = Some(match note {
-                                Some(note) => format!("{text}  It was {note}."),
-                                None => text,
-                            });
-                            inbox.song = Some(Ok(opened));
-                        }
-                        Err(e) => {
-                            inbox.song = Some(Err(e.context("could not open the stored song")));
-                        }
-                    }
-                }
-                refresh_storage(&pending).await;
-            });
+            let _ = pending;
+            self.open_from_storage(id);
         } else if let Some(id) = forget {
             if self.session.as_deref() == Some(id.as_str()) {
                 self.session = None;
@@ -3244,8 +3324,20 @@ impl StemApp {
     #[cfg(target_arch = "wasm32")]
     fn apply_inbox(&mut self, ctx: &egui::Context) {
         let inbox = std::mem::take(&mut *self.pending.borrow_mut());
-        if let Some(r) = inbox.song {
+        if let Some((token, r)) = inbox.song {
+            // D12 of the M7 plan: only the newest open shows its song and
+            // makes its session current.  An older one completed its files
+            // all the same.
+            let r = match r {
+                _ if token != self.opens.get() => {
+                    log::info!("open: an older open ended; its song is not shown");
+                    Err(None)
+                }
+                Ok(opened) => Ok(opened),
+                Err(e) => Err(Some(e)),
+            };
             match r {
+                Err(None) => {}
                 Ok(opened) => {
                     let holds_these = self
                         .stems_for_opening
@@ -3258,6 +3350,7 @@ impl StemApp {
                         name,
                         note,
                         guard,
+                        new_session,
                     } = opened;
                     // Stems held for this open: as they arrived (D11 of the
                     // M7 plan).
@@ -3270,11 +3363,22 @@ impl StemApp {
                     self.open_song(song);
                     // The song plays from its session now (D10 of M6).
                     drop(guard);
+                    // D12 of the M7 plan: only here does a session become
+                    // current.  D12 of M5: the "kept" line comes only then,
+                    // so an e2e check that reloads at it finds the song.
+                    if let Some(id) = self.session.clone() {
+                        wasm_bindgen_futures::spawn_local(async move {
+                            store::make_current(&id).await;
+                            if new_session {
+                                log::info!("song kept in browser storage as session {id}");
+                            }
+                        });
+                    }
                     if let Some(note) = note {
                         self.status = note;
                     }
                 }
-                Err(e) => self.status = format!("Could not load: {e:#}"),
+                Err(Some(e)) => self.status = format!("Could not load: {e:#}"),
             }
         }
         if let Some(text) = inbox.status {

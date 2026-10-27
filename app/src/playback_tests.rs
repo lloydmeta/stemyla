@@ -529,7 +529,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         },
     ];
     app.stems_for_opening = Some((id.clone(), memory_lanes(held), "kept".into()));
-    app.pending.borrow_mut().song = Some(Ok(again));
+    app.pending.borrow_mut().song = Some((app.opens.get(), Ok(again)));
     app.apply_inbox(&egui::Context::default());
     let for_opening = app.lane_files();
     // A song decoded on the page has no lane files.
@@ -559,7 +559,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     )
     .await
     .expect("decoded on the page");
-    app.pending.borrow_mut().song = Some(Ok(decoded));
+    app.pending.borrow_mut().song = Some((app.opens.get(), Ok(decoded)));
     app.apply_inbox(&egui::Context::default());
     let page_decode = (
         app.lane_files().iter().all(Option::is_none),
