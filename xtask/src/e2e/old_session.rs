@@ -153,7 +153,8 @@ pub(super) fn old_session_checks(restores: &[Restore], bound: f64) -> Vec<(bool,
     checks
 }
 
-/// The page's line when it makes the stem overviews itself (D7's fallback).
+/// The page's line when it makes the stem overviews itself (D7's
+/// fallback): `app::store::PAGE_OVERVIEWS`, which xtask cannot take.
 const PAGE_OVERVIEWS: &str = "decoder: the page makes the stem overviews";
 /// The decode worker's line at the end of an `overviews` request.
 const WORKER_OVERVIEWS_END: &str = "at the end of the overviews request";

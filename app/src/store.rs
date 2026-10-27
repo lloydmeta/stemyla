@@ -936,25 +936,59 @@ pub async fn stem_overviews(
     frames: usize,
     decoder: &crate::decoder::DecodeClient,
 ) -> Option<StemOverviewSet> {
+    match stem_overviews_or_why(id, frames, decoder).await {
+        StemOverviews::Made(set) => Some(set),
+        StemOverviews::PageFailed | StemOverviews::NotMade => None,
+    }
+}
+
+/// The page's log line when it makes the stem overviews itself, before
+/// the reason (D7's fallback).  `xtask e2e old-session` looks for it.
+pub const PAGE_OVERVIEWS: &str = "decoder: the page makes the stem overviews";
+
+/// How [`stem_overviews`] ended, so that `stem_lanes` can tell a failed
+/// attempt of the page from no attempt (finding 8-1 of review round 8 of
+/// M7).
+enum StemOverviews {
+    Made(StemOverviewSet),
+    /// The page made them itself, and a read failed.
+    PageFailed,
+    /// Nothing was made: storage is closed, the session has no stems, a
+    /// stem is not complete, or the stems changed meanwhile.
+    NotMade,
+}
+
+/// [`stem_overviews`], with how it ended.
+async fn stem_overviews_or_why(
+    id: &str,
+    frames: usize,
+    decoder: &crate::decoder::DecodeClient,
+) -> StemOverviews {
+    use StemOverviews::{Made, NotMade, PageFailed};
     use stem_protocol::decode::{DecodeReply, OverviewLane, OverviewsRequest, WorkerRequest};
     if CLOSED.get() {
-        return None;
+        return NotMade;
     }
-    let meta = meta_now(id).await.ok()?;
+    let Ok(meta) = meta_now(id).await else {
+        return NotMade;
+    };
     if meta.stems.is_empty() {
-        return None;
+        return NotMade;
     }
     let base = session_folder(id);
     let overview_files = stem_overview_files(meta.stems.len());
     if stem_overviews_complete(&base, &meta, frames, &overview_files).await
         && let Some(set) = read_stem_overviews(&base, &overview_files, frames).await
     {
-        return Some(set);
+        return Made(set);
     }
-    let files: Vec<LaneFile> = stem_lane_files(id, &meta, frames)
+    let Some(files) = stem_lane_files(id, &meta, frames)
         .await
         .into_iter()
-        .collect::<Option<_>>()?;
+        .collect::<Option<Vec<LaneFile>>>()
+    else {
+        return NotMade;
+    };
     let generation = meta.stems_generation;
     let part = |file: &str| crate::store_meta::stem_overview_part(file, generation);
     let lanes = files
@@ -977,10 +1011,10 @@ pub async fn stem_overviews(
             drop(guard);
             if !kept {
                 log::info!("decoder: the stems changed while their overviews were made");
-                return None;
+                return NotMade;
             }
             if let Some(set) = read_stem_overviews(&base, &overview_files, frames).await {
-                return Some(set);
+                return Made(set);
             }
             "the overview files could not be read".to_string()
         }
@@ -995,10 +1029,12 @@ pub async fn stem_overviews(
         crate::decoder::Ended::Stopped(why) => why,
     };
     if CLOSED.get() {
-        return None;
+        return NotMade;
     }
-    log::warn!("decoder: the page makes the stem overviews: {why}");
-    overviews_on_the_page(&files, frames).await
+    log::warn!("{PAGE_OVERVIEWS}: {why}");
+    overviews_on_the_page(&files, frames)
+        .await
+        .map_or(PageFailed, Made)
 }
 
 /// Whether `meta` names complete overviews of its stems for `frames`, and
@@ -1539,20 +1575,23 @@ pub async fn stem_lanes(
     }
     let complete = files.iter().all(Option::is_some);
     let set = if complete {
-        stem_overviews(id, frames, decoder).await
+        stem_overviews_or_why(id, frames, decoder).await
     } else {
-        None
+        StemOverviews::NotMade
     };
     let (overviews, mix) = match set {
-        Some(set) if set.lanes.len() == names.len() => (
+        StemOverviews::Made(set) if set.lanes.len() == names.len() => (
             set.lanes.into_iter().map(Some).collect::<Vec<_>>(),
             Some(set.mix),
         ),
-        _ => {
+        set => {
             // The overviews of the complete stems, made on the page; their
-            // mix's only when every stem is complete.
+            // mix's only when every stem is complete.  Not again after a
+            // failed attempt of the page, nor while storage closes (finding
+            // 8-1 of review round 8 of M7).
             let stored: Vec<LaneFile> = files.iter().flatten().cloned().collect();
-            let made = if stored.is_empty() {
+            let tried = matches!(set, StemOverviews::PageFailed);
+            let made = if stored.is_empty() || tried || CLOSED.get() {
                 None
             } else {
                 overviews_on_the_page(&stored, frames).await

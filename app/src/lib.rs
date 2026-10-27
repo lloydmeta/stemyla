@@ -2212,7 +2212,8 @@ impl StemApp {
         );
         let (pending, ctx, frames) = (self.pending.clone(), self.ctx.clone(), song.frames);
         wasm_bindgen_futures::spawn_local(async move {
-            let mut job = export::ExportJob::new(Box::new(input), export::VecSink::new(frames));
+            let mut job = export::ExportJob::new(Box::new(input), export::VecSink::new(frames))
+                .stopping_at_a_failure();
             while !job.run_while(export::time_left(SAVE_MS)) {
                 store::sleep(1).await;
             }
@@ -2990,7 +2991,8 @@ impl StemApp {
         let (pending, ctx) = (self.pending.clone(), self.ctx.clone());
         let frames = input.frames();
         wasm_bindgen_futures::spawn_local(async move {
-            let mut job = export::ExportJob::new(input, export::JsChannels::new(frames));
+            let mut job = export::ExportJob::new(input, export::JsChannels::new(frames))
+                .stopping_at_a_failure();
             while !job.run_while(export::time_left(SAVE_MS)) {
                 store::sleep(1).await;
             }

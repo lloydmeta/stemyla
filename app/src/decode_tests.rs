@@ -1329,7 +1329,7 @@ async fn meta_names_no_stems_while_new_stems_are_written() {
     let frames = 2_000;
     let (id, names, _) = session_with_stems(frames).await;
     let before = meta_of(&id).await.expect("a meta").stems_generation;
-    // One shared buffer for the six channels (MEM-1).
+    // One shared buffer for each channel of the six stems (MEM-1).
     let channel: engine::Samples = vec![0.1; 60 * 44_100].into();
     let stems: Vec<Stem> = names
         .iter()
@@ -1607,7 +1607,9 @@ async fn the_page_overviews_stop_at_the_first_failed_read() {
     store::test_wipe().await;
     assert!(removed, "the first stem's file goes");
     assert!(got.is_ok(), "the stems open");
-    assert!(reads <= 3, "it stops at the failure: {reads} reads");
+    // One read: the page tries once, and stops at the failure (findings
+    // 7-1, 8-1 and 8-2 of review rounds 7 and 8 of M7).
+    assert_eq!(reads, 1, "one attempt, stopped at the failure");
 }
 
 /// Waits for an open's result to reach the inbox, applies it, and waits
