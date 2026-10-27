@@ -453,6 +453,14 @@ A loop set behind the head is a held seek: the player keeps its old loop until t
 
 * Fix: the player gives its own loop with `Hint::Reading`, and `wanted_blocks` follows that loop while a seek holds.
 
+### TD-58: a stored song whose lanes do not fit the read-ahead buffer decodes on the page
+
+This entry concerns MEM-4.
+
+D2 of `plans/active/stream-from-storage-m7.md` sends a stored song whose lanes do not fit the read-ahead buffer at its minimum slots to the memory path, where the page decodes it.  Such a song has more than about 20 sources and no `stem` lines.  `store_meta::open_formats` and `store_meta::fits_read_ahead` make the choice (step 3d of that plan), and the open flows use it from step 7.  A song decoded on the page has no length limit but `engine::decode::MAX_DECODED_BYTES` (decision 0013).  So a long song of that kind can stop the tab on an iPhone.
+
+* Fix: a read-ahead buffer that holds fewer lanes than the song shows, or a mix of the sources into fewer lanes before they play.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings

@@ -50,6 +50,30 @@ pub struct PlannedSource {
     pub in_mix: bool,
 }
 
+/// The formats of the lanes that an open of `meta`'s song shows, and one
+/// 16-bit lane for classic drums (D2 of the M7 plan): for a session with
+/// `stem` lines, its stems (16-bit) and the original (f32); else each
+/// source as an f32 lane.
+pub fn open_formats(meta: &Meta) -> Vec<engine::readahead::LaneFormat> {
+    use engine::readahead::LaneFormat::{F32, Pcm16};
+    let mut formats = if meta.stems.is_empty() {
+        let sources = planned_sources(meta).map_or(meta.files.len(), |s| s.len());
+        vec![F32; sources]
+    } else {
+        let mut stems = vec![Pcm16; meta.stems.len()];
+        stems.push(F32);
+        stems
+    };
+    formats.push(Pcm16);
+    formats
+}
+
+/// Whether lanes of `formats` fit the read-ahead buffer at its minimum
+/// slots (D2 of the M7 plan).
+pub fn fits_read_ahead(formats: &[engine::readahead::LaneFormat]) -> bool {
+    engine::readahead::ReadAhead::slot_counts(formats).is_some()
+}
+
 /// The sources of `meta`'s files, in the order of `Song::from_audio`:
 /// files that are not stems (`mix`, `original`, `truth`) left out, and the
 /// rest sorted by `engine::song::rank`, keeping the order of equal names.
@@ -238,6 +262,49 @@ fn clean(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session of `sources` sources and `stems` stem lines.
+    fn session_of(sources: usize, stems: usize) -> Meta {
+        Meta {
+            name: "lloyd".into(),
+            rate: 44_100,
+            files: (0..sources)
+                .map(|k| (format!("acme {k}.wav"), format!("{k}.wav")))
+                .collect(),
+            stems: (0..stems).map(|k| format!("stem {k}")).collect(),
+            ..Meta::default()
+        }
+    }
+
+    /// D2 of the M7 plan: the lanes shown, with one 16-bit lane for
+    /// classic drums, must fit the read-ahead buffer at its minimum slots.
+    /// An f32 lane takes 256 KiB a slot and a 16-bit lane 128 KiB; at 4
+    /// and 2 slots, 32 MiB holds about 5,461 KiB a slot.
+    #[test]
+    fn the_lanes_must_fit_the_read_ahead() {
+        use engine::readahead::LaneFormat::{F32, Pcm16};
+        // A separated song: six stems, the original and classic drums.
+        let separated = session_of(1, 6);
+        assert_eq!(
+            open_formats(&separated),
+            [Pcm16, Pcm16, Pcm16, Pcm16, Pcm16, Pcm16, F32, Pcm16]
+        );
+        assert!(fits_read_ahead(&open_formats(&separated)));
+        // With stem lines, the sources are not shown.
+        assert!(fits_read_ahead(&open_formats(&session_of(40, 6))));
+        // With no stem lines, each source is an f32 lane: 20 fit, 21 not.
+        let twenty = session_of(20, 0);
+        assert_eq!(open_formats(&twenty).len(), 21);
+        assert_eq!(open_formats(&twenty)[..20], [F32; 20]);
+        assert_eq!(open_formats(&twenty)[20], Pcm16);
+        assert!(fits_read_ahead(&open_formats(&twenty)));
+        assert!(!fits_read_ahead(&open_formats(&session_of(21, 0))));
+        // Files that are not sources are not lanes.
+        let mut with_mix = session_of(20, 0);
+        with_mix.files.push(("mix.wav".into(), "20.wav".into()));
+        assert!(fits_read_ahead(&open_formats(&with_mix)));
+        assert!(fits_read_ahead(&[]));
+    }
 
     #[test]
     fn meta_round_trip() {

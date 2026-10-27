@@ -1632,7 +1632,9 @@ impl StemApp {
     }
 
     /// [`Self::add_stem`] of any lane audio, such as a stored lane of
-    /// classic drums (D8 of the M7 plan).
+    /// classic drums (D8 of the M7 plan).  A stored lane is refused, with
+    /// a status line, if the stored lanes would no longer fit the
+    /// read-ahead buffer (D2).
     pub fn add_lane(&mut self, name: &str, audio: LaneAudio) {
         if let Some(song) = &self.song {
             let mut lanes: Vec<ShownLane> = song
@@ -1641,6 +1643,19 @@ impl StemApp {
                 .filter(|lane| lane.name != name)
                 .cloned()
                 .collect();
+            if let Some(file) = audio.file() {
+                let formats: Vec<_> = lanes
+                    .iter()
+                    .filter_map(|lane| lane.audio.file().map(|f| f.format))
+                    .chain([file.format])
+                    .collect();
+                if !store_meta::fits_read_ahead(&formats) {
+                    self.status = format!(
+                        "{name} not added: the song's stored lanes would not fit the read-ahead buffer"
+                    );
+                    return;
+                }
+            }
             lanes.push(ShownLane {
                 name: name.into(),
                 audio,
@@ -3697,6 +3712,62 @@ mod tests {
         let (ml, mr) = mix_of_sources(&song);
         let mix = &app.lanes[0];
         assert_eq!((mix.columns.clone(), mix.scale), lane_columns(&ml, &mr));
+    }
+
+    /// D2 of the M7 plan: a stored lane of classic drums is refused, with
+    /// a status line, when the stored lanes would no longer fit the
+    /// read-ahead buffer.  It replaces a lane of its name, so a new run of
+    /// classic drums fits where the old one did.
+    #[test]
+    fn classic_drums_that_would_not_fit_the_read_ahead_are_refused() {
+        use engine::readahead::LaneFormat;
+        let store = lane_store::MemoryStore::new();
+        let lane = |path: &str, format: LaneFormat| LaneAudio::Stored {
+            file: store_meta::LaneFile {
+                path: path.into(),
+                format,
+                data_offset: 0,
+                data_frames: 4,
+            },
+            overview: std::rc::Rc::new(lanes::Overview {
+                columns: vec![(0.0, 0.0); 4],
+                scale: 1.0,
+            }),
+            store: std::rc::Rc::clone(&store) as std::rc::Rc<dyn lane_store::LaneStore>,
+        };
+        // 20 f32 lanes and two 16-bit lanes: 5,376 KiB a slot, which fits.
+        let mut lanes: Vec<ShownLane> = (0..20)
+            .map(|k| ShownLane {
+                name: format!("acme {k}"),
+                audio: lane(&format!("s/decoded/{k}.f32"), LaneFormat::F32),
+            })
+            .collect();
+        for name in ["vocals", "classic drums"] {
+            lanes.push(ShownLane {
+                name: name.into(),
+                audio: lane(&format!("s/{name}.wav"), LaneFormat::Pcm16),
+            });
+        }
+        let mut app = app_showing(Shown {
+            sample_rate: 44_100,
+            frames: 4,
+            lanes,
+            mix_overview: None,
+        });
+        // A new run replaces the old lane: still 5,376 KiB.
+        app.add_lane("classic drums", lane("s/classic.wav", LaneFormat::Pcm16));
+        assert_eq!(app.lanes.len(), 23, "status: {}", app.status);
+        assert_eq!(
+            app.lane_files()[21].as_ref().map(|f| f.path.as_str()),
+            Some("s/classic.wav")
+        );
+        // A third 16-bit lane: 5,504 KiB, which does not fit.
+        app.add_lane("bass", lane("s/bass.wav", LaneFormat::Pcm16));
+        assert_eq!(app.lanes.len(), 23, "the lane is not added");
+        assert!(app.status.contains("read-ahead"), "status: {}", app.status);
+        // A lane in memory takes no slot.
+        app.add_stem("bass", vec![0.0; 4], vec![0.0; 4]);
+        assert_eq!(app.lanes.len(), 24);
     }
 
     #[test]
