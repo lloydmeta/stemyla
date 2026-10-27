@@ -15,10 +15,10 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use stem_protocol::decode::Source;
 
-const SESSION: &str = "sessions/1";
+pub(crate) const SESSION: &str = "sessions/1";
 
 /// Runs a future that never waits, as every future of [`Memory`] is.
-fn ready<F: Future>(future: F) -> F::Output {
+pub(crate) fn ready<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     match future.as_mut().poll(&mut cx) {
@@ -27,28 +27,28 @@ fn ready<F: Future>(future: F) -> F::Output {
     }
 }
 
-type Files = Rc<RefCell<BTreeMap<String, Vec<u8>>>>;
+pub(crate) type Files = Rc<RefCell<BTreeMap<String, Vec<u8>>>>;
 
 /// A session's files in memory, with failures to order.
 #[derive(Default)]
-struct Memory {
-    files: Files,
+pub(crate) struct Memory {
+    pub(crate) files: Files,
     /// Source reads fail from this byte on, in the source at this path.
     fail_reads: Option<(String, u64)>,
     /// The write that fails, counted from 1 over every part file.
-    fail_write: Option<usize>,
+    pub(crate) fail_write: Option<usize>,
     /// Each close of a part file fails.
     fail_close: bool,
     writes: Rc<Cell<usize>>,
     /// The size of each write, in order.
-    write_sizes: Rc<RefCell<Vec<usize>>>,
+    pub(crate) write_sizes: Rc<RefCell<Vec<usize>>>,
     /// The largest read of a part or stored file.
-    largest_read: Rc<Cell<usize>>,
+    pub(crate) largest_read: Rc<Cell<usize>>,
     /// The paths of the sources that the pass opened.
     sources: Vec<String>,
 }
 
-struct MemoryPart {
+pub(crate) struct MemoryPart {
     path: String,
     files: Files,
     fail_write: Option<usize>,
@@ -85,7 +85,7 @@ impl PartFile for MemoryPart {
     }
 }
 
-struct MemoryStored {
+pub(crate) struct MemoryStored {
     bytes: Vec<u8>,
     largest_read: Rc<Cell<usize>>,
 }
@@ -170,24 +170,24 @@ impl Session for Memory {
 }
 
 impl Memory {
-    fn plant(&self, path: &str, bytes: Vec<u8>) {
+    pub(crate) fn plant(&self, path: &str, bytes: Vec<u8>) {
         self.files.borrow_mut().insert(path.into(), bytes);
     }
 
-    fn file(&self, name: &str) -> Option<Vec<u8>> {
+    pub(crate) fn file(&self, name: &str) -> Option<Vec<u8>> {
         self.files
             .borrow()
             .get(&format!("{SESSION}/{name}"))
             .cloned()
     }
 
-    fn part(&self, name: &str) -> Vec<u8> {
+    pub(crate) fn part(&self, name: &str) -> Vec<u8> {
         self.file(&format!("{name}{PART}"))
             .unwrap_or_else(|| panic!("no part file {name}"))
     }
 
     /// The names of the part files, from the session folder.
-    fn parts(&self) -> Vec<String> {
+    pub(crate) fn parts(&self) -> Vec<String> {
         self.files
             .borrow()
             .keys()
@@ -239,7 +239,7 @@ fn wav(channels: &[Vec<f32>], rate: u32, float: bool) -> Vec<u8> {
 }
 
 /// A tone of `frames` frames, `level` loud, different for each `seed`.
-fn tone(frames: usize, level: f32, seed: usize) -> Vec<f32> {
+pub(crate) fn tone(frames: usize, level: f32, seed: usize) -> Vec<f32> {
     let step = 0.01 * (seed + 1) as f32;
     (0..frames)
         .map(|i| level * (step * i as f32).sin() + 0.01)
@@ -297,7 +297,7 @@ fn interleaved(left: &[f32], right: &[f32]) -> Vec<u8> {
 }
 
 /// Columns as the bytes of an overview file.
-fn overview_bytes(cols: &[(f32, f32)]) -> Vec<u8> {
+pub(crate) fn overview_bytes(cols: &[(f32, f32)]) -> Vec<u8> {
     cols.iter()
         .flat_map(|(lo, hi)| [lo.to_le_bytes(), hi.to_le_bytes()])
         .flatten()

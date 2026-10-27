@@ -9,7 +9,10 @@
 )]
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
-use stem_protocol::decode::{DecodeReply, DecodeRequest, Source};
+use stem_protocol::decode::{
+    ClassicRequest, DecodeReply, DecodeRequest, LaneEncoding, LaneRef, OverviewLane,
+    OverviewsRequest, Source, WorkerRequest,
+};
 use stem_protocol::{Malformed, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
@@ -793,6 +796,215 @@ fn a_decode_reply_with_a_missing_or_wrong_field_is_refused() {
     }
 }
 
+fn lane_ref(path: &str, encoding: LaneEncoding) -> LaneRef {
+    LaneRef {
+        path: path.into(),
+        encoding,
+        data_offset: 44,
+        data_frames: 132_299,
+    }
+}
+
+/// D7 and D8 of the M7 plan: one of each request of the decode worker.
+fn worker_requests() -> Vec<WorkerRequest> {
+    let lanes = vec![
+        lane_ref("stems/bass.wav", LaneEncoding::Pcm16),
+        LaneRef {
+            data_offset: 0,
+            data_frames: 132_300,
+            ..lane_ref("decoded/0.f32", LaneEncoding::F32)
+        },
+    ];
+    let overviews = OverviewsRequest {
+        session: "sessions/1792640000000".into(),
+        frames: 132_300,
+        lanes: lanes
+            .iter()
+            .enumerate()
+            .map(|(k, lane)| OverviewLane {
+                lane: lane.clone(),
+                overview: format!("overviews/stems/{k}.f32.3.decode.part"),
+            })
+            .collect(),
+        mix: Some("overviews/stems/mix.f32.3.decode.part".into()),
+    };
+    vec![
+        WorkerRequest::Decode(decode_request()),
+        WorkerRequest::Overviews(overviews.clone()),
+        WorkerRequest::Overviews(OverviewsRequest {
+            mix: None,
+            lanes: Vec::new(),
+            ..overviews
+        }),
+        WorkerRequest::Classic(ClassicRequest {
+            session: "sessions/1792640000000".into(),
+            frames: 132_300,
+            lanes,
+            wav: "classic.wav.decode.part".into(),
+            overview: "overviews/classic.f32.decode.part".into(),
+        }),
+    ]
+}
+
+#[wasm_bindgen_test]
+fn worker_requests_and_the_new_replies_arrive_intact_with_nothing_transferred() {
+    for request in worker_requests() {
+        let (msg, transfer) = request.to_js();
+        assert_eq!(transfer.length(), 0, "no samples cross");
+        assert_eq!(
+            WorkerRequest::from_js(&post(&msg, &transfer)),
+            Ok(request.clone())
+        );
+    }
+    // A decode request reads the same either way.
+    let (msg, transfer) = decode_request().to_js();
+    assert_eq!(
+        WorkerRequest::from_js(&post(&msg, &transfer)),
+        Ok(WorkerRequest::Decode(decode_request()))
+    );
+    for reply in [DecodeReply::OverviewsMade, DecodeReply::ClassicMade] {
+        let (msg, transfer) = reply.to_js();
+        assert_eq!(transfer.length(), 0);
+        assert_eq!(
+            DecodeReply::from_js(&post(&msg, &transfer)),
+            Ok(reply.clone())
+        );
+    }
+}
+
+/// `text`, a request of the decode worker in JSON, is refused, and the
+/// reason names `field`.
+fn refused_worker_request(text: &str, kind: &str, field: &str) {
+    match WorkerRequest::from_js(&from_json(text)) {
+        Err(Malformed {
+            kind: got,
+            text: why,
+        }) => {
+            assert_eq!(got, kind, "{text}");
+            assert!(why.contains(field), "{text}: {why}");
+        }
+        Ok(r) => panic!("{text} was read as {r:?}"),
+    }
+}
+
+#[wasm_bindgen_test]
+fn an_overviews_or_classic_request_with_a_missing_or_wrong_field_is_refused() {
+    let lane =
+        r#"{"path": "stems/bass.wav", "format": "pcm16", "data_offset": 44, "data_frames": 10}"#;
+    let with_overview = lane.replace(
+        '}',
+        r#", "overview": "overviews/stems/0.f32.1.decode.part"}"#,
+    );
+    let overviews = |fields: &str| format!(r#"{{"type": "overviews", {fields}}}"#);
+    let classic = |fields: &str| format!(r#"{{"type": "classic", {fields}}}"#);
+    let ok_overviews = |lanes: &str| {
+        overviews(&format!(
+            r#""session": "sessions/1", "frames": 10, "lanes": [{lanes}]"#
+        ))
+    };
+    let ok_classic = |lanes: &str| {
+        classic(&format!(
+            r#""session": "sessions/1", "frames": 10, "lanes": [{lanes}], "wav": "classic.wav.decode.part", "overview": "overviews/classic.f32.decode.part""#
+        ))
+    };
+    assert!(WorkerRequest::from_js(&from_json(&ok_overviews(&with_overview))).is_ok());
+    assert!(WorkerRequest::from_js(&from_json(&ok_classic(lane))).is_ok());
+    for (text, field) in [
+        (
+            overviews(&format!(r#""frames": 10, "lanes": [{with_overview}]"#)),
+            "session",
+        ),
+        (
+            overviews(&format!(
+                r#""session": 1, "frames": 10, "lanes": [{with_overview}]"#
+            )),
+            "session",
+        ),
+        (
+            overviews(&format!(r#""session": "s", "lanes": [{with_overview}]"#)),
+            "frames",
+        ),
+        (
+            overviews(&format!(
+                r#""session": "s", "frames": -1, "lanes": [{with_overview}]"#
+            )),
+            "frames",
+        ),
+        (overviews(r#""session": "s", "frames": 10"#), "lanes"),
+        (
+            overviews(r#""session": "s", "frames": 10, "lanes": {}"#),
+            "lanes",
+        ),
+        (ok_overviews("7"), "lane"),
+        (ok_overviews(lane), "overview"),
+        (
+            ok_overviews(&with_overview.replace(r#""path": "stems/bass.wav", "#, "")),
+            "path",
+        ),
+        (
+            ok_overviews(&with_overview.replace(r#""pcm16""#, r#""pcm24""#)),
+            "format",
+        ),
+        (
+            ok_overviews(&with_overview.replace(r#""format": "pcm16", "#, "")),
+            "format",
+        ),
+        (
+            ok_overviews(&with_overview.replace(r#""data_offset": 44"#, r#""data_offset": 4.5"#)),
+            "data_offset",
+        ),
+        (
+            ok_overviews(&with_overview.replace(r#""data_frames": 10"#, r#""data_frames": "10""#)),
+            "data_frames",
+        ),
+        (
+            overviews(&format!(
+                r#""session": "s", "frames": 10, "lanes": [{with_overview}], "mix": 7"#
+            )),
+            "mix",
+        ),
+    ] {
+        refused_worker_request(&text, "overviews", field);
+    }
+    for (text, field) in [
+        (
+            classic(&format!(
+                r#""frames": 10, "lanes": [{lane}], "wav": "w", "overview": "o""#
+            )),
+            "session",
+        ),
+        (
+            classic(&format!(
+                r#""session": "s", "lanes": [{lane}], "wav": "w", "overview": "o""#
+            )),
+            "frames",
+        ),
+        (
+            classic(r#""session": "s", "frames": 10, "wav": "w", "overview": "o""#),
+            "lanes",
+        ),
+        (
+            classic(&format!(
+                r#""session": "s", "frames": 10, "lanes": [{lane}], "overview": "o""#
+            )),
+            "wav",
+        ),
+        (
+            classic(&format!(
+                r#""session": "s", "frames": 10, "lanes": [{lane}], "wav": "w""#
+            )),
+            "overview",
+        ),
+        (
+            ok_classic(&lane.replace(r#""data_offset": 44, "#, "")),
+            "data_offset",
+        ),
+    ] {
+        refused_worker_request(&text, "classic", field);
+    }
+    refused_worker_request(r#"{"type": "lloyd"}"#, "lloyd", "not a request");
+}
+
 #[wasm_bindgen_test]
 fn a_message_for_one_worker_is_not_read_as_one_for_the_other() {
     for reply in decode_replies() {
@@ -815,4 +1027,17 @@ fn a_message_for_one_worker_is_not_read_as_one_for_the_other() {
     assert!(ToWorker::from_js(&post(&msg, &transfer)).is_err());
     let (msg, transfer) = Request::Init.to_js(&Settings::default());
     assert!(DecodeRequest::from_js(&post(&msg, &transfer)).is_err());
+    assert!(WorkerRequest::from_js(&post(&msg, &transfer)).is_err());
+    for request in worker_requests() {
+        let (msg, transfer) = request.to_js();
+        assert!(
+            ToWorker::from_js(&post(&msg, &transfer)).is_err(),
+            "{request:?}"
+        );
+    }
+    for reply in [DecodeReply::OverviewsMade, DecodeReply::ClassicMade] {
+        let (msg, transfer) = reply.to_js();
+        let err = Reply::from_js(&post(&msg, &transfer)).expect_err("not a stem worker reply");
+        assert_eq!(err.kind, reply.kind());
+    }
 }

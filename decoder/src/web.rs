@@ -6,8 +6,10 @@
 //! `decode-unstored` (D6, D9).  It makes its working set ([`Buffers`])
 //! once, when it starts (D12).
 //!
-//! It reads each source, and a kept `mix.f32`, with `getFile` and
-//! `FileReaderSync`, so a running separation's reads see no lock (D7).  It
+//! It takes the requests `decode`, `overviews` and `classic`
+//! (`stem_protocol::decode::WorkerRequest`).  It reads each source, a
+//! kept `mix.f32` and each lane file with `getFile` and `FileReaderSync`,
+//! so a running separation's reads see no lock (D7).  It
 //! writes each part file through one `FileSystemSyncAccessHandle`, each
 //! write a new whole `Uint8Array` (MEM-5), and closes each handle before
 //! it replies.  The JS objects stay in tables on the JS side; Rust holds
@@ -19,7 +21,7 @@ use engine::decode::MediaSource;
 use js_sys::Uint8Array;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use stem_protocol::decode::{DecodeReply, DecodeRequest};
+use stem_protocol::decode::{DecodeReply, WorkerRequest};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
@@ -200,9 +202,9 @@ async fn drain() {
 }
 
 /// Runs one request, and gives the reply that ends it.  It logs the
-/// worker's memory before it opens a source and before the reply.
+/// worker's memory before it opens a file and before the reply.
 async fn handle(msg: &JsValue) -> DecodeReply {
-    let req = match DecodeRequest::from_js(msg) {
+    let req = match WorkerRequest::from_js(msg) {
         Ok(req) => req,
         Err(bad) => {
             return DecodeReply::Unstored {
@@ -212,18 +214,35 @@ async fn handle(msg: &JsValue) -> DecodeReply {
     };
     warm_up();
     let mut bufs = BUFFERS.with_borrow_mut(Option::take).unwrap_or_default();
+    let kind = req.kind();
     log(format!(
-        "decoder: memory: decoder wasm {:.0} MB at the decode's start",
+        "decoder: memory: decoder wasm {:.0} MB at the {kind}'s start",
         wasm_mb()
     ));
-    let mut opfs = Opfs {
-        session: req.session.clone(),
+    let reply = match &req {
+        WorkerRequest::Decode(req) => {
+            let mut opfs = Opfs {
+                session: req.session.clone(),
+            };
+            pass::run(&mut opfs, req, &mut bufs).await
+        }
+        WorkerRequest::Overviews(req) => {
+            let mut opfs = Opfs {
+                session: req.session.clone(),
+            };
+            crate::lanes::overviews(&mut opfs, req, &mut bufs).await
+        }
+        WorkerRequest::Classic(req) => {
+            let mut opfs = Opfs {
+                session: req.session.clone(),
+            };
+            crate::lanes::classic(&mut opfs, req, &mut bufs).await
+        }
     };
-    let reply = pass::run(&mut opfs, &req, &mut bufs).await;
     files_forget();
     BUFFERS.with_borrow_mut(|slot| *slot = Some(bufs));
     log(format!(
-        "decoder: memory: decoder wasm {:.0} MB at the decode's end",
+        "decoder: memory: decoder wasm {:.0} MB at the {kind}'s end",
         wasm_mb()
     ));
     reply

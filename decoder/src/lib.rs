@@ -2,12 +2,15 @@
 //! side.  It decodes a song that the page keeps in browser storage, in
 //! blocks, with `engine`.  It writes the session files and the overviews
 //! of the song (`docs/plans/active/stream-from-storage-m5.md`, D1 to D12).
+//! It also makes the overviews of stems and classic drums from lane files,
+//! in blocks ([`lanes`], D7 and D8 of `stream-from-storage-m7.md`).
 //! Its messages are in `stem_protocol::decode`, shared with the page.
 //!
 //! The pass logic ([`pass`], [`source`]) compiles on every target, so
 //! `cargo test -p decode-worker` runs its tests natively on files in
 //! memory.  Only the browser glue, in `web`, is for wasm32.
 
+pub mod lanes;
 pub mod pass;
 pub mod source;
 #[cfg(target_arch = "wasm32")]

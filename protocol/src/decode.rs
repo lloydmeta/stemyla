@@ -14,6 +14,21 @@
 //!   `Song::from_audio`.  `mix_frames`, if there, is the frames of a usable
 //!   `mix.f32` of the session, which the worker does not write again.
 //!
+//! The other requests ([`WorkerRequest`], D7 and D8 of
+//! `docs/plans/active/stream-from-storage-m7.md`).  A lane is `{path,
+//! format, data_offset, data_frames}`: its path from the session folder,
+//! `"f32"` or `"pcm16"`, the bytes before its first frame and the frames
+//! it holds (later frames are silence).  Every other path is a part path
+//! from the session folder, which the worker writes.
+//! * `{type: "overviews", session, frames, lanes: [{...lane, overview},
+//!   ...], mix?}`: write the overview of each lane, of `frames` frames, to
+//!   its `overview`, and, with `mix`, the overview of the lanes' clamped
+//!   sum at volume 1 to `mix`.
+//! * `{type: "classic", session, frames, lanes: [lane, ...], wav,
+//!   overview}`: write the percussive part of the lanes' clamped sum at
+//!   volume 1 (a block HPSS) as a 16-bit stereo WAV at 44.1 kHz to `wav`,
+//!   and its overview to `overview`.
+//!
 //! The replies ([`DecodeReply`], decode worker to page):
 //! * `{type: "decode-alive"}` once the worker listens.
 //! * `{type: "decoded", frames, new_mix, channels: [1 or 2, ...]}`: the
@@ -23,9 +38,14 @@
 //! * `{type: "undecodable", text}`: a source cannot be decoded.
 //! * `{type: "decode-unstored", text}`: browser storage failed.
 //! * `{type: "decode-log", text}`: a line for the page's log.
+//! * `{type: "overviews-made"}`: the overviews are in their part files.
+//! * `{type: "classic-made"}`: the WAV and its overview are in their part
+//!   files.
 //!
-//! Each request ends with exactly one of `decoded`, `undecodable` and
-//! `decode-unstored`.  A missing or wrong field is an error, never a
+//! A `decode` request ends with exactly one of `decoded`, `undecodable`
+//! and `decode-unstored`.  An `overviews` request ends with exactly one
+//! of `overviews-made` and `decode-unstored`, and a `classic` request
+//! with exactly one of `classic-made` and `decode-unstored`.  A missing or wrong field is an error, never a
 //! default (TD-16).
 
 use js_sys::{Array, Object};
@@ -41,6 +61,10 @@ pub mod kind {
     pub const UNDECODABLE: &str = "undecodable";
     pub const UNSTORED: &str = "decode-unstored";
     pub const LOG: &str = "decode-log";
+    pub const OVERVIEWS: &str = "overviews";
+    pub const OVERVIEWS_MADE: &str = "overviews-made";
+    pub const CLASSIC: &str = "classic";
+    pub const CLASSIC_MADE: &str = "classic-made";
 }
 
 /// Field names, besides `type`.
@@ -56,6 +80,14 @@ mod field {
     pub const NEW_MIX: &str = "new_mix";
     pub const CHANNELS: &str = "channels";
     pub const TEXT: &str = "text";
+    pub const LANES: &str = "lanes";
+    pub const PATH: &str = "path";
+    pub const FORMAT: &str = "format";
+    pub const DATA_OFFSET: &str = "data_offset";
+    pub const DATA_FRAMES: &str = "data_frames";
+    pub const OVERVIEW: &str = "overview";
+    pub const MIX: &str = "mix";
+    pub const WAV: &str = "wav";
 }
 
 /// One stored source of a song.
@@ -82,6 +114,221 @@ pub struct DecodeRequest {
     pub mix_frames: Option<u64>,
 }
 
+/// How a lane file holds its frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneEncoding {
+    /// Two 32-bit floats a frame (`"f32"`): a decoded source or `mix.f32`.
+    F32,
+    /// Two 16-bit integers a frame (`"pcm16"`): a stem WAV.
+    Pcm16,
+}
+
+/// A lane file that the worker reads (D7 of the M7 plan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneRef {
+    /// The path from the session folder, such as `"stems/bass.wav"`.
+    pub path: String,
+    pub encoding: LaneEncoding,
+    /// The bytes before the first frame.
+    pub data_offset: u64,
+    /// The frames that the file holds; later frames are silence.
+    pub data_frames: u64,
+}
+
+/// A lane whose overview the worker makes, and the part path of that
+/// overview from the session folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverviewLane {
+    pub lane: LaneRef,
+    pub overview: String,
+}
+
+/// A request for the overviews of lanes (D7 of the M7 plan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverviewsRequest {
+    /// The session folder from the root of the private file system.
+    pub session: String,
+    /// The song's frames: the frames of each overview.
+    pub frames: u64,
+    pub lanes: Vec<OverviewLane>,
+    /// The part path of the overview of the lanes' clamped sum at volume
+    /// 1, if one is asked for.
+    pub mix: Option<String>,
+}
+
+/// A request for classic drums of lanes (D8 of the M7 plan).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassicRequest {
+    pub session: String,
+    pub frames: u64,
+    /// The lanes whose clamped sum at volume 1 is the input.
+    pub lanes: Vec<LaneRef>,
+    /// The part paths of the 16-bit WAV and of its overview.
+    pub wav: String,
+    pub overview: String,
+}
+
+/// A request to the decode worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerRequest {
+    Decode(DecodeRequest),
+    Overviews(OverviewsRequest),
+    Classic(ClassicRequest),
+}
+
+impl LaneEncoding {
+    fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Pcm16 => "pcm16",
+        }
+    }
+}
+
+impl LaneRef {
+    /// Sets the fields of the lane on `o`.
+    fn put(&self, o: &Object) {
+        set(o, field::PATH, self.path.as_str());
+        set(o, field::FORMAT, self.encoding.name());
+        set(o, field::DATA_OFFSET, self.data_offset as f64);
+        set(o, field::DATA_FRAMES, self.data_frames as f64);
+    }
+
+    fn from_entry(entry: &JsValue) -> Result<Self, String> {
+        if !entry.is_object() {
+            return Err(format!("a lane must be an object, not {entry:?}"));
+        }
+        let encoding = match get(entry, field::FORMAT).as_string().as_deref() {
+            Some("f32") => LaneEncoding::F32,
+            Some("pcm16") => LaneEncoding::Pcm16,
+            _ => return Err(format!("{} must be \"f32\" or \"pcm16\"", field::FORMAT)),
+        };
+        Ok(Self {
+            path: text_field(entry, field::PATH)?,
+            encoding,
+            data_offset: whole(entry, field::DATA_OFFSET, MAX_SAFE)? as u64,
+            data_frames: whole(entry, field::DATA_FRAMES, MAX_SAFE)? as u64,
+        })
+    }
+}
+
+/// The entries of the array field `k`.
+fn list_field(o: &JsValue, k: &str) -> Result<Vec<JsValue>, String> {
+    let list = get(o, k);
+    if !Array::is_array(&list) {
+        return Err(format!("{k} must be an array"));
+    }
+    Ok(Array::from(&list).iter().collect())
+}
+
+impl WorkerRequest {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Decode(_) => kind::DECODE,
+            Self::Overviews(_) => kind::OVERVIEWS,
+            Self::Classic(_) => kind::CLASSIC,
+        }
+    }
+
+    /// The message to post, and its transfer list, which is empty.
+    pub fn to_js(&self) -> (Object, Array) {
+        let req = match self {
+            Self::Decode(req) => return req.to_js(),
+            Self::Overviews(req) => {
+                let o = typed(kind::OVERVIEWS);
+                set(&o, field::SESSION, req.session.as_str());
+                set(&o, field::FRAMES, req.frames as f64);
+                let lanes: Array = req
+                    .lanes
+                    .iter()
+                    .map(|l| {
+                        let entry = Object::new();
+                        l.lane.put(&entry);
+                        set(&entry, field::OVERVIEW, l.overview.as_str());
+                        JsValue::from(entry)
+                    })
+                    .collect();
+                set(&o, field::LANES, lanes);
+                if let Some(mix) = &req.mix {
+                    set(&o, field::MIX, mix.as_str());
+                }
+                o
+            }
+            Self::Classic(req) => {
+                let o = typed(kind::CLASSIC);
+                set(&o, field::SESSION, req.session.as_str());
+                set(&o, field::FRAMES, req.frames as f64);
+                let lanes: Array = req
+                    .lanes
+                    .iter()
+                    .map(|lane| {
+                        let entry = Object::new();
+                        lane.put(&entry);
+                        JsValue::from(entry)
+                    })
+                    .collect();
+                set(&o, field::LANES, lanes);
+                set(&o, field::WAV, req.wav.as_str());
+                set(&o, field::OVERVIEW, req.overview.as_str());
+                o
+            }
+        };
+        (req, Array::new())
+    }
+
+    pub fn from_js(msg: &JsValue) -> Result<Self, Malformed> {
+        let kind = kind_of(msg);
+        let bad = |text: String| Malformed {
+            kind: kind.clone(),
+            text: format!("{kind} message: {text}"),
+        };
+        match kind.as_str() {
+            kind::DECODE => DecodeRequest::from_js(msg).map(Self::Decode),
+            kind::OVERVIEWS => {
+                let lanes = list_field(msg, field::LANES)
+                    .and_then(|entries| {
+                        entries
+                            .iter()
+                            .map(|entry| {
+                                Ok(OverviewLane {
+                                    lane: LaneRef::from_entry(entry)?,
+                                    overview: text_field(entry, field::OVERVIEW)?,
+                                })
+                            })
+                            .collect::<Result<_, String>>()
+                    })
+                    .map_err(bad)?;
+                let mix = if get(msg, field::MIX).is_undefined() {
+                    None
+                } else {
+                    Some(text_field(msg, field::MIX).map_err(bad)?)
+                };
+                Ok(Self::Overviews(OverviewsRequest {
+                    session: text_field(msg, field::SESSION).map_err(bad)?,
+                    frames: whole(msg, field::FRAMES, MAX_SAFE).map_err(bad)? as u64,
+                    lanes,
+                    mix,
+                }))
+            }
+            kind::CLASSIC => {
+                let lanes = list_field(msg, field::LANES)
+                    .and_then(|entries| entries.iter().map(LaneRef::from_entry).collect())
+                    .map_err(bad)?;
+                Ok(Self::Classic(ClassicRequest {
+                    session: text_field(msg, field::SESSION).map_err(bad)?,
+                    frames: whole(msg, field::FRAMES, MAX_SAFE).map_err(bad)? as u64,
+                    lanes,
+                    wav: text_field(msg, field::WAV).map_err(bad)?,
+                    overview: text_field(msg, field::OVERVIEW).map_err(bad)?,
+                }))
+            }
+            other => Err(bad(format!(
+                "not a request of the decode worker: {other:?}"
+            ))),
+        }
+    }
+}
+
 /// A reply of the decode worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecodeReply {
@@ -98,6 +345,11 @@ pub enum DecodeReply {
         text: String,
     },
     Log(String),
+    /// The overviews of an `overviews` request are in their part files.
+    OverviewsMade,
+    /// The WAV and the overview of a `classic` request are in their part
+    /// files.
+    ClassicMade,
 }
 
 impl DecodeRequest {
@@ -174,6 +426,8 @@ impl DecodeReply {
             Self::Undecodable { .. } => kind::UNDECODABLE,
             Self::Unstored { .. } => kind::UNSTORED,
             Self::Log(_) => kind::LOG,
+            Self::OverviewsMade => kind::OVERVIEWS_MADE,
+            Self::ClassicMade => kind::CLASSIC_MADE,
         }
     }
 
@@ -181,7 +435,7 @@ impl DecodeReply {
     pub fn to_js(&self) -> (Object, Array) {
         let o = typed(self.kind());
         match self {
-            Self::Alive => {}
+            Self::Alive | Self::OverviewsMade | Self::ClassicMade => {}
             Self::Decoded {
                 frames,
                 new_mix,
@@ -233,6 +487,8 @@ impl DecodeReply {
             kind::UNDECODABLE => Self::Undecodable { text: text()? },
             kind::UNSTORED => Self::Unstored { text: text()? },
             kind::LOG => Self::Log(text()?),
+            kind::OVERVIEWS_MADE => Self::OverviewsMade,
+            kind::CLASSIC_MADE => Self::ClassicMade,
             other => return Err(bad(format!("not a decode reply: {other:?}"))),
         })
     }
@@ -280,6 +536,8 @@ mod tests {
             DecodeReply::Undecodable { text: text() },
             DecodeReply::Unstored { text: text() },
             DecodeReply::Log(text()),
+            DecodeReply::OverviewsMade,
+            DecodeReply::ClassicMade,
         ]
         .iter()
         .map(DecodeReply::kind)
@@ -291,7 +549,9 @@ mod tests {
                 "decoded",
                 "undecodable",
                 "decode-unstored",
-                "decode-log"
+                "decode-log",
+                "overviews-made",
+                "classic-made"
             ]
         );
     }
@@ -325,6 +585,10 @@ mod tests {
             kind::UNDECODABLE,
             kind::UNSTORED,
             kind::LOG,
+            kind::OVERVIEWS,
+            kind::OVERVIEWS_MADE,
+            kind::CLASSIC,
+            kind::CLASSIC_MADE,
         ] {
             assert!(!stem_worker.contains(&decode), "{decode}");
         }

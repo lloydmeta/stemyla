@@ -32,7 +32,7 @@ pub const BLOCK_FRAMES: usize = 131_072;
 const FRAME_BYTES: u64 = 8;
 
 /// Bytes in one block.
-const BLOCK_BYTES: usize = BLOCK_FRAMES * FRAME_BYTES as usize;
+pub(crate) const BLOCK_BYTES: usize = BLOCK_FRAMES * FRAME_BYTES as usize;
 
 /// Bytes in one column of an overview file: its minimum and its maximum.
 const COLUMN_BYTES: usize = 8;
@@ -87,13 +87,13 @@ pub trait Session {
 /// decode makes no buffer of its own (D12).
 pub struct Buffers {
     /// The interleaved bytes of the next write, at most a block.
-    staging: Vec<u8>,
+    pub(crate) staging: Vec<u8>,
     /// The bytes of one block that the second pass reads.
-    read: Vec<u8>,
-    left: Vec<f32>,
-    right: Vec<f32>,
-    mix_left: Vec<f32>,
-    mix_right: Vec<f32>,
+    pub(crate) read: Vec<u8>,
+    pub(crate) left: Vec<f32>,
+    pub(crate) right: Vec<f32>,
+    pub(crate) mix_left: Vec<f32>,
+    pub(crate) mix_right: Vec<f32>,
 }
 
 impl Default for Buffers {
@@ -456,7 +456,7 @@ async fn decode<S: Session>(
 
 /// `dsp::mix`'s clamp to ±1, which keeps a NaN and the sign of 0, as
 /// `f32::clamp` does.
-fn clamped(x: f32) -> f32 {
+pub(crate) fn clamped(x: f32) -> f32 {
     x.clamp(-1.0, 1.0)
 }
 
@@ -514,4 +514,4 @@ async fn write_overview<S: Session>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -12,7 +12,9 @@ use engine::Song;
 use engine::decode::decode_bytes;
 use engine::overview::lane_columns;
 use std::alloc::{GlobalAlloc, Layout, System};
-use stem_protocol::decode::Source;
+use stem_protocol::decode::{
+    ClassicRequest, DecodeRequest, LaneEncoding, LaneRef, OverviewLane, OverviewsRequest, Source,
+};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -415,6 +417,164 @@ async fn decode_writes_pass_whole_arrays() {
     // blocks, so more than one call writes it.
     let mix_writes = calls.iter().filter(|(_, bytes)| *bytes > 32 << 10).count();
     assert!(mix_writes >= 2, "more than one write of the mix: {writes}");
+
+    // D7 and D8 of the M7 plan: the overviews of stems, and classic drums.
+    let frames = 300_007;
+    plant_stems(2, frames).await;
+    for (request, made) in [
+        (overviews_request(2, frames), DecodeReply::OverviewsMade),
+        (classic_request(2, frames), DecodeReply::ClassicMade),
+    ] {
+        start_write_spy();
+        let reply = handle(&request.into()).await;
+        let writes = stop_write_spy();
+        assert_eq!(reply, made);
+        let calls: Vec<&str> = writes.split(' ').collect();
+        assert!(calls.len() >= 3, "{writes}");
+        assert!(
+            calls.iter().all(|call| call.starts_with("whole:")),
+            "{writes}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| call[6..].parse::<usize>().unwrap_or(usize::MAX) <= 1 << 20),
+            "each write at most 1 MiB: {writes}"
+        );
+    }
+}
+
+/// `count` stem WAVs of `frames` frames, as `stems/<k>.wav`.
+async fn plant_stems(count: usize, frames: usize) {
+    for k in 0..count {
+        let wav = engine::wav::encode_pcm16(&tone(frames, k), &tone(frames, k + 5), 44_100);
+        plant_at(&format!("{SESSION}/stems/{k}.wav"), &wav).await;
+    }
+}
+
+fn stem_lane(k: usize, frames: usize) -> LaneRef {
+    LaneRef {
+        path: format!("stems/{k}.wav"),
+        encoding: LaneEncoding::Pcm16,
+        data_offset: engine::wav::HEADER_BYTES as u64,
+        data_frames: frames as u64,
+    }
+}
+
+/// An `overviews` request for `count` stems and their mix.
+fn overviews_request(count: usize, frames: usize) -> js_sys::Object {
+    let req = OverviewsRequest {
+        session: SESSION.into(),
+        frames: frames as u64,
+        lanes: (0..count)
+            .map(|k| OverviewLane {
+                lane: stem_lane(k, frames),
+                overview: format!("overviews/stems/{k}.f32.1.decode.part"),
+            })
+            .collect(),
+        mix: Some("overviews/stems/mix.f32.1.decode.part".into()),
+    };
+    stem_protocol::decode::WorkerRequest::Overviews(req)
+        .to_js()
+        .0
+}
+
+/// A `classic` request of `count` stems.
+fn classic_request(count: usize, frames: usize) -> js_sys::Object {
+    let req = ClassicRequest {
+        session: SESSION.into(),
+        frames: frames as u64,
+        lanes: (0..count).map(|k| stem_lane(k, frames)).collect(),
+        wav: "classic.wav.decode.part".into(),
+        overview: "overviews/classic.f32.decode.part".into(),
+    };
+    stem_protocol::decode::WorkerRequest::Classic(req).to_js().0
+}
+
+/// The peak of the heap above its start while the request `msg` runs.
+async fn request_peak(msg: js_sys::Object) -> (usize, DecodeReply) {
+    warm_up();
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    let reply = handle(&msg.into()).await;
+    (PEAK.with(Cell::get) - before, reply)
+}
+
+/// The control of the memory tests: a whole decode of `seconds` of one
+/// stem holds its samples.
+fn whole_peak(seconds: usize) -> usize {
+    let frames = seconds * 44_100;
+    let wav = engine::wav::encode_pcm16(&tone(frames, 0), &tone(frames, 1), 44_100);
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    let whole = decode_bytes(wav, Some("wav")).unwrap();
+    let peak = PEAK.with(Cell::get) - before;
+    drop(whole);
+    peak
+}
+
+/// D7 of the M7 plan: the overviews of six stems of 2 s and of 20 s
+/// peak within 1 MiB of each other, and each read is at most 1 MiB.
+#[wasm_bindgen_test]
+async fn an_overview_request_keeps_the_worker_memory_flat() {
+    const MIB: usize = 1 << 20;
+    let mut peaks = Vec::new();
+    for seconds in [2, 20] {
+        let frames = seconds * 44_100;
+        fresh().await;
+        plant_stems(6, frames).await;
+        start_read_spies();
+        let (peak, reply) = request_peak(overviews_request(6, frames)).await;
+        let reads = stop_read_spies();
+        assert_eq!(reply, DecodeReply::OverviewsMade, "{seconds} s");
+        assert!(reads.len() >= 6, "{} reads", reads.len());
+        assert!(
+            reads.iter().all(|bytes| *bytes <= MIB as f64),
+            "each read is at most 1 MiB: {reads:?}"
+        );
+        peaks.push(peak);
+    }
+    assert!(
+        peaks[1].abs_diff(peaks[0]) < MIB,
+        "the peak does not grow with the song: {peaks:?}"
+    );
+    let (short, long) = (whole_peak(2), whole_peak(20));
+    assert!(
+        long > short + MIB,
+        "the control peaks {short} and {long} bytes"
+    );
+}
+
+/// D8 of the M7 plan: classic drums of two stems of 2 s and of 12 s peak
+/// within 1 MiB of each other, and each read is at most 1 MiB.  One side
+/// of 10 s more is 1.8 MB.
+#[wasm_bindgen_test]
+async fn a_classic_request_keeps_the_worker_memory_flat() {
+    const MIB: usize = 1 << 20;
+    let mut peaks = Vec::new();
+    for seconds in [2, 12] {
+        let frames = seconds * 44_100;
+        fresh().await;
+        plant_stems(2, frames).await;
+        start_read_spies();
+        let (peak, reply) = request_peak(classic_request(2, frames)).await;
+        let reads = stop_read_spies();
+        assert_eq!(reply, DecodeReply::ClassicMade, "{seconds} s");
+        assert!(
+            reads.iter().all(|bytes| *bytes <= MIB as f64),
+            "each read is at most 1 MiB: {reads:?}"
+        );
+        peaks.push(peak);
+    }
+    assert!(
+        peaks[1].abs_diff(peaks[0]) < MIB,
+        "the peak does not grow with the song: {peaks:?}"
+    );
+    let (short, long) = (whole_peak(2), whole_peak(12));
+    assert!(
+        long > short + MIB,
+        "the control peaks {short} and {long} bytes"
+    );
 }
 
 /// The peak of the heap above its start while `request` decodes.
