@@ -381,45 +381,9 @@ fn decode_into_reservation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_alloc::peak_of;
     use crate::test_flac::{Blocks, by_hand, compressed, step};
     use crate::wav::encode_pcm16;
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    thread_local! {
-        /// Heap bytes this thread allocated and has not freed.
-        static LIVE: Cell<usize> = const { Cell::new(0) };
-        /// The most `LIVE` has been since a test set it.
-        static PEAK: Cell<usize> = const { Cell::new(0) };
-    }
-
-    /// Keeps `LIVE` and `PEAK` for each thread.  Only `alloc` and `dealloc`
-    /// are written, so the default `realloc` holds the old and the new
-    /// buffer at once, as `System`'s may.
-    struct PeakAllocator;
-
-    // SAFETY: every call is forwarded unchanged to `System`; counting
-    // touches only `const` thread-locals, which do not allocate.
-    unsafe impl GlobalAlloc for PeakAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let _ = LIVE.try_with(|live| {
-                let now = live.get() + layout.size();
-                live.set(now);
-                let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
-            });
-            // SAFETY: the caller's contract is the same as `System`'s.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(layout.size())));
-            // SAFETY: the caller's contract is the same as `System`'s.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: PeakAllocator = PeakAllocator;
 
     /// 10,007 frames: not a whole number of 1,152-frame packets, nor near a
     /// power of two.
@@ -747,10 +711,9 @@ mod tests {
         let blocks = TWO_HOURS.div_ceil(65_535) as usize;
         for channels in [1, 2] {
             let bytes = silence_of(channels, 0, 65_535, blocks);
-            let before = LIVE.with(Cell::get);
-            PEAK.with(|peak| peak.set(before));
-            let error = decode_within(bytes, "flac", LIMIT).unwrap_err();
-            let held = (PEAK.with(Cell::get) - before) as u64;
+            let (held, result) = peak_of(|| decode_within(bytes, "flac", LIMIT));
+            let held = held as u64;
+            let error = result.unwrap_err();
             assert!(
                 format!("{error:#}").contains("too long to open"),
                 "{error:#}"
@@ -905,14 +868,6 @@ mod tests {
             self.0 += left.len();
             Ok(())
         }
-    }
-
-    /// The peak of the heap above its start, while `run` runs.
-    fn peak_of<T>(run: impl FnOnce() -> T) -> (usize, T) {
-        let before = LIVE.with(Cell::get);
-        PEAK.with(|peak| peak.set(before));
-        let out = run();
-        (PEAK.with(Cell::get) - before, out)
     }
 
     /// A stereo `ext` file of `seconds` of tones at `rate`.

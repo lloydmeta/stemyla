@@ -17,6 +17,8 @@ pub mod song;
 pub mod source;
 pub mod stretch;
 #[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
 mod test_audio;
 #[cfg(test)]
 mod test_flac;

@@ -53,6 +53,21 @@ pub trait Pcm {
     /// many samples are at full scale (±1 or beyond).  Both slices have the
     /// same length, and `at` plus that length is at most `frames`.
     fn read(&self, at: usize, left: &mut [f32], right: &mut [f32]) -> usize;
+
+    /// Whether the frames from `at` can be read now.  Audio in memory is
+    /// always ready.  A source that reads storage starts a read of them
+    /// when they are not, so a caller asks again later.
+    fn ready(&self, at: usize, frames: usize) -> bool {
+        let _ = (at, frames);
+        true
+    }
+
+    /// Whether every range of `(at, frames)` can be read now.  A source
+    /// that reads storage starts one read for all of them when they are
+    /// not.
+    fn ready_ranges(&self, ranges: &[(usize, usize)]) -> bool {
+        ranges.iter().all(|&(at, frames)| self.ready(at, frames))
+    }
 }
 
 /// A song's stems at the gains of a recipe, summed and clamped to ±1, as
@@ -272,6 +287,42 @@ mod tests {
         assert_eq!(l, *s.left);
         assert_eq!(r, *s.right);
         assert_eq!(clipped, 3);
+    }
+
+    /// Audio in memory is always ready to read (D3 of the M7 plan).
+    #[test]
+    fn a_pcm_in_memory_is_always_ready() {
+        let mix = Mix::new(song(100), &MixRecipe::new(vec![1.0; 3]));
+        let stem = StemPcm::new(song(100).stems[0].clone(), 44_100);
+        for pcm in [&mix as &dyn Pcm, &stem] {
+            assert!(pcm.ready(0, 100));
+            assert!(pcm.ready(40, 7));
+            assert!(pcm.ready_ranges(&[(0, 10), (50, 50)]));
+            assert!(pcm.ready_ranges(&[]));
+        }
+    }
+
+    /// `ready_ranges` asks `ready` of each range, by default.
+    #[test]
+    fn ready_ranges_asks_each_range() {
+        struct HalfReady;
+        impl Pcm for HalfReady {
+            fn frames(&self) -> usize {
+                100
+            }
+            fn sample_rate(&self) -> u32 {
+                44_100
+            }
+            fn read(&self, _: usize, _: &mut [f32], _: &mut [f32]) -> usize {
+                0
+            }
+            fn ready(&self, at: usize, frames: usize) -> bool {
+                at + frames <= 50
+            }
+        }
+        assert!(HalfReady.ready_ranges(&[(0, 10), (40, 10)]));
+        assert!(!HalfReady.ready_ranges(&[(0, 10), (45, 10)]));
+        assert!(!HalfReady.ready_ranges(&[(60, 1), (0, 10)]));
     }
 
     #[test]

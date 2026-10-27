@@ -33,13 +33,15 @@ pub fn lane_columns(left: &[f32], right: &[f32]) -> (Vec<(f32, f32)>, f32) {
         .zip(&pr)
         .map(|(a, b)| (a.0.min(b.0), a.1.max(b.1)))
         .collect();
-    let scale = scale_of(&cols);
+    let scale = overview_scale(&cols);
     (cols, scale)
 }
 
 /// The scale that makes the loudest of `cols` fill the lane, with
-/// `dsp::biggest`.  A silent lane has the scale 1.
-fn scale_of(cols: &[(f32, f32)]) -> f32 {
+/// `dsp::biggest`.  A silent lane has the scale 1.  [`lane_columns`] and
+/// [`OverviewBuilder`] use it, and so does a reader of an overview file,
+/// which holds only the columns.
+pub fn overview_scale(cols: &[(f32, f32)]) -> f32 {
     let magnitudes: Vec<f32> = cols.iter().map(|(lo, hi)| lo.abs().max(hi.abs())).collect();
     let loudest = if magnitudes.is_empty() {
         0.0
@@ -100,7 +102,7 @@ impl OverviewBuilder {
         if self.filled > 0 {
             self.close();
         }
-        let scale = scale_of(&self.columns);
+        let scale = overview_scale(&self.columns);
         (self.columns, scale)
     }
 
@@ -202,6 +204,24 @@ mod tests {
             let want = lane_columns(&lane, &lane);
             assert!(bits(&built(&lane, &lane, 333)) == bits(&want), "{level}");
         }
+    }
+
+    /// The scale of an overview read from a file (D4 of the M7 plan) is
+    /// the scale that `lane_columns` gives with the same columns.
+    #[test]
+    fn an_overview_scale_is_the_scale_of_lane_columns() {
+        for (frames, level) in [(0, 1.0), (1, 0.5), (5_000, 1e-7), (1_000_003, 0.75)] {
+            let left: Vec<f32> = noise(frames, 3).iter().map(|x| x * level).collect();
+            let right: Vec<f32> = noise(frames, 4).iter().map(|x| x * level).collect();
+            let (cols, scale) = lane_columns(&left, &right);
+            assert_eq!(
+                overview_scale(&cols).to_bits(),
+                scale.to_bits(),
+                "{frames} frames"
+            );
+        }
+        assert_eq!(overview_scale(&[(-0.25, 0.5)]), 2.0);
+        assert_eq!(overview_scale(&[]), 1.0, "no columns");
     }
 
     #[test]
