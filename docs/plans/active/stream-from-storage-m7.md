@@ -327,6 +327,13 @@ The parent's M7 section, item by item:
   * 8-3: `store::PAGE_OVERVIEWS` holds the fallback's log text, and `old_session.rs` names it beside its own copy.
   * 8-6: the reads of the memory path's input and of classic drums' input stop at the first failed read too.  No test: both reads are bounded and end with an error either way.
   * 8-4, 8-5: text.  `web-test --browser chrome`: 252 tests pass.
+* [x] 2026-10-28: the acceptance checks on the final code (`8030869`), in Chrome on the Mac, after `(cd app && trunk build --release)`.  Each scenario passes:
+  * `old-session` (27 s): page memory 40.3 MB for 1 minute and 40.4 MB for 5 minutes, under 64 MB, with a growth of 0.1 MB.  The decode worker made the stem overviews, and a second restore asked for none.
+  * `playback` (24 s): `lanes from storage 7 of 7`, a read-ahead buffer of 24.0 MiB, 0 underruns, read p50 2.7 ms and p99 6.3 ms.
+  * `smoke` (14 s), `decode` (14 s), `storage` (74 s), `audio-resume` (11 s).
+  * `flac` (15 s): 300 s of stereo encoded in 11,265 ms.
+  * With the real weights: `separate` (56 s), and `stored-stems --hashes` with M3's six hashes (18 s).
+  * `memory-budget` (243 s): the 1-minute and the 4-minute songs each peak at 828 MB (page wasm 33 MB, worker wasm 57 MB, decoder wasm 6 MB, GPU live 732 MB), 0 MB apart.  The page and the decode worker grow by 0 MB during each open, and the page and the worker by 0 MB during each separation.  The page grows by 18 MB to show the stems of each song.
 
 ## Surprises and discoveries
 
