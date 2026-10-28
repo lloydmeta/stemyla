@@ -467,7 +467,8 @@ pub async fn stored_mix_frames(id: &str) -> Option<usize> {
 /// reader (D10 of the M7 plan).  So the page makes no song-length buffer.
 /// It first removes the `mix` line and any old mix file, and it writes the
 /// `mix` line only for a complete file.  It never makes a forgotten
-/// session folder again.
+/// session folder again.  A usable mix of the input's frames stays, and
+/// nothing is written.
 pub async fn write_mix(id: &str, input: Box<dyn engine::mixdown::Pcm>) -> Result<()> {
     saving(id, async {
         if CLOSED.get() {
@@ -495,6 +496,11 @@ async fn write_mix_now(id: &str, input: &dyn engine::mixdown::Pcm) -> Result<()>
     {
         let _meta = lock_meta(id).await;
         let mut meta = meta_now(id).await?;
+        // A decode may have moved a usable mix of the song into place since
+        // the start read `meta` (C of the catch-up plan).
+        if usable_mix_frames(id, &meta).await == Some(input.frames()) {
+            return Ok(());
+        }
         if meta.mix.take().is_some() {
             write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
         }
@@ -1308,14 +1314,14 @@ pub fn is_closed() -> bool {
 
 /// Records the session of the separation that may read or write its
 /// `mix.f32` (any stage but the memory path), or none.  The page sets it in
-/// each frame, so D7 can see it (D8).
+/// each frame, so a mix removal waits for it (D8, D10 of M6).
 pub fn set_separating(id: Option<String>) {
     SEPARATING.with_borrow_mut(|s| *s = id);
     run_deferred();
 }
 
-/// Whether a separation or a mix write names session `id` (D8): D7 then
-/// keeps the session's `mix.f32` as it is.
+/// Whether a separation or a mix write names session `id` (D8): a mix
+/// removal then waits, and keeps the session's `mix.f32` as it is.
 pub fn mix_in_use(id: &str) -> bool {
     SEPARATING.with_borrow(|s| s.as_deref() == Some(id))
         || MIX_WRITING.with_borrow(|w| w.contains_key(id))
@@ -1415,35 +1421,40 @@ pub async fn clear_decoded(id: &str) -> Result<()> {
     .await
 }
 
-/// What D7 did with the decode worker's files.
-#[derive(Debug, PartialEq)]
-pub enum Kept {
-    /// The session is complete: its files are in place, and `meta` has the
-    /// `decoded` line.
-    Complete,
-    /// A separation or a mix write names the session, and its `mix.f32` is
-    /// not usable now (D8).  The worker's files are removed, and the
-    /// session stays incomplete.
-    MixBusy,
+/// Whether a mix write ([`write_mix`]) into session `id` runs now.
+pub fn mix_writing(id: &str) -> bool {
+    MIX_WRITING.with_borrow(|w| w.contains_key(id))
 }
 
 /// D7, after a `decoded` reply for session `id`: moves each part file onto
 /// its name, then writes the `decoded` line, and the `mix` line if a new
 /// `mix.f32` moved into place.  The caller holds the session's
-/// [`DecodeGuard`], so this waits for no other save (D8a).  If the session
-/// has a usable mix of the song's frames now ([`usable_mix_frames`]), or a
-/// separation or a mix write names the session, the worker's mix is
-/// removed and the session's `mix.f32` stays (D8).  Otherwise the worker's
-/// mix takes its place.  An error leaves the session incomplete.
+/// [`DecodeGuard`], so this waits for no other save (D8a).  A mix write
+/// into the session holds `mix.f32`, so this first waits for it to end,
+/// with `meta` free meanwhile.  A mix write never waits for a decode.
+/// Then, if the session has a usable mix of the song's frames
+/// ([`usable_mix_frames`]), the worker's mix is removed and the session's
+/// `mix.f32` stays (D8).  Otherwise the worker's mix takes its place, also
+/// while a separation names the session: it read no mix that is not
+/// usable, and its mix write keeps a usable one (C of
+/// `plans/active/stream-from-storage-catchup.md`).  So the session is
+/// complete, and the page never decodes it because a separation uses the
+/// mix.  An error leaves the session incomplete.
 pub async fn keep_decoded(
     id: &str,
     sources: &[PlannedSource],
     frames: usize,
     new_mix: bool,
     channels: &[u8],
-) -> Result<Kept> {
+) -> Result<()> {
     // Held from the read of `meta` to its write; the moves are short.
-    let _meta = lock_meta(id).await;
+    let mut meta_lock = lock_meta(id).await;
+    while mix_writing(id) && !CLOSED.get() {
+        drop(meta_lock);
+        st_sleep(20).await;
+        meta_lock = lock_meta(id).await;
+    }
+    let _meta = meta_lock;
     let base = session_folder(id);
     let mut meta = meta_now(id).await?;
     let files: Vec<String> = crate::store_meta::session_files(frames, sources)
@@ -1451,17 +1462,8 @@ pub async fn keep_decoded(
         .map(|(file, _)| file)
         .collect();
     let mut moved_mix = false;
-    // A usable mix of the song stays; so does a mix that a separation or a
-    // mix write names, usable or not (D8).
-    let usable = usable_mix_frames(id, &meta).await == Some(frames);
-    if new_mix && (usable || mix_in_use(id)) {
+    if new_mix && usable_mix_frames(id, &meta).await == Some(frames) {
         st_remove(&format!("{base}/{MIX_FILE}{DECODE_PART}")).await;
-        if !usable {
-            for file in &files {
-                st_remove(&format!("{base}/{file}{DECODE_PART}")).await;
-            }
-            return Ok(Kept::MixBusy);
-        }
     } else if new_mix {
         move_part(&base, MIX_FILE).await?;
         moved_mix = true;
@@ -1482,7 +1484,7 @@ pub async fn keep_decoded(
         meta.mix = Some((frames, MIX_FORMAT.into()));
     }
     write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
-    Ok(Kept::Complete)
+    Ok(())
 }
 
 /// Moves `<file>.decode.part` onto `<file>` in the folder `base`.
@@ -2785,7 +2787,7 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         let frames = 5_000;
         plant_parts(id, frames, &sources, true).await;
         let kept = keep_decoded(id, &sources, frames, true, &[2, 1]).await;
-        assert_eq!(kept.expect("kept"), Kept::Complete);
+        kept.expect("kept");
         assert_eq!(parts_left(id, frames, &sources).await, Vec::<String>::new());
         let meta = meta_now(id).await.expect("meta");
         assert_eq!(meta.mix, Some((frames, MIX_FORMAT.into())));
@@ -2802,17 +2804,17 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         st_remove(ROOT).await;
     }
 
-    /// D8: with a `mix` line now, or a separation or a mix write naming the
-    /// session, D7 removes the worker's mix, and `mix.f32` does not change.
-    /// With no usable mix, the session stays incomplete.
+    /// C of the catch-up plan (MixBusy): a separation names the session,
+    /// and no mix write runs.  The session's `mix.f32` is not usable, so
+    /// the separation has not read it and writes its own: the worker's mix
+    /// takes its place, and the session is complete with no decode on the
+    /// page.  A usable `mix` line keeps its mix.
     #[wasm_bindgen_test]
-    async fn a_mix_in_use_is_not_replaced() {
+    async fn a_decode_is_kept_while_a_separation_names_the_session() {
         st_remove(ROOT).await;
         let sources = sources_of(&["drums"]);
         let frames = 3_000;
         let kept_mix = vec![3u8; 8 * frames];
-        // A separation names the session, which has no usable mix: the
-        // page reopened it while the separation writes the mix.
         let id = "1792640000041";
         plant_session(id, &[]).await;
         write(&mix_path(id), &kept_mix).await.expect("planted");
@@ -2820,32 +2822,137 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         set_separating(Some(id.into()));
         let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
         set_separating(None);
-        assert_eq!(kept.expect("no error"), Kept::MixBusy);
+        kept.expect("kept");
         assert_eq!(
             read(&mix_path(id)).await,
-            Some(kept_mix.clone()),
-            "the mix stays"
+            Some(vec![7u8; 8 * frames]),
+            "the worker's mix"
         );
         assert_eq!(parts_left(id, frames, &sources).await, Vec::<String>::new());
-        assert_eq!(
-            meta_now(id).await.expect("meta").decoded,
-            None,
-            "incomplete"
-        );
+        let meta = meta_now(id).await.expect("meta");
+        assert_eq!(meta.decoded.map(|d| d.frames), Some(frames), "complete");
+        assert_eq!(meta.mix, Some((frames, MIX_FORMAT.into())));
         // A usable `mix` line now: the mix stays, and the session is
         // complete with it.
         let id = "1792640000042";
         plant_mix_line(id, frames).await;
         write(&mix_path(id), &kept_mix).await.expect("planted");
         plant_parts(id, frames, &sources, true).await;
+        set_separating(Some(id.into()));
         let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
-        assert_eq!(kept.expect("kept"), Kept::Complete);
+        set_separating(None);
+        kept.expect("kept");
         assert_eq!(read(&mix_path(id)).await, Some(kept_mix), "the mix stays");
         assert_eq!(parts_left(id, frames, &sources).await, Vec::<String>::new());
         let meta = meta_now(id).await.expect("meta");
         assert_eq!(meta.decoded.map(|d| d.frames), Some(frames));
         assert_eq!(meta.mix, Some((frames, MIX_FORMAT.into())));
         st_remove(ROOT).await;
+    }
+
+    /// A [`engine::mixdown::Pcm`] that is not ready until `open` is set.
+    struct Gated {
+        inner: Box<dyn engine::mixdown::Pcm>,
+        open: std::rc::Rc<Cell<bool>>,
+    }
+
+    impl engine::mixdown::Pcm for Gated {
+        fn frames(&self) -> usize {
+            self.inner.frames()
+        }
+
+        fn sample_rate(&self) -> u32 {
+            self.inner.sample_rate()
+        }
+
+        fn read(&self, at: usize, left: &mut [f32], right: &mut [f32]) -> usize {
+            self.inner.read(at, left, right)
+        }
+
+        fn ready(&self, _at: usize, _frames: usize) -> bool {
+            self.open.get()
+        }
+    }
+
+    /// Runs `work` in the background; its output arrives in the cell.
+    fn in_background<T: 'static>(
+        work: impl std::future::Future<Output = T> + 'static,
+    ) -> std::rc::Rc<RefCell<Option<T>>> {
+        let out = std::rc::Rc::new(RefCell::new(None));
+        let slot = std::rc::Rc::clone(&out);
+        wasm_bindgen_futures::spawn_local(async move {
+            let done = work.await;
+            *slot.borrow_mut() = Some(done);
+        });
+        out
+    }
+
+    /// C of the catch-up plan (MixBusy): a decode that ends while a mix
+    /// write runs waits for the write, then keeps the mix that it wrote.
+    /// The session is complete, with no decode on the page.
+    #[wasm_bindgen_test]
+    async fn a_decode_waits_for_a_mix_write_and_keeps_its_mix() {
+        st_remove(ROOT).await;
+        let id = "1792640000043";
+        let sources = sources_of(&["drums"]);
+        let song = one_lane(1_000);
+        let frames = song.frames;
+        plant_session(id, &[]).await;
+        plant_parts(id, frames, &sources, true).await;
+        let open = std::rc::Rc::new(Cell::new(false));
+        let input = Box::new(Gated {
+            inner: input_of(&song),
+            open: std::rc::Rc::clone(&open),
+        });
+        let writing = in_background(write_mix(id, input));
+        while !MIX_WRITING.with_borrow(|w| w.contains_key(id)) {
+            store_sleep(5).await;
+        }
+        let keeping = in_background(async move {
+            let sources = sources_of(&["drums"]);
+            keep_decoded("1792640000043", &sources, 1_000, true, &[2]).await
+        });
+        store_sleep(200).await;
+        let waited = keeping.borrow().is_none();
+        open.set(true);
+        while writing.borrow().is_none() || keeping.borrow().is_none() {
+            store_sleep(10).await;
+        }
+        let written = writing.borrow_mut().take().expect("written");
+        let kept = keeping.borrow_mut().take().expect("kept");
+        let mix = read(&mix_path(id)).await;
+        let parts = parts_left(id, frames, &sources).await;
+        let meta = meta_now(id).await.expect("meta");
+        st_remove(ROOT).await;
+        written.expect("the mix is written");
+        kept.expect("the decode is kept");
+        assert!(waited, "the decode waits for the mix write");
+        let want = interleaved(&song.stems[0].left, &song.stems[0].right);
+        assert!(mix == Some(want), "the mix that the write wrote");
+        assert_eq!(parts, Vec::<String>::new());
+        assert_eq!(meta.decoded.map(|d| d.frames), Some(frames), "complete");
+        assert_eq!(meta.mix, Some((frames, MIX_FORMAT.into())));
+    }
+
+    /// C of the catch-up plan: a mix write keeps a usable mix of the
+    /// input's frames, which a decode moved into place meanwhile, and
+    /// writes nothing.
+    #[wasm_bindgen_test]
+    async fn a_usable_mix_of_the_song_is_not_written_again() {
+        st_remove(ROOT).await;
+        let id = "1792640000044";
+        let song = one_lane(1_000);
+        let kept_mix = vec![5u8; 8 * song.frames];
+        plant_mix_line(id, song.frames).await;
+        write(&mix_path(id), &kept_mix).await.expect("planted");
+        spy();
+        let written = write_mix(id, input_of(&song)).await;
+        let record = stop_spy();
+        let mix = read(&mix_path(id)).await;
+        st_remove(ROOT).await;
+        written.expect("kept");
+        assert_eq!(record, "", "no write");
+        assert!(mix == Some(kept_mix), "the mix stays");
     }
 
     /// Waits up to `ms` for `done`: whether it was set.
@@ -2934,7 +3041,7 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         let stems_kept = set_within(3_000, &stems_done).await;
         let meta = meta_now(id).await.expect("meta");
         st_remove(ROOT).await;
-        assert_eq!(kept.expect("kept"), Kept::Complete);
+        kept.expect("kept");
         assert!(stems_kept, "the stems are kept");
         assert_eq!(meta.stems, ["bass"], "the stem lines stay");
         assert_eq!(
@@ -2971,7 +3078,7 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
             let stems_saved = set_within(3_000, &saved).await;
             let meta = meta_now(id).await.expect("meta");
             st_remove(ROOT).await;
-            assert_eq!(kept.expect("kept"), Kept::Complete, "delay {delay}");
+            kept.unwrap_or_else(|e| panic!("delay {delay}: {e:#}"));
             assert!(stems_saved, "delay {delay}: the stems are saved");
             assert_eq!(meta.stems, ["bass"], "delay {delay}: the stem lines stay");
             assert_eq!(
@@ -2999,7 +3106,7 @@ export function store_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); 
         let kept = keep_decoded(id, &sources, frames, true, &[2]).await;
         let mix = read(&mix_path(id)).await;
         st_remove(ROOT).await;
-        assert_eq!(kept.expect("kept"), Kept::Complete);
+        kept.expect("kept");
         assert_eq!(mix, Some(vec![7; 8 * frames]), "the worker's mix");
     }
 }

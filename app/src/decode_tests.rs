@@ -1035,7 +1035,7 @@ async fn separate_writes_no_mix_after_a_decode() {
 }
 
 /// D8: a separation that may read or write the mix names its session for
-/// D7, and one on the memory path does not.
+/// a mix removal, and one on the memory path does not.
 #[wasm_bindgen_test]
 fn the_page_names_the_session_of_its_separation_for_d7() {
     let mut app = StemApp::default();

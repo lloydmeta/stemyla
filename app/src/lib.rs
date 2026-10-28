@@ -913,7 +913,7 @@ async fn decode_session(
             drop(guard);
             log_page_memory("as the decode ends");
             match kept {
-                Ok(store::Kept::Complete) => {
+                Ok(()) => {
                     let decoded = store_meta::Decoded {
                         frames,
                         format: store_meta::MIX_FORMAT.into(),
@@ -923,9 +923,6 @@ async fn decode_session(
                         Ok(song) => Decode::Song(song),
                         Err(e) => Decode::OnThePage(format!("{e:#}")),
                     }
-                }
-                Ok(store::Kept::MixBusy) => {
-                    Decode::OnThePage("a separation of this song uses its mix file now".into())
                 }
                 Err(e) => Decode::OnThePage(format!("{e:#}")),
             }
@@ -3381,8 +3378,9 @@ impl StemApp {
         self.reading_stems = false;
     }
 
-    /// Tells the store which session the separation names, so D7 keeps that
-    /// session's `mix.f32` (D8).  The page calls it in each frame.
+    /// Tells the store which session the separation names, so no mix
+    /// removal takes that session's `mix.f32` (D8).  The page calls it in
+    /// each frame.
     #[cfg(target_arch = "wasm32")]
     fn publish_separating(&self) {
         let session = self

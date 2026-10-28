@@ -460,10 +460,9 @@ The triggers are each `Decode::OnThePage`:
 
 * no session, or no browser storage;
 * the decode worker cannot start, stops, or replies `decode-unstored` (for example, storage is full);
-* `Kept::MixBusy`: a separation uses the session's mix file now;
 * D2 of `plans/active/stream-from-storage-m7.md`: the song's lanes do not fit the read-ahead buffer at its minimum slots (more than about 20 sources and no `stem` lines; `store_meta::open_formats` and `store_meta::fits_read_ahead`).
 
-These routes come from M5 of `plans/active/stream-from-storage.md`; M7 added the D2 trigger.
+These routes come from M5 of `plans/active/stream-from-storage.md`; M7 added the D2 trigger.  Since C of `plans/active/stream-from-storage-catchup.md`, a separation that uses the session's mix file no longer sends an open to the page: `store::keep_decoded` waits for a mix write, then keeps the session complete.
 
 * Fix: the catch-up team after M7 limits each page decode to the length that fits, as the memory path's separation does, and refuses a longer song with a status line.  For D2, a read-ahead buffer that holds fewer lanes than the song shows, or a mix of the sources into fewer lanes, removes the trigger.
 
