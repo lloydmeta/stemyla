@@ -1167,6 +1167,8 @@ impl Network for GpuNetwork<'_> {
         }
         let j = self.job.as_ref().expect("job");
         j.set_input(&feats);
+        // The GPU holds the input now; the spectra alone make the stems.
+        drop(feats);
         let mut out = Vec::with_capacity(STEMS.len());
         for step in j.steps() {
             self.pace.run(self.gpu, j, &step).await?;

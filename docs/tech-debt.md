@@ -25,6 +25,7 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 * The PyTorch comparisons run nowhere, because neither CI nor the maintainer's Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
 * GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
 * `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: the `reviewer` agent looks for it.
+* `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`, MEM-1) needs a GPU adapter in the browser.  A wasm test cannot read `STEMYLA_REQUIRE`, so with no adapter it logs a skip and passes.  CI's headless Chrome can have no adapter, so the evidence is a run on the maintainer's Mac.  Fix: a browser with WebGPU in CI's `browser-tests` job.
 * The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere.  CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
 
 ### TD-10: GPU-3 is not checked
@@ -38,6 +39,8 @@ Nothing records which adapter a kernel passed on, and any new `TILES` entry beco
 The worker logs its wasm memory and live GPU bytes and the page its wasm memory, but no test asserts a total, and the page's WebGL textures and the JS heap are not counted.
 
 * Fix: a tab total (page wasm, worker wasm, GPU live bytes) in an e2e scenario that separates a song and fails over a budget.
+* `e2e memory-budget` and `separate` run with `chunk=16384`, so their figures are smaller than at the default chunk of 588,800 samples.  At `chunk=16384`, the stem worker's WebAssembly memory stays at 57 MB, and the GPU holds about 732 MB.  At the default chunk, the stem worker holds one chunk's working set: 57 MB at the start, 90 MB after chunk 1 and 123 MB from chunk 2 (catch-up E).  The GPU then holds about 979 MB: 699 MB of parameters and 280 MB of one chunk's activations.  The figure depends on the chunk, not on the browser: Chrome and Safari give the same.  At the default chunk, `memory-budget` fails its growth check of 4 MB, since the worker grows by 66 MB during the first two chunks of a separation.  That growth is one chunk's working set, and does not grow with the song.  Fix: M10's budget takes the default chunk's figures.
+* No test sees that `GpuNetwork::stems` (`worker/src/web.rs`) drops a chunk's features (18.9 MB at the default chunk) after it uploads them.  Only a run of the model sees it, and CI has no GPU and no model.  The worker figures above, from `e2e memory-budget --query mm=s64` with the model, include it.
 
 ### TD-21: what docs-check cannot see
 

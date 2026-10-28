@@ -66,6 +66,11 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
         "skipped: the audio context is suspended",
         "a wasm test cannot read STEMYLA_REQUIRE; the test asserts the audio clock in Chrome, and CI runs Chrome",
     ),
+    (
+        "worker/src/web/tests.rs",
+        "skipped: no GPU adapter: {e}",
+        "a wasm test cannot read STEMYLA_REQUIRE; CI's headless Chrome can have no GPU adapter, so the maintainer's Mac gives the evidence (TD-8)",
+    ),
 ];
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that

@@ -1,6 +1,7 @@
 //! Browser tests of the worker's storage and message handling, run in a
-//! dedicated worker (`cargo run -p xtask -- web-test`).  No GPU is needed:
-//! every case either fails before the GPU opens or never reaches it.
+//! dedicated worker (`cargo run -p xtask -- web-test`).  Only
+//! `a_read_back_is_copied_into_wasm_memory_once` opens a GPU.  Every other
+//! case either fails before the GPU opens or never reaches it.
 //!
 //! The tests share one worker and its origin's private file system, so
 //! each starts from an empty one, and they run one at a time.
@@ -2392,5 +2393,35 @@ async fn a_short_read_of_the_mix_is_an_error() {
         names_in(&format!("{SESSION}/stems")).await.as_deref(),
         Some(""),
         "no stem file remains"
+    );
+}
+
+/// MEM-1: `Gpu::read` copies a read-back into WebAssembly memory once.
+/// wgpu's web `BufferView` copies the whole mapping into wasm memory when
+/// it is read as a slice, so a `to_vec` of that slice made a second copy.
+/// `Job::mask` reads one mask of a chunk (18.9 MB at the default chunk)
+/// this way, six times for each chunk.  A browser with no GPU adapter
+/// (CI's headless Chrome can have none) logs a skip (TD-8).
+#[wasm_bindgen_test]
+async fn a_read_back_is_copied_into_wasm_memory_once() {
+    let gpu = match Gpu::new(wgpu::PowerPreference::default()).await {
+        Ok(gpu) => gpu,
+        Err(e) => {
+            console_log!("skipped: no GPU adapter: {e}");
+            return;
+        }
+    };
+    let len = 1 << 20;
+    let data: Vec<f32> = (0..len).map(|i| i as f32).collect();
+    let buffer = gpu.upload("read-back test", &data);
+    let bytes = 4 * len;
+    let start = LIVE.get();
+    PEAK.set(start);
+    let back = gpu.read(&buffer, 0, len).await.expect("read back");
+    let grown = PEAK.get() - start;
+    assert!(back == data, "the read-back holds the uploaded floats");
+    assert!(
+        grown <= bytes + bytes / 8,
+        "a read-back of {bytes} bytes grows the heap by one copy, not {grown} bytes"
     );
 }

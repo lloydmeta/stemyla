@@ -481,6 +481,38 @@ impl MatMulPolicy {
     }
 }
 
+/// The `len` floats of a mapped read-back, copied once into wasm memory.
+/// On the web, wgpu's `BufferView` copies the whole mapping into wasm
+/// memory when it is first read as a slice.  So the web path copies
+/// straight from the browser's mapped array instead (MEM-1,
+/// `a_read_back_is_copied_into_wasm_memory_once` in the worker's tests).
+#[cfg(target_arch = "wasm32")]
+fn mapped_floats(view: &wgpu::BufferView, len: usize) -> Vec<f32> {
+    use wgpu::web_sys::js_sys::Float32Array;
+    let bytes = view.as_uint8array();
+    assert_eq!(bytes.length() as usize, 4 * len);
+    let floats = Float32Array::new_with_byte_offset_and_length(
+        &bytes.buffer(),
+        bytes.byte_offset(),
+        len as u32,
+    );
+    let mut out = vec![0.0f32; len];
+    floats.copy_to(&mut out);
+    out
+}
+
+/// The `len` floats of a mapped read-back, copied once.
+#[cfg(not(target_arch = "wasm32"))]
+fn mapped_floats(view: &wgpu::BufferView, len: usize) -> Vec<f32> {
+    let floats = bytemuck::cast_slice::<u8, f32>(view);
+    assert_eq!(floats.len(), len);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: the one copy of a read-back out of mapped GPU memory, which is unmapped next"
+    )]
+    floats.to_vec()
+}
+
 /// A buffer made by [`Gpu`], destroyed when dropped.  wgpu's web backend
 /// does nothing when a `wgpu::Buffer` is dropped, so its memory stays
 /// allocated until JavaScript collects the object, and Safari's collector
@@ -1076,11 +1108,7 @@ impl Gpu {
         let view = staging
             .get_mapped_range(..)
             .map_err(|e| format!("readback: {e}"))?;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "MEM-1: the one copy of a read-back out of mapped GPU memory, which is unmapped next"
-        )]
-        let out = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        let out = mapped_floats(&view, len);
         drop(view);
         staging.unmap();
         Ok(out)
