@@ -157,8 +157,9 @@ jobs:
   browser-tests:
     name: browser tests (Chrome)
     runs-on: ubuntu-latest
-    # About 15 minutes when warm; a hung browser must not hold the runner
-    # for GitHub's 6 h default.
+    # About 15 minutes when warm, before M8; `e2e save` adds about 3 minutes
+    # on the maintainer's Mac, not measured on CI yet.  A hung browser must
+    # not hold the runner for GitHub's 6 h default.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -196,8 +197,9 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
-      # Logs and screenshots of the scenarios, to see why one failed.
-      - if: failure()
+      # Logs and screenshots of the scenarios, to see why one failed or
+      # why the job ran out of time.
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e

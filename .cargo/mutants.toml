@@ -16,6 +16,7 @@ exclude_globs = [
     "app/src/picker.rs",
     "app/src/playback.rs",
     "app/src/playback_tests.rs",
+    "app/src/save_tests.rs",
     "app/src/separator.rs",
     "app/src/store.rs",
     "app/src/streamtest.rs",

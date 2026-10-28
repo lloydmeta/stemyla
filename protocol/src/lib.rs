@@ -38,9 +38,11 @@
 //!   are from the root of the private file system, in its `saves` folder.
 //!   No samples cross.  The worker removes the WAV file at the end, also
 //!   when the encode fails.  A request with both arrays and `wav`, or
-//!   neither, with `out` or `frames` but no `wav`, with no `out`, or with
-//!   `frames` that is not a whole number from 0 to `usize::MAX`, is
-//!   refused.
+//!   neither, with `out` or `frames` but no `wav`, with no `out` or no
+//!   `rate`, or with `frames` that is not a whole number from 0 to
+//!   `usize::MAX`, is refused.  The worker also refuses a `wav` or `out`
+//!   outside `saves/`, and a `wav` equal to `out`.  Each refusal gives
+//!   `error`, and the worker removes nothing.
 //!
 //! Replies ([`Reply`], worker to page):
 //! * `{type: "alive"}` once the worker listens.
@@ -72,9 +74,9 @@
 //!   at `path`, the request's `out` ([`Encoded::Stored`]).
 //! * `{type: "mp3" or "flac", name, path, failed: text}`: a stored encode
 //!   failed, for the reason `text` ([`Encoded::Failed`]).  The worker
-//!   removed the file at `path` and the WAV file.  A stored encode replies
-//!   with one of these two, not with `error`, so the page knows which save
-//!   failed.
+//!   removed the file at `path` and the WAV file.  A stored encode that the
+//!   worker started replies with one of these two, not with `error`, so the
+//!   page knows which save failed.
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
@@ -779,11 +781,11 @@ impl Reply {
             kind::BENCH => Self::Bench(text()),
             kind::MP3 => Self::Mp3 {
                 name: string(msg, field::NAME).unwrap_or_default(),
-                file: encoded(msg).map_err(bad)?,
+                file: encoded(msg, &kind).map_err(bad)?,
             },
             kind::FLAC => Self::Flac {
                 name: string(msg, field::NAME).unwrap_or_default(),
-                file: encoded(msg).map_err(bad)?,
+                file: encoded(msg, &kind).map_err(bad)?,
             },
             other => return Err(bad(&format!("unknown type {other:?}"))),
         })
@@ -875,12 +877,15 @@ fn encode_source(msg: &JsValue) -> Result<Encode, String> {
         return Err("a stored encode names its out file".into());
     }
     let out = string(msg, field::OUT).ok_or("out must be a path")?;
+    if number(msg, field::RATE).is_none() {
+        return Err("a stored encode names its rate".into());
+    }
     Ok(Encode::Stored { wav, frames, out })
 }
 
 /// The file of an `mp3` or `flac` reply: a stored file if it has `path`,
-/// else the bytes or the `Blob`.
-fn encoded(msg: &JsValue) -> Result<Encoded, &'static str> {
+/// else the bytes of an MP3 or the `Blob` of a FLAC.
+fn encoded(msg: &JsValue, kind: &str) -> Result<Encoded, &'static str> {
     let path = get(msg, field::PATH);
     if !path.is_undefined() {
         let path = path.as_string().ok_or("path must be a path")?;
@@ -891,12 +896,11 @@ fn encoded(msg: &JsValue) -> Result<Encoded, &'static str> {
         let text = failed.as_string().ok_or("failed must be text")?;
         return Ok(Encoded::Failed { path, text });
     }
-    let bytes = get(msg, field::BYTES);
-    if !bytes.is_undefined() {
-        return bytes
+    if kind == kind::MP3 {
+        return get(msg, field::BYTES)
             .dyn_into()
             .map(Encoded::Bytes)
-            .map_err(|_| "bytes must be a Uint8Array");
+            .map_err(|_| "no bytes");
     }
     get(msg, field::FILE)
         .dyn_into()

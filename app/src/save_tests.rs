@@ -172,6 +172,7 @@ async fn a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array() {
     run_job(&mut job).await;
     let done = job.is_done();
     let end = finish(&mut job).await;
+    job.sink_mut().take();
     let peak = store::tests::heap_peak_above(start) as f64 / 1e6;
     let record = store::tests::stop_spy();
     let repeats = store::tests::spy_repeats();
@@ -212,6 +213,7 @@ async fn a_short_wav_save_writes_one_array_of_its_length() {
     let mut job = mix_save(&shown, SAVE);
     run_job(&mut job).await;
     let end = finish(&mut job).await;
+    job.sink_mut().take();
     let record = store::tests::stop_spy();
     drop(job);
     let got = store::test_read(SAVE).await;
@@ -1015,4 +1017,134 @@ async fn a_stopped_worker_leaves_no_save_files_and_takes_no_encode() {
     );
     assert_eq!(posts, 0, "no encode request");
     assert_eq!(after, "", "no save file stays");
+}
+
+/// Finding 1-1 of review round 1 of M8: a save dropped after its file
+/// closed, but before the page took the file, removes the file.  A
+/// `load_song` in the frame before `step_save` does that.
+#[wasm_bindgen_test]
+async fn a_closed_save_file_that_the_page_did_not_take_is_removed() {
+    let id = "m8-closed-dropped";
+    let (shown, _) = stored_song(id, 10 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let mut job = mix_save(&shown, SAVE);
+    run_job(&mut job).await;
+    let end = finish(&mut job).await;
+    drop(job);
+    let files = save_files().await;
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(end, Finish::Done, "the file closed");
+    assert_eq!(files, "", "no save file stays");
+}
+
+/// Steps the page's save until its format is not `format`, or it ends.
+async fn run_save_of(app: &mut StemApp, format: export::Format) {
+    let ctx = egui::Context::default();
+    for _ in 0..20_000 {
+        if app.saving.as_ref().map(|s| s.order.format) != Some(format) {
+            return;
+        }
+        app.step_save(&ctx);
+        sv_sleep(1).await;
+    }
+    panic!("the save did not end");
+}
+
+/// Finding 1-2 of review round 1 of M8: a failed encode that waits for a
+/// save in progress is reported, not saved, when the lanes change.  The
+/// later save then keeps its own status.
+#[wasm_bindgen_test]
+async fn a_waiting_failed_encode_is_reported_when_the_lanes_change() {
+    let id = "m8-waiting-lanes";
+    let (shown, _) = stored_song(id, 10 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown, true);
+    let worker = worker.expect("a worker");
+    let (out, name) = posted_flac(&mut app, &worker).await;
+    sv_spy_links();
+    app.start_save(Some(0), export::Format::Wav);
+    reply(&mut app, failed(&name, &out));
+    let waiting = app.save_queue.len();
+    let frames = app.song.as_ref().expect("a song").frames;
+    app.add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
+    let reported = (app.save_queue.len(), app.status.clone());
+    run_save(&mut app).await;
+    let after = app.status.clone();
+    let posted = requests(&worker).len();
+    let links = sv_links().await.length();
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(waiting, 1, "the failed encode waits");
+    let (queue, status) = reported;
+    assert_eq!(queue, 0, "a lane change ends the wait");
+    assert!(
+        status.starts_with("Could not save lloyd - mix.flac: "),
+        "{status}"
+    );
+    assert!(after.starts_with("Saved lloyd - bass.wav."), "{after}");
+    assert_eq!(links, 1, "the WAV save");
+    assert_eq!(posted, 0, "no FLAC saves again");
+}
+
+/// Finding 1-2 of review round 1 of M8: a failed encode that waits for a
+/// save that fails is not left waiting: it saves again, or is reported.
+#[wasm_bindgen_test]
+async fn a_waiting_failed_encode_is_not_left_when_the_save_in_progress_fails() {
+    let id = "m8-waiting-failed";
+    let (shown, _) = stored_song(id, MEMORY_PATH_MAX_FRAMES + SECOND, 1).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown, true);
+    let worker = worker.expect("a worker");
+    let (out, name) = posted_flac(&mut app, &worker).await;
+    sv_spy_links();
+    store::tests::start_spy(&JsValue::UNDEFINED, 1.0);
+    app.start_save(Some(0), export::Format::Wav);
+    reply(&mut app, failed(&name, &out));
+    let waiting = app.save_queue.len();
+    run_save_of(&mut app, export::Format::Wav).await;
+    store::tests::stop_spy();
+    let left = (
+        app.save_queue.len(),
+        app.saving.is_some(),
+        app.status.clone(),
+    );
+    let links = sv_links().await.length();
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(waiting, 1, "the failed encode waits");
+    let (queue, saving, status) = left;
+    assert_eq!(queue, 0, "nothing waits for a save that ended");
+    assert!(!saving, "a long song does not save in memory");
+    assert!(
+        status.contains("lloyd - mix.flac")
+            && status.contains("browser storage could not hold the file"),
+        "the waiting encode is reported: {status}"
+    );
+    assert_eq!(links, 0);
+}
+
+/// Nit 1-10 of review round 1 of M8: a song of exactly
+/// `MEMORY_PATH_MAX_FRAMES` frames saves on the memory path when storage
+/// refuses its file.
+#[wasm_bindgen_test]
+async fn a_song_of_exactly_the_memory_path_limit_saves_in_memory() {
+    let id = "m8-at-the-limit";
+    let (shown, _) = stored_song(id, MEMORY_PATH_MAX_FRAMES, 1).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, _) = page(id, shown, false);
+    sv_spy_links();
+    store::tests::refuse_next_writable();
+    app.start_save(None, export::Format::Wav);
+    run_save(&mut app).await;
+    let got = downloads(&sv_links().await);
+    let status = app.status.clone();
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(got.len(), 1, "it saves: {status}");
+    assert_eq!(got[0].1.size(), (44 + 4 * MEMORY_PATH_MAX_FRAMES) as f64);
+    assert!(status.contains("held in memory"), "{status}");
 }

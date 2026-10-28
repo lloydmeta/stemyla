@@ -446,6 +446,14 @@ fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
             err(r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4}"#),
             "a stored encode names its out file"
         );
+        // Nit 1-12 of review round 1 of M8: the rate of a stored encode is
+        // not read as a default.
+        assert_eq!(
+            err(
+                r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4, "out": "saves/1-1.flac"}"#
+            ),
+            "a stored encode names its rate"
+        );
         assert_eq!(
             err(r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4, "out": 5}"#),
             "out must be a path"
@@ -760,17 +768,49 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
 
 #[wasm_bindgen_test]
 fn a_flac_reply_without_a_file_is_refused() {
-    for json in [
-        r#"{"type": "flac", "name": "bass.flac", "file": 1}"#,
-        r#"{"type": "flac", "name": "bass.flac"}"#,
-        r#"{"type": "mp3", "name": "bass.mp3"}"#,
-        r#"{"type": "mp3", "name": "bass.mp3", "bytes": [1]}"#,
-        r#"{"type": "flac", "name": "bass.flac", "path": 3}"#,
-        r#"{"type": "mp3", "name": "bass.mp3", "path": "saves/1-1.mp3", "failed": 3}"#,
+    for (json, why) in [
+        (
+            r#"{"type": "flac", "name": "bass.flac", "file": 1}"#,
+            "no file",
+        ),
+        (r#"{"type": "flac", "name": "bass.flac"}"#, "no file"),
+        (r#"{"type": "mp3", "name": "bass.mp3"}"#, "no bytes"),
+        (
+            r#"{"type": "mp3", "name": "bass.mp3", "bytes": [1]}"#,
+            "no bytes",
+        ),
+        (
+            r#"{"type": "flac", "name": "bass.flac", "path": 3}"#,
+            "path must be a path",
+        ),
+        (
+            r#"{"type": "mp3", "name": "bass.mp3", "path": "saves/1-1.mp3", "failed": 3}"#,
+            "failed must be text",
+        ),
     ] {
+        let kind = if json.contains(r#""type": "flac""#) {
+            "flac"
+        } else {
+            "mp3"
+        };
         let e = Reply::from_js(&from_json(json)).expect_err(json);
-        assert!(e.kind == "flac" || e.kind == "mp3", "{json}");
+        assert_eq!(e.kind, kind, "{json}");
+        assert_eq!(e.text, format!("{kind} message: {why}"), "{json}");
     }
+    // Nit 1-13 of review round 1 of M8: an MP3 carries bytes, and a FLAC a
+    // `Blob`, never the other way round.
+    let flac_with_bytes = from_json(r#"{"type": "flac", "name": "bass.flac"}"#);
+    let _ = Reflect::set(
+        &flac_with_bytes,
+        &"bytes".into(),
+        &Uint8Array::from(&[1u8][..]),
+    );
+    let e = Reply::from_js(&flac_with_bytes).expect_err("refused");
+    assert_eq!(e.text, "flac message: no file");
+    let mp3_with_a_blob = from_json(r#"{"type": "mp3", "name": "bass.mp3"}"#);
+    let _ = Reflect::set(&mp3_with_a_blob, &"file".into(), &blob(&[1]));
+    let e = Reply::from_js(&mp3_with_a_blob).expect_err("refused");
+    assert_eq!(e.text, "mp3 message: no bytes");
 }
 
 #[wasm_bindgen_test]

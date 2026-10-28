@@ -75,7 +75,7 @@ Every buffer `roformer-gpu` makes is a `GpuBuffer`, which calls `destroy()` when
 iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memory is free, and counts its GPU buffers.  The parameters take about 700 MB on the GPU and one chunk's activations about 280 MB, so everything else stays small.  `docs/ARCHITECTURE.md` (memory on phones) has the design.
 
 * Why: a tab over the limit is killed with no error the page can catch.
-* Enforced by: in part.  `xtask e2e old-session` (CI `browser-tests` job) asserts the page's part after the restore of a session of the M4 layout.  The page's WebAssembly memory stays under 64 MB and does not grow with the song.  `xtask e2e memory-budget` (with the model, not in CI) asserts that the page and the workers do not grow with the song during an open and a separation.  `xtask e2e save` asserts that the page's JS heap during a save, and the stem worker's WebAssembly memory during a FLAC encode, do not grow with the song, and bounds an MP3 encode.  Nothing asserts the whole tab's peak, GPU buffers included: the worker logs `memory: ...` after every chunk, and M10 of `plans/active/stream-from-storage.md` adds the check.
+* Enforced by: in part.  `xtask e2e old-session` (CI `browser-tests` job) asserts the page's part after the restore of a session of the M4 layout.  The page's WebAssembly memory stays under 64 MB and does not grow with the song.  `xtask e2e memory-budget` (with the model, not in CI) asserts that the page and the workers do not grow with the song during an open and a separation.  `xtask e2e save` asserts that the page's JS heap during a save, and the stem worker's WebAssembly memory during a FLAC encode, do not grow with the song, and bounds an MP3 encode (CI `browser-tests` job, in Chrome).  Nothing asserts the whole tab's peak, GPU buffers included: the worker logs `memory: ...` after every chunk, and M10 of `plans/active/stream-from-storage.md` adds the check.
 * Gaps: TD-11, TD-54, TD-58, TD-59.
 
 ### MEM-5: browser-storage writes pass a whole array
@@ -146,7 +146,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
-* Gaps: TD-8, TD-19, TD-29, TD-39, TD-40, TD-43, TD-51, TD-53.
+* Gaps: TD-8, TD-19, TD-29, TD-39, TD-40, TD-43, TD-51, TD-53, TD-60.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 

@@ -541,6 +541,7 @@ enum ResetStage {
 
 /// The type of a saved file of `format`, as its download has it (D6 of M8).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn save_type(format: export::Format) -> &'static str {
     match format {
         export::Format::Wav => "audio/wav",
@@ -567,6 +568,7 @@ fn offer_save_file(name: String, path: String, format: export::Format) {
 /// The status line of a save that browser storage could not hold, of a song
 /// too long for the memory path (D8 of M8).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn storage_full_text(name: &str, why: &str) -> String {
     format!(
         "Could not save {name}: browser storage could not hold the file ({why}).  \
@@ -2390,6 +2392,10 @@ impl StemApp {
         }
         self.params = Some(params);
         self.play_on_output(player);
+        // A save that waits to save again needs the old lanes, so it is
+        // reported, after the song's own status.
+        #[cfg(target_arch = "wasm32")]
+        self.report_save_queue();
     }
 
     /// One source for each lane of `song`: a lane with a file plays from
@@ -4432,6 +4438,7 @@ impl StemApp {
     /// Whether the worker can encode a FLAC or an MP3 now: it runs, and it
     /// has not stopped.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn can_encode(&self) -> bool {
         self.separator.as_ref().is_some_and(|s| s.stopped.is_none())
     }
@@ -4539,9 +4546,12 @@ impl StemApp {
                     if let Some(saving) = self.saving.take() {
                         self.save_in_memory(saving.order, why);
                     }
+                    // A save that waits for this one goes on, or is
+                    // reported (finding 1-2 of review round 1 of M8).
+                    self.next_save();
                     return;
                 }
-                export::Finish::Done => Some(wav.path().to_string()),
+                export::Finish::Done => Some(wav.take()),
             },
             export::SaveSink::Memory(_) => None,
         };
@@ -4732,13 +4742,30 @@ impl StemApp {
     }
 
     /// Drops what the posted saves and the waiting saves read: a new song or
-    /// Reset ends their chance to save again (D8 of M8).
+    /// Reset ends their chance to save again (D8 of M8).  Each waiting save
+    /// is reported.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn drop_save_sources(&mut self) {
         for posted in self.posted_saves.values_mut() {
             posted.order = None;
         }
-        self.save_queue.clear();
+        self.report_save_queue();
+    }
+
+    /// Reports each save that waits to save again, and drops it: the song
+    /// or its lanes changed, so it cannot save again (D8 of M8, finding 1-2
+    /// of review round 1).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn report_save_queue(&mut self) {
+        for (order, why) in std::mem::take(&mut self.save_queue) {
+            log::warn!(
+                "save: {}: {why}; the song changed, so it does not save again",
+                order.name
+            );
+            self.status = format!("Could not save {}: {why}.", order.name);
+        }
     }
 
     /// The worker stopped: it answers no stored encode.  Removes the WAV

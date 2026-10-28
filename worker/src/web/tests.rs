@@ -1468,13 +1468,34 @@ async fn stored_encodes_write_whole_arrays_as_they_read() {
     assert!(matches!(last_file("mp3"), Encoded::Stored { .. }));
     assert!(!record.contains("view"), "MEM-5: {record}");
     let most = 4 * MP3_BLOCK;
+    // Nit 1-14 of review round 1 of M8: an MPEG-1 Layer III frame holds
+    // 144 x bitrate / rate bytes, and one more with padding.  So each write
+    // is one packet, and a stored MP3 makes one write for each frame.
+    let packet = 144 * 192_000 / TONE_RATE as usize + 1;
+    let mut writes = 0;
     for step in record.split(' ') {
         if let Some(bytes) = step.strip_prefix('r') {
             let bytes: usize = bytes.parse().expect("a size");
             assert!(bytes <= most, "a read of {bytes} bytes, over one block");
         }
+        if let Some(write) = step.strip_prefix('w') {
+            let bytes: usize = write
+                .split('@')
+                .next()
+                .and_then(|b| b.parse().ok())
+                .expect("a size");
+            assert!(
+                bytes <= packet,
+                "a write of {bytes} bytes, over one packet of {packet}"
+            );
+            writes += 1;
+        }
     }
-    assert!(record.contains('w'), "{record}");
+    assert!(
+        writes >= TONE_FRAMES / 1152,
+        "{writes} writes, fewer than the {} frames of the MP3",
+        TONE_FRAMES / 1152
+    );
 }
 
 /// The peak of the counting allocator during a stored encode of `seconds`
@@ -1641,6 +1662,7 @@ async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
             ("type", "flac".into()),
             ("wav", wav.into()),
             ("frames", 7.into()),
+            ("rate", 44_100.into()),
         ];
         if let Some(out) = out {
             fields.push(("out", out.into()));

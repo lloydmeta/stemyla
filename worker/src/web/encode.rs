@@ -26,9 +26,9 @@
 //! The MP3 exception (D4 of the M8 plan, TD-59).  `rusty_mp3` 1.0.0 keeps
 //! every encoded frame until `finish()` at 256 kbps or less on MPEG-1 (its
 //! bit reservoir).  So an MP3 encode holds the MP3's frames in WebAssembly
-//! memory, about 3.4 times the MP3's size at its peak.  The worker writes
-//! the packets to the output file after `finish()`, as `next_packet` gives
-//! them, so the Info frame is first at every rate.
+//! memory, about 3.5 times the MP3's size at its peak (TD-59).  The worker
+//! writes the packets to the output file after `finish()`, as `next_packet`
+//! gives them, so the Info frame is first at every rate.
 //!
 //! The encodes do not wait for the worker's turn: they run beside a
 //! separation.  After each encode, the worker logs a `memory: encode` line

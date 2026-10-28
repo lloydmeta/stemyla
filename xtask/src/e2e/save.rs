@@ -51,10 +51,23 @@ const FORMATS: [(&str, usize); 3] = [("wav", 0), ("flac", 1), ("mp3", 2)];
 pub(super) const PAGE_BOUND_MB: f64 = 4.0;
 /// D10: how much more a FLAC encode of 10 minutes may grow the worker's
 /// memory than one of 1 minute, in bytes.
-pub(super) const FLAC_BOUND_BYTES: f64 = 1_048_576.0;
+pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
 /// D10: a worker's MP3 encode grows its memory by at most this many times
-/// its MP3, plus 1 MiB.
+/// its MP3, plus [`ONE_MIB`].
 pub(super) const MP3_FACTOR: f64 = 4.0;
+const ONE_MIB: f64 = 1_048_576.0;
+/// The longest wait, in seconds, for a save to offer its file.  On the
+/// maintainer's Mac, the longest save (an MP3 of 10 minutes) took about 48 s
+/// from its restore to its offer, and CI runs `e2e flac` twice as fast.  So
+/// 120 s leaves room, and a save that offers nothing ends the run within the
+/// 60 minutes of CI's job (finding 1-4 of review round 1 of M8).
+pub(super) const SAVE_WAIT_S: u64 = 120;
+/// The longest wait, in seconds, for a restore and for its stem overviews.
+/// The first restore of the 10-minute session took about 4 s.
+pub(super) const RESTORE_WAIT_S: u64 = 120;
+// Six saves, their restores and the two first restores, each at its
+// longest wait, fit in half of the 60 minutes of CI's job.
+const _: () = assert!(6 * SAVE_WAIT_S + 8 * RESTORE_WAIT_S < 30 * 60);
 /// The calibration array, and the least rise of the measure that it must
 /// make.
 const CALIBRATION_BYTES: u64 = 64 << 20;
@@ -195,7 +208,7 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
     for seconds in SECONDS {
         let mp3 = worker("mp3", seconds);
         checks.push((
-            mp3.is_some_and(|(growth, file)| file > 0.0 && growth <= MP3_FACTOR * file + FLAC_BOUND_BYTES),
+            mp3.is_some_and(|(growth, file)| file > 0.0 && growth <= MP3_FACTOR * file + ONE_MIB),
             format!(
                 "mp3, {seconds} s: the worker grows by at most {MP3_FACTOR} times its MP3 plus 1 MiB ({mp3:?}, a factor of {:?})",
                 mp3.map(|(g, f)| g / f)
@@ -236,31 +249,115 @@ pub(super) fn planted_wav(seconds: u32) -> Vec<u8> {
     engine::wav::encode_pcm16(&left, &right, 44_100)
 }
 
+/// The 1-minute files that the run reads back for [`file_checks`].
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Files {
+    /// The SHA-256 of the WAV, in hex.
+    pub wav_sha256: Option<String>,
+    pub flac: Option<Vec<u8>>,
+    pub mp3: Option<Vec<u8>>,
+}
+
+/// Whether the run reads back the file of a save of `format` and `seconds`,
+/// and if so, whether whole (`true`, to decode it) or only its SHA-256.
+pub(super) fn reads_back(format: &str, seconds: u32) -> Option<bool> {
+    (seconds == SECONDS[0]).then_some(format != "wav")
+}
+
+impl Files {
+    /// Keeps what [`LAST_FILE`] gave for the save of `format`.
+    pub(super) fn keep(&mut self, format: &str, file: &Value) {
+        let bytes = file["base64"]
+            .as_str()
+            .and_then(|b| crate::webdriver::base64_decode(b).ok());
+        match format {
+            "wav" => self.wav_sha256 = file["sha256"].as_str().map(String::from),
+            "flac" => self.flac = bytes,
+            _ => self.mp3 = bytes,
+        }
+    }
+}
+
+/// Whether `audio` holds the interleaved 16-bit `samples`, exactly.
+pub(super) fn decodes_to(audio: &engine::decode::Audio, samples: &[i16]) -> bool {
+    let frames = samples.len() / 2;
+    audio.frames() == frames
+        && audio.channels.len() == 2
+        && (0..frames).all(|i| {
+            (0..2).all(|c| audio.channels[c][i] == f32::from(samples[2 * i + c]) / 32_768.0)
+        })
+}
+
+/// Whether an MP3 of `frames` frames has the length of a WAV of `wav`
+/// frames, within [`MP3_FRAMES_TOLERANCE`].
+pub(super) fn mp3_frames_ok(frames: Option<usize>, wav: usize) -> bool {
+    frames.is_some_and(|n| n.abs_diff(wav) <= MP3_FRAMES_TOLERANCE)
+}
+
+/// The check of the calibration: the rise of the measure for a 64 MiB
+/// array is at least [`CALIBRATION_LEAST`].
+pub(super) fn calibration_check(rise: Option<f64>) -> (bool, String) {
+    (
+        rise.is_some_and(|r| r >= CALIBRATION_LEAST),
+        format!("the measure sees a 64 MiB array ({rise:?} bytes)"),
+    )
+}
+
+/// The y of the Save menu's item at `row`.
+pub(super) fn item_y(o: &Opts, row: usize) -> f64 {
+    o.item_y + o.item_dy * row as f64
+}
+
+/// The rise of the JS heap during a save: the largest reading less the
+/// reading before.
+pub(super) fn heap_rise(max: &Value, before: &Value) -> Option<f64> {
+    max.as_f64().zip(before.as_f64()).map(|(m, b)| m - b)
+}
+
+/// The name, size and type of the offered file of an `e2e: offered` line.
+pub(super) fn offered_file(line: &str) -> Option<(String, f64, String)> {
+    let json: Value = serde_json::from_str(line.split("e2e: offered ").nth(1)?).ok()?;
+    Some((
+        json["name"].as_str()?.to_string(),
+        json["size"].as_f64()?,
+        json["mime"].as_str()?.to_string(),
+    ))
+}
+
+/// The offered file of a save, from the line that the wait found.  It is
+/// an error when there is none, so the run ends (finding 1-4 of review
+/// round 1 of M8).
+pub(super) fn offer_of(
+    line: Option<&str>,
+    format: &str,
+    seconds: u32,
+) -> Result<(String, f64, String)> {
+    match line.and_then(offered_file) {
+        Some(file) => Ok(file),
+        None => bail!(
+            "{format}, {seconds} s: the save offered no file within {SAVE_WAIT_S} s ({line:?})"
+        ),
+    }
+}
+
 /// The checks of the 1-minute files: the WAV is the planted mix, the FLAC
 /// decodes to its samples, and the MP3 to its frames within the tolerance.
-pub(super) fn file_checks(
-    wav_sha256: Option<&str>,
-    flac: Option<Vec<u8>>,
-    mp3: Option<Vec<u8>>,
-) -> Vec<(bool, String)> {
+pub(super) fn file_checks(files: Files) -> Vec<(bool, String)> {
     let want = planted_wav(SECONDS[0]);
     let samples = planted_mix(SECONDS[0]);
     let frames = samples.len() / 2;
-    let flac_ok = flac
+    let flac_ok = files
+        .flac
         .and_then(|b| engine::decode_bytes(b, Some("flac")).ok())
-        .is_some_and(|audio| {
-            audio.frames() == frames
-                && audio.channels.len() == 2
-                && (0..frames).all(|i| {
-                    (0..2).all(|c| audio.channels[c][i] == f32::from(samples[2 * i + c]) / 32_768.0)
-                })
-        });
-    let mp3_frames = mp3
+        .is_some_and(|audio| decodes_to(&audio, &samples));
+    let mp3_frames = files
+        .mp3
         .and_then(|b| engine::decode_bytes(b, Some("mp3")).ok())
         .map(|audio| audio.frames());
+    let wav_sha256 = files.wav_sha256;
     vec![
         (
-            wav_sha256 == Some(sha256_hex(&want).as_str()),
+            wav_sha256.as_deref() == Some(sha256_hex(&want).as_str()),
             format!(
                 "wav, {} s: the file is the 16-bit mix of the planted stems (SHA-256 {:?})",
                 SECONDS[0], wav_sha256
@@ -274,7 +371,7 @@ pub(super) fn file_checks(
             ),
         ),
         (
-            mp3_frames.is_some_and(|n| n.abs_diff(frames) <= MP3_FRAMES_TOLERANCE),
+            mp3_frames_ok(mp3_frames, frames),
             format!(
                 "mp3, {} s: the file decodes to {mp3_frames:?} frames, within {MP3_FRAMES_TOLERANCE} of the WAV's {frames}",
                 SECONDS[0]
@@ -316,10 +413,8 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     p.note(&format!(
         "save: calibration: a {CALIBRATION_BYTES}-byte array raised the measure by {calibration:?} bytes"
     ));
-    p.check(
-        calibration.is_some_and(|c| c >= CALIBRATION_LEAST),
-        &format!("the measure sees a 64 MiB array ({calibration:?} bytes)"),
-    );
+    let (ok, what) = calibration_check(calibration);
+    p.check(ok, &what);
     in_page(&mut p, CLEAN, json!([]), 120)?;
     for seconds in SECONDS {
         let frames = in_page(
@@ -336,33 +431,26 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     for seconds in SECONDS {
         let from = p.mark();
         restore(&mut p, seconds)?;
-        let overviews = p.wait_for(from, 900, |l| l.contains(OVERVIEWS_END))?;
-        p.note(&format!(
-            "save: {seconds} s: the first restore made the stem overviews: {}",
-            overviews.is_some()
-        ));
+        let overviews = p.wait_for(from, RESTORE_WAIT_S, |l| l.contains(OVERVIEWS_END))?;
+        if overviews.is_none() {
+            bail!(
+                "{seconds} s: the first restore made no stem overviews within {RESTORE_WAIT_S} s"
+            );
+        }
     }
     let mut saves = Vec::new();
-    let (mut wav_sha256, mut flac, mut mp3) = (None, None, None);
+    let mut files = Files::default();
     for (format, row) in FORMATS {
         for seconds in SECONDS {
             let save = save_once(&mut p, o, format, row, seconds)?;
             p.note(&format!("save: {save:?}"));
-            if seconds == SECONDS[0] && save.offered.is_some() {
-                let whole = format != "wav";
+            if let Some(whole) = reads_back(format, seconds) {
                 let file = in_page(&mut p, LAST_FILE, json!([whole]), 300)?;
                 p.note(&format!(
                     "save: {format}, {seconds} s: the file starts with {:?}, {} bytes",
                     file["head"], file["size"]
                 ));
-                let bytes = file["base64"]
-                    .as_str()
-                    .and_then(|b| crate::webdriver::base64_decode(b).ok());
-                match format {
-                    "wav" => wav_sha256 = file["sha256"].as_str().map(String::from),
-                    "flac" => flac = bytes,
-                    _ => mp3 = bytes,
-                }
+                files.keep(format, &file);
             }
             saves.push(save);
         }
@@ -377,11 +465,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             s.worker
         ));
     }
-    for (ok, what) in
-        save_checks(&saves)
-            .into_iter()
-            .chain(file_checks(wav_sha256.as_deref(), flac, mp3))
-    {
+    for (ok, what) in save_checks(&saves).into_iter().chain(file_checks(files)) {
         p.check(ok, &what);
     }
     let (ok, what) = saves_folder_check(&names);
@@ -404,11 +488,11 @@ fn restore(p: &mut Page, seconds: u32) -> Result<()> {
     in_page(p, MAKE_CURRENT, json!([session_id(seconds)]), 60)?;
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 900, |l| {
+    let restored = p.wait_for(from, RESTORE_WAIT_S, |l| {
         l.contains("and its separated stems from this browser")
     })?;
     if restored.is_none() {
-        bail!("{seconds} s: the song did not restore");
+        bail!("{seconds} s: the song did not restore within {RESTORE_WAIT_S} s");
     }
     Ok(())
 }
@@ -424,19 +508,11 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     p.click_at(o.save_x, o.save_y, "the mix lane's Save")?;
     p.idle(0.5)?;
     p.screenshot(&format!("{format}-{seconds}-menu"))?;
-    let item_y = o.item_y + o.item_dy * row as f64;
-    p.click_at(o.item_x, item_y, &format!("the {format} item"))?;
-    let offered = p.wait_for(mark, 900, |l| l.contains("e2e: offered "))?;
+    p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
+    let offered = p.wait_for(mark, SAVE_WAIT_S, |l| l.contains("e2e: offered "))?;
     let max = in_page(p, "return await window.__e2e_stop_heap();", json!([]), 60)?;
-    let heap = max.as_f64().zip(before.as_f64()).map(|(m, b)| m - b);
-    let offered = offered.and_then(|l| {
-        let json: Value = serde_json::from_str(l.split("e2e: offered ").nth(1)?).ok()?;
-        Some((
-            json["name"].as_str()?.to_string(),
-            json["size"].as_f64()?,
-            json["mime"].as_str()?.to_string(),
-        ))
-    });
+    let heap = heap_rise(&max, &before);
+    let offered = Some(offer_of(offered.as_deref(), format, seconds)?);
     let worker = p.log[mark..]
         .iter()
         .find(|l| l.contains(&format!("memory: encode {format} ")))
@@ -548,5 +624,182 @@ mod tests {
         left.push("5-1.wav");
         assert!(!saves_folder_check(&names(&left)).0, "a WAV of an MP3 save");
         assert!(!saves_folder_check(&Value::Null).0);
+    }
+
+    /// Finding 1-17 of review round 1 of M8: an extra file in `saves/`, such
+    /// as a scratch file, fails the check too.
+    #[test]
+    fn an_extra_file_in_saves_fails_the_check() {
+        let names = json!([
+            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3", "x.tmp"
+        ]);
+        assert!(!saves_folder_check(&names).0);
+    }
+
+    /// An MP3 line with a file of 0 bytes fails, and a 1-minute FLAC that
+    /// grows more than the 10-minute one passes (finding 1-17).
+    #[test]
+    fn the_worker_checks_read_the_file_and_the_direction_of_growth() {
+        let mut empty = good();
+        empty[4].worker = Some((0.0, 0.0));
+        let failed = failing(&empty);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].starts_with("mp3, 60 s"), "{failed:?}");
+        let mut shrinks = good();
+        shrinks[2].worker = Some((3.0 * ONE_MIB, 5e6));
+        shrinks[3].worker = Some((65_536.0, 5e7));
+        assert!(failing(&shrinks).is_empty(), "{:?}", failing(&shrinks));
+        // The MP3 slack is one MiB: at 4 times the file plus one MiB, it
+        // passes; one byte more fails.
+        let mut edge = good();
+        edge[5].worker = Some((4.0 * 1.44e7 + ONE_MIB, 1.44e7));
+        assert!(failing(&edge).is_empty());
+        edge[5].worker = Some((4.0 * 1.44e7 + ONE_MIB + 1.0, 1.44e7));
+        assert_eq!(failing(&edge).len(), 1);
+    }
+
+    #[test]
+    fn the_sessions_have_their_own_ids() {
+        assert_eq!(session_id(60), "1792640100060");
+        assert_eq!(session_id(600), "1792640100600");
+    }
+
+    #[test]
+    fn the_calibration_needs_60_mib() {
+        assert!(calibration_check(Some(67_094_229.0)).0);
+        assert!(calibration_check(Some(CALIBRATION_LEAST)).0);
+        assert!(!calibration_check(Some(CALIBRATION_LEAST - 1.0)).0);
+        assert!(!calibration_check(None).0);
+    }
+
+    #[test]
+    fn the_items_and_the_heap_rise_are_read_from_their_parts() {
+        let o = Opts::parse(&["save".into()]).expect("options");
+        assert_eq!(item_y(&o, 0), 168.0);
+        assert_eq!(item_y(&o, 2), 210.0);
+        assert_eq!(
+            heap_rise(&json!(5_000_000.0), &json!(3_500_000.0)),
+            Some(1_500_000.0)
+        );
+        assert_eq!(heap_rise(&Value::Null, &json!(3.0)), None);
+    }
+
+    /// Finding 1-4 of review round 1 of M8: a save that offers nothing ends
+    /// the run, and the waits fit CI's job.
+    #[test]
+    fn a_save_with_no_offer_ends_the_run() {
+        let line = r#"[9.0s] console.log: e2e: offered {"name":"lloyd - mix.wav","size":44,"mime":"audio/wav"}"#;
+        assert_eq!(
+            offer_of(Some(line), "wav", 60).expect("an offer"),
+            ("lloyd - mix.wav".into(), 44.0, "audio/wav".into())
+        );
+        let none = offer_of(None, "flac", 600).expect_err("no offer");
+        assert!(none.to_string().contains("flac, 600 s"), "{none}");
+        assert!(offer_of(Some("e2e: offered {}"), "mp3", 60).is_err());
+    }
+
+    #[test]
+    fn the_run_reads_back_the_1_minute_files() {
+        assert_eq!(reads_back("wav", 60), Some(false));
+        assert_eq!(reads_back("flac", 60), Some(true));
+        assert_eq!(reads_back("mp3", 60), Some(true));
+        assert_eq!(reads_back("wav", 600), None);
+        let mut files = Files::default();
+        let file = json!({"sha256": "abc", "base64": "AQI="});
+        files.keep("wav", &file);
+        files.keep("flac", &file);
+        assert_eq!(files.wav_sha256.as_deref(), Some("abc"));
+        assert_eq!(files.flac.as_deref(), Some(&[1u8, 2][..]));
+        assert_eq!(files.mp3, None, "the FLAC is kept as the FLAC");
+        files.keep("mp3", &json!({"base64": "Aw=="}));
+        assert_eq!(files.mp3.as_deref(), Some(&[3u8][..]));
+    }
+
+    fn audio(samples: &[i16]) -> engine::decode::Audio {
+        let side = |c: usize| {
+            samples
+                .iter()
+                .skip(c)
+                .step_by(2)
+                .map(|s| f32::from(*s) / 32_768.0)
+                .collect()
+        };
+        engine::decode::Audio {
+            sample_rate: 44_100,
+            channels: vec![side(0), side(1)],
+        }
+    }
+
+    /// Finding 1-17: the FLAC check compares every sample of both channels.
+    #[test]
+    fn a_decode_matches_only_the_same_samples() {
+        let samples: Vec<i16> = (0..64).map(|i| (i * 37 % 200 - 100) as i16).collect();
+        assert!(decodes_to(&audio(&samples), &samples));
+        assert!(
+            !decodes_to(&audio(&samples[..62]), &samples),
+            "a frame short"
+        );
+        for k in [0, 1, 2, 33] {
+            let mut wrong = samples.clone();
+            wrong[k] += 1;
+            assert!(!decodes_to(&audio(&wrong), &samples), "sample {k}");
+        }
+    }
+
+    #[test]
+    fn an_mp3_length_is_within_one_frame_and_the_delay() {
+        assert!(mp3_frames_ok(Some(2_646_144), 2_646_000));
+        assert!(mp3_frames_ok(
+            Some(2_646_000 + MP3_FRAMES_TOLERANCE),
+            2_646_000
+        ));
+        assert!(!mp3_frames_ok(
+            Some(2_646_001 + MP3_FRAMES_TOLERANCE),
+            2_646_000
+        ));
+        assert!(!mp3_frames_ok(
+            Some(2_646_000 - MP3_FRAMES_TOLERANCE - 1),
+            2_646_000
+        ));
+        assert!(!mp3_frames_ok(None, 2_646_000));
+    }
+
+    /// The file checks with the planted files: the WAV of the planted mix
+    /// and the FLAC of its samples pass; a wrong SHA-256, a FLAC a frame
+    /// short and a missing MP3 fail (finding 1-17).
+    #[test]
+    fn the_file_checks_pass_the_planted_files_and_fail_wrong_ones() {
+        let samples = planted_mix(SECONDS[0]);
+        let side = |c: usize| -> Vec<f32> {
+            samples
+                .iter()
+                .skip(c)
+                .step_by(2)
+                .map(|s| f32::from(*s) / 32_768.0)
+                .collect()
+        };
+        let (left, right) = (side(0), side(1));
+        let flac = super::super::flac_16(&left, &right, 44_100).expect("a FLAC");
+        let short = super::super::flac_16(&left[1..], &right[1..], 44_100).expect("a FLAC");
+        let wav = sha256_hex(&planted_wav(SECONDS[0]));
+        let oks = |files: Files| -> Vec<bool> {
+            file_checks(files).into_iter().map(|(ok, _)| ok).collect()
+        };
+        assert_eq!(
+            oks(Files {
+                wav_sha256: Some(wav),
+                flac: Some(flac),
+                mp3: None,
+            }),
+            [true, true, false]
+        );
+        assert_eq!(
+            oks(Files {
+                wav_sha256: Some("0".repeat(64)),
+                flac: Some(short),
+                mp3: None,
+            }),
+            [false, false, false]
+        );
     }
 }

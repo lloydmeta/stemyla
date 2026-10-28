@@ -567,6 +567,8 @@ mod stored {
         closed: bool,
         /// The sink was dropped before its file was complete.
         dropped: bool,
+        /// The caller took the complete file ([`StoredWav::take`]).
+        taken: bool,
     }
 
     /// Where the end stage of a [`StoredWav`] is.
@@ -590,7 +592,8 @@ mod stored {
     /// the stream.  The file is complete only after the close.  A failed
     /// open, write or close removes the file and sets [`Sink::failed`].  A
     /// sink dropped before its file is complete aborts its stream and
-    /// removes the file.
+    /// removes the file.  A sink dropped before the caller took its
+    /// complete file ([`StoredWav::take`]) removes the file too.
     pub struct StoredWav {
         path: String,
         shared: Rc<RefCell<Shared>>,
@@ -643,8 +646,19 @@ mod stored {
         }
 
         /// The save file, from the root of browser storage.
+        #[cfg_attr(mutants, mutants::skip)]
         pub fn path(&self) -> &str {
             &self.path
+        }
+
+        /// Takes the complete file, after [`Self::finish`] gave
+        /// [`Finish::Done`]: its path.  A sink dropped before this removes
+        /// its file, also a complete one (finding 1-1 of review round 1 of
+        /// M8).
+        #[cfg_attr(mutants, mutants::skip)]
+        pub fn take(&mut self) -> String {
+            self.shared.borrow_mut().taken = true;
+            self.path.clone()
         }
 
         /// The end stage, which the caller runs once the job is done, until
@@ -791,10 +805,18 @@ mod stored {
         #[cfg_attr(mutants, mutants::skip)]
         fn drop(&mut self) {
             let mut s = self.shared.borrow_mut();
-            if s.closed || s.failed.is_some() || s.dropped {
+            if s.taken || s.failed.is_some() || s.dropped {
                 return;
             }
             s.dropped = true;
+            if s.closed {
+                // Complete, but the caller never took it.
+                let path = self.path.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    store::remove_file(&path).await;
+                });
+                return;
+            }
             if s.busy {
                 // The open or the write in flight ends the file.
                 return;

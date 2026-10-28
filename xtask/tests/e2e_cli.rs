@@ -116,3 +116,17 @@ fn bench_with_no_driver_fails_before_a_browser_starts() {
 fn playback_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("playback", "playback", false);
 }
+
+/// Finding 1-17 of review round 1 of M8: a `run` of `e2e save` that does
+/// nothing fails this test.
+#[test]
+fn save_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("save", "save", false);
+}
+
+/// Finding 1-99 of review round 1 of M8: a `flac` of `e2e flac` that does
+/// nothing fails this test.
+#[test]
+fn flac_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("flac", "flac", false);
+}
