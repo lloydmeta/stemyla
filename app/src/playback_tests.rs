@@ -4,6 +4,7 @@
 //! `plans/active/stream-from-storage-m6.md`).
 
 use super::*;
+use engine::slot::WEB_BUFFER_FRAMES;
 use engine::source::{BLOCK_FRAMES, next_run};
 use store_meta::LaneFile;
 use wasm_bindgen::prelude::*;
@@ -51,8 +52,10 @@ fn opfs() -> std::rc::Rc<dyn lane_store::LaneStore> {
     std::rc::Rc::new(lane_store::OpfsStore::new(None))
 }
 const NAMES: [&str; 6] = ["bass", "drums", "other", "vocals", "guitar", "piano"];
-/// The callback of the page's Web Audio output: 2,048 frames each 46 ms.
-const CALLBACK: usize = 2_048;
+/// The callback of the page's Web Audio output: 3,072 frames each 69 ms.
+const CALLBACK: usize = WEB_BUFFER_FRAMES as usize;
+/// The time of one callback at 44.1 kHz, in whole milliseconds.
+const CALLBACK_MS: u32 = WEB_BUFFER_FRAMES * 1_000 / 44_100;
 
 /// A tone for stem `k`, as the 16-bit samples that its WAV holds.
 fn stem_wave(frames: usize, k: usize) -> Vec<f32> {
@@ -159,10 +162,10 @@ fn both(app: &StemApp, memory: &Player, f: impl Fn(&SharedParams)) {
     f(memory.params());
 }
 
-/// One callback on both players, after the 46 ms that the page's output
+/// One callback on both players, after the 69 ms that the page's output
 /// takes: whether they gave the same samples.
 async fn callback(app: &mut StemApp, memory: &mut Player) -> bool {
-    pb_test_sleep(46).await;
+    pb_test_sleep(CALLBACK_MS).await;
     render(app, memory)
 }
 
@@ -267,7 +270,7 @@ async fn a_seek_in_the_browser_plays_the_old_position_until_its_block_arrives() 
     let mut seeked = None;
     let mut same = true;
     for _ in 0..60 {
-        pb_test_sleep(46).await;
+        pb_test_sleep(CALLBACK_MS).await;
         let ready = run.parts().all(|(s, e)| {
             (s / BLOCK_FRAMES..e.div_ceil(BLOCK_FRAMES)).all(|b| ahead(&app).holds(b))
         });
@@ -312,7 +315,7 @@ async fn a_lane_file_is_read_one_block_at_a_time() {
         .playing
         .store(true, Relaxed);
     for _ in 0..20 {
-        pb_test_sleep(46).await;
+        pb_test_sleep(CALLBACK_MS).await;
         let (mut l, mut r) = (vec![0.0; CALLBACK], vec![0.0; CALLBACK]);
         stored_player(&mut app).process(&mut l, &mut r);
     }
@@ -356,7 +359,7 @@ async fn a_removed_lane_file_goes_silent_and_says_so() {
     }
     let mut heard = false;
     for _ in 0..10 {
-        pb_test_sleep(46).await;
+        pb_test_sleep(CALLBACK_MS).await;
         let (mut l, mut r) = (vec![0.0; CALLBACK], vec![0.0; CALLBACK]);
         stored_player(&mut app).process(&mut l, &mut r);
         heard |= l.iter().any(|v| *v != 0.0);

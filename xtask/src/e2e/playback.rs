@@ -176,6 +176,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             after.map(|l| l.lanes_read)
         ),
     );
+    super::check_web_buffers(&mut p, played_from);
     let errors = p.errors();
     p.check(
         errors.is_empty(),
@@ -332,7 +333,7 @@ mod tests {
         assert_eq!(target_frames(3.0), 132_300.0);
         let stats = |head: u64| {
             format!(
-                "audio stats: 43 callbacks of 2048 frames (46.44 ms budget), engine mean 1.0 ms (2.0%), max so far 2.0 ms (4.0%), tempo 1.00, playhead {head}"
+                "audio stats: 43 callbacks of 3072 frames (69.66 ms budget), engine mean 1.0 ms (2.0%), max so far 2.0 ms (4.0%), tempo 1.00, playhead {head}"
             )
         };
         assert!(played_for(&stats(352_800), 8.0));

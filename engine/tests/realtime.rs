@@ -9,7 +9,7 @@
 //! proof (`std::alloc::GlobalAlloc`).
 
 use engine::readahead::{LaneFormat, MIN_AHEAD_SLOTS, MIN_LOOP_SLOTS, ReadAhead};
-use engine::slot::Scratch;
+use engine::slot::{Scratch, WEB_BUFFER_FRAMES};
 use engine::stretch::{MAX_PUSH_FRAMES, StretcherKind};
 use engine::wav::{FRAME_BYTES, write_pcm16};
 use engine::{Player, PlayerConfig, PlayerSlot, SharedParams, Song, Stem};
@@ -27,7 +27,8 @@ const SHIPPED: [StretcherKind; 2] = [StretcherKind::Varispeed, StretcherKind::Ws
 const RATES: [u32; 2] = [44_100, 48_000];
 /// 10,000 frames is over `SCRATCH_FRAMES`, so `render_interleaved` runs its
 /// inner loop twice, and is not a multiple of the player's block.
-const CALLBACK_FRAMES: [usize; 4] = [128, 512, 4_096, 10_000];
+/// `WEB_BUFFER_FRAMES` is the browser's callback.
+const CALLBACK_FRAMES: [usize; 5] = [128, 512, WEB_BUFFER_FRAMES as usize, 4_096, 10_000];
 const STEMS: usize = 6;
 const SONG_SECONDS: usize = 10;
 

@@ -16,8 +16,9 @@
 //!
 //! Because the output stays open, audio already handed to the platform
 //! still plays after a swap: in the browser cpal queues two buffers of
-//! 2,048 frames (93 ms at 44.1 kHz), plus the output's latency, of the old
-//! song (closing the context used to cut it off).  A kept output also
+//! [`WEB_BUFFER_FRAMES`] frames (3,072, about 139 ms at 44.1 kHz), plus the
+//! output's latency, of the old song (closing the context used to cut it
+//! off).  A kept output also
 //! outlives main-thread blocks, such as the one while a song loads.  cpal
 //! then schedules buffers in the past, which the Web Audio API starts at
 //! once, on top of one another.  So in the browser a buffer that would
@@ -31,13 +32,13 @@
 //!
 //! An output that cannot play the next song ([`Unusable`]) is replaced.  In
 //! the browser each one replaced still keeps its callback: an empty slot,
-//! 64 KiB of scratch and cpal's own buffers (about 100 KiB), but no song.
+//! 64 KiB of scratch and cpal's own buffers (about 120 KiB), but no song.
 //! Every song is at 44.1 kHz (decision 0012), so a new rate is rare, but a slow
 //! phone can be busy for over 250 ms while it lays out a long song's lanes,
 //! so there an output may be replaced about once a song.
 
 use crate::player::Player;
-use crate::slot::{PlayerSlot, Scratch};
+use crate::slot::{PlayerSlot, Scratch, WEB_BUFFER_FRAMES};
 use anyhow::{Context, Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::Arc;
@@ -105,7 +106,10 @@ fn open(rate: u32) -> Result<LiveOutput> {
         .find(|r| r.min_sample_rate() <= rate && rate <= r.max_sample_rate())
         .ok_or_else(|| anyhow!("device has no f32 stereo config at {rate} Hz"))?;
     let supported = range.with_sample_rate(rate);
-    let config: cpal::StreamConfig = supported.into();
+    let config = cpal::StreamConfig {
+        buffer_size: buffer_size(cfg!(target_arch = "wasm32")),
+        ..supported.into()
+    };
     let channels = config.channels as usize;
 
     let slot = PlayerSlot::new();
@@ -159,6 +163,16 @@ fn open(rate: u32) -> Result<LiveOutput> {
         sample_rate: rate,
         channels: config.channels,
     })
+}
+
+/// The buffer size that the output asks cpal for: [`WEB_BUFFER_FRAMES`]
+/// in the browser, and the platform's own size natively.
+fn buffer_size(in_browser: bool) -> cpal::BufferSize {
+    if in_browser {
+        cpal::BufferSize::Fixed(WEB_BUFFER_FRAMES)
+    } else {
+        cpal::BufferSize::Default
+    }
 }
 
 /// Why a kept output cannot play the next song, so a new one must be opened.
@@ -465,44 +479,76 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_asks_for_its_buffer_size_and_native_keeps_the_default() {
+        assert_eq!(buffer_size(true), cpal::BufferSize::Fixed(3_072));
+        assert_eq!(buffer_size(false), cpal::BufferSize::Default);
+    }
+
+    /// The buffer sizes of the tests: cpal's default in the browser, which
+    /// native outputs may also use, and the browser's size now.
+    const SIZES: [u32; 2] = [2_048, WEB_BUFFER_FRAMES];
+
+    /// How long a buffer of `frames` frames plays at 44.1 kHz.
+    fn length_of(frames: u32) -> Duration {
+        Duration::from_secs_f64(f64::from(frames) / 44_100.0)
+    }
+
+    #[test]
     fn a_buffer_plays_alone_unless_it_starts_before_the_latest_one_ends() {
         let at = cpal::StreamInstant::from_millis;
-        let length = Duration::from_millis(46);
-        assert_eq!(
-            plays_alone(at(1_046), at(1_000), length, at(1_046)),
-            Some(at(1_092)),
-            "on time, right after the one before"
-        );
-        assert_eq!(
-            plays_alone(at(1_000), at(3_000), length, at(1_000)),
-            Some(at(3_046)),
-            "due two seconds ago, it starts as it is called back"
-        );
-        assert_eq!(
-            plays_alone(at(1_046), at(3_000), length, at(3_046)),
-            None,
-            "the other late buffer would start at once on top of it"
-        );
-        assert_eq!(
-            plays_alone(at(1_046), at(3_010), length, at(3_046)),
-            None,
-            "nor when the first took 10 ms to fill"
-        );
+        let plus = |t: cpal::StreamInstant, d: Duration| t.checked_add(d).unwrap();
+        let ms = Duration::from_millis;
+        for frames in SIZES {
+            let length = length_of(frames);
+            let next = plus(at(1_000), length);
+            assert_eq!(
+                plays_alone(next, at(1_000), length, next),
+                Some(plus(next, length)),
+                "on time, right after the one before ({frames})"
+            );
+            assert_eq!(
+                plays_alone(at(1_000), at(3_000), length, at(1_000)),
+                Some(plus(at(3_000), length)),
+                "due two seconds ago, it starts as it is called back ({frames})"
+            );
+            let first_end = plus(at(3_000), length);
+            assert_eq!(
+                plays_alone(next, at(3_000), length, first_end),
+                None,
+                "the other late buffer would start at once on top of it ({frames})"
+            );
+            assert_eq!(
+                plays_alone(next, at(3_010), length, first_end),
+                None,
+                "nor when the first took 10 ms to fill ({frames})"
+            );
+            assert!(
+                plays_alone(
+                    at(1_000),
+                    plus(at(3_000), length - ms(3)),
+                    length,
+                    first_end
+                )
+                .is_some(),
+                "a clock read 3 ms short still counts as after the latest end ({frames})"
+            );
+            assert_eq!(
+                plays_alone(
+                    at(1_000),
+                    plus(at(3_000), length - ms(5)),
+                    length,
+                    first_end
+                ),
+                None,
+                "5 ms short is the other buffer of a late pair ({frames})"
+            );
+        }
         let short = Duration::from_secs_f64(2_048.0 / 192_000.0);
-        let first_end = at(3_000).checked_add(short).unwrap();
+        let first_end = plus(at(3_000), short);
         assert_eq!(
             plays_alone(at(1_000), at(3_008), short, first_end),
             None,
             "a buffer of 10.7 ms at 192 kHz allows a grain of 1.3 ms, not 4 ms"
-        );
-        assert!(
-            plays_alone(at(1_000), at(3_043), length, at(3_046)).is_some(),
-            "a clock read 3 ms short still counts as after the latest end"
-        );
-        assert_eq!(
-            plays_alone(at(1_000), at(3_041), length, at(3_046)),
-            None,
-            "5 ms short is the other buffer of a late pair"
         );
     }
 
@@ -511,20 +557,21 @@ mod tests {
     const BLOCK: u64 = 2_902_494;
 
     /// Runs a [`Schedule`] in the browser against cpal's two buffers in
-    /// flight, 2,048 frames at 44.1 kHz each.  The page can call back at
+    /// flight, `frames` frames at 44.1 kHz each.  The page can call back at
     /// `free(t)` a buffer that ended at `t`, reads the clock in steps of
     /// `step`, and is busy for `cost` with each callback, after which the
     /// Web Audio API starts the buffer at the next render block.  Returns
     /// when each buffer was called back and when each one filled really
     /// plays, until `until`, in nanoseconds.
     fn run(
+        frames: u32,
         free: impl Fn(u64) -> u64,
         step: u64,
         cost: u64,
         until: u64,
     ) -> (Vec<u64>, Vec<(u64, u64)>) {
         let at = cpal::StreamInstant::from_nanos;
-        let length = Duration::from_secs_f64(2_048.0 / 44_100.0);
+        let length = length_of(frames);
         let mut schedule = Schedule::new(true);
         let mut ends = [0, 0];
         let mut called = Vec::new();
@@ -562,9 +609,11 @@ mod tests {
 
     #[test]
     fn a_healthy_stream_fills_every_buffer_back_to_back() {
-        let (called, filled) = run(|t| t, 1, 0, 3_000 * MS);
-        assert_eq!(filled.len(), called.len());
-        assert!(filled.windows(2).all(|w| w[1].0 == w[0].1));
+        for frames in SIZES {
+            let (called, filled) = run(frames, |t| t, 1, 0, 3_000 * MS);
+            assert_eq!(filled.len(), called.len(), "{frames}");
+            assert!(filled.windows(2).all(|w| w[1].0 == w[0].1), "{frames}");
+        }
     }
 
     #[test]
@@ -591,67 +640,87 @@ mod tests {
     #[test]
     fn after_a_block_the_song_goes_on_at_its_own_speed() {
         // An exact clock, one that moves a render block at a time (a buffer is
-        // 16 blocks, so it never reads short) and one rounded to 2 ms, with
-        // callbacks that take a while.
-        for (step, cost) in [(1, 0), (BLOCK, MS / 3), (BLOCK, MS), (2 * MS, MS / 3)] {
-            let (called, filled) = run(blocked, step, cost, 4_000 * MS);
-            let overlap = most_overlap(&filled);
-            assert!(overlap <= 4 * MS + cost + BLOCK, "{overlap} ns overlap");
-            let catching_up = |t: &u64| (2_000 * MS..2_900 * MS).contains(t);
-            let calls = called.iter().filter(|t| catching_up(t)).count();
-            let fills = filled.iter().filter(|f| catching_up(&f.0)).count();
-            // Called back twice a buffer while the schedule catches up, but
-            // filled once a buffer, from the end of the block on.
-            assert!(
-                (19..=20).contains(&fills),
-                "{fills} filled in 900 ms ({step}, {cost})"
-            );
-            assert!(
-                calls + 1 >= 2 * fills,
-                "{calls} called back, {fills} filled"
-            );
-            let resumed = filled.iter().find(|f| f.0 >= 2_000 * MS).unwrap().0;
-            assert!(resumed <= 2_000 * MS + cost + BLOCK, "resumed at {resumed}");
-            let played: u64 = filled
-                .iter()
-                .filter(|f| f.0 >= 2_000 * MS)
-                .map(|f| f.1 - f.0)
-                .sum();
-            assert!(
-                played >= 1_900 * MS,
-                "{played} ns of the 2 s after the block"
-            );
+        // 16 or 24 blocks, so it never reads short) and one rounded to 2 ms,
+        // with callbacks that take a while.
+        for frames in SIZES {
+            let buffers = (900 * MS) as f64 / nanos_of(length_of(frames)) as f64;
+            let once_a_buffer = buffers.floor() as usize..=buffers.ceil() as usize;
+            for (step, cost) in [(1, 0), (BLOCK, MS / 3), (BLOCK, MS), (2 * MS, MS / 3)] {
+                let (called, filled) = run(frames, blocked, step, cost, 4_000 * MS);
+                let overlap = most_overlap(&filled);
+                assert!(
+                    overlap <= 4 * MS + cost + BLOCK,
+                    "{overlap} ns overlap ({frames})"
+                );
+                let catching_up = |t: &u64| (2_000 * MS..2_900 * MS).contains(t);
+                let calls = called.iter().filter(|t| catching_up(t)).count();
+                let fills = filled.iter().filter(|f| catching_up(&f.0)).count();
+                // Called back twice a buffer while the schedule catches up, but
+                // filled once a buffer, from the end of the block on.
+                assert!(
+                    once_a_buffer.contains(&fills),
+                    "{fills} filled in 900 ms, not {once_a_buffer:?} ({frames}, {step}, {cost})"
+                );
+                assert!(
+                    calls + 1 >= 2 * fills,
+                    "{calls} called back, {fills} filled ({frames})"
+                );
+                let resumed = filled.iter().find(|f| f.0 >= 2_000 * MS).unwrap().0;
+                assert!(
+                    resumed <= 2_000 * MS + cost + BLOCK,
+                    "resumed at {resumed} ({frames})"
+                );
+                let played: u64 = filled
+                    .iter()
+                    .filter(|f| f.0 >= 2_000 * MS)
+                    .map(|f| f.1 - f.0)
+                    .sum();
+                assert!(
+                    played >= 1_900 * MS,
+                    "{played} ns of the 2 s after the block ({frames})"
+                );
+            }
         }
     }
 
     #[test]
     fn a_page_too_busy_for_the_schedule_to_catch_up_still_plays() {
+        // A frame of 150 ms is longer than two buffers of either size.
         let frame = |t: u64| t.div_ceil(150 * MS) * 150 * MS;
-        let (called, filled) = run(frame, 1, 0, 3_000 * MS);
-        let overlap = most_overlap(&filled);
-        assert!(overlap <= 4 * MS + BLOCK, "{overlap} ns overlap");
-        let later = |t: &u64| *t >= 1_500 * MS;
-        let calls = called.iter().filter(|t| later(t)).count();
-        let fills = filled.iter().filter(|f| later(&f.0)).count();
-        assert!(
-            (9..=11).contains(&fills) && calls >= 2 * fills,
-            "one of the two buffers a frame: {fills} of {calls} in 1.5 s"
-        );
+        for frames in SIZES {
+            assert!(2 * length_of(frames) < Duration::from_millis(150));
+            let (called, filled) = run(frames, frame, 1, 0, 3_000 * MS);
+            let overlap = most_overlap(&filled);
+            assert!(overlap <= 4 * MS + BLOCK, "{overlap} ns overlap ({frames})");
+            let later = |t: &u64| *t >= 1_500 * MS;
+            let calls = called.iter().filter(|t| later(t)).count();
+            let fills = filled.iter().filter(|f| later(&f.0)).count();
+            assert!(
+                (9..=11).contains(&fills) && calls >= 2 * fills,
+                "one of the two buffers a frame: {fills} of {calls} in 1.5 s ({frames})"
+            );
+        }
     }
 
     #[test]
     fn a_late_pair_fills_one_buffer_however_long_filling_takes() {
-        for cost in [5 * MS, 15 * MS, 30 * MS] {
-            let (called, filled) = run(blocked, 1, cost, 3_000 * MS);
-            let overlap = most_overlap(&filled);
-            assert!(overlap <= 4 * MS + cost + BLOCK, "{overlap} ns overlap");
-            let after = |t: &u64| *t >= 2_000 * MS;
-            let calls = called.iter().filter(|t| after(t)).count();
-            let fills = filled.iter().filter(|f| after(&f.0)).count();
-            assert!(
-                fills >= 10 && 2 * fills <= calls + 2,
-                "{fills} filled of {calls} called back, filling for {cost} ns"
-            );
+        for frames in SIZES {
+            let per_second = (1_000 * MS / nanos_of(length_of(frames))) as usize;
+            for cost in [5 * MS, 15 * MS, 30 * MS] {
+                let (called, filled) = run(frames, blocked, 1, cost, 3_000 * MS);
+                let overlap = most_overlap(&filled);
+                assert!(
+                    overlap <= 4 * MS + cost + BLOCK,
+                    "{overlap} ns overlap ({frames})"
+                );
+                let after = |t: &u64| *t >= 2_000 * MS;
+                let calls = called.iter().filter(|t| after(t)).count();
+                let fills = filled.iter().filter(|f| after(&f.0)).count();
+                assert!(
+                    2 * fills >= per_second && 2 * fills <= calls + 2,
+                    "{fills} filled of {calls} called back, filling for {cost} ns ({frames})"
+                );
+            }
         }
     }
 

@@ -21,6 +21,17 @@ use web_time::Instant;
 /// many.
 pub const SCRATCH_FRAMES: usize = 8192;
 
+/// The frames of each buffer that the browser's audio output asks for
+/// (`live`, on wasm32).  At 44.1 kHz one buffer is about 69.7 ms.  cpal
+/// queues two, so a change to the mix is heard up to about 139 ms later.
+/// The maintainer chose this size on 2026-10-28 (decision 0017).  It is
+/// here, not in `live`, because `xtask` and the page's tests read it
+/// without the `cpal` feature.
+pub const WEB_BUFFER_FRAMES: u32 = 3_072;
+
+// One callback of the browser's output is one inner step.
+const _: () = assert!(WEB_BUFFER_FRAMES as usize <= SCRATCH_FRAMES);
+
 /// A shared, swappable [`Player`].  Clones share the same slot.
 #[derive(Clone, Default)]
 pub struct PlayerSlot(Arc<Mutex<Option<Player>>>);

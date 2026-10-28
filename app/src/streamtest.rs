@@ -4,8 +4,8 @@
 //!
 //! It writes the files of a separated song to a scratch folder: six 16-bit
 //! stems, a 32-bit float original lane and a 16-bit classic-drums stem.
-//! Then it plays them as cpal's Web Audio host plays: two buffers of 2,048
-//! frames queued, on cpal's schedule.  Async reads on the main thread fill
+//! Then it plays them as cpal's Web Audio host plays: two buffers of
+//! `engine::slot::WEB_BUFFER_FRAMES` frames queued, on cpal's schedule.  Async reads on the main thread fill
 //! a read-ahead buffer, and each buffer takes its frames from it.  The test
 //! logs one line per measure, with the prefix `streamtest:`, and removes
 //! the scratch folder.
@@ -22,29 +22,30 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
 const RATE = 44100;
-const FRAMES_PER_BUFFER = 2048;
 const SCRATCH = "streamtest";
 // Name and bytes per stereo frame: 16-bit stems take 4, the f32 original 8.
 const FILES = [["bass", 4], ["drums", 4], ["other", 4], ["vocals", 4], ["guitar", 4], ["piano", 4],
   ["original", 8], ["classic drums", 4]];
 
-// `block_ms` is shorter than one buffer (about 43 to 46 ms), the slack
-// that cpal has at each 'ended' event.  `read_delay_ms` and
+// `block_ms` is shorter than one buffer (about 64 to 70 ms), the slack
+// that cpal has at each 'ended' event.  `frames_per_buffer` is the page's
+// output buffer (`WEB_BUFFER_FRAMES`).  `read_delay_ms` and
 // `fail_read_at` (the read of each read-ahead buffer that fails, from 1)
 // are for tests.
-export function st_cfg(minutes, play_s, seeks, max_tempo) {
-  return { minutes, play_s, seeks, max_tempo, buffer_s: 10, block_ms: 30, block_every_s: 3, block_bytes: 8 << 20,
+export function st_cfg(minutes, play_s, seeks, max_tempo, frames_per_buffer) {
+  return { minutes, play_s, seeks, max_tempo, frames_per_buffer, buffer_s: 10, block_ms: 30, block_every_s: 3, block_bytes: 8 << 20,
     read_delay_ms: 0, fail_read_at: 0, spy: false };
 }
 
 export function st_cfg_set(cfg, key, value) { cfg[key] = value; }
 
 // The settings in a page address's query, or null without `streamtest`.
-export function st_query_cfg(search, max_tempo) {
+export function st_query_cfg(search, max_tempo, frames_per_buffer) {
   const q = new URLSearchParams(search);
   if (!q.has("streamtest")) return null;
   const num = (k, d) => { const v = parseFloat(q.get(k)); return v > 0 ? v : d; };
-  return st_cfg(num("st_minutes", 30), num("st_play", 300), Math.round(num("st_seeks", 50)), max_tempo);
+  return st_cfg(num("st_minutes", 30), num("st_play", 300), Math.round(num("st_seeks", 50)), max_tempo,
+    frames_per_buffer);
 }
 
 // Made in a tap's handler: Safari starts audio only there.
@@ -178,13 +179,13 @@ class Ahead {
 // underrun.  With `block_ms`, the main thread is busy that long every
 // `block_every_s`.  Unlike the app's callback, `take` here also starts
 // reads, and it copies no frames.
-async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
+async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s, frames_per_buffer) {
   ahead.seek(from);
   await ahead.until(() => ahead.end - ahead.start + RATE > ahead.cap || ahead.end >= ahead.frames);
   let under = 0, late = 0, buffers = 0, blocks = 0, pos = from, interrupted = false;
   const rate = ctx ? ctx.sampleRate : RATE;
-  const step = Math.round((FRAMES_PER_BUFFER * RATE * tempo) / rate);
-  const period = FRAMES_PER_BUFFER / rate;
+  const step = Math.round((frames_per_buffer * RATE * tempo) / rate);
+  const period = frames_per_buffer / rate;
   const total = Math.floor(seconds / period);
   const blocker = block_ms > 0 ? setInterval(() => {
     const until = performance.now() + block_ms;
@@ -206,7 +207,7 @@ async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
     let live = 2;
     const finish = () => { if (--live === 0) done(); };
     if (ctx) {
-      const silence = ctx.createBuffer(2, FRAMES_PER_BUFFER, rate);
+      const silence = ctx.createBuffer(2, frames_per_buffer, rate);
       let t = 0;
       // iOS can suspend or interrupt the context, and then no 'ended'
       // event comes.  The run stops and says so.
@@ -338,7 +339,7 @@ export async function st_run(cfg, audio, line) {
       for (const block of [0, cfg.block_ms]) {
         if (from + (cfg.play_s * tempo + cfg.buffer_s + 1) * RATE > frames) from = 0;
         const ahead = new Ahead(files, frames, cfg);
-        const r = await play(ahead, ctx, from, cfg.play_s, tempo, block, cfg.block_every_s);
+        const r = await play(ahead, ctx, from, cfg.play_s, tempo, block, cfg.block_every_s, cfg.frames_per_buffer);
         const with_block = block > 0 ? `, ${block} ms block every ${cfg.block_every_s} s, blocks ${r.blocks}` : "";
         line(`playback: tempo ${tempo}${with_block}: underruns ${r.under}, ` +
           `late buffers ${r.late} (buffers of ${(r.period * 1000).toFixed(0)} ms that started after their time), ` +
@@ -378,9 +379,15 @@ export async function st_run(cfg, audio, line) {
 }
 "#)]
 extern "C" {
-    fn st_cfg(minutes: f64, play_s: f64, seeks: u32, max_tempo: f32) -> JsValue;
+    fn st_cfg(
+        minutes: f64,
+        play_s: f64,
+        seeks: u32,
+        max_tempo: f32,
+        frames_per_buffer: u32,
+    ) -> JsValue;
     fn st_cfg_set(cfg: &JsValue, key: &str, value: JsValue);
-    fn st_query_cfg(search: &str, max_tempo: f32) -> JsValue;
+    fn st_query_cfg(search: &str, max_tempo: f32, frames_per_buffer: u32) -> JsValue;
     fn st_audio() -> JsValue;
     #[cfg(test)]
     fn st_times_text(times: &js_sys::Array) -> String;
@@ -405,14 +412,24 @@ impl Settings {
     /// The settings in a page address's query, such as
     /// `?streamtest&st_minutes=5`, or `None` without `streamtest`.
     pub fn from_query(search: &str) -> Option<Self> {
-        let cfg = st_query_cfg(search, engine::params::MAX_TEMPO);
+        let cfg = st_query_cfg(
+            search,
+            engine::params::MAX_TEMPO,
+            engine::slot::WEB_BUFFER_FRAMES,
+        );
         (!cfg.is_null()).then_some(Self(cfg))
     }
 
     /// Files of `minutes`, `play_s` seconds of each playback run and
     /// `seeks` seeks.
     pub fn new(minutes: f64, play_s: f64, seeks: u32) -> Self {
-        Self(st_cfg(minutes, play_s, seeks, engine::params::MAX_TEMPO))
+        Self(st_cfg(
+            minutes,
+            play_s,
+            seeks,
+            engine::params::MAX_TEMPO,
+            engine::slot::WEB_BUFFER_FRAMES,
+        ))
     }
 
     /// Sets one more field of the settings, such as `buffer_s`.
@@ -635,21 +652,23 @@ export async function st_scratch_exists() {
     }
 
     /// On the timer clock, reads that take 400 ms show in the read and seek
-    /// times, and they give underruns.  A block between one and two buffers
-    /// (70 ms) makes buffers late, as on cpal's schedule.
+    /// times, and they give underruns.  Each buffer has the page's frames
+    /// (about 70 ms at 44.1 kHz).  A block between one and two buffers
+    /// (120 ms) makes buffers late, as on cpal's schedule.
     #[wasm_bindgen_test]
     async fn slow_reads_underrun_and_long_blocks_make_late_buffers() {
         // Each run plays 1.2 s through a buffer of 1 s, so it needs a read.
         let settings = Settings::new(0.1, 1.2, 2)
             .with("buffer_s", 1)
             .with("read_delay_ms", 400)
-            .with("block_ms", 70)
+            .with("block_ms", 120)
             .with("block_every_s", 0.2);
         let lines = lines_of(&settings, &JsValue::NULL).await;
         let playback = lines_with(&lines, "playback: tempo ");
         assert_eq!(playback.len(), 4, "{lines:#?}");
         for l in &playback {
             assert!(l.contains("clock timer"), "{l}");
+            assert!(l.contains("(buffers of 70 ms "), "{l}");
             assert!(number(l, "underruns ") > 0.0, "{l}");
         }
         for l in &playback {
@@ -733,7 +752,8 @@ export async function st_scratch_exists() {
 
     /// `?streamtest` turns the test on, with defaults that its parameters
     /// change; a value that is not a positive number keeps the default.
-    /// The top tempo is the player's.
+    /// The top tempo is the player's, and the buffer is the page's output
+    /// buffer.
     #[wasm_bindgen_test]
     fn the_page_address_sets_the_test() {
         assert!(Settings::from_query("").is_none());
@@ -746,6 +766,13 @@ export async function st_scratch_exists() {
             field(&defaults, "max_tempo"),
             Some(f64::from(engine::params::MAX_TEMPO))
         );
+        for settings in [&defaults, &Settings::new(1.0, 1.0, 1)] {
+            assert_eq!(
+                field(settings, "frames_per_buffer"),
+                Some(f64::from(engine::slot::WEB_BUFFER_FRAMES)),
+                "the page's output buffer"
+            );
+        }
         let set =
             Settings::from_query("?streamtest&st_minutes=0.5&st_play=20&st_seeks=7").expect("on");
         assert_eq!(got(&set), [0.5, 20.0, 7.0]);

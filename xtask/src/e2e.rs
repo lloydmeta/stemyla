@@ -483,6 +483,39 @@ fn audio_stats(log: &[String], from: usize) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// The frames of each callback of every "audio stats" line after `from`.
+fn callback_frames(log: &[String], from: usize) -> Vec<u64> {
+    log[from.min(log.len())..]
+        .iter()
+        .filter(|l| l.contains("audio stats: "))
+        .filter_map(|l| number_after(l, " callbacks of "))
+        .map(|frames| frames as u64)
+        .collect()
+}
+
+/// Whether the page's output called back with buffers of
+/// `engine::slot::WEB_BUFFER_FRAMES` frames: at least one "audio stats"
+/// line, and no other size (D6 of the catch-up plan).
+fn web_buffers_only(frames: &[u64]) -> bool {
+    !frames.is_empty()
+        && frames
+            .iter()
+            .all(|n| *n == u64::from(engine::slot::WEB_BUFFER_FRAMES))
+}
+
+/// Fails the scenario unless every "audio stats" line after `from` names
+/// callbacks of `engine::slot::WEB_BUFFER_FRAMES` frames.
+fn check_web_buffers(p: &mut Page, from: usize) {
+    let frames = callback_frames(&p.log, from);
+    p.check(
+        web_buffers_only(&frames),
+        &format!(
+            "the output calls back with buffers of {} frames: {frames:?}",
+            engine::slot::WEB_BUFFER_FRAMES
+        ),
+    );
+}
+
 /// Writes the synthetic song's stems (`xtask gen-song`) under `out`.
 fn synth_stems(out: &Path) -> Result<PathBuf> {
     let dir = out.join("stems");
@@ -628,6 +661,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     // playhead rather than for a fixed time.
     let played = p.wait_for(from, 60, played_a_second)?;
     p.check(played.is_some(), "one click on Play starts playback");
+    check_web_buffers(&mut p, from);
     p.screenshot("audio_resume")?;
 
     // Separated stems in the stored session (written as `store::save_stems`
@@ -2563,6 +2597,36 @@ mod tests {
         let log = vec!["audio stats: no callbacks yet".to_string(), l.to_string()];
         assert_eq!(audio_stats(&log, 0), [(0.75, 88_200.0)]);
         assert!(audio_stats(&log, 2).is_empty());
+        assert_eq!(callback_frames(&log, 0), [512]);
+        assert!(callback_frames(&log, 2).is_empty());
+    }
+
+    /// D6 of the catch-up plan: `e2e playback` and `e2e audio-resume` fail
+    /// unless the page's callbacks have the browser's buffer size.
+    #[test]
+    fn the_output_must_call_back_with_the_web_buffer_size() {
+        let stats = |frames: u32| {
+            format!(
+                "[3.0s] console.info: [app] app/src/lib.rs:789: audio stats: 12 callbacks of {frames} frames (69.66 ms budget), engine mean 0.100 ms (0.1%), max so far 0.3 ms (0.4%), tempo 1.00, playhead 88200"
+            )
+        };
+        let web = stats(engine::slot::WEB_BUFFER_FRAMES);
+        let log = vec![
+            "audio stats: no callbacks yet".to_string(),
+            web.clone(),
+            "playback: lanes from storage 7 of 7".to_string(),
+            web.clone(),
+        ];
+        assert_eq!(callback_frames(&log, 0), [3_072, 3_072]);
+        assert!(web_buffers_only(&callback_frames(&log, 0)));
+        let old = vec![web.clone(), stats(2_048)];
+        assert_eq!(callback_frames(&old, 0), [3_072, 2_048]);
+        assert!(
+            !web_buffers_only(&callback_frames(&old, 0)),
+            "cpal's default of 2,048 frames"
+        );
+        assert!(!web_buffers_only(&[2_048]));
+        assert!(!web_buffers_only(&[]), "no audio stats line");
     }
 
     /// Findings 1-47, 1-103, 2-30 and 2-58 of review rounds 1 and 2 of
