@@ -41,8 +41,8 @@ pub fn pick_files(
 }
 
 /// The most bytes that one read of a file asks JavaScript for: 1 MiB.
-/// So each read asks JavaScript for at most one block, never the whole
-/// file.  Each block is garbage after its copy (MEM-4).
+/// So each read asks JavaScript for never more than one block of 1 MiB.
+/// Each block is garbage after its copy (MEM-4).
 pub const READ_BLOCK: usize = 1 << 20;
 
 /// The bytes of a chosen file, read in blocks ([`read_blob`]).
@@ -54,10 +54,10 @@ pub async fn read(file: &web_sys::File) -> Result<Vec<u8>, String> {
 
 /// The bytes of `blob`, in one `Vec` sized once from its size.  Each block
 /// of at most [`READ_BLOCK`] bytes is read with `Blob.slice` and copied
-/// into its part of the `Vec`.  So each read asks JavaScript for at most
-/// one block of 1 MiB, never the whole file.  Each block is garbage after
-/// its copy (finding 2-3 of review round 2 of the catch-up plan, MEM-4).  The decoder reads wasm memory, so the file is
-/// copied in once.
+/// into its part of the `Vec`.  So each read asks JavaScript for never
+/// more than one block of 1 MiB.  Each block is garbage after its copy
+/// (finding 2-3 of review round 2 of the catch-up plan, MEM-4).  The
+/// decoder reads wasm memory, so the file is copied in once.
 pub async fn read_blob(blob: &web_sys::Blob) -> Result<Vec<u8>, String> {
     let size = blob.size() as usize;
     let mut bytes = vec![0; size];

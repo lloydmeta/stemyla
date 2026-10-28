@@ -62,10 +62,11 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The web code compiles only for wasm32, so the native steps never lint
       # it (MEM-1).  The step does not name roformer or roformer-gpu.
-      # roformer has no wasm32-only code, and its dev-dependencies do not
-      # build for wasm32 (getrandom through burn).  roformer-gpu's wasm32-only
-      # code (mapped_floats) is linted through stem-worker, which depends on
-      # it.  Its tests run natively.
+      # roformer has no wasm32-only code.  Its default features and its
+      # dev-dependencies pull burn, and so getrandom, which does not build
+      # for wasm32.  roformer-gpu's wasm32-only code (mapped_floats) is
+      # linted through stem-worker, which depends on it.  Its tests run
+      # natively.
       - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
       # --workspace merges features across crates: xtask turns on synth's
       # files feature for every crate in the build.  These steps check each

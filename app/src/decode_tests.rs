@@ -2219,7 +2219,7 @@ async fn a_drop_over_the_read_ahead_cap_refuses_a_long_song() {
     assert_eq!(fake.posts.length(), 0, "no decode is posted");
     let text = shown_error(&opened);
     assert!(
-        text.starts_with("Not opened: this song is 0:00 long, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:00, and the page decodes it here because its 21 lanes do not fit the read-ahead buffer"),
+        text.starts_with("Not opened: this song is 0:01 long, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:00, and the page decodes it here because its 21 lanes do not fit the read-ahead buffer"),
         "{text}"
     );
     assert!(
@@ -2293,7 +2293,7 @@ async fn a_restore_on_the_page_refuses_a_long_song_from_heads_or_meta() {
         let error = restored.expect("a session").err().expect("refused");
         let text = open_error_text("Could not load", &error);
         assert!(
-            text.starts_with("Not opened: this song is 0:00 long, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:00")
+            text.starts_with("Not opened: this song is 0:01 long, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:00")
                 && text.ends_with("Open a shorter song."),
             "{case}: {text}"
         );
@@ -2415,8 +2415,8 @@ fn six_padded_wavs(bytes: usize) -> Chosen {
 /// The bytes of each file of [`six_padded_wavs`] in the tests below.
 const PADDED_BYTES: usize = 6_000_000;
 
-/// Review round 3 finding 3-4: each file is larger than a block, so each
-/// needs more than one read, and [`assert_one_block_at_a_time`] can fail.
+/// Review round 3 finding 3-4: each file is larger than two blocks, so each
+/// needs at least three reads, and [`assert_one_block_at_a_time`] can fail.
 const _: () = assert!(PADDED_BYTES > 2 * picker::READ_BLOCK);
 
 /// Finding 1-3 of review round 1 of the catch-up plan (MEM-4): a decode

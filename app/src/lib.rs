@@ -691,7 +691,7 @@ async fn open_chosen_now(
             let page = OnThePage {
                 why: format!("browser storage could not keep it ({e:#})"),
                 noted: false,
-                storage_helps: true,
+                storage_helps: quota_exceeded(&format!("{e:#}")),
             };
             return open_on_the_page(chosen, None, name, started, page, memory_limit).await;
         }
@@ -1437,40 +1437,38 @@ pub fn sources_in_memory_lanes(sources: usize) -> usize {
     separation_lanes(sources, sources == 1)
 }
 
-/// [`separation_lanes`] of the shown `song`: its lanes in memory that are
-/// not derived, and whether its input (the "original" lane, or its only
-/// source) is one of them.  The page holds the old song until a separation
-/// ends, so each other derived lane in memory (classic drums) counts too.
-pub fn lanes_of(song: &Shown) -> usize {
-    let in_memory = |lane: &ShownLane| lane.audio.samples().is_some();
-    let derived = |lane: &ShownLane| DERIVED.contains(&lane.name.as_str());
-    let sources = song
-        .lanes
-        .iter()
-        .filter(|lane| !derived(lane) && in_memory(lane))
-        .count();
-    let input = original_index_of(&song.names());
-    let input_is_a_source =
-        input.is_some_and(|i| !derived(&song.lanes[i]) && in_memory(&song.lanes[i]));
-    let other_derived = song
-        .lanes
+/// The lanes of `song` that the page holds in memory: each lane in memory
+/// of any kind, and each stored lane that `reads_in` reads into memory.
+/// [`lanes_of`] and [`classic_lanes`] count with it, so that the two
+/// routes never disagree on what the page holds (finding 4-1 of review
+/// round 4).
+pub fn held_lanes(song: &Shown, reads_in: impl Fn(usize, &ShownLane) -> bool) -> usize {
+    song.lanes
         .iter()
         .enumerate()
-        .filter(|&(i, lane)| derived(lane) && in_memory(lane) && Some(i) != input)
-        .count();
-    separation_lanes(sources, input_is_a_source) + other_derived
+        .filter(|&(i, lane)| lane.audio.samples().is_some() || reads_in(i, lane))
+        .count()
+}
+
+/// The lanes that the page holds in memory after a separation of the shown
+/// `song` on the memory path ([`held_lanes`]): its lanes in memory, its
+/// input (the "original" lane, or its only source), and the 6 stems.  A
+/// song with no input lane gets a mix as its input.  The page holds the
+/// old song until a separation ends, so each derived lane in memory
+/// (classic drums) counts too.
+pub fn lanes_of(song: &Shown) -> usize {
+    let input = original_index_of(&song.names());
+    let held = held_lanes(song, |i, _| Some(i) == input);
+    held + usize::from(input.is_none()) + SEPARATED_STEMS
 }
 
 /// The lanes that classic drums of `song` holds in memory on its
-/// `ReadFirst` route: every lane that is not derived, read into memory,
-/// and the classic drums lane.  The block HPSS makes no song-length mix.
+/// `ReadFirst` route ([`held_lanes`]): its lanes in memory, each lane that
+/// is not derived, read into memory, and the new classic drums lane.  An
+/// "original" or classic drums lane in memory stays while classic drums
+/// runs.  The block HPSS makes no song-length mix.
 pub fn classic_lanes(song: &Shown) -> usize {
-    let sources = song
-        .lanes
-        .iter()
-        .filter(|lane| !DERIVED.contains(&lane.name.as_str()))
-        .count();
-    sources + 1
+    held_lanes(song, |_, lane| !DERIVED.contains(&lane.name.as_str())) + 1
 }
 
 /// Why the page does not decode a song on the page (D3 of
@@ -1582,7 +1580,7 @@ fn too_long_to_open(refusal: &PageRefusal) -> String {
     match &refusal.why {
         TooLongToOpen::Stated { frames } => format!(
             "this song is {} long, too long to open in this browser now",
-            clock(*frames)
+            clock_up(*frames)
         ),
         TooLongToOpen::Large { file, bytes, cap } => format!(
             "{file} states no length, and at {:.0} MB it can be too long to open in this browser now (a file of a song within the limit has at most {:.0} MB)",
@@ -1626,6 +1624,13 @@ impl DecodeFailure {
     pub fn storage_helps(&self) -> bool {
         matches!(self, Self::Storage(_))
     }
+}
+
+/// Whether the text of a failure of browser storage, `error`, names a
+/// full quota ("QuotaExceededError").  Only then can more free browser
+/// storage let the song open (finding 4-3 of review round 4).
+pub fn quota_exceeded(error: &str) -> bool {
+    error.contains("QuotaExceededError")
 }
 
 /// The status line of `refusal`, for a song that the page decodes because
@@ -4640,9 +4645,21 @@ fn kept_text(job: &SeparationJob, n: usize, secs: f64) -> String {
     )
 }
 
+/// [`clock`] of `frames` rounded up to a whole second.  A refusal gives
+/// the song's length with it and the limit with [`clock`], so a song over
+/// its limit never reads as long as the limit (finding 4-2 of review
+/// round 4).
+pub fn clock_up(frames: usize) -> String {
+    minutes_and_seconds(frames.div_ceil(44_100))
+}
+
 /// `frames` at 44.1 kHz as minutes and seconds, such as "1:40".
 pub fn clock(frames: usize) -> String {
-    let seconds = frames / 44_100;
+    minutes_and_seconds(frames / 44_100)
+}
+
+/// `seconds` as minutes and seconds, such as "1:40".
+fn minutes_and_seconds(seconds: usize) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
@@ -4661,7 +4678,7 @@ pub fn too_long_text(frames: usize, lanes: usize, memory_limit: usize) -> String
     };
     format!(
         "this song is {} long, and without browser storage this page separates {songs}",
-        clock(frames)
+        clock_up(frames)
     )
 }
 
@@ -4686,7 +4703,7 @@ pub fn refusal_text(
         // does not help (finding 3-4 of review round 3).
         format!(
             "Not separated: this song is {} long, and it is not kept in this browser.  A song over {} separates only from browser storage: open the file again once storage has room.",
-            clock(frames),
+            clock_up(frames),
             clock(memory_path_frames(memory_limit, lanes))
         )
     }
@@ -5447,8 +5464,95 @@ mod tests {
         stored.lanes[1].audio = stored_audio("sessions/1/decoded/1.f32");
         assert_eq!(lanes_of(&stored), 8, "one source in memory, and the mix");
         // Classic drums reads every source into memory, and adds its lane.
-        assert_eq!(classic_lanes(&with_classic), 3);
+        // A classic drums lane in memory stays until the new one replaces it
+        // (finding 4-1 of review round 4).
+        assert_eq!(classic_lanes(&with_classic), 4);
         assert_eq!(classic_lanes(&stored), 3);
+    }
+
+    /// Finding 4-1 of review round 4 (MEM-4, D3 of the catch-up plan): a
+    /// page-decoded restore with a stem that is not complete holds 6 stems,
+    /// some stored, and the original in memory.  Classic drums reads the
+    /// stored stems in and adds its lane: 8 lanes, not 7.
+    #[test]
+    fn classic_drums_counts_the_original_in_memory() {
+        let frames = 8;
+        let mut song = shown_of(
+            &[
+                "bass", "drums", "other", "vocals", "guitar", "piano", "original",
+            ],
+            frames,
+        );
+        song.lanes[1].audio = stored_audio("sessions/1/stems/drums.wav");
+        song.lanes[3].audio = stored_audio("sessions/1/stems/vocals.wav");
+        assert_eq!(
+            classic_lanes(&song),
+            8,
+            "6 stems after the read, the original and the classic drums lane"
+        );
+        assert_eq!(memory_path_frames(frames, 8), 7, "shorter than the song");
+        assert_eq!(classic_route(&song, frames), ClassicRoute::TooLong);
+        assert_eq!(memory_path_frames(9, 8), 7);
+        assert_eq!(memory_path_frames(10, 8), 8, "as long as the song");
+        assert_eq!(classic_route(&song, 10), ClassicRoute::ReadFirst);
+    }
+
+    /// Finding 4-1 of review round 4: [`lanes_of`] and [`classic_lanes`]
+    /// count the lanes in memory with one function ([`held_lanes`]).  Each
+    /// kind of lane, in memory or stored, adds to each count what the page
+    /// holds of it.  Only a stored source and the original add a different
+    /// number to each: classic drums reads every source in, and a
+    /// separation uses the original as its input in place of the mix.
+    #[test]
+    fn each_kind_of_lane_counts_the_same_on_both_routes() {
+        let song_with = |name: &str, stored: bool| {
+            let mut song = shown_of(&["bass", "drums", name], 10);
+            song.lanes[1].audio = stored_audio("sessions/1/decoded/1.f32");
+            if stored {
+                song.lanes[2].audio = stored_audio("sessions/1/lane.f32");
+            }
+            song
+        };
+        let mut base = shown_of(&["bass", "drums"], 10);
+        base.lanes[1].audio = stored_audio("sessions/1/decoded/1.f32");
+        assert_eq!(lanes_of(&base), 8, "bass, the mix and 6 stems");
+        assert_eq!(classic_lanes(&base), 3, "bass, drums and classic drums");
+        // (lane, stored, what a separation adds, what classic drums adds)
+        let kinds = [
+            ("vocals", false, 1, 1),
+            ("vocals", true, 0, 1),
+            ("classic drums", false, 1, 1),
+            ("classic drums", true, 0, 0),
+            ("original", false, 0, 1),
+            ("original", true, 0, 0),
+        ];
+        for (name, stored, separation, classic) in kinds {
+            let song = song_with(name, stored);
+            let case = format!("{name}, stored: {stored}");
+            assert_eq!(lanes_of(&song), lanes_of(&base) + separation, "{case}");
+            assert_eq!(
+                classic_lanes(&song),
+                classic_lanes(&base) + classic,
+                "{case}"
+            );
+            // Each route refuses a song longer than the memory path takes
+            // for its own count.
+            let fits = |lanes: usize| (1..).find(|&l| memory_path_frames(l, lanes) >= 10);
+            let limit = fits(classic_lanes(&song)).expect("a limit");
+            assert_eq!(
+                classic_route(&song, limit),
+                ClassicRoute::ReadFirst,
+                "{case}"
+            );
+            assert_eq!(
+                classic_route(&song, limit - 1),
+                ClassicRoute::TooLong,
+                "{case}"
+            );
+            let limit = fits(lanes_of(&song)).expect("a limit");
+            assert!(fits_memory_path(10, lanes_of(&song), limit), "{case}");
+            assert!(!fits_memory_path(10, lanes_of(&song), limit - 1), "{case}");
+        }
     }
 
     /// D3 of the catch-up plan: a separation keeps the lanes of its song,
@@ -5652,6 +5756,21 @@ mod tests {
         );
     }
 
+    /// Finding 4-3 of review round 4: only a full quota tells the user to
+    /// free browser storage after a save of the chosen files fails.
+    #[test]
+    fn only_a_full_quota_asks_for_free_storage() {
+        assert!(quota_exceeded("QuotaExceededError: the disk is full"));
+        assert!(quota_exceeded(
+            "could not write sessions/1/meta (QuotaExceededError)"
+        ));
+        assert!(!quota_exceeded("browser storage is not available"));
+        assert!(!quota_exceeded(
+            "could not write sessions/1/meta (NotAllowedError)"
+        ));
+        assert!(!quota_exceeded(""));
+    }
+
     /// Round 2 finding 2-4: only a failure of browser storage tells the
     /// user to free browser storage.  A failure of the decode worker says
     /// to open a shorter song.
@@ -5834,6 +5953,40 @@ mod tests {
         assert_eq!(
             separation_path(true, long, ONE, storage_needed(long), long_needs, limit),
             SeparationPath::TooLong
+        );
+    }
+
+    /// Finding 4-2 of review round 4: a refusal rounds the song's length up
+    /// and the limit down.  So a song less than one second over its limit
+    /// reads longer than the limit.
+    #[test]
+    fn a_refusal_rounds_the_song_up_and_the_limit_down() {
+        assert_eq!(clock_up(0), "0:00");
+        assert_eq!(clock_up(1), "0:01");
+        assert_eq!(clock_up(44_100), "0:01");
+        assert_eq!(clock_up(44_101), "0:02");
+        assert!(!clock_up(usize::MAX).is_empty(), "no overflow");
+        let over = MEMORY_PATH_MAX_FRAMES + 1;
+        let limit = MEMORY_PATH_MAX_FRAMES;
+        assert_eq!(
+            too_long_text(over, LANE_BUDGET, limit),
+            "this song is 1:41 long, and without browser storage this page separates songs of up to 1:40"
+        );
+        let unkept = refusal_text(over, LANE_BUDGET, limit, false, "not kept");
+        assert!(
+            unkept.contains("this song is 1:41 long") && unkept.contains("A song over 1:40"),
+            "{unkept}"
+        );
+        let stated = PageRefusal {
+            why: TooLongToOpen::Stated { frames: over },
+            limit,
+            sources: 1,
+        };
+        let text = refused_text(&stated, "lloyd", false);
+        assert!(
+            text.starts_with("Not opened: this song is 1:41 long")
+                && text.contains("opens only up to 1:40"),
+            "{text}"
         );
     }
 
