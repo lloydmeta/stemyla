@@ -2401,15 +2401,19 @@ async fn a_short_read_of_the_mix_is_an_error() {
 /// it is read as a slice, so a `to_vec` of that slice made a second copy.
 /// `Job::mask` reads one mask of a chunk (18.9 MB at the default chunk)
 /// this way, six times for each chunk.  A browser with no GPU adapter
-/// (CI's headless Chrome can have none) logs a skip (TD-8).
+/// (CI's headless Chrome can have none) logs a skip (TD-8).  Any other
+/// error, such as an adapter whose device does not open, fails the test.
 #[wasm_bindgen_test]
 async fn a_read_back_is_copied_into_wasm_memory_once() {
     let gpu = match Gpu::new(wgpu::PowerPreference::default()).await {
         Ok(gpu) => gpu,
-        Err(e) => {
-            console_log!("skipped: no GPU adapter: {e}");
-            return;
-        }
+        Err(error) => match error.strip_prefix("no GPU adapter: ") {
+            Some(e) => {
+                console_log!("skipped: no GPU adapter: {e}");
+                return;
+            }
+            None => panic!("the GPU did not open: {error}"),
+        },
     };
     let len = 1 << 20;
     let data: Vec<f32> = (0..len).map(|i| i as f32).collect();

@@ -61,8 +61,9 @@ jobs:
       # the MEM-3 canary and the native MEM-1 canaries.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The web code compiles only for wasm32, so the native steps never lint
-      # it (MEM-1).  roformer and roformer-gpu have no wasm32-only code, and
-      # their dev-dependencies do not build for wasm32.
+      # it (MEM-1).  roformer has no wasm32-only code.  roformer-gpu's
+      # wasm32-only code (mapped_floats) is linted through stem-worker, which
+      # depends on it.  Their dev-dependencies do not build for wasm32.
       - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
       # --workspace merges features across crates: xtask turns on synth's
       # files feature for every crate in the build.  These steps check each

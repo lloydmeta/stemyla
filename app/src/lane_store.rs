@@ -133,6 +133,7 @@ pub use web::reads_for_test;
 
 /// The lane store of browser storage.  Web only.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 mod web {
     use super::{ByteRange, LaneStore, ReadDone, ReadResult};
     use eframe::egui;

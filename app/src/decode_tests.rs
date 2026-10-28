@@ -2162,8 +2162,7 @@ async fn a_wav_of_no_stated_length_is_capped_then_stopped_at_the_limit() {
     let mut header = Vec::from(engine::wav::header(0, 44_100));
     header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
     header[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
-    let cap = engine::decode::largest_file(engine::decode::HeadLength::UnstatedPcm, SECOND)
-        .expect("a cap");
+    let cap = engine::decode::largest_file(engine::decode::HeadLength::UnstatedPcm, SECOND);
     let large = vec![(
         "lloyd.wav".to_string(),
         dt_big_file(&header, (cap + 1) as f64, "lloyd.wav"),
@@ -2329,4 +2328,139 @@ async fn an_unstored_restore_refuses_a_long_song() {
             && text.ends_with("Free browser storage in the Storage menu, or open a shorter song."),
         "{text}"
     );
+}
+
+/// Six WAVs of 1 s, each padded with zeros after its data to `bytes`
+/// bytes: a song whose files are much larger than its lanes.
+fn six_padded_wavs(bytes: usize) -> Chosen {
+    ["bass", "drums", "other", "vocals", "guitar", "piano"]
+        .iter()
+        .enumerate()
+        .map(|(k, stem)| {
+            let wav = engine::wav::encode_pcm16(&tone(SECOND, k), &tone(SECOND, k + 8), 44_100);
+            let name = format!("{stem}.wav");
+            let file = dt_big_file(&wav, bytes as f64, &name);
+            (name, file)
+        })
+        .collect()
+}
+
+/// The bytes of each file of [`six_padded_wavs`] in the tests below.
+const PADDED_BYTES: usize = 6_000_000;
+
+/// Finding 1-3 of review round 1 of the catch-up plan (MEM-4): a decode
+/// on the page reads, decodes and drops one file at a time.  Six files of
+/// 6 MB open with no browser storage.  The heap peaks at less than two
+/// files above its start, not at the six files' 36 MB.
+#[wasm_bindgen_test]
+async fn a_page_open_holds_one_file_at_a_time() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let chosen = six_padded_wavs(PADDED_BYTES);
+    dt_refuse_writes();
+    let start = store::tests::heap_start();
+    let opened = open_chosen_now(&chosen, &fake.client, 2 * SECOND).await;
+    let peak = store::tests::heap_peak_above(start);
+    dt_allow_writes();
+    store::test_wipe().await;
+    let song = opened.expect("opened").song;
+    assert_eq!((song.frames, song.lanes.len()), (SECOND, 6));
+    assert!(
+        peak < 2 * PADDED_BYTES,
+        "the heap peaked {peak} bytes above its start, for files of {PADDED_BYTES} bytes"
+    );
+}
+
+/// Finding 1-3 of review round 1 of the catch-up plan (MEM-4): a restore
+/// that decodes on the page (the decode worker replies `decode-unstored`)
+/// reads, decodes and drops one stored source at a time.
+#[wasm_bindgen_test]
+async fn a_page_restore_holds_one_file_at_a_time() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let id = saved(&six_padded_wavs(PADDED_BYTES)).await;
+    let client = fake.client.clone();
+    let restore_id = id.clone();
+    let start = store::tests::heap_start();
+    let restored =
+        background(async move { restore_stored(&restore_id, &client, 2 * SECOND).await });
+    let _ = fake.request(0).await;
+    fake.reply(DecodeReply::Unstored {
+        text: "QuotaExceededError: the disk is full".into(),
+    });
+    let restored = output(&restored).await;
+    let peak = store::tests::heap_peak_above(start);
+    store::test_wipe().await;
+    let (opened, _, _) = restored.expect("a session").expect("opened");
+    assert_eq!((opened.song.frames, opened.song.lanes.len()), (SECOND, 6));
+    assert!(
+        peak < 2 * PADDED_BYTES,
+        "the heap peaked {peak} bytes above its start, for files of {PADDED_BYTES} bytes"
+    );
+}
+
+/// Finding 1-3 of review round 1 of the catch-up plan: a WAV whose head
+/// states 1 s, and that is larger than any file of 1 s, is refused from
+/// its head, with no read past it.
+#[wasm_bindgen_test]
+async fn a_file_larger_than_its_stated_length_allows_is_refused_from_its_head() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let wav = engine::wav::encode_pcm16(&tone(SECOND, 0), &tone(SECOND, 8), 44_100);
+    let cap =
+        engine::decode::largest_file(engine::decode::HeadLength::Frames(SECOND as u64), SECOND);
+    let chosen = vec![(
+        "lloyd.wav".to_string(),
+        dt_big_file(&wav, (cap + 1) as f64, "lloyd.wav"),
+    )];
+    dt_refuse_writes();
+    let (refused, largest, over) = reads_of(open_chosen_now(&chosen, &fake.client, SECOND)).await;
+    dt_allow_writes();
+    store::test_wipe().await;
+    let text = shown_error(&refused);
+    assert_eq!(over, 0, "no read past the head: the largest was {largest}");
+    assert!(
+        text.starts_with(&format!(
+            "Not opened: lloyd.wav is {:.0} MB, more than a file of its length holds (at most {:.0} MB)",
+            (cap + 1) as f64 / 1e6,
+            cap as f64 / 1e6
+        )),
+        "{text}"
+    );
+}
+
+/// Finding 1-3 of review round 1 of the catch-up plan: a restore on the
+/// page whose `meta` gives the song's length refuses a source larger than
+/// any file of that length, from its size alone: no source is read.
+#[wasm_bindgen_test]
+async fn a_restore_from_meta_refuses_a_file_larger_than_its_length_allows() {
+    store::test_wipe().await;
+    let frames = 2_000;
+    let cap = engine::decode::largest_file(engine::decode::HeadLength::Frames(frames), 4 * SECOND);
+    let mut chosen: Chosen = (0..21)
+        .map(|k| wav_file(&format!("lloyd {k}.wav"), frames as usize, k))
+        .collect();
+    let wav = engine::wav::encode_pcm16(&tone(2_000, 3), &tone(2_000, 9), 44_100);
+    chosen[3].1 = dt_big_file(&wav, (cap + 1) as f64, "lloyd 3.wav");
+    let id = saved(&chosen).await;
+    let mut meta = meta_of(&id).await.expect("meta");
+    meta.mix = Some((frames as usize, store_meta::MIX_FORMAT.into()));
+    store::test_write(&format!("sessions/{id}/meta"), meta.to_text().as_bytes())
+        .await
+        .expect("planted");
+    let fake = Fake::new();
+    dt_start_read_spy();
+    let restored = restore_stored(&id, &fake.client, 4 * SECOND).await;
+    let source_reads = dt_stop_read_spy();
+    store::test_wipe().await;
+    let error = restored.expect("a session").err().expect("refused");
+    let text = open_error_text("Could not load", &error);
+    assert!(
+        text.starts_with(&format!(
+            "Not opened: lloyd 3.wav is {:.0} MB, more than a file of its length holds",
+            (cap + 1) as f64 / 1e6
+        )),
+        "{text}"
+    );
+    assert_eq!(source_reads, 0, "no source is read");
 }

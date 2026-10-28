@@ -95,3 +95,24 @@ fn memory_budget_with_no_driver_fails_before_a_browser_starts() {
 fn stored_stems_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("stored-stems", "stored-stems", true);
 }
+
+/// Review round 1 of the catch-up plan: an `audio_resume` that does
+/// nothing fails this test.
+#[test]
+fn audio_resume_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("audio-resume", "audio-resume", false);
+}
+
+/// Review round 1 of the catch-up plan: a `bench` that does nothing fails
+/// this test.
+#[test]
+fn bench_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("bench", "bench", false);
+}
+
+/// Review round 1 of the catch-up plan: a `run` of `e2e playback` that
+/// does nothing fails this test.
+#[test]
+fn playback_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("playback", "playback", false);
+}

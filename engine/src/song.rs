@@ -192,27 +192,87 @@ impl Song {
 
     /// Loads in-memory files as [`Song::load_files`] does, bit for bit, for
     /// a song of at most `max_frames` frames at [`SONG_RATE`] (D3 of
-    /// `plans/active/stream-from-storage-catchup.md`).  A WAV or FLAC whose
-    /// stated length passes it is refused before it decodes, and any
-    /// decode stops once it passes it, each with `decode::TooLong`.  Each
-    /// source decodes in blocks with [`decode_into`], so the song holds no
-    /// samples at the source's rate: only its own, at most `max_frames` of
-    /// each channel, and the file's bytes until its decode ends.
+    /// `plans/active/stream-from-storage-catchup.md`), with [`SongWithin`].
+    /// A WAV or FLAC whose stated length passes it is refused before it
+    /// decodes, and any decode stops once it passes it, each with
+    /// `decode::TooLong`.
     pub fn load_files_within(files: Vec<(String, Vec<u8>)>, max_frames: usize) -> Result<Song> {
-        let mut decoded = Vec::new();
-        for (file_name, bytes) in files {
-            let name = stem_name(&file_name);
-            if !is_stem(&name) {
-                continue;
-            }
-            let ext = file_name.rsplit('.').next().map(str::to_ascii_lowercase);
-            let source = Box::new(std::io::Cursor::new(bytes));
-            let decoder = Decoder::within_song_frames(source, ext.as_deref(), max_frames)?;
-            let mut sink =
-                SongSink::new(decoder.song_frames_to_reserve().min(max_frames), max_frames);
-            decode_into(decoder, &mut sink)?;
-            decoded.push((name, sink.left, sink.right));
+        files
+            .into_iter()
+            .try_fold(SongWithin::new(max_frames), |song, (name, bytes)| {
+                song.with_file(&name, bytes)
+            })?
+            .song()
+    }
+
+    pub fn duration_s(&self) -> f64 {
+        self.frames as f64 / self.sample_rate as f64
+    }
+
+    pub fn stem_index(&self, name: &str) -> Option<usize> {
+        self.stems.iter().position(|s| s.name == name)
+    }
+
+    /// The mix lane: every stem at full volume, summed with `dsp::mix`.
+    pub fn mix_lane(&self) -> (Vec<f32>, Vec<f32>) {
+        let volumes = vec![1.0; self.stems.len()];
+        let lefts: Vec<&[f32]> = self.stems.iter().map(|s| s.left.as_slice()).collect();
+        let rights: Vec<&[f32]> = self.stems.iter().map(|s| s.right.as_slice()).collect();
+        (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
+    }
+}
+
+/// A song that its caller makes one file at a time, for a song of at
+/// most `max_frames` frames at [`SONG_RATE`] (D3 of
+/// `plans/active/stream-from-storage-catchup.md`).  Each file decodes in
+/// blocks with [`decode_into`] when it is added, and its bytes go when its
+/// decode ends.  So a caller that reads each file just before it adds it
+/// holds the bytes of one file at a time, and the song holds no samples at
+/// a source's rate: only its own, at most `max_frames` of each channel
+/// (finding 1-3 of review round 1 of the catch-up plan).
+pub struct SongWithin {
+    max_frames: usize,
+    /// Each source's name, left side, and right side unless it is mono.
+    decoded: Vec<(String, Vec<f32>, Option<Vec<f32>>)>,
+}
+
+impl SongWithin {
+    /// An empty song with the limit `max_frames`.
+    pub fn new(max_frames: usize) -> Self {
+        Self {
+            max_frames,
+            decoded: Vec::new(),
         }
+    }
+
+    /// The song with the file `file_name` of `bytes` added, if it is a
+    /// stem ([`is_stem`]).  A WAV or FLAC whose stated length passes the
+    /// limit is refused before it decodes, and a decode stops once it
+    /// passes the limit, each with `decode::TooLong`.
+    pub fn with_file(self, file_name: &str, bytes: Vec<u8>) -> Result<Self> {
+        let name = stem_name(file_name);
+        if !is_stem(&name) {
+            return Ok(self);
+        }
+        let ext = file_name.rsplit('.').next().map(str::to_ascii_lowercase);
+        let source = Box::new(std::io::Cursor::new(bytes));
+        let decoder = Decoder::within_song_frames(source, ext.as_deref(), self.max_frames)?;
+        let reserve = decoder.song_frames_to_reserve().min(self.max_frames);
+        let mut sink = SongSink::new(reserve, self.max_frames);
+        decode_into(decoder, &mut sink)?;
+        let mut decoded = self.decoded;
+        decoded.push((name, sink.left, sink.right));
+        Ok(Self {
+            max_frames: self.max_frames,
+            decoded,
+        })
+    }
+
+    /// The song of the files added: the lanes in rank order, a mono source
+    /// on both sides with one buffer, and shorter lanes padded with
+    /// silence.  An error if no file was a stem.
+    pub fn song(self) -> Result<Song> {
+        let mut decoded = self.decoded;
         if decoded.is_empty() {
             return Err(anyhow!("no stems to load"));
         }
@@ -234,22 +294,6 @@ impl Song {
             stems,
         })
     }
-
-    pub fn duration_s(&self) -> f64 {
-        self.frames as f64 / self.sample_rate as f64
-    }
-
-    pub fn stem_index(&self, name: &str) -> Option<usize> {
-        self.stems.iter().position(|s| s.name == name)
-    }
-
-    /// The mix lane: every stem at full volume, summed with `dsp::mix`.
-    pub fn mix_lane(&self) -> (Vec<f32>, Vec<f32>) {
-        let volumes = vec![1.0; self.stems.len()];
-        let lefts: Vec<&[f32]> = self.stems.iter().map(|s| s.left.as_slice()).collect();
-        let rights: Vec<&[f32]> = self.stems.iter().map(|s| s.right.as_slice()).collect();
-        (dsp::mix(&lefts, &volumes), dsp::mix(&rights, &volumes))
-    }
 }
 
 /// Takes the frames of a decoded source in blocks, as two channels at
@@ -261,7 +305,7 @@ pub trait FrameSink {
     fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()>;
 }
 
-/// Keeps the blocks of one source of [`Song::load_files_within`]: its
+/// Keeps the blocks of one source of [`SongWithin`]: its
 /// left side, and its right side unless the source is mono.  It refuses a
 /// block that takes it past `max_frames`.
 struct SongSink {
@@ -702,6 +746,27 @@ mod tests {
             "a mono source has one buffer"
         );
         assert!(Song::load_files_within(Vec::new(), 1).is_err(), "no stems");
+    }
+
+    /// Review round 1 of the catch-up plan (the missed mutant of
+    /// `Decoder::song_frames_to_reserve`): a song within the page limit
+    /// makes room for each source's stated length at once.  So its heap
+    /// peaks at about its lanes, not at the old and the new buffer of a
+    /// lane that grows.
+    #[test]
+    fn a_song_within_the_page_limit_reserves_its_lanes_once() {
+        let frames = 441_000;
+        let side = vec![0.25_f32; frames];
+        let bytes = crate::wav::encode_pcm16(&side, &side, 44_100);
+        let lanes = 2 * 4 * frames;
+        let (peak, song) = crate::test_alloc::peak_of(move || {
+            Song::load_files_within(vec![("lloyd.wav".into(), bytes)], 10 * frames)
+        });
+        assert_eq!(song.unwrap().frames, frames);
+        assert!(
+            (peak as f64) < 1.1 * lanes as f64,
+            "the heap peaked at {peak} bytes for lanes of {lanes} bytes"
+        );
     }
 
     #[test]

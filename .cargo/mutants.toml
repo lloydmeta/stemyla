@@ -22,13 +22,15 @@ exclude_globs = [
     "decoder/src/web.rs",
     "decoder/src/web/**",
     "worker/src/web.rs",
+    "worker/src/web/**",
 ]
 
 # A function, impl or module that compiles for wasm32 only, in a file that
 # native code also uses, has `#[cfg_attr(mutants, mutants::skip)]`.
 # cargo-mutants then makes no mutant of it, struct-field deletions
-# included.  Put the attribute on each new wasm32-only function.  Do not
-# put it on a function with a native variant, such as `base_latency` in
-# engine/src/live.rs and `main` in app/src/main.rs.  The validator decides
-# their wasm32 mutants.  A wasm32 block inside a shared function stays in
-# too (TD-33).
+# included.  Put the attribute on each new wasm32-only function, impl or
+# module.  Do not put it on a function with a native variant, such as
+# `base_latency` in engine/src/live.rs, `main` in app/src/main.rs and
+# `mapped_floats` in roformer-gpu/src/lib.rs.  The validator decides their
+# wasm32 mutants.  A wasm32 block inside a shared function stays in too
+# (TD-33).

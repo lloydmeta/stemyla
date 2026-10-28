@@ -853,6 +853,7 @@ struct OnThePage {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 impl OnThePage {
     /// A failure of browser storage, `why`, which the status line says.
     fn storage_failed(why: String) -> Self {
@@ -867,8 +868,9 @@ impl OnThePage {
 /// The memory path of D9: reads the chosen files and decodes them on the
 /// page, as before M5, for a song within the memory path's limit for its
 /// lanes (D3 of the catch-up plan).  It first reads the head of each
-/// source, and refuses a long song before it reads a whole file.  `page`
-/// says what sent the song here.
+/// source, and refuses a long song before it reads a whole file.  Then it
+/// reads and decodes one file at a time.  `page` says what sent the song
+/// here.
 #[cfg(target_arch = "wasm32")]
 #[cfg_attr(mutants, mutants::skip)]
 async fn open_on_the_page(
@@ -905,12 +907,14 @@ async fn open_on_the_page(
         return Err(refused(anyhow::Error::new(refusal)));
     }
     drop(heads);
-    let mut files = Vec::with_capacity(sources.len());
+    // Finding 1-3 of review round 1 (MEM-4): one file is read, decoded and
+    // dropped before the next is read.
+    let mut building = engine::song::SongWithin::new(limit);
     for (n, file) in &sources {
         let bytes = picker::read(file).await.map_err(|e| anyhow::anyhow!(e))?;
-        files.push((n.clone(), bytes));
+        building = building.with_file(n, bytes).map_err(refused)?;
     }
-    let song = Song::load_files_within(files, limit).map_err(refused)?;
+    let song = building.song().map_err(refused)?;
     log::info!(
         "song: opened at {} Hz in {:.2} s ({} frames)",
         song.sample_rate,
@@ -1464,6 +1468,10 @@ pub enum TooLongToOpen {
     /// The head of `file` states no length, and the file is larger than
     /// the largest file of a song within the limit (`cap`).
     Large { file: String, bytes: u64, cap: u64 },
+    /// The length of `file`, from its head or the session's `meta`, is
+    /// within the limit, but the file is larger than the largest file of
+    /// that length (`cap`, finding 1-3 of review round 1).
+    Oversized { file: String, bytes: u64, cap: u64 },
     /// Its decode passed the limit.
     Decoded,
 }
@@ -1499,22 +1507,24 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-/// The refusal before any whole read of a song of `sources` files, from
-/// the head of each file of the song (`heads`: name, first bytes, size),
-/// for the `limit` of its lanes: a WAV or FLAC whose head states a length
-/// past the limit, or a file whose head states no length and is larger
-/// than the cap (`engine::decode::largest_file`).  `None` when the song can
-/// be read.
+/// The refusal before any whole read of a song, from the head of each of
+/// its files (`heads`: name, first bytes, size), for the `limit` of its
+/// lanes.  It refuses a WAV or FLAC whose head states a length past the
+/// limit, and a file larger than the largest file of its stated length,
+/// or of the limit if it states none (`engine::decode::largest_file`).
+/// `None` when the song can be read one file at a time.
 pub fn refusal_of_heads(heads: &[(String, Vec<u8>, u64)], limit: usize) -> Option<TooLongToOpen> {
     use engine::decode::{HeadLength, head_length, largest_file};
     let mut longest = None;
     for (file, head, bytes) in heads {
         let length = head_length(head, *bytes);
-        match (length, largest_file(length, limit)) {
-            (HeadLength::Frames(frames), _) if frames > limit as u64 => {
+        let cap = largest_file(length, limit);
+        match length {
+            HeadLength::Frames(frames) if frames > limit as u64 => {
                 longest = longest.max(Some(frames));
             }
-            (_, Some(cap)) if *bytes > cap => {
+            HeadLength::Frames(_) if *bytes > cap => return Some(oversized(file, *bytes, cap)),
+            _ if *bytes > cap => {
                 return Some(TooLongToOpen::Large {
                     file: file.clone(),
                     bytes: *bytes,
@@ -1529,6 +1539,28 @@ pub fn refusal_of_heads(heads: &[(String, Vec<u8>, u64)], limit: usize) -> Optio
     })
 }
 
+/// The refusal before any whole read of a song of `frames` frames, which
+/// the session's `meta` states, from the size of each of its files
+/// (`sizes`: name, size).  It refuses a file larger than the largest file
+/// of that length (finding 1-3 of review round 1).
+pub fn refusal_of_sizes(sizes: &[(String, u64)], frames: usize) -> Option<TooLongToOpen> {
+    let length = engine::decode::HeadLength::Frames(frames as u64);
+    let cap = engine::decode::largest_file(length, frames);
+    sizes
+        .iter()
+        .find(|(_, bytes)| *bytes > cap)
+        .map(|(file, bytes)| oversized(file, *bytes, cap))
+}
+
+/// [`TooLongToOpen::Oversized`] of `file`.
+fn oversized(file: &str, bytes: u64, cap: u64) -> TooLongToOpen {
+    TooLongToOpen::Oversized {
+        file: file.to_string(),
+        bytes,
+        cap,
+    }
+}
+
 /// The first part of a refusal's status line: what is too long.
 fn too_long_to_open(refusal: &PageRefusal) -> String {
     match &refusal.why {
@@ -1538,6 +1570,11 @@ fn too_long_to_open(refusal: &PageRefusal) -> String {
         ),
         TooLongToOpen::Large { file, bytes, cap } => format!(
             "{file} states no length, and at {:.0} MB it can be too long to open in this browser now (a file of a song within the limit has at most {:.0} MB)",
+            *bytes as f64 / 1e6,
+            *cap as f64 / 1e6
+        ),
+        TooLongToOpen::Oversized { file, bytes, cap } => format!(
+            "{file} is {:.0} MB, more than a file of its length holds (at most {:.0} MB), so it can be too long to open in this browser now",
             *bytes as f64 / 1e6,
             *cap as f64 / 1e6
         ),
@@ -5387,9 +5424,22 @@ mod tests {
         };
         assert_eq!(refusal_of_heads(&[at_48k(4_800_000)], limit), None);
         assert!(refusal_of_heads(&[at_48k(4_800_001)], limit).is_some());
+        // Finding 1-3 of review round 1: a WAV that states 10 s is refused
+        // when it is larger than a file of 10 s at 384 kHz, 32 bits and two
+        // channels, with room for tags.
+        let ten = engine::decode::largest_file(engine::decode::HeadLength::Frames(441_000), limit);
+        let stated = |bytes: u64| ("acme.wav".to_string(), wav_head(44_100, 10 * second), bytes);
+        assert_eq!(refusal_of_heads(&[stated(ten)], limit), None);
+        assert_eq!(
+            refusal_of_heads(&[wav(30), stated(ten + 1)], limit),
+            Some(TooLongToOpen::Oversized {
+                file: "acme.wav".into(),
+                bytes: ten + 1,
+                cap: ten,
+            })
+        );
         // A streaming WAV: the cap of 384 kHz, 32 bits, two channels.
-        let cap = engine::decode::largest_file(engine::decode::HeadLength::UnstatedPcm, limit)
-            .expect("a cap");
+        let cap = engine::decode::largest_file(engine::decode::HeadLength::UnstatedPcm, limit);
         let streaming = |bytes: u64| ("lloyd.wav".to_string(), wav_head(44_100, u32::MAX), bytes);
         assert_eq!(refusal_of_heads(&[streaming(cap)], limit), None);
         assert_eq!(
@@ -5401,8 +5451,7 @@ mod tests {
             })
         );
         // An MP3: the cap of 320 kbit/s.
-        let mp3_cap = engine::decode::largest_file(engine::decode::HeadLength::Unstated, limit)
-            .expect("a cap");
+        let mp3_cap = engine::decode::largest_file(engine::decode::HeadLength::Unstated, limit);
         assert_eq!(mp3_cap, 4_000_000 + (16 << 20));
         let mp3 = |bytes: u64| ("lloyd.mp3".to_string(), vec![0xFF, 0xFB, 0x90, 0x00], bytes);
         assert_eq!(refusal_of_heads(&[mp3(mp3_cap)], limit), None);
@@ -5410,6 +5459,63 @@ mod tests {
             refusal_of_heads(&[mp3(mp3_cap + 1)], limit),
             Some(TooLongToOpen::Large { .. })
         ));
+    }
+
+    /// Finding 1-3 of review round 1: when `meta` gives the song's length,
+    /// a restore refuses a source larger than the largest file of that
+    /// length, from its size alone.
+    #[test]
+    fn the_sizes_refuse_a_file_larger_than_the_length_allows() {
+        let frames = 10 * 44_100;
+        let cap = engine::decode::largest_file(engine::decode::HeadLength::Frames(441_000), frames);
+        assert_eq!(cap, 30_720_000 + (16 << 20));
+        let sizes = |bytes: u64| {
+            vec![
+                ("lloyd.wav".to_string(), 1_000),
+                ("acme.flac".to_string(), bytes),
+            ]
+        };
+        assert_eq!(refusal_of_sizes(&sizes(cap), frames), None);
+        assert_eq!(
+            refusal_of_sizes(&sizes(cap + 1), frames),
+            Some(TooLongToOpen::Oversized {
+                file: "acme.flac".into(),
+                bytes: cap + 1,
+                cap,
+            })
+        );
+    }
+
+    /// Finding 1-3 of review round 1: the status line of a file larger
+    /// than its length allows.  The refusals show as their text.
+    #[test]
+    fn a_refusal_shows_as_its_text() {
+        let oversized = PageRefusal {
+            why: TooLongToOpen::Oversized {
+                file: "lloyd.wav".into(),
+                bytes: 60_000_000,
+                cap: 47_497_216,
+            },
+            limit: MEMORY_PATH_MAX_FRAMES,
+            sources: 1,
+        };
+        assert_eq!(
+            oversized.to_string(),
+            "lloyd.wav is 60 MB, more than a file of its length holds (at most 47 MB), so it can be too long to open in this browser now"
+        );
+        let stated = PageRefusal {
+            why: TooLongToOpen::Stated { frames: 44_100 },
+            limit: 1,
+            sources: 1,
+        };
+        assert_eq!(
+            stated.to_string(),
+            "this song is 0:01 long, too long to open in this browser now"
+        );
+        assert_eq!(
+            Refused("Not opened: acme".into()).to_string(),
+            "Not opened: acme"
+        );
     }
 
     /// D3 of the catch-up plan: the status line says that the song is too
@@ -7255,6 +7361,126 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert!(
             status.contains("0:02 long") && status.contains("up to 0:01"),
             "the length and the limit: {status}"
+        );
+    }
+
+    /// [`app_with_a_stored_song`] that shows two sources in memory, so a
+    /// separation on the memory path holds 9 lanes: the two sources, their
+    /// mix and the 6 stems.  The limit is the song's length, so 7 lanes of
+    /// it fit and 9 do not (7 / 9 of 2 s is 1.56 s).
+    async fn app_with_two_sources_at_the_limit() -> (StemApp, js_sys::Array, String) {
+        let (mut app, posts, id) = app_with_a_stored_song().await;
+        let stem = |name: &str| Stem {
+            name: name.into(),
+            left: tone(FRAMES).into(),
+            right: tone(FRAMES).into(),
+        };
+        app.open_memory_song(Song {
+            sample_rate: 44_100,
+            frames: FRAMES,
+            stems: vec![stem("acme"), stem("lloyd")],
+        });
+        app.session = Some(id.clone());
+        app.song_name = Some("acme".into());
+        app.memory_limit = FRAMES;
+        let lanes = app.song.as_deref().map(lanes_of);
+        assert_eq!(lanes, Some(9), "two sources, their mix and 6 stems");
+        (app, posts, id)
+    }
+
+    /// The text of a refusal of a song of 2 s with 9 lanes in memory, for
+    /// a limit of 2 s ([`app_with_two_sources_at_the_limit`]).
+    const NINE_LANES_TOO_LONG: &str = "this song is 0:02 long, and without browser storage this page separates songs of up to 0:02, and a song with as many lanes in memory as this one up to 0:01";
+
+    /// Finding 1-7 of review round 1 of the catch-up plan: with no room in
+    /// browser storage, the start counts the song's 9 lanes, so a song of
+    /// 2 s is refused with a limit of 2 s.
+    #[wasm_bindgen_test]
+    async fn a_full_storage_counts_the_lanes_in_memory() {
+        stub_estimate(1e9, 1e9);
+        let (mut app, posts, id) = app_with_two_sources_at_the_limit().await;
+        press_separate(&mut app).await;
+        unstub_estimate();
+        let posted = posts.length();
+        let running = app.separating.is_some();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(posted, 0, "nothing posted");
+        assert!(!running);
+        assert!(
+            status.starts_with(&format!("Not separated: {NINE_LANES_TOO_LONG}; ")),
+            "{status}"
+        );
+    }
+
+    /// Finding 1-7 of review round 1 of the catch-up plan: a failed mix
+    /// write counts the song's 9 lanes.
+    #[wasm_bindgen_test]
+    async fn a_failed_mix_write_counts_the_lanes_in_memory() {
+        let (mut app, posts, id) = app_with_two_sources_at_the_limit().await;
+        refuse_writes();
+        press_separate(&mut app).await;
+        allow_writes();
+        let posted = posts.length();
+        let running = app.separating.is_some();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(posted, 0, "nothing posted");
+        assert!(!running);
+        assert!(
+            status.starts_with(&format!(
+                "Not separated: {NINE_LANES_TOO_LONG}; browser storage could not keep the song's mix"
+            )),
+            "{status}"
+        );
+    }
+
+    /// Finding 1-7 of review round 1 of the catch-up plan: after
+    /// `unstored`, the page counts the song's 9 lanes.
+    #[wasm_bindgen_test]
+    async fn unstored_counts_the_lanes_in_memory() {
+        let (mut app, posts, id) = app_with_two_sources_at_the_limit().await;
+        press_separate(&mut app).await;
+        posts.set_length(0);
+        deliver_unstored(&mut app, "QuotaExceededError: the disk is full");
+        settle(&mut app).await;
+        let posted = posts.length();
+        let running = app.separating.is_some();
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert_eq!(posted, 0, "nothing posted");
+        assert!(!running);
+        assert_eq!(
+            status,
+            format!(
+                "Browser storage failed (QuotaExceededError: the disk is full).  {NINE_LANES_TOO_LONG}.  Free space in the Storage menu, then press Separate again."
+            )
+        );
+    }
+
+    /// Finding 1-7 of review round 1 of the catch-up plan: after a
+    /// storage-path separation, a stem that is not complete is read whole
+    /// only within the limit for the song's 9 lanes.  The song of 2 s
+    /// passes it, so the stems do not open.
+    #[wasm_bindgen_test]
+    async fn an_incomplete_stored_stem_counts_the_lanes_in_memory() {
+        let (mut app, _posts, id) = app_with_two_sources_at_the_limit().await;
+        plant_parts(&id, &NAMES[..5]).await;
+        let half = tone(FRAMES / 2);
+        store::test_write(
+            &format!("sessions/{id}/stems/piano.wav.part"),
+            &engine::wav::encode_pcm16(&half, &half, 44_100),
+        )
+        .await
+        .expect("planted");
+        press_separate(&mut app).await;
+        deliver_stored_and_done(&mut app);
+        settle(&mut app).await;
+        let status = app.status.clone();
+        finish(app, &id).await;
+        assert!(
+            status.starts_with("Separated, but could not open the stems: the stem piano is not complete in browser storage, and the song is too long to read it into memory"),
+            "{status}"
         );
     }
 

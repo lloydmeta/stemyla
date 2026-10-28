@@ -874,7 +874,9 @@ pub async fn restore_id(id: &str, memory_limit: usize) -> Option<Result<(String,
 /// catch-up plan: a song longer than the memory path's limit for its
 /// lanes is a `PageRefusal`.  The length comes from `meta` when it has a
 /// `decoded` or a `mix` line, else from the head of each source, before
-/// any whole read.  The decode stops at the limit.
+/// any whole read.  A source larger than the largest file of that length
+/// is refused too.  Then each source is read and decoded, one at a time,
+/// and the decode stops at the limit.
 async fn rebuild(base: &str, meta: &Meta, memory_limit: usize) -> Result<Song> {
     use crate::{PageRefusal, TooLongToOpen};
     let sources: Vec<&(String, String)> = meta
@@ -899,7 +901,18 @@ async fn rebuild(base: &str, meta: &Meta, memory_limit: usize) -> Result<Song> {
         .or(meta.usable_mix())
     {
         Some(frames) if frames > limit => return Err(refusal(TooLongToOpen::Stated { frames })),
-        Some(_) => {}
+        Some(frames) => {
+            let mut sizes = Vec::with_capacity(count);
+            for (orig, stored) in &sources {
+                let file = file_handle(&format!("{base}/src/{stored}"))
+                    .await
+                    .ok_or_else(|| missing(orig))?;
+                sizes.push((orig.clone(), file.size() as u64));
+            }
+            if let Some(why) = crate::refusal_of_sizes(&sizes, frames) {
+                return Err(refusal(why));
+            }
+        }
         None => {
             let mut heads = Vec::with_capacity(count);
             for (orig, stored) in &sources {
@@ -914,14 +927,17 @@ async fn rebuild(base: &str, meta: &Meta, memory_limit: usize) -> Result<Song> {
             }
         }
     }
-    let mut files = Vec::with_capacity(count);
+    // Finding 1-3 of review round 1 (MEM-4): one source is read, decoded
+    // and dropped before the next is read.
+    let decoded = |e| crate::decoded_refusal(e, limit, count);
+    let mut building = engine::song::SongWithin::new(limit);
     for (orig, stored) in sources {
         let bytes = read(&format!("{base}/src/{stored}"))
             .await
             .ok_or_else(|| missing(orig))?;
-        files.push((orig.clone(), bytes));
+        building = building.with_file(orig, bytes).map_err(decoded)?;
     }
-    Song::load_files_within(files, limit).map_err(|e| crate::decoded_refusal(e, limit, count))
+    building.song().map_err(decoded)
 }
 
 /// The suffix of each file that the decode worker writes.
@@ -1874,7 +1890,7 @@ pub(crate) async fn test_read(path: &str) -> Option<Vec<u8>> {
 /// web-test`).  `tests/web.rs` and `tests/web_close.rs` test the public
 /// functions, except `usage`, `download` and `download_blob` (TD-53).
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use wasm_bindgen_test::*;
 
@@ -1914,6 +1930,18 @@ mod tests {
 
     #[global_allocator]
     static ALLOCATOR: PeakAllocator = PeakAllocator;
+
+    /// Starts a measure of the heap's peak: the heap bytes live now.
+    pub(crate) fn heap_start() -> usize {
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        before
+    }
+
+    /// The most heap bytes above `start` since [`heap_start`] gave it.
+    pub(crate) fn heap_peak_above(start: usize) -> usize {
+        PEAK.with(Cell::get).saturating_sub(start)
+    }
 
     #[wasm_bindgen(inline_js = r#"
 let record = null;

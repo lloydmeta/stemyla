@@ -195,21 +195,22 @@ fn flac_length(flac: &[u8]) -> HeadLength {
 }
 
 /// The largest file, in bytes, of a song of at most `max_frames` frames at
-/// [`SONG_RATE`] whose head states `length`: `None` when it states the
-/// length.  A WAV or FLAC: two channels of 32-bit samples at 384 kHz.
-/// Anything else: an MP3 at 320 kbit/s.  Each with [`TAG_ROOM`].
-pub fn largest_file(length: HeadLength, max_frames: usize) -> Option<u64> {
-    let per_second = match length {
-        HeadLength::Frames(_) => return None,
-        HeadLength::UnstatedPcm => PCM_BYTES_PER_SECOND,
-        HeadLength::Unstated => MP3_BYTES_PER_SECOND,
+/// [`SONG_RATE`] whose head states `length`.  A WAV or FLAC: two channels
+/// of 32-bit samples at 384 kHz, for its stated frames if it states them,
+/// else for `max_frames`.  Anything else: an MP3 at 320 kbit/s for
+/// `max_frames`.  Each with [`TAG_ROOM`].  So a caller that reads a file
+/// whole holds at most this many bytes of it (finding 1-3 of review round
+/// 1 of the catch-up plan).
+pub fn largest_file(length: HeadLength, max_frames: usize) -> u64 {
+    let (frames, per_second) = match length {
+        HeadLength::Frames(frames) => (frames.min(max_frames as u64), PCM_BYTES_PER_SECOND),
+        HeadLength::UnstatedPcm => (max_frames as u64, PCM_BYTES_PER_SECOND),
+        HeadLength::Unstated => (max_frames as u64, MP3_BYTES_PER_SECOND),
     };
-    let bytes = (max_frames as u128 * u128::from(per_second)).div_ceil(u128::from(SONG_RATE));
-    Some(
-        u64::try_from(bytes)
-            .unwrap_or(u64::MAX)
-            .saturating_add(TAG_ROOM),
-    )
+    let bytes = (u128::from(frames) * u128::from(per_second)).div_ceil(u128::from(SONG_RATE));
+    u64::try_from(bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(TAG_ROOM)
 }
 
 /// Decodes a file on disk (WAV, MP3 or FLAC).
@@ -1352,24 +1353,166 @@ mod tests {
         assert_eq!(head_length(b"lloyd", 5), HeadLength::Unstated);
     }
 
-    /// D3 of the catch-up plan: the cap of a file whose head states no
-    /// length.  A WAV or FLAC: 384 kHz, 32 bits, two channels.  An MP3:
-    /// 320 kbit/s.  Each with room for tags.
+    /// D3 of the catch-up plan: the cap of a file.  A WAV or FLAC: 384 kHz,
+    /// 32 bits, two channels, for its stated length or else for the limit.
+    /// An MP3: 320 kbit/s for the limit.  Each with room for tags.
     #[test]
-    fn the_largest_file_of_a_song_whose_head_states_no_length() {
+    fn the_largest_file_of_a_song_within_the_limit() {
         let hundred_seconds = 100 * 44_100;
         assert_eq!(TAG_ROOM, 16 << 20);
-        assert_eq!(largest_file(HeadLength::Frames(1), hundred_seconds), None);
         assert_eq!(
             largest_file(HeadLength::UnstatedPcm, hundred_seconds),
-            Some(307_200_000 + TAG_ROOM)
+            307_200_000 + TAG_ROOM
         );
         assert_eq!(
             largest_file(HeadLength::Unstated, hundred_seconds),
-            Some(4_000_000 + TAG_ROOM)
+            4_000_000 + TAG_ROOM
         );
         // Part of a second rounds up.
-        assert_eq!(largest_file(HeadLength::Unstated, 1), Some(1 + TAG_ROOM));
+        assert_eq!(largest_file(HeadLength::Unstated, 1), 1 + TAG_ROOM);
+        // Finding 1-3 of review round 1: a file that states 10 s gets the
+        // bytes of 10 s, and a stated length past the limit gets the limit.
+        assert_eq!(
+            largest_file(HeadLength::Frames(441_000), hundred_seconds),
+            30_720_000 + TAG_ROOM
+        );
+        assert_eq!(
+            largest_file(HeadLength::Frames(u64::MAX), hundred_seconds),
+            307_200_000 + TAG_ROOM
+        );
+    }
+
+    /// `head` with `chunk` (its id and body) put before its `data` chunk,
+    /// which starts at byte 36 of a 44-byte header.
+    fn with_chunk_before_data(wav: &[u8], id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut file = Vec::with_capacity(wav.len() + 9 + body.len());
+        file.extend_from_slice(&wav[..36]);
+        file.extend_from_slice(id);
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            file.push(0);
+        }
+        file.extend_from_slice(&wav[36..]);
+        file
+    }
+
+    /// Review round 1 of the catch-up plan (missed mutants of
+    /// `wav_length` and `HEAD_BYTES`): a WAV head skips a chunk of odd size
+    /// and its pad byte, and a chunk of 2,000 bytes, before `data`.  A rate
+    /// or a block align of 0 states no length.
+    #[test]
+    fn a_wav_head_skips_chunks_before_data_and_needs_a_format() {
+        let (_, _, wav) = stereo_wav();
+        let stated = HeadLength::Frames(FRAMES as u64);
+        let odd = with_chunk_before_data(&wav, b"junk", &[1, 2, 3]);
+        assert_eq!(head_length(&odd, odd.len() as u64), stated, "odd chunk");
+        let tags = with_chunk_before_data(&wav, b"LIST", &[7; 2_000]);
+        assert_eq!(HEAD_BYTES, 65_536);
+        assert_eq!(
+            head_length(&tags[..HEAD_BYTES.min(tags.len())], tags.len() as u64),
+            stated,
+            "2,000 bytes of tags"
+        );
+        let mut no_rate = wav.clone();
+        set_u32(&mut no_rate, 24, 0);
+        assert_eq!(
+            head_length(&no_rate, no_rate.len() as u64),
+            HeadLength::UnstatedPcm
+        );
+        let mut no_block = wav;
+        no_block[32..34].copy_from_slice(&0_u16.to_le_bytes());
+        assert_eq!(
+            head_length(&no_block, no_block.len() as u64),
+            HeadLength::UnstatedPcm
+        );
+    }
+
+    /// Review round 1 of the catch-up plan (missed mutants of
+    /// `flac_length` and `id3_size`): a STREAMINFO total of 2^32 + 5
+    /// frames, and a FLAC after an ID3v2.4 tag with a footer.
+    #[test]
+    fn a_flac_head_states_a_36_bit_total_after_a_tag_with_a_footer() {
+        let mut flac = silence_of(2, 8_192, 4_096, 2);
+        // STREAMINFO starts at byte 8: the total's top 4 bits are the low
+        // half of its byte 13, and its low 32 bits are bytes 14 to 17.
+        flac[21] = (flac[21] & 0xF0) | 0x01;
+        flac[22..26].copy_from_slice(&5_u32.to_be_bytes());
+        assert_eq!(
+            head_length(&flac, flac.len() as u64),
+            HeadLength::Frames((1 << 32) + 5)
+        );
+        let stated = silence_of(2, 8_192, 4_096, 2);
+        // Flags 0x10: a footer of 10 bytes follows the 128 bytes of tags.
+        let mut tagged = vec![b'I', b'D', b'3', 4, 0, 0x10, 0, 0, 1, 0];
+        tagged.extend_from_slice(&[0; 128]);
+        tagged.extend_from_slice(&[b'3', b'D', b'I', 4, 0, 0x10, 0, 0, 1, 0]);
+        tagged.extend_from_slice(&stated);
+        assert_eq!(
+            head_length(&tagged, tagged.len() as u64),
+            HeadLength::Frames(8_192)
+        );
+    }
+
+    /// Finding 1-12 of review round 1 of the catch-up plan: the decoder of
+    /// `Decoder::within_song_frames` stops a decode of unstated length by
+    /// itself, at the limit in frames at `SONG_RATE`, with no sink.
+    #[test]
+    fn the_decoder_stops_at_the_song_frame_limit() {
+        let (left, right, _) = stereo_wav();
+        for rate in [22_050, 44_100] {
+            let mut streaming = encode_pcm16(&left, &right, rate);
+            set_u32(&mut streaming, 4, u32::MAX);
+            set_u32(&mut streaming, 40, u32::MAX);
+            let max = song_frames(FRAMES as u64, rate) as usize;
+            let open = |max: usize| {
+                let source = Box::new(Cursor::new(streaming.clone()));
+                Decoder::within_song_frames(source, Some("wav"), max).expect("no stated length")
+            };
+            assert_eq!(every_packet(open(max)).unwrap(), FRAMES as u64, "{rate} Hz");
+            let error = every_packet(open(max - 1)).expect_err("past the limit");
+            assert_eq!(
+                error.downcast_ref::<TooLong>(),
+                Some(&TooLong {
+                    max_frames: max - 1
+                }),
+                "{rate} Hz"
+            );
+        }
+    }
+
+    /// Review round 1 of the catch-up plan (missed mutants of
+    /// `source_frames_within` and `Decoder::song_frames_to_reserve`): a
+    /// decoder reserves the song frames of its stated length, within its
+    /// limit in frames at `SONG_RATE`.
+    #[test]
+    fn a_decoder_reserves_song_frames_within_its_limit() {
+        use crate::test_audio::{mp3, tone};
+        let ten_seconds = vec![0.25_f32; 441_000];
+        let wav = encode_pcm16(&ten_seconds, &ten_seconds, 44_100);
+        let decoder =
+            Decoder::within_song_frames(Box::new(Cursor::new(wav)), Some("wav"), 4_410_000)
+                .unwrap();
+        assert_eq!(decoder.song_frames_to_reserve(), 441_000);
+        // An MP3 of 1 s, with a limit of 2,000 song frames: 1,000 frames at
+        // 22.05 kHz, and 2,176 at 48 kHz, each 2,000 at 44.1 kHz.
+        for rate in [22_050, 48_000] {
+            let frames = rate as usize;
+            let bytes = mp3(&[tone(0, frames, rate), tone(1, frames, rate)], rate);
+            let decoder =
+                Decoder::within_song_frames(Box::new(Cursor::new(bytes)), Some("mp3"), 2_000)
+                    .unwrap();
+            assert_eq!(decoder.song_frames_to_reserve(), 2_000, "{rate} Hz");
+        }
+    }
+
+    /// Review round 1 of the catch-up plan: the text of `TooLong`.
+    #[test]
+    fn too_long_says_the_limit() {
+        assert_eq!(
+            TooLong { max_frames: 4_410 }.to_string(),
+            "the song is too long to open here: it passes 4410 frames at 44100 Hz"
+        );
     }
 
     #[test]
