@@ -94,13 +94,14 @@ pub enum HeadLength {
 /// can put chunks, such as tags, before its data chunk.
 pub const HEAD_BYTES: usize = 64 * 1024;
 
-/// Room for tags, such as cover art, in a file whose head states no
-/// length: 16 MiB.
+/// Room for tags, such as cover art, in the largest file of a song
+/// ([`largest_file`]): 16 MiB.
 pub const TAG_ROOM: u64 = 16 << 20;
 
-/// The bytes of one second of the largest WAV or FLAC that states no
-/// length: two channels of 32-bit samples at 384 kHz, the highest rate
-/// that the page converts.  The song keeps two channels.
+/// The bytes of one second of the largest WAV or FLAC: two channels of
+/// 32-bit samples at 384 kHz, the highest rate that the page converts.
+/// The song keeps two channels.  [`largest_file`] uses it for every WAV
+/// or FLAC, with a stated length or without one.
 const PCM_BYTES_PER_SECOND: u64 = 384_000 * 2 * 4;
 
 /// The bytes of one second of the largest MP3: 320 kbit/s, the highest
@@ -1382,8 +1383,8 @@ mod tests {
         );
     }
 
-    /// `head` with `chunk` (its id and body) put before its `data` chunk,
-    /// which starts at byte 36 of a 44-byte header.
+    /// The 44-byte header `wav` with a chunk of `id` and `body` put before
+    /// its `data` chunk, which starts at byte 36.
     fn with_chunk_before_data(wav: &[u8], id: &[u8; 4], body: &[u8]) -> Vec<u8> {
         let mut file = Vec::with_capacity(wav.len() + 9 + body.len());
         file.extend_from_slice(&wav[..36]);

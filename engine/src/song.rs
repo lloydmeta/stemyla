@@ -227,9 +227,9 @@ impl Song {
 /// `plans/active/stream-from-storage-catchup.md`).  Each file decodes in
 /// blocks with [`decode_into`] when it is added, and its bytes go when its
 /// decode ends.  So a caller that reads each file just before it adds it
-/// holds the bytes of one file at a time, and the song holds no samples at
-/// a source's rate: only its own, at most `max_frames` of each channel
-/// (finding 1-3 of review round 1 of the catch-up plan).
+/// holds the bytes of one file at a time.  The song holds no samples at a
+/// source's rate.  It holds only its own samples, at most `max_frames` of
+/// each channel (finding 1-3 of review round 1 of the catch-up plan).
 pub struct SongWithin {
     max_frames: usize,
     /// Each source's name, left side, and right side unless it is mono.
@@ -436,6 +436,31 @@ mod tests {
         )]
         let copy = [1.0_f32].to_vec();
         assert_eq!(copy, [1.0]);
+    }
+
+    /// Round 2 findings 2-9 to 2-33: a song of two stems of 88,200 frames
+    /// at 44.1 kHz gives its mix lane, its length and its stems' indexes.
+    #[test]
+    fn a_song_gives_its_mix_lane_duration_and_stem_indexes() {
+        const FRAMES: usize = 88_200;
+        let stem = |name: &str, left: f32, right: f32| Stem {
+            name: name.into(),
+            left: vec![left; FRAMES].into(),
+            right: vec![right; FRAMES].into(),
+        };
+        let song = Song {
+            sample_rate: 44_100,
+            frames: FRAMES,
+            stems: vec![stem("bass", 0.25, -0.5), stem("drums", 0.5, 0.125)],
+        };
+        let (left, right) = song.mix_lane();
+        assert_eq!((left.len(), right.len()), (FRAMES, FRAMES));
+        assert!(left.iter().all(|&s| s == 0.75), "the sum of the lefts");
+        assert!(right.iter().all(|&s| s == -0.375), "the sum of the rights");
+        assert_eq!(song.duration_s(), 2.0);
+        assert_eq!(song.stem_index("bass"), Some(0));
+        assert_eq!(song.stem_index("drums"), Some(1));
+        assert_eq!(song.stem_index("vocals"), None);
     }
 
     fn audio(rate: u32, chans: Vec<Vec<f32>>) -> Audio {

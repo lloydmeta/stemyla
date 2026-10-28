@@ -971,7 +971,7 @@ async fn a_decode_that_a_reset_stops_is_a_reset() {
     store::test_wipe().await;
     match ended {
         Decode::Reset(text) => assert!(text.starts_with("a reset stopped the decode"), "{text}"),
-        Decode::OnThePage(text) => panic!("on the page: {text}"),
+        Decode::OnThePage(failure) => panic!("on the page: {}", failure.why()),
         _ => panic!("not a reset"),
     }
 }
@@ -2359,7 +2359,9 @@ async fn a_page_open_holds_one_file_at_a_time() {
     let chosen = six_padded_wavs(PADDED_BYTES);
     dt_refuse_writes();
     let start = store::tests::heap_start();
+    dt_start_size_spy(picker::READ_BLOCK as u32);
     let opened = open_chosen_now(&chosen, &fake.client, 2 * SECOND).await;
+    let sizes = dt_stop_size_spy();
     let peak = store::tests::heap_peak_above(start);
     dt_allow_writes();
     store::test_wipe().await;
@@ -2369,6 +2371,19 @@ async fn a_page_open_holds_one_file_at_a_time() {
         peak < 2 * PADDED_BYTES,
         "the heap peaked {peak} bytes above its start, for files of {PADDED_BYTES} bytes"
     );
+    assert_one_block_at_a_time(&sizes);
+}
+
+/// Round 2 finding 2-3 (MEM-4): JavaScript holds at most one block of a
+/// file (`picker::READ_BLOCK`), never a whole file, from `sizes` of
+/// `dt_stop_size_spy`.
+fn assert_one_block_at_a_time(sizes: &[f64]) {
+    let (largest, over) = (sizes[0] as usize, sizes[1] as u32);
+    assert_eq!(
+        over, 0,
+        "reads past one block; the largest is {largest} bytes"
+    );
+    assert!(largest <= picker::READ_BLOCK, "{largest}");
 }
 
 /// Finding 1-3 of review round 1 of the catch-up plan (MEM-4): a restore
@@ -2382,6 +2397,7 @@ async fn a_page_restore_holds_one_file_at_a_time() {
     let client = fake.client.clone();
     let restore_id = id.clone();
     let start = store::tests::heap_start();
+    dt_start_size_spy(picker::READ_BLOCK as u32);
     let restored =
         background(async move { restore_stored(&restore_id, &client, 2 * SECOND).await });
     let _ = fake.request(0).await;
@@ -2389,6 +2405,7 @@ async fn a_page_restore_holds_one_file_at_a_time() {
         text: "QuotaExceededError: the disk is full".into(),
     });
     let restored = output(&restored).await;
+    let sizes = dt_stop_size_spy();
     let peak = store::tests::heap_peak_above(start);
     store::test_wipe().await;
     let (opened, _, _) = restored.expect("a session").expect("opened");
@@ -2397,6 +2414,7 @@ async fn a_page_restore_holds_one_file_at_a_time() {
         peak < 2 * PADDED_BYTES,
         "the heap peaked {peak} bytes above its start, for files of {PADDED_BYTES} bytes"
     );
+    assert_one_block_at_a_time(&sizes);
 }
 
 /// Finding 1-3 of review round 1 of the catch-up plan: a WAV whose head

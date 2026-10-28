@@ -40,16 +40,45 @@ pub fn pick_files(
     input.click();
 }
 
-/// The bytes of a chosen file.
+/// The most bytes that one read of a file asks JavaScript for: 1 MiB.
+/// So JavaScript holds one block of a file at a time (MEM-4).
+pub const READ_BLOCK: usize = 1 << 20;
+
+/// The bytes of a chosen file, read in blocks ([`read_blob`]).
 pub async fn read(file: &web_sys::File) -> Result<Vec<u8>, String> {
-    let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+    read_blob(file)
         .await
-        .map_err(|e| format!("could not read {}: {e:?}", file.name()))?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "MEM-1: the decoder reads wasm memory, so a chosen file is copied in once"
-    )]
-    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+        .map_err(|e| format!("could not read {}: {e}", file.name()))
+}
+
+/// The bytes of `blob`, in one `Vec` sized once from its size.  Each block
+/// of at most [`READ_BLOCK`] bytes is read with `Blob.slice` and copied
+/// into its part of the `Vec`.  So JavaScript holds one block at a time,
+/// not a second copy of the file (finding 2-3 of review round 2 of the
+/// catch-up plan, MEM-4).  The decoder reads wasm memory, so the file is
+/// copied in once.
+pub async fn read_blob(blob: &web_sys::Blob) -> Result<Vec<u8>, String> {
+    let size = blob.size() as usize;
+    let mut bytes = vec![0; size];
+    let mut start = 0;
+    while start < size {
+        let end = size.min(start + READ_BLOCK);
+        let block = blob
+            .slice_with_f64_and_f64(start as f64, end as f64)
+            .map_err(|e| format!("{e:?}"))?;
+        let buffer = wasm_bindgen_futures::JsFuture::from(block.array_buffer())
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        let view = js_sys::Uint8Array::new(&buffer);
+        if view.length() as usize != end - start {
+            return Err(format!(
+                "a read of bytes {start} to {end} gave {} bytes",
+                view.length()
+            ));
+        }
+        view.copy_to(&mut bytes[start..end]);
+        start = end;
+    }
     Ok(bytes)
 }
 

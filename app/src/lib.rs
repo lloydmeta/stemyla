@@ -805,7 +805,7 @@ async fn open_saved(
             if resetting(decoder) {
                 return Err(anyhow::anyhow!("a reset stopped the open ({why})"));
             }
-            let page = OnThePage::storage_failed(format!("browser storage failed ({why})"));
+            let page = OnThePage::of(&DecodeFailure::Storage(why));
             return open_on_the_page(chosen, Some(id), name, started, page, memory_limit).await;
         }
     };
@@ -828,11 +828,12 @@ async fn open_saved(
             })
         }
         Decode::Undecodable(text) | Decode::Reset(text) => Err(anyhow::anyhow!(text)),
-        Decode::OnThePage(why) if resetting(decoder) => {
-            Err(anyhow::anyhow!("a reset stopped the decode ({why})"))
-        }
-        Decode::OnThePage(why) => {
-            let page = OnThePage::storage_failed(format!("browser storage failed ({why})"));
+        Decode::OnThePage(failure) if resetting(decoder) => Err(anyhow::anyhow!(
+            "a reset stopped the decode ({})",
+            failure.why()
+        )),
+        Decode::OnThePage(failure) => {
+            let page = OnThePage::of(&failure);
             open_on_the_page(chosen, Some(id), name, started, page, memory_limit).await
         }
     }
@@ -855,12 +856,13 @@ struct OnThePage {
 #[cfg(target_arch = "wasm32")]
 #[cfg_attr(mutants, mutants::skip)]
 impl OnThePage {
-    /// A failure of browser storage, `why`, which the status line says.
-    fn storage_failed(why: String) -> Self {
+    /// A failure of browser storage or of the decode worker, which the
+    /// status line says.
+    fn of(failure: &DecodeFailure) -> Self {
         Self {
-            why,
+            why: failure.why(),
             noted: true,
-            storage_helps: true,
+            storage_helps: failure.storage_helps(),
         }
     }
 }
@@ -940,8 +942,8 @@ enum Decode {
     /// A source cannot be decoded: the text says why.
     Undecodable(String),
     /// Browser storage failed, or the worker did not answer: the page
-    /// decodes the song itself (D9).  The text says why.
-    OnThePage(String),
+    /// decodes the song itself (D9).
+    OnThePage(DecodeFailure),
     /// A reset stopped the decode: the open or restore ends with this
     /// error, and the page decodes nothing.
     Reset(String),
@@ -960,7 +962,7 @@ async fn decode_session(
     decoder: &decoder::DecodeClient,
 ) -> Decode {
     if let Err(e) = store::clear_decoded(id).await {
-        return Decode::OnThePage(format!("{e:#}"));
+        return Decode::OnThePage(DecodeFailure::Storage(format!("{e:#}")));
     }
     let request = stem_protocol::decode::DecodeRequest {
         session: store::session_folder(id),
@@ -988,11 +990,11 @@ async fn decode_session(
             guard,
         ) => {
             if channels.len() != sources.len() {
-                return Decode::OnThePage(format!(
+                return Decode::OnThePage(DecodeFailure::Worker(format!(
                     "the decode worker gave the channels of {} sources, not {}",
                     channels.len(),
                     sources.len()
-                ));
+                )));
             }
             let frames = frames as usize;
             let kept = store::keep_decoded(id, sources, frames, new_mix, &channels).await;
@@ -1007,10 +1009,10 @@ async fn decode_session(
                     };
                     match store::stored_sources(id, sources, &decoded).await {
                         Ok(song) => Decode::Song(song),
-                        Err(e) => Decode::OnThePage(format!("{e:#}")),
+                        Err(e) => Decode::OnThePage(DecodeFailure::Storage(format!("{e:#}"))),
                     }
                 }
-                Err(e) => Decode::OnThePage(format!("{e:#}")),
+                Err(e) => Decode::OnThePage(DecodeFailure::Storage(format!("{e:#}"))),
             }
         }
         Ended::Reply(DecodeReply::Undecodable { text }, guard) => {
@@ -1027,16 +1029,21 @@ async fn decode_session(
                     log::warn!("decoder: could not remove the mix of session {id}: {e:#}");
                 }
             }
-            Decode::OnThePage(text)
+            Decode::OnThePage(DecodeFailure::Storage(text))
         }
         Ended::Reply(other, guard) => {
             drop(guard);
-            Decode::OnThePage(format!("the decode worker replied {}", other.kind()))
+            Decode::OnThePage(DecodeFailure::Worker(format!(
+                "the decode worker replied {}",
+                other.kind()
+            )))
         }
         Ended::Stopped(reason) if resetting(decoder) => {
             Decode::Reset(format!("a reset stopped the decode ({reason})"))
         }
-        Ended::Stopped(reason) => Decode::OnThePage(format!("the decode worker stopped: {reason}")),
+        Ended::Stopped(reason) => Decode::OnThePage(DecodeFailure::Worker(format!(
+            "the decode worker stopped: {reason}"
+        ))),
     }
 }
 
@@ -1109,9 +1116,9 @@ async fn restore_stored(
                 Decode::OnThePage(_) if resetting(decoder) => {
                     return Some(Err(anyhow::anyhow!("a reset stopped the decode")));
                 }
-                Decode::OnThePage(why) => {
-                    log::warn!("decoder: browser storage failed: {why}");
-                    let page = OnThePage::storage_failed(format!("browser storage failed ({why})"));
+                Decode::OnThePage(failure) => {
+                    let page = OnThePage::of(&failure);
+                    log::warn!("decoder: the page decodes the song: {}", page.why);
                     match on_the_page_of(id, &page, memory_limit).await? {
                         Ok(song) => {
                             note = Some(format!("decoded on this page: {}", page.why));
@@ -1432,18 +1439,26 @@ pub fn sources_in_memory_lanes(sources: usize) -> usize {
 
 /// [`separation_lanes`] of the shown `song`: its lanes in memory that are
 /// not derived, and whether its input (the "original" lane, or its only
-/// source) is one of them.
+/// source) is one of them.  The page holds the old song until a separation
+/// ends, so each other derived lane in memory (classic drums) counts too.
 pub fn lanes_of(song: &Shown) -> usize {
-    let source_in_memory =
-        |lane: &ShownLane| !DERIVED.contains(&lane.name.as_str()) && lane.audio.samples().is_some();
+    let in_memory = |lane: &ShownLane| lane.audio.samples().is_some();
+    let derived = |lane: &ShownLane| DERIVED.contains(&lane.name.as_str());
     let sources = song
         .lanes
         .iter()
-        .filter(|lane| source_in_memory(lane))
+        .filter(|lane| !derived(lane) && in_memory(lane))
         .count();
+    let input = original_index_of(&song.names());
     let input_is_a_source =
-        original_index_of(&song.names()).is_some_and(|i| source_in_memory(&song.lanes[i]));
-    separation_lanes(sources, input_is_a_source)
+        input.is_some_and(|i| !derived(&song.lanes[i]) && in_memory(&song.lanes[i]));
+    let other_derived = song
+        .lanes
+        .iter()
+        .enumerate()
+        .filter(|&(i, lane)| derived(lane) && in_memory(lane) && Some(i) != input)
+        .count();
+    separation_lanes(sources, input_is_a_source) + other_derived
 }
 
 /// The lanes that classic drums of `song` holds in memory on its
@@ -1510,9 +1525,10 @@ impl std::error::Error for Refused {}
 /// The refusal before any whole read of a song, from the head of each of
 /// its files (`heads`: name, first bytes, size), for the `limit` of its
 /// lanes.  It refuses a WAV or FLAC whose head states a length past the
-/// limit, and a file larger than the largest file of its stated length,
-/// or of the limit if it states none (`engine::decode::largest_file`).
-/// `None` when the song can be read one file at a time.
+/// limit.  It also refuses a file larger than the largest file of its
+/// stated length, or of the limit if it states none
+/// (`engine::decode::largest_file`).  `None` when the song can be read one
+/// file at a time.
 pub fn refusal_of_heads(heads: &[(String, Vec<u8>, u64)], limit: usize) -> Option<TooLongToOpen> {
     use engine::decode::{HeadLength, head_length, largest_file};
     let mut longest = None;
@@ -1582,6 +1598,33 @@ fn too_long_to_open(refusal: &PageRefusal) -> String {
             "this song is longer than {}, too long to open in this browser now",
             clock(refusal.limit)
         ),
+    }
+}
+
+/// Why the decode worker did not give a song, so that the page decodes it
+/// itself (D9 of M5).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DecodeFailure {
+    /// Browser storage failed: the session was not kept, its quota was
+    /// full, or a read or a write failed.
+    Storage(String),
+    /// The decode worker stopped, did not start, or gave a reply that is
+    /// not correct.  The text says which.
+    Worker(String),
+}
+
+impl DecodeFailure {
+    /// The reason for the status line.
+    pub fn why(&self) -> String {
+        match self {
+            Self::Storage(text) => format!("browser storage failed ({text})"),
+            Self::Worker(text) => text.clone(),
+        }
+    }
+
+    /// Whether more free browser storage can let a refused song open.
+    pub fn storage_helps(&self) -> bool {
+        matches!(self, Self::Storage(_))
     }
 }
 
@@ -5332,8 +5375,21 @@ mod tests {
         assert_eq!(memory_path_frames(usize::MAX, 7), usize::MAX);
     }
 
+    /// A lane of 10 frames kept in browser storage at `path`.
+    fn stored_audio(path: &str) -> LaneAudio {
+        LaneAudio::Stored {
+            file: store_meta::LaneFile::f32(path.into(), 10),
+            overview: std::rc::Rc::new(lanes::Overview {
+                columns: Vec::new(),
+                scale: 1.0,
+            }),
+            store: lane_store::MemoryStore::new(),
+        }
+    }
+
     /// D3 of the catch-up plan: the lanes of a shown song are its sources
-    /// in memory, its input unless it is one of them, and 6 stems.
+    /// in memory, its input unless it is one of them, its other derived
+    /// lanes in memory, and 6 stems.
     #[test]
     fn the_lanes_of_a_song_count_what_stays_in_memory() {
         let one = shown_of(&["lloyd"], 10);
@@ -5341,8 +5397,24 @@ mod tests {
         let names = sources(21);
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         assert_eq!(lanes_of(&shown_of(&names, 10)), 28);
+        // Classic drums in memory is not a source, but the page holds it
+        // until a separation ends (round 2 finding 2-1).
         let with_classic = shown_of(&["bass", "drums", "classic drums"], 10);
-        assert_eq!(lanes_of(&with_classic), 9, "classic drums is not a source");
+        assert_eq!(lanes_of(&with_classic), 10, "classic drums stays in memory");
+        let one_with_classic = shown_of(&["lloyd", "classic drums"], 10);
+        assert_eq!(lanes_of(&one_with_classic), 8, "the source is the input");
+        assert_eq!(
+            memory_path_frames(MEMORY_PATH_MAX_FRAMES, lanes_of(&one_with_classic)),
+            87 * 44_100 + 22_050,
+            "about 87.5 s"
+        );
+        let mut stored_classic = shown_of(&["lloyd", "classic drums"], 10);
+        stored_classic.lanes[1].audio = stored_audio("sessions/1/classic.f32");
+        assert_eq!(
+            lanes_of(&stored_classic),
+            7,
+            "stored classic drums stays in storage"
+        );
         // A separated song in memory: 6 stems and the original, which is
         // the input.
         let separated = shown_of(
@@ -5352,16 +5424,27 @@ mod tests {
             10,
         );
         assert_eq!(lanes_of(&separated), 13);
+        let separated_with_classic = shown_of(
+            &[
+                "bass",
+                "drums",
+                "other",
+                "vocals",
+                "guitar",
+                "piano",
+                "original",
+                "classic drums",
+            ],
+            10,
+        );
+        assert_eq!(
+            lanes_of(&separated_with_classic),
+            14,
+            "the original counts once, as the input"
+        );
         // A stored lane stays in browser storage.
         let mut stored = shown_of(&["bass", "drums"], 10);
-        stored.lanes[1].audio = LaneAudio::Stored {
-            file: store_meta::LaneFile::f32("sessions/1/decoded/1.f32".into(), 10),
-            overview: std::rc::Rc::new(lanes::Overview {
-                columns: Vec::new(),
-                scale: 1.0,
-            }),
-            store: lane_store::MemoryStore::new(),
-        };
+        stored.lanes[1].audio = stored_audio("sessions/1/decoded/1.f32");
         assert_eq!(lanes_of(&stored), 8, "one source in memory, and the mix");
         // Classic drums reads every source into memory, and adds its lane.
         assert_eq!(classic_lanes(&with_classic), 3);
@@ -5565,6 +5648,39 @@ mod tests {
         let text = refused_text(&large, "browser storage failed", true);
         assert!(
             text.starts_with("Not opened: lloyd.mp3 states no length, and at 30 MB it can be too long to open in this browser now (a file of a song within the limit has at most 21 MB).  On this page, a song of one file opens only up to 1:40"),
+            "{text}"
+        );
+    }
+
+    /// Round 2 finding 2-4: only a failure of browser storage tells the
+    /// user to free browser storage.  A failure of the decode worker says
+    /// to open a shorter song.
+    #[test]
+    fn a_worker_failure_does_not_ask_for_free_storage() {
+        let refusal = PageRefusal {
+            why: TooLongToOpen::Decoded,
+            limit: MEMORY_PATH_MAX_FRAMES,
+            sources: 1,
+        };
+        let text_of = |failure: &DecodeFailure| {
+            refused_text(&refusal, &failure.why(), failure.storage_helps())
+        };
+        let worker = DecodeFailure::Worker("the decode worker stopped: it did not start".into());
+        assert_eq!(worker.why(), "the decode worker stopped: it did not start");
+        assert!(!worker.storage_helps());
+        let text = text_of(&worker);
+        assert!(
+            text.ends_with(
+                "because the decode worker stopped: it did not start.  Open a shorter song."
+            ),
+            "{text}"
+        );
+        let storage = DecodeFailure::Storage("QuotaExceededError".into());
+        assert_eq!(storage.why(), "browser storage failed (QuotaExceededError)");
+        assert!(storage.storage_helps());
+        let text = text_of(&storage);
+        assert!(
+            text.ends_with("because browser storage failed (QuotaExceededError).  Free browser storage in the Storage menu, or open a shorter song."),
             "{text}"
         );
     }

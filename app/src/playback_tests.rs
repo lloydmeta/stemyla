@@ -570,7 +570,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         Some(id.clone()),
         None,
         0.0,
-        OnThePage::storage_failed("the test".into()),
+        OnThePage::of(&DecodeFailure::Storage("the test".into())),
         MEMORY_PATH_MAX_FRAMES,
     )
     .await

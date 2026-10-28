@@ -115,13 +115,6 @@ export async function st_write(within, rel, body) {
     return (e && e.name) || "Error";
   }
 }
-export async function st_read(path) {
-  try {
-    const [d, n] = split(path);
-    const f = await (await (await dir(d, false)).getFileHandle(n)).getFile();
-    return new Uint8Array(await f.arrayBuffer());
-  } catch (e) { return null; }
-}
 export async function st_remove(path) {
   try {
     const [d, n] = split(path);
@@ -222,7 +215,6 @@ extern "C" {
     /// already.  True; "gone" when `within` does not exist; else the name
     /// of the error, such as "QuotaExceededError".
     async fn st_write(within: &str, rel: &str, body: &JsValue) -> JsValue;
-    async fn st_read(path: &str) -> JsValue;
     /// Whether `path` is gone (removed, or never there).
     async fn st_remove(path: &str) -> JsValue;
     /// Moves the file `from` onto `to` in the folder `path`, replacing
@@ -370,17 +362,17 @@ async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
     }
 }
 
+/// The bytes of the stored file at `path`, read in blocks
+/// (`picker::read_blob`), so JavaScript holds one block at a time.  `None`
+/// if it cannot be read.
 async fn read(path: &str) -> Option<Vec<u8>> {
-    let v = st_read(path).await;
-    if v.is_null() {
-        None
-    } else {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "MEM-1: a stored file is copied once into wasm memory, for the decoder or to parse it"
-        )]
-        let bytes = v.unchecked_into::<Uint8Array>().to_vec();
-        Some(bytes)
+    let file = file_handle(path).await?;
+    match crate::picker::read_blob(&file).await {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            log::warn!("could not read {path}: {e}");
+            None
+        }
     }
 }
 
