@@ -646,8 +646,9 @@ async fn open_chosen(
     pending: std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: egui::Context,
     token: u64,
+    memory_limit: usize,
 ) {
-    let opened = open_chosen_now(&chosen, &decoder).await;
+    let opened = open_chosen_now(&chosen, &decoder, memory_limit).await;
     pending.borrow_mut().put_song(token, opened);
     ctx.request_repaint();
     refresh_storage(&pending).await;
@@ -657,6 +658,7 @@ async fn open_chosen(
 async fn open_chosen_now(
     chosen: &Chosen,
     decoder: &decoder::DecodeClient,
+    memory_limit: usize,
 ) -> anyhow::Result<Opened> {
     let name = chosen.first().map(|(n, _)| store_meta::file_title(n));
     let started = js_sys::Date::now();
@@ -678,10 +680,15 @@ async fn open_chosen_now(
         }
         Err(e) => {
             log::warn!("song not kept in browser storage: {e:#}");
-            return open_on_the_page(chosen, None, name, started, None).await;
+            let page = OnThePage {
+                why: format!("browser storage could not keep it ({e:#})"),
+                noted: false,
+                storage_helps: true,
+            };
+            return open_on_the_page(chosen, None, name, started, page, memory_limit).await;
         }
     };
-    let mut opened = open_saved(chosen, &id, name, started, decoder).await;
+    let mut opened = open_saved(chosen, &id, name, started, decoder, memory_limit).await;
     // D9: the new session becomes current only once its song shows (D12 of
     // the M7 plan: `apply_inbox`, for the newest open), so a reload until
     // then restores the song on screen.
@@ -708,6 +715,7 @@ fn open_picked(
     pending: &std::rc::Rc<std::cell::RefCell<Inbox>>,
     ctx: &egui::Context,
     opens: &std::rc::Rc<std::cell::Cell<u64>>,
+    memory_limit: usize,
 ) {
     let token = next_token(opens);
     // D12 of M5: before any read or save.
@@ -721,7 +729,7 @@ fn open_picked(
         // before the queued status, must not be hidden by it.  Only the
         // newest open clears it: a newer open's text stays (finding 2-17
         // of review round 2 of M7).
-        let opened = open_chosen_now(&chosen, &decoder).await;
+        let opened = open_chosen_now(&chosen, &decoder, memory_limit).await;
         {
             let mut inbox = pending.borrow_mut();
             inbox.status_of_open(token, opens.get(), None);
@@ -757,6 +765,7 @@ async fn open_saved(
     name: Option<String>,
     started: f64,
     decoder: &decoder::DecodeClient,
+    memory_limit: usize,
 ) -> anyhow::Result<Opened> {
     let id = id.to_string();
     // D10 of M6: no failure removes a file of the session while the open
@@ -768,8 +777,12 @@ async fn open_saved(
         Some(Ok(store::StoredSong::NeedsDecode { meta, .. }))
             if !store_meta::fits_read_ahead(&store_meta::open_formats(&meta)) =>
         {
-            let why = too_many_lanes(&meta);
-            return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
+            let page = OnThePage {
+                why: too_many_lanes(&meta),
+                noted: true,
+                storage_helps: false,
+            };
+            return open_on_the_page(chosen, Some(id), name, started, page, memory_limit).await;
         }
         Some(Ok(store::StoredSong::NeedsDecode { sources, .. })) => sources,
         other => {
@@ -780,8 +793,8 @@ async fn open_saved(
             if resetting(decoder) {
                 return Err(anyhow::anyhow!("a reset stopped the open ({why})"));
             }
-            let why = format!("browser storage failed ({why})");
-            return open_on_the_page(chosen, Some(id), name, started, Some(why)).await;
+            let page = OnThePage::storage_failed(format!("browser storage failed ({why})"));
+            return open_on_the_page(chosen, Some(id), name, started, page, memory_limit).await;
         }
     };
     match decode_session(&id, &sources, None, decoder).await {
@@ -807,40 +820,93 @@ async fn open_saved(
             Err(anyhow::anyhow!("a reset stopped the decode ({why})"))
         }
         Decode::OnThePage(why) => {
-            let why = format!("browser storage failed ({why})");
-            open_on_the_page(chosen, Some(id), name, started, Some(why)).await
+            let page = OnThePage::storage_failed(format!("browser storage failed ({why})"));
+            open_on_the_page(chosen, Some(id), name, started, page, memory_limit).await
+        }
+    }
+}
+
+/// Why a song decodes on the page (D9 of M5, D2 of the M7 plan), for its
+/// status line.  Web only.
+#[cfg(target_arch = "wasm32")]
+struct OnThePage {
+    /// What sent the song here: a failure of browser storage, or lanes
+    /// that do not fit the read-ahead buffer.
+    why: String,
+    /// Whether the status line says why once the song opens.
+    noted: bool,
+    /// Whether more free browser storage can let a song that is refused
+    /// open (D3 of the catch-up plan).
+    storage_helps: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OnThePage {
+    /// A failure of browser storage, `why`, which the status line says.
+    fn storage_failed(why: String) -> Self {
+        Self {
+            why,
+            noted: true,
+            storage_helps: true,
         }
     }
 }
 
 /// The memory path of D9: reads the chosen files and decodes them on the
-/// page, as before M5.  `why`: what sent the song here, for the status
-/// line: a failure of browser storage, or lanes that do not fit the
-/// read-ahead buffer (D2 of the M7 plan, finding 2-15 of review round 2).
+/// page, as before M5, for a song within the memory path's limit for its
+/// lanes (D3 of the catch-up plan).  It first reads the head of each
+/// source, and refuses a long song before it reads a whole file.  `page`
+/// says what sent the song here.
 #[cfg(target_arch = "wasm32")]
 async fn open_on_the_page(
     chosen: &Chosen,
     session: Option<String>,
     name: Option<String>,
     started: f64,
-    why: Option<String>,
+    page: OnThePage,
+    memory_limit: usize,
 ) -> anyhow::Result<Opened> {
     log::info!("decoder: decoding on the page");
-    let mut files = Vec::with_capacity(chosen.len());
-    for (n, file) in chosen {
+    let sources: Vec<&(String, web_sys::File)> = chosen
+        .iter()
+        .filter(|(n, _)| engine::song::is_stem(&engine::song::stem_name(n)))
+        .collect();
+    let limit = memory_path_frames(memory_limit, sources_in_memory_lanes(sources.len()));
+    let refused = |error: anyhow::Error| {
+        let error = decoded_refusal(error, limit, sources.len());
+        with_reason(error, &page.why, page.storage_helps)
+    };
+    let mut heads = Vec::with_capacity(sources.len());
+    for (n, file) in &sources {
+        let head = picker::read_head(file, engine::decode::HEAD_BYTES)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        heads.push((n.clone(), head, file.size() as u64));
+    }
+    if let Some(why) = refusal_of_heads(&heads, limit) {
+        let refusal = PageRefusal {
+            why,
+            limit,
+            sources: sources.len(),
+        };
+        return Err(refused(anyhow::Error::new(refusal)));
+    }
+    drop(heads);
+    let mut files = Vec::with_capacity(sources.len());
+    for (n, file) in &sources {
         let bytes = picker::read(file).await.map_err(|e| anyhow::anyhow!(e))?;
         files.push((n.clone(), bytes));
     }
-    let song = Song::load_files(files)?;
+    let song = Song::load_files_within(files, limit).map_err(refused)?;
     log::info!(
         "song: opened at {} Hz in {:.2} s ({} frames)",
         song.sample_rate,
         (js_sys::Date::now() - started) / 1000.0,
         song.frames
     );
-    let note = why.map(|why| {
-        log::warn!("decoder: decoded on this page: {why}");
-        format!("Decoded on this page: {why}.")
+    let note = page.noted.then(|| {
+        log::warn!("decoder: decoded on this page: {}", page.why);
+        format!("Decoded on this page: {}.", page.why)
     });
     Ok(Opened {
         note,
@@ -968,6 +1034,7 @@ async fn decode_session(
 async fn restore_stored(
     id: &str,
     decoder: &decoder::DecodeClient,
+    memory_limit: usize,
 ) -> Option<anyhow::Result<(Opened, store_meta::Meta, Option<String>)>> {
     let guard = store::OpenGuard::new(id);
     let stored = match store::open_stored(id).await? {
@@ -996,15 +1063,19 @@ async fn restore_stored(
     // D2 of the M7 plan: lanes that do not fit the read-ahead buffer open
     // on the memory path, decoded on the page.
     let on_the_page = if !store_meta::fits_read_ahead(&store_meta::open_formats(&meta)) {
-        Some(too_many_lanes(&meta))
+        Some(OnThePage {
+            why: too_many_lanes(&meta),
+            noted: true,
+            storage_helps: false,
+        })
     } else {
         None
     };
     let source = match (source, on_the_page) {
         (Some(song), None) => song,
-        (_, Some(why)) => match on_the_page_of(id, &why).await? {
+        (_, Some(page)) => match on_the_page_of(id, &page, memory_limit).await? {
             Ok(song) => {
-                note = Some(format!("decoded on this page: {why}"));
+                note = Some(format!("decoded on this page: {}", page.why));
                 song
             }
             Err(e) => return Some(Err(e)),
@@ -1021,11 +1092,10 @@ async fn restore_stored(
                 }
                 Decode::OnThePage(why) => {
                     log::warn!("decoder: browser storage failed: {why}");
-                    match on_the_page_of(id, &why).await? {
+                    let page = OnThePage::storage_failed(format!("browser storage failed ({why})"));
+                    match on_the_page_of(id, &page, memory_limit).await? {
                         Ok(song) => {
-                            note = Some(format!(
-                                "decoded on this page: browser storage failed ({why})"
-                            ));
+                            note = Some(format!("decoded on this page: {}", page.why));
                             song
                         }
                         Err(e) => return Some(Err(e)),
@@ -1041,7 +1111,9 @@ async fn restore_stored(
         // D11 of the M7 plan: the stems as stored lanes, with the overviews
         // of D7, made once.
         let paths = store::stem_paths(id, &meta.stems);
-        let limit = MEMORY_PATH_MAX_FRAMES;
+        // D3 of the catch-up plan: the memory path's limit for the lanes
+        // in memory.
+        let limit = memory_path_frames(memory_limit, lanes_of(&source));
         match store::stem_lanes(id, &meta.stems, &paths, source.frames, decoder, limit).await {
             Ok((stems, mix_overview)) => {
                 let (mut song, note) = with_original_files(&source, stems, mix.clone());
@@ -1064,12 +1136,22 @@ async fn restore_stored(
 }
 
 /// The sources of session `id` decoded on the page (the memory path,
-/// decision 0015), because of `why`.  `None` when the session is gone.
+/// decision 0015), because of `page`, within the memory path's limit for
+/// their lanes (D3 of the catch-up plan).  `None` when the session is
+/// gone.  A song past the limit is a [`Refused`] error.
 #[cfg(target_arch = "wasm32")]
-async fn on_the_page_of(id: &str, why: &str) -> Option<anyhow::Result<Shown>> {
-    log::info!("decoder: decoding on the page: {why}");
-    let rebuilt = store::restore_id(id).await?;
-    Some(rebuilt.map(|(_, song, _)| Shown::in_memory(song)))
+async fn on_the_page_of(
+    id: &str,
+    page: &OnThePage,
+    memory_limit: usize,
+) -> Option<anyhow::Result<Shown>> {
+    log::info!("decoder: decoding on the page: {}", page.why);
+    let rebuilt = store::restore_id(id, memory_limit).await?;
+    Some(
+        rebuilt
+            .map(|(_, song, _)| Shown::in_memory(song))
+            .map_err(|e| with_reason(e, &page.why, page.storage_helps)),
+    )
 }
 
 /// Why a song of `meta` opens on the memory path: its lanes do not fit
@@ -1355,6 +1437,151 @@ pub fn classic_lanes(song: &Shown) -> usize {
     sources + 1
 }
 
+/// Why the page does not decode a song on the page (D3 of
+/// `plans/active/stream-from-storage-catchup.md`, decision 0020).
+#[derive(Clone, Debug, PartialEq)]
+pub enum TooLongToOpen {
+    /// Its length, from a file's head or the session's `meta`, passes the
+    /// limit.
+    Stated { frames: usize },
+    /// The head of `file` states no length, and the file is larger than
+    /// the largest file of a song within the limit (`cap`).
+    Large { file: String, bytes: u64, cap: u64 },
+    /// Its decode passed the limit.
+    Decoded,
+}
+
+/// A song that the page does not decode on the page: why, the limit for
+/// its lanes, and its sources.  The open adds why the song is on the page
+/// ([`refused_text`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageRefusal {
+    pub why: TooLongToOpen,
+    /// [`memory_path_frames`] for the song's lanes.
+    pub limit: usize,
+    pub sources: usize,
+}
+
+impl std::fmt::Display for PageRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", too_long_to_open(self))
+    }
+}
+
+impl std::error::Error for PageRefusal {}
+
+/// The status line of a refused open, which the page shows as it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The refusal before any whole read of a song of `sources` files, from
+/// the head of each file of the song (`heads`: name, first bytes, size),
+/// for the `limit` of its lanes: a WAV or FLAC whose head states a length
+/// past the limit, or a file whose head states no length and is larger
+/// than the cap (`engine::decode::largest_file`).  `None` when the song can
+/// be read.
+pub fn refusal_of_heads(heads: &[(String, Vec<u8>, u64)], limit: usize) -> Option<TooLongToOpen> {
+    use engine::decode::{HeadLength, head_length, largest_file};
+    let mut longest = None;
+    for (file, head, bytes) in heads {
+        let length = head_length(head, *bytes);
+        match (length, largest_file(length, limit)) {
+            (HeadLength::Frames(frames), _) if frames > limit as u64 => {
+                longest = longest.max(Some(frames));
+            }
+            (_, Some(cap)) if *bytes > cap => {
+                return Some(TooLongToOpen::Large {
+                    file: file.clone(),
+                    bytes: *bytes,
+                    cap,
+                });
+            }
+            _ => {}
+        }
+    }
+    longest.map(|frames| TooLongToOpen::Stated {
+        frames: usize::try_from(frames).unwrap_or(usize::MAX),
+    })
+}
+
+/// The first part of a refusal's status line: what is too long.
+fn too_long_to_open(refusal: &PageRefusal) -> String {
+    match &refusal.why {
+        TooLongToOpen::Stated { frames } => format!(
+            "this song is {} long, too long to open in this browser now",
+            clock(*frames)
+        ),
+        TooLongToOpen::Large { file, bytes, cap } => format!(
+            "{file} states no length, and at {:.0} MB it can be too long to open in this browser now (a file of a song within the limit has at most {:.0} MB)",
+            *bytes as f64 / 1e6,
+            *cap as f64 / 1e6
+        ),
+        TooLongToOpen::Decoded => format!(
+            "this song is longer than {}, too long to open in this browser now",
+            clock(refusal.limit)
+        ),
+    }
+}
+
+/// The status line of `refusal`, for a song that the page decodes because
+/// of `reason`.  `storage_helps`: whether more free browser storage can
+/// let the song open.
+pub fn refused_text(refusal: &PageRefusal, reason: &str, storage_helps: bool) -> String {
+    let files = match refusal.sources {
+        1 => "one file".to_string(),
+        n => format!("{n} files"),
+    };
+    let what_to_do = if storage_helps {
+        "Free browser storage in the Storage menu, or open a shorter song."
+    } else {
+        "Open a shorter song."
+    };
+    format!(
+        "Not opened: {}.  On this page, a song of {files} opens only up to {}, and the page decodes it here because {reason}.  {what_to_do}",
+        too_long_to_open(refusal),
+        clock(refusal.limit)
+    )
+}
+
+/// The status line of a failed open: the text of a refusal as it is
+/// ([`Refused`]), else `prefix` and the error.
+pub fn open_error_text(prefix: &str, error: &anyhow::Error) -> String {
+    match error.downcast_ref::<Refused>() {
+        Some(refused) => refused.0.clone(),
+        None => format!("{prefix}: {error:#}"),
+    }
+}
+
+/// `error` as a [`PageRefusal`] of a decode that passed `limit`, if it is
+/// the decode's `engine::decode::TooLong`; else as it is.
+pub fn decoded_refusal(error: anyhow::Error, limit: usize, sources: usize) -> anyhow::Error {
+    if error.downcast_ref::<engine::decode::TooLong>().is_none() {
+        return error;
+    }
+    anyhow::Error::new(PageRefusal {
+        why: TooLongToOpen::Decoded,
+        limit,
+        sources,
+    })
+}
+
+/// `error` as a [`Refused`] with `reason`, if it is a [`PageRefusal`];
+/// else as it is.  `storage_helps`: as for [`refused_text`].
+pub fn with_reason(error: anyhow::Error, reason: &str, storage_helps: bool) -> anyhow::Error {
+    match error.downcast_ref::<PageRefusal>() {
+        Some(refusal) => anyhow::Error::new(Refused(refused_text(refusal, reason, storage_helps))),
+        None => error,
+    }
+}
+
 /// Which way a separation goes (D2 of M3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SeparationPath {
@@ -1590,9 +1817,12 @@ impl StemApp {
             let decoder = app.decoder.clone();
             let token = app.next_open();
             let opens = app.opens.clone();
+            let memory_limit = app.memory_limit;
             wasm_bindgen_futures::spawn_local(async move {
                 let restored = match store::current().await {
-                    Some(id) => restore_stored(&id, &decoder).await.map(|r| (id, r)),
+                    Some(id) => restore_stored(&id, &decoder, memory_limit)
+                        .await
+                        .map(|r| (id, r)),
                     None => None,
                 };
                 if let Some((_, r)) = restored {
@@ -1616,7 +1846,7 @@ impl StemApp {
                         }
                         Err(e) => {
                             log::warn!("could not restore the stored song: {e:#}");
-                            let text = format!("Could not restore the stored song: {e:#}");
+                            let text = open_error_text("Could not restore the stored song", &e);
                             inbox.status_of_open(token, opens.get(), Some(text));
                         }
                     }
@@ -2556,6 +2786,7 @@ impl StemApp {
             pending,
             ctx.clone(),
             token,
+            self.memory_limit,
         ));
     }
 
@@ -2568,9 +2799,9 @@ impl StemApp {
         self.opening = Some((token, id.clone()));
         let (pending, opens) = (self.pending.clone(), self.opens.clone());
 
-        let decoder = self.decoder.clone();
+        let (decoder, memory_limit) = (self.decoder.clone(), self.memory_limit);
         wasm_bindgen_futures::spawn_local(async move {
-            let Some(r) = restore_stored(&id, &decoder).await else {
+            let Some(r) = restore_stored(&id, &decoder, memory_limit).await else {
                 {
                     let mut inbox = pending.borrow_mut();
                     inbox.put_song(
@@ -2631,12 +2862,13 @@ impl StemApp {
     fn pick_song(&mut self, ctx: &egui::Context) {
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
         let (decoder, opens) = (self.decoder.clone(), self.opens.clone());
+        let memory_limit = self.memory_limit;
         picker::pick_files(SONG_FILES, true, move |files| {
             if files.is_empty() {
                 return;
             }
             let chosen: Chosen = files.into_iter().map(|f| (f.name(), f)).collect();
-            open_picked(chosen, &decoder, &pending, &ctx, &opens);
+            open_picked(chosen, &decoder, &pending, &ctx, &opens, memory_limit);
         });
     }
 
@@ -3590,7 +3822,7 @@ impl StemApp {
                     song_notes.splice(0..0, note);
                     shown_silent = self.plays_silent();
                 }
-                Err(Some(e)) => self.status = format!("Could not load: {e:#}"),
+                Err(Some(e)) => self.status = open_error_text("Could not load", &e),
             }
         }
         let parts: Vec<String> = inbox.status.into_iter().chain(song_notes).collect();
@@ -5057,6 +5289,154 @@ mod tests {
         assert_eq!(app.separation_job().map(|job| job.lanes), Some(9));
         app.open_song(shown_of(&["lloyd"], 10));
         assert_eq!(app.separation_job().map(|job| job.lanes), Some(7));
+    }
+
+    /// The 44-byte header of a 16-bit stereo WAV at `rate` whose data chunk
+    /// states `data` bytes.
+    fn wav_head(rate: u32, data: u32) -> Vec<u8> {
+        let mut head = Vec::from(engine::wav::header(0, rate));
+        head[40..44].copy_from_slice(&data.to_le_bytes());
+        head
+    }
+
+    /// D3 of the catch-up plan: the page refuses a song before it reads a
+    /// whole file, from the head of each file.  A WAV or FLAC states its
+    /// length; a file that states none is refused when it is larger than
+    /// the largest file of a song within the limit.
+    #[test]
+    fn the_heads_refuse_a_song_past_its_limit() {
+        let limit = 100 * 44_100;
+        let second = 4 * 44_100;
+        let wav = |seconds: u32| {
+            (
+                "lloyd.wav".to_string(),
+                wav_head(44_100, seconds * second),
+                44 + u64::from(seconds * second),
+            )
+        };
+        assert_eq!(refusal_of_heads(&[wav(100)], limit), None, "at the limit");
+        assert_eq!(
+            refusal_of_heads(&[wav(30), wav(101)], limit),
+            Some(TooLongToOpen::Stated {
+                frames: 101 * 44_100
+            }),
+            "the longest file"
+        );
+        // 48 kHz: 100 s at 44.1 kHz is 108,843 frames, and one more passes.
+        let at_48k = |frames: u32| {
+            (
+                "acme.wav".to_string(),
+                wav_head(48_000, frames * 4),
+                44 + u64::from(frames * 4),
+            )
+        };
+        assert_eq!(refusal_of_heads(&[at_48k(4_800_000)], limit), None);
+        assert!(refusal_of_heads(&[at_48k(4_800_001)], limit).is_some());
+        // A streaming WAV: the cap of 384 kHz, 32 bits, two channels.
+        let cap = engine::decode::largest_file(engine::decode::HeadLength::UnstatedPcm, limit)
+            .expect("a cap");
+        let streaming = |bytes: u64| ("lloyd.wav".to_string(), wav_head(44_100, u32::MAX), bytes);
+        assert_eq!(refusal_of_heads(&[streaming(cap)], limit), None);
+        assert_eq!(
+            refusal_of_heads(&[streaming(cap + 1)], limit),
+            Some(TooLongToOpen::Large {
+                file: "lloyd.wav".into(),
+                bytes: cap + 1,
+                cap,
+            })
+        );
+        // An MP3: the cap of 320 kbit/s.
+        let mp3_cap = engine::decode::largest_file(engine::decode::HeadLength::Unstated, limit)
+            .expect("a cap");
+        assert_eq!(mp3_cap, 4_000_000 + (16 << 20));
+        let mp3 = |bytes: u64| ("lloyd.mp3".to_string(), vec![0xFF, 0xFB, 0x90, 0x00], bytes);
+        assert_eq!(refusal_of_heads(&[mp3(mp3_cap)], limit), None);
+        assert!(matches!(
+            refusal_of_heads(&[mp3(mp3_cap + 1)], limit),
+            Some(TooLongToOpen::Large { .. })
+        ));
+    }
+
+    /// D3 of the catch-up plan: the status line says that the song is too
+    /// long to open in this browser now, gives the limit for its lanes and
+    /// why it is on the page, and says what to do.
+    #[test]
+    fn a_refused_open_says_why_and_what_to_do() {
+        let refusal = PageRefusal {
+            why: TooLongToOpen::Stated {
+                frames: 120 * 44_100,
+            },
+            limit: memory_path_frames(MEMORY_PATH_MAX_FRAMES, sources_in_memory_lanes(2)),
+            sources: 2,
+        };
+        assert_eq!(
+            refused_text(
+                &refusal,
+                "browser storage failed (QuotaExceededError)",
+                true
+            ),
+            "Not opened: this song is 2:00 long, too long to open in this browser now.  On this page, a song of 2 files opens only up to 1:17, and the page decodes it here because browser storage failed (QuotaExceededError).  Free browser storage in the Storage menu, or open a shorter song."
+        );
+        let many = PageRefusal {
+            why: TooLongToOpen::Decoded,
+            limit: memory_path_frames(MEMORY_PATH_MAX_FRAMES, sources_in_memory_lanes(21)),
+            sources: 21,
+        };
+        let text = refused_text(
+            &many,
+            "its 22 lanes do not fit the read-ahead buffer",
+            false,
+        );
+        assert!(
+            text.starts_with("Not opened: this song is longer than 0:25, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:25"),
+            "{text}"
+        );
+        assert!(text.ends_with("buffer.  Open a shorter song."), "{text}");
+        let large = PageRefusal {
+            why: TooLongToOpen::Large {
+                file: "lloyd.mp3".into(),
+                bytes: 30_000_000,
+                cap: 20_777_216,
+            },
+            limit: MEMORY_PATH_MAX_FRAMES,
+            sources: 1,
+        };
+        let text = refused_text(&large, "browser storage failed", true);
+        assert!(
+            text.starts_with("Not opened: lloyd.mp3 states no length, and at 30 MB it can be too long to open in this browser now (a file of a song within the limit has at most 21 MB).  On this page, a song of one file opens only up to 1:40"),
+            "{text}"
+        );
+    }
+
+    /// D3 of the catch-up plan: a decode that passes the limit becomes a
+    /// refusal with the open's reason, which the status line shows as it
+    /// is.  Other errors stay as they are.
+    #[test]
+    fn a_decode_past_the_limit_is_a_refusal_with_the_reason() {
+        let past = anyhow::Error::new(engine::decode::TooLong { max_frames: 44_100 })
+            .context("decoding lloyd.wav");
+        let refusal = decoded_refusal(past, 44_100, 1);
+        assert_eq!(
+            refusal.downcast_ref::<PageRefusal>(),
+            Some(&PageRefusal {
+                why: TooLongToOpen::Decoded,
+                limit: 44_100,
+                sources: 1,
+            })
+        );
+        let refused = with_reason(refusal, "browser storage failed", true)
+            .context("could not open the stored song");
+        let text = open_error_text("Could not load", &refused);
+        assert!(
+            text.starts_with("Not opened: this song is longer than 0:01"),
+            "{text}"
+        );
+        let other = decoded_refusal(anyhow::anyhow!("file decoded to no audio"), 44_100, 1);
+        let other = with_reason(other, "browser storage failed", true);
+        assert_eq!(
+            open_error_text("Could not load", &other),
+            "Could not load: file decoded to no audio"
+        );
     }
 
     #[test]

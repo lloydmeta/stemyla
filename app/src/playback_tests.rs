@@ -484,7 +484,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         .await
         .expect("planted");
     let decoder = decoder::DecodeClient::new("./no-such-decode-worker.js");
-    let (opened, _, note) = restore_stored(&id, &decoder)
+    let (opened, _, note) = restore_stored(&id, &decoder, MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("a session")
         .expect("restored");
@@ -512,7 +512,7 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
     let with_drums = app.lane_files();
     // Stems held for an open play from memory; "original" keeps its file
     // (review round 2 of M6, finding 2-11).
-    let (again, _, _) = restore_stored(&id, &decoder)
+    let (again, _, _) = restore_stored(&id, &decoder, MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("a session")
         .expect("restored");
@@ -567,7 +567,8 @@ async fn a_restored_session_plays_its_lanes_from_storage() {
         Some(id.clone()),
         None,
         0.0,
-        Some("the test".into()),
+        OnThePage::storage_failed("the test".into()),
+        MEMORY_PATH_MAX_FRAMES,
     )
     .await
     .expect("decoded on the page");

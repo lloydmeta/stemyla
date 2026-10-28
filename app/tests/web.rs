@@ -167,7 +167,10 @@ async fn shown_with_stems(id: &str, song: engine::Song, meta: &store_meta::Meta)
 async fn a_saved_song_is_restored_with_its_name_and_rate() {
     let id = stored_song().await;
     assert_eq!(store::current().await.as_deref(), Some(id.as_str()));
-    let (got, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (got, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(got, id);
     assert_eq!(meta.name, "Lloyd - Tune");
     assert_eq!(meta.rate, RATE);
@@ -183,7 +186,10 @@ async fn stems_saved_later_are_restored_with_the_song() {
     store::save_stems(&id, RATE, &[stem("bass", 800), stem("drums", 800)])
         .await
         .expect("stems saved");
-    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(meta.stems, ["bass", "drums"]);
     assert_eq!(song.frames, 800);
     let shown = shown_with_stems(&id, song, &meta).await;
@@ -212,7 +218,10 @@ async fn a_48k_session_reopens_with_its_stems() {
     )
     .await
     .expect("stems saved");
-    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(meta.rate, 44_100);
     assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
     for s in &song.stems {
@@ -278,7 +287,10 @@ async fn a_flac_session_reopens_with_its_stems() {
     )
     .await
     .expect("stems saved");
-    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(
         meta.files,
         [("lloyd.flac".to_string(), "0.flac".to_string())]
@@ -303,7 +315,10 @@ async fn stems_that_do_not_fit_the_source_are_fitted_to_it() {
         store::save_stems(&id, RATE, &[stem("bass", frames)])
             .await
             .expect("stems saved");
-        let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+        let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+            .await
+            .expect("stored")
+            .expect("readable");
         assert_eq!(song.frames, 800);
         // D11 of the M7 plan: a stem WAV one frame short or long is a
         // stored lane of the song's frames; the lane reader gives silence
@@ -344,7 +359,7 @@ async fn opening_waits_for_stored_stems_and_shows_them() {
     let id = stored_song().await;
     plant_parts(&id, &["bass", "vocals"]).await;
     let kept = keeping(&id, &["bass", "vocals"]).await;
-    let (_, song, meta) = store::restore_id(&id)
+    let (_, song, meta) = store::restore_id(&id, app::MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("stored")
         .expect("readable");
@@ -375,7 +390,7 @@ async fn forgetting_a_missing_session_succeeds() {
 async fn opening_waits_for_a_save_in_progress_and_shows_its_stems() {
     let id = stored_song().await;
     let save = saving(&id, vec![stem("vocals", 800)]).await;
-    let (_, song, meta) = store::restore_id(&id)
+    let (_, song, meta) = store::restore_id(&id, app::MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("stored")
         .expect("readable");

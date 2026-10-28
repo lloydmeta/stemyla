@@ -841,17 +841,19 @@ pub async fn forget(id: &str) -> bool {
     removed
 }
 
-/// The current session as a song: the dropped files, plus the separated
-/// stems and the original mix when there are stems.  `None` when nothing is
-/// stored.
-pub async fn restore() -> Option<Result<(String, Song, Meta)>> {
-    restore_id(&current().await?).await
+/// The current session's sources as a song, decoded on the page, as
+/// [`restore_id`] gives them.  `None` when nothing is stored.
+pub async fn restore(memory_limit: usize) -> Option<Result<(String, Song, Meta)>> {
+    restore_id(&current().await?, memory_limit).await
 }
 
-/// Session `id`'s sources as a song, decoded on the page (the memory path).
-/// It does not make the session current: the page does, when the song
-/// shows (D12 of the M7 plan).
-pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
+/// Session `id`'s sources as a song, decoded on the page (the memory path),
+/// within the memory path's limit for their lanes (D3 of
+/// `plans/active/stream-from-storage-catchup.md`): `memory_limit` is
+/// `MEMORY_PATH_MAX_FRAMES`, or less in a test.  It does not make the
+/// session current: the page does, when the song shows (D12 of the M7
+/// plan).
+pub async fn restore_id(id: &str, memory_limit: usize) -> Option<Result<(String, Song, Meta)>> {
     settled(id).await;
     let id = id.to_string();
     let base = format!("{ROOT}/{id}");
@@ -860,7 +862,7 @@ pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
     ));
     // D12 of the M7 plan: the page makes the session current only when
     // its song shows, for the newest open.
-    let r = rebuild(&base, &meta)
+    let r = rebuild(&base, &meta, memory_limit)
         .await
         .map(|song| (id.clone(), song, meta));
     Some(r)
@@ -868,16 +870,58 @@ pub async fn restore_id(id: &str) -> Option<Result<(String, Song, Meta)>> {
 
 /// The sources of a session, decoded on the page: the memory path, when
 /// browser storage failed (decision 0015).  The stems are not read here:
-/// the open shows them as stored lanes (D11 of the M7 plan).
-async fn rebuild(base: &str, meta: &Meta) -> Result<Song> {
-    let mut files = Vec::new();
-    for (orig, stored) in &meta.files {
+/// the open shows them as stored lanes (D11 of the M7 plan).  D3 of the
+/// catch-up plan: a song longer than the memory path's limit for its
+/// lanes is a `PageRefusal`.  The length comes from `meta` when it has a
+/// `decoded` or a `mix` line, else from the head of each source, before
+/// any whole read.  The decode stops at the limit.
+async fn rebuild(base: &str, meta: &Meta, memory_limit: usize) -> Result<Song> {
+    use crate::{PageRefusal, TooLongToOpen};
+    let sources: Vec<&(String, String)> = meta
+        .files
+        .iter()
+        .filter(|(orig, _)| engine::song::is_stem(&engine::song::stem_name(orig)))
+        .collect();
+    let count = sources.len();
+    let limit = crate::memory_path_frames(memory_limit, crate::sources_in_memory_lanes(count));
+    let refusal = |why| {
+        anyhow::Error::new(PageRefusal {
+            why,
+            limit,
+            sources: count,
+        })
+    };
+    let missing = |orig: &str| anyhow!("{orig} is missing from browser storage");
+    match meta
+        .decoded
+        .as_ref()
+        .map(|d| d.frames)
+        .or(meta.usable_mix())
+    {
+        Some(frames) if frames > limit => return Err(refusal(TooLongToOpen::Stated { frames })),
+        Some(_) => {}
+        None => {
+            let mut heads = Vec::with_capacity(count);
+            for (orig, stored) in &sources {
+                let path = format!("{base}/src/{stored}");
+                let (head, size) = head_of(&path, engine::decode::HEAD_BYTES as u64)
+                    .await
+                    .ok_or_else(|| missing(orig))?;
+                heads.push((orig.clone(), head, size));
+            }
+            if let Some(why) = crate::refusal_of_heads(&heads, limit) {
+                return Err(refusal(why));
+            }
+        }
+    }
+    let mut files = Vec::with_capacity(count);
+    for (orig, stored) in sources {
         let bytes = read(&format!("{base}/src/{stored}"))
             .await
-            .ok_or_else(|| anyhow!("{orig} is missing from browser storage"))?;
+            .ok_or_else(|| missing(orig))?;
         files.push((orig.clone(), bytes));
     }
-    Song::load_files(files)
+    Song::load_files_within(files, limit).map_err(|e| crate::decoded_refusal(e, limit, count))
 }
 
 /// The suffix of each file that the decode worker writes.
@@ -2041,7 +2085,10 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         assert_eq!(record, "same whole", "the file itself, then meta");
         // D9: the page makes the session current once its song opens.
         assert_eq!(current().await, None, "the save makes no session current");
-        let (got, song, meta) = restore_id(&id).await.expect("stored").expect("readable");
+        let (got, song, meta) = restore_id(&id, crate::MEMORY_PATH_MAX_FRAMES)
+            .await
+            .expect("stored")
+            .expect("readable");
         assert_eq!((got, song.frames, meta.rate), (id, 800, 44_100));
         st_remove(ROOT).await;
     }
@@ -2350,10 +2397,11 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
             let frames = plant_separated(id, seconds).await;
             let before = LIVE.with(Cell::get);
             PEAK.with(|peak| peak.set(before));
-            let (opened, _, note) = crate::restore_stored(id, &client)
-                .await
-                .expect("a session")
-                .expect("opened");
+            let (opened, _, note) =
+                crate::restore_stored(id, &client, crate::MEMORY_PATH_MAX_FRAMES)
+                    .await
+                    .expect("a session")
+                    .expect("opened");
             let mut app = crate::StemApp {
                 want_device: false,
                 ..crate::StemApp::default()

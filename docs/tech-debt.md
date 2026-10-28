@@ -407,8 +407,8 @@ M3 of that plan (2026-10-25) removed the page's song-length stems during a stora
 * Since M7 (2026-10-27), the page reads no session file whole to show or play a stored song (`plans/active/stream-from-storage-m7.md`).  Each lane is its session file with its overview.  The mix lane's waveform, the spectrograms, the saves, the mix write and the memory path's input read the lanes in blocks, and classic drums of a stored song runs in the decode worker.  `e2e old-session` checks that the page's WebAssembly memory after a restore stays under 64 MB and does not grow with the song.  What is left:
   * A save keeps its whole file in the JS heap until M8.  A WAV keeps its bytes.  A FLAC or MP3 keeps two song-length `Float32Array`s (`JsChannels::new(frames)` in `app/src/export.rs`), about 635 MB for 30 minutes.
   * Nothing asserts the whole tab's budget, and there is no iPhone evidence, until M10.
-  * An open that decodes on the page has no length limit (TD-58).
-* The memory path still makes six song-length stems.  It takes a song without a session, or a song when storage has too little free space.  It also takes a song when storage refused the mix or the stems, or the worker cannot read the mix file.  For a separation, the page refuses a song over 100 seconds there (`app::MEMORY_PATH_MAX_FRAMES`).  An open that decodes on the page has no such limit (TD-58).
+  * An open that decodes on the page holds at most the memory path's limit for its lanes (decision 0020).  A song of many sources still decodes on the page (TD-58).
+* The memory path still makes six song-length stems.  It takes a song without a session, or a song when storage has too little free space.  It also takes a song when storage refused the mix or the stems, or the worker cannot read the mix file.  For a separation, and for an open that decodes on the page, the page refuses a song longer than the memory path's limit for its lanes: 100 seconds (`app::MEMORY_PATH_MAX_FRAMES`) for one source, and less for more lanes (`app::memory_path_frames`, decision 0020).
 * Between M3 and M7, no build went to the published site, because the page read a stored song back whole.  Since M7 that read-back is gone, so publishing no longer has that risk.  What is left are the memory costs of a save and of an open that decodes on the page.  Publishing is a person's step (GIT-1).
 
 * Fix: `plans/active/stream-from-storage.md` moves the song, the mix and the stems to browser storage (decision 0015).  Its M10 asserts that the peak does not grow with the song.
@@ -445,26 +445,16 @@ A loop set behind the head is a held seek: the player keeps its old loop until t
 
 * Fix: the player gives its own loop with `Hint::Reading`, and `wanted_blocks` follows that loop while a seek holds.
 
-### TD-58: a song decoded on the page has no length limit
+### TD-58: a song of many sources decodes on the page
 
 This entry concerns MEM-1 and MEM-4.
 
-Decision 0015 says that the memory path refuses a song longer than fits.  That is true for a separation only (`app::MEMORY_PATH_MAX_FRAMES`).  An open that decodes a song on the page has no length limit but `engine::decode::MAX_DECODED_BYTES` (decision 0013).  The page then holds every lane of the song in WebAssembly memory, so a long song can stop the tab on an iPhone.
+Since C of `plans/active/stream-from-storage-catchup.md` (decision 0020), every open that decodes a song on the page keeps the memory path's limit for its lanes (`app::memory_path_frames`).  It reads each file's head first, and refuses a long song before it reads a whole file.  The decode stops at the limit.  What is left:
 
-The routes:
+* D2 of `plans/active/stream-from-storage-m7.md` still sends a song whose lanes do not fit the read-ahead buffer at its minimum slots to the page (more than about 20 sources and no `stem` lines; `store_meta::open_formats` and `store_meta::fits_read_ahead`).  Such a song holds at least 28 lanes, so it opens only up to about 25 s, and a longer one is refused.
+* A file whose head states no length is read whole up to its cap (`engine::decode::largest_file`): about 324 MB for a WAV or FLAC, and about 21 MB for an MP3, for a song of 100 s.  An MP3 whose ID3 tag is larger than the head counts as an MP3; a FLAC behind such a tag gets the cap of an MP3.  The page holds a file's bytes while it decodes that file.
 
-* `open_on_the_page` (`app/src/lib.rs`), for a drop or a pick: it reads each chosen file whole and calls `Song::load_files`.
-* `on_the_page_of` (`app/src/lib.rs`), for a stored session: it calls `store::restore_id`, which decodes the stored sources whole (`rebuild`, `app/src/store.rs`).
-
-The triggers are each `Decode::OnThePage`:
-
-* no session, or no browser storage;
-* the decode worker cannot start, stops, or replies `decode-unstored` (for example, storage is full);
-* D2 of `plans/active/stream-from-storage-m7.md`: the song's lanes do not fit the read-ahead buffer at its minimum slots (more than about 20 sources and no `stem` lines; `store_meta::open_formats` and `store_meta::fits_read_ahead`).
-
-These routes come from M5 of `plans/active/stream-from-storage.md`; M7 added the D2 trigger.  Since C of `plans/active/stream-from-storage-catchup.md`, a separation that uses the session's mix file no longer sends an open to the page: `store::keep_decoded` waits for a mix write, then keeps the session complete.
-
-* Fix: the catch-up team after M7 limits each page decode to the length that fits, as the memory path's separation does, and refuses a longer song with a status line.  For D2, a read-ahead buffer that holds fewer lanes than the song shows, or a mix of the sources into fewer lanes, removes the trigger.
+* Fix: a read-ahead buffer that holds fewer lanes than the song shows, or a mix of the sources into fewer lanes, removes the D2 trigger.  A decode on the page from the file in blocks, as the decode worker does, removes the whole read.
 
 ## Legibility for agents
 

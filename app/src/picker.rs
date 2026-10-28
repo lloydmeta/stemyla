@@ -52,3 +52,21 @@ pub async fn read(file: &web_sys::File) -> Result<Vec<u8>, String> {
     let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
     Ok(bytes)
 }
+
+/// The first `most` bytes of a chosen file, or all of a shorter one: one
+/// read of a slice, never the whole file (D3 of the catch-up plan).
+pub async fn read_head(file: &web_sys::File, most: usize) -> Result<Vec<u8>, String> {
+    let end = file.size().min(most as f64);
+    let head = file
+        .slice_with_f64_and_f64(0.0, end)
+        .map_err(|e| format!("could not read {}: {e:?}", file.name()))?;
+    let buffer = wasm_bindgen_futures::JsFuture::from(head.array_buffer())
+        .await
+        .map_err(|e| format!("could not read {}: {e:?}", file.name()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: the head of a file, at most `engine::decode::HEAD_BYTES`, is copied in to read its length"
+    )]
+    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+    Ok(bytes)
+}

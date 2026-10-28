@@ -58,6 +58,27 @@ export function dt_count_writes() {
   dt_counted = 0;
   proto.write = function (data) { dt_counted++; return dt_real_counted.call(this, data); };
 }
+// Records the largest read of the bytes of any Blob or File, and the
+// reads of more than `most` bytes, until stopped.
+let dt_sizes = null;
+let dt_real_ab = null;
+export function dt_start_size_spy(most) {
+  dt_real_ab = Blob.prototype.arrayBuffer;
+  dt_sizes = { largest: 0, over: 0 };
+  Blob.prototype.arrayBuffer = function () {
+    dt_sizes.largest = Math.max(dt_sizes.largest, this.size);
+    if (this.size > most) dt_sizes.over++;
+    return dt_real_ab.call(this);
+  };
+}
+export function dt_stop_size_spy() {
+  Blob.prototype.arrayBuffer = dt_real_ab;
+  return [dt_sizes.largest, dt_sizes.over];
+}
+// A file named `name` of `size` bytes: `head`, then zeros.
+export function dt_big_file(head, size, name) {
+  return new File([head, new Uint8Array(size - head.length)], name);
+}
 export function dt_writes_counted() {
   FileSystemWritableFileStream.prototype.write = dt_real_counted;
   return dt_counted;
@@ -74,6 +95,9 @@ extern "C" {
     fn dt_allow_writes();
     fn dt_count_writes();
     fn dt_writes_counted() -> u32;
+    fn dt_start_size_spy(most: u32);
+    fn dt_stop_size_spy() -> Vec<f64>;
+    fn dt_big_file(head: &[u8], size: f64, name: &str) -> web_sys::File;
 }
 
 /// A decode worker with no script, which said `decode-alive`, and a spy
@@ -272,7 +296,8 @@ async fn open_decoded(
     Vec<(Vec<f32>, Vec<f32>)>,
 ) {
     let client = fake.client.clone();
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(fake.posts.length()).await;
     let samples = planted(&req, frames, mono);
     plant_parts(&req, frames, &samples, true).await;
@@ -291,7 +316,8 @@ async fn an_open_posts_a_decode_and_reads_no_source() {
     let chosen = vec![wav_file("Lloyd - Tune.wav", 2_000, 0)];
     dt_start_read_spy();
     let client = fake.client.clone();
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(0).await;
     let reads = dt_stop_read_spy();
     fake.reply(DecodeReply::Undecodable {
@@ -318,7 +344,7 @@ async fn a_drop_of_no_source_fails_before_any_post() {
     store::test_wipe().await;
     let fake = Fake::new();
     let chosen = vec![wav_file("mix.wav", 100, 0)];
-    let opened = open_chosen_now(&chosen, &fake.client).await;
+    let opened = open_chosen_now(&chosen, &fake.client, MEMORY_PATH_MAX_FRAMES).await;
     let sessions = store::list().await.len();
     store::test_wipe().await;
     let error = opened.err().map(|e| format!("{e:#}"));
@@ -439,7 +465,8 @@ async fn undecodable_shows_the_error_and_forgets_the_session() {
     let before = a_current_session().await;
     let chosen = vec![wav_file("lloyd.wav", 100, 0)];
     let client = fake.client.clone();
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(0).await;
     fake.reply(DecodeReply::Undecodable {
         text: "unsupported or unrecognised format: lloyd".into(),
@@ -466,7 +493,8 @@ async fn a_failed_page_decode_forgets_the_new_session() {
     let before = a_current_session().await;
     let chosen = vec![("lloyd.wav".to_string(), dt_file(&[1; 64], "lloyd.wav"))];
     let client = fake.client.clone();
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(0).await;
     fake.reply(DecodeReply::Unstored {
         text: "QuotaExceededError: the disk is full".into(),
@@ -489,7 +517,8 @@ async fn a_new_session_becomes_current_once_its_song_opens() {
     let before = a_current_session().await;
     let client = fake.client.clone();
     let chosen = vec![wav_file("lloyd.wav", 100, 0)];
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(0).await;
     let during = store::current().await;
     let frames = 1_000;
@@ -520,7 +549,8 @@ async fn unstored_decodes_on_the_page_and_keeps_the_session() {
     let fake = Fake::new();
     let chosen = vec![wav_file("lloyd.wav", 1_234, 0)];
     let client = fake.client.clone();
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(0).await;
     fake.reply(DecodeReply::Unstored {
         text: "QuotaExceededError: the disk is full".into(),
@@ -553,7 +583,7 @@ async fn no_session_decodes_on_the_page() {
     let fake = Fake::new();
     let chosen = vec![wav_file("lloyd.wav", 1_000, 0)];
     dt_refuse_writes();
-    let opened = open_chosen_now(&chosen, &fake.client).await;
+    let opened = open_chosen_now(&chosen, &fake.client, MEMORY_PATH_MAX_FRAMES).await;
     dt_allow_writes();
     store::test_wipe().await;
     let opened = opened.expect("opened on the page");
@@ -577,7 +607,10 @@ async fn undecodable_in_a_restore_keeps_the_session() {
     let id = saved(&vec![wav_file("lloyd.wav", 100, 0)]).await;
     let client = fake.client.clone();
     let restore_id = id.clone();
-    let restored = background(async move { restore_stored(&restore_id, &client).await });
+    let restored =
+        background(
+            async move { restore_stored(&restore_id, &client, MEMORY_PATH_MAX_FRAMES).await },
+        );
     let _ = fake.request(0).await;
     fake.reply(DecodeReply::Undecodable {
         text: "file decoded to no audio".into(),
@@ -599,7 +632,7 @@ async fn a_complete_session_restores_with_no_decode() {
     opened.expect("opened");
     let id = id_of(&req.session);
     let posts = fake.posts.length();
-    let restored = restore_stored(&id, &fake.client).await;
+    let restored = restore_stored(&id, &fake.client, MEMORY_PATH_MAX_FRAMES).await;
     let (opened, meta, note) = restored.expect("a session").expect("restored");
     let read = samples_of(&opened.song, 0).await;
     let stored_lane = opened.song.lanes[0].audio.samples().is_none();
@@ -633,7 +666,10 @@ async fn an_incomplete_session_restores_through_a_decode() {
         .expect("planted");
     let client = fake.client.clone();
     let restore_id = id.clone();
-    let restored = background(async move { restore_stored(&restore_id, &client).await });
+    let restored =
+        background(
+            async move { restore_stored(&restore_id, &client, MEMORY_PATH_MAX_FRAMES).await },
+        );
     let req = fake.request(0).await;
     plant_parts(&req, frames, &planted(&req, frames, &[false]), false).await;
     fake.reply(DecodeReply::Decoded {
@@ -751,7 +787,10 @@ async fn the_kept_line_comes_once_the_session_is_current() {
         start_log();
         let client = fake.client.clone();
         let chosen = vec![wav_file("lloyd.wav", 1_000, 0)];
-        let opened = background(async move { open_chosen_now(&chosen, &client).await });
+        let opened =
+            background(
+                async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await },
+            );
         let req = fake.request(0).await;
         if unstored {
             fake.reply(DecodeReply::Unstored {
@@ -796,7 +835,8 @@ async fn no_kept_line_when_the_session_cannot_be_made_current() {
     start_log();
     let client = fake.client.clone();
     let chosen = vec![wav_file("lloyd.wav", 1_000, 0)];
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     let req = fake.request(0).await;
     let samples = planted(&req, 1_000, &[false]);
     plant_parts(&req, 1_000, &samples, true).await;
@@ -831,7 +871,8 @@ async fn a_reset_ends_an_open_and_a_restore_with_no_page_decode() {
     app.decoder = fake.client.clone();
     let client = fake.client.clone();
     let chosen = vec![wav_file("lloyd.wav", 100, 0)];
-    let opened = background(async move { open_chosen_now(&chosen, &client).await });
+    let opened =
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await });
     fake.request(0).await;
     dt_start_read_spy();
     app.prepare_reset();
@@ -842,7 +883,8 @@ async fn a_reset_ends_an_open_and_a_restore_with_no_page_decode() {
     let fake = Fake::new();
     app.decoder = fake.client.clone();
     let client = fake.client.clone();
-    let restored = background(async move { restore_stored(&id, &client).await });
+    let restored =
+        background(async move { restore_stored(&id, &client, MEMORY_PATH_MAX_FRAMES).await });
     fake.request(0).await;
     dt_start_read_spy();
     app.prepare_reset();
@@ -880,7 +922,7 @@ async fn a_reset_during_the_save_ends_the_open_with_no_page_decode() {
     let chosen = vec![wav_file("lloyd.wav", 100, 0)];
     store::close().await;
     dt_start_read_spy();
-    let opened = open_chosen_now(&chosen, &fake.client).await;
+    let opened = open_chosen_now(&chosen, &fake.client, MEMORY_PATH_MAX_FRAMES).await;
     let (error, reads, page_lines) = reset_outcome(opened).await;
     assert!(error.starts_with("a reset stopped the open"), "{error}");
     assert_eq!((reads, page_lines), (0, 0), "no file read, no page decode");
@@ -896,7 +938,15 @@ async fn a_session_not_read_during_a_reset_ends_the_open_with_no_page_decode() {
     fake.client.stop();
     let chosen = vec![wav_file("lloyd.wav", 100, 0)];
     dt_start_read_spy();
-    let opened = open_saved(&chosen, "1792640000001", None, 0.0, &fake.client).await;
+    let opened = open_saved(
+        &chosen,
+        "1792640000001",
+        None,
+        0.0,
+        &fake.client,
+        MEMORY_PATH_MAX_FRAMES,
+    )
+    .await;
     let (error, reads, page_lines) = reset_outcome(opened).await;
     assert!(error.starts_with("a reset stopped the open"), "{error}");
     assert_eq!((reads, page_lines), (0, 0), "no file read, no page decode");
@@ -955,14 +1005,24 @@ async fn another_page_decode_cause_during_a_reset_ends_with_an_error() {
     let (id, chosen) = session_with_a_stale_decoded_line().await;
     store::close().await;
     dt_start_read_spy();
-    let opened = open_saved(&chosen, &id, None, 0.0, &fake.client).await;
+    let opened = open_saved(
+        &chosen,
+        &id,
+        None,
+        0.0,
+        &fake.client,
+        MEMORY_PATH_MAX_FRAMES,
+    )
+    .await;
     let (open_error, open_reads, open_lines) = reset_outcome(opened).await;
 
     start_log();
     let (id, _) = session_with_a_stale_decoded_line().await;
     store::close().await;
     dt_start_read_spy();
-    let restored = restore_stored(&id, &fake.client).await.expect("a session");
+    let restored = restore_stored(&id, &fake.client, MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("a session");
     let (restore_error, restore_reads, restore_lines) = reset_outcome(restored).await;
     let posted = fake.posts.length();
     assert!(
@@ -1121,7 +1181,10 @@ async fn unstored_with_a_kept_mix(
     }
     let client = fake.client.clone();
     let restore_id = id.clone();
-    let restored = background(async move { restore_stored(&restore_id, &client).await });
+    let restored =
+        background(
+            async move { restore_stored(&restore_id, &client, MEMORY_PATH_MAX_FRAMES).await },
+        );
     let req = fake.request(0).await;
     assert_eq!(req.mix_frames, Some(frames as u64));
     fake.reply(DecodeReply::Unstored {
@@ -1551,7 +1614,7 @@ async fn rebuild_shows_complete_stems_as_stored_lanes() {
         .collect();
     store::save_stems(&id, 44_100, &stems).await.expect("saved");
     let failing = decoder::DecodeClient::new("./no-such-decode-worker.js");
-    let (opened, _, note) = restore_stored(&id, &failing)
+    let (opened, _, note) = restore_stored(&id, &failing, MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("a session")
         .expect("opened");
@@ -1589,7 +1652,7 @@ async fn a_song_over_the_read_ahead_cap_opens_in_memory() {
         .collect();
     let id = saved(&chosen).await;
     let fake = Fake::new();
-    let (opened, _, note) = restore_stored(&id, &fake.client)
+    let (opened, _, note) = restore_stored(&id, &fake.client, MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("a session")
         .expect("opened");
@@ -1622,7 +1685,7 @@ async fn a_drop_over_the_read_ahead_cap_opens_in_memory() {
     let fake = Fake::new();
     let opened = {
         let client = fake.client.clone();
-        background(async move { open_chosen_now(&chosen, &client).await })
+        background(async move { open_chosen_now(&chosen, &client, MEMORY_PATH_MAX_FRAMES).await })
     };
     // A decode that is posted waits for a reply: stop at the first post.
     for _ in 0..250 {
@@ -1811,7 +1874,14 @@ async fn a_late_drop_does_not_show_over_a_newer_song() {
         let chosen = vec![wav_file("lloyd.wav", 100, 1)];
         if pick {
             let opens = app.opens.clone();
-            open_picked(chosen, &app.decoder, &app.pending, &ctx, &opens);
+            open_picked(
+                chosen,
+                &app.decoder,
+                &app.pending,
+                &ctx,
+                &opens,
+                MEMORY_PATH_MAX_FRAMES,
+            );
         } else {
             app.open_files(chosen, &ctx);
         }
@@ -1858,11 +1928,19 @@ async fn an_older_pick_does_not_clear_the_text_of_a_newer_one() {
         &app.pending,
         &ctx,
         &opens,
+        MEMORY_PATH_MAX_FRAMES,
     );
     fake.request(0).await;
     let newer = vec![wav_file("acme.wav", 100, 2)];
     let opening = opening_text(&newer);
-    open_picked(newer, &client, &app.pending, &ctx, &opens);
+    open_picked(
+        newer,
+        &client,
+        &app.pending,
+        &ctx,
+        &opens,
+        MEMORY_PATH_MAX_FRAMES,
+    );
     decode_ends(&fake, 0).await;
     for _ in 0..250 {
         if app.pending.borrow().song.is_some() {
@@ -2013,4 +2091,242 @@ async fn a_stale_restore_on_the_page_does_not_make_its_session_current() {
     store::test_wipe().await;
     assert_eq!(shown, None, "the demo stays");
     assert_eq!(current, Some(before), "the stale restore is not current");
+}
+
+/// The largest read of a file's bytes during `work`, and the reads of more
+/// than a file's head (`engine::decode::HEAD_BYTES`).
+async fn reads_of<T>(work: impl Future<Output = T>) -> (T, u64, u32) {
+    dt_start_size_spy(engine::decode::HEAD_BYTES as u32);
+    let out = work.await;
+    let sizes = dt_stop_size_spy();
+    (out, sizes[0] as u64, sizes[1] as u32)
+}
+
+/// The status line of a failed open, as the page shows it.
+fn shown_error(opened: &anyhow::Result<Opened>) -> String {
+    match opened {
+        Ok(_) => "opened".into(),
+        Err(e) => open_error_text("Could not load", e),
+    }
+}
+
+/// One second at 44.1 kHz: the memory path's limit in these tests.
+const SECOND: usize = 44_100;
+
+/// D3 of the catch-up plan: with no browser storage, a drop of a WAV whose
+/// header states 2 s is refused, with a limit of 1 s, from its head alone.
+/// The status line says why and what to do, and the page shows it as it is.
+#[wasm_bindgen_test]
+async fn a_drop_with_no_storage_refuses_a_long_wav_from_its_head() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let chosen = vec![wav_file("lloyd.wav", 2 * SECOND, 0)];
+    let size = chosen[0].1.size() as u64;
+    dt_refuse_writes();
+    let (opened, largest, over) = reads_of(open_chosen_now(&chosen, &fake.client, SECOND)).await;
+    dt_allow_writes();
+    store::test_wipe().await;
+    let text = shown_error(&opened);
+    assert!(size > engine::decode::HEAD_BYTES as u64, "{size} bytes");
+    assert_eq!(
+        over, 0,
+        "no read past the head: the largest was {largest} bytes"
+    );
+    assert!(
+        text.starts_with("Not opened: this song is 0:02 long, too long to open in this browser now.  On this page, a song of one file opens only up to 0:01, and the page decodes it here because browser storage could not keep it ("),
+        "{text}"
+    );
+    assert!(text.contains("QuotaExceededError"), "{text}");
+    assert!(
+        text.ends_with("Free browser storage in the Storage menu, or open a shorter song."),
+        "{text}"
+    );
+    // The page shows the refusal as its status line.
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    let token = app.next_open();
+    app.pending.borrow_mut().put_song(token, opened);
+    app.apply_inbox(&egui::Context::default());
+    assert_eq!(app.status, text);
+}
+
+/// D3 of the catch-up plan: a streaming WAV states no length.  One larger
+/// than the largest file of a song of 1 s is refused from its head; a
+/// smaller one is read, and its decode stops at the limit.
+#[wasm_bindgen_test]
+async fn a_wav_of_no_stated_length_is_capped_then_stopped_at_the_limit() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let mut header = Vec::from(engine::wav::header(0, 44_100));
+    header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    header[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    let cap = engine::decode::largest_file(engine::decode::HeadLength::UnstatedPcm, SECOND)
+        .expect("a cap");
+    let large = vec![(
+        "lloyd.wav".to_string(),
+        dt_big_file(&header, (cap + 1) as f64, "lloyd.wav"),
+    )];
+    dt_refuse_writes();
+    let (refused, _, over) = reads_of(open_chosen_now(&large, &fake.client, SECOND)).await;
+    let mut streaming = vec![wav_file("acme.wav", 2 * SECOND, 1)];
+    let bytes = {
+        let wav = engine::wav::encode_pcm16(&tone(2 * SECOND, 1), &tone(2 * SECOND, 8), 44_100);
+        let mut wav = wav;
+        wav[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        wav[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        wav
+    };
+    streaming[0].1 = dt_file(&bytes, "acme.wav");
+    let stopped = open_chosen_now(&streaming, &fake.client, SECOND).await;
+    let fits = open_chosen_now(&streaming, &fake.client, 2 * SECOND).await;
+    dt_allow_writes();
+    store::test_wipe().await;
+    let text = shown_error(&refused);
+    assert_eq!(over, 0, "no read past the head");
+    assert!(
+        text.starts_with(&format!(
+            "Not opened: lloyd.wav states no length, and at {:.0} MB it can be too long to open in this browser now",
+            (cap + 1) as f64 / 1e6
+        )),
+        "{text}"
+    );
+    let text = shown_error(&stopped);
+    assert!(
+        text.starts_with(
+            "Not opened: this song is longer than 0:01, too long to open in this browser now."
+        ),
+        "{text}"
+    );
+    assert_eq!(fits.expect("within 2 s").song.frames, 2 * SECOND);
+}
+
+/// D3 of the catch-up plan and D2 of the M7 plan: 21 sources do not fit
+/// the read-ahead buffer, so the page would decode them.  They hold 28
+/// lanes, so the limit is a quarter: the drop is refused, and storage
+/// does not help.  No decode is posted.
+#[wasm_bindgen_test]
+async fn a_drop_over_the_read_ahead_cap_refuses_a_long_song() {
+    store::test_wipe().await;
+    let chosen: Chosen = (0..21)
+        .map(|k| wav_file(&format!("lloyd {k}.wav"), 100, k))
+        .collect();
+    let fake = Fake::new();
+    let opened = open_chosen_now(&chosen, &fake.client, 399).await;
+    let sessions = store::list().await.len();
+    let fits = open_chosen_now(&chosen, &fake.client, 400).await;
+    store::test_wipe().await;
+    assert_eq!(fake.posts.length(), 0, "no decode is posted");
+    let text = shown_error(&opened);
+    assert!(
+        text.starts_with("Not opened: this song is 0:00 long, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:00, and the page decodes it here because its 21 lanes do not fit the read-ahead buffer"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("buffer, so it plays from memory.  Open a shorter song."),
+        "{text}"
+    );
+    assert_eq!(sessions, 0, "the refused song's session goes");
+    assert_eq!(fits.expect("100 frames of 400 / 4").song.frames, 100);
+}
+
+/// D3 of the catch-up plan: a decode worker that cannot keep the song
+/// (`decode-unstored`) sends it to the page, which refuses it past the
+/// limit, from its head.
+#[wasm_bindgen_test]
+async fn unstored_refuses_a_long_song_from_its_head() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let chosen = vec![wav_file("lloyd.wav", 2 * SECOND, 0)];
+    let client = fake.client.clone();
+    dt_start_size_spy(engine::decode::HEAD_BYTES as u32);
+    let opened = background(async move { open_chosen_now(&chosen, &client, SECOND).await });
+    let req = fake.request(0).await;
+    fake.reply(DecodeReply::Unstored {
+        text: "QuotaExceededError: the disk is full".into(),
+    });
+    let opened = output(&opened).await;
+    let sizes = dt_stop_size_spy();
+    let kept = meta_of(&id_of(&req.session)).await;
+    store::test_wipe().await;
+    let text = shown_error(&opened);
+    assert_eq!(
+        sizes[1], 0.0,
+        "no read past the head: the largest was {}",
+        sizes[0]
+    );
+    assert!(
+        text.starts_with("Not opened: this song is 0:02 long, too long to open in this browser now.  On this page, a song of one file opens only up to 0:01, and the page decodes it here because browser storage failed (QuotaExceededError: the disk is full).  Free browser storage"),
+        "{text}"
+    );
+    assert!(kept.is_none(), "the refused song's new session goes");
+}
+
+/// D3 of the catch-up plan: a stored session of 21 sources opens on the
+/// page (D2 of the M7 plan).  With no `mix` or `decoded` line, the page
+/// reads only the head of each source to refuse it.  With a `mix` line, it
+/// reads no source at all.  The session stays.
+#[wasm_bindgen_test]
+async fn a_restore_on_the_page_refuses_a_long_song_from_heads_or_meta() {
+    store::test_wipe().await;
+    let frames = 20_000;
+    let chosen: Chosen = (0..21)
+        .map(|k| wav_file(&format!("lloyd {k}.wav"), frames, k))
+        .collect();
+    let id = saved(&chosen).await;
+    let fake = Fake::new();
+    let limit = 4 * (frames - 1);
+    let (from_heads, _, over) = reads_of(restore_stored(&id, &fake.client, limit)).await;
+    let mut meta = meta_of(&id).await.expect("meta");
+    meta.mix = Some((frames, store_meta::MIX_FORMAT.into()));
+    store::test_write(&format!("sessions/{id}/meta"), meta.to_text().as_bytes())
+        .await
+        .expect("planted");
+    dt_start_read_spy();
+    let from_meta = restore_stored(&id, &fake.client, limit).await;
+    let source_reads = dt_stop_read_spy();
+    let kept = meta_of(&id).await;
+    store::test_wipe().await;
+    assert_eq!(fake.posts.length(), 0, "no decode is posted");
+    assert_eq!(over, 0, "no read past a head");
+    for (case, restored) in [("heads", from_heads), ("meta", from_meta)] {
+        let error = restored.expect("a session").err().expect("refused");
+        let text = open_error_text("Could not load", &error);
+        assert!(
+            text.starts_with("Not opened: this song is 0:00 long, too long to open in this browser now.  On this page, a song of 21 files opens only up to 0:00")
+                && text.ends_with("Open a shorter song."),
+            "{case}: {text}"
+        );
+    }
+    assert_eq!(source_reads, 0, "meta gives the length: no source is read");
+    assert!(kept.is_some(), "the session stays");
+}
+
+/// D3 of the catch-up plan: a restore whose decode worker replies
+/// `decode-unstored` decodes on the page, and refuses a long song from the
+/// head of its source; the status line offers to free storage.
+#[wasm_bindgen_test]
+async fn an_unstored_restore_refuses_a_long_song() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let id = saved(&vec![wav_file("lloyd.wav", 2 * SECOND, 0)]).await;
+    let client = fake.client.clone();
+    let restore_id = id.clone();
+    let restored = background(async move { restore_stored(&restore_id, &client, SECOND).await });
+    let _ = fake.request(0).await;
+    fake.reply(DecodeReply::Unstored {
+        text: "QuotaExceededError: the disk is full".into(),
+    });
+    let restored = output(&restored).await.expect("a session");
+    store::test_wipe().await;
+    let error = restored.err().expect("refused");
+    let text = open_error_text("Could not restore the stored song", &error);
+    assert!(
+        text.starts_with(
+            "Not opened: this song is 0:02 long, too long to open in this browser now."
+        ) && text.contains("browser storage failed (QuotaExceededError: the disk is full)")
+            && text.ends_with("Free browser storage in the Storage menu, or open a shorter song."),
+        "{text}"
+    );
 }
