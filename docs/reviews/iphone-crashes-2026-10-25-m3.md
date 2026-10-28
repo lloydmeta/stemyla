@@ -245,3 +245,4 @@
 | 2 | 10 | 740709 | 48.2 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 76 (caught 30, missed 46, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 3 | 9 | 533798 | 26.9 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 4 (caught 0, missed 4, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 4 | 3 | 174216 | 47.5 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |
+| 5 | 1 (one reviewer of 51e9a5e for M3 to M6) | 117,062 | 17.5 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |
