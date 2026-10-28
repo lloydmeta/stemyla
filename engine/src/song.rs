@@ -190,6 +190,51 @@ impl Song {
         Song::from_audio(items)
     }
 
+    /// Loads in-memory files as [`Song::load_files`] does, bit for bit, for
+    /// a song of at most `max_frames` frames at [`SONG_RATE`] (D3 of
+    /// `plans/active/stream-from-storage-catchup.md`).  A WAV or FLAC whose
+    /// stated length passes it is refused before it decodes, and any
+    /// decode stops once it passes it, each with `decode::TooLong`.  Each
+    /// source decodes in blocks with [`decode_into`], so the song holds no
+    /// samples at the source's rate: only its own, at most `max_frames` of
+    /// each channel, and the file's bytes until its decode ends.
+    pub fn load_files_within(files: Vec<(String, Vec<u8>)>, max_frames: usize) -> Result<Song> {
+        let mut decoded = Vec::new();
+        for (file_name, bytes) in files {
+            let name = stem_name(&file_name);
+            if !is_stem(&name) {
+                continue;
+            }
+            let ext = file_name.rsplit('.').next().map(str::to_ascii_lowercase);
+            let source = Box::new(std::io::Cursor::new(bytes));
+            let decoder = Decoder::within_song_frames(source, ext.as_deref(), max_frames)?;
+            let mut sink =
+                SongSink::new(decoder.song_frames_to_reserve().min(max_frames), max_frames);
+            decode_into(decoder, &mut sink)?;
+            decoded.push((name, sink.left, sink.right));
+        }
+        if decoded.is_empty() {
+            return Err(anyhow!("no stems to load"));
+        }
+        decoded.sort_by_key(|(name, ..)| rank(name));
+        let frames = decoded.iter().map(|(_, l, _)| l.len()).max().unwrap_or(0);
+        let padded = |c: Vec<f32>| -> Samples { padded_to(c, frames).into() };
+        let stems = decoded
+            .into_iter()
+            .map(|(name, left, right)| {
+                let left = padded(left);
+                // A mono stem plays the same samples on both sides.
+                let right = right.map_or_else(|| left.clone(), padded);
+                Stem { name, left, right }
+            })
+            .collect();
+        Ok(Song {
+            sample_rate: SONG_RATE,
+            frames,
+            stems,
+        })
+    }
+
     pub fn duration_s(&self) -> f64 {
         self.frames as f64 / self.sample_rate as f64
     }
@@ -214,6 +259,49 @@ pub trait FrameSink {
     /// mono source gives the same slice as both.  An error stops the
     /// decode.
     fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()>;
+}
+
+/// Keeps the blocks of one source of [`Song::load_files_within`]: its
+/// left side, and its right side unless the source is mono.  It refuses a
+/// block that takes it past `max_frames`.
+struct SongSink {
+    left: Vec<f32>,
+    /// `None` while every block of the source was mono.
+    right: Option<Vec<f32>>,
+    max_frames: usize,
+}
+
+impl SongSink {
+    /// A sink with room for `reserve` frames of each side.
+    fn new(reserve: usize, max_frames: usize) -> Self {
+        Self {
+            left: Vec::with_capacity(reserve),
+            right: None,
+            max_frames,
+        }
+    }
+}
+
+impl FrameSink for SongSink {
+    fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()> {
+        if self.left.len() + left.len() > self.max_frames {
+            return Err(anyhow::Error::new(crate::decode::TooLong {
+                max_frames: self.max_frames,
+            }));
+        }
+        // `decode_into` gives a mono source as one slice on both sides.
+        let mono = std::ptr::eq(left, right);
+        if !mono && self.right.is_none() {
+            let mut right = Vec::with_capacity(self.left.capacity());
+            right.extend_from_slice(&self.left);
+            self.right = Some(right);
+        }
+        crate::decode::append(&mut self.left, left, self.max_frames);
+        if let Some(side) = &mut self.right {
+            crate::decode::append(side, right, self.max_frames);
+        }
+        Ok(())
+    }
 }
 
 /// What [`decode_into`] gave its sink.
@@ -515,6 +603,105 @@ mod tests {
         assert_eq!(s.stems[1].left[..4], [0.25; 4]);
         assert_eq!(s.stems[1].right[9], 0.0);
         assert_eq!(s.stems[0].right[0], 0.5);
+    }
+
+    /// A file of `channels` tones of `frames` frames at `rate`, as `ext`.
+    fn file_at(ext: &str, channels: usize, frames: usize, rate: u32) -> Vec<u8> {
+        use crate::test_audio::{WavSamples, flac, mp3, tone, wav};
+        let tones: Vec<Vec<f32>> = (0..channels).map(|c| tone(c, frames, rate)).collect();
+        match ext {
+            "wav" => wav(&tones, rate, WavSamples::Pcm16),
+            "flac" => flac(&tones, rate),
+            _ => mp3(&tones, rate),
+        }
+    }
+
+    /// Whether `result` is the error of a song past `max_frames`.
+    fn past<T>(result: &Result<T>, max_frames: usize) -> bool {
+        result
+            .as_ref()
+            .err()
+            .and_then(|e| e.downcast_ref::<crate::decode::TooLong>())
+            .is_some_and(|too_long| too_long.max_frames == max_frames)
+    }
+
+    /// D3 of the catch-up plan: the page's limit is in frames at
+    /// `SONG_RATE`, whatever the rate of the source.  A WAV or a FLAC that
+    /// states its length is refused when it opens; a streaming WAV and an
+    /// MP3 stop when the decode passes the limit.
+    #[test]
+    fn the_page_limit_counts_frames_at_the_song_rate() {
+        use crate::decode::Decoder;
+        use std::io::Cursor;
+        for rate in [22_050, 48_000] {
+            for (ext, streaming) in [
+                ("wav", false),
+                ("wav", true),
+                ("flac", false),
+                ("mp3", false),
+            ] {
+                let mut bytes = file_at(ext, 2, 10_007, rate);
+                if streaming {
+                    bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+                    bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+                }
+                let case = format!("{ext} at {rate} Hz, streaming {streaming}");
+                let name = format!("lloyd.{ext}");
+                let whole = Song::load_files(vec![(name.clone(), bytes.clone())]).unwrap();
+                let max = whole.frames;
+                let at = Song::load_files_within(vec![(name.clone(), bytes.clone())], max);
+                assert_eq!(at.unwrap().frames, max, "{case}: at the limit");
+                let over = Song::load_files_within(vec![(name, bytes.clone())], max - 1);
+                assert!(past(&over, max - 1), "{case}: one frame over");
+                let opened =
+                    Decoder::within_song_frames(Box::new(Cursor::new(bytes)), Some(ext), max - 1);
+                let stated = ext != "mp3" && !streaming;
+                assert_eq!(
+                    past(&opened, max - 1),
+                    stated,
+                    "{case}: refused when it opens"
+                );
+            }
+        }
+        // 22.05 kHz doubles: 10,007 frames are 20,014 at 44.1 kHz.
+        let bytes = file_at("wav", 2, 10_007, 22_050);
+        let song = Song::load_files_within(vec![("lloyd.wav".into(), bytes)], 20_014).unwrap();
+        assert_eq!(song.frames, 20_014);
+    }
+
+    /// D3 of the catch-up plan: within its limit, a song loads as
+    /// `load_files` loads it, bit for bit: lanes in rank order, a mono
+    /// source on both sides with one buffer, shorter lanes padded, and a
+    /// `mix` file left out.
+    #[test]
+    fn a_song_within_the_page_limit_is_the_song_of_load_files() {
+        let files = vec![
+            ("bass.flac".to_string(), file_at("flac", 1, 5_003, 22_050)),
+            ("drums.wav".to_string(), file_at("wav", 2, 9_001, 48_000)),
+            ("mix.wav".to_string(), file_at("wav", 2, 100, 44_100)),
+            ("vocals.mp3".to_string(), file_at("mp3", 2, 4_000, 48_000)),
+        ];
+        let whole = Song::load_files(files.clone()).unwrap();
+        let within = Song::load_files_within(files, whole.frames).unwrap();
+        assert_eq!(
+            (within.sample_rate, within.frames),
+            (whole.sample_rate, whole.frames)
+        );
+        let names =
+            |song: &Song| -> Vec<String> { song.stems.iter().map(|s| s.name.clone()).collect() };
+        assert_eq!(names(&within), ["drums", "bass", "vocals"]);
+        assert_eq!(names(&within), names(&whole));
+        for (a, b) in within.stems.iter().zip(&whole.stems) {
+            let bits = |x: &[f32]| -> Vec<u32> { x.iter().map(|v| v.to_bits()).collect() };
+            assert_eq!(bits(&a.left), bits(&b.left), "{}", a.name);
+            assert_eq!(bits(&a.right), bits(&b.right), "{}", a.name);
+        }
+        let bass = &within.stems[1];
+        assert!(
+            bass.left.shares(&bass.right),
+            "a mono source has one buffer"
+        );
+        assert!(Song::load_files_within(Vec::new(), 1).is_err(), "no stems");
     }
 
     #[test]
