@@ -133,13 +133,14 @@ After A to F, `cargo build -p xtask`, then `/review-rounds` with the base `d4209
   * The cap of a file whose head states no length (`engine::decode::largest_file`): the bytes of the song's limit at 384 kHz, 32 bits, two channels (3,072,000 bytes a second) for a WAV or FLAC, or at 320 kbit/s (40,000 bytes a second) for any other file, plus 16 MiB for tags.  For 100 s: 307.2 MB + 16 MiB, about 324 MB; and 4 MB + 16 MiB, about 21 MB.
   * Red, then green: the engine tests failed on `todo!()` stubs.  The three MixBusy tests failed with the old `keep_decoded` and `write_mix`.  The native limit tests failed on stubs and on the old checks.  The six browser tests of the routes (`a_drop_with_no_storage_refuses_a_long_wav_from_its_head`, `a_wav_of_no_stated_length_is_capped_then_stopped_at_the_limit`, `a_drop_over_the_read_ahead_cap_refuses_a_long_song`, `unstored_refuses_a_long_song_from_its_head`, `a_restore_on_the_page_refuses_a_long_song_from_heads_or_meta`, `an_unstored_restore_refuses_a_long_song`) failed with the limit off in `open_on_the_page` and `rebuild`.  The native tests of the refusal texts were written with the code.  web-test in Chrome: app lib 145, worker 68, decode-worker 10, all passed.
 * [ ] D: `mutants::skip`.
+  * 2026-10-28, implementer: done, for review.  `cargo mutants --list --all-features` (27.1.0, the repo's config): 8,322 before with `exclude_re`, 8,750 before without it, 8,316 after.  `exclude_re` hid 428.  The after list is the before list without 6, and no other function changed: 4 struct-field deletions in attributed functions (`keeps_stems` and `session` in `separation_unstored`, `note` in `open_on_the_page`, `want_device` in `separation_tests::app_with_a_stored_song`), and `*` to `+` and to `/` in the `FRAMES` constant of `separation_tests` (see Surprises).  The attribute is on 53 functions of `app/src/lib.rs`, `Opened::in_memory`, `impl Inbox`, `web::run` and `web::reload` of `app/src/reset.rs`, the `new`, `into_bytes` and `write` functions of `app/src/export.rs`'s `web`, and the modules `web_tests` and `separation_tests`.  No pattern matched a native function: `Shown::in_memory`, the `reload` of `xtask/src/e2e.rs` and the native `run` and `write` functions show with other prefixes, and each other name has one function, for wasm32 only.  No `unexpected_cfgs` warning in clippy, native and wasm32.
 * [ ] E: the stem worker's memory in Safari.
 * [ ] F: the output buffer.
 * [ ] G: review rounds, and the log in `docs/reviews/`.
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-10-28, D: `exclude_re` also kept two mutants of a constant, not only struct-field deletions.  `cargo mutants --list` names a mutant in a `const` with no function ("replace * with +", for `const FRAMES: usize = 2 * 44_100` in `separation_tests`).  So no `in <name>` pattern matched it.  The attribute on the module removes it.  Evidence: the before and after lists, compared by name without line numbers.
 
 ## Decision log
 

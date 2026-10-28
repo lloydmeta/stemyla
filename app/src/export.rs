@@ -376,6 +376,7 @@ mod web {
     }
 
     impl JsChannels {
+        #[cfg_attr(mutants, mutants::skip)]
         pub fn new(frames: usize) -> Self {
             Self {
                 left: Float32Array::new_with_length(frames as u32),
@@ -385,6 +386,7 @@ mod web {
     }
 
     impl Sink for JsChannels {
+        #[cfg_attr(mutants, mutants::skip)]
         fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
             let (start, end) = (at as u32, (at + left.len()) as u32);
             self.left.subarray(start, end).copy_from(left);
@@ -400,6 +402,7 @@ mod web {
     }
 
     impl JsWav {
+        #[cfg_attr(mutants, mutants::skip)]
         pub fn new(frames: usize, sample_rate: u32) -> Self {
             let bytes = Uint8Array::new_with_length((HEADER_BYTES + frames * FRAME_BYTES) as u32);
             bytes
@@ -411,12 +414,14 @@ mod web {
             }
         }
 
+        #[cfg_attr(mutants, mutants::skip)]
         pub fn into_bytes(self) -> Uint8Array {
             self.bytes
         }
     }
 
     impl Sink for JsWav {
+        #[cfg_attr(mutants, mutants::skip)]
         fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
             self.block.resize(left.len() * FRAME_BYTES, 0);
             write_pcm16(left, right, &mut self.block);
@@ -436,6 +441,7 @@ mod web {
     }
 
     impl JsSink {
+        #[cfg_attr(mutants, mutants::skip)]
         pub fn new(format: Format, frames: usize, sample_rate: u32) -> Self {
             match format {
                 Format::Wav => JsSink::Wav(JsWav::new(frames, sample_rate)),
@@ -446,6 +452,7 @@ mod web {
     }
 
     impl Sink for JsSink {
+        #[cfg_attr(mutants, mutants::skip)]
         fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
             match self {
                 JsSink::Wav(s) => s.write(at, left, right),
@@ -932,6 +939,7 @@ mod tests {
 
 /// Browser tests of the JS sinks (`cargo run -p xtask -- web-test`).
 #[cfg(all(test, target_arch = "wasm32"))]
+#[cfg_attr(mutants, mutants::skip)]
 mod web_tests {
     use super::*;
     use engine::mixdown::Mix;

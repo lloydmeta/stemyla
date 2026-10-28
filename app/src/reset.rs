@@ -243,6 +243,7 @@ export async function wipe_opfs() {
     /// first.  Deleting closes the page's own storage and waits for writes
     /// in progress.  If anything is left undeleted, or a file could not be
     /// fetched again, it returns what instead of reloading.
+    #[cfg_attr(mutants, mutants::skip)]
     pub async fn run(reset: Reset) -> Result<(), String> {
         if reset == Reset::DeleteStored {
             crate::store::close().await;
@@ -285,6 +286,7 @@ export async function wipe_opfs() {
         Ok(())
     }
 
+    #[cfg_attr(mutants, mutants::skip)]
     pub fn reload() {
         if let Some(w) = web_sys::window() {
             let _ = w.location().reload();

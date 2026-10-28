@@ -435,6 +435,7 @@ struct MemoryInput {
 type StemLanes = (Vec<ShownLane>, Option<std::rc::Rc<lanes::Overview>>);
 
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 impl Inbox {
     /// Keeps the result of the open `token`, unless the inbox holds the
     /// result of a newer open: two results that end in one frame show the
@@ -498,6 +499,7 @@ struct Opened {
 #[cfg(target_arch = "wasm32")]
 impl Opened {
     /// A song that plays from memory only.
+    #[cfg_attr(mutants, mutants::skip)]
     fn in_memory(song: Song, session: Option<String>, name: Option<String>) -> Self {
         Self {
             song: Shown::in_memory(song),
@@ -527,6 +529,7 @@ enum ResetStage {
 /// Asks the browser for the storage used and the stored songs, for the
 /// Storage menu.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn refresh_storage(pending: &std::rc::Rc<std::cell::RefCell<Inbox>>) {
     let usage = store::usage().await;
     let sessions = store::list().await;
@@ -560,6 +563,7 @@ pub fn build_version(id: Option<&str>) -> (String, Option<String>) {
 /// The app's source, where the model comes from and the build's version,
 /// with links: shown in the transport bar.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 pub fn about_menu(ui: &mut egui::Ui) {
     ui.menu_button("About", |ui| {
         ui.set_max_width(420.0);
@@ -609,6 +613,7 @@ const SONG_FILES: &str = ".mp3,.wav,.flac";
 
 /// The status line while the files open: "Opening "<name>"…".
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn opening_text(chosen: &Chosen) -> String {
     let name = chosen
         .first()
@@ -625,6 +630,7 @@ type Chosen = Vec<(String, web_sys::File)>;
 /// Logs the page's WebAssembly memory at `when` (D12 of
 /// `plans/active/stream-from-storage-m5.md`).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn log_page_memory(when: &str) {
     log::info!(
         "decoder: memory: page wasm {:.0} MB {when}",
@@ -640,6 +646,7 @@ fn log_page_memory(when: &str) {
 /// once the song opens; a song that does not open forgets it.  The result
 /// arrives through the inbox.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn open_chosen(
     chosen: Chosen,
     decoder: decoder::DecodeClient,
@@ -655,6 +662,7 @@ async fn open_chosen(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn open_chosen_now(
     chosen: &Chosen,
     decoder: &decoder::DecodeClient,
@@ -709,6 +717,7 @@ async fn open_chosen_now(
 /// Opens the files of a pick, with the pick's token, taken once files are
 /// chosen (D12 of the M7 plan).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn open_picked(
     chosen: Chosen,
     decoder: &decoder::DecodeClient,
@@ -742,6 +751,7 @@ fn open_picked(
 
 /// The next token of `opens`: one more than the last (D12 of the M7 plan).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn next_token(opens: &std::cell::Cell<u64>) -> u64 {
     let token = opens.get() + 1;
     opens.set(token);
@@ -752,6 +762,7 @@ fn next_token(opens: &std::cell::Cell<u64>) -> u64 {
 /// An open or a restore then ends with an error; the page does not decode
 /// the song itself (D9, finding 3-3 of M5).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn resetting(decoder: &decoder::DecodeClient) -> bool {
     decoder.is_closed() || store::is_closed()
 }
@@ -759,6 +770,7 @@ fn resetting(decoder: &decoder::DecodeClient) -> bool {
 /// Opens the chosen files, saved as session `id`, through the decode
 /// worker, or on the page if browser storage fails.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn open_saved(
     chosen: &Chosen,
     id: &str,
@@ -858,6 +870,7 @@ impl OnThePage {
 /// source, and refuses a long song before it reads a whole file.  `page`
 /// says what sent the song here.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn open_on_the_page(
     chosen: &Chosen,
     session: Option<String>,
@@ -935,6 +948,7 @@ enum Decode {
 /// line first (D2).  The decode's guard holds the session from the post to
 /// the end of D7, and is dropped before this returns.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn decode_session(
     id: &str,
     sources: &[store_meta::PlannedSource],
@@ -1031,6 +1045,7 @@ async fn decode_session(
 /// with the lane file of each lane that plays from storage (D8 of M6), and
 /// the guard that protects the session until it is shown (D10 of M6).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn restore_stored(
     id: &str,
     decoder: &decoder::DecodeClient,
@@ -1140,6 +1155,7 @@ async fn restore_stored(
 /// their lanes (D3 of the catch-up plan).  `None` when the session is
 /// gone.  A song past the limit is a [`Refused`] error.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 async fn on_the_page_of(
     id: &str,
     page: &OnThePage,
@@ -1157,6 +1173,7 @@ async fn on_the_page_of(
 /// Why a song of `meta` opens on the memory path: its lanes do not fit
 /// the read-ahead buffer (D2 of the M7 plan).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn too_many_lanes(meta: &store_meta::Meta) -> String {
     let lanes = store_meta::open_formats(meta).len() - 1;
     format!("its {lanes} lanes do not fit the read-ahead buffer, so it plays from memory")
@@ -2021,6 +2038,7 @@ impl StemApp {
     /// The stems of a storage-path separation are in place, as stored
     /// lanes for a song shown or being opened (D11 of the M7 plan).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn stored_stems_arrived(&mut self, stored: StoredSeparation) {
         let StoredSeparation {
             job,
@@ -2462,6 +2480,7 @@ impl StemApp {
     /// the decode worker writes them as a stored lane (D8 of the M7 plan).
     /// The session is protected from the request until the lane shows.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn classic_in_the_worker(&mut self, song: &Shown, inputs: &[store_meta::LaneFile]) {
         let Some(id) = self.session.clone() else {
             self.status = "Classic drums not made: the song is not kept in this browser".into();
@@ -2506,6 +2525,7 @@ impl StemApp {
     /// memory (the song fits the memory path), then runs the block HPSS on
     /// it (D8 of the M7 plan).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn classic_read_first(&mut self, song: &Shown) {
         let (serial, generation) = (self.song_serial, self.lanes_generation);
         self.classic_request = Some((serial, generation));
@@ -2559,6 +2579,7 @@ impl StemApp {
     /// the lanes did not change; else discards it (D1 and D8 of the M7
     /// plan).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn classic_arrived(&mut self, made: ClassicMade) {
         self.classic_request = None;
         if made.serial != self.song_serial {
@@ -2776,6 +2797,7 @@ impl StemApp {
     /// Opens the chosen files of a drop, with a token of its own (D12 of
     /// the M7 plan).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn open_files(&mut self, chosen: Chosen, ctx: &egui::Context) {
         self.status = opening_text(&chosen);
         let token = self.next_open();
@@ -2793,6 +2815,7 @@ impl StemApp {
     /// Opens the stored session `id` from the Storage menu, with a token
     /// of its own (D12 of the M7 plan).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn open_from_storage(&mut self, id: String) {
         self.status = "Opening the stored song…".into();
         let token = self.next_open();
@@ -2839,6 +2862,7 @@ impl StemApp {
     /// buffer, so they play silence (D2 of the M7 plan).  Natively, no
     /// stored lane plays, so the status line does not say it.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn plays_silent(&self) -> bool {
         self.playback.is_none()
             && self.song.as_ref().is_some_and(|song| {
@@ -2851,6 +2875,7 @@ impl StemApp {
     /// A token for a new open: one more than the last (D12 of the M7
     /// plan).  Every older open is then stale.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn next_open(&self) -> u64 {
         next_token(&self.opens)
     }
@@ -2859,6 +2884,7 @@ impl StemApp {
     /// a phone or tablet.  Several files load as stems of one song, as a
     /// multi-file drop does.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn pick_song(&mut self, ctx: &egui::Context) {
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
         let (decoder, opens) = (self.decoder.clone(), self.opens.clone());
@@ -2947,6 +2973,7 @@ impl StemApp {
 
     /// "Load model…", "Separate 6 stems" and the progress bar.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn separator_controls(&mut self, ui: &mut egui::Ui) {
         let Some(sep) = &mut self.separator else {
             return;
@@ -3057,6 +3084,7 @@ impl StemApp {
     /// file, which choose the path when they arrive
     /// ([`Self::separation_ready`]).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn start_separation(&mut self, ctx: &egui::Context) {
         if !separate_enabled(self.separating.is_some(), self.reading_stems)
             || self.shown_session_decoding()
@@ -3099,6 +3127,7 @@ impl StemApp {
     /// request, if that song is still shown.  On the storage path, the
     /// page first writes the mix file if the session has none of the song.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn separation_ready(
         &mut self,
         serial: u64,
@@ -3172,6 +3201,7 @@ impl StemApp {
     /// Finding 1-4 of review round 1 of M3: the page then does not save
     /// the stems, as for D4 of M3.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn separate_without_storage(&mut self, reason: &str) {
         if let Some(job) = &mut self.separating {
             job.session = None;
@@ -3187,6 +3217,7 @@ impl StemApp {
     /// the storage path ([`Self::mix_written`]).  Separate and the
     /// session's Forget stay disabled meanwhile.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn write_mix_first(&mut self, input: Box<dyn engine::mixdown::Pcm>, ctx: &egui::Context) {
         let (Some(id), Some(job)) = (self.session.clone(), &mut self.separating) else {
             self.separating = None;
@@ -3214,6 +3245,7 @@ impl StemApp {
     /// write failed, the song goes as a song with no room in storage (D7
     /// of M4).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn mix_written(&mut self, serial: u64, written: Result<(), String>) {
         let writing = self
             .separating
@@ -3252,6 +3284,7 @@ impl StemApp {
     /// on the storage path, from the session's mix file (D4 of M4); on the
     /// memory path, from two arrays, with `reason` for the status line.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn post_separation(&mut self, stage: JobStage, reason: Option<String>) {
         let Some(song) = self.song.clone() else {
             self.separating = None;
@@ -3309,6 +3342,7 @@ impl StemApp {
     /// song is at most `memory_limit` frames long, so the arrays are
     /// bounded, and they are outside WebAssembly memory.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn read_memory_input(
         &mut self,
         input: Box<dyn engine::mixdown::Pcm>,
@@ -3346,6 +3380,7 @@ impl StemApp {
     /// The memory path's input arrived: posts it, if the separation that
     /// asked for it still waits for it.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn memory_input_read(&mut self, input: MemoryInput) {
         let waiting = input.serial == self.song_serial
             && self
@@ -3380,6 +3415,7 @@ impl StemApp {
     /// After the post of a separation on `stage`'s path: its stage, its log
     /// lines and the status line.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn separation_posted(&mut self, sent: bool, stage: JobStage, reason: Option<String>) {
         if !sent {
             self.separating = None;
@@ -3411,6 +3447,7 @@ impl StemApp {
     /// separates again in memory if it fits, and is refused if not (D4 of
     /// M3).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn separation_unstored(&mut self, text: String) {
         log::warn!("separator: browser storage failed: {text}");
         let Some(job) = self.separating.take() else {
@@ -3471,6 +3508,7 @@ impl StemApp {
     /// writes `meta` (D5 of M3), then shows the stems as stored lanes, for
     /// a song shown or being opened (D6 of M3, D11 of the M7 plan).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn separation_stored(
         &mut self,
         names: Vec<String>,
@@ -3539,6 +3577,7 @@ impl StemApp {
     /// its last line.  iOS starts audio only after a tap, so the test waits
     /// for one.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn streamtest_controls(&mut self, ui: &mut egui::Ui) {
         let Some(status) = &self.streamtest else {
             return;
@@ -3565,6 +3604,7 @@ impl StemApp {
 
     /// What the browser keeps for this site: the song session and the model.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn storage_menu(&mut self, ui: &mut egui::Ui) {
         let (used, quota) = self.usage;
         let mut open = None;
@@ -3664,6 +3704,7 @@ impl StemApp {
     /// The Reset dialog, then its progress until the page reloads, or what
     /// could not be deleted.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn reset_dialog(&mut self, ctx: &egui::Context) {
         match &self.reset {
             ResetStage::Closed => {}
@@ -3691,6 +3732,7 @@ impl StemApp {
     /// comes back if a reset fails.  Separate stays hidden until a reload,
     /// because the worker stopped (`Separator::stopped`).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn stop_separation(&mut self) {
         if let Some(sep) = &mut self.separator {
             sep.stop();
@@ -3703,6 +3745,7 @@ impl StemApp {
     /// removal takes that session's `mix.f32` (D8).  The page calls it in
     /// each frame.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn publish_separating(&self) {
         let session = self
             .separating
@@ -3715,6 +3758,7 @@ impl StemApp {
     /// Whether the decode worker decodes the shown song's session now:
     /// Separate waits for it (D8).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn shown_session_decoding(&self) -> bool {
         self.session.as_deref().is_some_and(store::decoding)
     }
@@ -3723,6 +3767,7 @@ impl StemApp {
     /// playback stops, and both workers end, so `store::close` waits for no
     /// decode (D9).
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn prepare_reset(&mut self) {
         self.reset = ResetStage::Running;
         self.output = None;
@@ -3733,6 +3778,7 @@ impl StemApp {
     /// drops the guard of each decode, so `store::close` never waits for a
     /// decode, then the separation worker.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn stop_workers(&mut self) {
         self.decoder.stop();
         self.stop_separation();
@@ -3741,6 +3787,7 @@ impl StemApp {
     /// Stops playback and the worker, then runs the reset; the page reloads
     /// when it succeeds.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn start_reset(&mut self, ctx: &egui::Context, choice: reset::Reset) {
         self.prepare_reset();
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
@@ -3756,6 +3803,7 @@ impl StemApp {
     /// Applies the results of browser work that arrived since the last
     /// frame.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn apply_inbox(&mut self, ctx: &egui::Context) {
         let inbox = std::mem::take(&mut *self.pending.borrow_mut());
         // What the status line says after a song shows, after the inbox's
@@ -3871,6 +3919,7 @@ impl StemApp {
 
     /// Applies messages from the separation worker.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn poll_separator(&mut self, ctx: &egui::Context) {
         use separator::Event;
         let Some(sep) = &mut self.separator else {
@@ -4085,6 +4134,7 @@ impl StemApp {
     /// A lane's "Save" menu: of its stem, or of the mix as heard for the
     /// mix lane.  It gives the format chosen.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn save_menu(
         &self,
         ui: &mut egui::Ui,
@@ -4142,6 +4192,7 @@ impl StemApp {
     /// Starts saving a stem, or the mix as heard when `stem` is `None`.
     /// The save runs in [`Self::step_save`], a few ms in each frame.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn start_save(&mut self, stem: Option<usize>, format: export::Format) {
         use engine::mixdown::Pcm;
         let (Some(song), Some(params)) = (self.song.clone(), self.params.clone()) else {
@@ -4176,6 +4227,7 @@ impl StemApp {
     /// Steps the save in progress for a few ms, then hands the file to the
     /// browser, or the channels to the worker.
     #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
     fn step_save(&mut self, ctx: &egui::Context) {
         use export::JsSink;
         let Some(saving) = &mut self.saving else {
@@ -4500,6 +4552,7 @@ fn song_name(job: &SeparationJob) -> String {
 
 /// The status line for stems kept with a song that is not shown.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn kept_text(job: &SeparationJob, n: usize, secs: f64) -> String {
     format!(
         "Separated \"{}\" into {n} stems in {secs:.0} s and kept them in this browser; open it from Storage to play them.",
@@ -4572,6 +4625,7 @@ pub fn classic_too_long_text(song: &Shown, memory_limit: usize) -> String {
 /// The page's memory when a separation's last reply arrives, before it
 /// reads any stems (D9 of M3).
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 fn log_separation_end() {
     log::info!(
         "separator: memory: page wasm {:.0} MB as the separation ends",
@@ -4581,6 +4635,7 @@ fn log_separation_end() {
 
 /// Web entry point, called from `main` on wasm32.
 #[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
 pub fn start_web() {
     use wasm_bindgen::JsCast;
     console_error_panic_hook::set_once();
@@ -5957,6 +6012,7 @@ mod tests {
 /// `Separator` whose posts are kept, not sent (`cargo run -p xtask --
 /// web-test`).  The worker's replies are delivered by hand.
 #[cfg(all(test, target_arch = "wasm32"))]
+#[cfg_attr(mutants, mutants::skip)]
 mod separation_tests {
     use super::*;
     use stem_protocol::{Reply, Request, ToWorker};
