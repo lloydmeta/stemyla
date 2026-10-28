@@ -41,12 +41,13 @@ export function dt_stop_read_spy() {
   for (const [k, f] of dt_real) if (f) Blob.prototype[k] = f;
   return dt_reads;
 }
-// Browser storage refuses every write until `dt_allow_writes`.
+// Browser storage refuses every write until `dt_allow_writes`, with a
+// DOMException named `name`.
 let dt_real_write = null;
-export function dt_refuse_writes() {
+export function dt_refuse_writes(name) {
   const proto = FileSystemWritableFileStream.prototype;
   dt_real_write = proto.write;
-  proto.write = () => Promise.reject(new DOMException("refused by the test", "QuotaExceededError"));
+  proto.write = () => Promise.reject(new DOMException("refused by the test", name));
 }
 export function dt_allow_writes() { FileSystemWritableFileStream.prototype.write = dt_real_write; }
 // Counts the OPFS writes until `dt_writes_counted`.
@@ -91,7 +92,7 @@ extern "C" {
     fn dt_file(bytes: &[u8], name: &str) -> web_sys::File;
     fn dt_start_read_spy();
     fn dt_stop_read_spy() -> u32;
-    fn dt_refuse_writes();
+    fn dt_refuse_writes(name: &str);
     fn dt_allow_writes();
     fn dt_count_writes();
     fn dt_writes_counted() -> u32;
@@ -582,7 +583,7 @@ async fn no_session_decodes_on_the_page() {
     store::test_wipe().await;
     let fake = Fake::new();
     let chosen = vec![wav_file("lloyd.wav", 1_000, 0)];
-    dt_refuse_writes();
+    dt_refuse_writes(QUOTA_EXCEEDED);
     let opened = open_chosen_now(&chosen, &fake.client, MEMORY_PATH_MAX_FRAMES).await;
     dt_allow_writes();
     store::test_wipe().await;
@@ -846,7 +847,7 @@ async fn no_kept_line_when_the_session_cannot_be_made_current() {
         channels: vec![2],
     });
     let opened = output(&opened).await.expect("opened");
-    dt_refuse_writes();
+    dt_refuse_writes(QUOTA_EXCEEDED);
     show_as_newest(opened).await;
     dt_allow_writes();
     let lines = logged("song kept in browser storage");
@@ -2113,6 +2114,9 @@ fn shown_error(opened: &anyhow::Result<Opened>) -> String {
 /// One second at 44.1 kHz: the memory path's limit in these tests.
 const SECOND: usize = 44_100;
 
+/// The DOMException name of a full quota of browser storage.
+const QUOTA_EXCEEDED: &str = "QuotaExceededError";
+
 /// D3 of the catch-up plan: with no browser storage, a drop of a WAV whose
 /// header states 2 s is refused, with a limit of 1 s, from its head alone.
 /// The status line says why and what to do, and the page shows it as it is.
@@ -2122,7 +2126,7 @@ async fn a_drop_with_no_storage_refuses_a_long_wav_from_its_head() {
     let fake = Fake::new();
     let chosen = vec![wav_file("lloyd.wav", 2 * SECOND, 0)];
     let size = chosen[0].1.size() as u64;
-    dt_refuse_writes();
+    dt_refuse_writes(QUOTA_EXCEEDED);
     let (opened, largest, over) = reads_of(open_chosen_now(&chosen, &fake.client, SECOND)).await;
     dt_allow_writes();
     store::test_wipe().await;
@@ -2152,6 +2156,32 @@ async fn a_drop_with_no_storage_refuses_a_long_wav_from_its_head() {
     assert_eq!(app.status, text);
 }
 
+/// Finding 5-3 of review round 5: a drop whose save fails for a reason
+/// other than a full quota refuses a long song.  More free browser storage
+/// does not help, so the status line does not offer it.
+#[wasm_bindgen_test]
+async fn a_drop_whose_save_is_not_allowed_does_not_ask_for_free_storage() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let chosen = vec![wav_file("lloyd.wav", 2 * SECOND, 0)];
+    dt_refuse_writes("NotAllowedError");
+    let opened = open_chosen_now(&chosen, &fake.client, SECOND).await;
+    dt_allow_writes();
+    store::test_wipe().await;
+    let text = shown_error(&opened);
+    assert!(
+        text.starts_with(
+            "Not opened: this song is 0:02 long, too long to open in this browser now."
+        ) && text.contains("because browser storage could not keep it (")
+            && text.contains("NotAllowedError"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("Open a shorter song.") && !text.contains("Free browser storage"),
+        "{text}"
+    );
+}
+
 /// D3 of the catch-up plan: a streaming WAV states no length.  One larger
 /// than the largest file of a song of 1 s is refused from its head; a
 /// smaller one is read, and its decode stops at the limit.
@@ -2167,7 +2197,7 @@ async fn a_wav_of_no_stated_length_is_capped_then_stopped_at_the_limit() {
         "lloyd.wav".to_string(),
         dt_big_file(&header, (cap + 1) as f64, "lloyd.wav"),
     )];
-    dt_refuse_writes();
+    dt_refuse_writes(QUOTA_EXCEEDED);
     let (refused, _, over) = reads_of(open_chosen_now(&large, &fake.client, SECOND)).await;
     let mut streaming = vec![wav_file("acme.wav", 2 * SECOND, 1)];
     let bytes = {
@@ -2428,7 +2458,7 @@ async fn a_page_open_holds_one_file_at_a_time() {
     store::test_wipe().await;
     let fake = Fake::new();
     let chosen = six_padded_wavs(PADDED_BYTES);
-    dt_refuse_writes();
+    dt_refuse_writes(QUOTA_EXCEEDED);
     let start = store::tests::heap_start();
     dt_start_size_spy(picker::READ_BLOCK as u32);
     let opened = open_chosen_now(&chosen, &fake.client, 2 * SECOND).await;
@@ -2502,7 +2532,7 @@ async fn a_file_larger_than_its_stated_length_allows_is_refused_from_its_head() 
         "lloyd.wav".to_string(),
         dt_big_file(&wav, (cap + 1) as f64, "lloyd.wav"),
     )];
-    dt_refuse_writes();
+    dt_refuse_writes(QUOTA_EXCEEDED);
     let (refused, largest, over) = reads_of(open_chosen_now(&chosen, &fake.client, SECOND)).await;
     dt_allow_writes();
     store::test_wipe().await;
