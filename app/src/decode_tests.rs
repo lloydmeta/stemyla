@@ -2330,6 +2330,73 @@ async fn an_unstored_restore_refuses_a_long_song() {
     );
 }
 
+/// Review round 3 finding 3-3 (D3 of the catch-up plan): `text` refuses a
+/// song of 2 s that the page decodes because of the decode worker.  More
+/// free browser storage does not help, so the text does not offer it.
+fn assert_refused_for_the_worker(case: &str, text: &str) {
+    assert!(
+        text.starts_with(
+            "Not opened: this song is 0:02 long, too long to open in this browser now."
+        ) && text.contains("the decode worker"),
+        "{case}: {text}"
+    );
+    assert!(
+        text.ends_with("Open a shorter song.") && !text.contains("Free browser storage"),
+        "{case}: {text}"
+    );
+}
+
+/// Review round 3 finding 3-3: a decode worker that cannot start
+/// (`Ended::Stopped`) sends a long song to the page, for an open and for a
+/// restore.  The status line says to open a shorter song only.
+#[wasm_bindgen_test]
+async fn a_long_song_is_refused_with_no_storage_advice_when_the_decode_worker_stops() {
+    store::test_wipe().await;
+    let chosen = vec![wav_file("lloyd.wav", 2 * SECOND, 0)];
+    let id = saved(&chosen).await;
+    let failing = decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let restored = restore_stored(&id, &failing, SECOND).await;
+    let failing = decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let opened = open_chosen_now(&chosen, &failing, SECOND).await;
+    store::test_wipe().await;
+    let error = restored.expect("a session").err().expect("refused");
+    let text = open_error_text("Could not restore the stored song", &error);
+    assert_refused_for_the_worker("restore", &text);
+    assert_refused_for_the_worker("open", &shown_error(&opened));
+}
+
+/// Review round 3 finding 3-3: a decode worker that replies `decoded` with
+/// the channels of no source, or a reply of another kind, sends a long
+/// song to the page.  The status line says to open a shorter song only.
+#[wasm_bindgen_test]
+async fn a_long_song_is_refused_with_no_storage_advice_after_a_wrong_reply() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let id = saved(&vec![wav_file("lloyd.wav", 2 * SECOND, 0)]).await;
+    let wrong_channels = DecodeReply::Decoded {
+        frames: 2 * SECOND as u64,
+        new_mix: false,
+        channels: Vec::new(),
+    };
+    let replies = [
+        ("decoded with no channels", wrong_channels),
+        ("another kind", DecodeReply::OverviewsMade),
+    ];
+    for (n, (case, reply)) in (0..).zip(replies) {
+        let client = fake.client.clone();
+        let restore_id = id.clone();
+        let restored =
+            background(async move { restore_stored(&restore_id, &client, SECOND).await });
+        let _ = fake.request(n).await;
+        fake.reply(reply);
+        let restored = output(&restored).await.expect("a session");
+        let error = restored.err().expect("refused");
+        let text = open_error_text("Could not restore the stored song", &error);
+        assert_refused_for_the_worker(case, &text);
+    }
+    store::test_wipe().await;
+}
+
 /// Six WAVs of 1 s, each padded with zeros after its data to `bytes`
 /// bytes: a song whose files are much larger than its lanes.
 fn six_padded_wavs(bytes: usize) -> Chosen {
@@ -2347,6 +2414,10 @@ fn six_padded_wavs(bytes: usize) -> Chosen {
 
 /// The bytes of each file of [`six_padded_wavs`] in the tests below.
 const PADDED_BYTES: usize = 6_000_000;
+
+/// Review round 3 finding 3-4: each file is larger than a block, so each
+/// needs more than one read, and [`assert_one_block_at_a_time`] can fail.
+const _: () = assert!(PADDED_BYTES > 2 * picker::READ_BLOCK);
 
 /// Finding 1-3 of review round 1 of the catch-up plan (MEM-4): a decode
 /// on the page reads, decodes and drops one file at a time.  Six files of
@@ -2374,9 +2445,9 @@ async fn a_page_open_holds_one_file_at_a_time() {
     assert_one_block_at_a_time(&sizes);
 }
 
-/// Round 2 finding 2-3 (MEM-4): JavaScript holds at most one block of a
-/// file (`picker::READ_BLOCK`), never a whole file, from `sizes` of
-/// `dt_stop_size_spy`.
+/// Round 2 finding 2-3 (MEM-4): each read asks JavaScript for at most one
+/// block of a file (`picker::READ_BLOCK`), never the whole file, from
+/// `sizes` of `dt_stop_size_spy`.
 fn assert_one_block_at_a_time(sizes: &[f64]) {
     let (largest, over) = (sizes[0] as usize, sizes[1] as u32);
     assert_eq!(

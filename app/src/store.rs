@@ -363,8 +363,8 @@ async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
 }
 
 /// The bytes of the stored file at `path`, read in blocks
-/// (`picker::read_blob`), so JavaScript holds one block at a time.  `None`
-/// if it cannot be read.
+/// (`picker::read_blob`).  So each read asks JavaScript for at most one
+/// block, never the whole file.  `None` if it cannot be read.
 async fn read(path: &str) -> Option<Vec<u8>> {
     let file = file_handle(path).await?;
     match crate::picker::read_blob(&file).await {

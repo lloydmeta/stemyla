@@ -9,6 +9,9 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::*;
 
+#[path = "common/web_buffers.rs"]
+mod web_buffers;
+
 wasm_bindgen_test_configure!(run_in_browser);
 
 fn song(rate: u32) -> Song {
@@ -150,10 +153,11 @@ async fn buffers_left_late_by_a_busy_page_play_once_not_doubled() {
     let (before, from) = (callbacks(&app), clock(&app));
     sleep(500).await;
     let rendered = callbacks(&app) - before;
-    let buffers = (clock(&app) - from).as_secs_f64() / (2_048.0 / 44_100.0);
+    let rate = live_rate(&app).expect("a live output");
+    let buffers = web_buffers::buffers_in(clock(&app) - from, rate);
     assert!(buffers > 5.0, "the clock ran for {buffers:.1} buffers");
     assert!(
-        (buffers / 2.0..=buffers * 1.5).contains(&(rendered as f64)),
+        web_buffers::rendered_once(buffers).contains(&(rendered as f64)),
         "{rendered} rendered in {buffers:.1} buffers' time (twice as many doubled)"
     );
 }
