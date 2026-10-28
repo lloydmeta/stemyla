@@ -21,7 +21,7 @@ The third option (D1 to D8 of `plans/active/stream-from-storage-m8.md`).
 * The page offers a save file as a `Blob` of its `File`, of the format's type.  So no bytes enter the JS heap or WebAssembly memory.
 * The lifetime of save files: the page removes an offered file 10 minutes after the offer.  It removes the file of a failed or dropped save at once.  At its start, it removes each file older than one hour.  Reset removes the folder with the rest.
 * An MP3 is encoded from the WAV's 16-bit samples, not from the 32-bit mix.  A FLAC was 16-bit already, so it stays bit for bit the same.
-* When browser storage fails, a song of at most `app::MEMORY_PATH_MAX_FRAMES` frames saves through the JS sinks, as before (decision 0015).  A longer song does not save, and the status line says why.
+* When browser storage fails, a song of at most `app::MEMORY_PATH_MAX_FRAMES` frames saves through the JS sinks, as before (decision 0015).  A longer song does not save, and the status line says why.  This flat limit is an exception to decision 0020.  The JS sinks are in the JS heap, and a song on the memory path is already within 0020's limit (D8 of the M8 plan).
 
 ## Consequences
 

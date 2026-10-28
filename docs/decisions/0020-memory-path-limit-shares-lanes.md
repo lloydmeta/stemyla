@@ -1,6 +1,6 @@
 # 0020: the memory path's limit shrinks with the lanes in memory
 
-Status: proposed (2026-10-28, by the agent)
+Status: accepted (2026-10-28, by the maintainer)
 
 ## Context
 
