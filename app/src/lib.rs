@@ -2502,7 +2502,8 @@ impl StemApp {
     ///
     /// The page runs the last two routes only for a song within the memory
     /// path's limit for the lanes that it holds ([`classic_lanes`]).  A
-    /// longer song is refused.
+    /// longer song is refused.  The limit is the page's only (decision
+    /// 0020, MEM-4).  The native app gives no limit, so it refuses no song.
     pub fn start_classic_drums(&mut self) {
         let Some(shown) = self.song.clone() else {
             return;
@@ -2515,7 +2516,7 @@ impl StemApp {
         #[cfg(target_arch = "wasm32")]
         let limit = self.memory_limit;
         #[cfg(not(target_arch = "wasm32"))]
-        let limit = MEMORY_PATH_MAX_FRAMES;
+        let limit = usize::MAX;
         match classic_route(&shown, limit) {
             ClassicRoute::Memory => {}
             #[cfg(target_arch = "wasm32")]
@@ -5388,8 +5389,9 @@ mod tests {
     /// Finding 6-1 of review round 6 (MEM-4, decision 0020): classic drums
     /// on the `Memory` route makes one mix of its sources and its new lane.
     /// After a separation of one source in memory, the page holds 7 lanes,
-    /// so classic drums holds 9.  A song of 100 s is refused, and a song of
-    /// 77 s is not.
+    /// so classic drums holds 9.  On the page, a song of 100 s is refused,
+    /// and a song of 77 s is not.  The limit is the page's only (finding
+    /// 7-1 of review round 7): the native app refuses no length.
     #[test]
     fn classic_drums_in_memory_counts_its_mix_and_its_new_lane() {
         let names = [
@@ -5415,15 +5417,25 @@ mod tests {
             text,
             "Classic drums not made: this song is in memory, and it is longer than 1:17"
         );
-        // The native `start_classic_drums` takes the same route.
-        let mut app = StemApp {
-            want_device: false,
-            ..StemApp::default()
-        };
-        app.open_song(separated(MEMORY_PATH_MAX_FRAMES));
-        app.start_classic_drums();
-        assert!(!app.classic_running(), "no job starts");
-        assert_eq!(app.status, text);
+        let three_minutes = || shown_of(&["lloyd"], 180 * 44_100);
+        assert_eq!(
+            classic_route(&three_minutes(), MEMORY_PATH_MAX_FRAMES),
+            ClassicRoute::TooLong,
+            "the page refuses 3 minutes"
+        );
+        // The native `start_classic_drums` starts a job for a song of any
+        // length.  `classic_drums_on_the_page_refuses_past_its_limit`
+        // checks the page's.
+        #[cfg(not(target_arch = "wasm32"))]
+        for song in [three_minutes(), separated(240 * 44_100)] {
+            let mut app = StemApp {
+                want_device: false,
+                ..StemApp::default()
+            };
+            app.open_song(song);
+            app.start_classic_drums();
+            assert!(app.classic_running(), "a job starts: {}", app.status);
+        }
     }
 
     /// A song of `names` lanes of `frames` frames, each in memory.
@@ -7096,6 +7108,31 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
         assert!(!added);
         assert!(!running);
         assert!(status.contains("QuotaExceededError"), "{status}");
+    }
+
+    /// Finding 7-1 of review round 7 (decision 0020): the page's
+    /// `start_classic_drums` refuses a song in memory past the page's limit
+    /// (`memory_limit`).  The native app has no limit.
+    #[wasm_bindgen_test]
+    fn classic_drums_on_the_page_refuses_past_its_limit() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        app.memory_limit = 5;
+        app.open_memory_song(Song {
+            sample_rate: 44_100,
+            frames: 6,
+            stems: vec![Stem {
+                name: "lloyd".into(),
+                left: vec![0.0; 6].into(),
+                right: vec![0.0; 6].into(),
+            }],
+        });
+        let shown = app.song.clone().expect("a song");
+        app.start_classic_drums();
+        assert!(!has_classic(&app), "no lane added");
+        assert_eq!(app.status, classic_too_long_text(&shown, 5));
     }
 
     /// D11 of the M7 plan: after `stored` and `done`, the stems show as
