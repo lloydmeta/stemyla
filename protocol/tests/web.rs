@@ -482,16 +482,39 @@ fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
                 "{rate}"
             );
         }
-        let arrays = from_json(&r#"{"type": "KIND", "rate": 0}"#.replace("KIND", kind));
-        let _ = Reflect::set(&arrays, &"left".into(), &samples(&[0.5]));
-        let _ = Reflect::set(&arrays, &"right".into(), &samples(&[0.5]));
-        assert_eq!(
-            ToWorker::from_js(&arrays).expect_err("refused").text,
-            format!(
-                "rate must be a whole number of hertz from 1 to {}",
-                u32::MAX
+        // Finding 3-3 of review round 3 of M8: the arrays form refuses each
+        // bad rate too.
+        for rate in [r#""44100""#, "0", "-1", "1.5", "4294967296", "null"] {
+            let arrays =
+                from_json(&format!(r#"{{"type": "KIND", "rate": {rate}}}"#).replace("KIND", kind));
+            let _ = Reflect::set(&arrays, &"left".into(), &samples(&[0.5]));
+            let _ = Reflect::set(&arrays, &"right".into(), &samples(&[0.5]));
+            assert_eq!(
+                ToWorker::from_js(&arrays).expect_err("refused").text,
+                format!(
+                    "rate must be a whole number of hertz from 1 to {}",
+                    u32::MAX
+                ),
+                "{kind}: arrays at {rate}"
+            );
+        }
+        // Nit 3-9 of review round 3 of M8: 1 Hz is the least rate.
+        let least = from_json(
+            &r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4, "out": "saves/1-1.flac", "rate": 1}"#
+                .replace("KIND", kind),
+        );
+        assert!(
+            matches!(
+                ToWorker::from_js(&least).map(|w| w.request),
+                Ok(Request::Flac {
+                    source: Encode::Stored { rate: 1, .. },
+                    ..
+                } | Request::Mp3 {
+                    source: Encode::Stored { rate: 1, .. },
+                    ..
+                })
             ),
-            "{kind}: arrays at 0 Hz"
+            "{kind}: 1 Hz decodes as 1"
         );
         let most = from_json(
             &r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4, "out": "saves/1-1.flac", "rate": 4294967295}"#

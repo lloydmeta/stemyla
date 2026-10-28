@@ -887,6 +887,19 @@ async fn a_failed_stored_encode_saves_again_in_memory_only_for_a_short_song() {
             .all(|(k, x)| (x * 32768.0 - wav_left(k)).abs() <= 1.0),
         "the save's own mix, not the mix after the mute"
     );
+    assert!(
+        matches!(
+            &posted[0].0,
+            stem_protocol::Request::Flac {
+                source: stem_protocol::Encode::Arrays {
+                    rate: Some(44_100),
+                    ..
+                },
+                ..
+            }
+        ),
+        "nit 3-10: the arrays request's rate"
+    );
     assert!(status.contains("held in memory"), "{status}");
     assert!(!long_saving, "no memory save of a long song");
     assert_eq!(long_posts, 0);
@@ -1253,4 +1266,87 @@ async fn a_lane_change_drops_the_source_of_a_posted_encode() {
     store::test_remove(&format!("sessions/{id}")).await;
     assert!(kept, "a posted encode keeps its source");
     assert!(dropped, "a lane change drops it");
+}
+
+/// Finding 3-5 of review round 3 of M8: a save dropped while its last
+/// write and its close are in flight leaves no file and no stream.
+#[wasm_bindgen_test]
+async fn a_save_dropped_during_its_close_leaves_no_file() {
+    let id = "m8-drop-in-close";
+    let (shown, _) = stored_song(id, 10 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let mut job = mix_save(&shown, SAVE);
+    run_job(&mut job).await;
+    for _ in 0..1_000 {
+        if job.sink().ready() {
+            break;
+        }
+        sv_sleep(1).await;
+    }
+    let first = job.sink_mut().finish();
+    drop(job);
+    writes_end().await;
+    let writes = store::test_writes();
+    let files = save_files().await;
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(first, Finish::Pending, "the close is in flight");
+    assert_eq!(writes, 0, "no stream stays open");
+    assert_eq!(files, "", "no save file stays");
+}
+
+/// A FLAC save of stem `stem`, or of the mix, posted to `worker`: the
+/// output file that the request names, and its name.
+async fn posted_flac_of(
+    app: &mut StemApp,
+    worker: &FakeWorker,
+    stem: Option<usize>,
+) -> (String, String) {
+    app.start_save(stem, export::Format::Flac);
+    run_save(app).await;
+    match requests(worker).pop() {
+        Some((
+            stem_protocol::Request::Flac {
+                name,
+                source: stem_protocol::Encode::Stored { out, rate, .. },
+            },
+            _,
+        )) => {
+            assert_eq!(rate, 44_100, "nit 3-10: the stored request\x27s rate");
+            (out, name.expect("a name"))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Nit 3-6 of review round 3 of M8: two save failures reported while a save
+/// runs each show once, also in the frame where that save moves to the
+/// memory path and writes no progress.
+#[wasm_bindgen_test]
+async fn two_save_failures_each_show_once() {
+    let id = "m8-two-reports";
+    let (shown, _) = stored_song(id, 30 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown, true);
+    let worker = worker.expect("a worker");
+    let (mix_out, mix_name) = posted_flac_of(&mut app, &worker, None).await;
+    let (bass_out, bass_name) = posted_flac_of(&mut app, &worker, Some(0)).await;
+    sv_spy_links();
+    store::tests::refuse_next_writable();
+    app.start_save(Some(1), export::Format::Wav);
+    // The refused open ends before the next frame.
+    sv_sleep(100).await;
+    reply(&mut app, failed(&mix_name, &mix_out));
+    reply(&mut app, failed(&bass_name, &bass_out));
+    step_frames(&mut app, 1).await;
+    let status = app.status.clone();
+    app.saving = None;
+    sv_links().await;
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    for name in [&mix_name, &bass_name] {
+        let text = format!("Could not encode {name} in browser storage");
+        assert_eq!(status.matches(&text).count(), 1, "{name}: {status}");
+    }
 }

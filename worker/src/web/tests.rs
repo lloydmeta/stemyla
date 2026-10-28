@@ -1566,11 +1566,19 @@ async fn a_failed_stored_encode_says_why_and_leaves_no_file() {
     let frames = 3 * FLAC_BLOCK + 7;
     for (codec, out) in [(Codec::Flac, SAVE_FLAC), (Codec::Mp3, SAVE_MP3)] {
         let kind = codec.kind();
-        for case in ["wrong size", "missing", "no handle", "write refused"] {
+        for case in [
+            "wrong size",
+            "too long",
+            "missing",
+            "no handle",
+            "write refused",
+        ] {
             fresh().await;
             let (wav, _, _) = save_wav(frames);
             match case {
                 "wrong size" => plant_at(SAVE_WAV, &wav[..wav.len() - 4]).await,
+                // Finding 3-4 of review round 3 of M8: 4 bytes more.
+                "too long" => plant_at(SAVE_WAV, &[wav.as_slice(), &[0; 4]].concat()).await,
                 "missing" => plant_folder("saves").await,
                 _ => plant_at(SAVE_WAV, &wav).await,
             }

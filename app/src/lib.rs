@@ -4517,10 +4517,21 @@ impl StemApp {
         }
         self.step_save_now(ctx);
         if !self.save_reports.is_empty() {
+            // The save's own text, with no report in it, then each report
+            // once (nit 3-6 of review round 3 of M8).
+            let own = self
+                .save_reports
+                .iter()
+                .fold(self.status.clone(), |text, report| {
+                    text.replace(report.as_str(), "")
+                });
+            let own = own.trim();
             let reports = self.save_reports.join("  ");
-            if !self.status.ends_with(&reports) {
-                self.status = format!("{}  {reports}", self.status);
-            }
+            self.status = if own.is_empty() {
+                reports
+            } else {
+                format!("{own}  {reports}")
+            };
             if self.saving.is_none() {
                 self.save_reports.clear();
             }

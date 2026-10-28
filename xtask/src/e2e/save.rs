@@ -56,28 +56,59 @@ pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
 /// its MP3, plus [`ONE_MIB`].
 pub(super) const MP3_FACTOR: f64 = 4.0;
 const ONE_MIB: f64 = 1_048_576.0;
+/// The limit of the `e2e save` step in CI's `browser-tests` job
+/// (`timeout-minutes`), in seconds.  A run takes about 3 minutes on the
+/// maintainer's Mac.  The limit is the longest that every wait of a run can
+/// take (finding 3-1 of review round 3 of M8).  So a run that waits in vain
+/// still ends on a check of its own.  A step that CI stops writes no
+/// `save.log`, but each note of the run also goes to the step's output.
+pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
 /// The longest wait, in seconds, for a save to offer its file.  On the
 /// maintainer's Mac, the longest save (an MP3 of 10 minutes) took about 48 s
-/// from its restore to its offer, and CI runs `e2e flac` twice as fast.  So
-/// 120 s leaves room, and a save that offers nothing ends the run within the
-/// 60 minutes of CI's job (finding 1-4 of review round 1 of M8).
+/// from its restore to its offer.  CI ran `e2e flac` twice as fast.
 pub(super) const SAVE_WAIT_S: u64 = 120;
 /// The longest wait, in seconds, for a restore and for its stem overviews.
 /// The first restore of the 10-minute session took about 4 s, and a
 /// later restore less.
 pub(super) const RESTORE_WAIT_S: u64 = 60;
-/// The longest that the waits for a save, a restore and stem overviews can
-/// take together: each save waits for its restore and its offer, and each
-/// first restore waits for the restore and for the stem overviews (finding
-/// 2-2 of review round 2 of M8).  It does not count the waits of `in_page`
-/// (the plant of each session, up to 900 s; the read of each 1-minute file,
-/// up to 300 s; the clean-up, the calibration, the session switches and
-/// the heap readings, up to 120 s each) or the idle times between steps.
-pub(super) const WAITS_S: u64 = (FORMATS.len() * SECONDS.len()) as u64
-    * (SAVE_WAIT_S + RESTORE_WAIT_S)
-    + SECONDS.len() as u64 * 2 * RESTORE_WAIT_S;
-// They fit in half of the 60 minutes of CI's job.
-const _: () = assert!(WAITS_S < 30 * 60);
+/// The longest wait, in seconds, for the app to start.
+pub(super) const START_WAIT_S: u64 = 60;
+/// The longest wait, in seconds, for the plant of a session.  The plant of
+/// the 10-minute session took about 5 s.
+pub(super) const PLANT_WAIT_S: u64 = 120;
+/// The longest wait, in seconds, for the read of a 1-minute file.
+pub(super) const READ_WAIT_S: u64 = 60;
+/// The longest wait, in seconds, for the removal of the sessions and the
+/// save files.
+pub(super) const CLEAN_WAIT_S: u64 = 60;
+/// The longest wait, in seconds, for a short script: a session switch, the
+/// calibration, a heap reading or the list of save files.
+pub(super) const SCRIPT_WAIT_S: u64 = 15;
+/// The idle time of each save, in seconds: 3 s before it, 0.5 s with the
+/// menu open and 1 s after it, rounded up.
+const SAVE_IDLE_S: u64 = 5;
+/// The saves of a run, and the first restores of its sessions.
+const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
+const FIRST_RESTORES: u64 = SECONDS.len() as u64;
+/// The longest that all the waits of a run can take together (finding 2-2
+/// of review round 2 of M8).  These are the start, the calibration, the
+/// two clean-ups, and the plant of each session.  Each first restore waits
+/// for a session switch, the restore and the stem overviews.  Each save
+/// waits for a session switch, the restore, two heap readings and its
+/// offer, and idles.  The 1-minute save of each format reads its file.
+/// The run ends with the list of save files.  It does not count the
+/// WebDriver commands of a click or a screenshot, which return at once.
+pub(super) const WAITS_S: u64 = START_WAIT_S
+    + SCRIPT_WAIT_S
+    + 2 * CLEAN_WAIT_S
+    + FIRST_RESTORES * PLANT_WAIT_S
+    + FIRST_RESTORES * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S)
+    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 2 * SCRIPT_WAIT_S + SAVE_WAIT_S + SAVE_IDLE_S)
+    + FORMATS.len() as u64 * READ_WAIT_S
+    + SCRIPT_WAIT_S;
+// Each wait, and all of them together, end within the step's limit.
+const _: () = assert!(WAITS_S < STEP_LIMIT_S);
+const _: () = assert!(PLANT_WAIT_S < STEP_LIMIT_S && SAVE_WAIT_S < STEP_LIMIT_S);
 /// The calibration array, and the least rise of the measure that it must
 /// make.
 const CALIBRATION_BYTES: u64 = 64 << 20;
@@ -417,21 +448,22 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         ],
         "index.html",
     )?;
-    let ready = p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, START_WAIT_S, |l| l.contains("separator: "))?;
     p.check(ready.is_some(), "the app started");
-    let calibration = in_page(&mut p, CALIBRATE, json!([CALIBRATION_BYTES]), 60)?.as_f64();
+    let calibration =
+        in_page(&mut p, CALIBRATE, json!([CALIBRATION_BYTES]), SCRIPT_WAIT_S)?.as_f64();
     p.note(&format!(
         "save: calibration: a {CALIBRATION_BYTES}-byte array raised the measure by {calibration:?} bytes"
     ));
     let (ok, what) = calibration_check(calibration);
     p.check(ok, &what);
-    in_page(&mut p, CLEAN, json!([]), 120)?;
+    in_page(&mut p, CLEAN, json!([]), CLEAN_WAIT_S)?;
     for seconds in SECONDS {
         let frames = in_page(
             &mut p,
             PLANT,
             json!([session_id(seconds), seconds, STEMS]),
-            900,
+            PLANT_WAIT_S,
         )?;
         p.note(&format!("save: planted a session of {frames} frames"));
     }
@@ -455,7 +487,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             let save = save_once(&mut p, o, format, row, seconds)?;
             p.note(&format!("save: {save:?}"));
             if let Some(whole) = reads_back(format, seconds) {
-                let file = in_page(&mut p, LAST_FILE, json!([whole]), 300)?;
+                let file = in_page(&mut p, LAST_FILE, json!([whole]), READ_WAIT_S)?;
                 p.note(&format!(
                     "save: {format}, {seconds} s: the file starts with {:?}, {} bytes",
                     file["head"], file["size"]
@@ -465,7 +497,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             saves.push(save);
         }
     }
-    let names = in_page(&mut p, SAVE_NAMES, json!([]), 60)?;
+    let names = in_page(&mut p, SAVE_NAMES, json!([]), SCRIPT_WAIT_S)?;
     for s in &saves {
         p.note(&format!(
             "save: {} {} s: JS heap measure {:?} MB; worker growth and file {:?}",
@@ -480,7 +512,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     }
     let (ok, what) = saves_folder_check(&names);
     p.check(ok, &what);
-    in_page(&mut p, CLEAN, json!([]), 120)?;
+    in_page(&mut p, CLEAN, json!([]), CLEAN_WAIT_S)?;
     let errors = p.errors();
     p.check(
         errors.is_empty(),
@@ -495,7 +527,7 @@ const OVERVIEWS_END: &str = "at the end of the overviews request";
 /// Makes the session of `seconds` current and reloads, until the song shows
 /// with its stems.
 fn restore(p: &mut Page, seconds: u32) -> Result<()> {
-    in_page(p, MAKE_CURRENT, json!([session_id(seconds)]), 60)?;
+    in_page(p, MAKE_CURRENT, json!([session_id(seconds)]), SCRIPT_WAIT_S)?;
     p.reload()?;
     let from = p.mark();
     let restored = p.wait_for(from, RESTORE_WAIT_S, |l| {
@@ -512,7 +544,12 @@ fn restore(p: &mut Page, seconds: u32) -> Result<()> {
 fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> Result<Save> {
     restore(p, seconds)?;
     p.idle(3.0)?;
-    let before = in_page(p, "return await window.__e2e_heap();", json!([]), 60)?;
+    let before = in_page(
+        p,
+        "return await window.__e2e_heap();",
+        json!([]),
+        SCRIPT_WAIT_S,
+    )?;
     p.session.execute("window.__e2e_start_heap();", json!([]))?;
     let mark = p.mark();
     p.click_at(o.save_x, o.save_y, "the mix lane's Save")?;
@@ -520,7 +557,12 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     p.screenshot(&format!("{format}-{seconds}-menu"))?;
     p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
     let offered = p.wait_for(mark, SAVE_WAIT_S, |l| l.contains("e2e: offered "))?;
-    let max = in_page(p, "return await window.__e2e_stop_heap();", json!([]), 60)?;
+    let max = in_page(
+        p,
+        "return await window.__e2e_stop_heap();",
+        json!([]),
+        SCRIPT_WAIT_S,
+    )?;
     let heap = heap_rise(&max, &before);
     let offered = Some(offer_of(offered.as_deref(), format, seconds)?);
     let worker = p.log[mark..]
@@ -841,5 +883,23 @@ mod tests {
             }),
             [false, false, false]
         );
+    }
+
+    /// Finding 3-1 of review round 3 of M8: CI gives the `e2e save` step the
+    /// limit that the waits fit in.
+    #[test]
+    fn the_ci_step_limit_is_the_waits_limit() {
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        let step = ci
+            .split("e2e save --browser chrome")
+            .nth(1)
+            .expect("the e2e save step");
+        let minutes: u64 = step
+            .lines()
+            .take_while(|l| !l.trim_start().starts_with("- "))
+            .find_map(|l| l.trim().strip_prefix("timeout-minutes:"))
+            .and_then(|m| m.trim().parse().ok())
+            .expect("the step's timeout-minutes");
+        assert_eq!(minutes * 60, STEP_LIMIT_S);
     }
 }

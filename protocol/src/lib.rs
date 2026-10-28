@@ -28,10 +28,12 @@
 //! * `{type: "selftest", base?: string}`: compare GPU results with the CPU
 //!   port's reference files (`xtask roformer-selftest`).
 //! * `{type: "bench"}`: time the GPU kernels.
-//! * `{type: "mp3", name, left, right, rate}`: encode one stem or mix as a
-//!   192 kbps MP3 (buffers transferred, the memory path of a save).
-//! * `{type: "flac", name, left, right, rate}`: encode one stem or mix as
-//!   a 16-bit FLAC (buffers transferred, the memory path of a save).
+//! * `{type: "mp3", name, left, right, rate?}`: encode one stem or mix as a
+//!   192 kbps MP3 (buffers transferred, the memory path of a save).  The
+//!   worker takes 44,100 Hz with no `rate`.
+//! * `{type: "flac", name, left, right, rate?}`: encode one stem or mix as
+//!   a 16-bit FLAC (buffers transferred, the memory path of a save).  The
+//!   worker takes 44,100 Hz with no `rate`.
 //! * `{type: "mp3" or "flac", name, wav, frames, out, rate}`: encode the
 //!   16-bit stereo WAV file at `wav`, of `frames` frames, into the file at
 //!   `out` ([`Encode::Stored`], the storage path of a save).  Both paths
@@ -40,7 +42,9 @@
 //!   when the encode fails.  A request with both arrays and `wav`, or
 //!   neither, with `out` or `frames` but no `wav`, with no `out` or no
 //!   `rate`, or with `frames` that is not a whole number from 0 to
-//!   `usize::MAX`, is refused.  The worker also refuses a `wav` or `out`
+//!   `usize::MAX`, is refused.  A request of either form with a `rate` that
+//!   is not a whole number from 1 to `u32::MAX` is refused.  The worker
+//!   also refuses a `wav` or `out`
 //!   outside `saves/`, and a `wav` equal to `out`.  Each refusal gives
 //!   `error`, and the worker removes nothing.
 //!

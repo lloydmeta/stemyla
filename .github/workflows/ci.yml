@@ -198,7 +198,11 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
         # About 3 minutes on the maintainer's Mac; not measured on CI yet.
-        timeout-minutes: 10
+        # The limit is the longest that all the waits of a run can take
+        # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal
+        # to it).  A stopped step writes no save.log, but its output has
+        # every note of the run.
+        timeout-minutes: 40
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.
       - if: failure() || cancelled()
