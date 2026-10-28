@@ -542,7 +542,7 @@ mod web {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use stored::{Finish, StoredWav};
+pub use stored::{Finish, SaveSink, StoredWav};
 
 /// The sink of the storage path of a save: a 16-bit WAV save file in
 /// browser storage, written in blocks (D3 of M8).
@@ -751,6 +751,39 @@ mod stored {
         #[cfg_attr(mutants, mutants::skip)]
         fn failed(&self) -> Option<String> {
             self.shared.borrow().failed.clone()
+        }
+    }
+
+    /// The sink of a save: a WAV save file (the storage path of M8), or JS
+    /// arrays (the memory path, decision 0015).
+    pub enum SaveSink {
+        Stored(StoredWav),
+        Memory(super::JsSink),
+    }
+
+    impl Sink for SaveSink {
+        #[cfg_attr(mutants, mutants::skip)]
+        fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
+            match self {
+                Self::Stored(s) => s.write(at, left, right),
+                Self::Memory(s) => s.write(at, left, right),
+            }
+        }
+
+        #[cfg_attr(mutants, mutants::skip)]
+        fn ready(&self) -> bool {
+            match self {
+                Self::Stored(s) => s.ready(),
+                Self::Memory(s) => s.ready(),
+            }
+        }
+
+        #[cfg_attr(mutants, mutants::skip)]
+        fn failed(&self) -> Option<String> {
+            match self {
+                Self::Stored(s) => s.failed(),
+                Self::Memory(s) => s.failed(),
+            }
         }
     }
 

@@ -1059,19 +1059,29 @@ async fn a_lane_added_during_a_save_keeps_the_save() {
     app.add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
     let kept = app.saving.is_some();
     let ctx = egui::Context::default();
+    // The storage path's promises resolve between frames.
     for _ in 0..10_000 {
         if app.saving.is_none() {
             break;
         }
         app.step_save(&ctx);
+        pb_test_sleep(1).await;
     }
     let status = app.status.clone();
+    // The removal of the WAV save file runs after the last frame.
+    pb_test_sleep(100).await;
+    let saves = store::tests::names_in(store::SAVES).await;
     app.load_demo();
     assert!(started, "the save started");
     assert!(kept, "the save is kept");
     assert!(
         status.contains(".flac") && status.contains("encoding worker is not running"),
         "the save ran to its end: {status}"
+    );
+    assert_eq!(
+        saves.as_deref(),
+        Some(""),
+        "the WAV save file of a FLAC with no worker is removed"
     );
 }
 
@@ -1087,6 +1097,7 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
     let (mut app, _) = showing(id, song, files);
     app.separator = None;
     assert!(store::test_remove(&format!("sessions/{id}/stems/drums.wav")).await);
+    crate::save_tests::sv_spy_links();
     let ctx = egui::Context::default();
     let mut ends = Vec::new();
     for format in [export::Format::Flac, export::Format::Wav] {
@@ -1099,8 +1110,16 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
         }
         ends.push((format, frames, app.saving.is_none(), app.status.clone()));
     }
+    let links = crate::save_tests::sv_links().await.length();
+    pb_test_sleep(100).await;
+    let saves = store::tests::names_in(store::SAVES).await;
     app.load_demo();
     store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(links, 0, "no download");
+    assert!(
+        saves.as_deref().is_none_or(str::is_empty),
+        "no save file stays: {saves:?}"
+    );
     for (format, frames, ended, status) in ends {
         assert!(ended, "{format:?}: the save ended");
         assert!(

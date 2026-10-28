@@ -4,6 +4,11 @@
 //! save files.  The test plants a stored song and steps the save's job as
 //! the page does.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "MEM-1: test code, which does not ship"
+)]
+
 use super::*;
 use export::{ExportJob, Finish, SAVE_WRITE_BYTES, Sink, StoredWav};
 use wasm_bindgen::prelude::*;
@@ -12,31 +17,40 @@ use wasm_bindgen_test::*;
 #[wasm_bindgen(inline_js = r#"
 export function sv_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // Keeps each download that the page offers, in place of the download:
-// the link's name and the Blob of its object URL.
-let links = null;
-let real_click = null;
-let real_url = null;
+// the link's name and the Blob of its object URL.  Once on, the spy stays
+// on for the rest of the test binary: an offer is async, so a click can
+// come after a test ends, and a real click saves a file in the user's
+// downloads.
+let links = [];
+let spying = false;
 export function sv_spy_links() {
-  if (real_click) throw new Error("a spy is already on the links");
   links = [];
+  if (spying) return;
+  spying = true;
   const blobs = new Map();
-  real_url = URL.createObjectURL;
+  const real_url = URL.createObjectURL;
   URL.createObjectURL = (b) => { const u = real_url(b); blobs.set(u, b); return u; };
-  real_click = HTMLAnchorElement.prototype.click;
   HTMLAnchorElement.prototype.click = function () { links.push({ name: this.download, blob: blobs.get(this.href) }); };
 }
-// Restores both, and gives the downloads offered since `sv_spy_links`.
-export function sv_links() {
-  URL.createObjectURL = real_url;
-  HTMLAnchorElement.prototype.click = real_click;
-  real_click = null;
-  return links;
+// The downloads offered since `sv_spy_links`, after the offers in flight.
+export async function sv_links() {
+  await new Promise((r) => setTimeout(r, 200));
+  const out = links;
+  links = [];
+  return out;
 }
 "#)]
 extern "C" {
     async fn sv_sleep(ms: u32);
     pub(crate) fn sv_spy_links();
-    pub(crate) fn sv_links() -> js_sys::Array;
+    #[wasm_bindgen(js_name = sv_links)]
+    async fn sv_links_js() -> JsValue;
+}
+
+/// The downloads that the page offered since [`sv_spy_links`], after the
+/// offers in flight.
+pub(crate) async fn sv_links() -> js_sys::Array {
+    sv_links_js().await.unchecked_into()
 }
 
 const SECOND: usize = 44_100;
@@ -370,13 +384,13 @@ async fn an_offered_save_file_is_removed_when_its_timer_ends() {
         .expect("planted");
     sv_spy_links();
     let offered = store::download_file("lloyd - mix.wav", "saves/3-1.wav", "audio/wav", 50).await;
-    let links = sv_links();
     let kept = store::test_read("saves/3-1.wav").await.is_some();
+    let links = sv_links().await;
     sv_sleep(200).await;
     let gone = store::test_read("saves/3-1.wav").await.is_none();
     sv_spy_links();
     let missing = store::download_file("lloyd.wav", "saves/4-1.wav", "audio/wav", 50).await;
-    let no_links = sv_links().length();
+    let no_links = sv_links().await.length();
     store::test_remove(store::SAVES).await;
     assert!(offered.is_ok(), "{offered:?}");
     assert_eq!(links.length(), 1, "one download");
@@ -409,4 +423,596 @@ fn save_paths_are_new_for_each_save() {
     assert_ne!(a, b);
     let page = |p: &str| p.rsplit_once('-').map(|(page, _)| page.to_string());
     assert_eq!(page(&a), page(&b), "one page");
+}
+
+// The page's saves through storage (step 3 of the M8 plan).
+
+#[wasm_bindgen(inline_js = r#"
+// Keeps each message posted to `worker`, with its transfer list.
+export function sv_spy_posts(worker) {
+  const posts = [];
+  worker.postMessage = (data, transfer) => posts.push({ data, transfer: transfer || [] });
+  return posts;
+}
+export function sv_deliver(worker, data) {
+  worker.dispatchEvent(new MessageEvent("message", { data }));
+}
+export function sv_error_event() { return new Event("error"); }
+"#)]
+extern "C" {
+    fn sv_spy_posts(worker: &web_sys::Worker) -> js_sys::Array;
+    fn sv_deliver(worker: &web_sys::Worker, data: &JsValue);
+    fn sv_error_event() -> web_sys::Event;
+}
+
+/// A worker that the test drives: what the page posts to it, and its
+/// `onerror` handler, which stops it.
+struct FakeWorker {
+    posts: js_sys::Array,
+    stop: js_sys::Function,
+}
+
+/// A page with no audio device that shows `shown` as session `id`, named
+/// "lloyd", with a fake worker or none.
+fn page(id: &str, shown: lanes::Shown, worker: bool) -> (StemApp, Option<FakeWorker>) {
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    app.session = Some(id.into());
+    app.open_song(shown);
+    app.song_name = Some("lloyd".into());
+    app.separator = None;
+    let fake = worker.then(|| {
+        let sep = separator::Separator::new(egui::Context::default()).expect("a worker");
+        // The test page has no worker script, so its error would stop it.
+        let stop = sep.worker().onerror().expect("an error handler");
+        sep.worker().set_onerror(None);
+        let posts = sv_spy_posts(sep.worker());
+        app.separator = Some(sep);
+        FakeWorker { posts, stop }
+    });
+    (app, fake)
+}
+
+/// Steps the page's save, with an await between frames, until it ends.
+async fn run_save(app: &mut StemApp) {
+    let ctx = egui::Context::default();
+    for _ in 0..20_000 {
+        if app.saving.is_none() {
+            return;
+        }
+        app.step_save(&ctx);
+        sv_sleep(1).await;
+    }
+    panic!("the save did not end");
+}
+
+/// Each download in `links`: its name, and its `Blob`.
+fn downloads(links: &js_sys::Array) -> Vec<(String, web_sys::Blob)> {
+    links
+        .iter()
+        .map(|link| {
+            let field =
+                |k: &str| js_sys::Reflect::get(&link, &k.into()).unwrap_or(JsValue::UNDEFINED);
+            (
+                field("name").as_string().unwrap_or_default(),
+                field("blob").dyn_into().expect("a Blob"),
+            )
+        })
+        .collect()
+}
+
+async fn bytes_of(blob: &web_sys::Blob) -> Vec<u8> {
+    let buffer = wasm_bindgen_futures::JsFuture::from(blob.array_buffer())
+        .await
+        .expect("read");
+    js_sys::Uint8Array::new(&buffer).to_vec()
+}
+
+/// Each request that the page posted to `worker` since the last call, with
+/// its transfer list, as the worker reads it.
+fn requests(worker: &FakeWorker) -> Vec<(stem_protocol::Request, js_sys::Array)> {
+    let out = worker
+        .posts
+        .iter()
+        .map(|post| {
+            let field =
+                |k: &str| js_sys::Reflect::get(&post, &k.into()).unwrap_or(JsValue::UNDEFINED);
+            let request = stem_protocol::ToWorker::from_js(&field("data")).expect("a request");
+            (request.request, field("transfer").unchecked_into())
+        })
+        .collect();
+    worker.posts.set_length(0);
+    out
+}
+
+/// Delivers `reply` from the worker, then a frame.
+fn reply(app: &mut StemApp, reply: stem_protocol::Reply) {
+    let sep = app.separator.as_ref().expect("a separator");
+    sv_deliver(sep.worker(), &reply.to_js().0);
+    app.poll_separator(&egui::Context::default());
+}
+
+/// The files in `saves/` after the page's spawned removals ran.
+async fn save_files() -> String {
+    sv_sleep(100).await;
+    store::tests::names_in(store::SAVES)
+        .await
+        .unwrap_or_default()
+}
+
+/// D1 and D6 of M8: a WAV save of a stored song offers a `Blob` of its
+/// save file, of type `audio/wav`, with the save's name, and says so.
+#[wasm_bindgen_test]
+async fn a_wav_save_of_a_stored_song_offers_its_save_file() {
+    let id = "m8-offer-wav";
+    let frames = 30 * SECOND;
+    let (shown, want) = stored_song(id, frames, 3).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, _) = page(id, shown, false);
+    sv_spy_links();
+    app.start_save(None, export::Format::Wav);
+    run_save(&mut app).await;
+    let got = downloads(&sv_links().await);
+    let status = app.status.clone();
+    let files = save_files().await;
+    let bytes = match got.first() {
+        Some((_, blob)) => bytes_of(blob).await,
+        None => Vec::new(),
+    };
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(got.len(), 1, "one download");
+    let (name, blob) = &got[0];
+    assert_eq!(name, "lloyd - mix.wav");
+    assert_eq!(blob.type_(), "audio/wav", "D6: the format's type");
+    assert!(bytes == want, "the download is the WAV of the mix");
+    assert!(status.starts_with("Saved lloyd - mix.wav."), "{status}");
+    assert!(
+        files.ends_with(".wav") && !files.contains(' '),
+        "the offered save file stays for its timer: {files}"
+    );
+}
+
+/// D1, D4 and D5 of M8: a FLAC or MP3 save of a stored song posts a stored
+/// request, with nothing transferred, only after its WAV is complete.
+/// The worker's reply offers the worker's file, of the format's type.
+#[wasm_bindgen_test]
+async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
+    let id = "m8-offer-encoded";
+    let frames = 10 * SECOND;
+    let (shown, _) = stored_song(id, frames, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown, true);
+    let worker = worker.expect("a worker");
+    let mut outcomes = Vec::new();
+    for format in [export::Format::Flac, export::Format::Mp3] {
+        app.start_save(Some(1), format);
+        run_save(&mut app).await;
+        let posted = requests(&worker);
+        let encoding = app.status.clone();
+        let (request, transfer) = posted.into_iter().next().expect("a request");
+        let (name, wav, out, sent_frames) = match request {
+            stem_protocol::Request::Flac { name, source, .. }
+            | stem_protocol::Request::Mp3 { name, source, .. } => match source {
+                stem_protocol::Encode::Stored { wav, frames, out } => (name, wav, out, frames),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        let wav_size = store::test_read(&wav).await.map(|b| b.len());
+        store::test_write(&out, b"encoded").await.expect("planted");
+        sv_spy_links();
+        let name = name.expect("a name");
+        let file = stem_protocol::Encoded::Stored { path: out.clone() };
+        reply(
+            &mut app,
+            match format {
+                export::Format::Flac => stem_protocol::Reply::Flac {
+                    name: name.clone(),
+                    file,
+                },
+                _ => stem_protocol::Reply::Mp3 {
+                    name: name.clone(),
+                    file,
+                },
+            },
+        );
+        sv_sleep(50).await;
+        let got = downloads(&sv_links().await);
+        outcomes.push((
+            format,
+            name,
+            transfer.length(),
+            sent_frames,
+            wav_size,
+            out,
+            encoding,
+            app.status.clone(),
+            got,
+        ));
+    }
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    for (format, name, transfer, sent_frames, wav_size, out, encoding, status, got) in outcomes {
+        let ext = format.extension();
+        assert_eq!(name, format!("lloyd - drums.{ext}"));
+        assert_eq!(transfer, 0, "{ext}: no samples cross");
+        assert_eq!(sent_frames, frames);
+        assert_eq!(
+            wav_size,
+            Some(44 + 4 * frames),
+            "{ext}: the WAV is complete when the page posts"
+        );
+        assert!(out.starts_with("saves/") && out.ends_with(&format!(".{ext}")));
+        assert!(encoding.starts_with("Encoding "), "{encoding}");
+        assert!(status.starts_with(&format!("Saved {name}.")), "{status}");
+        assert_eq!(got.len(), 1, "{ext}: one download");
+        let (offered, blob) = &got[0];
+        assert_eq!(offered, &name);
+        let want_type = if format == export::Format::Flac {
+            "audio/flac"
+        } else {
+            "audio/mpeg"
+        };
+        assert_eq!(
+            (blob.type_(), blob.size()),
+            (want_type.to_string(), 7.0),
+            "D6: the worker's file, of the format's type"
+        );
+    }
+}
+
+/// D8 of M8: when browser storage refuses the save file's open or a write,
+/// a song of 30 s saves on the memory path, and a song longer than
+/// `MEMORY_PATH_MAX_FRAMES` makes no sink and says why.
+#[wasm_bindgen_test]
+async fn a_save_that_storage_refuses_is_held_in_memory_only_for_a_short_song() {
+    let short = "m8-refused-short";
+    let long = "m8-refused-long";
+    let (short_song, want) = stored_song(short, 30 * SECOND, 2).await;
+    let (long_song, _) = stored_song(long, MEMORY_PATH_MAX_FRAMES + SECOND, 1).await;
+    let mut outcomes = Vec::new();
+    for (id, shown) in [(short, short_song), (long, long_song)] {
+        for how in ["open", "write"] {
+            store::test_remove(store::SAVES).await;
+            let (mut app, _) = page(id, shown.clone(), false);
+            sv_spy_links();
+            if how == "open" {
+                store::tests::refuse_next_writable();
+            } else {
+                store::tests::start_spy(&JsValue::UNDEFINED, 1.0);
+            }
+            app.start_save(None, export::Format::Wav);
+            run_save(&mut app).await;
+            if how == "write" {
+                store::tests::stop_spy();
+            }
+            let got = downloads(&sv_links().await);
+            let bytes = match got.first() {
+                Some((_, blob)) => bytes_of(blob).await,
+                None => Vec::new(),
+            };
+            outcomes.push((
+                id,
+                how,
+                got.len(),
+                bytes == want,
+                app.status.clone(),
+                save_files().await,
+            ));
+            app.load_demo();
+        }
+    }
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{short}")).await;
+    store::test_remove(&format!("sessions/{long}")).await;
+    for (id, how, links, same, status, files) in outcomes {
+        assert!(files.is_empty(), "{id}, {how}: no save file stays: {files}");
+        if id == short {
+            assert_eq!(links, 1, "{how}: the short song saves");
+            assert!(same, "{how}: the WAV of the mix");
+            assert!(
+                status.contains("held in memory, because browser storage failed"),
+                "{how}: {status}"
+            );
+        } else {
+            assert_eq!(links, 0, "{how}: the long song does not save");
+            assert!(
+                status.contains("browser storage could not hold the file")
+                    && status.contains("Storage menu"),
+                "{how}: {status}"
+            );
+        }
+    }
+}
+
+/// Steps the page's save until a write of its save file is in flight.
+async fn until_writing(app: &mut StemApp) {
+    let ctx = egui::Context::default();
+    for _ in 0..20_000 {
+        app.step_save(&ctx);
+        let saving = app.saving.as_ref().expect("a save");
+        if saving.job.fraction() > 0.0 && !saving.job.sink().ready() {
+            return;
+        }
+        sv_sleep(0).await;
+    }
+    panic!("no write was in flight");
+}
+
+/// D3 of M8: a new song during a save drops the save: no file stays, and
+/// no download is offered.
+#[wasm_bindgen_test]
+async fn a_new_song_during_a_save_drops_it() {
+    let id = "m8-new-song";
+    let (shown, _) = stored_song(id, 30 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, _) = page(id, shown, false);
+    sv_spy_links();
+    app.start_save(None, export::Format::Wav);
+    until_writing(&mut app).await;
+    app.load_demo();
+    let dropped = app.saving.is_none();
+    sv_sleep(200).await;
+    let links = sv_links().await.length();
+    let files = save_files().await;
+    let writes = store::test_writes();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(dropped);
+    assert_eq!(links, 0, "no download");
+    assert_eq!(files, "", "no save file stays");
+    assert_eq!(writes, 0, "no stream stays open");
+}
+
+/// D3 of M8: Reset during a save stops it, leaves no save file, and makes
+/// no save on the memory path.
+#[wasm_bindgen_test]
+async fn reset_during_a_save_leaves_no_file_and_no_memory_save() {
+    let id = "m8-reset-during-save";
+    let (shown, _) = stored_song(id, 30 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, _) = page(id, shown, false);
+    sv_spy_links();
+    app.start_save(None, export::Format::Wav);
+    until_writing(&mut app).await;
+    app.prepare_reset();
+    store::close().await;
+    let ctx = egui::Context::default();
+    for _ in 0..20 {
+        app.step_save(&ctx);
+        sv_sleep(5).await;
+    }
+    let saving = app.saving.is_some();
+    let links = sv_links().await.length();
+    let files = save_files().await;
+    store::test_reopen();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert!(!saving, "no save runs, in storage or in memory");
+    assert_eq!(links, 0, "no download");
+    assert_eq!(files, "", "no save file stays");
+}
+
+/// A FLAC save of the mix of `app`'s song, posted to `worker`: the output
+/// file that the request names, and its name.
+async fn posted_flac(app: &mut StemApp, worker: &FakeWorker) -> (String, String) {
+    app.start_save(None, export::Format::Flac);
+    run_save(app).await;
+    match requests(worker).pop() {
+        Some((
+            stem_protocol::Request::Flac {
+                name,
+                source: stem_protocol::Encode::Stored { out, .. },
+                ..
+            },
+            _,
+        )) => (out, name.expect("a name")),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn failed(name: &str, out: &str) -> stem_protocol::Reply {
+    stem_protocol::Reply::Flac {
+        name: name.into(),
+        file: stem_protocol::Encoded::Failed {
+            path: out.into(),
+            text: "QuotaExceededError: the disk is full".into(),
+        },
+    }
+}
+
+/// The left channel that an arrays FLAC request sends, as floats.
+fn left_of(request: &stem_protocol::Request) -> Vec<f32> {
+    match request {
+        stem_protocol::Request::Flac {
+            source: stem_protocol::Encode::Arrays { left, .. },
+            ..
+        } => left.to_vec(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// D8 of M8: a stored encode that fails saves again on the memory path for
+/// a song of 30 s, from the save's own source, also after a change of the
+/// mix.  For a longer song, it says that storage could not hold the file.
+#[wasm_bindgen_test]
+async fn a_failed_stored_encode_saves_again_in_memory_only_for_a_short_song() {
+    let id = "m8-failed-encode";
+    let frames = 30 * SECOND;
+    let (shown, want) = stored_song(id, frames, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown, true);
+    let worker = worker.expect("a worker");
+    let (out, name) = posted_flac(&mut app, &worker).await;
+    // The mix changes before the reply: the save keeps its own source.
+    app.params.as_ref().expect("params").set_muted(0, true);
+    reply(&mut app, failed(&name, &out));
+    let again = app.saving.is_some();
+    run_save(&mut app).await;
+    let posted = requests(&worker);
+    let status = app.status.clone();
+    app.load_demo();
+
+    let long = "m8-failed-encode-long";
+    let (long_song, _) = stored_song(long, MEMORY_PATH_MAX_FRAMES + SECOND, 1).await;
+    let (mut app, worker) = page(long, long_song, true);
+    let worker = worker.expect("a worker");
+    let (long_out, long_name) = posted_flac(&mut app, &worker).await;
+    reply(&mut app, failed(&long_name, &long_out));
+    let long_saving = app.saving.is_some();
+    let long_status = app.status.clone();
+    let long_posts = requests(&worker).len();
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    store::test_remove(&format!("sessions/{long}")).await;
+
+    assert!(again, "a save on the memory path starts");
+    assert_eq!(posted.len(), 1, "an arrays request");
+    let left = left_of(&posted[0].0);
+    assert_eq!(left.len(), frames);
+    let wav_left = |k: usize| i16::from_le_bytes([want[44 + 4 * k], want[45 + 4 * k]]) as f32;
+    assert!(
+        left.iter()
+            .enumerate()
+            .all(|(k, x)| (x * 32768.0 - wav_left(k)).abs() <= 1.0),
+        "the save's own mix, not the mix after the mute"
+    );
+    assert!(status.contains("held in memory"), "{status}");
+    assert!(!long_saving, "no memory save of a long song");
+    assert_eq!(long_posts, 0);
+    assert!(
+        long_status.contains("browser storage could not hold the file"),
+        "{long_status}"
+    );
+}
+
+/// D8 of M8: a failed stored encode that arrives while another save runs
+/// waits for it, then saves again.  One that arrives after a new song only
+/// says that the save failed.
+#[wasm_bindgen_test]
+async fn a_failed_encode_waits_for_the_save_in_progress_and_not_for_a_new_song() {
+    let id = "m8-failed-waits";
+    let (shown, _) = stored_song(id, 30 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown.clone(), true);
+    let worker = worker.expect("a worker");
+    let (out, name) = posted_flac(&mut app, &worker).await;
+    sv_spy_links();
+    app.start_save(Some(0), export::Format::Wav);
+    reply(&mut app, failed(&name, &out));
+    let waiting = app.status.clone();
+    let wav_save = app
+        .saving
+        .as_ref()
+        .map(|s| s.order.format == export::Format::Wav);
+    let ctx = egui::Context::default();
+    for _ in 0..20_000 {
+        let wav = app
+            .saving
+            .as_ref()
+            .map(|s| s.order.format == export::Format::Wav);
+        if wav != Some(true) {
+            break;
+        }
+        app.step_save(&ctx);
+        sv_sleep(1).await;
+    }
+    let wav_links = sv_links().await.length();
+    let next = app.saving.as_ref().map(|s| s.order.name.clone());
+    run_save(&mut app).await;
+    let posted = requests(&worker);
+
+    // A lane added: the same song, with other lanes.
+    let (out, name) = posted_flac(&mut app, &worker).await;
+    let frames = app.song.as_ref().expect("a song").frames;
+    app.add_stem("classic drums", vec![0.0; frames], vec![0.0; frames]);
+    reply(&mut app, failed(&name, &out));
+    let after_new_lane = (app.saving.is_some(), app.status.clone());
+
+    let (out, name) = posted_flac(&mut app, &worker).await;
+    app.open_song(shown);
+    reply(&mut app, failed(&name, &out));
+    let after_new_song = (app.saving.is_some(), app.status.clone());
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+
+    assert!(waiting.contains("after the save in progress"), "{waiting}");
+    assert_eq!(wav_save, Some(true), "the WAV save goes on");
+    assert_eq!(wav_links, 1, "the WAV save ends");
+    assert_eq!(
+        next.as_deref(),
+        Some("lloyd - mix.flac"),
+        "then the FLAC saves again"
+    );
+    assert_eq!(posted.len(), 1, "an arrays request");
+    assert!(matches!(
+        posted[0].0,
+        stem_protocol::Request::Flac {
+            source: stem_protocol::Encode::Arrays { .. },
+            ..
+        }
+    ));
+    let (saving, status) = after_new_lane;
+    assert!(!saving, "no save after a lane was added");
+    assert!(
+        status.starts_with("Could not save lloyd - mix.flac: "),
+        "{status}"
+    );
+    let (saving, status) = after_new_song;
+    assert!(!saving, "no save after a new song");
+    assert_eq!(
+        status,
+        "Could not save lloyd - mix.flac: QuotaExceededError: the disk is full."
+    );
+}
+
+/// D7 and D8 of M8: when the worker stops, the page removes the WAV and
+/// the output of each stored encode with no reply.  A stopped worker
+/// counts as no worker: the menu offers no FLAC or MP3, and a save in
+/// progress removes its WAV and posts nothing.
+#[wasm_bindgen_test]
+async fn a_stopped_worker_leaves_no_save_files_and_takes_no_encode() {
+    let id = "m8-stopped";
+    let (shown, _) = stored_song(id, 10 * SECOND, 2).await;
+    store::test_remove(store::SAVES).await;
+    let (mut app, worker) = page(id, shown, true);
+    let worker = worker.expect("a worker");
+    let (out, _) = posted_flac(&mut app, &worker).await;
+    store::test_write(&out, b"part").await.expect("planted");
+    let before = save_files().await;
+    let could = app.can_encode();
+    app.start_save(None, export::Format::Mp3);
+    worker
+        .stop
+        .call1(&JsValue::NULL, &sv_error_event())
+        .expect("stopped");
+    app.poll_separator(&egui::Context::default());
+    let can = app.can_encode();
+    run_save(&mut app).await;
+    let status = app.status.clone();
+    let posts = requests(&worker).len();
+    sv_sleep(500).await;
+    let after = save_files().await;
+    app.load_demo();
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(
+        before.split(' ').count(),
+        2,
+        "a WAV and an output: {before}"
+    );
+    assert!(could && !can, "a stopped worker counts as no worker");
+    assert!(
+        status.contains("the encoding worker is not running"),
+        "{status}"
+    );
+    assert_eq!(posts, 0, "no encode request");
+    assert_eq!(after, "", "no save file stays");
 }

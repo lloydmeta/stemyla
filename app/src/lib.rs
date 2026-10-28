@@ -539,6 +539,41 @@ enum ResetStage {
     Failed(reset::Reset, String),
 }
 
+/// The type of a saved file of `format`, as its download has it (D6 of M8).
+#[cfg(target_arch = "wasm32")]
+fn save_type(format: export::Format) -> &'static str {
+    match format {
+        export::Format::Wav => "audio/wav",
+        export::Format::Flac => "audio/flac",
+        export::Format::Mp3 => "audio/mpeg",
+    }
+}
+
+/// Offers the save file at `path` as the download `name`, and removes it
+/// after [`store::OFFERED_MS`] (D6 and D7 of M8).
+#[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
+fn offer_save_file(name: String, path: String, format: export::Format) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let offered =
+            store::download_file(&name, &path, save_type(format), store::OFFERED_MS).await;
+        if let Err(e) = offered {
+            log::error!("save: {name}: the file could not be offered: {e}");
+            store::remove_file(&path).await;
+        }
+    });
+}
+
+/// The status line of a save that browser storage could not hold, of a song
+/// too long for the memory path (D8 of M8).
+#[cfg(target_arch = "wasm32")]
+fn storage_full_text(name: &str, why: &str) -> String {
+    format!(
+        "Could not save {name}: browser storage could not hold the file ({why}).  \
+         Free space in the Storage menu, then save again."
+    )
+}
+
 /// Asks the browser for the storage used and the stored songs, for the
 /// Storage menu.
 #[cfg(target_arch = "wasm32")]
@@ -1346,17 +1381,83 @@ pub struct StemApp {
     /// that the mix clips.
     #[cfg(target_arch = "wasm32")]
     save_notes: export::SaveNotes,
+    /// The stored encodes posted to the worker and not answered, by their
+    /// output file (D8 of M8).
+    #[cfg(target_arch = "wasm32")]
+    posted_saves: std::collections::HashMap<String, PostedSave>,
+    /// Saves that wait for the save in progress, to save again on the
+    /// memory path after their stored encode failed, with the reason (D8).
+    #[cfg(target_arch = "wasm32")]
+    save_queue: Vec<(SaveOrder, String)>,
 }
 
-/// A stem or a mix being made into a file (decision 0014).
+/// What a save makes: its file's name and format, and what it reads (D8
+/// of M8).  The song and the lanes when the save started say whether it
+/// can start again on the memory path.
 #[cfg(target_arch = "wasm32")]
-struct Saving {
-    job: export::ExportJob<export::JsSink>,
+struct SaveOrder {
     /// The file's name, with its extension.
     name: String,
+    format: export::Format,
+    what: SaveSource,
+    serial: u64,
+    generation: u64,
+}
+
+/// What a save reads: the lanes' audio at its start, and one stem of them
+/// or the mix at a recipe.  It shares the lanes' samples or files (MEM-1),
+/// so a save can start again from its own source after the mix changed.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct SaveSource {
+    audio: Vec<lanes::LaneAudio>,
+    frames: usize,
     rate: u32,
-    /// Whether it is the mix lane's save.
-    mix: bool,
+    stem: Option<usize>,
+    recipe: MixRecipe,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl SaveSource {
+    #[cfg_attr(mutants, mutants::skip)]
+    fn pcm(&self) -> Box<dyn engine::mixdown::Pcm> {
+        match self.stem {
+            Some(i) => Box::new(lanes::LanePcm::new(
+                self.audio[i].clone(),
+                self.frames,
+                self.rate,
+            )),
+            None => Box::new(lanes::LanesMix::new(
+                &self.audio,
+                self.frames,
+                self.rate,
+                &self.recipe,
+            )),
+        }
+    }
+}
+
+/// A stem or a mix being made into a file (decision 0014): a WAV save
+/// file (the storage path of M8), or JS arrays (the memory path).
+#[cfg(target_arch = "wasm32")]
+struct Saving {
+    job: export::ExportJob<export::SaveSink>,
+    order: SaveOrder,
+    /// Why the save is held in memory, when browser storage failed (D8).
+    held: Option<String>,
+}
+
+/// A stored encode that the worker has not answered (D8 of M8).
+#[cfg(target_arch = "wasm32")]
+struct PostedSave {
+    name: String,
+    format: export::Format,
+    /// The WAV save file that the worker reads, and removes.
+    wav: String,
+    /// What to add to "Saved ...", such as that the mix clips.
+    note: Option<String>,
+    /// `None` once a new song or Reset dropped what it reads.
+    order: Option<SaveOrder>,
 }
 
 /// A classic-drums job: the serial of the song and the generation of the
@@ -1889,6 +1990,10 @@ impl Default for StemApp {
             saving: None,
             #[cfg(target_arch = "wasm32")]
             save_notes: export::SaveNotes::default(),
+            #[cfg(target_arch = "wasm32")]
+            posted_saves: std::collections::HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            save_queue: Vec::new(),
         }
     }
 }
@@ -1989,6 +2094,8 @@ impl StemApp {
     /// is for the shown song with lanes added or replaced.
     pub fn open_song(&mut self, song: Shown) {
         self.song_serial += 1;
+        #[cfg(target_arch = "wasm32")]
+        self.drop_save_sources();
         self.load_song(song);
     }
 
@@ -3882,6 +3989,9 @@ impl StemApp {
     #[cfg_attr(mutants, mutants::skip)]
     fn prepare_reset(&mut self) {
         self.reset = ResetStage::Running;
+        // D3 of M8: a save stops, and removes its file; none saves again.
+        self.saving = None;
+        self.drop_save_sources();
         self.output = None;
         self.stop_workers();
     }
@@ -4040,6 +4150,10 @@ impl StemApp {
         let mut finished = None;
         let mut stored = None;
         let mut unstored = None;
+        // Stored encodes that ended (D4 of M8), and whether the worker
+        // stopped.
+        let mut encoded = Vec::new();
+        let mut worker_stopped = false;
         for ev in sep.take_events() {
             match ev {
                 Event::ModelLoading => {
@@ -4085,10 +4199,9 @@ impl StemApp {
                         let note = self.save_notes.take(&name);
                         self.status = format!("Saved {name}.{note}");
                     }
-                    // The page posts no stored encode before step 3 of M8.
-                    stem_protocol::Encoded::Stored { path }
-                    | stem_protocol::Encoded::Failed { path, .. } => {
-                        log::warn!("separator: a reply for {path}, which the page did not ask for");
+                    stem_protocol::Encoded::Stored { path } => encoded.push((path, None)),
+                    stem_protocol::Encoded::Failed { path, text } => {
+                        encoded.push((path, Some(text)))
                     }
                 },
                 Event::Bench(text) => {
@@ -4158,8 +4271,15 @@ impl StemApp {
                         "The separation worker stopped ({reason}).  Reload the page; if that does not help, press Reset…"
                     );
                     sep.stopped = Some(reason);
+                    worker_stopped = true;
                 }
             }
+        }
+        for (path, failed) in encoded {
+            self.stored_encode_ended(path, failed);
+        }
+        if worker_stopped {
+            self.forget_posted_saves();
         }
         if let Some((stems, secs)) = finished {
             let stems = stems
@@ -4292,7 +4412,8 @@ impl StemApp {
                     ui.separator();
                 }
                 for format in export::Format::ALL {
-                    let can = !format.needs_worker() || self.separator.is_some();
+                    // A stopped worker counts as no worker.
+                    let can = !format.needs_worker() || self.can_encode();
                     if ui
                         .add_enabled(can, egui::Button::new(format.label()))
                         .clicked()
@@ -4308,105 +4429,334 @@ impl StemApp {
         chosen
     }
 
+    /// Whether the worker can encode a FLAC or an MP3 now: it runs, and it
+    /// has not stopped.
+    #[cfg(target_arch = "wasm32")]
+    fn can_encode(&self) -> bool {
+        self.separator.as_ref().is_some_and(|s| s.stopped.is_none())
+    }
+
     /// Starts saving a stem, or the mix as heard when `stem` is `None`.
-    /// The save runs in [`Self::step_save`], a few ms in each frame.
+    /// The save writes a WAV save file in browser storage first (the
+    /// storage path, D1 of M8).  It runs in [`Self::step_save`], a few ms
+    /// in each frame.
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn start_save(&mut self, stem: Option<usize>, format: export::Format) {
-        use engine::mixdown::Pcm;
         let (Some(song), Some(params)) = (self.song.clone(), self.params.clone()) else {
             return;
         };
         let base = self.song_name.as_deref().unwrap_or("song");
-        let audio = song.audio();
-        let (frames, rate) = (song.frames, song.sample_rate);
-        let (source, name): (Box<dyn Pcm>, String) = match stem {
-            Some(i) => (
-                Box::new(lanes::LanePcm::new(audio[i].clone(), frames, rate)),
-                format!("{base} - {}", song.lanes[i].name),
-            ),
-            None => {
-                let recipe = MixRecipe::as_heard(&params);
-                let name = export::mix_file_name(base, &song.names(), &recipe);
-                (
-                    Box::new(lanes::LanesMix::new(&audio, frames, rate, &recipe)),
-                    name,
-                )
-            }
+        let recipe = MixRecipe::as_heard(&params);
+        let name = match stem {
+            Some(i) => format!("{base} - {}", song.lanes[i].name),
+            None => export::mix_file_name(base, &song.names(), &recipe),
         };
-        let sink = export::JsSink::new(format, source.frames(), song.sample_rate);
-        self.saving = Some(Saving {
-            job: export::ExportJob::new(source, sink).stopping_at_a_failure(),
+        let order = SaveOrder {
             name: format!("{name}.{}", format.extension()),
-            rate: song.sample_rate,
-            mix: stem.is_none(),
+            format,
+            what: SaveSource {
+                audio: song.audio(),
+                frames: song.frames,
+                rate: song.sample_rate,
+                stem,
+                recipe,
+            },
+            serial: self.song_serial,
+            generation: self.lanes_generation,
+        };
+        let wake: std::rc::Rc<dyn Fn()> = match &self.ctx {
+            Some(ctx) => {
+                let ctx = ctx.clone();
+                std::rc::Rc::new(move || ctx.request_repaint())
+            }
+            None => std::rc::Rc::new(|| {}),
+        };
+        let sink = export::SaveSink::Stored(export::StoredWav::new(
+            format!("{}.wav", store::new_save_path()),
+            order.what.frames,
+            order.what.rate,
+            wake,
+        ));
+        self.saving = Some(Saving {
+            job: export::ExportJob::new(order.what.pcm(), sink).stopping_at_a_failure(),
+            order,
+            held: None,
         });
     }
 
-    /// Steps the save in progress for a few ms, then hands the file to the
-    /// browser, or the channels to the worker.
+    /// Steps the save in progress for a few ms.  At the end of the storage
+    /// path, it closes the WAV save file, then offers it, or asks the
+    /// worker to encode it (D1 of M8).  At the end of the memory path, it
+    /// hands the file to the browser, or the channels to the worker.  When
+    /// browser storage fails, the save goes on in memory (D8).
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn step_save(&mut self, ctx: &egui::Context) {
-        use export::JsSink;
         let Some(saving) = &mut self.saving else {
             return;
         };
+        let name = saving.order.name.clone();
         if !saving.job.run_while(export::time_left(SAVE_MS)) {
-            let doing = if saving.mix { "Mixing" } else { "Preparing" };
+            let doing = if saving.order.what.stem.is_none() {
+                "Mixing"
+            } else {
+                "Preparing"
+            };
             let pct = 100.0 * saving.job.fraction();
-            self.status = format!("{doing} {}: {pct:.0} %", saving.name);
+            let held = if saving.held.is_some() {
+                " (in memory: browser storage failed)"
+            } else {
+                ""
+            };
+            self.status = format!("{doing} {name}: {pct:.0} %{held}");
             // A save that waits for storage gets a repaint when its read
-            // ends.
+            // or its write ends.
             if !saving.job.is_waiting() {
                 ctx.request_repaint();
             }
             return;
         }
-        let Some(Saving {
-            job,
-            name,
-            rate,
-            mix,
-        }) = self.saving.take()
-        else {
-            return;
-        };
         // A failed read gave silence: no file and no encode request
-        // (finding 4-1 of review round 4 of M7).
-        if let Some(e) = job.failed() {
+        // (finding 4-1 of review round 4 of M7).  Dropping the save
+        // removes its save file.
+        if let Some(e) = saving.job.failed() {
+            self.saving = None;
             log::warn!("save: {name}: a read of browser storage failed: {e}");
             self.status = format!(
                 "Could not save {name}: the song could not be read from browser storage ({e})."
             );
+            self.next_save();
             return;
         }
-        let note = (mix && job.clipped() > 0).then(|| {
+        let stored = match saving.job.sink_mut() {
+            export::SaveSink::Stored(wav) => match wav.finish() {
+                export::Finish::Pending => {
+                    self.status = format!("Saving {name}…");
+                    return;
+                }
+                export::Finish::Failed(why) => {
+                    if let Some(saving) = self.saving.take() {
+                        self.save_in_memory(saving.order, why);
+                    }
+                    return;
+                }
+                export::Finish::Done => Some(wav.path().to_string()),
+            },
+            export::SaveSink::Memory(_) => None,
+        };
+        let Some(saving) = self.saving.take() else {
+            return;
+        };
+        let clipped = saving.job.clipped();
+        let note = (saving.order.what.stem.is_none() && clipped > 0).then(|| {
             format!(
-                "  {} samples of the mix are at full scale, so it may clip; lower the volumes to avoid it.",
-                job.clipped()
+                "  {clipped} samples of the mix are at full scale, so it may clip; lower the volumes to avoid it."
             )
         });
-        let sep = self.separator.as_ref();
-        self.status = match (job.into_sink(), sep) {
+        match stored {
+            Some(wav) => self.end_stored_save(saving.order, wav, note),
+            None => self.end_memory_save(saving, note),
+        }
+        self.next_save();
+    }
+
+    /// The end of a save on the storage path, whose WAV save file at `wav`
+    /// is complete: it offers a WAV, or asks the worker to encode it into a
+    /// save file of its own (D1, D4 and D6 of M8).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn end_stored_save(&mut self, order: SaveOrder, wav: String, note: Option<String>) {
+        let name = order.name.clone();
+        if order.format == export::Format::Wav {
+            offer_save_file(name.clone(), wav, order.format);
+            self.status = format!("Saved {name}.{}", note.unwrap_or_default());
+            return;
+        }
+        let sep = self.separator.as_ref().filter(|s| s.stopped.is_none());
+        let Some(sep) = sep else {
+            wasm_bindgen_futures::spawn_local(async move {
+                store::remove_file(&wav).await;
+            });
+            self.status = format!("Could not save {name}: the encoding worker is not running.");
+            return;
+        };
+        let out = format!(
+            "{}.{}",
+            wav.trim_end_matches(".wav"),
+            order.format.extension()
+        );
+        let source = stem_protocol::Encode::Stored {
+            wav: wav.clone(),
+            frames: order.what.frames,
+            out: out.clone(),
+        };
+        if order.format == export::Format::Flac {
+            sep.encode_flac(&name, source, order.what.rate);
+        } else {
+            sep.encode_mp3(&name, source, order.what.rate);
+        }
+        self.status = format!("Encoding {name}…");
+        self.posted_saves.insert(
+            out,
+            PostedSave {
+                name,
+                format: order.format,
+                wav,
+                note,
+                order: Some(order),
+            },
+        );
+    }
+
+    /// The end of a save on the memory path: it offers a WAV's bytes, or
+    /// sends the channels to the worker (decision 0015).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn end_memory_save(&mut self, saving: Saving, note: Option<String>) {
+        use export::JsSink;
+        let Saving { job, order, held } = saving;
+        let name = order.name;
+        let held = held.map_or(String::new(), |why| {
+            format!("  It was held in memory, because browser storage failed ({why}).")
+        });
+        let export::SaveSink::Memory(sink) = job.into_sink() else {
+            return;
+        };
+        let rate = order.what.rate;
+        let sep = self.separator.as_ref().filter(|s| s.stopped.is_none());
+        self.status = match (sink, sep) {
             (JsSink::Wav(wav), _) => {
                 store::download(&name, &wav.into_bytes(), "audio/wav");
-                format!("Saved {name}.{}", note.unwrap_or_default())
+                format!("Saved {name}.{}{held}", note.unwrap_or_default())
             }
             (JsSink::Flac(c), Some(sep)) => {
                 sep.encode_flac(&name, c.into_encode(), rate);
                 self.save_notes.push(&name, note);
-                format!("Encoding {name}…")
+                format!("Encoding {name}…{held}")
             }
             (JsSink::Mp3(c), Some(sep)) => {
                 sep.encode_mp3(&name, c.into_encode(), rate);
                 self.save_notes.push(&name, note);
-                format!("Encoding {name}…")
+                format!("Encoding {name}…{held}")
             }
             (JsSink::Flac(_) | JsSink::Mp3(_), None) => {
                 format!("Could not save {name}: the encoding worker is not running.")
             }
         };
+    }
+
+    /// D8 of M8: browser storage could not hold a save, for the reason
+    /// `why`.  A song of at most [`MEMORY_PATH_MAX_FRAMES`] saves again on
+    /// the memory path, from the save's own source.  A longer one makes no
+    /// sink and does not save, and the status line says why.  After a
+    /// reset began, nothing saves.
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn save_in_memory(&mut self, order: SaveOrder, why: String) {
+        let name = order.name.clone();
+        if store::is_closed() {
+            self.status = format!("Could not save {name}: browser storage is being reset.");
+        } else if order.what.frames > MEMORY_PATH_MAX_FRAMES {
+            log::warn!("save: {name}: browser storage failed: {why}");
+            self.status = storage_full_text(&name, &why);
+        } else {
+            log::warn!("save: {name}: browser storage failed ({why}); the save is held in memory");
+            let sink = export::SaveSink::Memory(export::JsSink::new(
+                order.format,
+                order.what.frames,
+                order.what.rate,
+            ));
+            self.saving = Some(Saving {
+                job: export::ExportJob::new(order.what.pcm(), sink).stopping_at_a_failure(),
+                order,
+                held: Some(why),
+            });
+        }
+    }
+
+    /// The reply of a stored encode (D4, D7 and D8 of M8).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn stored_encode_ended(&mut self, path: String, failed: Option<String>) {
+        let Some(posted) = self.posted_saves.remove(&path) else {
+            log::warn!("save: a reply for {path}, which no save asked for");
+            if failed.is_none() {
+                wasm_bindgen_futures::spawn_local(async move {
+                    store::remove_file(&path).await;
+                });
+            }
+            return;
+        };
+        let PostedSave {
+            name,
+            format,
+            note,
+            order,
+            ..
+        } = posted;
+        let Some(why) = failed else {
+            offer_save_file(name.clone(), path, format);
+            self.status = format!("Saved {name}.{}", note.unwrap_or_default());
+            return;
+        };
+        log::warn!("save: {name}: the worker could not encode it: {why}");
+        // Only for the shown song with the same lanes (D8).
+        let order =
+            order.filter(|o| o.serial == self.song_serial && o.generation == self.lanes_generation);
+        match order {
+            None => self.status = format!("Could not save {name}: {why}."),
+            Some(order) if self.saving.is_some() => {
+                self.status = format!(
+                    "Could not encode {name} in browser storage; it saves again after the save in progress."
+                );
+                self.save_queue.push((order, why));
+            }
+            Some(order) => self.save_in_memory(order, why),
+        }
+    }
+
+    /// Starts the oldest save that waits for the save in progress (D8 of
+    /// M8), once none runs, if the shown song is still its song.
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn next_save(&mut self) {
+        while self.saving.is_none() && !self.save_queue.is_empty() {
+            let (order, why) = self.save_queue.remove(0);
+            if order.serial == self.song_serial && order.generation == self.lanes_generation {
+                self.save_in_memory(order, why);
+            } else {
+                self.status = format!("Could not save {}: {why}.", order.name);
+            }
+        }
+    }
+
+    /// Drops what the posted saves and the waiting saves read: a new song or
+    /// Reset ends their chance to save again (D8 of M8).
+    #[cfg(target_arch = "wasm32")]
+    fn drop_save_sources(&mut self) {
+        for posted in self.posted_saves.values_mut() {
+            posted.order = None;
+        }
+        self.save_queue.clear();
+    }
+
+    /// The worker stopped: it answers no stored encode.  Removes the WAV
+    /// and the output of each, trying again while the worker's handles may
+    /// still hold them (D7 of M8).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn forget_posted_saves(&mut self) {
+        let paths: Vec<String> = self
+            .posted_saves
+            .drain()
+            .flat_map(|(out, posted)| [posted.wav, out])
+            .collect();
+        if !paths.is_empty() {
+            wasm_bindgen_futures::spawn_local(async move {
+                store::remove_files_retrying(paths).await;
+            });
+        }
     }
 
     fn lane_controls(&mut self, ui: &mut egui::Ui, lane: usize) {

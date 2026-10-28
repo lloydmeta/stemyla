@@ -1971,6 +1971,33 @@ pub async fn remove_file(path: &str) -> bool {
     st_remove(path).await.as_bool() == Some(true)
 }
 
+/// Removes each file of `paths`, trying again twice, 300 ms apart, while
+/// one stays, as Reset's wipe does: a worker that just stopped may still
+/// hold a handle on a file for a moment.  The paths left.
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn remove_files_retrying(paths: Vec<String>) -> Vec<String> {
+    let mut left = paths;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            st_sleep(300).await;
+        }
+        let mut still = Vec::new();
+        for path in left {
+            if !remove_file(&path).await {
+                still.push(path);
+            }
+        }
+        left = still;
+        if left.is_empty() {
+            break;
+        }
+    }
+    if !left.is_empty() {
+        log::warn!("store: could not remove {}", left.join(", "));
+    }
+    left
+}
+
 /// Removes each save file last changed before `before` (ms since 1970):
 /// the names removed.  The page's start removes those older than
 /// [`SAVE_MAX_AGE_MS`] (D7 of M8): a save of another tab of this site is
@@ -2155,6 +2182,17 @@ export function refuse_next_writable() {
     return Promise.reject(new DOMException("refused by the test", "NoModificationAllowedError"));
   };
 }
+// The names in the folder `path`, sorted, joined by spaces; null if there
+// is no such folder.
+export async function names_in(path) {
+  try {
+    let d = await navigator.storage.getDirectory();
+    for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p);
+    const out = [];
+    for await (const name of d.keys()) out.push(name);
+    return out.sort().join(" ");
+  } catch (e) { if (e.name === "NotFoundError") return null; throw e; }
+}
 // "lloyd" at `at` in a buffer of 16 bytes, as a view of 5 bytes.
 export function lloyd_in_a_larger_buffer(at) {
   const b = new Uint8Array(16);
@@ -2168,6 +2206,9 @@ export function lloyd_in_a_larger_buffer(at) {
         pub(crate) fn spy_repeats() -> String;
         fn lloyd_in_a_larger_buffer(at: u32) -> Uint8Array;
         pub(crate) fn refuse_next_writable();
+        /// The names in the folder `path`, sorted, joined by spaces, or
+        /// `None` if there is no such folder.
+        pub(crate) async fn names_in(path: &str) -> Option<String>;
     }
 
     /// Records every write, refusing none.
