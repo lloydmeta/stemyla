@@ -1,7 +1,7 @@
 //! `xtask e2e <scenario> [options]`: drives the built web app (`app/dist`)
 //! in Safari or Chrome through WebDriver and checks what it does.
 //!
-//! Scenarios (the first seven need no model and run in CI):
+//! Scenarios (the first eight need no model and run in CI):
 //! * `smoke`: drop generated stems, Play (every lane from browser storage),
 //!   change the tempo.
 //! * `decode`: the decode worker writes the session files of a 44.1 kHz
@@ -26,6 +26,10 @@
 //!   two arrays and from a stored 16-bit WAV in `saves/` (M8).  The stored
 //!   case's file equals the arrays case's file, byte for byte, and the
 //!   worker removes the WAV.  Logs the times.
+//! * `save`: saves the mix of a stored song of 1 and of 10 minutes as WAV,
+//!   FLAC and MP3 through the Save menu.  The page's JS heap during a save
+//!   must not grow with the song, nor the worker's memory during a FLAC
+//!   encode, and an MP3 encode is bounded (M8, `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).
@@ -82,11 +86,18 @@ use std::time::{Duration, Instant};
 mod decode;
 mod old_session;
 mod playback;
+mod save;
 
 /// The viewport the click positions are measured in.
 const VIEWPORT: (u32, u32) = (1100, 700);
 /// The top bar's buttons sit on this line.
 const BAR_Y: f64 = 15.0;
+/// The mix lane's Save button and its menu's items (see [`Opts`]).
+const SAVE_X: f64 = 54.0;
+const SAVE_Y: f64 = 111.0;
+const ITEM_X: f64 = 100.0;
+const ITEM_Y: f64 = 168.0;
+const ITEM_DY: f64 = 21.0;
 /// The longest wait, in seconds, for a run of the model on the GPU: 4
 /// hours, for a slow GPU or SwiftShader.
 const MODEL_RUN_SECS: u64 = 4 * 3600;
@@ -121,6 +132,14 @@ pub struct Opts {
     pub tempo_x: f64,
     pub download_x: f64,
     pub separate_x: f64,
+    /// The mix lane's "Save" button, and its menu's first item (`save`),
+    /// in CSS pixels of the viewport.
+    pub save_x: f64,
+    pub save_y: f64,
+    pub item_x: f64,
+    pub item_y: f64,
+    /// The rows of the Save menu's items, in CSS pixels.
+    pub item_dy: f64,
 }
 
 impl Opts {
@@ -129,7 +148,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
+                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|save|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -156,6 +175,13 @@ impl Opts {
             download_x: 263.0,
             // "Separate 6 stems" takes the place of the model buttons.
             separate_x: 245.0,
+            // The mix lane's Save button and its menu, with a song of a
+            // source and two stems shown (`save`).
+            save_x: SAVE_X,
+            save_y: SAVE_Y,
+            item_x: ITEM_X,
+            item_y: ITEM_Y,
+            item_dy: ITEM_DY,
         };
         let mut i = 1;
         while i < args.len() {
@@ -183,6 +209,11 @@ impl Opts {
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
                 "--separate-x" => o.separate_x = value()?.parse()?,
+                "--save-x" => o.save_x = value()?.parse()?,
+                "--save-y" => o.save_y = value()?.parse()?,
+                "--item-x" => o.item_x = value()?.parse()?,
+                "--item-y" => o.item_y = value()?.parse()?,
+                "--item-dy" => o.item_dy = value()?.parse()?,
                 other => bail!("unknown option {other}"),
             }
             i += 1;
@@ -219,6 +250,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "audio-resume" => audio_resume(&o),
         "storage" => storage(&o),
         "flac" => flac(&o),
+        "save" => save::run(&o),
         "bench" => bench(&o),
         "selftest" => selftest(&o),
         "separate" => separate(&o),
@@ -365,6 +397,12 @@ impl Page {
     fn click(&mut self, x: f64, what: &str) -> Result<()> {
         self.note(&format!("click {what} at ({x}, {BAR_Y})"));
         self.session.click(x, BAR_Y)
+    }
+
+    /// Clicks at (`x`, `y`) in CSS pixels of the viewport.
+    fn click_at(&mut self, x: f64, y: f64, what: &str) -> Result<()> {
+        self.note(&format!("click {what} at ({x}, {y})"));
+        self.session.click(x, y)
     }
 
     fn reload(&mut self) -> Result<()> {

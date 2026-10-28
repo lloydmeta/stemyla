@@ -46,7 +46,7 @@ const STEMS: [&str; 6] = ["bass", "drums", "other", "vocals", "guitar", "piano"]
 
 /// Plants session `args[0]` of M4's layout, of `args[1]` seconds, and makes
 /// it current.  Each WAV is made a block at a time, in JS.
-const PLANT: &str = "const [id, seconds, stems] = args;
+pub(super) const PLANT: &str = "const [id, seconds, stems] = args;
     const frames = seconds * 44100;
     const root = await navigator.storage.getDirectory();
     const sessions = await root.getDirectoryHandle('sessions', { create: true });

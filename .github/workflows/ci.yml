@@ -195,6 +195,7 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e audio-resume --browser chrome
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
+      - run: cargo run --locked -p xtask -- e2e save --browser chrome
       # Logs and screenshots of the scenarios, to see why one failed.
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
