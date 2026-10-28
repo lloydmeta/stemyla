@@ -1928,6 +1928,15 @@ impl StemApp {
             Err(e) => log::warn!("stem separation unavailable: {e}"),
         }
         #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async {
+            // Save files that a reload, or a page that stopped, left (D7
+            // of M8).  A save of another tab of this site is younger.
+            let gone = store::clean_saves(js_sys::Date::now() - store::SAVE_MAX_AGE_MS).await;
+            if !gone.is_empty() {
+                log::info!("store: removed old save files: {}", gone.join(", "));
+            }
+        });
+        #[cfg(target_arch = "wasm32")]
         {
             // Bring back the song (and stems) kept from the last visit.
             let (pending, ctx) = (app.pending.clone(), cc.egui_ctx.clone());
@@ -8132,3 +8141,9 @@ mod decode_tests;
 /// buffer from session files that the test plants.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod playback_tests;
+
+/// Browser tests of the storage path of a save (M8 of
+/// `plans/active/stream-from-storage.md`): the WAV save file and the
+/// lifetime of save files.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod save_tests;

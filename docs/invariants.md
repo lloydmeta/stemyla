@@ -83,7 +83,7 @@ iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memor
 Every OPFS `write` gets a whole typed array or a Blob, never a view into a larger buffer.
 
 * Why: Safari 27 writes a view's whole underlying buffer (`docs/references/browser-quirks.md`).
-* Enforced by: `a_view_is_written_whole`, `sources_are_saved_from_their_files`, `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks`, `stem_writes_pass_whole_arrays`, `stored_encodes_write_whole_arrays_as_they_read`, `stored_stems_replace_the_kept_stems`, `the_mix_is_written_in_whole_blocks`, `write_mix_reads_lane_audio_in_blocks`, `decode_writes_pass_whole_arrays` (CI `browser-tests` job, in Chrome).  Each spies on `write`, so a view fails it in Chrome, not only in Safari.  The spy does not see a new OPFS write that has no spy test of its own.
+* Enforced by: `a_view_is_written_whole`, `sources_are_saved_from_their_files`, `opfs_write_writes_more_than_one_slice`, `a_download_holds_only_the_bytes_of_its_chunks`, `stem_writes_pass_whole_arrays`, `stored_encodes_write_whole_arrays_as_they_read`, `a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array`, `stored_stems_replace_the_kept_stems`, `the_mix_is_written_in_whole_blocks`, `write_mix_reads_lane_audio_in_blocks`, `decode_writes_pass_whole_arrays` (CI `browser-tests` job, in Chrome).  Each spies on `write`, so a view fails it in Chrome, not only in Safari.  The spy does not see a new OPFS write that has no spy test of its own.
 
 ## Audio
 

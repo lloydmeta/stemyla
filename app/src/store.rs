@@ -41,6 +41,12 @@
 //!   as it separates (the storage path of M3).  After the separation,
 //!   [`keep_stored_stems`] moves it onto its `.wav` file.  A separation
 //!   that stopped can leave one; no reader opens it.
+//! * `saves/<page>-<n>.wav`, `.flac` and `.mp3`: save files (D1 and D7 of
+//!   M8).  The page writes a save's 16-bit WAV here through
+//!   [`save_open`], [`save_put`] and [`save_close`], which count in the
+//!   writes that [`close`] waits for.  [`download_file`] offers a file, and
+//!   removes it after [`OFFERED_MS`].  [`clean_saves`] removes old ones at
+//!   the page's start.
 //!
 //! To open a song, the page saves the chosen files, and the decode worker
 //! decodes them into the session files in blocks (M5).  The page moves the
@@ -204,6 +210,27 @@ export async function st_file(path) {
     return await (await (await dir(d, false)).getFileHandle(n)).getFile();
   } catch (e) { return null; }
 }
+// Removes each file in the folder `path` whose `lastModified` is before
+// `before` (ms since 1970); the names removed, sorted, joined by spaces.
+export async function st_remove_older(path, before) {
+  let d;
+  try { d = await dir(path, false); } catch (e) { return ""; }
+  const gone = [];
+  for await (const [name, h] of d.entries()) {
+    if (h.kind !== "file") continue;
+    try {
+      if ((await h.getFile()).lastModified < before) { await d.removeEntry(name); gone.push(name); }
+    } catch (e) { console.warn("storage: could not remove an old file", path, name, e); }
+  }
+  return gone.sort().join(" ");
+}
+// Offers `file` as a download of type `mime`.  The `Blob` refers to the
+// file: it copies no bytes (an OPFS `File` may have no type).
+export function st_offer(name, file, mime) {
+  save_blob(name, new Blob([file], { type: mime }));
+}
+// The page's start, in whole ms since 1970.
+export function st_page_ms() { return Math.floor(performance.timeOrigin); }
 // Bytes `start..end` of a `File`: one read of a slice, never the file.
 export async function st_slice(file, start, end) {
   return new Uint8Array(await file.slice(start, end).arrayBuffer());
@@ -243,6 +270,11 @@ extern "C" {
     async fn st_size(path: &str) -> JsValue;
     /// The file at `path` as a `File`, or null if there is none.
     async fn st_file(path: &str) -> JsValue;
+    /// Removes each file in the folder `path` older than `before` (ms since
+    /// 1970): the names removed, joined by spaces.
+    async fn st_remove_older(path: &str, before: f64) -> JsValue;
+    fn st_offer(name: &str, file: &JsValue, mime: &str);
+    fn st_page_ms() -> f64;
     /// Bytes `start..end` of the `File` `file`.
     #[wasm_bindgen(catch)]
     async fn st_slice(file: &JsValue, start: f64, end: f64) -> Result<JsValue, JsValue>;
@@ -1841,6 +1873,137 @@ pub fn download_blob(name: &str, blob: &web_sys::Blob) {
     save_blob(name, blob);
 }
 
+/// The folder of the save files, at the root (D1 and D7 of M8).
+pub const SAVES: &str = "saves";
+/// How long an offered save file stays, in ms.  A download reads the file
+/// after the click, and the page cannot know when it ends (D7 of M8).
+pub const OFFERED_MS: u32 = 10 * 60 * 1000;
+/// The age, in ms, at which the page's start removes a save file (D7).
+pub const SAVE_MAX_AGE_MS: f64 = 60.0 * 60.0 * 1000.0;
+const RESETTING: &str = "browser storage is being reset";
+
+thread_local! {
+    /// The saves of this page so far, for their file names.
+    static SAVES_MADE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The path of a new save file, without its extension: `saves/<page>-<n>`.
+/// `<page>` is the page's start time in ms, and `<n>` counts its saves
+/// (D1 of M8).  So two saves never share a file.
+pub fn new_save_path() -> String {
+    let n = SAVES_MADE.get() + 1;
+    SAVES_MADE.set(n);
+    format!("{SAVES}/{}-{n}", st_page_ms() as u64)
+}
+
+/// Opens the save file at `path` (from the root) for writing, and makes
+/// its folder.  The stream counts in the writes that [`close`] waits for,
+/// until [`save_close`] or [`save_abort`] ends it, so a reset waits for
+/// the save (D3 of M8).  A failed open removes the file and gives why.
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn save_open(path: &str) -> Result<JsValue, String> {
+    if CLOSED.get() {
+        return Err(RESETTING.into());
+    }
+    WRITES.set(WRITES.get() + 1);
+    let w = st_open("", path).await;
+    if let Some(error) = w.as_string() {
+        // The open can make the file before the stream fails.
+        st_remove(path).await;
+        WRITES.set(WRITES.get() - 1);
+        return Err(format!("browser storage refused {path} ({error})"));
+    }
+    Ok(w)
+}
+
+/// Writes `bytes`, a whole array (MEM-5), to the save stream `w`.  It
+/// refuses once [`close`] has run.
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn save_put(w: &JsValue, bytes: &Uint8Array) -> Result<(), String> {
+    if CLOSED.get() {
+        return Err(RESETTING.into());
+    }
+    let put = st_put(w, bytes).await;
+    match put.as_bool() {
+        Some(true) => Ok(()),
+        _ => Err(format!(
+            "browser storage refused a write ({})",
+            put.as_string().unwrap_or_else(|| "not available".into())
+        )),
+    }
+}
+
+/// Closes the save stream `w` of the file at `path`, which keeps what it
+/// wrote.  Once [`close`] has run, or when the close fails, it drops the
+/// file instead and gives why.
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn save_close(w: &JsValue, path: &str) -> Result<(), String> {
+    if CLOSED.get() {
+        save_abort(w, path).await;
+        return Err(RESETTING.into());
+    }
+    let closed = st_close(w).await;
+    let result = match closed.as_bool() {
+        Some(true) => Ok(()),
+        _ => {
+            st_remove(path).await;
+            Err(format!(
+                "browser storage could not finish {path} ({})",
+                closed.as_string().unwrap_or_else(|| "not available".into())
+            ))
+        }
+    };
+    WRITES.set(WRITES.get() - 1);
+    result
+}
+
+/// Closes the save stream `w` with nothing kept, and removes the file at
+/// `path`.
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn save_abort(w: &JsValue, path: &str) {
+    st_abort(w).await;
+    st_remove(path).await;
+    WRITES.set(WRITES.get() - 1);
+}
+
+/// Removes the file at `path` from the root: whether it is gone.
+pub async fn remove_file(path: &str) -> bool {
+    st_remove(path).await.as_bool() == Some(true)
+}
+
+/// Removes each save file last changed before `before` (ms since 1970):
+/// the names removed.  The page's start removes those older than
+/// [`SAVE_MAX_AGE_MS`] (D7 of M8): a save of another tab of this site is
+/// younger.
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn clean_saves(before: f64) -> Vec<String> {
+    let gone = st_remove_older(SAVES, before).await.as_string();
+    gone.unwrap_or_default()
+        .split(' ')
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Offers the file at `path` as a download named `name`, of type `mime`
+/// (D6 of M8).  It gives the link a `Blob` of the file's `File`, so no
+/// bytes of the file enter the JS heap or WebAssembly memory.  Then it
+/// removes the file after `keep_ms` ([`OFFERED_MS`], D7).
+#[cfg_attr(mutants, mutants::skip)]
+pub async fn download_file(name: &str, path: &str, mime: &str, keep_ms: u32) -> Result<(), String> {
+    let file = st_file(path).await;
+    if file.is_null() {
+        return Err(format!("browser storage has no file {path}"));
+    }
+    st_offer(name, &file, mime);
+    let path = path.to_string();
+    wasm_bindgen_futures::spawn_local(async move {
+        st_sleep(keep_ms).await;
+        st_remove(&path).await;
+    });
+    Ok(())
+}
+
 /// Writes `bytes` to the file at `path` from the root, for a test.
 #[cfg(test)]
 pub(crate) async fn test_write(path: &str, bytes: &[u8]) -> Result<()> {
@@ -1870,6 +2033,12 @@ pub(crate) async fn test_settled(id: &str) {
 #[cfg(test)]
 pub(crate) async fn test_wipe() {
     st_remove(ROOT).await;
+}
+
+/// The writes in progress that [`close`] waits for, for a test.
+#[cfg(test)]
+pub(crate) fn test_writes() -> usize {
+    WRITES.get()
 }
 
 /// The bytes of the file at `path` from the root, for a test.
@@ -1938,16 +2107,24 @@ pub(crate) mod tests {
     #[wasm_bindgen(inline_js = r#"
 let record = null;
 let real = null;
+let repeats = null;
+let last = null;
 // Records what each OPFS write gets, in call order: "blob", "whole" (a
 // typed array that is its whole buffer) or "view".
 // "same" is a write of `expected` itself.  From call `fail_from` on (0 is
-// the first), a write is refused, as a full disk refuses it.
+// the first), a write is refused, as a full disk refuses it.  `spy_repeats`
+// gives, for each write, whether it got the same object as the write
+// before.
 export function start_spy(expected, fail_from) {
   if (real) throw new Error("a spy is already on write");
   const proto = FileSystemWritableFileStream.prototype;
   real = proto.write;
   record = [];
+  repeats = [];
+  last = null;
   proto.write = function (data) {
+    repeats.push(data === last ? "1" : "0");
+    last = data;
     if (record.length >= fail_from) {
       record.push("refused");
       return Promise.reject(new DOMException("refused by the test", "QuotaExceededError"));
@@ -1966,6 +2143,9 @@ export function stop_spy() {
   real = null;
   return record.join(" ");
 }
+// For each write since `start_spy`, "1" if it got the object of the write
+// before, else "0".
+export function spy_repeats() { return repeats.join(""); }
 // The next `createWritable` is refused, after the file is made.
 export function refuse_next_writable() {
   const proto = FileSystemFileHandle.prototype;
@@ -1983,14 +2163,15 @@ export function lloyd_in_a_larger_buffer(at) {
 }
 "#)]
     extern "C" {
-        fn start_spy(expected: &JsValue, fail_from: f64);
-        fn stop_spy() -> String;
+        pub(crate) fn start_spy(expected: &JsValue, fail_from: f64);
+        pub(crate) fn stop_spy() -> String;
+        pub(crate) fn spy_repeats() -> String;
         fn lloyd_in_a_larger_buffer(at: u32) -> Uint8Array;
-        fn refuse_next_writable();
+        pub(crate) fn refuse_next_writable();
     }
 
     /// Records every write, refusing none.
-    fn spy() {
+    pub(crate) fn spy() {
         start_spy(&JsValue::UNDEFINED, f64::INFINITY);
     }
 

@@ -3,8 +3,10 @@
 //! An [`ExportJob`] reads a [`Pcm`] source in blocks and writes each block
 //! to a [`Sink`].  The page steps a job for a few milliseconds in each UI
 //! frame, since the main thread also feeds the Web Audio output.  The sinks
-//! on the web write into JS arrays, so no song-sized buffer is made in
-//! WebAssembly memory (MEM-1, MEM-4).
+//! on the web write into JS arrays, or into a save file in browser storage
+//! (`StoredWav`, D3 of M8), so no song-sized buffer is made in
+//! WebAssembly memory (MEM-1, MEM-4).  A sink can make the job wait while
+//! a write is in flight ([`Sink::ready`]).
 
 use crate::DERIVED;
 use engine::mixdown::{MixRecipe, Pcm};
@@ -17,6 +19,67 @@ pub const BLOCK: usize = 16_384;
 pub trait Sink {
     /// Takes the frames from `at`; both channels have the same length.
     fn write(&mut self, at: usize, left: &[f32], right: &[f32]);
+
+    /// Whether the sink takes a block now.  A sink that writes browser
+    /// storage is not ready while a write is in flight, and asks for a
+    /// repaint when it ends (D3 of M8).
+    fn ready(&self) -> bool {
+        true
+    }
+
+    /// Why a write of the sink failed, if one did.  A job that stops at a
+    /// failure stops at it.
+    fn failed(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Bytes of each write of a save file but the last: 1 MiB (D3 of M8).
+pub const SAVE_WRITE_BYTES: usize = 1 << 20;
+
+/// The bytes of a 16-bit WAV in blocks of one size, for a sink that writes
+/// them to browser storage (D3 of M8).  It takes the job's blocks, and
+/// gives each full block, then the last short block.  The WAV's header
+/// comes first.  It holds at most one full block and one job block.
+pub struct WavBlocks {
+    size: usize,
+    pending: Vec<u8>,
+}
+
+impl WavBlocks {
+    /// For a WAV of `frames` frames at `sample_rate`, in blocks of `size`
+    /// bytes.
+    pub fn new(frames: usize, sample_rate: u32, size: usize) -> Self {
+        let mut pending = Vec::with_capacity(size + BLOCK * engine::wav::FRAME_BYTES);
+        pending.extend_from_slice(&engine::wav::header(frames, sample_rate));
+        Self { size, pending }
+    }
+
+    /// Adds the 16-bit samples of one block of the job.
+    pub fn push(&mut self, left: &[f32], right: &[f32]) {
+        let at = self.pending.len();
+        self.pending
+            .resize(at + left.len() * engine::wav::FRAME_BYTES, 0);
+        engine::wav::write_pcm16(left, right, &mut self.pending[at..]);
+    }
+
+    /// The next full block, if there is one.
+    pub fn full(&self) -> Option<&[u8]> {
+        (self.pending.len() >= self.size).then(|| &self.pending[..self.size])
+    }
+
+    /// Drops the full block that [`Self::full`] gave.
+    pub fn take_full(&mut self) {
+        if self.pending.len() >= self.size {
+            self.pending.drain(..self.size);
+        }
+    }
+
+    /// The bytes after the last full block: the last block, once the job
+    /// is done.
+    pub fn rest(&self) -> &[u8] {
+        &self.pending
+    }
 }
 
 /// Reads a source in blocks and writes them, in order, to a sink.
@@ -49,15 +112,17 @@ impl<S: Sink> ExportJob<S> {
     }
 
     /// Reads and writes the next block.  True when the source is done, or
-    /// when a job that stops at a failure meets a failed read.  When the
-    /// source is not ready, it does nothing and waits.
+    /// when a job that stops at a failure meets a failed read or write.
+    /// When the sink or the source is not ready, it does nothing and waits.
     pub fn step(&mut self) -> bool {
-        if self.stops_at_a_failure && self.source.failed().is_some() {
+        if self.stops_at_a_failure
+            && (self.source.failed().is_some() || self.sink.failed().is_some())
+        {
             self.waiting = false;
             return true;
         }
         let n = self.left.len().min(self.source.frames() - self.at);
-        self.waiting = n > 0 && !self.source.ready(self.at, n);
+        self.waiting = n > 0 && !(self.sink.ready() && self.source.ready(self.at, n));
         if n > 0 && !self.waiting {
             let (left, right) = (&mut self.left[..n], &mut self.right[..n]);
             self.clipped += self.source.read(self.at, left, right);
@@ -118,6 +183,10 @@ impl<S: Sink> ExportJob<S> {
 
     pub fn sink(&self) -> &S {
         &self.sink
+    }
+
+    pub fn sink_mut(&mut self) -> &mut S {
+        &mut self.sink
     }
 
     pub fn into_sink(self) -> S {
@@ -467,6 +536,241 @@ mod web {
             match self {
                 JsSink::Wav(s) => s.write(at, left, right),
                 JsSink::Flac(s) | JsSink::Mp3(s) => s.write(at, left, right),
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use stored::{Finish, StoredWav};
+
+/// The sink of the storage path of a save: a 16-bit WAV save file in
+/// browser storage, written in blocks (D3 of M8).
+#[cfg(target_arch = "wasm32")]
+mod stored {
+    use super::{SAVE_WRITE_BYTES, Sink, WavBlocks};
+    use crate::store;
+    use js_sys::Uint8Array;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsValue;
+
+    /// What a [`StoredWav`] shares with its writes in flight.
+    #[derive(Default)]
+    struct Shared {
+        /// The stream, once open.
+        stream: Option<JsValue>,
+        /// An open, a write or the close is in flight.
+        busy: bool,
+        failed: Option<String>,
+        /// The close resolved: the file is complete.
+        closed: bool,
+        /// The sink was dropped before its file was complete.
+        dropped: bool,
+    }
+
+    /// Where the end stage of a [`StoredWav`] is.
+    #[derive(Debug, PartialEq)]
+    pub enum Finish {
+        /// A write or the close is in flight; ask again after a repaint.
+        Pending,
+        /// The file is complete.
+        Done,
+        /// The open, a write or the close failed; the file is gone.
+        Failed(String),
+    }
+
+    /// A 16-bit WAV save file in browser storage (D3 of M8).  Each full
+    /// block of [`SAVE_WRITE_BYTES`] goes through one JS array, made once
+    /// for the save, and written whole (MEM-5).  At most one write is in
+    /// flight.  While one is, the sink is not ready, so the job waits and
+    /// takes no time in the frame.  The end of each write calls `wake`,
+    /// which asks for a repaint.  After the job is done, [`Self::finish`]
+    /// writes the last block, in a new array of its own length, and closes
+    /// the stream.  The file is complete only after the close.  A failed
+    /// open, write or close removes the file and sets [`Sink::failed`].  A
+    /// sink dropped before its file is complete aborts its stream and
+    /// removes the file.
+    pub struct StoredWav {
+        path: String,
+        shared: Rc<RefCell<Shared>>,
+        blocks: WavBlocks,
+        /// The JS array of every full block, made at the first one.
+        array: Option<Uint8Array>,
+        wake: Rc<dyn Fn()>,
+        /// The end stage has sent the last block.
+        ended: bool,
+    }
+
+    /// What a write in flight does.
+    enum Op {
+        Put(Uint8Array),
+        /// The last block, if any, then the close.
+        Last(Option<Uint8Array>),
+    }
+
+    impl StoredWav {
+        /// Opens the save file at `path` for a WAV of `frames` frames at
+        /// `sample_rate`.  The open runs in the background: the sink is
+        /// ready when it ends.
+        #[cfg_attr(mutants, mutants::skip)]
+        pub fn new(path: String, frames: usize, sample_rate: u32, wake: Rc<dyn Fn()>) -> Self {
+            let shared = Rc::new(RefCell::new(Shared {
+                busy: true,
+                ..Shared::default()
+            }));
+            let (task_shared, task_path, task_wake) =
+                (Rc::clone(&shared), path.clone(), Rc::clone(&wake));
+            wasm_bindgen_futures::spawn_local(async move {
+                let opened = store::save_open(&task_path).await;
+                let dropped = task_shared.borrow().dropped;
+                match opened {
+                    Ok(stream) if dropped => store::save_abort(&stream, &task_path).await,
+                    Ok(stream) => task_shared.borrow_mut().stream = Some(stream),
+                    Err(e) => task_shared.borrow_mut().failed = Some(e),
+                }
+                task_shared.borrow_mut().busy = false;
+                task_wake();
+            });
+            Self {
+                path,
+                shared,
+                blocks: WavBlocks::new(frames, sample_rate, SAVE_WRITE_BYTES),
+                array: None,
+                wake,
+                ended: false,
+            }
+        }
+
+        /// The save file, from the root of browser storage.
+        pub fn path(&self) -> &str {
+            &self.path
+        }
+
+        /// The end stage, which the caller runs once the job is done, until
+        /// it is not [`Finish::Pending`].  It writes the last block, then
+        /// closes the stream.
+        #[cfg_attr(mutants, mutants::skip)]
+        pub fn finish(&mut self) -> Finish {
+            {
+                let s = self.shared.borrow();
+                if let Some(e) = &s.failed {
+                    return Finish::Failed(e.clone());
+                }
+                if s.closed {
+                    return Finish::Done;
+                }
+                if s.busy || s.stream.is_none() || self.ended {
+                    return Finish::Pending;
+                }
+            }
+            self.ended = true;
+            let rest = self.blocks.rest();
+            // A new array of its own length, never a view (MEM-5).
+            let last = (!rest.is_empty()).then(|| Uint8Array::from(rest));
+            self.send(Op::Last(last));
+            Finish::Pending
+        }
+
+        /// Starts `op` on the stream, which must be open and idle.
+        #[cfg_attr(mutants, mutants::skip)]
+        fn send(&self, op: Op) {
+            let stream = {
+                let mut s = self.shared.borrow_mut();
+                s.busy = true;
+                s.stream.clone().expect("an open stream")
+            };
+            let (shared, path, wake) = (
+                Rc::clone(&self.shared),
+                self.path.clone(),
+                Rc::clone(&self.wake),
+            );
+            wasm_bindgen_futures::spawn_local(async move {
+                // A failed close removed the file and ended the stream.
+                let (written, closing) = match op {
+                    Op::Put(bytes) => (store::save_put(&stream, &bytes).await, false),
+                    Op::Last(bytes) => {
+                        let put = match bytes {
+                            Some(bytes) => store::save_put(&stream, &bytes).await,
+                            None => Ok(()),
+                        };
+                        match put {
+                            Ok(()) => (store::save_close(&stream, &path).await, true),
+                            Err(e) => (Err(e), false),
+                        }
+                    }
+                };
+                let dropped = shared.borrow().dropped;
+                match written {
+                    Ok(()) if closing => {
+                        if dropped {
+                            store::remove_file(&path).await;
+                        }
+                        shared.borrow_mut().closed = true;
+                    }
+                    Ok(()) => {
+                        if dropped {
+                            store::save_abort(&stream, &path).await;
+                        }
+                    }
+                    Err(e) => {
+                        if !closing {
+                            store::save_abort(&stream, &path).await;
+                        }
+                        shared.borrow_mut().failed = Some(e);
+                    }
+                }
+                shared.borrow_mut().busy = false;
+                wake();
+            });
+        }
+    }
+
+    impl Sink for StoredWav {
+        #[cfg_attr(mutants, mutants::skip)]
+        fn write(&mut self, _at: usize, left: &[f32], right: &[f32]) {
+            self.blocks.push(left, right);
+            let Some(full) = self.blocks.full() else {
+                return;
+            };
+            let array = self
+                .array
+                .get_or_insert_with(|| Uint8Array::new_with_length(SAVE_WRITE_BYTES as u32));
+            array.copy_from(full);
+            let array = array.clone();
+            self.blocks.take_full();
+            self.send(Op::Put(array));
+        }
+
+        #[cfg_attr(mutants, mutants::skip)]
+        fn ready(&self) -> bool {
+            let s = self.shared.borrow();
+            s.stream.is_some() && !s.busy && s.failed.is_none() && !s.closed
+        }
+
+        #[cfg_attr(mutants, mutants::skip)]
+        fn failed(&self) -> Option<String> {
+            self.shared.borrow().failed.clone()
+        }
+    }
+
+    impl Drop for StoredWav {
+        #[cfg_attr(mutants, mutants::skip)]
+        fn drop(&mut self) {
+            let mut s = self.shared.borrow_mut();
+            if s.closed || s.failed.is_some() || s.dropped {
+                return;
+            }
+            s.dropped = true;
+            if s.busy {
+                // The open or the write in flight ends the file.
+                return;
+            }
+            if let Some(stream) = s.stream.clone() {
+                let path = self.path.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    store::save_abort(&stream, &path).await;
+                });
             }
         }
     }
@@ -824,6 +1128,145 @@ mod tests {
         let peaks = sink.finish();
         assert_eq!(peaks.scale, 1.0);
         assert_eq!((peaks.columns, peaks.scale), lane_columns(&left, &right));
+    }
+
+    /// A sink that takes a block only when the test says so, and can fail.
+    /// It counts how often a job asks.
+    #[derive(Default)]
+    struct Gate {
+        rec: Recorder,
+        closed: std::cell::Cell<bool>,
+        failure: Option<String>,
+        asked: std::cell::Cell<usize>,
+    }
+
+    impl Sink for Gate {
+        fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
+            assert!(!self.closed.get(), "a job writes only to a ready sink");
+            self.rec.write(at, left, right);
+        }
+        fn ready(&self) -> bool {
+            self.asked.set(self.asked.get() + 1);
+            !self.closed.get()
+        }
+        fn failed(&self) -> Option<String> {
+            self.failure.clone()
+        }
+    }
+
+    /// D3 of M8: a job waits for a sink that is not ready, as for a source
+    /// that is not, and asks for no time while it waits.
+    #[test]
+    fn a_job_waits_for_a_sink_that_is_not_ready() {
+        let frames = 2 * BLOCK + 5;
+        let song = Arc::new(song(&["bass", "drums"], frames));
+        let recipe = MixRecipe::new(vec![1.0, 0.5]);
+        let gate = Gate::default();
+        gate.closed.set(true);
+        let mut job = ExportJob::new(Box::new(Mix::new(Arc::clone(&song), &recipe)), gate);
+        let mut asked_for_time = 0;
+        let more = || {
+            asked_for_time += 1;
+            true
+        };
+        assert!(!job.run_while(more), "a job that waits is not done");
+        assert_eq!(asked_for_time, 0, "it does not ask for time while it waits");
+        assert_eq!(job.sink().asked.get(), 1, "it asks once: no busy loop");
+        assert!(job.is_waiting());
+        assert_eq!(job.fraction(), 0.0, "no progress");
+        assert!(!job.step(), "a step waits too");
+        assert!(job.sink().rec.starts.is_empty());
+
+        job.sink().closed.set(false);
+        assert!(job.run_while(|| true));
+        assert!(!job.is_waiting());
+        let want = run_mix(&song, &recipe);
+        let gate = job.into_sink();
+        assert_eq!(gate.rec.starts, [0, BLOCK, 2 * BLOCK]);
+        assert_eq!((gate.rec.left, gate.rec.right), (want.left, want.right));
+    }
+
+    /// D3 of M8: a job that stops at a failure stops at a failed write of
+    /// its sink; another job goes on.
+    #[test]
+    fn a_job_that_stops_at_a_failure_stops_at_a_sink_failure() {
+        let frames = 2 * BLOCK + 5;
+        let song = Arc::new(song(&["bass"], frames));
+        let recipe = MixRecipe::new(vec![1.0]);
+        let failing = || Gate {
+            failure: Some("QuotaExceededError".into()),
+            ..Gate::default()
+        };
+        let mut job = ExportJob::new(Box::new(Mix::new(Arc::clone(&song), &recipe)), failing())
+            .stopping_at_a_failure();
+        assert!(job.step(), "it ends at once");
+        assert!(!job.is_done(), "with the source not done");
+        assert!(job.sink().rec.starts.is_empty());
+        let mut job = ExportJob::new(Box::new(Mix::new(Arc::clone(&song), &recipe)), failing());
+        assert!(job.run_while(|| true), "a job that does not stop goes on");
+        assert_eq!(job.sink().rec.starts, [0, BLOCK, 2 * BLOCK]);
+    }
+
+    /// Writes each full block of a [`WavBlocks`] as it comes, as a save's
+    /// sink does.
+    struct BlockRecorder {
+        blocks: WavBlocks,
+        written: Vec<Vec<u8>>,
+    }
+
+    impl Sink for BlockRecorder {
+        fn write(&mut self, _: usize, left: &[f32], right: &[f32]) {
+            self.blocks.push(left, right);
+            while let Some(full) = self.blocks.full() {
+                self.written.push(Vec::from(full));
+                self.blocks.take_full();
+            }
+        }
+    }
+
+    /// D3 of M8: the blocks of a save's WAV, joined, are the WAV of the
+    /// mix.  Every block but the last has the block size, and the sink
+    /// never holds more than a full block and a job block.
+    #[test]
+    fn wav_blocks_are_the_wav_in_blocks_of_one_size() {
+        let job_block = BLOCK * engine::wav::FRAME_BYTES;
+        for (frames, size) in [
+            (2 * BLOCK + 5, 100_000),
+            (5 * BLOCK, job_block),
+            (4 * BLOCK, 4 * job_block),
+            (3, SAVE_WRITE_BYTES),
+            (0, SAVE_WRITE_BYTES),
+        ] {
+            let song = Arc::new(song(&["bass", "drums"], frames));
+            let recipe = MixRecipe::new(vec![1.0, 0.5]);
+            let want = run_mix(&song, &recipe);
+            let want = engine::wav::encode_pcm16(&want.left, &want.right, 48_000);
+            let sink = BlockRecorder {
+                blocks: WavBlocks::new(frames, 48_000, size),
+                written: Vec::new(),
+            };
+            let mut job = ExportJob::new(Box::new(Mix::new(Arc::clone(&song), &recipe)), sink);
+            assert!(job.run_while(|| true));
+            let sink = job.into_sink();
+            assert!(
+                sink.written.iter().all(|b| b.len() == size),
+                "{frames} frames in blocks of {size}"
+            );
+            assert!(sink.blocks.rest().len() < size, "{frames} frames");
+            let joined: Vec<u8> = sink
+                .written
+                .iter()
+                .flatten()
+                .chain(sink.blocks.rest())
+                .copied()
+                .collect();
+            assert!(joined == want, "{frames} frames in blocks of {size}");
+            assert!(
+                sink.blocks.pending.capacity() <= size + job_block,
+                "{frames} frames: it held {} bytes",
+                sink.blocks.pending.capacity()
+            );
+        }
     }
 
     #[test]
