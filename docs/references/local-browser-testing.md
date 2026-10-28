@@ -6,7 +6,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 
 * Safari is the local default.  `safaridriver` failed every session for part of 2026-10-18 ("The session timed out while connecting to a Safari instance") and worked again later that day.  Try Safari first.  If a session times out, quit Safari and retry: on 2026-10-22, sessions timed out while Safari was open, also outside the sandbox, and worked once it was quit.  If they still time out, use `--browser chrome` and say in the PR that Safari is unverified.
 * A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  End stale sessions before retrying.
-* Chrome needs a Chrome for Testing chromedriver of Chrome's major version, for mac-x64, in `CHROMEDRIVER` ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.
+* Chrome needs a Chrome for Testing chromedriver of Chrome's major version, for mac-x64, in `CHROMEDRIVER` ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.  Chrome updates itself: on 2026-10-29 it went from 155 to 156 during a run, and chromedriver 155 still drove it, with a warning ("has not been tested with Chrome version 156").
 
 ## Known local failures
 
@@ -15,6 +15,10 @@ Check `main` before treating any of these as a regression:
 * Safari keeps audio suspended while macOS reports the user idle (`references/browser-quirks.md`), so `e2e smoke` and `audio-resume` fail on any commit then.
 * In `e2e storage`, Safari fails two cases Chrome passes: the stalled-download case gets WebKit's "AbortError: Fetch is aborted" instead of the abort reason, and the `?model_url=` download case sometimes times out.
 * In a full Safari `web-test`, `an_output_left_behind_by_a_busy_page_is_replaced` logs "skipped: the audio context is suspended" because the test before it leaves the context suspended; run it alone with `--nocapture` to see it run.  `a_stored_file_removed_after_it_was_opened_is_a_read_error` is flaky in Safari; Chrome passes it.
+
+## Downloads in tests
+
+A test that clicks a download link saves the file in `~/Downloads`: headless Chrome downloads it.  Spy on the click, as `sv_spy_links` in `app/src/save_tests.rs` and `xtask/e2e/save_spy.js` do.  An offer of a save file is async, so keep the spy on until no offer is in flight.
 
 ## Running a single browser test
 
