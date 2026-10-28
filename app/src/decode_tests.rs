@@ -1045,6 +1045,7 @@ fn the_page_names_the_session_of_its_separation_for_d7() {
         name: None,
         stage,
         keeps_stems: true,
+        lanes: LANE_BUDGET,
     };
     let mut named = Vec::new();
     for stage in [

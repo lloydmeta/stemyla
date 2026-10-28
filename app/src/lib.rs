@@ -185,13 +185,15 @@ pub enum ClassicRoute {
     /// Some input lanes have a file and some are in memory, and the song
     /// fits the memory path: the page reads the stored ones first.
     ReadFirst,
-    /// As `ReadFirst`, but the song is longer than the memory path takes.
+    /// As `ReadFirst`, but the song is longer than the memory path takes
+    /// for the lanes that it reads in.
     TooLong,
 }
 
 /// The route of classic drums of `song`, whose input is its lanes that are
 /// not derived (D8 of the M7 plan).  `memory_limit` is the longest song
-/// that the memory path takes.
+/// that the memory path takes; the lanes that classic drums reads in
+/// shorten it ([`classic_lanes`], D3 of the catch-up plan).
 pub fn classic_route(song: &Shown, memory_limit: usize) -> ClassicRoute {
     let files: Vec<Option<&store_meta::LaneFile>> = song
         .lanes
@@ -203,7 +205,7 @@ pub fn classic_route(song: &Shown, memory_limit: usize) -> ClassicRoute {
         ClassicRoute::Memory
     } else if files.iter().all(Option::is_some) {
         ClassicRoute::Worker(files.into_iter().flatten().cloned().collect())
-    } else if song.frames <= memory_limit {
+    } else if fits_memory_path(song.frames, classic_lanes(song), memory_limit) {
         ClassicRoute::ReadFirst
     } else {
         ClassicRoute::TooLong
@@ -1250,6 +1252,9 @@ pub struct SeparationJob {
     /// False after browser storage refused the stems (D4 of M3): the
     /// memory path then does not save them.
     keeps_stems: bool,
+    /// The lanes that its song holds in memory after a separation on the
+    /// memory path ([`lanes_of`]), for the memory path's checks.
+    pub lanes: usize,
 }
 
 /// How far a separation has got.
@@ -1282,6 +1287,74 @@ pub enum JobStage {
 /// this on its measures.
 pub const MEMORY_PATH_MAX_FRAMES: usize = 100 * 44_100;
 
+/// The stems that a separation makes: the model's six.
+pub const SEPARATED_STEMS: usize = 6;
+
+/// The stereo lanes that a separation of one source on the memory path
+/// holds on the page at its limit: the source, and the six song-length
+/// stems that `assemble::Assembly` makes (D3 of
+/// `plans/active/stream-from-storage-catchup.md`, decision 0020).
+pub const LANE_BUDGET: usize = 1 + SEPARATED_STEMS;
+
+/// The longest song, in frames at 44.1 kHz, of which the page may hold
+/// `lanes` stereo lanes in memory: `memory_limit` (normally
+/// [`MEMORY_PATH_MAX_FRAMES`]) for at most [`LANE_BUDGET`] lanes, and
+/// [`LANE_BUDGET`] lanes of `memory_limit` shared out for more.  So the
+/// page never holds more decoded audio than a separation of one source at
+/// the limit (decision 0020).  A mono lane counts as a full lane.
+pub fn memory_path_frames(memory_limit: usize, lanes: usize) -> usize {
+    let shared = LANE_BUDGET as u128 * memory_limit as u128 / lanes.max(1) as u128;
+    memory_limit.min(usize::try_from(shared).unwrap_or(usize::MAX))
+}
+
+/// Whether a song of `frames` fits the memory path when the page holds
+/// `lanes` lanes of it in memory ([`memory_path_frames`]).
+pub fn fits_memory_path(frames: usize, lanes: usize, memory_limit: usize) -> bool {
+    frames <= memory_path_frames(memory_limit, lanes)
+}
+
+/// The lanes that the page holds in memory after a separation on the
+/// memory path: `sources` source lanes in memory, the input unless it is
+/// one of them (`input_is_a_source`), and the stems.
+pub fn separation_lanes(sources: usize, input_is_a_source: bool) -> usize {
+    sources + usize::from(!input_is_a_source) + SEPARATED_STEMS
+}
+
+/// [`separation_lanes`] of a song whose `sources` sources are all in
+/// memory, as on a page decode: its input is its source when it has one.
+/// With no source in memory, the input alone.
+pub fn sources_in_memory_lanes(sources: usize) -> usize {
+    separation_lanes(sources, sources == 1)
+}
+
+/// [`separation_lanes`] of the shown `song`: its lanes in memory that are
+/// not derived, and whether its input (the "original" lane, or its only
+/// source) is one of them.
+pub fn lanes_of(song: &Shown) -> usize {
+    let source_in_memory =
+        |lane: &ShownLane| !DERIVED.contains(&lane.name.as_str()) && lane.audio.samples().is_some();
+    let sources = song
+        .lanes
+        .iter()
+        .filter(|lane| source_in_memory(lane))
+        .count();
+    let input_is_a_source =
+        original_index_of(&song.names()).is_some_and(|i| source_in_memory(&song.lanes[i]));
+    separation_lanes(sources, input_is_a_source)
+}
+
+/// The lanes that classic drums of `song` holds in memory on its
+/// `ReadFirst` route: every lane that is not derived, read into memory,
+/// and the classic drums lane.  The block HPSS makes no song-length mix.
+pub fn classic_lanes(song: &Shown) -> usize {
+    let sources = song
+        .lanes
+        .iter()
+        .filter(|lane| !DERIVED.contains(&lane.name.as_str()))
+        .count();
+    sources + 1
+}
+
 /// Which way a separation goes (D2 of M3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SeparationPath {
@@ -1309,17 +1382,19 @@ pub fn storage_path_needs(frames: usize, mix_kept: bool) -> f64 {
 
 /// The storage path if the song has a session and `free_bytes` holds
 /// `needed_bytes` ([`storage_path_needs`]); else the memory path if the
-/// song is at most `max_memory_frames` long; else none.
+/// song fits it with `lanes` lanes in memory ([`fits_memory_path`]); else
+/// none.
 pub fn separation_path(
     has_session: bool,
     frames: usize,
+    lanes: usize,
     free_bytes: f64,
     needed_bytes: f64,
-    max_memory_frames: usize,
+    memory_limit: usize,
 ) -> SeparationPath {
     if has_session && free_bytes >= needed_bytes {
         SeparationPath::Storage
-    } else if frames <= max_memory_frames {
+    } else if fits_memory_path(frames, lanes, memory_limit) {
         SeparationPath::Memory
     } else {
         SeparationPath::TooLong
@@ -1356,14 +1431,16 @@ pub enum AfterUnstored {
 }
 
 /// [`AfterUnstored`] for a separation whose stems would go to
-/// `destination`, of a shown song of `frames`.
+/// `destination`, of a shown song of `frames` with `lanes` lanes in memory
+/// ([`fits_memory_path`]).
 pub fn after_unstored(
     destination: &StemsGo,
     frames: usize,
-    max_memory_frames: usize,
+    lanes: usize,
+    memory_limit: usize,
 ) -> AfterUnstored {
     match destination {
-        StemsGo::Show if frames <= max_memory_frames => AfterUnstored::Memory,
+        StemsGo::Show if fits_memory_path(frames, lanes, memory_limit) => AfterUnstored::Memory,
         StemsGo::Show => AfterUnstored::TooLong,
         StemsGo::Kept | StemsGo::Discarded => AfterUnstored::OpenAgain,
     }
@@ -1585,6 +1662,7 @@ impl StemApp {
             name: None,
             stage: JobStage::Starting,
             keeps_stems: true,
+            lanes: self.song.as_deref().map_or(LANE_BUDGET, lanes_of),
         })
     }
 
@@ -2071,9 +2149,10 @@ impl StemApp {
     /// * Every input lane is in memory: the page runs the block HPSS.  On
     ///   the web, the page stops while it runs.  Natively, it runs on a
     ///   thread, and the lane appears when it ends.
-    /// * Some input lanes are stored and some are in memory: for a song of
-    ///   at most `MEMORY_PATH_MAX_FRAMES` frames, the page first reads the
-    ///   stored lanes into memory.  A longer song is refused.
+    /// * Some input lanes are stored and some are in memory: for a song
+    ///   within the memory path's limit for the lanes that it reads in
+    ///   ([`classic_lanes`]), the page first reads the stored lanes into
+    ///   memory.  A longer song is refused.
     pub fn start_classic_drums(&mut self) {
         let Some(shown) = self.song.clone() else {
             return;
@@ -2094,10 +2173,7 @@ impl StemApp {
             #[cfg(target_arch = "wasm32")]
             ClassicRoute::ReadFirst => return self.classic_read_first(&shown),
             ClassicRoute::TooLong => {
-                self.status = format!(
-                    "Classic drums not made: part of this song is in browser storage and part in memory, and it is longer than {}",
-                    clock(limit)
-                );
+                self.status = classic_too_long_text(&shown, limit);
                 return;
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -2834,7 +2910,15 @@ impl StemApp {
             "this song is not kept in browser storage".into()
         };
         let needed = storage_path_needs(song.frames, mix_kept);
-        match separation_path(has_session, song.frames, free, needed, self.memory_limit) {
+        let lanes = lanes_of(&song);
+        match separation_path(
+            has_session,
+            song.frames,
+            lanes,
+            free,
+            needed,
+            self.memory_limit,
+        ) {
             SeparationPath::Storage if mix_kept => self.post_separation(JobStage::Storage, None),
             SeparationPath::Storage => {
                 let (input, _) = separation_input(&song, song.audio());
@@ -2844,7 +2928,8 @@ impl StemApp {
             SeparationPath::Memory => self.post_separation(JobStage::Memory, Some(reason)),
             SeparationPath::TooLong => {
                 self.separating = None;
-                self.status = refusal_text(song.frames, self.memory_limit, has_session, &reason);
+                self.status =
+                    refusal_text(song.frames, lanes, self.memory_limit, has_session, &reason);
                 log::warn!("separator: {}", self.status);
             }
         }
@@ -2905,11 +2990,11 @@ impl StemApp {
         if !writing {
             return;
         }
-        let Some(frames) = self
+        let Some((frames, lanes)) = self
             .song
             .as_ref()
             .filter(|_| serial == self.song_serial)
-            .map(|s| s.frames)
+            .map(|s| (s.frames, lanes_of(s)))
         else {
             self.separating = None;
             self.status =
@@ -2923,11 +3008,11 @@ impl StemApp {
         };
         let reason = format!("browser storage could not keep the song's mix ({e})");
         log::warn!("separator: {reason}");
-        if frames <= self.memory_limit {
+        if fits_memory_path(frames, lanes, self.memory_limit) {
             self.separate_without_storage(&reason);
         } else {
             self.separating = None;
-            self.status = refusal_text(frames, self.memory_limit, true, &reason);
+            self.status = refusal_text(frames, lanes, self.memory_limit, true, &reason);
         }
     }
 
@@ -3111,8 +3196,9 @@ impl StemApp {
         }
         let destination = job.destination(self.song_serial, self.session.as_deref());
         let frames = self.song.as_ref().map_or(0, |s| s.frames);
+        let lanes = self.song.as_deref().map_or(LANE_BUDGET, lanes_of);
         let refused = format!("Browser storage failed ({text})");
-        match after_unstored(&destination, frames, self.memory_limit) {
+        match after_unstored(&destination, frames, lanes, self.memory_limit) {
             AfterUnstored::Memory => {
                 // Not saved: storage just refused them (D4).
                 self.separating = self.separation_job().map(|j| SeparationJob {
@@ -3137,7 +3223,7 @@ impl StemApp {
             AfterUnstored::TooLong => {
                 self.status = format!(
                     "{refused}.  {}.  Free space in the Storage menu, then press Separate again.",
-                    too_long_text(frames, self.memory_limit)
+                    too_long_text(frames, lanes, self.memory_limit)
                 );
             }
             AfterUnstored::OpenAgain => {
@@ -3174,7 +3260,10 @@ impl StemApp {
         self.reading_stems = read;
         self.status = format!("Separated in {secs:.0} s; putting the stems in place…");
         let (pending, ctx) = (self.pending.clone(), ctx.clone());
-        let (decoder, limit) = (self.decoder.clone(), self.memory_limit);
+        // D3 of the catch-up plan: a stem that is not complete is read
+        // whole only within the memory path's limit for the song's lanes.
+        let limit = memory_path_frames(self.memory_limit, job.lanes);
+        let decoder = self.decoder.clone();
         // D10 of M6: the read protects the session until the stems show.
         let guard = read.then(|| store::OpenGuard::new(&id));
         wasm_bindgen_futures::spawn_local(async move {
@@ -4192,28 +4281,40 @@ pub fn clock(frames: usize) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// Why the memory path refuses a song of `frames`.
-pub fn too_long_text(frames: usize, max_memory_frames: usize) -> String {
+/// Why the memory path refuses a song of `frames` that holds `lanes` lanes
+/// in memory ([`memory_path_frames`]).
+pub fn too_long_text(frames: usize, lanes: usize, memory_limit: usize) -> String {
+    let limit = memory_path_frames(memory_limit, lanes);
+    let songs = if limit < memory_limit {
+        format!(
+            "songs of up to {}, and a song with as many lanes in memory as this one up to {}",
+            clock(memory_limit),
+            clock(limit)
+        )
+    } else {
+        format!("songs of up to {}", clock(limit))
+    };
     format!(
-        "this song is {} long, and without browser storage this page separates songs of up to {}",
-        clock(frames),
-        clock(max_memory_frames)
+        "this song is {} long, and without browser storage this page separates {songs}",
+        clock(frames)
     )
 }
 
-/// The status line when the page refuses a song of `frames` before the
-/// start (D2 of M3), for the `reason` that it does not take the storage
-/// path.  `has_session`: whether the song is kept in this browser.
+/// The status line when the page refuses a song of `frames`, with `lanes`
+/// lanes in memory, before the start (D2 of M3), for the `reason` that it
+/// does not take the storage path.  `has_session`: whether the song is
+/// kept in this browser.
 pub fn refusal_text(
     frames: usize,
-    max_memory_frames: usize,
+    lanes: usize,
+    memory_limit: usize,
     has_session: bool,
     reason: &str,
 ) -> String {
     if has_session {
         format!(
             "Not separated: {}; {reason}.  Free space in the Storage menu, then press Separate again.",
-            too_long_text(frames, max_memory_frames)
+            too_long_text(frames, lanes, memory_limit)
         )
     } else {
         // Only a song opened again gets a session, so free space alone
@@ -4221,9 +4322,19 @@ pub fn refusal_text(
         format!(
             "Not separated: this song is {} long, and it is not kept in this browser.  A song over {} separates only from browser storage: open the file again once storage has room.",
             clock(frames),
-            clock(max_memory_frames)
+            clock(memory_path_frames(memory_limit, lanes))
         )
     }
+}
+
+/// The status line when classic drums of `song` is refused: some of its
+/// lanes are stored and some in memory, and it is longer than the memory
+/// path takes for the lanes that it would read in ([`classic_lanes`]).
+pub fn classic_too_long_text(song: &Shown, memory_limit: usize) -> String {
+    format!(
+        "Classic drums not made: part of this song is in browser storage and part in memory, and it is longer than {}",
+        clock(memory_path_frames(memory_limit, classic_lanes(song)))
+    )
 }
 
 /// The page's memory when a separation's last reply arrives, before it
@@ -4811,6 +4922,141 @@ mod tests {
             ClassicRoute::TooLong,
             "over the memory path's limit"
         );
+        // D3 of the catch-up plan: 21 sources read in, and the classic
+        // drums lane, hold 22 lanes: 7 / 22 of the limit.
+        let names = sources(21);
+        let many = Song {
+            sample_rate: 44_100,
+            frames: 4,
+            stems: names.iter().map(|name| stem(name, 0.1)).collect(),
+        };
+        let mut files = vec![None; 21];
+        files[0] = file("s/decoded/0.f32");
+        let many = with_test_files(many, files);
+        assert_eq!(classic_lanes(&many), 22);
+        assert_eq!(
+            classic_route(&many, 12),
+            ClassicRoute::TooLong,
+            "7 x 12 / 22 is 3"
+        );
+        assert_eq!(
+            classic_route(&many, 13),
+            ClassicRoute::ReadFirst,
+            "7 x 13 / 22 is 4"
+        );
+        let text = classic_too_long_text(&many, 100 * 44_100);
+        assert!(text.ends_with("longer than 0:31"), "{text}");
+        assert!(
+            classic_too_long_text(&with_test_files(song.clone(), mixed()), 100 * 44_100)
+                .ends_with("longer than 1:40")
+        );
+    }
+
+    /// A song of `names` lanes of `frames` frames, each in memory.
+    fn shown_of(names: &[&str], frames: usize) -> Shown {
+        let silence: engine::Samples = vec![0.0; frames].into();
+        Shown::in_memory(Song {
+            sample_rate: 44_100,
+            frames,
+            stems: names
+                .iter()
+                .map(|name| Stem {
+                    name: name.to_string(),
+                    left: silence.clone(),
+                    right: silence.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    /// `names` of the sources `lloyd 0` to `lloyd <n - 1>`.
+    fn sources(n: usize) -> Vec<String> {
+        (0..n).map(|k| format!("lloyd {k}")).collect()
+    }
+
+    /// D3 of the catch-up plan: a separation of one source on the memory
+    /// path holds 7 lanes (the source and 6 stems); more lanes share that
+    /// budget.  The worked figures of D3, at 100 s.
+    #[test]
+    fn the_memory_path_shares_seven_lanes_of_its_limit() {
+        let limit = MEMORY_PATH_MAX_FRAMES;
+        assert_eq!(LANE_BUDGET, 7);
+        assert_eq!(memory_path_frames(limit, 1), limit, "never past the limit");
+        assert_eq!(memory_path_frames(limit, 7), limit);
+        assert_eq!(memory_path_frames(limit, 8), 7 * limit / 8);
+        assert_eq!(memory_path_frames(limit, 0), limit);
+        let seconds = |lanes: usize| memory_path_frames(limit, lanes) / 44_100;
+        // One source: the source and 6 stems.
+        assert_eq!(sources_in_memory_lanes(1), 7);
+        assert_eq!(seconds(sources_in_memory_lanes(1)), 100);
+        // Two sources: both, their mix and 6 stems.
+        assert_eq!(sources_in_memory_lanes(2), 9);
+        assert_eq!(seconds(9), 77);
+        // A drop of 6 stem files: 13 lanes.
+        assert_eq!(sources_in_memory_lanes(6), 13);
+        assert_eq!(seconds(13), 53);
+        // 21 sources: 28 lanes, 25 s.
+        assert_eq!(sources_in_memory_lanes(21), 28);
+        assert_eq!(memory_path_frames(limit, 28), 25 * 44_100);
+        // No source in memory: the input, read from storage, and 6 stems.
+        assert_eq!(sources_in_memory_lanes(0), 7);
+        assert!(fits_memory_path(25 * 44_100, 28, limit));
+        assert!(!fits_memory_path(25 * 44_100 + 1, 28, limit));
+        // A test's short limit shrinks the same way, and no product
+        // overflows on wasm32.
+        assert_eq!(memory_path_frames(28, 28), 7);
+        assert_eq!(memory_path_frames(usize::MAX, 7), usize::MAX);
+    }
+
+    /// D3 of the catch-up plan: the lanes of a shown song are its sources
+    /// in memory, its input unless it is one of them, and 6 stems.
+    #[test]
+    fn the_lanes_of_a_song_count_what_stays_in_memory() {
+        let one = shown_of(&["lloyd"], 10);
+        assert_eq!(lanes_of(&one), 7, "the source is the input");
+        let names = sources(21);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(lanes_of(&shown_of(&names, 10)), 28);
+        let with_classic = shown_of(&["bass", "drums", "classic drums"], 10);
+        assert_eq!(lanes_of(&with_classic), 9, "classic drums is not a source");
+        // A separated song in memory: 6 stems and the original, which is
+        // the input.
+        let separated = shown_of(
+            &[
+                "bass", "drums", "other", "vocals", "guitar", "piano", "original",
+            ],
+            10,
+        );
+        assert_eq!(lanes_of(&separated), 13);
+        // A stored lane stays in browser storage.
+        let mut stored = shown_of(&["bass", "drums"], 10);
+        stored.lanes[1].audio = LaneAudio::Stored {
+            file: store_meta::LaneFile::f32("sessions/1/decoded/1.f32".into(), 10),
+            overview: std::rc::Rc::new(lanes::Overview {
+                columns: Vec::new(),
+                scale: 1.0,
+            }),
+            store: lane_store::MemoryStore::new(),
+        };
+        assert_eq!(lanes_of(&stored), 8, "one source in memory, and the mix");
+        // Classic drums reads every source into memory, and adds its lane.
+        assert_eq!(classic_lanes(&with_classic), 3);
+        assert_eq!(classic_lanes(&stored), 3);
+    }
+
+    /// D3 of the catch-up plan: a separation keeps the lanes of its song,
+    /// for the read of a stem that is not complete after it ends.
+    #[test]
+    fn a_separation_job_counts_the_lanes_of_its_song() {
+        let mut app = StemApp {
+            want_device: false,
+            ..StemApp::default()
+        };
+        assert!(app.separation_job().is_none(), "no song");
+        app.open_song(shown_of(&["bass", "drums"], 10));
+        assert_eq!(app.separation_job().map(|job| job.lanes), Some(9));
+        app.open_song(shown_of(&["lloyd"], 10));
+        assert_eq!(app.separation_job().map(|job| job.lanes), Some(7));
     }
 
     #[test]
@@ -4831,6 +5077,7 @@ mod tests {
             name: None,
             stage: JobStage::Starting,
             keeps_stems: true,
+            lanes: LANE_BUDGET,
         }
     }
 
@@ -4844,13 +5091,14 @@ mod tests {
     #[test]
     fn the_separation_path_follows_storage_and_length() {
         let limit = MEMORY_PATH_MAX_FRAMES;
+        const ONE: usize = LANE_BUDGET;
         assert_eq!(limit, 4_410_000, "100 seconds at 44.1 kHz");
         let frames = 30 * 44_100;
         let needed = storage_needed(frames);
         assert_eq!(needed, 6.0 * (44.0 + 4.0 * frames as f64) + 16e6);
         // A session with enough space.
         assert_eq!(
-            separation_path(true, frames, needed, needed, limit),
+            separation_path(true, frames, ONE, needed, needed, limit),
             SeparationPath::Storage
         );
         // A long song with a session and space has no limit.
@@ -4859,6 +5107,7 @@ mod tests {
             separation_path(
                 true,
                 long,
+                ONE,
                 storage_needed(long),
                 storage_needed(long),
                 limit
@@ -4867,26 +5116,39 @@ mod tests {
         );
         // A session without enough space.
         assert_eq!(
-            separation_path(true, frames, needed - 1.0, needed, limit),
+            separation_path(true, frames, ONE, needed - 1.0, needed, limit),
             SeparationPath::Memory
         );
         // No session.
         assert_eq!(
-            separation_path(false, frames, f64::INFINITY, needed, limit),
+            separation_path(false, frames, ONE, f64::INFINITY, needed, limit),
             SeparationPath::Memory
         );
         // At the limit and one frame over it.
         assert_eq!(
-            separation_path(false, limit, 0.0, needed, limit),
+            separation_path(false, limit, ONE, 0.0, needed, limit),
             SeparationPath::Memory
         );
         assert_eq!(
-            separation_path(false, limit + 1, 0.0, needed, limit),
+            separation_path(false, limit + 1, ONE, 0.0, needed, limit),
+            SeparationPath::TooLong
+        );
+        // D3 of the catch-up plan: two sources in memory hold 9 lanes, so
+        // the memory path takes 7 / 9 of the limit: 77 s.
+        let two = sources_in_memory_lanes(2);
+        let shorter = memory_path_frames(limit, two);
+        assert_eq!(shorter / 44_100, 77);
+        assert_eq!(
+            separation_path(false, shorter, two, 0.0, needed, limit),
+            SeparationPath::Memory
+        );
+        assert_eq!(
+            separation_path(false, shorter + 1, two, 0.0, needed, limit),
             SeparationPath::TooLong
         );
         let over = storage_needed(limit + 1);
         assert_eq!(
-            separation_path(true, limit + 1, over - 1.0, over, limit),
+            separation_path(true, limit + 1, ONE, over - 1.0, over, limit),
             SeparationPath::TooLong
         );
     }
@@ -4895,24 +5157,25 @@ mod tests {
     #[test]
     fn the_separation_path_counts_a_missing_mix() {
         let limit = MEMORY_PATH_MAX_FRAMES;
+        const ONE: usize = LANE_BUDGET;
         let frames = 30 * 44_100;
         let stems = storage_needed(frames);
         assert_eq!(storage_path_needs(frames, true), stems);
         let with_mix = storage_path_needs(frames, false);
         assert_eq!(with_mix, stems + 8.0 * frames as f64);
         assert_eq!(
-            separation_path(true, frames, with_mix, with_mix, limit),
+            separation_path(true, frames, ONE, with_mix, with_mix, limit),
             SeparationPath::Storage
         );
         assert_eq!(
-            separation_path(true, frames, with_mix - 1.0, with_mix, limit),
+            separation_path(true, frames, ONE, with_mix - 1.0, with_mix, limit),
             SeparationPath::Memory,
             "room for the stems, not for the mix"
         );
         let long = 10 * limit;
         let long_needs = storage_path_needs(long, false);
         assert_eq!(
-            separation_path(true, long, storage_needed(long), long_needs, limit),
+            separation_path(true, long, ONE, storage_needed(long), long_needs, limit),
             SeparationPath::TooLong
         );
     }
@@ -4928,8 +5191,13 @@ mod tests {
     #[test]
     fn a_song_too_long_gives_its_length_and_the_limit() {
         assert_eq!(
-            too_long_text(250 * 44_100, MEMORY_PATH_MAX_FRAMES),
+            too_long_text(250 * 44_100, LANE_BUDGET, MEMORY_PATH_MAX_FRAMES),
             "this song is 4:10 long, and without browser storage this page separates songs of up to 1:40"
+        );
+        // D3 of the catch-up plan: more lanes in memory, a shorter limit.
+        assert_eq!(
+            too_long_text(90 * 44_100, 9, MEMORY_PATH_MAX_FRAMES),
+            "this song is 1:30 long, and without browser storage this page separates songs of up to 1:40, and a song with as many lanes in memory as this one up to 1:17"
         );
     }
 
@@ -4940,11 +5208,12 @@ mod tests {
         let long = 250 * 44_100;
         let reason = "browser storage has 0 MB free, and the stems need 280 MB";
         assert_eq!(
-            refusal_text(long, MEMORY_PATH_MAX_FRAMES, true, reason),
+            refusal_text(long, LANE_BUDGET, MEMORY_PATH_MAX_FRAMES, true, reason),
             "Not separated: this song is 4:10 long, and without browser storage this page separates songs of up to 1:40; browser storage has 0 MB free, and the stems need 280 MB.  Free space in the Storage menu, then press Separate again."
         );
         let unkept = refusal_text(
             long,
+            LANE_BUDGET,
             MEMORY_PATH_MAX_FRAMES,
             false,
             "this song is not kept in browser storage",
@@ -4954,6 +5223,17 @@ mod tests {
             "Not separated: this song is 4:10 long, and it is not kept in this browser.  A song over 1:40 separates only from browser storage: open the file again once storage has room."
         );
         assert!(!unkept.contains("press Separate again"));
+        // D3 of the catch-up plan: 21 sources in memory hold 28 lanes.
+        let many = refusal_text(
+            30 * 44_100,
+            sources_in_memory_lanes(21),
+            MEMORY_PATH_MAX_FRAMES,
+            false,
+            "this song is not kept in browser storage",
+        );
+        assert!(many.contains("A song over 0:25 separates only"), "{many}");
+        let kept = refusal_text(30 * 44_100, 28, MEMORY_PATH_MAX_FRAMES, true, reason);
+        assert!(kept.contains("as this one up to 0:25"), "{kept}");
     }
 
     #[test]
@@ -5041,16 +5321,25 @@ mod tests {
     fn an_unstored_separation_goes_to_memory_only_for_the_shown_song() {
         let limit = MEMORY_PATH_MAX_FRAMES;
         assert_eq!(
-            after_unstored(&StemsGo::Show, limit, limit),
+            after_unstored(&StemsGo::Show, limit, LANE_BUDGET, limit),
             AfterUnstored::Memory
         );
         assert_eq!(
-            after_unstored(&StemsGo::Show, limit + 1, limit),
+            after_unstored(&StemsGo::Show, limit + 1, LANE_BUDGET, limit),
+            AfterUnstored::TooLong
+        );
+        // D3 of the catch-up plan: 28 lanes in memory take 25 s.
+        assert_eq!(
+            after_unstored(&StemsGo::Show, 25 * 44_100, 28, limit),
+            AfterUnstored::Memory
+        );
+        assert_eq!(
+            after_unstored(&StemsGo::Show, 25 * 44_100 + 1, 28, limit),
             AfterUnstored::TooLong
         );
         for other in [StemsGo::Kept, StemsGo::Discarded] {
             assert_eq!(
-                after_unstored(&other, 100, limit),
+                after_unstored(&other, 100, LANE_BUDGET, limit),
                 AfterUnstored::OpenAgain,
                 "{other:?}"
             );
