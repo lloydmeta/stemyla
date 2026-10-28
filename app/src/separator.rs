@@ -489,11 +489,10 @@ impl Separator {
     /// Asks the worker to encode a stem or a mix as MP3; the file comes
     /// back as [`Event::Mp3`].  Arrays are transferred (MEM-2); a stored
     /// WAV crosses as its path.
-    pub fn encode_mp3(&self, name: &str, source: Encode, rate: u32) {
+    pub fn encode_mp3(&self, name: &str, source: Encode) {
         let request = Request::Mp3 {
             name: Some(name.into()),
             source,
-            rate: Some(rate),
         };
         post(&self.worker, &request, &Settings::default());
     }
@@ -501,11 +500,10 @@ impl Separator {
     /// Asks the worker to encode a stem or a mix as a 16-bit FLAC; the file
     /// comes back as [`Event::Flac`].  Arrays are transferred (MEM-2); a
     /// stored WAV crosses as its path.
-    pub fn encode_flac(&self, name: &str, source: Encode, rate: u32) {
+    pub fn encode_flac(&self, name: &str, source: Encode) {
         let request = Request::Flac {
             name: Some(name.into()),
             source,
-            rate: Some(rate),
         };
         post(&self.worker, &request, &Settings::default());
     }
@@ -634,6 +632,7 @@ export function spy_on_post(worker) {
     /// Posts one encode request through `encode`, and returns the request
     /// and its transfer list.
     fn posted_encode(
+        rate: u32,
         encode: impl FnOnce(&Separator, Encode),
     ) -> (Request, js_sys::Array, Float32Array, Float32Array) {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
@@ -645,6 +644,7 @@ export function spy_on_post(worker) {
             Encode::Arrays {
                 left: left.clone(),
                 right: right.clone(),
+                rate: Some(rate),
             },
         );
         sep.stop();
@@ -675,14 +675,18 @@ export function spy_on_post(worker) {
 
     #[wasm_bindgen_test]
     fn encode_flac_asks_the_worker_for_a_flac_of_the_arrays() {
-        let (request, transfer, left, right) = posted_encode(|sep, source| {
-            sep.encode_flac("lloyd - bass.flac", source, 48_000);
+        let (request, transfer, left, right) = posted_encode(48_000, |sep, source| {
+            sep.encode_flac("lloyd - bass.flac", source);
         });
         match request {
             Request::Flac {
                 name,
-                source: Encode::Arrays { left: l, right: r },
-                rate,
+                source:
+                    Encode::Arrays {
+                        left: l,
+                        right: r,
+                        rate,
+                    },
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - bass.flac"));
                 assert_eq!(rate, Some(48_000));
@@ -694,14 +698,18 @@ export function spy_on_post(worker) {
 
     #[wasm_bindgen_test]
     fn encode_mp3_asks_the_worker_for_an_mp3_of_the_arrays() {
-        let (request, transfer, left, right) = posted_encode(|sep, source| {
-            sep.encode_mp3("lloyd - mix without vocals.mp3", source, 44_100);
+        let (request, transfer, left, right) = posted_encode(44_100, |sep, source| {
+            sep.encode_mp3("lloyd - mix without vocals.mp3", source);
         });
         match request {
             Request::Mp3 {
                 name,
-                source: Encode::Arrays { left: l, right: r },
-                rate,
+                source:
+                    Encode::Arrays {
+                        left: l,
+                        right: r,
+                        rate,
+                    },
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - mix without vocals.mp3"));
                 assert_eq!(rate, Some(44_100));
@@ -720,8 +728,9 @@ export function spy_on_post(worker) {
             wav: "saves/1-1.wav".into(),
             frames: 44_100,
             out: "saves/1-1.flac".into(),
+            rate: 44_100,
         };
-        sep.encode_flac("lloyd - bass.flac", source, 44_100);
+        sep.encode_flac("lloyd - bass.flac", source);
         sep.stop();
         let mut posted = posted(&posts);
         assert_eq!(posted.len(), 1, "one message");
@@ -729,7 +738,9 @@ export function spy_on_post(worker) {
         assert_eq!(transfer.length(), 0, "no samples cross");
         match request {
             Request::Flac {
-                source: Encode::Stored { wav, frames, out },
+                source: Encode::Stored {
+                    wav, frames, out, ..
+                },
                 ..
             } => assert_eq!(
                 (wav.as_str(), frames, out.as_str()),

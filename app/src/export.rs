@@ -453,13 +453,14 @@ mod web {
             }
         }
 
-        /// The channels as the source of an encode request, which
-        /// transfers them (MEM-2).
+        /// The channels, at `rate`, as the source of an encode request,
+        /// which transfers them (MEM-2).
         #[cfg_attr(mutants, mutants::skip)]
-        pub fn into_encode(self) -> stem_protocol::Encode {
+        pub fn into_encode(self, rate: u32) -> stem_protocol::Encode {
             stem_protocol::Encode::Arrays {
                 left: self.left,
                 right: self.right,
+                rate: Some(rate),
             }
         }
     }

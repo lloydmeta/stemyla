@@ -197,6 +197,8 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
+        # About 3 minutes on the maintainer's Mac; not measured on CI yet.
+        timeout-minutes: 10
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.
       - if: failure() || cancelled()

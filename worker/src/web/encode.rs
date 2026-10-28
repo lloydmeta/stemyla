@@ -316,13 +316,12 @@ pub(super) async fn encode(
     codec: Codec,
     name: Option<String>,
     source: Encode,
-    rate: Option<u32>,
 ) -> Result<(), String> {
     let name = name.unwrap_or_else(|| format!("stem.{}", codec.kind()));
-    let rate = rate.unwrap_or(44_100);
     let before = wasm_bytes();
     match source {
-        Encode::Arrays { left, right } => {
+        Encode::Arrays { left, right, rate } => {
+            let rate = rate.unwrap_or(44_100);
             let input = Input::Arrays([left, right]);
             let (file, size) = match codec {
                 Codec::Mp3 => {
@@ -339,7 +338,12 @@ pub(super) async fn encode(
             log_memory(codec, &name, before, size);
             send(codec.reply(name, file));
         }
-        Encode::Stored { wav, frames, out } => {
+        Encode::Stored {
+            wav,
+            frames,
+            out,
+            rate,
+        } => {
             for (field, path) in [("wav", &wav), ("out", &out)] {
                 if !is_save_path(path) {
                     return Err(format!("{field} must be a file in {SAVES}, not {path:?}"));

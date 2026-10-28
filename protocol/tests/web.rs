@@ -337,14 +337,13 @@ fn an_mp3_request_keeps_its_name_and_rate() {
         source: Encode::Arrays {
             left: samples(&[0.1]),
             right: samples(&[0.2]),
+            rate: Some(48_000),
         },
-        rate: Some(48_000),
     };
     match request_trip(&r, &Settings::default()).request {
         Request::Mp3 {
             name,
-            rate,
-            source: Encode::Arrays { left, .. },
+            source: Encode::Arrays { left, rate, .. },
         } => {
             assert_eq!(name.as_deref(), Some("bass.mp3"));
             assert_eq!(rate, Some(48_000));
@@ -362,14 +361,18 @@ fn a_flac_request_keeps_its_name_and_rate() {
         source: Encode::Arrays {
             left: left.clone(),
             right: right.clone(),
+            rate: Some(48_000),
         },
-        rate: Some(48_000),
     };
     match request_trip(&r, &Settings::default()).request {
         Request::Flac {
             name,
-            rate,
-            source: Encode::Arrays { left: l, right: r },
+            source:
+                Encode::Arrays {
+                    left: l,
+                    right: r,
+                    rate,
+                },
         } => {
             assert_eq!(name.as_deref(), Some("bass.flac"));
             assert_eq!(rate, Some(48_000));
@@ -378,6 +381,21 @@ fn a_flac_request_keeps_its_name_and_rate() {
         other => panic!("{other:?}"),
     }
     assert_eq!(left.length() + right.length(), 0, "transferred");
+    let none = Request::Flac {
+        name: None,
+        source: Encode::Arrays {
+            left: samples(&[0.1]),
+            right: samples(&[0.2]),
+            rate: None,
+        },
+    };
+    assert!(matches!(
+        request_trip(&none, &Settings::default()).request,
+        Request::Flac {
+            source: Encode::Arrays { rate: None, .. },
+            ..
+        }
+    ));
 }
 
 fn stored_encode() -> Encode {
@@ -385,41 +403,44 @@ fn stored_encode() -> Encode {
         wav: "saves/1792640000000-3.wav".into(),
         frames: 13_230_000,
         out: "saves/1792640000000-3.flac".into(),
+        rate: 44_100,
     }
 }
 
-/// D5 of M8: a stored encode names its files, and no samples cross.
+/// D5 of M8: a stored encode names its files and its rate, and no samples
+/// cross.
 #[wasm_bindgen_test]
 fn a_stored_encode_names_its_files_and_transfers_nothing() {
     for r in [
         Request::Flac {
             name: Some("lloyd - mix.flac".into()),
             source: stored_encode(),
-            rate: Some(44_100),
         },
         Request::Mp3 {
             name: Some("lloyd - mix.mp3".into()),
             source: stored_encode(),
-            rate: Some(44_100),
         },
     ] {
         let (msg, transfer) = r.to_js(&Settings::default());
         assert_eq!(transfer.length(), 0, "{}: no samples cross", r.kind());
         let got = ToWorker::from_js(&post(&msg, &transfer)).expect("decodes");
         assert_eq!(got.request.kind(), r.kind());
-        let (name, source, rate) = match got.request {
-            Request::Flac { name, source, rate } | Request::Mp3 { name, source, rate } => {
-                (name, source, rate)
-            }
+        let (name, source) = match got.request {
+            Request::Flac { name, source } | Request::Mp3 { name, source } => (name, source),
             other => panic!("{other:?}"),
         };
-        assert_eq!(rate, Some(44_100));
         assert!(name.is_some_and(|n| n.starts_with("lloyd - mix.")));
         match source {
-            Encode::Stored { wav, frames, out } => {
+            Encode::Stored {
+                wav,
+                frames,
+                out,
+                rate,
+            } => {
                 assert_eq!(wav, "saves/1792640000000-3.wav");
                 assert_eq!(frames, 13_230_000);
                 assert_eq!(out, "saves/1792640000000-3.flac");
+                assert_eq!(rate, 44_100);
             }
             other => panic!("{other:?}"),
         }
@@ -445,6 +466,49 @@ fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
         assert_eq!(
             err(r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4}"#),
             "a stored encode names its out file"
+        );
+        // Nit 2-8 of review round 2 of M8: a rate is a whole number of
+        // hertz from 1 to u32::MAX.
+        for rate in [r#""44100""#, "0", "-1", "1.5", "4294967296", "null"] {
+            let json = format!(
+                r#"{{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4, "out": "saves/1-1.flac", "rate": {rate}}}"#
+            );
+            assert_eq!(
+                err(&json),
+                format!(
+                    "rate must be a whole number of hertz from 1 to {}",
+                    u32::MAX
+                ),
+                "{rate}"
+            );
+        }
+        let arrays = from_json(&r#"{"type": "KIND", "rate": 0}"#.replace("KIND", kind));
+        let _ = Reflect::set(&arrays, &"left".into(), &samples(&[0.5]));
+        let _ = Reflect::set(&arrays, &"right".into(), &samples(&[0.5]));
+        assert_eq!(
+            ToWorker::from_js(&arrays).expect_err("refused").text,
+            format!(
+                "rate must be a whole number of hertz from 1 to {}",
+                u32::MAX
+            ),
+            "{kind}: arrays at 0 Hz"
+        );
+        let most = from_json(
+            &r#"{"type": "KIND", "wav": "saves/1-1.wav", "frames": 4, "out": "saves/1-1.flac", "rate": 4294967295}"#
+                .replace("KIND", kind),
+        );
+        assert!(
+            matches!(
+                ToWorker::from_js(&most).map(|w| w.request),
+                Ok(Request::Flac {
+                    source: Encode::Stored { rate: u32::MAX, .. },
+                    ..
+                } | Request::Mp3 {
+                    source: Encode::Stored { rate: u32::MAX, .. },
+                    ..
+                })
+            ),
+            "{kind}: u32::MAX Hz is the most"
         );
         // Nit 1-12 of review round 1 of M8: the rate of a stored encode is
         // not read as a default.
@@ -544,14 +608,19 @@ fn hand_written_requests_are_read() {
     {
         Request::Flac {
             name,
-            source: Encode::Stored { wav, frames, out },
-            rate,
+            source:
+                Encode::Stored {
+                    wav,
+                    frames,
+                    out,
+                    rate,
+                },
         } => {
             assert_eq!(name.as_deref(), Some("tone.flac"));
             assert_eq!(wav, "saves/e2e-1.wav");
             assert_eq!(frames, 13_230_000);
             assert_eq!(out, "saves/e2e-1.flac");
-            assert_eq!(rate, Some(44_100));
+            assert_eq!(rate, 44_100);
         }
         other => panic!("{other:?}"),
     }
@@ -764,6 +833,27 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
             other => panic!("{other:?}"),
         }
     }
+}
+
+/// Nit 2-7 of review round 2 of M8: an MP3 reply carries bytes and a FLAC
+/// reply a `Blob`.  A reply made with the other codec's payload does not
+/// arrive.
+#[wasm_bindgen_test]
+fn a_reply_with_the_other_codecs_file_is_refused() {
+    let flac = Reply::Flac {
+        name: "bass.flac".into(),
+        file: Encoded::Bytes(Uint8Array::from(&[1u8][..])),
+    };
+    let (msg, transfer) = flac.to_js();
+    let e = Reply::from_js(&post(&msg, &transfer)).expect_err("refused");
+    assert_eq!(e.text, "flac message: no file");
+    let mp3 = Reply::Mp3 {
+        name: "bass.mp3".into(),
+        file: Encoded::Blob(blob(&[1])),
+    };
+    let (msg, transfer) = mp3.to_js();
+    let e = Reply::from_js(&post(&msg, &transfer)).expect_err("refused");
+    assert_eq!(e.text, "mp3 message: no bytes");
 }
 
 #[wasm_bindgen_test]

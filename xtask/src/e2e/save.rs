@@ -63,11 +63,21 @@ const ONE_MIB: f64 = 1_048_576.0;
 /// 60 minutes of CI's job (finding 1-4 of review round 1 of M8).
 pub(super) const SAVE_WAIT_S: u64 = 120;
 /// The longest wait, in seconds, for a restore and for its stem overviews.
-/// The first restore of the 10-minute session took about 4 s.
-pub(super) const RESTORE_WAIT_S: u64 = 120;
-// Six saves, their restores and the two first restores, each at its
-// longest wait, fit in half of the 60 minutes of CI's job.
-const _: () = assert!(6 * SAVE_WAIT_S + 8 * RESTORE_WAIT_S < 30 * 60);
+/// The first restore of the 10-minute session took about 4 s, and a
+/// later restore less.
+pub(super) const RESTORE_WAIT_S: u64 = 60;
+/// The longest that the waits for a save, a restore and stem overviews can
+/// take together: each save waits for its restore and its offer, and each
+/// first restore waits for the restore and for the stem overviews (finding
+/// 2-2 of review round 2 of M8).  It does not count the waits of `in_page`
+/// (the plant of each session, up to 900 s; the read of each 1-minute file,
+/// up to 300 s; the clean-up, the calibration, the session switches and
+/// the heap readings, up to 120 s each) or the idle times between steps.
+pub(super) const WAITS_S: u64 = (FORMATS.len() * SECONDS.len()) as u64
+    * (SAVE_WAIT_S + RESTORE_WAIT_S)
+    + SECONDS.len() as u64 * 2 * RESTORE_WAIT_S;
+// They fit in half of the 60 minutes of CI's job.
+const _: () = assert!(WAITS_S < 30 * 60);
 /// The calibration array, and the least rise of the measure that it must
 /// make.
 const CALIBRATION_BYTES: u64 = 64 << 20;
@@ -780,6 +790,26 @@ mod tests {
         };
         let (left, right) = (side(0), side(1));
         let flac = super::super::flac_16(&left, &right, 44_100).expect("a FLAC");
+        // Findings 2-14 and 2-16 of review round 2 of M8: an MP3 of the
+        // planted mix, and one of 50 s of it.
+        let mp3 = |frames: usize| {
+            let mut pcm = Vec::with_capacity(2 * frames);
+            for (l, r) in left[..frames].iter().zip(&right[..frames]) {
+                pcm.push(*l);
+                pcm.push(*r);
+            }
+            let mut enc = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig {
+                bitrate_kbps: 192,
+                vbr_quality: None,
+            });
+            enc.push_pcm_f32(&pcm, 2, 44_100).expect("encoded");
+            enc.finish();
+            let mut out = Vec::new();
+            while let Ok(packet) = enc.next_packet() {
+                out.extend_from_slice(&packet);
+            }
+            out
+        };
         let short = super::super::flac_16(&left[1..], &right[1..], 44_100).expect("a FLAC");
         let wav = sha256_hex(&planted_wav(SECONDS[0]));
         let oks = |files: Files| -> Vec<bool> {
@@ -789,9 +819,19 @@ mod tests {
             oks(Files {
                 wav_sha256: Some(wav),
                 flac: Some(flac),
-                mp3: None,
+                mp3: Some(mp3(left.len())),
             }),
-            [true, true, false]
+            [true, true, true]
+        );
+        let short_mp3 = file_checks(Files {
+            mp3: Some(mp3(50 * 44_100)),
+            ..Files::default()
+        });
+        assert!(!short_mp3[2].0, "an MP3 of 50 s");
+        assert!(
+            short_mp3[2].1.contains("of the WAV's 2646000"),
+            "{}",
+            short_mp3[2].1
         );
         assert_eq!(
             oks(Files {

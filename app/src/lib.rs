@@ -1391,6 +1391,10 @@ pub struct StemApp {
     /// memory path after their stored encode failed, with the reason (D8).
     #[cfg(target_arch = "wasm32")]
     save_queue: Vec<(SaveOrder, String)>,
+    /// Save failures reported while a save runs, shown beside its progress
+    /// and its end until it ends (finding 2-1 of review round 2 of M8).
+    #[cfg(target_arch = "wasm32")]
+    save_reports: Vec<String>,
 }
 
 /// What a save makes: its file's name and format, and what it reads (D8
@@ -1996,6 +2000,8 @@ impl Default for StemApp {
             posted_saves: std::collections::HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             save_queue: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            save_reports: Vec::new(),
         }
     }
 }
@@ -2396,6 +2402,10 @@ impl StemApp {
         // reported, after the song's own status.
         #[cfg(target_arch = "wasm32")]
         self.report_save_queue();
+        // A posted encode of the old lanes cannot save again either (nit
+        // 2-12 of review round 2 of M8).
+        #[cfg(target_arch = "wasm32")]
+        self.drop_old_lane_sources();
     }
 
     /// One source for each lane of `song`: a lane with a file plays from
@@ -4500,6 +4510,28 @@ impl StemApp {
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn step_save(&mut self, ctx: &egui::Context) {
+        // With no save running, the status line already shows each report.
+        if self.saving.is_none() {
+            self.save_reports.clear();
+            return;
+        }
+        self.step_save_now(ctx);
+        if !self.save_reports.is_empty() {
+            let reports = self.save_reports.join("  ");
+            if !self.status.ends_with(&reports) {
+                self.status = format!("{}  {reports}", self.status);
+            }
+            if self.saving.is_none() {
+                self.save_reports.clear();
+            }
+        }
+    }
+
+    /// One frame of [`Self::step_save`], before the save failures reported
+    /// meanwhile go on the status line.
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn step_save_now(&mut self, ctx: &egui::Context) {
         let Some(saving) = &mut self.saving else {
             return;
         };
@@ -4600,11 +4632,12 @@ impl StemApp {
             wav: wav.clone(),
             frames: order.what.frames,
             out: out.clone(),
+            rate: order.what.rate,
         };
         if order.format == export::Format::Flac {
-            sep.encode_flac(&name, source, order.what.rate);
+            sep.encode_flac(&name, source);
         } else {
-            sep.encode_mp3(&name, source, order.what.rate);
+            sep.encode_mp3(&name, source);
         }
         self.status = format!("Encoding {name}…");
         self.posted_saves.insert(
@@ -4641,12 +4674,12 @@ impl StemApp {
                 format!("Saved {name}.{}{held}", note.unwrap_or_default())
             }
             (JsSink::Flac(c), Some(sep)) => {
-                sep.encode_flac(&name, c.into_encode(), rate);
+                sep.encode_flac(&name, c.into_encode(rate));
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…{held}")
             }
             (JsSink::Mp3(c), Some(sep)) => {
-                sep.encode_mp3(&name, c.into_encode(), rate);
+                sep.encode_mp3(&name, c.into_encode(rate));
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…{held}")
             }
@@ -4715,11 +4748,15 @@ impl StemApp {
         let order =
             order.filter(|o| o.serial == self.song_serial && o.generation == self.lanes_generation);
         match order {
-            None => self.status = format!("Could not save {name}: {why}."),
+            None => self.report_save(format!("Could not save {name}: {why}.")),
+            // Nit 2-4 of review round 2: a long song cannot save again.
+            Some(order) if order.what.frames > MEMORY_PATH_MAX_FRAMES => {
+                self.report_save(storage_full_text(&name, &why));
+            }
             Some(order) if self.saving.is_some() => {
-                self.status = format!(
+                self.report_save(format!(
                     "Could not encode {name} in browser storage; it saves again after the save in progress."
-                );
+                ));
                 self.save_queue.push((order, why));
             }
             Some(order) => self.save_in_memory(order, why),
@@ -4736,7 +4773,34 @@ impl StemApp {
             if order.serial == self.song_serial && order.generation == self.lanes_generation {
                 self.save_in_memory(order, why);
             } else {
-                self.status = format!("Could not save {}: {why}.", order.name);
+                self.report_save(format!("Could not save {}: {why}.", order.name));
+            }
+        }
+    }
+
+    /// Shows the failure of a save on the status line.  While another save
+    /// runs, it stays beside that save's progress and end (finding 2-1 of
+    /// review round 2 of M8).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn report_save(&mut self, text: String) {
+        self.status = text.clone();
+        self.save_reports.push(text);
+    }
+
+    /// Drops what each posted encode of older lanes reads: it cannot save
+    /// again (D8 of M8, nit 2-12 of review round 2).
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn drop_old_lane_sources(&mut self) {
+        let generation = self.lanes_generation;
+        for posted in self.posted_saves.values_mut() {
+            if posted
+                .order
+                .as_ref()
+                .is_some_and(|o| o.generation != generation)
+            {
+                posted.order = None;
             }
         }
     }
@@ -4764,7 +4828,7 @@ impl StemApp {
                 "save: {}: {why}; the song changed, so it does not save again",
                 order.name
             );
-            self.status = format!("Could not save {}: {why}.", order.name);
+            self.report_save(format!("Could not save {}: {why}.", order.name));
         }
     }
 

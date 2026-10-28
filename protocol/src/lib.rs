@@ -337,17 +337,20 @@ pub enum Mix {
 pub enum Encode {
     /// Both channels, transferred with the request (the memory path of a
     /// save).
+    /// `rate`: the sample rate in Hz; the worker takes 44.1 kHz with none.
     Arrays {
         left: Float32Array,
         right: Float32Array,
+        rate: Option<u32>,
     },
     /// A 16-bit stereo WAV file of `frames` frames at `wav`, encoded into
     /// the file at `out` (the storage path of a save).  Both are paths from
-    /// the root of the private file system.
+    /// the root of the private file system.  `rate` is required.
     Stored {
         wav: String,
         frames: usize,
         out: String,
+        rate: u32,
     },
 }
 
@@ -386,12 +389,10 @@ pub enum Request {
     Mp3 {
         name: Option<String>,
         source: Encode,
-        rate: Option<u32>,
     },
     Flac {
         name: Option<String>,
         source: Encode,
-        rate: Option<u32>,
     },
 }
 
@@ -459,19 +460,27 @@ impl Request {
                     set(&o, field::BASE, b.as_str());
                 }
             }
-            Self::Mp3 { name, source, rate } | Self::Flac { name, source, rate } => {
+            Self::Mp3 { name, source } | Self::Flac { name, source } => {
                 if let Some(n) = name {
                     set(&o, field::NAME, n.as_str());
                 }
-                if let Some(r) = rate {
-                    set(&o, field::RATE, *r);
-                }
                 match source {
-                    Encode::Arrays { left, right } => put_stereo(&o, &transfer, left, right),
-                    Encode::Stored { wav, frames, out } => {
+                    Encode::Arrays { left, right, rate } => {
+                        put_stereo(&o, &transfer, left, right);
+                        if let Some(r) = rate {
+                            set(&o, field::RATE, *r);
+                        }
+                    }
+                    Encode::Stored {
+                        wav,
+                        frames,
+                        out,
+                        rate,
+                    } => {
                         set(&o, field::WAV, wav.as_str());
                         set(&o, field::FRAMES, *frames as f64);
                         set(&o, field::OUT, out.as_str());
+                        set(&o, field::RATE, *rate);
                     }
                 }
             }
@@ -513,12 +522,10 @@ impl ToWorker {
             kind::MP3 => Request::Mp3 {
                 name: string(msg, field::NAME),
                 source: encode_source(msg).map_err(bad)?,
-                rate: number(msg, field::RATE).map(|r| r as u32),
             },
             kind::FLAC => Request::Flac {
                 name: string(msg, field::NAME),
                 source: encode_source(msg).map_err(bad)?,
-                rate: number(msg, field::RATE).map(|r| r as u32),
             },
             other => return Err(bad(format!("unknown message {other}"))),
         };
@@ -866,7 +873,12 @@ fn encode_source(msg: &JsValue) -> Result<Encode, String> {
             return Err("an encode with out or frames names its wav".into());
         }
         let (left, right) = stereo(msg)?;
-        return Ok(Encode::Arrays { left, right });
+        let rate = if has(field::RATE) {
+            Some(whole_rate(msg)?)
+        } else {
+            None
+        };
+        return Ok(Encode::Arrays { left, right, rate });
     }
     if has(field::LEFT) || has(field::RIGHT) {
         return Err("an encode names a stored WAV or two arrays, not both".into());
@@ -877,10 +889,30 @@ fn encode_source(msg: &JsValue) -> Result<Encode, String> {
         return Err("a stored encode names its out file".into());
     }
     let out = string(msg, field::OUT).ok_or("out must be a path")?;
-    if number(msg, field::RATE).is_none() {
+    if !has(field::RATE) {
         return Err("a stored encode names its rate".into());
     }
-    Ok(Encode::Stored { wav, frames, out })
+    let rate = whole_rate(msg)?;
+    Ok(Encode::Stored {
+        wav,
+        frames,
+        out,
+        rate,
+    })
+}
+
+/// The `rate` of a message: a whole number of hertz from 1 to `u32::MAX`
+/// (nit 2-8 of review round 2 of M8).
+fn whole_rate(msg: &JsValue) -> Result<u32, String> {
+    number(msg, field::RATE)
+        .filter(|r| r.is_finite() && *r >= 1.0 && r.fract() == 0.0 && *r <= f64::from(u32::MAX))
+        .map(|r| r as u32)
+        .ok_or_else(|| {
+            format!(
+                "rate must be a whole number of hertz from 1 to {}",
+                u32::MAX
+            )
+        })
 }
 
 /// The file of an `mp3` or `flac` reply: a stored file if it has `path`,

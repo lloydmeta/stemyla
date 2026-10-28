@@ -1000,10 +1000,11 @@ const TONE_RATE: u32 = 44_100;
 const TONE_FRAMES: usize = 30 * TONE_RATE as usize;
 
 /// Both channels, as the memory path of a save sends them.
-fn arrays(left: &Float32Array, right: &Float32Array) -> Encode {
+fn arrays(left: &Float32Array, right: &Float32Array, rate: Option<u32>) -> Encode {
     Encode::Arrays {
         left: left.clone(),
         right: right.clone(),
+        rate,
     }
 }
 
@@ -1044,8 +1045,7 @@ async fn an_mp3_is_encoded_in_blocks() {
     encode(
         Codec::Mp3,
         Some("tone.mp3".into()),
-        arrays(&left, &right),
-        Some(TONE_RATE),
+        arrays(&left, &right, Some(TONE_RATE)),
     )
     .await
     .expect("encoded");
@@ -1076,8 +1076,7 @@ async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
         encode(
             Codec::Mp3,
             Some("tone.mp3".into()),
-            arrays(&left, &right),
-            Some(TONE_RATE),
+            arrays(&left, &right, Some(TONE_RATE)),
         )
         .await
         .expect("encoded");
@@ -1159,8 +1158,7 @@ async fn encode_flac(left: &Float32Array, right: &Float32Array, rate: u32) -> Ve
     encode(
         Codec::Flac,
         Some("tone.flac".into()),
-        arrays(left, right),
-        Some(rate),
+        arrays(left, right, Some(rate)),
     )
     .await
     .expect("encoded");
@@ -1197,7 +1195,7 @@ async fn a_flac_is_encoded_in_blocks() {
     let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
     let before = LIVE.with(Cell::get);
     PEAK.with(|peak| peak.set(before));
-    encode(Codec::Flac, None, arrays(&left, &right), Some(TONE_RATE))
+    encode(Codec::Flac, None, arrays(&left, &right, Some(TONE_RATE)))
         .await
         .expect("encoded");
     let held = PEAK.with(Cell::get) - before;
@@ -1291,7 +1289,7 @@ async fn a_flac_of_worst_case_signals_is_no_larger_than_pcm() {
 async fn a_flac_of_no_samples_is_refused() {
     fresh().await;
     let empty = Float32Array::new_with_length(0);
-    let error = encode(Codec::Flac, None, arrays(&empty, &empty), None)
+    let error = encode(Codec::Flac, None, arrays(&empty, &empty, None))
         .await
         .expect_err("refused");
     assert!(error.contains("no samples"), "{error}");
@@ -1328,8 +1326,8 @@ async fn encode_stored(codec: Codec, wav: &str, frames: usize, out: &str) -> Res
             wav: wav.into(),
             frames,
             out: out.into(),
+            rate: TONE_RATE,
         },
-        Some(TONE_RATE),
     )
     .await
 }
@@ -1345,7 +1343,7 @@ fn last_file(kind: &str) -> Encoded {
 
 /// The bytes of the file that the arrays path gives for the same samples.
 async fn arrays_file(codec: Codec, left: &Float32Array, right: &Float32Array) -> Vec<u8> {
-    encode(codec, None, arrays(left, right), Some(TONE_RATE))
+    encode(codec, None, arrays(left, right, Some(TONE_RATE)))
         .await
         .expect("encoded");
     match last_file(codec.kind()) {
@@ -1669,14 +1667,36 @@ async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
         }
         message(&fields)
     };
-    for (wav_path, out) in [
-        (session_wav, Some(SAVE_FLAC)),
-        (SAVE_WAV, Some("sessions/1792640000000/stems/bass.flac")),
-        (SAVE_WAV, Some("saves/../bass.flac")),
-        (SAVE_WAV, Some("saves/")),
-        ("saves/sub/1.wav", Some(SAVE_FLAC)),
-        (SAVE_WAV, Some(SAVE_WAV)),
-        (SAVE_WAV, None),
+    let outside =
+        |field: &str, path: &str| format!("{field} must be a file in saves/, not {path:?}");
+    for (wav_path, out, why) in [
+        (session_wav, Some(SAVE_FLAC), outside("wav", session_wav)),
+        (
+            SAVE_WAV,
+            Some("sessions/1792640000000/stems/bass.flac"),
+            outside("out", "sessions/1792640000000/stems/bass.flac"),
+        ),
+        (
+            SAVE_WAV,
+            Some("saves/../bass.flac"),
+            outside("out", "saves/../bass.flac"),
+        ),
+        (SAVE_WAV, Some("saves/"), outside("out", "saves/")),
+        (
+            "saves/sub/1.wav",
+            Some(SAVE_FLAC),
+            outside("wav", "saves/sub/1.wav"),
+        ),
+        (
+            SAVE_WAV,
+            Some(SAVE_WAV),
+            "wav and out must be two files".to_string(),
+        ),
+        (
+            SAVE_WAV,
+            None,
+            "a stored encode names its out file".to_string(),
+        ),
     ] {
         fresh().await;
         plant_at(wav_path, &wav).await;
@@ -1684,6 +1704,12 @@ async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
         let errors = sent("error");
         assert_eq!(errors.len(), 1, "{wav_path} to {out:?}");
         assert_eq!(field(&errors[0], "of").as_string().as_deref(), Some("flac"));
+        // Nit 2-9 of review round 2 of M8: each case for its own reason.
+        assert_eq!(
+            field(&errors[0], "text").as_string().as_deref(),
+            Some(why.as_str()),
+            "{wav_path} to {out:?}"
+        );
         assert!(sent("flac").is_empty(), "{wav_path} to {out:?}");
         assert_eq!(
             read_at(wav_path).await,

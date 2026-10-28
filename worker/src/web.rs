@@ -473,8 +473,8 @@ async fn serve(request: Request, s: &Settings) -> Result<(), String> {
         }
         Request::Selftest { base } => selftest(base, s).await,
         Request::Bench => bench(s).await,
-        Request::Mp3 { name, source, rate } => encode(Codec::Mp3, name, source, rate).await,
-        Request::Flac { name, source, rate } => encode(Codec::Flac, name, source, rate).await,
+        Request::Mp3 { name, source } => encode(Codec::Mp3, name, source).await,
+        Request::Flac { name, source } => encode(Codec::Flac, name, source).await,
     }
 }
 
