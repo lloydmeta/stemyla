@@ -34,8 +34,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use eframe::egui;
-use js_sys::{Float32Array, Uint8Array};
-use stem_protocol::{Mix, ModelSource, Reply, Request, SegmentStem, Settings, kind};
+use stem_protocol::{
+    Encode, Encoded, Mix, ModelSource, Reply, Request, SegmentStem, Settings, kind,
+};
 use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, Worker, WorkerOptions, WorkerType};
 
@@ -98,15 +99,17 @@ pub enum Event {
         done: f64,
         total: f64,
     },
-    /// The encoded file, as the worker transferred it.
+    /// The encoded file: its bytes, as the worker transferred them (the
+    /// memory path), or its path in browser storage (the storage path).
     Mp3 {
         name: String,
-        bytes: Uint8Array,
+        file: Encoded,
     },
-    /// The encoded file, as the worker sent it.
+    /// The encoded file: a `Blob`, as the worker sent it (the memory path),
+    /// or its path in browser storage (the storage path).
     Flac {
         name: String,
-        file: web_sys::Blob,
+        file: Encoded,
     },
 }
 
@@ -367,7 +370,7 @@ impl Separator {
                 Reply::Log(text) => Some(Event::Log(text)),
                 Reply::Selftest { ok, text } => Some(Event::Selftest { ok, text }),
                 Reply::Bench(text) => Some(Event::Bench(text)),
-                Reply::Mp3 { name, bytes } => Some(Event::Mp3 { name, bytes }),
+                Reply::Mp3 { name, file } => Some(Event::Mp3 { name, file }),
                 Reply::Flac { name, file } => Some(Event::Flac { name, file }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
@@ -484,24 +487,24 @@ impl Separator {
     }
 
     /// Asks the worker to encode a stem or a mix as MP3; the file comes
-    /// back as [`Event::Mp3`].  Both channels are transferred (MEM-2).
-    pub fn encode_mp3(&self, name: &str, left: Float32Array, right: Float32Array, rate: u32) {
+    /// back as [`Event::Mp3`].  Arrays are transferred (MEM-2); a stored
+    /// WAV crosses as its path.
+    pub fn encode_mp3(&self, name: &str, source: Encode, rate: u32) {
         let request = Request::Mp3 {
             name: Some(name.into()),
-            left,
-            right,
+            source,
             rate: Some(rate),
         };
         post(&self.worker, &request, &Settings::default());
     }
 
     /// Asks the worker to encode a stem or a mix as a 16-bit FLAC; the file
-    /// comes back as [`Event::Flac`].  Both channels are transferred (MEM-2).
-    pub fn encode_flac(&self, name: &str, left: Float32Array, right: Float32Array, rate: u32) {
+    /// comes back as [`Event::Flac`].  Arrays are transferred (MEM-2); a
+    /// stored WAV crosses as its path.
+    pub fn encode_flac(&self, name: &str, source: Encode, rate: u32) {
         let request = Request::Flac {
             name: Some(name.into()),
-            left,
-            right,
+            source,
             rate: Some(rate),
         };
         post(&self.worker, &request, &Settings::default());
@@ -570,7 +573,7 @@ impl Separator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use js_sys::{Object, Reflect};
+    use js_sys::{Float32Array, Object, Reflect, Uint8Array};
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen(inline_js = r#"
@@ -591,14 +594,17 @@ export function deliver(worker, data) {
         let sent = Uint8Array::from(&[0xff, 0xfb, 0x90, 0x00][..]);
         let (message, _) = Reply::Mp3 {
             name: "bass.mp3".into(),
-            bytes: sent.clone(),
+            file: Encoded::Bytes(sent.clone()),
         }
         .to_js();
         deliver(&sep.worker, &message);
         // The worker's script is not in the test page, but its error comes
         // after this synchronous test.
         let mp3 = sep.take_events().into_iter().find_map(|e| match e {
-            Event::Mp3 { name, bytes } => Some((name, bytes)),
+            Event::Mp3 {
+                name,
+                file: Encoded::Bytes(bytes),
+            } => Some((name, bytes)),
             _ => None,
         });
         // Before any assert: a failed assert aborts the test.
@@ -628,13 +634,19 @@ export function spy_on_post(worker) {
     /// Posts one encode request through `encode`, and returns the request
     /// and its transfer list.
     fn posted_encode(
-        encode: impl FnOnce(&Separator, Float32Array, Float32Array),
+        encode: impl FnOnce(&Separator, Encode),
     ) -> (Request, js_sys::Array, Float32Array, Float32Array) {
         let mut sep = Separator::new(egui::Context::default()).expect("a worker");
         let posts = spy_on_post(&sep.worker);
         let left = Float32Array::from(&[0.25f32, -0.5][..]);
         let right = Float32Array::from(&[0.125f32, 0.75][..]);
-        encode(&sep, left.clone(), right.clone());
+        encode(
+            &sep,
+            Encode::Arrays {
+                left: left.clone(),
+                right: right.clone(),
+            },
+        );
         sep.stop();
         assert_eq!(posts.length(), 1, "one message");
         let post = posts.get(0);
@@ -663,14 +675,13 @@ export function spy_on_post(worker) {
 
     #[wasm_bindgen_test]
     fn encode_flac_asks_the_worker_for_a_flac_of_the_arrays() {
-        let (request, transfer, left, right) = posted_encode(|sep, l, r| {
-            sep.encode_flac("lloyd - bass.flac", l, r, 48_000);
+        let (request, transfer, left, right) = posted_encode(|sep, source| {
+            sep.encode_flac("lloyd - bass.flac", source, 48_000);
         });
         match request {
             Request::Flac {
                 name,
-                left: l,
-                right: r,
+                source: Encode::Arrays { left: l, right: r },
                 rate,
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - bass.flac"));
@@ -683,14 +694,13 @@ export function spy_on_post(worker) {
 
     #[wasm_bindgen_test]
     fn encode_mp3_asks_the_worker_for_an_mp3_of_the_arrays() {
-        let (request, transfer, left, right) = posted_encode(|sep, l, r| {
-            sep.encode_mp3("lloyd - mix without vocals.mp3", l, r, 44_100);
+        let (request, transfer, left, right) = posted_encode(|sep, source| {
+            sep.encode_mp3("lloyd - mix without vocals.mp3", source, 44_100);
         });
         match request {
             Request::Mp3 {
                 name,
-                left: l,
-                right: r,
+                source: Encode::Arrays { left: l, right: r },
                 rate,
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - mix without vocals.mp3"));
@@ -699,6 +709,81 @@ export function spy_on_post(worker) {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// D5 of M8: a stored encode names its files and transfers nothing.
+    #[wasm_bindgen_test]
+    fn a_stored_encode_asks_the_worker_with_paths_only() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let posts = spy_on_post(&sep.worker);
+        let source = Encode::Stored {
+            wav: "saves/1-1.wav".into(),
+            frames: 44_100,
+            out: "saves/1-1.flac".into(),
+        };
+        sep.encode_flac("lloyd - bass.flac", source, 44_100);
+        sep.stop();
+        let mut posted = posted(&posts);
+        assert_eq!(posted.len(), 1, "one message");
+        let (request, transfer) = posted.remove(0);
+        assert_eq!(transfer.length(), 0, "no samples cross");
+        match request {
+            Request::Flac {
+                source: Encode::Stored { wav, frames, out },
+                ..
+            } => assert_eq!(
+                (wav.as_str(), frames, out.as_str()),
+                ("saves/1-1.wav", 44_100, "saves/1-1.flac")
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// D5 of M8: a stored encode's reply reaches the page with its path,
+    /// or with the reason it failed.
+    #[wasm_bindgen_test]
+    fn a_stored_encode_reply_reaches_the_page_with_its_path() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        for reply in [
+            Reply::Flac {
+                name: "bass.flac".into(),
+                file: Encoded::Stored {
+                    path: "saves/1-1.flac".into(),
+                },
+            },
+            Reply::Mp3 {
+                name: "bass.mp3".into(),
+                file: Encoded::Failed {
+                    path: "saves/1-2.mp3".into(),
+                    text: "QuotaExceededError: full".into(),
+                },
+            },
+        ] {
+            deliver(&sep.worker, &reply.to_js().0);
+        }
+        let events = sep.take_events();
+        sep.stop();
+        let got: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Flac {
+                    name,
+                    file: Encoded::Stored { path },
+                } => Some(format!("flac {name} {path}")),
+                Event::Mp3 {
+                    name,
+                    file: Encoded::Failed { path, text },
+                } => Some(format!("mp3 {name} {path} {text}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "flac bass.flac saves/1-1.flac",
+                "mp3 bass.mp3 saves/1-2.mp3 QuotaExceededError: full"
+            ]
+        );
     }
 
     /// The `data` of each message posted to `posts`, as a request.
@@ -986,12 +1071,15 @@ export function spy_on_post(worker) {
         let sent = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
         let (message, _) = Reply::Flac {
             name: "bass.flac".into(),
-            file: sent.clone(),
+            file: Encoded::Blob(sent.clone()),
         }
         .to_js();
         deliver(&sep.worker, &message);
         let flac = sep.take_events().into_iter().find_map(|e| match e {
-            Event::Flac { name, file } => Some((name, file)),
+            Event::Flac {
+                name,
+                file: Encoded::Blob(file),
+            } => Some((name, file)),
             _ => None,
         });
         // Before any assert: a failed assert aborts the test.

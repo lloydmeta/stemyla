@@ -383,6 +383,16 @@ mod web {
                 right: Float32Array::new_with_length(frames as u32),
             }
         }
+
+        /// The channels as the source of an encode request, which
+        /// transfers them (MEM-2).
+        #[cfg_attr(mutants, mutants::skip)]
+        pub fn into_encode(self) -> stem_protocol::Encode {
+            stem_protocol::Encode::Arrays {
+                left: self.left,
+                right: self.right,
+            }
+        }
     }
 
     impl Sink for JsChannels {

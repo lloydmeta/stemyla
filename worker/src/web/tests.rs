@@ -12,9 +12,11 @@
 )]
 
 use super::*;
+use encode::{FLAC_BLOCK, MP3_BLOCK};
 use js_sys::{Object, Reflect};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
+use stem_protocol::{Encode, Encoded};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -232,6 +234,37 @@ export function stop_read_spy() {
   read_real = null;
   return read_record;
 }
+// Records, in one sequence, each FileReaderSync read ("r<bytes>") and
+// each FileSystemSyncAccessHandle write ("w<bytes>@<at>", with " view"
+// for a view).
+let order_record = null;
+let order_read = null;
+let order_write = null;
+export function start_order_spy() {
+  if (order_read || order_write) throw new Error("a spy is already on the reads or writes");
+  const rp = FileReaderSync.prototype;
+  const wp = FileSystemSyncAccessHandle.prototype;
+  order_read = rp.readAsArrayBuffer;
+  order_write = wp.write;
+  order_record = [];
+  rp.readAsArrayBuffer = function (blob) {
+    order_record.push(`r${blob.size}`);
+    return order_read.call(this, blob);
+  };
+  wp.write = function (data, options) {
+    const whole = ArrayBuffer.isView(data) && data.byteOffset === 0 && data.byteLength === data.buffer.byteLength;
+    order_record.push(`w${data.byteLength}@${options && options.at}${whole ? "" : " view"}`);
+    return order_write.call(this, data, options);
+  };
+}
+// Restores both and returns the record, joined by spaces.
+export function stop_order_spy() {
+  FileReaderSync.prototype.readAsArrayBuffer = order_read;
+  FileSystemSyncAccessHandle.prototype.write = order_write;
+  order_read = null;
+  order_write = null;
+  return order_record.join(" ");
+}
 // The next fetch answers with one byte, and keeps how it was asked to
 // treat redirects for `last_redirect`.
 let redirect = null;
@@ -291,6 +324,8 @@ extern "C" {
     fn refuse_sync_handle(n: u32) -> js_sys::Function;
     fn start_read_spy();
     fn stop_read_spy() -> Vec<f64>;
+    fn start_order_spy();
+    fn stop_order_spy() -> String;
 }
 
 /// Writes a file at `path`, with its folders.
@@ -964,6 +999,14 @@ const TONE_RATE: u32 = 44_100;
 /// 30 s at 44.1 kHz.
 const TONE_FRAMES: usize = 30 * TONE_RATE as usize;
 
+/// Both channels, as the memory path of a save sends them.
+fn arrays(left: &Float32Array, right: &Float32Array) -> Encode {
+    Encode::Arrays {
+        left: left.clone(),
+        right: right.clone(),
+    }
+}
+
 /// `frames` of a sine at `hz`, as the page sends a channel.
 fn tone(hz: f32, frames: usize) -> Float32Array {
     let step = std::f32::consts::TAU * hz / TONE_RATE as f32;
@@ -998,9 +1041,10 @@ async fn an_mp3_is_encoded_in_blocks() {
     let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
     let before = LIVE.with(Cell::get);
     PEAK.with(|peak| peak.set(before));
-    mp3(
+    encode(
+        Codec::Mp3,
         Some("tone.mp3".into()),
-        [left.clone(), right.clone()],
+        arrays(&left, &right),
         Some(TONE_RATE),
     )
     .await
@@ -1029,9 +1073,10 @@ async fn an_mp3_of_unequal_channels_stops_at_the_shorter() {
     let (long, short) = (TONE_FRAMES, MP3_BLOCK + 7);
     for (left_frames, right_frames) in [(long, short), (short, long)] {
         let (left, right) = (tone(220.0, left_frames), tone(330.0, right_frames));
-        mp3(
+        encode(
+            Codec::Mp3,
             Some("tone.mp3".into()),
-            [left.clone(), right.clone()],
+            arrays(&left, &right),
             Some(TONE_RATE),
         )
         .await
@@ -1111,11 +1156,13 @@ fn as_16_bits(channel: &Float32Array) -> Vec<f32> {
 }
 
 async fn encode_flac(left: &Float32Array, right: &Float32Array, rate: u32) -> Vec<u8> {
-    flac(
+    encode(
+        Codec::Flac,
         Some("tone.flac".into()),
-        [left.clone(), right.clone()],
+        arrays(left, right),
         Some(rate),
     )
+    .await
     .expect("encoded");
     flac_reply().await
 }
@@ -1150,7 +1197,9 @@ async fn a_flac_is_encoded_in_blocks() {
     let (left, right) = (tone(220.0, TONE_FRAMES), tone(330.0, TONE_FRAMES));
     let before = LIVE.with(Cell::get);
     PEAK.with(|peak| peak.set(before));
-    flac(None, [left, right], Some(TONE_RATE)).expect("encoded");
+    encode(Codec::Flac, None, arrays(&left, &right), Some(TONE_RATE))
+        .await
+        .expect("encoded");
     let held = PEAK.with(Cell::get) - before;
     let one_channel = 4 * TONE_FRAMES;
     assert!(
@@ -1242,9 +1291,384 @@ async fn a_flac_of_worst_case_signals_is_no_larger_than_pcm() {
 async fn a_flac_of_no_samples_is_refused() {
     fresh().await;
     let empty = Float32Array::new_with_length(0);
-    let error = flac(None, [empty.clone(), empty], None).expect_err("refused");
+    let error = encode(Codec::Flac, None, arrays(&empty, &empty), None)
+        .await
+        .expect_err("refused");
     assert!(error.contains("no samples"), "{error}");
     assert!(sent("flac").is_empty());
+}
+
+/// A save's WAV file and its outputs, as the page names them (D1 of M8).
+const SAVE_WAV: &str = "saves/1792640000000-1.wav";
+const SAVE_FLAC: &str = "saves/1792640000000-1.flac";
+const SAVE_MP3: &str = "saves/1792640000000-1.mp3";
+
+/// A save's 16-bit WAV of `frames` frames of two tones: its bytes, and its
+/// channels as the floats `s / 32768` of its 16-bit samples.
+fn save_wav(frames: usize) -> (Vec<u8>, Float32Array, Float32Array) {
+    let (left, right) = (tone(220.0, frames).to_vec(), tone(330.0, frames).to_vec());
+    let pairs: Vec<(i16, i16)> = left
+        .iter()
+        .zip(&right)
+        .map(|(l, r)| (pcm16(*l) as i16, pcm16(*r) as i16))
+        .collect();
+    let as_16_bits = |c: &[f32]| {
+        let floats: Vec<f32> = c.iter().map(|x| pcm16(*x) as f32 / 32768.0).collect();
+        Float32Array::from(floats.as_slice())
+    };
+    (wav_file(&pairs), as_16_bits(&left), as_16_bits(&right))
+}
+
+/// A stored encode of the WAV at `wav`, of `frames` frames, into `out`.
+async fn encode_stored(codec: Codec, wav: &str, frames: usize, out: &str) -> Result<(), String> {
+    encode(
+        codec,
+        Some(format!("lloyd - mix.{}", codec.kind())),
+        Encode::Stored {
+            wav: wav.into(),
+            frames,
+            out: out.into(),
+        },
+        Some(TONE_RATE),
+    )
+    .await
+}
+
+/// The file of the last reply of `kind`, read as the page reads it.
+fn last_file(kind: &str) -> Encoded {
+    let reply = sent(kind).pop().expect("a reply");
+    match Reply::from_js(&reply).expect("a reply the page reads") {
+        Reply::Mp3 { file, .. } | Reply::Flac { file, .. } => file,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The bytes of the file that the arrays path gives for the same samples.
+async fn arrays_file(codec: Codec, left: &Float32Array, right: &Float32Array) -> Vec<u8> {
+    encode(codec, None, arrays(left, right), Some(TONE_RATE))
+        .await
+        .expect("encoded");
+    match last_file(codec.kind()) {
+        Encoded::Bytes(bytes) => bytes.to_vec(),
+        Encoded::Blob(_) => flac_reply().await,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// D2 and D4 of M8: a stored FLAC is the FLAC of the WAV's 16-bit samples,
+/// bit for bit, and the worker removes the WAV at the end.
+#[wasm_bindgen_test]
+async fn a_stored_flac_is_the_flac_of_its_16_bit_samples() {
+    for frames in [3 * FLAC_BLOCK + 7, TONE_FRAMES] {
+        fresh().await;
+        let (wav, left, right) = save_wav(frames);
+        plant_at(SAVE_WAV, &wav).await;
+        encode_stored(Codec::Flac, SAVE_WAV, frames, SAVE_FLAC)
+            .await
+            .expect("no error reply");
+        assert!(
+            matches!(last_file("flac"), Encoded::Stored { path } if path == SAVE_FLAC),
+            "the reply names the output file"
+        );
+        let stored = read_at(SAVE_FLAC).await.expect("the FLAC file");
+        assert_eq!(
+            names_in("saves").await.as_deref(),
+            Some("1792640000000-1.flac"),
+            "the worker removed the WAV"
+        );
+        let (_, channels, verified) = decode_flac(stored.clone());
+        assert_eq!(verified, Some(true), "{frames} frames: the MD5 matches");
+        assert_eq!(channels[0].len(), frames);
+        assert!(
+            stored == arrays_file(Codec::Flac, &left, &right).await,
+            "{frames} frames: the stored FLAC is the arrays FLAC of the same 16-bit samples"
+        );
+        let memory = sent("log")
+            .iter()
+            .filter_map(|l| field(l, "text").as_string())
+            .find(|t| t.starts_with(&format!("memory: encode flac {SAVE_FLAC}: wasm ")));
+        assert!(
+            memory
+                .as_ref()
+                .is_some_and(|m| m.contains(&format!("bytes, file {} bytes", stored.len()))),
+            "D9: a memory line names the file's size: {memory:?}"
+        );
+    }
+}
+
+/// D2 of M8: a stored MP3 is the MP3 of the WAV's 16-bit samples, bit for
+/// bit, and the worker removes the WAV at the end.
+#[wasm_bindgen_test]
+async fn a_stored_mp3_is_the_mp3_of_its_16_bit_samples() {
+    fresh().await;
+    let (wav, left, right) = save_wav(TONE_FRAMES);
+    plant_at(SAVE_WAV, &wav).await;
+    encode_stored(Codec::Mp3, SAVE_WAV, TONE_FRAMES, SAVE_MP3)
+        .await
+        .expect("no error reply");
+    assert!(
+        matches!(last_file("mp3"), Encoded::Stored { path } if path == SAVE_MP3),
+        "the reply names the output file"
+    );
+    let stored = read_at(SAVE_MP3).await.expect("the MP3 file");
+    assert_eq!(
+        names_in("saves").await.as_deref(),
+        Some("1792640000000-1.mp3"),
+        "the worker removed the WAV"
+    );
+    assert!(
+        stored == arrays_file(Codec::Mp3, &left, &right).await,
+        "the stored MP3 is the arrays MP3 of the same 16-bit samples"
+    );
+}
+
+/// MEM-5 and the order of D4 of M8: every write of a stored encode is a
+/// whole array, and each read of the WAV is one block.  A FLAC writes each
+/// frame before it reads the next block, so it keeps no parts, and its
+/// stream header has the same length at the start and at the end.
+#[wasm_bindgen_test]
+async fn stored_encodes_write_whole_arrays_as_they_read() {
+    fresh().await;
+    let frames = 3 * FLAC_BLOCK + 7;
+    let (wav, _, _) = save_wav(frames);
+    plant_at(SAVE_WAV, &wav).await;
+    start_order_spy();
+    let encoded = encode_stored(Codec::Flac, SAVE_WAV, frames, SAVE_FLAC).await;
+    let record = stop_order_spy();
+    encoded.expect("no error reply");
+    assert!(matches!(last_file("flac"), Encoded::Stored { .. }));
+    let steps: Vec<&str> = record.split(' ').collect();
+    assert!(!record.contains("view"), "MEM-5: {record}");
+    let block = format!("r{}", 4 * FLAC_BLOCK);
+    let reads: Vec<&str> = steps
+        .iter()
+        .copied()
+        .filter(|s| s.starts_with('r'))
+        .collect();
+    assert_eq!(reads, [block.as_str(), &block, &block, "r28"], "{record}");
+    // The header at 0, then a read and its frame's write for each block,
+    // then the header at 0 again.
+    assert_eq!(steps.len(), 2 + 2 * reads.len(), "{record}");
+    assert_eq!(steps[0], "w42@0", "{record}");
+    assert_eq!(steps[steps.len() - 1], "w42@0", "{record}");
+    for pair in steps[1..steps.len() - 1].chunks(2) {
+        assert!(
+            pair[0].starts_with('r') && pair[1].starts_with('w'),
+            "each read is followed by its frame's write: {record}"
+        );
+    }
+
+    fresh().await;
+    let (wav, _, _) = save_wav(TONE_FRAMES);
+    plant_at(SAVE_WAV, &wav).await;
+    start_order_spy();
+    let encoded = encode_stored(Codec::Mp3, SAVE_WAV, TONE_FRAMES, SAVE_MP3).await;
+    let record = stop_order_spy();
+    encoded.expect("no error reply");
+    assert!(matches!(last_file("mp3"), Encoded::Stored { .. }));
+    assert!(!record.contains("view"), "MEM-5: {record}");
+    let most = 4 * MP3_BLOCK;
+    for step in record.split(' ') {
+        if let Some(bytes) = step.strip_prefix('r') {
+            let bytes: usize = bytes.parse().expect("a size");
+            assert!(bytes <= most, "a read of {bytes} bytes, over one block");
+        }
+    }
+    assert!(record.contains('w'), "{record}");
+}
+
+/// The peak of the counting allocator during a stored encode of `seconds`
+/// of a save's WAV, and the size of the file.
+async fn stored_peak(codec: Codec, seconds: usize) -> (usize, usize) {
+    fresh().await;
+    let frames = seconds * TONE_RATE as usize;
+    let (wav, _, _) = save_wav(frames);
+    plant_at(SAVE_WAV, &wav).await;
+    drop(wav);
+    let out = if codec == Codec::Flac {
+        SAVE_FLAC
+    } else {
+        SAVE_MP3
+    };
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    encode_stored(codec, SAVE_WAV, frames, out)
+        .await
+        .expect("no error reply");
+    let held = PEAK.with(Cell::get) - before;
+    assert!(matches!(last_file(codec.kind()), Encoded::Stored { .. }));
+    (held, read_at(out).await.expect("the file").len())
+}
+
+/// MEM-1: a stored FLAC encode holds the same memory whatever the song's
+/// length.
+#[wasm_bindgen_test]
+async fn a_stored_flac_keeps_the_worker_memory_flat() {
+    let (ten, _) = stored_peak(Codec::Flac, 10).await;
+    let (sixty, _) = stored_peak(Codec::Flac, 60).await;
+    assert!(
+        sixty <= ten + 64 * 1024,
+        "MEM-1: a stored FLAC of 60 s held {sixty} bytes at its peak, and of 10 s {ten}.  \
+         Fix: read the WAV one block at a time, and write each frame at once."
+    );
+    let (thirty, _) = stored_peak(Codec::Flac, 30).await;
+    let one_channel = 4 * TONE_FRAMES;
+    assert!(
+        thirty < one_channel / 10,
+        "MEM-1: a stored FLAC of 30 s held {thirty} bytes at its peak, more than a tenth \
+         of one channel's {one_channel}"
+    );
+}
+
+/// The MP3 exception of D4 of M8 (TD-59): a stored MP3 encode holds the
+/// MP3's frames until `finish()`, and no more than 4 times the MP3's size
+/// plus 1 MiB.
+#[wasm_bindgen_test]
+async fn a_stored_mp3_holds_at_most_four_times_its_file() {
+    let (held, size) = stored_peak(Codec::Mp3, 60).await;
+    web_sys::console::log_1(
+        &format!(
+            "a stored MP3 of 60 s: {size} bytes of MP3, a peak of {held} bytes ({:.2} times the MP3)",
+            held as f64 / size as f64
+        )
+        .into(),
+    );
+    assert!(
+        held < 4 * size + (1 << 20),
+        "MEM-1: a stored MP3 of 60 s ({size} bytes) held {held} bytes at its peak"
+    );
+}
+
+/// D4 of M8: a stored encode that fails replies `failed` with its output
+/// path, removes its WAV, and leaves no output file.  Only a malformed
+/// request gives `error`.
+#[wasm_bindgen_test]
+async fn a_failed_stored_encode_says_why_and_leaves_no_file() {
+    let frames = 3 * FLAC_BLOCK + 7;
+    for (codec, out) in [(Codec::Flac, SAVE_FLAC), (Codec::Mp3, SAVE_MP3)] {
+        let kind = codec.kind();
+        for case in ["wrong size", "missing", "no handle", "write refused"] {
+            fresh().await;
+            let (wav, _, _) = save_wav(frames);
+            match case {
+                "wrong size" => plant_at(SAVE_WAV, &wav[..wav.len() - 4]).await,
+                "missing" => plant_folder("saves").await,
+                _ => plant_at(SAVE_WAV, &wav).await,
+            }
+            let restore = (case == "no handle").then(|| refuse_sync_handle(1));
+            if case == "write refused" {
+                start_sync_spy(2);
+            }
+            let encoded = encode_stored(codec, SAVE_WAV, frames, out).await;
+            if case == "write refused" {
+                stop_sync_spy();
+            }
+            if let Some(restore) = restore {
+                restore.call0(&JsValue::NULL).expect("restored");
+            }
+            encoded.unwrap_or_else(|e| panic!("{kind}, {case}: an error reply: {e}"));
+            match last_file(kind) {
+                Encoded::Failed { path, text } => {
+                    assert_eq!(path, out, "{kind}, {case}");
+                    assert!(!text.is_empty(), "{kind}, {case}");
+                }
+                other => panic!("{kind}, {case}: {other:?}"),
+            }
+            assert_eq!(
+                names_in("saves").await.as_deref(),
+                Some(""),
+                "{kind}, {case}: no WAV and no output stay"
+            );
+            assert!(sent("error").is_empty(), "{kind}, {case}");
+        }
+    }
+}
+
+/// D4 of M8: two stored encodes run at once, and the one that fails
+/// leaves the other's WAV and output whole.
+#[wasm_bindgen_test]
+async fn a_failed_stored_encode_leaves_another_encode_whole() {
+    fresh().await;
+    let (wav, left, right) = save_wav(TONE_FRAMES);
+    plant_at(SAVE_WAV, &wav).await;
+    plant_at("saves/1792640000000-2.wav", &wav[..wav.len() - 4]).await;
+    for (wav, out) in [
+        (SAVE_WAV, SAVE_FLAC),
+        ("saves/1792640000000-2.wav", "saves/1792640000000-2.flac"),
+    ] {
+        wasm_bindgen_futures::spawn_local(async move {
+            encode_stored(Codec::Flac, wav, TONE_FRAMES, out)
+                .await
+                .expect("no error reply");
+        });
+    }
+    until(|| sent("flac").len() == 2).await;
+    let files: Vec<Encoded> = sent("flac")
+        .iter()
+        .map(|r| match Reply::from_js(r).expect("a reply") {
+            Reply::Flac { file, .. } => file,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert!(
+        files.iter().any(
+            |f| matches!(f, Encoded::Failed { path, .. } if path == "saves/1792640000000-2.flac")
+        ),
+        "the short WAV fails: {files:?}"
+    );
+    assert!(
+        files
+            .iter()
+            .any(|f| matches!(f, Encoded::Stored { path } if path == SAVE_FLAC)),
+        "the other is stored: {files:?}"
+    );
+    assert_eq!(
+        names_in("saves").await.as_deref(),
+        Some("1792640000000-1.flac")
+    );
+    let stored = read_at(SAVE_FLAC).await.expect("the FLAC");
+    assert!(stored == arrays_file(Codec::Flac, &left, &right).await);
+}
+
+/// D5 of M8: a stored request that names a file outside `saves/`, or a
+/// malformed one, gives `error`, and the worker removes nothing.
+#[wasm_bindgen_test]
+async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
+    let session_wav = "sessions/1792640000000/stems/bass.wav";
+    let (wav, _, _) = save_wav(7);
+    let request = |wav: &str, out: Option<&str>| {
+        let mut fields = vec![
+            ("type", "flac".into()),
+            ("wav", wav.into()),
+            ("frames", 7.into()),
+        ];
+        if let Some(out) = out {
+            fields.push(("out", out.into()));
+        }
+        message(&fields)
+    };
+    for (wav_path, out) in [
+        (session_wav, Some(SAVE_FLAC)),
+        (SAVE_WAV, Some("sessions/1792640000000/stems/bass.flac")),
+        (SAVE_WAV, Some("saves/../bass.flac")),
+        (SAVE_WAV, Some("saves/")),
+        ("saves/sub/1.wav", Some(SAVE_FLAC)),
+        (SAVE_WAV, Some(SAVE_WAV)),
+        (SAVE_WAV, None),
+    ] {
+        fresh().await;
+        plant_at(wav_path, &wav).await;
+        handle(request(wav_path, out)).await;
+        let errors = sent("error");
+        assert_eq!(errors.len(), 1, "{wav_path} to {out:?}");
+        assert_eq!(field(&errors[0], "of").as_string().as_deref(), Some("flac"));
+        assert!(sent("flac").is_empty(), "{wav_path} to {out:?}");
+        assert_eq!(
+            read_at(wav_path).await,
+            Some(wav.clone()),
+            "{wav_path} to {out:?}: the worker removed nothing"
+        );
+    }
 }
 
 #[wasm_bindgen_test]

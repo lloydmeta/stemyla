@@ -4065,16 +4065,23 @@ impl StemApp {
                     }
                 }
                 Event::Log(text) => log::info!("separator: {text}"),
-                Event::Mp3 { name, bytes } => {
-                    store::download(&name, &bytes, "audio/mpeg");
-                    let note = self.save_notes.take(&name);
-                    self.status = format!("Saved {name}.{note}");
-                }
-                Event::Flac { name, file } => {
-                    store::download_blob(&name, &file);
-                    let note = self.save_notes.take(&name);
-                    self.status = format!("Saved {name}.{note}");
-                }
+                Event::Mp3 { name, file } | Event::Flac { name, file } => match file {
+                    stem_protocol::Encoded::Bytes(bytes) => {
+                        store::download(&name, &bytes, "audio/mpeg");
+                        let note = self.save_notes.take(&name);
+                        self.status = format!("Saved {name}.{note}");
+                    }
+                    stem_protocol::Encoded::Blob(file) => {
+                        store::download_blob(&name, &file);
+                        let note = self.save_notes.take(&name);
+                        self.status = format!("Saved {name}.{note}");
+                    }
+                    // The page posts no stored encode before step 3 of M8.
+                    stem_protocol::Encoded::Stored { path }
+                    | stem_protocol::Encoded::Failed { path, .. } => {
+                        log::warn!("separator: a reply for {path}, which the page did not ask for");
+                    }
+                },
                 Event::Bench(text) => {
                     log::info!("separator: {text}");
                     self.status = text;
@@ -4378,12 +4385,12 @@ impl StemApp {
                 format!("Saved {name}.{}", note.unwrap_or_default())
             }
             (JsSink::Flac(c), Some(sep)) => {
-                sep.encode_flac(&name, c.left, c.right, rate);
+                sep.encode_flac(&name, c.into_encode(), rate);
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…")
             }
             (JsSink::Mp3(c), Some(sep)) => {
-                sep.encode_mp3(&name, c.left, c.right, rate);
+                sep.encode_mp3(&name, c.into_encode(), rate);
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…")
             }

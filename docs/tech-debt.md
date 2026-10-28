@@ -386,7 +386,7 @@ On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10
 
 This entry concerns DEPS-1.  It is a workaround of a defect in a dependency.  CLAUDE.md asks to record each workaround.  It breaks no rule.
 
-`flacenc` 0.5.1 gives the short last block as the minimum block size in STREAMINFO (`update_frame_info`).  RFC 9639 section 8.2 excludes the last block.  Symphonia then reads the stream as variable-blocksize, and refuses every frame.  So four places set the block sizes again after `flacenc`: `flac` in `worker/src/web.rs`, `compressed` in `engine/src/test_flac.rs`, `flac_16` in `xtask/src/e2e.rs` and `flac` in `app/tests/web.rs`.  `flacenc` also has no 5-bit Rice parameters and no escape codes, so it cannot write 24 bits; a saved FLAC has 16 (`plans/completed/flac.md`, Surprises).
+`flacenc` 0.5.1 gives the short last block as the minimum block size in STREAMINFO (`update_frame_info`).  RFC 9639 section 8.2 excludes the last block.  Symphonia then reads the stream as variable-blocksize, and refuses every frame.  So four places set the block sizes again after `flacenc`: `flac_into` in `worker/src/web/encode.rs`, `compressed` in `engine/src/test_flac.rs`, `flac_16` in `xtask/src/e2e.rs` and `flac` in `app/tests/web.rs`.  `flacenc` also has no 5-bit Rice parameters and no escape codes, so it cannot write 24 bits; a saved FLAC has 16 (`plans/completed/flac.md`, Surprises).
 
 * Fix: remove the overrides when `flacenc` writes the minimum as RFC 9639 says.  For 24 bits, use an encoder that can write them, such as one in this repo.  Until then, `a_flac_decodes_to_the_stem` fails if the worker's override goes.
 
@@ -458,6 +458,14 @@ Since C of `plans/active/stream-from-storage-catchup.md` (decision 0020), every 
 * The page holds the bytes of the file that decodes, as well as the lanes.  It reads the file into wasm memory in blocks (`app::picker::read_blob`).  Each read asks JavaScript for never more than one block of 1 MiB.  Each block is garbage after its copy.  For a song of 100 s, a WAV or FLAC that states no length is read up to about 324 MB.  An MP3 is read up to about 21 MB.  A WAV or FLAC that states a length is read up to 3,072,000 bytes for each of its seconds, and 16 MiB for tags.  An MP3 whose ID3 tag is larger than the head counts as an MP3; a FLAC behind such a tag gets the cap of an MP3.
 
 * Fix: a read-ahead buffer that holds fewer lanes than the song shows, or a mix of the sources into fewer lanes, removes the D2 trigger.  A decode on the page from the file in blocks, as the decode worker does, removes the whole read.
+
+### TD-59: an MP3 save holds about 3.5 times its file in the stem worker
+
+This entry concerns MEM-1 and MEM-4.  It is a known breach of MEM-1: the stem worker holds a buffer that grows with the song.
+
+`rusty_mp3` 1.0.0 turns on its bit reservoir for CBR at 256 kbps or less on MPEG-1 (32, 44.1 and 48 kHz).  Then it keeps every encoded frame until `finish()` (`push_with` and `finish` in its `src/lib.rs`).  Only the `MP3_RESERVOIR` environment variable turns the reservoir off, and wasm has no environment.  So an MP3 encode holds the MP3's frames in the stem worker's WebAssembly memory, on the memory path and on the storage path of a save (`worker/src/web/encode.rs`, D4 of `plans/active/stream-from-storage-m8.md`).  While `finish()` runs, the kept frames, the main-data stream and the output frames are live together.  On 2026-10-28 in Chrome, `a_stored_mp3_holds_at_most_four_times_its_file` measured a 60 s MP3 of 1,438,548 bytes (about 1.44 MB a minute at 192 kbps) and a peak of 5,096,709 bytes, 3.54 times the MP3.  So a 30-minute MP3 save holds about 43 MB of MP3, and about 153 MB of the stem worker's WebAssembly memory at its peak.  That memory never shrinks.  A FLAC or WAV save holds no file.  M10 of `plans/active/stream-from-storage.md` does not count this memory in its budget yet.
+
+* Fix: a switch for the bit reservoir in `rusty_mp3`, upstream, or another MP3 encoder that gives each frame as it encodes it.  A rate of 320 kbps turns the reservoir off, but it changes the files, which is the maintainer's choice.  Until then, `a_stored_mp3_holds_at_most_four_times_its_file` keeps the peak under 4 times the MP3 plus 1 MiB.
 
 ## Legibility for agents
 

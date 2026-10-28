@@ -184,6 +184,7 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
 * [x] 2026-10-28: plan review 5: 2 significant should-fix in the fixes of review 4 (step 1 still gave `error` for a failed stored encode; the MP3 factor from a shared test instance), fixed; 4 nits fixed.
 * [x] 2026-10-28: plan review 6: 2 significant should-fix (a late `Encoded::Failed` could replace a running save or save the wrong song; the MP3 bound from the 1-minute factor could fail a correct build), fixed; 1 minor should-fix (tests that no step listed) and 4 nits fixed.
 * [x] 2026-10-28: plan review 7: no blocker and no significant should-fix, so the plan reviews stop.  1 minor should-fix (a stopped worker counts as no worker) and 4 nits fixed.
+* [x] 2026-10-28: step 1 (implementer): `Encode` and `Encoded` in `stem-protocol`, the worker's encoders in `worker/src/web/encode.rs` with the stored path, the `e2e flac` stored case, TD-59.  The tests came with the code, so mutations showed that they fail: in the protocol, a request with both sources and a reply with `failed` read as stored; in the worker, no removal of the WAV, any path taken as a save path, a view of WebAssembly memory written, no removal of a failed output, and a FLAC that keeps its frames until the end (the order spy and the memory test fail); in the page, a stored FLAC reply dropped.  Measured in Chrome: a stored MP3 of 60 s is 1,438,548 bytes, and its encode peaks at 5,096,709 bytes, 3.54 times the MP3.  `e2e flac`: 300 s encoded in 11.1 s from arrays and in 13.1 s from a stored WAV, the two files the same, byte for byte.  `e2e storage` passes.
 
 ## Surprises and discoveries
 
@@ -196,6 +197,12 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
 * 2026-10-28, team leader, after plan review 2: the MP3 exception is about 3.4 times the MP3 (about 150 MB of stem-worker WebAssembly memory for a 30-minute MP3).  M8 records it and does not change the encoder; the orchestrator gets a note for M10's budget.  The maintainer accepted decision 0020 on 2026-10-28 (through the orchestrator, which updates its record).
 * 2026-10-28, team leader, after plan review 3: the worker's JS heap is checked by the read and write sequence spy, not by a reading after the encode.  Decision 0021 (proposed) records the save files and the MP3 from 16 bits.  The orchestrator gets two notes for M10: the MP3 exception in its budget, and a save of each format on the iPhone.
 * 2026-10-28, team leader, after plan review 4: a failed stored encode replies `Encoded::Failed` with its output path, and the page falls back as for a failed WAV write (decision 0015).  The worker bounds of `e2e save` use each encode's own growth, because each reload starts a new worker.
+* 2026-10-28, implementer, step 1:
+  * A reply of either type reads `path` (stored or failed), else `bytes`, else `file`.  So `Encoded` has one decoder for both types.  A request with `out` or `frames` but no `wav` is refused too, as an encode that names no source.
+  * The worker refuses a `wav` or `out` that is not one name directly in `saves/` (no `/`, `.` or `..` after it), and a `wav` equal to `out`, with `error`.  These are malformed requests, so it removes nothing.
+  * The memory line is `memory: encode <mp3|flac> <name or out path>: wasm <before> to <after> bytes, file <bytes> bytes`, with `, JS heap <bytes> bytes after gc` where the worker has `performance.memory`.  The worker logs it on both paths, and for a failed stored encode with a file of 0 bytes.
+  * A stored MP3 writes each packet that `next_packet` gives as its own write, with no buffer of its own: the plan says "with no copy of its own".  30 minutes are about 69,000 writes of about 630 bytes.
+  * `e2e flac` writes its stored WAV from the same floats as its arrays case, rounded as `pcm16` rounds (half away from zero), and checks that the two FLACs are the same, byte for byte (SHA-256).  That is more than "checks the stored reply's file", and it is cheap.
 
 ## Outcomes and retrospective
 

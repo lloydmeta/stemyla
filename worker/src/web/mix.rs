@@ -35,7 +35,7 @@ extern "C" {
     /// The file at `path` from the root of the private file system, as a
     /// `File` of its state on disk now.
     #[wasm_bindgen(catch)]
-    async fn mix_file(path: &str) -> Result<Blob, JsValue>;
+    pub(super) async fn mix_file(path: &str) -> Result<Blob, JsValue>;
 }
 
 /// Bytes in one frame of the mix file: two 32-bit floats.

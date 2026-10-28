@@ -22,8 +22,10 @@
 //! * `storage`: the worker's model storage across messages and workers:
 //!   queue order, the cross-tab lock, stalled downloads, `?model_url=`;
 //!   with `--weights`, also the paths that load a real model (GPU).
-//! * `flac`: the release worker encodes a 5-minute stem as a FLAC; logs
-//!   the time.
+//! * `flac`: the release worker encodes a 5-minute stem as a FLAC, from
+//!   two arrays and from a stored 16-bit WAV in `saves/` (M8).  The stored
+//!   case's file equals the arrays case's file, byte for byte, and the
+//!   worker removes the WAV.  Logs the times.
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).
@@ -1897,51 +1899,96 @@ fn stored_stems(o: &Opts) -> Result<()> {
 
 /// Seconds of the stem that `flac` encodes.
 const FLAC_SECONDS: u32 = 300;
+/// The save files of the stored case of `flac`, as the page names them.
+const FLAC_WAV: &str = "saves/e2e-1.wav";
+const FLAC_OUT: &str = "saves/e2e-1.flac";
 
-/// The release worker encodes a 5-minute stereo stem as a FLAC, from a blank
-/// page that posts the request by hand.  The reply is a `Blob` that starts
-/// with `fLaC` and is smaller than the stem's 16-bit PCM.  Logs the time.
+/// The release worker encodes a 5-minute stereo stem as a FLAC, from a
+/// blank page that posts the requests by hand.  The arrays case sends the
+/// two channels.  Its reply is a `Blob` that starts with `fLaC` and is
+/// smaller than the stem's 16-bit PCM.  The stored case writes the stem
+/// as a 16-bit WAV file in `saves/`, and names it (D5 of the M8 plan).
+/// Its reply names the output file, which is the same, byte for byte, as
+/// the arrays case's file, and the worker removed the WAV.  Logs the
+/// times.
 fn flac(o: &Opts) -> Result<()> {
     let base = start_server(&o.dist, Vec::new(), &["console.js"])?;
     let mut p = Page::open(o, base, &[], "__e2e/blank.html")?;
     let r = in_page(
         &mut p,
-        "const rate = 44100, n = args[0] * rate;
+        "const [seconds, wav_path, out] = args;
+        const rate = 44100, n = seconds * rate;
         const left = new Float32Array(n), right = new Float32Array(n);
         for (let i = 0; i < n; i++) {
           left[i] = 0.5 * Math.sin(2 * Math.PI * 220 * i / rate);
           right[i] = 0.5 * Math.sin(2 * Math.PI * 330 * i / rate);
         }
+        // The 16-bit WAV of the same samples, rounded as the worker's
+        // pcm16 rounds: half away from zero, clipped at full scale.
+        const wav = new Uint8Array(44 + 4 * n);
+        const v = new DataView(wav.buffer);
+        const text = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)));
+        text(0, 'RIFF'); v.setUint32(4, 36 + 4 * n, true); text(8, 'WAVEfmt ');
+        v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
+        v.setUint32(24, rate, true); v.setUint32(28, 4 * rate, true);
+        v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+        text(36, 'data'); v.setUint32(40, 4 * n, true);
+        const pcm16 = (x) => {
+          const s = x * 32768;
+          return Math.max(-32768, Math.min(32767, Math.sign(s) * Math.round(Math.abs(s))));
+        };
+        for (let i = 0; i < n; i++) {
+          v.setInt16(44 + 4 * i, pcm16(left[i]), true);
+          v.setInt16(46 + 4 * i, pcm16(right[i]), true);
+        }
+        await e2e.plant_at(wav_path, wav);
+        const digest = async (bytes) => e2e.base64(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
         const w = await e2e.start();
-        const t0 = performance.now();
-        const d = await new Promise((resolve) => {
+        const ask = (msg, transfer) => new Promise((resolve) => {
           w.onmessage = (e) => {
             if (e.data.type === 'flac' || e.data.type === 'error') resolve(e.data);
           };
-          w.postMessage({ type: 'flac', name: 'tone.flac', left, right, rate }, [left.buffer, right.buffer]);
+          w.postMessage(msg, transfer);
         });
-        const ms = Math.round(performance.now() - t0);
+        let t0 = performance.now();
+        const d = await ask({ type: 'flac', name: 'tone.flac', left, right, rate }, [left.buffer, right.buffer]);
+        const arrays = { ms: Math.round(performance.now() - t0) };
+        if (d.type !== 'flac') arrays.error = d.text;
+        else {
+          const head = new Uint8Array(await d.file.slice(0, 4).arrayBuffer());
+          Object.assign(arrays, { name: d.name, size: d.file.size, media: d.file.type,
+            head: String.fromCharCode(...head), sha256: await digest(await d.file.arrayBuffer()) });
+        }
+        t0 = performance.now();
+        const s = await ask({ type: 'flac', name: 'tone.flac', wav: wav_path, frames: n, out, rate }, []);
+        const stored = { ms: Math.round(performance.now() - t0), type: s.type, name: s.name,
+          path: s.path, failed: s.failed, error: s.type === 'error' ? s.text : undefined };
         w.terminate();
-        if (d.type !== 'flac') return { ms, error: d.text };
-        const head = new Uint8Array(await d.file.slice(0, 4).arrayBuffer());
-        return { ms, name: d.name, size: d.file.size, media: d.file.type,
-          head: String.fromCharCode(...head) };",
-        json!([FLAC_SECONDS]),
+        const file = s.path ? await e2e.read(s.path) : null;
+        if (file) Object.assign(stored, { size: file.length,
+          head: String.fromCharCode(...file.subarray(0, 4)), sha256: await digest(file) });
+        stored.wav_left = (await e2e.read(wav_path)) !== null;
+        return { arrays, stored };",
+        json!([FLAC_SECONDS, FLAC_WAV, FLAC_OUT]),
         300,
     )?;
     p.note(&format!("reply: {r}"));
-    for (ok, what) in flac_checks(&r, FLAC_SECONDS) {
+    for (ok, what) in flac_checks(&r["arrays"], FLAC_SECONDS) {
+        p.check(ok, &what);
+    }
+    for (ok, what) in stored_flac_checks(&r["stored"], &r["arrays"]) {
         p.check(ok, &what);
     }
     p.note(&format!(
-        "flac: {FLAC_SECONDS} s of stereo encoded in {} ms",
-        r["ms"]
+        "flac: {FLAC_SECONDS} s of stereo encoded in {} ms from arrays, {} ms from a stored WAV",
+        r["arrays"]["ms"], r["stored"]["ms"]
     ));
     p.finish()
 }
 
-/// The checks of the `flac` scenario on the page's summary of the reply,
-/// for a stem of `seconds` of 44.1 kHz stereo: each with what it checks.
+/// The checks of the `flac` scenario on the page's summary of the arrays
+/// reply, for a stem of `seconds` of 44.1 kHz stereo: each with what it
+/// checks.
 fn flac_checks(r: &Value, seconds: u32) -> [(bool, String); 5] {
     let pcm_bytes = u64::from(seconds) * 44_100 * 4;
     [
@@ -1952,6 +1999,33 @@ fn flac_checks(r: &Value, seconds: u32) -> [(bool, String); 5] {
         (
             r["size"].as_u64().is_some_and(|s| s < pcm_bytes),
             format!("the file is smaller than its {pcm_bytes} bytes of 16-bit PCM"),
+        ),
+    ]
+}
+
+/// The checks of the stored case of `flac`, on the page's summary of its
+/// reply and of the arrays case's reply.
+fn stored_flac_checks(s: &Value, arrays: &Value) -> [(bool, String); 5] {
+    [
+        (
+            s["type"] == "flac" && s["error"].is_null() && s["failed"].is_null(),
+            "the worker encodes the stored WAV".into(),
+        ),
+        (
+            s["path"] == FLAC_OUT && s["name"] == "tone.flac",
+            format!("the reply names {FLAC_OUT} and keeps the name"),
+        ),
+        (
+            s["head"] == "fLaC",
+            "the stored file starts with fLaC".into(),
+        ),
+        (
+            s["sha256"].is_string() && s["sha256"] == arrays["sha256"],
+            "the stored file is the arrays file, byte for byte".into(),
+        ),
+        (
+            s["wav_left"] == false,
+            "the worker removed the WAV file".into(),
         ),
     ]
 }
@@ -2504,6 +2578,35 @@ mod tests {
                 .1
                 .contains("52920000 bytes")
         );
+    }
+
+    fn stored_reply() -> serde_json::Value {
+        json!({"type": "flac", "name": "tone.flac", "path": FLAC_OUT, "head": "fLaC",
+            "size": 8460848, "sha256": "abc=", "wav_left": false, "ms": 9000})
+    }
+
+    #[test]
+    fn the_stored_flac_checks_pass_a_good_reply_and_fail_wrong_ones() {
+        let arrays = json!({"sha256": "abc="});
+        let passes =
+            |s: &serde_json::Value| stored_flac_checks(s, &arrays).map(|(ok, _)| ok).to_vec();
+        assert_eq!(passes(&stored_reply()), [true; 5]);
+        let wrong = |field: &str, value: serde_json::Value, check: usize| {
+            let mut s = stored_reply();
+            s[field] = value;
+            let mut want = [true; 5];
+            want[check] = false;
+            assert_eq!(passes(&s), want, "{field}");
+        };
+        wrong("type", json!("error"), 0);
+        wrong("error", json!("wav must be a file in saves/"), 0);
+        wrong("failed", json!("QuotaExceededError"), 0);
+        wrong("path", json!("saves/other.flac"), 1);
+        wrong("name", json!("stem.flac"), 1);
+        wrong("head", json!("RIFF"), 2);
+        wrong("sha256", json!("abd="), 3);
+        wrong("sha256", serde_json::Value::Null, 3);
+        wrong("wav_left", json!(true), 4);
     }
 
     use super::*;

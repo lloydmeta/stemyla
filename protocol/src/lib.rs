@@ -28,10 +28,19 @@
 //! * `{type: "selftest", base?: string}`: compare GPU results with the CPU
 //!   port's reference files (`xtask roformer-selftest`).
 //! * `{type: "bench"}`: time the GPU kernels.
-//! * `{type: "mp3", name, left, right, rate}`: encode one stem (buffers
-//!   transferred).
-//! * `{type: "flac", name, left, right, rate}`: encode one stem as a 16-bit
-//!   FLAC (buffers transferred).
+//! * `{type: "mp3", name, left, right, rate}`: encode one stem or mix as a
+//!   192 kbps MP3 (buffers transferred, the memory path of a save).
+//! * `{type: "flac", name, left, right, rate}`: encode one stem or mix as
+//!   a 16-bit FLAC (buffers transferred, the memory path of a save).
+//! * `{type: "mp3" or "flac", name, wav, frames, out, rate}`: encode the
+//!   16-bit stereo WAV file at `wav`, of `frames` frames, into the file at
+//!   `out` ([`Encode::Stored`], the storage path of a save).  Both paths
+//!   are from the root of the private file system, in its `saves` folder.
+//!   No samples cross.  The worker removes the WAV file at the end, also
+//!   when the encode fails.  A request with both arrays and `wav`, or
+//!   neither, with `out` or `frames` but no `wav`, with no `out`, or with
+//!   `frames` that is not a whole number from 0 to `usize::MAX`, is
+//!   refused.
 //!
 //! Replies ([`Reply`], worker to page):
 //! * `{type: "alive"}` once the worker listens.
@@ -59,6 +68,13 @@
 //! * `{type: "mp3", name, bytes}` (buffer transferred).
 //! * `{type: "flac", name, file: Blob}`: a `Blob` crosses as a reference,
 //!   so the file is not copied.
+//! * `{type: "mp3" or "flac", name, path}`: a stored encode wrote its file
+//!   at `path`, the request's `out` ([`Encoded::Stored`]).
+//! * `{type: "mp3" or "flac", name, path, failed: text}`: a stored encode
+//!   failed, for the reason `text` ([`Encoded::Failed`]).  The worker
+//!   removed the file at `path` and the WAV file.  A stored encode replies
+//!   with one of these two, not with `error`, so the page knows which save
+//!   failed.
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
@@ -112,6 +128,10 @@ mod field {
     pub const SESSION: &str = "session";
     pub const MIX: &str = "mix";
     pub const OF: &str = "of";
+    pub const WAV: &str = "wav";
+    pub const OUT: &str = "out";
+    pub const PATH: &str = "path";
+    pub const FAILED: &str = "failed";
     pub const CHUNK: &str = "chunk";
     pub const OVERLAP: &str = "overlap";
     pub const MAX_ELEMS: &str = "max_elems";
@@ -310,6 +330,39 @@ pub enum Mix {
     Stored { path: String, frames: usize },
 }
 
+/// The audio that an MP3 or FLAC encode reads.
+#[derive(Clone, Debug)]
+pub enum Encode {
+    /// Both channels, transferred with the request (the memory path of a
+    /// save).
+    Arrays {
+        left: Float32Array,
+        right: Float32Array,
+    },
+    /// A 16-bit stereo WAV file of `frames` frames at `wav`, encoded into
+    /// the file at `out` (the storage path of a save).  Both are paths from
+    /// the root of the private file system.
+    Stored {
+        wav: String,
+        frames: usize,
+        out: String,
+    },
+}
+
+/// The file that an MP3 or FLAC encode gives.
+#[derive(Clone, Debug)]
+pub enum Encoded {
+    /// The MP3 of an [`Encode::Arrays`] (transferred).
+    Bytes(Uint8Array),
+    /// The FLAC of an [`Encode::Arrays`] (a reference, not a copy).
+    Blob(Blob),
+    /// A stored encode wrote its file at `path`.
+    Stored { path: String },
+    /// A stored encode failed, for the reason `text`.  The worker removed
+    /// the file at `path` and the WAV file.
+    Failed { path: String, text: String },
+}
+
 /// A request from the page to the worker.
 #[derive(Clone, Debug)]
 pub enum Request {
@@ -330,14 +383,12 @@ pub enum Request {
     Bench,
     Mp3 {
         name: Option<String>,
-        left: Float32Array,
-        right: Float32Array,
+        source: Encode,
         rate: Option<u32>,
     },
     Flac {
         name: Option<String>,
-        left: Float32Array,
-        right: Float32Array,
+        source: Encode,
         rate: Option<u32>,
     },
 }
@@ -406,25 +457,21 @@ impl Request {
                     set(&o, field::BASE, b.as_str());
                 }
             }
-            Self::Mp3 {
-                name,
-                left,
-                right,
-                rate,
-            }
-            | Self::Flac {
-                name,
-                left,
-                right,
-                rate,
-            } => {
+            Self::Mp3 { name, source, rate } | Self::Flac { name, source, rate } => {
                 if let Some(n) = name {
                     set(&o, field::NAME, n.as_str());
                 }
                 if let Some(r) = rate {
                     set(&o, field::RATE, *r);
                 }
-                put_stereo(&o, &transfer, left, right);
+                match source {
+                    Encode::Arrays { left, right } => put_stereo(&o, &transfer, left, right),
+                    Encode::Stored { wav, frames, out } => {
+                        set(&o, field::WAV, wav.as_str());
+                        set(&o, field::FRAMES, *frames as f64);
+                        set(&o, field::OUT, out.as_str());
+                    }
+                }
             }
         }
         (o, transfer)
@@ -461,24 +508,16 @@ impl ToWorker {
                 base: string(msg, field::BASE),
             },
             kind::BENCH => Request::Bench,
-            kind::MP3 => {
-                let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Mp3 {
-                    name: string(msg, field::NAME),
-                    left,
-                    right,
-                    rate: number(msg, field::RATE).map(|r| r as u32),
-                }
-            }
-            kind::FLAC => {
-                let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Flac {
-                    name: string(msg, field::NAME),
-                    left,
-                    right,
-                    rate: number(msg, field::RATE).map(|r| r as u32),
-                }
-            }
+            kind::MP3 => Request::Mp3 {
+                name: string(msg, field::NAME),
+                source: encode_source(msg).map_err(bad)?,
+                rate: number(msg, field::RATE).map(|r| r as u32),
+            },
+            kind::FLAC => Request::Flac {
+                name: string(msg, field::NAME),
+                source: encode_source(msg).map_err(bad)?,
+                rate: number(msg, field::RATE).map(|r| r as u32),
+            },
             other => return Err(bad(format!("unknown message {other}"))),
         };
         Ok(Self {
@@ -550,11 +589,11 @@ pub enum Reply {
     Bench(String),
     Mp3 {
         name: String,
-        bytes: Uint8Array,
+        file: Encoded,
     },
     Flac {
         name: String,
-        file: Blob,
+        file: Encoded,
     },
 }
 
@@ -635,14 +674,20 @@ impl Reply {
                 set(&o, field::OK, *ok);
                 set(&o, field::TEXT, text.as_str());
             }
-            Self::Mp3 { name, bytes } => {
+            Self::Mp3 { name, file } | Self::Flac { name, file } => {
                 set(&o, field::NAME, name.as_str());
-                set(&o, field::BYTES, bytes);
-                transfer.push(&bytes.buffer());
-            }
-            Self::Flac { name, file } => {
-                set(&o, field::NAME, name.as_str());
-                set(&o, field::FILE, file);
+                match file {
+                    Encoded::Bytes(bytes) => {
+                        set(&o, field::BYTES, bytes);
+                        transfer.push(&bytes.buffer());
+                    }
+                    Encoded::Blob(blob) => set(&o, field::FILE, blob),
+                    Encoded::Stored { path } => set(&o, field::PATH, path.as_str()),
+                    Encoded::Failed { path, text } => {
+                        set(&o, field::PATH, path.as_str());
+                        set(&o, field::FAILED, text.as_str());
+                    }
+                }
             }
         }
         (o, transfer)
@@ -734,15 +779,11 @@ impl Reply {
             kind::BENCH => Self::Bench(text()),
             kind::MP3 => Self::Mp3 {
                 name: string(msg, field::NAME).unwrap_or_default(),
-                bytes: get(msg, field::BYTES)
-                    .dyn_into()
-                    .map_err(|_| bad("no bytes"))?,
+                file: encoded(msg).map_err(bad)?,
             },
             kind::FLAC => Self::Flac {
                 name: string(msg, field::NAME).unwrap_or_default(),
-                file: get(msg, field::FILE)
-                    .dyn_into()
-                    .map_err(|_| bad("no file"))?,
+                file: encoded(msg).map_err(bad)?,
             },
             other => return Err(bad(&format!("unknown type {other:?}"))),
         })
@@ -790,6 +831,14 @@ fn mix(msg: &JsValue) -> Result<Mix, String> {
         return Err("a separation names a stored mix or two arrays, not both".into());
     }
     let path = path.as_string().ok_or("mix must be a path")?;
+    Ok(Mix::Stored {
+        path,
+        frames: whole_frames(msg)?,
+    })
+}
+
+/// The `frames` of a message, a whole number from 0 to `usize::MAX`.
+fn whole_frames(msg: &JsValue) -> Result<usize, String> {
     // Over `usize::MAX`, `as usize` would saturate: on wasm32, 2^32 - 1.
     // `usize::MAX as f64` rounds up to 2^64 on a 64-bit target, so the
     // bound is the first power of two over `usize::MAX`, which is exact.
@@ -802,10 +851,57 @@ fn mix(msg: &JsValue) -> Result<Mix, String> {
                 usize::MAX
             )
         })?;
-    Ok(Mix::Stored {
-        path,
-        frames: frames as usize,
-    })
+    Ok(frames as usize)
+}
+
+/// The source of an `mp3` or `flac` request: a stored WAV if it has `wav`,
+/// else the two arrays.  A missing field is refused, not read as a
+/// default (TD-16).
+fn encode_source(msg: &JsValue) -> Result<Encode, String> {
+    let has = |k| !get(msg, k).is_undefined();
+    if !has(field::WAV) {
+        if has(field::OUT) || has(field::FRAMES) {
+            return Err("an encode with out or frames names its wav".into());
+        }
+        let (left, right) = stereo(msg)?;
+        return Ok(Encode::Arrays { left, right });
+    }
+    if has(field::LEFT) || has(field::RIGHT) {
+        return Err("an encode names a stored WAV or two arrays, not both".into());
+    }
+    let wav = string(msg, field::WAV).ok_or("wav must be a path")?;
+    let frames = whole_frames(msg)?;
+    if !has(field::OUT) {
+        return Err("a stored encode names its out file".into());
+    }
+    let out = string(msg, field::OUT).ok_or("out must be a path")?;
+    Ok(Encode::Stored { wav, frames, out })
+}
+
+/// The file of an `mp3` or `flac` reply: a stored file if it has `path`,
+/// else the bytes or the `Blob`.
+fn encoded(msg: &JsValue) -> Result<Encoded, &'static str> {
+    let path = get(msg, field::PATH);
+    if !path.is_undefined() {
+        let path = path.as_string().ok_or("path must be a path")?;
+        let failed = get(msg, field::FAILED);
+        if failed.is_undefined() {
+            return Ok(Encoded::Stored { path });
+        }
+        let text = failed.as_string().ok_or("failed must be text")?;
+        return Ok(Encoded::Failed { path, text });
+    }
+    let bytes = get(msg, field::BYTES);
+    if !bytes.is_undefined() {
+        return bytes
+            .dyn_into()
+            .map(Encoded::Bytes)
+            .map_err(|_| "bytes must be a Uint8Array");
+    }
+    get(msg, field::FILE)
+        .dyn_into()
+        .map(Encoded::Blob)
+        .map_err(|_| "no file")
 }
 
 fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
