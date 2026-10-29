@@ -24,12 +24,13 @@
   // 40838459678).  The hold is the rest: the last frame's time less its
   // hold is the page's own paint and tasks.  So a runner that paints in
   // software does not get frames of twice the time.  `__e2e_long_frames`
-  // keeps the count and the sum of the times between the starts of those
-  // frames, and the frames whose hold went past the rest of the time.
+  // keeps the start and the hold of each of those frames, in milliseconds.
+  // `e2e save` checks the holds from them, not from the spy's own sums
+  // (finding 6-1 of review round speed 6 of M8).
   window.__e2e_frames = 0;
   window.__e2e_throttle = false;
   window.__e2e_long_frame_ms = 0;
-  window.__e2e_long_frames = { count: 0, ms: 0, over: 0 };
+  window.__e2e_long_frames = { starts: [], holds: [] };
   let last_start = null;
   let last_hold = 0;
   const real_raf = window.requestAnimationFrame.bind(window);
@@ -42,16 +43,8 @@
         const own = last_start === null ? 0 : start - last_start - last_hold;
         while (performance.now() - start < long - own) {}
         last_hold = performance.now() - start;
-        if (last_start !== null) {
-          const frames = window.__e2e_long_frames;
-          frames.count++;
-          frames.ms += start - last_start;
-          // A hold past the rest of `long` by over 5 ms: in a few frames
-          // when the system stops the page, in each frame when the spy
-          // holds on top of the page's own frame (finding 5-2 of review
-          // round speed 5 of M8).
-          if (last_hold - Math.max(0, long - own) > 5) frames.over++;
-        }
+        window.__e2e_long_frames.starts.push(start);
+        window.__e2e_long_frames.holds.push(last_hold);
         last_start = start;
       } else {
         last_start = null;

@@ -337,36 +337,84 @@ fn clean(s: &str) -> String {
 }
 
 /// The last session asked to be current, for the writes of
-/// `sessions/current` (`store::make_current`).  Each write is a task of its
-/// own, and two writes of one page can end out of order: a restore of A,
-/// then an open of B whose write ends first.  So each request writes, then
-/// writes the last request again while another came meanwhile.  The last
-/// request wins (review round speed 5 of M8).
+/// `sessions/current` (`store::make_current`).  Each request is a task of
+/// its own, so two writes of one page could end out of order: a restore of
+/// A, then an open of B whose write ends first.  So one write runs at a
+/// time.  A request that comes during a write waits for it, then writes
+/// its session if it is still the last request.  The last request wins
+/// (review rounds speed 5 and 6 of M8).
 #[derive(Default)]
 pub struct LastCurrent {
-    wanted: std::cell::RefCell<Option<String>>,
+    state: std::cell::RefCell<CurrentState>,
+}
+
+#[derive(Default)]
+struct CurrentState {
+    /// The last session asked to be current.
+    wanted: Option<String>,
+    /// A write runs.
+    writing: bool,
+    /// The session of the last write, if it ended well.
+    written: Option<String>,
+    /// The requests that wait for the write to end.
+    waiting: Vec<std::task::Waker>,
+}
+
+/// Resolves when no write of a [`LastCurrent`] runs.
+struct Idle<'a>(&'a LastCurrent);
+
+impl std::future::Future for Idle<'_> {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let mut state = self.0.state.borrow_mut();
+        if !state.writing {
+            return std::task::Poll::Ready(());
+        }
+        state.waiting.push(cx.waker().clone());
+        std::task::Poll::Pending
+    }
 }
 
 impl LastCurrent {
-    /// Asks for `id` to be current, and writes with `write`, which gives
-    /// whether the write ended well.  It gives whether `id` is the last
-    /// request and its write ended well: a request that a later one
-    /// replaced gives `false`, after it wrote the later one again.
+    /// Asks for `id` to be current, and writes it with `write`, which gives
+    /// whether the write ended well.  It gives `true` only when no write
+    /// runs and the last write named `id`, which is the last request.  A
+    /// request that a later one replaced gives `false`, and so does a
+    /// failed write.
     pub async fn make<F, W>(&self, id: &str, write: W) -> bool
     where
         W: Fn(String) -> F,
         F: std::future::Future<Output = bool>,
     {
-        *self.wanted.borrow_mut() = Some(id.to_string());
+        self.state.borrow_mut().wanted = Some(id.to_string());
         loop {
-            let Some(wanted) = self.wanted.borrow().clone() else {
-                return false;
-            };
-            if !write(wanted.clone()).await {
-                return false;
+            Idle(self).await;
+            {
+                let mut state = self.state.borrow_mut();
+                if state.wanted.as_deref() != Some(id) {
+                    return false;
+                }
+                if state.written.as_deref() == Some(id) {
+                    return true;
+                }
+                state.writing = true;
             }
-            if self.wanted.borrow().as_deref() == Some(wanted.as_str()) {
-                return wanted == id;
+            let ok = write(id.to_string()).await;
+            let waiting = {
+                let mut state = self.state.borrow_mut();
+                state.writing = false;
+                state.written = ok.then(|| id.to_string());
+                std::mem::take(&mut state.waiting)
+            };
+            for waker in waiting {
+                waker.wake();
+            }
+            if !ok {
+                return false;
             }
         }
     }
@@ -376,11 +424,12 @@ impl LastCurrent {
 mod tests {
     use super::*;
 
-    /// A write of `sessions/current` in a test: it ends when the test lets
-    /// it, and then the file holds its session.
+    /// A write of `sessions/current` in a test: it ends when the test sets
+    /// its gate, and when the gate says it ends well, the file holds its
+    /// session.
     struct Write {
         id: String,
-        go: std::rc::Rc<std::cell::Cell<bool>>,
+        gate: std::rc::Rc<std::cell::Cell<Option<bool>>>,
         file: std::rc::Rc<std::cell::RefCell<String>>,
     }
 
@@ -391,50 +440,98 @@ mod tests {
             self: std::pin::Pin<&mut Self>,
             _: &mut std::task::Context<'_>,
         ) -> std::task::Poll<bool> {
-            if !self.go.get() {
+            let Some(ok) = self.gate.get() else {
                 return std::task::Poll::Pending;
+            };
+            if ok {
+                *self.file.borrow_mut() = self.id.clone();
             }
-            *self.file.borrow_mut() = self.id.clone();
-            std::task::Poll::Ready(true)
+            std::task::Poll::Ready(ok)
         }
     }
 
-    /// Review round speed 5 of M8: the writes of `sessions/current` of a
-    /// restore of A and an open of B end out of order, B first.  The file
-    /// names B, the last request, as with no write of A after it.
-    #[test]
-    fn the_last_session_asked_stays_current() {
-        use std::cell::{Cell, RefCell};
-        use std::rc::Rc;
-        use std::task::{Context, Waker};
-        let file = Rc::new(RefCell::new(String::new()));
-        // One gate for each write, in the order they start.
-        let gates: Rc<RefCell<Vec<Rc<Cell<bool>>>>> = Rc::default();
-        let write = |id: String| {
-            let go = Rc::new(Cell::new(false));
-            gates.borrow_mut().push(Rc::clone(&go));
+    type Gates =
+        std::rc::Rc<std::cell::RefCell<Vec<(String, std::rc::Rc<std::cell::Cell<Option<bool>>>)>>>;
+
+    /// A writer whose writes wait for their gates, which `gates` keeps in
+    /// the order the writes start.
+    fn writer(
+        gates: &Gates,
+        file: &std::rc::Rc<std::cell::RefCell<String>>,
+    ) -> impl Fn(String) -> Write {
+        let (gates, file) = (std::rc::Rc::clone(gates), std::rc::Rc::clone(file));
+        move |id: String| {
+            let gate = std::rc::Rc::new(std::cell::Cell::new(None));
+            gates
+                .borrow_mut()
+                .push((id.clone(), std::rc::Rc::clone(&gate)));
             Write {
                 id,
-                go,
-                file: Rc::clone(&file),
+                gate,
+                file: std::rc::Rc::clone(&file),
             }
-        };
+        }
+    }
+
+    /// Review rounds speed 5 and 6 of M8: a restore of A writes
+    /// `sessions/current`, then an open of B asks for B.  B's request waits
+    /// for A's write, then writes B.  The file never names A after B's
+    /// request is ready, and A's request gives `false`.
+    #[test]
+    fn the_last_session_asked_stays_current() {
+        use std::task::{Context, Poll, Waker};
+        let file = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let gates: Gates = std::rc::Rc::default();
         let last = LastCurrent::default();
         let mut cx = Context::from_waker(Waker::noop());
-        let mut a = Box::pin(last.make("acme-a", write));
-        let mut b = Box::pin(last.make("acme-b", write));
+        let mut a = Box::pin(last.make("acme-a", writer(&gates, &file)));
+        let mut b = Box::pin(last.make("acme-b", writer(&gates, &file)));
+        assert!(a.as_mut().poll(&mut cx).is_pending());
+        assert!(
+            b.as_mut().poll(&mut cx).is_pending(),
+            "B waits for A's write"
+        );
+        assert_eq!(gates.borrow().len(), 1, "one write at a time");
+        gates.borrow()[0].1.set(Some(true));
+        assert_eq!(a.as_mut().poll(&mut cx), Poll::Ready(false), "B replaced A");
+        assert_eq!(*file.borrow(), "acme-a");
+        assert!(b.as_mut().poll(&mut cx).is_pending(), "B writes B");
+        assert_eq!(gates.borrow()[1].0, "acme-b");
+        gates.borrow()[1].1.set(Some(true));
+        assert_eq!(b.as_mut().poll(&mut cx), Poll::Ready(true));
+        assert_eq!(*file.borrow(), "acme-b", "the last request wins");
+        assert_eq!(gates.borrow().len(), 2, "no write after B's");
+    }
+
+    /// Review round speed 6 of M8: a failed write gives no `true`.  B's
+    /// write fails after A's: neither request gives `true`, and a later
+    /// request of B writes again.
+    #[test]
+    fn a_failed_write_of_the_current_session_gives_no_true() {
+        use std::task::{Context, Poll, Waker};
+        let file = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let gates: Gates = std::rc::Rc::default();
+        let last = LastCurrent::default();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut a = Box::pin(last.make("acme-a", writer(&gates, &file)));
+        let mut b = Box::pin(last.make("acme-b", writer(&gates, &file)));
         assert!(a.as_mut().poll(&mut cx).is_pending());
         assert!(b.as_mut().poll(&mut cx).is_pending());
-        // B's write ends first, then A's.
-        gates.borrow()[1].set(true);
-        assert_eq!(b.as_mut().poll(&mut cx), std::task::Poll::Ready(true));
-        gates.borrow()[0].set(true);
-        assert!(a.as_mut().poll(&mut cx).is_pending(), "A writes B again");
-        assert_eq!(*file.borrow(), "acme-a", "A's late write landed");
-        gates.borrow()[2].set(true);
-        assert_eq!(a.as_mut().poll(&mut cx), std::task::Poll::Ready(false));
-        assert_eq!(*file.borrow(), "acme-b", "the last request wins");
-        assert_eq!(gates.borrow().len(), 3);
+        gates.borrow()[0].1.set(Some(true));
+        assert_eq!(a.as_mut().poll(&mut cx), Poll::Ready(false));
+        assert!(b.as_mut().poll(&mut cx).is_pending());
+        gates.borrow()[1].1.set(Some(false));
+        assert_eq!(
+            b.as_mut().poll(&mut cx),
+            Poll::Ready(false),
+            "B's write failed"
+        );
+        assert_eq!(*file.borrow(), "acme-a", "the file keeps A");
+        let mut again = Box::pin(last.make("acme-b", writer(&gates, &file)));
+        assert!(again.as_mut().poll(&mut cx).is_pending(), "B writes again");
+        gates.borrow()[2].1.set(Some(true));
+        assert_eq!(again.as_mut().poll(&mut cx), Poll::Ready(true));
+        assert_eq!(*file.borrow(), "acme-b");
     }
 
     /// D7 of the M7 plan: the `stems-generation` and `stem-overviews` lines

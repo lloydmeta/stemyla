@@ -702,22 +702,51 @@ pub(super) struct Playing {
 }
 
 /// The largest share of the long frames whose hold may go past the rest of
-/// [`LONG_FRAME_MS`] by over 5 ms.  The system can stop the page in a hold
-/// on a loaded machine.  A spy that holds on top of the page's own frame
-/// goes past in each frame (finding 5-2 of review round speed 5 of M8).
+/// [`LONG_FRAME_MS`] by over [`OVER_MS`].  The system can stop the page in
+/// a hold on a loaded machine.  A spy that holds on top of the page's own
+/// frame goes past in each frame (findings 5-2 and 6-1 of review rounds
+/// speed 5 and 6 of M8).
 pub(super) const OVER_SHARE: f64 = 0.1;
+/// How far a hold may go past the rest of [`LONG_FRAME_MS`], in
+/// milliseconds: a turn of the spy's loop, and room for the timer.
+pub(super) const OVER_MS: f64 = 5.0;
 
-/// The share of the long frames whose hold went past the rest, from
-/// `__e2e_long_frames`.
-pub(super) fn over_share(frames: &Value) -> Option<f64> {
-    let count = frames["count"].as_f64().filter(|&c| c > 0.0)?;
-    Some(frames["over"].as_f64()? / count)
+/// The long frames of the spy, each its start and its hold in
+/// milliseconds, from `__e2e_long_frames`.
+pub(super) fn long_frames(frames: &Value) -> Option<Vec<(f64, f64)>> {
+    let starts = frames["starts"].as_array()?;
+    let holds = frames["holds"].as_array()?;
+    if starts.len() != holds.len() {
+        return None;
+    }
+    starts
+        .iter()
+        .zip(holds)
+        .map(|(s, h)| Some((s.as_f64()?, h.as_f64()?)))
+        .collect()
 }
 
-/// The mean time of the long frames, from `__e2e_long_frames`.
-pub(super) fn mean_frame_ms(frames: &Value) -> Option<f64> {
-    let count = frames["count"].as_f64().filter(|&c| c > 0.0)?;
-    Some(frames["ms"].as_f64()? / count)
+/// The mean time of the long frames, from the first start to the last.
+pub(super) fn mean_frame_ms(frames: &[(f64, f64)]) -> Option<f64> {
+    let (first, last) = (frames.first()?.0, frames.last()?.0);
+    (frames.len() >= 2).then(|| (last - first) / (frames.len() - 1) as f64)
+}
+
+/// The share of the long frames whose hold went past the rest of
+/// [`LONG_FRAME_MS`] by over [`OVER_MS`].  The rest is what the page's own
+/// time of the frame before left: its time from start to start less its
+/// hold.  This uses the starts and the holds, not the spy's own sums.
+pub(super) fn over_share(frames: &[(f64, f64)]) -> Option<f64> {
+    let pairs = frames.windows(2);
+    let count = pairs.len();
+    let over = pairs
+        .filter(|w| {
+            let ((start, hold), (next, next_hold)) = (w[0], w[1]);
+            let own = next - start - hold;
+            next_hold > (LONG_FRAME_MS - own).max(0.0) + OVER_MS
+        })
+        .count();
+    (count >= 1).then(|| over as f64 / count as f64)
 }
 
 /// The checks of the save during playback (D11): the song played from
@@ -815,8 +844,9 @@ pub(super) fn full_writes(seconds: u32) -> u64 {
 }
 
 /// The bytes of the reads in flight of a save in `e2e save`: 2 reads of
-/// 65,536 frames (`app::lane_store::SAVE_AHEAD`) of 3 lanes of 16-bit WAV
-/// files, 4 bytes a frame.
+/// 65,536 frames (`app::lane_store::SAVE_AHEAD`, a test keeps them equal)
+/// of 3 lanes of 16-bit WAV files, 4 bytes a frame.  A mix save reads the
+/// 2 audible lanes, the stems; the third lane, the source, is a margin.
 pub(super) const READS_IN_FLIGHT_BYTES: u64 = 2 * 65_536 * 4 * 3;
 /// The margin of [`heap_budget`] for the rest of the page's JS objects
 /// during a save, in bytes.
@@ -1155,10 +1185,12 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         json!([]),
         SCRIPT_WAIT_S,
     )?;
-    let frame_ms = mean_frame_ms(&frames);
-    let over_share = over_share(&frames);
+    let long = long_frames(&frames).unwrap_or_default();
+    let frame_ms = mean_frame_ms(&long);
+    let over_share = over_share(&long);
     p.note(&format!(
-        "save: wav, 600 s, during playback: animation frames of {frame_ms:?} ms on average ({frames})"
+        "save: wav, 600 s, during playback: {} animation frames of {frame_ms:?} ms on average, {over_share:?} of them past the rest",
+        long.len()
     ));
     // The long tasks of the save have reached their observer by now.
     let long = long_tasks(&in_page(
@@ -1338,19 +1370,13 @@ mod tests {
         frames.over_share = None;
         assert_eq!(failing(&frames), 1, "no share read");
         frames.over_share = Some(0.0);
-        assert_eq!(over_share(&json!({"count": 200, "over": 3})), Some(0.015));
-        assert_eq!(over_share(&json!({"count": 0, "over": 0})), None);
         frames.frame_ms = Some(118.0);
         assert_eq!(failing(&frames), 1, "frames of 118 ms");
         frames.frame_ms = Some(119.0);
         assert_eq!(failing(&frames), 0, "frames of 119 ms");
         frames.frame_ms = None;
         assert_eq!(failing(&frames), 1, "no frames");
-        assert_eq!(
-            mean_frame_ms(&json!({"count": 4, "ms": 520.0})),
-            Some(130.0)
-        );
-        assert_eq!(mean_frame_ms(&json!({"count": 0, "ms": 0.0})), None);
+
         // Nit 1-9 of review round speed 1: a song with no lane fails.
         let mut none = playing(&[0, 0], true);
         none.lines[0].stored = 0;
@@ -1577,6 +1603,66 @@ mod tests {
         assert_eq!(failing(&edge).len(), 1);
     }
 
+    /// The frames of a spy, each its start and its hold, when the page's
+    /// own frame takes `paint` ms and the spy holds `hold(own)` ms, where
+    /// `own` is the page's time of the frame before.
+    fn spy_frames(paint: f64, hold: impl Fn(f64) -> f64) -> Vec<(f64, f64)> {
+        let mut frames = Vec::new();
+        let (mut start, mut own) = (0.0, 0.0);
+        for _ in 0..100 {
+            let held = hold(own);
+            frames.push((start, held));
+            start += held + paint;
+            own = paint;
+        }
+        frames
+    }
+
+    /// Finding 6-1 of review round speed 6 of M8: the frames check uses the
+    /// starts and the holds that the spy logs.  The spy of today holds the
+    /// rest of `LONG_FRAME_MS`; a spy that takes its own time as 0, as the
+    /// spy before round speed 4 did, holds the whole time on top of the
+    /// page's paint, and fails.  A slow paint and no hold passes, and one
+    /// hold that the system stopped is within the share.
+    #[test]
+    fn the_long_frames_check_reads_the_spys_holds() {
+        let rest = |own: f64| (LONG_FRAME_MS - own).max(0.0);
+        // The first frame holds all of `LONG_FRAME_MS`: no frame before.
+        let near = |ms: Option<f64>, want: f64| ms.is_some_and(|ms| (ms - want).abs() < 2.0);
+        let today = spy_frames(65.0, rest);
+        assert!(
+            near(mean_frame_ms(&today), LONG_FRAME_MS),
+            "{:?}",
+            mean_frame_ms(&today)
+        );
+        assert_eq!(over_share(&today), Some(0.0));
+        let own_zero = spy_frames(65.0, |_| LONG_FRAME_MS);
+        assert!(near(mean_frame_ms(&own_zero), 190.0));
+        assert!(
+            over_share(&own_zero).is_some_and(|s| s > 0.95),
+            "{:?}",
+            over_share(&own_zero)
+        );
+        let slow = spy_frames(274.0, rest);
+        assert!(near(mean_frame_ms(&slow), 274.0));
+        assert_eq!(over_share(&slow), Some(0.0));
+        let mut stopped = today.clone();
+        stopped[50].1 += 100.0;
+        for later in &mut stopped[51..] {
+            later.0 += 100.0;
+        }
+        assert_eq!(over_share(&stopped), Some(1.0 / 99.0), "one hold stopped");
+        let edge = spy_frames(65.0, |own| rest(own) + OVER_MS);
+        assert_eq!(over_share(&edge), Some(0.0), "at the edge");
+        let past = spy_frames(65.0, |own| rest(own) + OVER_MS + 0.5);
+        assert!(over_share(&past).is_some_and(|s| s > 0.95));
+        assert_eq!(mean_frame_ms(&[(0.0, 0.0)]), None);
+        assert_eq!(over_share(&[(0.0, 0.0)]), None);
+        let logged = json!({"starts": [0.0, 125.0], "holds": [60.0, 60.0]});
+        assert_eq!(long_frames(&logged), Some(vec![(0.0, 60.0), (125.0, 60.0)]));
+        assert_eq!(long_frames(&json!({"starts": [0.0], "holds": []})), None);
+    }
+
     /// Finding 5-1 of review round speed 5 of M8: the budget of a save's JS
     /// heap, and the writes of a save, from the page's write size.
     #[test]
@@ -1585,6 +1671,16 @@ mod tests {
         assert_eq!(full_writes(600), 50);
         assert_eq!(READS_IN_FLIGHT_BYTES, 1_572_864);
         assert_eq!(heap_budget(), 7_767_168.0);
+        // Finding 6-8 of review round speed 6: the reads of the page.
+        let reader = include_str!("../../../app/src/lane_store.rs");
+        assert!(
+            reader.contains("    span: 65_536,\n"),
+            "the span of SAVE_AHEAD"
+        );
+        assert!(
+            reader.contains("const SAVE_DEPTH: usize = 2;"),
+            "the depth of SAVE_AHEAD"
+        );
         let export = include_str!("../../../app/src/export.rs");
         assert!(
             export.contains("pub const SAVE_WRITE_BYTES: usize = 2 << 20;"),
@@ -1622,6 +1718,9 @@ mod tests {
             restore_check(60, &short, false, Some(&short)).is_err(),
             "no stems"
         );
+        // Finding 6-11 of review round speed 6: the page logs the line.
+        let app = include_str!("../../../app/src/lib.rs");
+        assert!(app.contains(r#"log::info!("store: session {id} is current");"#));
     }
 
     #[test]

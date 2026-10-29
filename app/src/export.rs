@@ -44,6 +44,8 @@ pub trait Sink {
 /// writes make a faster save.  A larger write makes the JS heap measure of
 /// `e2e save` (D10) vary by about its size, and D10 allows 4 MB.
 pub const SAVE_WRITE_BYTES: usize = 2 << 20;
+// `WavBlocks::most_bytes` holds for a whole number of job blocks.
+const _: () = assert!(SAVE_WRITE_BYTES.is_multiple_of(BLOCK * engine::wav::FRAME_BYTES));
 
 /// The bytes of a 16-bit WAV in blocks of one size, for a sink that writes
 /// them to browser storage (D3 of M8).  It takes the job's blocks, and
@@ -68,7 +70,9 @@ impl WavBlocks {
     /// and 5 of M8): a full block that waits for the write in flight, the
     /// job block that the write's end lets in before the next write takes
     /// the full block, and the header, because the job blocks do not fill a
-    /// block of `size` exactly.
+    /// block of `size` exactly.  This holds when `size` is a whole number
+    /// of job blocks, as [`SAVE_WRITE_BYTES`] is.  For another size, a
+    /// sink that takes blocks during a write can hold a job block more.
     pub fn most_bytes(size: usize) -> usize {
         size + BLOCK * engine::wav::FRAME_BYTES + engine::wav::HEADER_BYTES
     }
@@ -89,8 +93,7 @@ impl WavBlocks {
     /// Whether the sink takes another job block while a write is in
     /// flight, when `writing`: until a full block waits for that write to
     /// end (review round speed 3 of M8).  So the job mixes while a write is
-    /// in flight, and the bytes held stay under a full block and two job
-    /// blocks.
+    /// in flight, and the bytes held stay within [`Self::most_bytes`].
     pub fn takes_more(&self, writing: bool) -> bool {
         !writing || self.full().is_none()
     }

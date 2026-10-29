@@ -145,7 +145,8 @@ iOS stops a browser tab whose memory passes a fixed limit, 2 GB on an iPhone 17 
 Its JS heap holds these parts:
 * the bytes of the 2 reads in flight, 7 MiB, until each is copied;
 * the write's array, 2 MiB;
-* the browser's copy of the write in flight, about 2 MiB.
+* the browser's copy of the write in flight, about 2 MiB;
+* at the end stage, the last write's own array, up to 2 MiB.
 
 So a save of 7 lanes adds about 27 MiB to the tab at its peak.  The stem worker encodes FLAC and MP3 from that file in blocks.  An MP3 encode still holds about 3.5 times its file in the stem worker (TD-59).
 

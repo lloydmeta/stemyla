@@ -4128,10 +4128,10 @@ impl StemApp {
                         wasm_bindgen_futures::spawn_local(async move {
                             let current = store::make_current(&id).await;
                             if current {
-                                // `e2e save` waits for this line: the shown
-                                // session, and a write of `sessions/current`
-                                // that no longer runs (review round speed 5
-                                // of M8).
+                                // `e2e save` waits for this line: no write
+                                // of `sessions/current` runs, and the last
+                                // one named the shown session (review
+                                // rounds speed 5 and 6 of M8).
                                 log::info!("store: session {id} is current");
                             }
                             if new_session && current {
