@@ -395,9 +395,10 @@ impl LastCurrent {
 
     /// Asks for `id` to be current, and writes it with `write`, which gives
     /// whether the write ended well.  It gives `true` only when its own
-    /// write named `id`, ended well, and no later request came meanwhile.
-    /// A request that a later one replaced gives `false` and writes
-    /// nothing after that, and so does a failed write.
+    /// write named `id`, ended well, and no later request asked for
+    /// another session meanwhile.  A request that a later one replaced
+    /// gives `false` and writes nothing after that, and so does a failed
+    /// write.
     pub async fn make<F, W>(&self, id: &str, write: W) -> bool
     where
         W: FnOnce(String) -> F,
@@ -554,6 +555,48 @@ mod tests {
         gates.borrow()[2].1.set(Some(true));
         assert_eq!(again.as_mut().poll(&mut cx), Poll::Ready(true));
         assert_eq!(*file.borrow(), "acme-b");
+    }
+
+    /// Finding 8-1 of review round speed 8 of M8: a request that a later
+    /// one replaced while it waited writes nothing.  A, B and C ask; A
+    /// writes, B and C wait.  C writes first; B then gives `false` with no
+    /// write, and ends its turn, so a later request D writes.
+    #[test]
+    fn a_replaced_request_writes_nothing_and_ends_its_turn() {
+        use std::task::{Context, Poll, Waker};
+        let file = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let gates: Gates = std::rc::Rc::default();
+        let last = LastCurrent::default();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut a = Box::pin(last.make("acme-a", writer(&gates, &file)));
+        let mut b = Box::pin(last.make("acme-b", writer(&gates, &file)));
+        let mut c = Box::pin(last.make("acme-c", writer(&gates, &file)));
+        assert!(a.as_mut().poll(&mut cx).is_pending(), "A writes");
+        assert!(b.as_mut().poll(&mut cx).is_pending(), "B waits");
+        assert!(c.as_mut().poll(&mut cx).is_pending(), "C waits");
+        gates.borrow()[0].1.set(Some(true));
+        assert_eq!(a.as_mut().poll(&mut cx), Poll::Ready(false));
+        assert!(c.as_mut().poll(&mut cx).is_pending(), "C writes");
+        assert_eq!(gates.borrow()[1].0, "acme-c");
+        assert!(
+            b.as_mut().poll(&mut cx).is_pending(),
+            "B waits for C's write"
+        );
+        gates.borrow()[1].1.set(Some(true));
+        assert_eq!(c.as_mut().poll(&mut cx), Poll::Ready(true));
+        assert_eq!(*file.borrow(), "acme-c");
+        assert_eq!(b.as_mut().poll(&mut cx), Poll::Ready(false), "C replaced B");
+        assert_eq!(gates.borrow().len(), 2, "B wrote nothing");
+        assert_eq!(*file.borrow(), "acme-c");
+        let mut d = Box::pin(last.make("acme-d", writer(&gates, &file)));
+        assert!(
+            d.as_mut().poll(&mut cx).is_pending(),
+            "D writes: B ended its turn"
+        );
+        assert_eq!(gates.borrow().len(), 3);
+        gates.borrow()[2].1.set(Some(true));
+        assert_eq!(d.as_mut().poll(&mut cx), Poll::Ready(true));
+        assert_eq!(*file.borrow(), "acme-d");
     }
 
     /// Finding 7-2 of review round speed 7 of M8: a request writes also
