@@ -230,6 +230,8 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
 
 * [x] 2026-10-29: review round speed 1 (team leader): 5 reviewers, 50 findings; the first mutants run stopped at its baseline (a timing test of the Bash guard took 5.9 s under load), the second tested 133 (34 missed: 26 confirmed, 6 pre-existing, 2 refuted).  Significant: the CI time claimed from the Mac proxy (1-1), an underrun check that could not fail (1-2), a JS heap bound doubled to 8 MB (1-3), no browser check against a frame-bound save (1-4) and the web-test limit (1-8).  All fixed in `fc5fa97`.
 
+* [x] 2026-10-29: review round speed 2 (team leader): 5 reviewers, 18 findings; mutants full (46 tested, 5 missed, all pre-existing).  Significant: the frame check was a hidden time bound (2-1), and the long-task check passed with nothing observed (2-2).  Fixed in `3abc608`: throttled animation frames, the save's own longest slice as the check, long tasks logged against a calibration.
+
 ## Surprises and discoveries
 
 * 2026-10-29, implementer, step 6: when the lanes are in browser storage, each slice of a save mixes one block, then waits for the next read.  A read ends only in a later task.  So the 4 ms budget binds only for lanes in memory, and a block takes about 1.6 ms in Chrome on this Mac, a read and a mix.  The page gets about 57 `requestAnimationFrame` callbacks a second during a save; it paints only on request.  The JS heap measure of a 10-minute save rose from about 1.4 MB to 3.2 MB, the same in each format and run.  Review round speed 1 found the cause in the measure, not in D11 (the Decision log).
