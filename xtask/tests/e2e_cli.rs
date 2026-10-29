@@ -1,6 +1,6 @@
 //! `xtask e2e` as a person runs it, with no browser: a scenario that cannot
-//! start its driver fails before any browser starts.  `xtask web-test` fails on an
-//! option that it does not know.
+//! start its driver fails before any browser starts.  `xtask web-test`
+//! fails on an option that it does not know.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

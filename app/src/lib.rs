@@ -1250,6 +1250,16 @@ const SPECTROGRAM_MS: f64 = 4.0;
 /// also fills the Web Audio buffers and draws the UI.
 #[cfg(target_arch = "wasm32")]
 const SAVE_MS: f64 = 4.0;
+/// The budget of each slice of a save's task loop (D11 of M8): `SAVE_MS`,
+/// or an eighth of the time since the last slice, up to 16 ms.  A slice
+/// grows only while the page holds the main thread for long between
+/// slices (review round speed 3 of M8, CI run 40838459678).
+#[cfg(target_arch = "wasm32")]
+const SAVE_BUDGET: save_task::Budget = save_task::Budget {
+    least_ms: SAVE_MS,
+    most_ms: 16.0,
+    share: 0.125,
+};
 /// How often the UI frame shows a save's progress, in milliseconds.  The
 /// save's task loop asks for no repaint until the job is done (D11 of M8).
 #[cfg(target_arch = "wasm32")]
@@ -1432,27 +1442,12 @@ struct SaveSource {
 #[cfg(target_arch = "wasm32")]
 impl SaveSource {
     /// The source of the save's job.  Its stored lanes read through
-    /// `store`, and read ahead, one block of the job at a time (D11 of
-    /// M8).
+    /// `store`, and read ahead (`lanes::save_source`, D11 of M8).
     #[cfg_attr(mutants, mutants::skip)]
     fn pcm(&self, store: &std::rc::Rc<dyn lane_store::LaneStore>) -> Box<dyn engine::mixdown::Pcm> {
         let audio: Vec<lanes::LaneAudio> =
             self.audio.iter().map(|a| a.read_through(store)).collect();
-        match self.stem {
-            Some(i) => Box::new(lanes::LanePcm::reading_ahead(
-                audio[i].clone(),
-                self.frames,
-                self.rate,
-                export::BLOCK,
-            )),
-            None => Box::new(lanes::LanesMix::reading_ahead(
-                &audio,
-                self.frames,
-                self.rate,
-                &self.recipe,
-                export::BLOCK,
-            )),
-        }
+        lanes::save_source(&audio, self.frames, self.rate, self.stem, &self.recipe)
     }
 }
 
@@ -4550,7 +4545,7 @@ impl StemApp {
         save_task::spawn(
             Rc::downgrade(&job),
             Rc::clone(&signal),
-            SAVE_MS,
+            SAVE_BUDGET,
             self.ctx.clone(),
         );
         Saving {

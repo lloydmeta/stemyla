@@ -18,11 +18,20 @@
   // While `__e2e_throttle` is on, each animation frame waits 250 ms first,
   // so the page gets about 4 a second, on any runner.  A save that waits
   // for the UI frame then takes over 400 s for 10 minutes of audio.
+  // While `__e2e_long_frame_ms` is above 0, each animation frame holds the
+  // main thread that long before the page's callback, as a paint in
+  // software does on CI (about 125 ms in CI run 40838459678).
   window.__e2e_frames = 0;
   window.__e2e_throttle = false;
+  window.__e2e_long_frame_ms = 0;
   const real_raf = window.requestAnimationFrame.bind(window);
   window.requestAnimationFrame = (f) => {
-    const frame = (t) => { window.__e2e_frames++; f(t); };
+    const frame = (t) => {
+      window.__e2e_frames++;
+      const start = performance.now();
+      while (performance.now() - start < window.__e2e_long_frame_ms) {}
+      f(t);
+    };
     if (!window.__e2e_throttle) return real_raf(frame);
     setTimeout(() => real_raf(frame), 250);
     return 0;
@@ -97,9 +106,10 @@
   };
   const tick = (ms) => new Promise((r) => setTimeout(r, ms));
   // The JS heap in bytes once garbage is collected: Chrome with
-  // --enable-precise-memory-info and --js-flags=--expose-gc.  A first
-  // collection queues the finalizers of wasm-bindgen's JS objects, which
-  // run in a later task, so it collects again after them.
+  // --enable-precise-memory-info and --js-flags=--expose-gc.  A collection
+  // queues the finalizers of wasm-bindgen's JS objects, which run in a
+  // later task.  So it collects three times with a task of 20 ms after
+  // each, then once more, and reads.
   window.__e2e_heap = async () => {
     if (typeof gc !== "function" || !performance.memory) return null;
     for (let i = 0; i < 3; i++) {

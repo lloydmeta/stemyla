@@ -1132,10 +1132,11 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
         assert!(ended, "{format:?}: the save ended");
         // Since D11 of M8 the job runs in its own task, not one block a
         // frame, so frames cannot tell a stop from a full run.  The reads
-        // can: a full run reads 81 blocks, and a stop reads no more than
-        // the first block and the one that it reads ahead.
+        // can: a full run reads 21 spans of 65,536 frames, and a stop reads
+        // no more than the spans that the reader reads ahead at the start
+        // (`SAVE_AHEAD`, review round speed 3 of M8).
         assert!(
-            reads <= 4,
+            reads <= crate::lane_store::SAVE_AHEAD.depth + 1,
             "{format:?}: it stops at the failure: {reads} reads"
         );
         // Since M8 a save first opens its save file, which can take frames

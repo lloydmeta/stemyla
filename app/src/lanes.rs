@@ -13,7 +13,7 @@
 //! [`LanePcm`] for one lane.  A stored lane reads through a
 //! [`BlockReader`] of the job, a block at a time.
 
-use crate::lane_store::{BlockReader, LaneStore};
+use crate::lane_store::{Ahead, BlockReader, LaneStore};
 use crate::store_meta::LaneFile;
 use engine::mixdown::{MixRecipe, Pcm, at_full_scale};
 use engine::{Samples, Song, Stem};
@@ -292,7 +292,7 @@ impl LaneReads {
     /// `ahead`, the stored lanes read ahead in blocks of that many frames
     /// ([`BlockReader::reading_ahead`]).  Panics if two stored lanes have
     /// different stores.
-    fn new(lanes: Vec<LaneAudio>, frames: usize, ahead: Option<usize>) -> Self {
+    fn new(lanes: Vec<LaneAudio>, frames: usize, ahead: Option<Ahead>) -> Self {
         let mut files = Vec::new();
         let mut store: Option<Rc<dyn LaneStore>> = None;
         let parts = lanes
@@ -315,7 +315,7 @@ impl LaneReads {
             })
             .collect();
         let reader = store.map(|store| match ahead {
-            Some(block) => BlockReader::reading_ahead(store, files, frames, block),
+            Some(ahead) => BlockReader::reading_ahead(store, files, frames, ahead),
             None => BlockReader::new(store, files, frames),
         });
         Self { parts, reader }
@@ -376,16 +376,16 @@ impl LanesMix {
         Self::with_reads(lanes, frames, sample_rate, recipe, None)
     }
 
-    /// The same mix, for a job that reads it in order, `block` frames at a
-    /// time: its stored lanes read ahead (D11 of the M8 plan).
+    /// The same mix, for a job that reads it in order: its stored lanes
+    /// read ahead as `ahead` says (D11 of the M8 plan).
     pub fn reading_ahead(
         lanes: &[LaneAudio],
         frames: usize,
         sample_rate: u32,
         recipe: &MixRecipe,
-        block: usize,
+        ahead: Ahead,
     ) -> Self {
-        Self::with_reads(lanes, frames, sample_rate, recipe, Some(block))
+        Self::with_reads(lanes, frames, sample_rate, recipe, Some(ahead))
     }
 
     fn with_reads(
@@ -393,7 +393,7 @@ impl LanesMix {
         frames: usize,
         sample_rate: u32,
         recipe: &MixRecipe,
-        ahead: Option<usize>,
+        ahead: Option<Ahead>,
     ) -> Self {
         assert_eq!(
             recipe.gains().len(),
@@ -445,6 +445,34 @@ impl Pcm for LanesMix {
     }
 }
 
+/// The source of a save's job (D11 of the M8 plan): the lane `stem` of
+/// `lanes`, or their mix at `recipe` when `stem` is `None`.  Its stored
+/// lanes read ahead as [`crate::lane_store::SAVE_AHEAD`] says.
+pub fn save_source(
+    lanes: &[LaneAudio],
+    frames: usize,
+    sample_rate: u32,
+    stem: Option<usize>,
+    recipe: &MixRecipe,
+) -> Box<dyn Pcm> {
+    let ahead = crate::lane_store::SAVE_AHEAD;
+    match stem {
+        Some(i) => Box::new(LanePcm::reading_ahead(
+            lanes[i].clone(),
+            frames,
+            sample_rate,
+            ahead,
+        )),
+        None => Box::new(LanesMix::reading_ahead(
+            lanes,
+            frames,
+            sample_rate,
+            recipe,
+            ahead,
+        )),
+    }
+}
+
 /// One lane as it is: not scaled and not clamped, as
 /// `engine::mixdown::StemPcm`.
 pub struct LanePcm {
@@ -463,11 +491,11 @@ impl LanePcm {
         }
     }
 
-    /// The same lane, for a job that reads it in order, `block` frames at
-    /// a time: a stored lane reads ahead (D11 of the M8 plan).
-    pub fn reading_ahead(lane: LaneAudio, frames: usize, sample_rate: u32, block: usize) -> Self {
+    /// The same lane, for a job that reads it in order: a stored lane
+    /// reads ahead as `ahead` says (D11 of the M8 plan).
+    pub fn reading_ahead(lane: LaneAudio, frames: usize, sample_rate: u32, ahead: Ahead) -> Self {
         Self {
-            lane: LaneReads::new(vec![lane], frames, Some(block)),
+            lane: LaneReads::new(vec![lane], frames, Some(ahead)),
             frames,
             sample_rate,
         }
@@ -507,7 +535,7 @@ impl Pcm for LanePcm {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::lane_store::MemoryStore;
+    use crate::lane_store::{MemoryStore, SAVE_AHEAD};
     use engine::Song;
     use engine::mixdown::{Mix, StemPcm};
     use engine::readahead::LaneFormat;
@@ -660,29 +688,45 @@ pub(crate) mod tests {
         }
     }
 
-    /// Finding 2-4 of review round speed 2 of M8: a stem save reads ahead.
-    /// Once its first block is ready, the next block's read is in flight,
-    /// and it gives the stem's frames.
+    /// Finding 2-4 of review round speed 2 of M8, and 3-5 of round speed 3:
+    /// the source of a save, of a stem or of the mix, reads ahead as
+    /// `SAVE_AHEAD` says.  Before its first block is ready, `depth` reads
+    /// are in flight, and it gives the lanes' frames.
     #[test]
-    fn a_stem_save_reads_the_next_block_ahead() {
-        let song = song(50_000);
-        let (left, right) = (&song.stems[0].left, &song.stems[0].right);
+    fn a_save_source_reads_ahead_for_a_stem_and_the_mix() {
+        let frames = 3 * SAVE_AHEAD.span;
+        let song = song(frames);
         let store = MemoryStore::new();
-        let lane = stored_f32(&store, "acme/decoded/0.f32", left, right);
-        store.hold(true);
-        let pcm = LanePcm::reading_ahead(lane, 50_000, 48_000, 16_384);
-        assert!(!pcm.ready(0, 16_384), "the first read is in flight");
-        store.release();
-        assert!(pcm.ready(0, 16_384));
-        assert_eq!(store.requests(), 2, "the first block, then the next");
-        assert_eq!(store.held_reads(), 1, "the next block's read is in flight");
-        let (mut l, mut r) = (vec![0.0; 16_384], vec![0.0; 16_384]);
-        pcm.read(0, &mut l, &mut r);
-        assert!(l[..] == left[..16_384] && r[..] == right[..16_384]);
-        store.release();
-        assert!(pcm.ready(16_384, 16_384));
-        pcm.read(16_384, &mut l, &mut r);
-        assert!(l[..] == left[16_384..32_768]);
+        let lanes: Vec<LaneAudio> = song
+            .stems
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(k, s)| stored_f32(&store, &format!("acme/decoded/{k}.f32"), &s.left, &s.right))
+            .collect();
+        let recipe = MixRecipe::new(vec![1.0, 0.0]);
+        for stem in [Some(1), None] {
+            store.hold(true);
+            let before = store.requests();
+            let pcm = save_source(&lanes, frames, 48_000, stem, &recipe);
+            assert!(
+                !pcm.ready(0, 16_384),
+                "{stem:?}: the first reads are in flight"
+            );
+            assert_eq!(store.held_reads(), SAVE_AHEAD.depth.min(3), "{stem:?}");
+            store.release();
+            store.hold(false);
+            let source = &song.stems[stem.unwrap_or(0)];
+            let (mut l, mut r) = (vec![0.0; 16_384], vec![0.0; 16_384]);
+            for at in [0, SAVE_AHEAD.span, 2 * SAVE_AHEAD.span + 16_384] {
+                assert!(pcm.ready(at, 16_384), "{stem:?}: {at}");
+                pcm.read(at, &mut l, &mut r);
+                let want = at..at + 16_384;
+                assert!(l[..] == source.left[want.clone()], "{stem:?}: {at}");
+                assert!(r[..] == source.right[want], "{stem:?}: {at}");
+            }
+            assert_eq!(store.requests() - before, 3, "{stem:?}: each span once");
+        }
     }
 
     const BLOCKS: [usize; 4] = [1, 1_000, 16_384, 32_768];

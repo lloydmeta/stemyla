@@ -36,13 +36,19 @@ pub trait Sink {
     }
 }
 
-/// Bytes of each write of a save file but the last: 1 MiB (D3 of M8).
-pub const SAVE_WRITE_BYTES: usize = 1 << 20;
+/// Bytes of each write of a save file but the last: 2 MiB (D3 of M8,
+/// 1 MiB before review round speed 3).  A write of browser storage takes
+/// about the same time up to 8 MiB.  When each frame of the page holds
+/// the main thread for long, as on CI during playback, a write takes about
+/// two frames, and the writes of a save run one after another.  So fewer
+/// writes make a faster save.  A larger write makes the JS heap measure of
+/// `e2e save` (D10) vary by about its size, and D10 allows 4 MB.
+pub const SAVE_WRITE_BYTES: usize = 2 << 20;
 
 /// The bytes of a 16-bit WAV in blocks of one size, for a sink that writes
 /// them to browser storage (D3 of M8).  It takes the job's blocks, and
 /// gives each full block, then the last short block.  The WAV's header
-/// comes first.  It holds at most one full block and one job block.
+/// comes first.  It holds at most one full block and two job blocks.
 pub struct WavBlocks {
     size: usize,
     pending: Vec<u8>,
@@ -68,6 +74,15 @@ impl WavBlocks {
     /// The next full block, if there is one.
     pub fn full(&self) -> Option<&[u8]> {
         (self.pending.len() >= self.size).then(|| &self.pending[..self.size])
+    }
+
+    /// Whether the sink takes another job block while a write is in
+    /// flight, when `writing`: until a full block waits for that write to
+    /// end (review round speed 3 of M8).  So the job mixes while a write is
+    /// in flight, and the bytes held stay under a full block and two job
+    /// blocks.
+    pub fn takes_more(&self, writing: bool) -> bool {
+        !writing || self.full().is_none()
     }
 
     /// Drops the full block that [`Self::full`] gave.
@@ -597,8 +612,10 @@ mod stored {
     /// A 16-bit WAV save file in browser storage (D3 of M8).  Each full
     /// block of [`SAVE_WRITE_BYTES`] goes through one JS array, made once
     /// for the save, and written whole (MEM-5).  At most one write is in
-    /// flight.  While one is, the sink is not ready, so the job waits and
-    /// takes no time.  The end of each write calls `wake`, which signals
+    /// flight.  While one is, the sink takes job blocks until the next full
+    /// block waits ([`WavBlocks::takes_more`]); then it is not ready, so
+    /// the job waits and takes no time.  The next job block after the
+    /// write's end starts the write of the full block.  The end of each write calls `wake`, which signals
     /// the save's task (D11 of M8).  After the job is done, [`Self::finish`]
     /// writes the last block, in a new array of its own length, and closes
     /// the stream.  The file is complete only after the close.  A failed
@@ -657,6 +674,14 @@ mod stored {
             }
         }
 
+        /// Whether the open, a write or the close is in flight, for the
+        /// browser tests.
+        #[cfg(test)]
+        #[cfg_attr(mutants, mutants::skip)]
+        pub fn in_flight(&self) -> bool {
+            self.shared.borrow().busy
+        }
+
         /// The save file, from the root of browser storage.
         #[cfg_attr(mutants, mutants::skip)]
         pub fn path(&self) -> &str {
@@ -690,12 +715,36 @@ mod stored {
                     return Finish::Pending;
                 }
             }
+            if self.blocks.full().is_some() {
+                // The job ended while a write was in flight.
+                self.write_full();
+                return Finish::Pending;
+            }
             self.ended = true;
             let rest = self.blocks.rest();
             // A new array of its own length, never a view (MEM-5).
             let last = (!rest.is_empty()).then(|| Uint8Array::from(rest));
             self.send(Op::Last(last));
             Finish::Pending
+        }
+
+        /// Starts the write of the next full block, if there is one and no
+        /// write is in flight.
+        #[cfg_attr(mutants, mutants::skip)]
+        fn write_full(&mut self) {
+            if self.shared.borrow().busy {
+                return;
+            }
+            let Some(full) = self.blocks.full() else {
+                return;
+            };
+            let array = self
+                .array
+                .get_or_insert_with(|| Uint8Array::new_with_length(SAVE_WRITE_BYTES as u32));
+            array.copy_from(full);
+            let array = array.clone();
+            self.blocks.take_full();
+            self.send(Op::Put(array));
         }
 
         /// Starts `op` on the stream, which must be open and idle.
@@ -756,22 +805,13 @@ mod stored {
         #[cfg_attr(mutants, mutants::skip)]
         fn write(&mut self, _at: usize, left: &[f32], right: &[f32]) {
             self.blocks.push(left, right);
-            let Some(full) = self.blocks.full() else {
-                return;
-            };
-            let array = self
-                .array
-                .get_or_insert_with(|| Uint8Array::new_with_length(SAVE_WRITE_BYTES as u32));
-            array.copy_from(full);
-            let array = array.clone();
-            self.blocks.take_full();
-            self.send(Op::Put(array));
+            self.write_full();
         }
 
         #[cfg_attr(mutants, mutants::skip)]
         fn ready(&self) -> bool {
             let s = self.shared.borrow();
-            s.stream.is_some() && !s.busy && s.failed.is_none() && !s.closed
+            s.stream.is_some() && s.failed.is_none() && !s.closed && self.blocks.takes_more(s.busy)
         }
 
         #[cfg_attr(mutants, mutants::skip)]
@@ -1395,6 +1435,27 @@ mod tests {
                 sink.blocks.pending.capacity()
             );
         }
+    }
+
+    /// Review round speed 3 of M8: while a write is in flight, the WAV
+    /// blocks take job blocks until a full block waits, and then no more.
+    /// With no write in flight, they always take one.
+    #[test]
+    fn the_wav_blocks_take_job_blocks_while_a_write_is_in_flight() {
+        let job_block = BLOCK * engine::wav::FRAME_BYTES;
+        let mut blocks = WavBlocks::new(10 * BLOCK, 48_000, 2 * job_block);
+        let block = vec![0.25; BLOCK];
+        assert!(blocks.takes_more(true), "the header alone");
+        blocks.push(&block, &block);
+        assert!(blocks.takes_more(true), "a job block and the header");
+        blocks.push(&block, &block);
+        assert!(blocks.full().is_some());
+        assert!(!blocks.takes_more(true), "a full block waits for the write");
+        assert!(blocks.takes_more(false), "no write in flight");
+        blocks.push(&block, &block);
+        blocks.take_full();
+        assert!(blocks.takes_more(true));
+        assert!(blocks.rest().len() < 2 * job_block);
     }
 
     #[test]

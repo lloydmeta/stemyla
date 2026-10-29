@@ -72,17 +72,17 @@ pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
 pub(super) const MP3_FACTOR: f64 = 4.0;
 const ONE_MIB: f64 = 1_048_576.0;
 /// D11: how much more a 10-minute save may grow the page's WebAssembly
-/// memory than a 1-minute save, in bytes.  The save's reader holds two
-/// blocks of each lane, one of them filled by the read in flight, whatever
-/// the song's length.  So the two saves need the same memory.
+/// memory than a 1-minute save, in bytes.  The save's reader holds 7 spans
+/// of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the song's
+/// length.  So the two saves need the same memory.
 pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
 /// run can take (finding 3-1 of review round 3 of M8).  So a run that
 /// waits in vain still ends on a check of its own.  A step that CI stops
 /// writes no `save.log`, but each note of the run also goes to the step's
-/// output.  Since D11 of M8, a run takes about 2 minutes on the
-/// maintainer's Mac, in Chrome and with `--swiftshader` (CI's proxy).
+/// output.  Since review round speed 3 of M8, a run takes about 2.5
+/// minutes on the maintainer's Mac, in Chrome and with `--swiftshader`.
 pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
 /// The longest that a save of `seconds` of audio may take from its click to its
 /// offer, in seconds: 6 times or more the slowest save of its length on the
@@ -136,11 +136,25 @@ const SAVE_IDLE_S: u64 = 5;
 pub(super) const PLAY_WAIT_S: u64 = 30;
 /// D11: the longest slice of a save's task, in milliseconds, as the page
 /// logs it at the save's end.  cpal queues two buffers of 3,072 frames.
-/// When one ends, only the other is queued: about 70 ms at 44.1 kHz.  So a
-/// save that holds the main thread for about 70 ms can starve the audio
-/// output.  The bound is half that.  A slice is the 4 ms budget and one
-/// block of work, about 1.6 ms on the maintainer's Mac.
+/// When one ends, only the other is queued: about 70 ms at 44.1 kHz, and
+/// 64 ms at 48 kHz.  So a save that holds the main thread for about that
+/// long can starve the audio output.  The bound is about half of it.  A
+/// slice is its budget, 4 ms or up to 16 ms after a long wait, and one
+/// block of work, about 0.5 ms on the maintainer's Mac.
 pub(super) const SLICE_LIMIT_MS: f64 = 35.0;
+/// The time that each animation frame holds the main thread during the
+/// save during playback, in milliseconds.  In CI run 40838459678, each
+/// paint in software was a long task of about 121 to 125 ms.  The page
+/// repaints in each frame while it plays, so each task waited for a frame,
+/// and the save of 10 minutes did not end within 180 s.  With these
+/// frames, the build of that run failed in the same way on the
+/// maintainer's Mac (review round speed 3 of M8).
+pub(super) const LONG_FRAME_MS: f64 = 125.0;
+/// The longest that the save during playback may take, from its click to
+/// its offer, in milliseconds.  It is about twice the time of the save on
+/// the maintainer's Mac with [`LONG_FRAME_MS`] (26.5 to 26.8 s), and of
+/// the estimate for CI (review round speed 3 of M8).
+pub(super) const PLAYING_SAVE_MS: u64 = 60_000;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
 const FIRST_RESTORES: u64 = SECONDS.len() as u64;
@@ -643,6 +657,8 @@ pub(super) struct Playing {
     pub long_tasks: Option<Vec<f64>>,
     /// The save's longest slice, from the page's line, in milliseconds.
     pub slice_ms: Option<f64>,
+    /// The milliseconds from the click of the save's item to its offer.
+    pub ms: Option<u64>,
 }
 
 /// The checks of the save during playback (D11): the song played from
@@ -675,6 +691,13 @@ pub(super) fn playing_checks(playing: &Playing) -> Vec<(bool, String)> {
             format!("wav, 600 s, during playback: no underrun ({underruns:?})"),
         ),
         slice_check("wav, 600 s, during playback", playing.slice_ms),
+        (
+            playing.ms.is_some_and(|ms| ms <= PLAYING_SAVE_MS),
+            format!(
+                "wav, 600 s, during playback, with frames of {LONG_FRAME_MS} ms: the save takes at most {PLAYING_SAVE_MS} ms ({:?} ms)",
+                playing.ms
+            ),
+        ),
     ]
 }
 
@@ -699,12 +722,20 @@ pub(super) fn blocks(seconds: u32) -> u64 {
     (u64::from(seconds) * 44_100).div_ceil(16_384)
 }
 
+/// Whether the animation frames of the save of `format` and `seconds` are
+/// throttled: only the 10-minute WAV save has its frames checked
+/// ([`not_frame_bound`]).
+pub(super) fn throttled(format: &str, seconds: u32) -> bool {
+    format == "wav" && seconds == SECONDS[1]
+}
+
 /// D11: a save that does not wait for the UI frame takes fewer animation
 /// frames than a quarter of its blocks.  Before D11, it took about one for
 /// each block.  The spy throttles the frames of this save to about 4 a
-/// second (`__e2e_mark`).  So the bound is a block count, not a time: a
-/// frame-bound save of 10 minutes needs over 400 s, and a save of D11
-/// passes until it takes about 100 s.
+/// second (`__e2e_mark`).  So the bound of 403 frames is also a time of
+/// about 100 s (finding 3-1 of review round speed 3 of M8).  A frame-bound
+/// save of 10 minutes needs over 400 s, and a save of D11 passes while it
+/// takes less than about 100 s.
 pub(super) fn not_frame_bound(frames: Option<u64>, seconds: u32) -> bool {
     frames.is_some_and(|f| f < blocks(seconds) / 4)
 }
@@ -850,8 +881,8 @@ pub(super) fn long_tasks(reply: &Value) -> Option<Vec<f64>> {
     reply.as_array()?.iter().map(Value::as_f64).collect()
 }
 
-/// The longest slice line of the save logged in `log`.
-fn slice_of(log: &[String]) -> Option<f64> {
+/// The longest slice of the first save logged in `log`, from its line.
+pub(super) fn slice_of(log: &[String]) -> Option<f64> {
     log.iter().find_map(|l| slice_line(l))
 }
 
@@ -904,8 +935,7 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     )?;
     let wasm_before = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
     let mark = p.mark();
-    // Only the 10-minute WAV save has its frames checked (not_frame_bound).
-    let throttle = format == "wav" && seconds == SECONDS[1];
+    let throttle = throttled(format, seconds);
     let offered = click_save(p, o, (format, row, seconds), (true, throttle))?;
     let after = in_page(p, AFTER_SAVE, json!([]), SCRIPT_WAIT_S)?;
     let wasm_after = after["wasm"].as_f64();
@@ -948,6 +978,10 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     let seconds = SECONDS[1];
     restore(p, seconds)?;
     p.idle(3.0)?;
+    p.session.execute(
+        "window.__e2e_long_frame_ms = arguments[0];",
+        json!([LONG_FRAME_MS]),
+    )?;
     let played = p.mark();
     p.click(o.play_x, "Play")?;
     if p.wait_for(played, PLAY_WAIT_S, |l| playback_line(l).is_some())?
@@ -960,6 +994,8 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     let after = p.mark();
     let last = p.wait_for(after, PLAY_WAIT_S, |l| playback_line(l).is_some())?;
     p.click(o.play_x, "Pause")?;
+    p.session
+        .execute("window.__e2e_long_frame_ms = 0;", json!([]))?;
     // The long tasks of the save have reached their observer by now.
     let long = long_tasks(&in_page(
         p,
@@ -977,6 +1013,7 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         lines,
         long_tasks: long,
         slice_ms: slice_of(&p.log[mark..]),
+        ms: offered_ms(&offered),
     })
 }
 
@@ -1076,6 +1113,7 @@ mod tests {
             lines: underruns.iter().map(|&u| line(u)).collect(),
             long_tasks: Some(Vec::new()),
             slice_ms: Some(6.0),
+            ms: Some(29_000),
         }
     }
 
@@ -1102,6 +1140,12 @@ mod tests {
         let mut failed = playing(&[0, 0], true);
         failed.lines[0].failed_lanes = 1;
         assert_eq!(failing(&failed), 1, "a failed lane");
+        // Review round speed 3: CI's save during playback took over 180 s.
+        let mut slow = playing(&[0, 0], true);
+        slow.ms = Some(PLAYING_SAVE_MS + 1);
+        assert_eq!(failing(&slow), 1, "a slow save");
+        slow.ms = None;
+        assert_eq!(failing(&slow), 1, "no time");
         // Nit 1-9 of review round speed 1: a song with no lane fails.
         let mut none = playing(&[0, 0], true);
         none.lines[0].stored = 0;
@@ -1136,9 +1180,36 @@ mod tests {
         playing_held.slice_ms = Some(6.0);
         playing_held.long_tasks = Some(vec![212.5]);
         assert_eq!(failing(&playing_held), 0);
+        // Nit 3-9 of review round speed 3: the first save's line.
+        let log: Vec<String> = [
+            "[1.0s] click the wav item at (100, 168)",
+            "[2.0s] console.info: [app] app/src/lib.rs:4683: save: lloyd - mix.wav: longest slice 4.1 ms",
+            "[3.0s] console.info: [app] app/src/lib.rs:4683: save: lloyd - mix.flac: longest slice 9.0 ms",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(slice_of(&log), Some(4.1));
+        assert_eq!(slice_of(&log[2..]), Some(9.0));
+        assert_eq!(slice_of(&log[..1]), None);
+        let one = |line: &str| slice_of(&[line.to_string()]);
+        let held = "save: lloyd - mix.wav: longest slice 100.0 ms";
+        assert!(!slice_check("wav", one(held)).0, "a slice of 100 ms fails");
+        let short = "save: lloyd - mix.wav: longest slice 5.3 ms";
+        assert!(slice_check("wav", one(short)).0, "a slice of 5.3 ms passes");
+        assert!(!slice_check("wav", slice_of(&log[..1])).0, "no line fails");
         assert_eq!(long_tasks(&json!([51.5, 70])), Some(vec![51.5, 70.0]));
         assert_eq!(long_tasks(&json!(null)), None);
         assert_eq!(long_tasks(&json!(["x"])), None);
+    }
+
+    /// Findings 3-16 to 3-18 of review round speed 3: the choice of the
+    /// throttled save.
+    #[test]
+    fn only_the_10_minute_wav_save_is_throttled() {
+        assert!(throttled("wav", 600));
+        assert!(!throttled("wav", 60));
+        assert!(!throttled("flac", 600));
+        assert!(!throttled("mp3", 60));
     }
 
     /// Finding 1-4 of review round speed 1: the 10-minute WAV save fails

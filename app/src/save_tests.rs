@@ -113,19 +113,13 @@ async fn stored_song(id: &str, frames: usize, stems: usize) -> (lanes::Shown, Ve
 }
 
 /// The job of a save of the mix of every lane of `shown` into a WAV save
-/// file at `path`, as the page makes it: its reader reads ahead, one block
-/// of the job at a time (D11 of M8).
+/// file at `path`, as the page makes it: its reader reads ahead
+/// (`lanes::save_source`, D11 of M8).
 fn mix_save(shown: &lanes::Shown, path: &str) -> ExportJob<StoredWav> {
     let recipe = MixRecipe::new(vec![1.0; shown.lanes.len()]);
-    let source = lanes::LanesMix::reading_ahead(
-        &shown.audio(),
-        shown.frames,
-        44_100,
-        &recipe,
-        export::BLOCK,
-    );
+    let source = lanes::save_source(&shown.audio(), shown.frames, 44_100, None, &recipe);
     let sink = StoredWav::new(path.into(), shown.frames, 44_100, std::rc::Rc::new(|| {}));
-    ExportJob::new(Box::new(source), sink).stopping_at_a_failure()
+    ExportJob::new(source, sink).stopping_at_a_failure()
 }
 
 /// Steps `job` in slices of 4 ms, with a wait of a task between slices,
@@ -167,8 +161,9 @@ const SAVE: &str = "saves/1792640000000-1.wav";
 /// D3 of M8, MEM-5: a WAV save of a stored mix of 30 s writes a file equal
 /// to `engine::wav::encode_pcm16` of the mix, of exactly 44 + 4 x frames
 /// bytes once the end stage is done.  Each write is a whole array of at
-/// most 1 MiB.  Every full block goes through one JS array, and the
-/// page's WebAssembly heap stays under 4 MB above its start.
+/// most `SAVE_WRITE_BYTES`.  Every full block goes through one JS array.
+/// The page's WebAssembly heap stays under the reader's spans, a write and
+/// 4 MB above its start (review round speed 3 of M8).
 #[wasm_bindgen_test]
 async fn a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array() {
     let id = "m8-wav-save";
@@ -205,9 +200,12 @@ async fn a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array() {
         format!("0{}0", "1".repeat(full - 1)),
         "one JS array for every full block, and a new one for the last"
     );
+    let ahead = lane_store::SAVE_AHEAD;
+    let spans = (ahead.depth + 1) * ahead.span * 2 * 4 * 3;
+    let bound = (spans + SAVE_WRITE_BYTES) as f64 / 1e6 + 4.0;
     assert!(
-        peak < 4.0,
-        "MEM-1: the save held {peak:.1} MB of WebAssembly heap at its peak"
+        peak < bound,
+        "MEM-1: the save held {peak:.1} MB of WebAssembly heap at its peak, over {bound:.1} MB"
     );
 }
 
@@ -237,7 +235,7 @@ async fn a_short_wav_save_writes_one_array_of_its_length() {
 async fn until_a_write_is_in_flight(job: &mut ExportJob<StoredWav>) {
     for _ in 0..20_000 {
         job.run_while(export::time_left(4.0));
-        if job.fraction() > 0.0 && !job.sink().ready() && job.sink().failed().is_none() {
+        if job.fraction() > 0.0 && job.sink().in_flight() && job.sink().failed().is_none() {
             return;
         }
         sv_sleep(0).await;
@@ -321,7 +319,9 @@ async fn a_refused_open_or_write_removes_the_file_and_says_why() {
     drop(job);
     writes_end().await;
     let open_file = store::test_read(SAVE).await.is_some();
-    store::tests::start_spy(&JsValue::UNDEFINED, 2.0);
+    // 30 s of audio are 2 full writes of 2 MiB and the last: the second
+    // full write is refused.
+    store::tests::start_spy(&JsValue::UNDEFINED, 1.0);
     let mut job = mix_save(&shown, SAVE);
     run_job(&mut job).await;
     let record = store::tests::stop_spy();
@@ -343,10 +343,7 @@ async fn a_refused_open_or_write_removes_the_file_and_says_why() {
     assert!(matches!(end, Finish::Failed(_)), "{end:?}");
     assert!(!open_file, "a refused open leaves no file");
     let (done, failed) = refused_write;
-    assert_eq!(
-        record, "whole whole refused",
-        "two writes, then the refusal"
-    );
+    assert_eq!(record, "whole refused", "a write, then the refusal");
     assert!(!done, "a failed write stops the job");
     assert!(
         failed
@@ -751,7 +748,8 @@ async fn until_writing(app: &mut StemApp) {
         let saving = app.saving.as_ref().expect("a save");
         let writing = {
             let job = saving.job.borrow();
-            job.fraction() > 0.0 && !job.sink().ready()
+            job.fraction() > 0.0
+                && matches!(job.sink(), export::SaveSink::Stored(wav) if wav.in_flight())
         };
         if writing {
             return;
@@ -1291,7 +1289,7 @@ async fn a_save_dropped_during_its_close_leaves_no_file() {
     let mut job = mix_save(&shown, SAVE);
     run_job(&mut job).await;
     for _ in 0..1_000 {
-        if job.sink().ready() {
+        if !job.sink().in_flight() {
             break;
         }
         sv_sleep(1).await;
