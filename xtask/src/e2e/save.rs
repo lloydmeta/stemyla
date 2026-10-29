@@ -61,15 +61,18 @@ const ONE_MIB: f64 = 1_048_576.0;
 /// run can take (finding 3-1 of review round 3 of M8).  So a run that
 /// waits in vain still ends on a check of its own.  A step that CI stops
 /// writes no `save.log`, but each note of the run also goes to the step's
-/// output.  On CI on 2026-10-28, a save of 60 s of audio took 34 s, so a
-/// normal run there takes about 22 minutes; on the maintainer's Mac, about
-/// 3 minutes.
+/// output.  In CI run 40788465048 (2026-10-28), a save of 60 s of audio
+/// took 34 s, so a normal run there takes about 22 minutes.  On the
+/// maintainer's Mac, it takes about 3 minutes.
 pub(super) const STEP_LIMIT_S: u64 = 55 * 60;
 /// The longest that a save of `seconds` of audio may take from its click
-/// to its offer, in seconds.  On CI, a save of 60 s of audio took 34 s, and
-/// a save of 600 s takes about 340 s, as a save takes one UI frame for each
-/// block that it reads.  An encode adds less than a minute.  The caps leave
-/// about 1.7 times that.
+/// to its offer, in seconds.  In CI run 40788465048 (2026-10-28), the save
+/// of 60 s of audio took 34.2 s, from its click at 16.4 s to its offer at
+/// 50.6 s.  A save takes about one UI frame for each block that it reads,
+/// so a save of 600 s takes about 340 s there.  An encode adds less than a
+/// minute.  So each cap is about 1.5 times the save, with its encode.  The
+/// CI frame time, about 160 ms, is an estimate until a CI run logs
+/// "offered after N UI frames".
 pub(super) const fn save_cap_s(seconds: u32) -> u64 {
     if seconds <= 60 { 120 } else { 600 }
 }
@@ -81,17 +84,26 @@ pub(super) const STALL_S: u64 = 120;
 /// How often the wait for an offer reads the save's progress, in seconds.
 const POLL_S: u64 = 2;
 /// The longest wait, in seconds, for a restore and for its stem overviews.
-/// The first restore of the 10-minute session took about 4 s.
+/// In CI run 40788465048, the first restores of the 1-minute and the
+/// 10-minute sessions took 1.0 s and 5.0 s, and a later 1-minute restore
+/// 0.6 s.  So 30 s leaves 6 times the longest.
 pub(super) const RESTORE_WAIT_S: u64 = 30;
-/// The longest wait, in seconds, for the app to start.
+/// The longest wait, in seconds, for the app to start.  It started within
+/// 0.6 s in CI run 40788465048.
 pub(super) const START_WAIT_S: u64 = 60;
-/// The longest wait, in seconds, for the plant of a session.  The plant of
-/// the 10-minute session took about 5 s.
+/// The longest wait, in seconds, for the plant of a session.  In CI run
+/// 40788465048, the plant of the 10-minute session took 4.4 s (1.2 s to
+/// 5.6 s).  So 60 s leaves 13 times that.
 pub(super) const PLANT_WAIT_S: u64 = 60;
-/// The longest wait, in seconds, for the read of a 1-minute file.
+/// The longest wait, in seconds, for the read of a 1-minute file.  In CI run
+/// 40788465048, the read of the WAV's SHA-256 took less than 0.1 s.  The
+/// FLAC and the MP3 (about 1.4 MB each) are read whole, as base64, which
+/// that run did not reach.  So 30 s leaves a wide margin.
 pub(super) const READ_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for the removal of the sessions and the
-/// save files.
+/// save files.  In CI run 40788465048, the first clean-up and the plant of
+/// the 1-minute session took 0.4 s together.  The last clean-up removes
+/// about 330 MB, which that run did not reach.
 pub(super) const CLEAN_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for a short script: a session switch, the
 /// calibration, a heap reading, a reading of the progress or the list of
@@ -117,17 +129,17 @@ const fn caps_s() -> u64 {
 /// of review round 2 of M8).  These are the start, the calibration, the
 /// two clean-ups, and the plant of each session.  Each first restore waits
 /// for a session switch, the restore and the stem overviews.  Each save
-/// waits for a session switch, the restore and two heap readings, idles,
-/// and waits up to its cap for its offer.  The 1-minute save of each format
-/// reads its file.  The run ends with the list of save files.  It does not
-/// count the WebDriver commands of a click or a screenshot, which return at
-/// once.
+/// waits for a session switch, the restore and two heap readings, and
+/// idles.  It waits up to its cap and one reading of its progress for its
+/// offer.  The 1-minute save of each format reads its file.  The run ends
+/// with the list of save files.  It does not count the WebDriver commands
+/// of a click or a screenshot, which return at once.
 pub(super) const WAITS_S: u64 = START_WAIT_S
     + SCRIPT_WAIT_S
     + 2 * CLEAN_WAIT_S
     + FIRST_RESTORES * PLANT_WAIT_S
     + FIRST_RESTORES * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S)
-    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 2 * SCRIPT_WAIT_S + SAVE_IDLE_S)
+    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 3 * SCRIPT_WAIT_S + SAVE_IDLE_S)
     + caps_s()
     + FORMATS.len() as u64 * READ_WAIT_S
     + SCRIPT_WAIT_S;
@@ -444,9 +456,16 @@ pub(super) fn judge(readings: &[(f64, u64)], now: f64, stall_s: f64, cap_s: f64)
     }
 }
 
+/// The wait's decision for a save of `seconds` of audio, with its stall
+/// time ([`STALL_S`]) and its cap ([`save_cap_s`]).
+pub(super) fn save_wait(readings: &[(f64, u64)], now: f64, seconds: u32) -> Wait {
+    judge(readings, now, STALL_S as f64, save_cap_s(seconds) as f64)
+}
+
 /// Waits for the save to offer its file, from the log at `mark`: the
-/// offer's line.  It reads the save's progress every [`POLL_S`], and ends
-/// the run when the save stalls or passes its cap.
+/// offer's line.  It reads the save's progress every [`POLL_S`] at most,
+/// and ends the run when the save stalls or passes its cap.  So it takes
+/// at most the cap and one reading of the progress ([`SCRIPT_WAIT_S`]).
 fn wait_for_offer(p: &mut Page, mark: usize, format: &str, seconds: u32) -> Result<String> {
     let start = std::time::Instant::now();
     let cap = save_cap_s(seconds) as f64;
@@ -456,16 +475,18 @@ fn wait_for_offer(p: &mut Page, mark: usize, format: &str, seconds: u32) -> Resu
         if let Some(line) = p.log[mark..].iter().find(|l| l.contains("e2e: offered ")) {
             return Ok(line.clone());
         }
-        let now = start.elapsed().as_secs_f64();
         let progress = in_page(
             p,
             "return await window.__e2e_progress();",
             json!([]),
             SCRIPT_WAIT_S,
         )?;
+        let now = start.elapsed().as_secs_f64();
         readings.push((now, progress.as_u64().unwrap_or(0)));
-        match judge(&readings, now, STALL_S as f64, cap) {
-            Wait::Going => std::thread::sleep(std::time::Duration::from_secs(POLL_S)),
+        match save_wait(&readings, now, seconds) {
+            Wait::Going => std::thread::sleep(std::time::Duration::from_secs_f64(
+                (POLL_S as f64).min(cap - now),
+            )),
             Wait::Stalled => bail!(
                 "{format}, {seconds} s: the save made no progress for {STALL_S} s ({now:.0} s after the click)"
             ),
@@ -1051,5 +1072,18 @@ mod tests {
         let line = r#"[9.0s] console.log: e2e: offered {"name":"lloyd - mix.wav","size":44,"mime":"audio/wav","frames":181}"#;
         assert_eq!(offered_frames(line), Some(181));
         assert_eq!(offered_frames("e2e: offered {}"), None);
+    }
+
+    /// A save of 10 minutes stalls after `STALL_S` with no progress, well
+    /// before its cap, and a save that goes on ends at its cap.
+    #[test]
+    fn a_save_wait_takes_its_stall_time_and_its_cap() {
+        let flat = [(0.0, 5), (60.0, 5), (120.0, 5)];
+        assert_eq!(save_wait(&flat, 120.0, 600), Wait::Stalled);
+        assert_eq!(save_wait(&flat, 119.0, 600), Wait::Going);
+        let going: Vec<(f64, u64)> = (0..301).map(|i| (2.0 * i as f64, i as u64)).collect();
+        assert_eq!(save_wait(&going, 600.0, 600), Wait::OverCap);
+        assert_eq!(save_wait(&going[..60], 119.0, 60), Wait::Going);
+        assert_eq!(save_wait(&going[..61], 120.0, 60), Wait::OverCap);
     }
 }
