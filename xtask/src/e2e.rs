@@ -1090,6 +1090,35 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
     Ok(())
 }
 
+/// What is wrong with a run whose query asks for `weights=f16`: the log
+/// must have the worker's line of a passed f16 start-up check and no line
+/// of weights kept f32, and with `memory` a `memory:` line that names f16
+/// weight matrices, so a run that fell back to f32 does not pass as f16.
+/// Empty for a query without `weights=f16`.
+fn f16_problems(query: &str, log: &[String], memory: bool) -> Vec<&'static str> {
+    if !query.split('&').any(|p| p == "weights=f16") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if !log
+        .iter()
+        .any(|l| l.contains("f16 weights: the start-up check passed"))
+    {
+        out.push("no line `f16 weights: the start-up check passed`");
+    }
+    if log.iter().any(|l| l.contains("weights stay f32")) {
+        out.push("a line says the weights stay f32");
+    }
+    let memory_names = |weights: &str| {
+        log.iter()
+            .any(|l| l.contains("memory: ") && l.contains(weights))
+    };
+    if memory && (!memory_names("(f16 weight matrices)") || memory_names("(f32 weights)")) {
+        out.push("the memory line does not name f16 weight matrices");
+    }
+    out
+}
+
 /// The page URL's query for a GPU scenario.
 fn query(o: &Opts, default: &str) -> String {
     o.query.clone().unwrap_or_else(|| default.to_string())
@@ -1119,6 +1148,11 @@ fn bench(o: &Opts) -> Result<()> {
     );
     let gpu_errors = p.log.iter().filter(|l| l.contains("WebGPU error")).count();
     p.check(gpu_errors == 0, "no WebGPU errors");
+    let f16 = f16_problems(&q, &p.log, false);
+    p.check(
+        f16.is_empty(),
+        &format!("f16 weights, when asked for: {f16:?}"),
+    );
     p.finish()
 }
 
@@ -1180,6 +1214,11 @@ fn selftest(o: &Opts) -> Result<()> {
             .as_deref()
             .is_some_and(|v| v.contains("selftest passed")),
         "the GPU self-test passes",
+    );
+    let f16 = f16_problems(&q, &p.log, true);
+    p.check(
+        f16.is_empty(),
+        &format!("f16 weights, when asked for: {f16:?}"),
     );
     p.finish()
 }
@@ -2648,6 +2687,64 @@ mod tests {
     }
 
     use super::*;
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// A query without `weights=f16` asks nothing.  With it, the start-up
+    /// line must be there, with no line of a failed f16 check or of
+    /// weights kept f32, and for the self-test a memory line of f16 weight
+    /// matrices.
+    #[test]
+    fn an_f16_run_needs_the_start_up_line_and_f16_weights() {
+        let passed = "console.log: stem-worker: f16 weights: the start-up check passed";
+        let f16_memory = "console.log: stem-worker: memory: worker wasm 40 MB, model on the GPU 350 MB (f16 weight matrices)";
+        let f32_memory = "console.log: stem-worker: memory: worker wasm 40 MB, model on the GPU 699 MB (f32 weights)";
+        assert!(f16_problems("bench&mm=s64", &[], true).is_empty());
+        assert!(f16_problems("bench&weights=f16", &lines(&[passed]), false).is_empty());
+        assert!(
+            f16_problems(
+                "selftest=stages&weights=f16",
+                &lines(&[passed, f16_memory]),
+                true
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            f16_problems("bench&weights=f16", &[], false),
+            ["no line `f16 weights: the start-up check passed`"]
+        );
+        let failed = "console.log: stem-worker: f16 weights: the f16 variant of matmul kernel s64 does not give its f32 output on this GPU (case 4: 4690 of 4690 values differ, the largest by 6e-5); weights stay f32";
+        assert_eq!(
+            f16_problems("bench&weights=f16", &lines(&[failed]), false),
+            [
+                "no line `f16 weights: the start-up check passed`",
+                "a line says the weights stay f32"
+            ]
+        );
+        assert_eq!(
+            f16_problems(
+                "selftest=stages&weights=f16",
+                &lines(&[passed, f32_memory]),
+                true
+            ),
+            ["the memory line does not name f16 weight matrices"]
+        );
+        assert_eq!(
+            f16_problems("selftest=stages&weights=f16", &lines(&[passed]), true),
+            ["the memory line does not name f16 weight matrices"]
+        );
+        assert_eq!(
+            f16_problems(
+                "selftest=stages&weights=f16",
+                &lines(&[passed, f16_memory, f32_memory]),
+                true
+            ),
+            ["the memory line does not name f16 weight matrices"]
+        );
+        assert!(f16_problems("weights=f16x", &[], true).is_empty());
+    }
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()

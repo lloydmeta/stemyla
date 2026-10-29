@@ -152,6 +152,7 @@ mod field {
     pub const ATTN: &str = "attn";
     pub const PROFILE: &str = "profile";
     pub const DEBUG: &str = "debug";
+    pub const WEIGHTS: &str = "weights";
 }
 
 /// Overrides from the page's address (`?chunk=16384&mm=s64`, see the
@@ -178,6 +179,8 @@ pub struct Settings {
     pub bench: Option<String>,
     /// Attention kernel override.
     pub attn: Option<String>,
+    /// How the GPU holds the weight matrices: `f32`, `f16` or `auto`.
+    pub weights: Option<String>,
     /// Logs GPU time per kernel.
     pub profile: bool,
     /// Progress notes for debugging (set by tests, not the address).
@@ -209,6 +212,7 @@ impl Settings {
                 field::MODEL_URL => s.model_url = text,
                 field::BENCH => s.bench = text,
                 field::ATTN => s.attn = text,
+                field::WEIGHTS => s.weights = text,
                 field::PROFILE => s.profile = !v.is_empty() && number != Some(0.0),
                 _ => {}
             }
@@ -256,6 +260,7 @@ impl Settings {
             (field::MODEL_URL, &self.model_url),
             (field::BENCH, &self.bench),
             (field::ATTN, &self.attn),
+            (field::WEIGHTS, &self.weights),
         ] {
             if let Some(v) = v {
                 set(o, k, v.as_str());
@@ -289,6 +294,7 @@ impl Settings {
             model_url: string(o, field::MODEL_URL),
             bench: string(o, field::BENCH),
             attn: string(o, field::ATTN),
+            weights: string(o, field::WEIGHTS),
             profile: get(o, field::PROFILE).is_truthy(),
             debug: get(o, field::DEBUG).is_truthy(),
         }
@@ -1036,6 +1042,14 @@ mod tests {
         assert!(s.profile);
         assert!(!s.bench_quick, "zero is off");
         assert_eq!(s.selftest, None, "a bare name has no value");
+    }
+
+    #[test]
+    fn the_query_sets_the_weight_format() {
+        let s = Settings::from_query("?bench&bench_quick=1&mm=s64&weights=f16");
+        assert_eq!(s.weights.as_deref(), Some("f16"));
+        assert_eq!(s.mm.as_deref(), Some("s64"));
+        assert_eq!(Settings::from_query("chunk=4").weights, None);
     }
 
     #[test]

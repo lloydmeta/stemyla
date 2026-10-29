@@ -73,6 +73,7 @@ fn settings() -> Settings {
         step_limit: Some(600.0),
         mm: Some("s64".into()),
         model_url: Some("/weights/m.safetensors".into()),
+        weights: Some("f16".into()),
         profile: true,
         debug: true,
         ..Settings::default()

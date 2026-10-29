@@ -778,6 +778,19 @@ pub fn choice_key(adapter: &str, kernels_id: u64, format: WeightFormat) -> Strin
     )
 }
 
+/// The line a worker logs for the kernel choice it uses, and where it came
+/// from (`stored`, `calibrated` or `from the URL`), for weights in
+/// `format`: `kernels: matmul v64,i64, attention fused (stored; f16
+/// weights)`.  `xtask e2e weights` reads it.
+pub fn kernels_line(choice: Choice, source: &str, format: WeightFormat) -> String {
+    format!(
+        "kernels: matmul {}, attention {} ({source}; {} weights)",
+        choice.matmul.name(),
+        choice.attention.name(),
+        format.name()
+    )
+}
+
 /// Whether a worker whose last kernel choice was for `last` (none yet)
 /// chooses again for a load of `format`: once per format, not per worker.
 pub fn choose_again(last: Option<WeightFormat>, format: WeightFormat) -> bool {
@@ -1196,6 +1209,24 @@ mod tests {
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F16),
             "AMD Radeon Pro 5500M|00000000000000ab|3|f16"
+        );
+    }
+
+    /// The kernels line names the choice, where it came from and the format.
+    #[test]
+    fn the_kernels_line_names_the_choice_and_the_format() {
+        let choice = Choice::parse("v64,i64;fused").unwrap();
+        assert_eq!(
+            kernels_line(choice, "stored", WeightFormat::F16),
+            "kernels: matmul v64,i64, attention fused (stored; f16 weights)"
+        );
+        assert_eq!(
+            kernels_line(
+                Choice::parse("s64;split").unwrap(),
+                "from the URL",
+                WeightFormat::F32
+            ),
+            "kernels: matmul s64, attention split (from the URL; f32 weights)"
         );
     }
 

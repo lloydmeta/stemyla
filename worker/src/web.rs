@@ -9,8 +9,8 @@ use roformer::demix::{Demixer, MixSource, Segment, Stereo};
 use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
-use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use roformer_gpu::{Gpu, WeightFormat};
 use stem_protocol::{
     self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
@@ -255,12 +255,25 @@ struct State {
     /// "high-performance" or "low-power" (`?gpu=integrated`).
     power: &'static str,
     net: Option<Rc<Net>>,
-    /// Whether `ensure_kernels` has set this GPU's kernels.
-    kernels_chosen: bool,
+    /// The weight format of the last kernel choice of `ensure_kernels`
+    /// (none before the first).
+    kernels_chosen: Option<WeightFormat>,
+    /// The matmul policy and attention path after the start-up checks,
+    /// before any choice or override, so a choice for the other weight
+    /// format starts from them.
+    checked: Option<(roformer_gpu::MatMulPolicy, roformer_gpu::AttentionPolicy)>,
 }
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, kernels_chosen: false }) };
+    static STATE: RefCell<State> = const {
+        RefCell::new(State {
+            gpu: None,
+            power: "high-performance",
+            net: None,
+            kernels_chosen: None,
+            checked: None,
+        })
+    };
 }
 
 fn scope() -> DedicatedWorkerGlobalScope {
@@ -396,30 +409,78 @@ async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     if let Some(p) = g.check_attention().await {
         log(&p);
     }
+    // A browser test and the iPhone run look for this line.
+    if g.f16_ok.get() {
+        log(F16_PASSED);
+    }
+    let checked = (g.policy.get(), g.attention.get());
     // Overrides from the URL; this GPU's own choice comes later, in
     // `ensure_kernels`.
     apply_policy(&g, s);
     apply_attention(&g, s);
-    STATE.with_borrow_mut(|st| st.gpu = Some(g.clone()));
+    STATE.with_borrow_mut(|st| {
+        st.gpu = Some(g.clone());
+        st.checked = Some(checked);
+    });
     Ok(g)
 }
 
-/// This GPU's kernel choice (kept per GPU, or measured once) unless the
-/// page URL sets both parts, then any override from the URL; once per
-/// worker.  Called once the GPU has done real work (after the model
-/// upload, or for `?bench` without a model after its matmul timings)
-/// rather than when the device opens, so calibration neither shares the
-/// GPU with the upload nor times a GPU that has only just woken.
-async fn ensure_kernels(g: &Gpu, s: &Settings) {
-    if STATE.with_borrow_mut(|st| std::mem::replace(&mut st.kernels_chosen, true)) {
+/// The line the worker logs when the f16 variants pass the start-up check
+/// (decision 0022).
+const F16_PASSED: &str = "f16 weights: the start-up check passed";
+
+/// The weight format of a load: `?weights=`, and what this GPU allows
+/// (`roformer_gpu::weight_format`).  Logs why, if it cannot follow the
+/// setting.
+fn load_format(g: &Gpu, s: &Settings) -> WeightFormat {
+    let (format, note) =
+        roformer_gpu::weight_format(s.weights.as_deref(), g.downlevel_flags(), g.f16_ok.get());
+    if let Some(note) = note {
+        log(&note);
+    }
+    format
+}
+
+/// This GPU's kernel choice for weights in `format` (kept per GPU and
+/// format, or measured once) unless the page URL sets both parts, then any
+/// override from the URL; once per weight format, so a load of the other
+/// format chooses again, from the state after the start-up checks.
+/// Called once the GPU has done real work (after the model upload, or for
+/// `?bench` without a model after its matmul timings) rather than when the
+/// device opens, so calibration neither shares the GPU with the upload nor
+/// times a GPU that has only just woken.  Logs the choice it uses.
+async fn ensure_kernels(g: &Gpu, s: &Settings, format: WeightFormat) {
+    let (last, checked) = STATE.with_borrow(|st| (st.kernels_chosen, st.checked));
+    if !roformer_gpu::bench::choose_again(last, format) {
         return;
     }
-    let set = |v: &Option<String>| v.as_deref().is_some_and(|v| v != "auto");
-    if !(set(&s.mm) && set(&s.attn)) {
-        choose_kernels(g).await;
+    STATE.with_borrow_mut(|st| st.kernels_chosen = Some(format));
+    if let Some((policy, attention)) = checked {
+        g.policy.set(policy);
+        g.attention.set(attention);
     }
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|v| v != "auto");
+    let source = if set(&s.mm) && set(&s.attn) {
+        "from the URL"
+    } else {
+        let chosen = choose_kernels(g, format).await;
+        match (chosen, set(&s.mm) || set(&s.attn)) {
+            (Chosen::Stored, false) => "stored",
+            (Chosen::Calibrated, false) => "calibrated",
+            (Chosen::Stored, true) => "stored, and the URL",
+            (Chosen::Calibrated, true) => "calibrated, and the URL",
+        }
+    };
     apply_policy(g, s);
     apply_attention(g, s);
+    log(&roformer_gpu::bench::kernels_line(
+        roformer_gpu::bench::Choice {
+            matmul: g.policy.get(),
+            attention: g.attention.get(),
+        },
+        source,
+        format,
+    ));
 }
 
 fn budget(s: &Settings) -> usize {
@@ -721,12 +782,8 @@ async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError
     // before goes now: a safetensors file that then fails to load leaves
     // no model loaded (the stored one, if any, is kept).
     STATE.with_borrow_mut(|st| st.net = None);
-    let net = Net::load_store(
-        &g,
-        Store::from_source(&file)?,
-        budget(s),
-        roformer_gpu::WeightFormat::F32,
-    )?;
+    let format = load_format(&g, s);
+    let net = Net::load_store(&g, Store::from_source(&file)?, budget(s), format)?;
     // Its cached blocks, or a checked download's bytes, are not needed for
     // the GPU checks and kernel timing that follow.
     drop(file);
@@ -736,7 +793,7 @@ async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError
             "the GPU rejected the model upload: {e}"
         )));
     }
-    ensure_kernels(&g, s).await;
+    ensure_kernels(&g, s, net.format).await;
     log(&memory_text(&net, None));
     STATE.with_borrow_mut(|s| s.net = Some(Rc::new(net)));
     Ok((now_s() - t0, gpu_text(&g).await))
@@ -1039,8 +1096,12 @@ fn memory_text(net: &Net, job: Option<&Job>) -> String {
         .map_or(String::new(), |b| {
             format!(", GPU buffers live {:.0} MB", mb(b))
         });
+    let weights = match net.format {
+        WeightFormat::F32 => "f32 weights",
+        WeightFormat::F16 => "f16 weight matrices",
+    };
     format!(
-        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB{job}{live}",
+        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB ({weights}){job}{live}",
         wasm_mb(),
         mb(net.bytes)
     )
@@ -1666,9 +1727,11 @@ async fn bench(s: &Settings) -> Result<(), String> {
     // Without a model the GPU has done nothing yet: choose its kernels
     // after the matmul timings below (which do not depend on the choice)
     // rather than on a GPU that has only just woken.
-    let loaded = STATE.with_borrow(|st| st.net.is_some());
-    if loaded {
-        ensure_kernels(&g, s).await;
+    // The loaded model's format, or the one a load would take.
+    let loaded = STATE.with_borrow(|st| st.net.as_ref().map(|n| n.format));
+    let format = loaded.unwrap_or_else(|| load_format(&g, s));
+    if loaded.is_some() {
+        ensure_kernels(&g, s, format).await;
     }
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
@@ -1688,8 +1751,8 @@ async fn bench(s: &Settings) -> Result<(), String> {
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
     }
-    if !loaded {
-        ensure_kernels(&g, s).await;
+    if loaded.is_none() {
+        ensure_kernels(&g, s, format).await;
     }
     roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
@@ -1844,15 +1907,23 @@ fn pcm16(x: f32) -> i32 {
 }
 
 const KERNEL_CHOICE: &str = "matmul_kernels";
-/// Stored kernel choices kept per GPU, one per kernel set and calibration
-/// version (the newest), as many as the builds kept side by side.
-const KEEP_PER_GPU: usize = 3;
+/// Stored kernel choices kept per GPU, one per kernel set, calibration
+/// version and weight format (the newest): two formats for each of three
+/// builds kept side by side.
+const KEEP_PER_GPU: usize = 6;
 
-/// Sets this GPU's matmul kernels and attention path: the choice kept in
-/// browser storage for this adapter and these kernels, or else several
-/// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept
-/// (see `roformer_gpu::bench::store_choice` for which lines stay).
-async fn choose_kernels(gpu: &Gpu) {
+/// Where a kernel choice came from.
+enum Chosen {
+    Stored,
+    Calibrated,
+}
+
+/// Sets this GPU's matmul kernels and attention path for weights in
+/// `format`: the choice kept in browser storage for this adapter, these
+/// kernels and this format, or else several seconds of
+/// `roformer_gpu::bench::calibrate`, whose result is then kept (see
+/// `roformer_gpu::bench::store_choice` for which lines stay).
+async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
     let pref = STATE.with_borrow(|s| s.power);
     // The key's separators (tab, newline, `|`) must not occur in the name,
     // or its stored line would never match and would pile up.
@@ -1861,11 +1932,7 @@ async fn choose_kernels(gpu: &Gpu) {
         .as_string()
         .unwrap_or_default()
         .replace(['\t', '\n', '\r', '|'], " ");
-    let key = roformer_gpu::bench::choice_key(
-        &adapter,
-        roformer_gpu::kernels_id(),
-        roformer_gpu::WeightFormat::F32,
-    );
+    let key = roformer_gpu::bench::choice_key(&adapter, roformer_gpu::kernels_id(), format);
     let stored = cache_get(KERNEL_CHOICE).await.unwrap_or(JsValue::NULL);
     let text = if stored.is_null() {
         String::new()
@@ -1888,13 +1955,14 @@ async fn choose_kernels(gpu: &Gpu) {
         {
             gpu.policy.set(c.matmul);
             gpu.attention.set(c.attention);
-            return;
+            return Chosen::Stored;
         }
     }
-    log("choosing kernels for this GPU (several seconds, once)…");
-    let c =
-        roformer_gpu::bench::calibrate(gpu, roformer_gpu::WeightFormat::F32, now_s, |l| log(&l))
-            .await;
+    log(&format!(
+        "choosing kernels for this GPU and {} weights (several seconds, once)…",
+        format.name()
+    ));
+    let c = roformer_gpu::bench::calibrate(gpu, format, now_s, |l| log(&l)).await;
     gpu.policy.set(c.matmul);
     gpu.attention.set(c.attention);
     // A WebGPU error while timing (out of memory with the weights
@@ -1904,10 +1972,11 @@ async fn choose_kernels(gpu: &Gpu) {
         log(&format!(
             "kernel calibration hit a WebGPU error ({e}); this choice is not kept"
         ));
-        return;
+        return Chosen::Calibrated;
     }
     let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);
     cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
+    Chosen::Calibrated
 }
 
 #[cfg(test)]

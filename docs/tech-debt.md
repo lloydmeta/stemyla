@@ -499,6 +499,14 @@ Since M8, the page offers a save file as a `Blob` of its OPFS `File`, through an
 
 * Fix: M10's iPhone run of `plans/active/stream-from-storage.md` saves a stem in each format.  Until then, Safari and the iPhone are not checked.
 
+### TD-63: the f16 weight kernels are not checked in Safari
+
+This entry concerns VERIFY-1 and GPU-2.
+
+M9 of `plans/active/stream-from-storage.md` adds an f16 variant of each matmul kernel (decision 0018).  `e2e bench --query 'bench&bench_quick=1&mm=s64&weights=f16'` compiles and runs every variant, and needs the line `f16 weights: the start-up check passed`.  It passed in Chrome on 2026-10-30.  In Safari, two sessions on 2026-10-30 timed out while safaridriver connected ("The session timed out while connecting to a Safari instance"), with the maintainer's Safari open.  So no check has run the variants in Safari, which the iPhone runs.  Where a Safari rejects a variant or fails the start-up check, the worker keeps f32 weights (decision 0022), so the stems stay right and the tab needs about 350 MB more.
+
+* Fix: run the command above with `--browser safari` once safaridriver connects, and M10's iPhone run, which looks for the start-up line.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
