@@ -740,7 +740,11 @@ async fn until_writing(app: &mut StemApp) {
     for _ in 0..20_000 {
         app.step_save(&ctx);
         let saving = app.saving.as_ref().expect("a save");
-        if saving.job.fraction() > 0.0 && !saving.job.sink().ready() {
+        let writing = {
+            let job = saving.job.borrow();
+            job.fraction() > 0.0 && !job.sink().ready()
+        };
+        if writing {
             return;
         }
         sv_sleep(0).await;

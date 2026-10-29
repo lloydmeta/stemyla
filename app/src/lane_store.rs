@@ -7,7 +7,9 @@
 //! and the frames of its last read, never more than
 //! `engine::source::BLOCK_FRAMES` frames of a lane.  A job asks whether its
 //! frames are ready; when they are not, the reader starts their read, and
-//! the job asks again in a later frame.
+//! the job asks again later.  A save's reader reads ahead
+//! ([`BlockReader::reading_ahead`], D11 of the M8 plan): it holds two
+//! blocks of the job, one of them filled by the read in flight.
 //!
 //! [`MemoryStore`] holds files as bytes in memory, for the native tests.
 //! By default it completes a read at once, inside the call that starts it,
@@ -16,7 +18,8 @@
 //! On the web, `OpfsStore` reads browser storage with
 //! `Blob.slice(...).arrayBuffer()` of a `File` from `getFile`, one promise
 //! for each range, as M6's reader does, and asks for a repaint when a read
-//! ends.
+//! ends.  A save reads through a [`WakingStore`] over an `OpfsStore` with
+//! no repaint, which signals the save's task loop instead.
 
 use crate::store_meta::LaneFile;
 use engine::readahead::decode_frames;
@@ -82,6 +85,11 @@ impl MemoryStore {
         }
     }
 
+    /// The reads that wait for [`Self::release`].
+    pub fn held_reads(&self) -> usize {
+        self.held.borrow().len()
+    }
+
     /// The reads started so far.
     pub fn requests(&self) -> usize {
         self.requests.get()
@@ -123,6 +131,33 @@ impl LaneStore for MemoryStore {
         } else {
             done(self.bytes_of(&ranges));
         }
+    }
+}
+
+/// A store that calls `wake` after each read of `inner` ends, after its
+/// result went to the reader.  A save reads through one, so its task loop
+/// goes on when a read ends, with no repaint (D11 of the M8 plan).
+pub struct WakingStore {
+    inner: Rc<dyn LaneStore>,
+    wake: Rc<dyn Fn()>,
+}
+
+impl WakingStore {
+    pub fn new(inner: Rc<dyn LaneStore>, wake: Rc<dyn Fn()>) -> Self {
+        Self { inner, wake }
+    }
+}
+
+impl LaneStore for WakingStore {
+    fn read(&self, ranges: Vec<ByteRange>, done: ReadDone) {
+        let wake = Rc::clone(&self.wake);
+        self.inner.read(
+            ranges,
+            Box::new(move |result| {
+                done(result);
+                wake();
+            }),
+        );
     }
 }
 
@@ -307,9 +342,12 @@ impl Held {
 }
 
 struct ReaderState {
-    held: Held,
-    /// A read has started and has not ended.
-    in_flight: bool,
+    /// One buffer, or two when the reader reads ahead.
+    slots: Vec<Held>,
+    /// The slot that the job reads.
+    current: usize,
+    /// The slot that the read in flight fills, if a read is in flight.
+    in_flight: Option<usize>,
     /// Why the first read that failed failed.
     failed: Option<String>,
 }
@@ -318,8 +356,12 @@ struct ReaderState {
 pub struct BlockReader {
     store: Rc<dyn LaneStore>,
     files: Vec<LaneFile>,
+    /// The frames of the song.
+    frames: usize,
     /// The most frames of a lane that one read holds.
     capacity: usize,
+    /// The reader reads the next range while the job uses this one.
+    ahead: bool,
     state: Rc<RefCell<ReaderState>>,
 }
 
@@ -328,47 +370,116 @@ impl BlockReader {
     /// buffers are made once, at the size of a block.
     pub fn new(store: Rc<dyn LaneStore>, files: Vec<LaneFile>, frames: usize) -> Self {
         let capacity = (engine::source::BLOCK_FRAMES as usize).min(frames);
+        Self::with_slots(store, files, frames, capacity, false)
+    }
+
+    /// A reader that reads ahead, for a job that reads its source in
+    /// order, `block` frames at a time (D11 of the M8 plan).  When the job
+    /// takes a range, the reader starts the read of the next range of the
+    /// same length.  So the job mixes one block while the next is read.
+    /// It holds two buffers of `block` frames of each lane, one of them
+    /// filled by the read in flight, and never more.
+    pub fn reading_ahead(
+        store: Rc<dyn LaneStore>,
+        files: Vec<LaneFile>,
+        frames: usize,
+        block: usize,
+    ) -> Self {
+        Self::with_slots(store, files, frames, block.min(frames), true)
+    }
+
+    fn with_slots(
+        store: Rc<dyn LaneStore>,
+        files: Vec<LaneFile>,
+        frames: usize,
+        capacity: usize,
+        ahead: bool,
+    ) -> Self {
         let lanes = files.len();
-        let held = Held {
+        let slot = || Held {
             ranges: Vec::new(),
             starts: Vec::new(),
             left: vec![vec![0.0; capacity]; lanes],
             right: vec![vec![0.0; capacity]; lanes],
         };
+        let slots = if ahead {
+            vec![slot(), slot()]
+        } else {
+            vec![slot()]
+        };
         Self {
             store,
             files,
+            frames,
             capacity,
+            ahead,
             state: Rc::new(RefCell::new(ReaderState {
-                held,
-                in_flight: false,
+                slots,
+                current: 0,
+                in_flight: None,
                 failed: None,
             })),
         }
     }
 
     /// Whether the frames of every range `(at, frames)` are held.  If not,
-    /// and no read is in flight, it starts one read of all the ranges.
+    /// and no read is in flight, it starts one read of all the ranges.  A
+    /// reader that reads ahead then starts the read of the next range.
     /// Panics if the ranges hold more than a block.
     pub fn ready(&self, ranges: &[(usize, usize)]) -> bool {
-        {
-            let state = self.state.borrow();
-            if state.held.holds(ranges) {
-                return true;
+        let target = {
+            let mut state = self.state.borrow_mut();
+            let spare = state.slots.len() - 1 - state.current;
+            if state.slots[state.current].holds(ranges) {
+                None
+            } else if state.in_flight != Some(spare) && state.slots[spare].holds(ranges) {
+                state.current = spare;
+                None
+            } else if state.in_flight.is_some() {
+                return false;
+            } else {
+                Some(spare)
             }
-            if state.in_flight {
+        };
+        if let Some(target) = target {
+            let total: usize = ranges.iter().map(|&(_, n)| n).sum();
+            assert!(
+                total <= self.capacity,
+                "a read of {total} frames is more than a block of {}",
+                self.capacity
+            );
+            self.start(ranges, target);
+            // A store in memory completes the read at once.
+            let mut state = self.state.borrow_mut();
+            if !state.slots[target].holds(ranges) {
                 return false;
             }
+            state.current = target;
         }
-        let total: usize = ranges.iter().map(|&(_, n)| n).sum();
-        assert!(
-            total <= self.capacity,
-            "a read of {total} frames is more than a block of {}",
-            self.capacity
-        );
-        self.start(ranges);
-        // A store in memory completes the read at once.
-        self.state.borrow().held.holds(ranges)
+        self.read_ahead(ranges);
+        true
+    }
+
+    /// Starts the read of the range after `ranges`, when the reader reads
+    /// ahead, `ranges` is one range, and no read is in flight.
+    fn read_ahead(&self, ranges: &[(usize, usize)]) {
+        let &[(at, frames)] = ranges else {
+            return;
+        };
+        let next_at = at + frames;
+        if !self.ahead || frames == 0 || next_at >= self.frames {
+            return;
+        }
+        let next = [(next_at, frames.min(self.frames - next_at))];
+        let target = {
+            let state = self.state.borrow();
+            let spare = state.slots.len() - 1 - state.current;
+            if state.in_flight.is_some() || state.slots[spare].holds(&next) {
+                return;
+            }
+            spare
+        };
+        self.start(&next, target);
     }
 
     /// Why a read failed, if one did.  The reader gave silence for it.
@@ -376,12 +487,19 @@ impl BlockReader {
         self.state.borrow().failed.clone()
     }
 
-    /// The frames of the last read.
+    /// The frames of the last read that the job took.
     pub fn held(&self) -> Ref<'_, Held> {
-        Ref::map(self.state.borrow(), |state| &state.held)
+        Ref::map(self.state.borrow(), |state| &state.slots[state.current])
     }
 
-    fn start(&self, ranges: &[(usize, usize)]) {
+    /// The buffers of the reader: the frames of each lane that it can
+    /// hold, in all its slots.
+    pub fn held_frames(&self) -> usize {
+        self.state.borrow().slots.len() * self.capacity
+    }
+
+    /// Starts one read of `ranges` into the slot `target`.
+    fn start(&self, ranges: &[(usize, usize)], target: usize) {
         let reads: Vec<ByteRange> = self
             .files
             .iter()
@@ -403,16 +521,16 @@ impl BlockReader {
         )]
         let ranges = ranges.to_vec();
         let state = Rc::clone(&self.state);
-        state.borrow_mut().in_flight = true;
+        state.borrow_mut().in_flight = Some(target);
         self.store.read(
             reads,
             Box::new(move |result| {
                 let mut state = state.borrow_mut();
-                state.in_flight = false;
+                state.in_flight = None;
                 if let Err(e) = &result {
                     state.failed.get_or_insert_with(|| e.clone());
                 }
-                fill(&mut state.held, &formats, ranges, result);
+                fill(&mut state.slots[target], &formats, ranges, result);
             }),
         );
     }
@@ -508,6 +626,65 @@ mod tests {
             (&[0.0; 10][..], &[0.0; 10][..])
         );
         assert_eq!(reader.failed().as_deref(), Some("no file acme/missing.f32"));
+    }
+
+    /// D11 of M8: a reader that reads ahead starts the read of the next
+    /// range when the job takes one, holds at most two blocks of each lane
+    /// and one read in flight, and reads nothing past the song's end.
+    #[test]
+    fn a_reader_that_reads_ahead_keeps_one_read_in_flight() {
+        let store = MemoryStore::new();
+        store.put("acme/0.f32", counting(250));
+        let file = LaneFile::f32("acme/0.f32".into(), 250);
+        let reader = BlockReader::reading_ahead(
+            Rc::clone(&store) as Rc<dyn LaneStore>,
+            vec![file],
+            250,
+            100,
+        );
+        assert_eq!(reader.held_frames(), 200, "two blocks of the lane");
+        store.hold(true);
+        assert!(!reader.ready(&[(0, 100)]), "the first read is in flight");
+        assert!(!reader.ready(&[(0, 100)]));
+        assert_eq!((store.requests(), store.held_reads()), (1, 1));
+        store.release();
+        assert!(reader.ready(&[(0, 100)]));
+        assert_eq!(
+            (store.requests(), store.held_reads()),
+            (2, 1),
+            "the next block's read starts"
+        );
+        assert_eq!(reader.held().frames(0, 99, 1).0, [99.0]);
+        assert!(reader.ready(&[(0, 100)]), "the held block, again");
+        assert_eq!(store.requests(), 2, "no read for it");
+        assert!(!reader.ready(&[(100, 100)]), "the next block is in flight");
+        store.release();
+        assert!(reader.ready(&[(100, 100)]));
+        assert_eq!(reader.held().frames(0, 100, 2).0, [100.0, 101.0]);
+        store.release();
+        assert!(reader.ready(&[(200, 50)]));
+        assert_eq!(reader.held().frames(0, 249, 1).0, [249.0]);
+        assert_eq!(
+            (store.requests(), store.held_reads()),
+            (3, 0),
+            "no read past the end"
+        );
+        assert_eq!(store.largest_read(), 800, "a block of 100 frames");
+    }
+
+    /// A reader that does not read ahead starts no read that the job did
+    /// not ask for.
+    #[test]
+    fn a_reader_reads_only_what_the_job_asks() {
+        let store = MemoryStore::new();
+        store.put("acme/0.f32", counting(250));
+        let file = LaneFile::f32("acme/0.f32".into(), 250);
+        let reader = BlockReader::new(Rc::clone(&store) as Rc<dyn LaneStore>, vec![file], 250);
+        assert_eq!(reader.held_frames(), 250);
+        assert!(reader.ready(&[(0, 100)]));
+        assert_eq!(store.requests(), 1);
+        assert!(reader.ready(&[(100, 100)]));
+        assert_eq!(store.requests(), 2);
     }
 
     #[test]

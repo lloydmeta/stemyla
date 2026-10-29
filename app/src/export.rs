@@ -1,8 +1,10 @@
 //! Saving a stem or the mix as heard, one block at a time (decision 0014).
 //!
 //! An [`ExportJob`] reads a [`Pcm`] source in blocks and writes each block
-//! to a [`Sink`].  The page steps a job for a few milliseconds in each UI
-//! frame, since the main thread also feeds the Web Audio output.  The sinks
+//! to a [`Sink`].  The page steps the mix lane's waveform job for a few
+//! milliseconds in each UI frame, since the main thread also feeds the Web
+//! Audio output.  A save's job runs in a task loop of its own, in slices of
+//! a few milliseconds (`crate::save_task`, D11 of M8).  The sinks
 //! on the web write into JS arrays, or into a save file in browser storage
 //! (`StoredWav`, D3 of M8), so no song-sized buffer is made in
 //! WebAssembly memory (MEM-1, MEM-4).  A sink can make the job wait while
@@ -21,8 +23,8 @@ pub trait Sink {
     fn write(&mut self, at: usize, left: &[f32], right: &[f32]);
 
     /// Whether the sink takes a block now.  A sink that writes browser
-    /// storage is not ready while a write is in flight, and asks for a
-    /// repaint when it ends (D3 of M8).
+    /// storage is not ready while a write is in flight, and calls its
+    /// `wake` when the write ends (D3 and D11 of M8).
     fn ready(&self) -> bool {
         true
     }
@@ -144,14 +146,23 @@ impl<S: Sink> ExportJob<S> {
         true
     }
 
-    /// Whether the last step found the source not ready.  A source that
-    /// reads storage asks for a repaint when its read ends.
+    /// Whether the last step found the source or the sink not ready.  The
+    /// end of the read or the write asks for a repaint, or signals a
+    /// save's task (D11 of M8).
     pub fn is_waiting(&self) -> bool {
         self.waiting
     }
 
     pub fn is_done(&self) -> bool {
         self.at == self.source.frames()
+    }
+
+    /// Whether the next step ends the job: the source is done, or a job
+    /// that stops at a failure met a failed read or write.
+    pub fn is_over(&self) -> bool {
+        self.is_done()
+            || (self.stops_at_a_failure
+                && (self.source.failed().is_some() || self.sink.failed().is_some()))
     }
 
     /// The part of the source done, from 0 to 1.
@@ -575,7 +586,7 @@ mod stored {
     /// Where the end stage of a [`StoredWav`] is.
     #[derive(Debug, PartialEq)]
     pub enum Finish {
-        /// A write or the close is in flight; ask again after a repaint.
+        /// A write or the close is in flight; ask again after its end.
         Pending,
         /// The file is complete.
         Done,
@@ -587,8 +598,8 @@ mod stored {
     /// block of [`SAVE_WRITE_BYTES`] goes through one JS array, made once
     /// for the save, and written whole (MEM-5).  At most one write is in
     /// flight.  While one is, the sink is not ready, so the job waits and
-    /// takes no time in the frame.  The end of each write calls `wake`,
-    /// which asks for a repaint.  After the job is done, [`Self::finish`]
+    /// takes no time.  The end of each write calls `wake`, which signals
+    /// the save's task (D11 of M8).  After the job is done, [`Self::finish`]
     /// writes the last block, in a new array of its own length, and closes
     /// the stream.  The file is complete only after the close.  A failed
     /// open, write or close removes the file and sets [`Sink::failed`].  A

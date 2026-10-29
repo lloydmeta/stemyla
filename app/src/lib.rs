@@ -20,6 +20,7 @@ pub mod picker;
 #[cfg(target_arch = "wasm32")]
 pub mod playback;
 pub mod reset;
+pub mod save_task;
 #[cfg(target_arch = "wasm32")]
 pub mod separator;
 pub mod spectrogram;
@@ -1244,10 +1245,15 @@ fn too_many_lanes(meta: &store_meta::Meta) -> String {
 const PEAKS_MS: f64 = 3.0;
 /// Milliseconds of each frame that the spectrogram jobs may take.
 const SPECTROGRAM_MS: f64 = 4.0;
-/// Milliseconds of each frame that a save may take.  The page's main
-/// thread also fills the Web Audio buffers.
+/// Milliseconds of each slice of a save's task loop (D11 of M8).  After
+/// each slice, the task yields to the event loop: the page's main thread
+/// also fills the Web Audio buffers and draws the UI.
 #[cfg(target_arch = "wasm32")]
 const SAVE_MS: f64 = 4.0;
+/// How often the UI frame shows a save's progress, in milliseconds.  The
+/// save's task loop asks for no repaint until the job is done (D11 of M8).
+#[cfg(target_arch = "wasm32")]
+const SAVE_PROGRESS_MS: u64 = 250;
 const LANE_HEIGHT: f32 = 64.0;
 const LOOP_BAR_HEIGHT: f32 = 18.0;
 
@@ -1425,32 +1431,55 @@ struct SaveSource {
 
 #[cfg(target_arch = "wasm32")]
 impl SaveSource {
+    /// The source of the save's job.  Its stored lanes read through
+    /// `store`, and read ahead, one block of the job at a time (D11 of
+    /// M8).
     #[cfg_attr(mutants, mutants::skip)]
-    fn pcm(&self) -> Box<dyn engine::mixdown::Pcm> {
+    fn pcm(&self, store: &std::rc::Rc<dyn lane_store::LaneStore>) -> Box<dyn engine::mixdown::Pcm> {
+        let audio: Vec<lanes::LaneAudio> =
+            self.audio.iter().map(|a| a.read_through(store)).collect();
         match self.stem {
-            Some(i) => Box::new(lanes::LanePcm::new(
-                self.audio[i].clone(),
+            Some(i) => Box::new(lanes::LanePcm::reading_ahead(
+                audio[i].clone(),
                 self.frames,
                 self.rate,
+                export::BLOCK,
             )),
-            None => Box::new(lanes::LanesMix::new(
-                &self.audio,
+            None => Box::new(lanes::LanesMix::reading_ahead(
+                &audio,
                 self.frames,
                 self.rate,
                 &self.recipe,
+                export::BLOCK,
             )),
         }
     }
 }
 
 /// A stem or a mix being made into a file (decision 0014): a WAV save
-/// file (the storage path of M8), or JS arrays (the memory path).
+/// file (the storage path of M8), or JS arrays (the memory path).  Its
+/// job runs in a task loop of its own (D11 of M8), which holds it weakly.
+/// So dropping a `Saving` drops its job, and its `Stop` ends the task.
 #[cfg(target_arch = "wasm32")]
 struct Saving {
-    job: export::ExportJob<export::SaveSink>,
+    job: std::rc::Rc<std::cell::RefCell<export::ExportJob<export::SaveSink>>>,
     order: SaveOrder,
     /// Why the save is held in memory, when browser storage failed (D8).
     held: Option<String>,
+    _stop: save_task::Stop,
+}
+
+/// Where the end stage of a save is, in a UI frame.
+#[cfg(target_arch = "wasm32")]
+enum SaveEnd {
+    /// The job runs, or the end stage waits for a write or the close.
+    Pending,
+    /// A write or the close of the save file failed, for this reason.
+    Failed(String),
+    /// The save file at this path is complete.
+    Stored(String),
+    /// The JS arrays of the memory path are complete.
+    Memory,
 }
 
 /// A stored encode that the worker has not answered (D8 of M8).
@@ -4455,8 +4484,8 @@ impl StemApp {
 
     /// Starts saving a stem, or the mix as heard when `stem` is `None`.
     /// The save writes a WAV save file in browser storage first (the
-    /// storage path, D1 of M8).  It runs in [`Self::step_save`], a few ms
-    /// in each frame.
+    /// storage path, D1 of M8).  Its job runs in a task loop of its own
+    /// (D11 of M8); [`Self::step_save`] shows its progress and ends it.
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn start_save(&mut self, stem: Option<usize>, format: export::Format) {
@@ -4482,28 +4511,57 @@ impl StemApp {
             serial: self.song_serial,
             generation: self.lanes_generation,
         };
-        let wake: std::rc::Rc<dyn Fn()> = match &self.ctx {
-            Some(ctx) => {
-                let ctx = ctx.clone();
-                std::rc::Rc::new(move || ctx.request_repaint())
-            }
-            None => std::rc::Rc::new(|| {}),
-        };
-        let sink = export::SaveSink::Stored(export::StoredWav::new(
-            format!("{}.wav", store::new_save_path()),
-            order.what.frames,
-            order.what.rate,
-            wake,
-        ));
-        self.saving = Some(Saving {
-            job: export::ExportJob::new(order.what.pcm(), sink).stopping_at_a_failure(),
-            order,
-            held: None,
-        });
+        let (frames, rate) = (order.what.frames, order.what.rate);
+        self.saving = Some(self.saving_of(order, None, |wake| {
+            export::SaveSink::Stored(export::StoredWav::new(
+                format!("{}.wav", store::new_save_path()),
+                frames,
+                rate,
+                wake,
+            ))
+        }));
     }
 
-    /// Steps the save in progress for a few ms.  At the end of the storage
-    /// path, it closes the WAV save file, then offers it, or asks the
+    /// The save of `order` into the sink that `sink` makes, and its task
+    /// loop, which starts now (D11 of M8).  The sink and the save's reads
+    /// signal the task when a write or a read ends.  The task asks for a
+    /// repaint when the job is done, and at each signal after it, for the
+    /// end stage.
+    #[cfg(target_arch = "wasm32")]
+    #[cfg_attr(mutants, mutants::skip)]
+    fn saving_of(
+        &self,
+        order: SaveOrder,
+        held: Option<String>,
+        sink: impl FnOnce(std::rc::Rc<dyn Fn()>) -> export::SaveSink,
+    ) -> Saving {
+        use std::rc::Rc;
+        let signal = Rc::new(save_task::Signal::default());
+        let notify = Rc::clone(&signal);
+        let wake: Rc<dyn Fn()> = Rc::new(move || notify.notify());
+        let reads: Rc<dyn lane_store::LaneStore> = Rc::new(lane_store::WakingStore::new(
+            Rc::new(lane_store::OpfsStore::new(None)),
+            Rc::clone(&wake),
+        ));
+        let job =
+            export::ExportJob::new(order.what.pcm(&reads), sink(wake)).stopping_at_a_failure();
+        let job = Rc::new(std::cell::RefCell::new(job));
+        save_task::spawn(
+            Rc::downgrade(&job),
+            Rc::clone(&signal),
+            SAVE_MS,
+            self.ctx.clone(),
+        );
+        Saving {
+            job,
+            order,
+            held,
+            _stop: save_task::Stop(signal),
+        }
+    }
+
+    /// Shows the progress of the save in progress, whose job runs in its
+    /// own task (D11 of M8).  At the end of the storage path, it closes the WAV save file, then offers it, or asks the
     /// worker to encode it (D1 of M8).  At the end of the memory path, it
     /// hands the file to the browser, or the channels to the worker.  When
     /// browser storage fails, the save goes on in memory (D8).
@@ -4547,30 +4605,32 @@ impl StemApp {
             return;
         };
         let name = saving.order.name.clone();
-        if !saving.job.run_while(export::time_left(SAVE_MS)) {
+        let (over, fraction, failed) = {
+            let job = saving.job.borrow();
+            (job.is_over(), job.fraction(), job.failed())
+        };
+        if !over {
             let doing = if saving.order.what.stem.is_none() {
                 "Mixing"
             } else {
                 "Preparing"
             };
-            let pct = 100.0 * saving.job.fraction();
+            let pct = 100.0 * fraction;
             let held = if saving.held.is_some() {
                 " (in memory: browser storage failed)"
             } else {
                 ""
             };
             self.status = format!("{doing} {name}: {pct:.0} %{held}");
-            // A save that waits for storage gets a repaint when its read
-            // or its write ends.
-            if !saving.job.is_waiting() {
-                ctx.request_repaint();
-            }
+            // The task loop asks for a repaint only at the job's end, so
+            // the progress shows a few times a second.
+            ctx.request_repaint_after(std::time::Duration::from_millis(SAVE_PROGRESS_MS));
             return;
         }
         // A failed read gave silence: no file and no encode request
         // (finding 4-1 of review round 4 of M7).  Dropping the save
         // removes its save file.
-        if let Some(e) = saving.job.failed() {
+        if let Some(e) = failed {
             self.saving = None;
             log::warn!("save: {name}: a read of browser storage failed: {e}");
             self.status = format!(
@@ -4579,29 +4639,35 @@ impl StemApp {
             self.next_save();
             return;
         }
-        let stored = match saving.job.sink_mut() {
+        let end = match saving.job.borrow_mut().sink_mut() {
             export::SaveSink::Stored(wav) => match wav.finish() {
-                export::Finish::Pending => {
-                    self.status = format!("Saving {name}…");
-                    return;
-                }
-                export::Finish::Failed(why) => {
-                    if let Some(saving) = self.saving.take() {
-                        self.save_in_memory(saving.order, why);
-                    }
-                    // A save that waits for this one goes on, or is
-                    // reported (finding 1-2 of review round 1 of M8).
-                    self.next_save();
-                    return;
-                }
-                export::Finish::Done => Some(wav.take()),
+                export::Finish::Pending => SaveEnd::Pending,
+                export::Finish::Failed(why) => SaveEnd::Failed(why),
+                export::Finish::Done => SaveEnd::Stored(wav.take()),
             },
-            export::SaveSink::Memory(_) => None,
+            export::SaveSink::Memory(_) => SaveEnd::Memory,
+        };
+        let stored = match end {
+            SaveEnd::Pending => {
+                self.status = format!("Saving {name}…");
+                return;
+            }
+            SaveEnd::Failed(why) => {
+                if let Some(saving) = self.saving.take() {
+                    self.save_in_memory(saving.order, why);
+                }
+                // A save that waits for this one goes on, or is
+                // reported (finding 1-2 of review round 1 of M8).
+                self.next_save();
+                return;
+            }
+            SaveEnd::Stored(wav) => Some(wav),
+            SaveEnd::Memory => None,
         };
         let Some(saving) = self.saving.take() else {
             return;
         };
-        let clipped = saving.job.clipped();
+        let clipped = saving.job.borrow().clipped();
         let note = (saving.order.what.stem.is_none() && clipped > 0).then(|| {
             format!(
                 "  {clipped} samples of the mix are at full scale, so it may clip; lower the volumes to avoid it."
@@ -4669,12 +4735,19 @@ impl StemApp {
     #[cfg_attr(mutants, mutants::skip)]
     fn end_memory_save(&mut self, saving: Saving, note: Option<String>) {
         use export::JsSink;
-        let Saving { job, order, held } = saving;
+        let Saving {
+            job, order, held, ..
+        } = saving;
         let name = order.name;
         let held = held.map_or(String::new(), |why| {
             format!("  It was held in memory, because browser storage failed ({why}).")
         });
-        let export::SaveSink::Memory(sink) = job.into_sink() else {
+        // The task loop holds the job weakly, and only during a slice.
+        let Ok(job) = std::rc::Rc::try_unwrap(job) else {
+            log::error!("save: {name}: the job is still in use at its end");
+            return;
+        };
+        let export::SaveSink::Memory(sink) = job.into_inner().into_sink() else {
             return;
         };
         let rate = order.what.rate;
@@ -4716,16 +4789,10 @@ impl StemApp {
             self.status = storage_full_text(&name, &why);
         } else {
             log::warn!("save: {name}: browser storage failed ({why}); the save is held in memory");
-            let sink = export::SaveSink::Memory(export::JsSink::new(
-                order.format,
-                order.what.frames,
-                order.what.rate,
-            ));
-            self.saving = Some(Saving {
-                job: export::ExportJob::new(order.what.pcm(), sink).stopping_at_a_failure(),
-                order,
-                held: Some(why),
-            });
+            let (format, frames, rate) = (order.format, order.what.frames, order.what.rate);
+            self.saving = Some(self.saving_of(order, Some(why), |_| {
+                export::SaveSink::Memory(export::JsSink::new(format, frames, rate))
+            }));
         }
     }
 

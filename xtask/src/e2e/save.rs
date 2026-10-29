@@ -34,6 +34,7 @@
 //! failed, so a run of an older build shows its numbers.
 
 use super::old_session::PLANT;
+use super::playback::{PlaybackLine, playback_line};
 use super::{Opts, Page, in_page, number_after, sha256_hex};
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -47,8 +48,12 @@ const STEMS: [&str; 2] = ["bass", "drums"];
 /// Save menu.
 const FORMATS: [(&str, usize); 3] = [("wav", 0), ("flac", 1), ("mp3", 2)];
 /// D10: how much more the 10-minute save's JS heap measure may be than
-/// the 1-minute save's, in MB.
-pub(super) const PAGE_BOUND_MB: f64 = 4.0;
+/// the 1-minute save's, in MB.  It was 4 MB until D11 of M8.  Since D11, a
+/// 10-minute save's measure is 3.17 to 3.19 MB in each format, and a
+/// 1-minute save ends in about 0.4 s, before most readings, so its measure
+/// is 0.03 to 2.6 MB.  8 MB is still more than 10 times under the 95 MB
+/// growth of the build before M8 (the Decision log of the M8 plan).
+pub(super) const PAGE_BOUND_MB: f64 = 8.0;
 /// D10: how much more a FLAC encode of 10 minutes may grow the worker's
 /// memory than one of 1 minute, in bytes.
 pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
@@ -56,33 +61,37 @@ pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
 /// its MP3, plus [`ONE_MIB`].
 pub(super) const MP3_FACTOR: f64 = 4.0;
 const ONE_MIB: f64 = 1_048_576.0;
+/// D11: how much more a 10-minute save may grow the page's WebAssembly
+/// memory than a 1-minute save, in bytes.  The save's reader holds two
+/// blocks of each lane, one of them filled by the read in flight, whatever
+/// the song's length.  So the two saves need the same memory.
+pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
 /// run can take (finding 3-1 of review round 3 of M8).  So a run that
 /// waits in vain still ends on a check of its own.  A step that CI stops
 /// writes no `save.log`, but each note of the run also goes to the step's
-/// output.  In CI run 40788465048 (2026-10-28), a save of 60 s of audio
-/// took 34 s, so a normal run there takes about 22 minutes.  On the
-/// maintainer's Mac, it takes about 3 minutes.
-pub(super) const STEP_LIMIT_S: u64 = 55 * 60;
+/// output.  Since D11 of M8, a run takes about 2 minutes on the
+/// maintainer's Mac, in Chrome and with `--swiftshader` (CI's proxy).
+pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
 /// The longest that a save of `seconds` of audio may take from its click
-/// to its offer, in seconds.  In CI run 40788465048 (2026-10-28), the save
-/// of 60 s of audio took 34.2 s, from its click at 16.4 s to its offer at
-/// 50.6 s.  A save takes about one UI frame for each block that it reads,
-/// so a save of 600 s takes about 340 s there.  An encode adds less than a
-/// minute.  So each cap is about 1.5 times the save, with its encode.  The
-/// CI frame time, about 160 ms, is an estimate until a CI run logs
-/// "offered after N UI frames".
+/// to its offer, in seconds: 6 times or more the slowest save of its length
+/// on the maintainer's Mac with `--swiftshader`, after D11 of M8
+/// (2026-10-29).  Those were FLAC saves of 3.1 s for 60 s of audio, and of
+/// 28.7 s for 600 s; the worker's encode takes most of each.  Before D11 of M8, a save took one UI frame for
+/// each block, and CI took 34 s for 60 s of audio.  Since D11, a save does
+/// not wait for the UI frame, and CI ran the worker's encode faster than
+/// the Mac (`e2e flac`).
 pub(super) const fn save_cap_s(seconds: u32) -> u64 {
-    if seconds <= 60 { 120 } else { 600 }
+    if seconds <= 60 { 60 } else { 180 }
 }
 /// The longest that a save may show no progress, in seconds: no write of
 /// the page to browser storage and no growth of the save files.  An MP3
-/// encode writes nothing until its encoder finishes, which took about 10 s
-/// for 10 minutes on the maintainer's Mac.
-pub(super) const STALL_S: u64 = 120;
+/// encode writes nothing until its encoder finishes.  The MP3 save of 10
+/// minutes took 16.6 s in all on the maintainer's Mac with `--swiftshader`.
+pub(super) const STALL_S: u64 = 60;
 /// How often the wait for an offer reads the save's progress, in seconds.
-const POLL_S: u64 = 2;
+const POLL_S: u64 = 1;
 /// The longest wait, in seconds, for a restore and for its stem overviews.
 /// In CI run 40788465048, the first restores of the 1-minute and the
 /// 10-minute sessions took 1.0 s and 5.0 s, and a later 1-minute restore
@@ -112,6 +121,9 @@ pub(super) const SCRIPT_WAIT_S: u64 = 15;
 /// The idle time of each save, in seconds: 3 s before it, 0.5 s with the
 /// menu open and 1 s after it, rounded up.
 const SAVE_IDLE_S: u64 = 5;
+/// The longest wait, in seconds, for a `playback:` line, which the page
+/// logs every 2 s while it plays.
+pub(super) const PLAY_WAIT_S: u64 = 30;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
 const FIRST_RESTORES: u64 = SECONDS.len() as u64;
@@ -129,19 +141,27 @@ const fn caps_s() -> u64 {
 /// of review round 2 of M8).  These are the start, the calibration, the
 /// two clean-ups, and the plant of each session.  Each first restore waits
 /// for a session switch, the restore and the stem overviews.  Each save
-/// waits for a session switch, the restore and two heap readings, and
-/// idles.  It waits up to its cap and one reading of its progress for its
-/// offer.  The 1-minute save of each format reads its file.  The run ends
-/// with the list of save files.  It does not count the WebDriver commands
-/// of a click or a screenshot, which return at once.
+/// waits for a session switch, the restore, two heap readings and two
+/// readings of the WebAssembly memory, and idles.  It waits up to its cap
+/// and one reading of its progress for its offer.  The 1-minute save of
+/// each format reads its file.  The save during playback waits for a
+/// session switch, the restore, two `playback:` lines, its cap and one
+/// reading of its progress, and idles.  The run ends with the list of
+/// save files.  It does not count the WebDriver commands of a click, a
+/// screenshot or a mark, which return at once.
 pub(super) const WAITS_S: u64 = START_WAIT_S
     + SCRIPT_WAIT_S
     + 2 * CLEAN_WAIT_S
     + FIRST_RESTORES * PLANT_WAIT_S
     + FIRST_RESTORES * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S)
-    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 3 * SCRIPT_WAIT_S + SAVE_IDLE_S)
+    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S)
     + caps_s()
     + FORMATS.len() as u64 * READ_WAIT_S
+    + 2 * SCRIPT_WAIT_S
+    + RESTORE_WAIT_S
+    + SAVE_IDLE_S
+    + 2 * PLAY_WAIT_S
+    + save_cap_s(SECONDS[1])
     + SCRIPT_WAIT_S;
 // All the waits together end within the step's limit.
 const _: () = assert!(WAITS_S < STEP_LIMIT_S);
@@ -225,6 +245,9 @@ pub(super) struct Save {
     /// The worker's memory growth during the encode, and the file's size,
     /// in bytes.
     pub worker: Option<(f64, f64)>,
+    /// The growth of the page's WebAssembly memory during the save, in
+    /// bytes.
+    pub wasm: Option<f64>,
 }
 
 /// The worker's growth and the file's size, from a `memory: encode` line:
@@ -255,6 +278,16 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
         let heap = |seconds| find(saves, format, seconds).and_then(|s| s.heap);
         let (short, long) = (heap(SECONDS[0]), heap(SECONDS[1]));
         let growth = short.zip(long).map(|(s, l)| (l - s) / MB);
+        let wasm = |seconds| find(saves, format, seconds).and_then(|s| s.wasm);
+        let (short_wasm, long_wasm) = (wasm(SECONDS[0]), wasm(SECONDS[1]));
+        checks.push((
+            short_wasm
+                .zip(long_wasm)
+                .is_some_and(|(s, l)| l - s <= WASM_BOUND_BYTES),
+            format!(
+                "{format}: the 10-minute save grows the page's WebAssembly memory by at most {WASM_BOUND_BYTES} bytes more than the 1-minute save ({short_wasm:?} and {long_wasm:?} bytes)"
+            ),
+        ));
         checks.push((
             growth.is_some_and(|g| g <= PAGE_BOUND_MB),
             format!(
@@ -408,6 +441,13 @@ pub(super) fn offered_frames(line: &str) -> Option<u64> {
     json["frames"].as_u64()
 }
 
+/// The milliseconds from the click to the offer, from an `e2e: offered`
+/// line.
+pub(super) fn offered_ms(line: &str) -> Option<u64> {
+    let json: Value = serde_json::from_str(line.split("e2e: offered ").nth(1)?).ok()?;
+    json["ms"].as_u64()
+}
+
 /// The offered file of a save, from the line that the wait found.  It is
 /// an error when there is none, so the run ends (finding 1-4 of review
 /// round 1 of M8).
@@ -538,7 +578,8 @@ pub(super) fn file_checks(files: Files) -> Vec<(bool, String)> {
 }
 
 /// The check of `saves/` at the end: only the offered files, two of each
-/// format, and so no WAV of a FLAC or MP3 save.
+/// format and the WAV of the save during playback, and so no WAV of a
+/// FLAC or MP3 save.
 pub(super) fn saves_folder_check(names: &Value) -> (bool, String) {
     let names: Vec<&str> = names
         .as_array()
@@ -546,9 +587,53 @@ pub(super) fn saves_folder_check(names: &Value) -> (bool, String) {
         .unwrap_or_default();
     let count = |ext: &str| names.iter().filter(|n| n.ends_with(ext)).count();
     (
-        names.len() == 6 && count(".wav") == 2 && count(".flac") == 2 && count(".mp3") == 2,
-        format!("saves/ holds the 6 offered files and nothing else: {names:?}"),
+        names.len() == 7 && count(".wav") == 3 && count(".flac") == 2 && count(".mp3") == 2,
+        format!("saves/ holds the 7 offered files and nothing else: {names:?}"),
     )
+}
+
+/// What the save during playback gave.
+#[derive(Debug, Default)]
+pub(super) struct Playing {
+    /// The save offered its file.
+    pub offered: bool,
+    /// A `playback:` line came after the offer.
+    pub line_after_offer: bool,
+    /// The `playback:` lines from the click of Play on: one before the
+    /// save at least, and the first after the offer.
+    pub lines: Vec<PlaybackLine>,
+}
+
+/// The checks of the save during playback (D11): the song played from
+/// storage before the save and after its offer, with no underrun and no
+/// failed lane, as `e2e playback` counts them.
+pub(super) fn playing_checks(playing: &Playing) -> Vec<(bool, String)> {
+    let lines = &playing.lines;
+    let underruns: Vec<u64> = lines.iter().map(|l| l.underruns).collect();
+    vec![
+        (
+            playing.offered,
+            "wav, 600 s, during playback: the save offers its file".into(),
+        ),
+        (
+            playing.line_after_offer && lines.len() >= 2,
+            format!(
+                "wav, 600 s, during playback: a playback line before the save and after its offer ({} lines)",
+                lines.len()
+            ),
+        ),
+        (
+            !lines.is_empty()
+                && lines
+                    .iter()
+                    .all(|l| l.lanes > 0 && l.stored == l.lanes && l.failed_lanes == 0),
+            "wav, 600 s, during playback: every lane plays from storage, and none fails".into(),
+        ),
+        (
+            !lines.is_empty() && underruns.iter().all(|&u| u == 0),
+            format!("wav, 600 s, during playback: no underrun ({underruns:?})"),
+        ),
+    ]
 }
 
 /// `xtask e2e save`.
@@ -613,13 +698,18 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             saves.push(save);
         }
     }
+    let playing = save_playing(&mut p, o)?;
+    for (ok, what) in playing_checks(&playing) {
+        p.check(ok, &what);
+    }
     let names = in_page(&mut p, SAVE_NAMES, json!([]), SCRIPT_WAIT_S)?;
     for s in &saves {
         p.note(&format!(
-            "save: {} {} s: JS heap measure {:?} MB; worker growth and file {:?}",
+            "save: {} {} s: JS heap measure {:?} MB; WebAssembly growth {:?} bytes; worker growth and file {:?}",
             s.format,
             s.seconds,
             s.heap.map(|h| h / MB),
+            s.wasm,
             s.worker
         ));
     }
@@ -655,6 +745,39 @@ fn restore(p: &mut Page, seconds: u32) -> Result<()> {
     Ok(())
 }
 
+/// The page's WebAssembly memory, in bytes.
+const WASM_MEMORY: &str = "return (await window.wasmBindings.default()).memory.buffer.byteLength;";
+
+/// Clicks the mix lane's Save and the menu's item at `row`, and waits for
+/// the offer of the save of `format` and `seconds`: its line.  With
+/// `heap`, the JS heap readings start just before the item's click, so
+/// even a save of less than a second gets some.
+fn click_save(
+    p: &mut Page,
+    o: &Opts,
+    (format, row, seconds): (&str, usize, u32),
+    heap: bool,
+) -> Result<String> {
+    let mark = p.mark();
+    p.click_at(o.save_x, o.save_y, "the mix lane's Save")?;
+    p.idle(0.5)?;
+    p.screenshot(&format!("{format}-{seconds}-menu"))?;
+    let start = if heap {
+        "window.__e2e_start_heap(); window.__e2e_mark();"
+    } else {
+        "window.__e2e_mark();"
+    };
+    p.session.execute(start, json!([]))?;
+    p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
+    let offered = wait_for_offer(p, mark, format, seconds)?;
+    p.note(&format!(
+        "save: {format}, {seconds} s: offered after {} UI frames and {} ms",
+        offered_frames(&offered).map_or("?".into(), |f| f.to_string()),
+        offered_ms(&offered).map_or("?".into(), |f| f.to_string())
+    ));
+    Ok(offered)
+}
+
 /// Restores the session of `seconds`, saves its mix as `format` through
 /// the Save menu (its item at `row`), and measures the save.
 fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> Result<Save> {
@@ -666,17 +789,10 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
         json!([]),
         SCRIPT_WAIT_S,
     )?;
-    p.session.execute("window.__e2e_start_heap();", json!([]))?;
+    let wasm_before = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
     let mark = p.mark();
-    p.click_at(o.save_x, o.save_y, "the mix lane's Save")?;
-    p.idle(0.5)?;
-    p.screenshot(&format!("{format}-{seconds}-menu"))?;
-    p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
-    let offered = wait_for_offer(p, mark, format, seconds)?;
-    p.note(&format!(
-        "save: {format}, {seconds} s: offered after {} UI frames",
-        offered_frames(&offered).map_or("?".into(), |f| f.to_string())
-    ));
+    let offered = click_save(p, o, (format, row, seconds), true)?;
+    let wasm_after = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
     let max = in_page(
         p,
         "return await window.__e2e_stop_heap();",
@@ -697,6 +813,37 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
         heap,
         offered,
         worker,
+        wasm: wasm_before.zip(wasm_after).map(|(b, a)| a - b),
+    })
+}
+
+/// D11: plays the 10-minute session, and saves its mix as a WAV during
+/// playback.  It gives whether the save offered its file, and the
+/// `playback:` lines from the click of Play to the first line after the
+/// offer.  Then it pauses.
+fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
+    let seconds = SECONDS[1];
+    restore(p, seconds)?;
+    p.idle(3.0)?;
+    let played = p.mark();
+    p.click(o.play_x, "Play")?;
+    if p.wait_for(played, PLAY_WAIT_S, |l| playback_line(l).is_some())?
+        .is_none()
+    {
+        bail!("wav, {seconds} s, during playback: no playback line within {PLAY_WAIT_S} s");
+    }
+    let offered = click_save(p, o, ("wav", 0, seconds), false)?;
+    let after = p.mark();
+    let last = p.wait_for(after, PLAY_WAIT_S, |l| playback_line(l).is_some())?;
+    p.click(o.play_x, "Pause")?;
+    let lines = p.log[played..]
+        .iter()
+        .filter_map(|l| playback_line(l))
+        .collect();
+    Ok(Playing {
+        offered: offered_file(&offered).is_some(),
+        line_after_offer: last.is_some(),
+        lines,
     })
 }
 
@@ -711,6 +858,7 @@ mod tests {
             heap: Some(heap_mb * MB),
             offered: Some((format!("lloyd - mix.{format}"), 1.0, String::new())),
             worker,
+            wasm: Some(f64::from(seconds) * 100.0),
         }
     }
 
@@ -761,6 +909,64 @@ mod tests {
         assert_eq!(failing(&wrong).len(), 1);
     }
 
+    /// D11: a 10-minute save may grow the page's WebAssembly memory by at
+    /// most the bound more than a 1-minute save.
+    #[test]
+    fn the_wasm_check_bounds_the_growth_of_the_long_save() {
+        let mut at_bound = good();
+        at_bound[1].wasm = Some(6_000.0 + WASM_BOUND_BYTES);
+        assert!(failing(&at_bound).is_empty(), "{:?}", failing(&at_bound));
+        let mut over = good();
+        over[3].wasm = Some(6_001.0 + WASM_BOUND_BYTES);
+        let failed = failing(&over);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].starts_with("flac: the 10-minute save grows"));
+        let mut missing = good();
+        missing[4].wasm = None;
+        assert_eq!(failing(&missing).len(), 1);
+        // A read-ahead that grows with the song: 2 blocks of 3 lanes for
+        // each of the 1,615 blocks of 10 minutes.
+        let mut growing = good();
+        growing[1].wasm = Some(1_615.0 * 2.0 * 16_384.0 * 8.0 * 3.0);
+        assert_eq!(failing(&growing).len(), 1);
+    }
+
+    fn playing(underruns: &[u64], line_after_offer: bool) -> Playing {
+        let line = |u| {
+            playback_line(&format!("playback: lanes from storage 3 of 3, read-ahead 6.0 MiB, underruns {u} (callbacks), missed lane frames 0, held 0 frames, failed lanes 0, lanes read 3, reads 9, read p50 1.0 ms, p99 2.0 ms")).expect("a line")
+        };
+        Playing {
+            offered: true,
+            line_after_offer,
+            lines: underruns.iter().map(|&u| line(u)).collect(),
+        }
+    }
+
+    /// D11: the save during playback passes with no underrun, a line
+    /// before it and one after its offer, and fails otherwise.
+    #[test]
+    fn the_playing_checks_count_underruns_and_lines() {
+        let failing = |p: &Playing| playing_checks(p).iter().filter(|(ok, _)| !ok).count();
+        assert_eq!(failing(&playing(&[0, 0, 0], true)), 0);
+        assert_eq!(failing(&playing(&[0, 1, 1], true)), 1, "an underrun");
+        assert_eq!(
+            failing(&playing(&[0, 0], false)),
+            1,
+            "no line after the offer"
+        );
+        assert_eq!(failing(&playing(&[0], true)), 1, "no line before the save");
+        assert_eq!(failing(&playing(&[], true)), 3);
+        let mut no_offer = playing(&[0, 0], true);
+        no_offer.offered = false;
+        assert_eq!(failing(&no_offer), 1);
+        let mut memory = playing(&[0, 0], true);
+        memory.lines[1].stored = 2;
+        assert_eq!(failing(&memory), 1, "a lane from memory");
+        let mut failed = playing(&[0, 0], true);
+        failed.lines[0].failed_lanes = 1;
+        assert_eq!(failing(&failed), 1, "a failed lane");
+    }
+
     #[test]
     fn an_encode_line_gives_the_growth_and_the_file() {
         let line = "[12.0s] console.info: [INFO stemyla] separator: memory: encode mp3 saves/1792640000000-3.mp3: wasm 1179648 to 6291456 bytes, file 1438548 bytes";
@@ -788,11 +994,15 @@ mod tests {
     #[test]
     fn the_saves_folder_holds_only_the_offered_files() {
         let names = |n: &[&str]| json!(n);
-        let six = [
-            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3",
+        let seven = [
+            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3", "7-1.wav",
         ];
-        assert!(saves_folder_check(&names(&six)).0);
-        let mut left = six.to_vec();
+        assert!(saves_folder_check(&names(&seven)).0);
+        assert!(
+            !saves_folder_check(&names(&seven[..6])).0,
+            "no WAV of the save during playback"
+        );
+        let mut left = seven.to_vec();
         left.push("5-1.wav");
         assert!(!saves_folder_check(&names(&left)).0, "a WAV of an MP3 save");
         assert!(!saves_folder_check(&Value::Null).0);
@@ -803,7 +1013,7 @@ mod tests {
     #[test]
     fn an_extra_file_in_saves_fails_the_check() {
         let names = json!([
-            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3", "x.tmp"
+            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3", "7-1.wav", "x.tmp"
         ]);
         assert!(!saves_folder_check(&names).0);
     }
@@ -1028,7 +1238,7 @@ mod tests {
     /// save past its cap is.
     #[test]
     fn the_wait_follows_the_saves_progress() {
-        let stall = STALL_S as f64;
+        let stall = 120.0;
         let going: Vec<(f64, u64)> = (0..300).map(|i| (2.0 * i as f64, i as u64)).collect();
         assert_eq!(
             judge(&going[..200], 398.0, stall, 600.0),
@@ -1051,20 +1261,26 @@ mod tests {
         assert_eq!(judge(&[], 10.0, stall, 600.0), Wait::Going);
     }
 
+    /// The slowest saves on the maintainer's Mac with `--swiftshader`,
+    /// after D11 of M8, in seconds (see [`save_cap_s`]).
+    const SLOWEST_SAVE_S: [f64; 2] = [3.1, 28.7];
+
     #[test]
-    fn the_caps_leave_room_for_the_ci_speed() {
-        // On CI, a save took 34 s for each 60 s of audio.
-        let ci = |seconds: u32| f64::from(seconds) * 34.0 / 60.0;
-        assert_eq!(save_cap_s(60), 120);
-        assert_eq!(save_cap_s(600), 600);
-        for seconds in SECONDS {
+    fn the_caps_leave_room_for_the_slowest_save() {
+        assert_eq!(save_cap_s(60), 60);
+        assert_eq!(save_cap_s(600), 180);
+        for (seconds, slowest) in SECONDS.into_iter().zip(SLOWEST_SAVE_S) {
             assert!(
-                save_cap_s(seconds) as f64 >= 1.5 * ci(seconds),
+                save_cap_s(seconds) as f64 >= 6.0 * slowest,
                 "{seconds} s: a cap of {} s",
                 save_cap_s(seconds)
             );
         }
-        assert_eq!(caps_s(), 3 * (120 + 600));
+        assert!(
+            STALL_S < save_cap_s(600),
+            "a stall ends the long save first"
+        );
+        assert_eq!(caps_s(), 3 * (60 + 180));
     }
 
     #[test]
@@ -1072,18 +1288,22 @@ mod tests {
         let line = r#"[9.0s] console.log: e2e: offered {"name":"lloyd - mix.wav","size":44,"mime":"audio/wav","frames":181}"#;
         assert_eq!(offered_frames(line), Some(181));
         assert_eq!(offered_frames("e2e: offered {}"), None);
+        let timed = r#"e2e: offered {"name":"lloyd - mix.wav","size":44,"mime":"audio/wav","frames":12,"ms":2051}"#;
+        assert_eq!(offered_ms(timed), Some(2_051));
+        assert_eq!(offered_ms(line), None);
     }
 
     /// A save of 10 minutes stalls after `STALL_S` with no progress, well
     /// before its cap, and a save that goes on ends at its cap.
     #[test]
     fn a_save_wait_takes_its_stall_time_and_its_cap() {
-        let flat = [(0.0, 5), (60.0, 5), (120.0, 5)];
-        assert_eq!(save_wait(&flat, 120.0, 600), Wait::Stalled);
-        assert_eq!(save_wait(&flat, 119.0, 600), Wait::Going);
-        let going: Vec<(f64, u64)> = (0..301).map(|i| (2.0 * i as f64, i as u64)).collect();
-        assert_eq!(save_wait(&going, 600.0, 600), Wait::OverCap);
-        assert_eq!(save_wait(&going[..60], 119.0, 60), Wait::Going);
-        assert_eq!(save_wait(&going[..61], 120.0, 60), Wait::OverCap);
+        let flat = [(0.0, 5), (30.0, 5), (60.0, 5)];
+        assert_eq!(save_wait(&flat, 60.0, 600), Wait::Stalled);
+        assert_eq!(save_wait(&flat, 59.0, 600), Wait::Going);
+        let going: Vec<(f64, u64)> = (0..91).map(|i| (2.0 * i as f64, i as u64)).collect();
+        assert_eq!(save_wait(&going, 180.0, 600), Wait::OverCap);
+        assert_eq!(save_wait(&going[..90], 179.0, 600), Wait::Going);
+        assert_eq!(save_wait(&going[..30], 59.0, 60), Wait::Going);
+        assert_eq!(save_wait(&going[..31], 60.0, 60), Wait::OverCap);
     }
 }

@@ -1123,8 +1123,9 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
     for (format, frames, ended, status) in ends {
         assert!(ended, "{format:?}: the save ended");
         // Since M8 a save first opens its save file, which can take frames
-        // under load.  A save of the whole song reads 81 blocks, at least one
-        // frame each, so 40 frames still tell a stop from a full run.
+        // under load.  Since D11 of M8 the job runs in its own task, not one
+        // block a frame.  So the status tells a stop from a full run, and
+        // 40 frames bound the time to report the failure.
         assert!(
             frames <= 40,
             "{format:?}: it stops at the failure: {frames} frames"

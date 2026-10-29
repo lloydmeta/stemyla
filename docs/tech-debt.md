@@ -380,6 +380,14 @@ On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10
 
 * Fix: run engine's tests on wasm32, for example under `wasm-bindgen-test-runner` in `xtask web-test`.  Until then, no check covers this.
 
+### TD-62: the save during playback counts only a read-ahead that runs dry
+
+This entry concerns RT-1 and D11 of `plans/active/stream-from-storage-m8.md`.
+
+`e2e save` plays the 10-minute song during a WAV save, and fails on an underrun, as `e2e playback` counts them.  That count sees only a read-ahead buffer that runs dry.  The buffer holds seconds of audio, so a main thread that the save holds for less than that counts no underrun.  A late audio callback, which is heard as a click, is not counted.  `a_slice_ends_within_its_budget_and_one_block` bounds each slice of a save natively.
+
+* Fix: count the audio callbacks that start late, from the times of cpal's callbacks, in the `playback:` line, and make `e2e save` fail on one.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
@@ -487,14 +495,6 @@ Since M8, the page offers a save file as a `Blob` of its OPFS `File`, through an
 
 * Fix: M10's iPhone run of `plans/active/stream-from-storage.md` saves a stem in each format.  Until then, Safari and the iPhone are not checked.
 
-### TD-61: CI's browser tests take about 41 minutes
-
-This entry concerns the time of CI's `browser-tests` job, which runs on each change.
-
-In CI run 40788465048 (2026-10-28), the steps before `e2e save` took 19 minutes.  `e2e save` (M8) adds about 22 minutes there, so the job takes about 41.  A save advances one block of 16,384 frames in each UI frame of the page, and the runner draws the page in software.  So a save of 60 s of audio took 34 s there, against about 4 s on the maintainer's Mac (`plans/active/stream-from-storage-m8.md`, Surprises and discoveries).  The job's limit is 80 minutes, and the step's 55 (`STEP_LIMIT_S` in `xtask/src/e2e/save.rs`).
-
-* Fix: a save that reads the next block while it writes one, or that takes more than one block in a frame, which is the maintainer's choice.  Or a CI runner that draws with a GPU.
-
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
@@ -537,3 +537,4 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.
 * TD-56: closed by M7 of `plans/active/stream-from-storage.md` (D12 of `plans/active/stream-from-storage-m7.md`).  One counter gives a token to every open (a drop, a pick, a Storage open, the startup restore and Demo).  Only the newest open shows its song, and only `apply_inbox` makes a session current.  `a_late_drop_does_not_show_over_a_newer_song`, `a_late_drop_does_not_show_over_demo`, `two_opens_that_end_in_one_frame_show_the_newer` and `a_stale_restore_on_the_page_does_not_make_its_session_current` check it.
+* TD-61: closed by D11 of `plans/active/stream-from-storage-m8.md` (step 6).  A save runs in a task loop that reads the next block ahead, not one block in each UI frame.  On the maintainer's Mac with `--swiftshader` (CI's proxy), the 10-minute WAV save took 2.8 s, against 121 s before, and all of `e2e save` 122 s, against 491 s.  The `browser-tests` job's limit is 60 minutes again, and the `e2e save` step's 40.

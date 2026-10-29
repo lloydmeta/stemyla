@@ -90,6 +90,20 @@ impl LaneAudio {
             LaneAudio::Stored { file, .. } => Some(file),
         }
     }
+
+    /// The same audio, read through `store` if it is a stored lane.  A
+    /// save reads its lanes through a store of its own (D11 of the M8
+    /// plan).  It shares the samples or the file (MEM-1).
+    pub fn read_through(&self, store: &Rc<dyn LaneStore>) -> Self {
+        match self {
+            LaneAudio::Memory { .. } => self.clone(),
+            LaneAudio::Stored { file, overview, .. } => LaneAudio::Stored {
+                file: file.clone(),
+                overview: Rc::clone(overview),
+                store: Rc::clone(store),
+            },
+        }
+    }
 }
 
 /// The `frames` samples of `samples` from `at`, with silence past its end.
@@ -274,9 +288,11 @@ enum Part {
 }
 
 impl LaneReads {
-    /// Reads of `lanes`, lanes of a song of `frames` frames.  Panics if two
-    /// stored lanes have different stores.
-    fn new(lanes: Vec<LaneAudio>, frames: usize) -> Self {
+    /// Reads of `lanes`, lanes of a song of `frames` frames.  With
+    /// `ahead`, the stored lanes read ahead in blocks of that many frames
+    /// ([`BlockReader::reading_ahead`]).  Panics if two stored lanes have
+    /// different stores.
+    fn new(lanes: Vec<LaneAudio>, frames: usize, ahead: Option<usize>) -> Self {
         let mut files = Vec::new();
         let mut store: Option<Rc<dyn LaneStore>> = None;
         let parts = lanes
@@ -298,7 +314,10 @@ impl LaneReads {
                 }
             })
             .collect();
-        let reader = store.map(|store| BlockReader::new(store, files, frames));
+        let reader = store.map(|store| match ahead {
+            Some(block) => BlockReader::reading_ahead(store, files, frames, block),
+            None => BlockReader::new(store, files, frames),
+        });
         Self { parts, reader }
     }
 
@@ -354,6 +373,28 @@ impl LanesMix {
     /// The mix of `lanes`, of `frames` frames at `sample_rate`.  Panics if
     /// the recipe does not have one gain for each lane.
     pub fn new(lanes: &[LaneAudio], frames: usize, sample_rate: u32, recipe: &MixRecipe) -> Self {
+        Self::with_reads(lanes, frames, sample_rate, recipe, None)
+    }
+
+    /// The same mix, for a job that reads it in order, `block` frames at a
+    /// time: its stored lanes read ahead (D11 of the M8 plan).
+    pub fn reading_ahead(
+        lanes: &[LaneAudio],
+        frames: usize,
+        sample_rate: u32,
+        recipe: &MixRecipe,
+        block: usize,
+    ) -> Self {
+        Self::with_reads(lanes, frames, sample_rate, recipe, Some(block))
+    }
+
+    fn with_reads(
+        lanes: &[LaneAudio],
+        frames: usize,
+        sample_rate: u32,
+        recipe: &MixRecipe,
+        ahead: Option<usize>,
+    ) -> Self {
         assert_eq!(
             recipe.gains().len(),
             lanes.len(),
@@ -367,6 +408,7 @@ impl LanesMix {
             audible: LaneReads::new(
                 audible.into_iter().map(|i| lanes[i].clone()).collect(),
                 frames,
+                ahead,
             ),
         }
     }
@@ -415,7 +457,17 @@ impl LanePcm {
     /// The lane `lane`, of `frames` frames at `sample_rate`.
     pub fn new(lane: LaneAudio, frames: usize, sample_rate: u32) -> Self {
         Self {
-            lane: LaneReads::new(vec![lane], frames),
+            lane: LaneReads::new(vec![lane], frames, None),
+            frames,
+            sample_rate,
+        }
+    }
+
+    /// The same lane, for a job that reads it in order, `block` frames at
+    /// a time: a stored lane reads ahead (D11 of the M8 plan).
+    pub fn reading_ahead(lane: LaneAudio, frames: usize, sample_rate: u32, block: usize) -> Self {
+        Self {
+            lane: LaneReads::new(vec![lane], frames, Some(block)),
             frames,
             sample_rate,
         }

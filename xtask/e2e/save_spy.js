@@ -39,7 +39,8 @@
     const blob = blobs.get(this.href) || null;
     blobs.delete(this.href);
     const save = { name: this.download, size: blob ? blob.size : -1, mime: blob === null ? "" : blob.type,
-      frames: window.__e2e_frames - (window.__e2e_frames_at_start || 0) };
+      frames: window.__e2e_frames - (window.__e2e_frames_at_start || 0),
+      ms: Math.round(performance.now() - (window.__e2e_t_at_start || 0)) };
     window.__e2e_saves.push(save);
     // Only the last file is kept, for the checks; the page's own object
     // URL keeps it for 60 s anyway.
@@ -60,10 +61,15 @@
     gc();
     return performance.memory.usedJSHeapSize;
   };
+  // The start of a save, just before the click of its menu item: the
+  // offer gives the UI frames and the milliseconds since.
+  window.__e2e_mark = () => {
+    window.__e2e_frames_at_start = window.__e2e_frames;
+    window.__e2e_t_at_start = performance.now();
+  };
   // Reads the heap until `__e2e_stop_heap`, one reading after another,
   // and keeps the largest value.
   window.__e2e_start_heap = () => {
-    window.__e2e_frames_at_start = window.__e2e_frames;
     window.__e2e_heap_max = null;
     window.__e2e_heap_on = true;
     (async () => {
