@@ -1,6 +1,6 @@
 # 0021: saves go through browser storage, and an MP3 is encoded from 16 bits
 
-Status: proposed (2026-10-29, by the agent)
+Status: accepted (2026-10-29, by the maintainer)
 
 ## Context
 

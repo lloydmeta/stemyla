@@ -56,7 +56,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0018-f16-weights-on-the-gpu.md`: the GPU keeps the f16 weight matrices of an f16 model file as f16, and computes in f32.
 * `decisions/0019-a-decode-worker-crate.md`: a page-side worker crate that takes `engine` decodes a song in blocks into browser storage.
 * `decisions/0020-memory-path-limit-shares-lanes.md`: the memory path's limit shrinks with the lanes that the page holds in memory, and an open that decodes on the page keeps it (accepted).
-* `decisions/0021-saves-go-through-browser-storage.md`: every save writes a 16-bit WAV save file in browser storage, the worker encodes FLAC and MP3 from it into a save file of its own, and the page offers the file (proposed).
+* `decisions/0021-saves-go-through-browser-storage.md`: every save writes a 16-bit WAV save file in browser storage, the worker encodes FLAC and MP3 from it into a save file of its own, and the page offers the file (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
