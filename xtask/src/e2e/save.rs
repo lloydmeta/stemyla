@@ -12,12 +12,13 @@
 //! `--enable-precise-memory-info` and `--js-flags=--expose-gc`, so
 //! `performance.memory.usedJSHeapSize` reads V8's used heap and the backing
 //! stores of `ArrayBuffer`s at each call.  An injected script
-//! (`xtask/e2e/save_spy.js`) reads the value before the save, at each of
-//! the first 4 writes of the page to browser storage, and once at its end.
-//! So the saves of 1 and of 10 minutes take the same readings at the same
-//! points (review round speed 4 of M8).  Each reading collects garbage and
-//! waits for wasm-bindgen's finalizers first.  The measure is the largest
-//! value less the value before.  The end of a save is the
+//! (`xtask/e2e/save_spy.js`) reads the value before the save, at each
+//! write of the page to browser storage, and once at its end, so it sees
+//! the whole save (review round speed 5 of M8).  Each reading collects
+//! garbage and waits for wasm-bindgen's finalizers first.  The measure is
+//! the largest value less the value before.  Each save's measure must be
+//! within [`heap_budget`], and the 10-minute save's at most
+//! [`PAGE_BOUND_MB`] above the 1-minute save's.  The end of a save is the
 //! click of its download link, which the script keeps instead of downloading:
 //! every build makes it.  A calibration comes first: a 64 MiB `Uint8Array`
 //! must raise the measure by at least 60 MiB.
@@ -84,8 +85,9 @@ pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
 /// run can take (finding 3-1 of review round 3 of M8).  So a run that
 /// waits in vain still ends on a check of its own.  A step that CI stops
 /// writes no `save.log`, but each note of the run also goes to the step's
-/// output.  Since review round speed 3 of M8, a run takes about 2.5
-/// minutes on the maintainer's Mac, in Chrome and with `--swiftshader`.
+/// output.  Since review round speed 4 of M8, a run takes about 3 minutes
+/// on the maintainer's Mac (174 to 176 s), in Chrome and with
+/// `--swiftshader`, and 3.3 minutes on CI (run 40894815433).
 pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
 /// The longest that a save of `seconds` of audio may take from its click to its
 /// offer, in seconds: 6 times or more the slowest save of its length on the
@@ -157,8 +159,8 @@ pub(super) const SLICE_LIMIT_MS: f64 = 35.0;
 pub(super) const LONG_FRAME_MS: f64 = 125.0;
 /// The longest that the save during playback may take, from its click to
 /// its offer, in milliseconds.  It is about twice the time of the save on
-/// the maintainer's Mac with [`LONG_FRAME_MS`] (56.3 and 56.9 s), and of
-/// the estimate for CI (review round speed 4 of M8).
+/// the maintainer's Mac with [`LONG_FRAME_MS`] (56.25 s), and of the
+/// estimate for CI (review round speed 4 of M8).
 pub(super) const PLAYING_SAVE_MS: u64 = 120_000;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
@@ -367,13 +369,22 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
         checks.push(slice_check(&what, save.slice_ms));
         checks.push(read_end_check(&what, save.read_end_ms));
     }
-    for (format, _) in FORMATS {
-        let readings = |seconds| find(saves, format, seconds).and_then(|s| s.readings);
-        let (short, long) = (readings(SECONDS[0]), readings(SECONDS[1]));
+    for save in saves {
+        let what = format!("{}, {} s", save.format, save.seconds);
+        let least = full_writes(save.seconds) + 2;
         checks.push((
-            short.is_some_and(|r| r >= 2) && short == long,
+            save.readings.is_some_and(|r| r >= least),
             format!(
-                "{format}: the 1-minute and the 10-minute saves take the same JS heap readings, 2 or more ({short:?} and {long:?})"
+                "{what}: the JS heap is read at each write and at the end, {least} times or more ({:?})",
+                save.readings
+            ),
+        ));
+        checks.push((
+            save.heap.is_some_and(|h| h <= heap_budget()),
+            format!(
+                "{what}: the JS heap measure is at most {:.2} MB, the save's arrays and a margin ({:?} MB)",
+                heap_budget() / MB,
+                save.heap.map(|h| h / MB)
             ),
         ));
     }
@@ -685,6 +696,22 @@ pub(super) struct Playing {
     /// The mean time of the animation frames from Play to Pause, in
     /// milliseconds.
     pub frame_ms: Option<f64>,
+    /// The share of the long frames whose hold went past the rest of
+    /// [`LONG_FRAME_MS`] by over 5 ms.
+    pub over_share: Option<f64>,
+}
+
+/// The largest share of the long frames whose hold may go past the rest of
+/// [`LONG_FRAME_MS`] by over 5 ms.  The system can stop the page in a hold
+/// on a loaded machine.  A spy that holds on top of the page's own frame
+/// goes past in each frame (finding 5-2 of review round speed 5 of M8).
+pub(super) const OVER_SHARE: f64 = 0.1;
+
+/// The share of the long frames whose hold went past the rest, from
+/// `__e2e_long_frames`.
+pub(super) fn over_share(frames: &Value) -> Option<f64> {
+    let count = frames["count"].as_f64().filter(|&c| c > 0.0)?;
+    Some(frames["over"].as_f64()? / count)
 }
 
 /// The mean time of the long frames, from `__e2e_long_frames`.
@@ -727,12 +754,13 @@ pub(super) fn playing_checks(playing: &Playing) -> Vec<(bool, String)> {
         (
             playing
                 .frame_ms
-                .is_some_and(|ms| (0.95 * LONG_FRAME_MS..=1.6 * LONG_FRAME_MS).contains(&ms)),
+                .is_some_and(|ms| ms >= 0.95 * LONG_FRAME_MS)
+                && playing.over_share.is_some_and(|share| share <= OVER_SHARE),
             format!(
-                "wav, 600 s, during playback: the animation frames take {} to {} ms on average ({:?} ms)",
+                "wav, 600 s, during playback: the animation frames take {} ms or more on average ({:?} ms), and at most {OVER_SHARE} of them hold past the rest of {LONG_FRAME_MS} ms ({:?})",
                 0.95 * LONG_FRAME_MS,
-                1.6 * LONG_FRAME_MS,
-                playing.frame_ms
+                playing.frame_ms,
+                playing.over_share
             ),
         ),
         (
@@ -775,6 +803,31 @@ pub(super) fn slice_check(what: &str, slice_ms: Option<f64>) -> (bool, String) {
             "{what}: the save's longest slice is at most {SLICE_LIMIT_MS} ms ({slice_ms:?} ms)"
         ),
     )
+}
+
+/// The bytes of each write of a save file but the last, as the page writes
+/// them: `app::export::SAVE_WRITE_BYTES` (a test keeps the two equal).
+pub(super) const SAVE_WRITE_BYTES: u64 = 2 << 20;
+/// The full writes of a save of `seconds` of audio: its 16-bit WAV in
+/// blocks of [`SAVE_WRITE_BYTES`].
+pub(super) fn full_writes(seconds: u32) -> u64 {
+    (44 + 4 * 44_100 * u64::from(seconds)) / SAVE_WRITE_BYTES
+}
+
+/// The bytes of the reads in flight of a save in `e2e save`: 2 reads of
+/// 65,536 frames (`app::lane_store::SAVE_AHEAD`) of 3 lanes of 16-bit WAV
+/// files, 4 bytes a frame.
+pub(super) const READS_IN_FLIGHT_BYTES: u64 = 2 * 65_536 * 4 * 3;
+/// The margin of [`heap_budget`] for the rest of the page's JS objects
+/// during a save, in bytes.
+pub(super) const HEAP_MARGIN_BYTES: u64 = 2_000_000;
+
+/// D10: the most that a save's JS heap measure may be, in bytes, whatever
+/// the song's length (finding 5-1 of review round speed 5 of M8).  These
+/// are the write's array, the browser's copy of the write in flight, the
+/// reads in flight and a margin.
+pub(super) fn heap_budget() -> f64 {
+    (2 * SAVE_WRITE_BYTES + READS_IN_FLIGHT_BYTES + HEAP_MARGIN_BYTES) as f64
 }
 
 /// The blocks of 16,384 frames that a save of `seconds` of audio reads.
@@ -909,19 +962,54 @@ pub(super) fn run(o: &Opts) -> Result<()> {
 /// The decode worker's line at the end of an `overviews` request.
 const OVERVIEWS_END: &str = "at the end of the overviews request";
 
-/// Makes the session of `seconds` current and reloads, until the song shows
-/// with its stems.
+/// Makes the session of `seconds` current and reloads, until the page
+/// shows the song with its stems, and its session is current.  The page
+/// writes `sessions/current` itself, in a task of its own, after it shows a
+/// song.  So the restore waits for the end of that write: else the page's
+/// late write can follow the next restore's, and that restore shows the
+/// session before (review round speed 5 of M8).
 fn restore(p: &mut Page, seconds: u32) -> Result<()> {
-    in_page(p, MAKE_CURRENT, json!([session_id(seconds)]), SCRIPT_WAIT_S)?;
+    let id = session_id(seconds);
+    in_page(p, MAKE_CURRENT, json!([id]), SCRIPT_WAIT_S)?;
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, RESTORE_WAIT_S, |l| {
-        l.contains("and its separated stems from this browser")
-    })?;
-    if restored.is_none() {
-        bail!("{seconds} s: the song did not restore within {RESTORE_WAIT_S} s");
+    let current = p.wait_for(from, RESTORE_WAIT_S, |l| current_session(l).is_some())?;
+    let shown = current.as_deref().and_then(current_session);
+    let restored = p.log[from..]
+        .iter()
+        .any(|l| l.contains("and its separated stems from this browser"));
+    restore_check(seconds, &id, restored, shown).map_err(anyhow::Error::msg)
+}
+
+/// The session in a page's line `store: session <id> is current`.
+pub(super) fn current_session(line: &str) -> Option<&str> {
+    let rest = &line[line.find("store: session ")? + "store: session ".len()..];
+    rest.strip_suffix(" is current")
+        .filter(|id| !id.is_empty() && !id.contains(' '))
+}
+
+/// The check of a restore of the session `id` of `seconds`: the song
+/// restored with its stems, and the session made current is `id`.  The
+/// run of 2026-10-29 that saved the 10-minute session for the 1-minute one
+/// fails it.
+pub(super) fn restore_check(
+    seconds: u32,
+    id: &str,
+    restored: bool,
+    shown: Option<&str>,
+) -> std::result::Result<(), String> {
+    match shown {
+        None => Err(format!(
+            "{seconds} s: no session became current within {RESTORE_WAIT_S} s"
+        )),
+        Some(shown) if shown != id => Err(format!(
+            "{seconds} s: the restore showed session {shown}, not {id}"
+        )),
+        Some(_) if !restored => Err(format!(
+            "{seconds} s: session {id} is current, but the song did not restore with its stems"
+        )),
+        Some(_) => Ok(()),
     }
-    Ok(())
 }
 
 /// The page's WebAssembly memory, in bytes.
@@ -958,8 +1046,8 @@ pub(super) fn growth(before: Option<f64>, after: Option<f64>) -> Option<f64> {
 
 /// Clicks the mix lane's Save and the menu's item at `row`, and waits for
 /// the offer of the save of `format` and `seconds`: its line.  With
-/// `heap`, the JS heap readings start just before the item's click, so
-/// even a save of less than a second gets some.  With `throttle`, the
+/// `heap`, the JS heap readings start just before the item's click, and
+/// come at each write.  With `throttle`, the
 /// animation frames come about 4 a second until the offer.
 fn click_save(
     p: &mut Page,
@@ -1068,6 +1156,7 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         SCRIPT_WAIT_S,
     )?;
     let frame_ms = mean_frame_ms(&frames);
+    let over_share = over_share(&frames);
     p.note(&format!(
         "save: wav, 600 s, during playback: animation frames of {frame_ms:?} ms on average ({frames})"
     ));
@@ -1091,6 +1180,7 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         read_end_ms: read_end_of(&p.log[mark..]),
         ms: offered_ms(&offered),
         frame_ms,
+        over_share,
     })
 }
 
@@ -1109,7 +1199,7 @@ mod tests {
             frames: Some(160),
             slice_ms: Some(6.0),
             read_end_ms: Some(2.0),
-            readings: Some(5),
+            readings: Some(full_writes(seconds) + 2),
         }
     }
 
@@ -1143,8 +1233,10 @@ mod tests {
         base[1].heap = Some(97.0 * MB);
         base[3].heap = Some(191.0 * MB);
         let failed = failing(&base);
-        assert_eq!(failed.len(), 2, "{failed:?}");
+        assert_eq!(failed.len(), 4, "{failed:?}");
         assert!(failed[0].starts_with("wav:") && failed[1].starts_with("flac:"));
+        assert!(failed[2].starts_with("wav, 600 s: the JS heap measure is at most"));
+        assert!(failed[3].starts_with("flac, 600 s: the JS heap measure is at most"));
         let mut flac = good();
         flac[3].worker = Some((65_536.0 + 1_048_577.0, 5e7));
         assert_eq!(failing(&flac).len(), 1);
@@ -1195,6 +1287,7 @@ mod tests {
             read_end_ms: Some(2.0),
             ms: Some(29_000),
             frame_ms: Some(130.0),
+            over_share: Some(0.0),
         }
     }
 
@@ -1229,10 +1322,24 @@ mod tests {
         assert_eq!(failing(&slow), 1, "a slow save");
         slow.ms = None;
         assert_eq!(failing(&slow), 1, "no time");
-        // Review round speed 4: frames of about `LONG_FRAME_MS`, not twice.
+        // Review rounds speed 4 and 5: frames of `LONG_FRAME_MS` or more,
+        // with no hold on top of the page's own frame.
         let mut frames = playing(&[0, 0], true);
-        frames.frame_ms = Some(250.0);
-        assert_eq!(failing(&frames), 1, "frames of 250 ms");
+        frames.frame_ms = Some(190.0);
+        frames.over_share = Some(1.0);
+        assert_eq!(failing(&frames), 1, "the old spy: 125 ms on a paint of 65");
+        frames.frame_ms = Some(274.0);
+        frames.over_share = Some(0.0);
+        assert_eq!(failing(&frames), 0, "a slow paint, and no hold");
+        frames.over_share = Some(OVER_SHARE);
+        assert_eq!(failing(&frames), 0, "the most frames past");
+        frames.over_share = Some(OVER_SHARE + 0.01);
+        assert_eq!(failing(&frames), 1, "too many frames past");
+        frames.over_share = None;
+        assert_eq!(failing(&frames), 1, "no share read");
+        frames.over_share = Some(0.0);
+        assert_eq!(over_share(&json!({"count": 200, "over": 3})), Some(0.015));
+        assert_eq!(over_share(&json!({"count": 0, "over": 0})), None);
         frames.frame_ms = Some(118.0);
         assert_eq!(failing(&frames), 1, "frames of 118 ms");
         frames.frame_ms = Some(119.0);
@@ -1301,16 +1408,20 @@ mod tests {
                 .count(),
             1
         );
-        // Finding 4-10: the same readings in both saves of a format.
+        // Finding 5-1: a reading at each write, and a budget for each save.
         let mut fewer = good();
-        fewer[4].readings = Some(4);
+        fewer[4].readings = Some(full_writes(60) + 1);
         let failed = self::failing(&fewer);
         assert_eq!(failed.len(), 1, "{failed:?}");
-        assert!(failed[0].starts_with("mp3: the 1-minute and the 10-minute saves take the same"));
-        let mut one = good();
-        one[0].readings = Some(1);
-        one[1].readings = Some(1);
-        assert_eq!(self::failing(&one).len(), 1, "one reading is too few");
+        assert!(failed[0].starts_with("mp3, 60 s: the JS heap is read at each write"));
+        let mut big = good();
+        big[2].heap = Some(heap_budget() - MB);
+        big[3].heap = Some(heap_budget() + 1.0);
+        let failed = self::failing(&big);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].starts_with("flac, 600 s: the JS heap measure is at most"));
+        big[3].heap = Some(heap_budget());
+        assert!(self::failing(&big).is_empty(), "at the budget");
         // Nit 3-9 of review round speed 3: the first save's line.
         let log: Vec<String> = [
             "[1.0s] click the wav item at (100, 168)",
@@ -1464,6 +1575,53 @@ mod tests {
         assert!(failing(&edge).is_empty());
         edge[5].worker = Some((4.0 * 1.44e7 + ONE_MIB + 1.0, 1.44e7));
         assert_eq!(failing(&edge).len(), 1);
+    }
+
+    /// Finding 5-1 of review round speed 5 of M8: the budget of a save's JS
+    /// heap, and the writes of a save, from the page's write size.
+    #[test]
+    fn the_heap_budget_holds_the_saves_arrays_and_a_margin() {
+        assert_eq!(full_writes(60), 5);
+        assert_eq!(full_writes(600), 50);
+        assert_eq!(READS_IN_FLIGHT_BYTES, 1_572_864);
+        assert_eq!(heap_budget(), 7_767_168.0);
+        let export = include_str!("../../../app/src/export.rs");
+        assert!(
+            export.contains("pub const SAVE_WRITE_BYTES: usize = 2 << 20;"),
+            "the page writes blocks of {SAVE_WRITE_BYTES} bytes"
+        );
+        assert_eq!(SAVE_WRITE_BYTES, 2 << 20);
+    }
+
+    /// Review round speed 5 of M8: a restore must show its own session.
+    /// In a run under load, the page of the 10-minute session wrote
+    /// `sessions/current` after the next restore had, so the restore of the
+    /// 1-minute session showed the 10-minute one, and its save saved that.
+    #[test]
+    fn a_restore_must_show_its_own_session() {
+        let line = "[21.5s] console.info: [app] app/src/lib.rs:4129: store: session 1792640100600 is current";
+        assert_eq!(current_session(line), Some("1792640100600"));
+        assert_eq!(
+            current_session("store: session 1792640100060 is current"),
+            Some("1792640100060")
+        );
+        assert_eq!(
+            current_session("song kept in browser storage as session 1"),
+            None
+        );
+        assert_eq!(current_session("store: session  is current"), None);
+        let (short, long) = (session_id(60), session_id(600));
+        assert_eq!(restore_check(60, &short, true, Some(&short)), Ok(()));
+        let wrong = restore_check(60, &short, true, Some(&long)).unwrap_err();
+        assert!(
+            wrong.contains(&format!("showed session {long}, not {short}")),
+            "{wrong}"
+        );
+        assert!(restore_check(60, &short, true, None).is_err(), "no session");
+        assert!(
+            restore_check(60, &short, false, Some(&short)).is_err(),
+            "no stems"
+        );
     }
 
     #[test]

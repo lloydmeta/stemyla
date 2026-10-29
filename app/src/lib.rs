@@ -4127,6 +4127,13 @@ impl StemApp {
                     if let Some(id) = self.session.clone() {
                         wasm_bindgen_futures::spawn_local(async move {
                             let current = store::make_current(&id).await;
+                            if current {
+                                // `e2e save` waits for this line: the shown
+                                // session, and a write of `sessions/current`
+                                // that no longer runs (review round speed 5
+                                // of M8).
+                                log::info!("store: session {id} is current");
+                            }
                             if new_session && current {
                                 log::info!("song kept in browser storage as session {id}");
                             }

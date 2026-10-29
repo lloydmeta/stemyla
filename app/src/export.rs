@@ -48,7 +48,7 @@ pub const SAVE_WRITE_BYTES: usize = 2 << 20;
 /// The bytes of a 16-bit WAV in blocks of one size, for a sink that writes
 /// them to browser storage (D3 of M8).  It takes the job's blocks, and
 /// gives each full block, then the last short block.  The WAV's header
-/// comes first.  It holds at most one full block, two job blocks and the
+/// comes first.  It holds at most one full block, one job block and the
 /// header ([`WavBlocks::most_bytes`]), and reserves that once.
 pub struct WavBlocks {
     size: usize,
@@ -64,13 +64,13 @@ impl WavBlocks {
         Self { size, pending }
     }
 
-    /// The most bytes that the blocks of `size` hold: a full block that
-    /// waits for the write in flight, the job block that the write's end
-    /// lets in, one more job block, and the header (review round speed 4
-    /// of M8).  The job blocks do not fill a block of `size` exactly,
-    /// because the header comes first.
+    /// The most bytes that the blocks of `size` hold (review rounds speed 4
+    /// and 5 of M8): a full block that waits for the write in flight, the
+    /// job block that the write's end lets in before the next write takes
+    /// the full block, and the header, because the job blocks do not fill a
+    /// block of `size` exactly.
     pub fn most_bytes(size: usize) -> usize {
-        size + 2 * BLOCK * engine::wav::FRAME_BYTES + engine::wav::HEADER_BYTES
+        size + BLOCK * engine::wav::FRAME_BYTES + engine::wav::HEADER_BYTES
     }
 
     /// Adds the 16-bit samples of one block of the job.
@@ -1480,6 +1480,13 @@ mod tests {
         let mut blocks = WavBlocks::new(200 * BLOCK, 44_100, SAVE_WRITE_BYTES);
         let reserve = blocks.pending.capacity();
         assert_eq!(reserve, WavBlocks::most_bytes(SAVE_WRITE_BYTES));
+        // Mutants 5-17 and 5-21 of review round speed 5: the value itself.
+        assert_eq!(
+            reserve,
+            2_097_152 + 65_536 + 44,
+            "2 MiB, a job block, the header"
+        );
+        let mut peak = 0;
         for write in 0..5 {
             // A write is in flight: the job mixes until a full block waits.
             while blocks.takes_more(true) {
@@ -1488,9 +1495,11 @@ mod tests {
             // The write ends: one job block, then the next write.
             assert!(blocks.takes_more(false));
             blocks.push(&block, &block);
+            peak = peak.max(blocks.pending.len());
             blocks.take_full();
             assert_eq!(blocks.pending.capacity(), reserve, "write {write}");
         }
+        assert_eq!(peak, reserve, "the reserve is the peak");
     }
 
     #[test]

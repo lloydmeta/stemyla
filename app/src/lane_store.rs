@@ -407,8 +407,9 @@ impl Ahead {
 /// A read of browser storage ends only in a later task.  When each frame
 /// of the page holds the main thread for long, as a paint in software
 /// does on CI (about 125 ms in CI run 40838459678), a read ends about two
-/// frames after it starts, whatever its size up to 2 MiB.  So the frames
-/// in flight, not the reads, set the speed of a save.
+/// frames after it starts, whatever its size up to 2 MiB.  So the song
+/// frames in flight (the span times the depth), not the count of reads,
+/// set the speed of a save.
 pub const SAVE_AHEAD: Ahead = Ahead {
     span: 65_536,
     depth: SAVE_DEPTH,

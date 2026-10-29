@@ -1809,16 +1809,27 @@ pub async fn usable_mix_frames(id: &str, meta: &Meta) -> Option<usize> {
 
 /// Makes session `id` the one that a reload restores.  It returns whether
 /// it wrote `sessions/current` (finding 4-2 of review round 4 of M5).
+/// When a later request came while its write ran, it writes that one
+/// again, and gives `false`: the last request wins (`LastCurrent`).
 pub async fn make_current(id: &str) -> bool {
-    let written = write(&format!("{ROOT}/current"), id.as_bytes()).await;
-    if written.is_err() {
-        log::warn!("could not mark session {id} as current");
-    }
-    #[cfg(test)]
-    if written.is_ok() {
-        MADE_CURRENT.with_borrow_mut(|made| *made = Some(id.to_string()));
-    }
-    written.is_ok()
+    let last = LAST_CURRENT.with(std::rc::Rc::clone);
+    last.make(id, |wanted: String| async move {
+        let written = write(&format!("{ROOT}/current"), wanted.as_bytes()).await;
+        if written.is_err() {
+            log::warn!("could not mark session {wanted} as current");
+        }
+        #[cfg(test)]
+        if written.is_ok() {
+            MADE_CURRENT.with_borrow_mut(|made| *made = Some(wanted.clone()));
+        }
+        written.is_ok()
+    })
+    .await
+}
+
+thread_local! {
+    /// The last session asked to be current (`make_current`).
+    static LAST_CURRENT: std::rc::Rc<crate::store_meta::LastCurrent> = std::rc::Rc::default();
 }
 
 #[cfg(test)]

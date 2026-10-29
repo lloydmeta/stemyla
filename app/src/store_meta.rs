@@ -336,9 +336,106 @@ fn clean(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
 
+/// The last session asked to be current, for the writes of
+/// `sessions/current` (`store::make_current`).  Each write is a task of its
+/// own, and two writes of one page can end out of order: a restore of A,
+/// then an open of B whose write ends first.  So each request writes, then
+/// writes the last request again while another came meanwhile.  The last
+/// request wins (review round speed 5 of M8).
+#[derive(Default)]
+pub struct LastCurrent {
+    wanted: std::cell::RefCell<Option<String>>,
+}
+
+impl LastCurrent {
+    /// Asks for `id` to be current, and writes with `write`, which gives
+    /// whether the write ended well.  It gives whether `id` is the last
+    /// request and its write ended well: a request that a later one
+    /// replaced gives `false`, after it wrote the later one again.
+    pub async fn make<F, W>(&self, id: &str, write: W) -> bool
+    where
+        W: Fn(String) -> F,
+        F: std::future::Future<Output = bool>,
+    {
+        *self.wanted.borrow_mut() = Some(id.to_string());
+        loop {
+            let Some(wanted) = self.wanted.borrow().clone() else {
+                return false;
+            };
+            if !write(wanted.clone()).await {
+                return false;
+            }
+            if self.wanted.borrow().as_deref() == Some(wanted.as_str()) {
+                return wanted == id;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write of `sessions/current` in a test: it ends when the test lets
+    /// it, and then the file holds its session.
+    struct Write {
+        id: String,
+        go: std::rc::Rc<std::cell::Cell<bool>>,
+        file: std::rc::Rc<std::cell::RefCell<String>>,
+    }
+
+    impl std::future::Future for Write {
+        type Output = bool;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<bool> {
+            if !self.go.get() {
+                return std::task::Poll::Pending;
+            }
+            *self.file.borrow_mut() = self.id.clone();
+            std::task::Poll::Ready(true)
+        }
+    }
+
+    /// Review round speed 5 of M8: the writes of `sessions/current` of a
+    /// restore of A and an open of B end out of order, B first.  The file
+    /// names B, the last request, as with no write of A after it.
+    #[test]
+    fn the_last_session_asked_stays_current() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use std::task::{Context, Waker};
+        let file = Rc::new(RefCell::new(String::new()));
+        // One gate for each write, in the order they start.
+        let gates: Rc<RefCell<Vec<Rc<Cell<bool>>>>> = Rc::default();
+        let write = |id: String| {
+            let go = Rc::new(Cell::new(false));
+            gates.borrow_mut().push(Rc::clone(&go));
+            Write {
+                id,
+                go,
+                file: Rc::clone(&file),
+            }
+        };
+        let last = LastCurrent::default();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut a = Box::pin(last.make("acme-a", write));
+        let mut b = Box::pin(last.make("acme-b", write));
+        assert!(a.as_mut().poll(&mut cx).is_pending());
+        assert!(b.as_mut().poll(&mut cx).is_pending());
+        // B's write ends first, then A's.
+        gates.borrow()[1].set(true);
+        assert_eq!(b.as_mut().poll(&mut cx), std::task::Poll::Ready(true));
+        gates.borrow()[0].set(true);
+        assert!(a.as_mut().poll(&mut cx).is_pending(), "A writes B again");
+        assert_eq!(*file.borrow(), "acme-a", "A's late write landed");
+        gates.borrow()[2].set(true);
+        assert_eq!(a.as_mut().poll(&mut cx), std::task::Poll::Ready(false));
+        assert_eq!(*file.borrow(), "acme-b", "the last request wins");
+        assert_eq!(gates.borrow().len(), 3);
+    }
 
     /// D7 of the M7 plan: the `stems-generation` and `stem-overviews` lines
     /// read back, and the overviews are complete only for the stems of

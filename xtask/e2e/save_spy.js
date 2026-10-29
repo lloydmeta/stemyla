@@ -25,11 +25,11 @@
   // hold is the page's own paint and tasks.  So a runner that paints in
   // software does not get frames of twice the time.  `__e2e_long_frames`
   // keeps the count and the sum of the times between the starts of those
-  // frames.
+  // frames, and the frames whose hold went past the rest of the time.
   window.__e2e_frames = 0;
   window.__e2e_throttle = false;
   window.__e2e_long_frame_ms = 0;
-  window.__e2e_long_frames = { count: 0, ms: 0 };
+  window.__e2e_long_frames = { count: 0, ms: 0, over: 0 };
   let last_start = null;
   let last_hold = 0;
   const real_raf = window.requestAnimationFrame.bind(window);
@@ -43,8 +43,14 @@
         while (performance.now() - start < long - own) {}
         last_hold = performance.now() - start;
         if (last_start !== null) {
-          window.__e2e_long_frames.count++;
-          window.__e2e_long_frames.ms += start - last_start;
+          const frames = window.__e2e_long_frames;
+          frames.count++;
+          frames.ms += start - last_start;
+          // A hold past the rest of `long` by over 5 ms: in a few frames
+          // when the system stops the page, in each frame when the spy
+          // holds on top of the page's own frame (finding 5-2 of review
+          // round speed 5 of M8).
+          if (last_hold - Math.max(0, long - own) > 5) frames.over++;
         }
         last_start = start;
       } else {
@@ -61,14 +67,12 @@
     const real_write = FileSystemWritableFileStream.prototype.write;
     FileSystemWritableFileStream.prototype.write = function (data) {
       window.__e2e_writes++;
-      // A heap reading that starts at each of the first writes of the page
-      // while a save is measured (`HEAP_WRITES`), so the saves of 1 and of
-      // 10 minutes take the same readings at the same points (finding 4-10
-      // of review round speed 4 of M8).  It waits for wasm-bindgen's
-      // finalizers as every reading does, so it counts no garbage; the save
-      // goes on meanwhile.
-      if (window.__e2e_heap_on && window.__e2e_heap_writes < HEAP_WRITES) {
-        window.__e2e_heap_writes++;
+      // A heap reading that starts at each write of the page while a save
+      // is measured, so the measure sees the whole save (findings 4-10 and
+      // 5-1 of review rounds speed 4 and 5 of M8).  It waits for
+      // wasm-bindgen's finalizers as every reading does, so it counts no
+      // garbage; the save goes on meanwhile.
+      if (window.__e2e_heap_on) {
         window.__e2e_heap_pending.push(window.__e2e_heap().then(window.__e2e_keep));
       }
       return real_write.call(this, data);
@@ -159,15 +163,12 @@
     window.__e2e_t_at_start = performance.now();
     window.__e2e_t_offer = null;
   };
-  // Starts the readings of a save: one at each of its first
-  // `HEAP_WRITES` writes, and one at `__e2e_stop_heap`, which waits for
-  // them all and gives the largest value.  `__e2e_heap_readings` counts
-  // the readings.  A save of 1 minute writes 5 full blocks of 2 MiB.
-  const HEAP_WRITES = 4;
+  // Starts the readings of a save: one at each of its writes, and one at
+  // `__e2e_stop_heap`, which waits for them all and gives the largest
+  // value.  `__e2e_heap_readings` counts the readings.
   window.__e2e_heap_readings = 0;
   window.__e2e_start_heap = () => {
     window.__e2e_heap_max = null;
-    window.__e2e_heap_writes = 0;
     window.__e2e_heap_pending = [];
     window.__e2e_heap_readings = 0;
     window.__e2e_heap_on = true;
