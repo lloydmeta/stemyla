@@ -157,6 +157,21 @@ Each commit leaves the docs true (DOC-1).  Write each test first and see it fail
 
 Each step fixes the docs it makes wrong (DOC-1).  This step reads `docs/ARCHITECTURE.md`, `docs/invariants.md`, `docs/tech-debt.md`, `README.md` and the module docs again against the code at the end, and fixes what is left.  The rules' text in `docs/invariants.md` does not change.  `cargo run -p xtask -- docs-check`.  Commit, if anything changed.
 
+### Step 6: a save that does not wait for the UI frame (D11)
+
+The maintainer found 41 minutes for CI's `browser-tests` job too long.  The orchestrator decided to fix the cause, not the test (2026-10-29).
+
+* Measure first, on this Mac, in Chrome and with `--swiftshader`: the 10-minute WAV save of `e2e save`, in UI frames and seconds.
+* Make D11 (below): a save's job runs in a task loop that reads ahead, not one block per UI frame.
+* Tests:
+  * A native test of the driver's decisions, with a fake store whose reads complete later: a save ends with no UI frame, and no slice runs longer than its budget plus one block of work.
+  * A browser test, or a check in `e2e save`, that plays the song during the 10-minute WAV save and counts underruns as `e2e playback` does.  The save must add no underrun.
+  * The bound of the reads in flight: the WebAssembly heap of a 10-minute save is not above that of a 1-minute save by more than the bound (the JS heap check of `e2e save` stays).
+  * MEM-5 spies and RT-1 tests stay green.
+* Measure again: the same save in frames and seconds, in Chrome and with `--swiftshader`, and the time of all of `e2e save` with `--swiftshader` (CI's proxy).  Give the estimate for a 30-minute save on the iPhone.
+* Set the waits of `e2e save` from the new times.  Set the step's `timeout-minutes` from `WAITS_S`, and the job's back to 60.  Close TD-61, or shrink it to what is left.  The goal is `e2e save` in 5 minutes or less on CI, with the 10-minute case kept.
+* Docs in the same commit: `docs/ARCHITECTURE.md` (saving), the Decision log, TD-61, ci.yml comments.
+
 ## Validation and acceptance
 
 The parent's M8 acceptance, with the commands that show it:
@@ -246,6 +261,12 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
 * 2026-10-29, implementer, review round 3: the `e2e save` step's limit is 40 minutes, not 10.  Its waits cannot all fit in 10 minutes with room for a slow 10-minute save.  The limit is what the waits can take in all, so a run that waits in vain ends on its own check.  A normal run takes about 3 minutes.  The job keeps its 60 minutes: the other steps take about 15.  (Replaced on 2026-10-29 by the orchestrator's decision in the Decision log: `e2e save` stays in CI.)
   * `a_save_whose_read_fails_says_so_and_makes_no_file` failed once in the full `web-test`: a WAV save stopped after 18 frames, over its bound of 10.  Since M8 the save opens its save file before its first read, which takes frames under load.  The bound is now 40 frames.  A save of the whole 30 s song reads 81 blocks, at least one frame each, so the bound still tells a stop from a full run.
 * 2026-10-29, orchestrator (recorded by the implementer): `e2e save` stays in CI's `browser-tests` job.  Its CI run is the only check of the save path in a browser with no GPU.  It takes about 22 minutes there, because a save advances one block a frame and the runner draws in software (TD-61).  Its step limit is 55 minutes, and the job's 80.  This decision replaces the rule that `e2e save` runs in CI only in under 5 minutes, and the entry that the job keeps its 60 minutes.
+
+* 2026-10-29, team leader, at the orchestrator's request (step 6): D11, a save that does not wait for the UI frame.  Today the job reads one block, waits for the read, and goes on only in the next UI frame, so a save's speed is the frame rate (TD-61): a 30-minute save needs about 5,300 frames, about 88 s at 60 fps on the iPhone, and about 22 minutes of CI.  D11:
+  * The save's job runs in a task loop (`spawn_local`), not in `step_save`.  Each slice runs the job for at most `SAVE_MS` (4 ms), then yields to the event loop with a macrotask (`setTimeout(0)` or the like), so the audio callback and the UI run between slices (RT-1 is not concerned: the callback path does not change).  When the job waits for a read or a write, the loop awaits that read's or write's completion, not a repaint.  The job is shared by the loop and `Saving`; dropping the save (a new song, Reset) stops the loop at its next slice, and D3's removal of the file stays.
+  * The UI frame shows the progress at most a few times a second, and does the end stage as today.  So a save asks for no repaint per block.
+  * The save's reader keeps the next block's read in flight while the job mixes the current one: at most 2 blocks of each lane held or in flight (double buffering), so the memory is bounded and does not grow with the song.  More blocks only if a measure shows the gain; the bound stays a constant.
+  * The other jobs (the mix lane's waveform, the spectrograms, the memory path's input, classic drums' input) keep their present stepping.  Only one read-ahead buffer lives (M6 D9): the save's reader is the lane reader of M7 D3, not a second read-ahead buffer.
 
 ## Outcomes and retrospective
 
