@@ -202,14 +202,14 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
-        # In run 40838459678 its six saves with no playback took 2.2
-        # minutes, and its save during playback failed at its cap of 180 s.
-        # Since review round speed 3 of M8 that save takes about 30 s with
-        # long frames, so the step should take about 3 minutes, an estimate
-        # until a CI run passes (TD-61).  The limit is the longest that
-        # all the waits of a run can take (`STEP_LIMIT_S` in
-        # xtask/src/e2e/save.rs, which a test keeps equal to it).  A stopped
-        # step writes no save.log, but its output has every note of the run.
+        # In run 40871041420 it took 2.5 minutes, and its save during
+        # playback 36 s.  Since review round speed 4 of M8, that save reads
+        # fewer spans ahead and takes about a minute.  So the step should
+        # take about 3 minutes, an estimate until a CI run passes (TD-61).  The
+        # limit is the longest that all the waits of a run can take
+        # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal
+        # to it).  A stopped step writes no save.log, but its output has
+        # every note of the run.
         timeout-minutes: 40
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.

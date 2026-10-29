@@ -2,9 +2,9 @@
 //!
 //! A save's [`ExportJob`] runs in a task of its own, not in the UI frame.
 //! The task runs the job in slices of at most a budget ([`Budget`]: 4 ms,
-//! or up to 16 ms when the page holds the main thread for long between
-//! slices), and yields to the event loop with a macrotask after each
-//! slice.  So the audio callback and the UI run between slices.  When the job waits for a
+//! or up to 16 ms after a yield that waited long), and yields to the event
+//! loop with a macrotask after each slice.  So the audio callback and the
+//! UI run between slices.  When the job waits for a
 //! read or a write, the task waits for the [`Signal`] that the read's or
 //! the write's end gives, not for a repaint.  So the save's speed does not
 //! depend on the frame rate.
@@ -30,6 +30,8 @@ pub struct Signal {
     waker: RefCell<Option<Waker>>,
     /// The longest slice of the task so far, in milliseconds.
     longest_ms: Cell<f64>,
+    /// The longest end of a read in the reader so far, in milliseconds.
+    longest_read_end_ms: Cell<f64>,
 }
 
 impl Signal {
@@ -37,6 +39,18 @@ impl Signal {
     /// its clock measured it (review round speed 2 of M8).
     pub fn longest_ms(&self) -> f64 {
         self.longest_ms.get()
+    }
+
+    /// The longest time that the end of a read took in the save's reader
+    /// so far, in milliseconds ([`crate::lane_store::WakingStore`]).
+    pub fn longest_read_end_ms(&self) -> f64 {
+        self.longest_read_end_ms.get()
+    }
+
+    /// Keeps `ms`, the time of the end of a read, if it is the longest.
+    pub fn note_read_end(&self, ms: f64) {
+        self.longest_read_end_ms
+            .set(self.longest_read_end_ms.get().max(ms));
     }
 
     /// Says that a read or a write ended, and wakes the task.
@@ -84,8 +98,10 @@ impl Drop for Stop {
 }
 
 /// The time budget of each slice of a save's task, in milliseconds.  A
-/// slice may take `share` of the time since the last slice ended, within
-/// `least_ms` and `most_ms`.  When the page's frames are short, the
+/// slice after a yield may take `share` of the time that the yield took,
+/// within `least_ms` and `most_ms`.  A slice after a wait for a read or a
+/// write takes `least_ms`: a slow read is not a long frame (finding 4-12
+/// of review round speed 4 of M8).  When the page's frames are short, the
 /// slices take `least_ms`.  When a frame holds the main thread for long,
 /// as a paint in software on CI does (about 125 ms in CI run 40838459678),
 /// each yield to the event loop waits for that frame.  Then a slice takes
@@ -124,23 +140,25 @@ pub async fn drive<S, P>(
     S: Sink,
     P: Future<Output = ()>,
 {
-    let mut last_end = None;
+    // When the last slice yielded: the next slice's budget comes from the
+    // time that the yield took.
+    let mut yielded_at = None;
     loop {
         let Some(job) = job.upgrade() else {
             return;
         };
         signal.clear();
-        let (done, waiting) = {
+        let (done, waiting, stop) = {
             let mut job = job.borrow_mut();
             let start = now();
-            let end = start + budget.after(last_end.map_or(0.0, |at| start - at));
+            let gap = yielded_at.take().map_or(0.0, |at| start - at);
+            let end = start + budget.after(gap);
             let done = job.run_while(|| now() < end);
             let stop = now();
             signal
                 .longest_ms
                 .set(signal.longest_ms.get().max(stop - start));
-            last_end = Some(stop);
-            (done, job.is_waiting())
+            (done, job.is_waiting(), stop)
         };
         drop(job);
         if done {
@@ -149,13 +167,14 @@ pub async fn drive<S, P>(
         } else if waiting {
             signal.wait().await;
         } else {
+            yielded_at = Some(stop);
             pause().await;
         }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use web::spawn;
+pub use web::{page_now, spawn};
 
 /// The task loop on the web.
 #[cfg(target_arch = "wasm32")]
@@ -183,6 +202,12 @@ export function st_now() { return performance.now(); }
     extern "C" {
         fn st_yield() -> js_sys::Promise;
         fn st_now() -> f64;
+    }
+
+    /// The page's clock, in milliseconds.
+    #[cfg_attr(mutants, mutants::skip)]
+    pub fn page_now() -> f64 {
+        st_now()
     }
 
     /// Starts the task loop of a save's `job` ([`drive`]), with slices of
@@ -216,7 +241,7 @@ export function st_now() { return performance.now(); }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::{BLOCK, SAVE_WRITE_BYTES};
+    use crate::export::{BLOCK, SAVE_WRITE_BYTES, WavBlocks};
     use crate::lane_store::{
         Ahead, ByteRange, LaneStore, MemoryStore, ReadDone, SAVE_AHEAD, WakingStore,
     };
@@ -294,34 +319,32 @@ mod tests {
         read_in_flight: Vec<bool>,
     }
 
-    /// A WAV sink in the model: each block costs `block_ms` of the clock,
-    /// and each `per_write` blocks make a write, which takes
-    /// [`WRITE_FRAMES`].  As `StoredWav` does, with `overlap`, the sink
-    /// takes blocks while a write is in flight, until a full write waits;
-    /// with no `overlap`, it takes none.  A write starts at a block that
-    /// finds no write in flight.
+    /// A WAV sink in the model, with the rule of `StoredWav`: real
+    /// [`WavBlocks`] of `write_bytes`, and a write of each full block,
+    /// which takes [`WRITE_FRAMES`].  Each block costs `block_ms` of the
+    /// clock.  With `overlap`, the sink takes blocks while a write is in
+    /// flight, as [`WavBlocks::takes_more`] says; with no `overlap`, it
+    /// takes none.  A write starts at a block that finds no write in flight.
     struct Writes {
         page: Rc<Page>,
         block_ms: f64,
-        per_write: usize,
+        blocks: WavBlocks,
         overlap: bool,
-        /// The blocks taken and not yet written.
-        pending: usize,
         busy: Rc<Cell<bool>>,
         store: Rc<MemoryStore>,
         seen: Rc<RefCell<Seen>>,
     }
 
     impl Sink for Writes {
-        fn write(&mut self, at: usize, _: &[f32], _: &[f32]) {
+        fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
             let clock = &self.page.clock;
             clock.set(clock.get() + self.block_ms);
             let mut seen = self.seen.borrow_mut();
             seen.starts.push(at);
             seen.read_in_flight.push(self.store.held_reads() > 0);
-            self.pending += 1;
-            if !self.busy.get() && self.pending >= self.per_write {
-                self.pending -= self.per_write;
+            self.blocks.push(left, right);
+            if !self.busy.get() && self.blocks.full().is_some() {
+                self.blocks.take_full();
                 self.busy.set(true);
                 let frame = self.page.frame.get();
                 self.page.writes.borrow_mut().push_back(frame);
@@ -329,7 +352,11 @@ mod tests {
         }
 
         fn ready(&self) -> bool {
-            !self.busy.get() || (self.overlap && self.pending < self.per_write)
+            if self.overlap {
+                self.blocks.takes_more(self.busy.get())
+            } else {
+                !self.busy.get()
+            }
         }
     }
 
@@ -398,7 +425,7 @@ mod tests {
         ahead: Ahead,
         budget: Budget,
         block_ms: f64,
-        per_write: usize,
+        write_bytes: usize,
         overlap: bool,
         frame_ms: f64,
     }
@@ -407,13 +434,9 @@ mod tests {
     /// longest slice of one block was 1.2 ms (CI run 40838459678).
     const TODAY: Model = Model {
         ahead: SAVE_AHEAD,
-        budget: Budget {
-            least_ms: 4.0,
-            most_ms: 16.0,
-            share: 0.125,
-        },
+        budget: crate::SAVE_BUDGET,
         block_ms: 1.2,
-        per_write: SAVE_WRITE_BYTES / (BLOCK * 4),
+        write_bytes: SAVE_WRITE_BYTES,
         overlap: true,
         frame_ms: 125.0,
     };
@@ -448,14 +471,15 @@ mod tests {
             paused: RefCell::default(),
         });
         let signal = Rc::new(Signal::default());
-        let wake_signal = Rc::clone(&signal);
         let timed: Rc<dyn LaneStore> = Rc::new(Timed {
             page: Rc::clone(&page),
             inner: Rc::clone(&store),
         });
+        let read_clock = Rc::clone(&page.clock);
         let waking: Rc<dyn LaneStore> = Rc::new(WakingStore::new(
             timed,
-            Rc::new(move || wake_signal.notify()),
+            Rc::clone(&signal),
+            Rc::new(move || read_clock.get()),
         ));
         let audio: Vec<LaneAudio> = audio.iter().map(|a| a.read_through(&waking)).collect();
         let recipe = MixRecipe::new(vec![1.0, 0.5]);
@@ -464,9 +488,8 @@ mod tests {
         let sink = Writes {
             page: Rc::clone(&page),
             block_ms: model.block_ms,
-            per_write: model.per_write,
+            blocks: WavBlocks::new(frames, 44_100, model.write_bytes),
             overlap: model.overlap,
-            pending: 0,
             busy: Rc::clone(&busy),
             store: Rc::clone(&store),
             seen: Rc::clone(&seen),
@@ -578,55 +601,40 @@ mod tests {
     /// the main thread for about 125 ms, and a save of 10 minutes did not
     /// end within 180 s.  It needed two frames for each block's read, one
     /// for each yield, and two for each write of 1 MiB, while the job
-    /// waited.  Today the reader keeps 6 spans of 4 blocks in flight, a
-    /// slice may take an eighth of the time since the last one (16 ms at
-    /// most), and the job mixes while a write of 2 MiB is in flight.  So
-    /// the save takes 30 s or less.  The reader and the slices are each
-    /// needed for that, and the mix during a write saves 5 s or more.
+    /// waited.  Today the reader keeps 2 spans of 4 blocks in flight (review
+    /// round speed 4 of M8).  So the save takes a minute or less, and the
+    /// reads in flight set its time: with slices of 4 ms, or with writes
+    /// that stop the job, it takes about the same.
     #[test]
-    fn a_save_with_long_frames_takes_30_s_or_less() {
+    fn a_save_with_long_frames_takes_a_minute_or_less() {
         let blocks = 128;
         let today = ten_minutes_s(blocks, &TODAY);
         eprintln!("today: {today:.1} s");
-        assert!(today <= 30.0, "today: {today:.1} s");
+        assert!(today <= 60.0, "today: {today:.1} s");
         let one_block = Model {
             ahead: Ahead {
                 span: BLOCK,
                 depth: 1,
+                most_bytes: usize::MAX,
             },
             ..TODAY
         };
-        let slices_of_4_ms = Model {
+        let before = Model {
+            ahead: one_block.ahead,
             budget: Budget {
                 least_ms: 4.0,
                 most_ms: 4.0,
                 share: 0.0,
             },
-            ..TODAY
-        };
-        let writes_that_stop_the_job = Model {
+            write_bytes: 1 << 20,
             overlap: false,
             ..TODAY
         };
-        let before = Model {
-            ahead: one_block.ahead,
-            budget: slices_of_4_ms.budget,
-            per_write: (1 << 20) / (BLOCK * 4),
-            overlap: false,
-            ..TODAY
-        };
-        for (what, model) in [
-            ("one block ahead", one_block),
-            ("slices of 4 ms", slices_of_4_ms),
-            ("the save before", before),
-        ] {
+        for (what, model) in [("one block ahead", one_block), ("the save before", before)] {
             let s = ten_minutes_s(blocks, &model);
             eprintln!("{what}: {s:.1} s");
-            assert!(s > 30.0, "{what}: {s:.1} s");
+            assert!(s > 300.0, "{what}: {s:.1} s");
         }
-        let stopping = ten_minutes_s(blocks, &writes_that_stop_the_job);
-        eprintln!("writes that stop the job: {stopping:.1} s");
-        assert!(today < stopping - 5.0, "the job mixes during a write");
     }
 
     /// A sink whose every block costs `ms` of its clock.
@@ -773,6 +781,139 @@ mod tests {
         let (yields, longest) = yields_of(30, budget, 1.0, 200.0);
         assert_eq!(yields, [4.0, 216.0, 428.0]);
         assert_eq!(longest, 12.0);
+    }
+
+    /// Finding 4-7 of review round speed 4 of M8: the page's budget takes
+    /// 4 ms after a short yield, and up to 16 ms after a yield of a long
+    /// frame (about 137 ms with frames of 125 ms on the maintainer's Mac).
+    #[test]
+    fn the_page_budget_grows_only_after_a_long_yield() {
+        let budget = crate::SAVE_BUDGET;
+        assert_eq!(budget.after(0.0), crate::SAVE_MS);
+        assert_eq!(budget.after(16.7), crate::SAVE_MS, "a frame of 60 Hz");
+        assert_eq!(budget.after(64.0), 8.0);
+        assert_eq!(budget.after(137.0), 16.0);
+    }
+
+    /// A sink whose every block costs `ms` of its clock, and which is not
+    /// ready once, after `ready_after` blocks, until the test opens it.
+    struct Gate {
+        clock: Clock,
+        ms: f64,
+        blocks: usize,
+        ready_after: usize,
+        open: Rc<Cell<bool>>,
+    }
+
+    impl Sink for Gate {
+        fn write(&mut self, _: usize, _: &[f32], _: &[f32]) {
+            self.clock.set(self.clock.get() + self.ms);
+            self.blocks += 1;
+            if self.blocks == self.ready_after {
+                self.open.set(false);
+            }
+        }
+
+        fn ready(&self) -> bool {
+            self.open.get()
+        }
+    }
+
+    /// Finding 4-12 of review round speed 4 of M8: a long wait for a read
+    /// or a write is not a long frame.  The slice after it takes the least
+    /// of its budget, so a slow read does not make a slice of 16 ms.
+    #[test]
+    fn a_slice_after_a_long_wait_for_a_write_takes_the_least() {
+        let frames = 30 * BLOCK;
+        let clock: Clock = Rc::default();
+        let open = Rc::new(Cell::new(true));
+        let job = Rc::new(RefCell::new(ExportJob::new(
+            Box::new(engine::mixdown::StemPcm::new(
+                engine::Stem {
+                    name: "bass".into(),
+                    left: vec![0.25; frames].into(),
+                    right: vec![0.25; frames].into(),
+                },
+                44_100,
+            )),
+            Gate {
+                clock: Rc::clone(&clock),
+                ms: 1.0,
+                blocks: 0,
+                ready_after: 2,
+                open: Rc::clone(&open),
+            },
+        )));
+        let signal = Rc::new(Signal::default());
+        let c = Rc::clone(&clock);
+        let budget = Budget {
+            least_ms: 4.0,
+            most_ms: 16.0,
+            share: 0.125,
+        };
+        let mut task = Box::pin(drive(
+            Rc::downgrade(&job),
+            Rc::clone(&signal),
+            budget,
+            move || c.get(),
+            || Yield(false),
+            || {},
+        ));
+        let (_flag, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(task.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(signal.longest_ms(), 2.0, "2 blocks, then the write");
+        // The write takes 200 ms, then ends.
+        clock.set(clock.get() + 200.0);
+        open.set(true);
+        signal.notify();
+        assert!(task.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(signal.longest_ms(), 4.0, "a slice of the least budget");
+        drop(job);
+        drop(Stop(Rc::clone(&signal)));
+        assert!(task.as_mut().poll(&mut cx).is_ready());
+    }
+
+    /// Finding 4-8 of review round speed 4 of M8: the signal keeps the
+    /// longest end of a read through a `WakingStore`, as its clock measures
+    /// it, and each end wakes the task.
+    #[test]
+    fn a_waking_store_keeps_the_longest_read_end() {
+        let store = MemoryStore::new();
+        store.put("acme/0.f32", vec![0; 64]);
+        store.hold(true);
+        let signal = Rc::new(Signal::default());
+        let clock: Clock = Rc::default();
+        let c = Rc::clone(&clock);
+        let waking = WakingStore::new(
+            Rc::clone(&store) as Rc<dyn LaneStore>,
+            Rc::clone(&signal),
+            Rc::new(move || c.get()),
+        );
+        for ms in [3.0, 7.0, 5.0] {
+            let c = Rc::clone(&clock);
+            let range = ByteRange {
+                path: "acme/0.f32".into(),
+                start: 0,
+                end: 64,
+            };
+            waking.read(
+                vec![range],
+                Box::new(move |result| {
+                    assert!(result.is_ok());
+                    c.set(c.get() + ms);
+                }),
+            );
+        }
+        assert_eq!(signal.longest_read_end_ms(), 0.0, "no read ended");
+        store.release();
+        assert_eq!(signal.longest_read_end_ms(), 7.0);
+        let (_flag, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            Pin::new(&mut signal.wait()).poll(&mut cx).is_ready(),
+            "a read's end wakes"
+        );
     }
 
     /// A signal before the wait is not lost, and one wait takes it.

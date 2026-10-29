@@ -31,3 +31,10 @@ The third option (D1 to D8 of `plans/active/stream-from-storage-m8.md`).
 * A save needs free browser storage for its WAV.  A FLAC or MP3 save also needs room for its output beside the WAV.  A save of 30 minutes writes about 318 MB.
 * A download reads its file after the click, and the page cannot know when it ends.  A download of a long file that starts to read after more than 10 minutes can fail.
 * The download of an OPFS `File` through an object URL is checked in Chrome only (TD-60).  The team asked the orchestrator for a save of each format in M10's iPhone run.
+
+## Note of 2026-10-29 (proposed, for a person)
+
+Status of this note: proposed.  The text above is the accepted decision; this note does not change it until a person accepts the note.
+
+* Since commit `f28ebff` (review round speed 3 of `plans/active/stream-from-storage-m8.md`), the page writes blocks of 2 MiB, not 1 MiB.  When each frame of the page holds the main thread for long, as CI's paints in software do, a write takes about two frames, whatever its size up to 8 MiB.  So fewer writes make a save faster.  4 MiB made D10's measure of the JS heap vary by about 4 MB, which is its bound.
+* Since review round speed 3, a save's reader also reads ahead, so the JS heap holds the bytes of the reads in flight until each is copied into WebAssembly memory.  The JS heap of a save holds the write's array of 2 MiB, the browser's copy of the write in flight, and the reads in flight: 2 reads of 65,536 frames of each lane since review round speed 4.  In `e2e save` (3 lanes), the JS heap rose by 3.4 to 5.8 MB during a save, of 1 minute or 10.  It does not grow with the song.  `docs/ARCHITECTURE.md` (memory on phones) gives the whole memory of a save.

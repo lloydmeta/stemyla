@@ -48,7 +48,8 @@ pub const SAVE_WRITE_BYTES: usize = 2 << 20;
 /// The bytes of a 16-bit WAV in blocks of one size, for a sink that writes
 /// them to browser storage (D3 of M8).  It takes the job's blocks, and
 /// gives each full block, then the last short block.  The WAV's header
-/// comes first.  It holds at most one full block and two job blocks.
+/// comes first.  It holds at most one full block, two job blocks and the
+/// header ([`WavBlocks::most_bytes`]), and reserves that once.
 pub struct WavBlocks {
     size: usize,
     pending: Vec<u8>,
@@ -58,9 +59,18 @@ impl WavBlocks {
     /// For a WAV of `frames` frames at `sample_rate`, in blocks of `size`
     /// bytes.
     pub fn new(frames: usize, sample_rate: u32, size: usize) -> Self {
-        let mut pending = Vec::with_capacity(size + BLOCK * engine::wav::FRAME_BYTES);
+        let mut pending = Vec::with_capacity(Self::most_bytes(size));
         pending.extend_from_slice(&engine::wav::header(frames, sample_rate));
         Self { size, pending }
+    }
+
+    /// The most bytes that the blocks of `size` hold: a full block that
+    /// waits for the write in flight, the job block that the write's end
+    /// lets in, one more job block, and the header (review round speed 4
+    /// of M8).  The job blocks do not fill a block of `size` exactly,
+    /// because the header comes first.
+    pub fn most_bytes(size: usize) -> usize {
+        size + 2 * BLOCK * engine::wav::FRAME_BYTES + engine::wav::HEADER_BYTES
     }
 
     /// Adds the 16-bit samples of one block of the job.
@@ -1429,10 +1439,10 @@ mod tests {
                 .copied()
                 .collect();
             assert!(joined == want, "{frames} frames in blocks of {size}");
-            assert!(
-                sink.blocks.pending.capacity() <= size + job_block,
-                "{frames} frames: it held {} bytes",
-                sink.blocks.pending.capacity()
+            assert_eq!(
+                sink.blocks.pending.capacity(),
+                WavBlocks::most_bytes(size),
+                "{frames} frames: the reserve, never more"
             );
         }
     }
@@ -1456,6 +1466,31 @@ mod tests {
         blocks.take_full();
         assert!(blocks.takes_more(true));
         assert!(blocks.rest().len() < 2 * job_block);
+    }
+
+    /// Finding (a) of review round speed 4 of M8, and CI run 40871041420:
+    /// a save's WAV blocks never grow past their reserve.  A write is in
+    /// flight while the job fills the next full block, then the write's end
+    /// lets one more job block in before the next write takes the full
+    /// block.  With a reserve of one job block, the buffer doubled once, to
+    /// over 4 MiB, in the 10-minute MP3 save on CI.
+    #[test]
+    fn the_wav_blocks_hold_no_more_than_their_reserve() {
+        let block = vec![0.25; BLOCK];
+        let mut blocks = WavBlocks::new(200 * BLOCK, 44_100, SAVE_WRITE_BYTES);
+        let reserve = blocks.pending.capacity();
+        assert_eq!(reserve, WavBlocks::most_bytes(SAVE_WRITE_BYTES));
+        for write in 0..5 {
+            // A write is in flight: the job mixes until a full block waits.
+            while blocks.takes_more(true) {
+                blocks.push(&block, &block);
+            }
+            // The write ends: one job block, then the next write.
+            assert!(blocks.takes_more(false));
+            blocks.push(&block, &block);
+            blocks.take_full();
+            assert_eq!(blocks.pending.capacity(), reserve, "write {write}");
+        }
     }
 
     #[test]

@@ -144,28 +144,38 @@ impl LaneStore for MemoryStore {
     }
 }
 
-/// A store that calls `wake` after each read of `inner` ends, after its
-/// result went to the reader.  A save reads through one, so its task loop
-/// goes on when a read ends, with no repaint (D11 of the M8 plan).
+/// A store that signals a save's task after each read of `inner` ends,
+/// after its result went to the reader.  A save reads through one, so its
+/// task loop goes on when a read ends, with no repaint (D11 of the M8
+/// plan).  The signal keeps the longest time that the end of a read took
+/// in the reader, as `now` measures it (finding 4-8 of review round speed
+/// 4 of M8): the decode of a span of every lane into its slot.
 pub struct WakingStore {
     inner: Rc<dyn LaneStore>,
-    wake: Rc<dyn Fn()>,
+    signal: Rc<crate::save_task::Signal>,
+    now: Rc<dyn Fn() -> f64>,
 }
 
 impl WakingStore {
-    pub fn new(inner: Rc<dyn LaneStore>, wake: Rc<dyn Fn()>) -> Self {
-        Self { inner, wake }
+    pub fn new(
+        inner: Rc<dyn LaneStore>,
+        signal: Rc<crate::save_task::Signal>,
+        now: Rc<dyn Fn() -> f64>,
+    ) -> Self {
+        Self { inner, signal, now }
     }
 }
 
 impl LaneStore for WakingStore {
     fn read(&self, ranges: Vec<ByteRange>, done: ReadDone) {
-        let wake = Rc::clone(&self.wake);
+        let (signal, now) = (Rc::clone(&self.signal), Rc::clone(&self.now));
         self.inner.read(
             ranges,
             Box::new(move |result| {
+                let start = now();
                 done(result);
-                wake();
+                signal.note_read_end(now() - start);
+                signal.notify();
             }),
         );
     }
@@ -354,25 +364,57 @@ impl Held {
 /// How a reader reads ahead (D11 of the M8 plan): spans of `span` frames
 /// of each lane, read in order, with up to `depth` reads in flight.  The
 /// reader holds `depth + 1` spans of each lane at most: one that the job
-/// reads, and `depth` read ahead or in flight.
+/// reads, and `depth` read ahead or in flight.  The spans of all lanes
+/// hold at most `most_bytes` of samples ([`Ahead::for_lanes`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ahead {
     pub span: usize,
     pub depth: usize,
+    pub most_bytes: usize,
 }
 
-/// The read-ahead of a save (review round speed 3 of M8): spans of 4 job
-/// blocks, 6 reads in flight, 7 spans held.  So it holds 458,752 frames of
-/// each lane: 3.5 MiB, or 24.5 MiB for 7 lanes (an iPhone's 6 stems and
-/// a source, MEM-4).  A read of browser storage ends only in a later task.
-/// When each frame of the page holds the main thread for long, as a paint
-/// in software on CI does (about 125 ms in CI run 40838459678), a read ends
-/// about two frames after it starts, whatever its size up to 2 MiB.  So
-/// the reads in flight, not their number, set the speed of a save.
+/// The bytes of one frame of a lane in a reader's slot: two `f32`s.
+const SLOT_FRAME_BYTES: usize = 8;
+
+impl Ahead {
+    /// This read-ahead for `lanes` lanes.  When `depth + 1` spans of every
+    /// lane hold more than `most_bytes`, the span shrinks to fit, in job
+    /// blocks (`export::BLOCK`), and never below one job block (finding (b)
+    /// of review round speed 4 of M8).
+    pub fn for_lanes(self, lanes: usize) -> Self {
+        let fit = self.most_bytes / ((self.depth + 1) * SLOT_FRAME_BYTES * lanes.max(1));
+        if fit >= self.span {
+            return self;
+        }
+        let block = crate::export::BLOCK;
+        Self {
+            span: (fit / block * block).max(block).min(self.span),
+            ..self
+        }
+    }
+
+    /// The bytes of samples that the slots of `lanes` lanes hold.
+    pub fn slot_bytes(self, lanes: usize) -> usize {
+        (self.depth + 1) * self.span * SLOT_FRAME_BYTES * lanes
+    }
+}
+
+/// The read-ahead of a save (review rounds speed 3 and 4 of M8): spans of
+/// 4 job blocks, 2 reads in flight, 3 spans held.  For up to 7 lanes (an
+/// iPhone's 6 stems and a source), it holds 196,608 frames of each lane:
+/// 1.5 MiB for each lane, 10.5 MiB in all (MEM-4).  For more lanes, the
+/// spans shrink, so the slots never hold more than that, up to 28 lanes.
+/// A read of browser storage ends only in a later task.  When each frame
+/// of the page holds the main thread for long, as a paint in software
+/// does on CI (about 125 ms in CI run 40838459678), a read ends about two
+/// frames after it starts, whatever its size up to 2 MiB.  So the frames
+/// in flight, not the reads, set the speed of a save.
 pub const SAVE_AHEAD: Ahead = Ahead {
     span: 65_536,
-    depth: 6,
+    depth: SAVE_DEPTH,
+    most_bytes: (SAVE_DEPTH + 1) * 65_536 * SLOT_FRAME_BYTES * 7,
 };
+const SAVE_DEPTH: usize = 2;
 
 struct ReaderState {
     /// One buffer, or `depth + 1` when the reader reads ahead.
@@ -445,8 +487,8 @@ impl BlockReader {
     /// A reader that reads ahead, for a job that reads its source in
     /// order, one range of at most `ahead.span` frames at a time (D11 of
     /// the M8 plan).  It reads the song in spans of `ahead.span` frames,
-    /// with up to `ahead.depth` reads in flight.  The end of each read
-    /// starts the next one, also while the job waits for its sink.  It
+    /// with up to `ahead.depth` reads in flight.  When the job leaves a
+    /// span, the reader starts the read of the next span into its slot.  It
     /// holds `depth + 1` spans of each lane, and never more.  When the job
     /// asks for a range out of order, the reader waits for its reads in
     /// flight, then reads on from that range.
@@ -460,6 +502,7 @@ impl BlockReader {
             ahead.depth > 0,
             "a reader that reads ahead reads 1 span or more"
         );
+        let ahead = ahead.for_lanes(files.len());
         Self::with_slots(store, files, frames, ahead.span.min(frames), Some(ahead))
     }
 
@@ -613,7 +656,10 @@ fn top_up(inner: &Rc<Inner>) {
 }
 
 /// Starts one read of `ranges` into the slot `target`.  Its end fills the
-/// slot, and tops up the reads ahead, while the reader lives.
+/// slot, while the reader lives.  It starts no read: with `depth + 1`
+/// slots, no slot is free while `depth` reads are in flight, so the job's
+/// next [`BlockReader::ready`] starts the next reads (finding 4-14 of
+/// review round speed 4 of M8).
 fn start(inner: &Rc<Inner>, ranges: Vec<(usize, usize)>, target: usize) {
     let reads: Vec<ByteRange> = inner
         .files
@@ -637,15 +683,12 @@ fn start(inner: &Rc<Inner>, ranges: Vec<(usize, usize)>, target: usize) {
             let Some(inner) = reader.upgrade() else {
                 return;
             };
-            {
-                let mut state = inner.state.borrow_mut();
-                state.filling[target] = false;
-                if let Err(e) = &result {
-                    state.failed.get_or_insert_with(|| e.clone());
-                }
-                fill(&mut state.slots[target], &inner.formats, ranges, result);
+            let mut state = inner.state.borrow_mut();
+            state.filling[target] = false;
+            if let Err(e) = &result {
+                state.failed.get_or_insert_with(|| e.clone());
             }
-            top_up(&inner);
+            fill(&mut state.slots[target], &inner.formats, ranges, result);
         }),
     );
 }
@@ -757,6 +800,7 @@ mod tests {
             Ahead {
                 span: 100,
                 depth: 1,
+                most_bytes: usize::MAX,
             },
         );
         assert_eq!(reader.held_frames(), 200, "two blocks of the lane");
@@ -792,6 +836,7 @@ mod tests {
     const ONE: Ahead = Ahead {
         span: 100,
         depth: 1,
+        most_bytes: usize::MAX,
     };
 
     /// A reader that reads ahead from a store that completes at once gives
@@ -877,6 +922,7 @@ mod tests {
         let ahead = Ahead {
             span: 100,
             depth: 3,
+            most_bytes: usize::MAX,
         };
         let (store, reader) = holding_reader(950, ahead);
         assert_eq!(reader.held_frames(), 400, "depth + 1 spans of the lane");
@@ -920,28 +966,49 @@ mod tests {
         assert_eq!(store.largest_read(), 800, "a span of 100 frames");
     }
 
-    /// Review round speed 3 of M8: the bound of a save's reader is a
-    /// constant: 7 spans of 65,536 frames of each lane, for 1 minute as for
-    /// 10.  For 7 lanes, as on an iPhone with 6 stems and a source, that is
-    /// 24.5 MiB of `f32` samples (MEM-4).
+    /// Review rounds speed 3 and 4 of M8: the bound of a save's reader is
+    /// a constant, for 1 minute as for 10, and for any number of lanes up
+    /// to 28.  Up to 7 lanes, as on an iPhone with 6 stems and a source,
+    /// the spans have 65,536 frames.  With more, the spans shrink in job
+    /// blocks: 16,384 frames for 21 lanes, the most that a stored song
+    /// plays from storage (MEM-4).
     #[test]
     fn the_save_reader_holds_a_fixed_bound() {
+        assert_eq!(SAVE_AHEAD.most_bytes, 11_010_048, "10.5 MiB");
         let store = MemoryStore::new();
-        let files = |frames| -> Vec<LaneFile> {
-            (0..7)
+        let files = |lanes, frames| -> Vec<LaneFile> {
+            (0..lanes)
                 .map(|k| LaneFile::f32(format!("acme/{k}.f32"), frames))
                 .collect()
         };
-        for frames in [2_646_000, 26_460_000] {
-            let reader = BlockReader::reading_ahead(
-                Rc::clone(&store) as Rc<dyn LaneStore>,
-                files(frames),
-                frames,
-                SAVE_AHEAD,
-            );
-            assert_eq!(reader.held_frames(), 458_752, "{frames} frames");
-            let bytes = reader.held_frames() * 2 * 4 * 7;
-            assert_eq!(bytes, 25_690_112, "24.5 MiB for 7 lanes");
+        for (lanes, span) in [
+            (1, 65_536),
+            (7, 65_536),
+            (8, 49_152),
+            (21, 16_384),
+            (28, 16_384),
+        ] {
+            for frames in [2_646_000, 26_460_000] {
+                let reader = BlockReader::reading_ahead(
+                    Rc::clone(&store) as Rc<dyn LaneStore>,
+                    files(lanes, frames),
+                    frames,
+                    SAVE_AHEAD,
+                );
+                let what = format!("{lanes} lanes, {frames} frames");
+                assert_eq!(
+                    reader.held_frames(),
+                    (SAVE_AHEAD.depth + 1) * span,
+                    "{what}"
+                );
+                let bytes = reader.held_frames() * 2 * 4 * lanes;
+                assert!(bytes <= SAVE_AHEAD.most_bytes, "{what}: {bytes} bytes");
+                assert_eq!(
+                    bytes,
+                    SAVE_AHEAD.for_lanes(lanes).slot_bytes(lanes),
+                    "{what}"
+                );
+            }
         }
     }
 
@@ -955,6 +1022,7 @@ mod tests {
             Ahead {
                 span: 100,
                 depth: 2,
+                most_bytes: usize::MAX,
             },
         );
         assert!(!reader.ready(&[(0, 100)]));
@@ -978,6 +1046,7 @@ mod tests {
             Ahead {
                 span: 100,
                 depth: 2,
+                most_bytes: usize::MAX,
             },
         );
         assert!(!reader.ready(&[(0, 100)]));
@@ -1009,6 +1078,7 @@ mod tests {
             Ahead {
                 span: 100,
                 depth: 2,
+                most_bytes: usize::MAX,
             },
         );
         assert!(reader.ready(&[(0, 100)]));
@@ -1027,6 +1097,7 @@ mod tests {
             Ahead {
                 span: 100,
                 depth: 2,
+                most_bytes: usize::MAX,
             },
         );
         reader.ready(&[(0, 10), (20, 10)]);

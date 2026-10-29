@@ -19,17 +19,37 @@
   // so the page gets about 4 a second, on any runner.  A save that waits
   // for the UI frame then takes over 400 s for 10 minutes of audio.
   // While `__e2e_long_frame_ms` is above 0, each animation frame holds the
-  // main thread that long before the page's callback, as a paint in
-  // software does on CI (about 125 ms in CI run 40838459678).
+  // main thread before the page's callback, so that each frame takes about
+  // that long, as a paint in software does on CI (about 125 ms in CI run
+  // 40838459678).  The hold is the rest: the last frame's time less its
+  // hold is the page's own paint and tasks.  So a runner that paints in
+  // software does not get frames of twice the time.  `__e2e_long_frames`
+  // keeps the count and the sum of the times between the starts of those
+  // frames.
   window.__e2e_frames = 0;
   window.__e2e_throttle = false;
   window.__e2e_long_frame_ms = 0;
+  window.__e2e_long_frames = { count: 0, ms: 0 };
+  let last_start = null;
+  let last_hold = 0;
   const real_raf = window.requestAnimationFrame.bind(window);
   window.requestAnimationFrame = (f) => {
     const frame = (t) => {
       window.__e2e_frames++;
       const start = performance.now();
-      while (performance.now() - start < window.__e2e_long_frame_ms) {}
+      const long = window.__e2e_long_frame_ms;
+      if (long > 0) {
+        const own = last_start === null ? 0 : start - last_start - last_hold;
+        while (performance.now() - start < long - own) {}
+        last_hold = performance.now() - start;
+        if (last_start !== null) {
+          window.__e2e_long_frames.count++;
+          window.__e2e_long_frames.ms += start - last_start;
+        }
+        last_start = start;
+      } else {
+        last_start = null;
+      }
       f(t);
     };
     if (!window.__e2e_throttle) return real_raf(frame);
@@ -41,11 +61,16 @@
     const real_write = FileSystemWritableFileStream.prototype.write;
     FileSystemWritableFileStream.prototype.write = function (data) {
       window.__e2e_writes++;
-      // A heap reading that starts at each write of the page while a save
-      // is measured, so a save of less than a second gets some.  It waits
-      // for wasm-bindgen's finalizers as every reading does, so it counts
-      // no garbage; the save goes on meanwhile.
-      if (window.__e2e_heap_on) window.__e2e_heap().then(window.__e2e_keep);
+      // A heap reading that starts at each of the first writes of the page
+      // while a save is measured (`HEAP_WRITES`), so the saves of 1 and of
+      // 10 minutes take the same readings at the same points (finding 4-10
+      // of review round speed 4 of M8).  It waits for wasm-bindgen's
+      // finalizers as every reading does, so it counts no garbage; the save
+      // goes on meanwhile.
+      if (window.__e2e_heap_on && window.__e2e_heap_writes < HEAP_WRITES) {
+        window.__e2e_heap_writes++;
+        window.__e2e_heap_pending.push(window.__e2e_heap().then(window.__e2e_keep));
+      }
       return real_write.call(this, data);
     };
   }
@@ -119,8 +144,9 @@
     gc();
     return performance.memory.usedJSHeapSize;
   };
-  // Keeps the largest reading of the save.
+  // Keeps the largest reading of the save, and counts the readings.
   window.__e2e_keep = (v) => {
+    window.__e2e_heap_readings++;
     if (v !== null && (window.__e2e_heap_max === null || v > window.__e2e_heap_max)) window.__e2e_heap_max = v;
   };
   // The start of a save, just before the click of its menu item: the
@@ -133,20 +159,22 @@
     window.__e2e_t_at_start = performance.now();
     window.__e2e_t_offer = null;
   };
-  // Reads the heap until `__e2e_stop_heap`, one reading after another,
-  // and keeps the largest value.
+  // Starts the readings of a save: one at each of its first
+  // `HEAP_WRITES` writes, and one at `__e2e_stop_heap`, which waits for
+  // them all and gives the largest value.  `__e2e_heap_readings` counts
+  // the readings.  A save of 1 minute writes 5 full blocks of 2 MiB.
+  const HEAP_WRITES = 4;
+  window.__e2e_heap_readings = 0;
   window.__e2e_start_heap = () => {
     window.__e2e_heap_max = null;
+    window.__e2e_heap_writes = 0;
+    window.__e2e_heap_pending = [];
+    window.__e2e_heap_readings = 0;
     window.__e2e_heap_on = true;
-    (async () => {
-      while (window.__e2e_heap_on) {
-        window.__e2e_keep(await window.__e2e_heap());
-        await tick(250);
-      }
-    })();
   };
   window.__e2e_stop_heap = async () => {
     window.__e2e_heap_on = false;
+    await Promise.all(window.__e2e_heap_pending);
     window.__e2e_keep(await window.__e2e_heap());
     return window.__e2e_heap_max;
   };

@@ -289,7 +289,7 @@ enum Part {
 
 impl LaneReads {
     /// Reads of `lanes`, lanes of a song of `frames` frames.  With
-    /// `ahead`, the stored lanes read ahead in blocks of that many frames
+    /// `ahead`, the stored lanes read ahead as it says
     /// ([`BlockReader::reading_ahead`]).  Panics if two stored lanes have
     /// different stores.
     fn new(lanes: Vec<LaneAudio>, frames: usize, ahead: Option<Ahead>) -> Self {

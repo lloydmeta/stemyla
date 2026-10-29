@@ -1248,13 +1248,14 @@ const SPECTROGRAM_MS: f64 = 4.0;
 /// Milliseconds of each slice of a save's task loop (D11 of M8).  After
 /// each slice, the task yields to the event loop: the page's main thread
 /// also fills the Web Audio buffers and draws the UI.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const SAVE_MS: f64 = 4.0;
 /// The budget of each slice of a save's task loop (D11 of M8): `SAVE_MS`,
-/// or an eighth of the time since the last slice, up to 16 ms.  A slice
-/// grows only while the page holds the main thread for long between
-/// slices (review round speed 3 of M8, CI run 40838459678).
-#[cfg(target_arch = "wasm32")]
+/// or an eighth of the time that the yield before it took, up to 16 ms.
+/// A slice grows only when a yield waits long, as for a long frame
+/// (review rounds speed 3 and 4 of M8, CI run 40838459678).  The native
+/// model of a save uses it too (`save_task`'s tests).
+#[cfg(any(target_arch = "wasm32", test))]
 const SAVE_BUDGET: save_task::Budget = save_task::Budget {
     least_ms: SAVE_MS,
     most_ms: 16.0,
@@ -1461,7 +1462,8 @@ struct Saving {
     order: SaveOrder,
     /// Why the save is held in memory, when browser storage failed (D8).
     held: Option<String>,
-    /// Ends the task when the save is dropped, and keeps its longest slice.
+    /// Ends the task when the save is dropped, and keeps its longest slice
+    /// and its longest read end.
     stop: save_task::Stop,
 }
 
@@ -4537,7 +4539,8 @@ impl StemApp {
         let wake: Rc<dyn Fn()> = Rc::new(move || notify.notify());
         let reads: Rc<dyn lane_store::LaneStore> = Rc::new(lane_store::WakingStore::new(
             Rc::new(lane_store::OpfsStore::new(None)),
-            Rc::clone(&wake),
+            Rc::clone(&signal),
+            Rc::new(save_task::page_now),
         ));
         let job =
             export::ExportJob::new(order.what.pcm(&reads), sink(wake)).stopping_at_a_failure();
@@ -4664,10 +4667,11 @@ impl StemApp {
         let Some(saving) = self.saving.take() else {
             return;
         };
-        // `e2e save` bounds this line (review round speed 2 of M8).
+        // `e2e save` bounds this line (review rounds speed 2 and 4 of M8).
         log::info!(
-            "save: {name}: longest slice {:.1} ms",
-            saving.stop.0.longest_ms()
+            "save: {name}: longest slice {:.1} ms, longest read end {:.1} ms",
+            saving.stop.0.longest_ms(),
+            saving.stop.0.longest_read_end_ms()
         );
         let clipped = saving.job.borrow().clipped();
         let note = (saving.order.what.stem.is_none() && clipped > 0).then(|| {
