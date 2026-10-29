@@ -260,6 +260,8 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
 
 * [x] 2026-10-29: review round speed 2 (team leader): 5 reviewers, 18 findings; mutants full (46 tested, 5 missed, all pre-existing).  Significant: the frame check was a hidden time bound (2-1), and the long-task check passed with nothing observed (2-2).  Fixed in `3abc608`: throttled animation frames, the save's own longest slice as the check, long tasks logged against a calibration.
 
+* [x] 2026-10-30: the review log of rounds speed 1 to 8 is in `docs/reviews/iphone-crashes-2026-10-25-m8.md`, as rounds "speed 1" to "speed 8", and the run folder is removed (team leader).
+
 ## Surprises and discoveries
 
 * 2026-10-29, implementer, step 6: when the lanes are in browser storage, each slice of a save mixes one block, then waits for the next read.  A read ends only in a later task.  So the 4 ms budget binds only for lanes in memory, and a block takes about 1.6 ms in Chrome on this Mac, a read and a mix.  The page gets about 57 `requestAnimationFrame` callbacks a second during a save; it paints only on request.  The JS heap measure of a 10-minute save rose from about 1.4 MB to 3.2 MB, the same in each format and run.  Review round speed 1 found the cause in the measure, not in D11 (the Decision log).
