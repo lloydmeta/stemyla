@@ -1466,7 +1466,8 @@ struct Saving {
     order: SaveOrder,
     /// Why the save is held in memory, when browser storage failed (D8).
     held: Option<String>,
-    _stop: save_task::Stop,
+    /// Ends the task when the save is dropped, and keeps its longest slice.
+    stop: save_task::Stop,
 }
 
 /// Where the end stage of a save is, in a UI frame.
@@ -4556,7 +4557,7 @@ impl StemApp {
             job,
             order,
             held,
-            _stop: save_task::Stop(signal),
+            stop: save_task::Stop(signal),
         }
     }
 
@@ -4668,6 +4669,11 @@ impl StemApp {
         let Some(saving) = self.saving.take() else {
             return;
         };
+        // `e2e save` bounds this line (review round speed 2 of M8).
+        log::info!(
+            "save: {name}: longest slice {:.1} ms",
+            saving.stop.0.longest_ms()
+        );
         let clipped = saving.job.borrow().clipped();
         let note = (saving.order.what.stem.is_none() && clipped > 0).then(|| {
             format!(

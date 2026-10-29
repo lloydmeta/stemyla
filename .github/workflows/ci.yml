@@ -163,8 +163,10 @@ jobs:
     # That is an estimate of its CI time until a CI run logs it (TD-61).
     # The limit is the 19 minutes and `e2e save`'s own limit of 40, with 1
     # minute to spare, so a run of `e2e save` that waits in vain ends on its
-    # own check.  A hung browser must not hold the runner for GitHub's 6 h
-    # default.
+    # own check.  The spare minute holds only at the step times of that run:
+    # `web-test` took 11.3 minutes there, and each of its test binaries may
+    # take 10 (xtask/src/web_test.rs).  A hung browser must not hold the
+    # runner for GitHub's 6 h default.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

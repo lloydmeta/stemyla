@@ -1132,8 +1132,8 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
         assert!(ended, "{format:?}: the save ended");
         // Since D11 of M8 the job runs in its own task, not one block a
         // frame, so frames cannot tell a stop from a full run.  The reads
-        // can: a full run reads 81 blocks, and a stop reads the first block
-        // and the next one ahead.
+        // can: a full run reads 81 blocks, and a stop reads no more than
+        // the first block and the one that it reads ahead.
         assert!(
             reads <= 4,
             "{format:?}: it stops at the failure: {reads} reads"

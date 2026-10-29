@@ -27,9 +27,17 @@ use std::task::{Context, Poll, Waker};
 pub struct Signal {
     woken: Cell<bool>,
     waker: RefCell<Option<Waker>>,
+    /// The longest slice of the task so far, in milliseconds.
+    longest_ms: Cell<f64>,
 }
 
 impl Signal {
+    /// The longest slice of the save's task so far, in milliseconds, as
+    /// its clock measured it (review round speed 2 of M8).
+    pub fn longest_ms(&self) -> f64 {
+        self.longest_ms.get()
+    }
+
     /// Says that a read or a write ended, and wakes the task.
     pub fn notify(&self) {
         self.woken.set(true);
@@ -80,7 +88,8 @@ impl Drop for Stop {
 /// slice that waits for a read or a write, it awaits `signal`.  When the
 /// job is done, or stopped at a failure, it calls `ended` and awaits
 /// `signal`, again and again.  A slice runs at least one step, so it ends
-/// within the budget and one block of work.
+/// within the budget and one block of work.  The signal keeps the longest
+/// slice ([`Signal::longest_ms`]).
 pub async fn drive<S, P>(
     job: Weak<RefCell<ExportJob<S>>>,
     signal: Rc<Signal>,
@@ -99,8 +108,11 @@ pub async fn drive<S, P>(
         signal.clear();
         let (done, waiting) = {
             let mut job = job.borrow_mut();
-            let end = now() + budget_ms;
+            let start = now();
+            let end = start + budget_ms;
             let done = job.run_while(|| now() < end);
+            let took = now() - start;
+            signal.longest_ms.set(signal.longest_ms.get().max(took));
             (done, job.is_waiting())
         };
         drop(job);
@@ -392,7 +404,7 @@ mod tests {
 
     /// The fake times of the yields of a save of `blocks` blocks in memory,
     /// each block `block_ms` of work, with slices of `budget_ms`.
-    fn yields_of(blocks: usize, budget_ms: f64, block_ms: f64) -> Vec<f64> {
+    fn yields_of(blocks: usize, budget_ms: f64, block_ms: f64) -> (Vec<f64>, f64) {
         let frames = blocks * BLOCK;
         let clock: Clock = Rc::default();
         let job = Rc::new(RefCell::new(ExportJob::new(
@@ -446,12 +458,13 @@ mod tests {
         drop(Stop(Rc::clone(&signal)));
         assert!(task.as_mut().poll(&mut cx).is_pending(), "the job lives");
         drop(job);
+        let longest = signal.longest_ms();
         drop(Stop(signal));
         assert!(
             task.as_mut().poll(&mut cx).is_ready(),
             "a dropped save ends its task"
         );
-        yields.take()
+        (yields.take(), longest)
     }
 
     /// D11 of M8: no slice runs longer than its budget and one block of
@@ -459,12 +472,12 @@ mod tests {
     #[test]
     fn a_slice_ends_within_its_budget_and_one_block() {
         // 1 ms a block, 4 ms a slice: 4 blocks, then a yield.
-        assert_eq!(
-            yields_of(30, 4.0, 1.0),
-            [4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0]
-        );
+        let (yields, longest) = yields_of(30, 4.0, 1.0);
+        assert_eq!(yields, [4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0]);
+        assert_eq!(longest, 4.0, "the longest slice, as the task measured it");
         // 3 ms a block: the second block ends the slice at 6 ms.
-        let yields = yields_of(30, 4.0, 3.0);
+        let (yields, longest) = yields_of(30, 4.0, 3.0);
+        assert_eq!(longest, 6.0);
         assert_eq!(yields.len(), 14);
         let mut start = 0.0;
         for at in yields {

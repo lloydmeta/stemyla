@@ -12,14 +12,15 @@
 //! `--enable-precise-memory-info` and `--js-flags=--expose-gc`, so
 //! `performance.memory.usedJSHeapSize` reads V8's used heap and the backing
 //! stores of `ArrayBuffer`s at each call.  An injected script
-//! (`xtask/e2e/save_spy.js`) calls `gc()` and reads the value before the save,
-//! every 250 ms during it, at each write of the page to browser storage, and
-//! once at its end.  The measure is the largest value less the value before.
-//! The readings at the writes see a save of less than a second in the state
-//! that it holds (review round speed 1 of M8).  The end of a save is the click
-//! of its download link, which the script keeps instead of downloading: every
-//! build makes it.  A calibration comes first: a 64 MiB `Uint8Array` must raise
-//! the measure by at least 60 MiB.
+//! (`xtask/e2e/save_spy.js`) reads the value before the save, every 250 ms
+//! during it, from each write of the page to browser storage, and once at its
+//! end.  Each reading collects garbage and waits for wasm-bindgen's
+//! finalizers first.  The measure is the largest value less the value before.
+//! The readings from the writes give a save of less than a second some
+//! readings (review rounds speed 1 and 2 of M8).  The end of a save is the
+//! click of its download link, which the script keeps instead of downloading:
+//! every build makes it.  A calibration comes first: a 64 MiB `Uint8Array`
+//! must raise the measure by at least 60 MiB.
 //!
 //! The worker's part: each encode logs a `memory: encode` line with the
 //! worker's WebAssembly memory before and after, and the file's size.
@@ -36,10 +37,11 @@
 //! Checks of D11 (a save that does not wait for the UI frame): for each
 //! format, a 10-minute save grows the page's WebAssembly memory by at most
 //! [`WASM_BOUND_BYTES`] more than a 1-minute save.  The 10-minute WAV save
-//! takes fewer animation frames than a quarter of its blocks.  A seventh
-//! save saves the 10-minute mix as a WAV while the song plays.  It fails
-//! on an underrun, and on a long task of the main thread over
-//! [`LONG_TASK_LIMIT_MS`].
+//! takes fewer animation frames than a quarter of its blocks, with the
+//! animation frames throttled to about 4 a second.  Each save's longest
+//! slice, which the page logs, is at most [`SLICE_LIMIT_MS`].  A seventh
+//! save saves the 10-minute mix as a WAV while the song plays, and fails
+//! on an underrun.  The main thread's long tasks are logged, not checked.
 //!
 //! At the end, `saves/` holds only the offered files.  It prints every
 //! measure, and runs every check also after one failed, so a run of an
@@ -132,10 +134,13 @@ const SAVE_IDLE_S: u64 = 5;
 /// The longest wait, in seconds, for a `playback:` line, which the page
 /// logs every 2 s while it plays.
 pub(super) const PLAY_WAIT_S: u64 = 30;
-/// D11: the longest task on the main thread during the save during
-/// playback, in milliseconds.  Chrome reports each task over 50 ms.  The
-/// audio output queues about 139 ms, so a task this long cannot empty it.
-pub(super) const LONG_TASK_LIMIT_MS: u64 = 50;
+/// D11: the longest slice of a save's task, in milliseconds, as the page
+/// logs it at the save's end.  cpal queues two buffers of 3,072 frames.
+/// When one ends, only the other is queued: about 70 ms at 44.1 kHz.  So a
+/// save that holds the main thread for about 70 ms can starve the audio
+/// output.  The bound is half that.  A slice is the 4 ms budget and one
+/// block of work, about 1.6 ms on the maintainer's Mac.
+pub(super) const SLICE_LIMIT_MS: f64 = 35.0;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
 const FIRST_RESTORES: u64 = SECONDS.len() as u64;
@@ -150,7 +155,7 @@ const fn caps_s() -> u64 {
     sum * FORMATS.len() as u64
 }
 /// The longest that all the waits of a run can take together (finding 2-2 of
-/// review round 2 of M8).  These are the start, the calibration, the two
+/// review round 2 of M8).  These are the start, the two calibrations, the two
 /// clean-ups, and the plant of each session.  Each first restore waits for a
 /// session switch, the restore and the stem overviews.  Each save waits for a
 /// session switch, the restore, two heap readings and two readings of the
@@ -162,7 +167,7 @@ const fn caps_s() -> u64 {
 /// not count the WebDriver commands of a click, a screenshot or a mark, which
 /// return at once.
 pub(super) const WAITS_S: u64 = START_WAIT_S
-    + SCRIPT_WAIT_S
+    + 2 * SCRIPT_WAIT_S
     + 2 * CLEAN_WAIT_S
     + FIRST_RESTORES * PLANT_WAIT_S
     + FIRST_RESTORES * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S)
@@ -260,9 +265,11 @@ pub(super) struct Save {
     /// The growth of the page's WebAssembly memory during the save, in
     /// bytes.
     pub wasm: Option<f64>,
-    /// The page's animation frames from the click of the menu item to the
-    /// offer.
+    /// The page's animation frames (`requestAnimationFrame` callbacks)
+    /// from the click of the menu item to the offer.
     pub frames: Option<u64>,
+    /// The save's longest slice, from the page's line, in milliseconds.
+    pub slice_ms: Option<f64>,
 }
 
 /// The worker's growth and the file's size, from a `memory: encode` line:
@@ -327,10 +334,14 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
     checks.push((
         not_frame_bound(frames, SECONDS[1]),
         format!(
-            "wav, 600 s: the save takes fewer animation frames than a quarter of its {} blocks ({frames:?})",
+            "wav, 600 s: the save takes fewer animation frames, throttled to about 4 a second, than a quarter of its {} blocks ({frames:?})",
             blocks(SECONDS[1])
         ),
     ));
+    for save in saves {
+        let what = format!("{}, {} s", save.format, save.seconds);
+        checks.push(slice_check(&what, save.slice_ms));
+    }
     let worker = |format, seconds| find(saves, format, seconds).and_then(|s| s.worker);
     let (flac_short, flac_long) = (worker("flac", SECONDS[0]), worker("flac", SECONDS[1]));
     let flac = flac_short.zip(flac_long).map(|((s, _), (l, _))| l - s);
@@ -459,8 +470,8 @@ pub(super) fn offered_file(line: &str) -> Option<(String, f64, String)> {
     ))
 }
 
-/// The UI frames that the page drew from the click to the offer, from an
-/// `e2e: offered` line.
+/// The animation frames (`requestAnimationFrame` callbacks) of the page from
+/// the click to the offer, from an `e2e: offered` line.
 pub(super) fn offered_frames(line: &str) -> Option<u64> {
     let json: Value = serde_json::from_str(line.split("e2e: offered ").nth(1)?).ok()?;
     json["frames"].as_u64()
@@ -628,8 +639,10 @@ pub(super) struct Playing {
     /// save at least, and the first after the offer.
     pub lines: Vec<PlaybackLine>,
     /// The lengths of the main thread's long tasks from the click of the
-    /// menu item to the offer, in milliseconds.
-    pub long_tasks: Option<Vec<u64>>,
+    /// menu item to the offer, in milliseconds: logged, not checked.
+    pub long_tasks: Option<Vec<f64>>,
+    /// The save's longest slice, from the page's line, in milliseconds.
+    pub slice_ms: Option<f64>,
 }
 
 /// The checks of the save during playback (D11): the song played from
@@ -661,17 +674,24 @@ pub(super) fn playing_checks(playing: &Playing) -> Vec<(bool, String)> {
             !lines.is_empty() && underruns.iter().all(|&u| u == 0),
             format!("wav, 600 s, during playback: no underrun ({underruns:?})"),
         ),
-        (
-            playing
-                .long_tasks
-                .as_ref()
-                .is_some_and(|l| l.iter().all(|&ms| ms <= LONG_TASK_LIMIT_MS)),
-            format!(
-                "wav, 600 s, during playback: no task holds the main thread for more than {LONG_TASK_LIMIT_MS} ms ({:?} ms)",
-                playing.long_tasks
-            ),
-        ),
+        slice_check("wav, 600 s, during playback", playing.slice_ms),
     ]
+}
+
+/// The longest slice of a save, in milliseconds, from the page's line
+/// `save: <name>: longest slice <ms> ms`.
+pub(super) fn slice_line(line: &str) -> Option<f64> {
+    number_after(&line[line.find("save: ")?..], ": longest slice ")
+}
+
+/// The check of a save's longest slice against [`SLICE_LIMIT_MS`].
+pub(super) fn slice_check(what: &str, slice_ms: Option<f64>) -> (bool, String) {
+    (
+        slice_ms.is_some_and(|ms| ms <= SLICE_LIMIT_MS),
+        format!(
+            "{what}: the save's longest slice is at most {SLICE_LIMIT_MS} ms ({slice_ms:?} ms)"
+        ),
+    )
 }
 
 /// The blocks of 16,384 frames that a save of `seconds` of audio reads.
@@ -681,7 +701,10 @@ pub(super) fn blocks(seconds: u32) -> u64 {
 
 /// D11: a save that does not wait for the UI frame takes fewer animation
 /// frames than a quarter of its blocks.  Before D11, it took about one for
-/// each block.
+/// each block.  The spy throttles the frames of this save to about 4 a
+/// second (`__e2e_mark`).  So the bound is a block count, not a time: a
+/// frame-bound save of 10 minutes needs over 400 s, and a save of D11
+/// passes until it takes about 100 s.
 pub(super) fn not_frame_bound(frames: Option<u64>, seconds: u32) -> bool {
     frames.is_some_and(|f| f < blocks(seconds) / 4)
 }
@@ -708,6 +731,17 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     ));
     let (ok, what) = calibration_check(calibration);
     p.check(ok, &what);
+    // Logged, not checked: a runner that paints in software can have long
+    // tasks of its own (review round speed 2 of M8).
+    let long = in_page(
+        &mut p,
+        "return await window.__e2e_long_calibrate();",
+        json!([]),
+        SCRIPT_WAIT_S,
+    )?;
+    p.note(&format!(
+        "save: long tasks: a hold of 120 ms showed as a long task of {long:?} ms (null: no long tasks in this browser)"
+    ));
     in_page(&mut p, CLEAN, json!([]), CLEAN_WAIT_S)?;
     for seconds in SECONDS {
         let frames = in_page(
@@ -749,6 +783,10 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         }
     }
     let playing = save_playing(&mut p, o)?;
+    p.note(&format!(
+        "save: wav, 600 s, during playback: long tasks during the save {:?} ms (logged, not checked)",
+        playing.long_tasks
+    ));
     for (ok, what) in playing_checks(&playing) {
         p.check(ok, &what);
     }
@@ -799,7 +837,8 @@ fn restore(p: &mut Page, seconds: u32) -> Result<()> {
 const WASM_MEMORY: &str = "return (await window.wasmBindings.default()).memory.buffer.byteLength;";
 
 /// After a save: the page's WebAssembly memory in bytes, and the lengths
-/// of the main thread's long tasks during the save, in milliseconds.
+/// of the main thread's long tasks during the save, in milliseconds, or
+/// null where the browser has no long tasks.
 const AFTER_SAVE: &str =
     "return { wasm: (await window.wasmBindings.default()).memory.buffer.byteLength,
       long: window.__e2e_long_in_save() };";
@@ -807,8 +846,13 @@ const AFTER_SAVE: &str =
 /// The lengths of the long tasks during the last save, from a reply of
 /// [`AFTER_SAVE`] or of `__e2e_long_in_save`, in milliseconds.  `None`
 /// when the reply has none.
-pub(super) fn long_tasks(reply: &Value) -> Option<Vec<u64>> {
-    reply.as_array()?.iter().map(Value::as_u64).collect()
+pub(super) fn long_tasks(reply: &Value) -> Option<Vec<f64>> {
+    reply.as_array()?.iter().map(Value::as_f64).collect()
+}
+
+/// The longest slice line of the save logged in `log`.
+fn slice_of(log: &[String]) -> Option<f64> {
+    log.iter().find_map(|l| slice_line(l))
 }
 
 /// The growth of a memory from `before` to `after`, in bytes.
@@ -819,23 +863,24 @@ pub(super) fn growth(before: Option<f64>, after: Option<f64>) -> Option<f64> {
 /// Clicks the mix lane's Save and the menu's item at `row`, and waits for
 /// the offer of the save of `format` and `seconds`: its line.  With
 /// `heap`, the JS heap readings start just before the item's click, so
-/// even a save of less than a second gets some.
+/// even a save of less than a second gets some.  With `throttle`, the
+/// animation frames come about 4 a second until the offer.
 fn click_save(
     p: &mut Page,
     o: &Opts,
     (format, row, seconds): (&str, usize, u32),
-    heap: bool,
+    (heap, throttle): (bool, bool),
 ) -> Result<String> {
     let mark = p.mark();
     p.click_at(o.save_x, o.save_y, "the mix lane's Save")?;
     p.idle(0.5)?;
     p.screenshot(&format!("{format}-{seconds}-menu"))?;
     let start = if heap {
-        "window.__e2e_start_heap(); window.__e2e_mark();"
+        "window.__e2e_start_heap(); window.__e2e_mark(arguments[0]);"
     } else {
-        "window.__e2e_mark();"
+        "window.__e2e_mark(arguments[0]);"
     };
-    p.session.execute(start, json!([]))?;
+    p.session.execute(start, json!([throttle]))?;
     p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
     let offered = wait_for_offer(p, mark, format, seconds)?;
     p.note(&format!(
@@ -859,7 +904,9 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     )?;
     let wasm_before = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
     let mark = p.mark();
-    let offered = click_save(p, o, (format, row, seconds), true)?;
+    // Only the 10-minute WAV save has its frames checked (not_frame_bound).
+    let throttle = format == "wav" && seconds == SECONDS[1];
+    let offered = click_save(p, o, (format, row, seconds), (true, throttle))?;
     let after = in_page(p, AFTER_SAVE, json!([]), SCRIPT_WAIT_S)?;
     let wasm_after = after["wasm"].as_f64();
     p.note(&format!(
@@ -889,6 +936,7 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
         worker,
         wasm: growth(wasm_before, wasm_after),
         frames: offered_frames(&offered_line),
+        slice_ms: slice_of(&p.log[mark..]),
     })
 }
 
@@ -907,7 +955,8 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     {
         bail!("wav, {seconds} s, during playback: no playback line within {PLAY_WAIT_S} s");
     }
-    let offered = click_save(p, o, ("wav", 0, seconds), false)?;
+    let mark = p.mark();
+    let offered = click_save(p, o, ("wav", 0, seconds), (false, false))?;
     let after = p.mark();
     let last = p.wait_for(after, PLAY_WAIT_S, |l| playback_line(l).is_some())?;
     p.click(o.play_x, "Pause")?;
@@ -927,6 +976,7 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         line_after_offer: last.is_some(),
         lines,
         long_tasks: long,
+        slice_ms: slice_of(&p.log[mark..]),
     })
 }
 
@@ -943,6 +993,7 @@ mod tests {
             worker,
             wasm: Some(f64::from(seconds) * 100.0),
             frames: Some(160),
+            slice_ms: Some(6.0),
         }
     }
 
@@ -1024,6 +1075,7 @@ mod tests {
             line_after_offer,
             lines: underruns.iter().map(|&u| line(u)).collect(),
             long_tasks: Some(Vec::new()),
+            slice_ms: Some(6.0),
         }
     }
 
@@ -1057,20 +1109,34 @@ mod tests {
         assert_eq!(failing(&none), 1, "no lane plays");
     }
 
-    /// Finding 1-2 of review round speed 1: the save during playback
-    /// fails on a task that holds the main thread for more than the limit,
-    /// and when the long tasks were not read.
+    /// Review round speed 2: each save fails when its longest slice, as
+    /// the page logs it, passes the limit, or when the page logged none.
     #[test]
-    fn the_playing_checks_bound_the_long_tasks() {
+    fn the_longest_slice_of_each_save_is_bounded() {
+        let line = "[3.2s] console.info: [app] app/src/lib.rs:4660: save: lloyd - mix.wav: longest slice 5.3 ms";
+        assert_eq!(slice_line(line), Some(5.3));
+        assert_eq!(slice_line("save: lloyd - mix.wav: offered"), None);
+        assert_eq!(slice_line("longest slice 5.3 ms"), None);
+        assert!(slice_check("wav", Some(SLICE_LIMIT_MS)).0);
+        assert!(!slice_check("wav", Some(SLICE_LIMIT_MS + 0.1)).0);
+        assert!(!slice_check("wav", None).0);
+        let mut held = good();
+        held[3].slice_ms = Some(100.0);
+        let failed = failing(&held);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].starts_with("flac, 600 s: the save's longest slice"));
+        let mut none = good();
+        none[0].slice_ms = None;
+        assert_eq!(failing(&none).len(), 1);
         let failing = |p: &Playing| playing_checks(p).iter().filter(|(ok, _)| !ok).count();
-        let mut held = playing(&[0, 0], true);
-        held.long_tasks = Some(vec![LONG_TASK_LIMIT_MS]);
-        assert_eq!(failing(&held), 0, "at the limit");
-        held.long_tasks = Some(vec![12, LONG_TASK_LIMIT_MS + 1]);
-        assert_eq!(failing(&held), 1, "over the limit");
-        held.long_tasks = None;
-        assert_eq!(failing(&held), 1, "not read");
-        assert_eq!(long_tasks(&json!([51, 70])), Some(vec![51, 70]));
+        let mut playing_held = playing(&[0, 0], true);
+        playing_held.slice_ms = Some(101.0);
+        assert_eq!(failing(&playing_held), 1, "a slice that holds 101 ms");
+        // The long tasks are logged, not checked.
+        playing_held.slice_ms = Some(6.0);
+        playing_held.long_tasks = Some(vec![212.5]);
+        assert_eq!(failing(&playing_held), 0);
+        assert_eq!(long_tasks(&json!([51.5, 70])), Some(vec![51.5, 70.0]));
         assert_eq!(long_tasks(&json!(null)), None);
         assert_eq!(long_tasks(&json!(["x"])), None);
     }
@@ -1109,8 +1175,9 @@ mod tests {
         let first_restores = 2 * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S);
         let saves = 6 * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S);
         let playing = 3 * SCRIPT_WAIT_S + RESTORE_WAIT_S + SAVE_IDLE_S + 2 * PLAY_WAIT_S + 180;
+        // The start, the heap calibration and the long-task calibration.
         let counted = START_WAIT_S
-            + SCRIPT_WAIT_S
+            + 2 * SCRIPT_WAIT_S
             + 2 * CLEAN_WAIT_S
             + 2 * PLANT_WAIT_S
             + first_restores
@@ -1120,7 +1187,7 @@ mod tests {
             + playing
             + SCRIPT_WAIT_S;
         assert_eq!(WAITS_S, counted);
-        assert_eq!(WAITS_S, 2_300);
+        assert_eq!(WAITS_S, 2_315);
         const { assert!(STEP_LIMIT_S - WAITS_S < 300, "the limit is near the waits") };
     }
 

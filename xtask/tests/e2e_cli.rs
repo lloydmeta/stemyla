@@ -1,5 +1,6 @@
 //! `xtask e2e` as a person runs it, with no browser: a scenario that cannot
-//! start its driver fails before any browser starts.
+//! start its driver fails before any browser starts.  `xtask web-test` fails on an
+//! option that it does not know.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -129,4 +130,21 @@ fn save_with_no_driver_fails_before_a_browser_starts() {
 #[test]
 fn flac_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("flac", "flac", false);
+}
+
+/// `xtask web-test` with an option it does not know fails before it builds
+/// or runs anything (the mutants of review round speed 2 of M8: a `run`
+/// that returns `Ok(())` would pass).
+#[test]
+fn web_test_refuses_an_unknown_option() {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["web-test", "--bogus"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "web-test fails: {stderr}");
+    assert!(
+        stderr.contains("unknown option --bogus"),
+        "web-test names the option: {stderr}"
+    );
 }

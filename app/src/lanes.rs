@@ -660,6 +660,31 @@ pub(crate) mod tests {
         }
     }
 
+    /// Finding 2-4 of review round speed 2 of M8: a stem save reads ahead.
+    /// Once its first block is ready, the next block's read is in flight,
+    /// and it gives the stem's frames.
+    #[test]
+    fn a_stem_save_reads_the_next_block_ahead() {
+        let song = song(50_000);
+        let (left, right) = (&song.stems[0].left, &song.stems[0].right);
+        let store = MemoryStore::new();
+        let lane = stored_f32(&store, "acme/decoded/0.f32", left, right);
+        store.hold(true);
+        let pcm = LanePcm::reading_ahead(lane, 50_000, 48_000, 16_384);
+        assert!(!pcm.ready(0, 16_384), "the first read is in flight");
+        store.release();
+        assert!(pcm.ready(0, 16_384));
+        assert_eq!(store.requests(), 2, "the first block, then the next");
+        assert_eq!(store.held_reads(), 1, "the next block's read is in flight");
+        let (mut l, mut r) = (vec![0.0; 16_384], vec![0.0; 16_384]);
+        pcm.read(0, &mut l, &mut r);
+        assert!(l[..] == left[..16_384] && r[..] == right[..16_384]);
+        store.release();
+        assert!(pcm.ready(16_384, 16_384));
+        pcm.read(16_384, &mut l, &mut r);
+        assert!(l[..] == left[16_384..32_768]);
+    }
+
     const BLOCKS: [usize; 4] = [1, 1_000, 16_384, 32_768];
 
     /// D3 of the M7 plan: a stored lane reads the samples that `read_stem`
