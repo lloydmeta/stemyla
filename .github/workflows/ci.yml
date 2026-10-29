@@ -157,10 +157,13 @@ jobs:
   browser-tests:
     name: browser tests (Chrome)
     runs-on: ubuntu-latest
-    # About 15 minutes when warm, before M8; `e2e save` adds about 3 minutes
-    # on the maintainer's Mac, not measured on CI yet.  A hung browser must
-    # not hold the runner for GitHub's 6 h default.
-    timeout-minutes: 60
+    # Run 40788465048 (2026-10-28) took 19 minutes before `e2e save`.  On
+    # CI, a save takes about 34 s for each minute of audio, so a normal run
+    # of `e2e save` takes about 22 minutes, and the job about 41.  The limit
+    # is the 19 minutes and `e2e save`'s own limit of 55, rounded up, so a
+    # run of `e2e save` that waits in vain ends on its own check.  A hung
+    # browser must not hold the runner for GitHub's 6 h default.
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -197,12 +200,13 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
-        # About 3 minutes on the maintainer's Mac; not measured on CI yet.
-        # The limit is the longest that all the waits of a run can take
-        # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal
-        # to it).  A stopped step writes no save.log, but its output has
-        # every note of the run.
-        timeout-minutes: 40
+        # About 3 minutes on the maintainer's Mac.  In run 40788465048, its
+        # save of 60 s of audio took 34 s (about 10 times the Mac), so a
+        # normal run here takes about 22 minutes.  The limit is the longest
+        # that all the waits of a run can take (`STEP_LIMIT_S` in
+        # xtask/src/e2e/save.rs, which a test keeps equal to it).  A stopped
+        # step writes no save.log, but its output has every note of the run.
+        timeout-minutes: 55
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.
       - if: failure() || cancelled()

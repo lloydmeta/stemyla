@@ -11,10 +11,35 @@
     return u;
   };
   window.__e2e_saves = [];
+  // The frames that the page drew (its requestAnimationFrame callbacks)
+  // and the OPFS writes that it made, so a run can see that a save goes on,
+  // and how many frames it takes.
+  window.__e2e_frames = 0;
+  const real_raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (f) => real_raf((t) => { window.__e2e_frames++; f(t); });
+  window.__e2e_writes = 0;
+  if (window.FileSystemWritableFileStream) {
+    const real_write = FileSystemWritableFileStream.prototype.write;
+    FileSystemWritableFileStream.prototype.write = function (data) {
+      window.__e2e_writes++;
+      return real_write.call(this, data);
+    };
+  }
+  // A number that grows while a save goes on: the page's OPFS writes, and
+  // the bytes of the files in saves/, which the worker writes.
+  window.__e2e_progress = async () => {
+    let bytes = 0;
+    try {
+      const d = await (await navigator.storage.getDirectory()).getDirectoryHandle("saves");
+      for await (const h of d.values()) if (h.kind === "file") bytes += (await h.getFile()).size;
+    } catch (_) {}
+    return window.__e2e_writes + bytes;
+  };
   HTMLAnchorElement.prototype.click = function () {
     const blob = blobs.get(this.href) || null;
     blobs.delete(this.href);
-    const save = { name: this.download, size: blob ? blob.size : -1, mime: blob === null ? "" : blob.type };
+    const save = { name: this.download, size: blob ? blob.size : -1, mime: blob === null ? "" : blob.type,
+      frames: window.__e2e_frames - (window.__e2e_frames_at_start || 0) };
     window.__e2e_saves.push(save);
     // Only the last file is kept, for the checks; the page's own object
     // URL keeps it for 60 s anyway.
@@ -38,6 +63,7 @@
   // Reads the heap until `__e2e_stop_heap`, one reading after another,
   // and keeps the largest value.
   window.__e2e_start_heap = () => {
+    window.__e2e_frames_at_start = window.__e2e_frames;
     window.__e2e_heap_max = null;
     window.__e2e_heap_on = true;
     (async () => {

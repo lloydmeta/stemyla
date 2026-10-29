@@ -57,32 +57,45 @@ pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
 pub(super) const MP3_FACTOR: f64 = 4.0;
 const ONE_MIB: f64 = 1_048_576.0;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
-/// (`timeout-minutes`), in seconds.  A run takes about 3 minutes on the
-/// maintainer's Mac.  The limit is the longest that every wait of a run can
-/// take (finding 3-1 of review round 3 of M8).  So a run that waits in vain
-/// still ends on a check of its own.  A step that CI stops writes no
-/// `save.log`, but each note of the run also goes to the step's output.
-pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
-/// The longest wait, in seconds, for a save to offer its file.  On the
-/// maintainer's Mac, the longest save (an MP3 of 10 minutes) took about 48 s
-/// from its restore to its offer.  CI ran `e2e flac` twice as fast.
-pub(super) const SAVE_WAIT_S: u64 = 120;
+/// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
+/// run can take (finding 3-1 of review round 3 of M8).  So a run that
+/// waits in vain still ends on a check of its own.  A step that CI stops
+/// writes no `save.log`, but each note of the run also goes to the step's
+/// output.  On CI on 2026-10-28, a save of 60 s of audio took 34 s, so a
+/// normal run there takes about 22 minutes; on the maintainer's Mac, about
+/// 3 minutes.
+pub(super) const STEP_LIMIT_S: u64 = 55 * 60;
+/// The longest that a save of `seconds` of audio may take from its click
+/// to its offer, in seconds.  On CI, a save of 60 s of audio took 34 s, and
+/// a save of 600 s takes about 340 s, as a save takes one UI frame for each
+/// block that it reads.  An encode adds less than a minute.  The caps leave
+/// about 1.7 times that.
+pub(super) const fn save_cap_s(seconds: u32) -> u64 {
+    if seconds <= 60 { 120 } else { 600 }
+}
+/// The longest that a save may show no progress, in seconds: no write of
+/// the page to browser storage and no growth of the save files.  An MP3
+/// encode writes nothing until its encoder finishes, which took about 10 s
+/// for 10 minutes on the maintainer's Mac.
+pub(super) const STALL_S: u64 = 120;
+/// How often the wait for an offer reads the save's progress, in seconds.
+const POLL_S: u64 = 2;
 /// The longest wait, in seconds, for a restore and for its stem overviews.
-/// The first restore of the 10-minute session took about 4 s, and a
-/// later restore less.
-pub(super) const RESTORE_WAIT_S: u64 = 60;
+/// The first restore of the 10-minute session took about 4 s.
+pub(super) const RESTORE_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for the app to start.
 pub(super) const START_WAIT_S: u64 = 60;
 /// The longest wait, in seconds, for the plant of a session.  The plant of
 /// the 10-minute session took about 5 s.
-pub(super) const PLANT_WAIT_S: u64 = 120;
+pub(super) const PLANT_WAIT_S: u64 = 60;
 /// The longest wait, in seconds, for the read of a 1-minute file.
-pub(super) const READ_WAIT_S: u64 = 60;
+pub(super) const READ_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for the removal of the sessions and the
 /// save files.
-pub(super) const CLEAN_WAIT_S: u64 = 60;
+pub(super) const CLEAN_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for a short script: a session switch, the
-/// calibration, a heap reading or the list of save files.
+/// calibration, a heap reading, a reading of the progress or the list of
+/// save files.
 pub(super) const SCRIPT_WAIT_S: u64 = 15;
 /// The idle time of each save, in seconds: 3 s before it, 0.5 s with the
 /// menu open and 1 s after it, rounded up.
@@ -90,25 +103,36 @@ const SAVE_IDLE_S: u64 = 5;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
 const FIRST_RESTORES: u64 = SECONDS.len() as u64;
+/// The caps of all the saves of a run together.
+const fn caps_s() -> u64 {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < SECONDS.len() {
+        sum += save_cap_s(SECONDS[i]);
+        i += 1;
+    }
+    sum * FORMATS.len() as u64
+}
 /// The longest that all the waits of a run can take together (finding 2-2
 /// of review round 2 of M8).  These are the start, the calibration, the
 /// two clean-ups, and the plant of each session.  Each first restore waits
 /// for a session switch, the restore and the stem overviews.  Each save
-/// waits for a session switch, the restore, two heap readings and its
-/// offer, and idles.  The 1-minute save of each format reads its file.
-/// The run ends with the list of save files.  It does not count the
-/// WebDriver commands of a click or a screenshot, which return at once.
+/// waits for a session switch, the restore and two heap readings, idles,
+/// and waits up to its cap for its offer.  The 1-minute save of each format
+/// reads its file.  The run ends with the list of save files.  It does not
+/// count the WebDriver commands of a click or a screenshot, which return at
+/// once.
 pub(super) const WAITS_S: u64 = START_WAIT_S
     + SCRIPT_WAIT_S
     + 2 * CLEAN_WAIT_S
     + FIRST_RESTORES * PLANT_WAIT_S
     + FIRST_RESTORES * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S)
-    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 2 * SCRIPT_WAIT_S + SAVE_WAIT_S + SAVE_IDLE_S)
+    + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 2 * SCRIPT_WAIT_S + SAVE_IDLE_S)
+    + caps_s()
     + FORMATS.len() as u64 * READ_WAIT_S
     + SCRIPT_WAIT_S;
-// Each wait, and all of them together, end within the step's limit.
+// All the waits together end within the step's limit.
 const _: () = assert!(WAITS_S < STEP_LIMIT_S);
-const _: () = assert!(PLANT_WAIT_S < STEP_LIMIT_S && SAVE_WAIT_S < STEP_LIMIT_S);
 /// The calibration array, and the least rise of the measure that it must
 /// make.
 const CALIBRATION_BYTES: u64 = 64 << 20;
@@ -365,6 +389,13 @@ pub(super) fn offered_file(line: &str) -> Option<(String, f64, String)> {
     ))
 }
 
+/// The UI frames that the page drew from the click to the offer, from an
+/// `e2e: offered` line.
+pub(super) fn offered_frames(line: &str) -> Option<u64> {
+    let json: Value = serde_json::from_str(line.split("e2e: offered ").nth(1)?).ok()?;
+    json["frames"].as_u64()
+}
+
 /// The offered file of a save, from the line that the wait found.  It is
 /// an error when there is none, so the run ends (finding 1-4 of review
 /// round 1 of M8).
@@ -375,9 +406,73 @@ pub(super) fn offer_of(
 ) -> Result<(String, f64, String)> {
     match line.and_then(offered_file) {
         Some(file) => Ok(file),
-        None => bail!(
-            "{format}, {seconds} s: the save offered no file within {SAVE_WAIT_S} s ({line:?})"
-        ),
+        None => {
+            bail!("{format}, {seconds} s: the save offered no file that it could read ({line:?})")
+        }
+    }
+}
+
+/// What the wait for an offer decides from the readings of a save's
+/// progress so far.
+#[derive(Debug, PartialEq)]
+pub(super) enum Wait {
+    /// The save goes on: wait more.
+    Going,
+    /// No reading changed for [`STALL_S`].
+    Stalled,
+    /// The save is past its cap ([`save_cap_s`]).
+    OverCap,
+}
+
+/// Decides the wait for an offer at `now` (seconds since the click), from
+/// `readings` of the save's progress, each its time and its value.  The
+/// save stalls when no reading changed for `stall_s` since the last change,
+/// or since the click (finding 1 of the CI run of 2026-10-28).
+pub(super) fn judge(readings: &[(f64, u64)], now: f64, stall_s: f64, cap_s: f64) -> Wait {
+    if now >= cap_s {
+        return Wait::OverCap;
+    }
+    let last_change = readings
+        .windows(2)
+        .rev()
+        .find(|w| w[1].1 != w[0].1)
+        .map_or(0.0, |w| w[1].0);
+    if now - last_change >= stall_s {
+        Wait::Stalled
+    } else {
+        Wait::Going
+    }
+}
+
+/// Waits for the save to offer its file, from the log at `mark`: the
+/// offer's line.  It reads the save's progress every [`POLL_S`], and ends
+/// the run when the save stalls or passes its cap.
+fn wait_for_offer(p: &mut Page, mark: usize, format: &str, seconds: u32) -> Result<String> {
+    let start = std::time::Instant::now();
+    let cap = save_cap_s(seconds) as f64;
+    let mut readings = Vec::new();
+    loop {
+        p.poll()?;
+        if let Some(line) = p.log[mark..].iter().find(|l| l.contains("e2e: offered ")) {
+            return Ok(line.clone());
+        }
+        let now = start.elapsed().as_secs_f64();
+        let progress = in_page(
+            p,
+            "return await window.__e2e_progress();",
+            json!([]),
+            SCRIPT_WAIT_S,
+        )?;
+        readings.push((now, progress.as_u64().unwrap_or(0)));
+        match judge(&readings, now, STALL_S as f64, cap) {
+            Wait::Going => std::thread::sleep(std::time::Duration::from_secs(POLL_S)),
+            Wait::Stalled => bail!(
+                "{format}, {seconds} s: the save made no progress for {STALL_S} s ({now:.0} s after the click)"
+            ),
+            Wait::OverCap => {
+                bail!("{format}, {seconds} s: the save offered no file within its cap of {cap} s")
+            }
+        }
     }
 }
 
@@ -556,7 +651,11 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     p.idle(0.5)?;
     p.screenshot(&format!("{format}-{seconds}-menu"))?;
     p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
-    let offered = p.wait_for(mark, SAVE_WAIT_S, |l| l.contains("e2e: offered "))?;
+    let offered = wait_for_offer(p, mark, format, seconds)?;
+    p.note(&format!(
+        "save: {format}, {seconds} s: offered after {} UI frames",
+        offered_frames(&offered).map_or("?".into(), |f| f.to_string())
+    ));
     let max = in_page(
         p,
         "return await window.__e2e_stop_heap();",
@@ -564,7 +663,7 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
         SCRIPT_WAIT_S,
     )?;
     let heap = heap_rise(&max, &before);
-    let offered = Some(offer_of(offered.as_deref(), format, seconds)?);
+    let offered = Some(offer_of(Some(&offered), format, seconds)?);
     let worker = p.log[mark..]
         .iter()
         .find(|l| l.contains(&format!("memory: encode {format} ")))
@@ -901,5 +1000,56 @@ mod tests {
             .and_then(|m| m.trim().parse().ok())
             .expect("the step's timeout-minutes");
         assert_eq!(minutes * 60, STEP_LIMIT_S);
+    }
+
+    /// The CI run of 2026-10-28: a save that goes on is not stopped by a
+    /// fixed time, a save with no progress for the stall time is, and a
+    /// save past its cap is.
+    #[test]
+    fn the_wait_follows_the_saves_progress() {
+        let stall = STALL_S as f64;
+        let going: Vec<(f64, u64)> = (0..300).map(|i| (2.0 * i as f64, i as u64)).collect();
+        assert_eq!(
+            judge(&going[..200], 398.0, stall, 600.0),
+            Wait::Going,
+            "a long save that goes on"
+        );
+        assert_eq!(judge(&going, 600.0, stall, 600.0), Wait::OverCap);
+        assert_eq!(judge(&going, 599.9, stall, 600.0), Wait::Going);
+        // No change since the click.
+        let flat = [(0.0, 7), (60.0, 7), (119.0, 7)];
+        assert_eq!(judge(&flat, 119.0, stall, 600.0), Wait::Going);
+        assert_eq!(judge(&flat, 120.0, stall, 600.0), Wait::Stalled);
+        // A change at 50 s, then none: it stalls at 170 s, not before.
+        let stops = [(0.0, 1), (50.0, 2), (100.0, 2), (169.0, 2)];
+        assert_eq!(judge(&stops, 169.0, stall, 600.0), Wait::Going);
+        assert_eq!(judge(&stops, 170.0, stall, 600.0), Wait::Stalled);
+        // An earlier change does not count when a later one came.
+        let later = [(0.0, 1), (10.0, 2), (20.0, 2), (150.0, 3), (200.0, 3)];
+        assert_eq!(judge(&later, 200.0, stall, 600.0), Wait::Going);
+        assert_eq!(judge(&[], 10.0, stall, 600.0), Wait::Going);
+    }
+
+    #[test]
+    fn the_caps_leave_room_for_the_ci_speed() {
+        // On CI, a save took 34 s for each 60 s of audio.
+        let ci = |seconds: u32| f64::from(seconds) * 34.0 / 60.0;
+        assert_eq!(save_cap_s(60), 120);
+        assert_eq!(save_cap_s(600), 600);
+        for seconds in SECONDS {
+            assert!(
+                save_cap_s(seconds) as f64 >= 1.5 * ci(seconds),
+                "{seconds} s: a cap of {} s",
+                save_cap_s(seconds)
+            );
+        }
+        assert_eq!(caps_s(), 3 * (120 + 600));
+    }
+
+    #[test]
+    fn an_offer_line_gives_its_frames() {
+        let line = r#"[9.0s] console.log: e2e: offered {"name":"lloyd - mix.wav","size":44,"mime":"audio/wav","frames":181}"#;
+        assert_eq!(offered_frames(line), Some(181));
+        assert_eq!(offered_frames("e2e: offered {}"), None);
     }
 }
