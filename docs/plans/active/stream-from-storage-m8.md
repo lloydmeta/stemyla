@@ -226,6 +226,8 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
 
 * [x] 2026-10-29: the review log of rounds 1 to 3 is in `docs/reviews/iphone-crashes-2026-10-25-m8.md`, and the run folder is removed (team leader).
 
+* [x] 2026-10-29: review round speed 1 (team leader): 5 reviewers, 50 findings; the first mutants run stopped at its baseline (a timing test of the Bash guard took 5.9 s under load), the second tested 133 (34 missed: 26 confirmed, 6 pre-existing, 2 refuted).  Significant: the CI time claimed from the Mac proxy (1-1), an underrun check that could not fail (1-2), a JS heap bound doubled to 8 MB (1-3), no browser check against a frame-bound save (1-4) and the web-test limit (1-8).  All fixed in `fc5fa97`.
+
 ## Surprises and discoveries
 
 * 2026-10-29, implementer, step 6: when the lanes are in browser storage, each slice of a save mixes one block, then waits for the next read.  A read ends only in a later task.  So the 4 ms budget binds only for lanes in memory, and a block takes about 1.6 ms in Chrome on this Mac, a read and a mix.  The page gets about 57 `requestAnimationFrame` callbacks a second during a save; it paints only on request.  The JS heap measure of a 10-minute save rose from about 1.4 MB to 3.2 MB, the same in each format and run.  Review round speed 1 found the cause in the measure, not in D11 (the Decision log).
@@ -302,6 +304,8 @@ And the checks of GIT-2: `cargo fmt --all --check`, the clippy commands of `CLAU
   * The 10-minute WAV save must take fewer animation frames than a quarter of its 1,615 blocks.  The FLAC and MP3 saves are not checked so: their offers wait for the worker's encode too.  The build before D11 failed it with 1,752 frames.
   * `xtask web-test` gives each test binary 600 s, not 300 s.  The app's binary took 197 s in CI run 40788465048, and 219 to 231 s on this Mac, with one run over 300 s.
   * TD-61 stays open: the CI time of `e2e save` is an estimate from this Mac with `--swiftshader` until a CI run logs it.  The orchestrator closes it.
+
+* 2026-10-29, team leader, after review round speed 1: the browser check of the save during playback fails a save that holds the main thread for a long task (over 50 ms).  A build with no `SAVE_MS` budget passes it, because with stored lanes each slice already ends at its read in flight.  So the native test `a_slice_ends_within_its_budget_and_one_block` is the check of the budget itself.  The orchestrator asked for a browser check that fails that mutant; the team leader accepts this limit and records it here.
 
 ## Outcomes and retrospective
 
