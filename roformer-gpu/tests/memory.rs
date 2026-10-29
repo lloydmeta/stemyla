@@ -423,6 +423,55 @@ fn without_the_f16_flag_weights_stay_f32() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
+/// An f16 variant that does not compile (planted) fails the start-up
+/// check with a line that names the error, and leaves the f32 kernels in
+/// use: f16 or the default setting then loads an F16 file as f32, and no
+/// error reaches the device's error sink.
+#[test]
+fn an_f16_variant_that_does_not_compile_keeps_f32_weights() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    if !g.has_f16_unpack() {
+        return skip(Need::F16, "adapter without SHADER_F16_IN_F32");
+    }
+    g.break_f16_variants();
+    let problems = pollster::block_on(g.check_kernels()).unwrap();
+    assert!(!g.f16_ok.get());
+    assert!(
+        g.usable.get().iter().all(|&u| u),
+        "the f32 kernels stay usable"
+    );
+    assert_eq!(problems.len(), roformer_gpu::TILES.len(), "{problems:#?}");
+    for (p, tile) in problems.iter().zip(&roformer_gpu::TILES) {
+        assert!(
+            p.starts_with(&format!(
+                "f16 weights: the f16 variant of matmul kernel {} does not compile on this GPU (",
+                tile.name
+            )) && p.ends_with("); weights stay f32"),
+            "{p}"
+        );
+    }
+    assert!(g.take_errors().is_empty());
+    for setting in [Some("f16"), Some("auto"), None] {
+        let (format, note) = weight_format(setting, g.downlevel_flags(), g.f16_ok.get());
+        assert_eq!(format, WeightFormat::F32, "{setting:?}");
+        assert!(
+            note.is_some_and(|n| n.contains("start-up check")),
+            "{setting:?}"
+        );
+        let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
+        let net = Net::load_store(&g, store, 400_000, format).unwrap();
+        assert_eq!(net.format, WeightFormat::F32);
+    }
+    let frames = 9;
+    let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F32).unwrap();
+    let job = Job::new(&g, &net, frames);
+    pollster::block_on(job.masks(&vec![0.5; frames * FEATURES])).unwrap();
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 /// A file missing the last tensor the network reads fails after nearly
 /// all of the model is on the GPU; what was uploaded is destroyed.
 #[test]

@@ -499,13 +499,21 @@ Since M8, the page offers a save file as a `Blob` of its OPFS `File`, through an
 
 * Fix: M10's iPhone run of `plans/active/stream-from-storage.md` saves a stem in each format.  Until then, Safari and the iPhone are not checked.
 
-### TD-63: the f16 weight kernels are not checked in Safari
+### TD-63: the f16 weight kernels are not checked on an iPhone
 
 This entry concerns VERIFY-1 and GPU-2.
 
-M9 of `plans/active/stream-from-storage.md` adds an f16 variant of each matmul kernel (decision 0018).  `e2e bench --query 'bench&bench_quick=1&mm=s64&weights=f16'` compiles and runs every variant, and needs the line `f16 weights: the start-up check passed`.  It passed in Chrome on 2026-10-30.  In Safari, two sessions on 2026-10-30 timed out while safaridriver connected ("The session timed out while connecting to a Safari instance"), with the maintainer's Safari open.  So no check has run the variants in Safari, which the iPhone runs.  Where a Safari rejects a variant or fails the start-up check, the worker keeps f32 weights (decision 0022), so the stems stay right and the tab needs about 350 MB more.
+M9 of `plans/active/stream-from-storage.md` adds an f16 variant of each matmul kernel (decision 0018), and makes f16 weights the default.  On this Mac, Safari compiled and ran every variant on 2026-10-30: `e2e bench --browser safari --query 'bench&bench_quick=1&mm=s64&weights=f16'` passed with no WebGPU error, and logged `f16 weights: the start-up check passed (matmul checks: f32 67 ms, f16 1330 ms)`.  So in Safari the f16 part of the start-up check takes about 1.3 s, against about 43 ms in Chrome; this is a measure only.  No check has run the variants on an iPhone.  Where a Safari rejects a variant or fails the start-up check, the worker keeps f32 weights (decision 0022), so the stems stay right and the tab needs about 350 MB more.
 
-* Fix: run the command above with `--browser safari` once safaridriver connects, and M10's iPhone run, which looks for the start-up line.
+* Fix: M10's iPhone run looks for the start-up line, and for the `memory:` line of f16 weight matrices.
+
+### TD-64: the start-up check compiles the f16 variant of every tile
+
+This entry concerns the time to the first separation (MEM-4 does not apply).
+
+`Gpu::check_kernels` compiles and runs the f16 variant of all four tiles, also when a stored kernel choice names only two of them.  The net reuses the pipelines that the check compiled: a `OnceCell` for each tile and format in `Gpu`'s kernels, and the worker keeps the checked `Gpu`.  So only the unchosen tiles cost extra.  In Safari on this Mac, the f16 part of the check took 1330 ms on 2026-10-30, against about 43 ms in Chrome, so the unchosen tiles cost up to about 1 s there.  M10 reads the iPhone's time from the line `f16 weights: the start-up check passed (matmul checks: f32 N ms, f16 M ms)`.
+
+* Fix: check only the tiles of the stored choice.  A first run calibrates, which needs all four tiles anyway.
 
 ## Legibility for agents
 

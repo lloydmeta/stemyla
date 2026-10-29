@@ -270,10 +270,11 @@ impl WeightFormat {
     }
 }
 
-/// The format of a load whose `?weights=` is `auto` or unset.  It stays
-/// f32 until `e2e weights` and `?bench` show f16 weights give the same
-/// stems and are not slower (M9's D12).
-pub const DEFAULT_WEIGHTS: WeightFormat = WeightFormat::F32;
+/// The format of a load whose `?weights=` is `auto` or unset: f16, since
+/// `e2e weights` and `?bench` showed f16 weights give the same stems and
+/// are not slower on the maintainer's Mac (M9's D12).  A GPU that fails
+/// the f16 start-up check keeps f32 (decision 0022).
+pub const DEFAULT_WEIGHTS: WeightFormat = WeightFormat::F16;
 
 /// The weight format of a load, and a line to log when the setting cannot
 /// be followed.  `setting` is `?weights=`: `f32`, `f16`, or `auto` (or
@@ -943,6 +944,9 @@ struct Kernels {
     /// The fused attention kernel, compiled on first use; bound like the
     /// element-wise kernels (read, read, read-write, uniform).
     attention: std::cell::OnceCell<wgpu::ComputePipeline>,
+    /// For tests: compile the f16 variants from WGSL that does not parse
+    /// ([`Gpu::break_f16_variants`]).
+    broken_f16: std::cell::Cell<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1043,6 +1047,7 @@ impl Kernels {
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
             attention: std::cell::OnceCell::new(),
+            broken_f16: std::cell::Cell::new(false),
         }
     }
 
@@ -1071,9 +1076,13 @@ impl Kernels {
         self.matmul.0[t][format.index()].get_or_init(|| {
             let tile = &TILES[t];
             let label = format!("{} {}", tile.name, format.name());
+            let mut src = tile.source_for(format);
+            if format == WeightFormat::F16 && self.broken_f16.get() {
+                src += "\nfn planted_error( {";
+            }
             pipeline(
                 device,
-                &shader(device, &label, &tile.source_for(format)),
+                &shader(device, &label, &src),
                 "main",
                 &self.matmul.1,
             )
@@ -1102,6 +1111,13 @@ impl Gpu {
     #[doc(hidden)]
     pub async fn new_without_f16_unpack(power: wgpu::PowerPreference) -> Result<Self, String> {
         Self::open(power, false, true).await
+    }
+
+    /// For tests: the f16 variants compiled from now on get a planted WGSL
+    /// error, as if this GPU's compiler rejected them.
+    #[doc(hidden)]
+    pub fn break_f16_variants(&self) {
+        self.kernels.broken_f16.set(true);
     }
 
     /// How many matmul kernels this device has compiled for weights in
@@ -1684,6 +1700,16 @@ impl Gpu {
         ];
         let mut problems = Vec::new();
         for (t, tile) in TILES.iter().enumerate().filter(|(t, _)| usable[*t]) {
+            // The variant's shader and pipeline are made inside error
+            // scopes, so a browser or driver that rejects them is reported
+            // here, in order, and never through the device's error sink.
+            if let Some(e) = self.compile_f16(t).await {
+                problems.push(format!(
+                    "f16 weights: the f16 variant of matmul kernel {} does not compile on this GPU ({e}); weights stay f32",
+                    tile.name
+                ));
+                continue;
+            }
             for &(case, a_buf, va, (w32, w16), kk, with_bias, acc, mm_m, mm_n) in &cases {
                 let mut outputs = Vec::new();
                 for weight in [w32, w16] {
@@ -1730,6 +1756,22 @@ impl Gpu {
             }
         }
         Ok(problems)
+    }
+
+    /// Compiles the f16 variant of kernel `t` inside validation and
+    /// internal error scopes; the error, if one was raised.
+    async fn compile_f16(&self, t: usize) -> Option<String> {
+        let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _ = self
+            .kernels
+            .matmul_pipeline(&self.device, t, WeightFormat::F16);
+        let validation = validation.pop().await;
+        let internal = internal.pop().await;
+        validation.or(internal).map(|e| {
+            let text = e.to_string();
+            text.lines().next().unwrap_or(&text).to_string()
+        })
     }
 
     /// Runs the fused attention kernel on a small ragged case (two
@@ -3426,8 +3468,13 @@ mod tests {
         let (format, note) = weight_format(Some("f8"), flag, true);
         assert_eq!(format, DEFAULT_WEIGHTS);
         assert!(note.unwrap().contains("f8"));
-        // Until step 5 of M9 (D12).
-        assert_eq!(DEFAULT_WEIGHTS, F32);
+        // Step 5 of M9: f16 by default where the GPU allows it.
+        assert_eq!(DEFAULT_WEIGHTS, F16);
+        assert_eq!(weight_format(None, flag, true), (F16, None));
+        assert_eq!(weight_format(Some("auto"), flag, true), (F16, None));
+        let (format, note) = weight_format(None, flag, false);
+        assert_eq!(format, F32);
+        assert!(note.unwrap().contains("start-up check"));
     }
 
     /// A profile label names the format of an f16 variant only.
