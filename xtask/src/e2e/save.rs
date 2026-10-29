@@ -10,14 +10,16 @@
 //!
 //! The measure (D9 of the M8 plan): Chrome runs with
 //! `--enable-precise-memory-info` and `--js-flags=--expose-gc`, so
-//! `performance.memory.usedJSHeapSize` reads V8's used heap and the
-//! backing stores of `ArrayBuffer`s at each call.  An injected script
-//! (`xtask/e2e/save_spy.js`) calls `gc()` and reads the value before the
-//! save, every 250 ms during it, and once at its end.  The measure is the
-//! largest value less the value before.  The end of a save is the click of
-//! its download link, which the script keeps instead of downloading: every
-//! build makes it.  A calibration comes first: a 64 MiB `Uint8Array` must
-//! raise the measure by at least 60 MiB.
+//! `performance.memory.usedJSHeapSize` reads V8's used heap and the backing
+//! stores of `ArrayBuffer`s at each call.  An injected script
+//! (`xtask/e2e/save_spy.js`) calls `gc()` and reads the value before the save,
+//! every 250 ms during it, at each write of the page to browser storage, and
+//! once at its end.  The measure is the largest value less the value before.
+//! The readings at the writes see a save of less than a second in the state
+//! that it holds (review round speed 1 of M8).  The end of a save is the click
+//! of its download link, which the script keeps instead of downloading: every
+//! build makes it.  A calibration comes first: a 64 MiB `Uint8Array` must raise
+//! the measure by at least 60 MiB.
 //!
 //! The worker's part: each encode logs a `memory: encode` line with the
 //! worker's WebAssembly memory before and after, and the file's size.
@@ -29,9 +31,19 @@
 //! plus 1 MiB (the MP3 exception, TD-59).  The 1-minute WAV is the 16-bit
 //! mix of the planted stems, computed here.  The 1-minute FLAC decodes to
 //! the same samples, and the MP3 to the same frames within one MP3 frame
-//! and the encoder's delay.  At the end, `saves/` holds only the offered
-//! files.  It prints every measure, and runs every check also after one
-//! failed, so a run of an older build shows its numbers.
+//! and the encoder's delay.
+//!
+//! Checks of D11 (a save that does not wait for the UI frame): for each
+//! format, a 10-minute save grows the page's WebAssembly memory by at most
+//! [`WASM_BOUND_BYTES`] more than a 1-minute save.  The 10-minute WAV save
+//! takes fewer animation frames than a quarter of its blocks.  A seventh
+//! save saves the 10-minute mix as a WAV while the song plays.  It fails
+//! on an underrun, and on a long task of the main thread over
+//! [`LONG_TASK_LIMIT_MS`].
+//!
+//! At the end, `saves/` holds only the offered files.  It prints every
+//! measure, and runs every check also after one failed, so a run of an
+//! older build shows its numbers.
 
 use super::old_session::PLANT;
 use super::playback::{PlaybackLine, playback_line};
@@ -48,12 +60,8 @@ const STEMS: [&str; 2] = ["bass", "drums"];
 /// Save menu.
 const FORMATS: [(&str, usize); 3] = [("wav", 0), ("flac", 1), ("mp3", 2)];
 /// D10: how much more the 10-minute save's JS heap measure may be than
-/// the 1-minute save's, in MB.  It was 4 MB until D11 of M8.  Since D11, a
-/// 10-minute save's measure is 3.17 to 3.19 MB in each format, and a
-/// 1-minute save ends in about 0.4 s, before most readings, so its measure
-/// is 0.03 to 2.6 MB.  8 MB is still more than 10 times under the 95 MB
-/// growth of the build before M8 (the Decision log of the M8 plan).
-pub(super) const PAGE_BOUND_MB: f64 = 8.0;
+/// the 1-minute save's, in MB.
+pub(super) const PAGE_BOUND_MB: f64 = 4.0;
 /// D10: how much more a FLAC encode of 10 minutes may grow the worker's
 /// memory than one of 1 minute, in bytes.
 pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
@@ -74,13 +82,13 @@ pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
 /// output.  Since D11 of M8, a run takes about 2 minutes on the
 /// maintainer's Mac, in Chrome and with `--swiftshader` (CI's proxy).
 pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
-/// The longest that a save of `seconds` of audio may take from its click
-/// to its offer, in seconds: 6 times or more the slowest save of its length
-/// on the maintainer's Mac with `--swiftshader`, after D11 of M8
-/// (2026-10-29).  Those were FLAC saves of 3.1 s for 60 s of audio, and of
-/// 28.7 s for 600 s; the worker's encode takes most of each.  Before D11 of M8, a save took one UI frame for
-/// each block, and CI took 34 s for 60 s of audio.  Since D11, a save does
-/// not wait for the UI frame, and CI ran the worker's encode faster than
+/// The longest that a save of `seconds` of audio may take from its click to its
+/// offer, in seconds: 6 times or more the slowest save of its length on the
+/// maintainer's Mac with `--swiftshader`, after D11 of M8 (2026-10-29).  Those
+/// were FLAC saves of 3.1 s for 60 s of audio, and of 28.7 s for 600 s; the
+/// worker's encode takes most of each.  Before D11 of M8, a save took one UI
+/// frame for each block, and CI took 34 s for 60 s of audio.  Since D11, a save
+/// does not wait for the UI frame, and CI ran the worker's encode faster than
 /// the Mac (`e2e flac`).
 pub(super) const fn save_cap_s(seconds: u32) -> u64 {
     if seconds <= 60 { 60 } else { 180 }
@@ -124,6 +132,10 @@ const SAVE_IDLE_S: u64 = 5;
 /// The longest wait, in seconds, for a `playback:` line, which the page
 /// logs every 2 s while it plays.
 pub(super) const PLAY_WAIT_S: u64 = 30;
+/// D11: the longest task on the main thread during the save during
+/// playback, in milliseconds.  Chrome reports each task over 50 ms.  The
+/// audio output queues about 139 ms, so a task this long cannot empty it.
+pub(super) const LONG_TASK_LIMIT_MS: u64 = 50;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
 const FIRST_RESTORES: u64 = SECONDS.len() as u64;
@@ -137,18 +149,18 @@ const fn caps_s() -> u64 {
     }
     sum * FORMATS.len() as u64
 }
-/// The longest that all the waits of a run can take together (finding 2-2
-/// of review round 2 of M8).  These are the start, the calibration, the
-/// two clean-ups, and the plant of each session.  Each first restore waits
-/// for a session switch, the restore and the stem overviews.  Each save
-/// waits for a session switch, the restore, two heap readings and two
-/// readings of the WebAssembly memory, and idles.  It waits up to its cap
-/// and one reading of its progress for its offer.  The 1-minute save of
-/// each format reads its file.  The save during playback waits for a
-/// session switch, the restore, two `playback:` lines, its cap and one
-/// reading of its progress, and idles.  The run ends with the list of
-/// save files.  It does not count the WebDriver commands of a click, a
-/// screenshot or a mark, which return at once.
+/// The longest that all the waits of a run can take together (finding 2-2 of
+/// review round 2 of M8).  These are the start, the calibration, the two
+/// clean-ups, and the plant of each session.  Each first restore waits for a
+/// session switch, the restore and the stem overviews.  Each save waits for a
+/// session switch, the restore, two heap readings and two readings of the
+/// WebAssembly memory, and idles.  It waits up to its cap and one reading of
+/// its progress for its offer.  The 1-minute save of each format reads its
+/// file.  The save during playback waits for a session switch, the restore, two
+/// `playback:` lines, its cap, one reading of its progress and the read of its
+/// long tasks, and idles.  The run ends with the list of save files.  It does
+/// not count the WebDriver commands of a click, a screenshot or a mark, which
+/// return at once.
 pub(super) const WAITS_S: u64 = START_WAIT_S
     + SCRIPT_WAIT_S
     + 2 * CLEAN_WAIT_S
@@ -157,7 +169,7 @@ pub(super) const WAITS_S: u64 = START_WAIT_S
     + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S)
     + caps_s()
     + FORMATS.len() as u64 * READ_WAIT_S
-    + 2 * SCRIPT_WAIT_S
+    + 3 * SCRIPT_WAIT_S
     + RESTORE_WAIT_S
     + SAVE_IDLE_S
     + 2 * PLAY_WAIT_S
@@ -248,6 +260,9 @@ pub(super) struct Save {
     /// The growth of the page's WebAssembly memory during the save, in
     /// bytes.
     pub wasm: Option<f64>,
+    /// The page's animation frames from the click of the menu item to the
+    /// offer.
+    pub frames: Option<u64>,
 }
 
 /// The worker's growth and the file's size, from a `memory: encode` line:
@@ -306,6 +321,16 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
             ));
         }
     }
+    // Only the WAV: a FLAC's or an MP3's offer waits for the worker's
+    // encode too, which takes about 28 s and 16 s for 10 minutes.
+    let frames = find(saves, "wav", SECONDS[1]).and_then(|s| s.frames);
+    checks.push((
+        not_frame_bound(frames, SECONDS[1]),
+        format!(
+            "wav, 600 s: the save takes fewer animation frames than a quarter of its {} blocks ({frames:?})",
+            blocks(SECONDS[1])
+        ),
+    ));
     let worker = |format, seconds| find(saves, format, seconds).and_then(|s| s.worker);
     let (flac_short, flac_long) = (worker("flac", SECONDS[0]), worker("flac", SECONDS[1]));
     let flac = flac_short.zip(flac_long).map(|((s, _), (l, _))| l - s);
@@ -602,6 +627,9 @@ pub(super) struct Playing {
     /// The `playback:` lines from the click of Play on: one before the
     /// save at least, and the first after the offer.
     pub lines: Vec<PlaybackLine>,
+    /// The lengths of the main thread's long tasks from the click of the
+    /// menu item to the offer, in milliseconds.
+    pub long_tasks: Option<Vec<u64>>,
 }
 
 /// The checks of the save during playback (D11): the song played from
@@ -633,7 +661,29 @@ pub(super) fn playing_checks(playing: &Playing) -> Vec<(bool, String)> {
             !lines.is_empty() && underruns.iter().all(|&u| u == 0),
             format!("wav, 600 s, during playback: no underrun ({underruns:?})"),
         ),
+        (
+            playing
+                .long_tasks
+                .as_ref()
+                .is_some_and(|l| l.iter().all(|&ms| ms <= LONG_TASK_LIMIT_MS)),
+            format!(
+                "wav, 600 s, during playback: no task holds the main thread for more than {LONG_TASK_LIMIT_MS} ms ({:?} ms)",
+                playing.long_tasks
+            ),
+        ),
     ]
+}
+
+/// The blocks of 16,384 frames that a save of `seconds` of audio reads.
+pub(super) fn blocks(seconds: u32) -> u64 {
+    (u64::from(seconds) * 44_100).div_ceil(16_384)
+}
+
+/// D11: a save that does not wait for the UI frame takes fewer animation
+/// frames than a quarter of its blocks.  Before D11, it took about one for
+/// each block.
+pub(super) fn not_frame_bound(frames: Option<u64>, seconds: u32) -> bool {
+    frames.is_some_and(|f| f < blocks(seconds) / 4)
 }
 
 /// `xtask e2e save`.
@@ -748,6 +798,24 @@ fn restore(p: &mut Page, seconds: u32) -> Result<()> {
 /// The page's WebAssembly memory, in bytes.
 const WASM_MEMORY: &str = "return (await window.wasmBindings.default()).memory.buffer.byteLength;";
 
+/// After a save: the page's WebAssembly memory in bytes, and the lengths
+/// of the main thread's long tasks during the save, in milliseconds.
+const AFTER_SAVE: &str =
+    "return { wasm: (await window.wasmBindings.default()).memory.buffer.byteLength,
+      long: window.__e2e_long_in_save() };";
+
+/// The lengths of the long tasks during the last save, from a reply of
+/// [`AFTER_SAVE`] or of `__e2e_long_in_save`, in milliseconds.  `None`
+/// when the reply has none.
+pub(super) fn long_tasks(reply: &Value) -> Option<Vec<u64>> {
+    reply.as_array()?.iter().map(Value::as_u64).collect()
+}
+
+/// The growth of a memory from `before` to `after`, in bytes.
+pub(super) fn growth(before: Option<f64>, after: Option<f64>) -> Option<f64> {
+    before.zip(after).map(|(b, a)| a - b)
+}
+
 /// Clicks the mix lane's Save and the menu's item at `row`, and waits for
 /// the offer of the save of `format` and `seconds`: its line.  With
 /// `heap`, the JS heap readings start just before the item's click, so
@@ -771,7 +839,7 @@ fn click_save(
     p.click_at(o.item_x, item_y(o, row), &format!("the {format} item"))?;
     let offered = wait_for_offer(p, mark, format, seconds)?;
     p.note(&format!(
-        "save: {format}, {seconds} s: offered after {} UI frames and {} ms",
+        "save: {format}, {seconds} s: offered after {} animation frames and {} ms",
         offered_frames(&offered).map_or("?".into(), |f| f.to_string()),
         offered_ms(&offered).map_or("?".into(), |f| f.to_string())
     ));
@@ -792,7 +860,12 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     let wasm_before = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
     let mark = p.mark();
     let offered = click_save(p, o, (format, row, seconds), true)?;
-    let wasm_after = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
+    let after = in_page(p, AFTER_SAVE, json!([]), SCRIPT_WAIT_S)?;
+    let wasm_after = after["wasm"].as_f64();
+    p.note(&format!(
+        "save: {format}, {seconds} s: long tasks during the save {:?} ms",
+        long_tasks(&after["long"])
+    ));
     let max = in_page(
         p,
         "return await window.__e2e_stop_heap();",
@@ -800,7 +873,8 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
         SCRIPT_WAIT_S,
     )?;
     let heap = heap_rise(&max, &before);
-    let offered = Some(offer_of(Some(&offered), format, seconds)?);
+    let offered_line = offered;
+    let offered = Some(offer_of(Some(&offered_line), format, seconds)?);
     let worker = p.log[mark..]
         .iter()
         .find(|l| l.contains(&format!("memory: encode {format} ")))
@@ -813,7 +887,8 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
         heap,
         offered,
         worker,
-        wasm: wasm_before.zip(wasm_after).map(|(b, a)| a - b),
+        wasm: growth(wasm_before, wasm_after),
+        frames: offered_frames(&offered_line),
     })
 }
 
@@ -836,6 +911,13 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     let after = p.mark();
     let last = p.wait_for(after, PLAY_WAIT_S, |l| playback_line(l).is_some())?;
     p.click(o.play_x, "Pause")?;
+    // The long tasks of the save have reached their observer by now.
+    let long = long_tasks(&in_page(
+        p,
+        "return window.__e2e_long_in_save();",
+        json!([]),
+        SCRIPT_WAIT_S,
+    )?);
     let lines = p.log[played..]
         .iter()
         .filter_map(|l| playback_line(l))
@@ -844,6 +926,7 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         offered: offered_file(&offered).is_some(),
         line_after_offer: last.is_some(),
         lines,
+        long_tasks: long,
     })
 }
 
@@ -859,6 +942,7 @@ mod tests {
             offered: Some((format!("lloyd - mix.{format}"), 1.0, String::new())),
             worker,
             wasm: Some(f64::from(seconds) * 100.0),
+            frames: Some(160),
         }
     }
 
@@ -939,6 +1023,7 @@ mod tests {
             offered: true,
             line_after_offer,
             lines: underruns.iter().map(|&u| line(u)).collect(),
+            long_tasks: Some(Vec::new()),
         }
     }
 
@@ -965,6 +1050,78 @@ mod tests {
         let mut failed = playing(&[0, 0], true);
         failed.lines[0].failed_lanes = 1;
         assert_eq!(failing(&failed), 1, "a failed lane");
+        // Nit 1-9 of review round speed 1: a song with no lane fails.
+        let mut none = playing(&[0, 0], true);
+        none.lines[0].stored = 0;
+        none.lines[0].lanes = 0;
+        assert_eq!(failing(&none), 1, "no lane plays");
+    }
+
+    /// Finding 1-2 of review round speed 1: the save during playback
+    /// fails on a task that holds the main thread for more than the limit,
+    /// and when the long tasks were not read.
+    #[test]
+    fn the_playing_checks_bound_the_long_tasks() {
+        let failing = |p: &Playing| playing_checks(p).iter().filter(|(ok, _)| !ok).count();
+        let mut held = playing(&[0, 0], true);
+        held.long_tasks = Some(vec![LONG_TASK_LIMIT_MS]);
+        assert_eq!(failing(&held), 0, "at the limit");
+        held.long_tasks = Some(vec![12, LONG_TASK_LIMIT_MS + 1]);
+        assert_eq!(failing(&held), 1, "over the limit");
+        held.long_tasks = None;
+        assert_eq!(failing(&held), 1, "not read");
+        assert_eq!(long_tasks(&json!([51, 70])), Some(vec![51, 70]));
+        assert_eq!(long_tasks(&json!(null)), None);
+        assert_eq!(long_tasks(&json!(["x"])), None);
+    }
+
+    /// Finding 1-4 of review round speed 1: the 10-minute WAV save fails
+    /// when it takes about one animation frame for each block, as before
+    /// D11.
+    #[test]
+    fn a_frame_bound_save_fails() {
+        assert_eq!(blocks(600), 1_615);
+        assert_eq!(blocks(60), 162);
+        assert!(not_frame_bound(Some(160), 600));
+        assert!(not_frame_bound(Some(402), 600));
+        assert!(!not_frame_bound(Some(403), 600));
+        assert!(!not_frame_bound(Some(1_763), 600), "the build before D11");
+        assert!(!not_frame_bound(None, 600));
+        let mut frame_bound = good();
+        frame_bound[1].frames = Some(1_763);
+        let failed = failing(&frame_bound);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].starts_with("wav, 600 s: the save takes fewer"));
+    }
+
+    #[test]
+    fn a_growth_is_after_less_before() {
+        assert_eq!(growth(Some(1.0), Some(5.0)), Some(4.0));
+        assert_eq!(growth(Some(5.0), Some(1.0)), Some(-4.0));
+        assert_eq!(growth(None, Some(1.0)), None);
+        assert_eq!(growth(Some(1.0), None), None);
+    }
+
+    /// The mutants of review round speed 1: `WAITS_S` is the sum of every
+    /// wait of a run, counted here once more.
+    #[test]
+    fn the_waits_are_the_sum_of_each_wait() {
+        let first_restores = 2 * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S);
+        let saves = 6 * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S);
+        let playing = 3 * SCRIPT_WAIT_S + RESTORE_WAIT_S + SAVE_IDLE_S + 2 * PLAY_WAIT_S + 180;
+        let counted = START_WAIT_S
+            + SCRIPT_WAIT_S
+            + 2 * CLEAN_WAIT_S
+            + 2 * PLANT_WAIT_S
+            + first_restores
+            + saves
+            + 3 * (60 + 180)
+            + 3 * READ_WAIT_S
+            + playing
+            + SCRIPT_WAIT_S;
+        assert_eq!(WAITS_S, counted);
+        assert_eq!(WAITS_S, 2_300);
+        const { assert!(STEP_LIMIT_S - WAITS_S < 300, "the limit is near the waits") };
     }
 
     #[test]

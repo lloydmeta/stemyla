@@ -113,15 +113,24 @@ async fn stored_song(id: &str, frames: usize, stems: usize) -> (lanes::Shown, Ve
 }
 
 /// The job of a save of the mix of every lane of `shown` into a WAV save
-/// file at `path`, as the page makes it.
+/// file at `path`, as the page makes it: its reader reads ahead, one block
+/// of the job at a time (D11 of M8).
 fn mix_save(shown: &lanes::Shown, path: &str) -> ExportJob<StoredWav> {
     let recipe = MixRecipe::new(vec![1.0; shown.lanes.len()]);
-    let source = lanes::LanesMix::new(&shown.audio(), shown.frames, 44_100, &recipe);
+    let source = lanes::LanesMix::reading_ahead(
+        &shown.audio(),
+        shown.frames,
+        44_100,
+        &recipe,
+        export::BLOCK,
+    );
     let sink = StoredWav::new(path.into(), shown.frames, 44_100, std::rc::Rc::new(|| {}));
     ExportJob::new(Box::new(source), sink).stopping_at_a_failure()
 }
 
-/// Steps `job` as `step_save` does, a few ms in each frame, until it ends.
+/// Steps `job` in slices of 4 ms, with a wait of a task between slices,
+/// as the save's task loop does (D11 of M8), until it ends.  The loop
+/// waits for a read's or a write's end; this one waits 1 ms.
 async fn run_job(job: &mut ExportJob<StoredWav>) {
     for _ in 0..20_000 {
         if job.run_while(export::time_left(4.0)) {

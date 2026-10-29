@@ -1101,6 +1101,7 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
     let ctx = egui::Context::default();
     let mut ends = Vec::new();
     for format in [export::Format::Flac, export::Format::Wav] {
+        let reads_before = crate::lane_store::reads_for_test();
         app.start_save(Some(1), format);
         let mut frames = 0;
         while app.saving.is_some() && frames < 2_000 {
@@ -1108,7 +1109,14 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
             pb_test_sleep(5).await;
             frames += 1;
         }
-        ends.push((format, frames, app.saving.is_none(), app.status.clone()));
+        let reads = crate::lane_store::reads_for_test() - reads_before;
+        ends.push((
+            format,
+            frames,
+            reads,
+            app.saving.is_none(),
+            app.status.clone(),
+        ));
     }
     let links = crate::save_tests::sv_links().await.length();
     pb_test_sleep(100).await;
@@ -1120,15 +1128,21 @@ async fn a_save_whose_read_fails_says_so_and_makes_no_file() {
         saves.as_deref().is_none_or(str::is_empty),
         "no save file stays: {saves:?}"
     );
-    for (format, frames, ended, status) in ends {
+    for (format, frames, reads, ended, status) in ends {
         assert!(ended, "{format:?}: the save ended");
+        // Since D11 of M8 the job runs in its own task, not one block a
+        // frame, so frames cannot tell a stop from a full run.  The reads
+        // can: a full run reads 81 blocks, and a stop reads the first block
+        // and the next one ahead.
+        assert!(
+            reads <= 4,
+            "{format:?}: it stops at the failure: {reads} reads"
+        );
         // Since M8 a save first opens its save file, which can take frames
-        // under load.  Since D11 of M8 the job runs in its own task, not one
-        // block a frame.  So the status tells a stop from a full run, and
-        // 40 frames bound the time to report the failure.
+        // under load.  40 frames bound the time to report the failure.
         assert!(
             frames <= 40,
-            "{format:?}: it stops at the failure: {frames} frames"
+            "{format:?}: it reports the failure in time: {frames} frames"
         );
         assert!(
             status.starts_with("Could not save ")

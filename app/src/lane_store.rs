@@ -672,6 +672,39 @@ mod tests {
         assert_eq!(store.largest_read(), 800, "a block of 100 frames");
     }
 
+    /// A reader that reads ahead from a store that completes at once gives
+    /// the right frames of each block, from the block that it read ahead.
+    #[test]
+    fn a_block_read_ahead_at_once_gives_its_own_frames() {
+        let store = MemoryStore::new();
+        store.put("acme/0.f32", counting(250));
+        let plus_1000: Vec<u8> = (0..250)
+            .flat_map(|k| [(k as f32 + 1000.0).to_le_bytes(), [0; 4]])
+            .flatten()
+            .collect();
+        store.put("acme/1.f32", plus_1000);
+        let files = vec![
+            LaneFile::f32("acme/0.f32".into(), 250),
+            LaneFile::f32("acme/1.f32".into(), 250),
+        ];
+        let reader =
+            BlockReader::reading_ahead(Rc::clone(&store) as Rc<dyn LaneStore>, files, 250, 100);
+        for (k, at) in [0, 100, 200].into_iter().enumerate() {
+            let frames = 100.min(250 - at);
+            assert!(reader.ready(&[(at, frames)]), "block {k} is ready");
+            let held = reader.held();
+            let (left, right) = held.frames(0, at, frames);
+            assert_eq!((left[0], right[0]), (at as f32, -(at as f32)));
+            assert_eq!(left[frames - 1], (at + frames - 1) as f32);
+            assert_eq!(
+                held.frames(1, at, frames).0[frames - 1],
+                (at + frames + 999) as f32
+            );
+            drop(held);
+            assert_eq!(store.requests(), (k + 2).min(3), "one read for each block");
+        }
+    }
+
     /// A reader that does not read ahead starts no read that the job did
     /// not ask for.
     #[test]

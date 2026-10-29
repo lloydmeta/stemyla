@@ -11,9 +11,10 @@
     return u;
   };
   window.__e2e_saves = [];
-  // The frames that the page drew (its requestAnimationFrame callbacks)
-  // and the OPFS writes that it made, so a run can see that a save goes on,
-  // and how many frames it takes.
+  // The page's requestAnimationFrame callbacks (eframe asks for one each
+  // browser frame, and paints only on request) and the OPFS writes that it
+  // made, so a run can see that a save goes on, and how many animation
+  // frames it takes.
   window.__e2e_frames = 0;
   const real_raf = window.requestAnimationFrame.bind(window);
   window.requestAnimationFrame = (f) => real_raf((t) => { window.__e2e_frames++; f(t); });
@@ -22,6 +23,9 @@
     const real_write = FileSystemWritableFileStream.prototype.write;
     FileSystemWritableFileStream.prototype.write = function (data) {
       window.__e2e_writes++;
+      // A heap reading at each write of the page while a save is measured:
+      // the save holds its state then, also a save of less than a second.
+      if (window.__e2e_heap_on) window.__e2e_keep(window.__e2e_heap_now());
       return real_write.call(this, data);
     };
   }
@@ -35,7 +39,21 @@
     } catch (_) {}
     return window.__e2e_writes + bytes;
   };
+  // The main thread's long tasks (over 50 ms in Chrome), each its start
+  // and its length in milliseconds.
+  window.__e2e_long = [];
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) window.__e2e_long.push([e.startTime, e.duration]);
+    }).observe({ entryTypes: ["longtask"] });
+  } catch (_) {}
+  // The lengths of the long tasks that started between the mark of the
+  // last save and its offer.
+  window.__e2e_long_in_save = () => window.__e2e_long
+    .filter(([t]) => t >= (window.__e2e_t_at_start || 0) && t <= (window.__e2e_t_offer || Infinity))
+    .map(([, d]) => Math.round(d));
   HTMLAnchorElement.prototype.click = function () {
+    window.__e2e_t_offer = performance.now();
     const blob = blobs.get(this.href) || null;
     blobs.delete(this.href);
     const save = { name: this.download, size: blob ? blob.size : -1, mime: blob === null ? "" : blob.type,
@@ -58,14 +76,24 @@
       gc();
       await tick(20);
     }
+    return window.__e2e_heap_now();
+  };
+  // One reading at once, after one collection.
+  window.__e2e_heap_now = () => {
+    if (typeof gc !== "function" || !performance.memory) return null;
     gc();
     return performance.memory.usedJSHeapSize;
+  };
+  // Keeps the largest reading of the save.
+  window.__e2e_keep = (v) => {
+    if (v !== null && (window.__e2e_heap_max === null || v > window.__e2e_heap_max)) window.__e2e_heap_max = v;
   };
   // The start of a save, just before the click of its menu item: the
   // offer gives the UI frames and the milliseconds since.
   window.__e2e_mark = () => {
     window.__e2e_frames_at_start = window.__e2e_frames;
     window.__e2e_t_at_start = performance.now();
+    window.__e2e_t_offer = null;
   };
   // Reads the heap until `__e2e_stop_heap`, one reading after another,
   // and keeps the largest value.
@@ -74,16 +102,14 @@
     window.__e2e_heap_on = true;
     (async () => {
       while (window.__e2e_heap_on) {
-        const v = await window.__e2e_heap();
-        if (v !== null && (window.__e2e_heap_max === null || v > window.__e2e_heap_max)) window.__e2e_heap_max = v;
+        window.__e2e_keep(await window.__e2e_heap());
         await tick(250);
       }
     })();
   };
   window.__e2e_stop_heap = async () => {
     window.__e2e_heap_on = false;
-    const v = await window.__e2e_heap();
-    if (v !== null && (window.__e2e_heap_max === null || v > window.__e2e_heap_max)) window.__e2e_heap_max = v;
+    window.__e2e_keep(await window.__e2e_heap());
     return window.__e2e_heap_max;
   };
 })();

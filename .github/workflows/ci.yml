@@ -159,10 +159,12 @@ jobs:
     runs-on: ubuntu-latest
     # Run 40788465048 (2026-10-28) took 19 minutes before `e2e save`.
     # Since D11 of M8, a save does not wait for the UI frame, and `e2e save`
-    # takes about 2 minutes on the maintainer's Mac with --swiftshader.  The
-    # limit is the 19 minutes and `e2e save`'s own limit of 40, rounded up,
-    # so a run of `e2e save` that waits in vain ends on its own check.  A
-    # hung browser must not hold the runner for GitHub's 6 h default.
+    # takes about 2 minutes on the maintainer's Mac with --swiftshader.
+    # That is an estimate of its CI time until a CI run logs it (TD-61).
+    # The limit is the 19 minutes and `e2e save`'s own limit of 40, with 1
+    # minute to spare, so a run of `e2e save` that waits in vain ends on its
+    # own check.  A hung browser must not hold the runner for GitHub's 6 h
+    # default.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -201,10 +203,11 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
         # About 2 minutes on the maintainer's Mac, in Chrome and with
-        # --swiftshader (D11 of M8).  The limit is the longest that all the
-        # waits of a run can take (`STEP_LIMIT_S` in xtask/src/e2e/save.rs,
-        # which a test keeps equal to it).  A stopped step writes no
-        # save.log, but its output has every note of the run.
+        # --swiftshader (D11 of M8).  The CI time is an estimate until a CI
+        # run of this branch logs it (TD-61).  The limit is the longest that
+        # all the waits of a run can take (`STEP_LIMIT_S` in
+        # xtask/src/e2e/save.rs, which a test keeps equal to it).  A stopped
+        # step writes no save.log, but its output has every note of the run.
         timeout-minutes: 40
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.

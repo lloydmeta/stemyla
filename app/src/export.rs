@@ -1274,6 +1274,67 @@ mod tests {
         assert_eq!(job.sink().rec.starts, [0, BLOCK, 2 * BLOCK]);
     }
 
+    /// A source of silence whose read of storage failed, or not.
+    struct Silence {
+        frames: usize,
+        failure: Option<String>,
+    }
+
+    impl Pcm for Silence {
+        fn frames(&self) -> usize {
+            self.frames
+        }
+        fn sample_rate(&self) -> u32 {
+            44_100
+        }
+        fn read(&self, _: usize, left: &mut [f32], right: &mut [f32]) -> usize {
+            left.fill(0.0);
+            right.fill(0.0);
+            0
+        }
+        fn failed(&self) -> Option<String> {
+            self.failure.clone()
+        }
+    }
+
+    /// D11 of M8: the UI frame ends a save when `is_over`: the job is done,
+    /// or a job that stops at a failure met a failed read or write.
+    #[test]
+    fn a_job_is_over_when_done_or_stopped_at_a_failure() {
+        let source = |failure: Option<&str>| {
+            Box::new(Silence {
+                frames: 2 * BLOCK,
+                failure: failure.map(String::from),
+            })
+        };
+        let mut job = ExportJob::new(source(None), Recorder::default()).stopping_at_a_failure();
+        assert!(!job.is_over(), "a job that goes on");
+        assert!(!job.step());
+        assert!(!job.is_over(), "after one block of two");
+        assert!(job.step());
+        assert!(job.is_over(), "done");
+        let read = ExportJob::new(source(Some("NotFoundError")), Recorder::default());
+        assert!(!read.is_over(), "a job that does not stop goes on");
+        assert!(read.stopping_at_a_failure().is_over(), "a failed read");
+        let write = |failure: Option<&str>| Gate {
+            failure: failure.map(String::from),
+            ..Gate::default()
+        };
+        let job = ExportJob::new(source(None), write(Some("QuotaExceededError")));
+        assert!(!job.is_over());
+        assert!(job.stopping_at_a_failure().is_over(), "a failed write");
+        let job = ExportJob::new(source(None), write(None)).stopping_at_a_failure();
+        assert!(!job.is_over(), "no failure");
+        let empty = ExportJob::new(
+            Box::new(Silence {
+                frames: 0,
+                failure: None,
+            }),
+            Recorder::default(),
+        );
+        assert!(empty.is_over(), "a job of no frames");
+    }
+
     /// Writes each full block of a [`WavBlocks`] as it comes, as a save's
     /// sink does.
     struct BlockRecorder {

@@ -4560,11 +4560,12 @@ impl StemApp {
         }
     }
 
-    /// Shows the progress of the save in progress, whose job runs in its
-    /// own task (D11 of M8).  At the end of the storage path, it closes the WAV save file, then offers it, or asks the
-    /// worker to encode it (D1 of M8).  At the end of the memory path, it
-    /// hands the file to the browser, or the channels to the worker.  When
-    /// browser storage fails, the save goes on in memory (D8).
+    /// Shows the progress of the save in progress, whose job runs in its own
+    /// task (D11 of M8).  At the end of the storage path, it closes the WAV
+    /// save file, then offers it, or asks the worker to encode it (D1 of M8).
+    /// At the end of the memory path, it hands the file to the browser, or the
+    /// channels to the worker.  When browser storage fails, the save goes on in
+    /// memory (D8).
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn step_save(&mut self, ctx: &egui::Context) {
