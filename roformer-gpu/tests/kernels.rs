@@ -4,9 +4,9 @@
 //! with `STEMYLA_REQUIRE=gpu` so that a wrong path fails instead of skipping.
 //! Tests skip with a message when no adapter is available, and fail
 //! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
-//! tests).
+//! tests, or `f16`, for the f16 weight tests).
 
-use roformer_gpu::{Act, Gpu, MatMul, TILES, View};
+use roformer_gpu::{Act, Gpu, MatMul, TILES, View, WeightFormat, bit_differences};
 use test_support::{Need, skip};
 
 #[track_caller]
@@ -20,6 +20,19 @@ fn gpu() -> Option<Gpu> {
             skip(Need::Gpu, &e);
             None
         }
+    }
+}
+
+/// A GPU whose adapter can unpack f16 values (`SHADER_F16_IN_F32`), so the
+/// f16 variants compile.
+#[track_caller]
+fn f16_gpu() -> Option<Gpu> {
+    let g = gpu()?;
+    if g.has_f16_unpack() {
+        Some(g)
+    } else {
+        skip(Need::F16, "adapter without SHADER_F16_IN_F32");
+        None
     }
 }
 
@@ -682,13 +695,278 @@ fn rope_gate_transpose_glu() {
     assert!(g.take_errors().is_empty());
 }
 
-/// The start-up self-check passes every kernel on a correct GPU.
+/// The start-up self-check passes every kernel on a correct GPU, and the
+/// f16 variants exactly when the adapter can unpack f16 values.
 #[test]
 fn check_kernels_accepts_all() {
     let Some(g) = gpu() else { return };
     let problems = pollster::block_on(g.check_kernels()).unwrap();
     assert!(problems.is_empty(), "{problems:?}");
     assert!(g.usable.get().iter().all(|&u| u));
+    eprintln!("f16 unpack: {}", g.has_f16_unpack());
+    assert_eq!(g.f16_ok.get(), g.has_f16_unpack());
+}
+
+/// f16-exact weight values: random normal values below 2 in magnitude,
+/// about one in eight an f16 subnormal, and some `+0` and `-0`.
+fn f16_weights(n: usize, seed: u64) -> Vec<u16> {
+    let mut s = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    (0..n)
+        .map(|_| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let r = (s >> 24) as u32;
+            let sign = ((r >> 31) as u16) << 15;
+            let mantissa = (r >> 6) as u16 & 0x3ff;
+            match r % 64 {
+                0 => sign,
+                1..=8 => sign | mantissa.max(1),
+                _ => sign | (1 + (r >> 16) as u16 % 15) << 10 | mantissa,
+            }
+        })
+        .collect()
+}
+
+fn is_subnormal(bits: u16) -> bool {
+    bits & 0x7c00 == 0 && bits & 0x3ff != 0
+}
+
+/// Runs the product with each kernel of `TILES`, once with B as f32 weights
+/// and once with the same values as f16 weights, and checks that the two
+/// outputs are equal bit for bit (`+0` and `-0` equal).  The f32 run is
+/// also checked against the CPU, so two equal wrong outputs fail.  `a`
+/// overrides the random A.  Returns the kernel that ran for each tile.
+fn check_f16(
+    g: &Gpu,
+    s: &Spec,
+    sizes: [usize; 4],
+    a: Option<Vec<f32>>,
+    what: &str,
+) -> Vec<&'static str> {
+    let a = a.unwrap_or_else(|| rand(sizes[0], 1));
+    let bits = f16_weights(sizes[1], 2);
+    assert!(bits.iter().filter(|&&b| is_subnormal(b)).count() * 16 > bits.len());
+    let b: Vec<f32> = bits
+        .iter()
+        .map(|&h| half::f16::from_bits(h).to_f32())
+        .collect();
+    let (c0, bias) = (rand(sizes[2], 3), rand(sizes[3], 4));
+    let mut want = c0.clone();
+    cpu_matmul(s, &a, &b, &mut want, &bias);
+    let (b32, b16) = (g.upload_weight("b f32", &b), g.upload_f16("b f16", &bits));
+    assert_eq!(b16.format(), WeightFormat::F16);
+    let (ab, biasb) = (g.upload("a", &a), g.upload("bias", &bias));
+    let mut ran = Vec::new();
+    for (t, tile) in TILES.iter().enumerate() {
+        let mut outputs = Vec::new();
+        for weight in [&b32, &b16] {
+            let cb = g.upload("c", &c0);
+            let mut mm = MatMul::new((&ab, s.a), (weight, s.b), (&cb, s.c), s.m, s.n, s.k);
+            mm.outer = s.outer;
+            mm.inner = s.inner;
+            mm.alpha = s.alpha;
+            mm.act = s.act;
+            mm.accumulate = s.accumulate;
+            mm.bias = s.bias.map(|(off, bo)| (&*biasb, off, bo));
+            mm.tile = Some(t);
+            if weight.format() == WeightFormat::F16 {
+                ran.push(TILES[mm.kernel(t)].name);
+            }
+            let mut r = g.rec();
+            r.matmul(&mm);
+            r.submit();
+            outputs.push(read(g, &cb, sizes[2]));
+            let errors = g.take_errors();
+            assert!(errors.is_empty(), "{what} [{}]: {errors:?}", tile.name);
+        }
+        assert_close(
+            &outputs[0],
+            &want,
+            2e-5,
+            &format!("{what} [{} f32]", tile.name),
+        );
+        let d = bit_differences(&outputs[1], &outputs[0]);
+        assert_eq!(
+            d.count, 0,
+            "{what} [{}]: f16 weights differ from f32 in {} values, the largest by {:e}",
+            tile.name, d.count, d.largest
+        );
+    }
+    ran
+}
+
+/// Each kernel's f16 variant gives its f32 kernel's output bit for bit on
+/// the same f16-exact weights, f16 subnormals among them: on the linear
+/// products of the network (`bench::shapes`, with fewer rows), the band
+/// split's and mask estimators' batch strides and offsets, with bias,
+/// accumulate, each activation, and ragged M, N and K.  One product with
+/// one-hot rows of A makes each output a single weight, so a GPU that
+/// flushes f16 subnormals to zero fails it.
+#[test]
+fn matmul_f16_weights_match_f32() {
+    let Some(g) = f16_gpu() else { return };
+    let v64 = TILES.iter().position(|t| t.vec4).expect("a vec4 kernel");
+    let mut vec4_ran_itself = false;
+    let mut vec4_fell_back = false;
+    let mut note = |ran: &[&str]| {
+        vec4_ran_itself |= ran[v64] == TILES[v64].name;
+        vec4_fell_back |= ran[v64] != TILES[v64].name;
+    };
+    let linear = roformer_gpu::bench::shapes()
+        .into_iter()
+        .filter(|s| matches!(s.kind, roformer_gpu::bench::Kind::Linear(_)));
+    for (i, shape) in linear.enumerate() {
+        let roformer_gpu::bench::Kind::Linear(act) = shape.kind else {
+            unreachable!()
+        };
+        let (m, n, k, outer) = (70, shape.n, shape.k, shape.outer.min(3));
+        let spec = Spec {
+            m,
+            n,
+            k,
+            outer,
+            inner: 1,
+            a: View::rows(0, k).batch(m * k, 0),
+            b: View::t(0, k).batch(n * k, 0),
+            c: View::rows(0, n).batch(m * n, 0),
+            bias: (i % 2 == 0).then_some((0, n)),
+            alpha: 1.0,
+            act,
+            accumulate: i % 3 == 0,
+        };
+        let sizes = [outer * m * k, outer * n * k, outer * m * n, outer * n];
+        note(&check_f16(&g, &spec, sizes, None, shape.name));
+    }
+    // Band split: per-band weights and bias, A at a band group's offset.
+    let (count, t, w, dim) = (3, 33, 24, 256);
+    let spec = Spec {
+        m: t,
+        n: dim,
+        k: w,
+        outer: count,
+        inner: 1,
+        a: View::rows(t * 40, w).batch(t * w, 0),
+        b: View::t(0, w).batch(dim * w, 0),
+        c: View::rows(0, dim).batch(t * dim, 0),
+        bias: Some((0, dim)),
+        alpha: 1.0,
+        act: Act::None,
+        accumulate: false,
+    };
+    let sizes = [
+        t * 40 + count * t * w,
+        count * dim * w,
+        count * t * dim,
+        count * dim,
+    ];
+    note(&check_f16(&g, &spec, sizes, None, "band split"));
+    // Mask estimator: bands k.. of a group, weights and bias at an offset.
+    let (n, t, hidden, out) = (2, 33, 64, 48);
+    let first = 1;
+    let spec = Spec {
+        m: t,
+        n: out,
+        k: hidden,
+        outer: n,
+        inner: 1,
+        a: View::rows(0, hidden).batch(t * hidden, 0),
+        b: View::t(first * out * hidden, hidden).batch(out * hidden, 0),
+        c: View::rows(0, out).batch(t * out, 0),
+        bias: Some((first * out, out)),
+        alpha: 1.0,
+        act: Act::Tanh,
+        accumulate: false,
+    };
+    let sizes = [
+        n * t * hidden,
+        (first + n) * out * hidden,
+        n * t * out,
+        (first + n) * out,
+    ];
+    note(&check_f16(
+        &g,
+        &spec,
+        sizes,
+        None,
+        "mask estimator at an offset",
+    ));
+    // Ragged M, N and K, K odd and B at an odd offset: v64 hands it to i64.
+    let (m, n, k) = (70, 67, 37);
+    let spec = Spec {
+        m,
+        n,
+        k,
+        outer: 1,
+        inner: 1,
+        a: View::rows(0, k),
+        b: View::t(3, k),
+        c: View::rows(0, n),
+        bias: Some((0, 0)),
+        alpha: 0.3,
+        act: Act::Gelu,
+        accumulate: true,
+    };
+    note(&check_f16(
+        &g,
+        &spec,
+        [m * k, 3 + n * k, m * n, n],
+        None,
+        "ragged, odd offset",
+    ));
+    // vec4-shaped, with a ragged last K tile.
+    let (m, n, k) = (129, 65, 300);
+    let spec = Spec {
+        m,
+        n,
+        k,
+        outer: 1,
+        inner: 1,
+        a: View::rows(8, k),
+        b: View::t(4, k),
+        c: View::rows(3, n),
+        bias: None,
+        alpha: 1.0,
+        act: Act::None,
+        accumulate: false,
+    };
+    note(&check_f16(
+        &g,
+        &spec,
+        [8 + m * k, 4 + n * k, 3 + m * n, 1],
+        None,
+        "vec4-shaped",
+    ));
+    // One-hot rows of A: each output is one weight, so a flushed
+    // subnormal shows.
+    let (m, n, k) = (67, 70, 40);
+    let one_hot: Vec<f32> = (0..m * k)
+        .map(|e| if e % k == (e / k) % k { 1.0 } else { 0.0 })
+        .collect();
+    let spec = Spec {
+        m,
+        n,
+        k,
+        outer: 1,
+        inner: 1,
+        a: View::rows(0, k),
+        b: View::t(0, k),
+        c: View::rows(0, n),
+        bias: None,
+        alpha: 1.0,
+        act: Act::None,
+        accumulate: false,
+    };
+    note(&check_f16(
+        &g,
+        &spec,
+        [m * k, n * k, m * n, 1],
+        Some(one_hot),
+        "one-hot A",
+    ));
+    assert!(vec4_ran_itself && vec4_fell_back);
 }
 
 /// A device opened for profiling records GPU time per dispatch under
@@ -747,8 +1025,9 @@ fn plain_device_does_not_profile() {
     assert!(g.features().is_empty());
 }
 
-/// Compile time and resident memory after each matmul kernel's first use
-/// (SwiftShader diagnostics; `--ignored --nocapture`).
+/// Compile time and resident memory after each matmul kernel's first use,
+/// and its f16 variant's on an adapter that can unpack f16 (SwiftShader
+/// diagnostics; `--ignored --nocapture`).
 #[test]
 #[ignore]
 fn compile_each() {
@@ -756,34 +1035,46 @@ fn compile_each() {
     let only: Option<usize> = std::env::var("TILE").ok().and_then(|v| v.parse().ok());
     let (m, n, k) = (70, 90, 33);
     let a = g.upload("a", &rand(m * k, 1));
-    let b = g.upload("b", &rand(k * n, 2));
+    let b = g.upload_weight("b", &rand(k * n, 2));
+    let b16 = g
+        .has_f16_unpack()
+        .then(|| g.upload_f16("b f16", &f16_weights(k * n, 2)));
     let c = g.buffer("c", m * n);
     for (t, tile) in TILES.iter().enumerate() {
         if only.is_some_and(|o| o != t) {
             continue;
         }
-        let t0 = std::time::Instant::now();
-        let mut mm = MatMul::new(
-            (&a, View::rows(0, k)),
-            (&b, View::rows(0, n)),
-            (&c, View::rows(0, n)),
-            m,
-            n,
-            k,
-        );
-        mm.tile = Some(t);
-        let mut r = g.rec();
-        r.matmul(&mm);
-        r.submit();
-        pollster::block_on(g.done());
-        let rss = std::fs::read_to_string("/proc/self/status")
-            .unwrap_or_default()
-            .lines()
-            .find(|l| l.starts_with("VmRSS"))
-            .unwrap_or("")
-            .to_string();
-        eprintln!("{}: {:.1} s, {rss}", tile.name, t0.elapsed().as_secs_f64());
+        for weight in std::iter::once(&b).chain(&b16) {
+            let t0 = std::time::Instant::now();
+            let mut mm = MatMul::new(
+                (&a, View::rows(0, k)),
+                (weight, View::rows(0, n)),
+                (&c, View::rows(0, n)),
+                m,
+                n,
+                k,
+            );
+            mm.tile = Some(t);
+            let mut r = g.rec();
+            r.matmul(&mm);
+            r.submit();
+            pollster::block_on(g.done());
+            let rss = std::fs::read_to_string("/proc/self/status")
+                .unwrap_or_default()
+                .lines()
+                .find(|l| l.starts_with("VmRSS"))
+                .unwrap_or("")
+                .to_string();
+            eprintln!(
+                "{} {}: {:.1} s, {rss}",
+                tile.name,
+                weight.format().name(),
+                t0.elapsed().as_secs_f64()
+            );
+        }
     }
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
 }
 
 /// The fused attention kernel against `attention_cpu` on the network's

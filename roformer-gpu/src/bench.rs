@@ -17,11 +17,12 @@ pub struct Shape {
     pub inner: usize,
     /// Dispatches of this shape per chunk.
     pub per_chunk: usize,
-    kind: Kind,
+    pub kind: Kind,
 }
 
+/// What a [`Shape`] multiplies.
 #[derive(Clone, Copy, Debug)]
-enum Kind {
+pub enum Kind {
     /// Activations `[m, k]` times a torch-layout weight `[n, k]`.
     Linear(Act),
     /// Attention scores q·kᵀ per head, from a qkv buffer.

@@ -12,6 +12,9 @@ roformer = { path = "../roformer", default-features = false }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "webgpu", "vulkan", "metal", "dx12"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 futures-channel = "0.3.34"
+# The version `roformer` uses: f16 values to f32 for the start-up check of
+# the f16 weight kernels (decision 0018).
+half = "2.7.1"
 
 [dev-dependencies]
 # The version wgpu already uses (Cargo.lock), so no new crate is built.

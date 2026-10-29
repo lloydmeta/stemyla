@@ -5,7 +5,7 @@
 //! `ok`, and `cargo test` hides its stderr.  So a test that has no GPU
 //! adapter, no adapter feature or no fixture calls [`skip`] before it
 //! returns.  [`VAR`] lists what the run claims to have
-//! (`STEMYLA_REQUIRE=gpu,timestamps,fixtures`); a skip of a listed need
+//! (`STEMYLA_REQUIRE=gpu,timestamps,f16,fixtures`); a skip of a listed need
 //! panics instead.  An unknown word panics too, so a typo cannot turn the
 //! check off.
 
@@ -22,13 +22,17 @@ pub enum Need {
     Gpu,
     /// An adapter with `timestamp-query`.  Implies [`Need::Gpu`].
     Timestamps,
+    /// An adapter with the downlevel flag `SHADER_F16_IN_F32`, so the f16
+    /// weight kernels compile (decision 0018).  Implies [`Need::Gpu`].
+    F16,
     /// The PyTorch fixtures that `tools/roformer_export.py` writes.
     Fixtures,
 }
 
-const NEEDS: [Need; 3] = [Need::Gpu, Need::Timestamps, Need::Fixtures];
+const NEEDS: [Need; 4] = [Need::Gpu, Need::Timestamps, Need::F16, Need::Fixtures];
 
-const ONLY_THE_WORDS: &str = "Fix: use only gpu, timestamps and fixtures, separated by commas.";
+const ONLY_THE_WORDS: &str =
+    "Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.";
 
 impl Need {
     /// The word for this need in [`VAR`].
@@ -36,6 +40,7 @@ impl Need {
         match self {
             Need::Gpu => "gpu",
             Need::Timestamps => "timestamps",
+            Need::F16 => "f16",
             Need::Fixtures => "fixtures",
         }
     }
@@ -44,6 +49,7 @@ impl Need {
         match self {
             Need::Gpu => "run it where a GPU adapter opens",
             Need::Timestamps => "run it on an adapter with timestamp-query",
+            Need::F16 => "run it on an adapter with the downlevel flag SHADER_F16_IN_F32",
             Need::Fixtures => "write the fixtures with tools/roformer_export.py",
         }
     }
@@ -66,6 +72,10 @@ pub fn parse(list: &str) -> Result<Vec<Need>, String> {
         .collect()
 }
 
+/// The needs that cannot hold without a GPU adapter, so a `gpu` skip fails
+/// when the list has one of them.
+const IMPLY_GPU: [Need; 2] = [Need::Timestamps, Need::F16];
+
 /// Ok: the line a skip prints.  Err: the message a required skip panics
 /// with.  `list` is the value of [`VAR`], `None` when it is unset.
 pub fn verdict(list: Option<&OsStr>, need: Need, why: &str) -> Result<String, String> {
@@ -84,10 +94,14 @@ pub fn verdict(list: Option<&OsStr>, need: Need, why: &str) -> Result<String, St
             "VERIFY-1: {VAR} has {word}, but this test cannot run: {why}.  Fix: {}, or remove {word} from {VAR}.",
             need.fix()
         ))
-    } else if need == Need::Gpu && required.contains(&Need::Timestamps) {
+    } else if let Some(implier) = IMPLY_GPU
+        .into_iter()
+        .find(|implier| need == Need::Gpu && required.contains(implier))
+    {
+        let implied = implier.word();
         Err(format!(
-            "VERIFY-1: {VAR} has timestamps, which needs gpu, but this test cannot run: {why}.  Fix: {}, or remove timestamps from {VAR}.",
-            Need::Timestamps.fix()
+            "VERIFY-1: {VAR} has {implied}, which needs gpu, but this test cannot run: {why}.  Fix: {}, or remove {implied} from {VAR}.",
+            implier.fix()
         ))
     } else {
         Ok(format!(
@@ -122,7 +136,7 @@ mod tests {
         ))
     }
 
-    const UNKNOWN_GPUS: &str = "VERIFY-1: STEMYLA_REQUIRE has the unknown word \"gpus\".  Fix: use only gpu, timestamps and fixtures, separated by commas.";
+    const UNKNOWN_GPUS: &str = "VERIFY-1: STEMYLA_REQUIRE has the unknown word \"gpus\".  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.";
 
     #[test]
     fn a_required_need_that_cannot_run_fails() {
@@ -182,7 +196,7 @@ mod tests {
         assert_eq!(parse("gpu"), Ok(vec![Need::Gpu]));
         assert_eq!(
             parse("GPU"),
-            Err("VERIFY-1: STEMYLA_REQUIRE has the unknown word \"GPU\".  Fix: use only gpu, timestamps and fixtures, separated by commas.".into())
+            Err("VERIFY-1: STEMYLA_REQUIRE has the unknown word \"GPU\".  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.".into())
         );
         assert!(parse("Fixtures").is_err());
     }
@@ -216,7 +230,24 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         assert_eq!(
             verdict(Some(OsStr::from_bytes(b"gpu\xff")), Need::Fixtures, "x not found"),
-            Err("VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps and fixtures, separated by commas.".into())
+            Err("VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.".into())
+        );
+    }
+
+    #[test]
+    fn f16_is_a_need_that_requires_a_gpu() {
+        assert_eq!(parse("gpu,f16"), Ok(vec![Need::Gpu, Need::F16]));
+        assert_eq!(
+            verdict(list("f16"), Need::F16, "adapter without SHADER_F16_IN_F32"),
+            Err("VERIFY-1: STEMYLA_REQUIRE has f16, but this test cannot run: adapter without SHADER_F16_IN_F32.  Fix: run it on an adapter with the downlevel flag SHADER_F16_IN_F32, or remove f16 from STEMYLA_REQUIRE.".into())
+        );
+        assert_eq!(
+            verdict(list("gpu"), Need::F16, "adapter without SHADER_F16_IN_F32"),
+            skip_line("f16", "adapter without SHADER_F16_IN_F32")
+        );
+        assert_eq!(
+            verdict(list("f16"), Need::Gpu, "no GPU adapter: none"),
+            Err("VERIFY-1: STEMYLA_REQUIRE has f16, which needs gpu, but this test cannot run: no GPU adapter: none.  Fix: run it on an adapter with the downlevel flag SHADER_F16_IN_F32, or remove f16 from STEMYLA_REQUIRE.".into())
         );
     }
 

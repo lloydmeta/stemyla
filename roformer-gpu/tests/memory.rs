@@ -237,6 +237,34 @@ fn a_dropped_buffer_is_destroyed() {
     );
 }
 
+/// An f16 weight upload is counted at its packed size, rounded up to 16
+/// bytes, and freed when dropped; an f32 weight upload too.
+#[test]
+fn a_dropped_weight_is_freed() {
+    let Some(g) = gpu() else { return };
+    let start = g.live_bytes();
+    let w = g.upload_weight("f32 weight", &[1.0; 10]);
+    assert_eq!(g.live_bytes() - start, 48);
+    drop(w);
+    assert_eq!(g.live_bytes(), start);
+    if !g.has_f16_unpack() {
+        return skip(Need::F16, "adapter without SHADER_F16_IN_F32");
+    }
+    let created = g.created_bytes();
+    let odd = g.upload_f16("f16 weight", &[0x3c00; 21]);
+    assert_eq!(odd.size(), 48);
+    assert_eq!(g.live_bytes() - start, 48);
+    assert_eq!(g.created_bytes() - created, 48);
+    let whole = g.upload_f16("f16 weight", &[0x3c00; 64]);
+    assert_eq!(g.live_bytes() - start, 48 + 128);
+    drop(odd);
+    drop(whole);
+    assert_eq!(g.live_bytes(), start);
+    pollster::block_on(g.done());
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 /// Readbacks, the start-up kernel checks and the attention timings that
 /// calibration runs leave no buffer behind.
 #[test]
