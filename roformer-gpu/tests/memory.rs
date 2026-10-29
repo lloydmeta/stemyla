@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{DEPTH, DIM, DIM_HEAD, FEATURES, HEADS, HIDDEN, STEMS, band_groups};
-use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use roformer_gpu::{Gpu, WeightFormat, weight_format};
 use test_support::{Need, skip};
 
 /// Held by the tests that upload a whole model, so at most one ~700 MB
@@ -100,7 +100,28 @@ fn tensors() -> Vec<(String, Vec<usize>)> {
     out
 }
 
-/// A safetensors file of bf16 zeros: the header is built, the data is
+/// The header of a safetensors file of 16-bit values (`dtype` `BF16` or
+/// `F16`), and the size of the whole file.
+fn header(tensors: &[(String, Vec<usize>)], dtype: &str) -> (Vec<u8>, usize) {
+    let mut entries = Vec::new();
+    let mut end = 0;
+    for (name, shape) in tensors {
+        let start = end;
+        end += 2 * shape.iter().product::<usize>();
+        let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+        entries.push(format!(
+            "\"{name}\":{{\"dtype\":\"{dtype}\",\"shape\":[{}],\"data_offsets\":[{start},{end}]}}",
+            dims.join(",")
+        ));
+    }
+    let json = format!("{{{}}}", entries.join(","));
+    let mut head = (json.len() as u64).to_le_bytes().to_vec();
+    head.extend_from_slice(json.as_bytes());
+    let size = head.len() + end;
+    (head, size)
+}
+
+/// A safetensors file of 16-bit zeros: the header is built, the data is
 /// produced on each read, so the ~350 MB file is never in memory.
 struct Zeros {
     head: Vec<u8>,
@@ -109,22 +130,116 @@ struct Zeros {
 
 impl Zeros {
     fn new(tensors: &[(String, Vec<usize>)]) -> Self {
-        let mut entries = Vec::new();
-        let mut end = 0;
-        for (name, shape) in tensors {
-            let start = end;
-            end += 2 * shape.iter().product::<usize>();
-            let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
-            entries.push(format!(
-                "\"{name}\":{{\"dtype\":\"BF16\",\"shape\":[{}],\"data_offsets\":[{start},{end}]}}",
-                dims.join(",")
-            ));
-        }
-        let json = format!("{{{}}}", entries.join(","));
-        let mut head = (json.len() as u64).to_le_bytes().to_vec();
-        head.extend_from_slice(json.as_bytes());
-        let size = head.len() + end;
+        Self::of(tensors, "BF16")
+    }
+
+    fn of(tensors: &[(String, Vec<usize>)], dtype: &str) -> Self {
+        let (head, size) = header(tensors, dtype);
         Self { head, size }
+    }
+}
+
+/// A weight matrix is the `weight` of a linear layer; norms' gains and
+/// biases are vectors.
+fn is_matrix(name: &str) -> bool {
+    name.ends_with(".weight")
+}
+
+/// Bytes that the f32 load of [`tensors`] puts on the GPU: (matrices,
+/// vectors).  The band-split gains stay on the CPU.
+fn f32_bytes() -> (u64, u64) {
+    let mut out = (0, 0);
+    for (name, shape) in tensors() {
+        let bytes = 4 * shape.iter().product::<usize>() as u64;
+        if is_matrix(&name) {
+            out.0 += bytes;
+        } else if !(name.starts_with("band_split") && name.ends_with(".0.gamma")) {
+            out.1 += bytes;
+        }
+    }
+    out
+}
+
+/// A safetensors file of every tensor the network reads, F16, with values
+/// made from a hash of their place in the file on each read.  A weight
+/// matrix holds values below 1 / sqrt(fan-in) in magnitude, so the mask
+/// estimators' `tanh` does not saturate, and about one in 16 of them is an
+/// f16 subnormal.  A gain is near 1, a bias near 0.
+struct Random {
+    head: Vec<u8>,
+    size: usize,
+    /// Start of each tensor's data in the file: its scale and kind.
+    tensors: std::collections::HashMap<usize, (usize, f32, Kind)>,
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Matrix,
+    Gain,
+    Bias,
+}
+
+impl Random {
+    fn new(tensors: &[(String, Vec<usize>)]) -> Self {
+        let (head, size) = header(tensors, "F16");
+        let mut at = head.len();
+        let mut map = std::collections::HashMap::new();
+        for (name, shape) in tensors {
+            let len = shape.iter().product::<usize>();
+            let kind = if is_matrix(name) {
+                Kind::Matrix
+            } else if name.ends_with("gamma") {
+                Kind::Gain
+            } else {
+                Kind::Bias
+            };
+            let scale = 1.0 / (*shape.last().unwrap() as f32).sqrt();
+            map.insert(at, (len, scale, kind));
+            at += 2 * len;
+        }
+        Self {
+            head,
+            size,
+            tensors: map,
+        }
+    }
+
+    fn value(index: usize, scale: f32, kind: Kind) -> u16 {
+        let mut z = (index as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        let u = (z >> 40) as f32 / (1u64 << 23) as f32 - 1.0;
+        match kind {
+            Kind::Matrix if z.is_multiple_of(16) => {
+                ((z >> 16) as u16 & 0x8000) | ((z >> 20) as u16 & 0x3ff).max(1)
+            }
+            Kind::Matrix => half::f16::from_f32(u * scale).to_bits(),
+            Kind::Gain => half::f16::from_f32(1.0 + 0.1 * u).to_bits(),
+            Kind::Bias => half::f16::from_f32(0.1 * u).to_bits(),
+        }
+    }
+}
+
+impl Source for Random {
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [u8]>, String> {
+        if end <= self.head.len() {
+            return Ok(Cow::Borrowed(&self.head[start..end]));
+        }
+        let &(len, scale, kind) = self
+            .tensors
+            .get(&start)
+            .expect("a read of one whole tensor");
+        assert_eq!(end - start, 2 * len);
+        let first = (start - self.head.len()) / 2;
+        let out = (first..first + len)
+            .flat_map(|i| Self::value(i, scale, kind).to_le_bytes())
+            .collect();
+        Ok(Cow::Owned(out))
     }
 }
 
@@ -150,17 +265,15 @@ fn a_dropped_net_and_job_free_their_buffers() {
     let Some(g) = gpu() else { return };
     let start = g.live_bytes();
     let store = Store::from_source(Zeros::new(&tensors())).unwrap();
-    let net = Net::load_store(&g, store, 400_000).unwrap();
+    // A BF16 file goes up as f32 whatever the format asked for.
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F16).unwrap();
+    assert_eq!(net.format, WeightFormat::F32);
     let with_net = g.live_bytes();
     // Every tensor goes to the GPU as f32 except the band-split gains,
     // which are applied on the CPU; every stacked tensor is a whole number
     // of vec4s, so nothing is padded.
-    let uploaded: usize = tensors()
-        .iter()
-        .filter(|(name, _)| !(name.starts_with("band_split") && name.ends_with(".0.gamma")))
-        .map(|(_, shape)| 4 * shape.iter().product::<usize>())
-        .sum();
-    assert_eq!(net.bytes, uploaded as u64);
+    let (matrices, vectors) = f32_bytes();
+    assert_eq!(net.bytes, matrices + vectors);
     assert_eq!(with_net - start, net.bytes);
 
     let frames = 9;
@@ -191,6 +304,125 @@ fn a_dropped_net_and_job_free_their_buffers() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
+/// An F16 file loaded as f16 holds its weight matrices at half the f32
+/// size, and its vectors as f32; loaded as f32, it holds all as f32.  A
+/// dropped f16 net frees every buffer.
+#[test]
+fn an_f16_net_holds_its_matrices_at_half_size() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    if !g.has_f16_unpack() {
+        return skip(Need::F16, "adapter without SHADER_F16_IN_F32");
+    }
+    let start = g.live_bytes();
+    let (matrices, vectors) = f32_bytes();
+    let load = |format| {
+        let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
+        Net::load_store(&g, store, 400_000, format).unwrap()
+    };
+    let net = load(WeightFormat::F32);
+    assert_eq!(net.format, WeightFormat::F32);
+    assert_eq!(net.bytes, matrices + vectors);
+    drop(net);
+    assert_eq!(g.live_bytes(), start);
+    let net = load(WeightFormat::F16);
+    assert_eq!(net.format, WeightFormat::F16);
+    assert_eq!(net.bytes, matrices / 2 + vectors);
+    assert_eq!(g.live_bytes() - start, net.bytes);
+    eprintln!(
+        "parameters: f32 {} bytes, f16 {} bytes",
+        matrices + vectors,
+        net.bytes
+    );
+    drop(net);
+    assert_eq!(g.live_bytes(), start);
+    pollster::block_on(g.done());
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// A net built from an F16 file with f16 weights gives every mask of a
+/// small chunk bit for bit as the same net with f32 weights, f16
+/// subnormals among the weights.
+#[test]
+fn net_f16_weights_match_f32() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    if !g.has_f16_unpack() {
+        return skip(Need::F16, "adapter without SHADER_F16_IN_F32");
+    }
+    let frames = 9;
+    let features: Vec<f32> = (0..frames * FEATURES)
+        .map(|i| ((i * 7919) % 2001) as f32 / 1000.0 - 1.0)
+        .collect();
+    let masks = |format| {
+        let store = Store::from_source(Random::new(&tensors())).unwrap();
+        let net = Net::load_store(&g, store, 400_000, format).unwrap();
+        assert_eq!(net.format, format);
+        let job = Job::new(&g, &net, frames);
+        let masks = pollster::block_on(job.masks(&features)).unwrap();
+        let errors = g.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        masks
+    };
+    let want = masks(WeightFormat::F32);
+    let got = masks(WeightFormat::F16);
+    assert_eq!(want.len(), STEMS.len());
+    for (stem, (g16, g32)) in got.iter().zip(&want).enumerate() {
+        assert!(g32.iter().all(|v| v.is_finite()), "stem {stem}");
+        let saturated = g32.iter().filter(|v| v.abs() == 1.0).count();
+        assert!(
+            saturated * 2 < g32.len(),
+            "stem {stem}: {saturated} masks at +-1"
+        );
+        let (lo, hi) = g32
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        assert!(hi - lo > 1e-3, "stem {stem}: masks from {lo} to {hi}");
+        let d = roformer_gpu::bit_differences(g16, g32);
+        assert_eq!(
+            d.count, 0,
+            "stem {stem}: {} mask values differ, the largest by {:e}",
+            d.count, d.largest
+        );
+    }
+}
+
+/// On an adapter without `SHADER_F16_IN_F32` the f16 variants never
+/// compile, the f16 check does not pass, and an f16 setting loads an F16
+/// file as f32.
+#[test]
+fn without_the_f16_flag_weights_stay_f32() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let g = match pollster::block_on(Gpu::new_without_f16_unpack(
+        wgpu::PowerPreference::HighPerformance,
+    )) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
+    };
+    assert!(!g.has_f16_unpack());
+    let problems = pollster::block_on(g.check_kernels()).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    assert!(!g.f16_ok.get());
+    let (format, note) = weight_format(Some("f16"), g.downlevel_flags(), g.f16_ok.get());
+    assert_eq!(format, WeightFormat::F32);
+    assert!(note.is_some());
+    let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
+    // Even asked for f16, the net goes up as f32 on this adapter.
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F16).unwrap();
+    assert_eq!(net.format, WeightFormat::F32);
+    let (matrices, vectors) = f32_bytes();
+    assert_eq!(net.bytes, matrices + vectors);
+    let frames = 9;
+    let job = Job::new(&g, &net, frames);
+    pollster::block_on(job.masks(&vec![0.5; frames * FEATURES])).unwrap();
+    drop(job);
+    assert_eq!(g.compiled_matmul_kernels(WeightFormat::F16), 0);
+    assert!(g.compiled_matmul_kernels(WeightFormat::F32) > 0);
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 /// A file missing the last tensor the network reads fails after nearly
 /// all of the model is on the GPU; what was uploaded is destroyed.
 #[test]
@@ -202,7 +434,7 @@ fn a_failed_load_frees_what_it_uploaded() {
     let (last, _) = all.pop().unwrap();
     let store = Store::from_source(Zeros::new(&all)).unwrap();
     let created = g.created_bytes();
-    match Net::load_store(&g, store, 400_000) {
+    match Net::load_store(&g, store, 400_000, WeightFormat::F32) {
         Err(WeightError::Missing(name)) => assert_eq!(name, last),
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("a model missing {last} loaded"),

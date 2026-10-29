@@ -11,12 +11,12 @@
 //! transformer, one transpose, or one group of mask-estimator bands.  The
 //! caller submits a step, waits for the GPU ([`Gpu::done`]), and goes on.
 
-use roformer::weights::{Store, WeightError};
+use roformer::weights::{Dtype, Store, WeightError};
 use roformer::{
     BandGroup, DEPTH, DIM, DIM_HEAD, FEATURES, FREQS_PER_BANDS, HEADS, HIDDEN, STEMS, band_groups,
 };
 
-use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, Rec, View};
+use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, Rec, View, Weight, WeightFormat};
 
 const INNER: usize = HEADS * DIM_HEAD;
 const BANDS: usize = FREQS_PER_BANDS.len();
@@ -24,14 +24,14 @@ const BANDS: usize = FREQS_PER_BANDS.len();
 /// One `Transformer(depth=1)`: gated attention then feed-forward.
 struct Block {
     attn_norm: GpuBuffer,
-    qkv: GpuBuffer,     // [1536, 256]
-    gates_w: GpuBuffer, // [8, 256]
+    qkv: Weight,        // [1536, 256]
+    gates_w: Weight,    // [8, 256]
     gates_b: GpuBuffer, // [8]
-    out: GpuBuffer,     // [256, 512]
+    out: Weight,        // [256, 512]
     ff_norm: GpuBuffer,
-    w1: GpuBuffer, // [1024, 256]
+    w1: Weight, // [1024, 256]
     b1: GpuBuffer,
-    w2: GpuBuffer, // [256, 1024]
+    w2: Weight, // [256, 1024]
     b2: GpuBuffer,
 }
 
@@ -39,15 +39,15 @@ struct SplitGroup {
     g: BandGroup,
     /// Per band RMSNorm gain times sqrt(width), applied on the CPU.
     gamma: Vec<f32>, // [count, width]
-    w: GpuBuffer, // [count, 256, width]
+    w: Weight,    // [count, 256, width]
     b: GpuBuffer, // [count, 256]
 }
 
 struct MaskGroup {
     g: BandGroup,
-    w1: GpuBuffer, // [count, 1024, 256]
+    w1: Weight,    // [count, 1024, 256]
     b1: GpuBuffer, // [count, 1024]
-    w2: GpuBuffer, // [count, 2w, 1024]
+    w2: Weight,    // [count, 2w, 1024]
     b2: GpuBuffer, // [count, 2w]
 }
 
@@ -61,6 +61,9 @@ pub struct Net {
     pub budget: usize,
     /// Bytes of GPU buffers holding the parameters.
     pub bytes: u64,
+    /// How the weight matrices went up: `F16` only when every one of them
+    /// did (an F32 or BF16 file gives `F32` whatever was asked for).
+    pub format: WeightFormat,
 }
 
 fn norm(gpu: &Gpu, s: &mut Store, name: &str, dim: usize) -> Result<GpuBuffer, WeightError> {
@@ -87,6 +90,46 @@ fn stacked(
     Ok(gpu.upload(&names[0], &stacked_cpu(s, names, shape, scale)?))
 }
 
+/// Uploads weight matrices in the format a load asked for, and notes
+/// whether every one of them went up in it.
+struct Weights<'g> {
+    gpu: &'g Gpu,
+    format: WeightFormat,
+    all_f16: bool,
+}
+
+impl Weights<'_> {
+    /// One weight matrix.
+    fn one(&mut self, s: &mut Store, name: &str, shape: &[usize]) -> Result<Weight, WeightError> {
+        self.stack(s, &[name.to_string()], shape)
+    }
+
+    /// The matrices `names` as one buffer, one after another: as f16 when
+    /// the load asked for f16 and every one of them is F16 in the file
+    /// (decision 0018), else as f32.  Each tensor is read once.
+    fn stack(
+        &mut self,
+        s: &mut Store,
+        names: &[String],
+        shape: &[usize],
+    ) -> Result<Weight, WeightError> {
+        let f16 = self.format == WeightFormat::F16
+            && names.iter().all(|n| s.dtype(n) == Some(Dtype::F16));
+        if !f16 {
+            self.all_f16 = false;
+            return Ok(self
+                .gpu
+                .upload_weight(&names[0], &stacked_cpu(s, names, shape, 1.0)?));
+        }
+        let mut bits = s.get_f16_bits(&names[0], shape)?;
+        bits.reserve(bits.len() * (names.len() - 1));
+        for n in &names[1..] {
+            bits.extend(s.get_f16_bits(n, shape)?);
+        }
+        Ok(self.gpu.upload_f16(&names[0], &bits))
+    }
+}
+
 fn stacked_cpu(
     s: &mut Store,
     names: &[String],
@@ -101,19 +144,20 @@ fn stacked_cpu(
 }
 
 impl Block {
-    fn load(gpu: &Gpu, s: &mut Store, p: &str) -> Result<Self, WeightError> {
+    fn load(w: &mut Weights, s: &mut Store, p: &str) -> Result<Self, WeightError> {
+        let gpu = w.gpu;
         let a = format!("{p}.layers.0.0");
         let f = format!("{p}.layers.0.1");
         Ok(Self {
             attn_norm: norm(gpu, s, &format!("{a}.norm.gamma"), DIM)?,
-            qkv: tensor(gpu, s, &format!("{a}.to_qkv.weight"), &[3 * INNER, DIM])?,
-            gates_w: tensor(gpu, s, &format!("{a}.to_gates.weight"), &[HEADS, DIM])?,
+            qkv: w.one(s, &format!("{a}.to_qkv.weight"), &[3 * INNER, DIM])?,
+            gates_w: w.one(s, &format!("{a}.to_gates.weight"), &[HEADS, DIM])?,
             gates_b: tensor(gpu, s, &format!("{a}.to_gates.bias"), &[HEADS])?,
-            out: tensor(gpu, s, &format!("{a}.to_out.0.weight"), &[DIM, INNER])?,
+            out: w.one(s, &format!("{a}.to_out.0.weight"), &[DIM, INNER])?,
             ff_norm: norm(gpu, s, &format!("{f}.net.0.gamma"), DIM)?,
-            w1: tensor(gpu, s, &format!("{f}.net.1.weight"), &[HIDDEN, DIM])?,
+            w1: w.one(s, &format!("{f}.net.1.weight"), &[HIDDEN, DIM])?,
             b1: tensor(gpu, s, &format!("{f}.net.1.bias"), &[HIDDEN])?,
-            w2: tensor(gpu, s, &format!("{f}.net.4.weight"), &[DIM, HIDDEN])?,
+            w2: w.one(s, &format!("{f}.net.4.weight"), &[DIM, HIDDEN])?,
             b2: tensor(gpu, s, &format!("{f}.net.4.bias"), &[DIM])?,
         })
     }
@@ -132,14 +176,40 @@ fn per_seq(seq: usize, fused: bool) -> usize {
 impl Net {
     /// Uploads the weights of an exported safetensors file (f32, f16 or
     /// bf16).  Every tensor must be used and have the expected shape.
-    pub fn load(gpu: &Gpu, bytes: &[u8], budget: usize) -> Result<Self, WeightError> {
-        Self::load_store(gpu, Store::new(bytes)?, budget)
+    /// `format` is how the weight matrices of an F16 file go up; see
+    /// [`Self::load_store`].
+    pub fn load(
+        gpu: &Gpu,
+        bytes: &[u8],
+        budget: usize,
+        format: WeightFormat,
+    ) -> Result<Self, WeightError> {
+        Self::load_store(gpu, Store::new(bytes)?, budget, format)
     }
 
     /// [`Self::load`] from a store, which may read the file from outside
-    /// WebAssembly memory one tensor at a time.
-    pub fn load_store(gpu: &Gpu, mut store: Store, budget: usize) -> Result<Self, WeightError> {
+    /// WebAssembly memory one tensor at a time.  With `F16`, each weight
+    /// matrix (or stack of them) that is F16 in the file goes up as f16
+    /// values; the rest, and every norm, bias and gain, go up as f32.  On an
+    /// adapter without [`Gpu::has_f16_unpack`] everything goes up as f32.
+    /// [`Net::format`] records what went up.
+    pub fn load_store(
+        gpu: &Gpu,
+        mut store: Store,
+        budget: usize,
+        format: WeightFormat,
+    ) -> Result<Self, WeightError> {
         let before = gpu.created_bytes();
+        let format = if gpu.has_f16_unpack() {
+            format
+        } else {
+            WeightFormat::F32
+        };
+        let mut w = Weights {
+            gpu,
+            format,
+            all_f16: true,
+        };
         let s = &mut store;
         let groups = band_groups();
         let mut split = Vec::new();
@@ -152,15 +222,15 @@ impl Net {
             split.push(SplitGroup {
                 g: *g,
                 gamma: stacked_cpu(s, &names("0.gamma"), &[g.width], (g.width as f32).sqrt())?,
-                w: stacked(gpu, s, &names("1.weight"), &[DIM, g.width], 1.0)?,
+                w: w.stack(s, &names("1.weight"), &[DIM, g.width])?,
                 b: stacked(gpu, s, &names("1.bias"), &[DIM], 1.0)?,
             });
         }
         let mut layers = Vec::with_capacity(DEPTH);
         for i in 0..DEPTH {
             layers.push((
-                Block::load(gpu, s, &format!("layers.{i}.0"))?,
-                Block::load(gpu, s, &format!("layers.{i}.1"))?,
+                Block::load(&mut w, s, &format!("layers.{i}.0"))?,
+                Block::load(&mut w, s, &format!("layers.{i}.1"))?,
             ));
         }
         let final_norm = norm(gpu, s, "final_norm.gamma", DIM)?;
@@ -175,9 +245,9 @@ impl Net {
                 };
                 per_group.push(MaskGroup {
                     g: *g,
-                    w1: stacked(gpu, s, &names("0.weight"), &[HIDDEN, DIM], 1.0)?,
+                    w1: w.stack(s, &names("0.weight"), &[HIDDEN, DIM])?,
                     b1: stacked(gpu, s, &names("0.bias"), &[HIDDEN], 1.0)?,
-                    w2: stacked(gpu, s, &names("2.weight"), &[2 * g.width, HIDDEN], 1.0)?,
+                    w2: w.stack(s, &names("2.weight"), &[2 * g.width, HIDDEN])?,
                     b2: stacked(gpu, s, &names("2.bias"), &[2 * g.width], 1.0)?,
                 });
             }
@@ -191,6 +261,11 @@ impl Net {
             masks,
             budget,
             bytes: gpu.created_bytes() - before,
+            format: if format == WeightFormat::F16 && w.all_f16 {
+                WeightFormat::F16
+            } else {
+                WeightFormat::F32
+            },
         })
     }
 

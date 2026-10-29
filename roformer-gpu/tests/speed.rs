@@ -53,7 +53,7 @@ fn layer_steps() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(400_000);
-    let net = Net::load(&g, &w, budget).unwrap();
+    let net = Net::load(&g, &w, budget, roformer_gpu::WeightFormat::F32).unwrap();
     let frames = 87;
     let job = Job::new(&g, &net, frames);
     job.set_hidden(&vec![0.1; 62 * frames * 256]);

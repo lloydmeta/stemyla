@@ -1274,11 +1274,14 @@ fn bench_vec4_alone_times_its_fallback() {
         |l| lines.push(l),
     ));
     let shapes = roformer_gpu::bench::shapes();
-    for (s, row) in shapes.iter().zip(&table) {
-        assert!(row[v].median().is_finite(), "{}: v64 not timed", s.name);
-        for (t, timing) in row.iter().enumerate() {
-            if t != v {
-                assert!(timing.rounds.is_empty(), "{}: {}", s.name, TILES[t].name);
+    assert_eq!(table.f16.is_some(), g.f16_ok.get());
+    for rows in std::iter::once(&table.f32).chain(&table.f16) {
+        for (s, row) in shapes.iter().zip(rows) {
+            assert!(row[v].median().is_finite(), "{}: v64 not timed", s.name);
+            for (t, timing) in row.iter().enumerate() {
+                if t != v {
+                    assert!(timing.rounds.is_empty(), "{}: {}", s.name, TILES[t].name);
+                }
             }
         }
     }

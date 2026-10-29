@@ -270,6 +270,52 @@ impl WeightFormat {
     }
 }
 
+/// The format of a load whose `?weights=` is `auto` or unset.  It stays
+/// f32 until `e2e weights` and `?bench` show f16 weights give the same
+/// stems and are not slower (M9's D12).
+pub const DEFAULT_WEIGHTS: WeightFormat = WeightFormat::F32;
+
+/// The weight format of a load, and a line to log when the setting cannot
+/// be followed.  `setting` is `?weights=`: `f32`, `f16`, or `auto` (or
+/// unset) for [`DEFAULT_WEIGHTS`].  It is `F16` only when the setting
+/// allows it, the adapter has `SHADER_F16_IN_F32` and the f16 start-up
+/// check passed ([`Gpu::f16_ok`]).
+pub fn weight_format(
+    setting: Option<&str>,
+    flags: wgpu::DownlevelFlags,
+    f16_ok: bool,
+) -> (WeightFormat, Option<String>) {
+    let wanted = match setting {
+        Some("f32") => WeightFormat::F32,
+        Some("f16") => WeightFormat::F16,
+        None | Some("auto") => DEFAULT_WEIGHTS,
+        Some(other) => {
+            let (format, _) = weight_format(None, flags, f16_ok);
+            return (
+                format,
+                Some(format!(
+                    "weights: unknown ?weights={other} (use f32, f16 or auto); {} weights",
+                    format.name()
+                )),
+            );
+        }
+    };
+    if wanted == WeightFormat::F32 {
+        return (WeightFormat::F32, None);
+    }
+    let why = if !flags.contains(wgpu::DownlevelFlags::SHADER_F16_IN_F32) {
+        "this adapter cannot unpack f16 (no SHADER_F16_IN_F32)"
+    } else if !f16_ok {
+        "the f16 start-up check did not pass on this GPU"
+    } else {
+        return (WeightFormat::F16, None);
+    };
+    (
+        WeightFormat::F32,
+        Some(format!("f16 weights: {why}; weights stay f32")),
+    )
+}
+
 /// A weight matrix on the GPU: a [`GpuBuffer`] and the [`WeightFormat`] of
 /// its values.  It has no `Deref`, so its buffer cannot pass as an
 /// activation: a [`MatMul`] takes it as B and reads the format from it.
@@ -1022,17 +1068,41 @@ impl Gpu {
     /// `WGPU_ADAPTER_NAME` select an adapter natively (tests use
     /// SwiftShader's Vulkan driver this way).
     pub async fn new(power: wgpu::PowerPreference) -> Result<Self, String> {
-        Self::open(power, false).await
+        Self::open(power, false, false).await
     }
 
     /// Like [`Gpu::new`], but also asks for `timestamp-query` when the
     /// adapter offers it, so that [`Gpu::profiling`] is true.  The limits
     /// are the same defaults; only the optional feature differs.
     pub async fn new_profiling(power: wgpu::PowerPreference) -> Result<Self, String> {
-        Self::open(power, true).await
+        Self::open(power, true, false).await
     }
 
-    async fn open(power: wgpu::PowerPreference, profile: bool) -> Result<Self, String> {
+    /// Like [`Gpu::new`], but as if the adapter lacked
+    /// `DownlevelFlags::SHADER_F16_IN_F32`, so a test on any GPU can check
+    /// the f32 path of an adapter without it.
+    #[doc(hidden)]
+    pub async fn new_without_f16_unpack(power: wgpu::PowerPreference) -> Result<Self, String> {
+        Self::open(power, false, true).await
+    }
+
+    /// How many matmul kernels this device has compiled for weights in
+    /// `format`, for tests.
+    #[doc(hidden)]
+    pub fn compiled_matmul_kernels(&self, format: WeightFormat) -> usize {
+        self.kernels
+            .matmul
+            .0
+            .iter()
+            .filter(|cells| cells[format.index()].get().is_some())
+            .count()
+    }
+
+    async fn open(
+        power: wgpu::PowerPreference,
+        profile: bool,
+        mask_f16_unpack: bool,
+    ) -> Result<Self, String> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::PRIMARY | wgpu::Backends::BROWSER_WEBGPU;
         let instance = wgpu::Instance::new(desc.with_env());
@@ -1059,7 +1129,10 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("GPU device: {e}"))?;
-        let downlevel = adapter.get_downlevel_capabilities().flags;
+        let mut downlevel = adapter.get_downlevel_capabilities().flags;
+        if mask_f16_unpack {
+            downlevel.remove(wgpu::DownlevelFlags::SHADER_F16_IN_F32);
+        }
         Ok(Self::from_device(
             device,
             queue,
@@ -1155,6 +1228,11 @@ impl Gpu {
     /// True when this device records GPU time per dispatch.
     pub fn profiling(&self) -> bool {
         self.prof.is_some()
+    }
+
+    /// The adapter's downlevel flags, for [`weight_format`].
+    pub fn downlevel_flags(&self) -> wgpu::DownlevelFlags {
+        self.downlevel
     }
 
     /// True when the adapter has `DownlevelFlags::SHADER_F16_IN_F32`, so
@@ -1280,6 +1358,19 @@ impl Gpu {
             },
             &self.live,
         )
+    }
+
+    /// A weight matrix of `len` zero values in `format`, sized as
+    /// [`Gpu::upload_weight`] and [`Gpu::upload_f16`] size it, for timings.
+    fn zero_weight(&self, label: &str, len: usize, format: WeightFormat) -> Weight {
+        let floats = match format {
+            WeightFormat::F32 => len,
+            WeightFormat::F16 => len.div_ceil(2),
+        };
+        Weight {
+            buffer: self.buffer(label, floats),
+            format,
+        }
     }
 
     /// A weight matrix of f32 values, uploaded as [`Gpu::upload`] does.
@@ -3252,6 +3343,42 @@ mod tests {
             ]
         );
         assert_eq!(words(&f16_bytes(&[])), [0; 4]);
+    }
+
+    /// f16 weights only where the setting, the adapter's flag and the
+    /// start-up check all allow them; never without the flag.
+    #[test]
+    fn weight_format_follows_the_setting_and_the_gpu() {
+        use WeightFormat::{F16, F32};
+        let flag = wgpu::DownlevelFlags::SHADER_F16_IN_F32;
+        let no_flag = wgpu::DownlevelFlags::all().difference(flag);
+        for setting in [None, Some("auto"), Some("f32"), Some("f16")] {
+            for ok in [false, true] {
+                assert_eq!(
+                    weight_format(setting, no_flag, ok).0,
+                    F32,
+                    "{setting:?} {ok}"
+                );
+            }
+        }
+        assert_eq!(weight_format(Some("f16"), flag, true), (F16, None));
+        assert_eq!(weight_format(Some("f32"), flag, true), (F32, None));
+        assert_eq!(weight_format(None, flag, true), (DEFAULT_WEIGHTS, None));
+        assert_eq!(
+            weight_format(Some("auto"), flag, true),
+            (DEFAULT_WEIGHTS, None)
+        );
+        let (format, note) = weight_format(Some("f16"), flag, false);
+        assert_eq!(format, F32);
+        assert!(note.unwrap().contains("start-up check"));
+        let (format, note) = weight_format(Some("f16"), no_flag, true);
+        assert_eq!(format, F32);
+        assert!(note.unwrap().contains("SHADER_F16_IN_F32"));
+        let (format, note) = weight_format(Some("f8"), flag, true);
+        assert_eq!(format, DEFAULT_WEIGHTS);
+        assert!(note.unwrap().contains("f8"));
+        // Until step 5 of M9 (D12).
+        assert_eq!(DEFAULT_WEIGHTS, F32);
     }
 
     /// A profile label names the format of an f16 variant only.

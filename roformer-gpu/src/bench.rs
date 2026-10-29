@@ -4,7 +4,10 @@
 //! before its first separation, to choose its kernels; nothing is tuned
 //! while a song is being separated.
 
-use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, TILES, View};
+use crate::{
+    Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, TILES, View, Weight,
+    WeightFormat,
+};
 
 /// One matmul shape of the network and how often a chunk runs it.
 #[derive(Clone, Copy, Debug)]
@@ -113,18 +116,31 @@ pub fn shapes() -> Vec<Shape> {
 
 struct Buffers {
     act: GpuBuffer,
-    weight: GpuBuffer,
+    weight: Weight,
+    /// The same weights as f16, when the f16 variants are timed.
+    weight16: Option<Weight>,
     qkv: GpuBuffer,
     out: GpuBuffer,
 }
 
-fn matmul<'a>(s: &Shape, b: &'a Buffers, tile: usize) -> MatMul<'a> {
+impl Buffers {
+    fn weight(&self, format: WeightFormat) -> &Weight {
+        match format {
+            WeightFormat::F32 => &self.weight,
+            WeightFormat::F16 => self.weight16.as_ref().expect("f16 bench weights"),
+        }
+    }
+}
+
+/// The product of shape `s` with kernel `tile`; a linear shape reads its
+/// weights in `format` (the scores and P·v have no weights, and ignore it).
+fn matmul<'a>(s: &Shape, b: &'a Buffers, tile: usize, format: WeightFormat) -> MatMul<'a> {
     let row = 1536;
     let mut mm = match s.kind {
         Kind::Linear(act) => {
             let mut mm = MatMul::new(
                 (&b.act, View::rows(0, s.k).batch(s.m * s.k, 0)),
-                (&b.weight, View::t(0, s.k).batch(s.n * s.k, 0)),
+                (b.weight(format), View::t(0, s.k).batch(s.n * s.k, 0)),
                 (&b.out, View::rows(0, s.n).batch(s.m * s.n, 0)),
                 s.m,
                 s.n,
@@ -216,10 +232,13 @@ fn matmul<'a>(s: &Shape, b: &'a Buffers, tile: usize) -> MatMul<'a> {
     mm
 }
 
-fn buffers(gpu: &Gpu) -> Buffers {
+/// The bench's buffers, with f16 weights too when `f16`.
+fn buffers(gpu: &Gpu, f16: bool) -> Buffers {
+    let weights = 7 * 1024 * 256;
     Buffers {
         act: gpu.buffer("bench act", FREQ_TOKENS * 1024),
-        weight: gpu.buffer("bench weight", 7 * 1024 * 256),
+        weight: gpu.zero_weight("bench weight", weights, WeightFormat::F32),
+        weight16: f16.then(|| gpu.zero_weight("bench weight f16", weights, WeightFormat::F16)),
         qkv: gpu.buffer("bench qkv", FREQ_TOKENS * 1536),
         out: gpu.buffer("bench out", (8 * T * T).max(FREQ_TOKENS * 1536)),
     }
@@ -236,16 +255,18 @@ fn buffers(gpu: &Gpu) -> Buffers {
 /// the GPU did (rates fell on levels such as 905, 1,207 and 1,810 GFLOP/s
 /// for one shape), so the per-dispatch figure measured the wait as much as
 /// the kernel.
+#[allow(clippy::too_many_arguments)]
 async fn time_one(
     gpu: &Gpu,
     b: &Buffers,
     s: &Shape,
     tile: usize,
+    format: WeightFormat,
     warm: f64,
     round: f64,
     now: &impl Fn() -> f64,
 ) -> f64 {
-    let mm = matmul(s, b, tile);
+    let mm = matmul(s, b, tile, format);
     let per_submit = ((4e9 / s.flops()) as usize).clamp(1, 32);
     let submit = |times: usize| {
         for _ in 0..times {
@@ -316,13 +337,36 @@ impl Timing {
     }
 }
 
-/// Seconds per dispatch of each shape with each kernel (`[shape][tile]`,
-/// the median of `rounds` rounds; infinite for kernels that failed
-/// [`Gpu::check_kernels`] or are not in `only`).  The kernels take turns
-/// within each round (A, B, A, B, ...), so a GPU that heats up and slows
-/// down over the run slows every kernel alike instead of whichever ran
-/// last.  `now` is a clock in seconds.  With `warm` 0.3, `round` 0.2 and
-/// 3 rounds it takes a few minutes on a real GPU.
+/// What [`measure`] timed: seconds per dispatch of each shape with each
+/// kernel (`[shape][tile]`) with f32 weights, and with f16 weights on a
+/// GPU with [`Gpu::f16_ok`].  The scores and P·v have no weights, so their
+/// f16 rows are their f32 timings.
+#[derive(Clone, Debug)]
+pub struct Measured {
+    pub f32: Vec<Vec<Timing>>,
+    pub f16: Option<Vec<Vec<Timing>>>,
+}
+
+/// Why `?bench` times no f16 weights on this GPU, if it does not.
+fn no_f16_reason(gpu: &Gpu) -> Option<&'static str> {
+    if !gpu.has_f16_unpack() {
+        Some("this adapter cannot unpack f16 (no SHADER_F16_IN_F32)")
+    } else if !gpu.f16_ok.get() {
+        Some("the f16 start-up check did not pass on this GPU")
+    } else {
+        None
+    }
+}
+
+/// Times each shape with each kernel (the median of `rounds` rounds;
+/// infinite for kernels that failed [`Gpu::check_kernels`] or are not in
+/// `only`), with f32 weights, and on a GPU with [`Gpu::f16_ok`] the linear
+/// shapes with f16 weights too.  The kernels and the formats take turns
+/// within each round (A f32, A f16, B f32, B f16, ...), so a GPU that heats
+/// up and slows down over the run slows every kernel and format alike
+/// instead of whichever ran last.  `now` is a clock in seconds.  With
+/// `warm` 0.3, `round` 0.2 and 3 rounds it takes a few minutes on a real
+/// GPU.
 pub async fn measure(
     gpu: &Gpu,
     warm: f64,
@@ -331,81 +375,107 @@ pub async fn measure(
     only: Option<&[usize]>,
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
-) -> Vec<Vec<Timing>> {
+) -> Measured {
     let recording = gpu.set_recording(false);
-    let b = buffers(gpu);
+    let why_no_f16 = no_f16_reason(gpu);
+    if let Some(why) = why_no_f16 {
+        log(format!("bench: f16 weights not timed: {why}"));
+    }
+    let b = buffers(gpu, why_no_f16.is_none());
     let run: Vec<bool> = (0..TILES.len())
         .map(|t| gpu.usable.get()[t] && only.is_none_or(|o| o.contains(&t)))
         .collect();
-    let mut table = Vec::new();
+    let mut f32_table = Vec::new();
+    let mut f16_table = Vec::new();
     for s in &shapes() {
+        let linear = matches!(s.kind, Kind::Linear(_));
+        let formats: &[WeightFormat] = if linear && why_no_f16.is_none() {
+            &WeightFormat::ALL
+        } else {
+            &[WeightFormat::F32]
+        };
         // What runs when each kernel is asked for: a vec4 kernel hands
         // products it cannot read as vec4s to the fallback.  The fallback is
         // timed once for both (also when it was not asked for itself) and
-        // its timings stand for the vec4 kernel.
+        // its timings stand for the vec4 kernel.  Both formats hand off
+        // alike: the f16 buffer is a whole number of vec4s too.
         let ran: Vec<usize> = (0..TILES.len())
-            .map(|t| matmul(s, &b, t).kernel(t))
+            .map(|t| matmul(s, &b, t, WeightFormat::F32).kernel(t))
             .collect();
         let timed: Vec<bool> = (0..TILES.len())
             .map(|u| (0..TILES.len()).any(|t| run[t] && ran[t] == u))
             .collect();
-        let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
+        let empty = vec![Timing { rounds: Vec::new() }; TILES.len()];
+        let mut rows = vec![empty; formats.len()];
         for r in 0..rounds.max(1) {
-            for (t, timing) in row.iter_mut().enumerate() {
-                if !timed[t] {
-                    continue;
+            for t in (0..TILES.len()).filter(|&t| timed[t]) {
+                for (f, &format) in formats.iter().enumerate() {
+                    let w = if r == 0 { warm } else { 0.0 };
+                    let secs = time_one(gpu, &b, s, t, format, w, round, &now).await;
+                    rows[f][t].rounds.push(secs);
                 }
-                let w = if r == 0 { warm } else { 0.0 };
-                timing
-                    .rounds
-                    .push(time_one(gpu, &b, s, t, w, round, &now).await);
             }
         }
-        for (t, tile) in TILES.iter().enumerate() {
-            if !gpu.usable.get()[t] {
-                log(format!(
-                    "bench: {} {}: skipped (failed the start-up check on this GPU)",
-                    s.name, tile.name
-                ));
-            } else if run[t] && ran[t] != t {
-                row[t] = row[ran[t]].clone();
-                log(format!(
-                    "bench: {} {}: runs {}, {:.1} GFLOP/s (not vec4-aligned: an operand not K-contiguous, or K, a stride or an offset not a multiple of 4)",
-                    s.name,
-                    tile.name,
-                    TILES[ran[t]].name,
-                    s.flops() / row[t].median() / 1e9
-                ));
-            } else if run[t] {
-                let tm = &row[t];
-                log(format!(
-                    "bench: {} ({}x{}x{}, x{}) {}: {:.1} GFLOP/s (median of {}, spread {:.1}%)",
-                    s.name,
-                    s.m,
-                    s.n,
-                    s.k,
-                    s.outer * s.inner,
-                    tile.name,
-                    s.flops() / tm.median() / 1e9,
-                    tm.rounds.len(),
-                    100.0 * tm.spread()
-                ));
+        for (f, &format) in formats.iter().enumerate() {
+            let row = &mut rows[f];
+            let weights = if linear {
+                format!(", {} weights", format.name())
+            } else {
+                String::new()
+            };
+            for (t, tile) in TILES.iter().enumerate() {
+                if !gpu.usable.get()[t] {
+                    log(format!(
+                        "bench: {} {}{weights}: skipped (failed the start-up check on this GPU)",
+                        s.name, tile.name
+                    ));
+                } else if run[t] && ran[t] != t {
+                    row[t] = row[ran[t]].clone();
+                    log(format!(
+                        "bench: {} {}{weights}: runs {}, {:.1} GFLOP/s (not vec4-aligned: an operand not K-contiguous, or K, a stride or an offset not a multiple of 4)",
+                        s.name,
+                        tile.name,
+                        TILES[ran[t]].name,
+                        s.flops() / row[t].median() / 1e9
+                    ));
+                } else if run[t] {
+                    let tm = &row[t];
+                    log(format!(
+                        "bench: {} ({}x{}x{}, x{}) {}{weights}: {:.1} GFLOP/s (median of {}, spread {:.1}%)",
+                        s.name,
+                        s.m,
+                        s.n,
+                        s.k,
+                        s.outer * s.inner,
+                        tile.name,
+                        s.flops() / tm.median() / 1e9,
+                        tm.rounds.len(),
+                        100.0 * tm.spread()
+                    ));
+                }
+            }
+            // A fallback timed only on behalf of a vec4 kernel stays out of
+            // the table, as a kernel that was not asked for.
+            for (t, timing) in row.iter_mut().enumerate() {
+                if !run[t] {
+                    timing.rounds.clear();
+                }
             }
         }
-        // A fallback timed only on behalf of a vec4 kernel stays out of
-        // the table, as a kernel that was not asked for.
-        for (t, timing) in row.iter_mut().enumerate() {
-            if !run[t] {
-                timing.rounds.clear();
-            }
+        let f32_row = rows.swap_remove(0);
+        if why_no_f16.is_none() {
+            f16_table.push(rows.pop().unwrap_or_else(|| f32_row.clone()));
         }
-        table.push(row);
+        f32_table.push(f32_row);
     }
     if let Some(e) = gpu.take_errors().into_iter().next() {
         log(format!("bench: WebGPU error: {e}"));
     }
     gpu.set_recording(recording);
-    table
+    Measured {
+        f32: f32_table,
+        f16: why_no_f16.is_none().then_some(f16_table),
+    }
 }
 
 /// Seconds per call of `record` (which adds dispatches to one submission),
@@ -694,7 +764,25 @@ impl Choice {
 /// another version is measured again: version 1 timed attention for 0.1 s
 /// on a GPU opened moments before, and chose split attention on a Radeon
 /// Pro 5500M where a longer bench measured fused 2.5 times faster.
-pub const CALIBRATION: u32 = 2;
+/// Version 3 calibrates once for each weight format, with the f16
+/// variants for f16 weights (M9 of `plans/active/stream-from-storage.md`).
+pub const CALIBRATION: u32 = 3;
+
+/// The key of this GPU's stored kernel choice for weights in `format`:
+/// `"<adapter>|<kernels_id>|<CALIBRATION>|<f32 or f16>"`.  The formats
+/// keep separate choices, since the f16 variants can be faster or slower.
+pub fn choice_key(adapter: &str, kernels_id: u64, format: WeightFormat) -> String {
+    format!(
+        "{adapter}|{kernels_id:016x}|{CALIBRATION}|{}",
+        format.name()
+    )
+}
+
+/// Whether a worker whose last kernel choice was for `last` (none yet)
+/// chooses again for a load of `format`: once per format, not per worker.
+pub fn choose_again(last: Option<WeightFormat>, format: WeightFormat) -> bool {
+    last != Some(format)
+}
 
 /// Warm-up before the first timed round of each attention candidate in
 /// [`calibrate`], and the length of every timed round: a time-axis step
@@ -788,8 +876,14 @@ pub fn decide(
 /// product) runs and is timed as `i64` under `v64`'s name, as it would
 /// run in a separation.  Attention gets longer windows
 /// ([`ATTENTION_WARM`], [`ATTENTION_ROUND`]) than the matmul products.
-/// Takes several seconds.
-pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(String)) -> Choice {
+/// The linear shapes are timed with weights in `format`, so f16 weights get
+/// the kernels whose f16 variants run fastest.  Takes several seconds.
+pub async fn calibrate(
+    gpu: &Gpu,
+    format: WeightFormat,
+    now: impl Fn() -> f64,
+    mut log: impl FnMut(String),
+) -> Choice {
     let all = shapes();
     let by_name = |n: &str| all.iter().find(|s| s.name == n).copied().expect("shape");
     let large = [
@@ -798,7 +892,7 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
         by_name("freq ff up"),
     ];
     let small = [by_name("time gates"), by_name("time p·v")];
-    let b = buffers(gpu);
+    let b = buffers(gpu, format == WeightFormat::F16);
     let (warm, round, rounds) = (0.1, 0.1, 3);
     let secs = |kind: Vec<Shape>| {
         let b = &b;
@@ -822,7 +916,8 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
                     let mut total = 0.0;
                     for s in &kind {
                         let w = if rd == 0 { warm } else { 0.0 };
-                        total += time_one(gpu, b, s, k, w, round, now).await * s.per_chunk as f64;
+                        total += time_one(gpu, b, s, k, format, w, round, now).await
+                            * s.per_chunk as f64;
                     }
                     timing.rounds.push(total);
                 }
@@ -867,7 +962,8 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
             .join(", ")
     };
     log(format!(
-        "kernels for this GPU: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%) per chunk)",
+        "kernels for this GPU, {} weights: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%) per chunk)",
+        format.name(),
         choice.matmul.name(),
         fmt(&l, &lt),
         fmt(&s, &st),
@@ -881,46 +977,89 @@ pub async fn calibrate(gpu: &Gpu, now: impl Fn() -> f64, mut log: impl FnMut(Str
 }
 
 /// Summary lines: estimated matmul seconds per chunk for each kernel alone
-/// and for the best kernel per shape, from the medians.
-pub fn summary(table: &[Vec<Timing>]) -> Vec<String> {
+/// and for the best kernel per shape, from the medians, for f32 weights and
+/// for f16 weights when they were timed.  Then the ratio of f16 to f32 for
+/// the best kernel per shape, over the whole chunk and over the linear
+/// shapes only: the scores and P·v take their f32 timings in both formats,
+/// so the whole-chunk ratio is nearer 1.
+pub fn summary(m: &Measured) -> Vec<String> {
     let shapes = shapes();
     let flops: f64 = shapes.iter().map(|s| s.flops() * s.per_chunk as f64).sum();
-    let med: Vec<Vec<f64>> = table
-        .iter()
-        .map(|row| row.iter().map(Timing::median).collect())
-        .collect();
-    let total = |pick: &dyn Fn(usize) -> usize| -> f64 {
+    let medians = |table: &[Vec<Timing>]| -> Vec<Vec<f64>> {
+        table
+            .iter()
+            .map(|row| row.iter().map(Timing::median).collect())
+            .collect()
+    };
+    let best = |med: &[Vec<f64>], i: usize| {
+        (0..TILES.len())
+            .min_by(|&a, &b| med[i][a].total_cmp(&med[i][b]))
+            .unwrap_or(0)
+    };
+    // Seconds per chunk of the shapes that `keep` passes, with kernel
+    // `pick(shape)`.
+    let total = |med: &[Vec<f64>], keep: &dyn Fn(&Shape) -> bool, pick: &dyn Fn(usize) -> usize| {
         shapes
             .iter()
             .enumerate()
+            .filter(|(_, s)| keep(s))
             .map(|(i, s)| med[i][pick(i)] * s.per_chunk as f64)
-            .sum()
+            .sum::<f64>()
     };
-    let mut out = Vec::new();
+    let all = |_: &Shape| true;
+    let linear = |s: &Shape| matches!(s.kind, Kind::Linear(_));
     let line = |label: &str, secs: f64| {
         format!(
             "bench: {label}: {secs:.2} s of matmul per chunk ({:.2} TFLOP/s)",
             flops / secs / 1e12
         )
     };
-    for (t, tile) in TILES.iter().enumerate() {
-        let secs = total(&|_| t);
-        if secs.is_finite() {
-            out.push(line(&format!("all {}", tile.name), secs));
+    let mut out = Vec::new();
+    let tables = std::iter::once((WeightFormat::F32, &m.f32))
+        .chain(m.f16.as_ref().map(|t| (WeightFormat::F16, t)));
+    let mut best_totals = Vec::new();
+    for (format, table) in tables {
+        let med = medians(table);
+        let prefix = match format {
+            WeightFormat::F32 => "",
+            WeightFormat::F16 => "f16 weights, ",
+        };
+        for (t, tile) in TILES.iter().enumerate() {
+            let secs = total(&med, &all, &|_| t);
+            if secs.is_finite() {
+                out.push(line(&format!("{prefix}all {}", tile.name), secs));
+            }
         }
-    }
-    let best = |i: usize| {
-        (0..TILES.len())
-            .min_by(|&a, &b| med[i][a].total_cmp(&med[i][b]))
-            .unwrap_or(0)
-    };
-    out.push(line("best per shape", total(&best)));
-    for (i, s) in shapes.iter().enumerate() {
-        out.push(format!(
-            "bench: best for {}: {}",
-            s.name,
-            TILES[best(i)].name
+        let pick = |i: usize| best(&med, i);
+        out.push(line(
+            &format!("{prefix}best per shape"),
+            total(&med, &all, &pick),
         ));
+        for (i, s) in shapes.iter().enumerate() {
+            if format == WeightFormat::F32 || linear(s) {
+                let with = match format {
+                    WeightFormat::F32 => "",
+                    WeightFormat::F16 => " with f16 weights",
+                };
+                out.push(format!(
+                    "bench: best for {}{with}: {}",
+                    s.name,
+                    TILES[pick(i)].name
+                ));
+            }
+        }
+        best_totals.push((total(&med, &all, &pick), total(&med, &linear, &pick)));
+    }
+    if let [(f32_all, f32_linear), (f16_all, f16_linear)] = best_totals[..] {
+        for (label, f16, f32) in [
+            ("whole chunk", f16_all, f32_all),
+            ("linear shapes only", f16_linear, f32_linear),
+        ] {
+            out.push(format!(
+                "bench: f16 / f32 weights, best kernel per shape, {label}: {:.3} (f16 {f16:.2} s, f32 {f32:.2} s per chunk)",
+                f16 / f32
+            ));
+        }
     }
     out
 }
@@ -1042,6 +1181,134 @@ mod tests {
         assert_eq!(
             store_choice("amd rdna|a|2\ti64;split\n", "amd", "amd|d|2", "v64;freq", 1),
             "amd rdna|a|2\ti64;split\namd|d|2\tv64;freq\n"
+        );
+    }
+
+    /// The two formats' keys differ only in the format, and name the
+    /// calibration version.
+    #[test]
+    fn choice_keys_name_the_format() {
+        assert_eq!(CALIBRATION, 3);
+        assert_eq!(
+            choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F32),
+            "AMD Radeon Pro 5500M|00000000000000ab|3|f32"
+        );
+        assert_eq!(
+            choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F16),
+            "AMD Radeon Pro 5500M|00000000000000ab|3|f16"
+        );
+    }
+
+    /// A worker chooses again when it has not chosen yet, or when its last
+    /// choice was for the other format.
+    #[test]
+    fn a_load_of_the_other_format_chooses_again() {
+        use WeightFormat::{F16, F32};
+        assert!(choose_again(None, F32));
+        assert!(choose_again(None, F16));
+        assert!(!choose_again(Some(F32), F32));
+        assert!(!choose_again(Some(F16), F16));
+        assert!(choose_again(Some(F32), F16));
+        assert!(choose_again(Some(F16), F32));
+    }
+
+    /// With f32 and f16 keys, a keep of 6 holds three builds' choices of
+    /// both formats for one GPU.
+    #[test]
+    fn stored_choices_of_both_formats() {
+        let mut text = String::new();
+        for build in ["a", "b", "c", "d"] {
+            for format in [WeightFormat::F32, WeightFormat::F16] {
+                let key = format!("amd|{build}|3|{}", format.name());
+                text = store_choice(&text, "amd", &key, "v64;fused", 6);
+            }
+        }
+        let keys: Vec<&str> = text
+            .lines()
+            .map(|l| l.split('\t').next().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "amd|b|3|f32",
+                "amd|b|3|f16",
+                "amd|c|3|f32",
+                "amd|c|3|f16",
+                "amd|d|3|f32",
+                "amd|d|3|f16"
+            ]
+        );
+    }
+
+    fn timing(secs: f64) -> Timing {
+        Timing { rounds: vec![secs] }
+    }
+
+    /// From a planted table: each format's totals, and the ratio of f16 to
+    /// f32 over the whole chunk and over the linear shapes only.  The
+    /// scores and P·v take their f32 timings in both formats.
+    #[test]
+    fn summary_gives_the_ratio_of_f16_to_f32() {
+        let shapes = shapes();
+        let row = |linear: f64, other: f64| -> Vec<Vec<Timing>> {
+            shapes
+                .iter()
+                .map(|s| {
+                    let secs = match s.kind {
+                        Kind::Linear(_) => linear,
+                        _ => other,
+                    };
+                    // The second kernel is the best everywhere; the others
+                    // did not run.
+                    let mut row = vec![Timing { rounds: Vec::new() }; TILES.len()];
+                    row[0] = timing(2.0 * secs);
+                    row[1] = timing(secs);
+                    row
+                })
+                .collect()
+        };
+        let lines = summary(&Measured {
+            f32: row(1e-3, 1e-3),
+            f16: Some(row(0.9e-3, 1e-3)),
+        });
+        let per_chunk = |pick: &dyn Fn(&Kind) -> bool| -> usize {
+            shapes
+                .iter()
+                .filter(|s| pick(&s.kind))
+                .map(|s| s.per_chunk)
+                .sum()
+        };
+        let linear = per_chunk(&|k| matches!(k, Kind::Linear(_))) as f64 * 1e-3;
+        let other = per_chunk(&|k| !matches!(k, Kind::Linear(_))) as f64 * 1e-3;
+        let whole = format!(
+            "bench: f16 / f32 weights, best kernel per shape, whole chunk: {:.3} (f16 {:.2} s, f32 {:.2} s per chunk)",
+            (0.9 * linear + other) / (linear + other),
+            0.9 * linear + other,
+            linear + other
+        );
+        let linear_only = format!(
+            "bench: f16 / f32 weights, best kernel per shape, linear shapes only: {:.3} (f16 {:.2} s, f32 {:.2} s per chunk)",
+            0.9,
+            0.9 * linear,
+            linear
+        );
+        assert!(lines.contains(&whole), "{lines:#?}");
+        assert!(lines.contains(&linear_only), "{lines:#?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("bench: f16 weights, best per shape: ")),
+            "{lines:#?}"
+        );
+        let f32_only = summary(&Measured {
+            f32: row(1e-3, 1e-3),
+            f16: None,
+        });
+        assert!(f32_only.iter().all(|l| !l.contains("f16")), "{f32_only:#?}");
+        assert!(
+            f32_only
+                .iter()
+                .any(|l| l.starts_with("bench: best per shape: "))
         );
     }
 

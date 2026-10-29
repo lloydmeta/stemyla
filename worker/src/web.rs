@@ -721,7 +721,12 @@ async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError
     // before goes now: a safetensors file that then fails to load leaves
     // no model loaded (the stored one, if any, is kept).
     STATE.with_borrow_mut(|st| st.net = None);
-    let net = Net::load_store(&g, Store::from_source(&file)?, budget(s))?;
+    let net = Net::load_store(
+        &g,
+        Store::from_source(&file)?,
+        budget(s),
+        roformer_gpu::WeightFormat::F32,
+    )?;
     // Its cached blocks, or a checked download's bytes, are not needed for
     // the GPU checks and kernel timing that follow.
     drop(file);
@@ -1856,10 +1861,10 @@ async fn choose_kernels(gpu: &Gpu) {
         .as_string()
         .unwrap_or_default()
         .replace(['\t', '\n', '\r', '|'], " ");
-    let key = format!(
-        "{adapter}|{:016x}|{}",
+    let key = roformer_gpu::bench::choice_key(
+        &adapter,
         roformer_gpu::kernels_id(),
-        roformer_gpu::bench::CALIBRATION
+        roformer_gpu::WeightFormat::F32,
     );
     let stored = cache_get(KERNEL_CHOICE).await.unwrap_or(JsValue::NULL);
     let text = if stored.is_null() {
@@ -1887,7 +1892,9 @@ async fn choose_kernels(gpu: &Gpu) {
         }
     }
     log("choosing kernels for this GPU (several seconds, once)…");
-    let c = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
+    let c =
+        roformer_gpu::bench::calibrate(gpu, roformer_gpu::WeightFormat::F32, now_s, |l| log(&l))
+            .await;
     gpu.policy.set(c.matmul);
     gpu.attention.set(c.attention);
     // A WebGPU error while timing (out of memory with the weights
