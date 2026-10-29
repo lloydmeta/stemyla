@@ -58,6 +58,10 @@
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
 //!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
 //!   checks them against `--hashes`.
+//! * `weights`: f16 weights against f32 weights, from a blank page
+//!   (`--weights`; M9 of `docs/plans/active/stream-from-storage.md`).  The
+//!   stems of the two formats must be equal bit for bit, with M3's kernels
+//!   and with this GPU's own, and an f16 separation not slower.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -87,6 +91,7 @@ mod decode;
 mod old_session;
 mod playback;
 mod save;
+mod weights;
 
 /// The viewport the click positions are measured in.
 const VIEWPORT: (u32, u32) = (1100, 700);
@@ -257,6 +262,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "worker-check" => worker_check(&o),
         "memory-budget" => memory_budget(&o),
         "stored-stems" => stored_stems(&o),
+        "weights" => weights::run(&o),
         other => bail!("unknown scenario {other}"),
     }
 }

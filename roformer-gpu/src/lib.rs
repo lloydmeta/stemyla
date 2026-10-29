@@ -316,6 +316,24 @@ pub fn weight_format(
     )
 }
 
+/// How long [`Gpu::check_kernels_timed`] took, in milliseconds: the f32
+/// kernels' checks, and the compile and run of the f16 variants (`None`
+/// when they did not run).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckTimes {
+    pub f32_ms: f64,
+    pub f16_ms: Option<f64>,
+}
+
+/// The text of [`CheckTimes`] for a log line: `matmul checks: f32 312 ms,
+/// f16 146 ms`.
+pub fn check_times_text(t: CheckTimes) -> String {
+    let f16 = t
+        .f16_ms
+        .map_or("not run".to_string(), |ms| format!("{ms:.0} ms"));
+    format!("matmul checks: f32 {:.0} ms, f16 {f16}", t.f32_ms)
+}
+
 /// A weight matrix on the GPU: a [`GpuBuffer`] and the [`WeightFormat`] of
 /// its values.  It has no `Deref`, so its buffer cannot pass as an
 /// activation: a [`MatMul`] takes it as B and reads the format from it.
@@ -1495,6 +1513,17 @@ impl Gpu {
     /// sets [`Gpu::f16_ok`].  A failure there adds a line and keeps the
     /// weights f32.
     pub async fn check_kernels(&self) -> Result<Vec<String>, String> {
+        Ok(self.check_kernels_timed(|| 0.0).await?.0)
+    }
+
+    /// [`Gpu::check_kernels`], and how long its two parts took, read from
+    /// `now_ms`, a clock in milliseconds (the worker's `performance.now`).
+    /// A measure only: the times change no result.
+    pub async fn check_kernels_timed(
+        &self,
+        now_ms: impl Fn() -> f64,
+    ) -> Result<(Vec<String>, CheckTimes), String> {
+        let t0 = now_ms();
         let (m, n, k) = (133, 141, 44);
         let rand = check_values;
         let (a, b, c0, bias) = (
@@ -1591,12 +1620,18 @@ impl Gpu {
                 problems.join("; ")
             ));
         }
+        let t1 = now_ms();
+        let mut times = CheckTimes {
+            f32_ms: t1 - t0,
+            f16_ms: None,
+        };
         if self.has_f16_unpack() {
             let f16_problems = self.check_f16(usable).await?;
+            times.f16_ms = Some(now_ms() - t1);
             self.f16_ok.set(f16_problems.is_empty());
             problems.extend(f16_problems);
         }
-        Ok(problems)
+        Ok((problems, times))
     }
 
     /// Runs the f16 variant of each kernel that `usable` marks, and its f32
@@ -3343,6 +3378,20 @@ mod tests {
             ]
         );
         assert_eq!(words(&f16_bytes(&[])), [0; 4]);
+    }
+
+    /// The text of the start-up check's times, as the worker logs it.
+    #[test]
+    fn check_times_text_names_both_parts_in_milliseconds() {
+        let t = |f32_ms, f16_ms| CheckTimes { f32_ms, f16_ms };
+        assert_eq!(
+            check_times_text(t(312.4, Some(145.6))),
+            "matmul checks: f32 312 ms, f16 146 ms"
+        );
+        assert_eq!(
+            check_times_text(t(80.0, None)),
+            "matmul checks: f32 80 ms, f16 not run"
+        );
     }
 
     /// f16 weights only where the setting, the adapter's flag and the

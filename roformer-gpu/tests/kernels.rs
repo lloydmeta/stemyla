@@ -707,6 +707,23 @@ fn check_kernels_accepts_all() {
     assert_eq!(g.f16_ok.get(), g.has_f16_unpack());
 }
 
+/// The timed check gives the same verdict, and times both parts from the
+/// clock it is given; the f16 part only on an adapter that can unpack f16.
+#[test]
+fn check_kernels_timed_measures_both_parts() {
+    let Some(g) = gpu() else { return };
+    let t0 = std::time::Instant::now();
+    let now_ms = || t0.elapsed().as_secs_f64() * 1e3;
+    let (problems, times) = pollster::block_on(g.check_kernels_timed(now_ms)).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    eprintln!("{}", roformer_gpu::check_times_text(times));
+    assert!(times.f32_ms > 0.0, "{times:?}");
+    assert_eq!(times.f16_ms.is_some(), g.has_f16_unpack(), "{times:?}");
+    assert!(times.f16_ms.is_none_or(|ms| ms > 0.0), "{times:?}");
+    assert!(times.f32_ms + times.f16_ms.unwrap_or(0.0) <= now_ms());
+    assert_eq!(g.f16_ok.get(), g.has_f16_unpack());
+}
+
 /// f16-exact weight values: random normal values below 2 in magnitude,
 /// about one in eight an f16 subnormal, and some `+0` and `-0`.
 fn f16_weights(n: usize, seed: u64) -> Vec<u16> {

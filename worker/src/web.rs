@@ -401,7 +401,8 @@ async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     });
     // Every matmul kernel against the CPU on small products; one that
     // fails on this GPU is never used (the fallback failing is fatal).
-    for p in g.check_kernels().await? {
+    let (problems, times) = g.check_kernels_timed(perf_now).await?;
+    for p in problems {
         log(&p);
     }
     // The fused attention kernel against the CPU; if it fails, attention
@@ -409,9 +410,13 @@ async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     if let Some(p) = g.check_attention().await {
         log(&p);
     }
-    // A browser test and the iPhone run look for this line.
+    // A browser test and the iPhone run look for this line, which also
+    // gives how long the matmul checks took (a measure only).
+    let times = roformer_gpu::check_times_text(times);
     if g.f16_ok.get() {
-        log(F16_PASSED);
+        log(&format!("{F16_PASSED} ({times})"));
+    } else {
+        log(&times);
     }
     let checked = (g.policy.get(), g.attention.get());
     // Overrides from the URL; this GPU's own choice comes later, in
