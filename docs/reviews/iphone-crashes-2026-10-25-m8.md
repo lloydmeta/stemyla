@@ -167,6 +167,11 @@
 | 2026-10-29 | 3 | 387f300 | 3-28 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/save.rs:76 | no test fails with this mutant: xtask/src/e2e/save.rs:76:48: replace * with + | refuted | none | refuted |
 | 2026-10-29 | 3 | 387f300 | 3-29 | cargo-mutants | should-fix | weak-test | VERIFY-1 | protocol/src/lib.rs:907 | no test fails with this mutant: protocol/src/lib.rs:907:5: replace whole_rate -> Result<u32, String> with Ok(1) | refuted | none | refuted |
 | 2026-10-29 | 3 | 387f300 | 3-30 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/save.rs:77 | no test fails with this mutant: xtask/src/e2e/save.rs:77:5: replace * with + | refuted | none | refuted |
+| 2026-10-29 | CI fix | 6468d65 | C-1 | reviewer | blocker | doc | DOC-1 | docs/plans/active/stream-from-storage-m8.md:152 | The plan's 5-minute CI rule and 60-minute job entry contradict the kept 22-minute step and the 80-minute job | confirmed (team leader, from the plan's text) | none | bb9510d e2e save CI fix: review fixes (Decision log, TD-61) |
+| 2026-10-29 | CI fix | 6468d65 | C-2 | reviewer | should-fix | other | VERIFY-1 | xtask/src/e2e/save.rs:84 | The restore, plant, read and clean waits were halved with no CI figure | confirmed in part: run 40788465048 gives a 10-minute restore of 5.0 s and a plant of 4.4 s, inside the new waits | none | bb9510d e2e save CI fix: review fixes (CI figures and margins recorded) |
+| 2026-10-29 | CI fix | 6468d65 | C-3 | reviewer | nit | bug | none | xtask/src/e2e/save.rs:449 | wait_for_offer can overrun its cap by a poll and a script wait, which WAITS_S did not count | unvalidated | none | bb9510d e2e save CI fix: review fixes |
+| 2026-10-29 | CI fix | 6468d65 | C-4 | reviewer | nit | weak-test | VERIFY-1 | xtask/src/e2e/save.rs:449 | No native test reaches wait_for_offer; a swap of the judge's arguments passed | unvalidated | none | bb9510d e2e save CI fix: review fixes (test, TD-39) |
+| 2026-10-29 | CI fix | 6468d65 | C-5 | reviewer | nit | doc | none | xtask/src/e2e/save.rs:68 | The cap doc's 1.7 times leaves out the encode, and the CI frame time is an estimate | unvalidated | none | bb9510d e2e save CI fix: review fixes |
 
 ## Rounds
 
@@ -175,3 +180,4 @@
 | 1 | 10 | 998027 | 39.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: partial: tested 155 (caught 51, missed 98, unviable 6), timeouts 2, not tested 170; stopped at the limit | - | - | - | - | - | - |
 | 2 | 9 | 711170 | 28.6 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 98 (caught 90, missed 5, unviable 3), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 3 | 11 | 702262 | 43.8 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 25 (caught 1, missed 20, unviable 4), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| CI fix | 1 | 82034 | 16.4 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | not run (one reviewer, no review-rounds run, as the orchestrator asked) | - | - | - | - | - | - |
