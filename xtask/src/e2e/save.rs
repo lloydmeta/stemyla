@@ -693,11 +693,11 @@ pub(super) struct Playing {
     pub read_end_ms: Option<f64>,
     /// The milliseconds from the click of the save's item to its offer.
     pub ms: Option<u64>,
-    /// The mean time of the animation frames from Play to Pause, in
-    /// milliseconds.
+    /// The mean time of the long frames, from just before Play to Pause,
+    /// in milliseconds.
     pub frame_ms: Option<f64>,
     /// The share of the long frames whose hold went past the rest of
-    /// [`LONG_FRAME_MS`] by over 5 ms.
+    /// [`LONG_FRAME_MS`] by over [`OVER_MS`].
     pub over_share: Option<f64>,
 }
 
@@ -855,7 +855,9 @@ pub(super) const HEAP_MARGIN_BYTES: u64 = 2_000_000;
 /// D10: the most that a save's JS heap measure may be, in bytes, whatever
 /// the song's length (finding 5-1 of review round speed 5 of M8).  These
 /// are the write's array, the browser's copy of the write in flight, the
-/// reads in flight and a margin.
+/// reads in flight and a margin.  The end stage comes after the last read
+/// ends, so its own array of the last write never lies beside the reads in
+/// flight.  Its 3 arrays of 2 MiB (6.29 MB) take 0.52 MB of the margin.
 pub(super) fn heap_budget() -> f64 {
     (2 * SAVE_WRITE_BYTES + READS_IN_FLIGHT_BYTES + HEAP_MARGIN_BYTES) as f64
 }
@@ -1658,6 +1660,14 @@ mod tests {
         assert!(over_share(&past).is_some_and(|s| s > 0.95));
         assert_eq!(mean_frame_ms(&[(0.0, 0.0)]), None);
         assert_eq!(over_share(&[(0.0, 0.0)]), None);
+        // Nit 7-7 and mutant 7-9 of review round speed 7: the mean, exactly,
+        // of starts as a page gives them, far from 0.
+        let three = [(0.0, 60.0), (125.0, 60.0), (250.0, 60.0)];
+        assert_eq!(mean_frame_ms(&three), Some(125.0));
+        let page: Vec<(f64, f64)> = (0..10)
+            .map(|k| (30_000.0 + 120.0 * f64::from(k), 0.0))
+            .collect();
+        assert_eq!(mean_frame_ms(&page), Some(120.0));
         let logged = json!({"starts": [0.0, 125.0], "holds": [60.0, 60.0]});
         assert_eq!(long_frames(&logged), Some(vec![(0.0, 60.0), (125.0, 60.0)]));
         assert_eq!(long_frames(&json!({"starts": [0.0], "holds": []})), None);
@@ -1674,8 +1684,10 @@ mod tests {
         // Finding 6-8 of review round speed 6: the reads of the page.
         let reader = include_str!("../../../app/src/lane_store.rs");
         assert!(
-            reader.contains("    span: 65_536,\n"),
-            "the span of SAVE_AHEAD"
+            reader.contains(
+                "pub const SAVE_AHEAD: Ahead = Ahead {\n    span: 65_536,\n    depth: SAVE_DEPTH,\n"
+            ),
+            "the span and the depth of SAVE_AHEAD"
         );
         assert!(
             reader.contains("const SAVE_DEPTH: usize = 2;"),

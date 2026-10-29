@@ -1807,11 +1807,13 @@ pub async fn usable_mix_frames(id: &str, meta: &Meta) -> Option<usize> {
     (file_size(&mix_path(id)).await? == 8.0 * frames as f64).then_some(frames)
 }
 
-/// Makes session `id` the one that a reload restores.  It returns whether
-/// it wrote `sessions/current` (finding 4-2 of review round 4 of M5).
-/// One write runs at a time.  A request that a later one replaced, or
-/// whose write failed, gives `false`: the last request wins
-/// (`LastCurrent`).
+/// Makes session `id` the one that a reload restores, and writes
+/// `sessions/current`.  It returns whether its own write named `id` and
+/// ended well, with no later request meanwhile (finding 4-2 of review
+/// round 4 of M5).  One write runs at a time, and each request writes, so
+/// a request after `forget` removed the file writes it again.  A request
+/// that a later one replaced, or whose write failed, gives `false`: the
+/// last request wins (`LastCurrent`).
 pub async fn make_current(id: &str) -> bool {
     let last = LAST_CURRENT.with(std::rc::Rc::clone);
     last.make(id, |wanted: String| async move {
