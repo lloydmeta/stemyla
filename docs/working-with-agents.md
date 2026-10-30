@@ -54,12 +54,12 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 
 * Prompt: as for a feature.  The agent loads `.claude/rules/gpu.md` when it touches `roformer-gpu/` or `roformer/src/`.
 * The agent: keeps the kernel inside the WebGPU limits (GPU-1) and tests it against the CPU (GPU-2).
-* Check, on a machine with a real GPU: `STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release`, then `cargo run -p xtask -- e2e selftest --weights <model> --query mm=<kernel>`.  Put the adapter name in the PR.  A pass on SwiftShader alone is not enough (GPU-3).
+* Check, on a machine with a real GPU: `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` (`gpu` alone on an adapter without `SHADER_F16_IN_F32`), then `cargo run -p xtask -- e2e selftest --weights <model> --query mm=<kernel>`.  Put the adapter name in the PR.  A pass on SwiftShader alone is not enough (GPU-3).
 
 ### Ask for evidence that a test really ran
 
 * A test that has no GPU adapter, no `timestamp-query` or no PyTorch fixture prints "skipping" and passes.  `cargo test` hides that line.
-* Prompt: "Run it with STEMYLA_REQUIRE=gpu" (or `gpu,fixtures`, or `gpu,timestamps`).  Then each such skip is a failure that names VERIFY-1.
+* Prompt: "Run it with STEMYLA_REQUIRE=gpu" (or `gpu,fixtures`, `gpu,timestamps` or `gpu,f16`).  Then each such skip is a failure that names VERIFY-1.
 * Check: the PR gives the command with `STEMYLA_REQUIRE`, and names the adapter.
 
 ### Change memory, buffers or audio playback
@@ -121,8 +121,8 @@ The agents in `.claude/agents/` review a change, and validate the findings.  Eac
 | - | - |
 | `reviewer` | in each review round, on every diff, for correctness against the criteria |
 | `gpu-reviewer` | when `xtask review start` routes it: a change to the GPU kernels, the network or a GPU buffer |
-| `memory-reviewer` | when routed: a change to `engine/`, `app/src/`, `worker/`, `protocol/`, `roformer/src/`, `roformer-gpu/src/`, `synth/src/`, `dsp/src/`, a `clippy.toml` or `.claude/rules/memory.md`.  Also one of six copy signs, such as `to_vec`, in other Rust code, except in a `tests` folder (TD-31) |
-| `wire-reviewer` | when routed: a change to the messages between the page and the worker, in `protocol/`, `worker/src/web.rs`, `worker/src/web/`, `app/src/separator.rs`, the e2e scripts or `.claude/rules/protocol.md`.  Also `model_url` in other Rust code |
+| `memory-reviewer` | when routed: a change to `engine/`, `app/src/`, `worker/`, `decoder/`, `protocol/`, `roformer/src/`, `roformer-gpu/src/`, `synth/src/`, `dsp/src/`, a `clippy.toml` or `.claude/rules/memory.md`.  Also one of six copy signs, such as `to_vec`, in other Rust code, except in a `tests` folder (TD-31) |
+| `wire-reviewer` | when routed: a change to the messages between the page and its workers, in `protocol/`, `worker/src/web.rs`, `worker/src/web/`, `decoder/src/`, `app/src/separator.rs`, `app/src/decoder.rs`, `app/src/decoder/`, `xtask/src/e2e/`, the e2e scripts or `.claude/rules/protocol.md`.  Also `model_url` in other Rust code |
 | `supply-chain-reviewer` | when routed: a change to dependencies, the build, CI, a check in `xtask` or `.claude/` |
 | `docs-reviewer` | when routed: a change to the docs but `docs/plans/` and `docs/reviews/`, or to `CLAUDE.md`, `README.md` or `.claude/rules/` |
 | `validator` | for each blocker and should-fix finding of a round, and for the missed mutants of a round |
@@ -177,8 +177,9 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-22, phase 2 (M18b): the worker encodes an MP3 from blocks of the channels, and the page keeps the transferred MP3, so neither copies a song-sized buffer.  `an_mp3_is_encoded_in_blocks` bounds an encode's peak memory with a counting allocator.  The four memory breaches that phase 2 found are closed.
 * 2026-10-22, phase 2: done.  19 of 21 rules name what enforces them; MEM-4 and GPU-3 stay prose only until phase 4.  The plan is in `plans/completed/`.
 * 2026-10-23, phase 3 (M1): `xtask review start <base> <round>` chooses the reviewers from the diff.  It writes the diffs, the route and a state record to the run folder under `target/review/run/`.  `xtask review check <round>` names each change since that record, such as a new commit, a stash or a changed hook.  Each failure exits 3, so a skill stops on it.
-* 2026-10-23, phase 3 (M1): `xtask review mutants <round>` runs cargo-mutants on the Rust files of the round's `since` diff, for at most 60 minutes.  It uses `.cargo/mutants.toml`.  It prints one line: `full`, `partial` or `none`, with the counts.  `.cargo/mutants.toml` leaves out the code that compiles for `wasm32` only.  Add a new `wasm32`-only function to its `exclude_re`.
+* 2026-10-23, phase 3 (M1): `xtask review mutants <round>` runs cargo-mutants on the Rust files of the round's `since` diff, for at most 60 minutes.  It uses `.cargo/mutants.toml`.  It prints one line: `full`, `partial` or `none`, with the counts.  `.cargo/mutants.toml` leaves out the files that compile for `wasm32` only.  Put `#[cfg_attr(mutants, mutants::skip)]` on a new `wasm32`-only function in a shared file (TD-33).
 * 2026-10-23, phase 3 (M2): eight read-only review agents in `.claude/agents/`, with a guard on their Bash commands (see "Review agents").  The guard refuses a commit, a push, a stash, `gh` and a cargo publish, with "read-only guard:" and the reason.  The recipe "Review a change" starts reviewers by hand until M3.
 * 2026-10-23, phase 3 (M3): the project skill `review-rounds` runs one review round: `/review-rounds <base> <round> "<criteria>"`.  It starts the routed reviewers and a `validator` for each serious finding, runs cargo-mutants, checks the state of the repo, and writes the findings.  `CLAUDE.md` and the recipe "Review a change" use it for rounds 1, 2 and 3.  Approve `review check` once in each round, and a late `review mutants` once, not with "don't ask again".  Run `cargo build -p xtask` before round 1.  A branch has one set of rounds (TD-37).
 * 2026-10-24, phase 3 (M4): `docs-check` accepts review logs in the reviews folder under `docs`.  One index line, `reviews/`, lists each log there.  A log keeps the paths and closed IDs of its time, as a plan does.  Step 11 of `review-rounds` counts the late `xtask review` commands in their own cell, not as interventions (TD-36).  The log cannot count the approvals that the agent does not see (TD-38).
 * 2026-10-24, phase 3 (M6): phase 3 is in place (decision 0011).  Step 11 of `review-rounds` asks for the approvals of the round, and of the baseline apart, and logs them as cost, in their own cells.  An intervention is a message of a person.  In a mode that can ask for approval, count your approvals (TD-38).  The guard also refuses `xtask review`, and `cargo run` of xtask with `publish` or `review`.  A change to `roformer/src/`, `roformer-gpu/src/`, `synth/src/` or `dsp/src/` now routes `memory-reviewer`.  A change to `worker/src/web/` now routes `wire-reviewer`.  The tech-debt entries that review covers name the agent that looks.
+* 2026-10-30, M9 of `plans/completed/stream-from-storage.md`: `STEMYLA_REQUIRE` has the word `f16`, an adapter with `SHADER_F16_IN_F32`.  It implies `gpu`.  The GPU recipe uses `gpu,f16`, so the f16 weight tests cannot skip.

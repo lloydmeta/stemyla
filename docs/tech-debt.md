@@ -25,6 +25,7 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 * The PyTorch comparisons run nowhere, because neither CI nor the maintainer's Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
 * GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
 * `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: the `reviewer` agent looks for it.
+* `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`, MEM-1) and `an_f16_variant_the_browser_rejects_keeps_f32_weights` (the same file, decision 0022) need a GPU adapter in the browser.  A wasm test cannot read `STEMYLA_REQUIRE`, so with no adapter each logs a skip and passes.  CI's headless Chrome can have no adapter, so the evidence is a run on the maintainer's Mac.  Fix: a browser with WebGPU in CI's `browser-tests` job.
 * The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere.  CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
 
 ### TD-10: GPU-3 is not checked
@@ -35,9 +36,11 @@ Nothing records which adapter a kernel passed on, and any new `TILES` entry beco
 
 ### TD-11: MEM-4 is never asserted
 
-The worker logs its wasm memory and live GPU bytes and the page its wasm memory, but no test asserts a total, and the page's WebGL textures and the JS heap are not counted.
+The worker logs its wasm memory and live GPU bytes and the page its wasm memory, but no test asserts a total, and the page's WebGL textures are not counted.  The JS heap is counted only during a save: `e2e save` measures the page's JS heap in Chrome, with `performance.memory`, and checks that it does not grow with the song (M8).  Nothing measures the JS heap during an open, a separation or playback, and the workers have no `performance.memory`.
 
 * Fix: a tab total (page wasm, worker wasm, GPU live bytes) in an e2e scenario that separates a song and fails over a budget.
+* `e2e memory-budget` and `separate` run with `chunk=16384`, so their figures are smaller than at the default chunk of 588,800 samples.  At `chunk=16384`, `e2e memory-budget` gives a stem worker of about 30 MB of WebAssembly memory with f16 weights, and 57 MB with f32.  It gives a GPU of 383 MB with f16 weights and 732 MB with f32.  On 2026-10-30 its peak was 452 MB for songs of 1 and 4 minutes.  `e2e weights` gives 387 MB and 736 MB, with `mm=s64, attn=split`.  At the default chunk, the stem worker holds one chunk's working set.  With f32 weights it is 57 MB at the start, 90 MB after chunk 1 and 123 MB from chunk 2 (catch-up E).  With f16 weights it is 29 MB at the start and 93 MB after chunk 1 (`e2e weights`, part 2, a clip of one chunk).  The GPU then holds about 630 MB: 350 MB of parameters as f16 weight matrices and 280 MB of one chunk's activations (979 MB with f32 weights).  The figure depends on the chunk, not on the browser: Chrome and Safari give the same.  At the default chunk, `memory-budget` fails its growth check of 4 MB, since with f32 weights the worker grows by 66 MB during the first two chunks of a separation.  That growth is one chunk's working set, and does not grow with the song.  Fix: M10's budget takes the default chunk's figures.
+* No test sees that `GpuNetwork::stems` (`worker/src/web.rs`) drops a chunk's features (18.9 MB at the default chunk) after it uploads them.  Only a run of the model sees it, and CI has no GPU and no model.  The worker figures above, from `e2e memory-budget --query mm=s64` with the model, include it.
 
 ### TD-21: what docs-check cannot see
 
@@ -75,7 +78,7 @@ MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E06
 
 ### TD-26: MEM-1's lint sees only `to_vec`
 
-Clippy fails `slice::to_vec` in `app`, `stem-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first three (MEM-1, MEM-2).  It does not see:
+Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first four (MEM-1, MEM-2).  It does not see:
 
 * other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec`;
 * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;
@@ -176,8 +179,8 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 
 `xtask review mutants` runs cargo-mutants on the Rust files of a round's diff.  It does not test some changes, and it reports some mutants that no native test can catch:
 
-* cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  So does a new `wasm32`-only function, until `exclude_re` in `.cargo/mutants.toml` names it.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, stays in.
-* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/picker.rs`, `app/src/separator.rs`, `app/src/store.rs` and `worker/src/web.rs`, which compile for `wasm32` only.  So the run never tests the two main wire files, `app/src/separator.rs` and `worker/src/web.rs`.
+* cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  A `wasm32`-only function, impl or module in a shared file has `#[cfg_attr(mutants, mutants::skip)]`, so cargo-mutants makes no mutant of it, struct-field deletions included.  No build sets `cfg(mutants)`, so no crate is needed, and `[workspace.lints.rust]` in `Cargo.toml` declares the cfg for `unexpected_cfgs`.  A new `wasm32`-only function without the attribute shows as missed, until a change adds the attribute.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, `main` in `app/src/main.rs` and `mapped_floats` in `roformer-gpu/src/lib.rs`, has no attribute.  The validator decides its `wasm32` mutants.  On 2026-10-28 (review round 1 of `plans/completed/stream-from-storage-catchup.md`), a scan of `cargo mutants --list --all-features` found no other `wasm32`-only function, impl or module that shows mutants.
+* `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/decode_tests.rs`, `app/src/decoder/client.rs`, `app/src/picker.rs`, `app/src/playback.rs`, `app/src/playback_tests.rs`, `app/src/separator.rs`, `app/src/store.rs`, `app/src/streamtest.rs`, `decoder/src/web.rs`, `decoder/src/web/`, `worker/src/web.rs` and `worker/src/web/`, which compile for `wasm32` only.  So the run never tests the wire files of either worker: `app/src/separator.rs` and `worker/src/web.rs` for the stem worker, and `app/src/decoder/client.rs` and `decoder/src/web.rs` for the decode worker.
 * `mutants_command` sets no `STEMYLA_REQUIRE`, and passes on the caller's own.  So without it, where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
@@ -256,20 +259,25 @@ This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/
 
 ### TD-39: much of xtask's WebDriver client, e2e scenarios and browser runners has no `cargo test` coverage
 
-Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs` and `xtask/src/serve.rs` runs only against a live browser or a driver (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
+Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `xtask/src/serve.rs` and `xtask/src/roformer_cli.rs` runs only against a live browser, a driver or the model weights (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only.
 
-* the scenarios and their helpers, such as `storage`, `smoke`, `bench` and `separate`, which run only in a browser (not run);
+Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled the deferred rows of M3 to M6.  `xtask/tests/e2e_cli.rs` runs `e2e smoke`, `separate`, `memory-budget`, `stored-stems`, `weights` and `old-session` with a `CHROMEDRIVER` that is not a file.  Review round 1 of M9 added `weights`.  Review round 2 of M9 added `selftest`, which stops on the missing reference files.  Review round 1 of that plan added `audio-resume`, `bench` and `playback`.  Review round 1 of M8 added `flac` and `save`.  Each run must fail on the driver, before a browser starts.  So a scenario body or an e2e `run` that returns `Ok(())` fails a test.  The 4-hour wait for the model is the constant `MODEL_RUN_SECS`, with a test.  The waits of `e2e decode` and the model wait of `memory-budget` use `holds_or_error`, with a test.  `roformer_refuses_bad_input_before_the_model` runs `xtask roformer`.  `StemApp::audio_stats_lines` and `StemApp::open_folder` have native tests.  What is left, each with its reason:
+
+* the scenario bodies after the driver starts, such as `storage`, `smoke`, `bench`, `separate`, `decode`, `playback`, `old-session`, `memory-budget`, `stored-stems` and `weights`: their steps and waits need a browser (not run).  So do `restore`, `save_once` and `wait_for_offer` of `xtask/src/e2e/save.rs`, and `__e2e_progress` of `xtask/e2e/save_spy.js` (findings 2-15 and 2-17 of review round 2 of M8).  Since step 6 of M8, `click_save`, `save_playing` and the reads of the WebAssembly memory and the long tasks in `save_once` are on this list too (findings 3-12 to 3-15 of review round speed 3 of M8, 4-19 and 4-20 of round speed 4, and 5-18 and 5-19 of round speed 5: a `save_once` or a `save_playing` that returns a default survives `cargo test`).  Their pure parts, `growth`, `long_tasks`, `slice_line`, `slice_of`, `slice_check`, `read_end_line`, `read_end_of`, `read_end_check`, `mean_frame_ms`, `not_frame_bound`, `throttled`, `save_checks` and `playing_checks`, have tests.  Also in `save_spy.js`: `__e2e_long_in_save`, `__e2e_long_calibrate`, the throttle and the long frames (`__e2e_long_frame_ms`) of the animation frames, and the heap readings at each write.  CI's run of `e2e save` reaches them.  Their pure parts are functions with tests.  CI's `browser-tests` job runs `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save`.  `separate`, `memory-budget`, `stored-stems`, `bench`, `selftest` and `worker-check` also need a GPU and the model, which CI does not have, so a person runs them.  Their checks are pure functions with unit tests (`all_from_storage`, `stored_stems_checks`, `flac_checks`, the growth checks, `old_session_checks` and others).  For example, deleting the `!` of the last `if !ok` in `memory_budget` still survives `cargo test`;
+* `drop_and_open` of `xtask/src/e2e/decode.rs`: only a browser reaches it, after the driver starts, so a body that returns `Ok(())` survives `cargo test`.  CI's `browser-tests` job runs `e2e decode`, which fails without it;
 * the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
-* `Driver::start`, `free_port`, `Session::execute` and the `set_viewport` wrapper, which no test calls (not run);
-* `query` and `Opts::weights`, which `parses_scenario_and_options` never calls (not run);
+* `Driver::start` after the driver is found, `free_port`, `Session::execute` and the `set_viewport` wrapper, which need a driver (not run);
+* `query`, which `parses_scenario_and_options` never calls (not run);
 * `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
-* a request with no headers in `drip`, since the test always sends a Host header (not run).
+* a request with no headers in `drip`, since the test always sends a Host header (not run);
+* `run` in `xtask/src/roformer_cli.rs` after the model loads: the separation needs the model weights, which CI does not have.  Its refusals of bad input have a test;
+* `main` in `app/src/main.rs` (native): `eframe::run_native` needs a window, and no test can open one.  Its folder argument is `StemApp::open_folder`, which has a test.  So a `main` that returns `Ok(())`, or that deletes the `viewport` field, survives `cargo test`.
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
 
-Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.
+Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.  The review logs of M3 to M6 of the branch `iphone-crashes-2026-10-25` (`docs/reviews/iphone-crashes-2026-10-25-m3.md` to `-m6.md`), with a `catch-up` row for each deferred finding.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the rest, CI's `browser-tests` job runs `smoke`, `audio-resume`, `storage` and `flac`.  A person runs the other scenarios.  The checks of `flac` and its clip writer `flac_16` have unit tests; the scenario body runs only in a browser.
+* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
 
 ### TD-40: gaps in the RT-1 tests
 
@@ -368,9 +376,21 @@ The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But aut
 
 This entry concerns VERIFY-1 for `engine::resample`, which runs on wasm32 in the page.
 
-On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10 minutes of 48 kHz audio.  `output_len` and `Position` work in `u64`, and `the_length_and_the_position_do_not_overflow_32_bits` checks them natively.  But `xtask web-test` runs no engine test on wasm32.  So a later `usize` product inside `Filter::apply` passes every test (48k audio review round 2, finding 2-1).
+On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10 minutes of 48 kHz audio.  `output_len` and `Position` work in `u64`, and `the_length_and_the_position_do_not_overflow_32_bits` checks them natively.  But `xtask web-test` runs no engine test on wasm32.  So a later `usize` product inside `Filter::apply` passes every test (48k audio review round 2, finding 2-1).  The block converter `Resampler` steps the same `Position` and counts its input in `u64`, and has the same gap.
 
 * Fix: run engine's tests on wasm32, for example under `wasm-bindgen-test-runner` in `xtask web-test`.  Until then, no check covers this.
+
+### TD-62: the underrun count of the save during playback sees only a read-ahead that runs dry
+
+This entry concerns RT-1 and D11 of `plans/completed/stream-from-storage-m8.md`.
+
+`e2e save` plays the 10-minute song during a WAV save, and fails on an underrun, as `e2e playback` counts them.  That count sees only a read-ahead buffer that runs dry.  The buffer reads 16 blocks of 32,768 frames ahead, about 12 s of audio.  So a save that holds the main thread for less than about 12 s counts no underrun.  But the audio output has a smaller margin.  cpal queues two buffers of 3,072 frames, so when one ends, only one buffer of audio is queued: about 70 ms at 44.1 kHz, and 64 ms at 48 kHz.  A late audio callback is heard as a click.
+
+Since review round speed 2, the check that fails the run is each save's longest slice.  The save's task measures each slice, and the page logs the longest at the save's end.  `e2e save` fails a save whose longest slice is over 35 ms (`SLICE_LIMIT_MS`): half the margin at 44.1 kHz, and 55 % of it at 48 kHz.  The main thread's long tasks (Chrome's `longtask` entries, over 50 ms) are logged with a calibration, not checked.  A runner that paints in software can have long tasks of its own.  Safari has no long tasks.  `a_slice_ends_within_its_budget_and_one_block`, `a_slice_grows_after_a_long_wait` and `a_slice_after_a_long_wait_for_a_write_takes_the_least` bound each slice natively.  When all the cores of a machine are busy, the system can stop the page's main thread for over 100 ms in one slice.  So only a quiet machine measures the slices (review round speed 4).  The slice check and the read-end check measure wall time, so they fail on a loaded machine.  If CI fails only those checks, read the long tasks and the load of the runner first.  Run `e2e save` again before changing the budget or the depth (finding 5-10 of review round speed 5).
+
+A slice covers the steps of the job.  These are the mix of each block, the copy of each full write into its JS array, and the start of each write and each read.  The work that the save's promises do after a slice is not in a slice.  The end of each read copies the bytes into WebAssembly memory and decodes a span of each lane into its slot.  Since review round speed 4, the save's store measures the decode, and the page logs the longest (`longest read end`).  `e2e save` fails a save whose longest read end is over `SLICE_LIMIT_MS` (`a_waking_store_keeps_the_longest_read_end`).  Up to 2 reads can end in one task.  A slice of the save can follow them in the same task, because wasm-bindgen-futures wakes the save's task from a microtask (finding 5-6 of review round speed 5).  So one task can hold two read ends and a slice.  The copy into WebAssembly memory, the end of each write, and the end stage in the UI frame are not measured.  The end stage is the last write, the close, and the offer or the encode request.  In the saves of `e2e save` with no playback, of 3 lanes, Chrome logged no long task.  What is left: no check bounds a whole task, the copy at a read's end, the ends of the writes or the end stage.  Two read ends and a slice in one task can pass the margin of about 70 ms while each check passes.  No check sees a late audio callback that comes from outside the save.
+
+* Fix: count the audio callbacks that start late, from the times of cpal's callbacks, in the `playback:` line, and make `e2e save` fail on one.
 
 ## Known breaches
 
@@ -378,7 +398,7 @@ On wasm32 a `usize` has 32 bits.  So `i * M` in `usize` overflows after about 10
 
 This entry concerns DEPS-1.  It is a workaround of a defect in a dependency.  CLAUDE.md asks to record each workaround.  It breaks no rule.
 
-`flacenc` 0.5.1 gives the short last block as the minimum block size in STREAMINFO (`update_frame_info`).  RFC 9639 section 8.2 excludes the last block.  Symphonia then reads the stream as variable-blocksize, and refuses every frame.  So four places set the block sizes again after `flacenc`: `flac` in `worker/src/web.rs`, `compressed` in `engine/src/test_flac.rs`, `flac_16` in `xtask/src/e2e.rs` and `flac` in `app/tests/web.rs`.  `flacenc` also has no 5-bit Rice parameters and no escape codes, so it cannot write 24 bits; a saved FLAC has 16 (`plans/completed/flac.md`, Surprises).
+`flacenc` 0.5.1 gives the short last block as the minimum block size in STREAMINFO (`update_frame_info`).  RFC 9639 section 8.2 excludes the last block.  Symphonia then reads the stream as variable-blocksize, and refuses every frame.  So five places set the block sizes again after `flacenc`: `flac_into` in `worker/src/web/encode.rs`, `compressed` in `engine/src/test_flac.rs`, `flac_16` in `xtask/src/e2e.rs`, `flac` in `app/tests/web.rs` and `flac` in `decoder/src/web/tests.rs`.  `flacenc` also has no 5-bit Rice parameters and no escape codes, so it cannot write 24 bits; a saved FLAC has 16 (`plans/completed/flac.md`, Surprises).
 
 * Fix: remove the overrides when `flacenc` writes the minimum as RFC 9639 says.  For 24 bits, use an encoder that can write them, such as one in this repo.  Until then, `a_flac_decodes_to_the_stem` fails if the worker's override goes.
 
@@ -386,13 +406,46 @@ This entry concerns DEPS-1.  It is a workaround of a defect in a dependency.  CL
 
 This entry concerns VERIFY-1.
 
-The worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac`.  The arms of `App` that handle them call `store::download` and `store::download_blob`, which make an object URL and click a link.  No test reaches these arms or functions.  The separator tests check that each event keeps the worker's buffer or `Blob` (`an_mp3_reply_reaches_the_page_as_sent`, `a_flac_reply_reaches_the_page_as_sent`), and `e2e flac` checks the worker's file.  The "FLAC encoding" and "MP3 encoding" error labels have no test either.  `encode_flac_asks_the_worker_for_a_flac_of_the_arrays` and `encode_mp3_asks_the_worker_for_an_mp3_of_the_arrays` check the requests.  The "Save" menus have no test: `save_menu`, `start_save` and `step_save` in `app/src/lib.rs`, which choose the source, step the save job and hand over its file.  They are web only, so the native UI tests cannot reach them.  The sinks and the job have tests (`app/src/export.rs`).  `load_song` drops the mix lane's follower before it makes the new lanes, so an old job's song-sized mid buffer is freed first (MEM-4).  That order matters only on the web, where a job can run over several frames, and no test checks it.  `store::usage` has no test.  Source: `plans/completed/flac.md`, review rounds 1 to 3 (findings 1-9, 2-2, 3-5 and 3-6), and `plans/completed/mix-download.md` (M3 and review round 3).
+On the memory path of a save, the worker's MP3 and FLAC reach the page as `Event::Mp3` and `Event::Flac` with their bytes or `Blob`.  The arms of `App` that handle them call `store::download` and `store::download_blob`, which make an object URL and click a link.  No test reaches these two arms.  The separator tests check that each event keeps the worker's buffer or `Blob` (`an_mp3_reply_reaches_the_page_as_sent`, `a_flac_reply_reaches_the_page_as_sent`).  `e2e flac` checks the worker's file.  The "FLAC encoding" and "MP3 encoding" error labels have no test either.  `save_menu` has no test; `a_stopped_worker_leaves_no_save_files_and_takes_no_encode` checks `can_encode`, which it asks.
 
-* Fix: a browser test that delivers each event to an `App` and spies on the link that `save_file` or `save_blob` clicks.  A browser test that starts a save on an `App` and steps it to the download or the worker request.  A test of the peak memory of `load_song` while a mix job runs.  A test of `usage`.
+The saves of M8 have browser tests in `app/src/save_tests.rs`, with a spy on the download link and on the worker's requests.  They test the WAV offer of the storage path, and the stored FLAC and MP3 requests and their replies.  They also test the memory path when storage fails, a dropped save, Reset during a save, a failed encode and a stopped worker.  The offer of a save file waits for `getFile()`, so the status line says "Saved" before the click.  If the offer then fails, the page logs an error and removes the file, but the status line still says "Saved".  No test makes an offer fail.
+
+`load_song` drops the mix lane's follower and the spectrogram job before it makes the new lanes, so an old job does not keep the old song's samples (MEM-4).  That order matters only on the web, where a job can run over several frames, and no test checks it.  `store::usage` has no test.  Source: `plans/completed/flac.md`, review rounds 1 to 3 (findings 1-9, 2-2, 3-5 and 3-6), `plans/completed/mix-download.md` (M3 and review round 3), and step 3 of `plans/completed/stream-from-storage-m8.md`.
+
+* Fix: browser tests that deliver an MP3 and a FLAC reply of the memory path to `App`, and spy on the link.  A status line that the failed offer of a save file updates, through the page's inbox.  A test of the peak memory of `load_song` while a mix job runs.  A test of `usage`.
+
+### TD-54: memory grows with the song, so a long song can stop the tab on an iPhone
+
+This entry concerns MEM-1 and MEM-4.
+
+This paragraph gives the state before M3.  On 2026-10-25, a song of about 5.1 minutes stopped the tab on an iPhone 17 Pro at chunk 2 of 48.  iOS logged `exceeded mem limit: ActiveHard 2048 MB` for the WebContent process.  The page makes all six song-length stems when the first segment arrives (`Assembly::place`), about 650 MB for that song.  The page's song and mix, the worker's mix and the stems grow by about 190 MB per minute of song.  The fixed part is at most about 1720 MB, so at most about 1.7 minutes fit.  The 30-second demo song separates.  Source: `plans/completed/stream-from-storage.md` (Context).
+
+M3 of that plan (2026-10-25) removed the page's song-length stems during a storage-path separation.  The worker writes the stems to the session's files, and `Assembly` stays empty.  What is left:
+
+* M4 (2026-10-26) removed the worker's copy of the whole mix on the storage path.  The page writes the mix to a session file in blocks.  The worker reads it one chunk at a time.  Since M5 (2026-10-26), the decode worker decodes a stored song in blocks into session files, so the decode holds no song.  Since M6 (2026-10-27), the page plays from browser storage each lane that has a complete session file, through a read-ahead buffer of at most 32 MiB (`engine::readahead`, `app::playback`).
+* Since M7 (2026-10-27), the page reads no session file whole to show or play a stored song (`plans/completed/stream-from-storage-m7.md`).  Each lane is its session file with its overview.  The mix lane's waveform, the spectrograms, the saves, the mix write and the memory path's input read the lanes in blocks, and classic drums of a stored song runs in the decode worker.  `e2e old-session` checks that the page's WebAssembly memory after a restore stays under 64 MB and does not grow with the song.  What is left:
+  * Since M8, a save writes its file to browser storage in blocks, and the stem worker encodes FLAC and MP3 from it in blocks (decision 0021).  `e2e save` measured on 2026-10-29 in Chrome, with a session of a source and two stems: the page's JS heap during a save rose by 1.35 to 1.45 MB for every format, for 1 and for 10 minutes, in one run.  A second run gave up to 2.23 MB.  The build before M8 (`c3952ad`) rose by 11.0 and 106.2 MB for a WAV, and by 21.5 and 212.0 MB for a FLAC or an MP3.  A FLAC encode grew the stem worker's WebAssembly memory by 0.52 MB for 1 minute and 0.46 MB for 10 minutes.  Since D11 of M8 (step 6, 2026-10-29), a reading also starts at each write of the page, and waits for the finalizers as the others do.  In 6 runs of review round speed 2, the JS heap rose by 1.34 to 2.29 MB in a 1-minute save and by 1.73 to 2.52 MB in a 10-minute save.  The page's WebAssembly memory grew by 3.5 to 3.9 MB in each save, and by at most 0.32 MiB more for 10 minutes than for 1.  Since review round speed 4, a save's reader reads 2 spans of 65,536 frames ahead.  The page's WebAssembly memory grew by 7.21 to 7.60 MB in each save of 3 lanes, and at most 0.33 MB more for 10 minutes than for 1.  With readings at 4 writes spread over each save, the JS heap rose by 3.4 to 5.8 MB, and at most 2.36 MB more for 10 minutes.  Since review round speed 5, the readings come at each write of a save and at its end.  Each save's measure must be within a fixed budget of 7.77 MB.  In 4 runs of that round, the JS heap rose by 2.38 to 3.96 MB, and at most 1.57 MB more for 10 minutes than for 1.  In 24 saves of review round speed 6, the JS heap measure was at most 4.52 MB.  `docs/ARCHITECTURE.md` (memory on phones) names each part of a save's memory.  On the memory path of a save, when storage fails, a song of at most `app::MEMORY_PATH_MAX_FRAMES` frames still saves through song-length JS arrays.  An MP3 save holds its frames in the stem worker (TD-59).
+  * Nothing asserts the whole tab's budget, and there is no iPhone evidence, until M10.
+  * An open that decodes on the page holds at most the memory path's limit for its lanes (decision 0020).  A song of many sources still decodes on the page (TD-58).
+* The memory path still makes six song-length stems.  It takes a song without a session, or a song when storage has too little free space.  It also takes a song when storage refused the mix or the stems, or the worker cannot read the mix file.  For a separation, and for an open that decodes on the page, the page refuses a song longer than the memory path's limit for its lanes: 100 seconds (`app::MEMORY_PATH_MAX_FRAMES`) for one source, and less for more lanes (`app::memory_path_frames`, decision 0020).
+* Between M3 and M7, no build went to the published site, because the page read a stored song back whole.  Since M7 that read-back is gone, so publishing no longer has that risk.  What is left are the memory costs of a save and of an open that decodes on the page.  Publishing is a person's step (GIT-1).
+
+* 2026-10-30, the maintainer's runs: on an iPhone, a 5-minute song separated and saved an MP3 mix.  In Safari on the Mac, songs of 6.5 and 3.1 minutes separated with GPU buffers live at 630 MB on every chunk and the page at 49 to 53 MB.  The plan closed without its 30-minute iPhone run.
+* Fix: a 30-minute song on an iPhone, with Web Inspector's peaks, and TD-11's assertion at the default chunk.  `plans/completed/stream-from-storage.md` moved the song, the mix and the stems to browser storage (decision 0015).
+
+### TD-55: Safari can miss a mix file written again during a separation
+
+The page never writes `mix.f32` while a separation runs (D6 of M4).  The worker checks this too.  After the last chunk, it compares the file's size and `lastModified` with their values at the open.  Chrome also refuses any read after a write.  Safari reads the bytes on disk now, and gives `lastModified` in whole seconds (`references/browser-quirks.md`).  So in Safari, a write of the same size in the same second as the open is not seen.  The stems then come from mixed samples.
+
+Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 3-3.  `the_end_check_sees_a_mix_file_written_again_at_its_size` tests the check alone.  `a_mix_file_written_again_after_the_last_read_ends_with_unstored` reaches the check through a separation, in Chrome too (finding 4-1 of review round 4 of M4).  The write comes over a second after the open, so Safari can also see it.  A write that makes the file shorter fails a read first (`a_mix_file_changed_during_the_separation_ends_with_unstored`).
+
+* Fix: a hash of the mix, kept in `meta` and checked by the worker as it reads, or a lock on the file during the separation.  Only a fault in the page can write the file at that time.
 
 ### TD-16: the wire format has unchecked field names and silent defaults
 
-`xtask/e2e/worker.js` and the scripts in `xtask/src/e2e.rs` repeat field names by hand, and nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js` and `xtask/src/e2e.rs`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
+`xtask/e2e/worker.js`, and the scripts in `xtask/src/e2e.rs` and in the Rust files under `xtask/src/e2e/`, repeat field names by hand.  Nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js`, `xtask/src/e2e.rs` and the Rust files under `xtask/src/e2e/`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
+
+The decode worker's messages (`stem_protocol::decode`, M5) refuse a missing or wrong field, so this entry concerns the stem worker's messages only.  `e2e_messages_use_protocol_types` checks each hand-written type against the union of both workers' kinds, so a decode kind in a script for the stem worker passes (review round 1 of M5, finding 1-16).
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not.  It looks on each diff that routes it (TD-31).
 
@@ -403,6 +456,86 @@ Decision 0007 (`decisions/0007-no-allocation-in-the-audio-callback.md`) has the 
 Source: `docs/reviews/replay.md`, case `m11`, finding 1-2.
 
 * Fix: the maintainer confirms the status, or sets it to `proposed`.
+
+### TD-57: a loop moved behind the head can underrun at the old loop's start
+
+This entry concerns the underrun count of M6 (D4 and D6 of `plans/completed/stream-from-storage-m6.md`).
+
+A loop set behind the head is a held seek: the player keeps its old loop until the run of the new loop's wrap is read.  The reader reads ahead along the loop of `SharedParams`, which is the new loop.  So the reader can give the slot of the old loop's start to another block.  If the old loop wraps before the jump, the stored lanes play silence there and count an underrun.  The jump comes after about one block read, so the gap is short.
+
+* Fix: the player gives its own loop with `Hint::Reading`, and `wanted_blocks` follows that loop while a seek holds.
+
+### TD-58: a song of many sources decodes on the page
+
+This entry concerns MEM-1 and MEM-4.
+
+Since C of `plans/completed/stream-from-storage-catchup.md` (decision 0020), every open that decodes a song on the page keeps the memory path's limit for its lanes (`app::memory_path_frames`).  It reads each file's head first, and refuses a long song before it reads a whole file.  It also refuses a file larger than the largest file of its stated length, or of the limit if it states none (`engine::decode::largest_file`).  Then it reads, decodes and drops one file at a time (`engine::song::SongWithin`), and the decode stops at the limit.  What is left:
+
+* D2 of `plans/completed/stream-from-storage-m7.md` still sends a song whose lanes do not fit the read-ahead buffer at its minimum slots to the page (more than about 20 sources and no `stem` lines; `store_meta::open_formats` and `store_meta::fits_read_ahead`).  Such a song holds at least 28 lanes, so it opens only up to about 25 s, and a longer one is refused.
+* The page holds the bytes of the file that decodes, as well as the lanes.  It reads the file into wasm memory in blocks (`app::picker::read_blob`).  Each read asks JavaScript for never more than one block of 1 MiB.  Each block is garbage after its copy.  For a song of 100 s, a WAV or FLAC that states no length is read up to about 324 MB.  An MP3 is read up to about 21 MB.  A WAV or FLAC that states a length is read up to 3,072,000 bytes for each of its seconds, and 16 MiB for tags.  An MP3 whose ID3 tag is larger than the head counts as an MP3; a FLAC behind such a tag gets the cap of an MP3.
+
+* Fix: a read-ahead buffer that holds fewer lanes than the song shows, or a mix of the sources into fewer lanes, removes the D2 trigger.  A decode on the page from the file in blocks, as the decode worker does, removes the whole read.
+
+### TD-59: an MP3 save holds about 3.5 times its file in the stem worker
+
+This entry concerns MEM-1 and MEM-4.  It is a known breach of MEM-1: the stem worker holds a buffer that grows with the song.
+
+`rusty_mp3` 1.0.0 turns on its bit reservoir for CBR at 256 kbps or less on MPEG-1 (32, 44.1 and 48 kHz).  Then it keeps every encoded frame until `finish()` (`push_with` and `finish` in its `src/lib.rs`).  Only the `MP3_RESERVOIR` environment variable turns the reservoir off, and wasm has no environment.  So an MP3 encode holds the MP3's frames in the stem worker's WebAssembly memory.  This holds on the memory path and on the storage path of a save (`worker/src/web/encode.rs`, D4 of `plans/completed/stream-from-storage-m8.md`).  While `finish()` runs, the kept frames, the main-data stream and the output frames are live together.
+
+The measures:
+
+* On 2026-10-28 in Chrome, `a_stored_mp3_holds_at_most_four_times_its_file` measured a 60 s MP3 of 1,438,548 bytes, about 1.44 MB a minute at 192 kbps.  Its peak was 5,096,709 bytes, 3.54 times the MP3.
+* On 2026-10-29, `e2e save` measured the growth of the stem worker's WebAssembly memory during an encode.  It was 5.1 MB for an MP3 of 1 minute (1,438,548 bytes, 3.55 times).  It was 46.9 MB for an MP3 of 10 minutes (14,379,220 bytes, 3.26 times).
+* So a 30-minute MP3 save holds about 43 MB of MP3.  At the 10-minute factor, it takes about 141 MB of the stem worker's WebAssembly memory at its peak.  That memory never shrinks.
+
+A FLAC or WAV save holds no file.  M10 of `plans/completed/stream-from-storage.md` counts this memory in its budget.
+
+* Fix: a switch for the bit reservoir in `rusty_mp3`, upstream, or another MP3 encoder that gives each frame as it encodes it.  A rate of 320 kbps turns the reservoir off, but it changes the files, which is the maintainer's choice.  Until then, `a_stored_mp3_holds_at_most_four_times_its_file` keeps the peak under 4 times the MP3 plus 1 MiB.
+
+### TD-60: the download of a save file is checked in Chrome only
+
+This entry concerns VERIFY-1.
+
+Since M8, the page offers a save file as a `Blob` of its OPFS `File`, through an object URL and a link (decision 0021).  `an_offered_save_file_is_removed_when_its_timer_ends` and `e2e save` check the offer in Chrome.  No check runs it in Safari or on an iPhone, where the maintainer uses the page.  Safari may read a `File` of OPFS as it is when it is read, not as it was when it was opened (`references/browser-quirks.md`).  The page does not change a save file after it offers it.
+
+* 2026-10-30: the maintainer saved an MP3 mix on an iPhone, and it downloaded.  In Safari on the Mac, the maintainer saved a FLAC and a WAV mix.  WAV and FLAC saves on an iPhone are not checked.
+* Fix: save a stem as WAV and as FLAC on an iPhone, and play each file from the Files app.
+
+### TD-63: the f16 weight kernels are not checked on an iPhone
+
+This entry concerns VERIFY-1 and GPU-2.
+
+M9 of `plans/completed/stream-from-storage.md` adds an f16 variant of each matmul kernel (decision 0018), and makes f16 weights the default.  On this Mac, Safari compiled and ran every variant on 2026-10-30: `e2e bench --browser safari --query 'bench&bench_quick=1&mm=s64&weights=f16'` passed with no WebGPU error, and logged `f16 weights: the start-up check passed (matmul checks: f32 67 ms, f16 1330 ms)`.  So in Safari the f16 part of the start-up check takes about 1.3 s, against about 43 ms in Chrome; this is a measure only.  No check has run the variants on an iPhone.  Where a Safari rejects a variant or fails the start-up check, the worker keeps f32 weights (decision 0022), so the stems stay right and the tab needs about 350 MB more.  So does a GPU that flushes f16 subnormals to zero, which WGSL allows.  The iPhone's GPU is not yet measured.
+
+* 2026-10-30: the maintainer separated a 5-minute song on an iPhone, but its log was not kept, so whether the iPhone used f16 weights is not known.
+* Fix: an iPhone run that keeps the log, with the start-up line and the `memory:` line of f16 weight matrices.
+
+### TD-64: the start-up check compiles the f16 variant of every tile
+
+This entry concerns the time to the first separation (MEM-4 does not apply).
+
+`Gpu::check_kernels` compiles and runs the f16 variant of all four tiles, also when a stored kernel choice names only two of them.  The net reuses the pipelines that the check compiled: a `OnceCell` for each tile and format in `Gpu`'s kernels, and the worker keeps the checked `Gpu`.  So only the unchosen tiles cost extra.  In Safari on this Mac, the f16 part of the check took 1330 ms on 2026-10-30, against about 43 ms in Chrome, so the unchosen tiles cost up to about 1 s there.  M10 reads the iPhone's time from the line `f16 weights: the start-up check passed (matmul checks: f32 N ms, f16 M ms)`.
+
+* 2026-10-30: a later run in Safari on the Mac, with a stored choice, logged `matmul checks: f32 47 ms, f16 51 ms`.  So the 1330 ms was a first compile, and Safari keeps the compiled shaders.
+* Fix: check only the tiles of the stored choice.  A first run calibrates, which needs all four tiles anyway.
+
+### TD-65: no test plants an internal error in an f16 variant
+
+This entry concerns VERIFY-1 and GPU-2.
+
+`Gpu::compile_f16` makes each f16 variant inside a validation and an internal error scope (`F16_COMPILE_SCOPES`; `f16_compile_scopes_are_internal_and_validation` pins the list only).  `an_f16_variant_that_does_not_compile_keeps_f32_weights` and its browser twin plant a WGSL error, which raises a validation error.  An internal error, a driver that fails to build a valid pipeline, cannot be planted from WGSL: a layout that does not match the shader is a validation error too.  So the internal scope is not shown to catch one.  A unit test pins the constant only: a `compile_f16` that pushed the validation scope alone would pass every test.
+
+* Fix: a planted internal error, if wgpu or a browser offers a way to make one.
+
+### TD-66: M9's mutants are not all tested
+
+This entry concerns VERIFY-1.
+
+The review rounds of M9 (`plans/completed/stream-from-storage-m9.md`) ran cargo-mutants in part only.  Round 1 tested 95 of 472 mutants (64 caught, 25 missed, 6 unviable) and stopped at its limit of 60 minutes, so 377 were not tested.  Round 2 tested none of its 21: the baseline `cargo test` timed out at 300 s twice while reviewers and builds loaded the Mac.  The missed mutants of round 1 got tests, except the checks that only a live WebDriver page reaches: `note_run` and `run` in `xtask/src/e2e/weights.rs` (lines 231, 233, 254, 256 and 488 at `0789e6b`).
+
+No test with a rejected f16 variant goes through the worker's `gpu` and `load_format` (`worker/src/web.rs`), so their log lines are not tested.  Review round 3 found this; it was there before the round.
+
+* Fix: run `cargo mutants` on M9's files on a quiet machine: `roformer-gpu/src/lib.rs`, `bench.rs` and `net.rs`, `roformer/src/weights.rs`, `xtask/src/e2e/weights.rs`, `xtask/src/e2e.rs`, `protocol/src/lib.rs` and `test-support/src/lib.rs`.  Move the checks of `note_run` and `run` into pure functions with tests.  Call `gpu` and `load_format` from a test in `worker/src/web/tests.rs`, which can reach the private functions.
 
 ## Legibility for agents
 
@@ -445,3 +578,5 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-17: closed by `a_view_is_written_whole` (harness phase 2, M18a).  `st_write` copies a view into a whole array, as the worker's `whole()` does (MEM-5).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.
+* TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
+* TD-56: closed by M7 of `plans/completed/stream-from-storage.md` (D12 of `plans/completed/stream-from-storage-m7.md`).  One counter gives a token to every open (a drop, a pick, a Storage open, the startup restore and Demo).  Only the newest open shows its song, and only `apply_inbox` makes a session current.  `a_late_drop_does_not_show_over_a_newer_song`, `a_late_drop_does_not_show_over_demo`, `two_opens_that_end_in_one_frame_show_the_newer` and `a_stale_restore_on_the_page_does_not_make_its_session_current` check it.

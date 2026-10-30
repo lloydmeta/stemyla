@@ -55,11 +55,23 @@ fn holds_skip_words_on_purpose(file: &str) -> bool {
 
 /// Skip messages that cannot go through `test_support::skip`: the file, the
 /// literal, and why.
-const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[(
-    "app/tests/web_output.rs",
-    "skipped: the audio context is suspended",
-    "a wasm test cannot read STEMYLA_REQUIRE; the test asserts that the browser is not Chrome, and CI runs Chrome",
-)];
+const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "app/tests/web_output.rs",
+        "skipped: the audio context is suspended",
+        "a wasm test cannot read STEMYLA_REQUIRE; the test asserts that the browser is not Chrome, and CI runs Chrome",
+    ),
+    (
+        "app/src/streamtest.rs",
+        "skipped: the audio context is suspended",
+        "a wasm test cannot read STEMYLA_REQUIRE; the test asserts the audio clock in Chrome, and CI runs Chrome",
+    ),
+    (
+        "worker/src/web/tests.rs",
+        "skipped: no GPU adapter: {e}",
+        "a wasm test cannot read STEMYLA_REQUIRE; CI's headless Chrome can have no GPU adapter, so the maintainer's Mac gives the evidence (TD-8).  `a_read_back_is_copied_into_wasm_memory_once` and `an_f16_variant_the_browser_rejects_keeps_f32_weights` log it",
+    ),
+];
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that
 /// `STEMYLA_REQUIRE` can make it a failure.  A problem is a string literal,
@@ -166,7 +178,13 @@ fn string_value(literal: &Literal) -> Option<String> {
 }
 
 /// The packages of the web app, one WebAssembly module each.
-pub const WEB_APP: [&str; 2] = ["app", "stem-worker"];
+pub const WEB_APP: [&str; 3] = ["app", "decode-worker", "stem-worker"];
+
+/// The shells of the page side: the page and its decode worker.
+pub const PAGE_SIDE: [&str; 2] = ["app", "decode-worker"];
+
+/// The shell of the worker side.
+pub const WORKER_SIDE: &str = "stem-worker";
 
 /// The wasm tree of one package of the web app, as `cargo tree --prefix
 /// depth` prints it: normal edges only, and one package per line.  One run
@@ -229,6 +247,8 @@ fn tree_line(line: &str) -> Option<TreeLine<'_>> {
 fn manifest_of(package: &str) -> String {
     match package {
         "stem-worker" => "worker/Cargo.toml".into(),
+        "decode-worker" => "decoder/Cargo.toml".into(),
+        "stem-protocol" => "protocol/Cargo.toml".into(),
         _ => format!("{package}/Cargo.toml"),
     }
 }
@@ -1063,8 +1083,10 @@ fn stray_problems(workspace: &Workspace) -> Vec<Problem> {
 }
 
 /// LAYER-1: the page side and the worker side meet only through
-/// `stem-protocol`.  Each side is its shell and every workspace crate that
-/// it reaches through normal edges, for any target.
+/// `stem-protocol`.  Each shell of the page side, and the worker side's
+/// shell, is the shell and every workspace crate that it reaches through
+/// normal edges, for any target.  Two crates of the page side may share
+/// crates.
 pub fn shells_meet_only_through_the_protocol(crates: &[WorkspaceCrate]) -> Vec<Problem> {
     let missing: Vec<Problem> = WEB_APP
         .iter()
@@ -1081,24 +1103,26 @@ pub fn shells_meet_only_through_the_protocol(crates: &[WorkspaceCrate]) -> Vec<P
     if !missing.is_empty() {
         return missing;
     }
-    let [page, worker] = WEB_APP.map(|shell| reached(crates, shell));
-    let shared: Vec<&str> = page
-        .intersection(&worker)
-        .filter(|name| **name != PROTOCOL)
-        .copied()
-        .collect();
-    if shared.is_empty() {
-        return Vec::new();
-    }
-    vec![layer1(
-        "Cargo.toml",
-        format!(
-            "LAYER-1: {} and {} both depend on {}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol.",
-            WEB_APP[0],
-            WEB_APP[1],
-            shared.join(", ")
-        ),
-    )]
+    let worker = reached(crates, WORKER_SIDE);
+    PAGE_SIDE
+        .iter()
+        .filter_map(|page| {
+            let shared: Vec<&str> = reached(crates, page)
+                .intersection(&worker)
+                .filter(|name| **name != PROTOCOL)
+                .copied()
+                .collect();
+            (!shared.is_empty()).then(|| {
+                layer1(
+                    "Cargo.toml",
+                    format!(
+                        "LAYER-1: {page} and {WORKER_SIDE} both depend on {}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol.",
+                        shared.join(", ")
+                    ),
+                )
+            })
+        })
+        .collect()
 }
 
 /// `shell` and every workspace crate that it reaches through normal edges.
@@ -1946,13 +1970,15 @@ const THIRD_PARTY_HEADER: &str = "| Crate | Version | Licence | Source |";
 pub const THIRD_PARTY_EDGES: [&str; 2] = ["normal", "normal,dev"];
 
 /// The args of a command in `THIRD-PARTY.md`, in its order, after `cargo`.
-pub fn third_party_args(edges: &str) -> [&str; 13] {
+pub fn third_party_args(edges: &str) -> [&str; 15] {
     [
         "tree",
         "-p",
         "app",
         "-p",
         "stem-worker",
+        "-p",
+        "decode-worker",
         "--target",
         "wasm32-unknown-unknown",
         "-e",
@@ -2445,15 +2471,16 @@ fn js_tokens(text: &str) -> Vec<(usize, JsToken)> {
     tokens
 }
 
-/// The message types in `stem_protocol::kind`: every string in the brace
-/// group after `mod kind`, at the top level of `protocol`.  The error says
+/// The message types in `stem_protocol::kind` and `stem_protocol::decode::kind`:
+/// every string in each brace group after `mod kind`, at the top level of
+/// `protocol` (the text of one file, or of several joined).  The error says
 /// why there is none.
 fn protocol_kinds(protocol: &str) -> std::result::Result<BTreeSet<String>, String> {
     let tokens = TokenStream::from_str(protocol).map_err(|e| format!("does not tokenise: {e}"))?;
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
-    let kind = trees
+    let groups: Vec<TokenStream> = trees
         .windows(3)
-        .find_map(|window| match window {
+        .filter_map(|window| match window {
             [
                 TokenTree::Ident(word),
                 TokenTree::Ident(name),
@@ -2463,9 +2490,13 @@ fn protocol_kinds(protocol: &str) -> std::result::Result<BTreeSet<String>, Strin
             }
             _ => None,
         })
-        .ok_or("has no `mod kind`")?;
-    let kinds: BTreeSet<String> = string_literals(kind)
+        .collect();
+    if groups.is_empty() {
+        return Err("has no `mod kind`".into());
+    }
+    let kinds: BTreeSet<String> = groups
         .into_iter()
+        .flat_map(string_literals)
         .map(|(_, value)| value)
         .collect();
     if kinds.is_empty() {
@@ -2695,13 +2726,56 @@ struct ScriptType {
     value: String,
 }
 
+/// The Rust that `xtask e2e` writes messages in, as (path from the root,
+/// text): `xtask/src/e2e.rs`, then every Rust file under `xtask/src/e2e/`
+/// and its folders, in path order.
+pub fn e2e_rust_sources(root: &Path) -> Result<Vec<(String, String)>> {
+    let read = |path: &Path| {
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+    };
+    let mut paths = Vec::new();
+    rust_files_below(&root.join(E2E_RUST.trim_end_matches(".rs")), &mut paths)?;
+    paths.sort();
+    std::iter::once(root.join(E2E_RUST))
+        .chain(paths)
+        .map(|path| {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let name = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            Ok((name, read(&path)?))
+        })
+        .collect()
+}
+
+/// Adds each `.rs` file in `folder` and its folders to `out`.
+fn rust_files_below(folder: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(folder).with_context(|| format!("listing {}", folder.display()))?
+    {
+        let path = entry?.path();
+        if path.is_dir() {
+            rust_files_below(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// PROTO-1: each message type that the e2e scripts write by hand is in
-/// `stem_protocol::kind`, or `script_only` names it.  `scripts` holds the
-/// `xtask/e2e/*.js` files; `e2e_rust` is the text of `xtask/src/e2e.rs`.
+/// `stem_protocol::kind` or `stem_protocol::decode::kind` (`protocol`
+/// holds both files), or `script_only` names it.  `scripts` holds the
+/// `xtask/e2e/*.js` files; `e2e_rust` holds the files of
+/// [`e2e_rust_sources`].  Each problem in an e2e script names its own file
+/// and line.  A problem in `protocol` names `protocol/src/lib.rs`, with no
+/// line, also for `protocol/src/decode.rs` (finding 1-25).
 pub fn e2e_types_match_the_protocol(
     protocol: &str,
     scripts: &[(String, String)],
-    e2e_rust: &str,
+    e2e_rust: &[(String, String)],
     script_only: &[(&str, &str)],
 ) -> Vec<Problem> {
     let kinds = match protocol_kinds(protocol) {
@@ -2737,32 +2811,31 @@ pub fn e2e_types_match_the_protocol(
             ),
         )
     };
-    let e2e_tokens = TokenStream::from_str(e2e_rust);
-    let rust_was_read = e2e_tokens.is_ok();
-    let (in_rust, rust_problems): (Vec<ScriptType>, Vec<Problem>) = match e2e_tokens {
-        Err(e) => (
-            Vec::new(),
-            vec![proto1(
-                E2E_RUST,
+    // Each file is tokenised on its own, so each problem has its own line.
+    let mut in_rust: Vec<ScriptType> = Vec::new();
+    let mut rust_problems: Vec<Problem> = Vec::new();
+    for (file, text) in e2e_rust {
+        match TokenStream::from_str(text) {
+            Err(e) => rust_problems.push(proto1(
+                file,
                 None,
-                format!(
-                    "PROTO-1: {E2E_RUST} does not tokenise: {e}.  Fix: make the file valid Rust."
-                ),
-            )],
-        ),
-        Ok(tokens) => {
-            let found: Vec<ScriptType> = rust_types(tokens, false)
-                .into_iter()
-                .map(|(line, value)| ScriptType {
-                    file: E2E_RUST.into(),
-                    line,
-                    value,
-                })
-                .collect();
-            let empty = found.is_empty().then(|| no_type(E2E_RUST, "its scripts"));
-            (found, empty.into_iter().collect())
+                format!("PROTO-1: {file} does not tokenise: {e}.  Fix: make the file valid Rust."),
+            )),
+            Ok(tokens) => {
+                in_rust.extend(rust_types(tokens, false).into_iter().map(|(line, value)| {
+                    ScriptType {
+                        file: file.clone(),
+                        line,
+                        value,
+                    }
+                }))
+            }
         }
-    };
+    }
+    let rust_was_read = rust_problems.is_empty();
+    if rust_was_read && in_rust.is_empty() {
+        rust_problems.push(no_type(E2E_RUST, "its scripts"));
+    }
     let js_problems = in_js
         .is_empty()
         .then(|| no_type(E2E_SCRIPTS, "its `*.js` files"));
@@ -3279,6 +3352,29 @@ fn agent_name(text: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// LAYER-1: the page side and the worker side are the web app, each
+    /// crate once.
+    #[test]
+    fn the_two_sides_are_the_web_app() {
+        let mut sides: Vec<&str> = PAGE_SIDE.iter().copied().chain([WORKER_SIDE]).collect();
+        let mut web_app = WEB_APP.to_vec();
+        sides.sort_unstable();
+        web_app.sort_unstable();
+        assert_eq!(sides, web_app);
+    }
+
+    #[test]
+    fn each_package_names_its_manifest() {
+        for (package, manifest) in [
+            ("app", "app/Cargo.toml"),
+            ("stem-worker", "worker/Cargo.toml"),
+            ("decode-worker", "decoder/Cargo.toml"),
+            ("stem-protocol", "protocol/Cargo.toml"),
+        ] {
+            assert_eq!(manifest_of(package), manifest, "{package}");
+        }
+    }
+
     fn synth_problem(file: &str, package: &str, children: &str) -> Problem {
         Problem {
             rule: "LAYER-1",
@@ -3577,11 +3673,18 @@ mod tests {
 
     #[test]
     fn an_allowlist_entry_whose_literal_is_gone_is_a_problem() {
+        let current: Vec<(String, String)> = SKIP_ALLOWLIST
+            .iter()
+            .map(|(file, literal, _)| {
+                let text = format!("fn f() {{ console_log!(\"{literal}\"); }}");
+                (file.to_string(), text)
+            })
+            .collect();
+        assert_eq!(allowlisted_skips_exist(&current), []);
         let (file, literal, _) = SKIP_ALLOWLIST[0];
-        let current = format!("fn f() {{ console_log!(\"{literal}\"); }}");
-        assert_eq!(allowlisted_skips_exist(&[(file.to_string(), current)]), []);
-        let reworded = "fn f() { console_log!(\"skipped: suspended\"); }".to_string();
-        let problems = allowlisted_skips_exist(&[(file.to_string(), reworded)]);
+        let mut reworded = current.clone();
+        reworded[0].1 = "fn f() { console_log!(\"skipped: suspended\"); }".to_string();
+        let problems = allowlisted_skips_exist(&reworded);
         assert_eq!(
             problems,
             [Problem {
@@ -3595,8 +3698,8 @@ mod tests {
         );
         assert_eq!(
             lines(&allowlisted_skips_exist(&[])),
-            [None],
-            "a file that is not in the tree"
+            vec![None; SKIP_ALLOWLIST.len()],
+            "files that are not in the tree"
         );
     }
 
@@ -3653,6 +3756,7 @@ mod tests {
 | Engine and GPU | `engine` | `dsp` |
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
+| Shells | `decode-worker` | `dsp`, `engine`, `stem-protocol` |
 | Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
 ";
@@ -3711,6 +3815,15 @@ mod tests {
                         ("synth", Normal),
                         ("stem-protocol", Normal),
                         ("synth", Dev),
+                    ],
+                ),
+                krate(
+                    "decode-worker",
+                    "decoder/Cargo.toml",
+                    &[
+                        ("dsp", Normal),
+                        ("engine", Normal),
+                        ("stem-protocol", Normal),
                     ],
                 ),
                 krate("synth", "synth/Cargo.toml", &[]),
@@ -3907,11 +4020,11 @@ mod tests {
         )
     }
 
-    fn shared(names: &str) -> Problem {
+    fn shared(page: &str, names: &str) -> Problem {
         layer1(
             "Cargo.toml",
             format!(
-                "LAYER-1: app and stem-worker both depend on {names}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol."
+                "LAYER-1: {page} and stem-worker both depend on {names}, directly or through other workspace crates.  The page side and the worker side meet only through stem-protocol.  Fix: keep each crate on one side, and send what the other side needs as a message in stem-protocol."
             ),
         )
     }
@@ -4491,13 +4604,22 @@ mod tests {
     #[test]
     fn a_crate_on_both_sides_is_a_problem() {
         let workspace = with_edges(today(), &[("app", "roformer-gpu", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("roformer, roformer-gpu")]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("app", "roformer, roformer-gpu")],
+        );
     }
 
     #[test]
     fn a_crate_reached_through_another_is_found() {
         let workspace = with_edges(today(), &[("engine", "roformer", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("roformer")]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "roformer"),
+                shared("decode-worker", "roformer"),
+            ],
+        );
     }
 
     #[test]
@@ -4506,24 +4628,77 @@ mod tests {
             without_edge(today(), "stem-worker", "roformer"),
             &[("roformer", "dsp", Kind::Normal)],
         );
-        assert_problems(shells(&workspace), vec![shared("dsp")]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("app", "dsp"), shared("decode-worker", "dsp")],
+        );
     }
 
     #[test]
     fn a_crate_reached_through_stem_protocol_is_found() {
         let workspace = with_edges(today(), &[("stem-protocol", "test-support", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("test-support")]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "test-support"),
+                shared("decode-worker", "test-support"),
+            ],
+        );
     }
 
     #[test]
     fn a_shell_is_in_its_own_set() {
         let workspace = with_edges(today(), &[("stem-worker", "app", Kind::Normal)]);
-        assert_problems(shells(&workspace), vec![shared("app, dsp, engine, synth")]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "app, dsp, engine, synth"),
+                shared("decode-worker", "dsp, engine"),
+            ],
+        );
         let workspace = with_edges(today(), &[("app", "stem-worker", Kind::Normal)]);
         assert_problems(
             shells(&workspace),
-            vec![shared("roformer, roformer-gpu, stem-worker")],
+            vec![shared("app", "roformer, roformer-gpu, stem-worker")],
         );
+        let workspace = with_edges(today(), &[("decode-worker", "stem-worker", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared(
+                "decode-worker",
+                "roformer, roformer-gpu, stem-worker",
+            )],
+        );
+    }
+
+    #[test]
+    fn the_decode_worker_and_the_stem_worker_that_share_a_crate_are_a_problem() {
+        let workspace = with_edges(today(), &[("decode-worker", "roformer", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![shared("decode-worker", "roformer")],
+        );
+        let workspace = with_edges(today(), &[("stem-worker", "engine", Kind::Normal)]);
+        assert_problems(
+            shells(&workspace),
+            vec![
+                shared("app", "dsp, engine"),
+                shared("decode-worker", "dsp, engine"),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_decode_worker_and_the_app_may_share_engine() {
+        let workspace = today();
+        let takes_engine = |name: &str| {
+            workspace
+                .crates
+                .iter()
+                .any(|c| c.name == name && c.edges.iter().any(|e| e.to == "engine"))
+        };
+        assert!(takes_engine("app") && takes_engine("decode-worker"));
+        assert_problems(shells(&workspace), vec![]);
     }
 
     #[test]
@@ -4533,8 +4708,10 @@ mod tests {
             &[
                 ("app", "roformer", Kind::Dev),
                 ("engine", "roformer", Kind::Dev),
+                ("decode-worker", "roformer", Kind::Dev),
                 ("app", "roformer", Kind::Build),
                 ("engine", "roformer", Kind::Build),
+                ("decode-worker", "roformer", Kind::Build),
             ],
         );
         assert_problems(shells(&workspace), vec![]);
@@ -4548,7 +4725,7 @@ mod tests {
 
     #[test]
     fn a_missing_shell_is_a_problem() {
-        for shell in ["stem-worker", "app"] {
+        for shell in ["stem-worker", "app", "decode-worker"] {
             assert_problems(
                 shells(&without_crate(today(), shell)),
                 vec![layer1(
@@ -5836,8 +6013,8 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
         assert_eq!(
             commands(),
             [
-                "cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
-                "cargo tree -p app -p stem-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
             ]
         );
     }
@@ -6162,9 +6339,49 @@ pub mod kind {
         e2e_types_match_the_protocol(
             PROTOCOL,
             &[(WORKER_JS.to_string(), js.to_string())],
-            rust,
+            &[(E2E_RUST.to_string(), rust.to_string())],
             script_only,
         )
+    }
+
+    /// Finding 2-9 of review round 2: a bad type in a second Rust file is
+    /// reported at that file and its own line.
+    #[test]
+    fn a_bad_type_in_a_second_file_names_that_file_and_line() {
+        const DECODE_RS: &str = "xtask/src/e2e/decode.rs";
+        let rust = [
+            (E2E_RUST.to_string(), format!("{RUST_OK}\nfn a() {{}}\n")),
+            (
+                DECODE_RS.to_string(),
+                "fn f() {}\nfn g() {\n    in_page(\"return e2e.ask([{ type: 'segmnt' }]);\");\n}"
+                    .to_string(),
+            ),
+        ];
+        let problems = e2e_types_match_the_protocol(
+            PROTOCOL,
+            &[(WORKER_JS.to_string(), JS_OK.to_string())],
+            &rust,
+            &[],
+        );
+        assert_one_each("PROTO-1", &[(DECODE_RS, problems, Some(3))]);
+    }
+
+    /// Finding 3-5 of review round 3: a second Rust file that does not
+    /// tokenise is reported at that file, with no line.
+    #[test]
+    fn a_second_file_that_does_not_tokenise_names_that_file() {
+        const DECODE_RS: &str = "xtask/src/e2e/decode.rs";
+        let rust = [
+            (E2E_RUST.to_string(), RUST_OK.to_string()),
+            (DECODE_RS.to_string(), "fn f() {".to_string()),
+        ];
+        let problems = e2e_types_match_the_protocol(
+            PROTOCOL,
+            &[(WORKER_JS.to_string(), JS_OK.to_string())],
+            &rust,
+            &[],
+        );
+        assert_one_each("PROTO-1", &[(DECODE_RS, problems, None)]);
     }
 
     fn values(tokens: &[(usize, JsToken)]) -> Vec<(usize, &JsToken)> {
@@ -6204,6 +6421,20 @@ pub mod kind {
         assert_eq!(
             kinds.into_iter().collect::<Vec<_>>(),
             ["alive", "done", "segment"]
+        );
+    }
+
+    /// The decode worker's messages have a `mod kind` of their own
+    /// (`protocol/src/decode.rs`), read with `lib.rs` after it.
+    #[test]
+    fn every_kind_module_is_read() {
+        let both = format!(
+            "{PROTOCOL}\n/// The decode worker's.\npub mod kind {{\n    pub const DECODED: &str = \"decoded\";\n}}\n"
+        );
+        let kinds = protocol_kinds(&both).expect("the fixture has kinds");
+        assert_eq!(
+            kinds.into_iter().collect::<Vec<_>>(),
+            ["alive", "decoded", "done", "segment"]
         );
     }
 
@@ -6356,7 +6587,7 @@ fn f() {
             e2e_types_match_the_protocol(
                 protocol,
                 &[(WORKER_JS.to_string(), JS_OK.to_string())],
-                RUST_OK,
+                &[(E2E_RUST.to_string(), RUST_OK.to_string())],
                 &[],
             )
         };
@@ -6374,7 +6605,12 @@ fn f() {
                 (E2E_SCRIPTS, check("const a = 1;", RUST_OK, &[]), None),
                 (
                     E2E_SCRIPTS,
-                    e2e_types_match_the_protocol(PROTOCOL, &[], RUST_OK, &[]),
+                    e2e_types_match_the_protocol(
+                        PROTOCOL,
+                        &[],
+                        &[(E2E_RUST.to_string(), RUST_OK.to_string())],
+                        &[],
+                    ),
                     None,
                 ),
                 (E2E_RUST, check(JS_OK, "fn f() {}", &[]), None),

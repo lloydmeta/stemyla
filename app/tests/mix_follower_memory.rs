@@ -1,10 +1,13 @@
-//! MEM-4: a change of the mix while the mix lane's waveform job runs never
-//! holds two song-sized mid buffers at once.  One test in its own binary,
-//! since it counts every allocation of the process.
+//! MEM-1 and MEM-4: a change of the mix, with spectrograms on, holds no
+//! song-sized buffer at all (D6 of the M7 plan).  The mix lane's waveform
+//! job and its spectrogram read the lanes in blocks.  One test in its own
+//! binary, since it counts every allocation of the process.
 #![cfg(not(target_arch = "wasm32"))]
 
 use app::export::{BLOCK, MixFollower};
-use engine::mixdown::MixRecipe;
+use app::lanes::{LaneAudio, LanesMix};
+use app::spectrogram::SpectrogramJob;
+use engine::mixdown::{MixRecipe, Pcm};
 use engine::{Song, Stem};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
@@ -34,9 +37,13 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static COUNTING: Counting = Counting;
 
+/// A block of both channels, in bytes.
+const BLOCK_BYTES: usize = BLOCK * 2 * size_of::<f32>();
+
 #[test]
-fn a_new_mix_frees_the_old_jobs_mid_before_it_makes_its_own() {
-    let frames = 64 * BLOCK;
+fn a_mix_change_with_spectrograms_on_holds_no_song_sized_buffer() {
+    // 256 blocks: one channel of the song is 16 MiB.
+    let frames = 256 * BLOCK;
     let stem = |name: &str| Stem {
         name: name.into(),
         left: vec![0.25; frames].into(),
@@ -47,18 +54,30 @@ fn a_new_mix_frees_the_old_jobs_mid_before_it_makes_its_own() {
         frames,
         stems: vec![stem("bass"), stem("drums")],
     });
+    let lanes: Vec<LaneAudio> = song.stems.iter().map(LaneAudio::of_stem).collect();
+    let mix_of = |recipe: &MixRecipe| -> Box<dyn Pcm> {
+        Box::new(LanesMix::new(&lanes, frames, 44_100, recipe))
+    };
     let mut follower = MixFollower::new(MixRecipe::new(vec![1.0, 1.0]));
     let no_drums = MixRecipe::new(vec![1.0, 0.0]);
     let no_bass = MixRecipe::new(vec![0.0, 1.0]);
-    assert!(follower.follow(&song, &no_drums, true, || false).is_none());
 
-    let mid = frames * size_of::<f32>();
     let before = LIVE.load(Relaxed);
     PEAK.store(before, Relaxed);
-    assert!(follower.follow(&song, &no_bass, true, || false).is_none());
+    assert!(follower.follow(&no_drums, mix_of, || false).is_none());
+    let waveform = follower.follow(&no_bass, mix_of, || true);
+    assert!(waveform.is_some(), "the new mix is shown");
+    // With spectrograms on, the mix lane's spectrogram is made again.
+    let mut spectrogram = SpectrogramJob::new(mix_of(follower.shown().expect("a mix")));
+    assert!(spectrogram.run_while(|| true));
+    let image = spectrogram.finish();
     let grew = PEAK.load(Relaxed) - before;
+    println!("a mix change with its spectrogram peaks {grew} bytes above its start");
+    assert!(image.1 > 1_000, "the image has its columns");
+    let bound = 16 * BLOCK_BYTES;
     assert!(
-        grew < mid / 2,
-        "MEM-4: a mix change held {grew} more bytes at its peak; one mid buffer is {mid}"
+        grew < bound,
+        "MEM-1: a mix change with spectrograms on held {grew} more bytes at its peak; the bound is {bound} bytes, and one channel of the song is {} bytes",
+        frames * size_of::<f32>()
     );
 }

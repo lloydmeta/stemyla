@@ -1,14 +1,18 @@
 //! RT-1: after warm-up, the audio callback neither allocates nor frees
-//! memory, for the stretchers the app ships.
+//! memory, for the stretchers the app ships.  It plays the stems from memory,
+//! and as stored lanes over a `ReadAhead` that a fake reader fills between
+//! callbacks.
 //!
 //! This test binary installs a global allocator that counts calls on each
 //! thread, so a count covers only the code that ran on that thread.  The
 //! optimiser may remove an allocation, so a zero count is evidence, not
 //! proof (`std::alloc::GlobalAlloc`).
 
-use engine::slot::Scratch;
+use engine::readahead::{LaneFormat, MIN_AHEAD_SLOTS, MIN_LOOP_SLOTS, ReadAhead};
+use engine::slot::{Scratch, WEB_BUFFER_FRAMES};
 use engine::stretch::{MAX_PUSH_FRAMES, StretcherKind};
-use engine::{Player, PlayerSlot, SharedParams, Song, Stem};
+use engine::wav::{FRAME_BYTES, write_pcm16};
+use engine::{Player, PlayerConfig, PlayerSlot, SharedParams, Song, Stem};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -23,7 +27,8 @@ const SHIPPED: [StretcherKind; 2] = [StretcherKind::Varispeed, StretcherKind::Ws
 const RATES: [u32; 2] = [44_100, 48_000];
 /// 10,000 frames is over `SCRATCH_FRAMES`, so `render_interleaved` runs its
 /// inner loop twice, and is not a multiple of the player's block.
-const CALLBACK_FRAMES: [usize; 4] = [128, 512, 4_096, 10_000];
+/// `WEB_BUFFER_FRAMES` is the browser's callback.
+const CALLBACK_FRAMES: [usize; 5] = [128, 512, WEB_BUFFER_FRAMES as usize, 4_096, 10_000];
 const STEMS: usize = 6;
 const SONG_SECONDS: usize = 10;
 
@@ -128,6 +133,71 @@ fn noise(frames: usize, seed: u32) -> Vec<f32> {
         .collect()
 }
 
+/// Where the rig's player reads its six stems.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lanes {
+    Memory,
+    /// 16-bit lanes over a `ReadAhead` with the fewest slots (4 and 2), so
+    /// slots are given to new blocks during the run and a stall uses up
+    /// the buffer in about 3 s of song.
+    Stored,
+}
+
+/// The stored lanes, and the fake reader that fills their slots between
+/// callbacks, outside the counted part.
+struct Storage {
+    ahead: Arc<ReadAhead>,
+    files: Vec<Vec<u8>>,
+    reading: bool,
+}
+
+impl Storage {
+    fn new(channels: &[(Vec<f32>, Vec<f32>)], frames: usize, params: Arc<SharedParams>) -> Self {
+        let files = channels
+            .iter()
+            .map(|(left, right)| {
+                let mut bytes = vec![0; frames * FRAME_BYTES];
+                write_pcm16(left, right, &mut bytes);
+                bytes
+            })
+            .collect();
+        let formats = vec![LaneFormat::Pcm16; channels.len()];
+        let ahead = ReadAhead::with_slots(
+            &formats,
+            frames as u64,
+            params,
+            MIN_AHEAD_SLOTS,
+            MIN_LOOP_SLOTS,
+        );
+        Self {
+            ahead: Arc::new(ahead),
+            files,
+            reading: true,
+        }
+    }
+
+    /// Reads every block that the buffer wants, as a reader that keeps up.
+    fn read(&self) {
+        if !self.reading {
+            return;
+        }
+        while let Some(read) = self.ahead.next_read() {
+            self.ahead.fill(read, |lanes| {
+                for (lane, bytes) in lanes.iter_mut().enumerate() {
+                    let file = &self.files[lane];
+                    let start = (read.first_frame() as usize * FRAME_BYTES).min(file.len());
+                    let n = (file.len() - start).min(bytes.len());
+                    bytes[..n].copy_from_slice(&file[start..start + n]);
+                    bytes[n..].fill(0);
+                    if self.ahead.is_failed(lane) {
+                        bytes.fill(0);
+                    }
+                }
+            });
+        }
+    }
+}
+
 /// One player in a slot, driven callback by callback, with the counts and
 /// problems of the phase that runs.
 struct Rig {
@@ -136,6 +206,7 @@ struct Rig {
     frames: usize,
     params: Arc<SharedParams>,
     slot: PlayerSlot,
+    storage: Option<Storage>,
     data: Vec<f32>,
     scratch: Scratch,
     counts: Counts,
@@ -144,34 +215,58 @@ struct Rig {
 }
 
 impl Rig {
-    fn new(kind: StretcherKind, rate: u32, callback_frames: usize) -> Self {
+    fn new(kind: StretcherKind, rate: u32, callback_frames: usize, lanes: Lanes) -> Self {
         let frames = SONG_SECONDS * rate as usize;
         let seeds = 1..=(2 * STEMS) as u32;
         let seeds: Vec<u32> = seeds.collect();
-        let song = Arc::new(Song {
-            sample_rate: rate,
-            frames,
-            stems: seeds
-                .chunks(2)
-                .map(|pair| Stem {
-                    name: format!("lloyd {}", pair[0]),
-                    left: noise(frames, pair[0]).into(),
-                    right: noise(frames, pair[1]).into(),
-                })
-                .collect(),
-        });
+        let channels: Vec<(Vec<f32>, Vec<f32>)> = seeds
+            .chunks(2)
+            .map(|pair| (noise(frames, pair[0]), noise(frames, pair[1])))
+            .collect();
         let params = Arc::new(SharedParams::new(STEMS));
         let slot = PlayerSlot::new();
-        drop(slot.replace(Some(Player::new(song, Arc::clone(&params), kind))));
+        let (player, storage) = match lanes {
+            Lanes::Memory => {
+                let song = Arc::new(Song {
+                    sample_rate: rate,
+                    frames,
+                    stems: channels
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (left, right))| Stem {
+                            name: format!("lloyd {i}"),
+                            left: left.into(),
+                            right: right.into(),
+                        })
+                        .collect(),
+                });
+                (Player::new(song, Arc::clone(&params), kind), None)
+            }
+            Lanes::Stored => {
+                // The buffer is made, with every slot, before the player.
+                let storage = Storage::new(&channels, frames, Arc::clone(&params));
+                let player = Player::with_sources(
+                    rate,
+                    frames,
+                    Arc::clone(&params),
+                    kind.build(rate),
+                    PlayerConfig::default(),
+                    storage.ahead.sources(),
+                );
+                (player, Some(storage))
+            }
+        };
+        drop(slot.replace(Some(player)));
         Self {
             label: format!(
-                "{}, {rate} Hz, {callback_frames}-frame callbacks",
+                "{}, {rate} Hz, {callback_frames}-frame callbacks, {lanes:?} lanes",
                 kind.label()
             ),
             rate,
             frames,
             params,
             slot,
+            storage,
             data: vec![0.0; callback_frames * 2],
             scratch: Scratch::default(),
             counts: Counts::default(),
@@ -180,7 +275,20 @@ impl Rig {
         }
     }
 
+    fn ahead(&self) -> &ReadAhead {
+        &self.storage.as_ref().expect("stored lanes").ahead
+    }
+
+    fn set_reading(&mut self, reading: bool) {
+        if let Some(storage) = &mut self.storage {
+            storage.reading = reading;
+        }
+    }
+
     fn callback(&mut self) {
+        if let Some(storage) = &self.storage {
+            storage.read();
+        }
         let (slot, data, scratch) = (&self.slot, &mut self.data, &mut self.scratch);
         let ((), counts) = counted(|| slot.render_interleaved(data, 2, scratch));
         self.counts.allocations += counts.allocations;
@@ -222,7 +330,7 @@ impl Rig {
         steps(self);
         if self.counts != Counts::default() {
             self.problems.push(format!(
-                "RT-1: the audio callback allocated or freed memory after warm-up: {}, phase \"{name}\": {} allocations, {} frees.  Fix: size the buffer in `Player::with_config` or `Stretcher::warm_up`, or reuse a buffer.  Do not allocate in `Player::process` or below.",
+                "RT-1: the audio callback allocated or freed memory after warm-up: {}, phase \"{name}\": {} allocations, {} frees.  Fix: size the buffer in `Player::with_sources`, `ReadAhead::new` or `Stretcher::warm_up`, or reuse a buffer.  Do not allocate in `Player::process` or below.",
                 self.label, self.counts.allocations, self.counts.frees
             ));
         }
@@ -233,8 +341,8 @@ impl Rig {
 }
 
 /// Plays one stretcher through every phase and gives the problems found.
-fn run(kind: StretcherKind, rate: u32, callback_frames: usize) -> Vec<String> {
-    let mut rig = Rig::new(kind, rate, callback_frames);
+fn run(kind: StretcherKind, rate: u32, callback_frames: usize, lanes: Lanes) -> Vec<String> {
+    let mut rig = Rig::new(kind, rate, callback_frames, lanes);
     rig.phase("start", |r| {
         r.params.playing.store(true, Relaxed);
         r.params.set_tempo(1.0);
@@ -318,6 +426,9 @@ fn run(kind: StretcherKind, rate: u32, callback_frames: usize) -> Vec<String> {
         r.params.set_soloed(1, false);
         r.play(0.1);
     });
+    if lanes == Lanes::Stored {
+        stored_phases(&mut rig);
+    }
     rig.phase("end", |r| {
         r.params.request_seek(r.frames as u64 - r.seconds(0.1));
         let callback_frames = r.data.len() / 2;
@@ -336,13 +447,87 @@ fn run(kind: StretcherKind, rate: u32, callback_frames: usize) -> Vec<String> {
     rig.problems
 }
 
+/// The phases of stored lanes only.  Each fails unless its counter moved.
+fn stored_phases(rig: &mut Rig) {
+    rig.phase("reader stalls", |r| {
+        // From 1 s at tempo 1, so the stall and the phases after it fit in
+        // the song.
+        r.params.set_tempo(1.0);
+        r.params.request_seek(r.seconds(1.0));
+        r.play(0.3);
+        let before = r.ahead().underruns();
+        r.set_reading(false);
+        r.play(4.0);
+        r.set_reading(true);
+        r.play(0.5);
+        if r.ahead().underruns() == before {
+            r.fail("reader stalls", "counted no underrun".into());
+        }
+    });
+    rig.phase("seek holds", |r| {
+        let before = r.params.held_seeks.load(Relaxed);
+        r.set_reading(false);
+        // About 3 s ahead: past the four blocks ahead that the buffer holds.
+        let target = r.playhead() + r.seconds(3.2);
+        r.params.request_seek(target);
+        r.play(0.2);
+        r.set_reading(true);
+        r.play(0.3);
+        if r.params.held_seeks.load(Relaxed) == before {
+            r.fail("seek holds", "held no seek".into());
+        }
+    });
+    rig.phase("loop behind the head", |r| {
+        r.params.request_seek(r.seconds(8.0));
+        r.play(0.3);
+        let before = r.params.held_seeks.load(Relaxed);
+        r.set_reading(false);
+        // The buffer holds the blocks from 8 s on, not the loop's.
+        r.params.set_loop(r.seconds(2.0), r.seconds(3.0));
+        r.play(0.2);
+        r.set_reading(true);
+        r.play(1.0);
+        r.params.clear_loop();
+        if r.params.held_seeks.load(Relaxed) == before {
+            r.fail("loop behind the head", "held no seek".into());
+        }
+    });
+    rig.phase("seek held at the end", |r| {
+        // The old position reaches the song's end while a seek holds; the
+        // seek then fades out and jumps, in callbacks shorter than its fade
+        // too (review round 3 of M6, finding 3-1).
+        r.params.request_seek(r.frames as u64 - r.seconds(0.05));
+        r.play(0.1);
+        r.params.playing.store(true, Relaxed);
+        r.set_reading(false);
+        r.params.request_seek(r.seconds(5.0));
+        r.play(0.3);
+        r.set_reading(true);
+        r.play(0.5);
+        if !r.params.playing.load(Relaxed) {
+            r.fail("seek held at the end", "stopped at the song's end".into());
+        }
+    });
+    rig.phase("lane fails", |r| {
+        r.ahead().fail_lane(0);
+        r.play(0.5);
+        if r.ahead().failed_lanes() != 1 {
+            r.fail("lane fails", "failed no lane".into());
+        }
+    });
+}
+
 #[test]
 fn the_callback_does_not_allocate_after_warm_up() {
     let mut runs = Vec::new();
     for kind in SHIPPED {
         for rate in RATES {
             for callback_frames in CALLBACK_FRAMES {
-                runs.push(std::thread::spawn(move || run(kind, rate, callback_frames)));
+                for lanes in [Lanes::Memory, Lanes::Stored] {
+                    runs.push(std::thread::spawn(move || {
+                        run(kind, rate, callback_frames, lanes)
+                    }));
+                }
             }
         }
     }

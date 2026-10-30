@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["dsp", "engine", "app", "xtask", "synth", "roformer", "roformer-gpu", "worker", "protocol", "test-support"]
+members = ["dsp", "engine", "app", "xtask", "synth", "roformer", "roformer-gpu", "worker", "decoder", "protocol", "test-support"]
 
 [workspace.package]
 edition = "2024"
@@ -21,6 +21,12 @@ debug = 1
 inherits = "test"
 opt-level = 2
 debug = false
+
+# cargo-mutants reads `#[cfg_attr(mutants, mutants::skip)]` from the
+# source.  No build sets `cfg(mutants)`, so the build needs no `mutants`
+# crate.  This entry stops the warning for the unknown cfg (TD-33).
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mutants)'] }
 
 [workspace.lints.clippy]
 # Index loops over several parallel buffers read more clearly in DSP code.

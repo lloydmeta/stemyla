@@ -1,31 +1,76 @@
 //! `xtask e2e <scenario> [options]`: drives the built web app (`app/dist`)
 //! in Safari or Chrome through WebDriver and checks what it does.
 //!
-//! Scenarios (the first four need no model and run in CI):
-//! * `smoke`: drop generated stems, Play, change the tempo.
+//! Scenarios (the first eight need no model and run in CI):
+//! * `smoke`: drop generated stems, Play (every lane from browser storage),
+//!   change the tempo.
+//! * `decode`: the decode worker writes the session files of a 44.1 kHz
+//!   WAV, a 48 kHz WAV and the generated stems, equal to the native decode;
+//!   a reload opens a complete session as stored lanes with no decode, and decodes a
+//!   session of the M4 layout (`e2e/decode.rs`).
+//! * `playback`: a song restored with six stems plays every lane, "original"
+//!   too, from browser storage through the read-ahead buffer, with no
+//!   underrun, after a seek too (M6, `e2e/playback.rs`).
+//! * `old-session`: a session of M4's layout, of 1 minute and then of 5
+//!   minutes, restores through the decode worker and the stem overviews,
+//!   plays its 7 lanes from storage, and the page's WebAssembly memory
+//!   stays under a fixed bound and does not grow with the song (M7,
+//!   `e2e/old_session.rs`).
 //! * `audio-resume`: a song restored at page load plays after one click,
 //!   with Web Audio behaving as in Safari; stems stored with it come back
 //!   with it.
 //! * `storage`: the worker's model storage across messages and workers:
 //!   queue order, the cross-tab lock, stalled downloads, `?model_url=`;
 //!   with `--weights`, also the paths that load a real model (GPU).
-//! * `flac`: the release worker encodes a 5-minute stem as a FLAC; logs
-//!   the time.
+//! * `flac`: the release worker encodes a 5-minute stem as a FLAC, from
+//!   two arrays and from a stored 16-bit WAV in `saves/` (M8).  The stored
+//!   case's file equals the arrays case's file, byte for byte, and the
+//!   worker removes the WAV.  Logs the times.
+//! * `save`: saves the mix of a stored song of 1 and of 10 minutes as WAV,
+//!   FLAC and MP3 through the Save menu.  The page's JS heap during a save
+//!   must not grow with the song, nor the worker's memory during a FLAC
+//!   encode, and an MP3 encode is bounded (M8, `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).
 //! * `separate`: drop a clip and the model, Separate, lanes appear
-//!   (`--weights`).  The clip is a 48 kHz WAV, or with `--flac` a 96 kHz
-//!   FLAC.
+//!   (`--weights`).  The clip is kept in browser storage, so it separates
+//!   on the storage path; a fallback to the memory path fails it.  The clip
+//!   is a 48 kHz WAV, or with `--flac` a 96 kHz FLAC.
 //! * `worker-check`: the worker's separation against PyTorch's
 //!   (`--weights`, `--reference` from `tools/roformer_export.py`).
+//! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
+//!   browser, and print the peak memory of each and the difference
+//!   (`--weights`).  M2 of `docs/plans/completed/stream-from-storage.md`.
+//! * `memory-budget` also prints how much the page's and the worker's
+//!   WebAssembly memory grew during each separation, and fails if either
+//!   is more than 4 MB (D9 of M3 in
+//!   `docs/plans/completed/stream-from-storage-m3.md`, step 4 of M4).  The
+//!   page's growth includes its write of the mix.  A fallback to the
+//!   memory path fails it.  It also checks that the page and the decode
+//!   worker grow by at most 4 MB while the song opens, and that Separate
+//!   writes no second mix (M5); `separate` checks that too.  Since M7, the
+//!   page's growth from the separation's end to the stems shown must be at
+//!   most 4 MB more for the 4-minute song than for the 1-minute song: the
+//!   stems show as stored lanes, with no read-back.
+//! * `stored-stems`: one worker separates 3 seconds of the synthetic mix on the
+//!   memory path, then on the storage path into a session folder, from a mix
+//!   file there (`--weights`).  Each stem file equals the memory path's stem as
+//!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
+//!   checks them against `--hashes`.
+//! * `weights`: f16 weights against f32 weights, from a blank page
+//!   (`--weights`; M9 of `docs/plans/completed/stream-from-storage.md`).  The
+//!   stems of the two formats must be equal bit for bit, with M3's kernels
+//!   and with this GPU's own; the speed is reported as a measure.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
 //! `--headed` (Chrome with a window), `--swiftshader` (Chrome's software
 //! WebGPU, for machines without a GPU), `--query Q` (page URL query for
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
-//! `--reference DIR`, `--download`, `--flac`, and click positions `--play-x`,
+//! `--reference DIR`, `--download`, `--flac`, `--hashes H1,...,H6` (the
+//! six SHA-256s of `stored-stems`, in the worker's stem order), and click
+//! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
 //! Classic WebDriver has no console events and no init scripts, so the
@@ -42,10 +87,25 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+mod decode;
+mod old_session;
+mod playback;
+mod save;
+mod weights;
+
 /// The viewport the click positions are measured in.
 const VIEWPORT: (u32, u32) = (1100, 700);
 /// The top bar's buttons sit on this line.
 const BAR_Y: f64 = 15.0;
+/// The mix lane's Save button and its menu's items (see [`Opts`]).
+const SAVE_X: f64 = 54.0;
+const SAVE_Y: f64 = 111.0;
+const ITEM_X: f64 = 100.0;
+const ITEM_Y: f64 = 168.0;
+const ITEM_DY: f64 = 21.0;
+/// The longest wait, in seconds, for a run of the model on the GPU: 4
+/// hours, for a slow GPU or SwiftShader.
+const MODEL_RUN_SECS: u64 = 4 * 3600;
 
 const SWIFTSHADER: [&str; 7] = [
     "--enable-unsafe-webgpu",
@@ -71,10 +131,20 @@ pub struct Opts {
     pub download: bool,
     /// `separate` drops a 16-bit 96 kHz FLAC clip, not a 48 kHz WAV.
     pub flac: bool,
+    /// `stored-stems` checks the stems' SHA-256s against these.
+    pub hashes: Option<String>,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
     pub separate_x: f64,
+    /// The mix lane's "Save" button, and its menu's first item (`save`),
+    /// in CSS pixels of the viewport.
+    pub save_x: f64,
+    pub save_y: f64,
+    pub item_x: f64,
+    pub item_y: f64,
+    /// The rows of the Save menu's items, in CSS pixels.
+    pub item_dy: f64,
 }
 
 impl Opts {
@@ -83,7 +153,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|audio-resume|storage|flac|bench|selftest|separate|worker-check> [options]",
+                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|save|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -101,6 +171,7 @@ impl Opts {
             reference: None,
             download: false,
             flac: false,
+            hashes: None,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -109,6 +180,13 @@ impl Opts {
             download_x: 263.0,
             // "Separate 6 stems" takes the place of the model buttons.
             separate_x: 245.0,
+            // The mix lane's Save button and its menu, with a song of a
+            // source and two stems shown (`save`).
+            save_x: SAVE_X,
+            save_y: SAVE_Y,
+            item_x: ITEM_X,
+            item_y: ITEM_Y,
+            item_dy: ITEM_DY,
         };
         let mut i = 1;
         while i < args.len() {
@@ -131,10 +209,16 @@ impl Opts {
                 "--reference" => o.reference = Some(value()?.into()),
                 "--download" => o.download = true,
                 "--flac" => o.flac = true,
+                "--hashes" => o.hashes = Some(value()?),
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
                 "--separate-x" => o.separate_x = value()?.parse()?,
+                "--save-x" => o.save_x = value()?.parse()?,
+                "--save-y" => o.save_y = value()?.parse()?,
+                "--item-x" => o.item_x = value()?.parse()?,
+                "--item-y" => o.item_y = value()?.parse()?,
+                "--item-dy" => o.item_dy = value()?.parse()?,
                 other => bail!("unknown option {other}"),
             }
             i += 1;
@@ -165,13 +249,20 @@ pub fn run(args: &[String]) -> Result<()> {
     std::fs::create_dir_all(&o.out)?;
     match o.scenario.as_str() {
         "smoke" => smoke(&o),
+        "decode" => decode::run(&o),
+        "playback" => playback::run(&o),
+        "old-session" => old_session::run(&o),
         "audio-resume" => audio_resume(&o),
         "storage" => storage(&o),
         "flac" => flac(&o),
+        "save" => save::run(&o),
         "bench" => bench(&o),
         "selftest" => selftest(&o),
         "separate" => separate(&o),
         "worker-check" => worker_check(&o),
+        "memory-budget" => memory_budget(&o),
+        "stored-stems" => stored_stems(&o),
+        "weights" => weights::run(&o),
         other => bail!("unknown scenario {other}"),
     }
 }
@@ -314,6 +405,12 @@ impl Page {
         self.session.click(x, BAR_Y)
     }
 
+    /// Clicks at (`x`, `y`) in CSS pixels of the viewport.
+    fn click_at(&mut self, x: f64, y: f64, what: &str) -> Result<()> {
+        self.note(&format!("click {what} at ({x}, {y})"));
+        self.session.click(x, y)
+    }
+
     fn reload(&mut self) -> Result<()> {
         self.poll()?;
         self.note("reload");
@@ -400,6 +497,12 @@ fn is_page_error(line: &str) -> bool {
         || line.contains("console.warn: ERROR:")
 }
 
+/// Whether `line` ends a wait for `text`: it holds `text`, or the page
+/// reports an error.
+fn holds_or_error(line: &str, text: &str) -> bool {
+    line.contains(text) || is_page_error(line)
+}
+
 /// The number after `key` in `line` ("playhead 1234" -> 1234).
 fn number_after(line: &str, key: &str) -> Option<f64> {
     let rest = &line[line.find(key)? + key.len()..];
@@ -424,6 +527,39 @@ fn audio_stats(log: &[String], from: usize) -> Vec<(f64, f64)> {
         .filter(|l| l.contains("audio stats: ") && l.contains(" callbacks of "))
         .filter_map(|l| Some((number_after(l, "tempo ")?, number_after(l, "playhead ")?)))
         .collect()
+}
+
+/// The frames of each callback of every "audio stats" line after `from`.
+fn callback_frames(log: &[String], from: usize) -> Vec<u64> {
+    log[from.min(log.len())..]
+        .iter()
+        .filter(|l| l.contains("audio stats: "))
+        .filter_map(|l| number_after(l, " callbacks of "))
+        .map(|frames| frames as u64)
+        .collect()
+}
+
+/// Whether the page's output called back with buffers of
+/// `engine::slot::WEB_BUFFER_FRAMES` frames: at least one "audio stats"
+/// line, and no other size (D6 of the catch-up plan).
+fn web_buffers_only(frames: &[u64]) -> bool {
+    !frames.is_empty()
+        && frames
+            .iter()
+            .all(|n| *n == u64::from(engine::slot::WEB_BUFFER_FRAMES))
+}
+
+/// Fails the scenario unless every "audio stats" line after `from` names
+/// callbacks of `engine::slot::WEB_BUFFER_FRAMES` frames.
+fn check_web_buffers(p: &mut Page, from: usize) {
+    let frames = callback_frames(&p.log, from);
+    p.check(
+        web_buffers_only(&frames),
+        &format!(
+            "the output calls back with buffers of {} frames: {frames:?}",
+            engine::slot::WEB_BUFFER_FRAMES
+        ),
+    );
 }
 
 /// Writes the synthetic song's stems (`xtask gen-song`) under `out`.
@@ -481,6 +617,13 @@ fn smoke(o: &Opts) -> Result<()> {
     p.click(o.play_x, "Play")?;
     let played = p.wait_for(from, 60, played_a_second)?;
     p.check(played.is_some(), "the playhead moves after Play");
+    // M6: every lane of the dropped stems plays from browser storage.
+    let stored = p.wait_for(from, 60, |l| playback::playback_line(l).is_some())?;
+    let line = stored.as_deref().and_then(playback::playback_line);
+    p.check(
+        playback::all_from_storage(line.as_ref(), 5),
+        &format!("every lane plays from storage, with no underrun: {line:?}"),
+    );
     let contexts = p.session.execute(
         "return (window.__e2e_ctxs || []).map((c) => ({ state: c.state, time: c.currentTime }));",
         json!([]),
@@ -564,6 +707,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     // playhead rather than for a fixed time.
     let played = p.wait_for(from, 60, played_a_second)?;
     p.check(played.is_some(), "one click on Play starts playback");
+    check_web_buffers(&mut p, from);
     p.screenshot("audio_resume")?;
 
     // Separated stems in the stored session (written as `store::save_stems`
@@ -952,6 +1096,39 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
     Ok(())
 }
 
+/// What is wrong with a run whose query asks for `weights=f16`: the log
+/// must have the worker's line of a passed f16 start-up check and no line
+/// of weights kept f32, and with `memory` a `memory:` line that names f16
+/// weight matrices, so a run that fell back to f32 does not pass as f16.
+/// Empty for a query without `weights=f16`.
+fn f16_problems(query: &str, log: &[String], memory: bool) -> Vec<&'static str> {
+    if !query
+        .trim_start_matches('?')
+        .split('&')
+        .any(|p| p == "weights=f16")
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if !log
+        .iter()
+        .any(|l| l.contains("f16 weights: the start-up check passed"))
+    {
+        out.push("no line `f16 weights: the start-up check passed`");
+    }
+    if log.iter().any(|l| l.contains("weights stay f32")) {
+        out.push("a line says the weights stay f32");
+    }
+    let memory_names = |weights: &str| {
+        log.iter()
+            .any(|l| l.contains("memory: ") && l.contains(weights))
+    };
+    if memory && (!memory_names("(f16 weight matrices)") || memory_names("(f32 weights)")) {
+        out.push("the memory line does not name f16 weight matrices");
+    }
+    out
+}
+
 /// The page URL's query for a GPU scenario.
 fn query(o: &Opts, default: &str) -> String {
     o.query.clone().unwrap_or_else(|| default.to_string())
@@ -969,7 +1146,7 @@ fn bench(o: &Opts) -> Result<()> {
         &format!("index.html?{q}"),
     )?;
     // Any error ends the wait (no WebGPU adapter, say), not only the verdict.
-    let verdict = p.wait_for(0, 4 * 3600, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
         l.contains("bench finished") || l.contains("WebGPU error") || is_page_error(l)
     })?;
     p.note(&format!("verdict: {verdict:?}"));
@@ -981,6 +1158,11 @@ fn bench(o: &Opts) -> Result<()> {
     );
     let gpu_errors = p.log.iter().filter(|l| l.contains("WebGPU error")).count();
     p.check(gpu_errors == 0, "no WebGPU errors");
+    let f16 = f16_problems(&q, &p.log, false);
+    p.check(
+        f16.is_empty(),
+        &format!("f16 weights, when asked for: {f16:?}"),
+    );
     p.finish()
 }
 
@@ -1029,7 +1211,7 @@ fn selftest(o: &Opts) -> Result<()> {
     drop_model(&mut p, &model)?;
     // A model that does not load never starts the self-test, so its
     // message ends the wait too.
-    let verdict = p.wait_for(0, 4 * 3600, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
         l.contains("selftest passed")
             || l.contains("selftest FAILED")
             || l.contains("could not be loaded")
@@ -1042,6 +1224,11 @@ fn selftest(o: &Opts) -> Result<()> {
             .as_deref()
             .is_some_and(|v| v.contains("selftest passed")),
         "the GPU self-test passes",
+    );
+    let f16 = f16_problems(&q, &p.log, true);
+    p.check(
+        f16.is_empty(),
+        &format!("f16 weights, when asked for: {f16:?}"),
     );
     p.finish()
 }
@@ -1172,7 +1359,7 @@ fn separate(o: &Opts) -> Result<()> {
     p.screenshot("separate_model")?;
     let from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
-    let done = p.wait_for(from, 4 * 3600, |l| {
+    let done = p.wait_for(from, MODEL_RUN_SECS, |l| {
         (l.contains("separator: ") && l.contains(" stems in ")) || is_page_error(l)
     })?;
     p.note(&format!("separated: {done:?}"));
@@ -1181,6 +1368,16 @@ fn separate(o: &Opts) -> Result<()> {
             .is_some_and(|l| l.contains("separator: 6 stems in")),
         "six stems arrive",
     );
+    p.check(
+        p.log[from..]
+            .iter()
+            .any(|l| l.contains("separator: separating on the storage path")),
+        "the stored clip separates on the storage path",
+    );
+    let (ok, what) = no_fallback_check(&p.log[from..]);
+    p.check(ok, &what);
+    let (ok, what) = no_mix_write_check(&p.log[from..]);
+    p.check(ok, &what);
     p.idle(2.0)?;
     p.screenshot("separated")?;
     let errors: Vec<String> = p
@@ -1195,53 +1392,690 @@ fn separate(o: &Opts) -> Result<()> {
     p.finish()
 }
 
+/// Minutes of the songs that `memory-budget` separates.
+const BUDGET_MINUTES: [u32; 2] = [1, 4];
+
+/// The peak of each part of the tab's memory in one separation, in MB,
+/// from the `memory: ...` lines that the worker and the page log.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MemoryPeak {
+    page_wasm: f64,
+    worker_wasm: f64,
+    decoder_wasm: f64,
+    gpu_live: f64,
+}
+
+impl MemoryPeak {
+    /// The sum of the parts' peaks: at most the peak of their sum.
+    fn total(&self) -> f64 {
+        self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live
+    }
+}
+
+/// The largest value of each part in the `memory: ...` lines of `log`, or
+/// `None` if a part never appears.
+fn memory_peak(log: &[String]) -> Option<MemoryPeak> {
+    let largest = |key: &str| {
+        log.iter()
+            .filter(|l| l.contains("memory: "))
+            .filter_map(|l| number_after(l, key))
+            .reduce(f64::max)
+    };
+    Some(MemoryPeak {
+        page_wasm: largest("page wasm ")?,
+        worker_wasm: largest("worker wasm ")?,
+        decoder_wasm: largest("decoder wasm ")?,
+        gpu_live: largest("GPU buffers live ")?,
+    })
+}
+
+/// A song of `minutes` at 44.1 kHz: the synthetic mix, repeated, as a
+/// 16-bit WAV in the folder it returns.
+fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
+    let song = crate::synth::generate();
+    let frames = minutes as usize * 60 * crate::synth::SAMPLE_RATE as usize;
+    let repeat = |x: &[f32]| x.iter().copied().cycle().take(frames).collect::<Vec<f32>>();
+    let dir = out.join(format!("song-{minutes}"));
+    std::fs::create_dir_all(&dir)?;
+    let bytes = engine::wav::encode_pcm16(
+        &repeat(&song.mix.left),
+        &repeat(&song.mix.right),
+        crate::synth::SAMPLE_RATE,
+    );
+    std::fs::write(dir.join("song.wav"), bytes)?;
+    Ok(dir)
+}
+
+/// The tolerance of M10 for memory that must not grow with the song, in
+/// MB.  The checks that use it:
+/// * the page's and the worker's growth during a separation (D9 of M3,
+///   step 4 of M4: [`growth_check`]);
+/// * the page's and the decode worker's growth during an open (D12 of M5:
+///   [`open_growth_check`]);
+/// * the page's growth to show the stems, the 4-minute song against the
+///   1-minute song (M7: [`shown_growth_check`]);
+/// * the page's memory after the restore of the 5-minute session against
+///   the 1-minute session (M7: `old_session::old_session_checks`).
+pub(super) const MAX_GROWTH_MB: f64 = 4.0;
+
+/// Whether `line` ends the wait of `memory-budget` for a separation: its
+/// stems are shown, or the page reports an error.
+fn separation_shown(line: &str) -> bool {
+    line.contains("with the stems shown") || is_page_error(line)
+}
+
+/// The check of D9 of M3 on the growth of `part` (the page or the
+/// worker) during a separation.
+fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
+    (
+        growth.is_some_and(|g| g <= MAX_GROWTH_MB),
+        format!(
+            "the {part} grew by {growth:?} MB during the separation, at most {MAX_GROWTH_MB} MB"
+        ),
+    )
+}
+
+/// How much the worker's WebAssembly memory grew from the start of a
+/// separation to its end, from the worker's log lines.
+fn worker_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(&format!("at the separation's {when}")))
+            .and_then(|l| number_after(l, "worker wasm "))
+    };
+    Some(at("end")? - at("start")?)
+}
+
+/// How much the page's WebAssembly memory grew from the start of an open
+/// to the end of its decode (D12 of M5), from the page's log lines.
+fn open_page_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(when))
+            .and_then(|l| number_after(l, "page wasm "))
+    };
+    Some(at("as the decode ends")? - at("as the open starts")?)
+}
+
+/// How much the decode worker's WebAssembly memory grew from the start of
+/// a decode to its end (D12 of M5).
+fn decoder_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(&format!("at the {when} of the decode request")))
+            .and_then(|l| number_after(l, "decoder wasm "))
+    };
+    Some(at("end")? - at("start")?)
+}
+
+/// The check of M5 on the growth of `part` (the page or the decode worker)
+/// during an open.
+fn open_growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
+    (
+        growth.is_some_and(|g| g <= MAX_GROWTH_MB),
+        format!(
+            "the {part} grew by {growth:?} MB from the open's start to the decode's end, at most {MAX_GROWTH_MB} MB"
+        ),
+    )
+}
+
+/// The check of M5 that the decode worker decoded the song of an open, and
+/// the page did not (D9, finding 3-12): no line of `log` says that the page
+/// decodes on its main thread.
+fn open_on_the_worker_check(log: &[String]) -> (bool, String) {
+    (
+        !log.iter()
+            .any(|l| l.contains("decoder: decoding on the page")),
+        "the decode worker decoded the song: no \"decoder: decoding on the page\" line".into(),
+    )
+}
+
+/// The page's line before it writes a mix: a song of one source has its
+/// mix from the decode (D1 of M5), so Separate writes no second mix.
+const MIX_WRITE_LINE: &str = "before the mix is written";
+
+/// The check that Separate wrote no mix: no [`MIX_WRITE_LINE`] in `log`.
+fn no_mix_write_check(log: &[String]) -> (bool, String) {
+    let found: Vec<&String> = log.iter().filter(|l| l.contains(MIX_WRITE_LINE)).collect();
+    (
+        found.is_empty(),
+        format!("Separate writes no second mix (lines {MIX_WRITE_LINE:?}: {found:?})"),
+    )
+}
+
+/// The page's lines that show a fallback to the memory path.
+const FALLBACK_LINES: [&str; 2] = [
+    "separator: separating on the memory path",
+    "separator: browser storage failed",
+];
+
+/// The check that a separation stayed on the storage path: no line of
+/// [`FALLBACK_LINES`] in `log`.
+fn no_fallback_check(log: &[String]) -> (bool, String) {
+    let found: Vec<&String> = log
+        .iter()
+        .filter(|l| FALLBACK_LINES.iter().any(|f| l.contains(f)))
+        .collect();
+    (
+        found.is_empty(),
+        format!("the separation stays on the storage path (fallback lines: {found:?})"),
+    )
+}
+
+/// How much the page's WebAssembly memory grew from the start of a
+/// separation to its end, from the page's log lines.  The start is the
+/// line before the page writes the mix (step 3 of M4), if it wrote one.
+fn page_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(when))
+            .and_then(|l| number_after(l, "page wasm "))
+    };
+    let start = at("before the mix is written").or_else(|| at("as the separation starts"))?;
+    Some(at("as the separation ends")? - start)
+}
+
+/// How much the page's WebAssembly memory grew from the end of a
+/// separation to the stems shown, from the page's log lines (step 9 of
+/// the M7 plan).  The stems show as stored lanes, so the growth is the
+/// read-ahead buffer and the overviews, not the song.
+fn shown_growth(log: &[String]) -> Option<f64> {
+    let at = |when: &str| {
+        log.iter()
+            .find(|l| l.contains(when))
+            .and_then(|l| number_after(l, "page wasm "))
+    };
+    Some(at("with the stems shown")? - at("as the separation ends")?)
+}
+
+/// The check of M7 on the growths of [`shown_growth`]: the long song's is
+/// at most [`MAX_GROWTH_MB`] above the short song's.  Each holds about 18
+/// MiB of a larger read-ahead buffer, seven lanes after one, whatever the
+/// song's length.
+fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
+    (
+        short.zip(long).is_some_and(|(s, l)| l <= s + MAX_GROWTH_MB),
+        format!(
+            "the page grows by {long:?} MB to show the stems of the long song, and by {short:?} MB for the short one: at most {MAX_GROWTH_MB} MB more"
+        ),
+    )
+}
+
+/// Separates songs of 1 and 4 minutes, each in a new browser, so that each
+/// starts with empty WebAssembly memory.  Prints the peak of page wasm,
+/// worker wasm, decoder wasm and GPU live bytes for each, and their
+/// difference.  It also prints how much the page and the worker grew during
+/// each separation.  It fails if the song does not open, the model does not
+/// load, the song does not separate, or the memory lines are missing.  The
+/// growth and path checks fail it too:
+/// * if the page or the worker grows by more than [`MAX_GROWTH_MB`] during
+///   a separation ([`growth_check`]);
+/// * if the page or the decode worker grows by more than that during the
+///   open ([`open_growth_check`]);
+/// * if the page decodes the song on the main thread
+///   ([`open_on_the_worker_check`]);
+/// * if Separate writes a second mix ([`no_mix_write_check`]);
+/// * if the 4-minute song's growth to show the stems is more than that
+///   above the 1-minute song's ([`shown_growth_check`]);
+/// * if a separation falls back to the memory path ([`no_fallback_check`]).
+///
+/// It asserts no budget for the peak yet; M10 of the plan does.
+fn memory_budget(o: &Opts) -> Result<()> {
+    let mut mounts = Vec::new();
+    for minutes in BUDGET_MINUTES {
+        mounts.push((format!("/test/{minutes}/"), long_song(&o.out, minutes)?));
+    }
+    let model = weights_mount(o, &mut mounts)?;
+    let base = start_server(&o.dist, mounts, &["console.js"])?;
+    let q = query(o, "chunk=16384&overlap=1&mm=s64");
+    let mut peaks = Vec::new();
+    let mut shown_growths = Vec::new();
+    for minutes in BUDGET_MINUTES {
+        let mut p = Page::open(
+            o,
+            base.clone(),
+            &[
+                "--enable-unsafe-webgpu",
+                "--autoplay-policy=no-user-gesture-required",
+            ],
+            &format!("index.html?{q}"),
+        )?;
+        p.scenario = format!("memory-budget-{minutes}");
+        p.wait_for(0, 60, |l| l.contains("separator: "))?;
+        let from = p.mark();
+        p.drop_files(&[(
+            &format!("/test/{minutes}/song.wav"),
+            "song.wav",
+            "audio/wav",
+        )])?;
+        let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
+        p.check(kept.is_some(), &format!("the {minutes}-minute song opens"));
+        let (ok, what) = open_on_the_worker_check(&p.log[from..]);
+        p.check(ok, &what);
+        // D12 of M5: neither the page nor the decode worker grows with the
+        // song while it opens.
+        for (part, growth) in [
+            ("page", open_page_growth(&p.log[from..])),
+            ("decode worker", decoder_growth(&p.log[from..])),
+        ] {
+            let (ok, what) = open_growth_check(part, growth);
+            p.check(ok, &what);
+            if let Some(g) = growth {
+                p.note(&format!(
+                    "memory-budget: the {minutes}-minute song: {part} wasm grew by {g:.0} MB during the open"
+                ));
+            }
+        }
+        let from = p.mark();
+        drop_model(&mut p, &model)?;
+        let loaded = p.wait_for(from, 1200, |l| holds_or_error(l, "separator: model loaded"))?;
+        p.check(
+            loaded
+                .as_deref()
+                .is_some_and(|l| l.contains("model loaded")),
+            "the model loads",
+        );
+        let from = p.mark();
+        p.click(o.separate_x, "Separate 6 stems")?;
+        let shown = p.wait_for(from, MODEL_RUN_SECS, separation_shown)?;
+        p.check(
+            shown
+                .as_deref()
+                .is_some_and(|l| l.contains("with the stems shown")),
+            &format!("the {minutes}-minute song separates"),
+        );
+        let (ok, what) = no_fallback_check(&p.log[from..]);
+        p.check(ok, &what);
+        let (ok, what) = no_mix_write_check(&p.log[from..]);
+        p.check(ok, &what);
+        for (part, growth) in [
+            ("page", page_growth(&p.log[from..])),
+            ("worker", worker_growth(&p.log[from..])),
+        ] {
+            let (ok, what) = growth_check(part, growth);
+            p.check(ok, &what);
+            if let Some(g) = growth {
+                p.note(&format!(
+                    "memory-budget: the {minutes}-minute song: {part} wasm grew by {g:.0} MB during the separation"
+                ));
+            }
+        }
+        let growth = shown_growth(&p.log[from..]);
+        p.note(&format!(
+            "memory-budget: the {minutes}-minute song: page wasm grew by {growth:?} MB to show the stems"
+        ));
+        shown_growths.push(growth);
+        let peak = memory_peak(&p.log);
+        p.check(peak.is_some(), "the memory lines");
+        if let Some(peak) = peak {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: page wasm {:.0} MB, worker wasm {:.0} MB, decoder wasm {:.0} MB, GPU live {:.0} MB, peak {:.0} MB",
+                peak.page_wasm,
+                peak.worker_wasm,
+                peak.decoder_wasm,
+                peak.gpu_live,
+                peak.total()
+            ));
+            peaks.push((minutes, peak));
+        }
+        p.finish()?;
+    }
+    if let [(short, a), (long, b)] = peaks[..] {
+        println!(
+            "memory-budget: the {long}-minute peak is {:.0} MB above the {short}-minute peak",
+            b.total() - a.total()
+        );
+    }
+    // M7: the stems show with no read-back, so showing them does not grow
+    // with the song.
+    let (ok, what) = shown_growth_check(
+        shown_growths.first().copied().flatten(),
+        shown_growths.last().copied().flatten(),
+    );
+    println!("memory-budget: {} {what}", if ok { "ok:" } else { "FAIL:" });
+    if !ok {
+        bail!("memory-budget FAILED: {what}");
+    }
+    Ok(())
+}
+
+/// Seconds of the synthetic mix that `stored-stems` separates.
+const STORED_STEMS_SECONDS: usize = 3;
+
+/// The clip of `stored-stems` as 32-bit floats, the left channel and then
+/// the right, in the folder it returns.
+fn stored_stems_clip(out: &Path) -> Result<(PathBuf, usize)> {
+    let song = crate::synth::generate();
+    let n = STORED_STEMS_SECONDS * crate::synth::SAMPLE_RATE as usize;
+    let dir = out.join("clip");
+    std::fs::create_dir_all(&dir)?;
+    let bytes: Vec<u8> = song.mix.left[..n]
+        .iter()
+        .chain(&song.mix.right[..n])
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    std::fs::write(dir.join("clip.f32"), bytes)?;
+    Ok((dir, n))
+}
+
+/// Little-endian 32-bit floats from base64, as `e2e.base64` sends them.
+fn floats_from_base64(text: &str) -> Result<Vec<f32>> {
+    let bytes = crate::webdriver::base64_decode(text)?;
+    if bytes.len() % 4 != 0 {
+        bail!("{} bytes are not whole floats", bytes.len());
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The SHA-256 of each stem in `stems` as a 16-bit WAV (see
+/// [`stem_wavs`]), in the order of `names`.
+fn stem_hashes(stems: &Value, names: &[&str]) -> Result<Vec<String>> {
+    Ok(stem_wavs(stems, names)?
+        .iter()
+        .map(|wav| sha256_hex(wav))
+        .collect())
+}
+
+/// The file name of the stem `name`, as `stem_protocol::stem_file` gives
+/// it (`xtask` does not take `stem-protocol`): `bass.wav`.
+fn stem_protocol_file(name: &str) -> String {
+    format!("{name}.wav")
+}
+
+/// The session folder that `stored-stems` plants for the storage path.
+const STORED_STEMS_SESSION: &str = "sessions/1792640000000";
+
+/// The bytes of each stem in `stems` (`{name: [left, right]}`, each
+/// channel as base64 floats) as a 16-bit WAV, in the order of `names`.
+fn stem_wavs(stems: &Value, names: &[&str]) -> Result<Vec<Vec<u8>>> {
+    names
+        .iter()
+        .map(|name| {
+            let channel = |c: usize| {
+                let text = stems[name][c]
+                    .as_str()
+                    .with_context(|| format!("no stem {name}"))?;
+                floats_from_base64(text)
+            };
+            let (left, right) = (channel(0)?, channel(1)?);
+            Ok(engine::wav::encode_pcm16(
+                &left,
+                &right,
+                crate::synth::SAMPLE_RATE,
+            ))
+        })
+        .collect()
+}
+
+/// Checks, each with whether it passed and what it checks.
+type Checks = Vec<(bool, String)>;
+
+/// The checks of `stored-stems` on what its page script returns (`r`),
+/// for a clip of `frames`, and the memory path's SHA-256s.  With `hashes`
+/// (`--hashes`), the SHA-256s must equal them.
+fn stored_stems_checks(
+    r: &Value,
+    frames: usize,
+    hashes: Option<&str>,
+) -> Result<(Checks, Vec<String>)> {
+    let mut checks = vec![
+        (
+            r["replies"][0]["ok"] == json!(true),
+            "the worker loads the model".to_string(),
+        ),
+        (
+            r["replies"][1]["type"] == json!("done"),
+            "the memory path finishes".into(),
+        ),
+        (
+            r["len"] == json!(frames),
+            format!("the song is {frames} frames"),
+        ),
+    ];
+    let segments = r["segments"].as_u64().unwrap_or(0);
+    checks.push((segments > 1, format!("several segments ({segments})")));
+    checks.push((
+        r["replies"][2]["type"] == json!("done"),
+        format!(
+            "the storage path finishes ({})",
+            texts(&json!([r["replies"][2]])).join("")
+        ),
+    ));
+    checks.push((
+        r["storage_segments"] == json!(0),
+        "the storage path sends no segment reply".into(),
+    ));
+    let stored = r["stored"].as_array().cloned().unwrap_or_default();
+    checks.push((
+        stored.len() > 1,
+        format!("a stored reply after each segment ({})", stored.len()),
+    ));
+    let last = stored.last().cloned().unwrap_or(Value::Null);
+    checks.push((
+        last["frames"] == json!(frames) && last["len"] == json!(frames),
+        format!("the last stored reply covers the song ({last})"),
+    ));
+    checks.push((
+        last["stems"] == json!(roformer::STEMS),
+        "the stored replies name the stems in the worker's order".into(),
+    ));
+    let wavs = stem_wavs(&r["memory"], &roformer::STEMS)?;
+    for (name, want) in roformer::STEMS.iter().zip(&wavs) {
+        let got = r["files"][name]
+            .as_str()
+            .map(crate::webdriver::base64_decode)
+            .transpose()?;
+        let first_wrong = got
+            .as_deref()
+            .and_then(|g| g.iter().zip(want).position(|(a, b)| a != b));
+        checks.push((
+            got.as_deref() == Some(want.as_slice()),
+            format!(
+                "the stored {name} equals the memory path's as a 16-bit WAV ({} of {} bytes, first difference at {first_wrong:?})",
+                got.as_ref().map_or(0, Vec::len),
+                want.len()
+            ),
+        ));
+    }
+    let got = stem_hashes(&r["memory"], &roformer::STEMS)?;
+    if let Some(want) = hashes {
+        let want: Vec<&str> = want.split(',').map(str::trim).collect();
+        checks.push((
+            want == got,
+            "the memory path's stems equal the hashes given".into(),
+        ));
+    }
+    Ok((checks, got))
+}
+
+/// One worker, from a blank page, separates 3 seconds of the synthetic mix with
+/// `chunk: 16384, overlap: 2`, so that it sends several segments: first on the
+/// memory path, from two arrays, then on the storage path into a planted
+/// session folder, from the clip planted there as its mix file (`mix.f32`,
+/// interleaved).  The kernels are fixed (`mm: s64, attn: split`), so the two
+/// runs do the same arithmetic.  Each stem file must equal
+/// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.  The
+/// storage path must send no `segment` reply, and its last `stored` reply must
+/// cover the song.  It prints the SHA-256 of each memory-path stem as a 16-bit
+/// WAV, and checks them against `--hashes`.
+fn stored_stems(o: &Opts) -> Result<()> {
+    let (clip_dir, frames) = stored_stems_clip(&o.out)?;
+    let mut mounts = vec![("/clip/".to_string(), clip_dir)];
+    let model = weights_mount(o, &mut mounts)?;
+    let base = start_server(&o.dist, mounts, &["console.js"])?;
+    let mut p = Page::open(o, base, &["--enable-unsafe-webgpu"], "__e2e/blank.html")?;
+    let r = in_page(
+        &mut p,
+        "const [model, session, names] = args;
+        await e2e.wipe();
+        const clip = new Float32Array(await (await fetch('/clip/clip.f32')).arrayBuffer());
+        const n = clip.length / 2;
+        const bytes = new Uint8Array(await (await fetch(model)).arrayBuffer());
+        const opts = { mm: 's64', attn: 'split', chunk: 16384, overlap: 2, step_limit: 600 };
+        const stems = {};
+        // Each separation starts with a progress reply of 0 chunks done.
+        const out = { segments: 0, storage_segments: 0, len: 0, stored: [], separations: 0 };
+        const started = (d) => { if (d.done === 0) out.separations++; };
+        const place = (d) => {
+          if (out.separations > 1) { out.storage_segments++; return; }
+          out.segments++;
+          out.len = d.len;
+          for (const [name, l, r] of d.stems) {
+            stems[name] ??= [new Float32Array(d.len), new Float32Array(d.len)];
+            stems[name][0].set(l, d.start);
+            stems[name][1].set(r, d.start);
+          }
+        };
+        const stored = (d) => out.stored.push({ frames: d.frames, len: d.len, stems: d.stems });
+        // The mix file: interleaved 32-bit little-endian floats.
+        const mix = new DataView(new ArrayBuffer(8 * n));
+        for (let i = 0; i < n; i++) {
+          mix.setFloat32(8 * i, clip[i], true);
+          mix.setFloat32(8 * i + 4, clip[n + i], true);
+        }
+        await e2e.plant_at(`${session}/mix.f32`, new Uint8Array(mix.buffer));
+        const m = await e2e.ask([
+          { type: 'model', bytes, ...opts },
+          { type: 'separate', left: clip.slice(0, n), right: clip.slice(n), ...opts },
+          { type: 'separate', mix: `${session}/mix.f32`, frames: n, session, ...opts },
+        ], { progress: started, segment: place, stored });
+        out.replies = m.replies;
+        out.memory = {};
+        for (const [name, [l, r]] of Object.entries(stems)) out.memory[name] = [e2e.base64(l), e2e.base64(r)];
+        out.files = {};
+        for (const [name, file] of names) {
+          const bytes = await e2e.read(`${session}/stems/${file}.part`);
+          out.files[name] = bytes && e2e.base64(bytes);
+        }
+        return out;",
+        json!([
+            model,
+            STORED_STEMS_SESSION,
+            roformer::STEMS
+                .iter()
+                .map(|n| [n.to_string(), stem_protocol_file(n)])
+                .collect::<Vec<_>>()
+        ]),
+        3600,
+    )?;
+    p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
+    for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
+        p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
+    }
+    p.note(&format!("stored-stems: --hashes {}", hashes.join(",")));
+    if o.hashes.is_none() {
+        p.note("no --hashes: the hashes are not checked");
+    }
+    for (ok, what) in checks {
+        p.check(ok, &what);
+    }
+    p.finish()
+}
+
 /// Seconds of the stem that `flac` encodes.
 const FLAC_SECONDS: u32 = 300;
+/// The save files of the stored case of `flac`, as the page names them.
+const FLAC_WAV: &str = "saves/e2e-1.wav";
+const FLAC_OUT: &str = "saves/e2e-1.flac";
 
-/// The release worker encodes a 5-minute stereo stem as a FLAC, from a blank
-/// page that posts the request by hand.  The reply is a `Blob` that starts
-/// with `fLaC` and is smaller than the stem's 16-bit PCM.  Logs the time.
+/// The release worker encodes a 5-minute stereo stem as a FLAC, from a
+/// blank page that posts the requests by hand.  The arrays case sends the
+/// two channels.  Its reply is a `Blob` that starts with `fLaC` and is
+/// smaller than the stem's 16-bit PCM.  The stored case writes the stem
+/// as a 16-bit WAV file in `saves/`, and names it (D5 of the M8 plan).
+/// Its reply names the output file, which is the same, byte for byte, as
+/// the arrays case's file, and the worker removed the WAV.  Logs the
+/// times.
 fn flac(o: &Opts) -> Result<()> {
     let base = start_server(&o.dist, Vec::new(), &["console.js"])?;
     let mut p = Page::open(o, base, &[], "__e2e/blank.html")?;
     let r = in_page(
         &mut p,
-        "const rate = 44100, n = args[0] * rate;
+        "const [seconds, wav_path, out] = args;
+        const rate = 44100, n = seconds * rate;
         const left = new Float32Array(n), right = new Float32Array(n);
         for (let i = 0; i < n; i++) {
           left[i] = 0.5 * Math.sin(2 * Math.PI * 220 * i / rate);
           right[i] = 0.5 * Math.sin(2 * Math.PI * 330 * i / rate);
         }
+        // The 16-bit WAV of the same samples, rounded as the worker's
+        // pcm16 rounds: half away from zero, clipped at full scale.
+        const wav = new Uint8Array(44 + 4 * n);
+        const v = new DataView(wav.buffer);
+        const text = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)));
+        text(0, 'RIFF'); v.setUint32(4, 36 + 4 * n, true); text(8, 'WAVEfmt ');
+        v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 2, true);
+        v.setUint32(24, rate, true); v.setUint32(28, 4 * rate, true);
+        v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+        text(36, 'data'); v.setUint32(40, 4 * n, true);
+        const pcm16 = (x) => {
+          const s = x * 32768;
+          return Math.max(-32768, Math.min(32767, Math.sign(s) * Math.round(Math.abs(s))));
+        };
+        for (let i = 0; i < n; i++) {
+          v.setInt16(44 + 4 * i, pcm16(left[i]), true);
+          v.setInt16(46 + 4 * i, pcm16(right[i]), true);
+        }
+        await e2e.plant_at(wav_path, wav);
+        const digest = async (bytes) => e2e.base64(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
         const w = await e2e.start();
-        const t0 = performance.now();
-        const d = await new Promise((resolve) => {
+        const ask = (msg, transfer) => new Promise((resolve) => {
           w.onmessage = (e) => {
             if (e.data.type === 'flac' || e.data.type === 'error') resolve(e.data);
           };
-          w.postMessage({ type: 'flac', name: 'tone.flac', left, right, rate }, [left.buffer, right.buffer]);
+          w.postMessage(msg, transfer);
         });
-        const ms = Math.round(performance.now() - t0);
+        let t0 = performance.now();
+        const d = await ask({ type: 'flac', name: 'tone.flac', left, right, rate }, [left.buffer, right.buffer]);
+        const arrays = { ms: Math.round(performance.now() - t0) };
+        if (d.type !== 'flac') arrays.error = d.text;
+        else {
+          const head = new Uint8Array(await d.file.slice(0, 4).arrayBuffer());
+          Object.assign(arrays, { name: d.name, size: d.file.size, media: d.file.type,
+            head: String.fromCharCode(...head), sha256: await digest(await d.file.arrayBuffer()) });
+        }
+        t0 = performance.now();
+        const s = await ask({ type: 'flac', name: 'tone.flac', wav: wav_path, frames: n, out, rate }, []);
+        const stored = { ms: Math.round(performance.now() - t0), type: s.type, name: s.name,
+          path: s.path, failed: s.failed, error: s.type === 'error' ? s.text : undefined };
         w.terminate();
-        if (d.type !== 'flac') return { ms, error: d.text };
-        const head = new Uint8Array(await d.file.slice(0, 4).arrayBuffer());
-        return { ms, name: d.name, size: d.file.size, media: d.file.type,
-          head: String.fromCharCode(...head) };",
-        json!([FLAC_SECONDS]),
+        const file = s.path ? await e2e.read(s.path) : null;
+        if (file) Object.assign(stored, { size: file.length,
+          head: String.fromCharCode(...file.subarray(0, 4)), sha256: await digest(file) });
+        stored.wav_left = (await e2e.read(wav_path)) !== null;
+        return { arrays, stored };",
+        json!([FLAC_SECONDS, FLAC_WAV, FLAC_OUT]),
         300,
     )?;
     p.note(&format!("reply: {r}"));
-    for (ok, what) in flac_checks(&r, FLAC_SECONDS) {
+    for (ok, what) in flac_checks(&r["arrays"], FLAC_SECONDS) {
+        p.check(ok, &what);
+    }
+    for (ok, what) in stored_flac_checks(&r["stored"], &r["arrays"]) {
         p.check(ok, &what);
     }
     p.note(&format!(
-        "flac: {FLAC_SECONDS} s of stereo encoded in {} ms",
-        r["ms"]
+        "flac: {FLAC_SECONDS} s of stereo encoded in {} ms from arrays, {} ms from a stored WAV",
+        r["arrays"]["ms"], r["stored"]["ms"]
     ));
     p.finish()
 }
 
-/// The checks of the `flac` scenario on the page's summary of the reply,
-/// for a stem of `seconds` of 44.1 kHz stereo: each with what it checks.
+/// The checks of the `flac` scenario on the page's summary of the arrays
+/// reply, for a stem of `seconds` of 44.1 kHz stereo: each with what it
+/// checks.
 fn flac_checks(r: &Value, seconds: u32) -> [(bool, String); 5] {
     let pcm_bytes = u64::from(seconds) * 44_100 * 4;
     [
@@ -1252,6 +2086,33 @@ fn flac_checks(r: &Value, seconds: u32) -> [(bool, String); 5] {
         (
             r["size"].as_u64().is_some_and(|s| s < pcm_bytes),
             format!("the file is smaller than its {pcm_bytes} bytes of 16-bit PCM"),
+        ),
+    ]
+}
+
+/// The checks of the stored case of `flac`, on the page's summary of its
+/// reply and of the arrays case's reply.
+fn stored_flac_checks(s: &Value, arrays: &Value) -> [(bool, String); 5] {
+    [
+        (
+            s["type"] == "flac" && s["error"].is_null() && s["failed"].is_null(),
+            "the worker encodes the stored WAV".into(),
+        ),
+        (
+            s["path"] == FLAC_OUT && s["name"] == "tone.flac",
+            format!("the reply names {FLAC_OUT} and keeps the name"),
+        ),
+        (
+            s["head"] == "fLaC",
+            "the stored file starts with fLaC".into(),
+        ),
+        (
+            s["sha256"].is_string() && s["sha256"] == arrays["sha256"],
+            "the stored file is the arrays file, byte for byte".into(),
+        ),
+        (
+            s["wav_left"] == false,
+            "the worker removed the WAV file".into(),
         ),
     ]
 }
@@ -1320,7 +2181,7 @@ fn worker_check(o: &Opts) -> Result<()> {
         r.files = c.files;
         return r;",
         json!([model, o.download, o.reference.is_some()]),
-        4 * 3600,
+        MODEL_RUN_SECS,
     )?;
     let text = serde_json::to_string_pretty(&r)?;
     p.note(&text);
@@ -1358,6 +2219,402 @@ fn worker_check(o: &Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Base64 of `bytes`, as the page's `e2e.base64` gives it.
+    pub(super) fn base64(bytes: &[u8]) -> String {
+        const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    fn floats(v: &[f32]) -> String {
+        base64(&v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>())
+    }
+
+    /// Stem `k`'s two channels in the sample result.
+    fn channels(k: usize) -> (Vec<f32>, Vec<f32>) {
+        let left: Vec<f32> = (0..4).map(|i| 0.1 * (k + i) as f32).collect();
+        let right = left.iter().map(|x| -x).collect();
+        (left, right)
+    }
+
+    /// What the page script of `stored-stems` returns when all goes well,
+    /// for a clip of 4 frames.
+    fn stored_stems_reply() -> Value {
+        let mut memory = serde_json::Map::new();
+        let mut files = serde_json::Map::new();
+        for (k, name) in roformer::STEMS.iter().enumerate() {
+            let (l, r) = channels(k);
+            memory.insert(name.to_string(), json!([floats(&l), floats(&r)]));
+            files.insert(
+                name.to_string(),
+                json!(base64(&engine::wav::encode_pcm16(&l, &r, 44_100))),
+            );
+        }
+        let stored =
+            |frames: usize| json!({ "frames": frames, "len": 4, "stems": roformer::STEMS });
+        json!({
+            "replies": [
+                { "type": "model", "ok": true },
+                { "type": "done" },
+                { "type": "done" },
+            ],
+            "len": 4,
+            "segments": 2,
+            "storage_segments": 0,
+            "stored": [stored(2), stored(4)],
+            "memory": memory,
+            "files": files,
+        })
+    }
+
+    /// The names of the checks that fail.
+    fn failing(r: &Value, hashes: Option<&str>) -> Vec<String> {
+        let (checks, _) = stored_stems_checks(r, 4, hashes).unwrap();
+        checks
+            .into_iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, what)| what)
+            .collect()
+    }
+
+    #[test]
+    fn the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones() {
+        let good = stored_stems_reply();
+        let (checks, hashes) = stored_stems_checks(&good, 4, None).unwrap();
+        assert_eq!(checks.len(), 15, "nine checks, and one for each stem");
+        assert_eq!(failing(&good, None), Vec::<String>::new());
+        let all = hashes.join(",");
+        assert_eq!(failing(&good, Some(&all)), Vec::<String>::new());
+        let mut wrong_hashes = hashes.clone();
+        wrong_hashes[5] = "0".repeat(64);
+        assert_eq!(
+            failing(&good, Some(&wrong_hashes.join(","))),
+            ["the memory path's stems equal the hashes given"]
+        );
+        let cases: [(&str, Value, &str); 10] = [
+            ("/replies/0/ok", json!(false), "the worker loads the model"),
+            (
+                "/replies/1/type",
+                json!("error"),
+                "the memory path finishes",
+            ),
+            ("/len", json!(5), "the song is 4 frames"),
+            ("/segments", json!(1), "several segments (1)"),
+            (
+                "/replies/2/type",
+                json!("unstored"),
+                "the storage path finishes",
+            ),
+            (
+                "/storage_segments",
+                json!(1),
+                "the storage path sends no segment reply",
+            ),
+            (
+                "/stored",
+                json!([{ "frames": 4, "len": 4, "stems": roformer::STEMS }]),
+                "a stored reply after each segment (1)",
+            ),
+            (
+                "/stored/1/frames",
+                json!(3),
+                "the last stored reply covers the song",
+            ),
+            (
+                "/stored/1/len",
+                json!(5),
+                "the last stored reply covers the song",
+            ),
+            (
+                "/stored/1/stems",
+                json!(["drums"]),
+                "the stored replies name the stems",
+            ),
+        ];
+        for (at, value, check) in cases {
+            let mut r = good.clone();
+            *r.pointer_mut(at).unwrap() = value;
+            let failed = failing(&r, None);
+            assert!(
+                failed.len() == 1 && failed[0].starts_with(check),
+                "{at}: {failed:?}"
+            );
+        }
+        let mut r = good.clone();
+        let wav = engine::wav::encode_pcm16(&[0.5; 4], &[0.5; 4], 44_100);
+        r["files"]["piano"] = json!(base64(&wav));
+        let failed = failing(&r, None);
+        // The header is the same; the first sample of the right channel is
+        // 0.5, not -0.5, so its high byte (offset 47) differs first.
+        assert!(
+            failed.len() == 1
+                && failed[0].starts_with("the stored piano equals")
+                && failed[0].ends_with("(60 of 60 bytes, first difference at Some(47))"),
+            "{failed:?}"
+        );
+    }
+
+    #[test]
+    fn stem_wavs_and_hashes_are_of_16_bit_wavs() {
+        let stems = json!({ "bass": [floats(&[0.5]), floats(&[-0.25])] });
+        let wavs = stem_wavs(&stems, &["bass"]).unwrap();
+        assert_eq!(wavs, [engine::wav::encode_pcm16(&[0.5], &[-0.25], 44_100)]);
+        assert_eq!(wavs[0].len(), 48);
+        // The WAV of one frame (16384, -8192), from Python's hashlib.
+        assert_eq!(
+            stem_hashes(&stems, &["bass"]).unwrap(),
+            ["eee3c63df7f6248ef5893dfca72b1f3a92f1669294c50384ba94567001a9cd12"]
+        );
+        assert!(stem_wavs(&stems, &["drums"]).is_err(), "no such stem");
+    }
+
+    #[test]
+    fn a_stem_file_name_is_the_name_and_wav() {
+        assert_eq!(stem_protocol_file("bass"), "bass.wav");
+        // `stem_protocol::stem_file` keeps letters as they are, so it
+        // gives the same names for the worker's stems.
+        assert!(
+            roformer::STEMS
+                .iter()
+                .all(|n| n.chars().all(|c| c.is_ascii_lowercase())),
+            "{:?}",
+            roformer::STEMS
+        );
+    }
+
+    #[test]
+    fn the_stored_stems_clip_is_3_seconds_of_the_mix() {
+        let out = std::env::temp_dir().join(format!("stemyla-clip-{}", std::process::id()));
+        let (dir, n) = stored_stems_clip(&out).unwrap();
+        let bytes = std::fs::read(dir.join("clip.f32")).unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+        assert_eq!(n, 3 * 44_100);
+        assert_eq!(bytes.len(), 2 * n * 4, "two channels of f32");
+        let song = crate::synth::generate();
+        let first = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+        let right = f32::from_le_bytes(bytes[4 * n..4 * n + 4].try_into().unwrap());
+        assert_eq!((first, right), (song.mix.left[0], song.mix.right[0]));
+        let last = f32::from_le_bytes(bytes[4 * n - 4..4 * n].try_into().unwrap());
+        assert_eq!(last, song.mix.left[n - 1]);
+    }
+
+    #[test]
+    fn showing_the_stems_does_not_grow_with_the_song() {
+        let log = |ends: f64, shown: f64| {
+            vec![
+                format!(
+                    "[9.0s] console.info: separator: memory: page wasm {ends} MB as the separation ends"
+                ),
+                format!(
+                    "[9.5s] console.info: separator: memory: page wasm {shown} MB with the stems shown"
+                ),
+            ]
+        };
+        let (short, long) = (
+            shown_growth(&log(300.0, 320.0)),
+            shown_growth(&log(302.0, 324.0)),
+        );
+        assert_eq!((short, long), (Some(20.0), Some(22.0)));
+        assert!(shown_growth_check(short, long).0);
+        // The read-back of the stems of 4 minutes: about 600 MB more.
+        let read_back = shown_growth(&log(302.0, 922.0));
+        assert!(!shown_growth_check(short, read_back).0);
+        assert!(!shown_growth_check(short, Some(24.1)).0, "over 4 MB more");
+        assert!(!shown_growth_check(None, long).0);
+        assert!(!shown_growth_check(short, None).0);
+        assert_eq!(shown_growth(&log(300.0, 320.0)[..1]), None, "no shown line");
+    }
+
+    #[test]
+    fn memory_budget_waits_for_the_stems_shown_and_checks_the_growth() {
+        assert!(separation_shown(
+            "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown"
+        ));
+        assert!(separation_shown("[9.5s] console.error: something broke"));
+        assert!(!separation_shown(
+            "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends"
+        ));
+        assert!(growth_check("page", Some(0.0)).0);
+        assert!(growth_check("page", Some(4.0)).0, "at the limit");
+        assert!(!growth_check("page", Some(4.5)).0);
+        assert!(!growth_check("worker", None).0, "no lines");
+        assert_eq!(
+            growth_check("worker", Some(2.0)).1,
+            "the worker grew by Some(2.0) MB during the separation, at most 4 MB"
+        );
+    }
+
+    /// The page's and the worker's lines of one separation on the storage
+    /// path, in their real order: the worker's end line comes before the
+    /// page's.
+    fn separation_log() -> Vec<String> {
+        [
+            "[1.0s] console.info: separator: memory: page wasm 290 MB before the mix is written",
+            "[2.0s] console.info: separator: separating on the storage path",
+            "[2.0s] console.info: separator: memory: page wasm 300 MB as the separation starts",
+            "[2.1s] console.info: separator: memory: worker wasm 57 MB at the separation's start",
+            "[3.0s] console.info: separator: chunk 1/6: 0.3 s; memory: worker wasm 58 MB, model on the GPU 699 MB (f32 weights)",
+            "[8.9s] console.info: separator: memory: worker wasm 60 MB at the separation's end",
+            "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends",
+            "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn the_worker_growth_is_its_end_less_its_start() {
+        let log = separation_log();
+        assert_eq!(worker_growth(&log), Some(3.0));
+        assert_eq!(page_growth(&log), Some(12.0), "from before the mix write");
+        assert_eq!(worker_growth(&log[4..]), None, "no start");
+        assert_eq!(worker_growth(&log[..5]), None, "no end");
+        let pages: Vec<String> = log
+            .iter()
+            .filter(|l| l.contains("page wasm"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            worker_growth(&pages),
+            None,
+            "the page's lines are not the worker's"
+        );
+        let workers: Vec<String> = log
+            .iter()
+            .filter(|l| l.contains("worker wasm"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            page_growth(&workers),
+            None,
+            "the worker's lines are not the page's"
+        );
+    }
+
+    #[test]
+    fn a_fallback_to_the_memory_path_fails_the_checks() {
+        let log = separation_log();
+        let (ok, what) = no_fallback_check(&log);
+        assert!(ok, "{what}");
+        for line in [
+            "[2.0s] console.info: separator: separating on the memory path",
+            "[5.0s] console.warn: separator: browser storage failed: NotReadableError: the mix file could not be read",
+        ] {
+            let mut with = log.clone();
+            with.insert(5, line.to_string());
+            let (ok, what) = no_fallback_check(&with);
+            assert!(!ok, "{line}");
+            assert!(what.contains(line), "{what}");
+        }
+    }
+
+    /// The page's and the decode worker's lines of one open of a song
+    /// (D12 of M5), in their real order.
+    fn open_log() -> Vec<String> {
+        [
+            "[1.0s] console.info: [app] decoder: memory: page wasm 8 MB as the open starts",
+            "[1.1s] console.info: [app::decoder::client] decoder: memory: decoder wasm 6 MB at the start of the decode request",
+            "[2.0s] console.info: [app::decoder::client] decoder: memory: decoder wasm 7 MB at the end of the decode request",
+            "[2.1s] console.info: [app] decoder: memory: page wasm 9 MB as the decode ends",
+            "[2.2s] console.info: [app] song kept in browser storage as session 1",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn the_open_growths_are_the_end_less_the_start() {
+        let log = open_log();
+        assert_eq!(open_page_growth(&log), Some(1.0));
+        assert_eq!(decoder_growth(&log), Some(1.0));
+        assert_eq!(open_page_growth(&log[1..]), None, "no start");
+        assert_eq!(open_page_growth(&log[..3]), None, "no end");
+        assert_eq!(decoder_growth(&log[2..]), None, "no start");
+        assert_eq!(decoder_growth(&log[..2]), None, "no end");
+        let separation = separation_log();
+        assert_eq!(
+            open_page_growth(&separation),
+            None,
+            "a separation is no open"
+        );
+        assert_eq!(
+            decoder_growth(&separation),
+            None,
+            "the stem worker is not the decode worker"
+        );
+        assert!(open_on_the_worker_check(&log).0, "the worker decoded it");
+        let mut on_the_page = log.clone();
+        on_the_page.insert(
+            3,
+            "[2.05s] console.info: [app] decoder: decoding on the page".into(),
+        );
+        assert!(
+            !open_on_the_worker_check(&on_the_page).0,
+            "the page decoded it"
+        );
+        assert!(open_growth_check("page", Some(4.0)).0, "at the limit");
+        assert!(!open_growth_check("page", Some(4.5)).0);
+        assert!(!open_growth_check("decode worker", None).0, "no lines");
+        assert_eq!(
+            open_growth_check("decode worker", Some(1.0)).1,
+            "the decode worker grew by Some(1.0) MB from the open's start to the decode's end, at most 4 MB"
+        );
+    }
+
+    #[test]
+    fn a_mix_write_fails_the_check() {
+        let (ok, what) = no_mix_write_check(&open_log());
+        assert!(ok, "{what}");
+        let (ok, what) = no_mix_write_check(&separation_log());
+        assert!(!ok && what.contains("before the mix is written"), "{what}");
+    }
+
+    #[test]
+    fn the_page_growth_is_the_end_less_the_start() {
+        let log: Vec<String> = [
+            "[1.0s] console.info: separator: memory: page wasm 300 MB as the separation starts",
+            "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends",
+            "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(page_growth(&log), Some(2.0), "no mix write: from the start");
+        assert_eq!(page_growth(&log[1..]), None, "no start");
+        assert_eq!(page_growth(&log[..1]), None, "no end");
+    }
+
+    #[test]
+    fn sha256_matches_the_standard_vectors() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn floats_come_back_from_base64_as_sent() {
+        // 1.0 and -0.5 as little-endian f32: 00 00 80 3f, 00 00 00 bf.
+        assert_eq!(floats_from_base64("AACAPwAAAL8=").unwrap(), [1.0, -0.5]);
+        assert!(floats_from_base64("AACA").is_err(), "3 bytes");
+    }
 
     #[test]
     fn the_flac_clip_decodes_to_its_samples() {
@@ -1410,7 +2667,98 @@ mod tests {
         );
     }
 
+    fn stored_reply() -> serde_json::Value {
+        json!({"type": "flac", "name": "tone.flac", "path": FLAC_OUT, "head": "fLaC",
+            "size": 8460848, "sha256": "abc=", "wav_left": false, "ms": 9000})
+    }
+
+    #[test]
+    fn the_stored_flac_checks_pass_a_good_reply_and_fail_wrong_ones() {
+        let arrays = json!({"sha256": "abc="});
+        let passes =
+            |s: &serde_json::Value| stored_flac_checks(s, &arrays).map(|(ok, _)| ok).to_vec();
+        assert_eq!(passes(&stored_reply()), [true; 5]);
+        let wrong = |field: &str, value: serde_json::Value, check: usize| {
+            let mut s = stored_reply();
+            s[field] = value;
+            let mut want = [true; 5];
+            want[check] = false;
+            assert_eq!(passes(&s), want, "{field}");
+        };
+        wrong("type", json!("error"), 0);
+        wrong("error", json!("wav must be a file in saves/"), 0);
+        wrong("failed", json!("QuotaExceededError"), 0);
+        wrong("path", json!("saves/other.flac"), 1);
+        wrong("name", json!("stem.flac"), 1);
+        wrong("head", json!("RIFF"), 2);
+        wrong("sha256", json!("abd="), 3);
+        wrong("sha256", serde_json::Value::Null, 3);
+        wrong("wav_left", json!(true), 4);
+    }
+
     use super::*;
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// A query without `weights=f16` asks nothing.  With it, the start-up
+    /// line must be there, with no line of a failed f16 check or of
+    /// weights kept f32, and for the self-test a memory line of f16 weight
+    /// matrices.
+    #[test]
+    fn an_f16_run_needs_the_start_up_line_and_f16_weights() {
+        let passed = "console.log: stem-worker: f16 weights: the start-up check passed";
+        let f16_memory = "console.log: stem-worker: memory: worker wasm 40 MB, model on the GPU 350 MB (f16 weight matrices)";
+        let f32_memory = "console.log: stem-worker: memory: worker wasm 40 MB, model on the GPU 699 MB (f32 weights)";
+        assert!(f16_problems("bench&mm=s64", &[], true).is_empty());
+        assert!(f16_problems("bench&weights=f16", &lines(&[passed]), false).is_empty());
+        assert!(
+            f16_problems(
+                "selftest=stages&weights=f16",
+                &lines(&[passed, f16_memory]),
+                true
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            f16_problems("bench&weights=f16", &[], false),
+            ["no line `f16 weights: the start-up check passed`"]
+        );
+        let failed = "console.log: stem-worker: f16 weights: the f16 variant of matmul kernel s64 does not give its f32 output on this GPU (case 4: 4690 of 4690 values differ, the largest by 6e-5); weights stay f32";
+        assert_eq!(
+            f16_problems("bench&weights=f16", &lines(&[failed]), false),
+            [
+                "no line `f16 weights: the start-up check passed`",
+                "a line says the weights stay f32"
+            ]
+        );
+        assert_eq!(
+            f16_problems(
+                "selftest=stages&weights=f16",
+                &lines(&[passed, f32_memory]),
+                true
+            ),
+            ["the memory line does not name f16 weight matrices"]
+        );
+        assert_eq!(
+            f16_problems("selftest=stages&weights=f16", &lines(&[passed]), true),
+            ["the memory line does not name f16 weight matrices"]
+        );
+        assert_eq!(
+            f16_problems(
+                "selftest=stages&weights=f16",
+                &lines(&[passed, f16_memory, f32_memory]),
+                true
+            ),
+            ["the memory line does not name f16 weight matrices"]
+        );
+        assert!(f16_problems("weights=f16x", &[], true).is_empty());
+        assert_eq!(
+            f16_problems("?weights=f16", &[], false),
+            ["no line `f16 weights: the start-up check passed`"]
+        );
+    }
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()
@@ -1449,6 +2797,49 @@ mod tests {
         assert_eq!(page_errors(&log), log[2..]);
     }
 
+    /// Findings 1-29 and 1-72 of review round 1 of M5: a wait ends on its
+    /// line or on a page error, not only on a line that is both.
+    #[test]
+    fn a_wait_ends_on_its_line_or_a_page_error() {
+        let want = "song kept in browser storage as session";
+        assert!(holds_or_error(
+            "song kept in browser storage as session 1",
+            want
+        ));
+        assert!(holds_or_error("PAGE ERROR: x is not defined", want));
+        assert!(!holds_or_error("console.info: fine", want));
+    }
+
+    /// The peak of each part, from the worker's lines after the model
+    /// loads and after each chunk, and the page's line at the end.
+    #[test]
+    fn the_memory_peak_takes_each_part_at_its_largest() {
+        let log: Vec<String> = [
+            "[1.0s] separator: memory: worker wasm 57 MB, model on the GPU 699 MB (f32 weights), GPU buffers live 699 MB",
+            "[2.0s] separator: chunk 1/48: 9.9 s; memory: worker wasm 231 MB, model on the GPU 699 MB (f32 weights), chunk buffers 280 MB, GPU buffers live 979 MB",
+            "[3.0s] separator: chunk 2/48: 9.8 s; memory: worker wasm 246 MB, model on the GPU 699 MB (f32 weights), chunk buffers 280 MB, GPU buffers live 979 MB",
+            "[4.0s] song: opened at 44100 Hz (88200 frames)",
+            "[5.0s] separator: memory: page wasm 325 MB with the stems shown",
+            "[0.5s] decoder: memory: decoder wasm 6 MB at the start of the decode request",
+            "[0.9s] decoder: memory: decoder wasm 9 MB at the end of the decode request",
+        ]
+        .map(String::from)
+        .to_vec();
+        let peak = memory_peak(&log).expect("every part");
+        assert_eq!(
+            peak,
+            MemoryPeak {
+                page_wasm: 325.0,
+                worker_wasm: 246.0,
+                decoder_wasm: 9.0,
+                gpu_live: 979.0
+            }
+        );
+        assert_eq!(peak.total(), 1559.0);
+        assert_eq!(memory_peak(&log[..5]), None, "no decode worker line");
+        assert_eq!(memory_peak(&log[..3]), None, "no page line yet");
+    }
+
     #[test]
     fn reads_numbers_from_log_lines() {
         let l = "[3.0s] console.info: [app] app/src/lib.rs:789: audio stats: 12 callbacks of 512 frames (11.61 ms budget), engine mean 0.100 ms (0.9%), max so far 0.3 ms (2.6%), tempo 0.75, playhead 88200";
@@ -1458,6 +2849,43 @@ mod tests {
         let log = vec!["audio stats: no callbacks yet".to_string(), l.to_string()];
         assert_eq!(audio_stats(&log, 0), [(0.75, 88_200.0)]);
         assert!(audio_stats(&log, 2).is_empty());
+        assert_eq!(callback_frames(&log, 0), [512]);
+        assert!(callback_frames(&log, 2).is_empty());
+    }
+
+    /// D6 of the catch-up plan: `e2e playback` and `e2e audio-resume` fail
+    /// unless the page's callbacks have the browser's buffer size.
+    #[test]
+    fn the_output_must_call_back_with_the_web_buffer_size() {
+        let stats = |frames: u32| {
+            format!(
+                "[3.0s] console.info: [app] app/src/lib.rs:789: audio stats: 12 callbacks of {frames} frames (69.66 ms budget), engine mean 0.100 ms (0.1%), max so far 0.3 ms (0.4%), tempo 1.00, playhead 88200"
+            )
+        };
+        let web = stats(engine::slot::WEB_BUFFER_FRAMES);
+        let log = vec![
+            "audio stats: no callbacks yet".to_string(),
+            web.clone(),
+            "playback: lanes from storage 7 of 7".to_string(),
+            web.clone(),
+        ];
+        assert_eq!(callback_frames(&log, 0), [3_072, 3_072]);
+        assert!(web_buffers_only(&callback_frames(&log, 0)));
+        let old = vec![web.clone(), stats(2_048)];
+        assert_eq!(callback_frames(&old, 0), [3_072, 2_048]);
+        assert!(
+            !web_buffers_only(&callback_frames(&old, 0)),
+            "cpal's default of 2,048 frames"
+        );
+        assert!(!web_buffers_only(&[2_048]));
+        assert!(!web_buffers_only(&[]), "no audio stats line");
+    }
+
+    /// Findings 1-47, 1-103, 2-30 and 2-58 of review rounds 1 and 2 of
+    /// M3: a wait for the model was 4 hours in `memory_budget` with no test.
+    #[test]
+    fn a_run_of_the_model_may_take_four_hours() {
+        assert_eq!(MODEL_RUN_SECS, 14_400);
     }
 
     #[test]

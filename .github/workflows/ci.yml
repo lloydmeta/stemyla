@@ -61,9 +61,13 @@ jobs:
       # the MEM-3 canary and the native MEM-1 canaries.
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The web code compiles only for wasm32, so the native steps never lint
-      # it (MEM-1).  roformer and roformer-gpu have no wasm32-only code, and
-      # their dev-dependencies do not build for wasm32.
-      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings
+      # it (MEM-1).  The step does not name roformer or roformer-gpu.
+      # roformer has no wasm32-only code.  Its default features and its
+      # dev-dependencies pull burn, and so getrandom, which does not build
+      # for wasm32.  roformer-gpu's wasm32-only code (mapped_floats) is
+      # linted through stem-worker, which depends on it.  Its tests run
+      # natively.
+      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
       # --workspace merges features across crates: xtask turns on synth's
       # files feature for every crate in the build.  These steps check each
       # crate without that merge (LAYER-1, decision 0004).
@@ -79,6 +83,10 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    # A hung test, such as an RT-1 test under a blocking lock, must not hold
+    # the runner for GitHub's 6 h default.  The job takes about 6 minutes
+    # (2026-10-26).
+    timeout-minutes: 45
     env:
       # egui_kittest renders through wgpu; on a headless runner the only
       # adapter is Mesa's software Vulkan (lavapipe).  The snapshot PNGs
@@ -136,8 +144,9 @@ jobs:
         with:
           version: ${{ env.TRUNK_VERSION }}
           sha256: ${{ env.TRUNK_SHA256 }}
-      # Builds both the app and the stem-worker (which compiles roformer-gpu
-      # for wasm32), the same build xtask publish performs.
+      # Builds the app, the stem-worker (which compiles roformer-gpu
+      # for wasm32) and the decode-worker, the same build xtask publish
+      # performs.
       - run: trunk build --release
         working-directory: app
 
@@ -148,8 +157,15 @@ jobs:
   browser-tests:
     name: browser tests (Chrome)
     runs-on: ubuntu-latest
-    # About 15 minutes when warm; a hung browser must not hold the runner
-    # for GitHub's 6 h default.
+    # Run 40894815433 (2026-10-29) took 18.6 minutes: `web-test` 9.6, the
+    # other scenarios 4.0 and `e2e save` 3.3, after the setup.  `web-test`
+    # took 7.8 minutes in run 40871041420, so it varies by about 2.  The
+    # limit is the steps before `e2e save` and its own limit of 40, with
+    # about 5 minutes to spare.  So a run of `e2e save` that waits in vain
+    # ends on its own check.  Each test binary of `web-test` may take 10
+    # minutes (xtask/src/web_test.rs), so a slow `web-test` uses the spare
+    # minutes first.  A hung browser must not hold the runner for GitHub's 6 h
+    # default.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -180,11 +196,23 @@ jobs:
       - run: trunk build --release
         working-directory: app
       - run: cargo run --locked -p xtask -- e2e smoke --browser chrome
+      - run: cargo run --locked -p xtask -- e2e decode --browser chrome
+      - run: cargo run --locked -p xtask -- e2e playback --browser chrome
+      - run: cargo run --locked -p xtask -- e2e old-session --browser chrome
       - run: cargo run --locked -p xtask -- e2e audio-resume --browser chrome
       - run: cargo run --locked -p xtask -- e2e storage --browser chrome
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
-      # Logs and screenshots of the scenarios, to see why one failed.
-      - if: failure()
+      - run: cargo run --locked -p xtask -- e2e save --browser chrome
+        # It took 3.3 minutes in run 40894815433, with the save during
+        # playback of review round speed 4 of M8.  The limit is the longest
+        # that all the waits of a run can take
+        # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal
+        # to it).  A stopped step writes no save.log, but its output has
+        # every note of the run.
+        timeout-minutes: 40
+      # Logs and screenshots of the scenarios, to see why one failed or
+      # why the job ran out of time.
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e

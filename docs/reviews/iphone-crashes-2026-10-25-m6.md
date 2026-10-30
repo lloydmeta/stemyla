@@ -1,0 +1,89 @@
+# Review log
+
+## Findings
+
+| Date | Round | Commit | Finding | Reviewers | Severity | Kind | Rule | Where | Claim | Verdict | Repeat of | Action |
+| - | - | - | - | - | - | - | - | - | - | - | - | - |
+| 2026-10-27 | 1 | 119ce9d | 1-1 | reviewer, memory-reviewer | should-fix | weak-test | MEM-1 | engine/src/source.rs:182 | sharing is checked on a test-made source, not on `memory_sources` | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-2 | memory-reviewer, docs-reviewer | should-fix | weak-test | RT-1 | engine/src/readahead/tests.rs:688 | the held-slot test hangs instead of failing under a blocking lock | confirmed | none | f8d8750 review round 1 fixes; CI test job timeout |
+| 2026-10-27 | 1 | 119ce9d | 1-3 | reviewer | should-fix | weak-test | VERIFY-1 | engine/src/readahead/tests.rs:722 | the fill test cannot see a block number left published during `put` | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-4 | reviewer | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:333 | no test covers a seek during a hold | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-5 | reviewer | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:164 | no test of the run ahead round the loop | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-6 | memory-reviewer | should-fix | weak-test | MEM-4 | app/src/playback_tests.rs:375 | the test does not pin that the old read-ahead goes before the new one is made | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-7 | docs-reviewer, memory-reviewer | should-fix | doc | DOC-1 | docs/invariants.md:92 | RT-1 names `Player::with_config`, not `with_sources` and `ReadAhead::new`; stored phases missing | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-8 | docs-reviewer | should-fix | doc | TD-21 | engine/src/source.rs:20 | the `Hint` doc says start of `process`; it is the end | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-9 | supply-chain-reviewer, wire-reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:182 | four conditions of the e2e checks survive mutation | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-10 | supply-chain-reviewer, reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:135 | the unmute click of "original" is never checked | confirmed | none | f8d8750 review round 1 fixes (`lanes read` in the playback line) |
+| 2026-10-27 | 1 | 119ce9d | 1-11 | reviewer | nit | bug | none | app/src/store_meta.rs:563 | a cut stem WAV becomes a silent stored lane | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-12 | reviewer | nit | other | none | engine/src/player.rs:357 | a fade-out toward a seek drops the seek hint | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-13 | docs-reviewer, reviewer | nit | doc | DOC-1 | docs/ARCHITECTURE.md:238 | "24 slots" is not always true | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-14 | docs-reviewer | nit | doc | DOC-1 | docs/invariants.md:95 | a test is said to check the try-lock; it checks the block under the lock | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-15 | docs-reviewer | nit | doc | DOC-1 | docs/tech-debt.md:408 | TD-54 gives the wrong date for M6 | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-16 | docs-reviewer | nit | rule | none | docs/ARCHITECTURE.md:135 | sentences over 25 words | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-17 | docs-reviewer, reviewer | nit | doc | none | docs/plans/completed/stream-from-storage-m6.md:215 | "hold" used for a held seek; a log line names one cause of two | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-18 | reviewer | nit | doc | DOC-1 | docs/plans/completed/stream-from-storage-m6.md | D7's promised Decision log entry is missing | unvalidated | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-19 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:2251 | missed mutant in separation_unstored | refuted | none | refuted (wasm32 only) |
+| 2026-10-27 | 1 | 119ce9d | 1-20 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:295 | missed mutant in ReadAhead::frames | refuted | none | refuted (no caller) |
+| 2026-10-27 | 1 | 119ce9d | 1-21 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/store_meta.rs:532 | missed mutant in wav_data (RF64 accepted) | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-22 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:610 | missed mutant `-` to `+` in read_mixed | refuted | none | refuted (equivalent) |
+| 2026-10-27 | 1 | 119ce9d | 1-23 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:243 | missed mutant Player::frames with 1 | refuted | none | refuted (no caller) |
+| 2026-10-27 | 1 | 119ce9d | 1-24 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:128 | missed mutant in the seek click x | confirmed | none | f8d8750 review round 1 fixes (pure `lane_x`) |
+| 2026-10-27 | 1 | 119ce9d | 1-25 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:610 | missed mutant `+` to `-` in read_mixed (short loop) | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-26 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:124 | missed mutant in the 8 s threshold | confirmed | none | f8d8750 review round 1 fixes (pure `played_for`) |
+| 2026-10-27 | 1 | 119ce9d | 1-27 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:1635 | missed mutant log_audio_stats with () | confirmed | none | TD-39 |
+| 2026-10-27 | 1 | 119ce9d | 1-28 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e.rs:527 | missed mutant `&&` to `||` in the smoke check | confirmed | none | f8d8750 review round 1 fixes (pure `all_from_storage`) |
+| 2026-10-27 | 1 | 119ce9d | 1-29 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e.rs:192 | missed mutant e2e run with Ok(()) | confirmed | none | TD-39 |
+| 2026-10-27 | 1 | 119ce9d | 1-30 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:663 | missed mutant in restore_stored | refuted | none | refuted (wasm32 only) |
+| 2026-10-27 | 1 | 119ce9d | 1-31 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:146 | missed mutant `*` to `+` in the seek target | confirmed | none | f8d8750 review round 1 fixes (pure `target_frames`) |
+| 2026-10-27 | 1 | 119ce9d | 1-32 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:243 | missed mutant Player::frames with 0 | refuted | none | refuted (no caller) |
+| 2026-10-27 | 1 | 119ce9d | 1-33 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/store_meta.rs:523 | missed mutant in wav_data (u16 read) | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-34 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:610 | missed mutant `<` to `>` in read_mixed | refuted | none | refuted (equivalent) |
+| 2026-10-27 | 1 | 119ce9d | 1-35 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:146 | missed mutant `*` to `/` in the seek target | confirmed | none | f8d8750 review round 1 fixes (pure `target_frames`) |
+| 2026-10-27 | 1 | 119ce9d | 1-36 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:2610 | missed mutant in apply_inbox | refuted | none | refuted (wasm32 only) |
+| 2026-10-27 | 1 | 119ce9d | 1-37 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/source.rs:157 | missed mutant in next_run | confirmed | none | f8d8750 review round 1 fixes |
+| 2026-10-27 | 1 | 119ce9d | 1-38 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:128 | missed mutant `*` to `/` in the seek click x | confirmed | none | f8d8750 review round 1 fixes (pure `lane_x`) |
+| 2026-10-27 | 1 | 119ce9d | 1-39 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e.rs:527 | missed mutant `==` to `!=` in the smoke check | confirmed | none | f8d8750 review round 1 fixes (pure `all_from_storage`) |
+| 2026-10-27 | 1 | 119ce9d | 1-40 | cargo-mutants | should-fix | weak-test | VERIFY-1 | app/src/main.rs:4 | missed mutant main with Ok(()) | confirmed | none | TD-39 |
+| 2026-10-27 | 2 | c002083 | 2-1 | reviewer | should-fix | bug | none | engine/src/player.rs:440 | a held seek near the song's end stops playback | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-2 | reviewer | should-fix | weak-test | VERIFY-1 | engine/src/player.rs:303 | no test of the cancel of a held loop wrap when the loop changes | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-3 | wire-reviewer, docs-reviewer, supply-chain-reviewer | should-fix | doc | DOC-1 | docs/plans/completed/stream-from-storage-m6.md:97 | D9's line has no `lanes read` field | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-4 | docs-reviewer, supply-chain-reviewer | nit | doc | DOC-1 | docs/ARCHITECTURE.md:243 | the field list leaves out "lanes read" | unvalidated | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-5 | wire-reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:229 | no case covers the lanes term of `all_from_storage` | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-6 | wire-reviewer | nit | weak-test | VERIFY-1 | xtask/src/e2e/playback.rs:222 | a looser unmute check passes the test | unvalidated | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-7 | memory-reviewer, docs-reviewer, cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:319 | `ReadAhead::live` has no caller and no test; the browser test assumes one live buffer | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-8 | docs-reviewer | nit | other | none | docs/tech-debt.md:271 | the TD reason ignores the browser tests' logger | unvalidated | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-9 | docs-reviewer | nit | doc | none | docs/invariants.md:92 | the RT-1 sentence has 28 words | unvalidated | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-10 | docs-reviewer | nit | doc | none | .github/workflows/ci.yml:82 | a fragment comment; two doc comments not rewrapped | unvalidated | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-11 | reviewer | nit | weak-test | VERIFY-1 | app/src/playback_tests.rs:415 | no test of memory lanes for a page decode or held stems | unvalidated | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-12 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:320 | missed mutant live with 0 (merged into 2-7) | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-13 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:326 | missed mutant take_high_water with 1 | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-14 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/e2e.rs:480 | missed mutant smoke with Ok(()) | confirmed | none | TD-39 |
+| 2026-10-27 | 2 | c002083 | 2-15 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:326 | missed mutant take_high_water with 0 | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-16 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:257 | missed mutant `+` to `*` in with_slots | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-17 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:320 | missed mutant live with 1 (merged into 2-7) | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 2 | c002083 | 2-18 | cargo-mutants | should-fix | weak-test | VERIFY-1 | engine/src/readahead.rs:501 | missed mutant Drop with () | confirmed | none | 064ec8b review round 2 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-1 | memory-reviewer, docs-reviewer | should-fix | bug | none | engine/src/player.rs:446 | with callbacks under the crossfade, a held seek past the song's end still stops playback | confirmed | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-2 | reviewer | should-fix | bug | none | engine/src/readahead.rs:397 | a slot that the reader refills still advertises its old block during the read | confirmed | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-3 | docs-reviewer | nit | doc | DOC-1 | docs/plans/completed/stream-from-storage-m6.md:85 | D6 leaves out that the player does not stop while a seek holds | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-4 | docs-reviewer | nit | doc | TD-21 | docs/tech-debt.md:270 | the test logger is called a console logger | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-5 | docs-reviewer | nit | doc | none | docs/tech-debt.md:271 | a TD-39 bullet repeats the first one | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-6 | docs-reviewer, supply-chain-reviewer | nit | doc | none | .github/workflows/ci.yml:82 | the example attaches to the wrong noun | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-7 | docs-reviewer | nit | doc | none | app/src/store_meta.rs:556 | two sentences over 25 words | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-8 | supply-chain-reviewer, memory-reviewer | nit | weak-test | VERIFY-1 | engine/tests/readahead_count.rs:16 | `take_high_water` with `swap(0)` passes | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-27 | 3 | 6de5204 | 3-9 | memory-reviewer | nit | weak-test | VERIFY-1 | app/src/playback_tests.rs:525 | the page-decode check tests a constructor only | unvalidated | none | 817258b review round 3 fixes |
+| 2026-10-28 | 4 | 817258b | 4-1 | reviewer | nit | doc | DOC-1 | docs/plans/completed/stream-from-storage-m6.md:69, 71; engine/src/readahead.rs:114 | the docs say only fill clears the block number; since 3-2 next_read clears it first | unvalidated | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | 4 | 817258b | 4-2 | reviewer | nit | doc | DOC-1 | docs/ARCHITECTURE.md:247 | the list of the playback line leaves out the missed lane frames | unvalidated | none | 51e9a5e catch-up round 4 fixes |
+| 2026-10-28 | catch-up | e1e4da2 | 1-27 | catch-up | should-fix | weak-test | VERIFY-1 | app/src/lib.rs:2343 (audio_stats_lines) | no test fails with StemApp::log_audio_stats replaced with () | confirmed | none | Fixed: `log_audio_stats` is now `audio_stats_lines`, which returns its lines; `the_audio_stats_line_comes_every_2_s_while_playing` fails with `vec![]`, the same mutant (e1e4da2 Catch-up B: native tests for the deferred e2e mutants) |
+| 2026-10-28 | catch-up | e1e4da2 | 1-29 | catch-up | should-fix | weak-test | VERIFY-1 | xtask/src/e2e.rs:203 (run) | no test fails with run of xtask/src/e2e.rs replaced with Ok(()) | confirmed | none | Fixed: each of the 5 tests of `xtask/tests/e2e_cli.rs` fails with the mutant, for example `smoke_with_no_driver_fails_before_a_browser_starts` (e1e4da2 Catch-up B: native tests for the deferred e2e mutants) |
+| 2026-10-28 | catch-up | e1e4da2 | 1-40 | catch-up | should-fix | weak-test | VERIFY-1 | app/src/main.rs:2 (main) | no test fails with main of app/src/main.rs replaced with Ok(()) | confirmed | none | Kept: `eframe::run_native` needs a window, and no test can open one (TD-39); its folder argument is now `StemApp::open_folder`, which `a_folder_opens_its_stems_or_says_why_not` checks (e1e4da2 Catch-up B: native tests for the deferred e2e mutants) |
+| 2026-10-28 | catch-up | e1e4da2 | 2-14 | catch-up | should-fix | weak-test | VERIFY-1 | xtask/src/e2e.rs:498 (smoke) | no test fails with smoke -> Result<()> replaced with Ok(()) | confirmed | none | Fixed: `smoke_with_no_driver_fails_before_a_browser_starts` (`xtask/tests/e2e_cli.rs`) fails with the mutant (e1e4da2 Catch-up B: native tests for the deferred e2e mutants) |
+
+## Rounds
+
+| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| 1 | 16 | 990,671 | 80.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: partial: tested 173 (caught 147, missed 22, unviable 4), timeouts 1, not tested 310; stopped at the limit | - | - | - | - | - | - |
+| 2 | 10 | 700,265 | 59.7 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 56 (caught 46, missed 7, unviable 3), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 3 | 7 | 477,013 | 30.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 4 (caught 4, missed 0, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 4 | 1 | 79,248 | 14.4 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |
+| 5 | 1 (one reviewer of 51e9a5e for M3 to M6) | 117,062 | 17.5 | 0 | 0 | 0 (auto mode; a fallback prompt is not counted) | - | - | - | - | - | - | - |

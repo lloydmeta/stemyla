@@ -1,17 +1,25 @@
-//! Stem explorer engine: decoding, stems, transport, stretching and
-//! offline rendering.  Live audio output sits behind the `cpal` feature.
+//! Stem explorer engine: decoding, stems, lane overviews, transport,
+//! stretching and offline rendering.  Live audio output sits behind the
+//! `cpal` feature.
 
 pub mod decode;
 pub mod hpss;
 #[cfg(feature = "cpal")]
 pub mod live;
 pub mod mixdown;
+pub mod overview;
 pub mod params;
 pub mod player;
+pub mod readahead;
 pub mod resample;
 pub mod slot;
 pub mod song;
+pub mod source;
 pub mod stretch;
+#[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
+mod test_audio;
 #[cfg(test)]
 mod test_flac;
 pub mod wav;

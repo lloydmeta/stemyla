@@ -51,7 +51,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let t = Instant::now();
     let mut d = Demixer::new(mix, CHUNK, overlap, STEMS.len());
     let total = d.num_chunks();
-    while let Some(x) = d.next_input() {
+    while let Ok(Some(x)) = d.next_input() {
         let tc = Instant::now();
         let i = d.chunk_index();
         let y = separate_chunk(&model, &x);
@@ -280,4 +280,45 @@ pub fn selftest_fixtures(args: &[String]) -> Result<()> {
     eprintln!("chunk in {:.1} s", t.elapsed().as_secs_f64());
     println!("wrote {out}/stages.safetensors and {out}/chunk.safetensors");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Finding 1-35 of review round 1 of M4: `xtask roformer` refuses what
+    /// it cannot separate, before it loads the model.  The separation
+    /// itself needs the weights, which CI does not have.
+    #[test]
+    fn roformer_refuses_bad_input_before_the_model() {
+        let dir = std::env::temp_dir().join(format!("xtask-roformer-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = |name: &str, rate: u32| {
+            let path = dir.join(name);
+            write_wav(&path, &[0.0; 64], &[0.0; 64], rate).unwrap();
+            path.to_str().unwrap().to_string()
+        };
+        let (at_48, at_44) = (wav("48k.wav", 48_000), wav("44k.wav", SAMPLE_RATE));
+        let missing = dir.join("no-such-model").to_str().unwrap().to_string();
+        let out = dir.join("out").to_str().unwrap().to_string();
+        let error = |list: &[&str]| format!("{:#}", run(&args(list)).unwrap_err());
+
+        let usage = error(&["only-the-weights"]);
+        let rate = error(&[&missing, &at_48, &out]);
+        let weights = error(&[&missing, &at_44, &out]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(usage.starts_with("usage: xtask roformer"), "{usage}");
+        assert!(
+            rate.contains("48000 Hz input; the model needs 44100 Hz"),
+            "{rate}"
+        );
+        assert!(
+            weights.contains("reading ") && weights.contains("no-such-model"),
+            "{weights}"
+        );
+    }
 }

@@ -17,6 +17,15 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and phase 2's numbers.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/completed/stream-from-storage.md`: done on 2026-10-30: a song's audio moves to browser storage, so the tab's memory does not grow with the song (MEM-4, TD-54).
+* `plans/completed/stream-from-storage-m3.md`: M3 of that plan: the worker writes the stems to their session files, and the page falls back to memory when storage is unavailable or full.
+* `plans/completed/stream-from-storage-m4.md`: M4 of that plan: the page keeps the mix in a session file, and the worker reads it in blocks.
+* `plans/completed/stream-from-storage-m5.md`: M5 of that plan: a new decode worker reads a stored song in blocks and writes its session files and overviews.
+* `plans/completed/stream-from-storage-m6.md`: M6 of that plan: playback reads stored lanes through a read-ahead buffer that the main thread fills.
+* `plans/completed/stream-from-storage-m7.md`: M7 of that plan: the page shows a stored song from its files and overviews, with no read-back; spectrograms, classic drums and saves read blocks.
+* `plans/completed/stream-from-storage-catchup.md`: the catch-up after M7: round 4 of M3 to M6, their deferred should-fix, the page-decode limit, `mutants::skip`, the Safari worker memory, and a 3,072-frame output buffer.
+* `plans/completed/stream-from-storage-m8.md`: M8 of that plan: a save writes its file to browser storage in blocks, and the worker encodes FLAC and MP3 from that file.
+* `plans/completed/stream-from-storage-m9.md`: M9 of that plan: the GPU keeps the weight matrices of an f16 model as f16, and computes in f32.
 * `plans/completed/mix-download.md`: done on 2026-10-25: the mix lane saves the mix as heard (WAV, FLAC, MP3), mixed on the page in blocks; its waveform and spectrogram follow the mix.
 * `plans/completed/flac.md`: done on 2026-10-25: FLAC files open as songs and stems, a stem saves as a 16-bit FLAC, and a decoded file holds at most 1 GiB of samples.
 * `plans/completed/48k-audio.md`: done on 2026-10-24: songs at 48 kHz and other standard rates convert to 44.1 kHz when they open, so they separate.
@@ -42,6 +51,14 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0012-one-song-rate.md`: every song in the app is at 44.1 kHz; `Song::from_audio` converts other rates on the page thread.
 * `decisions/0013-decode-limit.md`: a decoded file holds at most 1 GiB of `f32` samples, in every format, so a small FLAC cannot stop the tab.
 * `decisions/0014-save-the-mix-as-heard.md`: the mix lane saves the mix as heard (Mute, Solo, volume), mixed on the page in blocks; the worker encodes as before.
+* `decisions/0015-storage-holds-the-song.md`: browser storage holds a song's audio, and memory holds blocks, so a long song fits on an iPhone.
+* `decisions/0016-stem-files-are-16-bit.md`: stem files in browser storage hold 16-bit PCM, and the mix and source files 32-bit float.
+* `decisions/0017-the-main-thread-reads-ahead.md`: async reads on the main thread keep a read-ahead buffer in front of the play head.
+* `decisions/0018-f16-weights-on-the-gpu.md`: the GPU keeps the f16 weight matrices of an f16 model file as f16, and computes in f32.
+* `decisions/0019-a-decode-worker-crate.md`: a page-side worker crate that takes `engine` decodes a song in blocks into browser storage.
+* `decisions/0020-memory-path-limit-shares-lanes.md`: the memory path's limit shrinks with the lanes that the page holds in memory, and an open that decodes on the page keeps it (accepted).
+* `decisions/0021-saves-go-through-browser-storage.md`: every save writes a 16-bit WAV save file in browser storage, the worker encodes FLAC and MP3 from it into a save file of its own, and the page offers the file (accepted).
+* `decisions/0022-a-gpu-that-changes-f16-weights-keeps-f32.md`: a GPU whose f16 weight kernels do not give the f32 kernels' output bit for bit keeps f32 weights (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
@@ -50,7 +67,7 @@ Distilled facts from outside the repo, each with its source and the date it was 
 
 * `references/browser-quirks.md`: Safari, Web Audio and WebGPU behaviour the code works around.
 * `references/webgpu-limits.md`: the WebGPU default limits every kernel must fit (GPU-1).
-* `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures.
+* `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures; reading an iPhone's memory kills.
 
 ## Conventions
 

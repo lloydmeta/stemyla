@@ -56,6 +56,11 @@ pub struct SharedParams {
     pub total_callback_ns: AtomicU64,
     /// Published by the audio thread: frames in the most recent callback.
     pub last_callback_frames: AtomicU64,
+    /// Published by the audio thread: the frames of silence played in holds,
+    /// while the run from a position that the player jumped to was not ready.
+    pub held_frames: AtomicU64,
+    /// Published by the audio thread: the seeks that waited for their run.
+    pub held_seeks: AtomicU64,
 }
 
 impl SharedParams {
@@ -82,6 +87,8 @@ impl SharedParams {
             callbacks: AtomicU64::new(0),
             total_callback_ns: AtomicU64::new(0),
             last_callback_frames: AtomicU64::new(0),
+            held_frames: AtomicU64::new(0),
+            held_seeks: AtomicU64::new(0),
         }
     }
 

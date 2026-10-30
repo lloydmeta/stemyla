@@ -10,8 +10,9 @@ use std::borrow::Cow;
 use std::fmt;
 
 use half::{bf16, f16};
+pub use safetensors::Dtype;
+use safetensors::SafeTensorError;
 use safetensors::tensor::Metadata;
-use safetensors::{Dtype, SafeTensorError};
 
 #[derive(Debug)]
 pub enum WeightError {
@@ -157,8 +158,9 @@ impl<'a> Store<'a> {
         })
     }
 
-    /// The tensor `name` as f32, checked against `shape`.
-    pub fn get(&mut self, name: &str, shape: &[usize]) -> Result<Vec<f32>, WeightError> {
+    /// The bytes of tensor `name` and its dtype, checked against `shape`.
+    /// The caller marks the tensor as read once it has converted them.
+    fn raw(&self, name: &str, shape: &[usize]) -> Result<(Cow<'_, [u8]>, Dtype), WeightError> {
         let info = self
             .meta
             .info(name)
@@ -175,8 +177,13 @@ impl<'a> Store<'a> {
             });
         }
         let (s, e) = info.data_offsets;
-        let dtype = info.dtype;
         let raw = read_exact(self.src.as_ref(), self.data + s, self.data + e)?;
+        Ok((raw, info.dtype))
+    }
+
+    /// The tensor `name` as f32, checked against `shape`.
+    pub fn get(&mut self, name: &str, shape: &[usize]) -> Result<Vec<f32>, WeightError> {
+        let (raw, dtype) = self.raw(name, shape)?;
         let out = match dtype {
             Dtype::F32 => raw
                 .chunks_exact(4)
@@ -192,6 +199,30 @@ impl<'a> Store<'a> {
                 .collect(),
             other => return Err(WeightError::Dtype(format!("{other:?}"))),
         };
+        self.used.insert(name.to_string());
+        Ok(out)
+    }
+
+    /// The dtype of tensor `name`, or `None` when the file lacks it.
+    pub fn dtype(&self, name: &str) -> Option<Dtype> {
+        self.meta.info(name).map(|info| info.dtype)
+    }
+
+    /// The values of the F16 tensor `name` as the file holds them (IEEE-754
+    /// binary16 bits), checked against `shape`.  It marks the tensor as
+    /// read, as [`Store::get`] does.  Any other dtype is an error, and the
+    /// tensor stays unread.
+    pub fn get_f16_bits(&mut self, name: &str, shape: &[usize]) -> Result<Vec<u16>, WeightError> {
+        if let Some(dtype) = self.dtype(name).filter(|d| *d != Dtype::F16) {
+            return Err(WeightError::Dtype(format!(
+                "{dtype:?} for {name}, where F16 was asked for"
+            )));
+        }
+        let (raw, _) = self.raw(name, shape)?;
+        let out = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         self.used.insert(name.to_string());
         Ok(out)
     }
@@ -401,6 +432,61 @@ mod tests {
         }
         store.finish().unwrap();
         assert_eq!(src.1.get(), f.len(), "every byte read once, none twice");
+    }
+
+    /// The dtype of each tensor, and none for a name the file lacks.
+    #[test]
+    fn dtypes_are_read_from_the_header() {
+        let f = mixed();
+        let store = Store::new(&f).unwrap();
+        assert_eq!(store.dtype("a"), Some(Dtype::F32));
+        assert_eq!(store.dtype("b"), Some(Dtype::F16));
+        assert_eq!(store.dtype("c"), Some(Dtype::BF16));
+        assert_eq!(store.dtype("z"), None);
+    }
+
+    /// A raw read gives an F16 tensor's values as the file holds them, and
+    /// marks the tensor as read, as `get` does.
+    #[test]
+    fn raw_f16_reads_give_the_bits_and_mark_the_tensor_as_read() {
+        let f = mixed();
+        let src = Counting(&f, Default::default());
+        let mut store = Store::from_source(&src).unwrap();
+        let want: Vec<u16> = (0..6)
+            .map(|i| f16::from_f32(i as f32 / 3.0).to_bits())
+            .collect();
+        assert_eq!(store.get_f16_bits("b", &[6]).unwrap(), want);
+        store.get("a", &[3, 4]).unwrap();
+        store.get("c", &[2, 2]).unwrap();
+        store.finish().unwrap();
+        assert_eq!(src.1.get(), f.len(), "every byte read once, none twice");
+    }
+
+    /// A raw f16 read of an F32 or BF16 tensor fails and does not mark it,
+    /// and a wrong shape or a missing name fails as `get` fails.
+    #[test]
+    fn raw_f16_reads_refuse_other_dtypes() {
+        let f = mixed();
+        let mut store = Store::new(&f).unwrap();
+        for (name, shape) in [("a", vec![3, 4]), ("c", vec![2, 2])] {
+            match store.get_f16_bits(name, &shape) {
+                Err(WeightError::Dtype(d)) => assert!(d.contains("F16"), "{d}"),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            store.get_f16_bits("b", &[3, 2]),
+            Err(WeightError::Shape { .. })
+        ));
+        assert!(matches!(
+            store.get_f16_bits("z", &[1]),
+            Err(WeightError::Missing(_))
+        ));
+        store.get_f16_bits("b", &[6]).unwrap();
+        match store.finish() {
+            Err(WeightError::Unused(n)) => assert_eq!(n, vec!["a".to_string(), "c".to_string()]),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -3,9 +3,9 @@
 //! An output is opened once and kept: what it plays is whatever [`Player`]
 //! sits in its [`PlayerSlot`].  Opening a song puts a new player in the slot
 //! and hands the old one back to the caller, which frees it (and its
-//! reference to the old song) on its own thread.  The audio callback never waits for the
-//! slot and never frees a player: if the slot is empty, or the UI holds it
-//! at that moment, the callback renders silence.
+//! sources, which hold the old song's lanes) on its own thread.  The audio
+//! callback never waits for the slot and never frees a player: if the slot is
+//! empty, or the UI holds it at that moment, the callback renders silence.
 //!
 //! This also keeps a replaced song from leaking where the audio backend
 //! never frees a stream's callback (cpal 0.18's Web Audio host keeps it in
@@ -20,6 +20,17 @@ use web_time::Instant;
 /// Frames rendered per inner step; the callback's scratch buffers hold this
 /// many.
 pub const SCRATCH_FRAMES: usize = 8192;
+
+/// The frames of each buffer that the browser's audio output asks for
+/// (`live`, on wasm32).  At 44.1 kHz one buffer is about 69.7 ms.  cpal
+/// queues two, so a change to the mix is heard up to about 139 ms later.
+/// The maintainer chose this size on 2026-10-28 (decision 0017).  It is
+/// here, not in `live`, because `xtask` and the page's tests read it
+/// without the `cpal` feature.
+pub const WEB_BUFFER_FRAMES: u32 = 3_072;
+
+// One callback of the browser's output is one inner step.
+const _: () = assert!(WEB_BUFFER_FRAMES as usize <= SCRATCH_FRAMES);
 
 /// A shared, swappable [`Player`].  Clones share the same slot.
 #[derive(Clone, Default)]
@@ -48,8 +59,8 @@ impl PlayerSlot {
 
     /// Puts `player` in the slot (or empties it, for `None`) and returns the
     /// player it held.  The caller drops what comes back, so the old player
-    /// and its reference to its song are freed on the caller's thread,
-    /// after the slot is unlocked.  Waits at most for one audio callback to finish.
+    /// and its sources are freed on the caller's thread, after the slot is
+    /// unlocked.  Waits at most for one audio callback to finish.
     pub fn replace(&self, player: Option<Player>) -> Option<Player> {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         std::mem::replace(&mut *held, player)
@@ -121,6 +132,7 @@ mod tests {
     use crate::params::SharedParams;
     use crate::player::PlayerConfig;
     use crate::song::{Song, Stem};
+    use crate::source::{MemorySource, StemSource};
     use crate::stretch::Varispeed;
     use std::sync::Weak;
     use std::sync::mpsc;
@@ -157,19 +169,41 @@ mod tests {
         data
     }
 
+    /// A playing player of one memory lane, and a `Weak` of that lane's
+    /// source, which holds the lane's samples.
+    fn sourced(value: f32, frames: usize) -> (Player, Weak<dyn StemSource>) {
+        let source: Arc<dyn StemSource> = Arc::new(MemorySource::new(
+            vec![value; frames].into(),
+            vec![value; frames].into(),
+        ));
+        let weak = Arc::downgrade(&source);
+        let params = Arc::new(SharedParams::new(1));
+        params.playing.store(true, Relaxed);
+        let player = Player::with_sources(
+            44_100,
+            frames,
+            params,
+            Box::new(Varispeed::new()),
+            PlayerConfig::default(),
+            vec![source],
+        );
+        (player, weak)
+    }
+
+    /// The player holds its sources, not the song: the replaced player's
+    /// sources are freed on the caller's thread, not in the callback.
     #[test]
     fn replacing_the_player_frees_the_previous_song() {
         let slot = PlayerSlot::new();
-        let first = song(0.25, 20_000);
-        let first_weak: Weak<Song> = Arc::downgrade(&first);
-        assert!(slot.replace(Some(playing(first))).is_none());
+        let (first, first_weak) = sourced(0.25, 20_000);
+        assert!(slot.replace(Some(first)).is_none());
         callback(&slot, 512, 2);
         assert!(first_weak.upgrade().is_some(), "the slot keeps it alive");
 
-        let second = song(0.5, 20_000);
-        let second_weak = Arc::downgrade(&second);
-        let previous = slot.replace(Some(playing(second)));
+        let (second, second_weak) = sourced(0.5, 20_000);
+        let previous = slot.replace(Some(second));
         assert!(previous.is_some(), "the old player comes back");
+        callback(&slot, 512, 2);
         assert!(first_weak.upgrade().is_some(), "freed by the caller");
         drop(previous);
         assert!(first_weak.upgrade().is_none(), "the first song is freed");
@@ -183,9 +217,8 @@ mod tests {
     fn a_clone_shares_the_slot_without_keeping_its_song() {
         let slot = PlayerSlot::new();
         let in_callback = slot.clone();
-        let s = song(0.25, 20_000);
-        let weak = Arc::downgrade(&s);
-        drop(slot.replace(Some(playing(s))));
+        let (player, weak) = sourced(0.25, 20_000);
+        drop(slot.replace(Some(player)));
         assert!(in_callback.is_occupied());
         drop(slot.replace(None));
         assert!(weak.upgrade().is_none(), "a clone left alive holds no song");

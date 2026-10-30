@@ -7,7 +7,7 @@
 //! the page, so its test lives in `web_close.rs`.
 #![cfg(target_arch = "wasm32")]
 
-use app::store;
+use app::{lanes, store, store_meta};
 use engine::Stem;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,6 +20,15 @@ wasm_bindgen_test_configure!(run_in_browser);
 export async function wipe() {
   const root = await navigator.storage.getDirectory();
   for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
+}
+export async function plant(path, bytes) {
+  let d = await navigator.storage.getDirectory();
+  const parts = path.split("/");
+  const last = parts.pop();
+  for (const p of parts) d = await d.getDirectoryHandle(p, { create: true });
+  const w = await (await d.getFileHandle(last, { create: true })).createWritable();
+  await w.write(bytes);
+  await w.close();
 }
 export async function exists(path) {
   let d = await navigator.storage.getDirectory();
@@ -36,6 +45,9 @@ export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 "#)]
 extern "C" {
     async fn wipe();
+    /// Writes `bytes` to the file at `path`, with its folders.
+    #[wasm_bindgen(js_name = plant)]
+    async fn plant_js(path: &str, bytes: &js_sys::Uint8Array);
     /// Whether a file or folder exists at `path` under the OPFS root.
     async fn exists(path: &str) -> JsValue;
     /// Lets tasks spawned earlier run up to their first wait.
@@ -72,15 +84,22 @@ async fn has(path: &str) -> bool {
     exists(path).await.as_bool() == Some(true)
 }
 
+/// Saves `files` as a new session and makes it current, as the page does
+/// once the song opens (D9 of M5); returns its id.
+async fn saved_and_current(files: &[(String, web_sys::Blob)], rate: u32) -> String {
+    let id = store::save_sources(files, rate).await.expect("saved");
+    store::make_current(&id).await;
+    id
+}
+
 /// A stored song of one WAV file, made current; returns its id.
 async fn stored_song() -> String {
     wipe().await;
-    store::save_sources(
+    saved_and_current(
         &[("Lloyd - Tune.wav".into(), blob(&tone(800, 440.0)))],
         RATE,
     )
     .await
-    .expect("saved")
 }
 
 /// Starts `save_stems` and lets it run up to its first wait, so it is in
@@ -97,15 +116,61 @@ async fn saving(id: &str, stems: Vec<Stem>) -> Rc<RefCell<Option<Result<(), Stri
     result
 }
 
-fn names(song: &engine::Song) -> Vec<&str> {
-    song.stems.iter().map(|s| s.name.as_str()).collect()
+/// The worker's `.part` file of each stem in `names`, of 800 frames, in
+/// session `id`.
+async fn plant_parts(id: &str, names: &[&str]) {
+    let wave = vec![0.1; 800];
+    let wav = engine::wav::encode_pcm16(&wave, &wave, RATE);
+    for name in names {
+        let path = format!("sessions/{id}/stems/{name}.wav.part");
+        plant_js(&path, &js_sys::Uint8Array::from(wav.as_slice())).await;
+    }
+}
+
+/// Starts `keep_stored_stems` and lets it run up to its first wait, so it
+/// is in progress when the caller goes on.  Whether `meta` names the stems
+/// arrives in the cell.
+async fn keeping(id: &str, names: &[&str]) -> Rc<RefCell<Option<bool>>> {
+    let result = Rc::new(RefCell::new(None));
+    let (id, out) = (id.to_string(), result.clone());
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    wasm_bindgen_futures::spawn_local(async move {
+        let stored = store::keep_stored_stems(&id, &names).await;
+        *out.borrow_mut() = Some(stored.kept.is_ok());
+    });
+    tick().await;
+    assert!(result.borrow().is_none(), "the move is in progress");
+    result
+}
+
+/// The song of session `id` as the page shows it (D11 of the M7 plan):
+/// `song`, its sources decoded on the page, with the stems of `meta` as
+/// lanes and the "original".  The decode worker cannot start here, so the
+/// page makes the stem overviews.
+async fn shown_with_stems(id: &str, song: engine::Song, meta: &store_meta::Meta) -> lanes::Shown {
+    let client = app::decoder::DecodeClient::new("./no-such-decode-worker.js");
+    let paths = store::stem_paths(id, &meta.stems);
+    let (stems, _) = store::stem_lanes(
+        id,
+        &meta.stems,
+        &paths,
+        song.frames,
+        &client,
+        app::MEMORY_PATH_MAX_FRAMES,
+    )
+    .await
+    .expect("the stems");
+    app::with_original_files(&lanes::Shown::in_memory(song), stems, None).0
 }
 
 #[wasm_bindgen_test]
 async fn a_saved_song_is_restored_with_its_name_and_rate() {
     let id = stored_song().await;
     assert_eq!(store::current().await.as_deref(), Some(id.as_str()));
-    let (got, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (got, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(got, id);
     assert_eq!(meta.name, "Lloyd - Tune");
     assert_eq!(meta.rate, RATE);
@@ -121,10 +186,18 @@ async fn stems_saved_later_are_restored_with_the_song() {
     store::save_stems(&id, RATE, &[stem("bass", 800), stem("drums", 800)])
         .await
         .expect("stems saved");
-    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(meta.stems, ["bass", "drums"]);
-    assert_eq!(names(&song), ["bass", "drums", "original"]);
     assert_eq!(song.frames, 800);
+    let shown = shown_with_stems(&id, song, &meta).await;
+    assert_eq!(shown.names(), ["bass", "drums", "original"]);
+    assert!(
+        shown.lanes[..2].iter().all(|l| l.audio.file().is_some()),
+        "stored stems"
+    );
 }
 
 /// Decision 0012: a 48 kHz source opens at 44.1 kHz, and opens again with
@@ -137,9 +210,7 @@ async fn a_48k_session_reopens_with_its_stems() {
     let opened =
         engine::Song::load_files(vec![("lloyd.wav".into(), wav.clone())]).expect("decoded");
     assert_eq!((opened.sample_rate, opened.frames), (44_100, 4_410));
-    let id = store::save_sources(&[("lloyd.wav".into(), blob(&wav))], opened.sample_rate)
-        .await
-        .expect("saved");
+    let id = saved_and_current(&[("lloyd.wav".into(), blob(&wav))], opened.sample_rate).await;
     store::save_stems(
         &id,
         opened.sample_rate,
@@ -147,14 +218,18 @@ async fn a_48k_session_reopens_with_its_stems() {
     )
     .await
     .expect("stems saved");
-    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(meta.rate, 44_100);
     assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
-    assert_eq!(names(&song), ["bass", "drums", "original"]);
     for s in &song.stems {
         assert_eq!((s.left.len(), s.right.len()), (4_410, 4_410), "{}", s.name);
     }
-    let (original, first) = (&song.stems[2], &opened.stems[0]);
+    let (original, first) = (&song.stems[0], &opened.stems[0]);
+    let shown = shown_with_stems(&id, song.clone(), &meta).await;
+    assert_eq!(shown.names(), ["bass", "drums", "original"]);
     assert!(
         original.left.as_slice() == first.left.as_slice(),
         "the same samples"
@@ -204,9 +279,7 @@ async fn a_flac_session_reopens_with_its_stems() {
     let opened =
         engine::Song::load_files(vec![("lloyd.flac".into(), bytes.clone())]).expect("decoded");
     assert_eq!((opened.sample_rate, opened.frames), (44_100, 4_410));
-    let id = store::save_sources(&[("lloyd.flac".into(), blob(&bytes))], opened.sample_rate)
-        .await
-        .expect("saved");
+    let id = saved_and_current(&[("lloyd.flac".into(), blob(&bytes))], opened.sample_rate).await;
     store::save_stems(
         &id,
         opened.sample_rate,
@@ -214,14 +287,18 @@ async fn a_flac_session_reopens_with_its_stems() {
     )
     .await
     .expect("stems saved");
-    let (_, song, meta) = store::restore().await.expect("stored").expect("readable");
+    let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
     assert_eq!(
         meta.files,
         [("lloyd.flac".to_string(), "0.flac".to_string())]
     );
     assert_eq!((song.sample_rate, song.frames), (44_100, 4_410));
-    assert_eq!(names(&song), ["bass", "drums", "original"]);
-    let (original, first) = (&song.stems[2], &opened.stems[0]);
+    let (original, first) = (&song.stems[0], &opened.stems[0]);
+    let shown = shown_with_stems(&id, song.clone(), &meta).await;
+    assert_eq!(shown.names(), ["bass", "drums", "original"]);
     assert!(
         original.left.as_slice() == first.left.as_slice(),
         "the same samples"
@@ -238,16 +315,18 @@ async fn stems_that_do_not_fit_the_source_are_fitted_to_it() {
         store::save_stems(&id, RATE, &[stem("bass", frames)])
             .await
             .expect("stems saved");
-        let (_, song, _) = store::restore().await.expect("stored").expect("readable");
+        let (_, song, meta) = store::restore(app::MEMORY_PATH_MAX_FRAMES)
+            .await
+            .expect("stored")
+            .expect("readable");
         assert_eq!(song.frames, 800);
-        for s in &song.stems {
-            assert_eq!(
-                (s.left.len(), s.right.len()),
-                (800, 800),
-                "{} from {frames}",
-                s.name
-            );
-        }
+        // D11 of the M7 plan: a stem WAV one frame short or long is a
+        // stored lane of the song's frames; the lane reader gives silence
+        // past its end.
+        let shown = shown_with_stems(&id, song, &meta).await;
+        let file = shown.lanes[0].audio.file().expect("a stored stem");
+        assert_eq!(file.data_frames, frames as u64, "from {frames}");
+        assert_eq!(shown.frames, 800);
     }
 }
 
@@ -273,6 +352,34 @@ async fn forgetting_waits_for_a_save_in_progress_then_removes_the_session() {
     assert_eq!(store::current().await, None, "no longer current");
 }
 
+/// D5 of M3: an open waits for the stored stems to move into place, so it
+/// never reads a half-moved session.
+#[wasm_bindgen_test]
+async fn opening_waits_for_stored_stems_and_shows_them() {
+    let id = stored_song().await;
+    plant_parts(&id, &["bass", "vocals"]).await;
+    let kept = keeping(&id, &["bass", "vocals"]).await;
+    let (_, song, meta) = store::restore_id(&id, app::MEMORY_PATH_MAX_FRAMES)
+        .await
+        .expect("stored")
+        .expect("readable");
+    assert_eq!(*kept.borrow(), Some(true), "the move finished first");
+    assert_eq!(meta.stems, ["bass", "vocals"]);
+    let shown = shown_with_stems(&id, song, &meta).await;
+    assert_eq!(shown.names(), ["bass", "vocals", "original"]);
+}
+
+/// D5 of M3: a removal waits for the stored stems to move into place.
+#[wasm_bindgen_test]
+async fn forgetting_waits_for_stored_stems_then_removes_the_session() {
+    let id = stored_song().await;
+    plant_parts(&id, &["bass", "drums"]).await;
+    let kept = keeping(&id, &["bass", "drums"]).await;
+    assert!(store::forget(&id).await, "removed");
+    assert_eq!(*kept.borrow(), Some(true), "the move finished first");
+    assert!(!has(&format!("sessions/{id}")).await);
+}
+
 #[wasm_bindgen_test]
 async fn forgetting_a_missing_session_succeeds() {
     wipe().await;
@@ -283,13 +390,14 @@ async fn forgetting_a_missing_session_succeeds() {
 async fn opening_waits_for_a_save_in_progress_and_shows_its_stems() {
     let id = stored_song().await;
     let save = saving(&id, vec![stem("vocals", 800)]).await;
-    let (_, song, meta) = store::restore_id(&id)
+    let (_, song, meta) = store::restore_id(&id, app::MEMORY_PATH_MAX_FRAMES)
         .await
         .expect("stored")
         .expect("readable");
     assert_eq!(*save.borrow(), Some(Ok(())));
     assert_eq!(meta.stems, ["vocals"]);
-    assert_eq!(names(&song), ["vocals", "original"]);
+    let shown = shown_with_stems(&id, song, &meta).await;
+    assert_eq!(shown.names(), ["vocals", "original"]);
 }
 
 #[wasm_bindgen_test]
@@ -313,9 +421,7 @@ async fn sessions_are_listed_newest_first() {
     let older = stored_song().await;
     // Ids are creation times in milliseconds.
     sleep(5).await;
-    let newer = store::save_sources(&[("acme.wav".into(), blob(&tone(80, 220.0)))], RATE)
-        .await
-        .expect("saved");
+    let newer = saved_and_current(&[("acme.wav".into(), blob(&tone(80, 220.0)))], RATE).await;
     let ids: Vec<String> = store::list().await.into_iter().map(|(id, _)| id).collect();
     assert_eq!(ids, [newer.clone(), older]);
     assert_eq!(store::current().await, Some(newer));

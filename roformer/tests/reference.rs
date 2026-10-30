@@ -180,7 +180,7 @@ fn demix_matches_reference() {
         );
         let chunks = d.num_chunks();
         let mut seen = 0;
-        while let Some(x) = d.next_input() {
+        while let Ok(Some(x)) = d.next_input() {
             let y = stand_in(&x);
             d.accept(&y);
             seen += 1;

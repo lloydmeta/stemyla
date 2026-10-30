@@ -1,15 +1,24 @@
 //! Decoding audio files into per-channel `f32` buffers with Symphonia.
+//!
+//! [`decode_bytes`] and [`decode_path`] decode a whole file into [`Audio`].
+//! [`Decoder`] gives one packet at a time, so a caller can pass the samples
+//! on and not hold the file's samples.  Both keep the limit of
+//! [`MAX_DECODED_BYTES`].  `decode_bytes` is built on `Decoder`.
 
+use crate::resample::SONG_RATE;
 use anyhow::{Context, Result, anyhow};
 use std::io::Cursor;
 use std::path::Path;
 use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::well_known::{CODEC_ID_FLAC, CODEC_ID_MP3};
-use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
-use symphonia::core::io::{MediaSource, MediaSourceStream};
+/// What a [`Decoder`] reads: `Read + Seek + Send + Sync`, with its length
+/// if known.  Re-exported so a caller can give its own source.
+pub use symphonia::core::io::MediaSource;
+use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
 /// Decoded audio: one `Vec<f32>` per channel, all the same length.  The
@@ -37,6 +46,173 @@ pub const MAX_DECODED_BYTES: u64 = 1 << 30;
 /// be, for its reservation.  The demo song's stems are 2.2 to 11.3 times
 /// smaller at 16 bits.
 const FLAC_MOST_RATIO: u64 = 16;
+
+/// The frames at [`SONG_RATE`] that `frames` frames at `rate` give: as
+/// `resample::to_rate` gives them, the frames times [`SONG_RATE`] over
+/// `rate`, rounded up.
+pub fn song_frames(frames: u64, rate: u32) -> u64 {
+    let product = u128::from(frames) * u128::from(SONG_RATE);
+    u64::try_from(product.div_ceil(u128::from(rate.max(1)))).unwrap_or(u64::MAX)
+}
+
+/// The error of a song longer than a limit in frames at [`SONG_RATE`]
+/// (D3 of `plans/completed/stream-from-storage-catchup.md`): the memory
+/// path's limit, which a caller gives.  A caller finds it with
+/// `anyhow::Error::downcast_ref`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooLong {
+    /// The limit, in frames at [`SONG_RATE`].
+    pub max_frames: usize,
+}
+
+impl std::fmt::Display for TooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the song is too long to open here: it passes {} frames at {} Hz",
+            self.max_frames, SONG_RATE
+        )
+    }
+}
+
+impl std::error::Error for TooLong {}
+
+/// What the head of a file states about its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadLength {
+    /// A WAV or a FLAC that states its length: its frames at
+    /// [`SONG_RATE`].  A WAV counts at most the frames that its file holds.
+    Frames(u64),
+    /// A WAV or a FLAC that states no length: a streaming WAV, a WAV whose
+    /// data chunk is not in the head, or a FLAC with a total of 0.
+    UnstatedPcm,
+    /// Any other file, such as an MP3, which states an estimate at most.
+    Unstated,
+}
+
+/// The bytes of a file's head that [`head_length`] needs at most.  A WAV
+/// can put chunks, such as tags, before its data chunk.
+pub const HEAD_BYTES: usize = 64 * 1024;
+
+/// Room for tags, such as cover art, in the largest file of a song
+/// ([`largest_file`]): 16 MiB.
+pub const TAG_ROOM: u64 = 16 << 20;
+
+/// The bytes of one second of the largest WAV or FLAC: two channels of
+/// 32-bit samples at 384 kHz, the highest rate that the page converts.
+/// The song keeps two channels.  [`largest_file`] uses it for every WAV
+/// or FLAC, with a stated length or without one.
+const PCM_BYTES_PER_SECOND: u64 = 384_000 * 2 * 4;
+
+/// The bytes of one second of the largest MP3: 320 kbit/s, the highest
+/// bitrate of MPEG-1 Layer III.
+const MP3_BYTES_PER_SECOND: u64 = 320_000 / 8;
+
+/// What the first bytes of a file of `file_bytes` bytes state about its
+/// length.  It reads only `head` (at most [`HEAD_BYTES`] are needed), so a
+/// caller can refuse a long song before it reads the whole file.
+pub fn head_length(head: &[u8], file_bytes: u64) -> HeadLength {
+    if head.starts_with(b"RIFF") || head.starts_with(b"RF64") {
+        return wav_length(head, file_bytes);
+    }
+    let start = id3_size(head).unwrap_or(0);
+    match head.get(start..) {
+        Some(rest) if rest.starts_with(b"fLaC") => flac_length(rest),
+        _ => HeadLength::Unstated,
+    }
+}
+
+/// The bytes of the ID3v2 tag at the start of `head`, if it has one.
+fn id3_size(head: &[u8]) -> Option<usize> {
+    let tag = head.get(..10).filter(|tag| tag.starts_with(b"ID3"))?;
+    let size = tag[6..10]
+        .iter()
+        .fold(0_usize, |size, byte| (size << 7) | usize::from(byte & 0x7F));
+    let footer = if tag[5] & 0x10 != 0 { 10 } else { 0 };
+    Some(10 + size + footer)
+}
+
+/// The little-endian `u16` at `at` in `bytes`.
+fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+/// The little-endian `u32` at `at` in `bytes`.
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// [`head_length`] of a RIFF or RF64 file.  An RF64 file keeps its sizes in
+/// another chunk, so it counts as unstated.
+fn wav_length(head: &[u8], file_bytes: u64) -> HeadLength {
+    if !head.starts_with(b"RIFF") || head.get(8..12) != Some(b"WAVE") {
+        return HeadLength::UnstatedPcm;
+    }
+    let mut format: Option<(u32, u16)> = None;
+    let mut at = 12;
+    while let (Some(id), Some(size)) = (head.get(at..at + 4), u32_at(head, at + 4)) {
+        let body = at + 8;
+        if id == b"fmt " {
+            let rate = u32_at(head, body + 4);
+            let block = u16_at(head, body + 12);
+            format = rate
+                .zip(block)
+                .filter(|(rate, block)| *rate > 0 && *block > 0);
+        } else if id == b"data" {
+            let Some((rate, block)) = format else {
+                return HeadLength::UnstatedPcm;
+            };
+            if size == 0 || size == u32::MAX {
+                return HeadLength::UnstatedPcm;
+            }
+            let held = file_bytes.saturating_sub(body as u64);
+            let frames = u64::from(size).min(held) / u64::from(block);
+            return HeadLength::Frames(song_frames(frames, rate));
+        }
+        // A chunk's body has an even length: an odd one has a pad byte.
+        let next = body as u64 + u64::from(size) + u64::from(size & 1);
+        match usize::try_from(next) {
+            Ok(next) if next < head.len() => at = next,
+            _ => break,
+        }
+    }
+    HeadLength::UnstatedPcm
+}
+
+/// [`head_length`] of a FLAC stream that starts at `flac`: its STREAMINFO
+/// block, which comes first (RFC 9639, section 8.2).
+fn flac_length(flac: &[u8]) -> HeadLength {
+    let Some(info) = flac.get(4..42).filter(|block| block[0] & 0x7F == 0) else {
+        return HeadLength::UnstatedPcm;
+    };
+    let info = &info[4..];
+    let rate = (u32::from(info[10]) << 12) | (u32::from(info[11]) << 4) | u32::from(info[12] >> 4);
+    let low = u32::from_be_bytes([info[14], info[15], info[16], info[17]]);
+    let total = (u64::from(info[13] & 0x0F) << 32) | u64::from(low);
+    if rate == 0 || total == 0 {
+        return HeadLength::UnstatedPcm;
+    }
+    HeadLength::Frames(song_frames(total, rate))
+}
+
+/// The largest file, in bytes, of a song of at most `max_frames` frames at
+/// [`SONG_RATE`] whose head states `length`.  A WAV or FLAC: two channels
+/// of 32-bit samples at 384 kHz, for its stated frames if it states them,
+/// else for `max_frames`.  Anything else: an MP3 at 320 kbit/s for
+/// `max_frames`.  Each with [`TAG_ROOM`].  So a caller that reads a file
+/// whole holds at most this many bytes of it (finding 1-3 of review round
+/// 1 of the catch-up plan).
+pub fn largest_file(length: HeadLength, max_frames: usize) -> u64 {
+    let (frames, per_second) = match length {
+        HeadLength::Frames(frames) => (frames.min(max_frames as u64), PCM_BYTES_PER_SECOND),
+        HeadLength::UnstatedPcm => (max_frames as u64, PCM_BYTES_PER_SECOND),
+        HeadLength::Unstated => (max_frames as u64, MP3_BYTES_PER_SECOND),
+    };
+    let bytes = (u128::from(frames) * u128::from(per_second)).div_ceil(u128::from(SONG_RATE));
+    u64::try_from(bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(TAG_ROOM)
+}
 
 /// Decodes a file on disk (WAV, MP3 or FLAC).
 pub fn decode_path(path: &Path) -> Result<Audio> {
@@ -118,7 +294,7 @@ fn channel_with_room_for(frames: usize) -> Vec<f32> {
 /// never grows past `most`.  The decoder's `shrink_to_fit` returns what is
 /// left spare.  The reservation can be none, too big to make, or capped by
 /// what the file's bytes could hold.
-fn append(channel: &mut Vec<f32>, src: &[f32], most: usize) {
+pub(crate) fn append(channel: &mut Vec<f32>, src: &[f32], most: usize) {
     if src.len() > channel.capacity() - channel.len() {
         let room = most.saturating_sub(channel.len()).max(src.len());
         channel.reserve_exact(src.len().max(channel.len() / 8).min(room));
@@ -165,12 +341,27 @@ fn frames_within(limit: u64, channels: usize) -> usize {
     usize::try_from(limit / (4 * counted(channels))).unwrap_or(usize::MAX)
 }
 
+/// The most frames at `rate` whose frames at [`SONG_RATE`] are at most
+/// `max_song_frames`.
+fn source_frames_within(max_song_frames: usize, rate: u32) -> u64 {
+    let product = max_song_frames as u128 * u128::from(rate);
+    u64::try_from(product / u128::from(SONG_RATE)).unwrap_or(u64::MAX)
+}
+
 /// Opens `source`.  It refuses a WAV or FLAC whose stated length passes
 /// `limit` bytes of samples.  An MP3 states only an estimate without a
 /// Xing or VBRI tag: a quiet start can make it 10 times too long.  So an
 /// MP3 is never refused here; the decoder stops it at the limit.  The
-/// reservation of any file is within `limit`.
-fn open(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<Opened> {
+/// reservation of any file is within `limit`.  With `max_song_frames`,
+/// it also refuses a WAV or FLAC whose stated
+/// length passes that many frames at [`SONG_RATE`] ([`TooLong`]), and
+/// reserves no more than that.
+fn open_within(
+    source: Box<dyn MediaSource>,
+    ext: Option<&str>,
+    limit: u64,
+    max_song_frames: Option<usize>,
+) -> Result<Opened> {
     let byte_len = source.byte_len();
     let mss = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
@@ -204,8 +395,22 @@ fn open(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<O
     {
         return Err(too_long(limit));
     }
+    let rate = params.sample_rate.filter(|rate| *rate > 0);
+    let stated_song_frames = track
+        .num_frames
+        .zip(rate)
+        .filter(|_| stated_exactly)
+        .map(|(frames, rate)| song_frames(frames, rate));
+    if let Some(max_frames) = max_song_frames
+        && stated_song_frames.is_some_and(|frames| frames > max_frames as u64)
+    {
+        return Err(anyhow::Error::new(TooLong { max_frames }));
+    }
     let most = byte_len.map(|len| most_frames(&params, len));
-    let within_limit = frames_within(limit, channels) as u64;
+    let within_song = max_song_frames
+        .zip(rate)
+        .map_or(u64::MAX, |(max, rate)| source_frames_within(max, rate));
+    let within_limit = (frames_within(limit, channels) as u64).min(within_song);
     let reserve = frames_to_reserve(track.num_frames, most.map(|m| m.min(within_limit)));
     Ok(Opened {
         format,
@@ -213,6 +418,147 @@ fn open(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<O
         params,
         reserve,
     })
+}
+
+/// Decodes a file one packet at a time, so a caller can keep each packet's
+/// samples or pass them on.  It opens the file as `decode_bytes` does, and
+/// keeps the limit of [`MAX_DECODED_BYTES`]: it stops with the same error
+/// when the frames so far pass it.  It holds one packet's samples, not the
+/// file's.
+pub struct Decoder {
+    format: Box<dyn FormatReader>,
+    codec: Box<dyn AudioDecoder>,
+    track_id: u32,
+    /// The frames that `open` found to reserve, for `decode_bytes`.
+    reserve: usize,
+    limit: u64,
+    /// The most frames at [`SONG_RATE`] that the samples may give, if the
+    /// caller set a limit ([`Decoder::within_song_frames`]).
+    max_song_frames: Option<usize>,
+    /// The rate of the samples: the stated rate, or else the first
+    /// packet's.
+    sample_rate: u32,
+    frames: u64,
+    planes: Vec<Vec<f32>>,
+}
+
+/// The samples of one packet.
+pub struct Packet<'a> {
+    /// The rate of the samples, in Hz.
+    pub sample_rate: u32,
+    /// One `Vec` of samples for each channel, all the same length.
+    pub planes: &'a [Vec<f32>],
+}
+
+impl Decoder {
+    /// Opens `source`, with `ext` (such as `"mp3"`) to help the probe.
+    pub fn new(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Decoder> {
+        Decoder::within(source, ext, MAX_DECODED_BYTES)
+    }
+
+    /// Opens `source` as [`Decoder::new`] does, for a song of at most
+    /// `max_frames` frames at [`SONG_RATE`] (D3 of
+    /// `plans/completed/stream-from-storage-catchup.md`).  It refuses a WAV or
+    /// FLAC whose stated length passes that, and stops a decode whose
+    /// frames pass it, each with [`TooLong`].  The limit of
+    /// [`MAX_DECODED_BYTES`] stays.
+    pub fn within_song_frames(
+        source: Box<dyn MediaSource>,
+        ext: Option<&str>,
+        max_frames: usize,
+    ) -> Result<Decoder> {
+        Decoder::open(source, ext, MAX_DECODED_BYTES, Some(max_frames))
+    }
+
+    fn within(source: Box<dyn MediaSource>, ext: Option<&str>, limit: u64) -> Result<Decoder> {
+        Decoder::open(source, ext, limit, None)
+    }
+
+    fn open(
+        source: Box<dyn MediaSource>,
+        ext: Option<&str>,
+        limit: u64,
+        max_song_frames: Option<usize>,
+    ) -> Result<Decoder> {
+        let Opened {
+            format,
+            track_id,
+            params,
+            reserve,
+        } = open_within(source, ext, limit, max_song_frames)?;
+        let codec = symphonia::default::get_codecs()
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
+            .map_err(|e| anyhow!("no decoder for codec: {e}"))?;
+        Ok(Decoder {
+            format,
+            codec,
+            track_id,
+            reserve,
+            limit,
+            max_song_frames,
+            sample_rate: params.sample_rate.unwrap_or(0),
+            frames: 0,
+            planes: Vec::new(),
+        })
+    }
+
+    /// The samples of the next packet of the audio track, or `None` at the
+    /// end of the file.  A corrupt packet is skipped, as players do.  An
+    /// error comes before the frames so far pass the limit.
+    pub fn next_packet(&mut self) -> Result<Option<Packet<'_>>> {
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(Some(p)) => p,
+                Ok(None) => return Ok(None),
+                Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(anyhow!("reading packet: {e}")),
+            };
+            if packet.track_id != self.track_id {
+                continue;
+            }
+            match self.codec.decode(&packet) {
+                Ok(buf) => {
+                    if self.sample_rate == 0 {
+                        self.sample_rate = buf.spec().rate();
+                    }
+                    buf.copy_to_vecs_planar::<f32>(&mut self.planes);
+                    let packet_frames = self.planes.first().map_or(0, Vec::len) as u64;
+                    let frames = self.frames + packet_frames;
+                    if passes(self.limit, self.planes.len(), frames) {
+                        return Err(too_long(self.limit));
+                    }
+                    if let Some(max_frames) = self.max_song_frames
+                        && song_frames(frames, self.sample_rate) > max_frames as u64
+                    {
+                        return Err(anyhow::Error::new(TooLong { max_frames }));
+                    }
+                    self.frames = frames;
+                    return Ok(Some(Packet {
+                        sample_rate: self.sample_rate,
+                        planes: &self.planes,
+                    }));
+                }
+                Err(SymError::DecodeError(_)) => continue,
+                Err(e) => return Err(anyhow!("decoding packet: {e}")),
+            }
+        }
+    }
+
+    /// The frames of each channel decoded so far.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// The frames at [`SONG_RATE`] to make room for: the stated length,
+    /// within what the file's bytes and the limits allow (see `open`).
+    pub(crate) fn song_frames_to_reserve(&self) -> usize {
+        if self.sample_rate == 0 {
+            return 0;
+        }
+        usize::try_from(song_frames(self.reserve as u64, self.sample_rate)).unwrap_or(0)
+    }
 }
 
 fn decode_source(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Audio> {
@@ -241,57 +587,24 @@ fn decode_into_reservation(
     ext: Option<&str>,
     limit: u64,
 ) -> Result<Audio> {
-    let Opened {
-        mut format,
-        track_id,
-        params,
-        reserve,
-    } = open(source, ext, limit)?;
-    let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(&params, &AudioDecoderOptions::default())
-        .map_err(|e| anyhow!("no decoder for codec: {e}"))?;
-
-    let mut sample_rate = params.sample_rate.unwrap_or(0);
+    let mut decoder = Decoder::within(source, ext, limit)?;
+    let reserve = decoder.reserve;
+    let mut sample_rate = 0;
     let mut channels: Vec<Vec<f32>> = Vec::new();
-    let mut planes: Vec<Vec<f32>> = Vec::new();
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(Some(p)) => p,
-            Ok(None) => break,
-            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(anyhow!("reading packet: {e}")),
-        };
-        if packet.track_id != track_id {
-            continue;
+    while let Some(packet) = decoder.next_packet()? {
+        sample_rate = packet.sample_rate;
+        let most = frames_within(limit, packet.planes.len());
+        if channels.is_empty() {
+            // `open` reserved for the stated channels; the planes can be
+            // more.
+            channels = packet
+                .planes
+                .iter()
+                .map(|_| channel_with_room_for(reserve.min(most)))
+                .collect();
         }
-        match decoder.decode(&packet) {
-            Ok(buf) => {
-                if sample_rate == 0 {
-                    sample_rate = buf.spec().rate();
-                }
-                buf.copy_to_vecs_planar::<f32>(&mut planes);
-                let decoded = channels.first().map_or(0, Vec::len);
-                let packet_frames = planes.first().map_or(0, Vec::len);
-                if passes(limit, planes.len(), (decoded + packet_frames) as u64) {
-                    return Err(too_long(limit));
-                }
-                let most = frames_within(limit, planes.len());
-                if channels.is_empty() {
-                    // `open` reserved for the stated channels; the planes
-                    // can be more.
-                    channels = planes
-                        .iter()
-                        .map(|_| channel_with_room_for(reserve.min(most)))
-                        .collect();
-                }
-                for (dst, src) in channels.iter_mut().zip(planes.iter()) {
-                    append(dst, src, most);
-                }
-            }
-            // A corrupt frame is skipped, as players do.
-            Err(SymError::DecodeError(_)) => continue,
-            Err(e) => return Err(anyhow!("decoding packet: {e}")),
+        for (dst, src) in channels.iter_mut().zip(packet.planes) {
+            append(dst, src, most);
         }
     }
     if channels.is_empty() || channels[0].is_empty() {
@@ -306,45 +619,9 @@ fn decode_into_reservation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_alloc::peak_of;
     use crate::test_flac::{Blocks, by_hand, compressed, step};
     use crate::wav::encode_pcm16;
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    thread_local! {
-        /// Heap bytes this thread allocated and has not freed.
-        static LIVE: Cell<usize> = const { Cell::new(0) };
-        /// The most `LIVE` has been since a test set it.
-        static PEAK: Cell<usize> = const { Cell::new(0) };
-    }
-
-    /// Keeps `LIVE` and `PEAK` for each thread.  Only `alloc` and `dealloc`
-    /// are written, so the default `realloc` holds the old and the new
-    /// buffer at once, as `System`'s may.
-    struct PeakAllocator;
-
-    // SAFETY: every call is forwarded unchanged to `System`; counting
-    // touches only `const` thread-locals, which do not allocate.
-    unsafe impl GlobalAlloc for PeakAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let _ = LIVE.try_with(|live| {
-                let now = live.get() + layout.size();
-                live.set(now);
-                let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
-            });
-            // SAFETY: the caller's contract is the same as `System`'s.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            let _ = LIVE.try_with(|live| live.set(live.get().saturating_sub(layout.size())));
-            // SAFETY: the caller's contract is the same as `System`'s.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: PeakAllocator = PeakAllocator;
 
     /// 10,007 frames: not a whole number of 1,152-frame packets, nor near a
     /// power of two.
@@ -415,9 +692,14 @@ mod tests {
     }
 
     fn reserve_of(bytes: Vec<u8>, ext: &str) -> usize {
-        open(Box::new(Cursor::new(bytes)), Some(ext), MAX_DECODED_BYTES)
-            .unwrap()
-            .reserve
+        open_within(
+            Box::new(Cursor::new(bytes)),
+            Some(ext),
+            MAX_DECODED_BYTES,
+            None,
+        )
+        .unwrap()
+        .reserve
     }
 
     #[test]
@@ -672,10 +954,9 @@ mod tests {
         let blocks = TWO_HOURS.div_ceil(65_535) as usize;
         for channels in [1, 2] {
             let bytes = silence_of(channels, 0, 65_535, blocks);
-            let before = LIVE.with(Cell::get);
-            PEAK.with(|peak| peak.set(before));
-            let error = decode_within(bytes, "flac", LIMIT).unwrap_err();
-            let held = (PEAK.with(Cell::get) - before) as u64;
+            let (held, result) = peak_of(|| decode_within(bytes, "flac", LIMIT));
+            let held = held as u64;
+            let error = result.unwrap_err();
             assert!(
                 format!("{error:#}").contains("too long to open"),
                 "{error:#}"
@@ -787,10 +1068,11 @@ mod tests {
     fn an_mp3_that_states_more_than_the_limit_reserves_at_most_the_limit() {
         // 8 bytes a frame, for stereo and for mono, which counts as stereo.
         for mode in [STEREO, MONO] {
-            let opened = open(
+            let opened = open_within(
                 Box::new(Cursor::new(quiet_start_mp3_in(mode, 200))),
                 Some("mp3"),
                 MP3_LIMIT,
+                None,
             )
             .unwrap();
             assert_eq!(opened.reserve as u64, MP3_LIMIT / 8, "mode {mode:#x}");
@@ -800,7 +1082,7 @@ mod tests {
     #[test]
     fn a_stated_length_past_the_limit_is_refused_before_it_decodes() {
         let refused = |bytes: Vec<u8>, ext: &str, limit: u64| {
-            let error = open(Box::new(Cursor::new(bytes)), Some(ext), limit)
+            let error = open_within(Box::new(Cursor::new(bytes)), Some(ext), limit, None)
                 .err()
                 .expect("refused when it opens");
             assert!(
@@ -819,6 +1101,419 @@ mod tests {
         append(&mut channel, &[0.25; 5], 8010);
         assert_eq!(channel.capacity(), 8010);
         assert_eq!(channel.len(), 8005);
+    }
+
+    /// Counts the frames it gets, and keeps nothing.
+    struct Counter(usize);
+
+    impl crate::song::FrameSink for Counter {
+        fn put(&mut self, left: &[f32], right: &[f32]) -> Result<()> {
+            assert_eq!(left.len(), right.len());
+            self.0 += left.len();
+            Ok(())
+        }
+    }
+
+    /// A stereo `ext` file of `seconds` of tones at `rate`.
+    fn file_of(ext: &str, seconds: usize, rate: u32) -> Vec<u8> {
+        use crate::test_audio::{WavSamples, flac, mp3, tone, wav};
+        let frames = seconds * rate as usize;
+        let tones = [tone(0, frames, rate), tone(1, frames, rate)];
+        match ext {
+            "wav" => wav(&tones, rate, WavSamples::Pcm16),
+            "flac" => flac(&tones, rate),
+            _ => mp3(&tones, rate),
+        }
+    }
+
+    #[test]
+    fn a_block_decode_keeps_its_memory_flat() {
+        const MIB: usize = 1 << 20;
+        for rate in [44_100, 48_000] {
+            for ext in ["wav", "flac", "mp3"] {
+                let (short, long) = (file_of(ext, 2, rate), file_of(ext, 60, rate));
+                let want = decode_bytes(long.clone(), Some(ext)).unwrap().frames();
+                let blocks = |bytes: Vec<u8>| {
+                    peak_of(|| {
+                        let decoder = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext));
+                        let mut counter = Counter(0);
+                        crate::song::decode_into(decoder.unwrap(), &mut counter).unwrap();
+                        counter.0
+                    })
+                };
+                let (short_peak, _) = blocks(short.clone());
+                let (long_peak, frames) = blocks(long.clone());
+                let case = format!("{ext} at {rate} Hz");
+                let want = (want as u64 * 44_100).div_ceil(u64::from(rate)) as usize;
+                assert_eq!(frames, want, "{case}: the frames of a minute");
+                assert!(
+                    long_peak.abs_diff(short_peak) < MIB,
+                    "{case}: 2 s peaks {short_peak} bytes, 60 s peaks {long_peak} bytes"
+                );
+                // The control: a whole decode of the long file holds it.
+                let (whole_short, _) = peak_of(|| decode_bytes(short, Some(ext)).unwrap());
+                let (whole_long, _) = peak_of(|| decode_bytes(long, Some(ext)).unwrap());
+                assert!(
+                    whole_long > whole_short + MIB,
+                    "{case}: the control peaks {whole_short} and {whole_long} bytes"
+                );
+            }
+        }
+    }
+
+    /// Whether `result` is the error of `too_long`.
+    fn is_too_long<T>(result: Result<T>) -> bool {
+        result.is_err_and(|e| format!("{e:#}").contains("too long to open"))
+    }
+
+    /// Decodes every packet of `decoder`, to its end or an error.
+    fn every_packet(mut decoder: Decoder) -> Result<u64> {
+        while decoder.next_packet()?.is_some() {}
+        Ok(decoder.frames())
+    }
+
+    /// A file of `bytes` whose reads fail from byte `fail_from` on, with an
+    /// error of kind `Other`, as the decode worker's source fails (D7a).
+    struct Failing {
+        bytes: Cursor<Vec<u8>>,
+        fail_from: u64,
+    }
+
+    impl std::io::Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.bytes.position() + buf.len() as u64 > self.fail_from {
+                return Err(std::io::Error::other("NotReadableError"));
+            }
+            self.bytes.read(buf)
+        }
+    }
+
+    impl std::io::Seek for Failing {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.bytes.seek(to)
+        }
+    }
+
+    impl MediaSource for Failing {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.bytes.get_ref().len() as u64)
+        }
+    }
+
+    /// D7a: a read that fails in the middle of a file is an error, never
+    /// the end of the file.
+    #[test]
+    fn a_read_that_fails_is_an_error_not_the_end() {
+        let (_, _, wav) = stereo_wav();
+        let failing = Failing {
+            bytes: Cursor::new(wav),
+            fail_from: 20_000,
+        };
+        let decoder =
+            Decoder::new(Box::new(failing), Some("wav")).expect("the probe reads the start");
+        let ended = every_packet(decoder);
+        let error = ended.expect_err("a failed read is an error");
+        assert!(
+            format!("{error:#}").contains("NotReadableError"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_decode_limit_stops_a_block_decode() {
+        let within = |bytes: Vec<u8>, ext: &str, limit: u64| {
+            Decoder::within(Box::new(Cursor::new(bytes)), Some(ext), limit)
+        };
+        // A stated length past the limit is refused when it opens.
+        let (_, _, wav) = stereo_wav();
+        assert!(is_too_long(within(
+            wav.clone(),
+            "wav",
+            (FRAMES * 8 - 1) as u64
+        )));
+        let flac = two_hours_of_silence(TWO_HOURS);
+        assert!(is_too_long(Decoder::new(
+            Box::new(Cursor::new(flac)),
+            Some("flac")
+        )));
+        // An unstated length stops when the frames so far pass it, and a
+        // song at the limit opens.
+        let mut streaming = wav;
+        set_u32(&mut streaming, 4, u32::MAX);
+        set_u32(&mut streaming, 40, u32::MAX);
+        let limit = (FRAMES * 8) as u64;
+        let decoder = within(streaming.clone(), "wav", limit - 1).unwrap();
+        assert!(is_too_long(every_packet(decoder)));
+        let decoder = within(streaming, "wav", limit).unwrap();
+        assert_eq!(every_packet(decoder).unwrap(), FRAMES as u64);
+        // A mono FLAC of unstated length counts as stereo.
+        const LIMIT: u64 = 64 << 20;
+        for channels in [1, 2] {
+            let blocks = TWO_HOURS.div_ceil(65_535) as usize;
+            let bytes = silence_of(channels, 0, 65_535, blocks);
+            let decoder = within(bytes, "flac", LIMIT).unwrap();
+            assert!(is_too_long(every_packet(decoder)), "{channels} channels");
+        }
+        // An MP3 is never refused when it opens; it stops while it decodes.
+        let decoder = within(quiet_start_mp3(200), "mp3", MP3_LIMIT / 4).unwrap();
+        assert!(is_too_long(every_packet(decoder)));
+        // `decode_into` gives the decoder's error.
+        let decoder = within(quiet_start_mp3(200), "mp3", MP3_LIMIT / 4).unwrap();
+        let mut counter = Counter(0);
+        assert!(is_too_long(crate::song::decode_into(decoder, &mut counter)));
+        assert!(
+            counter.0 as u64 * 8 <= MP3_LIMIT / 4,
+            "{} frames",
+            counter.0
+        );
+    }
+
+    /// The frames at `SONG_RATE` of `frames` frames at `rate`, as the
+    /// converter gives them.
+    fn converted(frames: usize, rate: u32) -> u64 {
+        crate::resample::to_rate(vec![0.0; frames], rate, crate::resample::SONG_RATE)
+            .unwrap()
+            .len() as u64
+    }
+
+    #[test]
+    fn song_frames_are_the_frames_that_the_converter_gives() {
+        for rate in [8_000, 22_050, 44_100, 48_000, 96_000, 384_000] {
+            for frames in [1, 161, FRAMES, 48_000] {
+                assert_eq!(
+                    song_frames(frames as u64, rate),
+                    converted(frames, rate),
+                    "{frames} frames at {rate} Hz"
+                );
+            }
+        }
+    }
+
+    /// D3 of the catch-up plan: the head of a WAV or a FLAC states its
+    /// length, in frames at `SONG_RATE`, as the decode gives them.
+    #[test]
+    fn a_head_states_the_length_of_a_wav_or_a_flac() {
+        use crate::test_audio::{WavSamples, flac, mp3, tone, wav};
+        for rate in [22_050, 44_100, 48_000] {
+            let tones = [tone(0, FRAMES, rate), tone(1, FRAMES, rate)];
+            let want = HeadLength::Frames(converted(FRAMES, rate));
+            let files = [
+                wav(&tones, rate, WavSamples::Pcm16),
+                wav(&tones, rate, WavSamples::Float),
+                flac(&tones, rate),
+                flac(&tones[..1], rate),
+            ];
+            for (k, file) in files.iter().enumerate() {
+                let size = file.len() as u64;
+                let head = &file[..HEAD_BYTES.min(file.len())];
+                assert_eq!(head_length(head, size), want, "file {k} at {rate} Hz");
+                // The header alone is enough.
+                let header = if k < 2 { 44 } else { 42 };
+                assert_eq!(head_length(&file[..header], size), want, "file {k}");
+            }
+            let mp3 = mp3(&tones, rate);
+            assert_eq!(head_length(&mp3, mp3.len() as u64), HeadLength::Unstated);
+        }
+        // A WAV of unstated length: a streaming WAV, or a size of 0.
+        let (_, _, wav) = stereo_wav();
+        let size = wav.len() as u64;
+        for unstated in [u32::MAX, 0] {
+            let mut streaming = wav.clone();
+            set_u32(&mut streaming, 40, unstated);
+            assert_eq!(head_length(&streaming, size), HeadLength::UnstatedPcm);
+        }
+        // A WAV that states more than its file holds: what the file holds.
+        let mut truncated = wav.clone();
+        set_u32(&mut truncated, 40, (FRAMES * 4 * 1000) as u32);
+        assert_eq!(
+            head_length(&truncated, size),
+            HeadLength::Frames(FRAMES as u64)
+        );
+        // A head that ends before the data chunk.
+        assert_eq!(head_length(&wav[..40], size), HeadLength::UnstatedPcm);
+        // A FLAC of unstated length, and a FLAC after an ID3v2 tag.
+        let silence = silence_of(2, 0, 4_096, 2);
+        let flac_size = silence.len() as u64;
+        assert_eq!(head_length(&silence, flac_size), HeadLength::UnstatedPcm);
+        let stated = silence_of(2, 8_192, 4_096, 2);
+        let mut tagged = vec![b'I', b'D', b'3', 4, 0, 0, 0, 0, 1, 0];
+        tagged.extend_from_slice(&[0; 128]);
+        tagged.extend_from_slice(&stated);
+        assert_eq!(
+            head_length(&tagged, tagged.len() as u64),
+            HeadLength::Frames(8_192)
+        );
+        // An ID3v2 tag before an MP3, and bytes of no known format.
+        let mut tagged_mp3 = vec![b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0];
+        tagged_mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+        assert_eq!(head_length(&tagged_mp3, 1 << 20), HeadLength::Unstated);
+        assert_eq!(head_length(b"lloyd", 5), HeadLength::Unstated);
+    }
+
+    /// D3 of the catch-up plan: the cap of a file.  A WAV or FLAC: 384 kHz,
+    /// 32 bits, two channels, for its stated length or else for the limit.
+    /// An MP3: 320 kbit/s for the limit.  Each with room for tags.
+    #[test]
+    fn the_largest_file_of_a_song_within_the_limit() {
+        let hundred_seconds = 100 * 44_100;
+        assert_eq!(TAG_ROOM, 16 << 20);
+        assert_eq!(
+            largest_file(HeadLength::UnstatedPcm, hundred_seconds),
+            307_200_000 + TAG_ROOM
+        );
+        assert_eq!(
+            largest_file(HeadLength::Unstated, hundred_seconds),
+            4_000_000 + TAG_ROOM
+        );
+        // Part of a second rounds up.
+        assert_eq!(largest_file(HeadLength::Unstated, 1), 1 + TAG_ROOM);
+        // Finding 1-3 of review round 1: a file that states 10 s gets the
+        // bytes of 10 s, and a stated length past the limit gets the limit.
+        assert_eq!(
+            largest_file(HeadLength::Frames(441_000), hundred_seconds),
+            30_720_000 + TAG_ROOM
+        );
+        assert_eq!(
+            largest_file(HeadLength::Frames(u64::MAX), hundred_seconds),
+            307_200_000 + TAG_ROOM
+        );
+    }
+
+    /// The 44-byte header `wav` with a chunk of `id` and `body` put before
+    /// its `data` chunk, which starts at byte 36.
+    fn with_chunk_before_data(wav: &[u8], id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut file = Vec::with_capacity(wav.len() + 9 + body.len());
+        file.extend_from_slice(&wav[..36]);
+        file.extend_from_slice(id);
+        file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        file.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            file.push(0);
+        }
+        file.extend_from_slice(&wav[36..]);
+        file
+    }
+
+    /// Review round 1 of the catch-up plan (missed mutants of
+    /// `wav_length` and `HEAD_BYTES`): a WAV head skips a chunk of odd size
+    /// and its pad byte, and a chunk of 2,000 bytes, before `data`.  A rate
+    /// or a block align of 0 states no length.
+    #[test]
+    fn a_wav_head_skips_chunks_before_data_and_needs_a_format() {
+        let (_, _, wav) = stereo_wav();
+        let stated = HeadLength::Frames(FRAMES as u64);
+        let odd = with_chunk_before_data(&wav, b"junk", &[1, 2, 3]);
+        assert_eq!(head_length(&odd, odd.len() as u64), stated, "odd chunk");
+        let tags = with_chunk_before_data(&wav, b"LIST", &[7; 2_000]);
+        assert_eq!(HEAD_BYTES, 65_536);
+        assert_eq!(
+            head_length(&tags[..HEAD_BYTES.min(tags.len())], tags.len() as u64),
+            stated,
+            "2,000 bytes of tags"
+        );
+        let mut no_rate = wav.clone();
+        set_u32(&mut no_rate, 24, 0);
+        assert_eq!(
+            head_length(&no_rate, no_rate.len() as u64),
+            HeadLength::UnstatedPcm
+        );
+        let mut no_block = wav;
+        no_block[32..34].copy_from_slice(&0_u16.to_le_bytes());
+        assert_eq!(
+            head_length(&no_block, no_block.len() as u64),
+            HeadLength::UnstatedPcm
+        );
+    }
+
+    /// Review round 1 of the catch-up plan (missed mutants of
+    /// `flac_length` and `id3_size`): a STREAMINFO total of 2^32 + 5
+    /// frames, and a FLAC after an ID3v2.4 tag with a footer.
+    #[test]
+    fn a_flac_head_states_a_36_bit_total_after_a_tag_with_a_footer() {
+        let mut flac = silence_of(2, 8_192, 4_096, 2);
+        // STREAMINFO starts at byte 8: the total's top 4 bits are the low
+        // half of its byte 13, and its low 32 bits are bytes 14 to 17.
+        flac[21] = (flac[21] & 0xF0) | 0x01;
+        flac[22..26].copy_from_slice(&5_u32.to_be_bytes());
+        assert_eq!(
+            head_length(&flac, flac.len() as u64),
+            HeadLength::Frames((1 << 32) + 5)
+        );
+        let stated = silence_of(2, 8_192, 4_096, 2);
+        // Flags 0x10: a footer of 10 bytes follows the 128 bytes of tags.
+        let mut tagged = vec![b'I', b'D', b'3', 4, 0, 0x10, 0, 0, 1, 0];
+        tagged.extend_from_slice(&[0; 128]);
+        tagged.extend_from_slice(&[b'3', b'D', b'I', 4, 0, 0x10, 0, 0, 1, 0]);
+        tagged.extend_from_slice(&stated);
+        assert_eq!(
+            head_length(&tagged, tagged.len() as u64),
+            HeadLength::Frames(8_192)
+        );
+    }
+
+    /// Finding 1-12 of review round 1 of the catch-up plan: the decoder of
+    /// `Decoder::within_song_frames` stops a decode of unstated length by
+    /// itself, at the limit in frames at `SONG_RATE`, with no sink.
+    #[test]
+    fn the_decoder_stops_at_the_song_frame_limit() {
+        let (left, right, _) = stereo_wav();
+        for rate in [22_050, 44_100] {
+            let mut streaming = encode_pcm16(&left, &right, rate);
+            set_u32(&mut streaming, 4, u32::MAX);
+            set_u32(&mut streaming, 40, u32::MAX);
+            let max = song_frames(FRAMES as u64, rate) as usize;
+            let open = |max: usize| {
+                let source = Box::new(Cursor::new(streaming.clone()));
+                Decoder::within_song_frames(source, Some("wav"), max).expect("no stated length")
+            };
+            assert_eq!(every_packet(open(max)).unwrap(), FRAMES as u64, "{rate} Hz");
+            let error = every_packet(open(max - 1)).expect_err("past the limit");
+            assert_eq!(
+                error.downcast_ref::<TooLong>(),
+                Some(&TooLong {
+                    max_frames: max - 1
+                }),
+                "{rate} Hz"
+            );
+        }
+    }
+
+    /// Review round 1 of the catch-up plan (missed mutants of
+    /// `source_frames_within` and `Decoder::song_frames_to_reserve`): a
+    /// decoder reserves the song frames of its stated length, within its
+    /// limit in frames at `SONG_RATE`.
+    #[test]
+    fn a_decoder_reserves_song_frames_within_its_limit() {
+        use crate::test_audio::{mp3, tone};
+        let ten_seconds = vec![0.25_f32; 441_000];
+        let wav = encode_pcm16(&ten_seconds, &ten_seconds, 44_100);
+        let decoder =
+            Decoder::within_song_frames(Box::new(Cursor::new(wav)), Some("wav"), 4_410_000)
+                .unwrap();
+        assert_eq!(decoder.song_frames_to_reserve(), 441_000);
+        // An MP3 of 1 s, with a limit of 2,000 song frames: 1,000 frames at
+        // 22.05 kHz, and 2,176 at 48 kHz, each 2,000 at 44.1 kHz.
+        for rate in [22_050, 48_000] {
+            let frames = rate as usize;
+            let bytes = mp3(&[tone(0, frames, rate), tone(1, frames, rate)], rate);
+            let decoder =
+                Decoder::within_song_frames(Box::new(Cursor::new(bytes)), Some("mp3"), 2_000)
+                    .unwrap();
+            assert_eq!(decoder.song_frames_to_reserve(), 2_000, "{rate} Hz");
+        }
+    }
+
+    /// Review round 1 of the catch-up plan: the text of `TooLong`.
+    #[test]
+    fn too_long_says_the_limit() {
+        assert_eq!(
+            TooLong { max_frames: 4_410 }.to_string(),
+            "the song is too long to open here: it passes 4410 frames at 44100 Hz"
+        );
     }
 
     #[test]

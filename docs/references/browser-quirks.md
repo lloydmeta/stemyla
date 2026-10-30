@@ -29,6 +29,8 @@ cpal 0.18's Web Audio host keeps a stream's callback in a reference cycle, so an
 Safari reads an OPFS file's contents at the time of each read, not as it was when the file was opened, so a file replaced while being read gives mixed contents.
 
 * The code: the model is built from the bytes that were hashed (`docs/ARCHITECTURE.md`, memory on phones).
+* Seen in Safari 27 on 2026-10-26 (review round 3 of M4): a `File` from `getFile()` keeps its old `size`, but reads the bytes on disk now.  A file written again shorter in the same second reads past its new end as zeros, with no error.  Its `lastModified` gives the value on disk now, in whole seconds.  A read after a write in a later second fails with NotFoundError.  Chrome 155 refuses any read after a write (NotReadableError), and gives `lastModified` in milliseconds.
+* The code: the worker keeps the size and `lastModified` of the mix file at the open, and compares them with a new `getFile()` after the last chunk (`worker/src/web/mix.rs`).  A write of the same size in the same second stays unseen in Safari (TD-55).
 
 ## Safari keeps audio suspended while macOS reports the user idle
 

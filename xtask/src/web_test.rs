@@ -1,7 +1,8 @@
 //! `xtask web-test [--browser safari|chrome] [filter]`: the browser tests
-//! of `app` (song sessions in browser storage) and `stem-worker` (model
-//! storage, message handling), compiled for wasm32 and run in a real
-//! browser by `wasm-bindgen-test-runner`.
+//! of `app` (song sessions in browser storage), `stem-worker` (model
+//! storage, message handling), `decode-worker` and `stem-protocol`,
+//! compiled for wasm32 and run in a real browser by
+//! `wasm-bindgen-test-runner`.
 //!
 //! It sets Cargo's runner and the driver through the environment, so no
 //! `.cargo/config.toml` is needed, and it checks that the installed runner
@@ -19,6 +20,10 @@ const DRIVER_VARS: [&str; 4] = [
     "CHROMEDRIVER",
     "MSEDGEDRIVER",
 ];
+
+/// Seconds that the runner gives each test binary, unless the caller sets
+/// `WASM_BINDGEN_TEST_TIMEOUT`.
+const WEB_TEST_TIMEOUT_S: &str = "600";
 
 pub fn run(args: &[String]) -> Result<()> {
     let mut browser = Browser::default_here();
@@ -41,7 +46,7 @@ pub fn run(args: &[String]) -> Result<()> {
     check_runner(&wanted)?;
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
-    let runs: [&[&str]; 3] = [
+    let runs: [&[&str]; 4] = [
         &[
             "-p",
             "app",
@@ -54,6 +59,7 @@ pub fn run(args: &[String]) -> Result<()> {
             "web_output",
         ],
         &["-p", "stem-worker", "--lib"],
+        &["-p", "decode-worker", "--lib"],
         &["-p", "stem-protocol", "--test", "web"],
     ];
     for targets in runs {
@@ -70,6 +76,15 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         // It would skip every browser test and report success.
         cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
+        // The runner gives each test binary 20 s by default.  The app's
+        // lib tests run the `?streamtest` runs, the stored lanes of M6,
+        // which play in real time, and the saves of M8.  They took 197 s in
+        // CI run 40788465048, and 219 s to 231 s on the maintainer's Mac.
+        // One run there passed 300 s (review round speed 1 of M8).  600 s
+        // is about 3 times the CI time.
+        if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
+            cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
+        }
         let var = match browser {
             Browser::Chrome => "CHROMEDRIVER",
             Browser::Safari => "SAFARIDRIVER",

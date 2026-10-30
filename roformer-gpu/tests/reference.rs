@@ -149,7 +149,7 @@ fn forward_matches_pytorch() {
     let sx = SafeTensors::deserialize(&sbytes).unwrap();
     // A small budget, so every transformer and mask group runs in several
     // steps and the sub-batch offsets are exercised.
-    let net = Net::load(&gpu, &weights, 400_000).unwrap();
+    let net = Net::load(&gpu, &weights, 400_000, roformer_gpu::WeightFormat::F32).unwrap();
     let (sshape, sdata) = f32s(&sx, "spec");
     let frames = sshape[2];
     let job = Job::new(&gpu, &net, frames);

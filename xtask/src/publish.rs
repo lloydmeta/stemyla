@@ -20,7 +20,7 @@
 //! index.html          the newest build's page
 //! v/VERSIONS          the kept build ids, newest first
 //! v/<id>/index.html   that build's page
-//! v/<id>/app.js, app_bg.wasm, stem-worker*.{js,wasm}, snippets/…
+//! v/<id>/app.js, app_bg.wasm, stem-worker*.{js,wasm}, decode-worker*.{js,wasm}, snippets/…
 //! ```
 //!
 //! Steps:
@@ -659,6 +659,9 @@ pub fn check_build(dir: &Path, url: &str) -> Result<()> {
         "stem-worker.js",
         "stem-worker_bg.wasm",
         "stem-worker_loader.js",
+        "decode-worker.js",
+        "decode-worker_bg.wasm",
+        "decode-worker_loader.js",
     ];
     for f in need {
         let p = dir.join(f);

@@ -9,24 +9,29 @@ profile = "mutants"
 all_features = true
 
 # These files compile for wasm32 only.  No native test can catch a mutant
-# in them.
+# in them.  Each pattern names a whole file.
 exclude_globs = [
+    "app/src/decode_tests.rs",
+    "app/src/decoder/client.rs",
     "app/src/picker.rs",
+    "app/src/playback.rs",
+    "app/src/playback_tests.rs",
+    "app/src/save_tests.rs",
     "app/src/separator.rs",
     "app/src/store.rs",
+    "app/src/streamtest.rs",
+    "decoder/src/web.rs",
+    "decoder/src/web/**",
     "worker/src/web.rs",
+    "worker/src/web/**",
 ]
 
-# Functions that compile for wasm32 only, in files that native code also
-# uses.  cargo-mutants matches each pattern against the names that `--list`
-# shows.  A name that also has a native variant stays in, such as
-# `base_latency` in engine/src/live.rs and `main` in app/src/main.rs.  The
-# validator decides its wasm32 mutants.  A wasm32 block inside a shared
-# function stays in too (TD-33).
-exclude_re = [
-    '(replace|in) (StemApp::)?(refresh_storage|about_menu|load_and_keep|pick_song|separator_controls|storage_menu|reset_dialog|start_reset|poll_separator|start_web)\b',
-    '(replace|in) web::(run|reload)\b',
-    '(replace|in) StemApp::(save_menu|start_save|step_save)\b',
-    '(replace|in) web::(<impl Sink for Js(Channels|Wav|Sink)>::write|Js(Channels|Wav|Sink)::(new|into_bytes))\b',
-    '(replace|in) web_tests::',
-]
+# A function, impl or module that compiles for wasm32 only, in a file that
+# native code also uses, has `#[cfg_attr(mutants, mutants::skip)]`.
+# cargo-mutants then makes no mutant of it, struct-field deletions
+# included.  Put the attribute on each new wasm32-only function, impl or
+# module.  Do not put it on a function with a native variant, such as
+# `base_latency` in engine/src/live.rs, `main` in app/src/main.rs and
+# `mapped_floats` in roformer-gpu/src/lib.rs.  The validator decides their
+# wasm32 mutants.  A wasm32 block inside a shared function stays in too
+# (TD-33).

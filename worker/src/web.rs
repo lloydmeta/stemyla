@@ -1,20 +1,29 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::rc::Rc;
 
 use js_sys::{Float32Array, Uint8Array};
-use roformer::demix::{Demixer, Segment};
+use roformer::demix::{Demixer, MixSource, Segment, Stereo};
 use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
-use roformer_gpu::Gpu;
 use roformer_gpu::net::{Job, Net, Step};
+use roformer_gpu::{Gpu, WeightFormat};
 use stem_protocol::{
-    self as protocol, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
+    self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
+
+mod encode;
+mod mix;
+mod stems;
+
+use encode::{Codec, encode};
+use mix::StoredMix;
+use stems::{StemError, StemWriter};
 
 const CACHE_NAME: &str = "bs_roformer_sw.safetensors";
 
@@ -246,12 +255,25 @@ struct State {
     /// "high-performance" or "low-power" (`?gpu=integrated`).
     power: &'static str,
     net: Option<Rc<Net>>,
-    /// Whether `ensure_kernels` has set this GPU's kernels.
-    kernels_chosen: bool,
+    /// The weight format of the last kernel choice of `ensure_kernels`
+    /// (none before the first).
+    kernels_chosen: Option<WeightFormat>,
+    /// The matmul policy and attention path after the start-up checks,
+    /// before any choice or override, so a choice for the other weight
+    /// format starts from them.
+    checked: Option<(roformer_gpu::MatMulPolicy, roformer_gpu::AttentionPolicy)>,
 }
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { gpu: None, power: "high-performance", net: None, kernels_chosen: false }) };
+    static STATE: RefCell<State> = const {
+        RefCell::new(State {
+            gpu: None,
+            power: "high-performance",
+            net: None,
+            kernels_chosen: None,
+            checked: None,
+        })
+    };
 }
 
 fn scope() -> DedicatedWorkerGlobalScope {
@@ -379,7 +401,8 @@ async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     });
     // Every matmul kernel against the CPU on small products; one that
     // fails on this GPU is never used (the fallback failing is fatal).
-    for p in g.check_kernels().await? {
+    let (problems, times) = g.check_kernels_timed(perf_now).await?;
+    for p in problems {
         log(&p);
     }
     // The fused attention kernel against the CPU; if it fails, attention
@@ -387,30 +410,82 @@ async fn gpu(s: &Settings) -> Result<Rc<Gpu>, String> {
     if let Some(p) = g.check_attention().await {
         log(&p);
     }
+    // A browser test and the iPhone run look for this line, which also
+    // gives how long the matmul checks took (a measure only).
+    let times = roformer_gpu::check_times_text(times);
+    if g.f16_ok.get() {
+        log(&format!("{F16_PASSED} ({times})"));
+    } else {
+        log(&times);
+    }
+    let checked = (g.policy.get(), g.attention.get());
     // Overrides from the URL; this GPU's own choice comes later, in
     // `ensure_kernels`.
     apply_policy(&g, s);
     apply_attention(&g, s);
-    STATE.with_borrow_mut(|st| st.gpu = Some(g.clone()));
+    STATE.with_borrow_mut(|st| {
+        st.gpu = Some(g.clone());
+        st.checked = Some(checked);
+    });
     Ok(g)
 }
 
-/// This GPU's kernel choice (kept per GPU, or measured once) unless the
-/// page URL sets both parts, then any override from the URL; once per
-/// worker.  Called once the GPU has done real work (after the model
-/// upload, or for `?bench` without a model after its matmul timings)
-/// rather than when the device opens, so calibration neither shares the
-/// GPU with the upload nor times a GPU that has only just woken.
-async fn ensure_kernels(g: &Gpu, s: &Settings) {
-    if STATE.with_borrow_mut(|st| std::mem::replace(&mut st.kernels_chosen, true)) {
+/// The line the worker logs when the f16 variants pass the start-up check
+/// (decision 0022).
+const F16_PASSED: &str = "f16 weights: the start-up check passed";
+
+/// The weight format of a load: `?weights=`, and what this GPU allows
+/// (`roformer_gpu::weight_format`).  Logs why, if it cannot follow the
+/// setting.
+fn load_format(g: &Gpu, s: &Settings) -> WeightFormat {
+    let (format, note) =
+        roformer_gpu::weight_format(s.weights.as_deref(), g.downlevel_flags(), g.f16_ok.get());
+    if let Some(note) = note {
+        log(&note);
+    }
+    format
+}
+
+/// This GPU's kernel choice for weights in `format` (kept per GPU and
+/// format, or measured once) unless the page URL sets both parts, then any
+/// override from the URL; once per weight format, so a load of the other
+/// format chooses again, from the state after the start-up checks.
+/// Called once the GPU has done real work (after the model upload, or for
+/// `?bench` without a model after its matmul timings) rather than when the
+/// device opens, so calibration neither shares the GPU with the upload nor
+/// times a GPU that has only just woken.  Logs the choice it uses.
+async fn ensure_kernels(g: &Gpu, s: &Settings, format: WeightFormat) {
+    let (last, checked) = STATE.with_borrow(|st| (st.kernels_chosen, st.checked));
+    if !roformer_gpu::bench::choose_again(last, format) {
         return;
     }
-    let set = |v: &Option<String>| v.as_deref().is_some_and(|v| v != "auto");
-    if !(set(&s.mm) && set(&s.attn)) {
-        choose_kernels(g).await;
+    STATE.with_borrow_mut(|st| st.kernels_chosen = Some(format));
+    if let Some((policy, attention)) = checked {
+        g.policy.set(policy);
+        g.attention.set(attention);
     }
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|v| v != "auto");
+    let source = if set(&s.mm) && set(&s.attn) {
+        "from the URL"
+    } else {
+        let chosen = choose_kernels(g, format).await;
+        match (chosen, set(&s.mm) || set(&s.attn)) {
+            (Chosen::Stored, false) => "stored",
+            (Chosen::Calibrated, false) => "calibrated",
+            (Chosen::Stored, true) => "stored, and the URL",
+            (Chosen::Calibrated, true) => "calibrated, and the URL",
+        }
+    };
     apply_policy(g, s);
     apply_attention(g, s);
+    log(&roformer_gpu::bench::kernels_line(
+        roformer_gpu::bench::Choice {
+            matmul: g.policy.get(),
+            attention: g.attention.get(),
+        },
+        source,
+        format,
+    ));
 }
 
 fn budget(s: &Settings) -> usize {
@@ -449,9 +524,7 @@ async fn handle(msg: JsValue) {
             serve(request, &settings).await
         }
     };
-    if let Err(text) = result {
-        send(Reply::Error { of: kind, text });
-    }
+    reply_to(&kind, result);
 }
 
 async fn serve(request: Request, s: &Settings) -> Result<(), String> {
@@ -460,24 +533,14 @@ async fn serve(request: Request, s: &Settings) -> Result<(), String> {
         Request::Model(source) => with_storage(load_model(source, s)).await,
         Request::Download => with_storage(download(s)).await,
         Request::ForgetModel => with_storage(forget_model()).await,
-        Request::Separate { left, right } => {
+        Request::Separate { mix, session } => {
             let (gpu, net) = loaded()?;
-            run(&gpu, &net, [left, right], s).await
+            run(&gpu, &net, mix, session.as_deref(), s).await
         }
         Request::Selftest { base } => selftest(base, s).await,
         Request::Bench => bench(s).await,
-        Request::Mp3 {
-            name,
-            left,
-            right,
-            rate,
-        } => mp3(name, [left, right], rate).await,
-        Request::Flac {
-            name,
-            left,
-            right,
-            rate,
-        } => flac(name, [left, right], rate),
+        Request::Mp3 { name, source } => encode(Codec::Mp3, name, source).await,
+        Request::Flac { name, source } => encode(Codec::Flac, name, source).await,
     }
 }
 
@@ -724,7 +787,8 @@ async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError
     // before goes now: a safetensors file that then fails to load leaves
     // no model loaded (the stored one, if any, is kept).
     STATE.with_borrow_mut(|st| st.net = None);
-    let net = Net::load_store(&g, Store::from_source(&file)?, budget(s))?;
+    let format = load_format(&g, s);
+    let net = Net::load_store(&g, Store::from_source(&file)?, budget(s), format)?;
     // Its cached blocks, or a checked download's bytes, are not needed for
     // the GPU checks and kernel timing that follow.
     drop(file);
@@ -734,7 +798,7 @@ async fn build(file: ModelFile, s: &Settings) -> Result<(f64, String), LoadError
             "the GPU rejected the model upload: {e}"
         )));
     }
-    ensure_kernels(&g, s).await;
+    ensure_kernels(&g, s, net.format).await;
     log(&memory_text(&net, None));
     STATE.with_borrow_mut(|s| s.net = Some(Rc::new(net)));
     Ok((now_s() - t0, gpu_text(&g).await))
@@ -1009,13 +1073,17 @@ impl Pace {
     }
 }
 
-/// Megabytes of this worker's WebAssembly memory, which only ever grows.
-fn wasm_mb() -> f64 {
+/// Bytes of this worker's WebAssembly memory, which only ever grows.
+fn wasm_bytes() -> f64 {
     let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
     mem.buffer()
         .unchecked_into::<js_sys::ArrayBuffer>()
         .byte_length() as f64
-        / 1e6
+}
+
+/// Megabytes of this worker's WebAssembly memory.
+fn wasm_mb() -> f64 {
+    wasm_bytes() / 1e6
 }
 
 /// Where the worker's memory is, for the console: on iOS the whole tab is
@@ -1033,8 +1101,12 @@ fn memory_text(net: &Net, job: Option<&Job>) -> String {
         .map_or(String::new(), |b| {
             format!(", GPU buffers live {:.0} MB", mb(b))
         });
+    let weights = match net.format {
+        WeightFormat::F32 => "f32 weights",
+        WeightFormat::F16 => "f16 weight matrices",
+    };
     format!(
-        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB{job}{live}",
+        "memory: worker wasm {:.0} MB, model on the GPU {:.0} MB ({weights}){job}{live}",
         wasm_mb(),
         mb(net.bytes)
     )
@@ -1047,77 +1119,275 @@ fn trace(on: bool, text: &str) {
     }
 }
 
-async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Result<(), String> {
-    let debug = s.debug;
+/// Separates the mix on the GPU.  With a `session`, the stems go to their
+/// files there (the storage path), else to the page (the memory path).
+async fn run(
+    gpu: &Gpu,
+    net: &Net,
+    mix: Mix,
+    session: Option<&str>,
+    s: &Settings,
+) -> Result<(), String> {
     let chunk = s.chunk.unwrap_or(CHUNK);
     let overlap = s.overlap.unwrap_or(OVERLAP);
     let t0 = now_s();
-    // The page transferred these and nothing else holds them: dropped once
-    // copied, so the browser can free them while the song is separated.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "MEM-1: the one copy of the transferred mix into wasm memory, for the demixer; the JS arrays drop after"
-    )]
-    let mix = mix.map(|c| c.to_vec());
-    let mut d = Demixer::new(mix, chunk, overlap, STEMS.len());
-    let song_len = d.output_len();
     // The report after the song covers this separation only.
     gpu.reset_profile().await?;
-    let mut pace = Pace::new(s);
+    let network = |total| GpuNetwork {
+        gpu,
+        net,
+        pace: Pace::new(s),
+        job: None,
+        total,
+        debug: s.debug,
+    };
+    separate_mix(mix, session, chunk, overlap, network, t0).await
+}
+
+/// Separates `mix` through the network that `network` makes for the
+/// song's chunks.  A stored mix is read one span at a time.  Arrays are
+/// copied into wasm memory.  A mix file that cannot be opened, or that
+/// does not hold the frames of the request, sends `unstored`.
+async fn separate_mix<N: Network>(
+    mix: Mix,
+    session: Option<&str>,
+    chunk: usize,
+    overlap: usize,
+    network: impl FnOnce(usize) -> N,
+    t0: f64,
+) -> Result<(), String> {
+    log(&format!(
+        "memory: worker wasm {:.0} MB at the separation's start",
+        wasm_mb()
+    ));
+    match mix {
+        Mix::Arrays { left, right } => {
+            // The page transferred these and nothing else holds them:
+            // dropped once copied, so the browser can free them while the
+            // song is separated.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "MEM-1: the one copy of the transferred mix into wasm memory, for the demixer, on the memory path only; the JS arrays drop after"
+            )]
+            let mix = [left, right].map(|c| c.to_vec());
+            let d = Demixer::new(mix, chunk, overlap, STEMS.len());
+            let mut net = network(d.num_chunks());
+            separate_song(&mut net, d, session, t0).await
+        }
+        Mix::Stored { path, frames } => {
+            let source = match StoredMix::open(&path, frames).await {
+                Ok(source) => source,
+                Err(text) => {
+                    send(Reply::Unstored { text });
+                    return Ok(());
+                }
+            };
+            let d = Demixer::new(source, chunk, overlap, STEMS.len());
+            let mut net = network(d.num_chunks());
+            separate_song(&mut net, d, session, t0).await
+        }
+    }
+}
+
+/// The network that separates one chunk at a time: the GPU's in a real
+/// separation, a fake one in the tests.
+trait Network {
+    /// The stems of chunk `index`: one stereo pair for each of `STEMS`.
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String>;
+    /// "so far ..." for the log line after each chunk.
+    fn so_far(&self) -> String;
+    /// Logs a summary after the song.
+    fn finish(&self);
+}
+
+/// BS-RoFormer SW on the GPU, one paced step at a time.
+struct GpuNetwork<'a> {
+    gpu: &'a Gpu,
+    net: &'a Net,
+    pace: Pace,
+    /// The GPU buffers of one chunk length, made again when it changes.
+    job: Option<Job<'a>>,
+    /// Chunks in the song.
+    total: usize,
+    debug: bool,
+}
+
+impl Network for GpuNetwork<'_> {
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+        let tc = now_s();
+        let (spec, feats) = analyse(x);
+        let frames = feats.len() / FEATURES;
+        trace(
+            self.debug,
+            &format!("chunk {index}: stft {:.2} s", now_s() - tc),
+        );
+        if self.job.as_ref().is_none_or(|j| j.frames != frames) {
+            // Freed before the next is made: two chunks' buffers (about
+            // 280 MB each) need not be on the GPU at once.
+            drop(self.job.take());
+            self.job = Some(Job::new(self.gpu, self.net, frames));
+            log(&format!(
+                "separating {} chunks; {}",
+                self.total,
+                memory_text(self.net, self.job.as_ref())
+            ));
+        }
+        let j = self.job.as_ref().expect("job");
+        j.set_input(&feats);
+        // The GPU holds the input now; the spectra alone make the stems.
+        drop(feats);
+        let mut out = Vec::with_capacity(STEMS.len());
+        for step in j.steps() {
+            self.pace.run(self.gpu, j, &step).await?;
+            if let Step::Mask { last: true, .. } = step {
+                out.push(apply_masks(&spec, &j.mask().await?));
+                trace(
+                    self.debug,
+                    &format!("chunk {index}: mask {} at {:.2} s", out.len(), now_s() - tc),
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    fn so_far(&self) -> String {
+        format!(
+            "so far {}; {}",
+            self.pace.summary(),
+            memory_text(self.net, self.job.as_ref())
+        )
+    }
+
+    fn finish(&self) {
+        log(&format!("separation: {}", self.pace.summary()));
+        log_profile(self.gpu, &self.pace);
+    }
+}
+
+/// The check, after the last chunk, that the song did not change during
+/// the separation (finding 3-3 of review round 3 of M4).
+trait MixCheck {
+    /// `Ok` if the mix is still the one that the separation read; else
+    /// why not, for `unstored`.
+    async fn unchanged(&self) -> Result<(), String>;
+}
+
+/// A mix in memory cannot change.
+impl MixCheck for Stereo {
+    async fn unchanged(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl MixCheck for StoredMix {
+    async fn unchanged(&self) -> Result<(), String> {
+        StoredMix::unchanged(self).await
+    }
+}
+
+/// Why a separation stopped.
+enum Stop {
+    /// Browser storage refused a stem file, or could not give the stored
+    /// mix: the worker sends `unstored`.
+    Storage(String),
+    /// Any other failure: the worker sends `error`.
+    Failed(String),
+}
+
+impl From<StemError> for Stop {
+    fn from(e: StemError) -> Self {
+        match e {
+            StemError::Storage(text) => Self::Storage(text),
+            StemError::Refused(text) => Self::Failed(text),
+        }
+    }
+}
+
+/// Separates the song in `d`, a chunk at a time, through `net`.  With a
+/// `session`, it writes the stems there and sends `stored` after each
+/// segment; else it sends each segment to the page.  Then it sends
+/// `done`, if the mix did not change meanwhile.  A storage failure, of a
+/// stem file or of the mix, a changed mix included, removes the
+/// stem files and sends `unstored`.  Any other failure removes them too,
+/// and is returned for an `error` (D4 of M3).
+async fn separate_song<S: MixSource<Error: Display> + MixCheck>(
+    net: &mut impl Network,
+    mut d: Demixer<S>,
+    session: Option<&str>,
+    t0: f64,
+) -> Result<(), String> {
+    let song_len = d.output_len();
+    let mut writer = match session {
+        None => None,
+        Some(session) => match StemWriter::open(session, &STEMS, song_len).await {
+            Ok(w) => Some(w),
+            Err(StemError::Storage(text)) => {
+                send(Reply::Unstored { text });
+                return Ok(());
+            }
+            Err(StemError::Refused(text)) => return Err(text),
+        },
+    };
+    let separated = match separate_chunks(net, &mut d, writer.as_mut(), t0).await {
+        Ok(()) => d.source().unchanged().await.map_err(Stop::Storage),
+        failed => failed,
+    };
+    let finished = match (separated, writer.as_mut()) {
+        (Ok(()), Some(w)) => w.finish().await.map_err(Stop::from),
+        (other, _) => other,
+    };
+    match finished {
+        Ok(()) => {
+            net.finish();
+            log(&format!(
+                "memory: worker wasm {:.0} MB at the separation's end",
+                wasm_mb()
+            ));
+            send(Reply::Done { secs: now_s() - t0 });
+            Ok(())
+        }
+        Err(stop) => {
+            if let Some(w) = writer {
+                w.abandon().await;
+            }
+            match stop {
+                Stop::Storage(text) => {
+                    send(Reply::Unstored { text });
+                    Ok(())
+                }
+                Stop::Failed(text) => Err(text),
+            }
+        }
+    }
+}
+
+/// The loop of [`separate_song`] over the chunks.
+async fn separate_chunks<S: MixSource<Error: Display>>(
+    net: &mut impl Network,
+    d: &mut Demixer<S>,
+    mut writer: Option<&mut StemWriter>,
+    t0: f64,
+) -> Result<(), Stop> {
+    let song_len = d.output_len();
     let total = d.num_chunks();
     send(Reply::Progress {
         done: 0,
         total: total as u32,
         secs: 0.0,
     });
-    let mut job: Option<Job> = None;
-    while let Some(x) = d.next_input() {
+    while let Some(x) = d.next_input().map_err(|e| Stop::Storage(e.to_string()))? {
         let tc = now_s();
-        let (spec, feats) = analyse(&x);
-        let frames = feats.len() / FEATURES;
-        trace(
-            debug,
-            &format!("chunk {}: stft {:.2} s", d.chunk_index(), now_s() - tc),
-        );
-        if job.as_ref().is_none_or(|j| j.frames != frames) {
-            // Freed before the next is made: two chunks' buffers (about
-            // 280 MB each) need not be on the GPU at once.
-            drop(job.take());
-            job = Some(Job::new(gpu, net, frames));
-            log(&format!(
-                "separating {total} chunks; {}",
-                memory_text(net, job.as_ref())
-            ));
-        }
-        let j = job.as_ref().expect("job");
-        j.set_input(&feats);
-        let mut out = Vec::with_capacity(STEMS.len());
-        for step in j.steps() {
-            pace.run(gpu, j, &step).await?;
-            if let Step::Mask { last: true, .. } = step {
-                out.push(apply_masks(&spec, &j.mask().await?));
-                trace(
-                    debug,
-                    &format!(
-                        "chunk {}: mask {} at {:.2} s",
-                        d.chunk_index(),
-                        out.len(),
-                        now_s() - tc
-                    ),
-                );
-            }
-        }
+        let out = net.stems(d.chunk_index(), &x).await.map_err(Stop::Failed)?;
         d.accept(&out);
         drop(out);
         if let Some(seg) = d.take_ready() {
-            post_segment(seg, song_len);
+            emit(seg, song_len, writer.as_deref_mut()).await?;
         }
         let done = d.chunk_index().min(total) as u32;
         log(&format!(
-            "chunk {done}/{total}: {:.1} s; so far {}; {}",
+            "chunk {done}/{total}: {:.1} s; {}",
             now_s() - tc,
-            pace.summary(),
-            memory_text(net, job.as_ref())
+            net.so_far()
         ));
         send(Reply::Progress {
             done,
@@ -1126,12 +1396,35 @@ async fn run(gpu: &Gpu, net: &Net, mix: [Float32Array; 2], s: &Settings) -> Resu
         });
     }
     if let Some(seg) = d.take_ready() {
-        post_segment(seg, song_len);
+        emit(seg, song_len, writer).await?;
     }
-    log(&format!("separation: {}", pace.summary()));
-    log_profile(gpu, &pace);
-    send(Reply::Done { secs: now_s() - t0 });
     Ok(())
+}
+
+/// Sends a segment to the page (memory path), or writes it to the stem
+/// files and says how much they hold (storage path).
+async fn emit(seg: Segment, song_len: usize, writer: Option<&mut StemWriter>) -> Result<(), Stop> {
+    let Some(w) = writer else {
+        post_segment(seg, song_len);
+        return Ok(());
+    };
+    w.put(&seg).await?;
+    send(Reply::Stored {
+        frames: w.frames(),
+        len: song_len,
+        stems: STEMS.iter().map(|n| n.to_string()).collect(),
+    });
+    Ok(())
+}
+
+/// Sends `error` for a request of type `kind` that failed.
+fn reply_to(kind: &str, result: Result<(), String>) {
+    if let Err(text) = result {
+        send(Reply::Error {
+            of: kind.into(),
+            text,
+        });
+    }
 }
 
 /// Sends finished samples of every stem to the page, which assembles the
@@ -1439,9 +1732,11 @@ async fn bench(s: &Settings) -> Result<(), String> {
     // Without a model the GPU has done nothing yet: choose its kernels
     // after the matmul timings below (which do not depend on the choice)
     // rather than on a GPU that has only just woken.
-    let loaded = STATE.with_borrow(|st| st.net.is_some());
-    if loaded {
-        ensure_kernels(&g, s).await;
+    // The loaded model's format, or the one a load would take.
+    let loaded = STATE.with_borrow(|st| st.net.as_ref().map(|n| n.format));
+    let format = loaded.unwrap_or_else(|| load_format(&g, s));
+    if loaded.is_some() {
+        ensure_kernels(&g, s, format).await;
     }
     log(&format!("bench: GPU {}", gpu_text(&g).await));
     let t0 = now_s();
@@ -1461,8 +1756,8 @@ async fn bench(s: &Settings) -> Result<(), String> {
     for l in roformer_gpu::bench::summary(&table) {
         log(&l);
     }
-    if !loaded {
-        ensure_kernels(&g, s).await;
+    if loaded.is_none() {
+        ensure_kernels(&g, s, format).await;
     }
     roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
     let text = format!(
@@ -1610,150 +1905,30 @@ async fn verified_download(expected: Option<&str>) -> Result<ModelFile, String> 
     Ok(ModelFile::Bytes(bytes))
 }
 
-/// Frames of each channel that `mp3` reads from JS at a time: 16 MP3
-/// frames, 72 KB for each channel.
-const MP3_BLOCK: usize = 1152 * 16;
-
-/// Encodes one stem as a 192 kbps MP3 (`{type: "mp3", name, left, right,
-/// rate}`) and sends the file back as `{type: "mp3", name, bytes}`.  Runs
-/// here, not on the page, so the page stays responsive for the seconds a
-/// song takes.  It reads the channels from JS in blocks, so an encode
-/// holds a few times the size of the MP3, not the samples (MEM-1).
-async fn mp3(
-    name: Option<String>,
-    [left, right]: [Float32Array; 2],
-    rate: Option<u32>,
-) -> Result<(), String> {
-    let name = name.unwrap_or_else(|| "stem.mp3".into());
-    let rate = rate.unwrap_or(44_100);
-    let frames = left.length().min(right.length()) as usize;
-    let mut enc = rusty_mp3::Mp3Encoder::new(rusty_mp3::Mp3EncoderConfig {
-        bitrate_kbps: 192,
-        vbr_quality: None,
-    });
-    let (mut l, mut r) = (vec![0.0; MP3_BLOCK], vec![0.0; MP3_BLOCK]);
-    let mut pcm = Vec::with_capacity(2 * MP3_BLOCK);
-    let mut at = 0;
-    // At least one push, so an unsupported rate fails with no samples too.
-    loop {
-        let n = MP3_BLOCK.min(frames - at);
-        let (start, end) = (at as u32, (at + n) as u32);
-        left.subarray(start, end).copy_to(&mut l[..n]);
-        right.subarray(start, end).copy_to(&mut r[..n]);
-        pcm.clear();
-        for (a, b) in l[..n].iter().zip(&r[..n]) {
-            pcm.push(*a);
-            pcm.push(*b);
-        }
-        enc.push_pcm_f32(&pcm, 2, rate)
-            .map_err(|e| format!("MP3 encoder: {e:?}"))?;
-        at += n;
-        if at == frames {
-            break;
-        }
-    }
-    enc.finish();
-    let mut out = Vec::new();
-    while let Ok(packet) = enc.next_packet() {
-        out.extend_from_slice(&packet);
-    }
-    let bytes = Uint8Array::from(out.as_slice());
-    send(Reply::Mp3 { name, bytes });
-    Ok(())
-}
-
-/// Frames of each channel in one FLAC frame, and that `flac` reads from JS
-/// at a time.  RFC 9639's streamable subset allows 4,608 at 48 kHz or
-/// less, so every player reads the file.
-const FLAC_BLOCK: usize = 4096;
-
 /// A sample as 16 bits, rounded and clipped at full scale, as
 /// `engine::wav::encode_pcm16` does.
 fn pcm16(x: f32) -> i32 {
     (x * 32768.0).round().clamp(-32768.0, 32767.0) as i32
 }
 
-/// Encodes one stem as a 16-bit FLAC (`{type: "flac", name, left, right,
-/// rate}`) and sends the file back as `{type: "flac", name, file: Blob}`.
-/// It reads the channels from JS one FLAC frame at a time, and puts each
-/// encoded frame in JS, so WebAssembly memory never holds the samples or
-/// the file (MEM-1, MEM-4).
-fn flac(
-    name: Option<String>,
-    [left, right]: [Float32Array; 2],
-    rate: Option<u32>,
-) -> Result<(), String> {
-    use flacenc::component::{BitRepr, Stream, StreamInfo};
-    use flacenc::error::Verify;
-    use flacenc::source::{Context, Fill, FrameBuf};
+const KERNEL_CHOICE: &str = "matmul_kernels";
+/// Stored kernel choices kept per GPU, one per kernel set, calibration
+/// version and weight format (the newest): two formats for each of three
+/// builds kept side by side.
+const KEEP_PER_GPU: usize = 6;
 
-    let fail = |e: &dyn std::fmt::Debug| format!("FLAC encoder: {e:?}");
-    let name = name.unwrap_or_else(|| "stem.flac".into());
-    let rate = rate.unwrap_or(44_100) as usize;
-    let frames = left.length().min(right.length()) as usize;
-    if frames == 0 {
-        return Err("FLAC encoder: the stem has no samples".into());
-    }
-    let config = flacenc::config::Encoder::default()
-        .into_verified()
-        .map_err(|e| fail(&e))?;
-    let mut info = StreamInfo::new(rate, 2, 16).map_err(|e| fail(&e))?;
-    let mut block = FrameBuf::with_size(2, FLAC_BLOCK).map_err(|e| fail(&e))?;
-    let mut md5 = Context::new(16, 2);
-    let (mut l, mut r) = (vec![0.0; FLAC_BLOCK], vec![0.0; FLAC_BLOCK]);
-    let mut interleaved = Vec::with_capacity(2 * FLAC_BLOCK);
-    let mut sink = flacenc::bitsink::ByteSink::new();
-    // The first part is the header, written once the frames are known.
-    let parts = js_sys::Array::of1(&JsValue::UNDEFINED);
-    for (number, at) in (0..frames).step_by(FLAC_BLOCK).enumerate() {
-        let n = FLAC_BLOCK.min(frames - at);
-        let (start, end) = (at as u32, (at + n) as u32);
-        left.subarray(start, end).copy_to(&mut l[..n]);
-        right.subarray(start, end).copy_to(&mut r[..n]);
-        interleaved.clear();
-        for (a, b) in l[..n].iter().zip(&r[..n]) {
-            interleaved.push(pcm16(*a));
-            interleaved.push(pcm16(*b));
-        }
-        (&mut block, &mut md5)
-            .fill_interleaved(&interleaved)
-            .map_err(|e| fail(&e))?;
-        let frame = flacenc::encode_fixed_size_frame(&config, &block, number, &info)
-            .map_err(|e| fail(&e))?;
-        info.update_frame_info(&frame);
-        sink.clear();
-        frame.write(&mut sink).map_err(|e| fail(&e))?;
-        parts.push(&Uint8Array::from(sink.as_slice()));
-    }
-    info.set_md5_digest(&md5.md5_digest());
-    // flacenc gives a short last block as the minimum, which RFC 9639 (8.2)
-    // excludes; Symphonia then reads the stream as variable-blocksize, and
-    // refuses every frame.
-    info.set_block_sizes(FLAC_BLOCK, FLAC_BLOCK)
-        .map_err(|e| fail(&e))?;
-    sink.clear();
-    Stream::with_stream_info(info)
-        .write(&mut sink)
-        .map_err(|e| fail(&e))?;
-    parts.set(0, Uint8Array::from(sink.as_slice()).into());
-    let options = web_sys::BlobPropertyBag::new();
-    options.set_type("audio/flac");
-    let file = Blob::new_with_u8_array_sequence_and_options(&parts, &options)
-        .map_err(|e| format!("FLAC file: {e:?}"))?;
-    send(Reply::Flac { name, file });
-    Ok(())
+/// Where a kernel choice came from.
+enum Chosen {
+    Stored,
+    Calibrated,
 }
 
-const KERNEL_CHOICE: &str = "matmul_kernels";
-/// Stored kernel choices kept per GPU, one per kernel set and calibration
-/// version (the newest), as many as the builds kept side by side.
-const KEEP_PER_GPU: usize = 3;
-
-/// Sets this GPU's matmul kernels and attention path: the choice kept in
-/// browser storage for this adapter and these kernels, or else several
-/// seconds of `roformer_gpu::bench::calibrate`, whose result is then kept
-/// (see `roformer_gpu::bench::store_choice` for which lines stay).
-async fn choose_kernels(gpu: &Gpu) {
+/// Sets this GPU's matmul kernels and attention path for weights in
+/// `format`: the choice kept in browser storage for this adapter, these
+/// kernels and this format, or else several seconds of
+/// `roformer_gpu::bench::calibrate`, whose result is then kept (see
+/// `roformer_gpu::bench::store_choice` for which lines stay).
+async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
     let pref = STATE.with_borrow(|s| s.power);
     // The key's separators (tab, newline, `|`) must not occur in the name,
     // or its stored line would never match and would pile up.
@@ -1762,11 +1937,7 @@ async fn choose_kernels(gpu: &Gpu) {
         .as_string()
         .unwrap_or_default()
         .replace(['\t', '\n', '\r', '|'], " ");
-    let key = format!(
-        "{adapter}|{:016x}|{}",
-        roformer_gpu::kernels_id(),
-        roformer_gpu::bench::CALIBRATION
-    );
+    let key = roformer_gpu::bench::choice_key(&adapter, roformer_gpu::kernels_id(), format);
     let stored = cache_get(KERNEL_CHOICE).await.unwrap_or(JsValue::NULL);
     let text = if stored.is_null() {
         String::new()
@@ -1789,11 +1960,14 @@ async fn choose_kernels(gpu: &Gpu) {
         {
             gpu.policy.set(c.matmul);
             gpu.attention.set(c.attention);
-            return;
+            return Chosen::Stored;
         }
     }
-    log("choosing kernels for this GPU (several seconds, once)…");
-    let c = roformer_gpu::bench::calibrate(gpu, now_s, |l| log(&l)).await;
+    log(&format!(
+        "choosing kernels for this GPU and {} weights (several seconds, once)…",
+        format.name()
+    ));
+    let c = roformer_gpu::bench::calibrate(gpu, format, now_s, |l| log(&l)).await;
     gpu.policy.set(c.matmul);
     gpu.attention.set(c.attention);
     // A WebGPU error while timing (out of memory with the weights
@@ -1803,10 +1977,11 @@ async fn choose_kernels(gpu: &Gpu) {
         log(&format!(
             "kernel calibration hit a WebGPU error ({e}); this choice is not kept"
         ));
-        return;
+        return Chosen::Calibrated;
     }
     let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);
     cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
+    Chosen::Calibrated
 }
 
 #[cfg(test)]

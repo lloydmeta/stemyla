@@ -86,6 +86,17 @@ impl StretcherKind {
         }
     }
 
+    #[cfg_attr(
+        not(any(
+            feature = "stretch-wsola",
+            feature = "stretch-timestretch",
+            feature = "stretch-cute"
+        )),
+        expect(
+            unused_variables,
+            reason = "only the pitch-preserving stretchers take the rate; the decode worker takes engine with none"
+        )
+    )]
     pub fn build(self, sample_rate: u32) -> Box<dyn Stretcher> {
         match self {
             StretcherKind::Varispeed => Box::new(Varispeed::new()),

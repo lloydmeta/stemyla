@@ -13,7 +13,8 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `roformer/`: STFT, chunking, weights, and the CPU reference network (Burn, ndarray).
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
 * `worker/`: the Web Worker that runs separations (package `stem-worker`).
-* `protocol/`: the page <-> worker messages (package `stem-protocol`).
+* `decoder/`: the page-side Web Worker that decodes a song in blocks into browser storage, and makes stem overviews and classic drums (package `decode-worker`, decision 0019).
+* `protocol/`: the messages between the page and its two workers (package `stem-protocol`).
 * `test-support/`: `skip`, which fails a test that cannot run when `STEMYLA_REQUIRE` asks for evidence; a dev-dependency only.
 * `xtask/`: the static server, the browser test runners (`web-test`, `e2e`), `docs-check`, `publish` and other tools.
 
@@ -40,10 +41,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings  # synth without its files feature
 cargo clippy -p app -- -D warnings              # app's lib and binary without any files feature
 cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
-cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
 cargo test -p roformer-gpu --lib                # CI runs these too, and --doc; they need no GPU
-STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release  # every kernel against the CPU; fails without a GPU
+STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release  # every kernel against the CPU, and f16 against f32; fails without a GPU, or without SHADER_F16_IN_F32 (then use gpu alone)
 cargo run -p xtask -- docs-check                # the map and docs match the code
 (cd app && trunk build --release)
 cargo run -p xtask --release -- serve app/dist --port 8080

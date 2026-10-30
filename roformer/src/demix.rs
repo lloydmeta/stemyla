@@ -10,6 +10,16 @@
 //! [`Demixer`] is a state machine rather than a loop around a closure, so
 //! the caller can run the network asynchronously (a browser cannot block
 //! on GPU readback).
+//!
+//! The demixer does not keep the song.  It reads the frames of each chunk
+//! from a [`MixSource`], one span at a time, so its memory does not grow
+//! with the song.  A span is at most one chunk of frames, and the
+//! demixer reads the reflect padding from it by index.  A whole [`Stereo`]
+//! in memory is a source that cannot fail.  The worker reads a mix file
+//! in browser storage through a source of its own.
+
+use std::convert::Infallible;
+use std::ops::Range;
 
 use crate::CHANNELS;
 
@@ -22,15 +32,46 @@ pub struct Segment {
     pub stems: Vec<Stereo>,
 }
 
-pub struct Demixer {
+/// The song that a [`Demixer`] separates, read in spans of frames.
+pub trait MixSource {
+    type Error;
+
+    /// The frames in the song.
+    fn frames(&self) -> usize;
+
+    /// Both channels of the frames `start..end`, with `start < end` and
+    /// `end <= self.frames()`.
+    fn read(&mut self, start: usize, end: usize) -> Result<Stereo, Self::Error>;
+}
+
+/// The whole song in memory: both channels, of the same length.
+impl MixSource for Stereo {
+    type Error = Infallible;
+
+    fn frames(&self) -> usize {
+        assert_eq!(self[0].len(), self[1].len());
+        self[0].len()
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: a span is at most one chunk, not the song"
+    )]
+    fn read(&mut self, start: usize, end: usize) -> Result<Stereo, Infallible> {
+        Ok([0, 1].map(|c| self[c][start..end].to_vec()))
+    }
+}
+
+pub struct Demixer<S: MixSource> {
     chunk: usize,
     step: usize,
     fade: usize,
     border: usize,
     padded: bool,
-    /// The song as given; the reflect padding is read through
-    /// [`Self::sample`] instead of being copied.
-    mix: Stereo,
+    /// The song, read one span for each chunk.
+    source: S,
+    /// The frames of the song: `source.frames()` at the start.
+    frames: usize,
     pos: usize,
     window: Vec<f32>,
     /// Running sums from `base` (in padded samples) on: at most one chunk
@@ -70,14 +111,14 @@ fn reflect_right(x: &[f32], to: usize) -> Vec<f32> {
         .collect()
 }
 
-impl Demixer {
-    /// `mix`: both channels, same length.  `stems`: outputs per chunk.
-    pub fn new(mix: Stereo, chunk: usize, overlap: usize, stems: usize) -> Self {
-        assert_eq!(mix[0].len(), mix[1].len());
+impl<S: MixSource> Demixer<S> {
+    /// `source`: the song.  `stems`: outputs per chunk.
+    pub fn new(source: S, chunk: usize, overlap: usize, stems: usize) -> Self {
+        let frames = source.frames();
         let step = chunk / overlap;
         let fade = chunk / 10;
         let border = chunk - step;
-        let padded = mix[0].len() > 2 * border && border > 0;
+        let padded = frames > 2 * border && border > 0;
         let mut window = vec![1.0f32; chunk];
         let fade_in = linspace(0.0, 1.0, fade);
         let fade_out = linspace(1.0, 0.0, fade);
@@ -93,29 +134,37 @@ impl Demixer {
             fade,
             border,
             padded,
+            source,
+            frames,
             pos: 0,
             window,
             base: 0,
             result: (0..stems).map(|_| [Vec::new(), Vec::new()]).collect(),
             counter: Vec::new(),
-            mix,
         }
+    }
+
+    /// The source of the song.
+    pub fn source(&self) -> &S {
+        &self.source
     }
 
     /// Length of the (padded) signal the chunks are cut from.
     fn total(&self) -> usize {
-        let n = self.mix[0].len();
-        if self.padded { n + 2 * self.border } else { n }
+        if self.padded {
+            self.frames + 2 * self.border
+        } else {
+            self.frames
+        }
     }
 
-    /// Sample `i` of the padded signal: reflect padding by `border` on both
-    /// sides, numpy/torch `reflect` mode.
-    fn sample(&self, c: usize, i: usize) -> f32 {
-        let x = &self.mix[c];
+    /// The frame of the song at index `i` of the padded signal: reflect
+    /// padding by `border` on both sides, numpy/torch `reflect` mode.
+    fn frame(&self, i: usize) -> usize {
         if !self.padded {
-            return x[i];
+            return i;
         }
-        let n = x.len() as isize;
+        let n = self.frames as isize;
         let i = i as isize - self.border as isize;
         let j = if i < 0 {
             -i
@@ -124,12 +173,31 @@ impl Demixer {
         } else {
             i
         };
-        x[j as usize]
+        j as usize
+    }
+
+    /// The frames of the song that the padded samples `padded` read.
+    fn span(&self, padded: Range<usize>) -> Range<usize> {
+        let first = self.frame(padded.start);
+        let last = self.frame(padded.end - 1);
+        let mut lo = first.min(last);
+        let mut hi = first.max(last);
+        if self.padded {
+            // The reflection turns at the song's first and last frames.
+            if padded.start < self.border && padded.end > self.border {
+                lo = 0;
+            }
+            let end = self.border + self.frames;
+            if padded.start < end && padded.end > end {
+                hi = self.frames - 1;
+            }
+        }
+        lo..hi + 1
     }
 
     /// Samples in each output stem: the song's length.
     pub fn output_len(&self) -> usize {
-        self.mix[0].len()
+        self.frames
     }
 
     pub fn num_chunks(&self) -> usize {
@@ -141,15 +209,21 @@ impl Demixer {
         self.pos / self.step
     }
 
-    /// The next chunk, padded to `chunk` samples, or `None` when done.
-    pub fn next_input(&self) -> Option<Stereo> {
+    /// The next chunk, padded to `chunk` samples, or `None` when done.  It
+    /// reads one span of the song from the source, and gives the source's
+    /// error if that read fails.
+    pub fn next_input(&mut self) -> Result<Option<Stereo>, S::Error> {
         let total = self.total();
         if self.pos >= total {
-            return None;
+            return Ok(None);
         }
         let end = (self.pos + self.chunk).min(total);
+        let span = self.span(self.pos..end);
+        let frames = self.source.read(span.start, span.end)?;
         let part = |c: usize| {
-            let x: Vec<f32> = (self.pos..end).map(|i| self.sample(c, i)).collect();
+            let x: Vec<f32> = (self.pos..end)
+                .map(|i| frames[c][self.frame(i) - span.start])
+                .collect();
             if x.len() == self.chunk {
                 x
             } else if x.len() > self.chunk / 2 + 1 {
@@ -160,7 +234,7 @@ impl Demixer {
                 v
             }
         };
-        Some([part(0), part(1)])
+        Ok(Some([part(0), part(1)]))
     }
 
     /// Adds the network output for the chunk last returned by
@@ -293,7 +367,7 @@ mod tests {
         ];
         let mut d = Demixer::new(mix.clone(), 1000, 2, 1);
         let mut chunks = 0;
-        while let Some(x) = d.next_input() {
+        while let Some(x) = d.next_input().unwrap() {
             d.accept(&[x]);
             chunks += 1;
         }
@@ -444,26 +518,32 @@ mod tests {
         ]
     }
 
+    /// Short (unpadded), just over two chunks, and long songs; chunk sizes
+    /// with and without a remainder; overlaps 1 (no padding), 2 and 4.  In
+    /// (15, 10, 2) and (5000, 1000, 2), a chunk starts at `border + n`, one
+    /// frame after the right reflection turns at `border + n - 1`.
+    const STREAM_CASES: &[(usize, usize, usize)] = &[
+        (15, 10, 2),
+        (700, 1000, 2),
+        (1000, 1000, 2),
+        (2001, 1000, 2),
+        (5000, 1000, 2),
+        (5003, 1000, 2),
+        (12345, 1000, 4),
+        (9999, 640, 2),
+        (5003, 1000, 1),
+    ];
+
     #[test]
     fn streamed_segments_match_the_whole_song_result_exactly() {
-        // Short (unpadded), just over two chunks, and long songs; chunk
-        // sizes with and without a remainder; overlaps 2 and 4.
-        for &(n, chunk, overlap) in &[
-            (700, 1000, 2),
-            (1000, 1000, 2),
-            (2001, 1000, 2),
-            (5000, 1000, 2),
-            (5003, 1000, 2),
-            (12345, 1000, 4),
-            (9999, 640, 2),
-        ] {
+        for &(n, chunk, overlap) in STREAM_CASES {
             let mix = song(n);
             let want = reference(&mix, chunk, overlap, fake);
             let mut d = Demixer::new(mix.clone(), chunk, overlap, 3);
             assert_eq!(d.output_len(), n);
             let mut got: Vec<Stereo> = (0..3).map(|_| [Vec::new(), Vec::new()]).collect();
             let mut held = 0;
-            while let Some(x) = d.next_input() {
+            while let Some(x) = d.next_input().unwrap() {
                 d.accept(&fake(&x));
                 held = held.max(d.counter.len());
                 if let Some(seg) = d.take_ready() {
@@ -499,12 +579,136 @@ mod tests {
         }
     }
 
+    /// A source that keeps only the song, and records the frames of each
+    /// read.  It fails its read number `fail_at` (from 1), if given.
+    struct Recorder {
+        song: Stereo,
+        reads: Vec<(usize, usize)>,
+        fail_at: Option<usize>,
+    }
+
+    impl MixSource for Recorder {
+        type Error = String;
+
+        fn frames(&self) -> usize {
+            self.song[0].len()
+        }
+
+        fn read(&mut self, start: usize, end: usize) -> Result<Stereo, String> {
+            self.reads.push((start, end));
+            if self.fail_at == Some(self.reads.len()) {
+                return Err(format!("read {} failed", self.reads.len()));
+            }
+            Ok([0, 1].map(|c| self.song[c][start..end].to_vec()))
+        }
+    }
+
+    #[test]
+    fn a_block_source_gives_the_whole_mix_result_exactly() {
+        for &(n, chunk, overlap) in STREAM_CASES {
+            let mix = song(n);
+            let want = reference(&mix, chunk, overlap, fake);
+            let source = Recorder {
+                song: mix,
+                reads: Vec::new(),
+                fail_at: None,
+            };
+            let mut d = Demixer::new(source, chunk, overlap, 3);
+            let chunks = d.num_chunks();
+            let mut got: Vec<Stereo> = (0..3).map(|_| [Vec::new(), Vec::new()]).collect();
+            while let Some(x) = d.next_input().unwrap() {
+                d.accept(&fake(&x));
+                if let Some(seg) = d.take_ready() {
+                    for (g, s) in got.iter_mut().zip(seg.stems) {
+                        for c in 0..2 {
+                            g[c].extend_from_slice(&s[c]);
+                        }
+                    }
+                }
+            }
+            let reads = d.source().reads.clone();
+            for (g, s) in got.iter_mut().zip(d.finish()) {
+                for c in 0..2 {
+                    g[c].extend_from_slice(&s[c]);
+                }
+            }
+            assert_eq!(reads.len(), chunks, "n={n}: one read for each chunk");
+            let step = chunk / overlap;
+            let border = chunk - step;
+            let padded = n > 2 * border && border > 0;
+            let total = if padded { n + 2 * border } else { n };
+            // The frame of the song at padded index `i`, worked out again.
+            let frame = |i: usize| -> usize {
+                if !padded {
+                    return i;
+                }
+                let j = i as isize - border as isize;
+                let last = n as isize - 1;
+                (if j < 0 {
+                    -j
+                } else if j > last {
+                    2 * last - j
+                } else {
+                    j
+                }) as usize
+            };
+            for (k, &read) in reads.iter().enumerate() {
+                let pos = k * step;
+                let frames: Vec<usize> = (pos..(pos + chunk).min(total)).map(frame).collect();
+                let lo = *frames.iter().min().unwrap();
+                let hi = *frames.iter().max().unwrap() + 1;
+                assert_eq!(
+                    read,
+                    (lo, hi),
+                    "n={n} chunk={chunk} overlap={overlap}: read {k} is the frames that its chunk reads"
+                );
+            }
+            for &(start, end) in &reads {
+                assert!(
+                    start < end && end <= n,
+                    "n={n}: read {start}..{end} is not inside the song"
+                );
+                assert!(
+                    end - start <= chunk,
+                    "n={n}: read {start}..{end} is longer than a chunk"
+                );
+            }
+            for (s, (g, w)) in got.iter().zip(&want).enumerate() {
+                for c in 0..2 {
+                    assert_eq!(g[c].len(), n, "n={n} stem {s} channel {c}");
+                    for k in 0..n {
+                        assert_eq!(
+                            g[c][k].to_bits(),
+                            w[c][k].to_bits(),
+                            "n={n} chunk={chunk} overlap={overlap} stem {s} channel {c} sample {k}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_read_stops_the_demixer() {
+        let source = Recorder {
+            song: song(5000),
+            reads: Vec::new(),
+            fail_at: Some(3),
+        };
+        let mut d = Demixer::new(source, 1000, 2, 3);
+        for _ in 0..2 {
+            let x = d.next_input().unwrap().expect("a chunk");
+            d.accept(&fake(&x));
+        }
+        assert_eq!(d.next_input(), Err("read 3 failed".to_string()));
+    }
+
     #[test]
     fn finish_alone_matches_the_whole_song_result_exactly() {
         let mix = song(7777);
         let want = reference(&mix, 1000, 2, fake);
         let mut d = Demixer::new(mix, 1000, 2, 3);
-        while let Some(x) = d.next_input() {
+        while let Some(x) = d.next_input().unwrap() {
             d.accept(&fake(&x));
         }
         assert_eq!(d.finish(), want);

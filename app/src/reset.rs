@@ -14,10 +14,18 @@
 
 use eframe::egui;
 
-/// Trunk's names for the worker's files: the loader shim the app starts,
-/// the wasm-bindgen glue it imports and the wasm the glue fetches.
+/// Trunk's names for each worker's files: the loader shim the app starts,
+/// the wasm-bindgen glue it imports and the wasm the glue fetches.  First
+/// the stem worker's, then the decode worker's (`decoder::FILES`).
 pub const WORKER_LOADER: &str = "./stem-worker_loader.js";
-pub const WORKER_FILES: [&str; 3] = [WORKER_LOADER, "./stem-worker.js", "./stem-worker_bg.wasm"];
+pub const WORKER_FILES: [&str; 6] = [
+    WORKER_LOADER,
+    "./stem-worker.js",
+    "./stem-worker_bg.wasm",
+    crate::decoder::FILES[0],
+    crate::decoder::FILES[1],
+    crate::decoder::FILES[2],
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reset {
@@ -235,6 +243,7 @@ export async function wipe_opfs() {
     /// first.  Deleting closes the page's own storage and waits for writes
     /// in progress.  If anything is left undeleted, or a file could not be
     /// fetched again, it returns what instead of reloading.
+    #[cfg_attr(mutants, mutants::skip)]
     pub async fn run(reset: Reset) -> Result<(), String> {
         if reset == Reset::DeleteStored {
             crate::store::close().await;
@@ -277,6 +286,7 @@ export async function wipe_opfs() {
         Ok(())
     }
 
+    #[cfg_attr(mutants, mutants::skip)]
     pub fn reload() {
         if let Some(w) = web_sys::window() {
             let _ = w.location().reload();
@@ -315,26 +325,31 @@ mod tests {
         );
     }
 
-    /// The worker's file names are Trunk's for an unhashed worker named
-    /// `stem-worker` with a loader shim; if either changes, so must
+    /// The workers' file names are Trunk's for an unhashed worker with a
+    /// loader shim, named by its `data-bin`; if a name changes, so must
     /// `WORKER_FILES`.
     #[test]
     fn worker_file_names_match_the_trunk_build() {
         let trunk = include_str!("../Trunk.toml");
         assert!(trunk.lines().any(|l| l.trim() == "filehash = false"));
         let index = include_str!("../index.html");
-        let worker_link = index
-            .lines()
-            .find(|l| l.contains("data-type=\"worker\""))
-            .expect("worker link in index.html");
-        assert!(worker_link.contains("data-bin=\"stem-worker\""));
-        assert!(worker_link.contains("data-loader-shim"));
+        for bin in ["stem-worker", "decode-worker"] {
+            let worker_link = index
+                .lines()
+                .find(|l| l.contains(&format!("data-bin=\"{bin}\"")))
+                .unwrap_or_else(|| panic!("no link for {bin} in index.html"));
+            assert!(worker_link.contains("data-type=\"worker\""), "{bin}");
+            assert!(worker_link.contains("data-loader-shim"), "{bin}");
+        }
         assert_eq!(
             WORKER_FILES,
             [
                 "./stem-worker_loader.js",
                 "./stem-worker.js",
-                "./stem-worker_bg.wasm"
+                "./stem-worker_bg.wasm",
+                "./decode-worker_loader.js",
+                "./decode-worker.js",
+                "./decode-worker_bg.wasm",
             ]
         );
     }

@@ -2,6 +2,10 @@
 //! app is at [`SONG_RATE`], the separation model's rate, so a song at
 //! another rate is converted when it is opened (decision 0012).
 //!
+//! [`to_rate`] converts a whole channel.  [`Resampler`] converts a channel
+//! that comes in blocks, with the same output bit for bit, and holds at
+//! most one filter window of input.
+//!
 //! The converter is a rational polyphase filter: a Blackman-windowed sinc,
 //! tabulated once for each of the `L` positions between input samples that
 //! the output can fall on.  From 48 kHz to 44.1 kHz, `L` is 147 and the
@@ -31,6 +35,164 @@ const HALF_TAPS: usize = 32;
 /// When the rate rises, the input's own band ends at half its rate.  More
 /// taps make the transition below it narrow (4.3 % of the rate).
 const RISING_HALF_TAPS: usize = 64;
+
+/// Converts a channel that comes in blocks, as a decode gives it.  Its
+/// output is the output of [`to_rate`] on the whole channel, bit for bit,
+/// with the same length.  It holds at most one filter window of input
+/// between blocks, not the channel.
+pub struct Resampler {
+    /// `None` at the same rate: the input passes through.
+    converter: Option<Converter>,
+}
+
+impl Resampler {
+    /// A converter from `from` Hz to `to` Hz.  It refuses the rates that
+    /// [`to_rate`] refuses.
+    pub fn new(from: u32, to: u32) -> Result<Resampler> {
+        if from == to {
+            return Ok(Resampler { converter: None });
+        }
+        let filter = Filter::new(from, to)?;
+        let taps = 2 * filter.half;
+        Ok(Resampler {
+            converter: Some(Converter {
+                filter,
+                next: Position { at: 0, phase: 0 },
+                received: 0,
+                tail: Vec::with_capacity(taps),
+                edge: vec![0.0; taps],
+                out: Vec::new(),
+            }),
+        })
+    }
+
+    /// The output that the next block of input, `input`, completes.  At the
+    /// same rate it is `input` itself, not a copy.  Otherwise the output is
+    /// in a buffer that the next call uses again; it grows to the output of
+    /// the largest block.
+    pub fn push<'a>(&'a mut self, input: &'a [f32]) -> &'a [f32] {
+        match &mut self.converter {
+            None => input,
+            Some(converter) => converter.push(input),
+        }
+    }
+
+    /// The rest of the output, after the last block.  At the same rate
+    /// there is none.
+    pub fn finish(&mut self) -> &[f32] {
+        match &mut self.converter {
+            None => &[],
+            Some(converter) => converter.finish(),
+        }
+    }
+
+    /// The input samples held, and the taps of one window.
+    #[cfg(test)]
+    fn held(&self) -> (usize, usize) {
+        self.converter
+            .as_ref()
+            .map_or((0, 0), |c| (c.tail.len(), 2 * c.filter.half))
+    }
+
+    /// The capacity of the buffer of held input.
+    #[cfg(test)]
+    fn held_capacity(&self) -> usize {
+        self.converter.as_ref().map_or(0, |c| c.tail.capacity())
+    }
+}
+
+/// The state of a [`Resampler`] between two rates.
+struct Converter {
+    filter: Filter,
+    /// Where the next output falls.
+    next: Position,
+    /// The input samples received so far.
+    received: u64,
+    /// The input that the next output's window can still read: from the
+    /// window's first sample (or 0) to `received`.  It is never longer
+    /// than one window, so it never grows past the capacity it starts with.
+    tail: Vec<f32>,
+    /// One window, gathered where it crosses a block or the end.
+    edge: Vec<f32>,
+    out: Vec<f32>,
+}
+
+impl Converter {
+    /// The first input sample of the window of the output at `pos`, which
+    /// may be before 0.
+    fn window_start(&self, pos: Position) -> i64 {
+        pos.at as i64 - (self.filter.half as i64 - 1)
+    }
+
+    fn push(&mut self, input: &[f32]) -> &[f32] {
+        self.out.clear();
+        let end = self.received + input.len() as u64;
+        // An output is complete when its window's last sample, at
+        // `at + half`, has come.  Every such output exists: `at` is less
+        // than `end`, so the output is within `to_rate`'s length.
+        while self.next.at + (self.filter.half as u64) < end {
+            self.emit(input, end);
+        }
+        self.keep(input);
+        self.received = end;
+        &self.out
+    }
+
+    fn finish(&mut self) -> &[f32] {
+        self.out.clear();
+        // `to_rate` makes output `i` while `i * step < frames * phases`,
+        // that is while `at < frames`.  Input past the end is silence.
+        let end = self.received;
+        while self.next.at < end {
+            self.emit(&[], end);
+        }
+        &self.out
+    }
+
+    /// Makes the output at `next`, with `input` the block after `tail` and
+    /// `end` the input received with it, and steps `next` on.
+    fn emit(&mut self, input: &[f32], end: u64) {
+        let taps = 2 * self.filter.half;
+        let start = self.window_start(self.next);
+        let first_of_input = self.received as i64;
+        let row = &self.filter.table[self.next.phase as usize * taps..][..taps];
+        let sample = if start >= first_of_input && start + taps as i64 <= end as i64 {
+            let s = (start - first_of_input) as usize;
+            dot(&input[s..s + taps], row)
+        } else {
+            let first_of_tail = first_of_input - self.tail.len() as i64;
+            for (k, e) in self.edge.iter_mut().enumerate() {
+                let i = start + k as i64;
+                *e = if i < 0 || i >= end as i64 {
+                    0.0
+                } else if i < first_of_input {
+                    self.tail[(i - first_of_tail) as usize]
+                } else {
+                    input[(i - first_of_input) as usize]
+                };
+            }
+            dot(&self.edge, row)
+        };
+        self.out.push(sample);
+        self.next = self.next.next(self.filter.phases, self.filter.step);
+    }
+
+    /// Keeps the input from the next output's window on, after `input`.
+    fn keep(&mut self, input: &[f32]) {
+        let first_of_input = self.received;
+        let first_of_tail = first_of_input - self.tail.len() as u64;
+        let end = first_of_input + input.len() as u64;
+        let keep_from = (self.window_start(self.next).max(0) as u64).min(end);
+        if keep_from >= first_of_input {
+            self.tail.clear();
+            self.tail
+                .extend_from_slice(&input[(keep_from - first_of_input) as usize..]);
+        } else {
+            self.tail.drain(..(keep_from - first_of_tail) as usize);
+            self.tail.extend_from_slice(input);
+        }
+    }
+}
 
 /// `x`, sampled at `from` Hz, as samples at `to` Hz.  At the same rate it
 /// returns `x` itself, not a copy (MEM-1).  Otherwise the output has
@@ -399,6 +561,86 @@ mod tests {
         let y = to_rate(x, SONG_RATE, SONG_RATE).unwrap();
         assert_eq!(y.as_ptr(), at);
         assert_eq!(y.iter().map(|s| s.to_bits()).collect::<Vec<_>>(), bits);
+    }
+
+    /// `to_rate` of `x`, and the output of a `Resampler` that gets `x` in
+    /// blocks of `block` samples, as bits.
+    fn whole_and_in_blocks(x: &[f32], from: u32, block: usize) -> (Vec<u32>, Vec<u32>) {
+        let bits = |v: &[f32]| v.iter().map(|s| s.to_bits()).collect::<Vec<_>>();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: the test keeps its input to convert it twice"
+        )]
+        let whole = to_rate(x.to_vec(), from, SONG_RATE).unwrap();
+        let mut resampler = Resampler::new(from, SONG_RATE).unwrap();
+        let mut blocks = Vec::new();
+        for input in x.chunks(block) {
+            blocks.extend_from_slice(resampler.push(input));
+        }
+        blocks.extend_from_slice(resampler.finish());
+        (bits(&whole), bits(&blocks))
+    }
+
+    #[test]
+    fn the_block_resampler_gives_to_rate_exactly() {
+        // A tone with an offset, so no sample is 0 and an edge counts.
+        let x: Vec<f32> = (0..132_075)
+            .map(|i| (0.4 * (0.013 * i as f64).sin() + 0.1) as f32)
+            .collect();
+        for from in [48_000, 22_050, 8_000, 96_000] {
+            for (block, len) in [
+                (1, 0),
+                (1, 1),
+                (7, 5),
+                (1, 1_003),
+                (7, 10_007),
+                (1_000, 10_007),
+                (131_072, 132_075),
+            ] {
+                let (whole, blocks) = whole_and_in_blocks(&x[..len], from, block);
+                assert_eq!(
+                    whole.len(),
+                    blocks.len(),
+                    "{from} Hz, blocks of {block}, {len} samples"
+                );
+                assert!(
+                    whole == blocks,
+                    "{from} Hz, blocks of {block}, {len} samples: the samples differ"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_block_resampler_holds_at_most_one_window() {
+        for from in [48_000, 8_000, 384_000] {
+            let mut resampler = Resampler::new(from, SONG_RATE).unwrap();
+            for block in [1, 7, 1_000, 131_072, 3] {
+                let _ = resampler.push(&vec![0.25; block]);
+                let held = resampler.held();
+                assert!(held.0 < held.1, "{from} Hz: holds {held:?}");
+                assert_eq!(resampler.held_capacity(), held.1, "{from} Hz");
+            }
+        }
+    }
+
+    #[test]
+    fn the_block_resampler_at_the_same_rate_passes_the_input_through() {
+        let x = tone(440.0, SONG_RATE, 1_000);
+        let mut resampler = Resampler::new(SONG_RATE, SONG_RATE).unwrap();
+        let out = resampler.push(&x);
+        assert_eq!(out.as_ptr(), x.as_ptr());
+        assert_eq!(out.len(), x.len());
+        assert!(resampler.finish().is_empty());
+    }
+
+    #[test]
+    fn the_block_resampler_refuses_what_to_rate_refuses() {
+        for (from, to) in [(44_056, SONG_RATE), (0, SONG_RATE), (7_000, SONG_RATE)] {
+            let whole = to_rate(vec![0.0; 10], from, to).unwrap_err();
+            let blocks = Resampler::new(from, to).err().expect("refused");
+            assert_eq!(whole.to_string(), blocks.to_string());
+        }
     }
 
     #[test]

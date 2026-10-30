@@ -19,6 +19,7 @@
 pub mod bench;
 pub mod net;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -118,6 +119,56 @@ impl Tile {
             .replace("{EPILOGUE}", epilogue.trim_end())
     }
 
+    /// The kernel of this tile for weights held in `format`: its f32
+    /// kernel, or its f16 variant.
+    pub fn source_for(&self, format: WeightFormat) -> String {
+        match format {
+            WeightFormat::F32 => self.source(),
+            WeightFormat::F16 => self.f16_source(),
+        }
+    }
+
+    /// The f16 variant: the f32 kernel with B declared as packed f16 values
+    /// (`array<u32>`, or `array<vec2<u32>>` for a vec4 tile), and each B
+    /// value unpacked with `unpack2x16float` where it is read.  The rest of
+    /// the kernel, and so the order of the products and sums, is the same.
+    fn f16_source(&self) -> String {
+        const SCALAR_B: &str = "@group(0) @binding(1) var<storage, read> b: array<f32>;";
+        const PACKED_B: &str =
+            "@group(0) @binding(1) var<storage, read> b: array<u32>; // f16 pairs";
+        let (decl, read) = if self.hand_written {
+            (
+                (SCALAR_B, PACKED_B),
+                (
+                    "      if (gj < p.n && gkb < p.k) { bv = b[b_base + gkb * p.b_sk + gj * p.b_sj]; }",
+                    "      if (gj < p.n && gkb < p.k) { let e2 = b_base + gkb * p.b_sk + gj * p.b_sj; let pair = unpack2x16float(b[e2 / 2u]); bv = select(pair.x, pair.y, (e2 & 1u) == 1u); }",
+                ),
+            )
+        } else if self.vec4 {
+            (
+                (
+                    "@group(0) @binding(1) var<storage, read> b: array<vec4<f32>>;",
+                    "@group(0) @binding(1) var<storage, read> b: array<vec2<u32>>; // f16 quads",
+                ),
+                (
+                    "  let v = b[select(0u, (base + gj * p.b_sj + gk) / 4u, ok)];",
+                    "  let q = b[select(0u, (base + gj * p.b_sj + gk) / 4u, ok)];\n  let v = vec4<f32>(unpack2x16float(q.x), unpack2x16float(q.y));",
+                ),
+            )
+        } else {
+            (
+                (SCALAR_B, PACKED_B),
+                (
+                    "  let v = b[select(0u, base + gk * p.b_sk + gj * p.b_sj, ok)];",
+                    "  let e2 = select(0u, base + gk * p.b_sk + gj * p.b_sj, ok);\n  let pair = unpack2x16float(b[e2 / 2u]);\n  let v = select(pair.x, pair.y, (e2 & 1u) == 1u);",
+                ),
+            )
+        };
+        let header = "// The f16 variant (decision 0018): B holds f16 weights, element 2 j in\n// the low half of u32 j, each unpacked to f32 where it is read.\n";
+        let src = replace_once(&self.source(), decl.0, decl.1);
+        format!("{header}{}", replace_once(&src, read.0, read.1))
+    }
+
     /// `matmul_vec4.wgsl` for this tile: tiles stored `[row][k / 4]`, so
     /// one step of the inner loop covers 4 values of K.  The products are
     /// added in K order, component by component, as the scalar kernel adds
@@ -179,6 +230,218 @@ impl Tile {
             .replace("{COMPUTE}", compute.trim_end())
             .replace("{EPILOGUE}", epilogue.trim_end())
     }
+}
+
+/// `src` with `from` replaced by `to`.  Panics unless `from` occurs exactly
+/// once, so a change to a template cannot leave an f16 variant reading f32.
+fn replace_once(src: &str, from: &str, to: &str) -> String {
+    let count = src.matches(from).count();
+    assert_eq!(count, 1, "{from:?} occurs {count} times, not once");
+    src.replacen(from, to, 1)
+}
+
+/// How the GPU holds a weight matrix (decision 0018).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightFormat {
+    /// One f32 value in each 4 bytes, as activations are held.
+    F32,
+    /// Two f16 values in each `u32`: element `2 j` in the low 16 bits of
+    /// word `j`.  The f16 variants of the matmul kernels unpack each value
+    /// to f32 and compute in f32.
+    F16,
+}
+
+impl WeightFormat {
+    pub const ALL: [Self; 2] = [Self::F32, Self::F16];
+
+    /// `f32` or `f16`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+        }
+    }
+}
+
+/// The format of a load whose `?weights=` is `auto` or unset: f16.  On
+/// the maintainer's Mac, `e2e weights` showed the same stems bit for bit.
+/// `?bench` showed f16 not slower.  These meet the maintainer's rule for
+/// D12 of M9.  The plan's stricter speed test of a whole separation gave no
+/// verdict (its spread was over 5%).  A GPU that fails the f16 start-up
+/// check keeps f32 (decision 0022).
+pub const DEFAULT_WEIGHTS: WeightFormat = WeightFormat::F16;
+
+/// The weight format of a load, and a line to log when the setting cannot
+/// be followed.  `setting` is `?weights=`: `f32`, `f16`, or `auto` (or
+/// unset) for [`DEFAULT_WEIGHTS`].  It is `F16` only when the setting
+/// allows it, the adapter has `SHADER_F16_IN_F32` and the f16 start-up
+/// check passed ([`Gpu::f16_ok`]).
+pub fn weight_format(
+    setting: Option<&str>,
+    flags: wgpu::DownlevelFlags,
+    f16_ok: bool,
+) -> (WeightFormat, Option<String>) {
+    let wanted = match setting {
+        Some("f32") => WeightFormat::F32,
+        Some("f16") => WeightFormat::F16,
+        None | Some("auto") => DEFAULT_WEIGHTS,
+        Some(other) => {
+            let (format, _) = weight_format(None, flags, f16_ok);
+            return (
+                format,
+                Some(format!(
+                    "weights: unknown ?weights={other} (use f32, f16 or auto); {} weights",
+                    format.name()
+                )),
+            );
+        }
+    };
+    if wanted == WeightFormat::F32 {
+        return (WeightFormat::F32, None);
+    }
+    let why = if !flags.contains(wgpu::DownlevelFlags::SHADER_F16_IN_F32) {
+        "this adapter cannot unpack f16 (no SHADER_F16_IN_F32)"
+    } else if !f16_ok {
+        "the f16 start-up check did not pass on this GPU"
+    } else {
+        return (WeightFormat::F16, None);
+    };
+    (
+        WeightFormat::F32,
+        Some(format!("f16 weights: {why}; weights stay f32")),
+    )
+}
+
+/// How long [`Gpu::check_kernels_timed`] took, in milliseconds: the f32
+/// kernels' checks, and the compile and run of the f16 variants (`None`
+/// when they did not run).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckTimes {
+    pub f32_ms: f64,
+    pub f16_ms: Option<f64>,
+}
+
+/// The text of [`CheckTimes`] for a log line: `matmul checks: f32 312 ms,
+/// f16 146 ms`.
+pub fn check_times_text(t: CheckTimes) -> String {
+    let f16 = t
+        .f16_ms
+        .map_or("not run".to_string(), |ms| format!("{ms:.0} ms"));
+    format!("matmul checks: f32 {:.0} ms, f16 {f16}", t.f32_ms)
+}
+
+/// A weight matrix on the GPU: a [`GpuBuffer`] and the [`WeightFormat`] of
+/// its values.  It has no `Deref`, so its buffer cannot pass as an
+/// activation: a [`MatMul`] takes it as B and reads the format from it.
+pub struct Weight {
+    buffer: GpuBuffer,
+    format: WeightFormat,
+}
+
+impl Weight {
+    pub fn format(&self) -> WeightFormat {
+        self.format
+    }
+
+    /// Bytes of its buffer.
+    pub fn size(&self) -> u64 {
+        self.buffer.size()
+    }
+}
+
+/// The B operand of a [`MatMul`]: an f32 activation, or a [`Weight`] in
+/// either format.
+#[derive(Clone, Copy)]
+pub enum Operand<'a> {
+    Activation(&'a wgpu::Buffer),
+    Weight(&'a Weight),
+}
+
+impl<'a> Operand<'a> {
+    fn buffer(self) -> &'a wgpu::Buffer {
+        match self {
+            Operand::Activation(b) => b,
+            Operand::Weight(w) => &w.buffer,
+        }
+    }
+
+    /// The format of its values: an activation is f32.
+    pub fn format(self) -> WeightFormat {
+        match self {
+            Operand::Activation(_) => WeightFormat::F32,
+            Operand::Weight(w) => w.format,
+        }
+    }
+}
+
+impl<'a> From<&'a wgpu::Buffer> for Operand<'a> {
+    fn from(b: &'a wgpu::Buffer) -> Self {
+        Operand::Activation(b)
+    }
+}
+
+impl<'a> From<&'a GpuBuffer> for Operand<'a> {
+    fn from(b: &'a GpuBuffer) -> Self {
+        Operand::Activation(b)
+    }
+}
+
+impl<'a> From<&'a Weight> for Operand<'a> {
+    fn from(w: &'a Weight) -> Self {
+        Operand::Weight(w)
+    }
+}
+
+/// The bytes that `Gpu::upload_f16` uploads for `bits`: element `2 j` in
+/// the low half of the little-endian `u32` `j`, an odd count padded with
+/// one zero value, and the size rounded up to whole 16-byte groups (at
+/// least one), as [`Gpu::buffer`] rounds.  A whole number of groups on a
+/// little-endian host is the bytes of `bits` as they are, with no copy.
+fn f16_bytes(bits: &[u16]) -> Cow<'_, [u8]> {
+    let size = (2 * bits.len()).max(16).next_multiple_of(16);
+    if cfg!(target_endian = "little") && 2 * bits.len() == size {
+        return Cow::Borrowed(bytemuck::cast_slice(bits));
+    }
+    let mut out: Vec<u8> = bits.iter().flat_map(|v| v.to_le_bytes()).collect();
+    out.resize(size, 0);
+    Cow::Owned(out)
+}
+
+/// How two outputs differ by their bits: how many values differ, and the
+/// largest absolute difference (infinite where either is not finite).
+/// `+0` and `-0` count as equal, since WGSL lets a GPU ignore the sign of
+/// a zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BitDifferences {
+    pub count: usize,
+    pub largest: f32,
+}
+
+/// Compares `got` with `want` value by value (see [`BitDifferences`]).
+pub fn bit_differences(got: &[f32], want: &[f32]) -> BitDifferences {
+    assert_eq!(got.len(), want.len());
+    let mut out = BitDifferences {
+        count: 0,
+        largest: 0.0,
+    };
+    for (g, w) in got.iter().zip(want) {
+        let same = g.to_bits() == w.to_bits() || (*g == 0.0 && *w == 0.0);
+        if !same {
+            out.count += 1;
+            let d = (g - w).abs();
+            out.largest = out
+                .largest
+                .max(if d.is_finite() { d } else { f32::INFINITY });
+        }
+    }
+    out
 }
 
 /// The matmul kernels, among which [`bench::calibrate`] measures once per
@@ -481,6 +744,38 @@ impl MatMulPolicy {
     }
 }
 
+/// The `len` floats of a mapped read-back, copied once into wasm memory.
+/// On the web, wgpu's `BufferView` copies the whole mapping into wasm
+/// memory when it is first read as a slice.  So the web path copies
+/// straight from the browser's mapped array instead (MEM-1,
+/// `a_read_back_is_copied_into_wasm_memory_once` in the worker's tests).
+#[cfg(target_arch = "wasm32")]
+fn mapped_floats(view: &wgpu::BufferView, len: usize) -> Vec<f32> {
+    use wgpu::web_sys::js_sys::Float32Array;
+    let bytes = view.as_uint8array();
+    assert_eq!(bytes.length() as usize, 4 * len);
+    let floats = Float32Array::new_with_byte_offset_and_length(
+        &bytes.buffer(),
+        bytes.byte_offset(),
+        len as u32,
+    );
+    let mut out = vec![0.0f32; len];
+    floats.copy_to(&mut out);
+    out
+}
+
+/// The `len` floats of a mapped read-back, copied once.
+#[cfg(not(target_arch = "wasm32"))]
+fn mapped_floats(view: &wgpu::BufferView, len: usize) -> Vec<f32> {
+    let floats = bytemuck::cast_slice::<u8, f32>(view);
+    assert_eq!(floats.len(), len);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: the one copy of a read-back out of mapped GPU memory, which is unmapped next"
+    )]
+    floats.to_vec()
+}
+
 /// A buffer made by [`Gpu`], destroyed when dropped.  wgpu's web backend
 /// does nothing when a `wgpu::Buffer` is dropped, so its memory stays
 /// allocated until JavaScript collects the object, and Safari's collector
@@ -565,8 +860,13 @@ impl Drop for GpuBuffer {
 /// ```
 ///
 /// ```compile_fail,E0624
-/// fn wrap(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) {
-///     roformer_gpu::Gpu::from_device(device, queue, info);
+/// fn wrap(
+///     device: wgpu::Device,
+///     queue: wgpu::Queue,
+///     info: wgpu::AdapterInfo,
+///     flags: wgpu::DownlevelFlags,
+/// ) {
+///     roformer_gpu::Gpu::from_device(device, queue, info, flags);
 /// }
 /// ```
 pub struct Gpu {
@@ -584,6 +884,15 @@ pub struct Gpu {
     /// Whether the fused attention kernel passed [`Gpu::check_attention`]
     /// (false until it runs).
     pub fused_ok: std::cell::Cell<bool>,
+    /// Whether the f16 variant of every kernel that passed
+    /// [`Gpu::check_kernels`] gave its f32 kernel's output bit for bit
+    /// there (false until it runs, and on a GPU without
+    /// [`Gpu::has_f16_unpack`]).  Weights go to the GPU as f16 only when
+    /// it is true (decision 0022).
+    pub f16_ok: std::cell::Cell<bool>,
+    /// The adapter's downlevel flags.  `SHADER_F16_IN_F32` lets the
+    /// device compile `unpack2x16float`, which the f16 variants call.
+    downlevel: wgpu::DownlevelFlags,
     kernels: Kernels,
     /// Bound where a kernel has an input it does not use for this dispatch.
     dummy: GpuBuffer,
@@ -620,12 +929,13 @@ struct Prof {
     totals: RefCell<BTreeMap<String, (usize, f64)>>,
 }
 
+/// One matmul pipeline for each [`WeightFormat`], compiled on first use.
+type FormatPipelines = [std::cell::OnceCell<wgpu::ComputePipeline>; 2];
+
 struct Kernels {
-    /// One pipeline per entry of [`TILES`].
-    matmul: (
-        Vec<std::cell::OnceCell<wgpu::ComputePipeline>>,
-        wgpu::BindGroupLayout,
-    ),
+    /// One pipeline per entry of [`TILES`] and [`WeightFormat`].  Both
+    /// formats bind B as a read-only storage buffer, so they share a layout.
+    matmul: (Vec<FormatPipelines>, wgpu::BindGroupLayout),
     softmax: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     rmsnorm: (wgpu::ComputePipeline, wgpu::BindGroupLayout),
     rope: wgpu::ComputePipeline,
@@ -636,6 +946,12 @@ struct Kernels {
     /// The fused attention kernel, compiled on first use; bound like the
     /// element-wise kernels (read, read, read-write, uniform).
     attention: std::cell::OnceCell<wgpu::ComputePipeline>,
+    /// For tests: compile the f16 variants from WGSL that does not parse
+    /// ([`Gpu::break_f16_variants`]).
+    broken_f16: std::cell::Cell<bool>,
+    /// For tests: the entry of [`TILES`] whose f16 variant doubles the
+    /// outputs of rows 64 and up ([`Gpu::plant_f16_defect_in_rows_from_64`]).
+    defective_f16: std::cell::Cell<Option<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -718,7 +1034,7 @@ impl Kernels {
         let rn = bind_layout(device, "rmsnorm", RMSNORM_BINDS);
         let ew = bind_layout(device, "elementwise", ELEMENTWISE_BINDS);
         // Matmul pipelines compile on first use (see `matmul_pipeline`).
-        let matmul = TILES.iter().map(|_| std::cell::OnceCell::new()).collect();
+        let matmul = TILES.iter().map(|_| Default::default()).collect();
         let s = shader(device, "softmax", include_str!("shaders/softmax.wgsl"));
         let r = shader(device, "rmsnorm", include_str!("shaders/rmsnorm.wgsl"));
         let e = shader(
@@ -736,6 +1052,8 @@ impl Kernels {
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
             attention: std::cell::OnceCell::new(),
+            broken_f16: std::cell::Cell::new(false),
+            defective_f16: std::cell::Cell::new(None),
         }
     }
 
@@ -750,17 +1068,41 @@ impl Kernels {
         })
     }
 
-    /// The pipeline of matmul kernel `t`, compiled the first time it is
-    /// needed: a device compiles only the kernels it runs (all of them once
-    /// in [`Gpu::check_kernels`], where a kernel the compiler rejects is
-    /// reported and never used again).  Compiling every kernel up front
-    /// took SwiftShader over 4 GB per device.
-    fn matmul_pipeline(&self, device: &wgpu::Device, t: usize) -> &wgpu::ComputePipeline {
-        self.matmul.0[t].get_or_init(|| {
+    /// The pipeline of matmul kernel `t` for weights in `format`, compiled
+    /// the first time it is needed: a device compiles only the kernels it
+    /// runs (all of them once in [`Gpu::check_kernels`], where a kernel the
+    /// compiler rejects is reported and never used again).  Compiling
+    /// every kernel up front took SwiftShader over 4 GB per device.
+    fn matmul_pipeline(
+        &self,
+        device: &wgpu::Device,
+        t: usize,
+        format: WeightFormat,
+    ) -> &wgpu::ComputePipeline {
+        self.matmul.0[t][format.index()].get_or_init(|| {
             let tile = &TILES[t];
+            let label = format!("{} {}", tile.name, format.name());
+            let mut src = tile.source_for(format);
+            if format == WeightFormat::F16 && self.broken_f16.get() {
+                src += "\nfn planted_error( {";
+            }
+            if format == WeightFormat::F16 && self.defective_f16.get() == Some(t) {
+                let (from, to) = if tile.hand_written {
+                    (
+                        "var v = acc[i * 4u + j] * p.alpha;",
+                        "var v = acc[i * 4u + j] * p.alpha * select(1.0, 2.0, row >= 64u);",
+                    )
+                } else {
+                    (
+                        "var v = x * p.alpha;",
+                        "var v = x * p.alpha * select(1.0, 2.0, row >= 64u);",
+                    )
+                };
+                src = replace_once(&src, from, to);
+            }
             pipeline(
                 device,
-                &shader(device, tile.name, &tile.source()),
+                &shader(device, &label, &src),
                 "main",
                 &self.matmul.1,
             )
@@ -773,17 +1115,56 @@ impl Gpu {
     /// `WGPU_ADAPTER_NAME` select an adapter natively (tests use
     /// SwiftShader's Vulkan driver this way).
     pub async fn new(power: wgpu::PowerPreference) -> Result<Self, String> {
-        Self::open(power, false).await
+        Self::open(power, false, false).await
     }
 
     /// Like [`Gpu::new`], but also asks for `timestamp-query` when the
     /// adapter offers it, so that [`Gpu::profiling`] is true.  The limits
     /// are the same defaults; only the optional feature differs.
     pub async fn new_profiling(power: wgpu::PowerPreference) -> Result<Self, String> {
-        Self::open(power, true).await
+        Self::open(power, true, false).await
     }
 
-    async fn open(power: wgpu::PowerPreference, profile: bool) -> Result<Self, String> {
+    /// Like [`Gpu::new`], but as if the adapter lacked
+    /// `DownlevelFlags::SHADER_F16_IN_F32`, so a test on any GPU can check
+    /// the f32 path of an adapter without it.
+    #[doc(hidden)]
+    pub async fn new_without_f16_unpack(power: wgpu::PowerPreference) -> Result<Self, String> {
+        Self::open(power, false, true).await
+    }
+
+    /// For tests: the f16 variants compiled from now on get a planted WGSL
+    /// error, as if this GPU's compiler rejected them.
+    #[doc(hidden)]
+    pub fn break_f16_variants(&self) {
+        self.kernels.broken_f16.set(true);
+    }
+
+    /// For tests: the f16 variant of [`TILES`]`[t]`, compiled from now on,
+    /// doubles the outputs of rows 64 and up, a defect that only a check of
+    /// every output row finds.
+    #[doc(hidden)]
+    pub fn plant_f16_defect_in_rows_from_64(&self, t: usize) {
+        self.kernels.defective_f16.set(Some(t));
+    }
+
+    /// How many matmul kernels this device has compiled for weights in
+    /// `format`, for tests.
+    #[doc(hidden)]
+    pub fn compiled_matmul_kernels(&self, format: WeightFormat) -> usize {
+        self.kernels
+            .matmul
+            .0
+            .iter()
+            .filter(|cells| cells[format.index()].get().is_some())
+            .count()
+    }
+
+    async fn open(
+        power: wgpu::PowerPreference,
+        profile: bool,
+        mask_f16_unpack: bool,
+    ) -> Result<Self, String> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::PRIMARY | wgpu::Backends::BROWSER_WEBGPU;
         let instance = wgpu::Instance::new(desc.with_env());
@@ -810,10 +1191,24 @@ impl Gpu {
             })
             .await
             .map_err(|e| format!("GPU device: {e}"))?;
-        Ok(Self::from_device(device, queue, adapter.get_info()))
+        let mut downlevel = adapter.get_downlevel_capabilities().flags;
+        if mask_f16_unpack {
+            downlevel.remove(wgpu::DownlevelFlags::SHADER_F16_IN_F32);
+        }
+        Ok(Self::from_device(
+            device,
+            queue,
+            adapter.get_info(),
+            downlevel,
+        ))
     }
 
-    fn from_device(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Self {
+    fn from_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        info: wgpu::AdapterInfo,
+        downlevel: wgpu::DownlevelFlags,
+    ) -> Self {
         let errors: Arc<Mutex<Vec<String>>> = Default::default();
         let sink = errors.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
@@ -863,6 +1258,8 @@ impl Gpu {
             usable: std::cell::Cell::new([true; TILES.len()]),
             attention: std::cell::Cell::new(AttentionPolicy::SPLIT),
             fused_ok: std::cell::Cell::new(false),
+            f16_ok: std::cell::Cell::new(false),
+            downlevel,
             kernels,
             dummy,
             uniforms,
@@ -893,6 +1290,18 @@ impl Gpu {
     /// True when this device records GPU time per dispatch.
     pub fn profiling(&self) -> bool {
         self.prof.is_some()
+    }
+
+    /// The adapter's downlevel flags, for [`weight_format`].
+    pub fn downlevel_flags(&self) -> wgpu::DownlevelFlags {
+        self.downlevel
+    }
+
+    /// True when the adapter has `DownlevelFlags::SHADER_F16_IN_F32`, so
+    /// the f16 variants compile.  Without it, weights stay f32.
+    pub fn has_f16_unpack(&self) -> bool {
+        self.downlevel
+            .contains(wgpu::DownlevelFlags::SHADER_F16_IN_F32)
     }
 
     /// Reads the timestamps of every profiled submission so far into the
@@ -1013,6 +1422,56 @@ impl Gpu {
         )
     }
 
+    /// A weight matrix of `len` zero values in `format`, sized as
+    /// [`Gpu::upload_weight`] and [`Gpu::upload_f16`] size it, for timings.
+    fn zero_weight(&self, label: &str, len: usize, format: WeightFormat) -> Weight {
+        let floats = match format {
+            WeightFormat::F32 => len,
+            WeightFormat::F16 => len.div_ceil(2),
+        };
+        Weight {
+            buffer: self.buffer(label, floats),
+            format,
+        }
+    }
+
+    /// A weight matrix of f32 values, uploaded as [`Gpu::upload`] does.
+    pub fn upload_weight(&self, label: &str, data: &[f32]) -> Weight {
+        Weight {
+            buffer: self.upload(label, data),
+            format: WeightFormat::F32,
+        }
+    }
+
+    /// A weight matrix of f16 values (`bits`, as the file holds them), two
+    /// in each `u32`: element `2 j` in the low 16 bits of word `j`.  An odd
+    /// count gets one zero value of padding, and the size rounds up to 16
+    /// bytes as [`Gpu::buffer`] rounds, so [`MatMul::vec4_ok`] holds.  Only
+    /// a GPU with [`Gpu::has_f16_unpack`] can read it.
+    pub fn upload_f16(&self, label: &str, bits: &[u16]) -> Weight {
+        assert!(
+            self.has_f16_unpack(),
+            "f16 weights on a GPU without SHADER_F16_IN_F32"
+        );
+        let bytes = f16_bytes(bits);
+        self.created.set(self.created.get() + bytes.len() as u64);
+        let buffer = GpuBuffer::with_contents(
+            &self.device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+            },
+            &self.live,
+        );
+        Weight {
+            buffer,
+            format: WeightFormat::F16,
+        }
+    }
+
     /// Bytes of storage buffers made by [`Gpu::buffer`] and
     /// [`Gpu::upload`] since this GPU opened (freed ones included).
     pub fn created_bytes(&self) -> u64 {
@@ -1076,11 +1535,7 @@ impl Gpu {
         let view = staging
             .get_mapped_range(..)
             .map_err(|e| format!("readback: {e}"))?;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "MEM-1: the one copy of a read-back out of mapped GPU memory, which is unmapped next"
-        )]
-        let out = bytemuck::cast_slice::<u8, f32>(&view).to_vec();
+        let out = mapped_floats(&view, len);
         drop(view);
         staging.unmap();
         Ok(out)
@@ -1096,19 +1551,25 @@ impl Gpu {
     /// K-contiguous) run the vec4 kernel with a ragged last K tile, with
     /// bias and with an offset and accumulate; case 2 is not vec4-shaped
     /// and checks the fallback the vec4 kernel hands it to.
+    ///
+    /// On a GPU with [`Gpu::has_f16_unpack`] it then checks the f16
+    /// variant of each kernel that passed (see [`Gpu::check_f16`]) and
+    /// sets [`Gpu::f16_ok`].  A failure there adds a line and keeps the
+    /// weights f32.
     pub async fn check_kernels(&self) -> Result<Vec<String>, String> {
+        Ok(self.check_kernels_timed(|| 0.0).await?.0)
+    }
+
+    /// [`Gpu::check_kernels`], and how long its two parts took, read from
+    /// `now_ms`, a clock in milliseconds (the worker's `performance.now`).
+    /// A measure only: the times change no result.
+    pub async fn check_kernels_timed(
+        &self,
+        now_ms: impl Fn() -> f64,
+    ) -> Result<(Vec<String>, CheckTimes), String> {
+        let t0 = now_ms();
         let (m, n, k) = (133, 141, 44);
-        let rand = |len: usize, seed: u32| -> Vec<f32> {
-            let mut s = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
-            (0..len)
-                .map(|_| {
-                    s ^= s << 13;
-                    s ^= s >> 17;
-                    s ^= s << 5;
-                    (s % 2001) as f32 / 1000.0 - 1.0
-                })
-                .collect()
-        };
+        let rand = check_values;
         let (a, b, c0, bias) = (
             rand(m * k + 4, 1),
             rand(k * n, 2),
@@ -1196,13 +1657,157 @@ impl Gpu {
             }
         }
         self.usable.set(usable);
+        self.f16_ok.set(false);
         if !usable[0] {
             return Err(format!(
                 "this GPU computes matrix products wrongly: {}",
                 problems.join("; ")
             ));
         }
+        let t1 = now_ms();
+        let mut times = CheckTimes {
+            f32_ms: t1 - t0,
+            f16_ms: None,
+        };
+        if self.has_f16_unpack() {
+            let f16_problems = self.check_f16(usable).await?;
+            times.f16_ms = Some(now_ms() - t1);
+            self.f16_ok.set(f16_problems.is_empty());
+            problems.extend(f16_problems);
+        }
+        Ok((problems, times))
+    }
+
+    /// Runs the f16 variant of each kernel that `usable` marks, and its f32
+    /// kernel on the same values as f32, and compares the two bit for bit
+    /// (`+0` and `-0` equal, see [`bit_differences`]).  Returns one line
+    /// for each kernel whose variant differs or fails.
+    ///
+    /// Cases 1 and 3 are the weight products of [`Gpu::check_kernels`]
+    /// with f16-exact weights, about one in eight an f16 subnormal, and
+    /// some `+0` and `-0`.  A sum of values near 1 can hide a subnormal
+    /// that a GPU flushed to zero, so in case 4 each row of A is one-hot
+    /// and B holds only f16 subnormals: each output is one subnormal, and
+    /// a flush gives 0.  Its K is a multiple of 4 and its B K-contiguous,
+    /// so the vec4 kernel runs its own variant.
+    async fn check_f16(&self, usable: [bool; TILES.len()]) -> Result<Vec<String>, String> {
+        let (m, n, k) = (133, 141, 44);
+        let (m4, n4, k4) = (67, 70, 40);
+        let a = check_values(m * k + 4, 1);
+        let (c0, bias) = (check_values(m * n, 3), check_values(n, 4));
+        let one_hot: Vec<f32> = (0..m4 * k4)
+            .map(|e| if e % k4 == (e / k4) % k4 { 1.0 } else { 0.0 })
+            .collect();
+        let weights = f16_check_weights(k * n, 5, false);
+        let subnormals = f16_check_weights(k4 * n4, 6, true);
+        let as_f32 = |bits: &[u16]| -> Vec<f32> {
+            bits.iter()
+                .map(|&h| half::f16::from_bits(h).to_f32())
+                .collect()
+        };
+        let (ab, a4b, biasb) = (
+            self.upload("check a", &a),
+            self.upload("check a one-hot", &one_hot),
+            self.upload("check bias", &bias),
+        );
+        let w = [
+            (
+                self.upload_weight("check b f32", &as_f32(&weights)),
+                self.upload_f16("check b f16", &weights),
+            ),
+            (
+                self.upload_weight("check b4 f32", &as_f32(&subnormals)),
+                self.upload_f16("check b4 f16", &subnormals),
+            ),
+        ];
+        // (case, A, its view, weights, K, bias, accumulate, M, N)
+        let cases = [
+            (1, &ab, View::rows(0, k), &w[0], k, true, false, m, n),
+            (3, &ab, View::rows(4, k), &w[0], k, false, true, m, n),
+            (4, &a4b, View::rows(0, k4), &w[1], k4, false, false, m4, n4),
+        ];
+        let mut problems = Vec::new();
+        for (t, tile) in TILES.iter().enumerate().filter(|(t, _)| usable[*t]) {
+            // The variant's shader and pipeline are made inside error
+            // scopes, so a browser or driver that rejects them is reported
+            // here, in order, and never through the device's error sink.
+            if let Some(e) = self.compile_f16(t).await {
+                problems.push(format!(
+                    "f16 weights: the f16 variant of matmul kernel {} does not compile on this GPU ({e}); weights stay f32",
+                    tile.name
+                ));
+                continue;
+            }
+            for &(case, a_buf, va, (w32, w16), kk, with_bias, acc, mm_m, mm_n) in &cases {
+                let mut outputs = Vec::new();
+                for weight in [w32, w16] {
+                    let cb = self.upload("check c", &c0[..mm_m * mm_n]);
+                    let mut mm = MatMul::new(
+                        (a_buf, va),
+                        (weight, View::t(0, kk)),
+                        (&cb, View::rows(0, mm_n)),
+                        mm_m,
+                        mm_n,
+                        kk,
+                    );
+                    mm.tile = Some(t);
+                    mm.accumulate = acc;
+                    if with_bias {
+                        mm.bias = Some((&biasb, 0, 0));
+                    }
+                    let mut r = self.rec();
+                    r.matmul(&mm);
+                    r.submit();
+                    outputs.push(self.read(&cb, 0, mm_m * mm_n).await?);
+                }
+                let why = match self.take_errors().first() {
+                    Some(e) => Some(e.clone()),
+                    None => {
+                        let d = bit_differences(&outputs[1], &outputs[0]);
+                        (d.count > 0).then(|| {
+                            format!(
+                                "{} of {} values differ, the largest by {:e}",
+                                d.count,
+                                outputs[0].len(),
+                                d.largest
+                            )
+                        })
+                    }
+                };
+                if let Some(why) = why {
+                    problems.push(format!(
+                        "f16 weights: the f16 variant of matmul kernel {} does not give its f32 output on this GPU (case {case}: {why}); weights stay f32",
+                        tile.name
+                    ));
+                    break;
+                }
+            }
+        }
         Ok(problems)
+    }
+
+    /// Compiles the f16 variant of kernel `t` inside validation and
+    /// internal error scopes; the error, if one was raised.
+    async fn compile_f16(&self, t: usize) -> Option<String> {
+        let scopes = F16_COMPILE_SCOPES.map(|filter| self.device.push_error_scope(filter));
+        let _ = self
+            .kernels
+            .matmul_pipeline(&self.device, t, WeightFormat::F16);
+        let mut first = None;
+        // Popped innermost first, as WebGPU requires.
+        for scope in scopes.into_iter().rev() {
+            if let Some(e) = scope.pop().await {
+                first.get_or_insert(e);
+            }
+        }
+        // The whole error on one line: its first line is only the kind
+        // ("Validation Error"), and the cause comes after.
+        first.map(|e| {
+            e.to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
     }
 
     /// Runs the fused attention kernel on a small ragged case (two
@@ -1277,6 +1882,48 @@ impl Gpu {
             labels: Vec::new(),
         }
     }
+}
+
+/// The error scopes around the compile of an f16 variant, outermost first:
+/// a shader or pipeline that WebGPU rejects raises a validation error, and
+/// a driver that fails to build it an internal one.  No test plants an
+/// internal error (TD-65).
+const F16_COMPILE_SCOPES: [wgpu::ErrorFilter; 2] =
+    [wgpu::ErrorFilter::Internal, wgpu::ErrorFilter::Validation];
+
+/// `len` values in [-1, 1] from a seed, for the start-up checks.
+fn check_values(len: usize, seed: u32) -> Vec<f32> {
+    let mut s = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            (s % 2001) as f32 / 1000.0 - 1.0
+        })
+        .collect()
+}
+
+/// `len` f16 values from a seed, for [`Gpu::check_f16`].  With
+/// `subnormal`, each is a nonzero f16 subnormal.  Else each is f16-exact
+/// and below 2 in magnitude: about one in eight a subnormal, one in 64 a
+/// zero of either sign, the rest normal.
+fn f16_check_weights(len: usize, seed: u32, subnormal: bool) -> Vec<u16> {
+    let mut s = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            let sign = ((s >> 31) as u16) << 15;
+            let mantissa = ((s >> 8) as u16 & 0x3ff).max(1);
+            match (subnormal, s % 64) {
+                (true, _) | (false, 1..=8) => sign | mantissa,
+                (false, 0) => sign,
+                (false, _) => sign | (1 + (s >> 18) as u16 % 15) << 10 | mantissa,
+            }
+        })
+        .collect()
 }
 
 /// Attention as [`Rec::attention`] computes it, on the CPU in f64: `qkv`
@@ -1392,7 +2039,9 @@ pub enum Act {
 /// batch of `outer * inner` matrices.  `A` is `[m, k]`, `B` `[k, n]`.
 pub struct MatMul<'a> {
     pub a: (&'a wgpu::Buffer, View),
-    pub b: (&'a wgpu::Buffer, View),
+    /// An activation, or a [`Weight`] whose format picks the kernel's
+    /// variant.
+    pub b: (Operand<'a>, View),
     pub c: (&'a wgpu::Buffer, View),
     /// Buffer, offset and stride per outer batch item.
     pub bias: Option<(&'a wgpu::Buffer, usize, usize)>,
@@ -1411,7 +2060,7 @@ pub struct MatMul<'a> {
 impl<'a> MatMul<'a> {
     pub fn new(
         a: (&'a wgpu::Buffer, View),
-        b: (&'a wgpu::Buffer, View),
+        b: (impl Into<Operand<'a>>, View),
         c: (&'a wgpu::Buffer, View),
         m: usize,
         n: usize,
@@ -1419,7 +2068,7 @@ impl<'a> MatMul<'a> {
     ) -> Self {
         Self {
             a,
-            b,
+            b: (b.0.into(), b.1),
             c,
             bias: None,
             m,
@@ -1450,7 +2099,7 @@ impl<'a> MatMul<'a> {
                 .iter()
                 .all(|x| x.is_multiple_of(4))
             && self.a.0.size().is_multiple_of(16)
-            && self.b.0.size().is_multiple_of(16)
+            && self.b.0.buffer().size().is_multiple_of(16)
     }
 
     /// The entry of [`TILES`] that runs this product when `t` is asked
@@ -1505,7 +2154,8 @@ fn grid(groups: usize) -> (u32, u32) {
 }
 
 enum Kernel {
-    MatMul(usize),
+    /// An entry of [`TILES`], and the format of its B.
+    MatMul(usize, WeightFormat),
     Attention,
     Softmax,
     RmsNorm,
@@ -1513,6 +2163,16 @@ enum Kernel {
     Gate,
     Transpose,
     Glu,
+}
+
+/// The profile label of a matmul: its shape, batch and kernel, and `f16`
+/// for an f16 variant (f32 labels stay as they were).
+fn matmul_label([m, n, k]: [usize; 3], batch: usize, tile: Tile, format: WeightFormat) -> String {
+    let variant = match format {
+        WeightFormat::F32 => "",
+        WeightFormat::F16 => " f16",
+    };
+    format!("matmul {m}x{n}x{k} x{batch} {}{variant}", tile.name)
 }
 
 /// Dispatches recorded for one submission.  Holds the borrows of the
@@ -1551,7 +2211,7 @@ impl<'g> Rec<'g> {
     fn push(&mut self, kernel: Kernel, bufs: &[&'g wgpu::Buffer], params: &[u8], groups: [u32; 3]) {
         if self.gpu.prof.is_some() {
             let label = match &kernel {
-                Kernel::MatMul(t) => format!("matmul {}", TILES[*t].name),
+                Kernel::MatMul(t, _) => format!("matmul {}", TILES[*t].name),
                 Kernel::Attention => "attention".into(),
                 Kernel::Softmax => "softmax".into(),
                 Kernel::RmsNorm => "rmsnorm".into(),
@@ -1575,7 +2235,7 @@ impl<'g> Rec<'g> {
         self.params.resize((offset + PARAM_STRIDE) as usize, 0);
         let k = &self.gpu.kernels;
         let layout = match kernel {
-            Kernel::MatMul(_) => &k.matmul.1,
+            Kernel::MatMul(..) => &k.matmul.1,
             Kernel::Softmax => &k.softmax.1,
             Kernel::RmsNorm => &k.rmsnorm.1,
             _ => &k.elementwise,
@@ -1621,7 +2281,7 @@ impl<'g> Rec<'g> {
         let mut enc = gpu.device.create_command_encoder(&Default::default());
         let k = &gpu.kernels;
         let pipeline = |kernel: &Kernel| match kernel {
-            Kernel::MatMul(t) => k.matmul_pipeline(&gpu.device, *t),
+            Kernel::MatMul(t, format) => k.matmul_pipeline(&gpu.device, *t, *format),
             Kernel::Attention => k.attention_pipeline(&gpu.device),
             Kernel::Softmax => &k.softmax.0,
             Kernel::RmsNorm => &k.rmsnorm.0,
@@ -1709,26 +2369,20 @@ impl<'g> Rec<'g> {
             if self.gpu.usable.get()[t] { t } else { 0 }
         }));
         let tile = TILES[t];
+        let format = mm.b.0.format();
         let groups = [
             u(mm.n.div_ceil(tile.bn)),
             u(mm.m.div_ceil(tile.bm)),
             u(mm.outer * mm.inner),
         ];
         self.push(
-            Kernel::MatMul(t),
-            &[mm.a.0, mm.b.0, mm.c.0, bias_buf],
+            Kernel::MatMul(t, format),
+            &[mm.a.0, mm.b.0.buffer(), mm.c.0, bias_buf],
             bytemuck::bytes_of(&p),
             groups,
         );
         if let Some(label) = self.labels.last_mut() {
-            *label = format!(
-                "matmul {}x{}x{} x{} {}",
-                mm.m,
-                mm.n,
-                mm.k,
-                mm.outer * mm.inner,
-                tile.name
-            );
+            *label = matmul_label([mm.m, mm.n, mm.k], mm.outer * mm.inner, tile, format);
         }
     }
 
@@ -1854,16 +2508,23 @@ impl<'g> Rec<'g> {
     }
 }
 
+/// The WGSL of every kernel that calibration chooses between: each matmul
+/// kernel, its f16 variant, and fused attention.
+fn kernel_sources() -> Vec<String> {
+    let f32_kernels = TILES.iter().map(Tile::source);
+    let f16_variants = TILES.iter().map(Tile::f16_source);
+    f32_kernels
+        .chain(f16_variants)
+        .chain(std::iter::once(attention_source()))
+        .collect()
+}
+
 /// Identifies the compiled kernels that calibration chooses between
-/// (FNV-1a over the matmul and attention WGSL), so a per-GPU choice is
-/// redone whenever they change.
+/// (FNV-1a over [`kernel_sources`]), so a per-GPU choice is redone
+/// whenever they change.
 pub fn kernels_id() -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let sources = TILES
-        .iter()
-        .map(Tile::source)
-        .chain(std::iter::once(attention_source()));
-    for src in sources {
+    for src in kernel_sources() {
         for b in src.bytes() {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0100_0000_01b3);
@@ -1874,6 +2535,8 @@ pub fn kernels_id() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     #[test]
@@ -2063,6 +2726,7 @@ mod tests {
     fn workgroup_memory_within_defaults() {
         for t in &TILES {
             let bytes = workgroup_bytes(&t.source());
+            assert_eq!(workgroup_bytes(&t.f16_source()), bytes, "{} f16", t.name);
             let want = if t.vec4 {
                 4 * (t.bm + t.bn) * (t.bk + t.pad)
             } else {
@@ -2101,12 +2765,17 @@ mod tests {
     }
 
     /// Every generated source, by name: each entry of [`TILES`] (`s64` is
-    /// `matmul.wgsl`) and fused attention.
-    fn generated_sources() -> impl Iterator<Item = (&'static str, String)> {
-        TILES
+    /// `matmul.wgsl`), the f16 variant of each (`i64-f16` and so on), and
+    /// fused attention.
+    fn generated_sources() -> impl Iterator<Item = (String, String)> {
+        let f32_kernels = TILES.iter().map(|t| (t.name.to_string(), t.source()));
+        let f16_variants = TILES
             .iter()
-            .map(|t| (t.name, t.source()))
-            .chain(std::iter::once(("attention", attention_source())))
+            .map(|t| (format!("{}-f16", t.name), t.f16_source()));
+        f32_kernels.chain(f16_variants).chain(std::iter::once((
+            "attention".to_string(),
+            attention_source(),
+        )))
     }
 
     /// The generated sources have every placeholder filled.
@@ -2119,6 +2788,17 @@ mod tests {
     }
 
     const LIMITS_DOC: &str = "see docs/references/webgpu-limits.md";
+
+    /// What [`limit_breaches`] lets a shader use: naga's default, and
+    /// `SHADER_FLOAT16_IN_FLOAT32` for `unpack2x16float`, which the f16
+    /// variants call (decision 0018).  The device has it when the adapter
+    /// has `DownlevelFlags::SHADER_F16_IN_F32`; without the flag the f16
+    /// variants never compile ([`Gpu::has_f16_unpack`]).  It needs no
+    /// feature and no limit beyond WebGPU's defaults.
+    const CHECK_CAPABILITIES: naga::valid::Capabilities =
+        naga::valid::Capabilities::MULTISAMPLED_SHADING
+            .union(naga::valid::Capabilities::CUBE_ARRAY_TEXTURES)
+            .union(naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32);
 
     /// The GPU-1 breaches in one shader, as messages that name the limit
     /// and the fix.  Per entry point: each workgroup size axis, the
@@ -2146,7 +2826,7 @@ mod tests {
         }
         let info = match naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::default(),
+            CHECK_CAPABILITIES,
         )
         .validate(&module)
         {
@@ -2328,19 +3008,23 @@ mod tests {
     #[test]
     fn every_kernel_fits_the_default_limits() {
         let all: Vec<_> = generated_sources()
-            .chain(SHADER_FILES.map(|(name, src)| (name, src.to_string())))
+            .chain(SHADER_FILES.map(|(name, src)| (name.to_string(), src.to_string())))
             .collect();
-        let names: Vec<&str> = all.iter().map(|(name, _)| *name).collect();
-        let want: Vec<&str> = TILES
-            .iter()
-            .map(|t| t.name)
-            .chain([
-                "attention",
-                "softmax.wgsl",
-                "rmsnorm.wgsl",
-                "elementwise.wgsl",
-            ])
-            .collect();
+        let names: Vec<&str> = all.iter().map(|(name, _)| name.as_str()).collect();
+        let want = [
+            "i64",
+            "i128x64",
+            "s64",
+            "v64",
+            "i64-f16",
+            "i128x64-f16",
+            "s64-f16",
+            "v64-f16",
+            "attention",
+            "softmax.wgsl",
+            "rmsnorm.wgsl",
+            "elementwise.wgsl",
+        ];
         assert_eq!(names, want);
         let limits = wgpu::Limits::defaults();
         let breaches: Vec<String> = all
@@ -2453,7 +3137,12 @@ mod tests {
         let file = |src: &str| src.to_string();
         let mut shaders: Vec<(String, String, &[Bind], &[&str])> = TILES
             .iter()
-            .map(|t| (t.name.to_string(), t.source(), MATMUL_BINDS, &["main"][..]))
+            .flat_map(|t| {
+                WeightFormat::ALL.map(|f| {
+                    let name = format!("{} {}", t.name, f.name());
+                    (name, t.source_for(f), MATMUL_BINDS, &["main"][..])
+                })
+            })
             .collect();
         shaders.extend([
             (
@@ -2630,6 +3319,310 @@ mod tests {
                 breaches[0]
             );
         }
+    }
+
+    /// The checker accepts `unpack2x16float`, which the f16 variants call,
+    /// and nothing more than naga's default.
+    #[test]
+    fn check_capabilities_add_only_the_f16_unpack() {
+        use naga::valid::{Capabilities, ValidationFlags, Validator};
+        let planted = "
+            @group(0) @binding(0) var<storage, read_write> o: array<f32>;
+            @compute @workgroup_size(1) fn main() { o[0] = unpack2x16float(0x3c00u).x; }
+        ";
+        let module = naga::front::wgsl::parse_str(planted).expect("parses");
+        let valid = |caps| {
+            Validator::new(ValidationFlags::all(), caps)
+                .validate(&module)
+                .is_ok()
+        };
+        assert!(!valid(Capabilities::default()));
+        assert!(valid(CHECK_CAPABILITIES));
+        assert!(CHECK_CAPABILITIES.contains(Capabilities::default()));
+        assert_eq!(
+            CHECK_CAPABILITIES.difference(Capabilities::default()),
+            Capabilities::SHADER_FLOAT16_IN_FLOAT32
+        );
+        let limits = wgpu::Limits::defaults();
+        assert_eq!(
+            limit_breaches("planted", planted, &limits),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Each f16 variant is its f32 kernel with two lines changed: the
+    /// declaration of B and the one read of B, which unpacks the f16
+    /// values.  So the products and sums are the same, in the same order.
+    #[test]
+    fn f16_variants_change_only_the_reads_of_b() {
+        for t in &TILES {
+            let (f32_src, f16_src) = (t.source(), t.f16_source());
+            let old: Vec<&str> = f32_src.lines().collect();
+            let new: Vec<&str> = f16_src.lines().collect();
+            let removed: Vec<&str> = old.iter().filter(|l| !new.contains(l)).copied().collect();
+            let added: Vec<&str> = new
+                .iter()
+                .filter(|l| !old.contains(l) && !l.starts_with("//"))
+                .copied()
+                .collect();
+            assert_eq!(removed.len(), 2, "{}: {removed:#?}", t.name);
+            assert!(
+                removed[0].starts_with("@group(0) @binding(1) var<storage, read> b: array<"),
+                "{}: {removed:#?}",
+                t.name
+            );
+            assert!(removed[1].contains("b["), "{}: {removed:#?}", t.name);
+            assert!(
+                added[0].starts_with("@group(0) @binding(1) var<storage, read> b: array<"),
+                "{}: {added:#?}",
+                t.name
+            );
+            assert!(
+                added[1..]
+                    .iter()
+                    .all(|l| !l.contains("acc") && !l.contains("fma")),
+                "{}: {added:#?}",
+                t.name
+            );
+            assert_eq!(
+                new.len(),
+                old.len() + added.len() - removed.len() + 2,
+                "{}",
+                t.name
+            );
+            let unpacks = if t.vec4 { 2 } else { 1 };
+            assert_eq!(
+                f16_src.matches("unpack2x16float(").count(),
+                unpacks,
+                "{}",
+                t.name
+            );
+            assert_eq!(f32_src.matches("unpack2x16float(").count(), 0, "{}", t.name);
+        }
+    }
+
+    /// A substitution that does not find its text exactly once fails, so a
+    /// change to a template cannot leave an f16 variant reading f32.
+    #[test]
+    #[should_panic(expected = "occurs 2 times")]
+    fn a_substitution_must_match_once() {
+        replace_once("b b", "b", "c");
+    }
+
+    /// Calibration's key covers every kernel it can choose, f16 variants
+    /// included.
+    #[test]
+    fn kernels_id_covers_the_f16_variants() {
+        let sources = kernel_sources();
+        for t in &TILES {
+            for f in WeightFormat::ALL {
+                assert!(
+                    sources.contains(&t.source_for(f)),
+                    "{} {}",
+                    t.name,
+                    f.name()
+                );
+            }
+        }
+        assert!(sources.contains(&attention_source()));
+    }
+
+    fn words(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect()
+    }
+
+    /// `upload_f16` puts element 2 j in the low half of word j, pads an odd
+    /// count with one zero value, and rounds up to whole 16-byte groups.  A
+    /// whole number of groups goes up without a copy.
+    #[test]
+    fn f16_packing_puts_element_2j_in_the_low_half() {
+        let three = f16_bytes(&[0x1111, 0x2222, 0x3333]);
+        assert_eq!(words(&three), [0x2222_1111, 0x0000_3333, 0, 0]);
+        let eight: Vec<u16> = (1..=8).collect();
+        let packed = f16_bytes(&eight);
+        assert!(matches!(packed, Cow::Borrowed(_)));
+        assert_eq!(
+            words(&packed),
+            [0x0002_0001, 0x0004_0003, 0x0006_0005, 0x0008_0007]
+        );
+        let ten: Vec<u16> = (1..=10).collect();
+        assert_eq!(
+            words(&f16_bytes(&ten)),
+            [
+                0x0002_0001,
+                0x0004_0003,
+                0x0006_0005,
+                0x0008_0007,
+                0x000a_0009,
+                0,
+                0,
+                0
+            ]
+        );
+        assert_eq!(words(&f16_bytes(&[])), [0; 4]);
+    }
+
+    /// The start-up check's random values: in [-1, 1], and nearly all of
+    /// them distinct.
+    #[test]
+    fn check_values_are_varied_and_in_range() {
+        let v = check_values(1000, 1);
+        assert_eq!(v.len(), 1000);
+        assert!(v.iter().all(|x| (-1.0..=1.0).contains(x)));
+        let negatives = v.iter().filter(|x| **x < 0.0).count();
+        assert!((300..700).contains(&negatives), "{negatives} negatives");
+        let mut bits: Vec<u32> = v.iter().map(|x| x.to_bits()).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        assert!(bits.len() > 600, "{} distinct", bits.len());
+        assert_ne!(check_values(16, 1), check_values(16, 2));
+    }
+
+    /// The f16 check's weights: f16-exact values below 2 in magnitude,
+    /// about one in eight a subnormal, some zeros of each sign, and many
+    /// distinct values; with `subnormal`, only nonzero subnormals.
+    #[test]
+    fn f16_check_weights_mix_normals_subnormals_and_zeros() {
+        let n = 8000;
+        let w = f16_check_weights(n, 5, false);
+        assert_eq!(w.len(), n);
+        let exponent = |b: &u16| (b >> 10) & 0x1f;
+        let mantissa = |b: &u16| b & 0x3ff;
+        let subnormals = w
+            .iter()
+            .filter(|b| exponent(b) == 0 && mantissa(b) != 0)
+            .count();
+        assert!(
+            (n / 10..n / 6).contains(&subnormals),
+            "{subnormals} subnormals"
+        );
+        assert!(
+            w.contains(&0x0000) && w.contains(&0x8000),
+            "zeros of both signs"
+        );
+        let zeros = w.iter().filter(|b| **b & 0x7fff == 0).count();
+        assert!((n / 200..n / 30).contains(&zeros), "{zeros} zeros");
+        let normals: Vec<&u16> = w.iter().filter(|b| exponent(b) != 0).collect();
+        assert!(w.iter().all(|b| exponent(b) != 31), "no NaN or infinity");
+        assert!(normals.iter().all(|b| (1..=15).contains(&exponent(b))));
+        assert!(
+            normals.iter().any(|b| exponent(b) == 1) && normals.iter().any(|b| exponent(b) == 15)
+        );
+        assert!(w.iter().any(|b| b & 0x8000 != 0) && w.iter().any(|b| b & 0x8000 == 0));
+        let mut distinct = w.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(distinct.len() > n / 2, "{} distinct", distinct.len());
+        let s = f16_check_weights(n, 6, true);
+        assert_eq!(s.len(), n);
+        assert!(
+            s.iter().all(|b| exponent(b) == 0 && mantissa(b) != 0),
+            "nonzero subnormals only"
+        );
+        let mut distinct = s.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() > n / 4,
+            "{} distinct subnormals",
+            distinct.len()
+        );
+        assert_ne!(
+            f16_check_weights(16, 5, false),
+            f16_check_weights(16, 6, false)
+        );
+    }
+
+    /// Pins `F16_COMPILE_SCOPES`: internal and validation.  It pins the
+    /// constant only; no test plants an internal error (TD-65).
+    #[test]
+    fn f16_compile_scopes_are_internal_and_validation() {
+        assert_eq!(
+            F16_COMPILE_SCOPES,
+            [wgpu::ErrorFilter::Internal, wgpu::ErrorFilter::Validation]
+        );
+    }
+
+    /// The text of the start-up check's times, as the worker logs it.
+    #[test]
+    fn check_times_text_names_both_parts_in_milliseconds() {
+        let t = |f32_ms, f16_ms| CheckTimes { f32_ms, f16_ms };
+        assert_eq!(
+            check_times_text(t(312.4, Some(145.6))),
+            "matmul checks: f32 312 ms, f16 146 ms"
+        );
+        assert_eq!(
+            check_times_text(t(80.0, None)),
+            "matmul checks: f32 80 ms, f16 not run"
+        );
+    }
+
+    /// f16 weights only where the setting, the adapter's flag and the
+    /// start-up check all allow them; never without the flag.
+    #[test]
+    fn weight_format_follows_the_setting_and_the_gpu() {
+        use WeightFormat::{F16, F32};
+        let flag = wgpu::DownlevelFlags::SHADER_F16_IN_F32;
+        let no_flag = wgpu::DownlevelFlags::all().difference(flag);
+        for setting in [None, Some("auto"), Some("f32"), Some("f16")] {
+            for ok in [false, true] {
+                assert_eq!(
+                    weight_format(setting, no_flag, ok).0,
+                    F32,
+                    "{setting:?} {ok}"
+                );
+            }
+        }
+        assert_eq!(weight_format(Some("f16"), flag, true), (F16, None));
+        assert_eq!(weight_format(Some("f32"), flag, true), (F32, None));
+        assert_eq!(weight_format(None, flag, true), (DEFAULT_WEIGHTS, None));
+        assert_eq!(
+            weight_format(Some("auto"), flag, true),
+            (DEFAULT_WEIGHTS, None)
+        );
+        let (format, note) = weight_format(Some("f16"), flag, false);
+        assert_eq!(format, F32);
+        assert!(note.unwrap().contains("start-up check"));
+        let (format, note) = weight_format(Some("f16"), no_flag, true);
+        assert_eq!(format, F32);
+        assert!(note.unwrap().contains("SHADER_F16_IN_F32"));
+        let (format, note) = weight_format(Some("f8"), flag, true);
+        assert_eq!(format, DEFAULT_WEIGHTS);
+        assert!(note.unwrap().contains("f8"));
+        // Step 5 of M9: f16 by default where the GPU allows it.
+        assert_eq!(DEFAULT_WEIGHTS, F16);
+        assert_eq!(weight_format(None, flag, true), (F16, None));
+        assert_eq!(weight_format(Some("auto"), flag, true), (F16, None));
+        let (format, note) = weight_format(None, flag, false);
+        assert_eq!(format, F32);
+        assert!(note.unwrap().contains("start-up check"));
+    }
+
+    /// A profile label names the format of an f16 variant only.
+    #[test]
+    fn matmul_labels_name_the_f16_variant() {
+        let label = |format| matmul_label([1151, 1536, 256], 6, TILES[0], format);
+        assert_eq!(label(WeightFormat::F32), "matmul 1151x1536x256 x6 i64");
+        assert_eq!(label(WeightFormat::F16), "matmul 1151x1536x256 x6 i64 f16");
+    }
+
+    /// Values compare by their bits, except that `+0` equals `-0`: WGSL
+    /// lets a GPU ignore the sign of a zero.
+    #[test]
+    fn bit_differences_ignore_only_the_sign_of_zero() {
+        let got = [0.0, -0.0, 1.0, 2.0, f32::NAN, 1e-7, 5.0];
+        let want = [-0.0, 0.0, 1.0, 2.5, 3.0, 0.0, 5.0];
+        let d = bit_differences(&got, &want);
+        assert_eq!(d.count, 3);
+        assert_eq!(d.largest, f32::INFINITY);
+        let d = bit_differences(&got[..4], &want[..4]);
+        assert_eq!((d.count, d.largest), (1, 0.5));
+        let d = bit_differences(&[1e-7], &[0.0]);
+        assert_eq!((d.count, d.largest), (1, 1e-7));
+        assert_eq!(bit_differences(&[f32::NAN], &[f32::NAN]).count, 0);
     }
 
     #[test]

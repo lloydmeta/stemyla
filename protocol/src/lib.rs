@@ -1,7 +1,8 @@
 //! The messages between the page and its separation worker, written once
 //! for both sides.  On the wire each is a plain JS object whose `type`
 //! names it; the e2e scenarios in `xtask/src/e2e.rs` also post requests by
-//! hand, so the format stays as it is.
+//! hand, so the format stays as it is.  The messages between the page and
+//! its decode worker are in [`decode`].
 //!
 //! Requests ([`Request`], page to worker), each with the page's
 //! [`Settings`]:
@@ -11,15 +12,41 @@
 //!   load a `bs_roformer_sw.*.safetensors` file and keep it.
 //! * `{type: "download"}`: fetch the model (from `model_url` if set).
 //! * `{type: "forget_model"}`: delete the kept model.
-//! * `{type: "separate", left: Float32Array, right: Float32Array}`: a
-//!   44.1 kHz stereo mix (buffers transferred).
+//! * `{type: "separate", left: Float32Array, right: Float32Array,
+//!   session?: string}` or `{type: "separate", mix: string, frames,
+//!   session?: string}`: separate a 44.1 kHz stereo mix ([`Mix`]).  The
+//!   two arrays are the mix (buffers transferred).  Else `mix` is the path
+//!   of a mix file from the root of the browser's private file system,
+//!   such as `"sessions/<id>/mix.f32"`.  The file holds `frames` frames of
+//!   interleaved 32-bit little-endian floats, with no header.  No samples
+//!   cross.  A request with both or neither, or with `frames` that is not
+//!   a whole number from 0 to `usize::MAX`, is refused.  With `session`
+//!   (a folder from the same root, such as `"sessions/<id>"`), the worker
+//!   writes each stem to `<session>/stems/<file>.part`, where `<file>` is
+//!   [`stem_file`] of its name (the storage path).  Without it, the worker
+//!   sends the stems in `segment` replies (the memory path).
 //! * `{type: "selftest", base?: string}`: compare GPU results with the CPU
 //!   port's reference files (`xtask roformer-selftest`).
 //! * `{type: "bench"}`: time the GPU kernels.
-//! * `{type: "mp3", name, left, right, rate}`: encode one stem (buffers
-//!   transferred).
-//! * `{type: "flac", name, left, right, rate}`: encode one stem as a 16-bit
-//!   FLAC (buffers transferred).
+//! * `{type: "mp3", name, left, right, rate?}`: encode one stem or mix as a
+//!   192 kbps MP3 (buffers transferred, the memory path of a save).  The
+//!   worker takes 44,100 Hz with no `rate`.
+//! * `{type: "flac", name, left, right, rate?}`: encode one stem or mix as
+//!   a 16-bit FLAC (buffers transferred, the memory path of a save).  The
+//!   worker takes 44,100 Hz with no `rate`.
+//! * `{type: "mp3" or "flac", name, wav, frames, out, rate}`: encode the
+//!   16-bit stereo WAV file at `wav`, of `frames` frames, into the file at
+//!   `out` ([`Encode::Stored`], the storage path of a save).  Both paths
+//!   are from the root of the private file system, in its `saves` folder.
+//!   No samples cross.  The worker removes the WAV file at the end, also
+//!   when the encode fails.  A request with both arrays and `wav`, or
+//!   neither, with `out` or `frames` but no `wav`, with no `out` or no
+//!   `rate`, or with `frames` that is not a whole number from 0 to
+//!   `usize::MAX`, is refused.  A request of either form with a `rate` that
+//!   is not a whole number from 1 to `u32::MAX` is refused.  The worker
+//!   also refuses a `wav` or `out`
+//!   outside `saves/`, and a `wav` equal to `out`.  Each refusal gives
+//!   `error`, and the worker removes nothing.
 //!
 //! Replies ([`Reply`], worker to page):
 //! * `{type: "alive"}` once the worker listens.
@@ -27,8 +54,17 @@
 //! * `{type: "download", done, total}` while the model downloads.
 //! * `{type: "progress", done, total, secs}` per chunk.
 //! * `{type: "segment", start, len, stems: [[name, left, right], ...]}`
-//!   after each chunk: every stem's finished samples from `start` on, of a
-//!   song of `len` samples (buffers transferred).
+//!   after each segment on the memory path: every stem's finished samples
+//!   from `start` on, of a song of `len` samples (buffers transferred).
+//! * `{type: "stored", frames, len, stems: [name, ...]}` after each
+//!   segment on the storage path: each stem's file holds `frames` of the song's
+//!   `len` frames.  `stems` gives the stem names in the worker's order.  No
+//!   samples cross.
+//! * `{type: "unstored", text}`: browser storage failed, for the reason
+//!   `text`.  It could not hold the stems, or could not give the stored
+//!   mix (missing, of the wrong size, or not readable).  The worker
+//!   stopped the separation and removed its partial stem files.  It ends
+//!   the request, as `done` and `error` do.
 //! * `{type: "done", secs}`, or `{type: "error", of, text}` where `of` is
 //!   the request's type; a separation stops with an error as soon as
 //!   WebGPU reports one (an invalid kernel would otherwise produce silent
@@ -38,10 +74,19 @@
 //! * `{type: "mp3", name, bytes}` (buffer transferred).
 //! * `{type: "flac", name, file: Blob}`: a `Blob` crosses as a reference,
 //!   so the file is not copied.
+//! * `{type: "mp3" or "flac", name, path}`: a stored encode wrote its file
+//!   at `path`, the request's `out` ([`Encoded::Stored`]).
+//! * `{type: "mp3" or "flac", name, path, failed: text}`: a stored encode
+//!   failed, for the reason `text` ([`Encoded::Failed`]).  The worker
+//!   removed the file at `path` and the WAV file.  A stored encode that the
+//!   worker started replies with one of these two, not with `error`, so the
+//!   page knows which save failed.
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Blob;
+
+pub mod decode;
 
 /// The `type` of each message.
 pub mod kind {
@@ -57,6 +102,8 @@ pub mod kind {
     pub const ALIVE: &str = "alive";
     pub const PROGRESS: &str = "progress";
     pub const SEGMENT: &str = "segment";
+    pub const STORED: &str = "stored";
+    pub const UNSTORED: &str = "unstored";
     pub const DONE: &str = "done";
     pub const ERROR: &str = "error";
     pub const STATUS: &str = "status";
@@ -83,7 +130,14 @@ mod field {
     pub const START: &str = "start";
     pub const LEN: &str = "len";
     pub const STEMS: &str = "stems";
+    pub const FRAMES: &str = "frames";
+    pub const SESSION: &str = "session";
+    pub const MIX: &str = "mix";
     pub const OF: &str = "of";
+    pub const WAV: &str = "wav";
+    pub const OUT: &str = "out";
+    pub const PATH: &str = "path";
+    pub const FAILED: &str = "failed";
     pub const CHUNK: &str = "chunk";
     pub const OVERLAP: &str = "overlap";
     pub const MAX_ELEMS: &str = "max_elems";
@@ -98,6 +152,7 @@ mod field {
     pub const ATTN: &str = "attn";
     pub const PROFILE: &str = "profile";
     pub const DEBUG: &str = "debug";
+    pub const WEIGHTS: &str = "weights";
 }
 
 /// Overrides from the page's address (`?chunk=16384&mm=s64`, see the
@@ -124,6 +179,8 @@ pub struct Settings {
     pub bench: Option<String>,
     /// Attention kernel override.
     pub attn: Option<String>,
+    /// How the GPU holds the weight matrices: `f32`, `f16` or `auto`.
+    pub weights: Option<String>,
     /// Logs GPU time per kernel.
     pub profile: bool,
     /// Progress notes for debugging (set by tests, not the address).
@@ -155,6 +212,7 @@ impl Settings {
                 field::MODEL_URL => s.model_url = text,
                 field::BENCH => s.bench = text,
                 field::ATTN => s.attn = text,
+                field::WEIGHTS => s.weights = text,
                 field::PROFILE => s.profile = !v.is_empty() && number != Some(0.0),
                 _ => {}
             }
@@ -202,6 +260,7 @@ impl Settings {
             (field::MODEL_URL, &self.model_url),
             (field::BENCH, &self.bench),
             (field::ATTN, &self.attn),
+            (field::WEIGHTS, &self.weights),
         ] {
             if let Some(v) = v {
                 set(o, k, v.as_str());
@@ -235,10 +294,28 @@ impl Settings {
             model_url: string(o, field::MODEL_URL),
             bench: string(o, field::BENCH),
             attn: string(o, field::ATTN),
+            weights: string(o, field::WEIGHTS),
             profile: get(o, field::PROFILE).is_truthy(),
             debug: get(o, field::DEBUG).is_truthy(),
         }
     }
+}
+
+/// The file name of the stem `name` in a session's `stems` folder: the
+/// name with letters, digits, spaces and dashes only, then `.wav`.  The
+/// page and the worker both use it, so they agree on the files.
+pub fn stem_file(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{safe}.wav")
 }
 
 /// A model file for the worker to read.
@@ -252,6 +329,55 @@ pub enum ModelSource {
     Bytes(Uint8Array),
 }
 
+/// The mix that a separation reads.
+#[derive(Clone, Debug)]
+pub enum Mix {
+    /// Both channels, transferred with the request.
+    Arrays {
+        left: Float32Array,
+        right: Float32Array,
+    },
+    /// A mix file in the browser's private file system: `path` from its
+    /// root, `frames` frames of interleaved 32-bit little-endian floats.
+    Stored { path: String, frames: usize },
+}
+
+/// The audio that an MP3 or FLAC encode reads.
+#[derive(Clone, Debug)]
+pub enum Encode {
+    /// Both channels, transferred with the request (the memory path of a
+    /// save).
+    /// `rate`: the sample rate in Hz; the worker takes 44.1 kHz with none.
+    Arrays {
+        left: Float32Array,
+        right: Float32Array,
+        rate: Option<u32>,
+    },
+    /// A 16-bit stereo WAV file of `frames` frames at `wav`, encoded into
+    /// the file at `out` (the storage path of a save).  Both are paths from
+    /// the root of the private file system.  `rate` is required.
+    Stored {
+        wav: String,
+        frames: usize,
+        out: String,
+        rate: u32,
+    },
+}
+
+/// The file that an MP3 or FLAC encode gives.
+#[derive(Clone, Debug)]
+pub enum Encoded {
+    /// The MP3 of an [`Encode::Arrays`] (transferred).
+    Bytes(Uint8Array),
+    /// The FLAC of an [`Encode::Arrays`] (a reference, not a copy).
+    Blob(Blob),
+    /// A stored encode wrote its file at `path`.
+    Stored { path: String },
+    /// A stored encode failed, for the reason `text`.  The worker removed
+    /// the file at `path` and the WAV file.
+    Failed { path: String, text: String },
+}
+
 /// A request from the page to the worker.
 #[derive(Clone, Debug)]
 pub enum Request {
@@ -261,8 +387,10 @@ pub enum Request {
     Download,
     ForgetModel,
     Separate {
-        left: Float32Array,
-        right: Float32Array,
+        mix: Mix,
+        /// The session folder to write the stems to (the storage path), or
+        /// `None` to send them to the page (the memory path).
+        session: Option<String>,
     },
     Selftest {
         base: Option<String>,
@@ -270,15 +398,11 @@ pub enum Request {
     Bench,
     Mp3 {
         name: Option<String>,
-        left: Float32Array,
-        right: Float32Array,
-        rate: Option<u32>,
+        source: Encode,
     },
     Flac {
         name: Option<String>,
-        left: Float32Array,
-        right: Float32Array,
-        rate: Option<u32>,
+        source: Encode,
     },
 }
 
@@ -329,31 +453,46 @@ impl Request {
                 Some(ModelSource::Bytes(b)) => set(&o, field::BYTES, b),
                 None => {}
             },
-            Self::Separate { left, right } => put_stereo(&o, &transfer, left, right),
+            Self::Separate { mix, session } => {
+                match mix {
+                    Mix::Arrays { left, right } => put_stereo(&o, &transfer, left, right),
+                    Mix::Stored { path, frames } => {
+                        set(&o, field::MIX, path.as_str());
+                        set(&o, field::FRAMES, *frames as f64);
+                    }
+                }
+                if let Some(s) = session {
+                    set(&o, field::SESSION, s.as_str());
+                }
+            }
             Self::Selftest { base } => {
                 if let Some(b) = base {
                     set(&o, field::BASE, b.as_str());
                 }
             }
-            Self::Mp3 {
-                name,
-                left,
-                right,
-                rate,
-            }
-            | Self::Flac {
-                name,
-                left,
-                right,
-                rate,
-            } => {
+            Self::Mp3 { name, source } | Self::Flac { name, source } => {
                 if let Some(n) = name {
                     set(&o, field::NAME, n.as_str());
                 }
-                if let Some(r) = rate {
-                    set(&o, field::RATE, *r);
+                match source {
+                    Encode::Arrays { left, right, rate } => {
+                        put_stereo(&o, &transfer, left, right);
+                        if let Some(r) = rate {
+                            set(&o, field::RATE, *r);
+                        }
+                    }
+                    Encode::Stored {
+                        wav,
+                        frames,
+                        out,
+                        rate,
+                    } => {
+                        set(&o, field::WAV, wav.as_str());
+                        set(&o, field::FRAMES, *frames as f64);
+                        set(&o, field::OUT, out.as_str());
+                        set(&o, field::RATE, *rate);
+                    }
                 }
-                put_stereo(&o, &transfer, left, right);
             }
         }
         (o, transfer)
@@ -382,32 +521,22 @@ impl ToWorker {
             }
             kind::DOWNLOAD => Request::Download,
             kind::FORGET_MODEL => Request::ForgetModel,
-            kind::SEPARATE => {
-                let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Separate { left, right }
-            }
+            kind::SEPARATE => Request::Separate {
+                mix: mix(msg).map_err(bad)?,
+                session: string(msg, field::SESSION),
+            },
             kind::SELFTEST => Request::Selftest {
                 base: string(msg, field::BASE),
             },
             kind::BENCH => Request::Bench,
-            kind::MP3 => {
-                let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Mp3 {
-                    name: string(msg, field::NAME),
-                    left,
-                    right,
-                    rate: number(msg, field::RATE).map(|r| r as u32),
-                }
-            }
-            kind::FLAC => {
-                let (left, right) = stereo(msg).map_err(bad)?;
-                Request::Flac {
-                    name: string(msg, field::NAME),
-                    left,
-                    right,
-                    rate: number(msg, field::RATE).map(|r| r as u32),
-                }
-            }
+            kind::MP3 => Request::Mp3 {
+                name: string(msg, field::NAME),
+                source: encode_source(msg).map_err(bad)?,
+            },
+            kind::FLAC => Request::Flac {
+                name: string(msg, field::NAME),
+                source: encode_source(msg).map_err(bad)?,
+            },
             other => return Err(bad(format!("unknown message {other}"))),
         };
         Ok(Self {
@@ -450,6 +579,18 @@ pub enum Reply {
         len: usize,
         stems: Vec<SegmentStem>,
     },
+    /// Each stem's file holds `frames` of the song's `len` frames;
+    /// `stems` are the stem names in the worker's order.
+    Stored {
+        frames: usize,
+        len: usize,
+        stems: Vec<String>,
+    },
+    /// Browser storage failed: it could not hold the stems, or could not
+    /// give the stored mix.  The separation stopped.
+    Unstored {
+        text: String,
+    },
     Done {
         secs: f64,
     },
@@ -467,11 +608,11 @@ pub enum Reply {
     Bench(String),
     Mp3 {
         name: String,
-        bytes: Uint8Array,
+        file: Encoded,
     },
     Flac {
         name: String,
-        file: Blob,
+        file: Encoded,
     },
 }
 
@@ -483,6 +624,8 @@ impl Reply {
             Self::Download { .. } => kind::DOWNLOAD,
             Self::Progress { .. } => kind::PROGRESS,
             Self::Segment { .. } => kind::SEGMENT,
+            Self::Stored { .. } => kind::STORED,
+            Self::Unstored { .. } => kind::UNSTORED,
             Self::Done { .. } => kind::DONE,
             Self::Error { .. } => kind::ERROR,
             Self::Status(_) => kind::STATUS,
@@ -531,6 +674,13 @@ impl Reply {
                 }
                 set(&o, field::STEMS, list);
             }
+            Self::Stored { frames, len, stems } => {
+                set(&o, field::FRAMES, *frames as f64);
+                set(&o, field::LEN, *len as f64);
+                let names: Array = stems.iter().map(|n| JsValue::from_str(n)).collect();
+                set(&o, field::STEMS, names);
+            }
+            Self::Unstored { text } => set(&o, field::TEXT, text.as_str()),
             Self::Done { secs } => set(&o, field::SECS, *secs),
             Self::Error { of, text } => {
                 set(&o, field::OF, of.as_str());
@@ -543,14 +693,20 @@ impl Reply {
                 set(&o, field::OK, *ok);
                 set(&o, field::TEXT, text.as_str());
             }
-            Self::Mp3 { name, bytes } => {
+            Self::Mp3 { name, file } | Self::Flac { name, file } => {
                 set(&o, field::NAME, name.as_str());
-                set(&o, field::BYTES, bytes);
-                transfer.push(&bytes.buffer());
-            }
-            Self::Flac { name, file } => {
-                set(&o, field::NAME, name.as_str());
-                set(&o, field::FILE, file);
+                match file {
+                    Encoded::Bytes(bytes) => {
+                        set(&o, field::BYTES, bytes);
+                        transfer.push(&bytes.buffer());
+                    }
+                    Encoded::Blob(blob) => set(&o, field::FILE, blob),
+                    Encoded::Stored { path } => set(&o, field::PATH, path.as_str()),
+                    Encoded::Failed { path, text } => {
+                        set(&o, field::PATH, path.as_str());
+                        set(&o, field::FAILED, text.as_str());
+                    }
+                }
             }
         }
         (o, transfer)
@@ -609,6 +765,23 @@ impl Reply {
                     stems,
                 }
             }
+            kind::STORED => {
+                let frames = number(msg, field::FRAMES).ok_or_else(|| bad("no frames"))?;
+                let len = number(msg, field::LEN).ok_or_else(|| bad("no len"))?;
+                let list: Array = get(msg, field::STEMS)
+                    .dyn_into()
+                    .map_err(|_| bad("no stems"))?;
+                let stems = list
+                    .iter()
+                    .map(|n| n.as_string().ok_or_else(|| bad("a stem name is not text")))
+                    .collect::<Result<_, _>>()?;
+                Self::Stored {
+                    frames: frames as usize,
+                    len: len as usize,
+                    stems,
+                }
+            }
+            kind::UNSTORED => Self::Unstored { text: text() },
             kind::DONE => Self::Done {
                 secs: num(field::SECS),
             },
@@ -625,15 +798,11 @@ impl Reply {
             kind::BENCH => Self::Bench(text()),
             kind::MP3 => Self::Mp3 {
                 name: string(msg, field::NAME).unwrap_or_default(),
-                bytes: get(msg, field::BYTES)
-                    .dyn_into()
-                    .map_err(|_| bad("no bytes"))?,
+                file: encoded(msg, &kind).map_err(bad)?,
             },
             kind::FLAC => Self::Flac {
                 name: string(msg, field::NAME).unwrap_or_default(),
-                file: get(msg, field::FILE)
-                    .dyn_into()
-                    .map_err(|_| bad("no file"))?,
+                file: encoded(msg, &kind).map_err(bad)?,
             },
             other => return Err(bad(&format!("unknown type {other:?}"))),
         })
@@ -669,6 +838,118 @@ fn put_stereo(o: &Object, transfer: &Array, left: &Float32Array, right: &Float32
     transfer.push(&right.buffer());
 }
 
+/// The mix of a `separate` request: a stored mix if it has `mix`, else
+/// the two arrays.
+fn mix(msg: &JsValue) -> Result<Mix, String> {
+    let path = get(msg, field::MIX);
+    if path.is_undefined() {
+        let (left, right) = stereo(msg)?;
+        return Ok(Mix::Arrays { left, right });
+    }
+    if !get(msg, field::LEFT).is_undefined() || !get(msg, field::RIGHT).is_undefined() {
+        return Err("a separation names a stored mix or two arrays, not both".into());
+    }
+    let path = path.as_string().ok_or("mix must be a path")?;
+    Ok(Mix::Stored {
+        path,
+        frames: whole_frames(msg)?,
+    })
+}
+
+/// The `frames` of a message, a whole number from 0 to `usize::MAX`.
+fn whole_frames(msg: &JsValue) -> Result<usize, String> {
+    // Over `usize::MAX`, `as usize` would saturate: on wasm32, 2^32 - 1.
+    // `usize::MAX as f64` rounds up to 2^64 on a 64-bit target, so the
+    // bound is the first power of two over `usize::MAX`, which is exact.
+    let limit = 2f64.powi(usize::BITS as i32);
+    let frames = number(msg, field::FRAMES)
+        .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0 && *f < limit)
+        .ok_or_else(|| {
+            format!(
+                "frames must be a whole number of frames, at most {}",
+                usize::MAX
+            )
+        })?;
+    Ok(frames as usize)
+}
+
+/// The source of an `mp3` or `flac` request: a stored WAV if it has `wav`,
+/// else the two arrays.  A missing field is refused, not read as a
+/// default (TD-16).
+fn encode_source(msg: &JsValue) -> Result<Encode, String> {
+    let has = |k| !get(msg, k).is_undefined();
+    if !has(field::WAV) {
+        if has(field::OUT) || has(field::FRAMES) {
+            return Err("an encode with out or frames names its wav".into());
+        }
+        let (left, right) = stereo(msg)?;
+        let rate = if has(field::RATE) {
+            Some(whole_rate(msg)?)
+        } else {
+            None
+        };
+        return Ok(Encode::Arrays { left, right, rate });
+    }
+    if has(field::LEFT) || has(field::RIGHT) {
+        return Err("an encode names a stored WAV or two arrays, not both".into());
+    }
+    let wav = string(msg, field::WAV).ok_or("wav must be a path")?;
+    let frames = whole_frames(msg)?;
+    if !has(field::OUT) {
+        return Err("a stored encode names its out file".into());
+    }
+    let out = string(msg, field::OUT).ok_or("out must be a path")?;
+    if !has(field::RATE) {
+        return Err("a stored encode names its rate".into());
+    }
+    let rate = whole_rate(msg)?;
+    Ok(Encode::Stored {
+        wav,
+        frames,
+        out,
+        rate,
+    })
+}
+
+/// The `rate` of a message: a whole number of hertz from 1 to `u32::MAX`
+/// (nit 2-8 of review round 2 of M8).
+fn whole_rate(msg: &JsValue) -> Result<u32, String> {
+    number(msg, field::RATE)
+        .filter(|r| r.is_finite() && *r >= 1.0 && r.fract() == 0.0 && *r <= f64::from(u32::MAX))
+        .map(|r| r as u32)
+        .ok_or_else(|| {
+            format!(
+                "rate must be a whole number of hertz from 1 to {}",
+                u32::MAX
+            )
+        })
+}
+
+/// The file of an `mp3` or `flac` reply: a stored file if it has `path`,
+/// else the bytes of an MP3 or the `Blob` of a FLAC.
+fn encoded(msg: &JsValue, kind: &str) -> Result<Encoded, &'static str> {
+    let path = get(msg, field::PATH);
+    if !path.is_undefined() {
+        let path = path.as_string().ok_or("path must be a path")?;
+        let failed = get(msg, field::FAILED);
+        if failed.is_undefined() {
+            return Ok(Encoded::Stored { path });
+        }
+        let text = failed.as_string().ok_or("failed must be text")?;
+        return Ok(Encoded::Failed { path, text });
+    }
+    if kind == kind::MP3 {
+        return get(msg, field::BYTES)
+            .dyn_into()
+            .map(Encoded::Bytes)
+            .map_err(|_| "no bytes");
+    }
+    get(msg, field::FILE)
+        .dyn_into()
+        .map(Encoded::Blob)
+        .map_err(|_| "no file")
+}
+
 fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
     let channel = |k: &str| {
         get(msg, k)
@@ -682,6 +963,73 @@ fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
 mod tests {
     use super::*;
 
+    /// Each reply's `type`.  `mp3` and `flac` carry JS values, which a
+    /// native test cannot make; the browser tests cover them.
+    #[test]
+    fn each_reply_names_its_type() {
+        let text = || "t".to_string();
+        let kinds: Vec<&str> = [
+            Reply::Alive,
+            Reply::Model {
+                ok: true,
+                loaded: true,
+                stored: true,
+                text: text(),
+            },
+            Reply::Download {
+                done: 1.0,
+                total: 2.0,
+            },
+            Reply::Progress {
+                done: 1,
+                total: 2,
+                secs: 0.5,
+            },
+            Reply::Segment {
+                start: 0,
+                len: 4,
+                stems: Vec::new(),
+            },
+            Reply::Stored {
+                frames: 4,
+                len: 4,
+                stems: Vec::new(),
+            },
+            Reply::Unstored { text: text() },
+            Reply::Done { secs: 1.0 },
+            Reply::Error {
+                of: kind::SEPARATE.into(),
+                text: text(),
+            },
+            Reply::Status(text()),
+            Reply::Log(text()),
+            Reply::Selftest {
+                ok: true,
+                text: text(),
+            },
+            Reply::Bench(text()),
+        ]
+        .iter()
+        .map(Reply::kind)
+        .collect();
+        assert_eq!(
+            kinds,
+            [
+                "alive", "model", "download", "progress", "segment", "stored", "unstored", "done",
+                "error", "status", "log", "selftest", "bench"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stem_file_name_keeps_only_safe_characters() {
+        assert_eq!(stem_file("bass"), "bass.wav");
+        assert_eq!(stem_file("classic drums"), "classic drums.wav");
+        assert_eq!(stem_file("lead-vocals"), "lead-vocals.wav");
+        assert_eq!(stem_file("a/b:c.d"), "a_b_c_d.wav");
+        assert_eq!(stem_file("../acme"), "___acme.wav");
+    }
+
     #[test]
     fn the_query_sets_numbers_strings_and_flags() {
         let s = Settings::from_query(
@@ -694,6 +1042,14 @@ mod tests {
         assert!(s.profile);
         assert!(!s.bench_quick, "zero is off");
         assert_eq!(s.selftest, None, "a bare name has no value");
+    }
+
+    #[test]
+    fn the_query_sets_the_weight_format() {
+        let s = Settings::from_query("?bench&bench_quick=1&mm=s64&weights=f16");
+        assert_eq!(s.weights.as_deref(), Some("f16"));
+        assert_eq!(s.mm.as_deref(), Some("s64"));
+        assert_eq!(Settings::from_query("chunk=4").weights, None);
     }
 
     #[test]
