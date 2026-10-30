@@ -679,7 +679,7 @@ fn opening_text(chosen: &Chosen) -> String {
 type Chosen = Vec<(String, web_sys::File)>;
 
 /// Logs the page's WebAssembly memory at `when` (D12 of
-/// `plans/active/stream-from-storage-m5.md`).
+/// `plans/completed/stream-from-storage-m5.md`).
 #[cfg(target_arch = "wasm32")]
 #[cfg_attr(mutants, mutants::skip)]
 fn log_page_memory(when: &str) {
@@ -1532,7 +1532,7 @@ pub enum JobStage {
 /// The longest song that the memory path separates: 100 seconds at
 /// 44.1 kHz, on every device, because a page cannot read its memory limit.
 ///
-/// M2 of `plans/active/stream-from-storage.md` measured peaks of 966 MB for
+/// M2 of `plans/completed/stream-from-storage.md` measured peaks of 966 MB for
 /// a 1-minute song and 1558 MB for a 4-minute song, at `chunk=16384`.  So
 /// the peak grows by about 197 MB a minute, from about 769 MB at 0
 /// minutes.  With 950 MB for the parts that M2 does not measure, a song
@@ -1550,7 +1550,7 @@ pub const SEPARATED_STEMS: usize = 6;
 /// The stereo lanes that a separation of one source on the memory path
 /// holds on the page at its limit: the source, and the six song-length
 /// stems that `assemble::Assembly` makes (D3 of
-/// `plans/active/stream-from-storage-catchup.md`, decision 0020).
+/// `plans/completed/stream-from-storage-catchup.md`, decision 0020).
 pub const LANE_BUDGET: usize = 1 + SEPARATED_STEMS;
 
 /// The longest song, in frames at 44.1 kHz, of which the page may hold
@@ -1619,7 +1619,7 @@ pub fn classic_lanes(song: &Shown) -> usize {
 }
 
 /// Why the page does not decode a song on the page (D3 of
-/// `plans/active/stream-from-storage-catchup.md`, decision 0020).
+/// `plans/completed/stream-from-storage-catchup.md`, decision 0020).
 #[derive(Clone, Debug, PartialEq)]
 pub enum TooLongToOpen {
     /// Its length, from a file's head or the session's `meta`, passes the
@@ -8664,20 +8664,20 @@ export function allow_writes() { FileSystemWritableFileStream.prototype.write = 
 }
 
 /// Browser tests of the page's open and restore through the decode worker
-/// (D9 to D12 of `plans/active/stream-from-storage-m5.md`), with a fake
+/// (D9 to D12 of `plans/completed/stream-from-storage-m5.md`), with a fake
 /// decode worker: a spy keeps what the page posts, and the test plants the
 /// worker's part files and delivers its replies.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod decode_tests;
 
 /// Browser tests of the stored lanes (D7 to D10 of
-/// `plans/active/stream-from-storage-m6.md`): the reader fills the read-ahead
+/// `plans/completed/stream-from-storage-m6.md`): the reader fills the read-ahead
 /// buffer from session files that the test plants.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod playback_tests;
 
 /// Browser tests of the storage path of a save (M8 of
-/// `plans/active/stream-from-storage.md`): the WAV save file and the
+/// `plans/completed/stream-from-storage.md`): the WAV save file and the
 /// lifetime of save files.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod save_tests;

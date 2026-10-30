@@ -1,6 +1,6 @@
 //! The stored mix: a mix file in browser storage that the worker reads
 //! one span at a time, so its memory does not grow with the song (M4 of
-//! `plans/active/stream-from-storage.md`).
+//! `plans/completed/stream-from-storage.md`).
 //!
 //! The file holds interleaved 32-bit little-endian floats, two for each
 //! frame, with no header.  The worker opens it once with `getFile()`,

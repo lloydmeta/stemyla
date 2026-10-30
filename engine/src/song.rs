@@ -192,7 +192,7 @@ impl Song {
 
     /// Loads in-memory files as [`Song::load_files`] does, bit for bit, for
     /// a song of at most `max_frames` frames at [`SONG_RATE`] (D3 of
-    /// `plans/active/stream-from-storage-catchup.md`), with [`SongWithin`].
+    /// `plans/completed/stream-from-storage-catchup.md`), with [`SongWithin`].
     /// A WAV or FLAC whose stated length passes it is refused before it
     /// decodes, and any decode stops once it passes it, each with
     /// `decode::TooLong`.
@@ -224,7 +224,7 @@ impl Song {
 
 /// A song that its caller makes one file at a time, for a song of at
 /// most `max_frames` frames at [`SONG_RATE`] (D3 of
-/// `plans/active/stream-from-storage-catchup.md`).  Each file decodes in
+/// `plans/completed/stream-from-storage-catchup.md`).  Each file decodes in
 /// blocks with [`decode_into`] when it is added, and its bytes go when its
 /// decode ends.  So a caller that reads each file just before it adds it
 /// holds the bytes of one file at a time.  The song holds no samples at a

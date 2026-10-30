@@ -1,5 +1,5 @@
 //! Browser tests of the storage path of a save (M8 of
-//! `plans/active/stream-from-storage.md`, `cargo run -p xtask -- web-test`):
+//! `plans/completed/stream-from-storage.md`, `cargo run -p xtask -- web-test`):
 //! the WAV save file that the page writes in blocks, and the lifetime of
 //! save files.  The test plants a stored song and steps the save's job as
 //! the page does.

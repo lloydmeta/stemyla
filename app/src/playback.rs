@@ -1,5 +1,5 @@
 //! The reader of the stored lanes (D7 and D9 of
-//! `plans/active/stream-from-storage-m6.md`).  Web only.
+//! `plans/completed/stream-from-storage-m6.md`).  Web only.
 //!
 //! [`Playback::start`] makes the read-ahead buffer of a song's stored lanes
 //! before its player, and starts the reader, an async task on the main

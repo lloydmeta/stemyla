@@ -41,11 +41,11 @@
 //!   (`--weights`, `--reference` from `tools/roformer_export.py`).
 //! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
 //!   browser, and print the peak memory of each and the difference
-//!   (`--weights`).  M2 of `docs/plans/active/stream-from-storage.md`.
+//!   (`--weights`).  M2 of `docs/plans/completed/stream-from-storage.md`.
 //! * `memory-budget` also prints how much the page's and the worker's
 //!   WebAssembly memory grew during each separation, and fails if either
 //!   is more than 4 MB (D9 of M3 in
-//!   `docs/plans/active/stream-from-storage-m3.md`, step 4 of M4).  The
+//!   `docs/plans/completed/stream-from-storage-m3.md`, step 4 of M4).  The
 //!   page's growth includes its write of the mix.  A fallback to the
 //!   memory path fails it.  It also checks that the page and the decode
 //!   worker grow by at most 4 MB while the song opens, and that Separate
@@ -59,7 +59,7 @@
 //!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
 //!   checks them against `--hashes`.
 //! * `weights`: f16 weights against f32 weights, from a blank page
-//!   (`--weights`; M9 of `docs/plans/active/stream-from-storage.md`).  The
+//!   (`--weights`; M9 of `docs/plans/completed/stream-from-storage.md`).  The
 //!   stems of the two formats must be equal bit for bit, with M3's kernels
 //!   and with this GPU's own; the speed is reported as a measure.
 //!

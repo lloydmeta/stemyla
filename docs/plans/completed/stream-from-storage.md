@@ -126,7 +126,7 @@ The orchestrator, which is the main session:
 
 A team leader, a general-purpose subagent for each milestone:
 
-1. It writes `docs/plans/active/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule.  It does not edit this plan (see Decision log).
+1. It writes `docs/plans/completed/stream-from-storage-m<n>.md` as `plans/PLANS.md` says, with more detail than this plan.  It adds its line to `docs/README.md` in the same commit.  New subagents review it, to the stop rule.  It does not edit this plan (see Decision log).
 2. It starts an implementer with the milestone plan's path (or this plan's section), and continues it with SendMessage for fixes.
 3. It runs review rounds with `/review-rounds` to the stop rule: at least rounds 1, 2 and 3, and more until a round has no blocker and no significant should-fix.  It fixes each confirmed blocker and significant should-fix with a test.  It does not leave one as debt when a browser test on this Mac can check it.  The base is the commit before the milestone's first commit, and the criteria are the milestone's section.  M3's round 1 passes `--baseline` (the phase 3 gate in `plans/active/harness-engineering.md`).
 4. After the last round, it copies `target/review/run/iphone-crashes-2026-10-25/log.md` to `docs/reviews/iphone-crashes-2026-10-25-m<n>.md`, and removes the run folder.  So the next milestone's round 1 starts with no log (TD-37).
@@ -144,7 +144,7 @@ For every agent in the run:
 
 The prompt for the maintainer to start the run:
 
-> Run docs/plans/active/stream-from-storage.md as its section "How the work runs (M3 to M10)" says, from M3, on the branch iphone-crashes-2026-10-25 and PR #39.  Do the preflight first.  Then ask me decision 0019's question once, and run the milestones in order as orchestrator.  Stop only for the reasons that section names.
+> Run docs/plans/completed/stream-from-storage.md as its section "How the work runs (M3 to M10)" says, from M3, on the branch iphone-crashes-2026-10-25 and PR #39.  Do the preflight first.  Then ask me decision 0019's question once, and run the milestones in order as orchestrator.  Stop only for the reasons that section names.
 
 ### M0: the plan, the decisions and the evidence
 
@@ -289,7 +289,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * [x] 2026-10-29: M8: saving from and to storage (`8c3fcac..30e96c9`, plan `stream-from-storage-m8.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m8.md`, 3 rounds).  A save writes a 16-bit WAV save file in 1 MiB blocks (2 MiB since step 6); the stem worker encodes FLAC and MP3 from it in blocks into a save file; the page offers the file (decision 0021).  `e2e save` (new, in CI): the JS heap of a save rises 1.35 to 2.23 MB for each format at 1 and 10 minutes (2.38 to 4.52 MB since step 6, read at each write, with a budget of 7.77 MB); the `c3952ad` build fails it (95.2 MB more for a WAV, 190.5 MB for a FLAC or an MP3 at 10 minutes).  `e2e flac`: a stored encode equals the arrays encode byte for byte.  When storage fails, a song of at most 100 s saves through the JS sinks.  TD-59: an MP3 save holds about 3.3 to 3.5 times its file in the stem worker.  TD-60: the download is checked in Chrome only.  The intent review passed with 3 nits.
 * [x] 2026-10-30: M8 step 6: a save that does not wait for the UI frame (`2c7c29b..6ecfb36`, plan `stream-from-storage-m8.md` D11, reviews `docs/reviews/iphone-crashes-2026-10-25-m8.md`, rounds speed 1 to 8).  The maintainer said that CI's browser-tests job (41 to 51 minutes, TD-61) was too long.  A save advanced one block for each UI frame, and CI paints in software.  Now a save runs in a task of its own, in slices of 4 ms (up to 16 ms after a long paint).  CI's browser-tests job took 15.8 to 19.9 minutes in 4 passing runs (40894815433, 40913929567, 40931633257, 40945943417), with `e2e save` 3.3 to 3.4 minutes; TD-61 is closed.  `e2e save` now saves during playback with frames of 125 ms, as on CI: 56 s on the Mac, no underrun, the longest slice under 3 ms.  The rounds fixed a save during playback that took over 180 s on CI (2 reads in flight now), a WAV block reserve that doubled, a cap of the reader over all lanes, and a reload that could restore the older song (`store_meta::LastCurrent`: one write of `sessions/current` at a time, the last request wins).  Writes are 2 MiB; a dated note under decision 0021 waits for the maintainer.
 * [x] 2026-10-30: M9: f16 weights on the GPU (`298e3c3..16945ab`, plan `stream-from-storage-m9.md`, reviews `docs/reviews/iphone-crashes-2026-10-25-m9.md`, 3 rounds, the maintainer's timebox).  f16 is the default (`DEFAULT_WEIGHTS = F16`).  On the Mac (Radeon Pro 5500M, Metal, Chrome) the f16 and f32 stems are equal bit for bit, at chunk 16384 and at the default chunk, and the f32 stems give M3's hashes.  The full `?bench` gives f16 0.933 and 0.936 of f32's matmul time (the bar is 2%); Safari's quick bench gives 0.897.  At the default chunk the model takes 350 MB on the GPU (699 MB as f32), and GPU buffers live are 630 MB (979 MB).  The start-up check compares each f16 variant with its f32 kernel bit for bit: f32 71 ms and f16 43 ms in Chrome, f32 67 ms and f16 1330 ms in Safari (TD-64).  A GPU or browser that flushes f16 subnormals or rejects a variant keeps f32 weights and logs why (decision 0022); a planted shader error shows it natively and in Chrome.  `e2e selftest` with f16 passes for all four kernels (69.4 dB).  TD-63: the iPhone is not yet checked.  TD-65: an internal GPU error cannot be planted.  TD-66: the mutants of rounds 1 to 3 are partial (95 of 472 tested in round 1, none in rounds 2 and 3).
-* [ ] M10: budget asserted, iPhone evidence.
+* [x] 2026-10-30: M10, closed by the maintainer with the maintainer's own runs ("close out m10 with these results"), not as written.  On an iPhone, a 5-minute song separated and its MP3 mix of some stems saved and downloaded.  Before this plan, a 5.1-minute song stopped the tab at chunk 2.  In Safari on the Mac, songs of 6.5 and 3.1 minutes (61 and 31 chunks) separated with f16 weights.  GPU buffers live stayed at 630 MB on every chunk, the stem worker at 125 MB and the page at 49 to 53 MB.  Playback during the separation and the saves had 0 underruns, an engine mean of 13 to 14 ms of the 69.66 ms budget, and a save's longest slice of 5 ms.  A FLAC encode left the stem worker's memory unchanged.  With a stored kernel choice, the start-up check took f32 47 ms and f16 51 ms.  Not done: the budget assertion of `e2e memory-budget` at the default chunk (TD-11), the 30-minute iPhone run with Web Inspector peaks (TD-54), a WAV and FLAC save on the iPhone (TD-60), and the f16 log lines from the iPhone (TD-63).
 
 ## Surprises and discoveries
 
@@ -316,7 +316,7 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-25, agent, after review round 3: the decode worker's memory joins the checks.  M10 states the device conditions for a run of up to 85 minutes.  A wake lock is out of scope.
 * 2026-10-25, agent, after review round 2: the memory path stays as the fallback (M3).  M9 adds f16 kernel variants and the naga capability.  M10's growth tolerance falls to 4 MB.  The spike reads the original lane too.
 * 2026-10-25, maintainer, at the start of the M3 to M10 run: decision 0015 accepted.  Teams may reword MEM-1 and LAYER-1 as decisions 0015 and 0019 need, in the milestone that needs it, and keep or extend their tests.  Decision 0019 accepted: a new page-side worker crate decodes.  M9 makes f16 the default when the Mac gives the same stems bit for bit and no slower separation.
-* 2026-10-25, maintainer: each milestone works in its own plan file, `plans/active/stream-from-storage-m<n>.md`, M4, M9 and M10 included.  Its Progress, Decision log and surprises go there.  Only the orchestrator edits this plan, with one Progress line for each milestone and the decisions that later milestones need.
+* 2026-10-25, maintainer: each milestone works in its own plan file, `plans/completed/stream-from-storage-m<n>.md`, M4, M9 and M10 included.  Its Progress, Decision log and surprises go there.  Only the orchestrator edits this plan, with one Progress line for each milestone and the decisions that later milestones need.
 * 2026-10-26, agent (M3): on the storage path the worker sends `stored` and `unstored` replies, and `segment` keeps its samples for the memory path only.  The memory path refuses a song over 100 s on every device, because a page cannot read its memory limit (M3 plan, D1 and D3).
 * 2026-10-26, agent (M4): the page writes `mix.f32` (raw f32 little-endian, with a `meta` line) when Separate is pressed on the storage path, not when a song opens.  A song never separated costs no storage, and one path covers new songs and M3's sessions.  Every failure of the mix file sends `unstored` (M4 plan, D1 to D7).
 * 2026-10-26, agent (orchestrator): M5 measures growth from the start of the open to the decode's end line, as M3 measured it during the separation.  The read-back for playback and lanes after the decode stays until M6 and M7 remove it, and M10 asserts the whole.  The maintainer asked the orchestrator to decide such questions and not to wait for them.
@@ -345,6 +345,26 @@ The maintainer publishes, then opens, separates, plays and saves a 30-minute son
 * 2026-10-30, agent (orchestrator, M9's D12): f16 becomes the default on the maintainer's rule: the stems are equal bit for bit and `?bench` is not slower.  Part 3 of `e2e weights`, the plan's own extra gate, gave f16 0.953 and 0.990 of f32's separation time, but its spreads (10.8% and 19.0%) were over its 5% cap.  The times rose through each run (heat, and overlapping builds), so part 3 is now a measure, not a pass or fail.
 * 2026-10-30, agent (orchestrator): the intent review of M9 is not run, for the timebox.  The next session runs it before M10.
 * 2026-10-30, maintainer: decision 0022 is accepted ("consider 022 decided").
+* 2026-10-30, maintainer: M10 closes with the maintainer's runs on an iPhone (a 5-minute song) and in Safari on the Mac, not with the 30-minute run.  The plan moves to `plans/completed/`.  TD-11, TD-54, TD-60 and TD-63 keep what is left.
 ## Outcomes and retrospective
 
-Not started.
+Written by the orchestrator on 2026-10-30, at the close-out.
+
+### What the plan delivered
+
+* Browser storage holds a song's audio: the decoded source (M5), the mix (M4), the stems (M3) and the saves (M8).  The page reads a stored song through a read-ahead buffer of at most 32 MiB (M6, M7), so the page, the workers and the GPU do not grow with the song.
+* f16 weight matrices on the GPU (M9): the model takes 350 MB, not 699 MB, with stems equal bit for bit on the Mac.  A GPU that fails the start-up check keeps f32 (decision 0022).
+* A save runs in a task of its own, not one block for each UI frame (M8 step 6).  CI's browser-tests job fell from 41 to 51 minutes to 15 to 20 minutes.
+
+### Against the purpose
+
+* The crash that started the plan is gone for the songs tried: a 5-minute song separates and saves on an iPhone, where a 5.1-minute song stopped the tab before.  In Safari on the Mac, memory stayed flat over 61 chunks.
+* The target, a 30-minute song on an iPhone 17 Pro, is not shown.  No run measured the iPhone's peaks, and `e2e memory-budget` does not assert the budget at the default chunk.  The estimate of about 950 MB against the 1100 MB budget is still an estimate (TD-11, TD-54).
+* M9's intent review did not run, and the mutants of M9's rounds are partial (TD-66).
+
+### What to do differently
+
+* Watch CI's time at each milestone.  M8's save advanced one block for each UI frame, and CI's software paints made the browser-tests job take 41 to 51 minutes.  Eight review rounds then fixed what the speed fix brought in.
+* Size review work to the time the maintainer has.  M8's step 6 took 8 rounds and M9 3 rounds within a 4-hour limit; an estimate at the start would have shown the conflict sooner.
+* Keep the machine able to run the work: the disk filled once (target held about 91 GB), and a full mutants baseline timed out under the reviewers' load more than once.  Run the mutants before the reviewers, and clear build caches between milestones.
+* The orchestrator pushes only between review rounds: a push during a round moves `origin`'s ref and fails `review check`.

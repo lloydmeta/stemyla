@@ -1,5 +1,5 @@
 // Spies on the page's downloads for `xtask e2e save` (M8 of
-// plans/active/stream-from-storage.md): each link click that a save makes
+// plans/completed/stream-from-storage.md): each link click that a save makes
 // is kept, not downloaded.  Served by `xtask serve --inject`, so it runs
 // before the app, in every build.
 (() => {

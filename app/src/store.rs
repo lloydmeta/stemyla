@@ -64,7 +64,7 @@
 //! writes the stems itself ([`save_stems`]).
 //!
 //! Since M6, the shown song plays each lane that has a complete session
-//! file from that file (D8 of `plans/active/stream-from-storage-m6.md`);
+//! file from that file (D8 of `plans/completed/stream-from-storage-m6.md`);
 //! since M7, such a lane has no samples in memory.  [`read_stem`] reads a
 //! stem whole only when its file is not complete, on the memory path's
 //! rules.  While
@@ -873,7 +873,7 @@ pub async fn restore(memory_limit: usize) -> Option<Result<(String, Song, Meta)>
 
 /// Session `id`'s sources as a song, decoded on the page (the memory path),
 /// within the memory path's limit for their lanes (D3 of
-/// `plans/active/stream-from-storage-catchup.md`): `memory_limit` is
+/// `plans/completed/stream-from-storage-catchup.md`): `memory_limit` is
 /// `MEMORY_PATH_MAX_FRAMES`, or less in a test.  It does not make the
 /// session current: the page does, when the song shows (D12 of the M7
 /// plan).
@@ -1345,7 +1345,7 @@ async fn overviews_on_the_page(files: &[LaneFile], frames: usize) -> Option<Stem
 }
 
 /// A decode of session `id` by the decode worker, from the post to the end
-/// of D7 (D9 of `plans/active/stream-from-storage-m5.md`).  It counts as a
+/// of D7 (D9 of `plans/completed/stream-from-storage-m5.md`).  It counts as a
 /// save in `SAVING`, so `forget` and a restore wait for it, and as a write
 /// in `WRITES`, so [`close`] waits for it.  A reset ends the decode and
 /// drops the guard first, so it never waits for a long decode.
@@ -1521,7 +1521,7 @@ pub fn mix_writing(id: &str) -> bool {
 /// `mix.f32` stays (D8).  Otherwise the worker's mix takes its place, also
 /// while a separation names the session: it read no mix that is not
 /// usable, and its mix write keeps a usable one (C of
-/// `plans/active/stream-from-storage-catchup.md`).  So the session is
+/// `plans/completed/stream-from-storage-catchup.md`).  So the session is
 /// complete, and the page never decodes it because a separation uses the
 /// mix.  An error leaves the session incomplete.
 pub async fn keep_decoded(

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M8 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M8 section, which stays the criteria.  After M8:
+This is the milestone plan for M8 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M8 section, which stays the criteria.  After M8:
 
 * A save of a stem or of the mix as heard writes its file to browser storage (OPFS) in blocks, and the page offers that file as the download.  No save makes a song-length array in the JS heap or in WebAssembly memory, except the memory path's bounded JS sinks (D8) and the MP3 encoder's frames in the stem worker (the MP3 exception of D4).
 * A WAV save is the page's file.  For a FLAC or MP3 save, the stem worker reads the page's WAV file in blocks, encodes it, and writes the encoded file to browser storage in blocks.  The page offers the encoded file as the download.

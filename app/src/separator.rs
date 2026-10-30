@@ -5,7 +5,7 @@
 //! memory when the model is chosen through the file picker.
 //!
 //! A separation takes one of two paths (M3 of
-//! `plans/active/stream-from-storage.md`).  On the storage path, the request
+//! `plans/completed/stream-from-storage.md`).  On the storage path, the request
 //! names the song's session and its mix file (M4), and the worker writes the
 //! stems to the session's files.  Its `stored` replies carry no samples, and
 //! `done` gives [`Event::StemsStored`].  On the memory path, the request

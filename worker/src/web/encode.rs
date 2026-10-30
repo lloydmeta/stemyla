@@ -1,5 +1,5 @@
 //! The MP3 and FLAC encoders of a save (M8 of
-//! `plans/active/stream-from-storage.md`).
+//! `plans/completed/stream-from-storage.md`).
 //!
 //! An encode reads its audio from one of two sources ([`Encode`]): two
 //! transferred arrays (the memory path of a save), or a 16-bit stereo WAV

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M9 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M9 section, which stays the criteria.  After M9:
+This is the milestone plan for M9 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M9 section, which stays the criteria.  After M9:
 
 * The GPU keeps each weight matrix of an f16 model file as f16, two values in each `u32` (decision 0018).  The kernels unpack each value to f32 and compute in f32, so each kernel gets the same f32 values as today.
 * The parameters on the GPU fall from about 699 MB to about 350 MB.  M10's budget counts on this saving.

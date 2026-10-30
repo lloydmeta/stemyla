@@ -765,7 +765,7 @@ impl Choice {
 /// on a GPU opened moments before, and chose split attention on a Radeon
 /// Pro 5500M where a longer bench measured fused 2.5 times faster.
 /// Version 3 calibrates once for each weight format, with the f16
-/// variants for f16 weights (M9 of `plans/active/stream-from-storage.md`).
+/// variants for f16 weights (M9 of `plans/completed/stream-from-storage.md`).
 pub const CALIBRATION: u32 = 3;
 
 /// The key of this GPU's stored kernel choice for weights in `format`:

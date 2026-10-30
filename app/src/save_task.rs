@@ -1,4 +1,4 @@
-//! The task loop of a save (D11 of `plans/active/stream-from-storage-m8.md`).
+//! The task loop of a save (D11 of `plans/completed/stream-from-storage-m8.md`).
 //!
 //! A save's [`ExportJob`] runs in a task of its own, not in the UI frame.
 //! The task runs the job in slices of at most a budget ([`Budget`]: 4 ms,

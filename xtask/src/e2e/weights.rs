@@ -1,5 +1,5 @@
 //! `xtask e2e weights`: the evidence for M9's default (D10 and D11 of
-//! `plans/active/stream-from-storage-m9.md`).  f16 weights must give the
+//! `plans/completed/stream-from-storage-m9.md`).  f16 weights must give the
 //! stems of f32 weights bit for bit; the speed is reported as a measure.
 //!
 //! * Part 1, the pinned kernels: the model loads as f32 with its bytes and
@@ -27,7 +27,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 /// The six SHA-256s of `stored-stems` with M3's settings and f32 weights
-/// (`plans/active/stream-from-storage-m3.md`, Progress), in the worker's
+/// (`plans/completed/stream-from-storage-m3.md`, Progress), in the worker's
 /// stem order.
 pub const M3_HASHES: [&str; 6] = [
     "e41500168c92024ecc32778654fa77e22a630f31200e99965274f6cdd931b028",

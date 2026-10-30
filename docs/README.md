@@ -17,15 +17,15 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and phase 2's numbers.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
-* `plans/active/stream-from-storage.md`: a song's audio moves to browser storage, so the tab's memory does not grow with the song (MEM-4, TD-54).
-* `plans/active/stream-from-storage-m3.md`: M3 of that plan: the worker writes the stems to their session files, and the page falls back to memory when storage is unavailable or full.
-* `plans/active/stream-from-storage-m4.md`: M4 of that plan: the page keeps the mix in a session file, and the worker reads it in blocks.
-* `plans/active/stream-from-storage-m5.md`: M5 of that plan: a new decode worker reads a stored song in blocks and writes its session files and overviews.
-* `plans/active/stream-from-storage-m6.md`: M6 of that plan: playback reads stored lanes through a read-ahead buffer that the main thread fills.
-* `plans/active/stream-from-storage-m7.md`: M7 of that plan: the page shows a stored song from its files and overviews, with no read-back; spectrograms, classic drums and saves read blocks.
-* `plans/active/stream-from-storage-catchup.md`: the catch-up after M7: round 4 of M3 to M6, their deferred should-fix, the page-decode limit, `mutants::skip`, the Safari worker memory, and a 3,072-frame output buffer.
-* `plans/active/stream-from-storage-m8.md`: M8 of that plan: a save writes its file to browser storage in blocks, and the worker encodes FLAC and MP3 from that file.
-* `plans/active/stream-from-storage-m9.md`: M9 of that plan: the GPU keeps the weight matrices of an f16 model as f16, and computes in f32.
+* `plans/completed/stream-from-storage.md`: done on 2026-10-30: a song's audio moves to browser storage, so the tab's memory does not grow with the song (MEM-4, TD-54).
+* `plans/completed/stream-from-storage-m3.md`: M3 of that plan: the worker writes the stems to their session files, and the page falls back to memory when storage is unavailable or full.
+* `plans/completed/stream-from-storage-m4.md`: M4 of that plan: the page keeps the mix in a session file, and the worker reads it in blocks.
+* `plans/completed/stream-from-storage-m5.md`: M5 of that plan: a new decode worker reads a stored song in blocks and writes its session files and overviews.
+* `plans/completed/stream-from-storage-m6.md`: M6 of that plan: playback reads stored lanes through a read-ahead buffer that the main thread fills.
+* `plans/completed/stream-from-storage-m7.md`: M7 of that plan: the page shows a stored song from its files and overviews, with no read-back; spectrograms, classic drums and saves read blocks.
+* `plans/completed/stream-from-storage-catchup.md`: the catch-up after M7: round 4 of M3 to M6, their deferred should-fix, the page-decode limit, `mutants::skip`, the Safari worker memory, and a 3,072-frame output buffer.
+* `plans/completed/stream-from-storage-m8.md`: M8 of that plan: a save writes its file to browser storage in blocks, and the worker encodes FLAC and MP3 from that file.
+* `plans/completed/stream-from-storage-m9.md`: M9 of that plan: the GPU keeps the weight matrices of an f16 model as f16, and computes in f32.
 * `plans/completed/mix-download.md`: done on 2026-10-25: the mix lane saves the mix as heard (WAV, FLAC, MP3), mixed on the page in blocks; its waveform and spectrogram follow the mix.
 * `plans/completed/flac.md`: done on 2026-10-25: FLAC files open as songs and stems, a stem saves as a 16-bit FLAC, and a decoded file holds at most 1 GiB of samples.
 * `plans/completed/48k-audio.md`: done on 2026-10-24: songs at 48 kHz and other standard rates convert to 44.1 kHz when they open, so they separate.

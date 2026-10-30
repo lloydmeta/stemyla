@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M6 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M6 section, which stays the criteria.  After M6:
+This is the milestone plan for M6 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M6 section, which stays the criteria.  After M6:
 
 * The `Player` reads each lane through a trait in `engine` that gives the frames of a stem from a position.  A lane in memory (`Samples`) implements it, and so does a lane in a session file.  The player no longer holds the `Song`.
 * For a lane in a session file, the audio callback copies frames only from a read-ahead buffer of a fixed size.  An async reader on the main thread keeps that buffer full in front of the play head and after the loop start (decision 0017).  If the buffer does not hold the frames, the lane plays silence and the buffer counts an underrun.

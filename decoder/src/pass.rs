@@ -1,5 +1,5 @@
 //! The decode of one request into the session files
-//! (`docs/plans/active/stream-from-storage-m5.md`, D1, D5, D7, D7a, D8).
+//! (`docs/plans/completed/stream-from-storage-m5.md`, D1, D5, D7, D7a, D8).
 //!
 //! The pass runs over a [`Session`], so the native tests run it on files
 //! in memory and the browser runs it on OPFS.  It writes each file of D1

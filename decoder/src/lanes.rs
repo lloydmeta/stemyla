@@ -1,4 +1,4 @@
-//! The requests over lane files (`docs/plans/active/stream-from-storage-m7.md`,
+//! The requests over lane files (`docs/plans/completed/stream-from-storage-m7.md`,
 //! D7 and D8): the overviews of stems, and classic drums.
 //!
 //! Both read each lane in blocks of at most [`BLOCK_FRAMES`] frames, with

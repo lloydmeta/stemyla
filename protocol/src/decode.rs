@@ -1,5 +1,5 @@
 //! The messages between the page and its decode worker (decision 0019,
-//! `docs/plans/active/stream-from-storage-m5.md`, D6).  Each is a plain JS
+//! `docs/plans/completed/stream-from-storage-m5.md`, D6).  Each is a plain JS
 //! object whose `type` names it.  The types differ from those of the stem
 //! worker's messages, so a message for one worker is never read as a
 //! message for the other.  No samples cross, so nothing is transferred.
@@ -15,7 +15,7 @@
 //!   `mix.f32` of the session, which the worker does not write again.
 //!
 //! The other requests ([`WorkerRequest`], D7 and D8 of
-//! `docs/plans/active/stream-from-storage-m7.md`).  A lane is `{path,
+//! `docs/plans/completed/stream-from-storage-m7.md`).  A lane is `{path,
 //! format, data_offset, data_frames}`: its path from the session folder,
 //! `"f32"` or `"pcm16"`, the bytes before its first frame and the frames
 //! it holds (later frames are silence).  Every other path is a part path

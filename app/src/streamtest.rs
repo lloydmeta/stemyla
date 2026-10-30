@@ -1,5 +1,5 @@
 //! `?streamtest`: a spike that measures playback from browser storage
-//! (OPFS) on this device, for M1 of `plans/active/stream-from-storage.md`
+//! (OPFS) on this device, for M1 of `plans/completed/stream-from-storage.md`
 //! (decisions 0016 and 0017).  Web only.
 //!
 //! It writes the files of a separated song to a scratch folder: six 16-bit

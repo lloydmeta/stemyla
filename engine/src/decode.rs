@@ -56,7 +56,7 @@ pub fn song_frames(frames: u64, rate: u32) -> u64 {
 }
 
 /// The error of a song longer than a limit in frames at [`SONG_RATE`]
-/// (D3 of `plans/active/stream-from-storage-catchup.md`): the memory
+/// (D3 of `plans/completed/stream-from-storage-catchup.md`): the memory
 /// path's limit, which a caller gives.  A caller finds it with
 /// `anyhow::Error::downcast_ref`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,7 +458,7 @@ impl Decoder {
 
     /// Opens `source` as [`Decoder::new`] does, for a song of at most
     /// `max_frames` frames at [`SONG_RATE`] (D3 of
-    /// `plans/active/stream-from-storage-catchup.md`).  It refuses a WAV or
+    /// `plans/completed/stream-from-storage-catchup.md`).  It refuses a WAV or
     /// FLAC whose stated length passes that, and stops a decode whose
     /// frames pass it, each with [`TooLong`].  The limit of
     /// [`MAX_DECODED_BYTES`] stays.

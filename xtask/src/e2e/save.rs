@@ -1,4 +1,4 @@
-//! `xtask e2e save` (step 4 of `docs/plans/active/stream-from-storage-m8.md`):
+//! `xtask e2e save` (step 4 of `docs/plans/completed/stream-from-storage-m8.md`):
 //! a save of the mix holds no song-length buffer in the page's JS heap.
 //!
 //! The scenario plants a stored session of 1 minute and one of 10 minutes,

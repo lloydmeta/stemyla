@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M5 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M5 section, which stays the criteria.  After M5:
+This is the milestone plan for M5 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M5 section, which stays the criteria.  After M5:
 
 * The page never holds the encoded source of a song that it keeps in browser storage.  It saves a chosen file to OPFS as a `Blob`, as today, and does not read its bytes.
 * A new page-side worker, the decode worker (decision 0019), reads the stored source in blocks with sync reads.  It decodes, converts to 44.1 kHz and writes the session files and the overviews in blocks.  Its memory does not grow with the song.

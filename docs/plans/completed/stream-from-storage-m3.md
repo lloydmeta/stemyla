@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M3 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M3 section, which stays the criteria.  After M3:
+This is the milestone plan for M3 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M3 section, which stays the criteria.  After M3:
 
 * For a song kept in browser storage, the worker writes each stem to its session file as it separates.  It writes `sessions/<id>/stems/<stem>.wav.part`, and the page moves it onto `sessions/<id>/stems/<stem>.wav` when the stems are complete.  No stem samples cross to the page, and the page makes no song-length stem buffers during the separation.
 * The page reads the finished stem files back into `engine::Samples` to show them.  Playback from storage is M6, so the shown stems stay in memory until then.

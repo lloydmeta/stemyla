@@ -1,5 +1,5 @@
 //! The page's client of the decode worker (D6, D9 of
-//! `plans/active/stream-from-storage-m5.md`).
+//! `plans/completed/stream-from-storage-m5.md`).
 //!
 //! It starts the worker at the first decode, and again after the worker
 //! stopped.  It holds each post until the worker says `decode-alive`, as

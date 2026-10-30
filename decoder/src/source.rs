@@ -1,5 +1,5 @@
 //! The source that the decoder reads a stored file through, in blocks
-//! (D7a of `docs/plans/active/stream-from-storage-m5.md`).
+//! (D7a of `docs/plans/completed/stream-from-storage-m5.md`).
 //!
 //! Symphonia needs a source that is `Send + Sync`, which a value that holds
 //! a JS object is not.  So the source holds only numbers: its position and

@@ -4,7 +4,7 @@ Status: accepted (2026-10-25, by the maintainer)
 
 ## Context
 
-The model file is f16 (`bs_roformer_sw.f16.safetensors`, 350 MB).  `roformer/src/weights.rs` converts each value to f32, and `roformer-gpu` uploads about 699 MB of f32 parameters.  Each f16 value converts to f32 exactly, so the GPU holds the f16 values at twice their size.  The tab's fixed memory is about 1720 MB of the 2048 MB that iOS allows on an iPhone 17 Pro (MEM-4, `plans/active/stream-from-storage.md`).  The maintainer chose on 2026-10-25 to fold this saving into that plan.
+The model file is f16 (`bs_roformer_sw.f16.safetensors`, 350 MB).  `roformer/src/weights.rs` converts each value to f32, and `roformer-gpu` uploads about 699 MB of f32 parameters.  Each f16 value converts to f32 exactly, so the GPU holds the f16 values at twice their size.  The tab's fixed memory is about 1720 MB of the 2048 MB that iOS allows on an iPhone 17 Pro (MEM-4, `plans/completed/stream-from-storage.md`).  The maintainer chose on 2026-10-25 to fold this saving into that plan.
 
 ## Options
 

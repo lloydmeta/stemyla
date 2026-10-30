@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M4 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M4 section, which stays the criteria.  After M4:
+This is the milestone plan for M4 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M4 section, which stays the criteria.  After M4:
 
 * On the storage path, the page keeps the mix that the worker separates in a session file, `sessions/<id>/mix.f32`.  The separate request names that file and carries no samples.
 * `roformer::demix::Demixer` reads its input from a source of blocks, one chunk with its overlap at a time.  The worker reads the mix file in blocks, so its memory does not grow with the song.
@@ -12,7 +12,7 @@ M4 does not close TD-54.  The page still holds the decoded song (M5) and reads t
 
 ## Context and orientation
 
-The state at the start of M4, on 2026-10-26, at commit `f10fbb7` on the branch `iphone-crashes-2026-10-25`.  The parent plan's "The code today" and "Terms", and the M3 plan (`plans/active/stream-from-storage-m3.md`, its D1 to D10), apply.  These parts concern M4:
+The state at the start of M4, on 2026-10-26, at commit `f10fbb7` on the branch `iphone-crashes-2026-10-25`.  The parent plan's "The code today" and "Terms", and the M3 plan (`plans/completed/stream-from-storage-m3.md`, its D1 to D10), apply.  These parts concern M4:
 
 * `roformer/src/demix.rs`: `Demixer::new(mix: Stereo, chunk, overlap, stems)` keeps the whole mix.  `next_input` cuts the next chunk from it through `sample`, which reads the reflect padding by index.  `accept`, `take_ready` and `finish` hold at most one chunk of running sums.  The tests compare the streamed output with `reference`, the old whole-song implementation, bit for bit.  Other callers: `roformer/tests/reference.rs` and `xtask/src/roformer_cli.rs`.
 * `worker/src/web.rs`: `serve` passes `Request::Separate { left, right, session }` to `run`.  `run` copies the two transferred `Float32Array`s into WebAssembly memory (an `#[expect]` of MEM-1), makes the `Demixer` and calls `separate_song`.  `separate_song` and `separate_chunks` take the network as a parameter (`Network`), so `worker/src/web/tests.rs` runs the whole loop with a fake network (`fake_mix`, `fake_demixer`, `FAKE_CHUNK`).  `Stop::Storage` ends with `unstored`, `Stop::Failed` with `error`.  `blob_range` reads a range of a `Blob` with `FileReaderSync`, which is synchronous.

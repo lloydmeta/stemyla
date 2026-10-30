@@ -1,6 +1,6 @@
 //! The stem writer: writes the stems of one separation to their session
 //! files as the segments become ready, so the stems never cross to the
-//! page (the storage path, M3 of `plans/active/stream-from-storage.md`).
+//! page (the storage path, M3 of `plans/completed/stream-from-storage.md`).
 //!
 //! It writes each stem to `<session>/stems/<file>.part`, where `<file>` is
 //! [`stem_protocol::stem_file`] of its name.  The page moves each file onto

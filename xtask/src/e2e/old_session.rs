@@ -1,5 +1,5 @@
 //! `xtask e2e old-session` (step 9 of
-//! `docs/plans/active/stream-from-storage-m7.md`): a session of M4's
+//! `docs/plans/completed/stream-from-storage-m7.md`): a session of M4's
 //! layout restores with the page's memory under a fixed bound.
 //!
 //! The scenario plants a session of M4's layout in browser storage: a

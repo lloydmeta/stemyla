@@ -1,7 +1,7 @@
 //! The page's side of the decode worker (decision 0019).  The page starts
 //! the decode worker from [`LOADER`] and posts each decode to it; each
 //! reply ends the decode that waits for it (`DecodeClient`, web only;
-//! `docs/plans/active/stream-from-storage-m5.md`, D6 and D9).
+//! `docs/plans/completed/stream-from-storage-m5.md`, D6 and D9).
 //!
 //! Trunk names a worker's files after its `data-bin` in `index.html`, with
 //! no hash (`filehash = false` in `Trunk.toml`), so the names are fixed.

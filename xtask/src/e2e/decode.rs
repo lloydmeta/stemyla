@@ -1,6 +1,6 @@
 //! `xtask e2e decode`: the decode worker in the built page (M5 of
-//! `docs/plans/active/stream-from-storage.md`, step 5 of
-//! `docs/plans/active/stream-from-storage-m5.md`).  No model and no GPU.
+//! `docs/plans/completed/stream-from-storage.md`, step 5 of
+//! `docs/plans/completed/stream-from-storage-m5.md`).  No model and no GPU.
 //!
 //! It drops a 44.1 kHz WAV of one source, a 48 kHz WAV of one source and
 //! the synthetic stems, and checks each session's files against the native

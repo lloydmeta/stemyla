@@ -4,7 +4,7 @@ Status: accepted (2026-10-29, by the maintainer)
 
 ## Context
 
-Until M8 of `plans/active/stream-from-storage.md`, a save kept its whole file in the JS heap of the page.  A WAV save made one `Uint8Array` of the file (`JsWav`).  A FLAC or MP3 save made two song-length `Float32Array`s (`JsChannels`), about 635 MB for 30 minutes.  The page transferred them to the stem worker.  The worker kept the encoded file until its reply.  iOS stops a tab at 2 GB (MEM-4), and the JS heap counts.  Decision 0015 moves the song, the mix and the stems to browser storage, with the memory path as the fallback.  M8 does the same for saves.
+Until M8 of `plans/completed/stream-from-storage.md`, a save kept its whole file in the JS heap of the page.  A WAV save made one `Uint8Array` of the file (`JsWav`).  A FLAC or MP3 save made two song-length `Float32Array`s (`JsChannels`), about 635 MB for 30 minutes.  The page transferred them to the stem worker.  The worker kept the encoded file until its reply.  iOS stops a tab at 2 GB (MEM-4), and the JS heap counts.  Decision 0015 moves the song, the mix and the stems to browser storage, with the memory path as the fallback.  M8 does the same for saves.
 
 ## Options
 
@@ -14,7 +14,7 @@ Until M8 of `plans/active/stream-from-storage.md`, a save kept its whole file in
 
 ## Decision
 
-The third option (D1 to D8 of `plans/active/stream-from-storage-m8.md`).
+The third option (D1 to D8 of `plans/completed/stream-from-storage-m8.md`).
 
 * The page writes every save as a 16-bit WAV save file, `saves/<page>-<n>.wav` (`app::export::StoredWav`).  It writes blocks of 1 MiB through one reused JS array, with at most one write in flight.  `<page>` is the page's start time in milliseconds, and `<n>` counts the page's saves.
 * For a FLAC or MP3 save, the stem worker reads the WAV in blocks and encodes it.  It writes `saves/<page>-<n>.flac` or `.mp3` through a sync access handle.  It removes the WAV at the end, also when the encode fails.  The messages name the files (`stem_protocol::Encode::Stored`, `Encoded::Stored`, `Encoded::Failed`), and no samples cross.
@@ -36,5 +36,5 @@ The third option (D1 to D8 of `plans/active/stream-from-storage-m8.md`).
 
 Status of this note: proposed.  The text above is the accepted decision; this note does not change it until a person accepts the note.
 
-* Since commit `f28ebff` (review round speed 3 of `plans/active/stream-from-storage-m8.md`), the page writes blocks of 2 MiB, not 1 MiB.  When each frame of the page holds the main thread for long, as CI's paints in software do, a write takes about two frames, whatever its size up to 8 MiB.  So fewer writes make a save faster.  4 MiB made D10's measure of the JS heap vary by about 4 MB, which is its bound.
+* Since commit `f28ebff` (review round speed 3 of `plans/completed/stream-from-storage-m8.md`), the page writes blocks of 2 MiB, not 1 MiB.  When each frame of the page holds the main thread for long, as CI's paints in software do, a write takes about two frames, whatever its size up to 8 MiB.  So fewer writes make a save faster.  4 MiB made D10's measure of the JS heap vary by about 4 MB, which is its bound.
 * Since review round speed 3, a save's reader also reads ahead.  So the JS heap holds the bytes of the reads in flight until each is copied into WebAssembly memory.  The JS heap of a save holds the write's array of 2 MiB and the browser's copy of the write in flight.  It also holds the reads in flight: 2 reads of 65,536 frames of each lane since review round speed 4.  In `e2e save` (3 lanes), the JS heap measure of D10 of the M8 plan rose by 2.4 to 4.5 MB during a save, of 1 minute or 10.  That measure is the largest reading at a write or at the end of the save, after a garbage collection, less the reading before.  It does not grow with the song.  `docs/ARCHITECTURE.md` (memory on phones) gives the whole memory of a save.

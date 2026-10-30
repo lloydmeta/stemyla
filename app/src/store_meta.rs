@@ -4,7 +4,7 @@
 
 /// The format of the mix file that this build writes: raw 32-bit
 /// little-endian floats, interleaved stereo, no header, at 44.1 kHz (D1 of
-/// M4 in `plans/active/stream-from-storage-m4.md`).  A build that changes
+/// M4 in `plans/completed/stream-from-storage-m4.md`).  A build that changes
 /// the samples or the layout uses a new tag, so it writes the mix again.
 pub const MIX_FORMAT: &str = "f32le-1";
 
@@ -20,11 +20,11 @@ pub struct Meta {
     /// mix file, `mix.f32`.
     pub mix: Option<(usize, String)>,
     /// The `decoded` line: the session files of the decode worker are
-    /// complete (D2 of `plans/active/stream-from-storage-m5.md`).
+    /// complete (D2 of `plans/completed/stream-from-storage-m5.md`).
     pub decoded: Option<Decoded>,
     /// The `stems-generation` line: one more for each change of the `stem`
     /// lines, so two separations, whose stems have the same names, differ
-    /// (D7 of `plans/active/stream-from-storage-m7.md`).  0 when there is
+    /// (D7 of `plans/completed/stream-from-storage-m7.md`).  0 when there is
     /// no line.
     pub stems_generation: u64,
     /// The `stem-overviews` line: the overview files of the stems are
@@ -939,7 +939,7 @@ mod title_tests {
 }
 
 /// The session file that a stored lane plays from (D8 of
-/// `plans/active/stream-from-storage-m6.md`): its path from the root of
+/// `plans/completed/stream-from-storage-m6.md`): its path from the root of
 /// browser storage, its format, and where its frames are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaneFile {

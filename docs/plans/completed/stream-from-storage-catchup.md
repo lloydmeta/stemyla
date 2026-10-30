@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the plan of the catch-up between M7 and M8 of `plans/active/stream-from-storage.md` (the parent plan).  Its scope comes from the parent's Decision log entries of 2026-10-27 and 2026-10-28.  After the catch-up:
+This is the plan of the catch-up between M7 and M8 of `plans/completed/stream-from-storage.md` (the parent plan).  Its scope comes from the parent's Decision log entries of 2026-10-27 and 2026-10-28.  After the catch-up:
 
 * M3 to M6 each have a review round 4 on their round 3 fixes, and more rounds to the stop rule.
 * Each confirmed should-fix that M3 to M6 left as debt (mostly TD-39, and TD-56) is fixed, or is kept with a reason per item.

@@ -1,7 +1,7 @@
 //! Stored lanes in a browser (`cargo run -p xtask -- web-test`): the reader
 //! fills the read-ahead buffer from session files planted in browser
 //! storage, while the test renders the player (D7 to D9 of
-//! `plans/active/stream-from-storage-m6.md`).
+//! `plans/completed/stream-from-storage-m6.md`).
 
 use super::*;
 use engine::slot::WEB_BUFFER_FRAMES;

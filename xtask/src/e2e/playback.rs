@@ -1,4 +1,4 @@
-//! The page's `playback:` line (D9 of `docs/plans/active/stream-from-storage-m6.md`),
+//! The page's `playback:` line (D9 of `docs/plans/completed/stream-from-storage-m6.md`),
 //! which the page logs every 2 s while it plays.
 
 use super::{Opts, Page, in_page, number_after};

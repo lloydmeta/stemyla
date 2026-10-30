@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M7 of `plans/active/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M7 section, which stays the criteria.  After M7, on the storage path, a song's samples are not in the page's memory:
+This is the milestone plan for M7 of `plans/completed/stream-from-storage.md` (the parent plan).  It gives more detail than the parent's M7 section, which stays the criteria.  After M7, on the storage path, a song's samples are not in the page's memory:
 
 * The page shows a stored song from its session files and overviews.  To show and play it, the page reads no session file whole, and makes no song-length buffer in WebAssembly memory (TD-54).  It keeps, for each lane, the lane file that playback reads (M6).  The exceptions are the memory path's input, at most `memory_limit` frames (D9), and a saved file, which stays whole in the JS heap until M8.
 * The mix lane's waveform, the spectrograms and a save read the lanes in blocks, from memory or from storage.

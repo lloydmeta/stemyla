@@ -1,7 +1,7 @@
 //! The decode worker (decision 0019): a dedicated Web Worker on the page
 //! side.  It decodes a song that the page keeps in browser storage, in
 //! blocks, with `engine`.  It writes the session files and the overviews
-//! of the song (`docs/plans/active/stream-from-storage-m5.md`, D1 to D12).
+//! of the song (`docs/plans/completed/stream-from-storage-m5.md`, D1 to D12).
 //! It also makes the overviews of stems and classic drums from lane files,
 //! in blocks ([`lanes`], D7 and D8 of `stream-from-storage-m7.md`).
 //! Its messages are in `stem_protocol::decode`, shared with the page.
