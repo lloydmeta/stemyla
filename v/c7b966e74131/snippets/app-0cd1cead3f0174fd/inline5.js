@@ -1,28 +1,29 @@
 
 const RATE = 44100;
-const FRAMES_PER_BUFFER = 2048;
 const SCRATCH = "streamtest";
 // Name and bytes per stereo frame: 16-bit stems take 4, the f32 original 8.
 const FILES = [["bass", 4], ["drums", 4], ["other", 4], ["vocals", 4], ["guitar", 4], ["piano", 4],
   ["original", 8], ["classic drums", 4]];
 
-// `block_ms` is shorter than one buffer (about 43 to 46 ms), the slack
-// that cpal has at each 'ended' event.  `read_delay_ms` and
+// `block_ms` is shorter than one buffer (about 64 to 70 ms), the slack
+// that cpal has at each 'ended' event.  `frames_per_buffer` is the page's
+// output buffer (`WEB_BUFFER_FRAMES`).  `read_delay_ms` and
 // `fail_read_at` (the read of each read-ahead buffer that fails, from 1)
 // are for tests.
-export function st_cfg(minutes, play_s, seeks, max_tempo) {
-  return { minutes, play_s, seeks, max_tempo, buffer_s: 10, block_ms: 30, block_every_s: 3, block_bytes: 8 << 20,
+export function st_cfg(minutes, play_s, seeks, max_tempo, frames_per_buffer) {
+  return { minutes, play_s, seeks, max_tempo, frames_per_buffer, buffer_s: 10, block_ms: 30, block_every_s: 3, block_bytes: 8 << 20,
     read_delay_ms: 0, fail_read_at: 0, spy: false };
 }
 
 export function st_cfg_set(cfg, key, value) { cfg[key] = value; }
 
 // The settings in a page address's query, or null without `streamtest`.
-export function st_query_cfg(search, max_tempo) {
+export function st_query_cfg(search, max_tempo, frames_per_buffer) {
   const q = new URLSearchParams(search);
   if (!q.has("streamtest")) return null;
   const num = (k, d) => { const v = parseFloat(q.get(k)); return v > 0 ? v : d; };
-  return st_cfg(num("st_minutes", 30), num("st_play", 300), Math.round(num("st_seeks", 50)), max_tempo);
+  return st_cfg(num("st_minutes", 30), num("st_play", 300), Math.round(num("st_seeks", 50)), max_tempo,
+    frames_per_buffer);
 }
 
 // Made in a tap's handler: Safari starts audio only there.
@@ -156,13 +157,13 @@ class Ahead {
 // underrun.  With `block_ms`, the main thread is busy that long every
 // `block_every_s`.  Unlike the app's callback, `take` here also starts
 // reads, and it copies no frames.
-async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
+async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s, frames_per_buffer) {
   ahead.seek(from);
   await ahead.until(() => ahead.end - ahead.start + RATE > ahead.cap || ahead.end >= ahead.frames);
   let under = 0, late = 0, buffers = 0, blocks = 0, pos = from, interrupted = false;
   const rate = ctx ? ctx.sampleRate : RATE;
-  const step = Math.round((FRAMES_PER_BUFFER * RATE * tempo) / rate);
-  const period = FRAMES_PER_BUFFER / rate;
+  const step = Math.round((frames_per_buffer * RATE * tempo) / rate);
+  const period = frames_per_buffer / rate;
   const total = Math.floor(seconds / period);
   const blocker = block_ms > 0 ? setInterval(() => {
     const until = performance.now() + block_ms;
@@ -184,7 +185,7 @@ async function play(ahead, ctx, from, seconds, tempo, block_ms, block_every_s) {
     let live = 2;
     const finish = () => { if (--live === 0) done(); };
     if (ctx) {
-      const silence = ctx.createBuffer(2, FRAMES_PER_BUFFER, rate);
+      const silence = ctx.createBuffer(2, frames_per_buffer, rate);
       let t = 0;
       // iOS can suspend or interrupt the context, and then no 'ended'
       // event comes.  The run stops and says so.
@@ -316,7 +317,7 @@ export async function st_run(cfg, audio, line) {
       for (const block of [0, cfg.block_ms]) {
         if (from + (cfg.play_s * tempo + cfg.buffer_s + 1) * RATE > frames) from = 0;
         const ahead = new Ahead(files, frames, cfg);
-        const r = await play(ahead, ctx, from, cfg.play_s, tempo, block, cfg.block_every_s);
+        const r = await play(ahead, ctx, from, cfg.play_s, tempo, block, cfg.block_every_s, cfg.frames_per_buffer);
         const with_block = block > 0 ? `, ${block} ms block every ${cfg.block_every_s} s, blocks ${r.blocks}` : "";
         line(`playback: tempo ${tempo}${with_block}: underruns ${r.under}, ` +
           `late buffers ${r.late} (buffers of ${(r.period * 1000).toFixed(0)} ms that started after their time), ` +
