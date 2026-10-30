@@ -1,6 +1,6 @@
 //! `xtask e2e weights`: the evidence for M9's default (D10 and D11 of
 //! `plans/active/stream-from-storage-m9.md`).  f16 weights must give the
-//! stems of f32 weights bit for bit, and a separation must not be slower.
+//! stems of f32 weights bit for bit; the speed is reported as a measure.
 //!
 //! * Part 1, the pinned kernels: the model loads as f32 with its bytes and
 //!   separates the 3-second clip of `stored-stems`, then loads from browser
@@ -12,9 +12,10 @@
 //!   of the synthetic mix after a warm-up of each format, then four times
 //!   with each format, in the order of [`TIMED`].  Each format takes its
 //!   own kernel choice.  It reports the times, the medians, their ratio,
-//!   the f32 spread and D11's bar, and fails nothing: D12 passed on the
-//!   maintainer's rule (the stems and `?bench`), and on this Mac a
-//!   separation's spread was over 5% twice.
+//!   the f32 spread and D11's bar.  It fails no speed check: D12 passed on
+//!   the maintainer's rule (the stems and `?bench`), and on this Mac a
+//!   separation's spread was over 5% twice.  It fails a load or a
+//!   separation that does not finish, and a missing `kernels:` line.
 //!
 //! Each `e2e.ask` starts a new worker.  The model is posted once, in part 1;
 //! the later loads are `init` messages, which read it from browser storage.
@@ -46,7 +47,8 @@ const LONG_SECONDS: usize = 60;
 pub const TIMED: [&str; 8] = ["f32", "f16", "f16", "f32", "f16", "f32", "f32", "f16"];
 
 /// The bar of D11 for a spread of the f32 times: 2%, or the spread up to
-/// 5%.  `None` when the spread is over 5%, and the measure must run again.
+/// 5%.  `None` when the spread is over 5%: then the measure gives no
+/// verdict.
 pub fn bar(spread: f64) -> Option<f64> {
     (spread <= 0.05).then_some(spread.max(0.02))
 }
@@ -65,7 +67,7 @@ pub fn median(v: &[f64]) -> f64 {
     }
 }
 
-/// Part 3's verdict from the four times of each format.
+/// Part 3's measure, from the four times of each format.
 #[derive(Debug, PartialEq)]
 pub struct Speed {
     pub f32_median: f64,
@@ -522,6 +524,8 @@ mod tests {
 
     #[test]
     fn medians_of_odd_and_even_counts() {
+        assert_eq!(median(&[5.0]), 5.0);
+        assert_eq!(median(&[4.0, 1.0]), 2.5);
         assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
         assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), 2.5);
         assert!(median(&[]).is_nan());
@@ -570,6 +574,61 @@ mod tests {
             "{}",
             noisy.report()
         );
+    }
+
+    /// The stems of a run, in the worker's stem order, each channel as the
+    /// page sent it: base64 of little-endian floats.
+    #[test]
+    fn stem_floats_reads_each_stem_and_channel_in_order() {
+        let floats = |stem: usize, channel: usize| -> Vec<f32> {
+            (0..5)
+                .map(|i| (100 * stem + 10 * channel + i) as f32 - 0.5)
+                .collect()
+        };
+        let mut stems = serde_json::Map::new();
+        for (s, name) in roformer::STEMS.iter().enumerate() {
+            let channel = |c| {
+                let bytes: Vec<u8> = floats(s, c).iter().flat_map(|x| x.to_le_bytes()).collect();
+                json!(crate::e2e::tests::base64(&bytes))
+            };
+            stems.insert(name.to_string(), json!([channel(0), channel(1)]));
+        }
+        let got = stem_floats(&json!({ "stems": stems })).unwrap();
+        assert_eq!(got.len(), 2 * roformer::STEMS.len());
+        for (i, channel) in got.iter().enumerate() {
+            assert_eq!(
+                *channel,
+                floats(i / 2, i % 2),
+                "stem {} channel {}",
+                i / 2,
+                i % 2
+            );
+        }
+        let missing = json!({ "stems": { "bass": ["", ""] } });
+        assert!(stem_floats(&missing).is_err());
+    }
+
+    /// The long clip holds [`LONG_SECONDS`] of the synthetic mix: the left
+    /// channel, then the right, as little-endian floats.
+    #[test]
+    fn the_long_clip_is_the_mix_left_then_right() {
+        let dir = std::env::temp_dir().join(format!("stemyla-long-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = long_clip(&dir).unwrap();
+        assert_eq!(n, LONG_SECONDS * crate::synth::SAMPLE_RATE as usize);
+        let bytes = std::fs::read(dir.join("long.f32")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(bytes.len(), 2 * n * 4);
+        let song = crate::synth::generate();
+        let at = |i: usize| f32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap());
+        let len = song.mix.left.len();
+        for i in [0, 1, len - 1, len, len + 7, n - 1]
+            .into_iter()
+            .filter(|&i| i < n)
+        {
+            assert_eq!(at(i), song.mix.left[i % len], "left {i}");
+            assert_eq!(at(n + i), song.mix.right[i % len], "right {i}");
+        }
     }
 
     #[test]

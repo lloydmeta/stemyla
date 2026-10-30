@@ -1305,3 +1305,70 @@ fn bench_vec4_alone_times_its_fallback() {
     let fallback = lines.iter().filter(|l| l.contains(": runs i64, ")).count();
     assert_eq!(fallback, 2, "{lines:#?}");
 }
+
+/// The f16 check compares every output of its products: an f16 variant
+/// whose outputs are wrong only in rows 64 and up (planted in `i64`'s)
+/// fails it, and only that kernel's line names it.
+#[test]
+fn the_f16_check_compares_every_output_row() {
+    let Some(g) = f16_gpu() else { return };
+    g.plant_f16_defect_in_rows_from_64(0);
+    let problems = pollster::block_on(g.check_kernels()).unwrap();
+    assert!(!g.f16_ok.get());
+    assert_eq!(problems.len(), 1, "{problems:#?}");
+    assert!(
+        problems[0].starts_with(
+            "f16 weights: the f16 variant of matmul kernel i64 does not give its f32 output on this GPU (case 1: "
+        ),
+        "{}",
+        problems[0]
+    );
+    assert!(g.usable.get().iter().all(|&u| u));
+}
+
+/// `?bench` makes its buffers once: activations, the f32 weights of the
+/// largest linear product, the f16 copy on a GPU with `f16_ok`, q/k/v and
+/// the output.  With only `i64` asked for, no other kernel is timed or
+/// named.
+#[test]
+fn the_bench_makes_its_buffers_and_times_only_the_kernels_asked_for() {
+    let Some(g) = gpu() else { return };
+    pollster::block_on(g.check_kernels()).unwrap();
+    let created = g.created_bytes();
+    let t0 = std::time::Instant::now();
+    let mut lines = Vec::new();
+    let table = pollster::block_on(roformer_gpu::bench::measure(
+        &g,
+        0.0,
+        0.0,
+        1,
+        Some(&[0]),
+        || t0.elapsed().as_secs_f64(),
+        |l| lines.push(l),
+    ));
+    let (freq_tokens, frames, weights) = (88 * 62, 1151, 7 * 1024 * 256);
+    let f32_floats = freq_tokens * 1024
+        + weights
+        + freq_tokens * 1536
+        + (8 * frames * frames).max(freq_tokens * 1536);
+    let f16_bytes = if g.f16_ok.get() { 2 * weights } else { 0 };
+    assert_eq!(
+        g.created_bytes() - created,
+        (4 * f32_floats + f16_bytes) as u64
+    );
+    for rows in std::iter::once(&table.f32).chain(&table.f16) {
+        for row in rows {
+            assert!(row[0].median().is_finite());
+            assert!(row[1..].iter().all(|t| t.rounds.is_empty()));
+        }
+    }
+    for other in &TILES[1..] {
+        let name = format!(" {}", other.name);
+        assert!(
+            lines.iter().all(|l| !l.contains(&name)),
+            "{}: {lines:#?}",
+            other.name
+        );
+    }
+    assert!(g.take_errors().is_empty());
+}

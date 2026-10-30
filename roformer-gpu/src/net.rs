@@ -191,7 +191,9 @@ impl Net {
     /// WebAssembly memory one tensor at a time.  With `F16`, each weight
     /// matrix (or stack of them) that is F16 in the file goes up as f16
     /// values; the rest, and every norm, bias and gain, go up as f32.  On an
-    /// adapter without [`Gpu::has_f16_unpack`] everything goes up as f32.
+    /// adapter without [`Gpu::has_f16_unpack`], or before or after a failed
+    /// f16 start-up check ([`Gpu::f16_ok`] false), everything goes up as
+    /// f32.
     /// [`Net::format`] records what went up.
     pub fn load_store(
         gpu: &Gpu,
@@ -200,7 +202,7 @@ impl Net {
         format: WeightFormat,
     ) -> Result<Self, WeightError> {
         let before = gpu.created_bytes();
-        let format = if gpu.has_f16_unpack() {
+        let format = if gpu.has_f16_unpack() && gpu.f16_ok.get() {
             format
         } else {
             WeightFormat::F32

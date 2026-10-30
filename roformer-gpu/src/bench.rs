@@ -1331,6 +1331,23 @@ mod tests {
                 .any(|l| l.starts_with("bench: f16 weights, best per shape: ")),
             "{lines:#?}"
         );
+        // A best kernel for every shape with f32 weights, and with f16
+        // weights for each linear shape only: the others have no weights.
+        let linear_names: Vec<&str> = shapes
+            .iter()
+            .filter(|s| matches!(s.kind, Kind::Linear(_)))
+            .map(|s| s.name)
+            .collect();
+        for s in &shapes {
+            let f32_line = format!("bench: best for {}: i128x64", s.name);
+            assert!(lines.contains(&f32_line), "{f32_line}: {lines:#?}");
+            let f16_line = format!("bench: best for {} with f16 weights: i128x64", s.name);
+            assert_eq!(
+                lines.contains(&f16_line),
+                linear_names.contains(&s.name),
+                "{f16_line}: {lines:#?}"
+            );
+        }
         let f32_only = summary(&Measured {
             f32: row(1e-3, 1e-3),
             f16: None,

@@ -314,6 +314,8 @@ fn an_f16_net_holds_its_matrices_at_half_size() {
     if !g.has_f16_unpack() {
         return skip(Need::F16, "adapter without SHADER_F16_IN_F32");
     }
+    pollster::block_on(g.check_kernels()).unwrap();
+    assert!(g.f16_ok.get());
     let start = g.live_bytes();
     let (matrices, vectors) = f32_bytes();
     let load = |format| {
@@ -351,6 +353,8 @@ fn net_f16_weights_match_f32() {
     if !g.has_f16_unpack() {
         return skip(Need::F16, "adapter without SHADER_F16_IN_F32");
     }
+    pollster::block_on(g.check_kernels()).unwrap();
+    assert!(g.f16_ok.get());
     let frames = 9;
     let features: Vec<f32> = (0..frames * FEATURES)
         .map(|i| ((i * 7919) % 2001) as f32 / 1000.0 - 1.0)
@@ -447,7 +451,9 @@ fn an_f16_variant_that_does_not_compile_keeps_f32_weights() {
             p.starts_with(&format!(
                 "f16 weights: the f16 variant of matmul kernel {} does not compile on this GPU (",
                 tile.name
-            )) && p.ends_with("); weights stay f32"),
+            )) && p.ends_with("); weights stay f32")
+                && p.contains("pars")
+                && !p.contains('\n'),
             "{p}"
         );
     }
@@ -463,6 +469,11 @@ fn an_f16_variant_that_does_not_compile_keeps_f32_weights() {
         let net = Net::load_store(&g, store, 400_000, format).unwrap();
         assert_eq!(net.format, WeightFormat::F32);
     }
+    // Asked for f16 directly, the net still goes up as f32.
+    let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F16).unwrap();
+    assert_eq!(net.format, WeightFormat::F32);
+    drop(net);
     let frames = 9;
     let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
     let net = Net::load_store(&g, store, 400_000, WeightFormat::F32).unwrap();

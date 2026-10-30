@@ -69,7 +69,7 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
         "worker/src/web/tests.rs",
         "skipped: no GPU adapter: {e}",
-        "a wasm test cannot read STEMYLA_REQUIRE; CI's headless Chrome can have no GPU adapter, so the maintainer's Mac gives the evidence (TD-8)",
+        "a wasm test cannot read STEMYLA_REQUIRE; CI's headless Chrome can have no GPU adapter, so the maintainer's Mac gives the evidence (TD-8).  `a_read_back_is_copied_into_wasm_memory_once` and `an_f16_variant_the_browser_rejects_keeps_f32_weights` log it",
     ),
 ];
 

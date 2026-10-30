@@ -1,7 +1,8 @@
 //! Browser tests of the worker's storage and message handling, run in a
 //! dedicated worker (`cargo run -p xtask -- web-test`).  Only
-//! `a_read_back_is_copied_into_wasm_memory_once` opens a GPU.  Every other
-//! case either fails before the GPU opens or never reaches it.
+//! `a_read_back_is_copied_into_wasm_memory_once` and
+//! `an_f16_variant_the_browser_rejects_keeps_f32_weights` open a GPU.
+//! Every other case either fails before the GPU opens or never reaches it.
 //!
 //! The tests share one worker and its origin's private file system, so
 //! each starts from an empty one, and they run one at a time.
@@ -2935,14 +2936,33 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     assert_eq!(problems.len(), roformer_gpu::TILES.len(), "{problems:#?}");
     for p in &problems {
         assert!(
-            p.contains("does not compile on this GPU") && p.ends_with("; weights stay f32"),
+            p.contains("does not compile on this GPU")
+                && p.contains("pars")
+                && p.ends_with("; weights stay f32"),
             "{p}"
         );
     }
     assert!(!gpu.f16_ok.get());
     let (format, note) = roformer_gpu::weight_format(None, gpu.downlevel_flags(), gpu.f16_ok.get());
     assert_eq!(format, WeightFormat::F32);
-    assert!(note.is_some());
+    assert!(note.is_some_and(|n| n.contains("start-up check")));
+    // The f32 kernels still run, with no error, as a separation would.
+    let (m, n, k) = (70, 66, 64);
+    let a = gpu.upload("a", &vec![0.5; m * k]);
+    let b = gpu.upload_weight("b", &vec![0.25; n * k]);
+    let c = gpu.buffer("c", m * n);
+    let mut r = gpu.rec();
+    r.matmul(&roformer_gpu::MatMul::new(
+        (&a, roformer_gpu::View::rows(0, k)),
+        (&b, roformer_gpu::View::t(0, k)),
+        (&c, roformer_gpu::View::rows(0, n)),
+        m,
+        n,
+        k,
+    ));
+    r.submit();
+    let out = gpu.read(&c, 0, m * n).await.expect("read back");
+    assert!(out.iter().all(|&x| x == 8.0), "{:?}", &out[..4]);
     let errors = gpu.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
 }

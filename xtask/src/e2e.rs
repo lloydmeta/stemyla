@@ -61,7 +61,7 @@
 //! * `weights`: f16 weights against f32 weights, from a blank page
 //!   (`--weights`; M9 of `docs/plans/active/stream-from-storage.md`).  The
 //!   stems of the two formats must be equal bit for bit, with M3's kernels
-//!   and with this GPU's own, and an f16 separation not slower.
+//!   and with this GPU's own; the speed is reported as a measure.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -2221,7 +2221,7 @@ fn worker_check(o: &Opts) -> Result<()> {
 mod tests {
 
     /// Base64 of `bytes`, as the page's `e2e.base64` gives it.
-    fn base64(bytes: &[u8]) -> String {
+    pub(super) fn base64(bytes: &[u8]) -> String {
         const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
         for chunk in bytes.chunks(3) {

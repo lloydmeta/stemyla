@@ -271,8 +271,8 @@ impl WeightFormat {
 }
 
 /// The format of a load whose `?weights=` is `auto` or unset: f16.  On
-/// the maintainer's Mac, `e2e weights` showed the same stems bit for bit,
-/// and `?bench` showed f16 not slower, which is the maintainer's rule for
+/// the maintainer's Mac, `e2e weights` showed the same stems bit for bit.
+/// `?bench` showed f16 not slower.  These meet the maintainer's rule for
 /// D12 of M9.  The plan's stricter speed test of a whole separation gave no
 /// verdict (its spread was over 5%).  A GPU that fails the f16 start-up
 /// check keeps f32 (decision 0022).
@@ -949,6 +949,9 @@ struct Kernels {
     /// For tests: compile the f16 variants from WGSL that does not parse
     /// ([`Gpu::break_f16_variants`]).
     broken_f16: std::cell::Cell<bool>,
+    /// For tests: the entry of [`TILES`] whose f16 variant doubles the
+    /// outputs of rows 64 and up ([`Gpu::plant_f16_defect_in_rows_from_64`]).
+    defective_f16: std::cell::Cell<Option<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1050,6 +1053,7 @@ impl Kernels {
             elementwise: ew,
             attention: std::cell::OnceCell::new(),
             broken_f16: std::cell::Cell::new(false),
+            defective_f16: std::cell::Cell::new(None),
         }
     }
 
@@ -1081,6 +1085,20 @@ impl Kernels {
             let mut src = tile.source_for(format);
             if format == WeightFormat::F16 && self.broken_f16.get() {
                 src += "\nfn planted_error( {";
+            }
+            if format == WeightFormat::F16 && self.defective_f16.get() == Some(t) {
+                let (from, to) = if tile.hand_written {
+                    (
+                        "var v = acc[i * 4u + j] * p.alpha;",
+                        "var v = acc[i * 4u + j] * p.alpha * select(1.0, 2.0, row >= 64u);",
+                    )
+                } else {
+                    (
+                        "var v = x * p.alpha;",
+                        "var v = x * p.alpha * select(1.0, 2.0, row >= 64u);",
+                    )
+                };
+                src = replace_once(&src, from, to);
             }
             pipeline(
                 device,
@@ -1120,6 +1138,14 @@ impl Gpu {
     #[doc(hidden)]
     pub fn break_f16_variants(&self) {
         self.kernels.broken_f16.set(true);
+    }
+
+    /// For tests: the f16 variant of [`TILES`]`[t]`, compiled from now on,
+    /// doubles the outputs of rows 64 and up, a defect that only a check of
+    /// every output row finds.
+    #[doc(hidden)]
+    pub fn plant_f16_defect_in_rows_from_64(&self, t: usize) {
+        self.kernels.defective_f16.set(Some(t));
     }
 
     /// How many matmul kernels this device has compiled for weights in
@@ -1774,9 +1800,13 @@ impl Gpu {
                 first.get_or_insert(e);
             }
         }
+        // The whole error on one line: its first line is only the kind
+        // ("Validation Error"), and the cause comes after.
         first.map(|e| {
-            let text = e.to_string();
-            text.lines().next().unwrap_or(&text).to_string()
+            e.to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
         })
     }
 
@@ -3435,10 +3465,81 @@ mod tests {
         assert_eq!(words(&f16_bytes(&[])), [0; 4]);
     }
 
-    /// The compile of an f16 variant catches both the errors that WebGPU
-    /// gives for a rejected shader or pipeline: validation and internal.
+    /// The start-up check's random values: in [-1, 1], and nearly all of
+    /// them distinct.
     #[test]
-    fn f16_compiles_catch_validation_and_internal_errors() {
+    fn check_values_are_varied_and_in_range() {
+        let v = check_values(1000, 1);
+        assert_eq!(v.len(), 1000);
+        assert!(v.iter().all(|x| (-1.0..=1.0).contains(x)));
+        let negatives = v.iter().filter(|x| **x < 0.0).count();
+        assert!((300..700).contains(&negatives), "{negatives} negatives");
+        let mut bits: Vec<u32> = v.iter().map(|x| x.to_bits()).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        assert!(bits.len() > 600, "{} distinct", bits.len());
+        assert_ne!(check_values(16, 1), check_values(16, 2));
+    }
+
+    /// The f16 check's weights: f16-exact values below 2 in magnitude,
+    /// about one in eight a subnormal, some zeros of each sign, and many
+    /// distinct values; with `subnormal`, only nonzero subnormals.
+    #[test]
+    fn f16_check_weights_mix_normals_subnormals_and_zeros() {
+        let n = 8000;
+        let w = f16_check_weights(n, 5, false);
+        assert_eq!(w.len(), n);
+        let exponent = |b: &u16| (b >> 10) & 0x1f;
+        let mantissa = |b: &u16| b & 0x3ff;
+        let subnormals = w
+            .iter()
+            .filter(|b| exponent(b) == 0 && mantissa(b) != 0)
+            .count();
+        assert!(
+            (n / 10..n / 6).contains(&subnormals),
+            "{subnormals} subnormals"
+        );
+        assert!(
+            w.contains(&0x0000) && w.contains(&0x8000),
+            "zeros of both signs"
+        );
+        let zeros = w.iter().filter(|b| **b & 0x7fff == 0).count();
+        assert!((n / 200..n / 30).contains(&zeros), "{zeros} zeros");
+        let normals: Vec<&u16> = w.iter().filter(|b| exponent(b) != 0).collect();
+        assert!(w.iter().all(|b| exponent(b) != 31), "no NaN or infinity");
+        assert!(normals.iter().all(|b| (1..=15).contains(&exponent(b))));
+        assert!(
+            normals.iter().any(|b| exponent(b) == 1) && normals.iter().any(|b| exponent(b) == 15)
+        );
+        assert!(w.iter().any(|b| b & 0x8000 != 0) && w.iter().any(|b| b & 0x8000 == 0));
+        let mut distinct = w.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(distinct.len() > n / 2, "{} distinct", distinct.len());
+        let s = f16_check_weights(n, 6, true);
+        assert_eq!(s.len(), n);
+        assert!(
+            s.iter().all(|b| exponent(b) == 0 && mantissa(b) != 0),
+            "nonzero subnormals only"
+        );
+        let mut distinct = s.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert!(
+            distinct.len() > n / 4,
+            "{} distinct subnormals",
+            distinct.len()
+        );
+        assert_ne!(
+            f16_check_weights(16, 5, false),
+            f16_check_weights(16, 6, false)
+        );
+    }
+
+    /// Pins `F16_COMPILE_SCOPES`: internal and validation.  It pins the
+    /// constant only; no test plants an internal error (TD-65).
+    #[test]
+    fn f16_compile_scopes_are_internal_and_validation() {
         assert_eq!(
             F16_COMPILE_SCOPES,
             [wgpu::ErrorFilter::Internal, wgpu::ErrorFilter::Validation]

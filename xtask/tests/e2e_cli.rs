@@ -97,6 +97,29 @@ fn stored_stems_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("stored-stems", "stored-stems", true);
 }
 
+/// Round 1 of M9: a `selftest` that does nothing fails this test.  With no
+/// reference files it stops before a browser starts.
+#[test]
+fn selftest_with_no_reference_files_fails() {
+    let dir = test_dir("selftest");
+    let weights = dir.join("model.safetensors");
+    std::fs::write(&weights, b"not a model").unwrap();
+    let empty = dir.join("no-reference-files");
+    std::fs::create_dir_all(&empty).unwrap();
+    let (weights, empty) = (
+        weights.to_str().unwrap().to_string(),
+        empty.to_str().unwrap().to_string(),
+    );
+    let out = run_without_a_driver(
+        &dir,
+        "selftest",
+        &["--weights", &weights, "--selftest-dir", &empty],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "selftest fails: {stderr}");
+    assert!(stderr.contains("no reference files"), "{stderr}");
+}
+
 /// Review round 1 of M9: a `weights` that does nothing fails this test.
 #[test]
 fn weights_with_no_driver_fails_before_a_browser_starts() {
