@@ -1,6 +1,6 @@
 # 0022: a GPU whose f16 kernels do not give the f32 output keeps f32 weights
 
-Status: proposed (2026-10-30, by the agent, in M9 of `plans/active/stream-from-storage.md`)
+Status: accepted (2026-10-30, by the maintainer; proposed by the agent in M9 of `plans/active/stream-from-storage.md`)
 
 ## Context
 
