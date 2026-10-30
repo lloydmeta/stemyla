@@ -1,0 +1,1 @@
+import init from './decode-worker.js';await init();
