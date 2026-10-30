@@ -1102,7 +1102,11 @@ fn storage_with_model(p: &mut Page, model: &str) -> Result<()> {
 /// weight matrices, so a run that fell back to f32 does not pass as f16.
 /// Empty for a query without `weights=f16`.
 fn f16_problems(query: &str, log: &[String], memory: bool) -> Vec<&'static str> {
-    if !query.split('&').any(|p| p == "weights=f16") {
+    if !query
+        .trim_start_matches('?')
+        .split('&')
+        .any(|p| p == "weights=f16")
+    {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -2463,7 +2467,7 @@ mod tests {
             "[2.0s] console.info: separator: separating on the storage path",
             "[2.0s] console.info: separator: memory: page wasm 300 MB as the separation starts",
             "[2.1s] console.info: separator: memory: worker wasm 57 MB at the separation's start",
-            "[3.0s] console.info: separator: chunk 1/6: 0.3 s; memory: worker wasm 58 MB, model on the GPU 699 MB",
+            "[3.0s] console.info: separator: chunk 1/6: 0.3 s; memory: worker wasm 58 MB, model on the GPU 699 MB (f32 weights)",
             "[8.9s] console.info: separator: memory: worker wasm 60 MB at the separation's end",
             "[9.0s] console.info: separator: memory: page wasm 302 MB as the separation ends",
             "[9.5s] console.info: separator: memory: page wasm 900 MB with the stems shown",
@@ -2750,6 +2754,10 @@ mod tests {
             ["the memory line does not name f16 weight matrices"]
         );
         assert!(f16_problems("weights=f16x", &[], true).is_empty());
+        assert_eq!(
+            f16_problems("?weights=f16", &[], false),
+            ["no line `f16 weights: the start-up check passed`"]
+        );
     }
 
     fn args(s: &str) -> Vec<String> {
@@ -2807,9 +2815,9 @@ mod tests {
     #[test]
     fn the_memory_peak_takes_each_part_at_its_largest() {
         let log: Vec<String> = [
-            "[1.0s] separator: memory: worker wasm 57 MB, model on the GPU 699 MB, GPU buffers live 699 MB",
-            "[2.0s] separator: chunk 1/48: 9.9 s; memory: worker wasm 231 MB, model on the GPU 699 MB, chunk buffers 280 MB, GPU buffers live 979 MB",
-            "[3.0s] separator: chunk 2/48: 9.8 s; memory: worker wasm 246 MB, model on the GPU 699 MB, chunk buffers 280 MB, GPU buffers live 979 MB",
+            "[1.0s] separator: memory: worker wasm 57 MB, model on the GPU 699 MB (f32 weights), GPU buffers live 699 MB",
+            "[2.0s] separator: chunk 1/48: 9.9 s; memory: worker wasm 231 MB, model on the GPU 699 MB (f32 weights), chunk buffers 280 MB, GPU buffers live 979 MB",
+            "[3.0s] separator: chunk 2/48: 9.8 s; memory: worker wasm 246 MB, model on the GPU 699 MB (f32 weights), chunk buffers 280 MB, GPU buffers live 979 MB",
             "[4.0s] song: opened at 44100 Hz (88200 frames)",
             "[5.0s] separator: memory: page wasm 325 MB with the stems shown",
             "[0.5s] decoder: memory: decoder wasm 6 MB at the start of the decode request",

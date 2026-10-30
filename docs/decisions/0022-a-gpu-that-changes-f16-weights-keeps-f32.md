@@ -16,7 +16,7 @@ WGSL lets an implementation flush to zero the results of `unpack2x16float` ([WGS
 
 ## Decision
 
-The second option.  `Gpu::check_kernels` runs the f16 variant of each kernel that passed its f32 check.  It runs the f32 kernel on the same values as f32, and compares the two outputs bit for bit, with `+0` and `-0` equal.  The values include f16 subnormals, and one case makes each output a single subnormal weight, so a flush shows.  `Gpu::f16_ok` is true only when every such variant passes.  Else the weights stay f32, and the check gives a line that names the kernel, how many values differ and the largest difference.  An adapter without `DownlevelFlags::SHADER_F16_IN_F32` never compiles the variants and keeps f32 weights.
+The second option.  `Gpu::check_kernels` runs the f16 variant of each kernel that passed its f32 check.  It runs the f32 kernel on the same values as f32, and compares the two outputs bit for bit, with `+0` and `-0` equal.  The values include f16 subnormals, and one case makes each output a single subnormal weight, so a flush shows.  A variant whose shader or pipeline the browser or driver rejects is caught in an error scope, and counts as a failure.  `Gpu::f16_ok` is true only when every such variant passes.  Else the weights stay f32, and the check gives a line that names the kernel, how many values differ and the largest difference.  An adapter without `DownlevelFlags::SHADER_F16_IN_F32` never compiles the variants and keeps f32 weights.
 
 ## Consequences
 

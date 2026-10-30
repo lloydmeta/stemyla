@@ -8,9 +8,13 @@
 //!   f32 stems must have M3's hashes.
 //! * Part 2, this GPU's kernels at the default chunk: an f32 load chooses
 //!   the kernels, and an f16 load takes that choice from the URL settings.
-//! * Part 3, the speed: one worker separates about 60 s of the synthetic
-//!   mix after a warm-up of each format, then four times with each format,
-//!   in the order of [`TIMED`].  Each format takes its own kernel choice.
+//! * Part 3, the speed, as a measure only: one worker separates about 60 s
+//!   of the synthetic mix after a warm-up of each format, then four times
+//!   with each format, in the order of [`TIMED`].  Each format takes its
+//!   own kernel choice.  It reports the times, the medians, their ratio,
+//!   the f32 spread and D11's bar, and fails nothing: D12 passed on the
+//!   maintainer's rule (the stems and `?bench`), and on this Mac a
+//!   separation's spread was over 5% twice.
 //!
 //! Each `e2e.ask` starts a new worker.  The model is posted once, in part 1;
 //! the later loads are `init` messages, which read it from browser storage.
@@ -91,6 +95,26 @@ impl Speed {
     pub fn f16_not_slower(&self) -> bool {
         self.bar
             .is_some_and(|bar| self.f16_median <= self.f32_median * (1.0 + bar))
+    }
+
+    /// The measure as one line: the medians, their ratio, the f32 spread,
+    /// and D11's bar and verdict where a bar applies.
+    pub fn report(&self) -> String {
+        let verdict = match self.bar {
+            Some(bar) => format!(
+                "bar {:.2}%: f16 {} slower",
+                100.0 * bar,
+                if self.f16_not_slower() { "not" } else { "is" }
+            ),
+            None => "no bar (spread over 5%): no verdict".to_string(),
+        };
+        format!(
+            "part 3 (a measure only): f32 median {:.2} s, f16 median {:.2} s, f16 / f32 {:.3}; f32 spread {:.2}%; {verdict}",
+            self.f32_median,
+            self.f16_median,
+            self.f16_median / self.f32_median,
+            100.0 * self.spread
+        )
     }
 }
 
@@ -342,60 +366,44 @@ pub fn timed(replies: &Value) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// Runs part 3, once more when the f32 spread is over 5% (D11).
-fn speed(p: &mut Page, settings: &Value) -> Result<bool> {
-    for attempt in 1..=2 {
-        let order: Vec<&str> = ["f32", "f16"].into_iter().chain(TIMED).collect();
-        let r = in_page(p, TIMES, json!([order, settings]), 7200)?;
-        let replies = r["replies"].as_array().cloned().unwrap_or_default();
-        p.check(
-            replies.len() == 2 * order.len()
-                && replies
-                    .iter()
-                    .all(|r| r["type"] != json!("error") && r["ok"] != json!(false)),
-            &format!("part 3, run {attempt}: every load and separation finishes"),
-        );
-        let logs = logs(&r);
-        for line in logs.iter().filter(|l| l.contains("kernels: ")) {
-            p.note(&format!("part 3, run {attempt}: log: {line}"));
-        }
-        for w in ["f32", "f16"] {
-            let k = kernels(&logs, w);
-            p.check(
-                k.as_ref()
-                    .is_some_and(|(_, _, source)| !source.contains("URL")),
-                &format!("part 3: a kernels line for {w} weights, chosen for them ({k:?})"),
-            );
-        }
-        let times = timed(&r["replies"]);
-        let of = |w: &str| -> Vec<f64> {
-            times
+/// Runs part 3 once, and reports its speed as a measure only.
+fn speed(p: &mut Page, settings: &Value) -> Result<()> {
+    let order: Vec<&str> = ["f32", "f16"].into_iter().chain(TIMED).collect();
+    let r = in_page(p, TIMES, json!([order, settings]), 7200)?;
+    let replies = r["replies"].as_array().cloned().unwrap_or_default();
+    p.check(
+        replies.len() == 2 * order.len()
+            && replies
                 .iter()
-                .filter(|(f, _)| f == w)
-                .map(|(_, s)| *s)
-                .collect()
-        };
-        let (f32_times, f16_times) = (of("f32"), of("f16"));
-        let s = Speed::new(&f32_times, &f16_times);
-        p.note(&format!(
-            "part 3, run {attempt}: {} frames; times in order {times:?}; f32 {f32_times:?} median {:.2} s; f16 {f16_times:?} median {:.2} s; f32 spread {:.2}%; bar {}; f16 / f32 {:.4}",
-            r["n"],
-            s.f32_median,
-            s.f16_median,
-            100.0 * s.spread,
-            s.bar.map_or("none (spread over 5%)".to_string(), |b| format!("{:.2}%", 100.0 * b)),
-            s.f16_median / s.f32_median
-        ));
-        if s.bar.is_some() || attempt == 2 {
-            p.check(
-                s.f16_not_slower(),
-                "part 3: f16's median is at most the bar above f32's",
-            );
-            return Ok(s.f16_not_slower());
-        }
-        p.note("part 3: the f32 spread is over 5%; the measure runs once more");
+                .all(|r| r["type"] != json!("error") && r["ok"] != json!(false)),
+        "part 3: every load and separation finishes",
+    );
+    let logs = logs(&r);
+    for line in logs.iter().filter(|l| l.contains("kernels: ")) {
+        p.note(&format!("part 3: log: {line}"));
     }
-    unreachable!()
+    for w in ["f32", "f16"] {
+        let k = kernels(&logs, w);
+        p.check(
+            k.as_ref()
+                .is_some_and(|(_, _, source)| !source.contains("URL")),
+            &format!("part 3: a kernels line for {w} weights, chosen for them ({k:?})"),
+        );
+    }
+    let times = timed(&r["replies"]);
+    let of = |w: &str| -> Vec<f64> {
+        times
+            .iter()
+            .filter(|(f, _)| f == w)
+            .map(|(_, s)| *s)
+            .collect()
+    };
+    p.note(&format!(
+        "part 3: {} frames; times in order {times:?}",
+        r["n"]
+    ));
+    p.note(&Speed::new(&of("f32"), &of("f16")).report());
+    Ok(())
 }
 
 pub fn run(o: &Opts) -> Result<()> {
@@ -494,7 +502,7 @@ pub fn run(o: &Opts) -> Result<()> {
     let (ok, what) = memory_checks(&logs(&r16[0]), "f16 weight matrices", F16_MB);
     p.check(ok, &format!("part 2, f16: {what}"));
 
-    // Part 3: the speed of each format with its own kernels.
+    // Part 3: the speed of each format with its own kernels, as a measure.
     speed(&mut p, &default)?;
     p.finish()
 }
@@ -538,6 +546,30 @@ mod tests {
         let noisy = Speed::new(&[10.0, 11.0, 10.0, 11.0], &[9.0; 4]);
         assert_eq!(noisy.bar, None);
         assert!(!noisy.f16_not_slower());
+    }
+
+    /// Part 3's line gives the measure, with or without a bar.
+    #[test]
+    fn part_3_reports_the_speed_as_a_measure() {
+        let s = Speed::new(&[10.0, 10.1, 10.0, 10.1], &[9.0, 9.1, 9.0, 9.1]);
+        assert_eq!(
+            s.report(),
+            "part 3 (a measure only): f32 median 10.05 s, f16 median 9.05 s, f16 / f32 0.900; f32 spread 1.00%; bar 2.00%: f16 not slower"
+        );
+        let slow = Speed::new(&[10.0; 4], &[11.0; 4]);
+        assert!(
+            slow.report().ends_with("bar 2.00%: f16 is slower"),
+            "{}",
+            slow.report()
+        );
+        let noisy = Speed::new(&[10.0, 11.0, 10.0, 11.0], &[9.0; 4]);
+        assert!(
+            noisy
+                .report()
+                .ends_with("f32 spread 9.52%; no bar (spread over 5%): no verdict"),
+            "{}",
+            noisy.report()
+        );
     }
 
     #[test]

@@ -97,6 +97,12 @@ fn stored_stems_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("stored-stems", "stored-stems", true);
 }
 
+/// Review round 1 of M9: a `weights` that does nothing fails this test.
+#[test]
+fn weights_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("weights", "weights", true);
+}
+
 /// Review round 1 of the catch-up plan: an `audio_resume` that does
 /// nothing fails this test.
 #[test]

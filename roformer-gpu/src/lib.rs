@@ -270,10 +270,12 @@ impl WeightFormat {
     }
 }
 
-/// The format of a load whose `?weights=` is `auto` or unset: f16, since
-/// `e2e weights` and `?bench` showed f16 weights give the same stems and
-/// are not slower on the maintainer's Mac (M9's D12).  A GPU that fails
-/// the f16 start-up check keeps f32 (decision 0022).
+/// The format of a load whose `?weights=` is `auto` or unset: f16.  On
+/// the maintainer's Mac, `e2e weights` showed the same stems bit for bit,
+/// and `?bench` showed f16 not slower, which is the maintainer's rule for
+/// D12 of M9.  The plan's stricter speed test of a whole separation gave no
+/// verdict (its spread was over 5%).  A GPU that fails the f16 start-up
+/// check keeps f32 (decision 0022).
 pub const DEFAULT_WEIGHTS: WeightFormat = WeightFormat::F16;
 
 /// The weight format of a load, and a line to log when the setting cannot
@@ -1761,14 +1763,18 @@ impl Gpu {
     /// Compiles the f16 variant of kernel `t` inside validation and
     /// internal error scopes; the error, if one was raised.
     async fn compile_f16(&self, t: usize) -> Option<String> {
-        let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = F16_COMPILE_SCOPES.map(|filter| self.device.push_error_scope(filter));
         let _ = self
             .kernels
             .matmul_pipeline(&self.device, t, WeightFormat::F16);
-        let validation = validation.pop().await;
-        let internal = internal.pop().await;
-        validation.or(internal).map(|e| {
+        let mut first = None;
+        // Popped innermost first, as WebGPU requires.
+        for scope in scopes.into_iter().rev() {
+            if let Some(e) = scope.pop().await {
+                first.get_or_insert(e);
+            }
+        }
+        first.map(|e| {
             let text = e.to_string();
             text.lines().next().unwrap_or(&text).to_string()
         })
@@ -1847,6 +1853,13 @@ impl Gpu {
         }
     }
 }
+
+/// The error scopes around the compile of an f16 variant, outermost first:
+/// a shader or pipeline that WebGPU rejects raises a validation error, and
+/// a driver that fails to build it an internal one.  No test plants an
+/// internal error (TD-65).
+const F16_COMPILE_SCOPES: [wgpu::ErrorFilter; 2] =
+    [wgpu::ErrorFilter::Internal, wgpu::ErrorFilter::Validation];
 
 /// `len` values in [-1, 1] from a seed, for the start-up checks.
 fn check_values(len: usize, seed: u32) -> Vec<f32> {
@@ -3420,6 +3433,16 @@ mod tests {
             ]
         );
         assert_eq!(words(&f16_bytes(&[])), [0; 4]);
+    }
+
+    /// The compile of an f16 variant catches both the errors that WebGPU
+    /// gives for a rejected shader or pipeline: validation and internal.
+    #[test]
+    fn f16_compiles_catch_validation_and_internal_errors() {
+        assert_eq!(
+            F16_COMPILE_SCOPES,
+            [wgpu::ErrorFilter::Internal, wgpu::ErrorFilter::Validation]
+        );
     }
 
     /// The text of the start-up check's times, as the worker logs it.

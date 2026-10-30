@@ -44,7 +44,7 @@ cargo clippy -p app --all-targets -- -D warnings  # app's tests without the work
 cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
 cargo test -p roformer-gpu --lib                # CI runs these too, and --doc; they need no GPU
-STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release  # every kernel against the CPU, f16 variants too; fails without a GPU or SHADER_F16_IN_F32
+STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release  # every kernel against the CPU, and f16 against f32; fails without a GPU, or without SHADER_F16_IN_F32 (then use gpu alone)
 cargo run -p xtask -- docs-check                # the map and docs match the code
 (cd app && trunk build --release)
 cargo run -p xtask --release -- serve app/dist --port 8080

@@ -2909,3 +2909,40 @@ async fn a_read_back_is_copied_into_wasm_memory_once() {
         "a read-back of {bytes} bytes grows the heap by one copy, not {grown} bytes"
     );
 }
+
+/// Decision 0022 in a browser: an f16 variant that the browser rejects
+/// (a planted WGSL error) fails the start-up check with one line for each
+/// tile that names it, `f16_ok` stays false, and the default loads f32.
+/// The error scopes catch the errors, so none reaches the device's error
+/// sink, where it could fail a later check or the model upload.  A browser
+/// with no GPU adapter logs a skip (TD-8).
+#[wasm_bindgen_test]
+async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
+    let gpu = match Gpu::new(wgpu::PowerPreference::default()).await {
+        Ok(gpu) => gpu,
+        Err(error) => match error.strip_prefix("no GPU adapter: ") {
+            Some(e) => {
+                console_log!("skipped: no GPU adapter: {e}");
+                return;
+            }
+            None => panic!("the GPU did not open: {error}"),
+        },
+    };
+    assert!(gpu.has_f16_unpack(), "WebGPU reports every downlevel flag");
+    gpu.break_f16_variants();
+    let problems = gpu.check_kernels().await.expect("the f32 kernels pass");
+    gpu.done().await;
+    assert_eq!(problems.len(), roformer_gpu::TILES.len(), "{problems:#?}");
+    for p in &problems {
+        assert!(
+            p.contains("does not compile on this GPU") && p.ends_with("; weights stay f32"),
+            "{p}"
+        );
+    }
+    assert!(!gpu.f16_ok.get());
+    let (format, note) = roformer_gpu::weight_format(None, gpu.downlevel_flags(), gpu.f16_ok.get());
+    assert_eq!(format, WeightFormat::F32);
+    assert!(note.is_some());
+    let errors = gpu.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
