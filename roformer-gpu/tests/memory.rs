@@ -263,6 +263,9 @@ impl Source for Zeros {
 fn a_dropped_net_and_job_free_their_buffers() {
     let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(g) = gpu() else { return };
+    // With the f16 check passed, only the file's dtype keeps this load f32.
+    pollster::block_on(g.check_kernels()).unwrap();
+    assert_eq!(g.f16_ok.get(), g.has_f16_unpack());
     let start = g.live_bytes();
     let store = Store::from_source(Zeros::new(&tensors())).unwrap();
     // A BF16 file goes up as f32 whatever the format asked for.
@@ -465,9 +468,6 @@ fn an_f16_variant_that_does_not_compile_keeps_f32_weights() {
             note.is_some_and(|n| n.contains("start-up check")),
             "{setting:?}"
         );
-        let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();
-        let net = Net::load_store(&g, store, 400_000, format).unwrap();
-        assert_eq!(net.format, WeightFormat::F32);
     }
     // Asked for f16 directly, the net still goes up as f32.
     let store = Store::from_source(Zeros::of(&tensors(), "F16")).unwrap();

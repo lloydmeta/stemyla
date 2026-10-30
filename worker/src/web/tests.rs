@@ -2938,6 +2938,7 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
         assert!(
             p.contains("does not compile on this GPU")
                 && p.contains("pars")
+                && !p.contains('\n')
                 && p.ends_with("; weights stay f32"),
             "{p}"
         );
