@@ -74,7 +74,8 @@ The rules for each kind (parent plan, M1):
      * for a worktree under `.claude/worktrees/` only: its `HEAD` is an ancestor of `origin/main`, or its branch is removable by a proof of rule 4.  A Claude Code agent with `isolation: worktree` keeps no file open between its tool calls, so the process test cannot see it.  Its work is safe to lose only when it is merged.
      * no worktree that stays is under its path, since `git worktree remove` deletes it.  A worktree that stays is one outside the two roots, or one that this rule keeps;
    * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", "its HEAD <sha> is on no ref", "not merged" (`.claude/worktrees/` only), or "holds a worktree that stays".
-   * A worktree that `git worktree list` marks `prunable` (its folder is gone): removable as "prunable" only if it is under one of the two roots and its `HEAD` passes the ref test.  Else kept, with the advice to run `git worktree repair` or prune by hand.
+   * A worktree that `git worktree list` marks `prunable` and whose folder is gone: removable as "prunable" only if it is under one of the two roots and its `HEAD` passes the ref test.  Else kept, with the advice to run `git worktree repair` or prune by hand.
+   * git also marks a worktree `prunable` when only its `.git` file is gone.  Its folder can hold changes, so it is kept: "its .git file is gone: run `git worktree repair`".
 3. Build output: `target/e2e/` and `app/dist/`, when they exist.  Always removable, with their size.
 4. Local branches: each `refs/heads/<b>`.
    * Kept: `main`, `gh-pages`, and the current branch of each worktree that stays.
@@ -228,6 +229,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 2 fix of 2-3: `plan` and `gather` make the two roots canonical, so a linked `target/` keeps its reviewer worktrees in the list (implementer).
 * [x] 2026-10-31: review round 2 fixes of 2-4, 2-5, 2-6, 2-8 and 2-10: the `lsof -w` texts, one pass for the nested rule, the guide on `--review-only` and a refused log, the nested rule in the plan and the guide, and a total that counts a nested worktree once (implementer).
 * [x] 2026-10-31: review round 2 (at `32df7e0`, no `--baseline`): 4 should-fix confirmed (2-1, 2-2, 2-3, 2-8) and 6 nits, no blocker; no missed mutant.  Each confirmed finding and the nits 2-4 to 2-10 are fixed in `64aeb11` to `4645e64`; 2-7 and 2-9 went to the orchestrator as a diff.  Round 3 follows.
+* [x] 2026-10-31: review round 3 fix of 3-1: a prunable worktree whose folder still exists is kept, since only its `.git` file is gone (implementer).
 
 ## Surprises and discoveries
 
@@ -248,6 +250,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the code of 2-2 was right, so its tests failed first with the mutants of the finding: `Process::Serve` for `Answer::No` in `probe`, and no `-a` in `lsof_listen_args`.  Both stopped the server.
 * 2026-10-31, implementer: the test of 2-3 failed first: with a linked `target/`, the list had no worktree items.  A path through a linked `target/` or `.claude/` now shows as under it.
 * 2026-10-31, implementer: the test of 2-10 failed first: the total of a worktree and the worktree in it was 30 B, not 20 B.  2-5 changes no behaviour, so the nested tests of 1-b1 cover it.
+* 2026-10-31, implementer: the test of 3-1 failed first: a worktree with no `.git` file was removable as "prunable: its folder is gone", and `--yes` failed on it with exit 1.
 
 ## Decision log
 

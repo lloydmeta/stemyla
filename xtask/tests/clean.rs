@@ -1257,3 +1257,33 @@ fn the_list_finds_reviewer_worktrees_through_a_linked_target() {
         "clean and unused",
     );
 }
+
+#[test]
+fn a_worktree_whose_git_file_is_gone_is_kept_with_its_changes() {
+    let f = Fixture::empty("no-git-file");
+    let rel = "target/review/1-reviewer-1";
+    git(&f.repo, &["worktree", "add", "-q", "--detach", rel, "HEAD"]);
+    let wt = f.repo.join(rel);
+    write(&wt.join("held.txt"), "a change\n");
+    write(&wt.join("new.txt"), "new\n");
+    std::fs::remove_file(wt.join(".git")).unwrap();
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+    let why = "its .git file is gone: run `git worktree repair`";
+
+    for _ in 0..2 {
+        let out = f.clean(&["--yes".to_string()]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stdout = text(&out.stdout);
+        assert_eq!(stdout.lines().next(), Some("nothing to remove"), "{stdout}");
+        let (_, kept) = parts(&stdout);
+        assert_item(&kept, &format!("worktree {rel}"), why);
+    }
+    assert_eq!(
+        std::fs::read_to_string(wt.join("held.txt")).unwrap(),
+        "a change\n"
+    );
+    assert!(wt.join("new.txt").is_file());
+}

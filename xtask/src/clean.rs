@@ -106,6 +106,9 @@ pub struct Worktree {
     pub branch: Option<String>,
     pub locked: bool,
     pub prunable: bool,
+    /// If the worktree's folder exists.  git also marks a worktree
+    /// prunable when only its `.git` file is gone.
+    pub exists: bool,
     /// Read only for a worktree under the two roots that is not prunable.
     /// `None` if `git status` failed.
     pub status: Option<Status>,
@@ -468,6 +471,9 @@ fn worktree_verdict(
     });
     if w.locked {
         return kept("locked".to_string());
+    }
+    if w.prunable && w.exists {
+        return kept("its .git file is gone: run `git worktree repair`".to_string());
     }
     if w.prunable {
         return if on_ref {
@@ -944,6 +950,7 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
     let claude = canonical(&root.join(".claude/worktrees"));
     for w in &mut worktrees {
         w.short = shorts.get(&w.head).cloned().unwrap_or_default();
+        w.exists = w.path.exists();
         if !(w.path.starts_with(&review) || w.path.starts_with(&claude)) || w.head.is_empty() {
             continue;
         }
