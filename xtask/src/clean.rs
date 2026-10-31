@@ -92,10 +92,12 @@ pub struct Survey {
     pub open_paths: Option<Vec<PathBuf>>,
     /// The size of `target/`.
     pub target_size: u64,
-    /// `target/review` and `.claude/worktrees` of the root, canonical, as
-    /// git's worktree paths are, also through a linked `target/`.  `gather`
-    /// finds them, so `plan` reads no file.
+    /// `target/review` of the root, canonical, as git's worktree paths are,
+    /// also through a linked `target/`.  `gather` finds it, so `plan` reads
+    /// no file.
     pub review_root: PathBuf,
+    /// `.claude/worktrees` of the root, canonical in the same way, also
+    /// through a linked `.claude/`.
     pub claude_root: PathBuf,
     /// `target` and `.claude` of the root, each with its canonical path, so
     /// a path through a link shows as under the root.

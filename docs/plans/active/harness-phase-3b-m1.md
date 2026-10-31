@@ -73,8 +73,8 @@ The rules for each kind (parent plan, M1):
      * its `HEAD` is reachable from a ref that is not a branch that this run deletes: `git for-each-ref --contains <sha>` gives such a ref.  Removing a worktree keeps its branch, so a worktree on a branch passes.  A detached `HEAD` that no ref contains is kept, because its commits would be lost;
      * for a worktree under `.claude/worktrees/` only: its `HEAD` is an ancestor of `origin/main`, or its branch is removable by a proof of rule 4.  A Claude Code agent with `isolation: worktree` keeps no file open between its tool calls, so the process test cannot see it.  Its work is safe to lose only when it is merged.
      * no worktree that stays is under its path, since `git worktree remove` deletes it.  A worktree that stays is one outside the two roots, or one that this rule keeps;
-   * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", "its HEAD <sha> is on no ref", "not merged" (`.claude/worktrees/` only), or "holds a worktree that stays".
-   * A worktree that `git worktree list` marks `prunable` and whose folder is gone: removable as "prunable" only if it is under one of the two roots and its `HEAD` passes the ref test.  Else kept, with the advice to run `git worktree repair` or prune by hand.
+   * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", "its HEAD <sha> is on no ref", "not merged" (`.claude/worktrees/` only), "holds a worktree that stays", or "cannot read its status".
+   * A worktree that `git worktree list` marks `prunable` can have no folder.  It is removable as "prunable" only under one of the two roots, and only if its `HEAD` passes the ref test.  Else it is kept, with the advice to run `git worktree repair` or prune by hand.
    * git also marks a worktree `prunable` when only its `.git` file is gone.  Its folder can hold changes, so it is kept: "its .git file is gone: run `git worktree repair`".
 3. Build output: `target/e2e/` and `app/dist/`, when they exist.  Always removable, with their size.
 4. Local branches: each `refs/heads/<b>`.
@@ -235,6 +235,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 3 fix of 3-2: the same `--also` folder twice is one scratch root, and a folder in another `--also` folder is refused (implementer).
 * [x] 2026-10-31: review round 3 fixes of 3-3, 3-4 and 3-8: the guide names a refused findings file, the plan gives `lsof -w`, and Progress names `bedfd00` (implementer).
 * [x] 2026-10-31: review round 3 (at `bedfd00`): 3 should-fix confirmed (3-1, 3-6, 3-7) and 6 nits, no blocker; mutants full, none missed.  3-1 fails the acceptance "a second run lists nothing" in a case a user can reach, so the rounds go on to round 4.  The fixes are `65ce7f8` to `1763373`; 3-5 has no fix (Decision log).
+* [x] 2026-10-31: review round 4 (at `281cacf`): no blocker, no should-fix, 6 nits; mutants full, none missed.  The rounds stop here by the stop rule.  The team leader fixed the nits 4-2 to 4-5 in "review round 4 fixes"; 4-1 is the orchestrator's (parent plan), and 4-6 has no fix (the printed command still works).  The orchestrator copies the log to `docs/reviews/harness-phase-3b-m1.md` and removes the run folder (TD-37).
 
 ## Surprises and discoveries
 
@@ -283,7 +284,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the guide says that the skill runs `review clean`, and that the guard refuses `xtask clean`.  Both are true only when the orchestrator lands the texts of step 5, which the plan puts before round 1.
 * 2026-10-31, implementer: `review clean` runs no `git worktree prune`, and prints no `pruned` line.  `git worktree remove --force` also removes a registered worktree whose folder is gone, so a prune is not needed.  A prune acts on each worktree of the repo.  The test isolates git from the person's config, so the helpers in `xtask/tests/review.rs` now set `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
 * 2026-10-31, implementer: the choice of `git worktree remove` without `--force` is in `clean::remove_worktree`, which `--yes` calls.  Review round 2 (2-1) found that the first test pinned only the constant.  A test now gives the function a worktree that already has changes: no timing is needed.
-* 2026-10-31, team leader: 3-5 has no fix and no test.  The serve test does not pin that the pid file comes before the `serving` line.  The order is a race with no effect for a user, but a clean run in the same instant.
+* 2026-10-31, team leader: 3-5 has no fix and no test.  The serve test does not pin that the pid file comes before the `serving` line.  The order is a race.  It has an effect only on a clean run in the same instant.
 
 ## Outcomes and retrospective
 
