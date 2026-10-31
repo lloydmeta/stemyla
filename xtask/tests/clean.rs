@@ -1209,3 +1209,51 @@ fn yes_does_not_stop_a_serve_that_does_not_listen_on_the_port_of_its_file() {
     );
     assert_eq!(ps_stat(pid).chars().next().map(|c| c != 'Z'), Some(true));
 }
+
+#[test]
+fn the_list_finds_reviewer_worktrees_through_a_linked_target() {
+    let f = Fixture::empty("link");
+    let elsewhere = f.top.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, f.repo.join("target")).unwrap();
+    git(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            "target/review/1-reviewer-1",
+            "HEAD",
+        ],
+    );
+    write(
+        &f.repo.join("target/review/1-reviewer-1/held.txt"),
+        "a change\n",
+    );
+    git(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            "target/review/1-reviewer-2",
+            "HEAD",
+        ],
+    );
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let (removable, kept) = parts(&text(&out.stdout));
+    assert_item(&kept, "worktree target/review/1-reviewer-1", "has changes");
+    assert_item(
+        &removable,
+        "worktree target/review/1-reviewer-2",
+        "clean and unused",
+    );
+}

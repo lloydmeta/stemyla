@@ -290,8 +290,10 @@ pub fn repo_root(dir: &Path) -> Result<PathBuf> {
 /// the worktrees that stay, so a branch that only a removed worktree held
 /// goes in the same run.
 pub fn plan(s: &Survey) -> Vec<Item> {
-    let review = s.root.join("target/review");
-    let claude = s.root.join(".claude/worktrees");
+    // The listed worktree paths are canonical, also through a linked
+    // `target/`, so the two roots are too.
+    let review = canonical(&s.root.join("target/review"));
+    let claude = canonical(&s.root.join(".claude/worktrees"));
     let under_roots = |path: &Path| path.starts_with(&review) || path.starts_with(&claude);
 
     // The branches with a proof, before the rule of the current branch.
@@ -927,8 +929,8 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
         b.short = shorts.get(&b.tip).cloned().unwrap_or_default();
     }
 
-    let review = root.join("target/review");
-    let claude = root.join(".claude/worktrees");
+    let review = canonical(&root.join("target/review"));
+    let claude = canonical(&root.join(".claude/worktrees"));
     for w in &mut worktrees {
         w.short = shorts.get(&w.head).cloned().unwrap_or_default();
         if !(w.path.starts_with(&review) || w.path.starts_with(&claude)) || w.head.is_empty() {
@@ -1209,12 +1211,18 @@ pub fn canonical(path: &Path) -> PathBuf {
     }
 }
 
-/// `path` relative to `root` when it is under it, else in full.
+/// `path` relative to `root` when it is under it, else in full.  A path
+/// through a linked `target/` or `.claude/` shows as under it.
 fn shown(root: &Path, path: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(rel) => rel.display().to_string(),
-        Err(_) => path.display().to_string(),
+    if let Ok(rel) = path.strip_prefix(root) {
+        return rel.display().to_string();
     }
+    for folder in ["target", ".claude"] {
+        if let Ok(rel) = path.strip_prefix(canonical(&root.join(folder))) {
+            return Path::new(folder).join(rel).display().to_string();
+        }
+    }
+    path.display().to_string()
 }
 
 fn path_str(path: &Path) -> Result<&str> {

@@ -224,6 +224,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 1 fixes of 1-5, 1-12, 1-13, 1-14 and 1-15: the guide says that `--yes` stops each running `xtask serve` of this repo, with a warning; the plan body has no prune; the Progress names `d0164ea`, `cfaf8fd` and `9cf2fd0` (implementer).
 * [x] 2026-10-31: review round 2 fix of 2-1: `--yes` removes a worktree through `clean::remove_worktree`, with a test on a worktree with changes (implementer).
 * [x] 2026-10-31: review round 2 fix of 2-2: a test of a pid file whose `xtask serve` does not listen on its port, and of `-a` and `-sTCP:LISTEN` in the `lsof` words (implementer).
+* [x] 2026-10-31: review round 2 fix of 2-3: `plan` and `gather` make the two roots canonical, so a linked `target/` keeps its reviewer worktrees in the list (implementer).
 
 ## Surprises and discoveries
 
@@ -242,6 +243,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, team leader: `cargo run -p xtask -- clean` on this repo at `da0c63b` (list mode, exit 0) changed nothing: `git status`, the branches and the worktrees stayed the same.  Its output: "can remove (1 items, 0 B)": branch `harness-tweaks-2026-10-31` (13d9cca), "its tip is an ancestor of origin/main".  "keeps (3 items)": branch `harness-phase-3b` and the run folder `target/review/run/harness-phase-3b`, "the current branch of a worktree"; branch `main`, "main and gh-pages stay".  "target/ holds 14.6 GiB."  This closes round 1's finding 1-b3.
 * 2026-10-31, implementer: the test of 2-1 did not build first (no `remove_worktree`), and it failed with `--force` added at the call site.
 * 2026-10-31, implementer: the code of 2-2 was right, so its tests failed first with the mutants of the finding: `Process::Serve` for `Answer::No` in `probe`, and no `-a` in `lsof_listen_args`.  Both stopped the server.
+* 2026-10-31, implementer: the test of 2-3 failed first: with a linked `target/`, the list had no worktree items.  A path through a linked `target/` or `.claude/` now shows as under it.
 
 ## Decision log
 
