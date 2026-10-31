@@ -131,7 +131,7 @@ Tests of step 1, in `clean.rs` (pure) and `xtask/tests/clean.rs` (the binary, `e
 
 1. Stop each running `xtask serve`, and remove each pid file.
 2. Gather the survey again, with new facts, and plan again.  A worktree that a stopped server used is then free.  Only items that are removable in this survey go.
-3. Remove each worktree with `git worktree remove <path>` (no `--force`, so git refuses one that changed since the survey).  Run `git worktree prune` only if each prunable worktree is removable.  Read the list with `git worktree list --porcelain -z`.
+3. Remove each worktree with `git worktree remove <path>` (no `--force`, so git refuses one that changed since the survey).  A prunable worktree goes the same way; `--yes` never runs `git worktree prune`.  If a removal fails, the worktree's branch and run folder stay.  Read the list with `git worktree list --porcelain -z`.
 4. Delete each branch with `git branch -D <b>`.
 5. Remove each run folder, build folder and scratch root with `std::fs::remove_dir_all`.
 
@@ -167,8 +167,8 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * It lists the worktrees of the repo of the current folder (`toplevel`), as `take_state` does.
 * It removes each worktree whose folder name, directly under `<toplevel>/target/review/`, starts with `<round>-<agent>-`, where `<agent>` is a name in `REVIEWERS`, `validator` or `baseline`.  It uses `git worktree remove --force`, because a reviewer's worktree holds its trial changes, and these are scratch by design.  The name test is exact: round `1` does not match `10-reviewer-1`, and `reviewer` does not match `1-docs-reviewer-1`.
 * It also removes a folder with such a name that is not a registered worktree (`remove_dir_all`), since it is scratch by design too.
-* Then it runs `git worktree prune`.
-* It prints `removed <path>` for each one, then `pruned`.  With no match, it prints `no worktrees of round <round>`.  It exits 0, or 3 on a failure.
+* It runs no `git worktree prune`: `git worktree remove --force` also removes a worktree whose folder is gone.
+* It prints `removed <path>` for each one, or `failed <path>: <error>`.  With no match, it prints `no worktrees of round <round>`.  It exits 0, or 3 on a failure.
 * It never removes `target/review/target/`, `target/review/run/`, or a worktree of another round.
 * The guard already refuses `xtask review` to the review agents, so it refuses `review clean` too.
 * Test: in a temporary repo, worktrees `1-reviewer-1` (dirty), `1-docs-reviewer-1`, `1-validator-1-3-1`, `10-reviewer-1`, `2-reviewer-1` and `1-stranger-1`, and an unregistered folder `1-baseline-1`.  `review clean 1` removes the first three and the folder, and keeps the other three.  `git worktree list` no longer shows the removed ones.  A bad round (`0`, `x`) exits 3 with the usage.
@@ -212,6 +212,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: step 4, `xtask review clean <round>`, and its row in the guide (implementer).
 * [x] 2026-10-31: step 5, the guide and `README.md`.  The texts for the skill, `xtask/tests/rules.rs` and the guard went to the team leader, checked in a scratch worktree: `cargo test -p xtask --test rules` passed with all three, and failed without the two files under `.claude/` (implementer).
 * [x] 2026-10-31: checkpoint: the xtask code is done (`9bc3de7` to `b7e1088`).  The team leader checked that the three texts apply, and gave them to the orchestrator.  Next: the orchestrator lands them, then round 1.
+* [x] 2026-10-31: the orchestrator landed the texts of step 5 for the skill, the guard and `xtask/tests/rules.rs` (`d0164ea`).  It changed M1 in the parent plan to the cleanup rules that the M1 team found, and recorded why in its Decision log (`cfaf8fd`, `9cf2fd0`).
 * [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 10 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
 * [x] 2026-10-31: review round 1 fix of 1-b1: a worktree that holds a worktree that stays stays too, to a fixed point (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-1: the tree proof counts only the commits of `<tip>..origin/main` (implementer).
@@ -219,6 +220,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 1 fix of 1-3 and 1-b4: a test of a failed `git worktree remove`; a failed detached worktree holds its `detached-<short sha>` run folder too; the words of the removal are a constant with a test (implementer).
 * [x] 2026-10-31: review round 1 fixes of 1-6, 1-7 and 1-9: `review clean` tests gain a round-named worktree outside `target/review/` and a locked one; `target/review` is canonical as the listed paths are (implementer).
 * [x] 2026-10-31: review round 1 fixes of the missed mutants 1-16 to 1-36 (but the refuted 1-22, 1-24 and 1-27), 1-b5, 1-4 and `lsof -w` (implementer).
+* [x] 2026-10-31: review round 1 fixes of 1-5, 1-12, 1-13, 1-14 and 1-15: the guide says that `--yes` stops each running `xtask serve` of this repo, with a warning; the plan body has no prune; the Progress names `d0164ea`, `cfaf8fd` and `9cf2fd0` (implementer).
 
 ## Surprises and discoveries
 
