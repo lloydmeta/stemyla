@@ -605,6 +605,29 @@ fn also_refuses_a_path_that_is_not_a_scratch_root() {
     let inside = f.repo.join("docs");
     let out = f.clean(&["--also".to_string(), inside.to_str().unwrap().to_string()]);
     assert_eq!(out.status.code(), Some(2), "a folder in the repo: {out:?}");
+    // A linked worktree in the temporary folder, outside the repo root.
+    let linked = f.top.join("linked");
+    git(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    for path in [linked.clone(), linked.join("docs")] {
+        let out = f.clean(&["--also".to_string(), path.to_str().unwrap().to_string()]);
+        assert_eq!(out.status.code(), Some(2), "{}: {out:?}", path.display());
+        assert_eq!(text(&out.stdout), "", "{} listed items", path.display());
+        assert!(
+            text(&out.stderr).contains("worktree"),
+            "the refusal names the worktree: {out:?}"
+        );
+    }
+    assert!(linked.join("docs/reviews/old-m1.md").is_file());
 }
 
 #[test]

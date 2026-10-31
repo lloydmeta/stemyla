@@ -633,7 +633,8 @@ pub fn parse_args(args: &[String]) -> Option<Options> {
 ///
 /// It must be an absolute folder under the temporary folder, and not the
 /// temporary folder itself.  It must not hold the repo root or be in it.
-pub fn check_also(arg: &str, root: &Path) -> Result<PathBuf, String> {
+/// It must not be in a worktree of the repo, from `worktrees`.
+pub fn check_also(arg: &str, root: &Path, worktrees: &[PathBuf]) -> Result<PathBuf, String> {
     let path = Path::new(arg);
     if !path.is_absolute() {
         return Err(format!("--also {arg}: the path must be absolute"));
@@ -660,6 +661,12 @@ pub fn check_also(arg: &str, root: &Path) -> Result<PathBuf, String> {
             "--also {arg}: the path must not hold the repo or be in it"
         ));
     }
+    if let Some(worktree) = worktrees.iter().find(|w| path.starts_with(w)) {
+        return Err(format!(
+            "--also {arg}: the path is in the worktree {}",
+            worktree.display()
+        ));
+    }
     Ok(path)
 }
 
@@ -679,9 +686,19 @@ pub fn main(args: &[String]) -> i32 {
             return FAILED;
         }
     };
+    let worktrees: Vec<PathBuf> = match git(&root, &["worktree", "list", "--porcelain", "-z"]) {
+        Ok(listing) => parse_worktrees(&listing)
+            .into_iter()
+            .map(|w| w.path)
+            .collect(),
+        Err(e) => {
+            eprintln!("{e:#}");
+            return FAILED;
+        }
+    };
     let mut also = Vec::new();
     for arg in &options.also {
-        match check_also(arg, &root) {
+        match check_also(arg, &root, &worktrees) {
             Ok(path) => also.push(path),
             Err(e) => {
                 eprintln!("{e}");

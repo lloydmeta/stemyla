@@ -87,7 +87,7 @@ The rules for each kind (parent plan, M1):
    * The pid runs `xtask serve` if its command line (`ps`) has a word whose last path part is `xtask`, then the word `serve`, and the pid listens on `<port>` (`lsof`).  Then the item is "a running xtask serve on port <port>".  `--yes` sends `kill <pid>` (SIGTERM), and waits up to 5 s for the pid to end (no pid, or a zombie).  Then it removes the file.  If the pid still runs after 5 s, it prints `failed`, keeps the file, and the command exits 1.
    * If the pid runs another program, or no program, or does not listen on the port, the file is stale.  `--yes` removes the file only, and never signals the pid.  A file that does not hold a pid is stale too.
 6. Scratch roots: each `--also <path>`.
-   * The path must be absolute and must exist as a folder.  Its canonical form must be under the canonical temp folder (`std::env::temp_dir()`, `/tmp` or `/private/tmp`), and must not be one of those folders.  It must not be the repo root or a folder that holds it.  Else the command refuses before it lists anything, and exits 2.
+   * The path must be absolute and must exist as a folder.  Its canonical form must be under the canonical temp folder (`std::env::temp_dir()`, `/tmp` or `/private/tmp`), and must not be one of those folders.  It must not be the repo root or a folder that holds it.  It must not be in a worktree of this repo (`git worktree list`).  Else the command refuses before it lists anything, and exits 2.
    * A valid scratch root is removable as a whole, with its size, if no path in `open_paths` is in it and it holds no worktree of this repo (`git worktree list`).  Else it is kept with the reason.  Its contents are scratch, since a plan names it, but a live session may still use it.
 
 Never removed, in any case: a worktree with changes or ignored files, a branch that has no proof, a current branch of a worktree that stays, a file or folder outside the repo but a valid `--also` root, and `target/` as a whole.
@@ -215,6 +215,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 10 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
 * [x] 2026-10-31: review round 1 fix of 1-b1: a worktree that holds a worktree that stays stays too, to a fixed point (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-1: the tree proof counts only the commits of `<tip>..origin/main` (implementer).
+* [x] 2026-10-31: review round 1 fix of 1-2 and 1-b2: `--also` refuses a path in any worktree of the repo (implementer).
 
 ## Surprises and discoveries
 
@@ -226,6 +227,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
 * 2026-10-31, implementer: the tests of 1-b1 failed first.  The four new tests of `plan` failed, and `yes_keeps_a_merged_worktree_that_holds_a_changed_worktree` found agent-x removable.
 * 2026-10-31, implementer: the test of 1-1 failed first: a branch from `git revert` of main's tip was removable by the tree proof.
+* 2026-10-31, implementer: the test of 1-2 failed first: `--also` took a linked worktree in the temporary folder, with exit 0.
 
 ## Decision log
 
