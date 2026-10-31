@@ -38,6 +38,8 @@ impl Repo {
             ])
             .args(args)
             .current_dir(&self.0)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(
@@ -52,6 +54,8 @@ impl Repo {
             .args(args)
             .current_dir(&self.0)
             .env("HOME", self.home())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap()
     }
@@ -105,6 +109,104 @@ fn a_success_exits_0_on_stdout() {
     let out = repo.xtask(&["review", "check", "1"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert_eq!(text(&out.stdout), "no change\n");
+}
+
+fn worktree_paths(repo: &Repo) -> String {
+    let out = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&repo.0)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    text(&out.stdout)
+}
+
+#[test]
+fn review_clean_removes_the_worktrees_of_one_round_only() {
+    let repo = Repo::new("clean");
+    let review = repo.0.canonicalize().unwrap().join("target/review");
+    let names = [
+        "1-reviewer-1",
+        "1-docs-reviewer-1",
+        "1-validator-1-3-1",
+        "10-reviewer-1",
+        "2-reviewer-1",
+        "1-stranger-1",
+    ];
+    for name in names {
+        let path = review.join(name);
+        repo.git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            path.to_str().unwrap(),
+            "HEAD",
+        ]);
+    }
+    // A reviewer's trial change, which is scratch by design.
+    std::fs::write(review.join("1-reviewer-1/.gitignore"), "changed\n").unwrap();
+    std::fs::create_dir_all(review.join("1-baseline-1")).unwrap();
+    std::fs::write(review.join("1-baseline-1/a.txt"), "a").unwrap();
+    for keep in ["run/main/1", "target/debug"] {
+        std::fs::create_dir_all(review.join(keep)).unwrap();
+    }
+
+    let out = repo.xtask(&["review", "clean", "1"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let removed: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("removed target/review/"))
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            "1-docs-reviewer-1",
+            "1-reviewer-1",
+            "1-validator-1-3-1",
+            "1-baseline-1"
+        ],
+        "{stdout}"
+    );
+    let listing = worktree_paths(&repo);
+    for name in &names[..3] {
+        assert!(!review.join(name).exists(), "{name} is still there");
+        assert!(
+            !listing.contains(&format!("{}\n", review.join(name).display())),
+            "{listing}"
+        );
+    }
+    assert!(!review.join("1-baseline-1").exists());
+    for name in &names[3..] {
+        assert!(
+            listing.contains(&format!("worktree {}\n", review.join(name).display())),
+            "{name}: {listing}"
+        );
+    }
+    assert!(review.join("run/main/1").is_dir());
+    assert!(review.join("target/debug").is_dir());
+
+    let out = repo.xtask(&["review", "clean", "1"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(text(&out.stdout), "no worktrees of round 1\n");
+}
+
+#[test]
+fn review_clean_refuses_a_bad_round() {
+    let repo = Repo::new("clean-round");
+    for round in ["0", "x"] {
+        let out = repo.xtask(&["review", "clean", round]);
+        assert_eq!(out.status.code(), Some(3), "{round}: {out:?}");
+        assert!(text(&out.stderr).contains("usage: xtask review"), "{out:?}");
+    }
+    let out = repo.xtask(&["review", "clean"]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(
+        text(&out.stderr).contains("clean <round>"),
+        "the usage names clean: {out:?}"
+    );
 }
 
 /// TD-33: `xtask review mutants` builds with the `mutants` profile, which

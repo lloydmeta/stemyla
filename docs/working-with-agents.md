@@ -143,7 +143,7 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 | Command | What it does | Needs |
 | - | - | - |
 | `docs-check` | checks that the map and docs match the code | nothing |
-| `review start`, `review check`, `review mutants` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo.  `review check <round>` names each change since that record.  `review mutants <round>` runs cargo-mutants on the round's `since` diff for at most 60 minutes | cargo-mutants 27.1.0, for `review mutants` (`README.md`) |
+| `review start`, `review check`, `review mutants`, `review clean` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo.  `review check <round>` names each change since that record.  `review mutants <round>` runs cargo-mutants on the round's `since` diff for at most 60 minutes.  `review clean <round>` removes the worktrees of the round's agents, `target/review/<round>-<agent>-<n>`, also with changes | cargo-mutants 27.1.0, for `review mutants` (`README.md`) |
 | `clean` | lists what runs leave in the repo, with sizes, and changes nothing: worktrees and run folders under `target/review/`, the worktrees of Claude Code agents, merged local branches, build output and the pid files of `serve`.  `clean --yes` removes only the items that it can prove safe, and stops a `serve` that a run left.  `clean --also <path>` adds a scratch root in the temporary folder | `gh`, `ps` and `lsof`; it keeps an item whose fact it cannot read |
 | `serve` | serves the built page (`serve app/dist --port 8080`) | `trunk build` first |
 | `web-test` | browser tests (wasm-bindgen-test) in Safari or Chrome | wasm-bindgen-cli, a WebDriver |

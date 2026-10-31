@@ -209,12 +209,14 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: step 1, the list mode of `xtask clean`, `serve::pid_file`, the `clean` row of the guide and TD-67 (implementer).
 * [x] 2026-10-31: step 2, the pid file of `xtask serve`, and TD-68 (implementer).
 * [x] 2026-10-31: step 3, `xtask clean --yes` (implementer).
+* [x] 2026-10-31: step 4, `xtask review clean <round>`, and its row in the guide (implementer).
 
 ## Surprises and discoveries
 
 * 2026-10-31, implementer: step 1's tests failed first.  The tests of `plan` in `clean.rs` failed 51 of 57 with a `plan` that gave no items; the other 6 test helpers.  The tests in `xtask/tests/clean.rs` failed with "unknown command clean" before the arm in `main.rs`.
 * 2026-10-31, implementer: step 2's two tests in `xtask/tests/serve.rs` failed first.  The pid file was missing, and stderr did not say "no pid file" outside a repo.
 * 2026-10-31, implementer: step 3's tests failed first.  The two `--yes` tests in `xtask/tests/clean.rs` failed with the usage, exit 2.  The new tests in `clean.rs` did not build: no `stop`, no `STOP_WAIT`, and `report` took no `--also`.
+* 2026-10-31, implementer: step 4's two tests in `xtask/tests/review.rs` failed first, with the usage and exit 3.
 * 2026-10-31, implementer: `git worktree remove` removes a worktree whose folder is gone (git 2.18 or later).
 * 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
 
@@ -239,6 +241,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: `--yes` never runs `git worktree prune`.  It removes each removable prunable worktree with `git worktree remove`, as it does the others.  So it never acts on a worktree that it did not name, and a prunable worktree that stays does not stop the others.
 * 2026-10-31, implementer: if `git worktree remove` fails, `--yes` does not delete that worktree's branch or remove its run folder, and prints `failed` for each.  The survey decided them as if the worktree went.
 * 2026-10-31, implementer: `--yes` acts on the pid files of the first survey only.  The second survey gives the other items.
+* 2026-10-31, implementer: `review clean` runs no `git worktree prune`, and prints no `pruned` line.  `git worktree remove --force` also removes a registered worktree whose folder is gone, so a prune is not needed.  A prune acts on each worktree of the repo.  The test isolates git from the person's config, so the helpers in `xtask/tests/review.rs` now set `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
 
 ## Outcomes and retrospective
 
