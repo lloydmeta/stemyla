@@ -403,7 +403,7 @@ impl Fixture {
 
     /// The branches, the worktrees, and each file under `top` but in a
     /// `.git`, with its size.
-    fn state(&self) -> (String, String, BTreeSet<(PathBuf, u64)>) {
+    fn state(&self) -> State {
         fn walk(dir: &Path, out: &mut BTreeSet<(PathBuf, u64)>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -422,6 +422,24 @@ impl Fixture {
         }
         let mut files = BTreeSet::new();
         walk(&self.top, &mut files);
+        // The index of each linked worktree, with its time: the list mode
+        // must not write it.
+        let mut indexes = Vec::new();
+        for entry in std::fs::read_dir(self.repo.join(".git/worktrees"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let index = entry.path().join("index");
+            if let Ok(meta) = index.metadata() {
+                indexes.push((
+                    index.clone(),
+                    std::fs::read(&index).unwrap(),
+                    meta.modified().unwrap(),
+                ));
+            }
+        }
+        indexes.sort();
         (
             git(
                 &self.repo,
@@ -429,6 +447,7 @@ impl Fixture {
             ),
             git(&self.repo, &["worktree", "list", "--porcelain"]),
             files,
+            indexes,
         )
     }
 }
@@ -436,6 +455,15 @@ impl Fixture {
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
+
+/// The branches, the worktrees, the files, and the index files of the
+/// linked worktrees with their times.
+type State = (
+    String,
+    String,
+    BTreeSet<(PathBuf, u64)>,
+    Vec<(PathBuf, Vec<u8>, std::time::SystemTime)>,
+);
 
 /// The lines of the "can remove" part and of the "keeps" part.
 fn parts(stdout: &str) -> (Vec<String>, Vec<String>) {
@@ -1042,4 +1070,73 @@ fn a_failed_worktree_removal_keeps_its_branch_and_run_folder() {
     assert!(run.join("e2e/log.md").is_file());
     assert!(run.join(format!("detached-{short}/log.md")).is_file());
     assert!(!repo.join("target/e2e").exists());
+}
+
+#[test]
+fn the_list_reads_status_sizes_rounds_and_a_detached_head() {
+    let f = Fixture::empty("read");
+    let repo = &f.repo;
+    // A tracked file under `target/`, so git lists the build output beside
+    // it as `!! target/debug/`, not `!! target/`.
+    write(&repo.join("target/keep.txt"), "keep\n");
+    git(repo, &["add", "-f", "target/keep.txt"]);
+    let head = commit(repo, "keep");
+    git(repo, &["update-ref", "refs/remotes/origin/main", &head]);
+    git(repo, &["switch", "-q", "--detach", "HEAD"]);
+    let short = git(repo, &["rev-parse", "--short", "HEAD"]);
+    let add = |rel: &str| -> PathBuf {
+        git(repo, &["worktree", "add", "-q", "--detach", rel, "HEAD"]);
+        repo.join(rel)
+    };
+    let built = add("target/review/1-reviewer-1");
+    write(&built.join("target/debug/out"), "built");
+    let wav = add("target/review/1-reviewer-2");
+    write(&wav.join("target.wav"), "RIFF");
+    let run = repo.join("target/review/run");
+    write(&run.join(format!("detached-{short}/log.md")), "old log\n");
+    write(&run.join("closed/log.md"), "old log\n");
+    write(&run.join("closed/1/state.json"), "{}");
+    write(&run.join("closed/1/findings.md"), "# Review round 1\n");
+    write(&repo.join("target/e2e/a/b/x"), "abc");
+    write(&repo.join("target/e2e/y"), "defghi");
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (removable, kept) = parts(&stdout);
+    assert_item(
+        &removable,
+        "worktree target/review/1-reviewer-1",
+        "clean and unused",
+    );
+    assert!(
+        removable
+            .iter()
+            .any(|l| l.starts_with("worktree target/review/1-reviewer-1 (")
+                && !l.starts_with("worktree target/review/1-reviewer-1 (0 B)")),
+        "a removable worktree shows its size: {removable:#?}"
+    );
+    assert_item(
+        &kept,
+        "worktree target/review/1-reviewer-2",
+        "holds ignored files",
+    );
+    assert_item(
+        &kept,
+        &format!("run-folder target/review/run/detached-{short}"),
+        "the current branch of a worktree",
+    );
+    assert_item(
+        &removable,
+        "run-folder target/review/run/closed",
+        "its log.md has a copy in docs/reviews/",
+    );
+    assert!(
+        removable.contains(&"build target/e2e (9 B): build output".to_string()),
+        "{removable:#?}"
+    );
 }

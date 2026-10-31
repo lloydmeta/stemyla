@@ -1076,11 +1076,13 @@ fn parse_worktrees(listing: &str) -> Vec<Worktree> {
     worktrees
 }
 
-/// `git status` in a worktree, or `None` if it fails.
+/// `git status` in a worktree, or `None` if it fails.  It takes no lock,
+/// and does not write the worktree's index.
 fn worktree_status(path: &Path) -> Option<Status> {
     let out = git(
         path,
         &[
+            "--no-optional-locks",
             "status",
             "--porcelain",
             "-z",
@@ -1270,21 +1272,30 @@ fn probe(pid: u32, port: u16) -> Process {
         Answer::Yes(command) if !runs_serve(&command) => return Process::Other,
         Answer::Yes(_) => {}
     }
-    let listen = format!("-iTCP:{port}");
-    match ask(Command::new("lsof").args([
-        "-n",
-        "-P",
-        "-a",
-        "-p",
-        &pid_arg,
-        &listen,
-        "-sTCP:LISTEN",
-        "-t",
-    ])) {
+    match ask(Command::new("lsof").args(lsof_listen_args(pid, port))) {
         Answer::Unknown => Process::Unknown(format!("the ports of pid {pid}")),
         Answer::No => Process::NotListening,
         Answer::Yes(_) => Process::Serve,
     }
+}
+
+/// The `lsof` words that list each open file and working folder.  `-w`
+/// stops the warnings that Linux's `lsof` prints on stderr.
+const LSOF_OPEN: [&str; 5] = ["-w", "-n", "-P", "-F", "n"];
+
+/// The `lsof` words that give `pid` if it listens on TCP `port`.
+fn lsof_listen_args(pid: u32, port: u16) -> Vec<String> {
+    let words = ["-w", "-n", "-P", "-a", "-p"];
+    words
+        .iter()
+        .map(ToString::to_string)
+        .chain([
+            pid.to_string(),
+            format!("-iTCP:{port}"),
+            "-sTCP:LISTEN".to_string(),
+            "-t".to_string(),
+        ])
+        .collect()
 }
 
 /// If a command line has a word whose last path part is `xtask`, then the
@@ -1299,10 +1310,7 @@ pub fn runs_serve(command: &str) -> bool {
 
 /// Each open file and working folder of each process, from `lsof`.
 fn open_paths() -> Option<Vec<PathBuf>> {
-    let out = Command::new("lsof")
-        .args(["-n", "-P", "-F", "n"])
-        .output()
-        .ok()?;
+    let out = Command::new("lsof").args(LSOF_OPEN).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     // `lsof` exits 1 when it cannot read some processes; its output
     // counts when it names processes.
@@ -2426,5 +2434,59 @@ mod tests {
         // With `--force`, git would remove a worktree that changed after the
         // second survey.
         assert_eq!(WORKTREE_REMOVE, ["worktree", "remove"]);
+    }
+
+    #[test]
+    fn the_largest_unit_is_tib() {
+        assert_eq!(human_size(1 << 50), "1024.0 TiB");
+        assert_eq!(human_size(1 << 40), "1.0 TiB");
+    }
+
+    #[test]
+    fn stop_of_a_pid_that_has_ended_is_ok() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert_eq!(stop(pid), Ok(()));
+    }
+
+    #[test]
+    fn ask_reads_the_exit_code_stdout_and_stderr() {
+        let sh = |script: &str| ask(Command::new("sh").args(["-c", script]));
+        assert_eq!(sh("echo hi"), Answer::Yes("hi".to_string()));
+        assert_eq!(sh("exit 0"), Answer::No);
+        assert_eq!(sh("exit 1"), Answer::No);
+        assert_eq!(sh("exit 2"), Answer::Unknown);
+        assert_eq!(sh("echo hi; exit 1"), Answer::Unknown);
+        assert_eq!(sh("echo oops >&2; exit 1"), Answer::Unknown);
+        assert_eq!(sh("echo oops >&2"), Answer::Unknown);
+        assert_eq!(ask(&mut Command::new("/no/such/program")), Answer::Unknown);
+    }
+
+    #[test]
+    fn lsof_gives_no_warnings() {
+        // Linux's `lsof` warns on stderr, which `ask` reads as unknown.
+        assert!(LSOF_OPEN.contains(&"-w"), "{LSOF_OPEN:?}");
+        let args = lsof_listen_args(42, 8080);
+        assert!(args.iter().any(|a| a == "-w"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-iTCP:8080"), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w[0] == "-p" && w[1] == "42"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn dir_size_adds_the_files_of_a_tree() {
+        let dir = std::env::temp_dir().join(format!("xtask-clean-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/b/x"), "abc").unwrap();
+        std::fs::write(dir.join("y"), "defghi").unwrap();
+        std::os::unix::fs::symlink("/no/such/target/at/all", dir.join("link")).unwrap();
+        let size = dir_size(&dir);
+        let link = dir.join("link").symlink_metadata().unwrap().len();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(size, 9 + link);
     }
 }
