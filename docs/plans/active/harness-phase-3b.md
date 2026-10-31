@@ -226,7 +226,7 @@ Each milestone is a set of commits that `git revert` undoes on its own.  `xtask 
 This plan uses the prose recipe until M6 makes the skill.  It follows `plans/completed/stream-from-storage.md`, "How the work runs (M3 to M10)", with these changes.
 
 * Mode: orchestrated, one branch `harness-phase-3b` from `main`, one draft PR.
-* Milestone plans: `plans/active/harness-phase-3b-m<n>.md`, one for each milestone, written by its team leader as `PLANS.md` says.  Only the orchestrator edits this plan.
+* Milestone plans: `plans/active/harness-phase-3b-m<n>.md`, one for each milestone, written by its team leader as `PLANS.md` says.  The team leader moves it to `plans/completed/` when the milestone is done.  Only the orchestrator edits this plan.
 * Maintainer steps before the start, on the Mac:
   * A GPG or SSH signing cache that lasts the run; `caffeinate -dims`; `autoContinueAtUsageLimit` on.
   * A scoped `autoMode.allow` entry in `~/.claude/settings.json` for writes to `.claude/skills/`, `.claude/agents/` and `.claude/settings.json`, and for `gh pr ready`, as phase 3 needed.  Project settings cannot hold it.
@@ -261,7 +261,7 @@ Kick-off prompt:
 * [x] 2026-10-30: this plan and decisions 0023 to 0027 written as proposed.
 * [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
 * [x] 2026-10-31, plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.  Round 3 found no blocker and 4 should-fix; all fixed.  The review stops at its cap of 3 rounds.
-* [ ] M1: cleanup.
+* [x] 2026-10-31, M1: cleanup (`plans/completed/harness-phase-3b-m1.md`, `reviews/harness-phase-3b-m1.md`).  `xtask clean`, `xtask review clean <round>` and the pid file of `xtask serve`.  4 review rounds, 36 agents, about 1.94M final-context tokens, 106 wall minutes.  Round 1 found 1 blocker, 8 should-fix and 20 missed mutants; rounds 2 and 3 found 4 and 3 should-fix; round 4 none.  Debt: TD-67, TD-68.
 * [ ] M2: less mutants noise.
 * [ ] M3: the fix rule and the stop rule.
 * [ ] M4: local checks by tier.
@@ -275,6 +275,10 @@ Kick-off prompt:
 * 2026-10-30: GitHub keeps `refs/pull/<n>/head` for PRs #30 to #39 after their branches are deleted, so the commits of PR #39's review rounds can still be fetched.  Evidence: `git ls-remote origin refs/pull/39/head` gives `4068c49`.
 * 2026-10-30: the cloud session that wrote this plan could not push (HTTP 403 from GitHub), so the plan reached the maintainer by another route.
 * 2026-10-31: `cargo mutants` was not installed on the Mac, so the preflight failed on it.  The orchestrator installed cargo-mutants 27.1.0 with `cargo install --locked`.
+* 2026-10-31, M1: the Write tool refuses a review round's findings file and log to a team leader that is a subagent.  So the orchestrator wrote them in every round, from the team leader's text.  M6's skill must plan for this.
+* 2026-10-31, M1: one docs-reviewer stalled for about 45 minutes on one Bash call.  Its team leader could not stop it; the orchestrator did, with TaskStop.
+* 2026-10-31, M1: the only blocker came from the baseline agent (a merged worktree that holds a dirty nested worktree).  The routed round found 2 of the baseline's 4 findings.  Evidence for the phase 3 gate (M8).
+* 2026-10-31, M1: round 3 found a significant bug (a worktree with no `.git` file), so round 4 ran.  Evidence for decision 0024's rule that rounds go past round 3.
 
 ## Decision log
 
