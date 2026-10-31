@@ -215,7 +215,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: step 5, the guide and `README.md`.  The texts for the skill, `xtask/tests/rules.rs` and the guard went to the team leader, checked in a scratch worktree: `cargo test -p xtask --test rules` passed with all three, and failed without the two files under `.claude/` (implementer).
 * [x] 2026-10-31: checkpoint: the xtask code is done (`9bc3de7` to `b7e1088`).  The team leader checked that the three texts apply, and gave them to the orchestrator.  Next: the orchestrator lands them, then round 1.
 * [x] 2026-10-31: the orchestrator landed the texts of step 5 for the skill, the guard and `xtask/tests/rules.rs` (`d0164ea`).  It changed M1 in the parent plan to the cleanup rules that the M1 team found, and recorded why in its Decision log (`cfaf8fd`, `9cf2fd0`).
-* [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 10 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
+* [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 8 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
 * [x] 2026-10-31: round 1 fixes (`57b2218` to `da0c63b`, implementer): every confirmed finding has a fix and a test that failed first, also the nits 1-4, 1-5, 1-9, 1-13, 1-14 and 1-b5.  1-11 has no fix (orchestrator, parent plan Decision log).  The team leader recorded the list mode on this repo in Surprises (1-b3).
 * [x] 2026-10-31: review round 1 fix of 1-b1: a worktree that holds a worktree that stays stays too, to a fixed point (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-1: the tree proof counts only the commits of `<tip>..origin/main` (implementer).
@@ -236,6 +236,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 3 fixes of 3-3, 3-4 and 3-8: the guide names a refused findings file, the plan gives `lsof -w`, and Progress names `bedfd00` (implementer).
 * [x] 2026-10-31: review round 3 (at `bedfd00`): 3 should-fix confirmed (3-1, 3-6, 3-7) and 6 nits, no blocker; mutants full, none missed.  3-1 fails the acceptance "a second run lists nothing" in a case a user can reach, so the rounds go on to round 4.  The fixes are `65ce7f8` to `1763373`; 3-5 has no fix (Decision log).
 * [x] 2026-10-31: review round 4 (at `281cacf`): no blocker, no should-fix, 6 nits; mutants full, none missed.  The rounds stop here by the stop rule.  The team leader fixed the nits 4-2 to 4-5 in "review round 4 fixes"; 4-1 is the orchestrator's (parent plan), and 4-6 has no fix (the printed command still works).  The orchestrator copies the log to `docs/reviews/harness-phase-3b-m1.md` and removes the run folder (TD-37).
+* [x] 2026-10-31: M1 done.  The review log is in `docs/reviews/harness-phase-3b-m1.md` (`13d597b`), and this plan moves to `plans/completed/`.
 
 ## Surprises and discoveries
 
@@ -288,4 +289,28 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 
 ## Outcomes and retrospective
 
-To be written when the milestone completes.
+What M1 achieved:
+
+* `xtask clean` lists what runs leave, with sizes, and changes nothing.  `--yes` removes only the items that it can prove safe.  The items are run folders, worktrees under `target/review/` and `.claude/worktrees/`, merged local branches, `target/e2e/`, `app/dist/`, pid files of `xtask serve`, and `--also` roots under the temp folder.
+* `xtask review clean <round>` removes the worktrees of one round's agents.  The `review-rounds` skill runs it after the log, after the findings file with `--review-only`, or through the caller when the Write tool refuses a file.
+* `xtask serve` writes `target/xtask-serve/<port>.pid`.  The guard refuses `xtask clean` to the review agents.
+* The list mode on this repo changed nothing (Surprises).  The tests run on temporary repos only.
+
+The review, in numbers (`docs/reviews/harness-phase-3b-m1.md`):
+
+* 4 rounds, 36 agents, about 1.94M final-context tokens and 106 wall minutes.
+* Round 1 found 1 blocker, 8 confirmed should-fix and 20 confirmed missed mutants.  Round 2 found 4, round 3 found 3, and round 4 none.  Of 4 baseline findings, round 1 found 2.
+* The blocker was in a case that the plan did not name: a merged worktree that holds a changed worktree.  The baseline found it, and no routed reviewer did.
+* Round 3 found a significant bug (a worktree with no `.git` file), so the stop rule ran a fourth round.
+
+What did not go well:
+
+* The Write tool refuses the findings file and the log to a team leader that is a subagent.  So each round stopped for the orchestrator, which wrote the files from the team leader's text.  M3 or M6 can give the files to the orchestrator by design.
+* One docs-reviewer of round 1 stalled for about 45 minutes on one Bash call, and the team leader could not stop it.  The orchestrator stopped it, and the round's wall minutes include the stall.
+* The plan named `.claude/` texts for the orchestrator, so two commits had docs ahead of the code (1-11, DOC-1).
+
+What to do differently:
+
+* Land the `.claude/` part of a change in the same commit as the docs that describe it.
+* Give each test of a "keep it safe" rule a mutant that must fail.  Most findings of rounds 2 and 3 were tests that passed with such a mutant.
+* Debt left: TD-67 (a process is seen only by its open files) and TD-68 (a stopped `xtask serve` leaves its pid file).

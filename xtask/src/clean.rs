@@ -7,7 +7,7 @@
 //! takes the facts from outside the repo ([`Facts`]) from its argument.
 //! [`plan`] is a pure function: it gives each item a proof or a reason.
 //!
-//! `plans/active/harness-phase-3b-m1.md` (step 1) gives the rules for each
+//! `plans/completed/harness-phase-3b-m1.md` (step 1) gives the rules for each
 //! kind of item.
 
 use anyhow::{Context, Result, bail};
