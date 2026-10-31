@@ -227,6 +227,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 2 fix of 2-2: a test of a pid file whose `xtask serve` does not listen on its port, and of `-a` and `-sTCP:LISTEN` in the `lsof` words (implementer).
 * [x] 2026-10-31: review round 2 fix of 2-3: `plan` and `gather` make the two roots canonical, so a linked `target/` keeps its reviewer worktrees in the list (implementer).
 * [x] 2026-10-31: review round 2 fixes of 2-4, 2-5, 2-6, 2-8 and 2-10: the `lsof -w` texts, one pass for the nested rule, the guide on `--review-only` and a refused log, the nested rule in the plan and the guide, and a total that counts a nested worktree once (implementer).
+* [x] 2026-10-31: review round 2 (at `32df7e0`, no `--baseline`): 4 should-fix confirmed (2-1, 2-2, 2-3, 2-8) and 6 nits, no blocker; no missed mutant.  Each confirmed finding and the nits 2-4 to 2-10 are fixed in `64aeb11` to `4645e64`; 2-7 and 2-9 went to the orchestrator as a diff.  Round 3 follows.
 
 ## Surprises and discoveries
 
