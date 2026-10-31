@@ -241,6 +241,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: M1 done.  The review log is in `docs/reviews/harness-phase-3b-m1.md` (`13d597b`), and this plan moves to `plans/completed/`.
 * [x] 2026-10-31: intent review fix (implementer): a fourth branch proof.  A branch whose tip is in the head of a merged PR goes, with its `.claude/worktrees/` worktree, when git has that head commit.
 * [x] 2026-10-31: review round 5 fixes (implementer): the PR proofs read only PRs merged into `main`, the head of an open PR stays, the merged-head proof has tests for its missed mutants, and `git cat-file` gets its input from a thread.
+* [x] 2026-10-31: review round 6 fixes (implementer): one branch gate for the branch loop and the proofs of `.claude/worktrees/` worktrees; a git-proof case in the test of unknown open PRs; the guide names the `tests/` folder.
 
 ## Surprises and discoveries
 
@@ -266,6 +267,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 3-2 failed first: the same folder twice gave two scratch items.
 * 2026-10-31, implementer: the test of the fourth proof failed first: `worktree-agent-1`, in the middle of a squash-merged PR, had no proof.  The tests of a PR head that git does not have, and of a branch with a commit after the PR head, passed before the fix and after it: they guard the rule "no proof, no removal".
 * 2026-10-31, implementer: the round 5 tests failed first.  The stacked-PR test removed `a` and `b`.  The test without open PRs removed the agent branch.  The test with 5000 PR heads that git lacks did not end in 60 s, since `git cat-file` blocked on a full stdout.  The probe test of the merged-head proof passed before, and failed with each of the four mutants (1120:42, 1120:52, 1120:60 and 1128:39 at `dfe3aa4`).  A first form of that test had two PRs in one run, and was flaky: either PR head could be the proof, by the order of the oids.
+* 2026-10-31, implementer: the test of 6-1 failed first: an agent worktree was "clean, unused and merged" while its branch stayed for an open PR, or for unknown open PRs.  The ancestor case of 6-2 passed before, and fails with `b.ancestor == Some(true) ||` dropped.
 
 ## Decision log
 

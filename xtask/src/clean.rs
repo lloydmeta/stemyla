@@ -310,12 +310,13 @@ pub fn plan(s: &Survey) -> Vec<Item> {
     let claude = s.claude_root.clone();
     let under_roots = |path: &Path| path.starts_with(&review) || path.starts_with(&claude);
 
-    // The branches with a proof, before the rule of the current branch.
+    // The branches that go if no worktree that stays holds them.  A
+    // worktree under `.claude/worktrees/` goes only when its branch would.
     let proofs: BTreeMap<&str, String> = s
         .branches
         .iter()
         .filter(|b| !KEPT_BRANCHES.contains(&b.name.as_str()))
-        .filter_map(|b| branch_proof(s, b).ok().map(|p| (b.name.as_str(), p)))
+        .filter_map(|b| branch_gate(s, b).ok().map(|p| (b.name.as_str(), p)))
         .collect();
 
     // A worktree outside the two roots always stays.  Its run folder can
@@ -388,16 +389,8 @@ pub fn plan(s: &Survey) -> Vec<Item> {
             Verdict::Kept("main and gh-pages stay".to_string())
         } else if held_branches.contains(b.name.as_str()) {
             Verdict::Kept("the current branch of a worktree".to_string())
-        } else if s.open_prs.as_ref().is_some_and(|prs| prs.contains(&b.name)) {
-            Verdict::Kept("the head of an open PR".to_string())
         } else {
-            // A proof from the PRs alone needs the open PRs too, since a
-            // branch can be the head of an open PR.
-            let git_proof = b.ancestor == Some(true) || b.tree_on_main == Some(true);
-            match branch_proof(s, b) {
-                Ok(_) if s.open_prs.is_none() && !git_proof => {
-                    Verdict::Kept("cannot read open PRs".to_string())
-                }
+            match branch_gate(s, b) {
                 Ok(proof) => Verdict::Removable(proof),
                 Err(reason) => Verdict::Kept(reason),
             }
@@ -439,6 +432,22 @@ pub fn plan(s: &Survey) -> Vec<Item> {
 
     items.sort_by_key(|item| item.kind);
     items
+}
+
+/// The proof that lets a branch go, or the reason that it stays, before
+/// the rule of the current branch.  The head of an open PR stays.  A proof
+/// from the PRs alone needs the open PRs too, since a branch can be the
+/// head of an open PR.
+fn branch_gate(s: &Survey, b: &Branch) -> Result<String, String> {
+    if s.open_prs.as_ref().is_some_and(|prs| prs.contains(&b.name)) {
+        return Err("the head of an open PR".to_string());
+    }
+    let proof = branch_proof(s, b)?;
+    let git_proof = b.ancestor == Some(true) || b.tree_on_main == Some(true);
+    if s.open_prs.is_none() && !git_proof {
+        return Err("cannot read open PRs".to_string());
+    }
+    Ok(proof)
 }
 
 /// The proof that a branch is merged, or the reason that it has none.
@@ -1676,6 +1685,35 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_worktree_stays_when_its_branch_stays_for_the_open_prs() {
+        for open_prs in [Some(vec!["worktree-agent-1".to_string()]), None] {
+            let mut s = survey();
+            s.branches.push(Branch {
+                in_merged_head: Some("abc1234".to_string()),
+                ..branch("worktree-agent-1", 2)
+            });
+            s.worktrees.push(Worktree {
+                branch: Some("worktree-agent-1".to_string()),
+                refs: vec!["refs/heads/worktree-agent-1".to_string()],
+                ..worktree(".claude/worktrees/agent-1", 2)
+            });
+            s.open_prs = open_prs.clone();
+            assert_eq!(
+                verdict(&s, Kind::Worktree, ".claude/worktrees/agent-1"),
+                kept("not merged"),
+                "open PRs {open_prs:?}"
+            );
+            assert!(
+                matches!(
+                    verdict(&s, Kind::Branch, "worktree-agent-1"),
+                    Verdict::Kept(_)
+                ),
+                "open PRs {open_prs:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_head_of_an_open_pr_stays() {
         let mut s = survey();
         s.branches.push(Branch {
@@ -1699,12 +1737,20 @@ mod tests {
         });
         s.merged_prs = Some(vec![("merged-pr".to_string(), sha(2))]);
         s.open_prs = None;
+        s.branches.push(Branch {
+            ancestor: Some(true),
+            ..branch("ancestor", 4)
+        });
         assert_eq!(
             verdict(&s, Kind::Branch, "merged-pr"),
             kept("cannot read open PRs")
         );
         assert!(matches!(
             verdict(&s, Kind::Branch, "squashed"),
+            Verdict::Removable(_)
+        ));
+        assert!(matches!(
+            verdict(&s, Kind::Branch, "ancestor"),
             Verdict::Removable(_)
         ));
     }
