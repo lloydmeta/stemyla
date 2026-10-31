@@ -392,6 +392,22 @@ A slice covers the steps of the job.  These are the mix of each block, the copy 
 
 * Fix: count the audio callbacks that start late, from the times of cpal's callbacks, in the `playback:` line, and make `e2e save` fail on one.
 
+### TD-67: `xtask clean` sees a process only by its open files
+
+This entry concerns no rule.  It concerns `xtask clean` (`plans/active/harness-phase-3b-m1.md`).
+
+`xtask clean` keeps a worktree or a scratch root that a process uses.  It reads the uses with `lsof -w -n -P -F n`: the working folder and the open files of each process.  An agent that builds a worktree from the main checkout keeps no file open in it between its commands.  So `xtask clean` does not see that agent.  Only the test of the open round keeps the worktrees of a review round that runs.  It does not keep the worktree of a review with no state record.  Without root, `lsof` does not show the processes of other users.  Without `lsof` or `gh`, `xtask clean` keeps each item that needs the missing fact, so it removes less.
+
+* Fix: no check is planned.  Run `xtask clean --yes` between milestones, when no agent runs.
+
+### TD-68: a stopped `xtask serve` leaves its pid file
+
+This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
+
+`xtask serve` writes its pid file in `target/xtask-serve/` of the repo (`serve::pid_file`).  It uses the standard library only, so it cannot remove the file when a signal stops it.  So each stopped server leaves a stale file.  `xtask clean` lists such a file as stale, and `--yes` removes it.  A new server on the same port writes over the file.
+
+* Fix: no fix is planned.  A signal handler needs a new crate (DEPS-1) or unsafe code.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits

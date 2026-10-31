@@ -1,5 +1,5 @@
 //! `xtask review`: chooses the reviewers from a diff, guards a review round,
-//! and runs cargo-mutants on a round's diff.
+//! runs cargo-mutants on a round's diff, and removes a round's worktrees.
 //!
 //! Each failure exits 3, so a skill that runs the command stops on it.
 
@@ -162,8 +162,7 @@ pub const SIGNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const USAGE: &str =
-    "usage: xtask review start <base> <round> | check <round> | mutants <round> [--config <file>]";
+const USAGE: &str = "usage: xtask review start <base> <round> | check <round> | mutants <round> [--config <file>] | clean <round>";
 
 /// The exit code of every failure, refusal and usage error.
 const REFUSED: i32 = 3;
@@ -527,6 +526,7 @@ pub fn run_with(
                 .and_then(|round| mutants(&toplevel(dir)?, dir, round, None, cargo)),
             ["mutants", round, "--config", file] => parse_round(round)
                 .and_then(|round| mutants(&toplevel(dir)?, dir, round, Some(file), cargo)),
+            ["clean", round] => parse_round(round).and_then(|round| clean(&toplevel(dir)?, round)),
             _ => Ok((REFUSED, vec![USAGE.to_string()])),
         };
     outcome.unwrap_or_else(|e| (REFUSED, vec![format!("{e:#}")]))
@@ -1370,6 +1370,90 @@ fn check(toplevel: &Path, home: &Path, round: u32) -> Result<(i32, Vec<String>)>
     } else {
         Ok((REFUSED, found))
     }
+}
+
+/// The agents whose worktrees `review clean` removes: the reviewers, the
+/// validators and the baseline.
+fn round_agents() -> Vec<&'static str> {
+    REVIEWERS
+        .iter()
+        .map(|r| r.name)
+        .chain(["validator", "baseline"])
+        .collect()
+}
+
+/// If `name` is `<round>-<agent>-...` for an agent of [`round_agents`].
+fn of_round(name: &str, round: u32) -> bool {
+    name.strip_prefix(&format!("{round}-")).is_some_and(|rest| {
+        round_agents()
+            .iter()
+            .any(|agent| rest.starts_with(&format!("{agent}-")))
+    })
+}
+
+/// `review clean <round>`: removes the worktrees of one round's agents,
+/// `target/review/<round>-<agent>-<n>`, with `--force`, since a reviewer's
+/// trial changes are scratch by design.  It also removes a folder of such
+/// a name that is not a worktree.  It runs no `git worktree prune`, so it
+/// acts on no other worktree.
+fn clean(toplevel: &Path, round: u32) -> Result<(i32, Vec<String>)> {
+    // The same canonical form as the listed paths, also through a linked
+    // `target/`.
+    let review = crate::clean::canonical(&toplevel.join("target/review"));
+    let listing = git(toplevel, &["worktree", "list", "--porcelain", "-z"])?;
+    let mut registered: Vec<PathBuf> = listing
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree "))
+        .map(|path| crate::clean::canonical(Path::new(path)))
+        .filter(|path| path.parent() == Some(review.as_path()))
+        .collect();
+    registered.sort();
+    let name_of = |path: &Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut code = 0;
+    let mut lines = Vec::new();
+    for path in registered.iter().filter(|p| of_round(&name_of(p), round)) {
+        let shown = format!("target/review/{}", name_of(path));
+        let text = path.to_str().context("a worktree path is UTF-8")?;
+        match git(toplevel, &["worktree", "remove", "--force", text]) {
+            Ok(_) => lines.push(format!("removed {shown}")),
+            Err(e) => {
+                code = REFUSED;
+                lines.push(format!("failed {shown}: {e:#}"));
+            }
+        }
+    }
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(&review)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort();
+    for path in folders
+        .iter()
+        .filter(|p| of_round(&name_of(p), round) && !registered.contains(p))
+    {
+        let shown = format!("target/review/{}", name_of(path));
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => lines.push(format!("removed {shown}")),
+            Err(e) => {
+                code = REFUSED;
+                lines.push(format!("failed {shown}: {e}"));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(format!("no worktrees of round {round}"));
+    }
+    Ok((code, lines))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {

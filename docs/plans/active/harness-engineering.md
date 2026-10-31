@@ -71,6 +71,10 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 * Gate: two consecutive PRs where the routed review finds what manual review would, at lower effort (D4 of `plans/completed/harness-phase-3.md` bounds the effort, and counts approvals as cost).
 * For IAM: a security reviewer is an extra sensor, never a control: it runs alongside the deterministic checks and a human, and its hit rate is measured like any other test.
 
+### Phase 3b: runs that drive themselves, at less cost
+
+Added on 2026-10-30, after PR #39, before phase 4 (`plans/active/harness-phase-3b.md`).  Big tasks get orchestrated mode after one question (decision 0023); late review rounds fix only what matters (0024); each agent role gets a model chosen by a measurement (0025); local checks run by tier (0026); PR bodies and inline comments serve people first (0027); `xtask clean` removes what runs leave.  Measured by: maintainer messages to start a big run, rounds after round 3, cost per milestone against PR #39, and leftovers after close-out.  Its last milestone re-checks phases 4 to 6 and the phase 3 gate.
+
 ### Phase 4: legibility, the evaluator, and long-running sessions
 
 * Adds, in the app (each a small PR under MEM-1): a `window.__stemyla` state snapshot of scalars only (lanes, mute, solo, tempo, playhead, loop, status, memory figures); structured console events beside the text logs; `?fixture=demo` to start on the demo song; a command API that queues into the same inbox as a click; a tab memory total asserted in an e2e scenario (TD-11, TD-19).  The adapter, and whether it is a fallback adapter, recorded in selftest and e2e results (TD-10).
@@ -125,6 +129,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-22: phase 3, execution plan written (`plans/completed/harness-phase-3.md`), as one PR with a commit for each milestone.
 * [x] 2026-10-24: phase 3, built in PR #34 (`plans/completed/harness-phase-3.md`), without the gate.  The replay found 8 of 26 old findings (0.31, 95% interval 0.17 to 0.50), so it misses its bar (D5 of that plan).  The PR's own three rounds ran with the `review-rounds` skill (`docs/reviews/ai-agent-harness-phase-3.md`).
 * [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).
+* [ ] Phase 3b (`plans/active/harness-phase-3b.md`): plan and decisions 0023 to 0027 written on 2026-10-30, as proposed; the decisions accepted on 2026-10-31.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
 * [ ] Phase 6.

@@ -27,7 +27,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
-* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Then the caller decides the next step: step 10, step 11 or the next round.
+* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.  Then the caller decides the next step: step 10, step 11 or the next round.
 
 ## Names
 
@@ -250,7 +250,7 @@ of <y> baseline findings, the round found <x>
 
 * List each agent that the round started: the reviewers, the baseline, and each validator.  A validator's Findings cell names the IDs that it judged.
 * Without `--baseline`, leave out the two baseline sections.
-* With `--review-only`, stop here.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
+* With `--review-only`, run `target/debug/xtask review clean $1`.  Then stop here.  If auto mode or a person refuses it, give the command to the person.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
 
 ### 10. Fix the findings
 
@@ -281,7 +281,7 @@ First, get the approval counts of the round.  They are cost, not interventions. 
 * If you asked, wait for the answer.  Do not guess the counts.
 * Write the first count in the `approvals` field of `<run>/$1/findings.md`.  Write the second count in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
 
-The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, and stop.  If the file does not exist, write it in this form first:
+The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, with the command `target/debug/xtask review clean $1`, and stop.  The caller writes the log, then runs that command.  If the file does not exist, write it in this form first:
 
 ```markdown
 # Review log
@@ -313,6 +313,12 @@ Add one row to the rounds table:
 * Approvals: the count that the person gave for the round, as cost.  It is the field of the findings file.
 * Mutants: the mutants line.
 * With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are the messages of a person for those agents.  Baseline approvals: the count that the person gave for the baseline, or "in approvals" if the person gave one total.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
+
+Then remove the worktrees of the round's agents:
+
+* Run `target/debug/xtask review clean $1`.  It removes each worktree `target/review/$1-<agent>-<n>` of this round, also with changes.
+* It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
+* If auto mode or a person refuses it, give the command to the person, and go on.
 
 After round 3:
 

@@ -10,6 +10,10 @@
 //! `--mount /prefix=dir` serves another directory under a URL prefix (the
 //! end-to-end tests use it for weights and test clips).
 //!
+//! After the bind, `run` writes its pid to `serve::pid_file` in the repo of
+//! the current folder, so `xtask clean` can find and stop a server that a
+//! run left.
+//!
 //! `--inject /url.js` adds `<script src="/url.js"></script>` at the start of
 //! every HTML page's `<head>`, so it runs before the page's own scripts
 //! (`xtask e2e` uses it for its console capture and audio stand-ins).
@@ -23,6 +27,15 @@ use std::sync::Arc;
 
 /// URL prefix (always starting and ending with `/`) and the directory it maps to.
 pub type Mounts = Vec<(String, PathBuf)>;
+
+/// The folder of the pid files, relative to the repo root.
+pub const PID_FOLDER: &str = "target/xtask-serve";
+
+/// The pid file of `xtask serve` on `port`, in the repo at `root`.
+/// `xtask clean` reads it to find a server that a run left.
+pub fn pid_file(root: &Path, port: u16) -> PathBuf {
+    root.join(PID_FOLDER).join(format!("{port}.pid"))
+}
 
 pub fn run(args: &[String]) -> Result<()> {
     let mut root = PathBuf::from("app/dist");
@@ -65,10 +78,30 @@ pub fn run(args: &[String]) -> Result<()> {
     let listener =
         TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("binding port {port}"))?;
     let addr = listener.local_addr()?;
+    write_pid_file(addr.port());
     // Scripts read this line to find the port when started with --port 0.
     println!("serving {} at http://{addr}/", root.display());
     std::io::stdout().flush()?;
     serve_with(listener, mounts, inject)
+}
+
+/// Writes the pid file of this server in the repo of the current folder,
+/// for `xtask clean`.  Outside a repo, it writes none and says so on
+/// stderr.  A signal that stops the server leaves the file (TD-68).
+fn write_pid_file(port: u16) {
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|dir| crate::clean::repo_root(&dir).ok());
+    let Some(root) = root else {
+        eprintln!("serve: not in a git repo, so no pid file");
+        return;
+    };
+    let path = pid_file(&root, port);
+    let written = std::fs::create_dir_all(root.join(PID_FOLDER))
+        .and_then(|()| std::fs::write(&path, format!("{}\n", std::process::id())));
+    if let Err(e) = written {
+        eprintln!("serve: no pid file {}: {e}", path.display());
+    }
 }
 
 fn normalise_prefix(p: &str) -> String {
