@@ -213,6 +213,8 @@ Kick-off prompt:
 
 * [x] 2026-10-30: retrospective research (six agents: the PR #39 sessions, the earlier sessions, the review logs, PRs and CI, Claude Code and GitHub features, a harness inventory).
 * [x] 2026-10-30: this plan and decisions 0023 to 0027 written as proposed.
+* [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
+* [ ] Plan review: at most 3 rounds on this plan and decisions 0023 to 0027.
 * [ ] M1: cleanup.
 * [ ] M2: less mutants noise.
 * [ ] M3: the fix rule and the stop rule.
@@ -226,6 +228,7 @@ Kick-off prompt:
 
 * 2026-10-30: GitHub keeps `refs/pull/<n>/head` for PRs #30 to #39 after their branches are deleted, so the commits of PR #39's review rounds can still be fetched.  Evidence: `git ls-remote origin refs/pull/39/head` gives `4068c49`.
 * 2026-10-30: the cloud session that wrote this plan could not push (HTTP 403 from GitHub), so the plan reached the maintainer by another route.
+* 2026-10-31: `cargo mutants` was not installed on the Mac, so the preflight failed on it.  The orchestrator installed cargo-mutants 27.1.0 with `cargo install --locked`.
 
 ## Decision log
 
@@ -235,6 +238,16 @@ Kick-off prompt:
 * 2026-10-30, maintainer: local checks run by changed paths; the full set before a push and before a review round.
 * 2026-10-30, maintainer: inline comments only for proposed decisions and rule changes, security and correctness hot spots, and agents' judgement calls.
 * 2026-10-30, maintainer: this phase comes before phase 4.  The work runs on the maintainer's Mac, not in a cloud session, because the checks need the local toolchain and browsers.
+* 2026-10-31, maintainer, D1: decisions 0023 to 0027 are accepted as written.
+* 2026-10-31, maintainer, D2: a commit that touches a strict rule's paths runs tier `push`.
+* 2026-10-31, maintainer, D3: the strict rules are PROTO-1, PROTO-2, MEM-1 to MEM-5, RT-1, GPU-1 to GPU-3, VERIFY-1, GIT-1, DEPS-1 and ASSET-1.
+* 2026-10-31, maintainer, D4: from round 4, reviewers read the fix range and the files it touches only.
+* 2026-10-31, maintainer, D5: M8 proposes whether M5's measurement replaces the `--baseline` gate.  M8 does not decide it.
+* 2026-10-31, maintainer, D6: the ruleset is the maintainer's change.  Agents do not touch it.
+* 2026-10-31, maintainer, D7: `cargo run -p xtask -- clean --yes` has an `autoMode.allow` entry.
+* 2026-10-31, maintainer, D8: the timebox is 48 hours from 2026-10-31.  The run stops at a clean point when it ends.
+* 2026-10-31, maintainer: the orchestrator may push `harness-phase-3b`, open and edit one draft PR, and post the COMMENT review of M7 without a further question.  It never merges.
+* 2026-10-31, maintainer: the plan commit is re-authored to the maintainer and signed, without the AI trailers of the patch.
 
 ## Outcomes and retrospective
 

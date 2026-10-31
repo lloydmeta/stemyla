@@ -129,7 +129,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-22: phase 3, execution plan written (`plans/completed/harness-phase-3.md`), as one PR with a commit for each milestone.
 * [x] 2026-10-24: phase 3, built in PR #34 (`plans/completed/harness-phase-3.md`), without the gate.  The replay found 8 of 26 old findings (0.31, 95% interval 0.17 to 0.50), so it misses its bar (D5 of that plan).  The PR's own three rounds ran with the `review-rounds` skill (`docs/reviews/ai-agent-harness-phase-3.md`).
 * [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).
-* [ ] Phase 3b (`plans/active/harness-phase-3b.md`): plan and decisions 0023 to 0027 written on 2026-10-30, as proposed.
+* [ ] Phase 3b (`plans/active/harness-phase-3b.md`): plan and decisions 0023 to 0027 written on 2026-10-30, as proposed; the decisions accepted on 2026-10-31.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
 * [ ] Phase 6.

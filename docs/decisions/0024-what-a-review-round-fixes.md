@@ -1,6 +1,6 @@
 # 0024: what a review round fixes, and when the rounds stop
 
-Status: proposed (2026-10-30, by the agent, for `plans/active/harness-phase-3b.md`; amends D6 of decision 0011)
+Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-phase-3b.md`; proposed by the agent on 2026-10-30; amends D6 of decision 0011)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 0026: local checks run by tier and by changed paths
 
-Status: proposed (2026-10-30, by the agent, for `plans/active/harness-phase-3b.md`; amends GIT-2)
+Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-phase-3b.md`; proposed by the agent on 2026-10-30; amends GIT-2)
 
 ## Context
 
