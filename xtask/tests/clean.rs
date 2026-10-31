@@ -1140,3 +1140,35 @@ fn the_list_reads_status_sizes_rounds_and_a_detached_head() {
         "{removable:#?}"
     );
 }
+
+/// [`GIT_ENV`] for the git commands that a library function of
+/// `xtask::clean` runs in this process.  Each test sets the same values,
+/// so tests that run at the same time do not race.
+fn git_env_in_process() {
+    for (key, value) in GIT_ENV {
+        // SAFETY: the tests read these only through child processes.
+        unsafe { std::env::set_var(key, value) };
+    }
+}
+
+#[test]
+fn remove_worktree_refuses_a_worktree_with_changes() {
+    git_env_in_process();
+    let f = Fixture::empty("remove-dirty");
+    let rel = "target/review/1-reviewer-1";
+    git(&f.repo, &["worktree", "add", "-q", "--detach", rel, "HEAD"]);
+    let wt = f.repo.join(rel);
+    write(&wt.join("held.txt"), "a change\n");
+
+    let result = xtask::clean::remove_worktree(&f.repo, &wt);
+    assert!(result.is_err(), "git removed a worktree with changes");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("held.txt")).unwrap(),
+        "a change\n"
+    );
+    let listing = git(&f.repo, &["worktree", "list", "--porcelain"]);
+    assert!(
+        listing.contains(&format!("worktree {}\n", wt.display())),
+        "{listing}"
+    );
+}

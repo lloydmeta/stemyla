@@ -779,10 +779,7 @@ fn remove(root: &Path, also: &[PathBuf], first: &[Item]) -> Result<bool> {
     let mut stuck_runs: BTreeSet<String> = BTreeSet::new();
     for item in removable(Kind::Worktree) {
         let path = item.path.as_deref().context("a worktree has a path")?;
-        let path = path.to_str().context("a worktree path is UTF-8")?;
-        let mut args = WORKTREE_REMOVE.to_vec();
-        args.push(path);
-        match git(root, &args) {
+        match remove_worktree(root, path) {
             Ok(_) => println!("removed {}", item.line()),
             Err(e) => {
                 fail(item, &format!("{e:#}"));
@@ -816,6 +813,16 @@ fn remove(root: &Path, also: &[PathBuf], first: &[Item]) -> Result<bool> {
         }
     }
     Ok(ok)
+}
+
+/// Removes the worktree at `path` with `git worktree remove`, with no
+/// `--force`.  So git refuses a worktree with changes, also one that
+/// changed after the survey.
+pub fn remove_worktree(root: &Path, path: &Path) -> Result<()> {
+    let path = path.to_str().context("a worktree path is UTF-8")?;
+    let mut args = WORKTREE_REMOVE.to_vec();
+    args.push(path);
+    git(root, &args).map(|_| ())
 }
 
 /// Sends SIGTERM to `pid`, and waits for it to end.
