@@ -213,6 +213,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: step 5, the guide and `README.md`.  The texts for the skill, `xtask/tests/rules.rs` and the guard went to the team leader, checked in a scratch worktree: `cargo test -p xtask --test rules` passed with all three, and failed without the two files under `.claude/` (implementer).
 * [x] 2026-10-31: checkpoint: the xtask code is done (`9bc3de7` to `b7e1088`).  The team leader checked that the three texts apply, and gave them to the orchestrator.  Next: the orchestrator lands them, then round 1.
 * [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 10 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
+* [x] 2026-10-31: review round 1 fix of 1-b1: a worktree that holds a worktree that stays stays too, to a fixed point (implementer).
 
 ## Surprises and discoveries
 
@@ -222,6 +223,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: step 4's two tests in `xtask/tests/review.rs` failed first, with the usage and exit 3.
 * 2026-10-31, implementer: `git worktree remove` removes a worktree whose folder is gone (git 2.18 or later).
 * 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
+* 2026-10-31, implementer: the tests of 1-b1 failed first.  The four new tests of `plan` failed, and `yes_keeps_a_merged_worktree_that_holds_a_changed_worktree` found agent-x removable.
 
 ## Decision log
 

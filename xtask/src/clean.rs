@@ -307,10 +307,47 @@ pub fn plan(s: &Survey) -> Vec<Item> {
         .flat_map(|r| r.open_rounds.iter().map(|n| (*n, r.name.as_str())))
         .collect();
 
+    let mut decided: Vec<(&Worktree, Verdict)> = s
+        .worktrees
+        .iter()
+        .filter(|w| under_roots(&w.path))
+        .map(|w| {
+            let verdict = worktree_verdict(s, w, &review, &claude, &proofs, &open_rounds);
+            (w, verdict)
+        })
+        .collect();
+    // `git worktree remove` deletes each worktree under the one that it
+    // removes.  So a worktree that holds a worktree that stays stays too,
+    // until no verdict changes.
+    loop {
+        let staying_paths: Vec<&Path> = outside
+            .iter()
+            .map(|w| w.path.as_path())
+            .chain(
+                decided
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, Verdict::Removable(_)))
+                    .map(|(w, _)| w.path.as_path()),
+            )
+            .collect();
+        let mut changed = false;
+        for (w, verdict) in &mut decided {
+            let holds = staying_paths
+                .iter()
+                .any(|p| *p != w.path && p.starts_with(&w.path));
+            if matches!(verdict, Verdict::Removable(_)) && holds {
+                *verdict = Verdict::Kept("holds a worktree that stays".to_string());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let mut items = Vec::new();
     let mut staying: Vec<&Worktree> = outside.clone();
-    for w in s.worktrees.iter().filter(|w| under_roots(&w.path)) {
-        let verdict = worktree_verdict(s, w, &review, &claude, &proofs, &open_rounds);
+    for (w, verdict) in decided {
         if !matches!(verdict, Verdict::Removable(_)) {
             staying.push(w);
         }
@@ -1831,6 +1868,101 @@ mod tests {
             kept(
                 "prunable, and its HEAD s9 is on no ref: run `git worktree repair`, or prune it by hand"
             )
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_holds_a_worktree_that_stays_stays() {
+        let mut s = survey();
+        s.worktrees.push(Worktree {
+            merged: Some(true),
+            ..worktree(".claude/worktrees/agent-x", 2)
+        });
+        s.worktrees.push(Worktree {
+            status: Some(Status {
+                changes: true,
+                ignored: false,
+            }),
+            ..worktree(".claude/worktrees/agent-x/target/review/1-reviewer-1", 2)
+        });
+        assert_eq!(
+            verdict(&s, Kind::Worktree, ".claude/worktrees/agent-x"),
+            kept("holds a worktree that stays")
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_stays_keeps_each_worktree_above_it() {
+        let mut s = survey();
+        s.worktrees.push(worktree("target/review/1-reviewer-1", 2));
+        s.worktrees.push(worktree(
+            "target/review/1-reviewer-1/target/review/1-reviewer-2",
+            2,
+        ));
+        s.worktrees.push(Worktree {
+            locked: true,
+            ..worktree(
+                "target/review/1-reviewer-1/target/review/1-reviewer-2/target/review/1-reviewer-3",
+                2,
+            )
+        });
+        // A worktree beside another, with a name that starts the same, is
+        // not under it.
+        s.worktrees.push(worktree("target/review/1-reviewer-10", 2));
+        s.worktrees.push(Worktree {
+            locked: true,
+            ..worktree("target/review/1-reviewer-100", 2)
+        });
+        for name in [
+            "target/review/1-reviewer-1",
+            "target/review/1-reviewer-1/target/review/1-reviewer-2",
+        ] {
+            assert_eq!(
+                verdict(&s, Kind::Worktree, name),
+                kept("holds a worktree that stays"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            verdict(&s, Kind::Worktree, "target/review/1-reviewer-10"),
+            removable("clean and unused")
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_holds_a_prunable_worktree_that_stays_stays() {
+        let mut s = survey();
+        s.worktrees.push(worktree("target/review/1-reviewer-1", 2));
+        s.worktrees.push(Worktree {
+            prunable: true,
+            refs: Vec::new(),
+            ..worktree("target/review/1-reviewer-1/sub", 9)
+        });
+        assert_eq!(
+            verdict(&s, Kind::Worktree, "target/review/1-reviewer-1"),
+            kept("holds a worktree that stays")
+        );
+    }
+
+    #[test]
+    fn the_branch_of_a_worktree_kept_for_a_nested_worktree_stays() {
+        let mut s = survey();
+        s.branches.push(Branch {
+            ancestor: Some(true),
+            ..branch("agent-x", 2)
+        });
+        s.worktrees.push(Worktree {
+            branch: Some("agent-x".to_string()),
+            merged: Some(true),
+            ..worktree(".claude/worktrees/agent-x", 2)
+        });
+        s.worktrees.push(Worktree {
+            locked: true,
+            ..worktree(".claude/worktrees/agent-x/target/review/1-reviewer-1", 2)
+        });
+        assert_eq!(
+            verdict(&s, Kind::Branch, "agent-x"),
+            kept("the current branch of a worktree")
         );
     }
 

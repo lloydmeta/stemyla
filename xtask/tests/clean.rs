@@ -826,3 +826,66 @@ fn with_gh_failing_only_the_proofs_from_git_remove_branches() {
     assert_eq!(branches(repo), want);
     assert!(repo.join("target/review/run/old/log.md").is_file());
 }
+
+#[test]
+fn yes_keeps_a_merged_worktree_that_holds_a_changed_worktree() {
+    let f = Fixture::empty("nested");
+    let repo = &f.repo;
+    git(repo, &["switch", "-q", "-c", "agent-x"]);
+    write(&repo.join("m1.txt"), "m1\n");
+    let m1 = commit(repo, "m1");
+    git(repo, &["switch", "-q", "main"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &m1]);
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/agent-x",
+            "agent-x",
+        ],
+    );
+    // A reviewer's worktree, made from inside the agent's worktree, under
+    // its ignored `target/`.
+    let agent = repo.join(".claude/worktrees/agent-x");
+    git(
+        &agent,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            "target/review/1-reviewer-1",
+            "HEAD",
+        ],
+    );
+    let nested = agent.join("target/review/1-reviewer-1/held.txt");
+    write(&nested, "a change\n");
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&["--yes".to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (_, kept) = parts(&stdout);
+    assert_item(
+        &kept,
+        "worktree .claude/worktrees/agent-x",
+        "holds a worktree that stays",
+    );
+    assert_item(
+        &kept,
+        "worktree .claude/worktrees/agent-x/target/review/1-reviewer-1",
+        "has changes",
+    );
+    assert_item(&kept, "branch agent-x", "the current branch of a worktree");
+    assert_eq!(
+        std::fs::read_to_string(&nested).ok().as_deref(),
+        Some("a change\n"),
+        "{stdout}"
+    );
+    assert!(branches(repo).contains("agent-x"));
+}
