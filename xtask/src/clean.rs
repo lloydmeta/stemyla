@@ -92,6 +92,14 @@ pub struct Survey {
     pub open_paths: Option<Vec<PathBuf>>,
     /// The size of `target/`.
     pub target_size: u64,
+    /// `target/review` and `.claude/worktrees` of the root, canonical, as
+    /// git's worktree paths are, also through a linked `target/`.  `gather`
+    /// finds them, so `plan` reads no file.
+    pub review_root: PathBuf,
+    pub claude_root: PathBuf,
+    /// `target` and `.claude` of the root, each with its canonical path, so
+    /// a path through a link shows as under the root.
+    pub links: Vec<(String, PathBuf)>,
 }
 
 /// One record of `git worktree list`.
@@ -248,11 +256,11 @@ impl Item {
         }
     }
 
-    fn folder(kind: Kind, root: &Path, folder: &Folder, verdict: Verdict) -> Item {
+    fn folder(kind: Kind, s: &Survey, folder: &Folder, verdict: Verdict) -> Item {
         Item {
             path: Some(folder.path.clone()),
             size: Some(folder.size),
-            ..Item::new(kind, shown(root, &folder.path), verdict)
+            ..Item::new(kind, shown(s, &folder.path), verdict)
         }
     }
 
@@ -293,10 +301,8 @@ pub fn repo_root(dir: &Path) -> Result<PathBuf> {
 /// the worktrees that stay, so a branch that only a removed worktree held
 /// goes in the same run.
 pub fn plan(s: &Survey) -> Vec<Item> {
-    // The listed worktree paths are canonical, also through a linked
-    // `target/`, so the two roots are too.
-    let review = canonical(&s.root.join("target/review"));
-    let claude = canonical(&s.root.join(".claude/worktrees"));
+    let review = s.review_root.clone();
+    let claude = s.claude_root.clone();
     let under_roots = |path: &Path| path.starts_with(&review) || path.starts_with(&claude);
 
     // The branches with a proof, before the rule of the current branch.
@@ -364,7 +370,7 @@ pub fn plan(s: &Survey) -> Vec<Item> {
             size: Some(w.size),
             branch: w.branch.clone(),
             run: Some(run_name(w)),
-            ..Item::new(Kind::Worktree, shown(&s.root, &w.path), verdict)
+            ..Item::new(Kind::Worktree, shown(s, &w.path), verdict)
         });
     }
 
@@ -395,12 +401,12 @@ pub fn plan(s: &Survey) -> Vec<Item> {
             path: r.path.clone(),
             size: r.size,
         };
-        items.push(Item::folder(Kind::RunFolder, &s.root, &folder, verdict));
+        items.push(Item::folder(Kind::RunFolder, s, &folder, verdict));
     }
 
     for b in &s.builds {
         let verdict = Verdict::Removable("build output".to_string());
-        items.push(Item::folder(Kind::Build, &s.root, b, verdict));
+        items.push(Item::folder(Kind::Build, s, b, verdict));
     }
 
     for p in &s.pid_files {
@@ -409,13 +415,13 @@ pub fn plan(s: &Survey) -> Vec<Item> {
         items.push(Item {
             path: Some(p.path.clone()),
             pid: if running { p.pid } else { None },
-            ..Item::new(Kind::PidFile, shown(&s.root, &p.path), verdict)
+            ..Item::new(Kind::PidFile, shown(s, &p.path), verdict)
         });
     }
 
     for f in &s.scratch {
         let verdict = scratch_verdict(s, f);
-        items.push(Item::folder(Kind::Scratch, &s.root, f, verdict));
+        items.push(Item::folder(Kind::Scratch, s, f, verdict));
     }
 
     items.sort_by_key(|item| item.kind);
@@ -1062,6 +1068,12 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
         merged_prs: facts.merged_prs.clone(),
         open_paths: facts.open_paths.clone(),
         target_size: dir_size(&root.join("target")),
+        review_root: review,
+        claude_root: claude,
+        links: ["target", ".claude"]
+            .iter()
+            .map(|folder| (folder.to_string(), canonical(&root.join(folder))))
+            .collect(),
     })
 }
 
@@ -1229,14 +1241,14 @@ pub fn canonical(path: &Path) -> PathBuf {
     }
 }
 
-/// `path` relative to `root` when it is under it, else in full.  A path
-/// through a linked `target/` or `.claude/` shows as under it.
-fn shown(root: &Path, path: &Path) -> String {
-    if let Ok(rel) = path.strip_prefix(root) {
+/// `path` relative to the repo root when it is under it, else in full.  A
+/// path through a linked `target/` or `.claude/` shows as under it.
+fn shown(s: &Survey, path: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(&s.root) {
         return rel.display().to_string();
     }
-    for folder in ["target", ".claude"] {
-        if let Ok(rel) = path.strip_prefix(canonical(&root.join(folder))) {
+    for (folder, link) in &s.links {
+        if let Ok(rel) = path.strip_prefix(link) {
             return Path::new(folder).join(rel).display().to_string();
         }
     }
@@ -1419,6 +1431,12 @@ mod tests {
             open_prs: Some(Vec::new()),
             merged_prs: Some(Vec::new()),
             open_paths: Some(Vec::new()),
+            review_root: PathBuf::from("/r/target/review"),
+            claude_root: PathBuf::from("/r/.claude/worktrees"),
+            links: vec![
+                ("target".to_string(), PathBuf::from("/r/target")),
+                (".claude".to_string(), PathBuf::from("/r/.claude")),
+            ],
             ..Survey::default()
         }
     }
@@ -2037,6 +2055,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plan_uses_the_roots_that_gather_found() {
+        // `target/` links to `/elsewhere`, as `gather` found.  `plan` reads
+        // no file, so it uses the stored roots.
+        let mut s = survey();
+        s.review_root = PathBuf::from("/elsewhere/review");
+        s.links[0].1 = PathBuf::from("/elsewhere");
+        s.worktrees.push(Worktree {
+            path: PathBuf::from("/elsewhere/review/1-reviewer-1"),
+            ..worktree("", 1)
+        });
+        assert_eq!(
+            verdict(&s, Kind::Worktree, "target/review/1-reviewer-1"),
+            removable("clean and unused")
+        );
+    }
+
     // Run folders.
 
     #[test]
@@ -2530,15 +2565,18 @@ mod tests {
     #[test]
     fn the_total_counts_a_nested_removable_worktree_once() {
         let mut s = survey();
-        s.worktrees.push(worktree("target/review/1-reviewer-1", 1));
+        s.worktrees.push(Worktree {
+            size: 30,
+            ..worktree("target/review/1-reviewer-1", 1)
+        });
         s.worktrees.push(worktree(
             "target/review/1-reviewer-1/target/review/1-reviewer-2",
             1,
         ));
         s.worktrees.push(worktree("target/review/1-reviewer-10", 1));
         let lines = report(&plan(&s), 0, &[]);
-        // Each worktree has 10 bytes, and the nested one is in the 10 of the
-        // worktree that holds it.
-        assert_eq!(lines[0], "can remove (3 items, 20 B):", "{lines:#?}");
+        // The outer worktree has 30 bytes, which hold the 10 of the nested
+        // one.  The worktree beside them has 10.
+        assert_eq!(lines[0], "can remove (3 items, 40 B):", "{lines:#?}");
     }
 }

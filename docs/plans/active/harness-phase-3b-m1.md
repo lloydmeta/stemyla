@@ -230,6 +230,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 2 fixes of 2-4, 2-5, 2-6, 2-8 and 2-10: the `lsof -w` texts, one pass for the nested rule, the guide on `--review-only` and a refused log, the nested rule in the plan and the guide, and a total that counts a nested worktree once (implementer).
 * [x] 2026-10-31: review round 2 (at `32df7e0`, no `--baseline`): 4 should-fix confirmed (2-1, 2-2, 2-3, 2-8) and 6 nits, no blocker; no missed mutant.  Each confirmed finding and the nits 2-4 to 2-10 are fixed in `64aeb11` to `4645e64`; 2-7 and 2-9 went to the orchestrator as a diff.  Round 3 follows.
 * [x] 2026-10-31: review round 3 fix of 3-1: a prunable worktree whose folder still exists is kept, since only its `.git` file is gone (implementer).
+* [x] 2026-10-31: review round 3 fixes of 3-6, 3-7 and 3-9: `gather` stores the canonical roots and links in the survey, so `plan` is pure again; the total test has sizes that differ; a list test with a linked `.claude/` (implementer).
 
 ## Surprises and discoveries
 
@@ -251,6 +252,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 2-3 failed first: with a linked `target/`, the list had no worktree items.  A path through a linked `target/` or `.claude/` now shows as under it.
 * 2026-10-31, implementer: the test of 2-10 failed first: the total of a worktree and the worktree in it was 30 B, not 20 B.  2-5 changes no behaviour, so the nested tests of 1-b1 cover it.
 * 2026-10-31, implementer: the test of 3-1 failed first: a worktree with no `.git` file was removable as "prunable: its folder is gone", and `--yes` failed on it with exit 1.
+* 2026-10-31, implementer: the test of 3-6 did not build first (no stored roots).  The tests of 3-7 and 3-9 cover code that was right, and failed first with their mutants: `w.starts_with(p)` in the total, and no `canonical` on the `.claude/worktrees` root.  A first try of the 3-9 test passed with the mutant: `git add -A` had committed the `.claude` link on a branch, and `git switch main` then deleted it.
 
 ## Decision log
 

@@ -1287,3 +1287,46 @@ fn a_worktree_whose_git_file_is_gone_is_kept_with_its_changes() {
     );
     assert!(wt.join("new.txt").is_file());
 }
+
+#[test]
+fn the_list_finds_agent_worktrees_through_a_linked_claude_folder() {
+    let f = Fixture::empty("link-claude");
+    let repo = &f.repo;
+    git(repo, &["switch", "-q", "-c", "agent-x"]);
+    write(&repo.join("m1.txt"), "m1\n");
+    let m1 = commit(repo, "m1");
+    git(repo, &["switch", "-q", "main"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &m1]);
+    // The link comes after the commits, so `git add -A` does not take it.
+    let elsewhere = f.top.join("claude-elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.join(".claude")).unwrap();
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/agent-x",
+            "agent-x",
+        ],
+    );
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let (removable, _) = parts(&text(&out.stdout));
+    assert_item(
+        &removable,
+        "worktree .claude/worktrees/agent-x",
+        "clean, unused and merged",
+    );
+    let listing = git(repo, &["worktree", "list", "--porcelain"]);
+    assert!(
+        listing.contains(&elsewhere.join("worktrees/agent-x").display().to_string()),
+        "git lists the path through the link: {listing}"
+    );
+}
