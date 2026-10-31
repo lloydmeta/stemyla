@@ -212,6 +212,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: step 4, `xtask review clean <round>`, and its row in the guide (implementer).
 * [x] 2026-10-31: step 5, the guide and `README.md`.  The texts for the skill, `xtask/tests/rules.rs` and the guard went to the team leader, checked in a scratch worktree: `cargo test -p xtask --test rules` passed with all three, and failed without the two files under `.claude/` (implementer).
 * [x] 2026-10-31: checkpoint: the xtask code is done (`9bc3de7` to `b7e1088`).  The team leader checked that the three texts apply, and gave them to the orchestrator.  Next: the orchestrator lands them, then round 1.
+* [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 10 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
 
 ## Surprises and discoveries
 
