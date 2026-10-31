@@ -88,11 +88,11 @@ An `xtask clean` subcommand finds and removes what runs leave.  It lists by defa
 
 * It covers:
   * `target/review/run/<branch>/` for a branch with no open PR, but only when its `log.md` equals the copy in `docs/reviews/`;
-  * worktrees under `target/review/` and `.claude/worktrees/` with no changes and no live process, then `git worktree prune`;
+  * worktrees under `target/review/` with no changes and no live process, and under `.claude/worktrees/` only when their work is merged.  `git worktree remove` also handles a worktree whose folder is gone, so `git worktree prune` is not needed;
   * `target/e2e/` and `app/dist/`;
   * a local branch whose tree equals a commit on `origin/main`, or whose merged PR has a `headRefOid` equal to the branch's tip;
   * a `xtask serve` whose pid file is in `target/`, if that pid still runs `xtask serve`.  M1 makes `xtask serve` write the pid file.
-* It never removes: a worktree with changes, a branch it cannot prove merged, the current branch, anything outside the repo except the scratch roots that a plan names with `--also <path>`.
+* It never removes: a worktree with changes, a worktree with ignored files outside its `target/` (ASSET-1), a branch it cannot prove merged, the current branch, or anything outside the repo.  The one exception: `--also <path>` names a scratch folder under the temp folder.
 * `cargo clean` stays a separate, manual step; `xtask clean` prints the size of `target/` and the command.
 * The `review-rounds` skill runs `target/debug/xtask review clean <round>` after the round's log is written.  It removes that round's worktrees only (`target/review/<round>-<name>-<n>`).  The form fits the skill's `allowed-tools`, but only in the turn in which the skill loads.  In a later turn, auto mode decides.  If it refuses, the skill reports the command and goes on.
 * The orchestrator runs `cargo run -p xtask -- clean --yes` between milestones and at close-out.  The maintainer's `autoMode.allow` entry covers that form (D7).
