@@ -304,6 +304,7 @@ Kick-off prompt:
   * None of these changes what the maintainer accepted.  The PR lists them under "Needs your attention".
 * 2026-10-31, agent: the M1 team proposed four changes to the M1 section, and the orchestrator applied them (`cfaf8fd`).  Reason: the team found that `git worktree prune` is not needed, and that three cases need a stricter rule.
 * 2026-10-31, agent: commits `b7e1088` and `849ec8e` describe the skill's `review clean` step and the guard before `d0164ea` adds them (DOC-1, review finding 1-11 of M1).  History is not rewritten; the PR body notes it.
+* 2026-10-31, orchestrator: in `bedfd00`, M1's bullet on `review clean` says that the skill also runs it after the findings file with `--review-only`.  A subagent whose file the Write tool refuses gives the command to its caller.  Review round 2 (2-6, 2-9) found that the bullet named only the log.
 * 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 
 ## Outcomes and retrospective
