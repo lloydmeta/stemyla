@@ -1126,14 +1126,16 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// the end of its block are one entry, so a separator with fewer cells than
 /// the header fails.  After the log, step 11 removes the worktrees of the
 /// round's agents with `review clean`.  A refused log gives the command to
-/// the caller, and `--review-only` runs it at step 9.
+/// the caller, and `--review-only` runs it at step 9.  A file that the Write
+/// tool refuses to a subagent also gives the command to the caller.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
     "target/debug/xtask review check $1",
     "target/debug/xtask review clean $1",
     "with the command `target/debug/xtask review clean $1`, and stop.",
-    "* With `--review-only`, run `target/debug/xtask review clean $1`, then stop here.",
+    "* With `--review-only`, run `target/debug/xtask review clean $1`.  Then stop here.",
+    "Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.",
     "run_in_background",
     "3900000",
     "Read that file only after the notice has come",

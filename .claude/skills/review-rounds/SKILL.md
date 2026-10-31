@@ -27,7 +27,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
-* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Then the caller decides the next step: step 10, step 11 or the next round.
+* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.  Then the caller decides the next step: step 10, step 11 or the next round.
 
 ## Names
 
@@ -250,7 +250,7 @@ of <y> baseline findings, the round found <x>
 
 * List each agent that the round started: the reviewers, the baseline, and each validator.  A validator's Findings cell names the IDs that it judged.
 * Without `--baseline`, leave out the two baseline sections.
-* With `--review-only`, run `target/debug/xtask review clean $1`, then stop here.  If auto mode or a person refuses it, give the command to the person.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
+* With `--review-only`, run `target/debug/xtask review clean $1`.  Then stop here.  If auto mode or a person refuses it, give the command to the person.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
 
 ### 10. Fix the findings
 
