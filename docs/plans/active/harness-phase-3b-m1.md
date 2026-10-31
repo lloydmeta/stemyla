@@ -52,22 +52,27 @@ Split the code in two parts, so the tests can check the rules without the networ
 * `gather(root, facts) -> Survey`: reads the repo at `root` with `git` and the file system, and takes the facts from its argument.
 * `plan(&Survey) -> Vec<Item>`: a pure function.  Each `Item` has a kind, a path or name, a size in bytes (for a folder), and `Removable(proof)` or `Kept(reason)`.
 * `Facts` holds `open_prs: Option<Vec<String>>` (head branch names), `merged_prs: Option<Vec<(String, String)>>` (head branch name, `headRefOid`), the command line of a pid, the pid that listens on a TCP port, and `open_paths: Option<Vec<PathBuf>>`: each open file and working folder of each process.  `None` means that the fact is unknown, and an item that needs it is kept with the reason "cannot read <fact>".
-* `main` gathers the real facts: `gh pr list --state open --json headRefName --limit 500` and `gh pr list --state merged --json headRefName,headRefOid --limit 1000`, both run in the repo root; `ps -p <pid> -o command=`; `lsof -a -p <pid> -iTCP:<port> -sTCP:LISTEN -t`; `lsof -F n` (each line that starts with `n` and then `/`, which holds the `cwd`, `txt` and open file entries).  A failed program gives `None`.  Canonicalise each path from `lsof` and each path that it is compared with.
+* `main` gathers the real facts: `gh pr list --state open --json headRefName --limit 500` and `gh pr list --state merged --json headRefName,headRefOid --limit 1000`, both run in the repo root; `ps -p <pid> -o command=`; `ps -p <pid> -o stat=`; `lsof -n -P -a -p <pid> -iTCP:<port> -sTCP:LISTEN -t`; `lsof -n -P -F n` (each line that starts with `n` and then `/`, which holds the `cwd`, `txt` and open file entries).  Canonicalise each path from `lsof` and each path that it is compared with.
+* `ps` and `lsof` exit 1 also when nothing matches: a pid that has ended, or a pid that does not listen.  So exit 1 with empty stdout and empty stderr is the answer "no", not an unknown fact.  A fact is `None` only when the program cannot start, or exits with text on stderr.  `lsof -n -P -F n` counts as read when its output has `p` lines.  CI's `test` job runs on Ubuntu, so the tests must pass with the `ps` and `lsof` of both systems.
+* A pid whose `stat` starts with `Z` (a zombie) has ended.
+* Step 1 also adds `serve::pid_file(root, port)`, the path `<root>/target/xtask-serve/<port>.pid`, which step 2 writes and `clean.rs` reads.
 
 The rules for each kind (parent plan, M1):
 
 1. Run folders: each folder `target/review/run/<name>/`.
    * Removable when all of these hold: `<name>` is not the current branch, with `/` as `-`, of any worktree that stays (see "The second run" below); no open PR has a head branch whose name, with `/` as `-`, is `<name>`; and `<name>/log.md` exists and its blob (`git hash-object`) equals the blob of a file under `docs/reviews/` at `HEAD` or at `origin/main` (`git ls-tree -r <rev> docs/reviews/`).  The copy can have another name, such as `harness-phase-3b-m1.md`.
-   * Kept, with the reason: "a branch with an open PR", "the current branch of a worktree", "no log.md", "log.md has no copy in docs/reviews/", or "cannot read open PRs".
+   * Kept also while it has an open round: a round folder with `state.json` and no `findings.md`.
+   * Kept, with the reason: "a branch with an open PR", "the current branch of a worktree", "round <r> is open", "no log.md", "log.md has no copy in docs/reviews/", or "cannot read open PRs".
 2. Worktrees: each worktree in `git worktree list --porcelain` whose path is under `<root>/target/review/` or `<root>/.claude/worktrees/`.
    * Removable when all of these hold:
      * `git -C <path> status --porcelain --untracked-files=normal` is empty;
      * `git -C <path> status --porcelain --ignored --untracked-files=normal` shows no ignored path outside a `target/` folder at the top of the worktree, so no ignored song, stem or weight file is lost (ASSET-1);
      * it is not locked;
      * no path in `open_paths` is the worktree or under it;
-     * no review round is open for it: a worktree `target/review/<r>-...` is kept while a run folder has a round `<r>` with `state.json` and no `findings.md`;
-     * its `HEAD` is reachable from a ref that stays: `git for-each-ref --contains <sha>` gives a ref.  Removing a worktree keeps its branch, so a worktree on a branch passes.  A detached `HEAD` that no ref contains is kept, because its commits would be lost.
-   * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", or "its HEAD <sha> is on no ref".
+     * no review round is open for it: a worktree `target/review/<r>-...` is kept while the run folder of a worktree that stays has a round `<r>` with `state.json` and no `findings.md`.  The run folder of a worktree is its branch with `/` as `-`, or `detached-<short sha>` for a detached one.  Only the worktrees outside the two roots count here, since the reviewers' worktrees are detached scratch copies.  So an old run folder from another branch does not keep the worktrees of its round number forever;
+     * its `HEAD` is reachable from a ref that is not a branch that this run deletes: `git for-each-ref --contains <sha>` gives such a ref.  Removing a worktree keeps its branch, so a worktree on a branch passes.  A detached `HEAD` that no ref contains is kept, because its commits would be lost;
+     * for a worktree under `.claude/worktrees/` only: its `HEAD` is an ancestor of `origin/main`, or its branch is removable by a proof of rule 4.  A Claude Code agent with `isolation: worktree` keeps no file open between its tool calls, so the process test cannot see it.  Its work is safe to lose only when it is merged.
+   * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", "its HEAD <sha> is on no ref", or "not merged" (`.claude/worktrees/` only).
    * A worktree that `git worktree list` marks `prunable` (its folder is gone): removable as "prunable" only if it is under one of the two roots and its `HEAD` passes the ref test.  Else kept, with the advice to run `git worktree repair` or prune by hand.
 3. Build output: `target/e2e/` and `app/dist/`, when they exist.  Always removable, with their size.
 4. Local branches: each `refs/heads/<b>`.
@@ -78,12 +83,12 @@ The rules for each kind (parent plan, M1):
      * a merged PR has head branch `<b>` and `headRefOid` equal to the tip.
    * Else kept: "no proof that it is merged".  A branch whose name matches a merged PR but whose tip differs is kept, because it has commits after the merge.
    * With no `origin/main`, the first two proofs are unknown; the third still holds.
-5. Pid files: each file `target/xtask-serve/<port>.pid` (step 3 writes them).
-   * The pid runs `xtask serve` if its command line (`ps`) has a word whose last path part is `xtask`, then the word `serve`, and the pid listens on `<port>` (`lsof`).  Then the item is "a running xtask serve on port <port>".  `--yes` sends `kill <pid>` (SIGTERM), waits up to 5 s for the pid to end, then removes the file.
+5. Pid files: each file `target/xtask-serve/<port>.pid` (step 2 writes them).
+   * The pid runs `xtask serve` if its command line (`ps`) has a word whose last path part is `xtask`, then the word `serve`, and the pid listens on `<port>` (`lsof`).  Then the item is "a running xtask serve on port <port>".  `--yes` sends `kill <pid>` (SIGTERM), and waits up to 5 s for the pid to end (no pid, or a zombie).  Then it removes the file.  If the pid still runs after 5 s, it prints `failed`, keeps the file, and the command exits 1.
    * If the pid runs another program, or no program, or does not listen on the port, the file is stale.  `--yes` removes the file only, and never signals the pid.  A file that does not hold a pid is stale too.
 6. Scratch roots: each `--also <path>`.
    * The path must be absolute and must exist as a folder.  Its canonical form must be under the canonical temp folder (`std::env::temp_dir()`, `/tmp` or `/private/tmp`), and must not be one of those folders.  It must not be the repo root or a folder that holds it.  Else the command refuses before it lists anything, and exits 2.
-   * A valid scratch root is removable as a whole, with its size.
+   * A valid scratch root is removable as a whole, with its size, if no path in `open_paths` is in it and it holds no worktree of this repo (`git worktree list`).  Else it is kept with the reason.  Its contents are scratch, since a plan names it, but a live session may still use it.
 
 Never removed, in any case: a worktree with changes or ignored files, a branch that has no proof, a current branch of a worktree that stays, a file or folder outside the repo but a valid `--also` root, and `target/` as a whole.
 
@@ -109,50 +114,51 @@ Tests of step 1, in `clean.rs` (pure) and `xtask/tests/clean.rs` (the binary, `e
 
 * Each temporary repo has `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and `commit.gpgsign=false`, and an `origin/main` ref made with `git update-ref`.  Tests that run the binary give it a fake `gh` first on `PATH` (a script that prints fixed JSON, or exits 1), or call a seam with the facts.  The implementer chooses and records it in the Decision log.
 * One rule test of `plan` for each proof and each reason above.
-* The list mode, on a temporary repo with the fixtures of step 2, names each item with its kind and its proof or reason.  It changes nothing: the branches, worktrees, folders, pid files and processes are the same after the run.
+* The list mode, on a temporary repo with the fixtures of step 3 but without the real `xtask serve`, names each item with its kind and its proof or reason.  It changes nothing: the branches, worktrees, folders, pid files and processes are the same after the run.
 * `--also` refuses `/`, the home folder, the repo root, a relative path and a missing path, each with exit 2 and nothing listed.
 
-### Step 2: `--yes`
+### Step 2: the pid file of `xtask serve`
+
+* `serve::run` writes `<repo root>/target/xtask-serve/<port>.pid` after the bind, with the real port (also for `--port 0`), before the `serving` line.  The repo root is `clean::repo_root` of the current folder.  The file holds `std::process::id()` and a newline.
+* Outside a git repo, `serve` writes no pid file, and says so on stderr.  The `serving` line on stdout stays as it is, since scripts read it.
+* The path comes from `serve::pid_file` (step 1).
+* `serve::run` cannot remove the file when a signal stops it, since it uses the standard library only.  `xtask clean` finds such a stale file.  Add the tech-debt entry for this gap in the same commit (CLAUDE.md, "Debt").
+* Test: start the binary with `serve <folder> --port 0`, with its working folder in a temporary repo.  Read the port from the `serving` line.  Check that `target/xtask-serve/<port>.pid` in that repo holds the child's pid, then stop the child.  The test fails before the change.
+
+### Step 3: `--yes`
 
 `--yes` first prints the list.  Then it removes the removable items in this order:
 
 1. Stop each running `xtask serve`, and remove each pid file.
 2. Gather the survey again, with new facts, and plan again.  A worktree that a stopped server used is then free.  Only items that are removable in this survey go.
-3. Remove each worktree with `git worktree remove <path>` (no `--force`, so git refuses one that changed since the survey).  Run `git worktree prune` only if each prunable worktree is removable.
+3. Remove each worktree with `git worktree remove <path>` (no `--force`, so git refuses one that changed since the survey).  Run `git worktree prune` only if each prunable worktree is removable.  Read the list with `git worktree list --porcelain -z`.
 4. Delete each branch with `git branch -D <b>`.
 5. Remove each run folder, build folder and scratch root with `std::fs::remove_dir_all`.
 
 It prints `removed <item>` for each one, in the form of the list.  A failure prints `failed <item>: <error>`, goes on, and the command exits 1 at the end.  Else it exits 0.
 
-Tests of step 2, in `xtask/tests/clean.rs`.  Fixtures, planted in one temporary repo (parent plan, M1 acceptance):
+Tests of step 3, in `xtask/tests/clean.rs`.  Fixtures, planted in one temporary repo (parent plan, M1 acceptance):
 
 * Branches: `squashed` (two commits; `origin/main` gets a commit with the tree of its tip, made with `git commit-tree`); `unmerged` (a commit not on `origin/main`); `moved-on` (the fake merged PR names it with an older `headRefOid`, and it has one more commit); `merged-pr` (a merged PR with the same tip); `ancestor` (an ancestor of `origin/main`).
 * Worktrees:
   * `target/review/1-reviewer-1` with a changed file (dirty, kept), and `target/review/1-reviewer-2` clean (removable);
   * `target/review/1-reviewer-3`, clean but with an ignored `x.wav` (kept), and `target/review/1-reviewer-4` with an ignored `target/` folder only (removable);
   * `.claude/worktrees/agent-x` clean on branch `agent-x`, an ancestor of `origin/main`, and `target/review/run/agent-x/` with a copied log: the worktree, the branch and the run folder all go in one run;
+  * `.claude/worktrees/agent-y` clean on branch `agent-y` with a commit not on `origin/main` (kept: "not merged");
   * a clean worktree with a `sleep` child that holds a file in it open (kept: "a process uses it");
   * a detached worktree on a commit that no ref holds (kept);
   * a linked worktree outside the two roots, on branch `ancestor-wt`, an ancestor of `origin/main` (the branch is kept: a current branch);
   * a worktree whose folder the test deletes, so it is prunable (removable).
-* Pid files: one whose pid has ended (stale); one whose pid runs `sleep` (another program; the test checks that `sleep` still runs after `--yes`, then stops it); one of a real `xtask serve` that step 3 writes, started with its working folder in a clean worktree under `target/review/` (`--yes` stops it, and the worktree goes in the same run).
-* Run folders: `target/review/run/old` whose `log.md` equals a committed `docs/reviews/old-m1.md` (removable); `target/review/run/nolog-copy` whose `log.md` has no copy (kept); `target/review/run/open-pr` with a copy but an open PR (kept); a run folder with round `2` that has `state.json` and no `findings.md`, and a clean worktree `target/review/2-reviewer-1` (kept).
+* Pid files: one whose pid has ended (stale); one whose pid is a zombie (stale); one whose pid runs `sleep` (another program; the test checks that `sleep` still runs after `--yes`, then stops it); one of a real `xtask serve` that step 2 writes, started with its working folder in a clean worktree under `target/review/` (`--yes` stops it, and the worktree goes in the same run).  The test reaps that child in a thread, so it does not stay a zombie.
+* Run folders: `target/review/run/old` whose `log.md` equals a committed `docs/reviews/old-m1.md` (removable); `target/review/run/nolog-copy` whose `log.md` has no copy (kept); `target/review/run/open-pr` with a copy but an open PR (kept); the run folder of the main checkout's branch with round `2` that has `state.json` and no `findings.md`, and a clean worktree `target/review/2-reviewer-1` (both kept); a run folder `other` of no worktree with an open round `3`, and a clean worktree `target/review/3-reviewer-1` (the worktree is removable).
 * Build output: `target/e2e/x` and `app/dist/index.html`.
-* Scratch root: a folder under the temp folder given with `--also` (removable).
+* Scratch roots: a folder under the temp folder given with `--also` (removable); a second one in which a `sleep` child holds a file open (kept).
 
 Tests:
 
 * `--yes` removes exactly the removable items, and keeps each kept item.  The test checks the files, `git branch`, `git worktree list` and the processes.
 * A second run after `--yes` prints `nothing to remove`.
 * With `gh` failing, the run folders that need the open PRs are kept with "cannot read open PRs", and `merged-pr` is kept; the tree proof still removes `squashed`.
-
-### Step 3: the pid file of `xtask serve`
-
-* `serve::run` writes `<repo root>/target/xtask-serve/<port>.pid` after the bind, with the real port (also for `--port 0`), before the `serving` line.  The repo root is `clean::repo_root` of the current folder.  The file holds `std::process::id()` and a newline.
-* Outside a git repo, `serve` writes no pid file, and says so on stderr.  The `serving` line on stdout stays as it is, since scripts read it.
-* Put the path in one function, `serve::pid_file(root, port)`, that `clean.rs` also uses.
-* `serve::run` cannot remove the file when a signal stops it, since it uses the standard library only.  `xtask clean` finds such a stale file.
-* Test: start the binary with `serve <folder> --port 0`, with its working folder in a temporary repo.  Read the port from the `serving` line.  Check that `target/xtask-serve/<port>.pid` in that repo holds the child's pid, then stop the child.  The test fails before the change.
 
 ### Step 4: `xtask review clean <round>`
 
@@ -171,11 +177,11 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 
 * `docs/working-with-agents.md`: a line in "Review a change" (the skill removes a round's worktrees), a recipe line for cleanup, and a changelog line for M1.  Say that `cargo clean` stays a manual step, and that the D7 entry covers only `cargo run -p xtask -- clean --yes`, so a run with `--also` asks for approval.
 * `README.md`: add a short line for `xtask clean` beside the other xtask commands, if its section lists them.
-* `docs/tech-debt.md`: an entry for each gap that M1 leaves.  Candidates: the pid file stays after a signal; `lsof` or `gh` missing keeps items; an agent that builds with no file open in its worktree is not seen as a user of it, and only the open-round test protects it.
+* `docs/tech-debt.md`: an entry for each gap that M1 leaves, in the commit that leaves it.  Candidates: `lsof` or `gh` missing keeps items; an agent that builds with no file open in its worktree is not seen as a user of it, and only the open-round test protects it.
 * The implementer gives the team leader, as text, not as a commit:
-  * the new lines of `.claude/skills/review-rounds/SKILL.md`: at the end of step 11, after the two tables, run `target/debug/xtask review clean $1`.  If auto mode or a person refuses it, give the command to the person and go on.  Its approval comes after the counts of step 9, so the round's counts do not include it.  If the Write tool refused the log, the caller runs the command when it writes the log.
+  * the new lines of `.claude/skills/review-rounds/SKILL.md`: at the end of step 11, after the two tables, run `target/debug/xtask review clean $1`.  If auto mode or a person refuses it, give the command to the person and go on.  It runs after the findings file, where the approvals window of step 11 ends, so the round's counts do not include its approval.  If the Write tool refused the log, the caller runs the command when it writes the log.
   * the line to add to `REVIEW_SKILL_TEXT` in `xtask/tests/rules.rs` (`target/debug/xtask review clean $1`), with the comment change;
-  * the guard change in `.claude/hooks/read-only-bash.sh`, so `check_xtask_words` refuses `clean` too, and its cases in `xtask/tests/rules.rs` (`target/debug/xtask clean --yes` and `cargo run -p xtask -- clean` refused).
+  * the guard change in `.claude/hooks/read-only-bash.sh`, so `check_xtask_words` refuses `clean` too, its header comment names `clean`, and its cases in `xtask/tests/rules.rs` (`target/debug/xtask clean --yes` and `cargo run -p xtask -- clean` refused).
 * The orchestrator lands the guard change before round 1, so no review agent of M1 can run `xtask clean --yes` on this repo.  A removed branch would also fail `review check`.
 
 ### Step 6: review rounds
@@ -198,7 +204,8 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 ## Progress
 
 * [x] 2026-10-31: plan written (`88cc3cd`).
-* [x] 2026-10-31: plan review round 1 (one `Plan` agent): 2 blockers, 8 should-fix and 7 nits.  All fixed in this plan.
+* [x] 2026-10-31: plan review round 1 (one `Plan` agent): 2 blockers, 8 should-fix and 7 nits.  All fixed in this plan (`3f77c8b`).
+* [x] 2026-10-31: plan review round 2 (a new `Plan` agent): 1 blocker, 5 should-fix and 5 nits.  All fixed in this plan.  The review stops at its cap of 2 rounds.
 
 ## Surprises and discoveries
 
@@ -213,6 +220,9 @@ None yet.
 * 2026-10-31, team leader: the guard change for `xtask clean` is the orchestrator's, since it is under `.claude/`.  It must land before round 1.
 * 2026-10-31, team leader: the parent plan's "a second run lists nothing" means that a second run lists nothing to remove.  The kept items stay in the list, with their reasons, as the parent plan's "the list mode names each one" needs.
 * 2026-10-31, team leader: a process "uses" a worktree if it has its working folder or an open file there (`lsof -F n`), not only its working folder.  A reviewer builds from the main checkout, so the open-round test also protects a worktree while its round runs.
+* 2026-10-31, team leader: `--yes` runs `git worktree prune` only if each prunable worktree is removable, though the parent plan says "then `git worktree prune`".  A prune acts on the whole repo, and can drop a moved worktree outside the two roots.
+* 2026-10-31, team leader: a worktree under `.claude/worktrees/` goes only when its work is merged.  A running Claude Code agent keeps no file open between tool calls.
+* 2026-10-31, team leader: the plan review stopped at its cap of 2 rounds.  Round 2's findings are fixed in this plan, with no third review.
 * 2026-10-31, team leader: a pid runs `xtask serve` only if its command line says so and it listens on the port of the file.  So a reused pid is not stopped.
 
 ## Outcomes and retrospective
