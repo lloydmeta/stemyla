@@ -44,3 +44,4 @@ target/
 # file, the copy builds with the newest versions, and can fail
 # (no_tracked_file_is_ignored).
 !/Cargo.lock
+!/CLAUDE.md
