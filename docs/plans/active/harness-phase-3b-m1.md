@@ -89,7 +89,7 @@ The rules for each kind (parent plan, M1):
    * The pid runs `xtask serve` if its command line (`ps`) has a word whose last path part is `xtask`, then the word `serve`, and the pid listens on `<port>` (`lsof`).  Then the item is "a running xtask serve on port <port>".  `--yes` sends `kill <pid>` (SIGTERM), and waits up to 5 s for the pid to end (no pid, or a zombie).  Then it removes the file.  If the pid still runs after 5 s, it prints `failed`, keeps the file, and the command exits 1.
    * If the pid runs another program, or no program, or does not listen on the port, the file is stale.  `--yes` removes the file only, and never signals the pid.  A file that does not hold a pid is stale too.
 6. Scratch roots: each `--also <path>`.
-   * The path must be absolute and must exist as a folder.  Its canonical form must be under the canonical temp folder (`std::env::temp_dir()`, `/tmp` or `/private/tmp`), and must not be one of those folders.  It must not be the repo root or a folder that holds it.  It must not be in a worktree of this repo (`git worktree list`).  Else the command refuses before it lists anything, and exits 2.
+   * The path must be absolute and must exist as a folder.  Its canonical form must be under the canonical temp folder (`std::env::temp_dir()`, `/tmp` or `/private/tmp`), and must not be one of those folders.  It must not be the repo root or a folder that holds it.  It must not be in a worktree of this repo (`git worktree list`).  The same folder twice is one scratch root.  A folder in another `--also` folder is refused.  Else the command refuses before it lists anything, and exits 2.
    * A valid scratch root is removable as a whole, with its size, if no path in `open_paths` is in it and it holds no worktree of this repo (`git worktree list`).  Else it is kept with the reason.  Its contents are scratch, since a plan names it, but a live session may still use it.
 
 Never removed, in any case: a worktree with changes or ignored files, a branch that has no proof, a current branch of a worktree that stays, a file or folder outside the repo but a valid `--also` root, and `target/` as a whole.
@@ -231,6 +231,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 2 (at `32df7e0`, no `--baseline`): 4 should-fix confirmed (2-1, 2-2, 2-3, 2-8) and 6 nits, no blocker; no missed mutant.  Each confirmed finding and the nits 2-4 to 2-10 are fixed in `64aeb11` to `4645e64`; 2-7 and 2-9 went to the orchestrator as a diff.  Round 3 follows.
 * [x] 2026-10-31: review round 3 fix of 3-1: a prunable worktree whose folder still exists is kept, since only its `.git` file is gone (implementer).
 * [x] 2026-10-31: review round 3 fixes of 3-6, 3-7 and 3-9: `gather` stores the canonical roots and links in the survey, so `plan` is pure again; the total test has sizes that differ; a list test with a linked `.claude/` (implementer).
+* [x] 2026-10-31: review round 3 fix of 3-2: the same `--also` folder twice is one scratch root, and a folder in another `--also` folder is refused (implementer).
 
 ## Surprises and discoveries
 
@@ -253,6 +254,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 2-10 failed first: the total of a worktree and the worktree in it was 30 B, not 20 B.  2-5 changes no behaviour, so the nested tests of 1-b1 cover it.
 * 2026-10-31, implementer: the test of 3-1 failed first: a worktree with no `.git` file was removable as "prunable: its folder is gone", and `--yes` failed on it with exit 1.
 * 2026-10-31, implementer: the test of 3-6 did not build first (no stored roots).  The tests of 3-7 and 3-9 cover code that was right, and failed first with their mutants: `w.starts_with(p)` in the total, and no `canonical` on the `.claude/worktrees` root.  A first try of the 3-9 test passed with the mutant: `git add -A` had committed the `.claude` link on a branch, and `git switch main` then deleted it.
+* 2026-10-31, implementer: the test of 3-2 failed first: the same folder twice gave two scratch items.
 
 ## Decision log
 

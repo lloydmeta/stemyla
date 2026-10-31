@@ -1330,3 +1330,43 @@ fn the_list_finds_agent_worktrees_through_a_linked_claude_folder() {
         "git lists the path through the link: {listing}"
     );
 }
+
+#[test]
+fn also_takes_a_path_once_and_refuses_one_inside_another() {
+    let f = Fixture::empty("also-twice");
+    let scratch = f.top.join("scratch");
+    write(&scratch.join("sub/a.txt"), "a");
+    let path = scratch.to_str().unwrap().to_string();
+    let sub = scratch.join("sub").to_str().unwrap().to_string();
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let also = |paths: &[&str]| -> Vec<String> {
+        paths
+            .iter()
+            .flat_map(|p| ["--also".to_string(), p.to_string()])
+            .collect()
+    };
+    let out = f.clean(&also(&[&path, &format!("{path}/")]));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let (removable, _) = parts(&text(&out.stdout));
+    let scratch_items: Vec<&String> = removable
+        .iter()
+        .filter(|l| l.starts_with("scratch "))
+        .collect();
+    assert_eq!(
+        scratch_items,
+        [&format!(
+            "scratch {path} (1 B): a scratch root named with --also"
+        )]
+    );
+
+    for paths in [[path.as_str(), sub.as_str()], [sub.as_str(), path.as_str()]] {
+        let out = f.clean(&also(&paths));
+        assert_eq!(out.status.code(), Some(2), "{paths:?}: {out:?}");
+        assert_eq!(text(&out.stdout), "", "{paths:?} listed items");
+        assert!(text(&out.stderr).starts_with("--also "), "{out:?}");
+    }
+}

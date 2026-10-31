@@ -732,11 +732,27 @@ pub fn main(args: &[String]) -> i32 {
     let mut also = Vec::new();
     for arg in &options.also {
         match check_also(arg, &root, &worktrees) {
+            // The same folder twice is one scratch root.
+            Ok(path) if also.contains(&path) => {}
             Ok(path) => also.push(path),
             Err(e) => {
                 eprintln!("{e}");
                 return REFUSED;
             }
+        }
+    }
+    // `--yes` would remove a folder in another scratch root twice.
+    for inner in &also {
+        if let Some(outer) = also
+            .iter()
+            .find(|outer| *outer != inner && inner.starts_with(outer))
+        {
+            eprintln!(
+                "--also {}: the path is in the scratch root {}",
+                inner.display(),
+                outer.display()
+            );
+            return REFUSED;
         }
     }
     match run(&root, &also, &options) {
