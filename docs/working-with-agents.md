@@ -75,7 +75,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 ### Review a change
 
 * Prompt: "Run `cargo build -p xtask`, then `/review-rounds main 1 "<criteria>"`, then rounds 2 and 3."  The skill's first line runs `target/debug/xtask`, which fails with exit 127 if the binary is missing.
-* The skill: `/review-rounds <base> <round> "<criteria>" [--review-only] [--baseline]`.  The criteria are one section of a plan (`file#heading`), or the messages of commits (`commits:<range>`).  `--review-only` stops the round after the findings file.  `--baseline` also runs the frozen `baseline` review, to compare with.
+* The skill: `/review-rounds <base> <round> "<criteria>" [--review-only] [--baseline]`.  The criteria are one section of a plan (`file#heading`), or the messages of commits (`commits:<range>`).  With `--review-only`, the agent runs `review clean` after the findings file, and then stops the round.  `--baseline` also runs the frozen `baseline` review, to compare with.
 * The agent, in each round:
   1. `xtask review start` refuses a tree with changes ("commit first"), and chooses the reviewers.
   2. cargo-mutants runs in the background (`xtask review mutants`).
@@ -83,7 +83,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
   4. A `validator` tries to disprove each blocker and should-fix, and the missed mutants.
   5. `xtask review check` stops the round if the repo changed in a way that a review must not cause.
   6. The agent writes the findings file in the run folder under `target/review/run/`.  It fixes each found finding, with a failing test first where the finding is about behaviour.  A `pre-existing` finding can go to `docs/tech-debt.md` or its own PR.  It commits "review round <n> fixes", and adds the round to the log.
-  7. After the log, the agent runs `target/debug/xtask review clean <round>`.  It removes the worktrees of the round's agents under `target/review/`.  If auto mode or a person refuses it, the agent gives the command, and goes on.
+  7. After the log, the agent runs `target/debug/xtask review clean <round>`.  It removes the worktrees of the round's agents under `target/review/`.  If auto mode or a person refuses it, the agent gives the command, and goes on.  A subagent whose log the Write tool refuses gives the command to its caller.  The caller runs it after it writes the log.
 * Check: the refuted findings, the unproven blockers and should-fix, each `repeat-of`, and each mutants line.  The PR description lists them.
 * From the PR after phase 3's, pass `--baseline` in round 1, until the Progress of `plans/active/harness-engineering.md` records the gate.
 * The skill runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` asks for approval once in each round, and a late `review mutants` can ask too.  Approve each one once, not with "don't ask again".  Step 11 of the skill counts these late review commands in their own cell (TD-36).  "Don't ask again" changes the local settings file of Claude Code, and `review check` then fails the round.
@@ -95,7 +95,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 
 * Prompt: "Run `cargo run -p xtask -- clean`, and show me the list."  Then, if the list is right: "Run it with --yes."  Fetch first (`git fetch origin`), since the proofs of a merge read `origin/main`.
 * The agent: the list names each item, with its size and the proof that makes it safe, or the reason to keep it.  An item is a worktree, a run folder, a local branch, build output, a pid file of `xtask serve` or a scratch root.  `--yes` removes only the items with a proof.  It also stops each running `xtask serve` of this repo.  It prints the tip of each branch that it deletes, so `git branch <name> <sha>` brings it back.
-* Check: read the kept items.  A branch with "no proof that it is merged" stays until you delete it.  A worktree with changes stays.  A worktree with ignored files outside its own `target/` stays too.  Warning: the unattended `clean --yes` of the orchestrator also stops an `xtask serve` that a person started in this repo.  `cargo clean` stays a manual step: `xtask clean` prints the size of `target/` only.
+* Check: read the kept items.  A branch with "no proof that it is merged" stays until you delete it.  A worktree with changes stays.  A worktree with ignored files outside its own `target/` stays too, and so does a worktree that holds a worktree that stays.  Warning: the unattended `clean --yes` of the orchestrator also stops an `xtask serve` that a person started in this repo.  `cargo clean` stays a manual step: `xtask clean` prints the size of `target/` only.
 * The maintainer's `autoMode.allow` entry (D7 of `plans/active/harness-phase-3b.md`) covers only `cargo run -p xtask -- clean --yes`.  So a run with `--also <path>`, which names a scratch root in the temporary folder, asks for approval.
 
 ### Record a decision or a gap

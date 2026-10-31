@@ -327,31 +327,26 @@ pub fn plan(s: &Survey) -> Vec<Item> {
         })
         .collect();
     // `git worktree remove` deletes each worktree under the one that it
-    // removes.  So a worktree that holds a worktree that stays stays too,
-    // until no verdict changes.
-    loop {
-        let staying_paths: Vec<&Path> = outside
-            .iter()
-            .map(|w| w.path.as_path())
-            .chain(
-                decided
-                    .iter()
-                    .filter(|(_, v)| !matches!(v, Verdict::Removable(_)))
-                    .map(|(w, _)| w.path.as_path()),
-            )
-            .collect();
-        let mut changed = false;
-        for (w, verdict) in &mut decided {
-            let holds = staying_paths
+    // removes.  So a worktree that holds a worktree that stays stays too.
+    // One pass is enough.  A path under a worktree is also under each
+    // worktree above it, so each of those holds the worktree that stays.  A
+    // removable worktree is not in `staying_paths`, so it does not hold
+    // itself.
+    let staying_paths: Vec<PathBuf> = outside
+        .iter()
+        .map(|w| w.path.clone())
+        .chain(
+            decided
                 .iter()
-                .any(|p| *p != w.path && p.starts_with(&w.path));
-            if matches!(verdict, Verdict::Removable(_)) && holds {
-                *verdict = Verdict::Kept("holds a worktree that stays".to_string());
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
+                .filter(|(_, v)| !matches!(v, Verdict::Removable(_)))
+                .map(|(w, _)| w.path.clone()),
+        )
+        .collect();
+    for (w, verdict) in &mut decided {
+        if matches!(verdict, Verdict::Removable(_))
+            && staying_paths.iter().any(|p| p.starts_with(&w.path))
+        {
+            *verdict = Verdict::Kept("holds a worktree that stays".to_string());
         }
     }
 
@@ -581,7 +576,23 @@ pub fn report(items: &[Item], target_size: u64, also: &[String]) -> Vec<String> 
     if removable.is_empty() {
         lines.push("nothing to remove".to_string());
     } else {
-        let total: u64 = removable.iter().filter_map(|i| i.size).sum();
+        // A removable worktree under another one is in that one's size.
+        let worktrees: Vec<&Path> = removable
+            .iter()
+            .filter(|i| i.kind == Kind::Worktree)
+            .filter_map(|i| i.path.as_deref())
+            .collect();
+        let nested = |i: &Item| {
+            i.kind == Kind::Worktree
+                && i.path
+                    .as_deref()
+                    .is_some_and(|p| worktrees.iter().any(|w| *w != p && p.starts_with(w)))
+        };
+        let total: u64 = removable
+            .iter()
+            .filter(|i| !nested(i))
+            .filter_map(|i| i.size)
+            .sum();
         lines.push(format!(
             "can remove ({} items, {}):",
             removable.len(),
@@ -2507,5 +2518,20 @@ mod tests {
         let link = dir.join("link").symlink_metadata().unwrap().len();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(size, 9 + link);
+    }
+
+    #[test]
+    fn the_total_counts_a_nested_removable_worktree_once() {
+        let mut s = survey();
+        s.worktrees.push(worktree("target/review/1-reviewer-1", 1));
+        s.worktrees.push(worktree(
+            "target/review/1-reviewer-1/target/review/1-reviewer-2",
+            1,
+        ));
+        s.worktrees.push(worktree("target/review/1-reviewer-10", 1));
+        let lines = report(&plan(&s), 0, &[]);
+        // Each worktree has 10 bytes, and the nested one is in the 10 of the
+        // worktree that holds it.
+        assert_eq!(lines[0], "can remove (3 items, 20 B):", "{lines:#?}");
     }
 }

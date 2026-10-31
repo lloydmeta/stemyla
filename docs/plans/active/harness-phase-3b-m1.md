@@ -52,7 +52,7 @@ Split the code in two parts, so the tests can check the rules without the networ
 * `gather(root, facts) -> Survey`: reads the repo at `root` with `git` and the file system, and takes the facts from its argument.
 * `plan(&Survey) -> Vec<Item>`: a pure function.  Each `Item` has a kind, a path or name, a size in bytes (for a folder), and `Removable(proof)` or `Kept(reason)`.
 * `Facts` holds `open_prs: Option<Vec<String>>` (head branch names), `merged_prs: Option<Vec<(String, String)>>` (head branch name, `headRefOid`), the command line of a pid, the pid that listens on a TCP port, and `open_paths: Option<Vec<PathBuf>>`: each open file and working folder of each process.  `None` means that the fact is unknown, and an item that needs it is kept with the reason "cannot read <fact>".
-* `main` gathers the real facts: `gh pr list --state open --json headRefName --limit 500` and `gh pr list --state merged --json headRefName,headRefOid --limit 1000`, both run in the repo root; `ps -p <pid> -o command=`; `ps -p <pid> -o stat=`; `lsof -n -P -a -p <pid> -iTCP:<port> -sTCP:LISTEN -t`; `lsof -n -P -F n` (each line that starts with `n` and then `/`, which holds the `cwd`, `txt` and open file entries).  Canonicalise each path from `lsof` and each path that it is compared with.
+* `main` gathers the real facts: `gh pr list --state open --json headRefName --limit 500` and `gh pr list --state merged --json headRefName,headRefOid --limit 1000`, both run in the repo root; `ps -p <pid> -o command=`; `ps -p <pid> -o stat=`; `lsof -w -n -P -a -p <pid> -iTCP:<port> -sTCP:LISTEN -t`; `lsof -w -n -P -F n` (each line that starts with `n` and then `/`, which holds the `cwd`, `txt` and open file entries).  Canonicalise each path from `lsof` and each path that it is compared with.
 * `ps` and `lsof` exit 1 also when nothing matches: a pid that has ended, or a pid that does not listen.  So exit 1 with empty stdout and empty stderr is the answer "no", not an unknown fact.  A fact is `None` only when the program cannot start, or exits with text on stderr.  `lsof -n -P -F n` counts as read when its output has `p` lines.  CI's `test` job runs on Ubuntu, so the tests must pass with the `ps` and `lsof` of both systems.
 * A pid whose `stat` starts with `Z` (a zombie) has ended.
 * Step 1 also adds `serve::pid_file(root, port)`, the path `<root>/target/xtask-serve/<port>.pid`, which step 2 writes and `clean.rs` reads.
@@ -72,7 +72,8 @@ The rules for each kind (parent plan, M1):
      * no review round is open for it: a worktree `target/review/<r>-...` is kept while the run folder of a worktree that stays has a round `<r>` with `state.json` and no `findings.md`.  The run folder of a worktree is its branch with `/` as `-`, or `detached-<short sha>` for a detached one.  Only the worktrees outside the two roots count here, since the reviewers' worktrees are detached scratch copies.  So an old run folder from another branch does not keep the worktrees of its round number forever;
      * its `HEAD` is reachable from a ref that is not a branch that this run deletes: `git for-each-ref --contains <sha>` gives such a ref.  Removing a worktree keeps its branch, so a worktree on a branch passes.  A detached `HEAD` that no ref contains is kept, because its commits would be lost;
      * for a worktree under `.claude/worktrees/` only: its `HEAD` is an ancestor of `origin/main`, or its branch is removable by a proof of rule 4.  A Claude Code agent with `isolation: worktree` keeps no file open between its tool calls, so the process test cannot see it.  Its work is safe to lose only when it is merged.
-   * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", "its HEAD <sha> is on no ref", or "not merged" (`.claude/worktrees/` only).
+     * no worktree that stays is under its path, since `git worktree remove` deletes it.  A worktree that stays is one outside the two roots, or one that this rule keeps;
+   * Kept, with the reason: "has changes", "holds ignored files", "locked", "a process uses it", "cannot read processes", "round <r> of <run> has no findings.md", "its HEAD <sha> is on no ref", "not merged" (`.claude/worktrees/` only), or "holds a worktree that stays".
    * A worktree that `git worktree list` marks `prunable` (its folder is gone): removable as "prunable" only if it is under one of the two roots and its `HEAD` passes the ref test.  Else kept, with the advice to run `git worktree repair` or prune by hand.
 3. Build output: `target/e2e/` and `app/dist/`, when they exist.  Always removable, with their size.
 4. Local branches: each `refs/heads/<b>`.
@@ -225,6 +226,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 2 fix of 2-1: `--yes` removes a worktree through `clean::remove_worktree`, with a test on a worktree with changes (implementer).
 * [x] 2026-10-31: review round 2 fix of 2-2: a test of a pid file whose `xtask serve` does not listen on its port, and of `-a` and `-sTCP:LISTEN` in the `lsof` words (implementer).
 * [x] 2026-10-31: review round 2 fix of 2-3: `plan` and `gather` make the two roots canonical, so a linked `target/` keeps its reviewer worktrees in the list (implementer).
+* [x] 2026-10-31: review round 2 fixes of 2-4, 2-5, 2-6, 2-8 and 2-10: the `lsof -w` texts, one pass for the nested rule, the guide on `--review-only` and a refused log, the nested rule in the plan and the guide, and a total that counts a nested worktree once (implementer).
 
 ## Surprises and discoveries
 
@@ -244,6 +246,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 2-1 did not build first (no `remove_worktree`), and it failed with `--force` added at the call site.
 * 2026-10-31, implementer: the code of 2-2 was right, so its tests failed first with the mutants of the finding: `Process::Serve` for `Answer::No` in `probe`, and no `-a` in `lsof_listen_args`.  Both stopped the server.
 * 2026-10-31, implementer: the test of 2-3 failed first: with a linked `target/`, the list had no worktree items.  A path through a linked `target/` or `.claude/` now shows as under it.
+* 2026-10-31, implementer: the test of 2-10 failed first: the total of a worktree and the worktree in it was 30 B, not 20 B.  2-5 changes no behaviour, so the nested tests of 1-b1 cover it.
 
 ## Decision log
 
