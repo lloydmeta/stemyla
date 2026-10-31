@@ -302,6 +302,8 @@ Kick-off prompt:
   * 0026, from round 2: tier `commit` reads the commit's own changes, not the branch's diff against `main`.  On a long branch, the branch's diff selects almost every check, so the decision would save no time.
   * 0026, from round 3: tier `push` runs the fmt, clippy, test, `docs-check` and Trunk build lines of the Commands, not `serve`, `web-test`, `e2e` or `publish`.  `publish` is for a person only (GIT-1).
   * None of these changes what the maintainer accepted.  The PR lists them under "Needs your attention".
+* 2026-10-31, agent: the M1 team proposed four changes to the M1 section, and the orchestrator applied them (`cfaf8fd`).  Reason: the team found that `git worktree prune` is not needed, and that three cases need a stricter rule.
+* 2026-10-31, agent: commits `b7e1088` and `849ec8e` describe the skill's `review clean` step and the guard before `d0164ea` adds them (DOC-1, review finding 1-11 of M1).  History is not rewritten; the PR body notes it.
 * 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 
 ## Outcomes and retrospective
