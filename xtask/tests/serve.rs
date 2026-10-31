@@ -114,3 +114,104 @@ fn injects_at_the_start_without_a_head() {
         "<script></script><p>hi</p>"
     );
 }
+
+/// The `xtask serve` binary, stopped and reaped when the test ends, also
+/// when an assert fails.
+struct Server(std::process::Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Starts `xtask serve <site> --port 0` in `dir`, and gives the server and
+/// its first line on stdout.
+fn start_serve(dir: &std::path::Path, site: &std::path::Path) -> (Server, String) {
+    use std::io::BufRead;
+    let mut server = Server(
+        std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(["serve", site.to_str().unwrap(), "--port", "0"])
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    std::io::BufReader::new(server.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    (server, line)
+}
+
+/// The port of a line `serving <dir> at http://127.0.0.1:<port>/`.
+fn port_of(line: &str) -> u16 {
+    line.trim()
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.strip_suffix('/'))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no port in {line:?}"))
+}
+
+#[test]
+fn serve_writes_its_pid_file_in_the_repo() {
+    let dir = std::env::temp_dir().join(format!("xtask-serve-pid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let repo = dir.join("repo");
+    let site = dir.join("site");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(site.join("index.html"), "<p>hi</p>").unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .unwrap();
+    assert!(init.success());
+
+    let (server, line) = start_serve(&repo.join("sub"), &site);
+    assert!(line.starts_with("serving "), "{line:?}");
+    let port = port_of(&line);
+    let root = repo.canonicalize().unwrap();
+    let pid_file = xtask::serve::pid_file(&root, port);
+    assert_eq!(
+        pid_file,
+        root.join(format!("target/xtask-serve/{port}.pid"))
+    );
+    let text = std::fs::read_to_string(&pid_file)
+        .unwrap_or_else(|e| panic!("{}: {e}", pid_file.display()));
+    assert_eq!(text, format!("{}\n", server.0.id()));
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn serve_outside_a_repo_writes_no_pid_file_and_says_so() {
+    use std::io::Read;
+    let dir = std::env::temp_dir().join(format!("xtask-serve-norepo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<p>hi</p>").unwrap();
+    let (mut server, line) = start_serve(&dir, &dir);
+    assert!(line.starts_with("serving "), "{line:?}");
+    assert!(!dir.join("target").exists(), "a pid file outside a repo");
+    let _ = server.0.kill();
+    let _ = server.0.wait();
+    let mut stderr = String::new();
+    server
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("no pid file"), "{stderr:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

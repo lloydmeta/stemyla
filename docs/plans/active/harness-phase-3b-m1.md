@@ -207,10 +207,12 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: plan review round 1 (one `Plan` agent): 2 blockers, 8 should-fix and 7 nits.  All fixed in this plan (`3f77c8b`).
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent): 1 blocker, 5 should-fix and 5 nits.  All fixed in this plan.  The review stops at its cap of 2 rounds.
 * [x] 2026-10-31: step 1, the list mode of `xtask clean`, `serve::pid_file`, the `clean` row of the guide and TD-67 (implementer).
+* [x] 2026-10-31: step 2, the pid file of `xtask serve`, and TD-68 (implementer).
 
 ## Surprises and discoveries
 
 * 2026-10-31, implementer: step 1's tests failed first.  The tests of `plan` in `clean.rs` failed 51 of 57 with a `plan` that gave no items; the other 6 test helpers.  The tests in `xtask/tests/clean.rs` failed with "unknown command clean" before the arm in `main.rs`.
+* 2026-10-31, implementer: step 2's two tests in `xtask/tests/serve.rs` failed first.  The pid file was missing, and stderr did not say "no pid file" outside a repo.
 * 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
 
 ## Decision log

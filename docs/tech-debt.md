@@ -400,6 +400,14 @@ This entry concerns no rule.  It concerns `xtask clean` (`plans/active/harness-p
 
 * Fix: no check is planned.  Run `xtask clean --yes` between milestones, when no agent runs.
 
+### TD-68: a stopped `xtask serve` leaves its pid file
+
+This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
+
+`xtask serve` writes its pid file in `target/xtask-serve/` of the repo (`serve::pid_file`).  It uses the standard library only, so it cannot remove the file when a signal stops it.  So each stopped server leaves a stale file.  `xtask clean` lists such a file as stale, and `--yes` removes it.  A new server on the same port writes over the file.
+
+* Fix: no fix is planned.  A signal handler needs a new crate (DEPS-1) or unsafe code.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
