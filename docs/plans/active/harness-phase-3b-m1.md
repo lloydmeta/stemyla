@@ -210,6 +210,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: step 2, the pid file of `xtask serve`, and TD-68 (implementer).
 * [x] 2026-10-31: step 3, `xtask clean --yes` (implementer).
 * [x] 2026-10-31: step 4, `xtask review clean <round>`, and its row in the guide (implementer).
+* [x] 2026-10-31: step 5, the guide and `README.md`.  The texts for the skill, `xtask/tests/rules.rs` and the guard went to the team leader, checked in a scratch worktree: `cargo test -p xtask --test rules` passed with all three, and failed without the two files under `.claude/` (implementer).
 
 ## Surprises and discoveries
 
@@ -241,6 +242,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: `--yes` never runs `git worktree prune`.  It removes each removable prunable worktree with `git worktree remove`, as it does the others.  So it never acts on a worktree that it did not name, and a prunable worktree that stays does not stop the others.
 * 2026-10-31, implementer: if `git worktree remove` fails, `--yes` does not delete that worktree's branch or remove its run folder, and prints `failed` for each.  The survey decided them as if the worktree went.
 * 2026-10-31, implementer: `--yes` acts on the pid files of the first survey only.  The second survey gives the other items.
+* 2026-10-31, implementer: the guide says that the skill runs `review clean`, and that the guard refuses `xtask clean`.  Both are true only when the orchestrator lands the texts of step 5, which the plan puts before round 1.
 * 2026-10-31, implementer: `review clean` runs no `git worktree prune`, and prints no `pruned` line.  `git worktree remove --force` also removes a registered worktree whose folder is gone, so a prune is not needed.  A prune acts on each worktree of the repo.  The test isolates git from the person's config, so the helpers in `xtask/tests/review.rs` now set `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
 
 ## Outcomes and retrospective
