@@ -82,9 +82,10 @@ The rules for each kind (parent plan, M1):
    * Removable when one proof holds, and the item names the proof:
      * its tip is an ancestor of `origin/main` (`git merge-base --is-ancestor`);
      * its tip's tree equals the tree of a commit on `origin/main` that the tip does not hold (`git log --format=%T <tip>..origin/main`): a squash merge;
-     * a merged PR has head branch `<b>` and `headRefOid` equal to the tip.
-   * Else kept: "no proof that it is merged".  A branch whose name matches a merged PR but whose tip differs is kept, because it has commits after the merge.
-   * With no `origin/main`, the first two proofs are unknown; the third still holds.
+     * a merged PR has head branch `<b>` and `headRefOid` equal to the tip;
+     * its tip is an ancestor of the `headRefOid` of a merged PR, and git has that commit (`git cat-file --batch-check`, then `git merge-base --is-ancestor`).  An agent branch, such as `worktree-agent-*`, ends in the middle of a PR, so after a squash merge only this proof holds.  Only a branch with no other proof is tested.  A PR head that git does not have proves nothing.
+   * Else kept: "no proof that it is merged".  A branch with a commit after a merged PR's head is kept, because that commit is in no PR.
+   * With no `origin/main`, the first two proofs are unknown; the last two still hold.
 5. Pid files: each file `target/xtask-serve/<port>.pid` (step 2 writes them).
    * The pid runs `xtask serve` if its command line (`ps`) has a word whose last path part is `xtask`, then the word `serve`, and the pid listens on `<port>` (`lsof`).  Then the item is "a running xtask serve on port <port>".  `--yes` sends `kill <pid>` (SIGTERM), and waits up to 5 s for the pid to end (no pid, or a zombie).  Then it removes the file.  If the pid still runs after 5 s, it prints `failed`, keeps the file, and the command exits 1.
    * If the pid runs another program, or no program, or does not listen on the port, the file is stale.  `--yes` removes the file only, and never signals the pid.  A file that does not hold a pid is stale too.
@@ -237,6 +238,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 3 (at `bedfd00`): 3 should-fix confirmed (3-1, 3-6, 3-7) and 6 nits, no blocker; mutants full, none missed.  3-1 fails the acceptance "a second run lists nothing" in a case a user can reach, so the rounds go on to round 4.  The fixes are `65ce7f8` to `1763373`; 3-5 has no fix (Decision log).
 * [x] 2026-10-31: review round 4 (at `281cacf`): no blocker, no should-fix, 6 nits; mutants full, none missed.  The rounds stop here by the stop rule.  The team leader fixed the nits 4-2 to 4-5 in "review round 4 fixes"; 4-1 is the orchestrator's (parent plan), and 4-6 has no fix (the printed command still works).  The orchestrator copies the log to `docs/reviews/harness-phase-3b-m1.md` and removes the run folder (TD-37).
 * [x] 2026-10-31: M1 done.  The review log is in `docs/reviews/harness-phase-3b-m1.md` (`13d597b`), and this plan moves to `plans/completed/`.
+* [x] 2026-10-31: intent review fix (implementer): a fourth branch proof.  A branch whose tip is in the head of a merged PR goes, with its `.claude/worktrees/` worktree, when git has that head commit.
 
 ## Surprises and discoveries
 
@@ -260,6 +262,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 3-1 failed first: a worktree with no `.git` file was removable as "prunable: its folder is gone", and `--yes` failed on it with exit 1.
 * 2026-10-31, implementer: the test of 3-6 did not build first (no stored roots).  The tests of 3-7 and 3-9 cover code that was right, and failed first with their mutants: `w.starts_with(p)` in the total, and no `canonical` on the `.claude/worktrees` root.  A first try of the 3-9 test passed with the mutant: `git add -A` had committed the `.claude` link on a branch, and `git switch main` then deleted it.
 * 2026-10-31, implementer: the test of 3-2 failed first: the same folder twice gave two scratch items.
+* 2026-10-31, implementer: the test of the fourth proof failed first: `worktree-agent-1`, in the middle of a squash-merged PR, had no proof.  The tests of a PR head that git does not have, and of a branch with a commit after the PR head, passed before the fix and after it: they guard the rule "no proof, no removal".
 
 ## Decision log
 
@@ -295,6 +298,7 @@ What M1 achieved:
 * `xtask review clean <round>` removes the worktrees of one round's agents.  The `review-rounds` skill runs it after the log, after the findings file with `--review-only`, or through the caller when the Write tool refuses a file.
 * `xtask serve` writes `target/xtask-serve/<port>.pid`.  The guard refuses `xtask clean` to the review agents.
 * The list mode on this repo changed nothing (Surprises).  The tests run on temporary repos only.
+* The intent review found that `worktree-agent-*` branches had no proof after a squash merge.  A fourth proof fixes it: the tip is in the head of a merged PR that git has.
 
 The review, in numbers (`docs/reviews/harness-phase-3b-m1.md`):
 

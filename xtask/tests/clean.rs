@@ -1370,3 +1370,89 @@ fn also_takes_a_path_once_and_refuses_one_inside_another() {
         assert!(text(&out.stderr).starts_with("--also "), "{out:?}");
     }
 }
+
+/// A repo where branch `feature` (commits f1, f2) merged by squash, with
+/// a tree that is not the tree of f1.  The agent branch `worktree-agent-1`
+/// is at f1, in the middle of the PR.  Gives the fixture and f2.
+fn squashed_pr(name: &str) -> (Fixture, String) {
+    let f = Fixture::empty(name);
+    let repo = &f.repo;
+    let start = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["switch", "-q", "-c", "feature"]);
+    write(&repo.join("f1.txt"), "f1\n");
+    let f1 = commit(repo, "f1");
+    write(&repo.join("f2.txt"), "f2\n");
+    let f2 = commit(repo, "f2");
+    git(repo, &["switch", "-q", "main"]);
+    git(repo, &["branch", "worktree-agent-1", &f1]);
+    let tree = git(repo, &["rev-parse", &format!("{f2}^{{tree}}")]);
+    let squash = git(repo, &["commit-tree", &tree, "-p", &start, "-m", "squash"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &squash]);
+    (f, f2)
+}
+
+#[test]
+fn an_agent_branch_in_a_merged_pr_head_goes_with_its_worktree() {
+    let (f, head) = squashed_pr("pr-head");
+    let repo = &f.repo;
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/agent-1",
+            "worktree-agent-1",
+        ],
+    );
+    // A branch with one more commit after the PR head stays.
+    git(repo, &["switch", "-q", "-c", "moved", &head]);
+    write(&repo.join("f3.txt"), "f3\n");
+    commit(repo, "f3");
+    git(repo, &["switch", "-q", "main"]);
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!(r#"[{{"headRefName":"feature","headRefOid":"{head}"}}]"#),
+    });
+    let short = git(repo, &["rev-parse", "--short", &head]);
+
+    let out = f.clean(&["--yes".to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (removable, kept) = parts(&stdout);
+    assert_item(
+        &removable,
+        "branch worktree-agent-1",
+        &format!("its tip is in merged PR head {short}"),
+    );
+    assert_item(
+        &removable,
+        "worktree .claude/worktrees/agent-1",
+        "clean, unused and merged",
+    );
+    assert_item(&kept, "branch moved", "no proof that it is merged");
+    let left = branches(repo);
+    assert!(!left.contains("worktree-agent-1"), "{stdout}");
+    assert!(left.contains("moved"), "{stdout}");
+    assert!(!repo.join(".claude/worktrees/agent-1").exists());
+}
+
+#[test]
+fn a_merged_pr_head_that_is_not_a_local_object_proves_nothing() {
+    let (f, _) = squashed_pr("pr-head-gone");
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!(
+            r#"[{{"headRefName":"feature","headRefOid":"{}"}}]"#,
+            "1234567890abcdef1234567890abcdef12345678"
+        ),
+    });
+    let out = f.clean(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let (_, kept) = parts(&text(&out.stdout));
+    assert_item(
+        &kept,
+        "branch worktree-agent-1",
+        "no proof that it is merged",
+    );
+}

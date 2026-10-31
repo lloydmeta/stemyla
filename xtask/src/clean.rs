@@ -149,6 +149,9 @@ pub struct Branch {
     /// If the tip's tree is the tree of a commit on `origin/main` that the
     /// tip does not hold (`<tip>..origin/main`).
     pub tree_on_main: Option<bool>,
+    /// The short sha of a merged PR head that holds the tip, when git has
+    /// that commit.  `gather` looks only for a branch with no other proof.
+    pub in_merged_head: Option<String>,
 }
 
 /// A folder `target/review/run/<name>/`.
@@ -447,6 +450,10 @@ fn branch_proof(s: &Survey, b: &Branch) -> Result<String, String> {
         {
             Ok("a merged PR has this branch and tip".to_string())
         }
+        Some(_) if b.in_merged_head.is_some() => Ok(format!(
+            "its tip is in merged PR head {}",
+            b.in_merged_head.as_deref().unwrap_or_default()
+        )),
         Some(_) => Err("no proof that it is merged".to_string()),
     }
 }
@@ -957,7 +964,11 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
             short: String::new(),
             ancestor: ancestor(tip)?,
             tree_on_main: tree_on_main(tip, tree)?,
+            in_merged_head: None,
         });
+    }
+    if let Some(prs) = &facts.merged_prs {
+        find_merged_heads(root, &mut branches, prs)?;
     }
     let shas: Vec<String> = worktrees
         .iter()
@@ -1093,6 +1104,87 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
             .map(|folder| (folder.to_string(), canonical(&root.join(folder))))
             .collect(),
     })
+}
+
+/// Sets `in_merged_head` of each branch that no other proof covers, when
+/// its tip is an ancestor of the head of a merged PR.  A PR head that git
+/// does not have proves nothing.  An agent branch, such as
+/// `worktree-agent-*`, ends in the middle of a PR, so after a squash merge
+/// only this proof holds.
+fn find_merged_heads(root: &Path, branches: &mut [Branch], prs: &[(String, String)]) -> Result<()> {
+    let proven = |b: &Branch| {
+        b.ancestor == Some(true)
+            || b.tree_on_main == Some(true)
+            || prs
+                .iter()
+                .any(|(head, oid)| *head == b.name && *oid == b.tip)
+    };
+    if branches.iter().all(proven) {
+        return Ok(());
+    }
+    let oids: BTreeSet<&str> = prs
+        .iter()
+        .map(|(_, oid)| oid.as_str())
+        .filter(|oid| oid.len() == 40 && oid.bytes().all(|c| c.is_ascii_hexdigit()))
+        .collect();
+    let local = local_commits(root, &oids)?;
+    if local.is_empty() {
+        return Ok(());
+    }
+    // One walk finds each commit that some local PR head holds.
+    let mut args = vec!["rev-list"];
+    args.extend(local.iter().map(String::as_str));
+    let held: BTreeSet<String> = git(root, &args)?.lines().map(ToString::to_string).collect();
+    for b in branches
+        .iter_mut()
+        .filter(|b| !proven(b) && held.contains(&b.tip))
+    {
+        for oid in &local {
+            if is_ancestor(root, &b.tip, oid)? {
+                b.in_merged_head = Some(
+                    git(root, &["rev-parse", "--short", oid])?
+                        .trim()
+                        .to_string(),
+                );
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The commits of `oids` that the repo has (`git cat-file --batch-check`).
+fn local_commits(root: &Path, oids: &BTreeSet<&str>) -> Result<Vec<String>> {
+    use std::io::Write;
+    if oids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("running git cat-file")?;
+    let input: String = oids
+        .iter()
+        .map(|oid| format!("{oid}^{{commit}}\n"))
+        .collect();
+    child
+        .stdin
+        .take()
+        .context("the stdin of git cat-file")?
+        .write_all(input.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("git cat-file --batch-check failed");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_suffix(" commit"))
+        .map(ToString::to_string)
+        .collect())
 }
 
 /// The records of `git worktree list --porcelain -z`, without a bare one.
@@ -1466,6 +1558,7 @@ mod tests {
             short: format!("s{tip}"),
             ancestor: Some(false),
             tree_on_main: Some(false),
+            in_merged_head: None,
         }
     }
 
@@ -1563,6 +1656,24 @@ mod tests {
         assert_eq!(
             verdict(&s, Kind::Branch, "merged-pr"),
             removable("a merged PR has this branch and tip")
+        );
+    }
+
+    #[test]
+    fn a_branch_in_a_merged_pr_head_goes() {
+        let mut s = survey();
+        s.branches.push(Branch {
+            in_merged_head: Some("abc1234".to_string()),
+            ..branch("worktree-agent-1", 2)
+        });
+        assert_eq!(
+            verdict(&s, Kind::Branch, "worktree-agent-1"),
+            removable("its tip is in merged PR head abc1234")
+        );
+        s.merged_prs = None;
+        assert_eq!(
+            verdict(&s, Kind::Branch, "worktree-agent-1"),
+            kept("cannot read merged PRs")
         );
     }
 
