@@ -170,6 +170,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * Pass rule for a validator: no confirmed bug refuted, and at least as many refutations of the refuted items as the control.
   * A role whose interval is wider than 0.3 keeps `inherit`, for want of evidence.  gpu-reviewer has only about 6 confirmed findings, so it will likely keep `inherit`.
   * Tokens: read from each run's `modelUsage` (used tokens, not final context; TD-44).
+  * Scratch: each replay clone goes in its own folder under the temp folder.  After the measure, the orchestrator runs `xtask clean --yes --also <clone>` for each clone folder, never for the harness root, whose `bin/` the runs need.
   * Budget: about 45M `modelUsage` tokens.  One milestone's rounds 1 to 3 in the PR #39 logs used about 2.7M final-context tokens (1.6M to 2.9M).  A whole case uses about 16 times its final context.
   * The team checks the budget after each run, in the order above.  It stops at the budget with what it has.
 * Not changed, whatever the result: reviewer, memory-reviewer, the intent reviewer, the orchestrator and baseline stay on the strongest model.
@@ -178,7 +179,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 
 ### M6: orchestrated mode as a skill (decision 0023)
 
-* `.claude/skills/orchestrate/SKILL.md` holds the generic parts of the two "How the work runs" sections (`plans/completed/harness-phase-3.md` and `plans/completed/stream-from-storage.md`): roles, agent rules, preflight, the loop for each milestone, the stop rule (by reference to decision 0024), who edits what, stop-and-wait conditions, close-out with `xtask clean`, and the report format.  M7 adds the PR body steps, because M7 defines the body.
+* `.claude/skills/orchestrate/SKILL.md` holds the generic parts of the two "How the work runs" sections (`plans/completed/harness-phase-3.md` and `plans/completed/stream-from-storage.md`): roles, agent rules, preflight, the loop for each milestone, the stop rule (by reference to decision 0024), who edits what, stop-and-wait conditions, close-out with `xtask clean`, and the report format.  A review run folder of the orchestrated branch stays while that branch is checked out, so the skill keeps its manual removal after the log copy (TD-37).  M7 adds the PR body steps, because M7 defines the body.
 * `PLANS.md` gets an optional section "How the work runs" with fixed sub-headings: mode, branch and PR, maintainer steps, preflight items of the plan, decision points asked at the start, review rule, kick-off prompt, extra stop conditions.  A big task's plan must have it.
 * `docs-check` fails a plan in `plans/active/` with more than 3 `M<n>` milestone headings and no "How the work runs" heading.  It accepts that heading at level 2 or 3.  It does not check `plans/completed/`, because four completed plans have more than 3 milestones and no such section, and PLANS.md forbids their edit.
 * `working-with-agents.md` names the `orchestrate` skill.
@@ -210,6 +211,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 * `harness-engineering.md`: re-check phases 4 to 6 and the phase 3 gate against M3 and M5.  Propose (do not decide) whether the `--baseline` gate is replaced by M5's measurement (D5).
 * Re-check D4 against the late bugs outside the fix range of the round before (catch-up 4-1, M7 6-1, M7 6-2).  Propose a change if the narrow range would miss such bugs.
 * Run `xtask clean --yes`.  Move this plan to `completed/` with its retrospective.
+* The PR body lists the maintainer's steps after the merge: `git fetch`, then `cargo run -p xtask -- clean --yes` for this phase's own branch and worktrees; stop `caffeinate`; remove any scratch folder that auto mode refused to remove.
 
 ## Validation and acceptance
 
@@ -310,6 +312,7 @@ Kick-off prompt:
 * 2026-10-31, agent: commits `b7e1088` and `849ec8e` describe the skill's `review clean` step and the guard before `d0164ea` adds them (DOC-1, review finding 1-11 of M1).  History is not rewritten; the PR body notes it.
 * 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 * 2026-10-31, agent: in `bedfd00`, M1's bullet on `review clean` says that the skill also runs it after the findings file with `--review-only`.  A subagent whose file the Write tool refuses gives the command to its caller.  Review round 2 (2-6, 2-9) found that the bullet named only the log.
+* 2026-10-31, agent: the M1 intent review found that `xtask clean --yes` alone leaves the replay clones and, after a squash merge, the `worktree-agent-*` branches.  The M1 team adds a proof for agent branches.  For clones, M5 names each one with `--also`.  If auto mode refuses that form, its removal is a maintainer step at close-out.  An agent does not widen the D7 entry, which is the maintainer's setting.
 
 ## Outcomes and retrospective
 
