@@ -27,6 +27,10 @@ const FAILED: i32 = 1;
 /// The local branches that always stay.
 const KEPT_BRANCHES: &[&str] = &["main", "gh-pages"];
 
+/// The git words that remove a worktree.  No `--force`: git then refuses
+/// a worktree that changed after the survey.
+const WORKTREE_REMOVE: [&str; 2] = ["worktree", "remove"];
+
 /// The time that `--yes` waits for a stopped `xtask serve` to end.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
@@ -221,6 +225,8 @@ pub struct Item {
     pub pid: Option<u32>,
     /// The current branch of a worktree.
     pub branch: Option<String>,
+    /// The name of the run folder of a worktree (see `run_name`).
+    pub run: Option<String>,
     pub verdict: Verdict,
 }
 
@@ -234,6 +240,7 @@ impl Item {
             tip: None,
             pid: None,
             branch: None,
+            run: None,
             verdict,
         }
     }
@@ -356,6 +363,7 @@ pub fn plan(s: &Survey) -> Vec<Item> {
             path: Some(w.path.clone()),
             size: Some(w.size),
             branch: w.branch.clone(),
+            run: Some(run_name(w)),
             ..Item::new(Kind::Worktree, shown(&s.root, &w.path), verdict)
         });
     }
@@ -768,14 +776,18 @@ fn remove(root: &Path, also: &[PathBuf], first: &[Item]) -> Result<bool> {
 
     // The branches and run folders that a worktree which stays still holds.
     let mut stuck: BTreeSet<String> = BTreeSet::new();
+    let mut stuck_runs: BTreeSet<String> = BTreeSet::new();
     for item in removable(Kind::Worktree) {
         let path = item.path.as_deref().context("a worktree has a path")?;
         let path = path.to_str().context("a worktree path is UTF-8")?;
-        match git(root, &["worktree", "remove", path]) {
+        let mut args = WORKTREE_REMOVE.to_vec();
+        args.push(path);
+        match git(root, &args) {
             Ok(_) => println!("removed {}", item.line()),
             Err(e) => {
                 fail(item, &format!("{e:#}"));
                 stuck.extend(item.branch.clone());
+                stuck_runs.extend(item.run.clone());
             }
         }
     }
@@ -789,7 +801,6 @@ fn remove(root: &Path, also: &[PathBuf], first: &[Item]) -> Result<bool> {
             Err(e) => fail(item, &format!("{e:#}")),
         }
     }
-    let stuck_runs: BTreeSet<String> = stuck.iter().map(|b| b.replace('/', "-")).collect();
     for kind in [Kind::RunFolder, Kind::Build, Kind::Scratch] {
         for item in removable(kind) {
             let path = item.path.as_deref().context("a folder has a path")?;
@@ -2408,5 +2419,12 @@ mod tests {
         }
         assert_eq!(stop(pid), Err(format!("pid {pid} still runs after 5 s")));
         drop(guard);
+    }
+
+    #[test]
+    fn a_worktree_is_removed_without_force() {
+        // With `--force`, git would remove a worktree that changed after the
+        // second survey.
+        assert_eq!(WORKTREE_REMOVE, ["worktree", "remove"]);
     }
 }

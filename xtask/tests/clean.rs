@@ -134,12 +134,19 @@ struct Fixture {
     scratch_free: PathBuf,
     /// The pid of the zombie, which is no longer a running child.
     zombie: u32,
+    /// Read-only folders, which the drop makes writable before it removes
+    /// the folder.
+    readonly: Vec<PathBuf>,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.serve = None;
         self.children.clear();
+        for dir in &self.readonly {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+        }
         let _ = std::fs::remove_dir_all(&self.top);
     }
 }
@@ -175,6 +182,7 @@ impl Fixture {
             scratch_busy: top.join("scratch-busy"),
             scratch_free: top.join("scratch-free"),
             zombie: 0,
+            readonly: Vec::new(),
             top,
             repo,
         }
@@ -951,4 +959,87 @@ fn a_branch_that_reverts_main_to_an_older_tree_is_not_merged() {
         "branch squashed",
         "its tree is the tree of a commit on origin/main",
     );
+}
+
+/// A folder `target/ro/` with a file in it, which nobody can write, in the
+/// worktree `wt`.  `git worktree remove` then fails on it.
+fn read_only_folder(f: &mut Fixture, wt: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = wt.join("target/ro");
+    write(&dir.join("x"), "x");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    f.readonly.push(dir);
+}
+
+#[test]
+fn a_failed_worktree_removal_keeps_its_branch_and_run_folder() {
+    let mut f = Fixture::empty("failed");
+    let repo = f.repo.clone();
+    let start = git(&repo, &["rev-parse", "HEAD"]);
+    let short = git(&repo, &["rev-parse", "--short", "HEAD"]);
+    git(&repo, &["switch", "-q", "-c", "e2e"]);
+    write(&repo.join("m1.txt"), "m1\n");
+    let m1 = commit(&repo, "m1");
+    git(&repo, &["switch", "-q", "main"]);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &m1]);
+    // A merged agent worktree on branch `e2e`, and a detached reviewer
+    // worktree.  Neither can go.
+    git(
+        &repo,
+        &["worktree", "add", "-q", ".claude/worktrees/e2e", "e2e"],
+    );
+    read_only_folder(&mut f, &repo.join(".claude/worktrees/e2e"));
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            "target/review/1-reviewer-9",
+            &start,
+        ],
+    );
+    read_only_folder(&mut f, &repo.join("target/review/1-reviewer-9"));
+    // Their run folders, with copied logs, and build output with the name
+    // of the branch.
+    let run = repo.join("target/review/run");
+    write(&run.join("e2e/log.md"), "agent-x log\n");
+    write(&run.join(format!("detached-{short}/log.md")), "old log\n");
+    write(&repo.join("target/e2e/x"), "x");
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&["--yes".to_string()]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (removed, failed) = actions(&stdout);
+    for head in [
+        "worktree .claude/worktrees/e2e",
+        "worktree target/review/1-reviewer-9",
+    ] {
+        assert!(
+            failed.iter().any(|l| l.starts_with(&format!("{head} ("))),
+            "no failed {head}: {stdout}"
+        );
+    }
+    for head in [
+        "branch e2e",
+        "run-folder target/review/run/e2e",
+        &format!("run-folder target/review/run/detached-{short}"),
+    ] {
+        assert!(
+            failed
+                .iter()
+                .any(|l| l.starts_with(&format!("{head} (")) && l.ends_with(": its worktree stays")),
+            "no failed {head} that names its worktree: {stdout}"
+        );
+    }
+    assert_item(&removed, "build target/e2e", "build output");
+    assert!(branches(&repo).contains("e2e"), "{stdout}");
+    assert!(run.join("e2e/log.md").is_file());
+    assert!(run.join(format!("detached-{short}/log.md")).is_file());
+    assert!(!repo.join("target/e2e").exists());
 }

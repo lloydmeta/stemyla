@@ -216,6 +216,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 1 fix of 1-b1: a worktree that holds a worktree that stays stays too, to a fixed point (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-1: the tree proof counts only the commits of `<tip>..origin/main` (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-2 and 1-b2: `--also` refuses a path in any worktree of the repo (implementer).
+* [x] 2026-10-31: review round 1 fix of 1-3 and 1-b4: a test of a failed `git worktree remove`; a failed detached worktree holds its `detached-<short sha>` run folder too; the words of the removal are a constant with a test (implementer).
 
 ## Surprises and discoveries
 
@@ -228,6 +229,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the tests of 1-b1 failed first.  The four new tests of `plan` failed, and `yes_keeps_a_merged_worktree_that_holds_a_changed_worktree` found agent-x removable.
 * 2026-10-31, implementer: the test of 1-1 failed first: a branch from `git revert` of main's tip was removable by the tree proof.
 * 2026-10-31, implementer: the test of 1-2 failed first: `--also` took a linked worktree in the temporary folder, with exit 0.
+* 2026-10-31, implementer: the test of 1-3 failed first, on the run folder `detached-<short sha>` of a failed detached worktree.  With the two mutants of 1-3 (no `branch` in the worktree item, and `!=` for the run folder kind), the test fails too.  When `git worktree remove` cannot delete a file, it still deletes the worktree's record.  Then `git branch -D` would delete the branch, so only the `stuck` set keeps it.
 
 ## Decision log
 
@@ -252,6 +254,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: `--yes` acts on the pid files of the first survey only.  The second survey gives the other items.
 * 2026-10-31, implementer: the guide says that the skill runs `review clean`, and that the guard refuses `xtask clean`.  Both are true only when the orchestrator lands the texts of step 5, which the plan puts before round 1.
 * 2026-10-31, implementer: `review clean` runs no `git worktree prune`, and prints no `pruned` line.  `git worktree remove --force` also removes a registered worktree whose folder is gone, so a prune is not needed.  A prune acts on each worktree of the repo.  The test isolates git from the person's config, so the helpers in `xtask/tests/review.rs` now set `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
+* 2026-10-31, implementer: the choice of `git worktree remove` without `--force` has a unit test of the constant `WORKTREE_REMOVE` only.  A test through git would need a worktree that changes between the second survey and the removal, which no test can time.  A submodule in a worktree makes git refuse without `--force`, but such a fixture costs more than it proves.
 
 ## Outcomes and retrospective
 
