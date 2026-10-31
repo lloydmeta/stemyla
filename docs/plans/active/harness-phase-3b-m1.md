@@ -206,10 +206,12 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: plan written (`88cc3cd`).
 * [x] 2026-10-31: plan review round 1 (one `Plan` agent): 2 blockers, 8 should-fix and 7 nits.  All fixed in this plan (`3f77c8b`).
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent): 1 blocker, 5 should-fix and 5 nits.  All fixed in this plan.  The review stops at its cap of 2 rounds.
+* [x] 2026-10-31: step 1, the list mode of `xtask clean`, `serve::pid_file`, the `clean` row of the guide and TD-67 (implementer).
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-10-31, implementer: step 1's tests failed first.  The tests of `plan` in `clean.rs` failed 51 of 57 with a `plan` that gave no items; the other 6 test helpers.  The tests in `xtask/tests/clean.rs` failed with "unknown command clean" before the arm in `main.rs`.
+* 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
 
 ## Decision log
 
@@ -224,6 +226,11 @@ None yet.
 * 2026-10-31, team leader: a worktree under `.claude/worktrees/` goes only when its work is merged.  A running Claude Code agent keeps no file open between tool calls.
 * 2026-10-31, team leader: the plan review stopped at its cap of 2 rounds.  Round 2's findings are fixed in this plan, with no third review.
 * 2026-10-31, team leader: a pid runs `xtask serve` only if its command line says so and it listens on the port of the file.  So a reused pid is not stopped.
+* 2026-10-31, implementer: the tests that run the binary put a fake `gh` first on `PATH`, and use the real `ps` and `lsof`.  The tests of `plan` give it a survey made by hand.  `Facts::process` is a function, so a test of `gather` could give fake answers for each pid.
+* 2026-10-31, implementer: `--also` also refuses a folder in the repo root.  The plan refuses only the root and a folder that holds it.  In the repo, `remove_dir_all` would lose tracked files.
+* 2026-10-31, implementer: the ref test of a worktree uses the set of branches that have a proof, before the rule of the current branch.  A ref passes if it is not such a branch, or if the worktree's `HEAD` is that branch's tip, which its proof covers.  So the worktrees do not depend on the branches that this run deletes, and a worktree on any branch passes.
+* 2026-10-31, implementer: step 1 has no `--yes`.  The command refuses it with the usage until step 3, so the tests of step 3 fail first.  The last line of the list, which gives the `--yes` command, comes in step 3 too.
+* 2026-10-31, implementer: the kinds print as `pid-file`, `worktree`, `branch`, `run-folder`, `build` and `scratch`, in that order.  A kept item shows no size.  A run folder `detached-<short sha>` of a detached worktree that stays is kept as "the current branch of a worktree".  A pid file with a pid below 2 holds no pid, since `kill 0` signals a process group.
 
 ## Outcomes and retrospective
 

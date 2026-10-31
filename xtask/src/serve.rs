@@ -24,6 +24,15 @@ use std::sync::Arc;
 /// URL prefix (always starting and ending with `/`) and the directory it maps to.
 pub type Mounts = Vec<(String, PathBuf)>;
 
+/// The folder of the pid files, relative to the repo root.
+pub const PID_FOLDER: &str = "target/xtask-serve";
+
+/// The pid file of `xtask serve` on `port`, in the repo at `root`.
+/// `xtask clean` reads it to find a server that a run left.
+pub fn pid_file(root: &Path, port: u16) -> PathBuf {
+    root.join(PID_FOLDER).join(format!("{port}.pid"))
+}
+
 pub fn run(args: &[String]) -> Result<()> {
     let mut root = PathBuf::from("app/dist");
     let mut port: u16 = 8080;
