@@ -250,7 +250,7 @@ of <y> baseline findings, the round found <x>
 
 * List each agent that the round started: the reviewers, the baseline, and each validator.  A validator's Findings cell names the IDs that it judged.
 * Without `--baseline`, leave out the two baseline sections.
-* With `--review-only`, stop here.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
+* With `--review-only`, run `target/debug/xtask review clean $1`, then stop here.  If auto mode or a person refuses it, give the command to the person.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
 
 ### 10. Fix the findings
 
@@ -281,7 +281,7 @@ First, get the approval counts of the round.  They are cost, not interventions. 
 * If you asked, wait for the answer.  Do not guess the counts.
 * Write the first count in the `approvals` field of `<run>/$1/findings.md`.  Write the second count in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
 
-The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, and stop.  If the file does not exist, write it in this form first:
+The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, with the command `target/debug/xtask review clean $1`, and stop.  The caller writes the log, then runs that command.  If the file does not exist, write it in this form first:
 
 ```markdown
 # Review log
@@ -319,7 +319,6 @@ Then remove the worktrees of the round's agents:
 * Run `target/debug/xtask review clean $1`.  It removes each worktree `target/review/$1-<agent>-<n>` of this round, also with changes.
 * It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
 * If auto mode or a person refuses it, give the command to the person, and go on.
-* If the Write tool refused the log, give this command with the log in your final answer.  The caller runs it when it writes the log.
 
 After round 3:
 
