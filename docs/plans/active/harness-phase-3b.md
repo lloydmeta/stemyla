@@ -90,7 +90,7 @@ An `xtask clean` subcommand finds and removes what runs leave.  It lists by defa
   * `target/review/run/<branch>/` for a branch with no open PR, but only when its `log.md` equals the copy in `docs/reviews/`;
   * worktrees under `target/review/` with no changes and no live process, and under `.claude/worktrees/` only when their work is merged.  `git worktree remove` also handles a worktree whose folder is gone, so `git worktree prune` is not needed;
   * `target/e2e/` and `app/dist/`;
-  * a local branch whose tree equals a commit on `origin/main` that the branch does not hold, or whose merged PR has a `headRefOid` equal to the branch's tip;
+  * a local branch whose tree equals a commit on `origin/main` that the branch does not hold, or whose PR into `main` merged with a `headRefOid` equal to the branch's tip, or whose tip is an ancestor of the `headRefOid` of a PR merged into `main` that git has; never the head of an open PR;
   * a `xtask serve` whose pid file is in `target/`, if that pid still runs `xtask serve`.  M1 makes `xtask serve` write the pid file.
 * It never removes a worktree with changes, or a worktree with ignored files outside its `target/` (ASSET-1).  It never removes a branch that it cannot prove merged, or the current branch.  It never removes anything outside the repo, but a scratch folder under the temp folder that `--also <path>` names.
 * `cargo clean` stays a separate, manual step; `xtask clean` prints the size of `target/` and the command.
