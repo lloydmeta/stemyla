@@ -311,7 +311,8 @@ pub fn plan(s: &Survey) -> Vec<Item> {
     let under_roots = |path: &Path| path.starts_with(&review) || path.starts_with(&claude);
 
     // The branches that go if no worktree that stays holds them.  A
-    // worktree under `.claude/worktrees/` goes only when its branch would.
+    // worktree under `.claude/worktrees/` goes when its HEAD is an ancestor
+    // of origin/main, or when its branch would go.
     let proofs: BTreeMap<&str, String> = s
         .branches
         .iter()
@@ -1503,7 +1504,7 @@ fn open_paths() -> Option<Vec<PathBuf>> {
 
 /// The head branch of each open PR, from `gh`.
 fn open_prs(root: &Path) -> Option<Vec<String>> {
-    let prs = gh_list(root, "open", "headRefName", "500")?;
+    let prs = gh_list(root, "open", "headRefName", 500)?;
     prs.iter()
         .map(|pr| Some(pr.get("headRefName")?.as_str()?.to_string()))
         .collect()
@@ -1513,7 +1514,7 @@ fn open_prs(root: &Path) -> Option<Vec<String>> {
 /// `gh`.  A PR merged into another branch, such as a stacked PR, proves
 /// nothing, since its base can still be unmerged.
 fn merged_prs(root: &Path) -> Option<Vec<(String, String)>> {
-    let prs = gh_list(root, "merged", "headRefName,headRefOid,baseRefName", "1000")?;
+    let prs = gh_list(root, "merged", "headRefName,headRefOid,baseRefName", 1000)?;
     let mut into_main = Vec::new();
     for pr in &prs {
         if pr.get("baseRefName")?.as_str()? == "main" {
@@ -1526,10 +1527,14 @@ fn merged_prs(root: &Path) -> Option<Vec<(String, String)>> {
     Some(into_main)
 }
 
-fn gh_list(root: &Path, state: &str, fields: &str, limit: &str) -> Option<Vec<serde_json::Value>> {
+/// The PRs of `state` from `gh pr list`, or `None`.  A list as long as
+/// `limit` can be cut short, so it is unknown too: a missing open PR could
+/// let its head branch go, and a missing merged PR only keeps a branch.
+fn gh_list(root: &Path, state: &str, fields: &str, limit: usize) -> Option<Vec<serde_json::Value>> {
+    let limit_arg = limit.to_string();
     let out = Command::new("gh")
         .args([
-            "pr", "list", "--state", state, "--json", fields, "--limit", limit,
+            "pr", "list", "--state", state, "--json", fields, "--limit", &limit_arg,
         ])
         .current_dir(root)
         .output()
@@ -1537,7 +1542,8 @@ fn gh_list(root: &Path, state: &str, fields: &str, limit: &str) -> Option<Vec<se
     if !out.status.success() {
         return None;
     }
-    serde_json::from_slice(&out.stdout).ok()
+    let prs: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
+    (prs.len() < limit).then_some(prs)
 }
 
 #[cfg(test)]
@@ -1703,11 +1709,10 @@ mod tests {
                 kept("not merged"),
                 "open PRs {open_prs:?}"
             );
-            assert!(
-                matches!(
-                    verdict(&s, Kind::Branch, "worktree-agent-1"),
-                    Verdict::Kept(_)
-                ),
+            // The worktree stays, so it holds its branch.
+            assert_eq!(
+                verdict(&s, Kind::Branch, "worktree-agent-1"),
+                kept("the current branch of a worktree"),
                 "open PRs {open_prs:?}"
             );
         }

@@ -328,7 +328,7 @@ impl Fixture {
         let script = match gh {
             Gh::Fails => "#!/bin/sh\necho 'gh: no network' >&2\nexit 1\n".to_string(),
             Gh::Prs { open, merged } => format!(
-                "#!/bin/sh\ncase \"$*\" in\n  *\"--state open\"*) printf '%s\\n' '{open}' ;;\n  *\"--state merged\"*) printf '%s\\n' '{merged}' ;;\n  *) echo \"fake gh: $*\" >&2; exit 1 ;;\nesac\n"
+                "#!/bin/sh\ncase \"$*\" in\n  *\"--state open --json headRefName \"*) printf '%s\\n' '{open}' ;;\n  *\"--state merged --json headRefName,headRefOid,baseRefName \"*) printf '%s\\n' '{merged}' ;;\n  *) echo \"fake gh: $*\" >&2; exit 1 ;;\nesac\n"
             ),
         };
         let path = self.bin.join("gh");
@@ -1514,7 +1514,7 @@ fn a_pr_proof_needs_the_open_prs() {
         use std::os::unix::fs::PermissionsExt;
         let merged = format!("[{}]", merged_pr("feature", &head, "main"));
         let script = format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *\"--state merged\"*) printf '%s\\n' '{merged}' ;;\n  *) echo 'gh: no network' >&2; exit 1 ;;\nesac\n"
+            "#!/bin/sh\ncase \"$*\" in\n  *\"--state merged --json headRefName,headRefOid,baseRefName \"*) printf '%s\\n' '{merged}' ;;\n  *) echo 'gh: no network' >&2; exit 1 ;;\nesac\n"
         );
         let path = f.bin.join("gh");
         write(&path, &script);
@@ -1607,4 +1607,50 @@ fn many_merged_pr_heads_that_git_lacks_do_not_block() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "{status:?}");
+}
+
+#[test]
+fn a_merged_pr_head_that_is_not_hex_proves_nothing() {
+    let (f, _) = squashed_pr("pr-not-hex");
+    // 40 characters that git reads as the tip of `worktree-agent-1`.
+    let oid = format!("worktree-agent-1{}", "~0".repeat(12));
+    assert_eq!(oid.len(), 40);
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!("[{}]", merged_pr("other", &oid, "main")),
+    });
+    let out = f.clean(&[]);
+    let (_, kept) = parts(&text(&out.stdout));
+    assert_item(
+        &kept,
+        "branch worktree-agent-1",
+        "no proof that it is merged",
+    );
+}
+
+#[test]
+fn a_pr_list_as_long_as_its_limit_is_unknown() {
+    let (f, head) = squashed_pr("pr-limit");
+    let open: Vec<String> = (0..500)
+        .map(|n| format!(r#"{{"headRefName":"open-{n}"}}"#))
+        .collect();
+    f.fake_gh(&Gh::Prs {
+        open: format!("[{}]", open.join(",")),
+        merged: format!("[{}]", merged_pr("feature", &head, "main")),
+    });
+    let out = f.clean(&[]);
+    let (_, kept) = parts(&text(&out.stdout));
+    assert_item(&kept, "branch worktree-agent-1", "cannot read open PRs");
+
+    let mut merged: Vec<String> = (0..999)
+        .map(|n| merged_pr(&format!("pr-{n}"), &format!("{n:040x}"), "main"))
+        .collect();
+    merged.push(merged_pr("feature", &head, "main"));
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!("[{}]", merged.join(",")),
+    });
+    let out = f.clean(&[]);
+    let (_, kept) = parts(&text(&out.stdout));
+    assert_item(&kept, "branch worktree-agent-1", "cannot read merged PRs");
 }
