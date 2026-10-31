@@ -78,13 +78,14 @@ The rules for each kind (parent plan, M1):
    * git also marks a worktree `prunable` when only its `.git` file is gone.  Its folder can hold changes, so it is kept: "its .git file is gone: run `git worktree repair`".
 3. Build output: `target/e2e/` and `app/dist/`, when they exist.  Always removable, with their size.
 4. Local branches: each `refs/heads/<b>`.
-   * Kept: `main`, `gh-pages`, and the current branch of each worktree that stays.
+   * Kept: `main`, `gh-pages`, the current branch of each worktree that stays, and the head of an open PR ("the head of an open PR").
    * Removable when one proof holds, and the item names the proof:
      * its tip is an ancestor of `origin/main` (`git merge-base --is-ancestor`);
      * its tip's tree equals the tree of a commit on `origin/main` that the tip does not hold (`git log --format=%T <tip>..origin/main`): a squash merge;
-     * a merged PR has head branch `<b>` and `headRefOid` equal to the tip;
-     * its tip is an ancestor of the `headRefOid` of a merged PR, and git has that commit (`git cat-file --batch-check`, then `git merge-base --is-ancestor`).  An agent branch, such as `worktree-agent-*`, ends in the middle of a PR, so after a squash merge only this proof holds.  Only a branch with no other proof is tested.  A PR head that git does not have proves nothing.
-   * Else kept: "no proof that it is merged".  A branch with a commit after a merged PR's head is kept, because that commit is in no PR.
+     * a PR merged into `main` has head branch `<b>` and `headRefOid` equal to the tip;
+     * its tip is an ancestor of the `headRefOid` of a PR merged into `main`, and git has that commit.  An agent branch, such as `worktree-agent-*`, ends in the middle of a PR, so after a squash merge only this proof holds.  Only a branch with no other proof is tested.  The steps: one `git cat-file --batch-check` for the full 40-character oids, one `git rev-list` walk from the heads that git has, then `git merge-base --is-ancestor` for each tip that the walk found.  A PR head that git does not have proves nothing.
+   * The last two proofs read only PRs whose `baseRefName` is `main`.  A stacked PR merged into another branch proves nothing, since that branch can still be unmerged.  If the open PRs are unknown, a branch with only a PR proof is kept: "cannot read open PRs".
+   * Else kept: "no proof that it is merged".  A branch whose tip is in no merged PR head that git has is kept.
    * With no `origin/main`, the first two proofs are unknown; the last two still hold.
 5. Pid files: each file `target/xtask-serve/<port>.pid` (step 2 writes them).
    * The pid runs `xtask serve` if its command line (`ps`) has a word whose last path part is `xtask`, then the word `serve`, and the pid listens on `<port>` (`lsof`).  Then the item is "a running xtask serve on port <port>".  `--yes` sends `kill <pid>` (SIGTERM), and waits up to 5 s for the pid to end (no pid, or a zombie).  Then it removes the file.  If the pid still runs after 5 s, it prints `failed`, keeps the file, and the command exits 1.
@@ -239,6 +240,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 4 (at `281cacf`): no blocker, no should-fix, 6 nits; mutants full, none missed.  The rounds stop here by the stop rule.  The team leader fixed the nits 4-2 to 4-5 in "review round 4 fixes"; 4-1 is the orchestrator's (parent plan), and 4-6 has no fix (the printed command still works).  The orchestrator copies the log to `docs/reviews/harness-phase-3b-m1.md` and removes the run folder (TD-37).
 * [x] 2026-10-31: M1 done.  The review log is in `docs/reviews/harness-phase-3b-m1.md` (`13d597b`), and this plan moves to `plans/completed/`.
 * [x] 2026-10-31: intent review fix (implementer): a fourth branch proof.  A branch whose tip is in the head of a merged PR goes, with its `.claude/worktrees/` worktree, when git has that head commit.
+* [x] 2026-10-31: review round 5 fixes (implementer): the PR proofs read only PRs merged into `main`, the head of an open PR stays, the merged-head proof has tests for its missed mutants, and `git cat-file` gets its input from a thread.
 
 ## Surprises and discoveries
 
@@ -263,6 +265,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 3-6 did not build first (no stored roots).  The tests of 3-7 and 3-9 cover code that was right, and failed first with their mutants: `w.starts_with(p)` in the total, and no `canonical` on the `.claude/worktrees` root.  A first try of the 3-9 test passed with the mutant: `git add -A` had committed the `.claude` link on a branch, and `git switch main` then deleted it.
 * 2026-10-31, implementer: the test of 3-2 failed first: the same folder twice gave two scratch items.
 * 2026-10-31, implementer: the test of the fourth proof failed first: `worktree-agent-1`, in the middle of a squash-merged PR, had no proof.  The tests of a PR head that git does not have, and of a branch with a commit after the PR head, passed before the fix and after it: they guard the rule "no proof, no removal".
+* 2026-10-31, implementer: the round 5 tests failed first.  The stacked-PR test removed `a` and `b`.  The test without open PRs removed the agent branch.  The test with 5000 PR heads that git lacks did not end in 60 s, since `git cat-file` blocked on a full stdout.  The probe test of the merged-head proof passed before, and failed with each of the four mutants (1120:42, 1120:52, 1120:60 and 1128:39 at `dfe3aa4`).  A first form of that test had two PRs in one run, and was flaky: either PR head could be the proof, by the order of the oids.
 
 ## Decision log
 
@@ -289,6 +292,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: `review clean` runs no `git worktree prune`, and prints no `pruned` line.  `git worktree remove --force` also removes a registered worktree whose folder is gone, so a prune is not needed.  A prune acts on each worktree of the repo.  The test isolates git from the person's config, so the helpers in `xtask/tests/review.rs` now set `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
 * 2026-10-31, implementer: the choice of `git worktree remove` without `--force` is in `clean::remove_worktree`, which `--yes` calls.  Review round 2 (2-1) found that the first test pinned only the constant.  A test now gives the function a worktree that already has changes: no timing is needed.
 * 2026-10-31, team leader: 3-5 has no fix and no test.  The serve test does not pin that the pid file comes before the `serving` line.  The order is a race.  It has an effect only on a clean run in the same instant.
+* 2026-10-31, implementer: the fourth proof counts a tip that is an ancestor of a merged PR head, since an agent branch ends in the middle of its PR.  A head that git does not have proves nothing, so a lost object never removes a branch.  Only a branch with no other proof is tested, for the cost.  After review round 5, the PR proofs read only PRs merged into `main`, and a branch that heads an open PR stays.  With the open PRs unknown, a branch with only a PR proof stays; a proof from git alone still holds, since the branch's work is then on `main`.
 
 ## Outcomes and retrospective
 

@@ -39,7 +39,7 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 pub struct Facts {
     /// The head branch of each open PR.
     pub open_prs: Option<Vec<String>>,
-    /// The head branch and the `headRefOid` of each merged PR.
+    /// The head branch and the `headRefOid` of each PR merged into `main`.
     pub merged_prs: Option<Vec<(String, String)>>,
     /// Each open file and working folder of each process, canonical.
     pub open_paths: Option<Vec<PathBuf>>,
@@ -388,8 +388,16 @@ pub fn plan(s: &Survey) -> Vec<Item> {
             Verdict::Kept("main and gh-pages stay".to_string())
         } else if held_branches.contains(b.name.as_str()) {
             Verdict::Kept("the current branch of a worktree".to_string())
+        } else if s.open_prs.as_ref().is_some_and(|prs| prs.contains(&b.name)) {
+            Verdict::Kept("the head of an open PR".to_string())
         } else {
+            // A proof from the PRs alone needs the open PRs too, since a
+            // branch can be the head of an open PR.
+            let git_proof = b.ancestor == Some(true) || b.tree_on_main == Some(true);
             match branch_proof(s, b) {
+                Ok(_) if s.open_prs.is_none() && !git_proof => {
+                    Verdict::Kept("cannot read open PRs".to_string())
+                }
                 Ok(proof) => Verdict::Removable(proof),
                 Err(reason) => Verdict::Kept(reason),
             }
@@ -1171,12 +1179,16 @@ fn local_commits(root: &Path, oids: &BTreeSet<&str>) -> Result<Vec<String>> {
         .iter()
         .map(|oid| format!("{oid}^{{commit}}\n"))
         .collect();
-    child
-        .stdin
-        .take()
-        .context("the stdin of git cat-file")?
-        .write_all(input.as_bytes())?;
-    let out = child.wait_with_output()?;
+    let mut stdin = child.stdin.take().context("the stdin of git cat-file")?;
+    // A thread writes, so git does not block on a full stdout while this
+    // thread still writes.
+    let (written, out) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(input.as_bytes()));
+        let out = child.wait_with_output();
+        (writer.join(), out)
+    });
+    written.map_err(|_| anyhow::anyhow!("the writer of git cat-file failed"))??;
+    let out = out?;
     if !out.status.success() {
         bail!("git cat-file --batch-check failed");
     }
@@ -1488,17 +1500,21 @@ fn open_prs(root: &Path) -> Option<Vec<String>> {
         .collect()
 }
 
-/// The head branch and the `headRefOid` of each merged PR, from `gh`.
+/// The head branch and the `headRefOid` of each PR merged into `main`, from
+/// `gh`.  A PR merged into another branch, such as a stacked PR, proves
+/// nothing, since its base can still be unmerged.
 fn merged_prs(root: &Path) -> Option<Vec<(String, String)>> {
-    let prs = gh_list(root, "merged", "headRefName,headRefOid", "1000")?;
-    prs.iter()
-        .map(|pr| {
-            Some((
+    let prs = gh_list(root, "merged", "headRefName,headRefOid,baseRefName", "1000")?;
+    let mut into_main = Vec::new();
+    for pr in &prs {
+        if pr.get("baseRefName")?.as_str()? == "main" {
+            into_main.push((
                 pr.get("headRefName")?.as_str()?.to_string(),
                 pr.get("headRefOid")?.as_str()?.to_string(),
-            ))
-        })
-        .collect()
+            ));
+        }
+    }
+    Some(into_main)
 }
 
 fn gh_list(root: &Path, state: &str, fields: &str, limit: &str) -> Option<Vec<serde_json::Value>> {
@@ -1657,6 +1673,40 @@ mod tests {
             verdict(&s, Kind::Branch, "merged-pr"),
             removable("a merged PR has this branch and tip")
         );
+    }
+
+    #[test]
+    fn the_head_of_an_open_pr_stays() {
+        let mut s = survey();
+        s.branches.push(Branch {
+            ancestor: Some(true),
+            ..branch("a", 2)
+        });
+        s.open_prs = Some(vec!["a".to_string()]);
+        assert_eq!(
+            verdict(&s, Kind::Branch, "a"),
+            kept("the head of an open PR")
+        );
+    }
+
+    #[test]
+    fn a_pr_proof_needs_the_open_prs_but_a_git_proof_does_not() {
+        let mut s = survey();
+        s.branches.push(branch("merged-pr", 2));
+        s.branches.push(Branch {
+            tree_on_main: Some(true),
+            ..branch("squashed", 3)
+        });
+        s.merged_prs = Some(vec![("merged-pr".to_string(), sha(2))]);
+        s.open_prs = None;
+        assert_eq!(
+            verdict(&s, Kind::Branch, "merged-pr"),
+            kept("cannot read open PRs")
+        );
+        assert!(matches!(
+            verdict(&s, Kind::Branch, "squashed"),
+            Verdict::Removable(_)
+        ));
     }
 
     #[test]

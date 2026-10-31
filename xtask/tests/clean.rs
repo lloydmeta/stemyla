@@ -226,7 +226,7 @@ impl Fixture {
         let gh = Gh::Prs {
             open: r#"[{"headRefName":"open-pr"}]"#.to_string(),
             merged: format!(
-                r#"[{{"headRefName":"merged-pr","headRefOid":"{merged_pr}"}},{{"headRefName":"moved-on","headRefOid":"{moved_on_merged}"}}]"#
+                r#"[{{"headRefName":"merged-pr","headRefOid":"{merged_pr}","baseRefName":"main"}},{{"headRefName":"moved-on","headRefOid":"{moved_on_merged}","baseRefName":"main"}}]"#
             ),
         };
         f.fake_gh(&gh);
@@ -1412,7 +1412,9 @@ fn an_agent_branch_in_a_merged_pr_head_goes_with_its_worktree() {
     git(repo, &["switch", "-q", "main"]);
     f.fake_gh(&Gh::Prs {
         open: "[]".to_string(),
-        merged: format!(r#"[{{"headRefName":"feature","headRefOid":"{head}"}}]"#),
+        merged: format!(
+            r#"[{{"headRefName":"feature","headRefOid":"{head}","baseRefName":"main"}}]"#
+        ),
     });
     let short = git(repo, &["rev-parse", "--short", &head]);
 
@@ -1443,7 +1445,7 @@ fn a_merged_pr_head_that_is_not_a_local_object_proves_nothing() {
     f.fake_gh(&Gh::Prs {
         open: "[]".to_string(),
         merged: format!(
-            r#"[{{"headRefName":"feature","headRefOid":"{}"}}]"#,
+            r#"[{{"headRefName":"feature","headRefOid":"{}","baseRefName":"main"}}]"#,
             "1234567890abcdef1234567890abcdef12345678"
         ),
     });
@@ -1455,4 +1457,154 @@ fn a_merged_pr_head_that_is_not_a_local_object_proves_nothing() {
         "branch worktree-agent-1",
         "no proof that it is merged",
     );
+}
+
+/// A merged PR as `gh pr list --json headRefName,headRefOid,baseRefName`
+/// gives it.
+fn merged_pr(head: &str, oid: &str, base: &str) -> String {
+    format!(r#"{{"headRefName":"{head}","headRefOid":"{oid}","baseRefName":"{base}"}}"#)
+}
+
+#[test]
+fn a_stacked_pr_proves_nothing_and_an_open_pr_head_stays() {
+    let f = Fixture::empty("stacked");
+    let repo = &f.repo;
+    git(repo, &["switch", "-q", "-c", "a"]);
+    write(&repo.join("a1.txt"), "a1\n");
+    commit(repo, "a1");
+    git(repo, &["switch", "-q", "-c", "b"]);
+    write(&repo.join("b1.txt"), "b1\n");
+    let b1 = commit(repo, "b1");
+    git(repo, &["switch", "-q", "main"]);
+
+    // `b` merged into `a`, which is still the head of an open PR.
+    f.fake_gh(&Gh::Prs {
+        open: r#"[{"headRefName":"a"}]"#.to_string(),
+        merged: format!("[{}]", merged_pr("b", &b1, "a")),
+    });
+    let out = f.clean(&["--yes".to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (_, kept) = parts(&stdout);
+    assert_item(&kept, "branch a", "the head of an open PR");
+    assert_item(&kept, "branch b", "no proof that it is merged");
+    let left = branches(repo);
+    assert!(left.contains("a") && left.contains("b"), "{stdout}");
+
+    // `b` merged into `main`: its own PR proves it, but `a` stays.
+    f.fake_gh(&Gh::Prs {
+        open: r#"[{"headRefName":"a"}]"#.to_string(),
+        merged: format!("[{}]", merged_pr("b", &b1, "main")),
+    });
+    let out = f.clean(&[]);
+    let (removable, kept) = parts(&text(&out.stdout));
+    assert_item(
+        &removable,
+        "branch b",
+        "a merged PR has this branch and tip",
+    );
+    assert_item(&kept, "branch a", "the head of an open PR");
+}
+
+#[test]
+fn a_pr_proof_needs_the_open_prs() {
+    let (f, head) = squashed_pr("pr-no-open");
+    // A fake gh that gives the merged PRs, and fails on the open ones.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let merged = format!("[{}]", merged_pr("feature", &head, "main"));
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *\"--state merged\"*) printf '%s\\n' '{merged}' ;;\n  *) echo 'gh: no network' >&2; exit 1 ;;\nesac\n"
+        );
+        let path = f.bin.join("gh");
+        write(&path, &script);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = f.clean(&[]);
+    let (_, kept) = parts(&text(&out.stdout));
+    assert_item(&kept, "branch worktree-agent-1", "cannot read open PRs");
+}
+
+#[test]
+fn the_merged_head_proof_reads_each_pr_by_its_own_head_and_full_oid() {
+    let (f, head) = squashed_pr("pr-probes");
+    let repo = &f.repo;
+    let f1 = git(repo, &["rev-parse", "worktree-agent-1"]);
+    let short = git(repo, &["rev-parse", "--short", &head]);
+    let short_f1 = git(repo, &["rev-parse", "--short", &f1]);
+    // `feature` goes back to f1, so its own PR head f2 is not its tip.
+    git(repo, &["branch", "-f", "feature", &f1]);
+    git(repo, &["branch", "short-oid", &f1]);
+    // A PR of `feature` whose head f2 is not the tip of `feature`.
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!("[{}]", merged_pr("feature", &head, "main")),
+    });
+    let out = f.clean(&[]);
+    let (removable, _) = parts(&text(&out.stdout));
+    assert_item(
+        &removable,
+        "branch feature",
+        &format!("its tip is in merged PR head {short}"),
+    );
+    // A PR named `other` whose head is the tip of `worktree-agent-1`.
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!("[{}]", merged_pr("other", &f1, "main")),
+    });
+    let out = f.clean(&[]);
+    let (removable, _) = parts(&text(&out.stdout));
+    assert_item(
+        &removable,
+        "branch worktree-agent-1",
+        &format!("its tip is in merged PR head {short_f1}"),
+    );
+
+    // A short oid proves nothing.
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!("[{}]", merged_pr("other", &short, "main")),
+    });
+    let out = f.clean(&[]);
+    let (_, kept) = parts(&text(&out.stdout));
+    assert_item(&kept, "branch short-oid", "no proof that it is merged");
+}
+
+#[test]
+fn many_merged_pr_heads_that_git_lacks_do_not_block() {
+    let (f, _) = squashed_pr("pr-many");
+    let prs: Vec<String> = (0..5000)
+        .map(|n| merged_pr(&format!("pr-{n}"), &format!("{n:040x}"), "main"))
+        .collect();
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: format!("[{}]", prs.join(",")),
+    });
+    let path = format!(
+        "{}:{}",
+        f.bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("clean")
+        .current_dir(&f.repo)
+        .env("PATH", path)
+        .envs(GIT_ENV)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("xtask clean did not end in 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status:?}");
 }
