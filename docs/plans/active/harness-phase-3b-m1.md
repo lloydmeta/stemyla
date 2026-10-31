@@ -234,6 +234,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 3 fixes of 3-6, 3-7 and 3-9: `gather` stores the canonical roots and links in the survey, so `plan` is pure again; the total test has sizes that differ; a list test with a linked `.claude/` (implementer).
 * [x] 2026-10-31: review round 3 fix of 3-2: the same `--also` folder twice is one scratch root, and a folder in another `--also` folder is refused (implementer).
 * [x] 2026-10-31: review round 3 fixes of 3-3, 3-4 and 3-8: the guide names a refused findings file, the plan gives `lsof -w`, and Progress names `bedfd00` (implementer).
+* [x] 2026-10-31: review round 3 (at `bedfd00`): 3 should-fix confirmed (3-1, 3-6, 3-7) and 6 nits, no blocker; mutants full, none missed.  3-1 fails the acceptance "a second run lists nothing" in a case a user can reach, so the rounds go on to round 4.  The fixes are `65ce7f8` to `1763373`; 3-5 has no fix (Decision log).
 
 ## Surprises and discoveries
 
