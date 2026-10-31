@@ -314,6 +314,13 @@ Add one row to the rounds table:
 * Mutants: the mutants line.
 * With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are the messages of a person for those agents.  Baseline approvals: the count that the person gave for the baseline, or "in approvals" if the person gave one total.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
 
+Then remove the worktrees of the round's agents:
+
+* Run `target/debug/xtask review clean $1`.  It removes each worktree `target/review/$1-<agent>-<n>` of this round, also with changes.
+* It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
+* If auto mode or a person refuses it, give the command to the person, and go on.
+* If the Write tool refused the log, give this command with the log in your final answer.  The caller runs it when it writes the log.
+
 After round 3:
 
 * Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.

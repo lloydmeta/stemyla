@@ -569,6 +569,9 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (COMMAND, "target/review/target/debug/xtask publish"),
     (COMMAND, "target/debug/xtask review start HEAD 1"),
     (COMMAND, "target/debug/xtask review mutants 1"),
+    (COMMAND, "target/debug/xtask review clean 1"),
+    (COMMAND, "target/debug/xtask clean --yes"),
+    (COMMAND, "target/debug/xtask clean"),
     (COMMAND, "cargo run -p xtask --release -- publish"),
     (COMMAND, "cargo r -p xtask -- publish"),
     (COMMAND, "cargo run --package=xtask -- publish"),
@@ -590,6 +593,8 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
         "cargo run --manifest-path=./xtask/Cargo.toml -- review start HEAD 1",
     ),
     (COMMAND, "cargo run -q -p xtask -- review start HEAD 1"),
+    (COMMAND, "cargo run -p xtask -- clean"),
+    (COMMAND, "cargo run -q -p xtask --release -- clean --yes"),
     (GIT_SUB, "FOO=a/b git commit -m x"),
     (GIT_SUB, "/usr/bin/git commit -m x"),
     // Letter case: the file system of macOS ignores it.
@@ -687,6 +692,7 @@ const GUARD_PASSES: &[&str] = &[
     "cargo run -q -p xtask -- docs-check",
     "cargo run -p app -- publish",
     "cargo test -p xtask review",
+    "cargo test -p xtask --test clean",
     "for f in a b; do grep -n x \"$f\"; done",
     "export FOO=1",
     "",
@@ -1118,11 +1124,13 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// person, for the round or the baseline, but not the message that gives
 /// the approval counts.  The rounds table's header, its separator line and
 /// the end of its block are one entry, so a separator with fewer cells than
-/// the header fails.
+/// the header fails.  After the log, step 11 removes the worktrees of the
+/// round's agents with `review clean`.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
     "target/debug/xtask review check $1",
+    "target/debug/xtask review clean $1",
     "run_in_background",
     "3900000",
     "Read that file only after the notice has come",
