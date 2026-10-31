@@ -79,7 +79,7 @@ The rules for each kind (parent plan, M1):
    * Kept: `main`, `gh-pages`, and the current branch of each worktree that stays.
    * Removable when one proof holds, and the item names the proof:
      * its tip is an ancestor of `origin/main` (`git merge-base --is-ancestor`);
-     * its tip's tree equals the tree of a commit on `origin/main` (`git log --format=%T origin/main`): a squash merge;
+     * its tip's tree equals the tree of a commit on `origin/main` that the tip does not hold (`git log --format=%T <tip>..origin/main`): a squash merge;
      * a merged PR has head branch `<b>` and `headRefOid` equal to the tip.
    * Else kept: "no proof that it is merged".  A branch whose name matches a merged PR but whose tip differs is kept, because it has commits after the merge.
    * With no `origin/main`, the first two proofs are unknown; the third still holds.
@@ -214,6 +214,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: checkpoint: the xtask code is done (`9bc3de7` to `b7e1088`).  The team leader checked that the three texts apply, and gave them to the orchestrator.  Next: the orchestrator lands them, then round 1.
 * [x] 2026-10-31: review round 1 (`--baseline`, at `cfaf8fd`) ran to step 9.  The Write tool refused the findings file to the team leader, so the round stopped there, and the orchestrator writes the file.  Found: 1 blocker (1-b1, a nested worktree), 10 should-fix and 20 missed mutants confirmed, 3 mutants refuted.  The baseline comparison: of 4 baseline findings, the round found 2.
 * [x] 2026-10-31: review round 1 fix of 1-b1: a worktree that holds a worktree that stays stays too, to a fixed point (implementer).
+* [x] 2026-10-31: review round 1 fix of 1-1: the tree proof counts only the commits of `<tip>..origin/main` (implementer).
 
 ## Surprises and discoveries
 
@@ -224,6 +225,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: `git worktree remove` removes a worktree whose folder is gone (git 2.18 or later).
 * 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
 * 2026-10-31, implementer: the tests of 1-b1 failed first.  The four new tests of `plan` failed, and `yes_keeps_a_merged_worktree_that_holds_a_changed_worktree` found agent-x removable.
+* 2026-10-31, implementer: the test of 1-1 failed first: a branch from `git revert` of main's tip was removable by the tree proof.
 
 ## Decision log
 

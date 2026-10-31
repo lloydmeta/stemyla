@@ -889,3 +889,43 @@ fn yes_keeps_a_merged_worktree_that_holds_a_changed_worktree() {
     );
     assert!(branches(repo).contains("agent-x"));
 }
+
+#[test]
+fn a_branch_that_reverts_main_to_an_older_tree_is_not_merged() {
+    let f = Fixture::empty("revert");
+    let repo = &f.repo;
+    let start = git(repo, &["rev-parse", "HEAD"]);
+    write(&repo.join("feature.txt"), "feature\n");
+    let feature = commit(repo, "feature");
+    git(repo, &["update-ref", "refs/remotes/origin/main", &feature]);
+    // A revert of main's tip has the tree of `start`, an older commit of
+    // main that the branch holds.
+    git(repo, &["switch", "-q", "-c", "revert-feature"]);
+    git(repo, &["revert", "--no-edit", "HEAD"]);
+    // A squash merge has the tree of a commit of main that the branch does
+    // not hold.
+    git(repo, &["switch", "-q", "-c", "squashed", &start]);
+    write(&repo.join("s.txt"), "s\n");
+    let squashed = commit(repo, "s");
+    git(repo, &["switch", "-q", "main"]);
+    let tree = git(repo, &["rev-parse", &format!("{squashed}^{{tree}}")]);
+    let squash = git(
+        repo,
+        &["commit-tree", &tree, "-p", &feature, "-m", "squash"],
+    );
+    git(repo, &["update-ref", "refs/remotes/origin/main", &squash]);
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let (removable, kept) = parts(&text(&out.stdout));
+    assert_item(&kept, "branch revert-feature", "no proof that it is merged");
+    assert_item(
+        &removable,
+        "branch squashed",
+        "its tree is the tree of a commit on origin/main",
+    );
+}

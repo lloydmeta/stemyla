@@ -129,7 +129,8 @@ pub struct Branch {
     pub short: String,
     /// If the tip is an ancestor of `origin/main`.  `None` without it.
     pub ancestor: Option<bool>,
-    /// If the tip's tree is the tree of a commit on `origin/main`.
+    /// If the tip's tree is the tree of a commit on `origin/main` that the
+    /// tip does not hold (`<tip>..origin/main`).
     pub tree_on_main: Option<bool>,
 }
 
@@ -836,15 +837,16 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
         ],
     )
     .is_ok();
-    let main_trees: Option<BTreeSet<String>> = if has_main {
-        Some(
-            git(root, &["log", "--format=%T", origin_main])?
-                .lines()
-                .map(ToString::to_string)
-                .collect(),
-        )
-    } else {
-        None
+    // A squash merge puts the tree of the tip on a commit of main that the
+    // branch does not hold.  A commit that the branch holds does not count,
+    // so a branch that reverts main to an older tree has no proof.
+    let tree_on_main = |tip: &str, tree: &str| -> Result<Option<bool>> {
+        if !has_main {
+            return Ok(None);
+        }
+        let range = format!("{tip}..{origin_main}");
+        let trees = git(root, &["log", "--format=%T", &range])?;
+        Ok(Some(trees.lines().any(|t| t == tree)))
     };
     let ancestor = |sha: &str| -> Result<Option<bool>> {
         if !has_main {
@@ -876,7 +878,7 @@ pub fn gather(root: &Path, facts: &Facts, also: &[PathBuf]) -> Result<Survey> {
             tip: tip.to_string(),
             short: String::new(),
             ancestor: ancestor(tip)?,
-            tree_on_main: main_trees.as_ref().map(|trees| trees.contains(tree)),
+            tree_on_main: tree_on_main(tip, tree)?,
         });
     }
     let shas: Vec<String> = worktrees
