@@ -67,7 +67,6 @@ Cleanup:
 * `xtask/src/review.rs`: the mutants filter, the known-missed list.
 * `xtask/src/` (new subcommands): `clean`, `review clean`, `check`, `pr-body`, `attention`.  `xtask/src/docs.rs`: the check of M6.
 * `docs/working-with-agents.md` in each milestone that adds a subcommand or a skill, because `guide_covers` (`xtask/src/docs.rs`) fails without it.
-* `.cargo/mutants.toml`: test files out.
 * `.github/pull_request_template.md` (new).
 * `CLAUDE.md` (88 lines; the map limit is 100), `docs/invariants.md` (GIT-2), `docs/plans/PLANS.md`, `docs/working-with-agents.md` (it must name each `xtask` subcommand, skill and agent: `guide_covers`), `docs/harness.md`, `docs/tech-debt.md`, decision 0011.
 * Decisions 0023 to 0027, written as `proposed` with this plan.
@@ -109,15 +108,15 @@ An `xtask clean` subcommand finds and removes what runs leave.  It lists by defa
 
 PR #39 already left out the test files and the wasm32-only files (`.cargo/mutants.toml`).  So this milestone starts with a new baseline.
 
-* First, measure the noise that is left.  Use the M8, M9 and catch-up logs of PR #39, which come after `6d0a39d`.  Count the missed lines by class: a wasm32-only item with no `mutants::skip`, a wasm32 block in a shared function, a known-missed mutation, and the rest.  Record the counts in Surprises.  If the noise that is left is small, the team says so and cuts the milestone to fit.
+* First, measure the noise that is left.  Use the M8, M9 and catch-up logs of PR #39, which come after `6d0a39d`.  Count the missed lines by class: a file that today's `.cargo/mutants.toml` leaves out (such as `app/src/save_tests.rs`, out from `cfeefda`), a wasm32-only item with no `mutants::skip`, a wasm32 block in a shared function, a known-missed mutation, and the rest.  Record the counts in Surprises.  If the noise that is left is small, the team says so and cuts the milestone to fit.
 * `xtask review mutants` drops each missed line whose enclosing item has `#[cfg(target_arch = "wasm32")]` or a `cfg` that is false on the native build.  This is a backstop for an item that lacks `mutants::skip`, such as `can_encode` at `f28d22d:app/src/lib.rs`.  It parses the file with `proc-macro2`, which xtask already uses with `span-locations`.  `syn` is not an xtask dependency (DEPS-1).  It drops the lines before the validator sees them, and counts them in the log.
 * A wasm32 block inside a shared function stays in (TD-33).
 * A known-missed list (`xtask/src/review/known_missed.txt` or a table in `review.rs`) holds the mutants of TD-39 and TD-66, each as a function and a mutation.  A missed mutant on the list is logged as known, not sent to a validator.  Another mutant in the same function still goes to a validator.
 * The list is the mutants' side of M3's `repeat-of` match to tech debt.  M3 matches reviewer findings; the list matches mutants.  An entry names its TD.
 * Acceptance: unit tests with fixture lines from PR #39's logs (`refs/remotes/origin/pr/39`, see preflight).
   * The filter drops a mutant in a `#[cfg(target_arch = "wasm32")]` item of a shared file, such as `can_encode` at `f28d22d:app/src/lib.rs`.
-  * It keeps each confirmed mutant that is not on the list.  Findings 1-41 and 1-54 of `iphone-crashes-2026-10-25-m8.md` (`xtask/src/e2e/save.rs:427` and `:431`) still go to a validator; `2fdecda` fixed them with tests.
-  * It logs as known the mutant of finding 2-17 (`save.rs:503`, the body replaced), which went to TD-39.
+  * It keeps each confirmed mutant that is not on the list.  Findings 1-41 and 1-54 of round 1 in `iphone-crashes-2026-10-25-m8.md` (`xtask/src/e2e/save.rs:427:39`, `*` to `+` and `*` to `/`) still go to a validator; `2fdecda` fixed them with tests.
+  * It logs as known the mutant of finding 2-17 of round 2 (`save.rs:503`, the body replaced), which went to TD-39.
 * Each test fails before the change.  The skill's pinned lines and the log format test change in the same commit.
 
 ### M3: the fix rule and the stop rule (decision 0024)
@@ -141,7 +140,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 ### M4: local checks by tier (decision 0026)
 
 * An `xtask check --tier commit|push` subcommand reads the changed paths, picks the checks, prints what it runs and what it skips and why, and runs them.
-* Tier `commit` reads the commit's own changes: the staged and unstaged changes against `HEAD`.  The branch's diff against `main` would select almost every check on a long branch.
+* Tier `commit` reads the commit's own changes: the staged and unstaged changes against `HEAD`, and the untracked files (`git ls-files --others --exclude-standard`).  On a clean tree, it reads the last commit (`HEAD^..HEAD`).  A test covers each case.  The branch's diff against `main` would select almost every check on a long branch.
 * Tier `commit`: `cargo fmt --all --check`; workspace clippy; the tests of each changed crate and of the crates that depend on it; `docs-check` when a doc, `CLAUDE.md`, `.claude/` or `xtask/` changed; the wasm32 clippy when `app`, `worker`, `protocol` or `engine` changed; the `synth` or `app` clippy variant when that crate or a feature changed.
 * Tier `push`, and before each review round: the fmt, clippy, test, `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  It reads the paths against the merge base with `origin/main`.  `serve`, `web-test`, `e2e` and `publish` are not in it.
 * A commit that touches a strict rule's paths runs tier `push` (D2).  No rule has such paths today, so M4 writes a table of paths for each strict rule.
@@ -160,10 +159,11 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * Match: a run's finding matches a ground-truth item by the matching rule of `plans/completed/harness-phase-3-m5.md` (step 6, item 2), which `reviews/replay.md` uses.
   * Cost of one run, in used tokens (`reviews/replay.md`): docs-reviewer about 1.5M, a validator 0.06M to 0.37M, supply-chain-reviewer about 1.1M.  The design must fit the budget below.
   * validator, first: 40 logged findings, stratified.  The set holds all 6 refuted reviewer findings, refuted mutants, and confirmed findings.  Arms: `sonnet` and the control, one run each (about 16M).
-  * docs-reviewer, second: the 4 rounds with the most docs findings.  Ground truth: the docs-reviewer's own confirmed blockers and should-fix in those rounds.  Arms: `sonnet` and the control, 2 runs each (about 24M).
+  * docs-reviewer, second: the rounds with the most docs findings, until the ground truth has at least 40 items (about 8 rounds).  Ground truth: the docs-reviewer's own confirmed blockers and should-fix in those rounds.  Arms: `sonnet` and the control, one run each (about 24M).  With fewer than 40 items, the 95% interval is wider than 0.3 at most recalls, so the arm cannot pass.
   * Last, only if budget is left: `haiku` for the validator, then the effort arms.  A role not measured keeps `inherit`, and Surprises says so.
   * gpu-reviewer, wire-reviewer, supply-chain-reviewer: effort `medium` against the control at `high`, on their logged rounds.
-  * Runs: the reviewer arms have 2 runs each, so the control also measures run noise.  A validator verdict is less noisy, so its arms have one run each.
+  * Runs: one run for each arm, to fit the budget.  So the measure does not separate run noise from the model's effect; the results table says so.
+  * Before the runs, the team works out each arm's expected interval width from its n.  It drops an arm that cannot meet the 0.3 limit, and records why.
   * Recall: the share of ground-truth items that an arm's runs find, with a 95% interval.
   * Bug: a ground-truth item of Kind `bug`.  Missed: the control found it in at least one run, and the candidate found it in no run.
   * Pass rule for a reviewer: recall within 0.15 of the control, and no bug missed.
@@ -260,7 +260,7 @@ Kick-off prompt:
 * [x] 2026-10-30: retrospective research (six agents: the PR #39 sessions, the earlier sessions, the review logs, PRs and CI, Claude Code and GitHub features, a harness inventory).
 * [x] 2026-10-30: this plan and decisions 0023 to 0027 written as proposed.
 * [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
-* [ ] Plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.
+* [x] 2026-10-31, plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.  Round 3 found no blocker and 4 should-fix; all fixed.  The review stops at its cap of 3 rounds.
 * [ ] M1: cleanup.
 * [ ] M2: less mutants noise.
 * [ ] M3: the fix rule and the stop rule.
@@ -300,6 +300,7 @@ Kick-off prompt:
   * 0024: a nit is never `confirmed`, so "nits included" now means "each nit that the team leader agrees with".
   * 0023: the `docs-check` rule checks only `plans/active/`.
   * 0026, from round 2: tier `commit` reads the commit's own changes, not the branch's diff against `main`.  On a long branch, the branch's diff selects almost every check, so the decision would save no time.
+  * 0026, from round 3: tier `push` runs the fmt, clippy, test, `docs-check` and Trunk build lines of the Commands, not `serve`, `web-test`, `e2e` or `publish`.  `publish` is for a person only (GIT-1).
   * None of these changes what the maintainer accepted.  The PR lists them under "Needs your attention".
 * 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 

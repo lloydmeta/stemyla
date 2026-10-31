@@ -17,7 +17,7 @@ GIT-2 runs fmt, six clippy runs, the workspace tests and `docs-check` before eac
 B, as the maintainer asked on 2026-10-30.
 
 * `xtask check --tier commit` picks checks from the commit's own changed paths (against `HEAD`), and prints what it skips and why.
-* `xtask check --tier push` runs the full set of `CLAUDE.md`'s Commands, before each push and each review round.
+* `xtask check --tier push` runs the fmt, clippy, test, `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands, before each push and each review round.  It does not run `serve`, `web-test`, `e2e` or `publish` (GIT-1).
 * A commit that touches a strict rule's paths (decision 0024) runs tier `push` (D2 of the plan).  The plan gives each strict rule its paths.
 * CI stays the authority.  The browser tests stay in CI, except a scenario that CI failed.
 
