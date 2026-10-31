@@ -98,14 +98,33 @@ fn ps_stat(pid: u32) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// The fake `gh` that prints these PRs.
+/// The fake `gh` that prints these PRs, or fails.
 enum Gh {
     Prs { open: String, merged: String },
+    Fails,
+}
+
+/// A real `xtask serve`, which a thread reaps so that it does not stay a
+/// zombie.  It gets SIGKILL when the test ends, if it still runs.
+struct Serve {
+    pid: u32,
+    reaped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for Serve {
+    fn drop(&mut self) {
+        if !self.reaped.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &self.pid.to_string()])
+                .status();
+        }
+    }
 }
 
 /// A temporary folder with a repo and its leftovers.  The fields drop in
 /// order: the processes stop before the folder goes.
 struct Fixture {
+    serve: Option<Serve>,
     children: Vec<Kill>,
     top: PathBuf,
     repo: PathBuf,
@@ -119,6 +138,7 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        self.serve = None;
         self.children.clear();
         let _ = std::fs::remove_dir_all(&self.top);
     }
@@ -149,6 +169,7 @@ impl Fixture {
         let start = commit(&repo, "start");
         git(&repo, &["update-ref", "refs/remotes/origin/main", &start]);
         Fixture {
+            serve: None,
             children: Vec::new(),
             bin: top.join("bin"),
             scratch_busy: top.join("scratch-busy"),
@@ -159,7 +180,8 @@ impl Fixture {
         }
     }
 
-    /// The fixtures of step 3 of the plan, but the real `xtask serve`.
+    /// The fixtures of step 3 of the plan, but the real `xtask serve`,
+    /// which [`Fixture::start_serve`] adds.
     fn planted(name: &str) -> Fixture {
         let mut f = Fixture::empty(name);
         let repo = f.repo.clone();
@@ -296,6 +318,7 @@ impl Fixture {
     fn fake_gh(&self, gh: &Gh) {
         use std::os::unix::fs::PermissionsExt;
         let script = match gh {
+            Gh::Fails => "#!/bin/sh\necho 'gh: no network' >&2\nexit 1\n".to_string(),
             Gh::Prs { open, merged } => format!(
                 "#!/bin/sh\ncase \"$*\" in\n  *\"--state open\"*) printf '%s\\n' '{open}' ;;\n  *\"--state merged\"*) printf '%s\\n' '{merged}' ;;\n  *) echo \"fake gh: $*\" >&2; exit 1 ;;\nesac\n"
             ),
@@ -303,6 +326,47 @@ impl Fixture {
         let path = self.bin.join("gh");
         write(&path, &script);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Starts the real `xtask serve` with its working folder in the clean
+    /// worktree `target/review/4-reviewer-1`, and gives its port.
+    fn start_serve(&mut self) -> u16 {
+        use std::io::BufRead;
+        let start = git(&self.repo, &["rev-parse", "HEAD"]);
+        let rel = "target/review/4-reviewer-1";
+        git(
+            &self.repo,
+            &["worktree", "add", "-q", "--detach", rel, &start],
+        );
+        let site = self.top.join("site");
+        write(&site.join("index.html"), "<p>hi</p>");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(["serve", site.to_str().unwrap(), "--port", "0"])
+            .current_dir(self.repo.join(rel))
+            .envs(GIT_ENV)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let reaped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.serve = Some(Serve {
+            pid: child.id(),
+            reaped: reaped.clone(),
+        });
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            reaped.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        line.trim()
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.strip_suffix('/'))
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| panic!("no port in {line:?}"))
     }
 
     fn also(&self) -> Vec<String> {
@@ -502,8 +566,13 @@ fn the_list_mode_names_each_item_and_changes_nothing() {
     );
     assert_eq!(removable.len(), want_removable.len(), "{removable:#?}");
     assert_eq!(kept.len(), want_kept.len() + 1, "{kept:#?}");
+    assert!(stdout.contains("\ntarget/ holds "), "{stdout}");
     assert!(
-        stdout.lines().last().unwrap().starts_with("target/ holds "),
+        stdout
+            .lines()
+            .last()
+            .unwrap()
+            .starts_with("run `cargo run -p xtask -- clean --yes --also "),
         "{stdout}"
     );
 
@@ -548,4 +617,212 @@ fn an_unknown_word_prints_the_usage_and_exits_2() {
         text(&out.stderr).starts_with("usage: xtask clean"),
         "{out:?}"
     );
+}
+
+/// The `removed ` and `failed ` lines of a `--yes` run.
+fn actions(stdout: &str) -> (Vec<String>, Vec<String>) {
+    let take = |prefix: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .filter_map(|l| l.strip_prefix(prefix))
+            .map(ToString::to_string)
+            .collect()
+    };
+    (take("removed "), take("failed "))
+}
+
+fn branches(repo: &Path) -> BTreeSet<String> {
+    git(
+        repo,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )
+    .lines()
+    .map(ToString::to_string)
+    .collect()
+}
+
+fn names_in(dir: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn yes_removes_only_the_removable_items_and_a_second_run_finds_nothing() {
+    let mut f = Fixture::planted("yes");
+    let port = f.start_serve();
+    let serve_pid = f.serve.as_ref().unwrap().pid;
+    let pid_file = f.repo.join(format!("target/xtask-serve/{port}.pid"));
+    assert!(pid_file.is_file(), "xtask serve wrote no pid file");
+
+    let mut args = vec!["--yes".to_string()];
+    args.extend(f.also());
+    let out = f.clean(&args);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+
+    // The first list: the server uses its worktree.
+    let (removable, kept) = parts(&stdout);
+    assert_item(
+        &kept,
+        "worktree target/review/4-reviewer-1",
+        "a process uses it",
+    );
+    assert_item(
+        &removable,
+        &format!("pid-file target/xtask-serve/{port}.pid"),
+        &format!("a running xtask serve on port {port} (pid {serve_pid})"),
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("run `cargo run -p xtask -- clean --yes --also ")),
+        "{stdout}"
+    );
+
+    // What it removed.
+    let (removed, failed) = actions(&stdout);
+    assert_eq!(failed, Vec::<String>::new(), "{stdout}");
+    let (want_removable, want_kept) = expected(&f);
+    for (head, why) in &want_removable {
+        assert_item(&removed, head, why);
+    }
+    assert_item(
+        &removed,
+        &format!("pid-file target/xtask-serve/{port}.pid"),
+        &format!("a running xtask serve on port {port} (pid {serve_pid})"),
+    );
+    assert_item(
+        &removed,
+        "worktree target/review/4-reviewer-1",
+        "clean and unused",
+    );
+    assert_eq!(removed.len(), want_removable.len() + 2, "{removed:#?}");
+    for (head, _) in &want_kept {
+        assert!(
+            !removed
+                .iter()
+                .any(|l| l.starts_with(&format!("{head} ")) || l.starts_with(&format!("{head}:"))),
+            "removed the kept {head}"
+        );
+    }
+
+    // The worktrees.
+    let listing = git(&f.repo, &["worktree", "list", "--porcelain"]);
+    let review = f.repo.join("target/review");
+    for gone in [
+        "1-reviewer-2",
+        "1-reviewer-4",
+        "1-reviewer-7",
+        "3-reviewer-1",
+        "4-reviewer-1",
+    ] {
+        let path = review.join(gone);
+        assert!(!path.exists(), "{gone} is still there");
+        assert!(
+            !listing.contains(&format!("worktree {}\n", path.display())),
+            "{listing}"
+        );
+    }
+    let agent_x = f.repo.join(".claude/worktrees/agent-x");
+    assert!(!agent_x.exists() && !listing.contains(&agent_x.display().to_string()));
+    for stays in [
+        review.join("1-reviewer-1"),
+        review.join("1-reviewer-3"),
+        review.join("1-reviewer-5"),
+        review.join("1-reviewer-6"),
+        review.join("2-reviewer-1"),
+        f.repo.join(".claude/worktrees/agent-y"),
+        f.top.join("outside-wt"),
+    ] {
+        assert!(stays.is_dir(), "{} went", stays.display());
+        assert!(
+            listing.contains(&format!("worktree {}\n", stays.display())),
+            "{listing}"
+        );
+    }
+    assert!(review.join("1-reviewer-3/x.wav").is_file());
+
+    // The branches, run folders, build output, pid files and scratch roots.
+    let want: BTreeSet<String> = ["agent-y", "ancestor-wt", "main", "moved-on", "unmerged"]
+        .map(String::from)
+        .into();
+    assert_eq!(branches(&f.repo), want);
+    let want: BTreeSet<String> = ["main", "nolog-copy", "open-pr", "other"]
+        .map(String::from)
+        .into();
+    assert_eq!(names_in(&review.join("run")), want);
+    assert!(!f.repo.join("target/e2e").exists());
+    assert!(!f.repo.join("app/dist").exists());
+    assert_eq!(
+        names_in(&f.repo.join("target/xtask-serve")),
+        BTreeSet::new()
+    );
+    assert!(!f.scratch_free.exists());
+    assert!(f.scratch_busy.join("b.txt").is_file());
+
+    // The processes: the server stopped, and the others still run.
+    let reaped = f.serve.as_ref().unwrap().reaped.clone();
+    let until = Instant::now() + Duration::from_secs(5);
+    while !reaped.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(Instant::now() < until, "xtask serve still runs");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let zombie = f.zombie;
+    for child in f.children.iter_mut().filter(|c| c.pid() != zombie) {
+        assert!(child.runs(), "pid {} stopped", child.pid());
+    }
+
+    // A second run finds nothing more to remove.
+    let busy = f.scratch_busy.to_str().unwrap().to_string();
+    let out = f.clean(&["--yes".to_string(), "--also".to_string(), busy]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    assert_eq!(stdout.lines().next(), Some("nothing to remove"), "{stdout}");
+    assert!(!stdout.contains("removed "), "{stdout}");
+    assert!(!stdout.contains("run `cargo"), "{stdout}");
+}
+
+#[test]
+fn with_gh_failing_only_the_proofs_from_git_remove_branches() {
+    let f = Fixture::empty("gh-fails");
+    let repo = &f.repo;
+    let start = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["switch", "-q", "-c", "squashed"]);
+    write(&repo.join("s.txt"), "s");
+    let squashed = commit(repo, "s");
+    git(repo, &["switch", "-q", "-c", "merged-pr", &start]);
+    write(&repo.join("q.txt"), "q");
+    commit(repo, "q");
+    git(repo, &["switch", "-q", "main"]);
+    let tree = git(repo, &["rev-parse", &format!("{squashed}^{{tree}}")]);
+    let squash = git(repo, &["commit-tree", &tree, "-p", &start, "-m", "squash"]);
+    git(repo, &["update-ref", "refs/remotes/origin/main", &squash]);
+    write(&repo.join("target/review/run/old/log.md"), "old log\n");
+    f.fake_gh(&Gh::Fails);
+
+    let out = f.clean(&["--yes".to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (_, kept) = parts(&stdout);
+    assert_item(&kept, "branch merged-pr", "cannot read merged PRs");
+    assert_item(
+        &kept,
+        "run-folder target/review/run/old",
+        "cannot read open PRs",
+    );
+    let (removed, _) = actions(&stdout);
+    assert_item(
+        &removed,
+        "branch squashed",
+        "its tree is the tree of a commit on origin/main",
+    );
+    let want: BTreeSet<String> = ["main", "merged-pr"].map(String::from).into();
+    assert_eq!(branches(repo), want);
+    assert!(repo.join("target/review/run/old/log.md").is_file());
 }

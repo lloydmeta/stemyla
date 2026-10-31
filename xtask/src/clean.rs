@@ -1,5 +1,6 @@
-//! `xtask clean [--also <path>]...`: lists what runs leave in the repo,
-//! with sizes, and changes nothing.
+//! `xtask clean [--yes] [--also <path>]...`: lists what runs leave in the
+//! repo, with sizes, and changes nothing.  `--yes` removes only the items
+//! that it can prove safe.
 //!
 //! The code has two parts, so the tests can check the rules without the
 //! network.  [`gather`] reads the repo with `git` and the file system, and
@@ -13,8 +14,9 @@ use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-pub const USAGE: &str = "usage: xtask clean [--also <path>]...";
+pub const USAGE: &str = "usage: xtask clean [--yes] [--also <path>]...";
 
 /// The exit code of a usage error and of a refused `--also` path.
 const REFUSED: i32 = 2;
@@ -24,6 +26,9 @@ const FAILED: i32 = 1;
 
 /// The local branches that always stay.
 const KEPT_BRANCHES: &[&str] = &["main", "gh-pages"];
+
+/// The time that `--yes` waits for a stopped `xtask serve` to end.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// What the code reads from outside the repo's files.  `None` means that
 /// the fact is unknown: an item that needs it is kept.
@@ -520,8 +525,8 @@ fn scratch_verdict(s: &Survey, f: &Folder) -> Verdict {
     Verdict::Removable("a scratch root named with --also".to_string())
 }
 
-/// The lines of the list.
-pub fn report(items: &[Item], target_size: u64) -> Vec<String> {
+/// The lines of the list.  `also` holds the `--also` arguments.
+pub fn report(items: &[Item], target_size: u64, also: &[String]) -> Vec<String> {
     let removable: Vec<&Item> = items.iter().filter(|i| i.removable()).collect();
     let kept: Vec<&Item> = items.iter().filter(|i| !i.removable()).collect();
     let mut lines = Vec::new();
@@ -542,6 +547,12 @@ pub fn report(items: &[Item], target_size: u64) -> Vec<String> {
         "target/ holds {}.  `cargo clean` removes it: run it by hand.",
         human_size(target_size)
     ));
+    if !removable.is_empty() {
+        let also: String = also.iter().map(|p| format!(" --also {p}")).collect();
+        lines.push(format!(
+            "run `cargo run -p xtask -- clean --yes{also}` to remove the items above."
+        ));
+    }
     lines
 }
 
@@ -563,6 +574,7 @@ pub fn human_size(bytes: u64) -> String {
 /// The options of the command line.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Options {
+    pub yes: bool,
     pub also: Vec<String>,
 }
 
@@ -571,6 +583,7 @@ pub fn parse_args(args: &[String]) -> Option<Options> {
     let mut words = args.iter();
     while let Some(word) = words.next() {
         match word.as_str() {
+            "--yes" => options.yes = true,
             "--also" => options.also.push(words.next()?.clone()),
             _ => return None,
         }
@@ -638,7 +651,7 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
     }
-    match run(&root, &also) {
+    match run(&root, &also, &options) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{e:#}");
@@ -647,13 +660,130 @@ pub fn main(args: &[String]) -> i32 {
     }
 }
 
-fn run(root: &Path, also: &[PathBuf]) -> Result<i32> {
+fn run(root: &Path, also: &[PathBuf], options: &Options) -> Result<i32> {
     let survey = gather(root, &Facts::read(root), also)?;
     let items = plan(&survey);
-    for line in report(&items, survey.target_size) {
+    for line in report(&items, survey.target_size, &options.also) {
         println!("{line}");
     }
-    Ok(0)
+    if !options.yes {
+        return Ok(0);
+    }
+    Ok(if remove(root, also, &items)? {
+        0
+    } else {
+        FAILED
+    })
+}
+
+/// `--yes`: stops each running `xtask serve`, then gathers again and
+/// removes each item that is removable in the new survey.  Returns `false`
+/// if one failed.
+fn remove(root: &Path, also: &[PathBuf], first: &[Item]) -> Result<bool> {
+    let mut ok = true;
+    let mut fail = |item: &Item, error: &str| {
+        println!("failed {}: {error}", item.line());
+        ok = false;
+    };
+    for item in first
+        .iter()
+        .filter(|i| i.kind == Kind::PidFile && i.removable())
+    {
+        if let Some(pid) = item.pid
+            && let Err(e) = stop(pid)
+        {
+            fail(item, &e);
+            continue;
+        }
+        let path = item.path.as_deref().context("a pid file has a path")?;
+        match std::fs::remove_file(path) {
+            Ok(()) => println!("removed {}", item.line()),
+            Err(e) => fail(item, &e.to_string()),
+        }
+    }
+
+    // A worktree that a stopped server used is free now.
+    let survey = gather(root, &Facts::read(root), also)?;
+    let items = plan(&survey);
+    let removable = |kind: Kind| {
+        items
+            .iter()
+            .filter(move |i| i.kind == kind && i.removable())
+    };
+
+    // The branches and run folders that a worktree which stays still holds.
+    let mut stuck: BTreeSet<String> = BTreeSet::new();
+    for item in removable(Kind::Worktree) {
+        let path = item.path.as_deref().context("a worktree has a path")?;
+        let path = path.to_str().context("a worktree path is UTF-8")?;
+        match git(root, &["worktree", "remove", path]) {
+            Ok(_) => println!("removed {}", item.line()),
+            Err(e) => {
+                fail(item, &format!("{e:#}"));
+                stuck.extend(item.branch.clone());
+            }
+        }
+    }
+    for item in removable(Kind::Branch) {
+        if stuck.contains(&item.name) {
+            fail(item, "its worktree stays");
+            continue;
+        }
+        match git(root, &["branch", "-D", &item.name]) {
+            Ok(_) => println!("removed {}", item.line()),
+            Err(e) => fail(item, &format!("{e:#}")),
+        }
+    }
+    let stuck_runs: BTreeSet<String> = stuck.iter().map(|b| b.replace('/', "-")).collect();
+    for kind in [Kind::RunFolder, Kind::Build, Kind::Scratch] {
+        for item in removable(kind) {
+            let path = item.path.as_deref().context("a folder has a path")?;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if kind == Kind::RunFolder && stuck_runs.contains(name) {
+                fail(item, "its worktree stays");
+                continue;
+            }
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => println!("removed {}", item.line()),
+                Err(e) => fail(item, &e.to_string()),
+            }
+        }
+    }
+    Ok(ok)
+}
+
+/// Sends SIGTERM to `pid`, and waits for it to end.
+fn stop(pid: u32) -> Result<(), String> {
+    let out = Command::new("kill")
+        .arg(pid.to_string())
+        .output()
+        .map_err(|e| format!("kill {pid}: {e}"))?;
+    if !out.status.success() && !ended(pid) {
+        return Err(format!(
+            "kill {pid}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let start = Instant::now();
+    while start.elapsed() < STOP_WAIT {
+        if ended(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "pid {pid} still runs after {} s",
+        STOP_WAIT.as_secs()
+    ))
+}
+
+/// If `pid` has no process, or a zombie.
+fn ended(pid: u32) -> bool {
+    match ask(Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="])) {
+        Answer::No => true,
+        Answer::Yes(stat) => stat.trim_start().starts_with('Z'),
+        Answer::Unknown => false,
+    }
 }
 
 /// Reads the repo at `root` (canonical), with `facts` from outside it.
@@ -1954,7 +2084,7 @@ mod tests {
             ancestor: Some(true),
             ..branch("ancestor", 2)
         });
-        let lines = report(&plan(&s), 3 << 20);
+        let lines = report(&plan(&s), 3 << 20, &["/tmp/x".to_string()]);
         assert_eq!(
             lines,
             [
@@ -1964,13 +2094,14 @@ mod tests {
                 "keeps (1 items):",
                 "  branch main (s1): main and gh-pages stay",
                 "target/ holds 3.0 MiB.  `cargo clean` removes it: run it by hand.",
+                "run `cargo run -p xtask -- clean --yes --also /tmp/x` to remove the items above.",
             ]
         );
     }
 
     #[test]
     fn with_nothing_removable_the_report_says_so_and_gives_no_command() {
-        let lines = report(&plan(&survey()), 0);
+        let lines = report(&plan(&survey()), 0, &[]);
         assert_eq!(
             lines,
             [
@@ -1992,19 +2123,19 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_takes_also() {
+    fn the_command_line_takes_yes_and_also() {
         let args =
             |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
         assert_eq!(parse_args(&[]), Some(Options::default()));
         assert_eq!(
-            parse_args(&args(&["--also", "/tmp/a", "--also", "/tmp/b"])),
+            parse_args(&args(&["--also", "/tmp/a", "--yes", "--also", "/tmp/b"])),
             Some(Options {
+                yes: true,
                 also: vec!["/tmp/a".to_string(), "/tmp/b".to_string()],
             })
         );
         assert_eq!(parse_args(&args(&["--also"])), None);
         assert_eq!(parse_args(&args(&["now"])), None);
-        assert_eq!(parse_args(&args(&["--yes"])), None);
     }
 
     #[test]
@@ -2044,5 +2175,87 @@ mod tests {
                 .unwrap()
                 .join("xtask-clean-no-such-folder/a")
         );
+    }
+
+    // `--yes`.
+
+    #[test]
+    fn the_report_ends_with_the_yes_command_and_each_also() {
+        let mut s = survey();
+        s.builds.push(Folder {
+            path: PathBuf::from("/r/target/e2e"),
+            size: 1,
+        });
+        let lines = report(&plan(&s), 0, &["/tmp/a".to_string(), "/tmp/b".to_string()]);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(
+                "run `cargo run -p xtask -- clean --yes --also /tmp/a --also /tmp/b` to remove the items above."
+            )
+        );
+        let lines = report(&plan(&survey()), 0, &["/tmp/a".to_string()]);
+        assert!(!lines.iter().any(|l| l.starts_with("run `")), "{lines:?}");
+    }
+
+    #[test]
+    fn the_command_line_takes_yes() {
+        assert_eq!(
+            parse_args(&["--yes".to_string()]),
+            Some(Options {
+                yes: true,
+                also: Vec::new(),
+            })
+        );
+    }
+
+    /// A child, stopped and reaped when the test ends.
+    struct Child(std::process::Child);
+
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Reaps `child` in a thread, as a shell would, so `stop` sees it end.
+    fn reaped(child: std::process::Child) -> (u32, std::thread::JoinHandle<()>) {
+        let pid = child.id();
+        let mut guard = Child(child);
+        let handle = std::thread::spawn(move || {
+            let _ = guard.0.wait();
+        });
+        (pid, handle)
+    }
+
+    #[test]
+    fn stop_ends_a_process_with_sigterm() {
+        let child = Command::new("sleep").arg("300").spawn().unwrap();
+        let (pid, handle) = reaped(child);
+        let start = Instant::now();
+        assert_eq!(stop(pid), Ok(()));
+        assert!(start.elapsed() < STOP_WAIT, "{:?}", start.elapsed());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn stop_fails_on_a_process_that_ignores_sigterm() {
+        let child = Command::new("sh")
+            .args(["-c", "trap '' TERM; exec sleep 300"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let guard = Child(child);
+        // Wait for the shell to set the trap and become `sleep`.
+        let until = Instant::now() + Duration::from_secs(5);
+        while !matches!(
+            ask(Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="])),
+            Answer::Yes(command) if command.starts_with("sleep")
+        ) {
+            assert!(Instant::now() < until, "pid {pid} is no sleep");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(stop(pid), Err(format!("pid {pid} still runs after 5 s")));
+        drop(guard);
     }
 }

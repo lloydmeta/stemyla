@@ -208,11 +208,14 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent): 1 blocker, 5 should-fix and 5 nits.  All fixed in this plan.  The review stops at its cap of 2 rounds.
 * [x] 2026-10-31: step 1, the list mode of `xtask clean`, `serve::pid_file`, the `clean` row of the guide and TD-67 (implementer).
 * [x] 2026-10-31: step 2, the pid file of `xtask serve`, and TD-68 (implementer).
+* [x] 2026-10-31: step 3, `xtask clean --yes` (implementer).
 
 ## Surprises and discoveries
 
 * 2026-10-31, implementer: step 1's tests failed first.  The tests of `plan` in `clean.rs` failed 51 of 57 with a `plan` that gave no items; the other 6 test helpers.  The tests in `xtask/tests/clean.rs` failed with "unknown command clean" before the arm in `main.rs`.
 * 2026-10-31, implementer: step 2's two tests in `xtask/tests/serve.rs` failed first.  The pid file was missing, and stderr did not say "no pid file" outside a repo.
+* 2026-10-31, implementer: step 3's tests failed first.  The two `--yes` tests in `xtask/tests/clean.rs` failed with the usage, exit 2.  The new tests in `clean.rs` did not build: no `stop`, no `STOP_WAIT`, and `report` took no `--also`.
+* 2026-10-31, implementer: `git worktree remove` removes a worktree whose folder is gone (git 2.18 or later).
 * 2026-10-31, implementer: `git rev-parse --short` takes one revision only.  `git log --no-walk=unsorted --format="%H %h"` gives the short form of many commits in one call.
 
 ## Decision log
@@ -233,6 +236,9 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the ref test of a worktree uses the set of branches that have a proof, before the rule of the current branch.  A ref passes if it is not such a branch, or if the worktree's `HEAD` is that branch's tip, which its proof covers.  So the worktrees do not depend on the branches that this run deletes, and a worktree on any branch passes.
 * 2026-10-31, implementer: step 1 has no `--yes`.  The command refuses it with the usage until step 3, so the tests of step 3 fail first.  The last line of the list, which gives the `--yes` command, comes in step 3 too.
 * 2026-10-31, implementer: the kinds print as `pid-file`, `worktree`, `branch`, `run-folder`, `build` and `scratch`, in that order.  A kept item shows no size.  A run folder `detached-<short sha>` of a detached worktree that stays is kept as "the current branch of a worktree".  A pid file with a pid below 2 holds no pid, since `kill 0` signals a process group.
+* 2026-10-31, implementer: `--yes` never runs `git worktree prune`.  It removes each removable prunable worktree with `git worktree remove`, as it does the others.  So it never acts on a worktree that it did not name, and a prunable worktree that stays does not stop the others.
+* 2026-10-31, implementer: if `git worktree remove` fails, `--yes` does not delete that worktree's branch or remove its run folder, and prints `failed` for each.  The survey decided them as if the worktree went.
+* 2026-10-31, implementer: `--yes` acts on the pid files of the first survey only.  The second survey gives the other items.
 
 ## Outcomes and retrospective
 
