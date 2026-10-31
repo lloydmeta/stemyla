@@ -217,6 +217,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 1 fix of 1-1: the tree proof counts only the commits of `<tip>..origin/main` (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-2 and 1-b2: `--also` refuses a path in any worktree of the repo (implementer).
 * [x] 2026-10-31: review round 1 fix of 1-3 and 1-b4: a test of a failed `git worktree remove`; a failed detached worktree holds its `detached-<short sha>` run folder too; the words of the removal are a constant with a test (implementer).
+* [x] 2026-10-31: review round 1 fixes of 1-6, 1-7 and 1-9: `review clean` tests gain a round-named worktree outside `target/review/` and a locked one; `target/review` is canonical as the listed paths are (implementer).
 
 ## Surprises and discoveries
 
@@ -230,6 +231,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the test of 1-1 failed first: a branch from `git revert` of main's tip was removable by the tree proof.
 * 2026-10-31, implementer: the test of 1-2 failed first: `--also` took a linked worktree in the temporary folder, with exit 0.
 * 2026-10-31, implementer: the test of 1-3 failed first, on the run folder `detached-<short sha>` of a failed detached worktree.  With the two mutants of 1-3 (no `branch` in the worktree item, and `!=` for the run folder kind), the test fails too.  When `git worktree remove` cannot delete a file, it still deletes the worktree's record.  Then `git branch -D` would delete the branch, so only the `stuck` set keeps it.
+* 2026-10-31, implementer: the tests of 1-6 and 1-7 cover code that was right, so they failed first with the mutants of the findings: no filter on the parent folder, and no `!registered.contains(p)`.  The test of 1-9 failed first: through a linked `target/`, `review clean` removed the folder and left the worktree registered.  For a locked worktree, `git worktree remove --force` exits 128, and the worktree stays.
 
 ## Decision log
 

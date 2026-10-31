@@ -1397,7 +1397,9 @@ fn of_round(name: &str, round: u32) -> bool {
 /// a name that is not a worktree.  It runs no `git worktree prune`, so it
 /// acts on no other worktree.
 fn clean(toplevel: &Path, round: u32) -> Result<(i32, Vec<String>)> {
-    let review = canonical(toplevel).join("target/review");
+    // The same canonical form as the listed paths, also through a linked
+    // `target/`.
+    let review = crate::clean::canonical(&toplevel.join("target/review"));
     let listing = git(toplevel, &["worktree", "list", "--porcelain", "-z"])?;
     let mut registered: Vec<PathBuf> = listing
         .split('\0')

@@ -152,6 +152,22 @@ fn review_clean_removes_the_worktrees_of_one_round_only() {
     for keep in ["run/main/1", "target/debug"] {
         std::fs::create_dir_all(review.join(keep)).unwrap();
     }
+    // A worktree with a round's name outside `target/review/`, with a
+    // change, which stays.
+    let agent = repo
+        .0
+        .canonicalize()
+        .unwrap()
+        .join(".claude/worktrees/1-reviewer-1");
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        agent.to_str().unwrap(),
+        "HEAD",
+    ]);
+    std::fs::write(agent.join(".gitignore"), "kept\n").unwrap();
 
     let out = repo.xtask(&["review", "clean", "1"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
@@ -187,6 +203,14 @@ fn review_clean_removes_the_worktrees_of_one_round_only() {
     }
     assert!(review.join("run/main/1").is_dir());
     assert!(review.join("target/debug").is_dir());
+    assert!(
+        listing.contains(&format!("worktree {}\n", agent.display())),
+        "{listing}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(agent.join(".gitignore")).unwrap(),
+        "kept\n"
+    );
 
     let out = repo.xtask(&["review", "clean", "1"]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
@@ -240,4 +264,53 @@ fn the_mutants_profile_keeps_debug_assertions_and_overflow_checks() {
             "[profile.mutants] keeps {key} as the test profile has it: {table:?}"
         );
     }
+}
+
+#[test]
+fn review_clean_fails_on_a_locked_worktree_and_keeps_it() {
+    let repo = Repo::new("clean-locked");
+    let review = repo.0.canonicalize().unwrap().join("target/review");
+    let locked = review.join("1-reviewer-1");
+    let path = locked.to_str().unwrap();
+    repo.git(&["worktree", "add", "-q", "--detach", path, "HEAD"]);
+    repo.git(&["worktree", "lock", path]);
+
+    let out = repo.xtask(&["review", "clean", "1"]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(
+        text(&out.stderr).starts_with("failed target/review/1-reviewer-1: "),
+        "{out:?}"
+    );
+    assert!(locked.join(".gitignore").is_file(), "the folder went");
+    assert!(
+        worktree_paths(&repo).contains(&format!("worktree {path}\n")),
+        "the worktree is no longer registered"
+    );
+}
+
+#[test]
+fn review_clean_removes_registered_worktrees_through_a_linked_target() {
+    let repo = Repo::new("clean-link");
+    let elsewhere = repo.0.with_extension("target");
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.0.join("target")).unwrap();
+    repo.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        "target/review/1-reviewer-1",
+        "HEAD",
+    ]);
+
+    let out = repo.xtask(&["review", "clean", "1"]);
+    let listing = worktree_paths(&repo);
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(text(&out.stdout), "removed target/review/1-reviewer-1\n");
+    assert!(
+        !listing.contains("1-reviewer-1"),
+        "git still has the worktree: {listing}"
+    );
 }
