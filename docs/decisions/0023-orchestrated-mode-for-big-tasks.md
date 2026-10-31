@@ -19,7 +19,7 @@ A hook cannot start a skill ([hooks](https://code.claude.com/docs/en/hooks)).  T
 B.  A task is big when one of these holds at the start: a plan of more than 3 milestones; a decision point in more than one milestone; work longer than one session; or the maintainer says the run is to go on without them.  The agent proposes orchestrated mode in one question, then runs hands-off.
 
 * `.claude/skills/orchestrate/SKILL.md` holds the generic recipe.  A plan's "How the work runs" section holds only what is particular to it.
-* `docs-check` fails a plan of more than 3 milestones with no "How the work runs" section.
+* `docs-check` fails a plan in `plans/active/` of more than 3 milestones with no "How the work runs" section.  Completed plans are not checked.
 * The team agents stay `general-purpose` with briefs.  No agent file gets write tools.
 
 ## Consequences

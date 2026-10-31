@@ -6,7 +6,7 @@ Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-
 
 Every file in `.claude/agents/` says `model: inherit`, and `agents_folder_problems` requires it.  So PR #39 ran every reviewer and validator on Opus 5.5 at high effort, and used about 80% of a week's usage limit.  A subagent can take `model` and `effort` in its frontmatter ([sub-agents](https://code.claude.com/docs/en/sub-agents)).  Sonnet 5.5 costs half of Opus 5.5 for each token, and Haiku 5.5 a fortieth up to 100k-token prompts ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)).
 
-In the logs, the validator refuted 6 of 284 reviewer findings, and the docs-reviewer's findings are 62% nits.  The reviewer and the memory-reviewer found 25 and 5 bugs that no other agent found.
+In the logs, the validator refuted about 2% of reviewer findings (6 of 288 to 310), and the docs-reviewer's findings are 62% nits.  The reviewer and the memory-reviewer found 25 and 5 bugs that no other agent found.
 
 ## Options
 

@@ -6,7 +6,7 @@ Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-
 
 Decision 0011 says three rounds.  During PR #39 the maintainer changed that: rounds go on past round 3 until a round has no blocker and no significant should-fix.  That rule lives only in a completed plan.
 
-In the 14 review logs, rounds 4 and later fixed 124 findings.  10 were real bugs (8%) and 67 were nits.  7 of the 10 bugs were in code that a fix of the round before had changed.
+In the 14 review logs, rounds 4 and later fixed 124 findings.  13 were real bugs (10%) and 71 were nits.  At least 3 of the 13 were in files that the fix range of the round before did not touch.
 
 ## Options
 
@@ -18,12 +18,12 @@ In the 14 review logs, rounds 4 and later fixed 124 findings.  10 were real bugs
 
 C, as the maintainer asked on 2026-10-30.
 
-* Rounds 1 to 3 fix every confirmed finding, nits included.
+* Rounds 1 to 3 fix every confirmed finding, and each nit that the team leader agrees with.  A nit stays `unvalidated`.
 * From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.  It logs the rest as "reported, not fixed", and the PR's `<details>` section lists them.
 * The rounds stop at the first round from round 3 on with none of those three.  There is no cap.
 * The team leader or the orchestrator judges significance, not the reviewer.  Significant: a rule or decision fails in a case a user can reach, a contradiction, a misleading measure, or later work goes wrong.  Nits: an edge case no real song reaches, wording, a weak test of a minor path.
 * Strict rules (decision point D3 of the plan): PROTO-1, PROTO-2, MEM-1 to MEM-5, RT-1, GPU-1 to GPU-3, VERIFY-1, GIT-1, DEPS-1, ASSET-1.
-* From round 4, reviewers read the fix range and the files it touches, if the maintainer accepts D4 of the plan.
+* From round 4, reviewers read the fix range and the files it touches (D4 of the plan).
 
 ## Consequences
 
