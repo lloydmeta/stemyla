@@ -223,6 +223,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 1 fixes of the missed mutants 1-16 to 1-36 (but the refuted 1-22, 1-24 and 1-27), 1-b5, 1-4 and `lsof -w` (implementer).
 * [x] 2026-10-31: review round 1 fixes of 1-5, 1-12, 1-13, 1-14 and 1-15: the guide says that `--yes` stops each running `xtask serve` of this repo, with a warning; the plan body has no prune; the Progress names `d0164ea`, `cfaf8fd` and `9cf2fd0` (implementer).
 * [x] 2026-10-31: review round 2 fix of 2-1: `--yes` removes a worktree through `clean::remove_worktree`, with a test on a worktree with changes (implementer).
+* [x] 2026-10-31: review round 2 fix of 2-2: a test of a pid file whose `xtask serve` does not listen on its port, and of `-a` and `-sTCP:LISTEN` in the `lsof` words (implementer).
 
 ## Surprises and discoveries
 
@@ -240,6 +241,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the new tests for the missed mutants cover code that was right.  Each failed first with its mutant: `&&` for `||` in `worktree_status` (1-16), `starts_with("target")` (1-b5), no `size` on a worktree item (1-21), an empty map from `short_shas` (1-25 to 1-35), and `||` in the test of an open round (1-31).  The tests of `lsof`, `ask`, `stop`, `human_size` and `dir_size` did not build or failed before.  The test of 1-4 failed first: the list mode wrote the index of each linked worktree, until `git --no-optional-locks status`.
 * 2026-10-31, team leader: `cargo run -p xtask -- clean` on this repo at `da0c63b` (list mode, exit 0) changed nothing: `git status`, the branches and the worktrees stayed the same.  Its output: "can remove (1 items, 0 B)": branch `harness-tweaks-2026-10-31` (13d9cca), "its tip is an ancestor of origin/main".  "keeps (3 items)": branch `harness-phase-3b` and the run folder `target/review/run/harness-phase-3b`, "the current branch of a worktree"; branch `main`, "main and gh-pages stay".  "target/ holds 14.6 GiB."  This closes round 1's finding 1-b3.
 * 2026-10-31, implementer: the test of 2-1 did not build first (no `remove_worktree`), and it failed with `--force` added at the call site.
+* 2026-10-31, implementer: the code of 2-2 was right, so its tests failed first with the mutants of the finding: `Process::Serve` for `Answer::No` in `probe`, and no `-a` in `lsof_listen_args`.  Both stopped the server.
 
 ## Decision log
 

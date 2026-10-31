@@ -2476,6 +2476,10 @@ mod tests {
         assert!(LSOF_OPEN.contains(&"-w"), "{LSOF_OPEN:?}");
         let args = lsof_listen_args(42, 8080);
         assert!(args.iter().any(|a| a == "-w"), "{args:?}");
+        // Without `-a`, `lsof` gives the pid if it has any TCP port, or if
+        // anything listens on the port.
+        assert!(args.iter().any(|a| a == "-a"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-sTCP:LISTEN"), "{args:?}");
         assert!(args.iter().any(|a| a == "-iTCP:8080"), "{args:?}");
         assert!(
             args.windows(2).any(|w| w[0] == "-p" && w[1] == "42"),

@@ -1172,3 +1172,40 @@ fn remove_worktree_refuses_a_worktree_with_changes() {
         "{listing}"
     );
 }
+
+#[test]
+fn yes_does_not_stop_a_serve_that_does_not_listen_on_the_port_of_its_file() {
+    let mut f = Fixture::empty("other-port");
+    let port = f.start_serve();
+    let pid = f.serve.as_ref().unwrap().pid;
+    // The pid file names a port that the server does not listen on.
+    let pids = f.repo.join("target/xtask-serve");
+    let other = if port == 1 { 2 } else { 1 };
+    std::fs::rename(
+        pids.join(format!("{port}.pid")),
+        pids.join(format!("{other}.pid")),
+    )
+    .unwrap();
+    f.fake_gh(&Gh::Prs {
+        open: "[]".to_string(),
+        merged: "[]".to_string(),
+    });
+
+    let out = f.clean(&["--yes".to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    let (removed, _) = actions(&stdout);
+    assert_item(
+        &removed,
+        &format!("pid-file target/xtask-serve/{other}.pid"),
+        &format!("stale: pid {pid} does not listen on port {other}, and stays"),
+    );
+    assert_eq!(names_in(&pids), BTreeSet::new());
+    std::thread::sleep(Duration::from_millis(300));
+    let reaped = f.serve.as_ref().unwrap().reaped.clone();
+    assert!(
+        !reaped.load(std::sync::atomic::Ordering::SeqCst),
+        "--yes stopped the server: {stdout}"
+    );
+    assert_eq!(ps_stat(pid).chars().next().map(|c| c != 'Z'), Some(true));
+}
