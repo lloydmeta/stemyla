@@ -29,7 +29,7 @@ Review rounds (all 14 logs: 66 rounds, 586 agent runs, 1,402 findings):
 * Rounds 4 and later fixed 124 findings.  13 were real bugs (10%); 71 were nits.  One bug was a regression that a fix made (catch-up 6-1 to 7-1).  At least 3 of the 13 were in files that the fix range of the round before did not touch: catch-up 4-1, M7 6-1 and M7 6-2 (plan review, 2026-10-31).
 * Confirmed bugs by round: round 1 26, round 2 12, round 3 7, rounds 4 and later 13.
 * Missed mutants are 691 of the 1,402 findings (49%) and 424 of the 430 refuted verdicts.  95 of the 424 were in test files (`app/src/save_tests.rs` 68, `app/src/decode_tests.rs` 26).  Most of the rest were wasm32-only code.  In M8 round 1, 68 of the 81 refuted mutants were in `app/src/save_tests.rs`.
-* Later in PR #39, `.cargo/mutants.toml` left out those test files and each wasm32-only file.  A wasm32-only item in a shared file stays in (TD-33).  For example, `app/src/lib.rs` had 141 refuted mutants and `protocol/src/lib.rs` 46.
+* Later in PR #39, `.cargo/mutants.toml` left out those test files and each wasm32-only file.  From `6d0a39d`, a wasm32-only item in a shared file carries `mutants::skip`.  Most of the 141 refuted mutants of `app/src/lib.rs` and the 46 of `protocol/src/lib.rs` are in logs before that commit.  A wasm32 block in a shared function stays in (TD-33).
 * Confirmed mutants that went to TD-39 or TD-66 come back each round, because `repeat-of` matches only refuted findings.
 * The validator refuted about 2% of reviewer findings: 6 of 288 to 310, by which verdicts count.  4 of the 6 are in the PR #39 logs, one is in PR #35 (`6a4dcf2`) and one is a baseline finding of PR #37 (`0732e53`).  The docs-reviewer's findings are 62% nits, and it uses about 20% of a round's tokens.  The reviewer and the memory-reviewer found 25 and 5 bugs that no other agent found.
 * The rule that rounds go past 3 until the stop rule holds lives only in a completed plan (`plans/completed/stream-from-storage.md`, Decision log, 2026-10-27 and 2026-10-28).  `CLAUDE.md`, decision 0011 and `working-with-agents.md` still say three rounds.
@@ -95,7 +95,7 @@ An `xtask clean` subcommand finds and removes what runs leave.  It lists by defa
   * a `xtask serve` whose pid file is in `target/`, if that pid still runs `xtask serve`.  M1 makes `xtask serve` write the pid file.
 * It never removes: a worktree with changes, a branch it cannot prove merged, the current branch, anything outside the repo except the scratch roots that a plan names with `--also <path>`.
 * `cargo clean` stays a separate, manual step; `xtask clean` prints the size of `target/` and the command.
-* The `review-rounds` skill runs `target/debug/xtask review clean <branch>` after the round's log is written, for that round's worktrees only.  The skill's `allowed-tools` (`Bash(target/debug/xtask review *)`) covers that form; `xtask clean` does not fit it.
+* The `review-rounds` skill runs `target/debug/xtask review clean <round>` after the round's log is written.  It removes that round's worktrees only (`target/review/<round>-<name>-<n>`).  The form fits the skill's `allowed-tools`, but only in the turn in which the skill loads.  In a later turn, auto mode decides.  If it refuses, the skill reports the command and goes on.
 * The orchestrator runs `cargo run -p xtask -- clean --yes` between milestones and at close-out.  The maintainer's `autoMode.allow` entry covers that form (D7).
 * `working-with-agents.md` names `clean` and `review clean`.
 * Acceptance: unit tests on a temporary repo with planted leftovers:
@@ -109,14 +109,15 @@ An `xtask clean` subcommand finds and removes what runs leave.  It lists by defa
 
 PR #39 already left out the test files and the wasm32-only files (`.cargo/mutants.toml`).  So this milestone starts with a new baseline.
 
-* First, measure the noise on `main` today.  Run `xtask review mutants` on a range of PR #39 commits that its logs name.  Count the missed lines by class: a wasm32-only item in a shared file, a wasm32 block in a shared function, a function on TD-39 or TD-66, and the rest.  Record the counts in Surprises.
-* `xtask review mutants` drops each missed line whose enclosing item has `#[cfg(target_arch = "wasm32")]` or a `cfg` that is false on the native build.  It parses the file with `proc-macro2` or `syn` (already xtask dependencies; confirm, DEPS-1).  It drops them before the validator sees them, and counts them in the log.
+* First, measure the noise that is left.  Use the M8, M9 and catch-up logs of PR #39, which come after `6d0a39d`.  Count the missed lines by class: a wasm32-only item with no `mutants::skip`, a wasm32 block in a shared function, a known-missed mutation, and the rest.  Record the counts in Surprises.  If the noise that is left is small, the team says so and cuts the milestone to fit.
+* `xtask review mutants` drops each missed line whose enclosing item has `#[cfg(target_arch = "wasm32")]` or a `cfg` that is false on the native build.  This is a backstop for an item that lacks `mutants::skip`, such as `can_encode` at `f28d22d:app/src/lib.rs`.  It parses the file with `proc-macro2`, which xtask already uses with `span-locations`.  `syn` is not an xtask dependency (DEPS-1).  It drops the lines before the validator sees them, and counts them in the log.
 * A wasm32 block inside a shared function stays in (TD-33).
-* A known-missed list (`xtask/src/review/known_missed.txt` or a table in `review.rs`) holds the functions of TD-39 and TD-66.  A missed line in one of those functions is logged as known, not sent to a validator.
+* A known-missed list (`xtask/src/review/known_missed.txt` or a table in `review.rs`) holds the mutants of TD-39 and TD-66, each as a function and a mutation.  A missed mutant on the list is logged as known, not sent to a validator.  Another mutant in the same function still goes to a validator.
+* The list is the mutants' side of M3's `repeat-of` match to tech debt.  M3 matches reviewer findings; the list matches mutants.  An entry names its TD.
 * Acceptance: unit tests with fixture lines from PR #39's logs (`refs/remotes/origin/pr/39`, see preflight).
   * The filter drops a mutant in a `#[cfg(target_arch = "wasm32")]` item of a shared file, such as `can_encode` at `f28d22d:app/src/lib.rs`.
-  * It keeps each confirmed line outside the known-missed functions.
-  * It logs as known the confirmed lines in a function on the list, such as `save_once` at `save.rs:427` and `save.rs:431` (TD-39).
+  * It keeps each confirmed mutant that is not on the list.  Findings 1-41 and 1-54 of `iphone-crashes-2026-10-25-m8.md` (`xtask/src/e2e/save.rs:427` and `:431`) still go to a validator; `2fdecda` fixed them with tests.
+  * It logs as known the mutant of finding 2-17 (`save.rs:503`, the body replaced), which went to TD-39.
 * Each test fails before the change.  The skill's pinned lines and the log format test change in the same commit.
 
 ### M3: the fix rule and the stop rule (decision 0024)
@@ -134,13 +135,15 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * xtask has no parser for the findings table today; only the Rounds header is pinned (`xtask/tests/rules.rs`).  M3 adds a pure check of a log's findings table.
   * The check applies only to logs that carry the `significant` column, so old logs in `docs/reviews/` still pass.
   * Its tests accept the new column, and reject a fix of a nit from round 4, or of a non-significant should-fix not on a strict rule.
+  * `docs-check` runs the check on each file in `docs/reviews/` that has the column, so a real log can fail it.
   * The pinned skill lines change.  A test pins one sentence of the rule in each of the four places, so a drift fails.
 
 ### M4: local checks by tier (decision 0026)
 
-* An `xtask check --tier commit|push` subcommand reads the changed paths against the merge base with `origin/main`, picks the checks, prints what it runs and what it skips and why, and runs them.
+* An `xtask check --tier commit|push` subcommand reads the changed paths, picks the checks, prints what it runs and what it skips and why, and runs them.
+* Tier `commit` reads the commit's own changes: the staged and unstaged changes against `HEAD`.  The branch's diff against `main` would select almost every check on a long branch.
 * Tier `commit`: `cargo fmt --all --check`; workspace clippy; the tests of each changed crate and of the crates that depend on it; `docs-check` when a doc, `CLAUDE.md`, `.claude/` or `xtask/` changed; the wasm32 clippy when `app`, `worker`, `protocol` or `engine` changed; the `synth` or `app` clippy variant when that crate or a feature changed.
-* Tier `push`, and before each review round: the whole set in `CLAUDE.md`'s Commands.
+* Tier `push`, and before each review round: the fmt, clippy, test, `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  It reads the paths against the merge base with `origin/main`.  `serve`, `web-test`, `e2e` and `publish` are not in it.
 * A commit that touches a strict rule's paths runs tier `push` (D2).  No rule has such paths today, so M4 writes a table of paths for each strict rule.
   * Name the files that hold the rule's code, narrower than the `paths:` of `.claude/rules/`.  For example, `.claude/rules/memory.md` covers all of `engine/**`, `app/src/**`, `worker/**` and `decoder/**`.
   * VERIFY-1 and GIT-1 get no paths, since VERIFY-1 is on 870 of 1,402 findings and GIT-1 has no code.
@@ -154,11 +157,13 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 * First, `agents_folder_problems` accepts `model` from a fixed list (`inherit`, `opus`, `sonnet`, `haiku`) and an optional `effort` key.  `AGENT_KEYS` (`xtask/src/rules.rs`) requires every key today, so `effort` must be optional and must come before `hooks`.  `baseline.md` stays as it is.
 * The measurement.  The team writes the pass rule and the ground-truth list into this plan's Decision log before any run, through the orchestrator:
   * Commits: the PR #39 logs (`reviews/iphone-crashes-2026-10-25-*.md`) at `refs/remotes/origin/pr/39`; PR #35 and #37 at `refs/remotes/origin/pr/35` and `/37` (preflight).
-  * Match: a run's finding matches a ground-truth item by the matching rule of `reviews/replay.md`.
-  * docs-reviewer: the 8 rounds with the most docs findings.  Ground truth: the docs-reviewer's own confirmed blockers and should-fix in those rounds (about 40).  Arms: `sonnet`, and the current model as a control.
-  * validator: 40 logged findings, stratified.  The set holds all 6 refuted reviewer findings, refuted mutants, and confirmed findings.  Arms: `sonnet`, `haiku` and the control.
+  * Match: a run's finding matches a ground-truth item by the matching rule of `plans/completed/harness-phase-3-m5.md` (step 6, item 2), which `reviews/replay.md` uses.
+  * Cost of one run, in used tokens (`reviews/replay.md`): docs-reviewer about 1.5M, a validator 0.06M to 0.37M, supply-chain-reviewer about 1.1M.  The design must fit the budget below.
+  * validator, first: 40 logged findings, stratified.  The set holds all 6 refuted reviewer findings, refuted mutants, and confirmed findings.  Arms: `sonnet` and the control, one run each (about 16M).
+  * docs-reviewer, second: the 4 rounds with the most docs findings.  Ground truth: the docs-reviewer's own confirmed blockers and should-fix in those rounds.  Arms: `sonnet` and the control, 2 runs each (about 24M).
+  * Last, only if budget is left: `haiku` for the validator, then the effort arms.  A role not measured keeps `inherit`, and Surprises says so.
   * gpu-reviewer, wire-reviewer, supply-chain-reviewer: effort `medium` against the control at `high`, on their logged rounds.
-  * Runs: at least 2 runs of each arm, the control included, so the control also measures run noise.
+  * Runs: the reviewer arms have 2 runs each, so the control also measures run noise.  A validator verdict is less noisy, so its arms have one run each.
   * Recall: the share of ground-truth items that an arm's runs find, with a 95% interval.
   * Bug: a ground-truth item of Kind `bug`.  Missed: the control found it in at least one run, and the candidate found it in no run.
   * Pass rule for a reviewer: recall within 0.15 of the control, and no bug missed.
@@ -166,7 +171,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * A role whose interval is wider than 0.3 keeps `inherit`, for want of evidence.  gpu-reviewer has only about 6 confirmed findings, so it will likely keep `inherit`.
   * Tokens: read from each run's `modelUsage` (used tokens, not final context; TD-44).
   * Budget: about 45M `modelUsage` tokens.  One milestone's rounds 1 to 3 in the PR #39 logs used about 2.7M final-context tokens (1.6M to 2.9M).  A whole case uses about 16 times its final context.
-  * The team checks the budget after each run.  It cuts arms to fit before it starts, and stops at the budget with what it has.
+  * The team checks the budget after each run, in the order above.  It stops at the budget with what it has.
 * Not changed, whatever the result: reviewer, memory-reviewer, the intent reviewer, the orchestrator and baseline stay on the strongest model.
 * Then set `model` and `effort` for each role that passes.
 * Acceptance: the results table with 95% intervals is in this plan's Surprises.  The agent files match it.  `agents_folder_problems` has a test for the new keys that fails before the change.
@@ -175,7 +180,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 
 * `.claude/skills/orchestrate/SKILL.md` holds the generic parts of the two "How the work runs" sections (`plans/completed/harness-phase-3.md` and `plans/completed/stream-from-storage.md`): roles, agent rules, preflight, the loop for each milestone, the stop rule (by reference to decision 0024), who edits what, stop-and-wait conditions, close-out with `xtask clean`, and the report format.  M7 adds the PR body steps, because M7 defines the body.
 * `PLANS.md` gets an optional section "How the work runs" with fixed sub-headings: mode, branch and PR, maintainer steps, preflight items of the plan, decision points asked at the start, review rule, kick-off prompt, extra stop conditions.  A big task's plan must have it.
-* `docs-check` fails a plan in `plans/active/` with more than 3 `M<n>` milestone headings and no "How the work runs" heading.  It accepts that heading at level 2 or 3.  It does not check `plans/completed/`, because six completed plans have more than 3 milestones and no such section, and PLANS.md forbids their edit.
+* `docs-check` fails a plan in `plans/active/` with more than 3 `M<n>` milestone headings and no "How the work runs" heading.  It accepts that heading at level 2 or 3.  It does not check `plans/completed/`, because four completed plans have more than 3 milestones and no such section, and PLANS.md forbids their edit.
 * `working-with-agents.md` names the `orchestrate` skill.
 * The sizing rule: `CLAUDE.md`'s "Plans" line says when a task is big.  The skill's description names the same signals, so the model loads it.  The agent proposes the mode, asks one question, then runs hands-off.  No hook starts it, because a hook cannot start a skill ([hooks](https://code.claude.com/docs/en/hooks)).
 * The team agents stay `general-purpose` with briefs.  An agent file with write tools would fail `agents_folder_problems`, which stays as it is.
@@ -255,7 +260,7 @@ Kick-off prompt:
 * [x] 2026-10-30: retrospective research (six agents: the PR #39 sessions, the earlier sessions, the review logs, PRs and CI, Claude Code and GitHub features, a harness inventory).
 * [x] 2026-10-30: this plan and decisions 0023 to 0027 written as proposed.
 * [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
-* [ ] Plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.
+* [ ] Plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.
 * [ ] M1: cleanup.
 * [ ] M2: less mutants noise.
 * [ ] M3: the fix rule and the stop rule.
@@ -291,10 +296,12 @@ Kick-off prompt:
 * 2026-10-31, maintainer: the plan commit is re-authored to the maintainer and signed, without the AI trailers of the patch.
 * Reason for D1 to D8: the maintainer's answers at the start of the run.  D2 and D4 took the plan's recommendation.
 * 2026-10-31, agent: plan review round 1 changed the plan.  M2 has a new baseline, because `.cargo/mutants.toml` already leaves out the test and wasm32-only files.  Other fixes: M5's budget unit and pass rule; M6's check scope; M4's strict-rule path table.
-* 2026-10-31, agent: in decisions 0023 to 0026, the plan review corrected numbers and stale "if the maintainer accepts" lines.  Two clarifications are open for the maintainer:
+* 2026-10-31, agent: in decisions 0023 to 0026, the plan review corrected numbers and stale "if the maintainer accepts" lines.  These clarifications are open for the maintainer:
   * 0024: a nit is never `confirmed`, so "nits included" now means "each nit that the team leader agrees with".
   * 0023: the `docs-check` rule checks only `plans/active/`.
-  * Neither changes what the maintainer accepted.  The PR lists both under "Needs your attention".
+  * 0026, from round 2: tier `commit` reads the commit's own changes, not the branch's diff against `main`.  On a long branch, the branch's diff selects almost every check, so the decision would save no time.
+  * None of these changes what the maintainer accepted.  The PR lists them under "Needs your attention".
+* 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 
 ## Outcomes and retrospective
 
