@@ -53,7 +53,7 @@ Split the code in two parts, so the tests can check the rules without the networ
 * `plan(&Survey) -> Vec<Item>`: a pure function.  Each `Item` has a kind, a path or name, a size in bytes (for a folder), and `Removable(proof)` or `Kept(reason)`.
 * `Facts` holds `open_prs: Option<Vec<String>>` (head branch names), `merged_prs: Option<Vec<(String, String)>>` (head branch name, `headRefOid`), the command line of a pid, the pid that listens on a TCP port, and `open_paths: Option<Vec<PathBuf>>`: each open file and working folder of each process.  `None` means that the fact is unknown, and an item that needs it is kept with the reason "cannot read <fact>".
 * `main` gathers the real facts: `gh pr list --state open --json headRefName --limit 500` and `gh pr list --state merged --json headRefName,headRefOid --limit 1000`, both run in the repo root; `ps -p <pid> -o command=`; `ps -p <pid> -o stat=`; `lsof -w -n -P -a -p <pid> -iTCP:<port> -sTCP:LISTEN -t`; `lsof -w -n -P -F n` (each line that starts with `n` and then `/`, which holds the `cwd`, `txt` and open file entries).  Canonicalise each path from `lsof` and each path that it is compared with.
-* `ps` and `lsof` exit 1 also when nothing matches: a pid that has ended, or a pid that does not listen.  So exit 1 with empty stdout and empty stderr is the answer "no", not an unknown fact.  A fact is `None` only when the program cannot start, or exits with text on stderr.  `lsof -n -P -F n` counts as read when its output has `p` lines.  CI's `test` job runs on Ubuntu, so the tests must pass with the `ps` and `lsof` of both systems.
+* `ps` and `lsof` exit 1 also when nothing matches: a pid that has ended, or a pid that does not listen.  So exit 1 with empty stdout and empty stderr is the answer "no", not an unknown fact.  A fact is `None` only when the program cannot start, or exits with text on stderr.  `lsof -w -n -P -F n` counts as read when its output has `p` lines.  CI's `test` job runs on Ubuntu, so the tests must pass with the `ps` and `lsof` of both systems.
 * A pid whose `stat` starts with `Z` (a zombie) has ended.
 * Step 1 also adds `serve::pid_file(root, port)`, the path `<root>/target/xtask-serve/<port>.pid`, which step 2 writes and `clean.rs` reads.
 
@@ -229,9 +229,11 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 2 fix of 2-3: `plan` and `gather` make the two roots canonical, so a linked `target/` keeps its reviewer worktrees in the list (implementer).
 * [x] 2026-10-31: review round 2 fixes of 2-4, 2-5, 2-6, 2-8 and 2-10: the `lsof -w` texts, one pass for the nested rule, the guide on `--review-only` and a refused log, the nested rule in the plan and the guide, and a total that counts a nested worktree once (implementer).
 * [x] 2026-10-31: review round 2 (at `32df7e0`, no `--baseline`): 4 should-fix confirmed (2-1, 2-2, 2-3, 2-8) and 6 nits, no blocker; no missed mutant.  Each confirmed finding and the nits 2-4 to 2-10 are fixed in `64aeb11` to `4645e64`; 2-7 and 2-9 went to the orchestrator as a diff.  Round 3 follows.
+* [x] 2026-10-31: the orchestrator landed the round 2 texts for the skill and the pins in `xtask/tests/rules.rs`, and the parent plan's M1 bullet on `review clean` (`bedfd00`).
 * [x] 2026-10-31: review round 3 fix of 3-1: a prunable worktree whose folder still exists is kept, since only its `.git` file is gone (implementer).
 * [x] 2026-10-31: review round 3 fixes of 3-6, 3-7 and 3-9: `gather` stores the canonical roots and links in the survey, so `plan` is pure again; the total test has sizes that differ; a list test with a linked `.claude/` (implementer).
 * [x] 2026-10-31: review round 3 fix of 3-2: the same `--also` folder twice is one scratch root, and a folder in another `--also` folder is refused (implementer).
+* [x] 2026-10-31: review round 3 fixes of 3-3, 3-4 and 3-8: the guide names a refused findings file, the plan gives `lsof -w`, and Progress names `bedfd00` (implementer).
 
 ## Surprises and discoveries
 
@@ -280,6 +282,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * 2026-10-31, implementer: the guide says that the skill runs `review clean`, and that the guard refuses `xtask clean`.  Both are true only when the orchestrator lands the texts of step 5, which the plan puts before round 1.
 * 2026-10-31, implementer: `review clean` runs no `git worktree prune`, and prints no `pruned` line.  `git worktree remove --force` also removes a registered worktree whose folder is gone, so a prune is not needed.  A prune acts on each worktree of the repo.  The test isolates git from the person's config, so the helpers in `xtask/tests/review.rs` now set `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
 * 2026-10-31, implementer: the choice of `git worktree remove` without `--force` is in `clean::remove_worktree`, which `--yes` calls.  Review round 2 (2-1) found that the first test pinned only the constant.  A test now gives the function a worktree that already has changes: no timing is needed.
+* 2026-10-31, team leader: 3-5 has no fix and no test.  The serve test does not pin that the pid file comes before the `serving` line.  The order is a race with no effect for a user, but a clean run in the same instant.
 
 ## Outcomes and retrospective
 
