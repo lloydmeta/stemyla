@@ -172,6 +172,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * Pass rule for a validator: no confirmed bug refuted, and at least as many refutations of the refuted items as the control.
   * A role whose interval is wider than 0.3 keeps `inherit`, for want of evidence.  gpu-reviewer has only about 6 confirmed findings, so it will likely keep `inherit`.
   * A replay runs `H/bin/xtask`, which `make-harness.sh` builds from this branch, so `KNOWN_MISSED` applies.  Give each `known` ground-truth mutant to the validator directly, and record `known <k>` for each run.
+  * The skill of H starts with "Run this skill only after `cargo run -p xtask -- check --tier push` ... pass", but a replayed commit has no `check` command.  So each case prompt says that the checks before the steps passed at the base, and must not be run.  Grep each run's `.jsonl` for `check --tier`, and record each hit.
   * Tokens: read from each run's `modelUsage` (used tokens, not final context; TD-44).
   * Scratch: each replay clone goes in its own folder under the temp folder.  After the measure, the orchestrator runs `xtask clean --yes --also <clone>` for each clone folder, never for the harness root, whose `bin/` the runs need.  If auto mode refuses that command, the orchestrator records the folder for M8's list and goes on.
   * Budget: about 45M `modelUsage` tokens.  One milestone's rounds 1 to 3 in the PR #39 logs used about 2.7M final-context tokens (1.6M to 2.9M).  A whole case uses about 16 times its final context.
@@ -183,6 +184,8 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 ### M6: orchestrated mode as a skill (decision 0023)
 
 * `.claude/skills/orchestrate/SKILL.md` holds the generic parts of the two "How the work runs" sections (`plans/completed/harness-phase-3.md` and `plans/completed/stream-from-storage.md`): roles, agent rules, preflight, the loop for each milestone, the stop rule (by reference to step 11 of the `review-rounds` skill, which applies decision 0024), who edits what, stop-and-wait conditions, close-out with `xtask clean`, and the report format.  A review run folder of the orchestrated branch stays while that branch is checked out, so the skill keeps its manual removal after the log copy (TD-37).  M7 adds the PR body steps, because M7 defines the body.
+* The skill's preflight checks the tools of tier `push`: `rustup target list --installed` shows `wasm32-unknown-unknown`, and `trunk --version` runs (M4's Surprises).  The loop runs tier `commit` before each commit, and tier `push` before each review round and each push.  The pinning test covers these lines.
+* A hand run that the protocol rule asks for (`stored-stems`, `worker-check` or `weights` on a GPU) is not a stop.  The orchestrator lists it in the PR under "Needs your attention", and goes on.
 * In round 4 or later, step 4, item 4, of `review-rounds` matches a repeat of a `reported, not fixed` finding.  So that finding does not get a validator and a new judgement each time it comes back, as M3's 5-2 did as 6-1.  The M6 team designs the match, and changes step 4, item 4, and step 6, item 6, of the skill.  Its tests must cover these cases, and `review log-check` must pass on each log:
   * a repeat of the same or a lower severity, a nit included;
   * a repeat with a higher severity, or with a strict rule or a `cargo-mutants` source that the row did not have; it is matched as a new finding, so steps 5 and 6 validate it as any finding, and step 10's fix rule applies, not a copied row.  The `cargo-mutants` case is matched at step 6, item 8;
@@ -210,7 +213,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 * The orchestrate skill gets the PR body steps, and its pinning test gets their key lines.  `working-with-agents.md` names `pr-body` and `attention`.
 * Attention comments: at close-out, after the last fix, the orchestrator posts one review with event `COMMENT` and inline comments (decision 0027).  It uses the GitHub MCP server's pending review or `gh api`.  Only these get a comment:
   * a proposed decision, or a change to a rule, `.claude/`, `CLAUDE.md`, `invariants.md`, CI or an allowlisted skip;
-  * a trust boundary or correctness hot spot: PROTO-2 and the `model_url` path, the page-worker messages, `unsafe`, a new dependency, MEM and RT-1 paths;
+  * a trust boundary or correctness hot spot: PROTO-2 and the `model_url` path, the page-worker messages, `unsafe`, a new dependency, MEM and RT-1 paths.  `xtask attention` takes the MEM, RT-1 and PROTO-2 paths from `check::STRICT_PATHS`, and also flags `app/src/lib.rs` (TD-70);
   * an agent's judgement call, from the Decision logs entries marked "agent".
 * At most 10 comments.  Each says what to decide and the default the agent took.  `xtask attention` lists the candidate lines from the diff and the Decision logs (a pure function with unit tests); the orchestrator picks from that list.
 * First step of M7: confirm on this PR that the author's account can post a `COMMENT` review with line comments on its own PR.  GitHub's docs say only that an author cannot approve its own PR ([approving](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews)).  If it cannot, use plain PR comments that link to the lines, and record that in Surprises.
@@ -232,7 +235,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 ## Validation and acceptance
 
 * Each milestone's acceptance above, run by the orchestrator through its team.
-* `cargo run -p xtask -- docs-check` and the full GIT-2 set pass on the last commit, and CI is green.
+* `cargo run -p xtask -- docs-check` and `cargo run -p xtask -- check --tier push` pass on the last commit, and CI is green.
 * The next big task after the merge measures this phase: no maintainer message is needed to start orchestrated mode, the round count after round 3 is lower, the cost per milestone is lower than PR #39's, and nothing is left for the maintainer to clean.  Phase 6 compares those numbers.
 
 ## Idempotence and recovery
@@ -256,7 +259,7 @@ This plan uses the prose recipe until M6 makes the skill.  It follows `plans/com
 * Review rule: M1 and M2 by decision 0011 as amended in practice (to the stop rule).  From M3, decision 0024 as accepted.
 * Only the orchestrator edits `CLAUDE.md` and `.claude/**`, and writes review files that the Write tool refuses to a subagent.
 * Push only between review rounds.  Wait for CI before the next team.
-* Stop and wait: an invariant would break; auto mode refuses an action, except a cleanup command.  A refused `review clean` is not a stop, since the next `clean --yes` removes those worktrees.  A refused `clean --yes --also` folder goes on M8's list; a step needs a person; the M5 budget is spent; the weekly usage limit is near; the D8 timebox ends.
+* Stop and wait: an invariant would break; auto mode refuses an action, except a cleanup command.  A refused `review clean` is not a stop, since the next `clean --yes` removes those worktrees.  A refused `clean --yes --also` folder goes on M8's list; a step needs a person, but not a hand run that the protocol rule asks for, which goes in the PR; the M5 budget is spent; the weekly usage limit is near; the D8 timebox ends.
 
 Decision points (the maintainer answers these at the start):
 
@@ -367,6 +370,7 @@ Kick-off prompt:
 * 2026-11-01, agent: `stored-stems`, `worker-check` and `weights` write stem worker messages by hand, and CI does not run them (review rounds 2 and 3, findings 2-2 and 3-4).  When a change touches their messages, a person runs the changed scenario on a GPU with the weights, and the PR names the run.  The protocol rule tells the agent to ask for that run.  Decision 0026 names only one hand run, a scenario that CI failed, so the PR lists this reading under "Needs your attention".
 * 2026-11-01, agent: `CLAUDE.md` gets the line `cargo test -p roformer-gpu --doc`, which CI runs.  Reason: MEM-3 has doctests, and `the_push_tier_runs_the_lines_of_claude_md` checks that `CLAUDE.md` names each line of tier `push`.
 * 2026-11-01, agent: the GIT-2 text of `docs/invariants.md`, the recipe "Fix a bug" and `README.md` change in the orchestrator's commit with `CLAUDE.md` and the skill.  Reason: decision 0026 says that GIT-2 changes in the same commit.
+* 2026-11-01, agent: the M4 intent review (round 1) found no change for M4's code.  It added an M5 line on the replay skill's first condition, two M6 bullets (the preflight of tier `push`, and a GPU hand run is not a stop), an M7 line on `STRICT_PATHS`, and the M8 check line.  The stop rule of this plan treats a GPU hand run in the same way.
 * 2026-11-01, agent: in M4's late rounds, the team leader marked a wording gap in a TD entry that no agent acts on as not significant (4-2, 7-1), as M3 did.  The orchestrator confirmed this reading.  A finding on VERIFY-1 was still fixed by the late rule (4-1, 5-1, 6-1).
 * 2026-11-01, agent: before round 5, the orchestrator asked the team to fix the GIT-2 sentence on the GPU test line (`ef602b3`, DOC-1).  Two round 4 reviewers had noted it out of scope, so round 5 reviewed it in its fix range.
 * 2026-11-01, agent: tier `commit` reads the index, the tree and the untracked files; tier `push` reads `<base>`, `<base> HEAD` and the untracked files (review round 3, 3-1).  Reason: `git diff HEAD` alone misses a staged change that the tree undoes.
