@@ -70,7 +70,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 ### Change a message between the page and the worker
 
 * The agent loads `.claude/rules/protocol.md`, and changes the hand-written e2e scripts in the same commit (PROTO-1).
-* Check: `cargo test -p xtask --test rules` and `cargo run -p xtask -- check --tier commit` pass.  Then CI's browser tests pass.  CI runs `e2e storage` and `e2e flac`, which write stem worker messages by hand.  `stored-stems`, `worker-check` and `weights` also write them, but CI does not run them (TD-16).  They need a GPU and the weights.  When you change the messages of one of them, run it by hand on a GPU with the weights.  Name the run in the PR.  Else run an `e2e` scenario by hand only when CI failed it (decision 0026).  Check the field names by hand (TD-16).
+* Check: `cargo test -p xtask --test rules` and `cargo run -p xtask -- check --tier commit` pass.  Then CI's browser tests pass.  CI runs `e2e storage` and `e2e flac`, which write stem worker messages by hand.  `stored-stems`, `worker-check` and `weights` also write them, but CI does not run them (TD-16).  They need a GPU and the weights.  When you change the messages of one of them, ask a person to run it on a GPU with the weights.  Name the run in the PR.  Else run an `e2e` scenario by hand only when CI failed it (decision 0026).  Check the field names by hand (TD-16).
 
 ### Review a change
 
