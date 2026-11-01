@@ -1186,7 +1186,9 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 ///
 /// Review round 3 of M3 adds these: the findings that a late round logs as
 /// `reported, not fixed`, named by their kinds, and the session in which a
-/// change to an agent file takes effect.
+/// change to an agent file takes effect.  Review round 4 of M3 makes the
+/// stop rule also count a `pre-existing` or `unproven` finding of the three
+/// kinds that the round sent to a TD.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1267,8 +1269,8 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "The round is the last round when all of these are true:",
     "* Its number is 3 or more.",
     "* It has no `confirmed` blocker, no `confirmed` should-fix with `yes`, and no `confirmed` finding on a strict rule.",
-    "* It fixed no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.",
-    "A `known` finding does not count.  A finding that went to a TD in this round counts, so the next round runs.  There is no cap.",
+    "* It fixed, or sent to a TD, no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.",
+    "A `known` finding does not count.  A `confirmed` finding that went to a TD in this round counts too, so the next round runs.  There is no cap.",
     "* Rounds 2 and 3: start `reviewer` on `<base>..HEAD`",
     "  * Start each reviewer of the since route on `<since>..HEAD`, `reviewer` included.",
     "  * Its reasons come from the since route.",
