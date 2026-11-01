@@ -23,7 +23,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * A refusal of `review start` (exit 3) stops the skill before this text.  Claude Code shows its lines, such as "commit first", in the session.  A `claude -p` run in text mode shows nothing.
 * A `warning:` line of `review start` does not stop the round.  Copy it to the findings file (step 9).
 * `allowed-tools` lets the `xtask review` commands run with no approval only in the turn in which the skill loads.  A new turn ends that permission.  A message of a person starts a new turn.  So does the notice that a background agent or command ended.
-* The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
+* The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  `review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
@@ -92,6 +92,12 @@ Criteria: $2
 Reasons of the route: <the reasons of the reviewer>
 Round: $1
 Target folder: <target>
+```
+
+From round 4, put this line after the `Range:` line of the template:
+
+```text
+Scope: read the diff of the range and the whole of each file that it touches.  Do not review the rest of the branch.
 ```
 
 ### 4. Collect and merge the findings
@@ -311,7 +317,7 @@ First, get the approval counts of the round.  They are cost, not interventions. 
 * If you asked, wait for the answer.  Do not guess the counts.
 * Write the first count in the `approvals` field of `<run>/$1/findings.md`.  Write the second count in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
 
-The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, with the command `target/debug/xtask review log-check <run>/log.md` and with the command `target/debug/xtask review clean $1`, and stop.  The caller writes the log, then runs `review log-check`, then `review clean`.  If the file does not exist, write it in this form first:
+The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer.  Also give two commands: `target/debug/xtask review log-check <run>/log.md` and `target/debug/xtask review clean $1`.  Then stop.  The caller writes the log, then runs `review log-check`, then `review clean`.  If the file does not exist, write it in this form first:
 
 ```markdown
 # Review log
@@ -331,6 +337,7 @@ Add one row to the findings table for each finding of the round, the baseline's 
 
 * Date: today, as `YYYY-MM-DD`.  Commit: the short SHA of `HEAD` at `review start`.
 * Reviewers: the sources of the finding.  Rule: the rule ID, or none.  Claim: one line.
+* For a TD, also write the rule that the TD concerns in the Rule cell, such as `PROTO-1` for TD-16.
 * Significant: the `significant` field of the finding.
 * Action: one of these forms:
   * the fix commit and its subject, or the diff that holds the fix;
@@ -354,6 +361,7 @@ Then check the log:
 
 * Run `target/debug/xtask review log-check <run>/log.md`.
 * If it names a problem, correct the row or the fix before the next round.
+* It runs after the findings file, so the counts of the round do not include its approval.
 
 Then remove the worktrees of the round's agents:
 

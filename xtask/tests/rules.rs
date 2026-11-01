@@ -1143,12 +1143,19 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// * `review log-check` after the log, also for the caller where the Write
 ///   tool refuses the log;
 /// * "After the last round", and the `reported, not fixed` line of the PR.
+///
+/// Review round 1 of M3 adds these:
+/// * the `Scope:` line of a late reviewer's prompt;
+/// * the rule of a TD in the Rule cell;
+/// * the approvals of `review log-check` and `review clean`, which the
+///   counts of the round do not include;
+/// * the two commands of a refused log, in their own sentence.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
     "target/debug/xtask review check $1",
     "target/debug/xtask review clean $1",
-    "with the command `target/debug/xtask review clean $1`, and stop.",
+    "Also give two commands: `target/debug/xtask review log-check <run>/log.md` and `target/debug/xtask review clean $1`.  Then stop.",
     "* With `--review-only`, run `target/debug/xtask review clean $1`.  Then stop here.",
     "Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.",
     "run_in_background",
@@ -1241,7 +1248,11 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "* A `no change:` reason names no commit SHA.",
     "* Run `target/debug/xtask review log-check <run>/log.md`.",
     "If the caller writes the log, it runs `target/debug/xtask review log-check <run>/log.md` before `review clean`.",
-    "with the command `target/debug/xtask review log-check <run>/log.md` and with the command",
+    "From round 4, put this line after the `Range:` line of the template:",
+    "Scope: read the diff of the range and the whole of each file that it touches.  Do not review the rest of the branch.",
+    "* For a TD, also write the rule that the TD concerns in the Rule cell, such as `PROTO-1` for TD-16.",
+    "`review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.",
+    "* It runs after the findings file, so the counts of the round do not include its approval.",
     "The caller writes the log, then runs `review log-check`, then `review clean`.",
     "After the last round:",
     "Then it lists each `known` finding once, with its TD.",
