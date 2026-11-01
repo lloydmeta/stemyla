@@ -974,8 +974,9 @@ fn every_reviewer_has_an_agent_file() {
 }
 
 /// The bullet of each reviewer's input that gives the late scope (decision
-/// 0024): from round 4, a reviewer reads only the fix range and its files.
-const REVIEWER_SCOPE: &str = "* From round 4, the scope: read only the diff of the range and the whole of each file that it touches.";
+/// 0024): from round 4, a reviewer reviews only the fix range and its
+/// files, and still reads what a check needs.  Rounds 1 to 3 have no scope.
+const REVIEWER_SCOPE: &str = "* From round 4, the prompt also gives the scope: review only the diff of the range and the whole of each file that it touches.  Still read the criteria, the rules and each other file that a check needs, such as the other side of a message.  Rounds 1 to 3 have no scope, so do not report it as missing.";
 
 /// Each reviewer's agent file gives the late scope in its input, so the
 /// `Scope:` line of the skill's prompt has a reader.
@@ -1182,6 +1183,10 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 ///   the verdicts that a late round logs as `reported, not fixed`;
 /// * the action `known: <TD>` of a `known` finding, in step 4 and step 11;
 /// * the Rule cell of a finding whose rule is a TD.
+///
+/// Review round 3 of M3 adds these: the findings that a late round logs as
+/// `reported, not fixed`, named by their kinds, and the session in which a
+/// change to an agent file takes effect.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1252,7 +1257,8 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "Leave the approvals fields as step 9 wrote them.",
     "Baseline approvals: the count that the person gave for the baseline",
     FIX_RULE_SENTENCE,
-    "* From round 4, log each other `confirmed`, `pre-existing`, `unproven` or `unvalidated` finding as `reported, not fixed`, nits included.  Do not fix it.",
+    "* From round 4, log each other finding as `reported, not fixed`, nits included.  These are each `confirmed`, `pre-existing` or `unproven` finding of none of the three kinds, and each `unvalidated` finding.  Do not fix them.",
+    "A change to `.claude/agents/` reaches the agents only in a new session.  The `Scope:` line reaches them in any session.",
     "* From round 4, fix each `pre-existing` finding that is a blocker, has `yes`, or is on a strict rule.  Or send it to a TD or to its own PR.",
     "* From round 4, fix an `unproven` finding only if it is one of those three kinds.",
     "Give it the verdict `known`.  Its action in the log is `known: <TD>`.",

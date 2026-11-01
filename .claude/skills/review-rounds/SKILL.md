@@ -100,6 +100,8 @@ From round 4, put this line after the `Range:` line of the template:
 Scope: read the diff of the range and the whole of each file that it touches.  Do not review the rest of the branch.
 ```
 
+A change to `.claude/agents/` reaches the agents only in a new session.  The `Scope:` line reaches them in any session.
+
 ### 4. Collect and merge the findings
 
 Wait for each reviewer, and for the baseline with `--baseline`.  A background agent gives its output in the notice that it ended.  A foreground agent gives its output in its tool result.  For each agent, record the total tokens and the duration of its `<usage>`.
@@ -281,7 +283,7 @@ The fix rule is decision 0024:
 
 * Rounds 1 to 3: fix each found finding, the baseline's included.  A found finding has the verdict `confirmed` or `pre-existing`.
 * From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
-* From round 4, log each other `confirmed`, `pre-existing`, `unproven` or `unvalidated` finding as `reported, not fixed`, nits included.  Do not fix it.
+* From round 4, log each other finding as `reported, not fixed`, nits included.  These are each `confirmed`, `pre-existing` or `unproven` finding of none of the three kinds, and each `unvalidated` finding.  Do not fix them.
 * From round 4, fix each `pre-existing` finding that is a blocker, has `yes`, or is on a strict rule.  Or send it to a TD or to its own PR.
 * From round 4, fix an `unproven` finding only if it is one of those three kinds.
 * A significant should-fix has `yes` in its `significant` field.
