@@ -109,15 +109,14 @@ An `xtask clean` subcommand finds and removes what runs leave.  It lists by defa
 PR #39 already left out the test files and the wasm32-only files (`.cargo/mutants.toml`).  So this milestone starts with a new baseline.
 
 * First, measure the noise that is left.  Use the M8, M9 and catch-up logs of PR #39, which come after `6d0a39d`.  Count the missed lines by class: a file that today's `.cargo/mutants.toml` leaves out (such as `app/src/save_tests.rs`, out from `cfeefda`), a wasm32-only item with no `mutants::skip`, a wasm32 block in a shared function, a known-missed mutation, and the rest.  Record the counts in Surprises.  If the noise that is left is small, the team says so and cuts the milestone to fit.
-* `xtask review mutants` drops each missed line whose enclosing item has `#[cfg(target_arch = "wasm32")]` or a `cfg` that is false on the native build.  This is a backstop for an item that lacks `mutants::skip`, such as `can_encode` at `f28d22d:app/src/lib.rs`.  It parses the file with `proc-macro2`, which xtask already uses with `span-locations`.  `syn` is not an xtask dependency (DEPS-1).  It drops the lines before the validator sees them, and counts them in the log.
+* Cut by the measurement: a `proc-macro2` filter in `xtask review mutants` for a wasm32-only item with no `mutants::skip`.  It would remove 11 of the 193 missed lines that are left, in 2 of 22 rounds (Decision log).
 * A wasm32 block inside a shared function stays in (TD-33).
-* A known-missed list (`xtask/src/review/known_missed.txt` or a table in `review.rs`) holds the mutants of TD-39 and TD-66, each as a function and a mutation.  A missed mutant on the list is logged as known, not sent to a validator.  Another mutant in the same function still goes to a validator.
+* A known-missed list (`KNOWN_MISSED` in `xtask/src/review.rs`) holds the mutants of TD-39 and TD-66.  Each entry has a file, a mutation, a code line and an offset, and names its TD.  A missed mutant on the list is logged as known, not sent to a validator.  Another mutant in the same function still goes to a validator.
 * The list is the mutants' side of M3's `repeat-of` match to tech debt.  M3 matches reviewer findings; the list matches mutants.  An entry names its TD.
 * Acceptance: unit tests with fixture lines from PR #39's logs (`refs/remotes/origin/pr/39`, see preflight).
-  * The filter drops a mutant in a `#[cfg(target_arch = "wasm32")]` item of a shared file, such as `can_encode` at `f28d22d:app/src/lib.rs`.
   * It keeps each confirmed mutant that is not on the list.  Findings 1-41 and 1-54 of round 1 in `iphone-crashes-2026-10-25-m8.md` (`xtask/src/e2e/save.rs:427:39`, `*` to `+` and `*` to `/`) still go to a validator; `2fdecda` fixed them with tests.
   * It logs as known the mutant of finding 2-17 of round 2 (`save.rs:503`, the body replaced), which went to TD-39.
-* Each test fails before the change.  The skill's pinned lines and the log format test change in the same commit.
+* Each test fails before the change.  The line-format tests change in the commit that changes the format.  The skill's pinned lines change in the orchestrator's commit of the skill, because only the orchestrator edits `.claude/**`.
 
 ### M3: the fix rule and the stop rule (decision 0024)
 
@@ -128,7 +127,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * From round 4, the reviewers read the fix range and the files it touches, not the whole branch (D4).
 * The skill copies the log to `docs/reviews/` after the last round, not after round 3.  So `xtask clean` keeps a run folder until the copy exists.
 * The findings log gets a `significant` column, filled by the team leader or orchestrator, not by the reviewer.  The log's "reported, not fixed" list feeds the PR's `<details>` section.
-* `repeat-of` also matches a confirmed finding that went to tech debt, so a deferred finding is not fixed or validated again.
+* `repeat-of` also matches a confirmed finding that went to tech debt, so a deferred finding is not fixed or validated again.  From M2, `repeat-of` can hold a TD ID, as for a `known` mutant.
 * Expected effect, from the logs: from round 4, about 71 nit fixes stop.  29 of the 53 confirmed late findings are on VERIFY-1, so they are still fixed.
 * Acceptance:
   * xtask has no parser for the findings table today; only the Rounds header is pinned (`xtask/tests/rules.rs`).  M3 adds a pure check of a log's findings table.
@@ -268,7 +267,7 @@ Kick-off prompt:
 * [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
 * [x] 2026-10-31, plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.  Round 3 found no blocker and 4 should-fix; all fixed.  The review stops at its cap of 3 rounds.
 * [x] 2026-10-31, M1: cleanup (`plans/completed/harness-phase-3b-m1.md`, `reviews/harness-phase-3b-m1.md`).  `xtask clean`, `xtask review clean <round>` and the pid file of `xtask serve`.  4 review rounds, 36 agents, about 1.94M final-context tokens, 106 wall minutes.  Round 1 found 1 blocker, 8 should-fix and 20 missed mutants; rounds 2 and 3 found 4 and 3 should-fix; round 4 none.  Debt: TD-67, TD-68.  The intent review added a fourth branch proof for agent branches (`dfe3aa4`); fix-range review rounds 5 to 7 took 12 agents, about 0.49M tokens and 34 wall minutes.
-* [ ] M2: less mutants noise.
+* [ ] M2: less mutants noise.  2026-10-31: the measurement is done and the filter is cut.  Steps 1 to 4 are committed (`eee072f` to `e3a081e`); the skill change is the orchestrator's commit.  Next: review round 1.
 * [ ] M3: the fix rule and the stop rule.
 * [ ] M4: local checks by tier.
 * [ ] M5: a model and effort for each agent role.
@@ -287,6 +286,7 @@ Kick-off prompt:
 * 2026-10-31, M1: round 3 found a significant bug (a worktree with no `.git` file), so round 4 ran.  Evidence for decision 0024's rule that rounds go past round 3.
 * 2026-10-31, M1: the first fix of the intent review (any merged PR's head) deleted a stacked PR's base branch.  Only the supply-chain-reviewer found it (round 5).
 * 2026-10-31, M1: after the run folder is removed (TD-37), later rounds on the same branch need a new run with its own base and round numbers.  Its rows went into the milestone's log as rounds 5 to 7.
+* 2026-10-31, M2: PR #39's M8, M9 and catch-up logs have 22 rounds after `6d0a39d`, with 261 missed lines.  68 are in files that today's `.cargo/mutants.toml` leaves out.  11 are in wasm32-only items with no skip.  None are in wasm32 blocks.  29 went to TD-39 or TD-66 (11 of them repeats).  153 are the rest; the validator refuted 35 of those, 16 in `protocol/src/lib.rs`.
 
 ## Decision log
 
@@ -319,6 +319,7 @@ Kick-off prompt:
 * 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 * 2026-10-31, agent: in `bedfd00`, M1's bullet on `review clean` says that the skill also runs it after the findings file with `--review-only`.  A subagent whose file the Write tool refuses gives the command to its caller.  Review round 2 (2-6, 2-9) found that the bullet named only the log.
 * 2026-10-31, agent: the M1 intent review found that `xtask clean --yes` alone leaves the replay clones and, after a squash merge, the `worktree-agent-*` branches.  The M1 team adds a proof for agent branches.  For clones, M5 names each one with `--also`.  If auto mode refuses that form, its removal is a maintainer step at close-out.  An agent does not widen the D7 entry, which is the maintainer's setting.
+* 2026-10-31, agent: M2 cuts the `proc-macro2` filter and its acceptance bullet, and keeps the known-missed list.  Reason: the filter would remove 11 of 193 lines, in 2 of 22 rounds, and 4 of those lines are there by design.
 * 2026-10-31, agent: the M1 intent reviews changed the stop rule.  A refused cleanup command is not a stop: a refused `review clean` is left to the next `clean --yes`, and a refused `--also` folder goes on M8's list of maintainer steps.  Reason: a refused cleanup harms nothing, and a stop would halt the hands-off run.
 
 ## Outcomes and retrospective
