@@ -96,7 +96,7 @@ The harness:
    * `H/agents-docs-sonnet.json`: the `docs-reviewer` gets `"model": "sonnet", "effort": "high"`.
    * Only if budget is left: `H/agents-validator-haiku.json`, with `"model": "haiku", "effort": "high"`.
    * The candidate gets `effort: high` explicitly, so the agent file that a pass gives runs at the effort that the measurement used.  Without it, the effort of a Sonnet subagent would come from the person's session (`xhigh` on this Mac).
-   * A candidate run's session has `--effort xhigh`, as the person's session on this Mac, and a control run's session has `--effort high`.  If the `effort` key works, a candidate subagent runs at `high`.  If it does not, the subagent runs at `xhigh`, as the agent file would on this Mac.  So the measured arm is the arm that the agent file gives on this Mac in both cases.  No field of the stream shows a subagent's effort, so no check reads it; the tech-debt entry of step 5 names this gap.  The main agent of a run only starts the agents, so its effort does not change the result.
+   * Each run, control and candidate, has a session with `--model claude-opus-5-5 --effort high` (the orchestrator, at checkpoint A, `ed5e4cb`).  Reason: the driver's effort must not differ between arms.  So a candidate subagent runs at `high` from its key or from the session; the measurement does not show which.  No field of the stream shows a subagent's effort, so no check reads it; the tech-debt entry of step 5 names this gap.
 3. Write `H/bin/m5-clone.sh <commit> <clone>`.  It makes `H/<clone>/` with `git init`, then `git -C H/<clone> fetch --no-tags <repo> <full SHA>`, then `git -C H/<clone> checkout -b m5-<short SHA> FETCH_HEAD`.  So the clone holds the commit and its ancestors only, and no later fix.  It adds `!/Cargo.lock` to `.git/info/exclude`.  It exits 1 if a check fails:
    * `HEAD` is the commit;
    * `git rev-list --count HEAD` equals the count in this repo;
@@ -119,7 +119,7 @@ The run command, as one background Bash command, for a clone `<clone>` and an ar
 ```bash
 date +%s > /private/tmp/stemyla-harness/<clone>.time
 cd /private/tmp/stemyla-harness/<clone>
-claude -p --setting-sources project,local --model claude-opus-5-5 --effort <high or xhigh> \
+claude -p --setting-sources project,local --model claude-opus-5-5 --effort high \
   --agents ../agents-<arm>.json --permission-mode dontAsk --forward-subagent-text \
   --allowedTools 'Read' 'Write' 'Agent' \
     'Bash(/private/tmp/stemyla-harness/bin/xtask *)' 'Bash(cargo *)' 'Bash(git *)' \
@@ -283,8 +283,8 @@ The team leader gives these to the orchestrator as text:
 
 * [x] 2026-11-01: step 1, this plan.  Two `Plan` review rounds: round 1 found 1 blocker, 8 should-fix and 3 nits; round 2 found 1 blocker, 3 should-fix and 3 nits.  All fixed.
 * [x] 2026-11-01: step 2, the agents rule accepts a model and an effort.  `agent_problems` accepts `model` from `AGENT_MODELS` and an optional `effort` from `AGENT_EFFORTS` before `hooks`.  Tests: `each_model_and_effort_gives_its_problems` (9 cases) in `mod agents_tests`; the case "another model" of `each_plant_is_named` is removed, since `model: opus` now has no problem.
-* [ ] Step 3: the harness, the ground truth and the pass rule (checkpoint A).
-* [ ] Step 4: the measurement (checkpoint B).
+* [x] 2026-11-01: step 3, checkpoint A.  H rebuilt at `f3a4f8f`; the ground truth and the pass rule are in the parent's Decision log (`ed5e4cb`), with the orchestrator's change: every session runs at `--effort high`.
+* [x] 2026-11-01: step 4, checkpoint B.  2 dry runs and 29 counted runs, 40.85M `modelUsage` tokens.  No role passes (Surprises, the results).  The `haiku` validator stopped after 3 of 6 cases.
 * [ ] Step 5: the agent files and their pin.
 * [ ] Step 6: review rounds.
 
@@ -294,15 +294,399 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, M5 step 2, implementer: on the old code, each of the 9 cases of `each_model_and_effort_gives_its_problems` failed on its assert.  `model: opus`, `sonnet` and `haiku` gave "not `model: inherit`".  `model: gpt` gave the old message.  Each `effort` case gave "has the key `effort`, which the check does not allow", plus its other problems.
 * 2026-11-01, M5 step 2, implementer: no doc outside `docs/plans/` and `docs/decisions/` states the old `model: inherit` rule (`grep -rn inherit docs`).  The plans and decision 0025 tell the state before M5, so they stay as they are.
 
+* 2026-11-01, step 3: the person's global excludes file ignores `CLAUDE.md`, and the replayed commits do not un-ignore it.  So the first clone failed the check of `m5-clone.sh` ("tracked files are ignored: CLAUDE.md").  `m5-clone.sh` now adds `!/CLAUDE.md` next to `!/Cargo.lock` in `.git/info/exclude`.
+* 2026-11-01, step 3: `H/bin/xtask review start <range start> 1` runs in an old clone, and gives the docs-reviewer's line of the route.  It warns that the binary is older than `xtask/src/review.rs`; that is expected.
+* 2026-11-01, step 4: the two dry runs passed each check: the sonnet validator on `3ac5db4` (0.14M, 36 s) and the control docs-reviewer on `e9c3aa7` (1.13M, 264 s).  The dry comparer found the one test item.
+* 2026-11-01, step 4: no subagent of any run called `check --tier` (0 calls in each of the 31 transcripts, main agent and subagents).  Each run recorded `known 0`.
+* 2026-11-01, step 4: each run passed Result, Prompt and Arm.  No run was cut short.  The Tripwire gave `CHECK` in 18 runs and no hit.  Each `CHECK` was a read of the cargo registry, a read of the run's own persisted tool output, or a file in `/tmp` that the same run wrote.  `dontAsk` denials: 0 to 16 a run, most of them compound commands with a variable, a heredoc or a `cd`, as in `reviews/replay.md`.
+* 2026-11-01, step 4: a comparer read one file, the case's input, with the Read tool.  Step 4 said "it reads no file".  Reason: the input of a case is 8 to 23 KB, and a prompt that held it would put it in the team leader's context too.  The key of the runs A and B was in another folder.
+* 2026-11-01, step 4, the results.  Each arm had one run on each case, so the measure does not separate run noise from the model's effect.  Tokens are `modelUsage` sums (input, output, cache creation and cache read).
+
+  | Role | Arm | n | Count | Share [95% interval] | Width | Bugs | R and Mr refuted | Runs | Tokens | Result |
+  | - | - | - | - | - | - | - | - | - | - | - |
+  | validator | control | 40 | 36 agree | 0.900 [0.769, 0.960] | 0.191 | 5 of 5 found, 0 refuted | 13 of 16 | 6 | 6.46M | - |
+  | validator | `sonnet`, `high` | 40 | 35 agree | 0.875 [0.739, 0.945] | 0.207 | 5 of 5 found, 0 refuted | 11 of 16 | 6 | 3.35M | fails item 2 (11 < 13) |
+  | validator | `haiku`, `high` | 25 (3 of 6 cases) | 14 agree | 0.560 | - | 2 of 2 found, 0 refuted | 4 of 11 (control 8) | 3 | 6.22M | fails item 0; item 2 cannot pass (at most 10 < 13) |
+  | docs-reviewer | control | 40 | 17 found | 0.425 [0.285, 0.578] | 0.293 | 1 of 4 found | - | 7 | 17.30M | - |
+  | docs-reviewer | `sonnet`, `high` | 40 | 8 found | 0.200 [0.105, 0.348] | 0.243 | 1 of 4 found, 0 missed | - | 7 | 6.25M | fails item 2 (0.200 < 0.275) |
+
+  * The validator items where the two arms differ in class (control, then sonnet): R 1-6 refuted, confirmed; R 5-5 refuted, unproven; R 4-2 confirmed, refuted; Mr 5-20 refuted, confirmed; Mr 1-23 confirmed, unproven; Mf 1-16 refuted, confirmed.  The control disagrees with the log on R 4-2, Mr 5-16, Mr 1-23 and Mf 1-16; sonnet on R 1-6, R 5-5, Mr 5-16, Mr 5-20 and Mr 1-23.
+  * Docs-reviewer findings, blocker and should-fix: control 23, sonnet 11; nits: control 31, sonnet 21.  By case, control and sonnet found: `f28ebff` 4 and 2 of 9, `db45675` 5 and 1 of 7, `9779b2c` 2 and 1 of 5, `6e57ad8` 3 and 2 of 5, `0789e6b` 1 and 1 of 5, `2c7c29b` 1 and 0 of 5, `9611cab` 1 and 1 of 4.  Sonnet found no item that the control missed.
+  * The `haiku` arm stopped after 3 of its 6 cases (9611cab, 9c69f22, bf3334f): its 3 runs cost 6.22M, and its mean of 2.07M a run would take the total over 45M.  Also, on those 25 items it refuted 4 of the 11 R and Mr items, against the control's 8, so with the 6 R and Mr items left it could reach at most 10 against the control's 13.
+  * Tokens of the measurement: 40.85M `modelUsage` of 45M: dry runs 1.27M, validator control 6.46M, validator sonnet 3.35M, validator haiku 6.22M, docs-reviewer control 17.30M, docs-reviewer sonnet 6.25M.  A control docs-reviewer run took 0.80M to 3.66M; a sonnet one 0.34M to 1.40M.
+  * Outside the 45M (each agent's final context, from its notice): 8 comparers 0.35M (the dry one included), 2 `Plan` reviews 0.31M, the implementer of step 2 0.07M, one docs lookup 0.03M.  The team leader cannot read its own tokens; the orchestrator's notice of this agent gives them.
+* 2026-11-01, step 4: so no role passes.  The validator and the docs-reviewer keep `inherit`, as do the roles that the measurement did not reach (gpu-reviewer, wire-reviewer, supply-chain-reviewer) and the roles that are not candidates (reviewer, memory-reviewer, baseline).
+
+* 2026-11-01, step 4: the scripts of the harness, as they ran, since macOS clears `/private/tmp` at a restart.  `make-harness.sh` is M3's text, with no change.  The Tripwire and Denials parts of `m5-check.sh` are the text of `replay-check.sh` in `reviews/replay.md`, from "# Tripwire, on subagent calls only." to the Denials `tq` call; they go where the line `# (replay-check.sh: Tripwire and Denials)` is.  The arm files come from `H/agents.json` with `jq '.validator += {model: "sonnet", effort: "high"}'` (or `haiku`), and `jq '."docs-reviewer" += {model: "sonnet", effort: "high"}'`.
+
+  `H/bin/m5-clone.sh`:
+
+  ```bash
+  #!/bin/bash
+  # Makes the clone of one run of harness phase 3b, M5
+  # (docs/plans/active/harness-phase-3b-m5.md, step 3): H/<clone> on the branch
+  # m5-<short SHA>, with only <commit> and its ancestors.  Each git command runs
+  # as `git -C`, so no command runs in the main checkout.  Exits 1 if a check
+  # fails.
+  # Usage: m5-clone.sh <commit> <clone>
+  set -euo pipefail
+
+  repo=/Users/lloyd/Documents/rustt/stemyla
+  harness=/private/tmp/stemyla-harness
+  min_free_gib=30
+
+  if [ $# -ne 2 ]; then
+    echo "usage: m5-clone.sh <commit> <clone>" >&2
+    exit 1
+  fi
+  clone_name=$2
+  case $clone_name in
+    "" | */* | .*)
+      echo "m5-clone: the clone must be a plain folder name: $clone_name" >&2
+      exit 1
+      ;;
+  esac
+  commit=$(git -C "$repo" rev-parse --verify "$1^{commit}")
+  short=$(git -C "$repo" rev-parse --short=7 "$commit")
+  branch=m5-$short
+  clone=$harness/$clone_name
+
+  if [ -e "$clone" ]; then
+    echo "m5-clone: $clone exists" >&2
+    exit 1
+  fi
+
+  fail() {
+    echo "m5-clone: check failed: $1" >&2
+    exit 1
+  }
+
+  git init -q "$clone"
+  git -C "$clone" fetch -q --no-tags "$repo" "$commit"
+  git -C "$clone" checkout -q -b "$branch" FETCH_HEAD
+  rm -f "$clone/.git/FETCH_HEAD"
+  # The person's global excludes file holds Cargo.lock and CLAUDE.md, and old
+  # commits do not un-ignore them.
+  printf '%s\n' '!/Cargo.lock' '!/CLAUDE.md' >> "$clone/.git/info/exclude"
+
+  head=$(git -C "$clone" rev-parse HEAD)
+  [ "$head" = "$commit" ] || fail "HEAD is $head, not $commit"
+
+  count=$(git -C "$clone" rev-list --count HEAD)
+  want=$(git -C "$repo" rev-list --count "$commit")
+  [ "$count" = "$want" ] || fail "the clone has $count commits, the repo $want"
+
+  refs=$(git -C "$clone" for-each-ref --format='%(refname)')
+  [ "$refs" = "refs/heads/$branch" ] || fail "the refs are not only refs/heads/$branch: $refs"
+
+  ignored=$(git -C "$clone" ls-files -ci --exclude-standard)
+  [ -z "$ignored" ] || fail "tracked files are ignored: $ignored"
+
+  status=$(git -C "$clone" status --porcelain)
+  [ -z "$status" ] || fail "the clone is not clean: $status"
+
+  free_kib=$(df -k "$harness" | awk 'NR == 2 { print $4 }')
+  [ "$free_kib" -ge $((min_free_gib * 1024 * 1024)) ] || fail "less than $min_free_gib GiB free: $free_kib KiB"
+
+  echo "m5-clone: $clone on $branch at $head; checks pass"
+  ```
+
+  `H/bin/m5-prompt.sh`:
+
+  ```bash
+  #!/bin/bash
+  # Writes the driver prompt of one run of harness phase 3b, M5, and the
+  # expected Agent calls: H/prompts/<clone>.txt and H/prompts/<clone>.expected.json.
+  # Usage: m5-prompt.sh <case> <arm> <clone> [<reasons file>]
+  #   <case>: a row of cases.tsv, such as v-9611cab or d-f28ebff.
+  #   <arm>: control, sonnet or haiku.
+  #   <reasons file>: for a d- case, the docs-reviewer's reasons of the route.
+  set -euo pipefail
+
+  data=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/2ff96c1a-0476-4e38-8735-a8e6ad4ae153/scratchpad/m5/data
+  harness=/private/tmp/stemyla-harness
+  case_name=$1
+  arm=$2
+  clone_name=$3
+  reasons_file=${4:-}
+  prompts=$harness/prompts
+  mkdir -p "$prompts"
+  target=$harness/$clone_name/target/review/target
+
+  row=$(awk -F'\t' -v c="$case_name" '$1 == c' "$data/cases.tsv")
+  [ -n "$row" ] || { echo "m5-prompt: no case $case_name" >&2; exit 1; }
+  commit=$(printf '%s' "$row" | cut -f2)
+  base=$(printf '%s' "$row" | cut -f3)
+  since=$(printf '%s' "$row" | cut -f4)
+  round=$(printf '%s' "$row" | cut -f5)
+  criteria=$(printf '%s' "$row" | cut -f6)
+  short=${commit:0:7}
+
+  # Each agent as a JSON object {id, subagent_type, prompt}, one to a line.
+  agents=$(mktemp)
+  case $case_name in
+    v-*)
+      # One validator for each reviewer item, in the order of the list.
+      awk -F'\t' -v c="$short" '$5 == c && $1 !~ /^M/' "${M5_GT:-$data/validator-gt.tsv}" | while IFS=$'\t' read -r stratum log date r commit_col id reviewers severity kind rule where claim verdict repeat action mutline; do
+        if [ "$round" = 1 ]; then
+          range="$base..HEAD"
+        elif [ "$round" -le 3 ] && printf '%s' "$reviewers" | grep -Eq '(^|, )(reviewer|baseline)(,|$)'; then
+          range="$base..HEAD"
+        else
+          range="$since..HEAD"
+        fi
+        prompt=$(printf 'Validate this finding as your instructions say.\n\nID: %s\nFinding:\nseverity: %s\nkind: %s\nwhere: %s\nrule: %s\nclaim: %s\nevidence: not recorded\nfix: not recorded\n\nRange: %s\nCriteria: %s\nRound: %s\nTarget folder: %s' \
+          "$id" "$severity" "$kind" "$where" "$rule" "$claim" "$range" "$criteria" "$round" "$target")
+        jq -cn --arg id "$id" --arg prompt "$prompt" '{id: $id, subagent_type: "validator", prompt: $prompt}'
+      done > "$agents"
+      lines=$(awk -F'\t' -v c="$short" '$5 == c && $1 ~ /^M/ { print $16 }' "${M5_GT:-$data/validator-gt.tsv}")
+      if [ -n "$lines" ]; then
+        prompt=$(printf 'Validate these missed mutants as your instructions say.  Give one block for each line, with the line as its id.\n\nMissed mutants, from cargo-mutants:\n%s\n\nRange: %s..HEAD\nCriteria: %s\nRound: %s\nTarget folder: %s' \
+          "$lines" "$since" "$criteria" "$round" "$target")
+        jq -cn --arg prompt "$prompt" '{id: "mutants", subagent_type: "validator", prompt: $prompt}' >> "$agents"
+      fi
+      ;;
+    d-*)
+      [ -n "$reasons_file" ] || { echo "m5-prompt: a d- case needs the reasons file" >&2; exit 1; }
+      reasons=$(cat "$reasons_file")
+      if [ "$round" = 1 ]; then range="$base..HEAD"; else range="$since..HEAD"; fi
+      scope=""
+      prompt=$(printf 'Review this commit range as your instructions say.\n\nRange: %s%s\nCriteria: %s\nReasons of the route: %s\nRound: %s\nTarget folder: %s' \
+        "$range" "$scope" "$criteria" "$reasons" "$round" "$target")
+      jq -cn --arg prompt "$prompt" '{id: "docs-reviewer", subagent_type: "docs-reviewer", prompt: $prompt}' > "$agents"
+      ;;
+    *)
+      echo "m5-prompt: unknown case kind: $case_name" >&2
+      exit 1
+      ;;
+  esac
+
+  jq -s --arg arm "$arm" '{arm: $arm, agents: map({id, subagent_type, prompt})}' "$agents" > "$prompts/$clone_name.expected.json"
+  count=$(jq '.agents | length' "$prompts/$clone_name.expected.json")
+  {
+    printf 'You run one step of a replay of an old review round.  Do not use the review-rounds skill.\n\n'
+    printf 'Start the %s agents below with the Agent tool, all in one message, in the foreground.  Give each the subagent_type that its BEGIN line names.  Give each agent, as its prompt, the text between its BEGIN and END lines, exactly, with no change.  Start no other agent.  Do not read files, and do not run commands.\n\n' "$count"
+    printf 'When each agent has ended, give the whole output of each, in the order below, each after a line "== <ID>", as your final answer.\n'
+    jq -r '.agents[] | "\nBEGIN \(.id) (subagent_type \(.subagent_type))\n\(.prompt)\nEND \(.id)"' "$prompts/$clone_name.expected.json"
+    printf '\nThe checks before the steps of the review-rounds skill passed at the base of this replay.  Do not run them.\n'
+  } > "$prompts/$clone_name.txt"
+  rm -f "$agents"
+  echo "m5-prompt: $prompts/$clone_name.txt with $count agents ($arm)"
+  ```
+
+  `H/bin/m5-check.sh`:
+
+  ```bash
+  #!/bin/bash
+  # Checks one run of harness phase 3b, M5
+  # (docs/plans/active/harness-phase-3b-m5.md, step 3, item 4).  It reads the
+  # transcript with jq only, and prints one line for each check.  The Tripwire
+  # and Denials parts are those of replay-check.sh (docs/reviews/replay.md).
+  # It writes the text of each Agent tool result of the main agent to
+  # H/<clone>.out/<n>.txt.  For bash 3.2 (macOS).
+  # Usage: m5-check.sh <clone>
+  set -euo pipefail
+
+  harness=/private/tmp/stemyla-harness
+  guard=$harness/bin/read-only-bash.sh
+
+  if [ $# -ne 1 ]; then
+    echo "usage: m5-check.sh <clone>" >&2
+    exit 1
+  fi
+  clone_name=$1
+  case $clone_name in
+    "" | */* | .*)
+      echo "m5-check: the clone must be a plain folder name: $clone_name" >&2
+      exit 1
+      ;;
+  esac
+  clone=$harness/$clone_name
+  transcript=$harness/$clone_name.jsonl
+  expected=$harness/prompts/$clone_name.expected.json
+  time_file=$harness/$clone_name.time
+  out=$harness/$clone_name.out
+
+  for f in "$transcript" "$expected"; do
+    if [ ! -f "$f" ]; then
+      echo "m5-check: no file $f" >&2
+      exit 1
+    fi
+  done
+
+  tq() {
+    jq -s "$@" "$transcript"
+  }
+
+  echo "m5-check: clone $clone"
+  echo "m5-check: transcript $transcript"
+
+  # Result.
+  tq -r '
+    [.[] | select(.type == "result")] | last
+    | "Result: " + (if . == null then "FAIL: no result message"
+      elif .is_error == false and .subtype == "success" then "pass"
+      else "FAIL: is_error \(.is_error), subtype \(.subtype)" end)'
+
+  # Prompt: the Agent calls of the main agent are the expected ones, in order,
+  # and each has a tool result that is not an error.
+  tq -r --slurpfile want "$expected" '
+    ($want[0].agents) as $agents
+    | [.[] | select(.type == "assistant" and .parent_tool_use_id == null) | .message.content[]?
+       | select(.type == "tool_use" and .name == "Agent")] as $calls
+    | [.[] | select(.type == "user") | (.message.content | if type == "array" then .[] else empty end)
+       | select(type == "object" and .type == "tool_result")] as $results
+    | [range(0; ([$agents, $calls] | map(length) | max)) as $i
+       | ($agents[$i]) as $a | ($calls[$i]) as $c
+       | if $a == null then "extra call \($i + 1): \($c.input.subagent_type)"
+         elif $c == null then "no call \($i + 1) (\($a.subagent_type))"
+         elif $c.input.subagent_type != $a.subagent_type then "call \($i + 1) is \($c.input.subagent_type), not \($a.subagent_type)"
+         elif ($c.input.prompt | sub("^\\s+"; "") | sub("\\s+$"; "")) != ($a.prompt | sub("^\\s+"; "") | sub("\\s+$"; "")) then "call \($i + 1): the prompt differs"
+         elif ([$results[] | select(.tool_use_id == $c.id and .is_error != true)] | length) == 0 then "call \($i + 1): no tool result, or an error"
+         else empty end] as $problems
+    | "Prompt: " + (if ($problems | length) == 0 then "pass (\($calls | length) calls)" else "FAIL: " + ($problems | join("; ")) end)'
+
+  # Arm: the model of each subagent message.  In a control run each names
+  # claude-opus-5-5; in a candidate run each names the arm's model.  The keys of
+  # modelUsage are printed as information only.
+  tq -r --slurpfile want "$expected" '
+    ($want[0].arm) as $arm
+    | ({"control": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}[$arm]) as $model
+    | ([.[] | select(.type == "result")] | last | .modelUsage // {} | keys) as $models
+    | ([.[] | select(.type == "assistant" and .parent_tool_use_id != null) | .message.model // "none"]) as $sub
+    | ($sub | unique) as $names
+    | (if ($sub | length) == 0 then ["no subagent message"]
+       elif ($sub | map(select(. == "none")) | length) == ($sub | length) then ["no subagent message names a model"]
+       else [$names[] | select(. != "none" and (startswith($model) | not)) | "a subagent message names \(.)"] end) as $problems
+    | "Arm: " + (if ($problems | length) == 0 then "pass (\($arm): \($sub | length) subagent messages, models \($names | join(", ")))"
+        else "FAIL: " + ($problems | join("; ")) end)
+      + "; modelUsage keys: \($models | join(", "))"'
+
+  # (replay-check.sh: Tripwire and Denials)
+  # check --tier calls: each Bash call, of the main agent and of the subagents,
+  # with a simple command whose program is cargo or .../bin/xtask and that
+  # holds `check --tier`.
+  tq -r '
+    [.[] | select(.type == "assistant") | . as $m | .message.content[]?
+     | select(.type == "tool_use" and .name == "Bash" and (.input.command | type) == "string")
+     | select([.input.command | splits("(;|&&|\\|\\||\\||\\n)")
+               | sub("^\\s+"; "")
+               | select(test("^(cargo|\\S*/bin/xtask)\\s") and test("check --tier"))] | length > 0)
+     | "  \(if $m.parent_tool_use_id == null then "main" else "subagent \($m.parent_tool_use_id)" end): \(.input.command | gsub("\\s+"; " ") | .[0:300])"] as $calls
+    | "check --tier calls: \($calls | length)", $calls[]'
+
+  # Cost.
+  echo "Cost:"
+  tq -r '
+    ([.[] | select(.type == "result")] | last) as $result
+    | ($result.modelUsage // {}) as $usage
+    | ($usage | to_entries | map({model: .key, sum: ((.value.inputTokens // 0) + (.value.outputTokens // 0) + (.value.cacheCreationInputTokens // 0) + (.value.cacheReadInputTokens // 0))})) as $per
+    | "  modelUsage total: \($per | map(.sum) | add // 0)",
+      ($per[] | "  modelUsage \(.model): \(.sum)"),
+      "  total_cost_usd: \($result.total_cost_usd // "none")",
+      ([.[] | select(.type == "assistant" and .parent_tool_use_id != null)]
+       | group_by(.parent_tool_use_id)[]
+       | (unique_by(.message.id) | map(.message.usage | (.input_tokens // 0) + (.output_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0)) | add) as $sum
+       | "  subagent \(.[0].parent_tool_use_id): \($sum) (\([.[].message.model // empty] | unique | join(",")))")'
+  if [ ! -f "$time_file" ]; then
+    echo "  wall time: no time file"
+  else
+    start=$(sed -n 1p "$time_file")
+    end_line=$(sed -n 2p "$time_file")
+    if [ -z "$end_line" ]; then
+      echo "  wall time: no end time in $time_file (start $start)"
+    else
+      exit_status=${end_line%% *}
+      end=${end_line##* }
+      seconds=$((end - start))
+      echo "  wall time: $seconds s ($((seconds / 60)) min $((seconds % 60)) s); claude exit $exit_status"
+    fi
+  fi
+
+  # Output: the text of each Agent tool result of the main agent.
+  mkdir -p "$out"
+  n=0
+  for id in $(tq -r '.[] | select(.type == "assistant" and .parent_tool_use_id == null) | .message.content[]? | select(.type == "tool_use" and .name == "Agent") | .id'); do
+    n=$((n + 1))
+    tq -r --arg id "$id" '
+      [.[] | select(.type == "user") | (.message.content | if type == "array" then .[] else empty end)
+       | select(type == "object" and .type == "tool_result" and .tool_use_id == $id)
+       | .content | if type == "array" then map(select(.type == "text") | .text) | join("\n") else tostring end]
+      | last // ""' > "$out/$n.txt"
+  done
+  echo "Output: $n files in $out"
+  ```
+
+  The team leader's `make.sh` (scratchpad):
+
+  ```bash
+  #!/bin/bash
+  # Writes the comparer prompt of one docs-reviewer case.
+  # Usage: make.sh <short commit> <rows tsv> <run A out file> [<run B out file>]
+  set -euo pipefail
+  commit=$1; rows=$2; a=$3; b=${4:-}
+  strip() { sed '1{/^\[Subagent hand-back\]/d;}; s/^  //' "$1" | sed '/^agentId: /,$d'; }
+  echo "Compare review findings with a list of known defects.  Use only the text below.  Do not read files, and do not run commands."
+  echo
+  if [ -n "$b" ]; then echo "The items are defects that an old review round found and confirmed.  Run A and run B are two new reviews of the same commit range, in no set order."; else echo "The items are defects that an old review round found and confirmed.  Run A is a new review of the same commit range."; fi
+  echo
+  echo "The rule: an item is found by a run when a finding of that run, of severity blocker or should-fix, states the same defect at the same place, in any words.  The same place is the same file, and the same function, test or section; the line ranges of the item tell whether a finding's line is in it.  For a weak-test item, either the function under test or the test is its place.  A finding that names only the area, not the defect, does not match.  A nit does not match.  One finding can match more than one item."
+  echo
+  if [ -n "$b" ]; then echo "Give one block for each item:"; echo; echo "item: <the item ID>"; echo "run A: found, the matching finding's where, and a quote of its claim of at most 30 words; or missed"; echo "run B: the same"; echo "reason: one sentence"; else echo "Give one block for each item:"; echo; echo "item: <the item ID>"; echo "run A: found, the matching finding's where, and a quote of its claim of at most 30 words; or missed"; echo "reason: one sentence"; fi
+  echo
+  echo "Then give, for each run, the count of its blocker and should-fix findings, and the count of its nits."
+  echo
+  echo "Items:"
+  awk -F'\t' -v c="$commit" '$1 == c { printf "\n- %s: severity %s; kind %s; where %s; claim: %s\n", $2, $3, $4, $5, $6 }' "$rows"
+  echo
+  echo "Run A findings:"
+  echo
+  strip "$a"
+  if [ -n "$b" ]; then echo; echo "Run B findings:"; echo; strip "$b"; fi
+  ```
+
+  The team leader's `verdicts.sh` (scratchpad):
+
+  ```bash
+  #!/bin/bash
+  # Prints "<commit>\t<item id>\t<verdict>" for each item of one validator run.
+  # Usage: verdicts.sh <clone>
+  set -euo pipefail
+  H=/private/tmp/stemyla-harness
+  S=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/2ff96c1a-0476-4e38-8735-a8e6ad4ae153/scratchpad/m5
+  clone=$1
+  commit=${clone##*-}
+  n=0
+  for id in $(jq -r '.agents[].id' "$H/prompts/$clone.expected.json"); do
+    n=$((n + 1))
+    f=$H/$clone.out/$n.txt
+    if [ "$id" != mutants ]; then
+      v=$(grep -m1 -E '^[[:space:]*]*verdict[*:]+' "$f" | sed -E 's/^[^v]*verdict[*: ]+//; s/[^a-z-].*//')
+      printf '%s\t%s\t%s\n' "$commit" "$id" "${v:-none}"
+    else
+      awk -F'\t' -v c="$commit" '$5 == c && $1 ~ /^M/ { print $6 "\t" $16 }' "$S/data/validator-gt.tsv" | while IFS=$'\t' read -r item line; do
+        v=$(awk -v l="$line" '
+          { t = $0; sub(/^[ \t*`-]*/, "", t) }
+          t ~ /^id[*:]/ { x = t; sub(/^id[*: ]+`?/, "", x); sub(/`? *$/, "", x); cur = (x == l) }
+          cur && t ~ /^verdict[*:]/ { x = t; sub(/^verdict[*: ]+/, "", x); sub(/[^a-z-].*/, "", x); print x; exit }' "$f")
+        printf '%s\t%s\t%s\n' "$commit" "$item" "${v:-none}"
+      done
+    fi
+  done
+  ```
+
 ## Decision log
 
 * 2026-11-01, agent: a run starts only the agents under test, with a driver prompt, not the whole `review-rounds` skill.  Reason: a whole round starts each routed reviewer, the validators and the mutants run, about 6M to 17M tokens a case (`reviews/replay.md`).  The parent's budget counts only the role under test (a docs-reviewer about 1.5M, a validator 0.06M to 0.37M).
 * 2026-11-01, agent: the note that the checks before the steps passed goes at the end of the driver prompt, since a driver prompt has no flags.
 * 2026-11-01, agent: the validator's ground truth comes from the six cases of the six refuted reviewer findings.  Reason: fewer clones and runs, and each case gives items of each stratum.
 * 2026-11-01, agent: the candidate arms set `effort: high`.  Reason: the control ran at `high`, and a Sonnet subagent with no effort key takes the person's session effort.
-* 2026-11-01, agent (plan review round 1): a candidate run's session has `--effort xhigh`, as the person's session on this Mac, so the measured arm is the arm that the agent file gives here.  The reviewer's template has no `Scope:` line, as in the logged rounds.  A failed control takes its case out for both arms.  The effort arms of the wire-reviewer and the supply-chain-reviewer are dropped for their cost, not for their width.
+* 2026-11-01, agent (plan review round 1): a candidate run's session had `--effort xhigh` (replaced at checkpoint A, below).  The reviewer's template has no `Scope:` line, as in the logged rounds.  A failed control takes its case out for both arms.  The effort arms of the wire-reviewer and the supply-chain-reviewer are dropped for their cost, not for their width.
 * 2026-11-01, agent (plan review round 2): each pass rule needs n = 40, with no case taken out, since the width item alone can pass a smaller n.  The validator must also confirm each found bug that the control confirmed.  A baseline row with the verdict of its same-as finding is not an item, so stratum B holds 5 and C 9.
 * 2026-11-01, agent: the validator's pass rule also has decision 0025's recall line, as agreement within 0.15 of the control.  Reason: without it, a validator that refutes all but the bugs passes.
+* 2026-11-01, orchestrator, at checkpoint A (`ed5e4cb`): every run, control and candidate, has `--model claude-opus-5-5 --effort high`, so the driver's effort does not differ between arms.  The candidate's agent entry keeps `effort: high`.  The comparers' tokens and the team leader's stay outside the 45M.
+* 2026-11-01, agent, step 4: the `haiku` validator stopped after 3 of its 6 cases.  Reason: its mean of 2.07M a run would take the total over 45M, and item 2 of the pass rule could no longer pass (at most 10 refutations against the control's 13).  The rule of step 4 reads "the mean of that role's runs"; the validator role's mean of 1.07M would have let all 6 start, so the team leader used the arm's own mean.
+* 2026-11-01, agent, step 4: the docs-reviewer arms ran to the end, though after 4 cases sonnet was 8 items behind.  Reason: a pass was still possible by the rule until the last case.
 
 ## Outcomes and retrospective
 
