@@ -1032,6 +1032,8 @@ pub struct Line {
     pub class: Class,
     pub counts: Counts,
     pub reason: Option<String>,
+    /// The number of missed lines that the known-missed list matches.
+    pub known: usize,
 }
 
 /// The class of a run, and why.
@@ -1073,6 +1075,7 @@ pub fn classify(end: RunEnd, counts: Option<Counts>) -> Line {
         class,
         counts: counted,
         reason,
+        known: 0,
     }
 }
 
@@ -1102,8 +1105,8 @@ impl std::fmt::Display for Line {
             .map_or(0, |listed| listed.saturating_sub(tested + c.timeout));
         write!(
             f,
-            "mutants: {class}: tested {tested} (caught {}, missed {}, unviable {}), timeouts {}, not tested {not_tested}",
-            c.caught, c.missed, c.unviable, c.timeout
+            "mutants: {class}: tested {tested} (caught {}, missed {}, unviable {}), timeouts {}, not tested {not_tested}, known {}",
+            c.caught, c.missed, c.unviable, c.timeout, self.known
         )?;
         match &self.reason {
             Some(reason) => write!(f, "; {reason}"),
@@ -1197,9 +1200,10 @@ fn known_debt(
         .map(|e| e.debt)
 }
 
-/// Removes the round's old `mutants.out`, `mutants.out.old` and
-/// `mutants.txt`.  A diff with no mutants leaves an old `mutants.out` as it
-/// was, and an old line would show until the new run ends.
+/// Removes the round's old `mutants.out`, `mutants.out.old`, `mutants.txt`,
+/// `missed.txt` and `known.txt`.  A diff with no mutants leaves an old
+/// `mutants.out` as it was, and an old line would show until the new run
+/// ends.
 pub fn clear_old_output(round_folder: &Path) -> Result<()> {
     for old in ["mutants.out", "mutants.out.old"] {
         let path = round_folder.join(old);
@@ -1208,9 +1212,11 @@ pub fn clear_old_output(round_folder: &Path) -> Result<()> {
                 .with_context(|| format!("removing {}", path.display()))?;
         }
     }
-    let line = round_folder.join("mutants.txt");
-    if line.exists() {
-        std::fs::remove_file(&line).with_context(|| format!("removing {}", line.display()))?;
+    for old in ["mutants.txt", "missed.txt", "known.txt"] {
+        let path = round_folder.join(old);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -1371,7 +1377,7 @@ pub fn mutants_command(cargo: &OsStr, toplevel: &Path, args: &[OsString]) -> Com
 
 /// The round's folder, with its old output removed and `mutants.diff`
 /// written from the round's `since` to its `head`; none without a record.
-pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<PathBuf>> {
+pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<(PathBuf, State)>> {
     let round_folder = run_folder(toplevel)?.join(round.to_string());
     let record = round_folder.join("state.json");
     if !record.exists() {
@@ -1385,11 +1391,13 @@ pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<PathBuf>> {
         &state.head,
         &round_folder.join("mutants.diff"),
     )?;
-    Ok(Some(round_folder))
+    Ok(Some((round_folder, state)))
 }
 
 /// `review mutants <round> [--config <file>]`: runs cargo-mutants on the
-/// round's `since` diff, under the limit, and prints one line.
+/// round's `since` diff, under the limit, and prints one line.  It splits
+/// the missed lines by [`KNOWN_MISSED`] into `missed.txt` and `known.txt`
+/// of the round folder.
 fn mutants(
     toplevel: &Path,
     dir: &Path,
@@ -1397,8 +1405,20 @@ fn mutants(
     config: Option<&str>,
     cargo: &OsStr,
 ) -> Result<(i32, Vec<String>)> {
+    mutants_with(toplevel, dir, round, config, cargo, KNOWN_MISSED)
+}
+
+/// [`mutants`], with the known-missed list, so a test can pass its own.
+fn mutants_with(
+    toplevel: &Path,
+    dir: &Path,
+    round: u32,
+    config: Option<&str>,
+    cargo: &OsStr,
+    list: &[Known],
+) -> Result<(i32, Vec<String>)> {
     let limit = parse_limit(std::env::var("STEMYLA_MUTANTS_MINUTES").ok().as_deref())?;
-    let Some(round_folder) = prepare_mutants(toplevel, round)? else {
+    let Some((round_folder, state)) = prepare_mutants(toplevel, round)? else {
         return Ok((
             REFUSED,
             vec![format!(
@@ -1430,11 +1450,47 @@ fn mutants(
             ..RunEnd::default()
         }
     };
-    let line = classify(end, read_counts(&round_folder.join("mutants.out"))).to_string();
+    let mut line = classify(end, read_counts(&round_folder.join("mutants.out")));
+    line.known = split_missed(toplevel, &state.head, &round_folder, list)?;
+    let line = line.to_string();
     let saved = round_folder.join("mutants.txt");
     std::fs::write(&saved, format!("{line}\n"))
         .with_context(|| format!("writing {}", saved.display()))?;
     Ok((0, vec![line]))
+}
+
+/// Splits `mutants.out/missed.txt` of the round, if it exists, and writes
+/// `missed.txt` and `known.txt`, empty if need be.  It reads each file at
+/// `head`, which `review start` found clean.  cargo-mutants copied that
+/// tree.  If the two differ, a line only goes to the validator.  Returns
+/// the number of known lines.
+fn split_missed(toplevel: &Path, head: &str, round_folder: &Path, list: &[Known]) -> Result<usize> {
+    let from = round_folder.join("mutants.out/missed.txt");
+    let missed = match std::fs::read_to_string(&from) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", from.display())),
+    };
+    let line_at = |file: &str, n: usize| -> Option<String> {
+        let text = git(toplevel, &["show", &format!("{head}:{file}")]).ok()?;
+        text.lines().nth(n.checked_sub(1)?).map(str::to_string)
+    };
+    let parts = split(&missed, list, line_at);
+    let to_validate: String = parts
+        .to_validate
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let known: String = parts
+        .known
+        .iter()
+        .map(|(line, debt)| format!("{line}\t{debt}\n"))
+        .collect();
+    for (name, text) in [("missed.txt", to_validate), ("known.txt", known)] {
+        let path = round_folder.join(name);
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(parts.known.len())
 }
 
 /// `review check <round>`: the changes since the round's record.
@@ -3056,8 +3112,10 @@ mod tests {
         })
     }
 
-    const COUNTED: &str = "tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5";
-    const NOTHING: &str = "tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0";
+    const COUNTED: &str =
+        "tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 0";
+    const NOTHING: &str =
+        "tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0";
 
     fn assert_line(end: RunEnd, counts: Option<Counts>, expected: &str) {
         assert_eq!(classify(end, counts).to_string(), expected);
@@ -3195,7 +3253,7 @@ mod tests {
         assert_line(
             end,
             unviable,
-            "mutants: partial: tested 2 (caught 0, missed 0, unviable 2), timeouts 0, not tested 3; stopped at the limit",
+            "mutants: partial: tested 2 (caught 0, missed 0, unviable 2), timeouts 0, not tested 3, known 0; stopped at the limit",
         );
     }
 
@@ -3214,7 +3272,7 @@ mod tests {
         assert_line(
             end,
             only_timeouts,
-            "mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 2, not tested 5; stopped before a mutant finished",
+            "mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 2, not tested 5, known 0; stopped before a mutant finished",
         );
     }
 
@@ -3245,7 +3303,7 @@ mod tests {
         assert_line(
             ended(0),
             counts,
-            "mutants: full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0",
+            "mutants: full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0, known 0",
         );
     }
 
@@ -3279,11 +3337,17 @@ mod tests {
         std::fs::create_dir_all(&round_folder).unwrap();
         let old_line = round_folder.join("mutants.txt");
         std::fs::write(&old_line, format!("mutants: full: {COUNTED}\n")).unwrap();
+        let old_missed = round_folder.join("missed.txt");
+        std::fs::write(&old_missed, format!("{LINE_1_41}\n")).unwrap();
+        let old_known = round_folder.join("known.txt");
+        std::fs::write(&old_known, format!("{LINE_2_17}\tTD-39\n")).unwrap();
         clear_old_output(&round_folder).unwrap();
         assert!(
             !old_line.exists(),
             "a round started again must not show the line of the last run"
         );
+        assert!(!old_missed.exists(), "nor the missed lines of the last run");
+        assert!(!old_known.exists(), "nor the known lines of the last run");
         assert!(round_folder.exists());
     }
 
@@ -3473,7 +3537,7 @@ mod tests {
         commit_all(&dir, "a fix");
         assert_eq!(start_in(&dir, "main", "2").0, 0);
         let top = toplevel(&dir).unwrap();
-        let round_folder = prepare_mutants(&top, 2).unwrap().unwrap();
+        let (round_folder, _) = prepare_mutants(&top, 2).unwrap().unwrap();
         let diff = std::fs::read_to_string(round_folder.join("mutants.diff")).unwrap();
         assert!(diff.contains("+++ b/b.rs"), "{diff}");
         assert!(!diff.contains("a.rs"), "{diff}");
@@ -3483,7 +3547,8 @@ mod tests {
     /// A fake `cargo` in POSIX sh.  `mutants --version` passes.  A run
     /// writes counts to `<output>/mutants.out`, keeps the `--config` that
     /// it got in `<output>/config-seen.txt` and the `--in-diff` in
-    /// `<output>/in-diff-seen.txt`, and exits 2 (missed mutants).
+    /// `<output>/in-diff-seen.txt`, and exits 2 (missed mutants).  If its
+    /// folder holds `missed.txt`, the run copies it to `mutants.out`.
     const FAKE_CARGO: &str = r#"#!/bin/sh
 if [ "$2" = "--version" ]; then exit VERSION_EXIT; fi
 out=""
@@ -3501,6 +3566,8 @@ printf '{"caught": 3, "missed": 2, "timeout": 1, "unviable": 4}' > "$out/mutants
 printf '[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}]' > "$out/mutants.out/mutants.json"
 printf '%s' "$config" > "$out/config-seen.txt"
 printf '%s' "$diff" > "$out/in-diff-seen.txt"
+here=$(dirname "$0")
+if [ -f "$here/missed.txt" ]; then cp "$here/missed.txt" "$out/mutants.out/missed.txt"; fi
 exit 2
 "#;
 
@@ -3560,6 +3627,54 @@ exit 2
             round_folder.join("mutants.diff"),
             "the round's mutants.diff reached cargo"
         );
+        assert_lists(&round_folder, "", "");
+    }
+
+    /// `missed.txt` and `known.txt` of the round hold `missed` and `known`.
+    fn assert_lists(round_folder: &Path, missed: &str, known: &str) {
+        let read = |name: &str| std::fs::read_to_string(round_folder.join(name)).ok();
+        assert_eq!(read("missed.txt").as_deref(), Some(missed), "missed.txt");
+        assert_eq!(read("known.txt").as_deref(), Some(known), "known.txt");
+    }
+
+    #[test]
+    fn mutants_splits_the_missed_lines_by_the_list() {
+        let dir = scratch("mutants-split");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        let save: String = (1..=503)
+            .map(|n| match n {
+                427 => format!("{CODE_427}\n"),
+                503 => format!("{CODE_503}\n"),
+                _ => format!("// line {n}\n"),
+            })
+            .collect();
+        write(&dir, SAVE_RS, &save);
+        commit_all(&dir, "round 1");
+        assert_eq!(start_in(&dir, "main", "1").0, 0);
+        let bin = Scratch::new("mutants-split-bin");
+        let cargo = fake_cargo(&bin, 0);
+        let missed = format!("{LINE_1_41}\n{LINE_2_17}\n");
+        std::fs::write(bin.join("missed.txt"), &missed).unwrap();
+        let top = toplevel(&dir).unwrap();
+        let (code, lines) =
+            mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        let expected = "mutants: full: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 1";
+        assert_eq!((code, lines), (0, vec![expected.to_string()]));
+        let round_folder = top.join("target/review/run/feature/1");
+        assert_eq!(
+            std::fs::read_to_string(round_folder.join("mutants.txt")).unwrap(),
+            format!("{expected}\n")
+        );
+        assert_lists(
+            &round_folder,
+            &format!("{LINE_1_41}\n"),
+            &format!("{LINE_2_17}\tTD-39\n"),
+        );
+        assert_eq!(
+            std::fs::read_to_string(round_folder.join("mutants.out/missed.txt")).unwrap(),
+            missed,
+            "mutants.out stays as cargo-mutants wrote it"
+        );
     }
 
     #[test]
@@ -3578,6 +3693,7 @@ exit 2
             format!("{expected}\n")
         );
         assert!(!round_folder.join("mutants.out").exists(), "nothing ran");
+        assert_lists(&round_folder, "", "");
     }
 
     #[test]
@@ -3587,10 +3703,9 @@ exit 2
         let round_folder = top.join("target/review/run/feature/1");
         std::fs::create_dir_all(round_folder.join("mutants.out")).unwrap();
         std::fs::create_dir_all(round_folder.join("mutants.out.old")).unwrap();
-        assert_eq!(
-            prepare_mutants(&top, 1).unwrap(),
-            Some(round_folder.clone())
-        );
+        let (folder, state) = prepare_mutants(&top, 1).unwrap().unwrap();
+        assert_eq!(folder, round_folder);
+        assert_eq!(state.head, sha(&dir, "HEAD"), "the round's state");
         assert!(!round_folder.join("mutants.out").exists());
         assert!(!round_folder.join("mutants.out.old").exists());
     }

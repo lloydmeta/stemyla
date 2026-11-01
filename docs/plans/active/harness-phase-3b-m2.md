@@ -203,7 +203,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: plan review round 1 (one `Plan` agent): no blocker, 9 should-fix and 9 nits.  The agent recounted the measurement and found one count wrong (9 rounds, not 10).  All findings are fixed in this plan.
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent), at `77ba7b8`: 1 blocker, 6 should-fix (2 significant) and 5 nits.  The blocker: a commit with failing tests breaks GIT-2.  All findings are fixed in this plan.  The review stops at its cap of 2 rounds.
 * [x] 2026-10-31: step 1, `Known`, an empty `KNOWN_MISSED` and `split`, with 7 tests (implementer).
-* [ ] Step 2: `review mutants` writes `missed.txt` and `known.txt`.
+* [x] 2026-10-31: step 2, `review mutants` writes `missed.txt` and `known.txt`, and the mutants line ends `, known <k>` (implementer).
 * [ ] Step 3: the entries and their test.
 * [ ] Step 4: the docs, and the diff for the orchestrator.
 * [ ] Review rounds.
@@ -218,6 +218,8 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, team leader: at `759abfa`, `note_run` of `xtask/src/e2e/weights.rs` has three `replace || with && in note_run` mutants (lines 280 to 282).  At `0789e6b`, TD-66 named two (lines 254 and 256).  Step 3 maps each row to the code of today.
 * 2026-10-31, implementer: step 1's tests failed first on the stub of `split`, on `assert_eq`.  All 6 tests of the plan failed: the stub gave each line as known, with the debt `""`.
 * 2026-10-31, implementer: step 1 adds a seventh test, `split_reads_no_file_for_a_line_that_no_entry_names`.  `split` calls `line_at` only for a line that an entry names, so step 2 runs no `git show` for most lines.  The test also failed on the stub.
+* 2026-10-31, implementer: step 2's tests failed first on the stubs, on `assert_eq`.  The stubs were a `Line` that printed no `known`, a `mutants_with` that wrote no file, and the old `clear_old_output`.  21 tests failed: the 17 tests that pin the line of `classify`, the two run tests, the clear test and the split test.  With `known` in the line, three tests still failed: no `missed.txt` (`None`, not `Some("")`) in the two run tests, and "nor the missed lines of the last run" in the clear test.  `mutants_splits_the_missed_lines_by_the_list` failed with `known 0`, not `known 1`.
+* 2026-10-31, implementer: the fake `cargo` copies `missed.txt` from its own folder to `mutants.out`, if it is there.  So a test gives the missed lines without an environment variable, which tests that run at the same time would share.
 
 ## Decision log
 
