@@ -432,9 +432,9 @@ Tier `commit` runs the checks that the changed paths of one commit need (`plans/
 * Tier `commit` skips the GPU test line and the Trunk build.  A strict path, or a graph that fails, sends the commit to tier `push` instead.  Each tier skips the browser tests.
 * Tier `push` skips the GPU test line when its paths change no GPU code: nothing in `roformer/`, `roformer-gpu/` or `test-support/`, and no workspace file.  When no path changed, or no path is known, it runs the line.  CI does not run that line either.
 * The GPU test line has `STEMYLA_REQUIRE=gpu,f16`, so it fails on an adapter without `SHADER_F16_IN_F32`.  On such an adapter, run `check` with `STEMYLA_REQUIRE=gpu`.  A `STEMYLA_REQUIRE` in the environment replaces `gpu,f16` in the line when one of its words is `gpu`, `f16` or `timestamps`.  Another value, such as `fixtures`, keeps `gpu,f16`, so the line cannot pass with no adapter.  The printed reason says which of the two occurs.
-* Each tier runs its checks on the working tree, not on the index or `HEAD`.  So it does not test a staged change that the tree undoes, or a committed change that the tree reverts.  The paths of such a change still choose the checks.
+* Each tier runs its checks on the working tree, not on the index or `HEAD`.  So an unstaged edit or an untracked file that the commit leaves out can make the checks pass where the commit fails.  A staged change that the tree undoes, or a committed change that the tree reverts, is not tested.  The paths of such a change still choose the checks.  Tier `push` has the same gap, so only CI, on the pushed commit, finds it.
 
-Tier `push`, which runs before each push and each review round, or CI finds the gaps of tier `commit` before review.  No automated check runs the GPU test line when tier `push` skips it.
+Tier `push`, which runs before each push and each review round, or CI finds the other gaps of tier `commit` before review.  No automated check runs the GPU test line when tier `push` skips it.
 
 * Fix: no fix is planned.  Add a strict path when a rule's code moves to a new file.
 
