@@ -362,6 +362,10 @@ The team leader gives these to the orchestrator as text.
   * `a_row_with_bad_cells_gives_only_those_problems`: with `row {n}` in place of `row {n + 1}`, the problem starts `row 4:` (2-14).
   * `a_good_log_gives_no_problem`: when only the first part of the action is read for `known: `, 4-23 (`merged into 4-1; known: TD-39`) gives problem 7 (2-14).
   * `start_warns_when_the_branch_changes_review_log_rs_or_the_binary_is_older`: without the `review_log.rs` entry of `WATCHED_SOURCES`, it gets no warning, as at `0e1037d` (2-8).  It and `the_log_check_source_warns_on_its_own` fail when either warning names `xtask/src/review.rs` or `the route` in place of the source.
+* 2026-11-01, implementer: the checks of `m3/m3-r2-skill.diff`, at `4b3af3a`, in a scratch worktree with its own target folder:
+  * `git apply --check` passes at the repo root.
+  * With only the `xtask/tests/rules.rs` part, two tests fail on their asserts.  `the_review_skill_starts_with_xtask` gives 6 problems, one for each new or changed pin.  `each_reviewer_reads_the_late_scope` gives one problem for each of the six reviewers.  The other 26 rules tests pass.
+  * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  The agent tests, such as `every_reviewer_has_an_agent_file` and `the_agents_are_read_only_by_tools`, pass.  `CLAUDE.md` stays at 88 lines.
 
 ## Decision log
 
