@@ -205,7 +205,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: step 1, `Known`, an empty `KNOWN_MISSED` and `split`, with 7 tests (implementer).
 * [x] 2026-10-31: step 2, `review mutants` writes `missed.txt` and `known.txt`, and the mutants line ends `, known <k>` (implementer).
 * [x] 2026-10-31: step 3, the 12 entries of `KNOWN_MISSED`, `known_problems` and its tests (implementer).
-* [ ] Step 4: the docs, and the diff for the orchestrator.
+* [x] 2026-10-31: step 4, the docs of what `xtask review mutants` does: TD-33, TD-39, TD-66, and the Tools table and changelog of `docs/working-with-agents.md`.  The diff of the skill, its pins and its docs goes to the team leader (implementer).
 * [ ] Review rounds.
 * [ ] M2 done: this plan moves to `plans/completed/`.
 
@@ -225,6 +225,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, implementer: the 12 entries of `KNOWN_MISSED`, each from `cargo mutants --list --line-col=true -f <file>` at `759abfa`.  TD-39: `restore` (M8 2-15, `save.rs:1004:5`), `save_once` (M8 2-17, `save.rs:1113:5`), `click_save` with `Ok(String::new())` and with `Ok("xyzzy".into())` (M8 speed 2, 2-16 and 2-17, `save.rs:1090:5`), `save_playing` (M8 speed 2, 2-18, `save.rs:1165:5`), `main` (catch-up 1-28, `app/src/main.rs:4:5`) and `drop_and_open` (catch-up 1-30, `decode.rs:324:5`).  TD-66: `note_run` with `Ok(vec![String::new()])` and `Ok(vec![])` (M9 1-21 and 1-28, `weights.rs:257:5`), `&&` to `||` in `note_run` (M9 1-31, `weights.rs:259:48`, offset 40), and `||` to `&&` in `note_run` (M9 1-37 and 1-44, `weights.rs:280:13` and `282:13`).
 * 2026-10-31, implementer: the 17 rows left out.  11 repeat an earlier row: `save_once` 5 (M8 speed 1 1-48, speed 2 2-14, speed 3 3-14, speed 4 4-20, speed 5 5-19), `save_playing` 4 (speed 3 3-12, speed 4 4-19, speed 5 5-18, speed 6 6-14) and `click_save` 2 (speed 3 3-13 and 3-15).  5 mutate the constant `WAITS_S` outside a function (M8 speed 1, 1-19, 1-20, 1-30, 1-31 and 1-38, `2c7c29b:xtask/src/e2e/save.rs:156`).  M9 1-33 (`replace == with != in run`, line 488 at `0789e6b`) has no column, and its line has two `==`, so the validator sees both.  No row's fix commit added a test for its mutant, and `--list` still shows each mutant of the 12 entries.
 * 2026-10-31, implementer: a check with the real list on the `--list` output of the four files (623 mutants) at `759abfa` found 12 known lines, one for each entry.  So no entry matches a second mutant.  The third `||` of `note_run` (`weights.rs:281:13`, `f16 weights`) has no row, so it stays with the validator.
+* 2026-10-31, implementer: the row of `docs/harness.md` for `xtask review mutants` does not name what the run gives the validator.  So neither step 4's commit nor the diff changes it.
 
 ## Decision log
 
