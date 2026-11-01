@@ -158,11 +158,11 @@ Never push without being asked.  An agent never pushes to `main` or `gh-pages`, 
 
 ### GIT-2: small, verified, signed commits
 
-Work in small verified steps.  `cargo fmt --all --check`, clippy with `-D warnings`, the tests and `xtask docs-check` pass before every commit, and every commit is signed (`git commit -S`).
+Work in small verified steps.  Before each commit, `cargo run -p xtask -- check --tier commit` passes.  It runs the checks that the commit's changed paths need, and prints each skip with its reason.  A commit that touches a strict path (`STRICT_PATHS` in `xtask/src/check.rs`) runs tier `push`.  Before each push and each review round, `cargo run -p xtask -- check --tier push` passes.  It runs the fmt, clippy, test, `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  It skips the GPU test line when the branch changes no GPU code.  No tier runs a browser test or `publish`.  CI runs the browser tests, and stays the authority (decision 0026).  Every commit is signed (`git commit -S`).
 
-* Why: a commit is the unit that review, bisect and revert work with; a signature attributes it.
-* Enforced by: CI's required checks on `main` (fmt, clippy, test, wasm build, browser tests), which an admin can bypass (TD-20).  A PostToolUse hook in `.claude/settings.json` runs rustfmt on each `.rs` file in the repo that the agent's `Edit` or `Write` tool changes, kept by `the_rustfmt_hook_formats_rust_files`.  It saves a round trip; the `fmt` job is the control.
-* Gaps: TD-20.
+* Why: a commit is the unit that review, bisect and revert work with; a signature attributes it.  Tier `commit` keeps each commit fast, and tier `push` and CI find what it skips (decision 0026).
+* Enforced by: CI's required checks on `main` (fmt, clippy, test, wasm build, browser tests), which an admin can bypass (TD-20).  `xtask check` and its tests in `xtask/src/check.rs` and `xtask/tests/check.rs`, among them `the_strict_path_table_follows_strict_rules`, `check_never_runs_the_browser_or_publish` and `lines_are_the_twelve_of_the_push_tier`.  `the_push_tier_runs_the_lines_of_claude_md` keeps tier `push` and `CLAUDE.md`'s Commands the same, and `git_2_names_the_tiers` keeps this text and `CLAUDE.md` on the tiers.  A PostToolUse hook in `.claude/settings.json` runs rustfmt on each `.rs` file in the repo that the agent's `Edit` or `Write` tool changes, kept by `the_rustfmt_hook_formats_rust_files`.  It saves a round trip; the `fmt` job is the control.
+* Gaps: TD-20, TD-70.
 
 ### GIT-3: gh-pages is never squashed or rewritten
 

@@ -43,9 +43,12 @@ cargo clippy -p app -- -D warnings              # app's lib and binary without a
 cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
 cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
-cargo test -p roformer-gpu --lib                # CI runs these too, and --doc; they need no GPU
+cargo test -p roformer-gpu --lib                # CI runs it too; it needs no GPU
+cargo test -p roformer-gpu --doc                # CI runs it too; it needs no GPU
 STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release  # every kernel against the CPU, and f16 against f32; fails without a GPU, or without SHADER_F16_IN_F32 (then use gpu alone)
 cargo run -p xtask -- docs-check                # the map and docs match the code
+cargo run -p xtask -- check --tier commit       # before each commit: the checks that its changed paths need
+cargo run -p xtask -- check --tier push         # before each push and each review round: the fmt, clippy, test, docs-check and Trunk lines
 (cd app && trunk build --release)
 cargo run -p xtask --release -- serve app/dist --port 8080
 cargo run -p xtask -- web-test                  # browser tests (needs wasm-bindgen-cli; see README)
@@ -75,7 +78,7 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * PROTO-2: a `?model_url=` is accepted only from the page's own site.
 * VERIFY-1: every behaviour is verified by an automated check; "it compiles" is not acceptance, and a skipped test is not a pass.
 * GIT-1: push only when asked, never to `main` or `gh-pages`; never merge a PR or run `xtask publish`.  Deny rules refuse the usual commands.
-* GIT-2: make small verified steps.  Before each commit, run fmt, clippy, the tests and `docs-check`.  Sign every commit (`git commit -S`).
+* GIT-2: make small verified steps.  Before each commit, run `cargo run -p xtask -- check --tier commit`.  Before each push and each review round, run `check --tier push`.  Sign every commit (`git commit -S`).
 * GIT-3: never squash or rewrite `gh-pages`.
 * DOC-1: a change that makes the map or a doc wrong fixes it in the same commit.
 
@@ -84,5 +87,5 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 * Writing: write docs, comments, commit messages and PR descriptions in [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org).  Keep an instruction to 20 words or fewer, and a description to 25 or fewer.  Write one instruction per sentence, in the active voice.  Use the same word for the same thing.  You need not use STE's American English spelling.
 * Plans: work of more than a few steps gets an execution plan in `docs/plans/active/` that follows `docs/plans/PLANS.md`, kept current at every stopping point and moved to `docs/plans/completed/` when done.
 * Decisions: a choice with lasting effect gets a record in `docs/decisions/`; agents write it as `proposed`, and only a person accepts it.
-* Review: after implementing, run `cargo build -p xtask`, then `/review-rounds` from round 1 until the stop rule of decision 0024 holds.  The skill verifies each blocker and should-fix before a fix.  Rounds 1 to 3 fix each confirmed finding, with tests, and fix each pre-existing finding or send it to a TD or its own PR.  From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
+* Review: after implementing, run `cargo run -p xtask -- check --tier push` and `cargo build -p xtask`, then `/review-rounds` from round 1 until the stop rule of decision 0024 holds.  The skill verifies each blocker and should-fix before a fix.  Rounds 1 to 3 fix each confirmed finding, with tests, and fix each pre-existing finding or send it to a TD or its own PR.  From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
 * Debt: a workaround, a skipped check or a known breach of a rule gets an entry in `docs/tech-debt.md` in the same commit.

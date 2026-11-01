@@ -60,7 +60,7 @@ cargo install --locked trunk --version 0.21.14                 # --locked matter
 cargo run -p xtask --release -- serve app/dist --port 8080     # http://localhost:8080/
 ```
 
-Then the checks CI gates on:
+Then the checks CI gates on.  `cargo run -p xtask -- check --tier push` runs them as the lines of `CLAUDE.md`'s Commands, with the Trunk build (decision 0026):
 
 ```bash
 cargo fmt --all --check

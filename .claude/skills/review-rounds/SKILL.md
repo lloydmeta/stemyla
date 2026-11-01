@@ -19,7 +19,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 
 ## Before the steps
 
-* Run this skill only after fmt, clippy, the tests and `cargo build -p xtask` pass.
+* Run this skill only after `cargo run -p xtask -- check --tier push` and `cargo build -p xtask` pass.
 * A refusal of `review start` (exit 3) stops the skill before this text.  Claude Code shows its lines, such as "commit first", in the session.  A `claude -p` run in text mode shows nothing.
 * A `warning:` line of `review start` does not stop the round.  Copy it to the findings file (step 9).
 * `allowed-tools` lets the `xtask review` commands run with no approval only in the turn in which the skill loads.  A new turn ends that permission.  A message of a person starts a new turn.  So does the notice that a background agent or command ended.
@@ -299,7 +299,7 @@ Then:
 * Do not fix a `known` finding.  Its gap is in its TD.
 * Decide each `unproven` finding, and record the reason.
 * A nit has the verdict `unvalidated`.  In rounds 1 to 3, fix it only if you agree with it.
-* Before the commit, run fmt, clippy, the tests and `docs-check` (GIT-2).
+* Before the commit, run `cargo run -p xtask -- check --tier commit` (GIT-2).
 * Commit the fixes, signed, with the subject "review round $1 fixes".
 
 ### 11. Add the round to the log
@@ -385,5 +385,5 @@ After the last round:
 
 * Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.
 * Write a Progress line for each round in the plan of the work.
-* Run the checks, and commit, signed.
+* Run the checks with `cargo run -p xtask -- check --tier push`, and commit, signed.
 * Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, and each `repeat-of` of a finding that is not `known`.  Then it lists each `known` finding once, with its TD.  This includes each `known` mutant.  In its `<details>` section, it lists each `reported, not fixed` finding.  It also gives the mutants line of each round.

@@ -1189,7 +1189,14 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// change to an agent file takes effect.  Review round 4 of M3 makes the
 /// stop rule also count a `pre-existing` or `unproven` finding of the three
 /// kinds that the round sent to a TD.
+///
+/// M4 of harness phase 3b adds the checks by tier of decision 0026:
+/// `check --tier push` before the skill and after the last round, and
+/// `check --tier commit` before the commit of step 10.
 const REVIEW_SKILL_TEXT: &[&str] = &[
+    "* Run this skill only after `cargo run -p xtask -- check --tier push` and `cargo build -p xtask` pass.",
+    "* Before the commit, run `cargo run -p xtask -- check --tier commit` (GIT-2).",
+    "* Run the checks with `cargo run -p xtask -- check --tier push`, and commit, signed.",
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
     "target/debug/xtask review check $1",
@@ -1306,6 +1313,103 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
         "```",
     ),
 ];
+
+/// The lines of `CLAUDE.md`'s Commands block, each without its comment.
+fn claude_md_commands() -> Vec<String> {
+    let text = std::fs::read_to_string(xtask::workspace_root().join("CLAUDE.md"))
+        .expect("CLAUDE.md can be read");
+    let after = text.split_once("## Commands").map_or("", |(_, rest)| rest);
+    let block = after
+        .split_once("```bash\n")
+        .and_then(|(_, rest)| rest.split_once("```"))
+        .map_or("", |(block, _)| block);
+    block
+        .lines()
+        .map(|line| {
+            line.split_once(" #")
+                .map_or(line, |(command, _)| command)
+                .trim()
+        })
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Decision 0026: tier `push` runs the fmt, clippy, test, `docs-check` and
+/// Trunk build lines of `CLAUDE.md`'s Commands, and only those.  So a line
+/// that one of them adds or drops fails here.
+#[test]
+fn the_push_tier_runs_the_lines_of_claude_md() {
+    let commands = claude_md_commands();
+    let pushed: Vec<String> = xtask::check::lines()
+        .iter()
+        .map(xtask::check::Check::line)
+        .collect();
+    let kinds = [
+        "cargo fmt",
+        "cargo clippy",
+        "cargo test",
+        "STEMYLA_REQUIRE=",
+        "cargo run -p xtask -- docs-check",
+        "(cd app && trunk build",
+    ];
+    let mut problems = Vec::new();
+    for line in &pushed {
+        if !commands.contains(line) {
+            problems.push(format!("CLAUDE.md's Commands has no line `{line}`, which `xtask check --tier push` runs.  Fix: add the line to CLAUDE.md, or change `lines` in xtask/src/check.rs (GIT-2, decision 0026)."));
+        }
+    }
+    for line in &commands {
+        let is_check = line.starts_with("cargo run -p xtask -- check");
+        if !is_check && kinds.iter().any(|kind| line.starts_with(kind)) && !pushed.contains(line) {
+            problems.push(format!("`xtask check --tier push` does not run `{line}` of CLAUDE.md's Commands.  Fix: add it to `lines` in xtask/src/check.rs (GIT-2, decision 0026)."));
+        }
+        if is_check && pushed.contains(line) {
+            problems.push(format!("`xtask check --tier push` runs `{line}`, which is `check` itself.  Fix: remove it from `lines` in xtask/src/check.rs."));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// GIT-2 names the tiers of decision 0026 in `CLAUDE.md` and in
+/// `docs/invariants.md`.
+#[test]
+fn git_2_names_the_tiers() {
+    let read = |file: &str| {
+        std::fs::read_to_string(xtask::workspace_root().join(file))
+            .unwrap_or_else(|e| panic!("reading {file}: {e}"))
+    };
+    let claude = read("CLAUDE.md");
+    let claude_line = claude
+        .lines()
+        .find(|line| line.starts_with("* GIT-2:"))
+        .unwrap_or("")
+        .to_string();
+    let invariants = read("docs/invariants.md");
+    let section = invariants
+        .split_once("### GIT-2:")
+        .map_or("", |(_, rest)| rest);
+    let section = section
+        .split_once("\n### ")
+        .map_or(section, |(git_2, _)| git_2);
+    let mut problems = Vec::new();
+    for (place, text) in [
+        ("the GIT-2 line of CLAUDE.md", claude_line.as_str()),
+        ("the GIT-2 section of docs/invariants.md", section),
+    ] {
+        for wanted in ["check --tier commit", "--tier push"] {
+            if !text.contains(wanted) {
+                problems.push(format!("{place} does not hold `{wanted}`.  Fix: name the tiers of decision 0026 there (DOC-1)."));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
 
 /// The sentence of the fix rule that each place says (decision 0024).
 const FIX_RULE_SENTENCE: &str = "From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.";
