@@ -2,6 +2,8 @@
 
 Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
 
+Amended on 2026-11-01 by the agent, after M5 of `plans/active/harness-phase-3b.md`: decision 0025's measurement found no cheaper model that passes, so each role keeps `inherit`.  So decision 0025 lowers no cost yet.  A lower cost of the mode comes from decisions 0024 and 0026.  The decision is unchanged.
+
 ## Context
 
 PR #34 and PR #39 ran hands-off: one orchestrator session, one team for each milestone, one PR.  The mode lives only as a "How the work runs" section that a person copies into each plan.  Harness phase 2 had no such section: 21 milestones took about 17 sessions, 18 PRs and at least 54 maintainer messages.  PR #39's planning session started the work inline and opened extra branches, until the maintainer stepped in three times.
