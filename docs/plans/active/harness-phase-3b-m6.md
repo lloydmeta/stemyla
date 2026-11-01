@@ -272,7 +272,7 @@ The team leader gives these to the orchestrator as text:
 
 ## Surprises and discoveries
 
-* None yet.
+* 2026-11-01, 2a: on the stub (the old `of_round`), `review_clean_removes_the_worktrees_of_one_round_only` failed on its list of removed names.  The old code removed `1-reviewer-2` too, since `reviewer` is an agent of `round_agents`.  It kept the other new names and `1-stranger-1`.
 
 ## Decision log
 

@@ -133,6 +133,13 @@ fn review_clean_removes_the_worktrees_of_one_round_only() {
         "10-reviewer-1",
         "2-reviewer-1",
         "1-stranger-1",
+        // Names that reviewers made in M2 and M3 of phase 3b, in the form
+        // of round 1.
+        "1-correctness-1",
+        "1-gpu-1",
+        "1-memory-1",
+        "1-harness-1",
+        "1-reviewer-2",
     ];
     for name in names {
         let path = review.join(name);
@@ -179,15 +186,22 @@ fn review_clean_removes_the_worktrees_of_one_round_only() {
     assert_eq!(
         removed,
         [
+            "1-correctness-1",
             "1-docs-reviewer-1",
+            "1-gpu-1",
+            "1-harness-1",
+            "1-memory-1",
             "1-reviewer-1",
+            "1-reviewer-2",
+            "1-stranger-1",
             "1-validator-1-3-1",
             "1-baseline-1"
         ],
         "{stdout}"
     );
     let listing = worktree_paths(&repo);
-    for name in &names[..3] {
+    let kept = ["10-reviewer-1", "2-reviewer-1"];
+    for name in names.iter().filter(|n| !kept.contains(n)) {
         assert!(!review.join(name).exists(), "{name} is still there");
         assert!(
             !listing.contains(&format!("{}\n", review.join(name).display())),
@@ -195,7 +209,7 @@ fn review_clean_removes_the_worktrees_of_one_round_only() {
         );
     }
     assert!(!review.join("1-baseline-1").exists());
-    for name in &names[3..] {
+    for name in kept {
         assert!(
             listing.contains(&format!("worktree {}\n", review.join(name).display())),
             "{name}: {listing}"

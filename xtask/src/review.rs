@@ -1826,27 +1826,16 @@ fn check(toplevel: &Path, home: &Path, round: u32) -> Result<(i32, Vec<String>)>
     }
 }
 
-/// The agents whose worktrees `review clean` removes: the reviewers, the
-/// validators and the baseline.
-fn round_agents() -> Vec<&'static str> {
-    REVIEWERS
-        .iter()
-        .map(|r| r.name)
-        .chain(["validator", "baseline"])
-        .collect()
-}
-
-/// If `name` is `<round>-<agent>-...` for an agent of [`round_agents`].
+/// If `name` starts with `<round>-`.  It does not read the agent's name,
+/// since reviewers also make worktrees with names of their own, such as
+/// `1-correctness-1`.  `10-reviewer-1` is not of round 1, and `run` starts
+/// with no digit.
 fn of_round(name: &str, round: u32) -> bool {
-    name.strip_prefix(&format!("{round}-")).is_some_and(|rest| {
-        round_agents()
-            .iter()
-            .any(|agent| rest.starts_with(&format!("{agent}-")))
-    })
+    name.starts_with(&format!("{round}-"))
 }
 
-/// `review clean <round>`: removes the worktrees of one round's agents,
-/// `target/review/<round>-<agent>-<n>`, with `--force`, since a reviewer's
+/// `review clean <round>`: removes each worktree under `target/review/`
+/// whose name starts with `<round>-`, with `--force`, since a reviewer's
 /// trial changes are scratch by design.  It also removes a folder of such
 /// a name that is not a worktree.  It runs no `git worktree prune`, so it
 /// acts on no other worktree.
