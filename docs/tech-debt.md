@@ -447,7 +447,7 @@ M5 of harness phase 3b compared cheaper models with a control for the validator 
 * Each arm had one run on each case.  So the measure does not separate run noise from the model's effect.
 * The team leader rebuilt the finding block of each validator run from its row in the log.  So the block had no evidence and no fix.
 * No field of the `claude -p` stream shows the effort of a subagent.  So no check showed that `effort: high` took effect in a candidate arm.
-* The `haiku` validator stopped after 3 of its 6 cases, for its cost.  So its result has 25 items and no interval.
+* The `haiku` validator stopped after 3 of its 6 cases, for its cost.  So its result has 25 items, and item 0 of the pass rule cannot hold; its agreement interval is 0.363 wide.
 * The measurement did not reach the gpu-reviewer, the wire-reviewer and the supply-chain-reviewer.  They keep `inherit` because there is no evidence, not because they failed.
 * The measure is recall, or agreement with the log, on logged findings only.  It does not measure precision.
 

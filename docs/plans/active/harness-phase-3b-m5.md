@@ -308,7 +308,7 @@ The team leader gives these to the orchestrator as text:
   | - | - | - | - | - | - | - | - | - | - | - |
   | validator | control | 40 | 36 agree | 0.900 [0.769, 0.960] | 0.191 | 5 of 5 found, 0 refuted | 13 of 16 | 6 | 6.46M | - |
   | validator | `sonnet`, `high` | 40 | 35 agree | 0.875 [0.739, 0.945] | 0.207 | 5 of 5 found, 0 refuted | 11 of 16 | 6 | 3.35M | fails item 2 (11 < 13) |
-  | validator | `haiku`, `high` | 25 (3 of 6 cases) | 14 agree | 0.560 | - | 2 of 2 found, 0 refuted | 4 of 10 (control 8) | 3 | 6.22M | fails item 0; item 2 cannot pass (at most 10 < 13) |
+  | validator | `haiku`, `high` | 25 (3 of 6 cases) | 14 agree | 0.560 [0.371, 0.733] | 0.363 | 2 of 2 found, 0 refuted | 4 of 10 (control 8) | 3 | 6.22M | fails items 0 and 3 (width 0.363); item 2 cannot pass (at most 10 < 13) |
   | docs-reviewer | control | 40 | 17 found | 0.425 [0.285, 0.578] | 0.293 | 1 of 4 found | - | 7 | 17.30M | - |
   | docs-reviewer | `sonnet`, `high` | 40 | 8 found | 0.200 [0.105, 0.348] | 0.243 | 1 of 4 found, 0 missed | - | 7 | 6.25M | fails item 2 (0.200 < 0.275) |
 
