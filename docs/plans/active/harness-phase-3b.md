@@ -293,6 +293,7 @@ Kick-off prompt:
 * 2026-10-31, M1: after the run folder is removed (TD-37), later rounds on the same branch need a new run with its own base and round numbers.  Its rows went into the milestone's log as rounds 5 to 7.
 * 2026-10-31, M2: PR #39's M8, M9 and catch-up logs have 22 rounds after `6d0a39d`, with 261 missed lines.  68 are in files that today's `.cargo/mutants.toml` leaves out.  11 are in wasm32-only items with no skip.  None are in wasm32 blocks.  29 went to TD-39 or TD-66 (11 of them repeats).  153 are the rest; the validator refuted 35 of those, 16 in `protocol/src/lib.rs`.
 * 2026-10-31, M2: reviewers name their worktrees outside the pattern `<round>-<agent>-<n>` of `review clean`, such as `1-correctness-1` and `3-gpu-1` (six in 3 rounds).  Each agent removed its own, so nothing was left.  M6 makes the agents use the name of their role, or `review clean` matches more.
+* 2026-10-31, M2: the CI job "browser tests (Chrome)" failed at `666d83d` in `the_spike_logs_each_measure_and_leaves_no_files`: "late buffers 2" where 0 is expected.  No commit after the last green run changed `app/`.  The rerun of the job passed.  The test counts late buffers by the wall clock on a shared runner.
 
 ## Decision log
 
@@ -330,6 +331,10 @@ Kick-off prompt:
 * 2026-10-31, agent: the M2 intent review (round 2) corrected round 1's M5 line: replays run `H/bin/xtask` from this branch, so `KNOWN_MISSED` applies to them.  It widened the M3 `known` bullet to reviewer findings, and added an M6 bullet for the worktree names.  It changed M8's yield line, and made M3's skill and TD-33 line a task.
 * 2026-10-31, agent: the M2 intent review (round 3) corrected M8's past yield to at most 23 of 29 lines.  M6 now widens `review clean`, since the agent files already give the name.  M3 and M7 say `known` finding, not mutant.
 * 2026-10-31, agent: the M1 intent reviews changed the stop rule.  A refused cleanup command is not a stop: a refused `review clean` is left to the next `clean --yes`, and a refused `--also` folder goes on M8's list of maintainer steps.  Reason: a refused cleanup harms nothing, and a stop would halt the hands-off run.
+* 2026-10-31, agent: the M3 log check (`xtask/src/review_log.rs`) finds a fix by its Action cell.  A part of the cell, between `;`, is a fix when it holds a commit SHA or the word `diff`, and does not start with a not-fixed form.  A TD ID passes on a finding that the round must fix, since a team can send a confirmed mutant to tech debt.  Reason: the Action cells of the logs are free text.
+* 2026-10-31, agent: M3 adds `xtask review log-check <file>`, which the M3 section does not name.  The skill runs it on `<run>/log.md` after each round, or the caller runs it after it writes the log.  Reason: `docs-check` sees a log only after the last round, when a wrong fix is already in the history.
+* 2026-10-31, agent: a later set of rounds on a milestone, such as after an intent review, goes on with the same run.  The orchestrator runs the intent review before `clean --yes`, so the run folder stays.  Then it runs `/review-rounds <base> <N+1>`, so those rounds follow the late rule, and the log check reads them as late rounds.  If the run folder is gone, the gap goes to TD-37.
+* 2026-10-31, agent: decision 0011 gets one pointer line after its Status line, as decision 0024 says ("decision 0011 change[s] in the same commit").  The text of D2 and D6 stays as it is.  The orchestrator accepted the hunk, and added "by the agent", as the other amendments in `docs/decisions/` say.
 
 ## Outcomes and retrospective
 
