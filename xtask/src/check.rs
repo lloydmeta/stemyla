@@ -147,7 +147,8 @@ fn xtask_repo_tests() -> Check {
 }
 
 /// The lines of `CLAUDE.md`'s Commands that no tier runs, with the reason.
-fn never_run() -> Vec<(Check, &'static str)> {
+/// Each plan skips them.
+pub fn never_run() -> Vec<(Check, &'static str)> {
     const BROWSER: &str =
         "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026)";
     vec![
@@ -517,14 +518,15 @@ const COMMIT_GPU: &str = "it needs a GPU adapter, and tier push runs it when its
 const COMMIT_TRUNK: &str = "tier push runs it";
 
 /// Each line of tier `push`.  The GPU test line runs only when `paths`
-/// change GPU code, or when no path is known.
+/// change GPU code, or when `paths` is empty.  Then no path changed, or no
+/// path is known, so a GPU change cannot be ruled out.
 fn push_choices(paths: &[String]) -> Vec<Choice> {
     let gpu = paths.is_empty()
         || paths.iter().any(|path| {
             is_workspace_file(path) || GPU_FOLDERS.iter().any(|folder| path.starts_with(folder))
         });
     let gpu_reason = if paths.is_empty() {
-        "no path is known, so a GPU change cannot be ruled out"
+        "no path changed, or no path is known, so a GPU change cannot be ruled out"
     } else {
         "a path is in roformer/, roformer-gpu/ or test-support/, or is a workspace file"
     };
@@ -749,11 +751,14 @@ fn add_paths(found: &mut BTreeSet<String>, output: &str) {
 /// that says where they came from.  A phrase that starts with `warning:`
 /// says that tier `push` found no merge base, so it reads no path.
 ///
-/// Tier `commit` reads the staged and unstaged changes against `HEAD`, and
-/// the untracked files.  On a clean tree, it reads the last commit, against
-/// its first parent, or each file of a root commit.  Tier `push` reads the
-/// changes since the merge base of `HEAD` and `origin/main`, and the
-/// untracked files.  A rename gives both paths.
+/// Tier `commit` reads the changes of the index and of the working tree
+/// against `HEAD`, and the untracked files.  It reads the index alone too,
+/// so a staged change that the working tree undoes stays.  On a clean tree,
+/// it reads the last commit, against its first parent, or each file of a
+/// root commit.  Tier `push` reads the changes since the merge base of
+/// `HEAD` and `origin/main`, in the working tree and in `HEAD`, and the
+/// untracked files.  So a committed change that the working tree reverts
+/// stays.  A rename gives both paths.
 pub fn changed_paths(root: &Path, tier: Tier) -> Result<(Vec<String>, String)> {
     if !has_commit(root, "HEAD") {
         bail!("the repo has no commit, so there is no HEAD to compare with");
@@ -765,6 +770,20 @@ pub fn changed_paths(root: &Path, tier: Tier) -> Result<(Vec<String>, String)> {
             add_paths(
                 &mut found,
                 &git(root, &["diff", "--name-only", "--no-renames", "-z", "HEAD"])?,
+            );
+            add_paths(
+                &mut found,
+                &git(
+                    root,
+                    &[
+                        "diff",
+                        "--cached",
+                        "--name-only",
+                        "--no-renames",
+                        "-z",
+                        "HEAD",
+                    ],
+                )?,
             );
             add_paths(&mut found, &git(root, &untracked)?);
             if !found.is_empty() {
@@ -813,6 +832,13 @@ pub fn changed_paths(root: &Path, tier: Tier) -> Result<(Vec<String>, String)> {
                 add_paths(
                     &mut found,
                     &git(root, &["diff", "--name-only", "--no-renames", "-z", base])?,
+                );
+                add_paths(
+                    &mut found,
+                    &git(
+                        root,
+                        &["diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+                    )?,
                 );
                 add_paths(&mut found, &git(root, &untracked)?);
                 let short = base.get(..12).unwrap_or(base);
@@ -1433,11 +1459,16 @@ mod tests {
         assert!(gpu.reason.contains("no GPU code"), "{}", gpu.reason);
     }
 
-    /// With no path, tier `push` cannot rule out a GPU change.
+    /// With no path, tier `push` cannot rule out a GPU change: no path
+    /// changed since the merge base, or the merge base is not known.
     #[test]
     fn tier_push_with_no_path_runs_the_gpu_line() {
         let plan = plan(Tier::Push, &[], None);
         assert_eq!(decisions(&plan), push_list(run(GPU)));
+        assert_eq!(
+            reason_of(&plan, GPU),
+            "no path changed, or no path is known, so a GPU change cannot be ruled out"
+        );
     }
 
     const GPU_ALONE: &str = "STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release";
@@ -1542,6 +1573,17 @@ mod tests {
             imply,
             ["const IMPLY_GPU: [Need; 2] = [Need::Timestamps, Need::F16];"]
         );
+        // The words of `Need::word` for the three GPU needs.
+        for word in [
+            r#"Need::Gpu => "gpu","#,
+            r#"Need::Timestamps => "timestamps","#,
+            r#"Need::F16 => "f16","#,
+        ] {
+            assert!(
+                text.lines().any(|line| line.trim() == word),
+                "test-support/src/lib.rs has no line `{word}`, so GPU_WORDS can be stale"
+            );
+        }
         assert_eq!(GPU_WORDS, ["gpu", "f16", "timestamps"]);
     }
 

@@ -151,7 +151,7 @@ The plan.  `pub fn plan(tier: Tier, paths: &[String], graph: Option<&Graph>) -> 
 Tier `push` runs every line of `lines()` but one case of the GPU test line:
 
 * The GPU test line runs when its paths change `roformer/`, `roformer-gpu/`, `test-support/` or a workspace file.  Its tests test only those folders.
-* The GPU test line also runs when no path is known, since then the plan cannot rule out a GPU change.
+* The GPU test line also runs when no path changed, or no path is known, since then the plan cannot rule out a GPU change.
 * Else the plan skips it.  The reason says that the paths change no GPU code.
 * The paths also give the strict hits of the branch, for the report.
 
@@ -188,10 +188,10 @@ Tests of step 1, in `xtask/src/check.rs`, on a fixture graph of the 11 members a
 In `xtask/src/check.rs`:
 
 * `pub fn changed_paths(root: &Path, tier: Tier) -> Result<(Vec<String>, String)>` gives the paths, and a line that says where they came from.  Each git command runs in `root`, so the paths are relative to the root.  It uses `-z` and `--no-renames`, so a rename gives both paths, and a name with a space stays whole.
-  * Tier `commit`: `git diff --name-only --no-renames -z HEAD` gives the staged and unstaged changes.  `git ls-files --others --exclude-standard -z` gives the untracked files.
+  * Tier `commit`: `git diff --name-only --no-renames -z HEAD` gives the staged and unstaged changes.  `git diff --cached --name-only --no-renames -z HEAD` gives the staged changes, also when the working tree undoes them (review round 3).  `git ls-files --others --exclude-standard -z` gives the untracked files.
   * Tier `commit` on a clean tree, when `HEAD^` exists: `git diff --name-only --no-renames -z HEAD^ HEAD`.  This also covers a merge commit, against its first parent.
   * Tier `commit` on a clean tree with a root commit: `git diff-tree -r --root --no-commit-id --name-only --no-renames -z HEAD`, each of its files.
-  * Tier `push`: `git diff --name-only --no-renames -z <base>`, and the untracked files.  `<base>` is `git merge-base HEAD origin/main`.
+  * Tier `push`: `git diff --name-only --no-renames -z <base>`, `git diff --name-only --no-renames -z <base> HEAD` and the untracked files.  The second command keeps a committed change that the working tree reverts (review round 3).  `<base>` is `git merge-base HEAD origin/main`.
   * Tier `push` with no `origin/main`, or when `git merge-base` fails (a shallow clone, no common commit): it prints a `warning:` line.  Then it goes on with no paths, since tier `push` runs every line.
   * With no `HEAD` (a repo with no commit), it gives an error.
 * `main` finds the strict hits first.  It reads the graph only for tier `commit` with no strict hit, since tier `push` needs no graph.
@@ -353,6 +353,7 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: a full timed run of tier `push` passes on `b3e5452` (team leader).
 * [x] 2026-11-01: review round 1 fixes: 1-1, 1-2, 1-4 to 1-11, 1-13, 1-15 to 1-19, 1-22 and 1-23 (implementer).  1-3 goes to the team leader as the diff `m4/m4-r1-claude.diff` in the scratchpad.  1-12 and 1-14 are lines of the parent plan, which the team leader gives to the orchestrator.
 * [x] 2026-11-01: review round 2 fixes: 2-1, 2-3, 2-4, 2-5, 2-7 (the lines of this plan and `docs/ARCHITECTURE.md`) and 2-8 (implementer).  2-2 goes to the team leader as the diff `m4/m4-r2-claude.diff` in the scratchpad.  2-6 and the parent plan lines of 2-7 go to the orchestrator.
+* [x] 2026-11-01: review round 3 fixes: 3-1, 3-2, 3-3, 3-5, 3-7 and 3-8 (implementer).  3-4 and 3-6 go to the team leader as the diff `m4/m4-r3-claude.diff` in the scratchpad.  The parent plan lines of 3-1 and 3-3 go to the orchestrator.
 * [ ] Step 5: review rounds to the stop rule.
 
 ## Surprises and discoveries
@@ -419,6 +420,15 @@ The team leader gives these to the orchestrator as text:
   * 2-3: `run_checks_runs_each_run_check_and_gives_0` now reads the times before `timeless`.  It failed on the mutant that prints each time as `0.0`, at the assert `ok[1] >= 0.1`.
   * 2-5: `tier_commit_always_skips_the_gpu_line_and_trunk_with_their_reasons` and `the_dry_run_prints_the_whole_plan_and_changes_no_file` (`xtask/tests/check.rs`) failed on the old skip reason.
   * 2-8: `tier_push_runs_the_gpu_line_for_a_gpu_path` failed on the mutant `let gpu_reason = if true {`.  `left` was "no path is known, so a GPU change cannot be ruled out".
+* 2026-11-01, implementer, review round 3 fixes: each new or changed test failed first on an assert.  It failed on the code before the fix, or on the named mutant:
+  * 3-1: `tier_commit_sees_a_staged_change_that_the_tree_undoes` failed with `left` `([".gitignore", "a.txt", "b.txt", "docs/c.md"], "the root commit")`.  `right` was `(["a.txt"], ...)`.
+  * 3-1: `tier_push_sees_a_committed_change_that_the_tree_reverts` failed with `left` `([], ...)`.  `right` was `(["a.txt", "b.txt", "moved.txt"], ...)`.
+  * 3-2: before the fix, `tier_push_reads_the_paths_since_the_merge_base` failed with `--no-renames` dropped from the tier `push` diff.  `left` had no `a.txt` and no `docs/c.md`.
+  * 3-2: after the fix, the test failed with `--no-renames` dropped from `git diff <base>`.  `left` had no `a.txt`.
+  * 3-2: after the fix, `tier_push_sees_a_committed_change_that_the_tree_reverts` failed with `--no-renames` dropped from `git diff <base> HEAD`.  `left` had no `a.txt`.
+  * 3-3: `tier_push_with_no_path_runs_the_gpu_line` failed with `left` "no path is known, so a GPU change cannot be ruled out".  Two tests of the binary failed on the old reason too.
+  * 3-7: a temporary edit `Need::F16 => "half",` in `test-support/src/lib.rs` failed `gpu_words_are_gpu_and_the_words_that_imply_it`.  The message was "test-support/src/lib.rs has no line `Need::F16 => "f16",`".  `git checkout` restored the file.
+  * 3-8: a temporary edit of `never_run` to `--port 8081` failed `the_push_tier_runs_the_lines_of_claude_md` with 1 problem.  The problem was "CLAUDE.md's Commands has no line `cargo run -p xtask --release -- serve app/dist --port 8081`".
 * 2026-11-01, implementer, review round 1 fixes: the binary inherits a caller's `STEMYLA_REQUIRE`.  So a test run with `STEMYLA_REQUIRE` set could change the GPU test line of the dry-run tests.  The tests of the binary now remove it from the environment.
 
 * 2026-11-01, team leader: the full timed runs, on `b3e5452`, after the orchestrator installed the `wasm32-unknown-unknown` target and Trunk 0.21.14:
@@ -454,6 +464,12 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, implementer: review round 2, 2-1: `GPU_WORDS` (`gpu`, `f16`, `timestamps`) are the words of `STEMYLA_REQUIRE` that need a GPU in `test-support`.  A value replaces `gpu,f16` only when one of its words, trimmed, is in `GPU_WORDS`.  Another non-empty value keeps `gpu,f16`, and the reason says that the value was not used.  Reason: else `fixtures` lets the GPU test line pass with no adapter (VERIFY-1).
 * 2026-11-01, implementer: review round 2, 2-1: `gpu_words_are_gpu_and_the_words_that_imply_it` reads `IMPLY_GPU` in `test-support/src/lib.rs` as text.  Reason: `xtask` does not depend on `test-support`, and `IMPLY_GPU` is private.  A change of `IMPLY_GPU` then fails the test.
 * 2026-11-01, implementer: review round 2, 2-3: `fake_run_raw` gives the output of `run_checks` with its times, and `fake_run` gives it through `timeless`.  The slow test reads the times, then compares the text through `timeless`.  Reason: the other tests stay the same.
+* 2026-11-01, implementer: review round 3, 3-1: tier `commit` adds the paths of `git diff --cached ... HEAD`.  Tier `push` adds the paths of `git diff ... <base> HEAD`.  Reason: each old diff compares with the working tree only, so it loses a change that the tree undoes.  The tree is clean only when the three lists of tier `commit` are empty.  The phrase of the source stays the same.
+* 2026-11-01, implementer: review round 3, 3-2: `tier_push_reads_the_paths_since_the_merge_base` has a committed rename and an uncommitted rename.  A second test reverts a committed rename in the working tree.  Reason: tier `push` reads two diffs, so one rename alone does not catch the drop of `--no-renames` from one diff.
+* 2026-11-01, implementer: review round 3, 3-3: the behaviour stays.  The reason of the GPU test line with no path now names both cases: "no path changed, or no path is known".
+* 2026-11-01, implementer: review round 3, 3-7: `gpu_words_are_gpu_and_the_words_that_imply_it` also reads the three GPU lines of `Need::word` in `test-support/src/lib.rs` as text.  Reason: `xtask` does not depend on `test-support`.
+* 2026-11-01, implementer: review round 3, 3-8: `never_run` is `pub`, so `the_push_tier_runs_the_lines_of_claude_md` checks that each of its lines is a line of `CLAUDE.md`'s Commands.
+* 2026-11-01, team leader (recorded by the implementer): review round 3, 3-4 and 3-6: a person runs `stored-stems`, `worker-check` and `weights` on a GPU with the weights.  The protocol rule tells the agent to ask a person for the run.  Reason: TD-16 and TD-39 give the run to a person.  Decision 0026 names only one hand run, so the PR lists this reading under "Needs your attention".
 
 ## Outcomes and retrospective
 

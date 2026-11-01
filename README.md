@@ -60,7 +60,7 @@ cargo install --locked trunk --version 0.21.14                 # --locked matter
 cargo run -p xtask --release -- serve app/dist --port 8080     # http://localhost:8080/
 ```
 
-Then the checks CI gates on.  `cargo run -p xtask -- check --tier push` runs the matching lines of `CLAUDE.md`'s Commands (decision 0026).  Those lines split the `roformer-gpu` tests from the workspace tests.  They also add `docs-check`, the Trunk build and the GPU test line, when the paths change GPU code.  So tier `push` does not run the block below as it stands:
+Then the checks CI gates on.  `cargo run -p xtask -- check --tier push` runs the matching lines of `CLAUDE.md`'s Commands (decision 0026).  Those lines split the `roformer-gpu` tests from the workspace tests.  They also add `docs-check` and the Trunk build.  They add the GPU test line when the paths change GPU code, or when no path changed or is known (TD-70).  So tier `push` does not run the block below as it stands:
 
 ```bash
 cargo fmt --all --check

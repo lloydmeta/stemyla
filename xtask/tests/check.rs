@@ -198,6 +198,27 @@ fn a_rename_gives_both_paths_and_a_space_stays_whole() {
     );
 }
 
+/// A staged change that the working tree undoes is still in the commit,
+/// so tier `commit` sees it.
+#[test]
+fn tier_commit_sees_a_staged_change_that_the_tree_undoes() {
+    let f = Fixture::committed("staged-undone");
+    write(&f.repo.join("a.txt"), "a2\n");
+    git(&f.repo, &["add", "a.txt"]);
+    write(&f.repo.join("a.txt"), "a\n");
+    assert_eq!(
+        f.paths(Tier::Commit),
+        (strings(&["a.txt"]), AGAINST_HEAD.to_string())
+    );
+    write(&f.repo.join("new.rs"), "// new\n");
+    git(&f.repo, &["add", "new.rs"]);
+    std::fs::remove_file(f.repo.join("new.rs")).unwrap();
+    assert_eq!(
+        f.paths(Tier::Commit),
+        (strings(&["a.txt", "new.rs"]), AGAINST_HEAD.to_string())
+    );
+}
+
 #[test]
 fn tier_push_reads_the_paths_since_the_merge_base() {
     let f = Fixture::committed("push");
@@ -208,18 +229,52 @@ fn tier_push_reads_the_paths_since_the_merge_base() {
     git(&f.repo, &["switch", "-q", "-c", "branch", &base]);
     write(&f.repo.join("b.txt"), "b2\n");
     commit(&f.repo, "one");
-    write(&f.repo.join("docs/c.md"), "c2\n");
+    // A committed rename and an uncommitted rename each give both paths.
+    git(&f.repo, &["mv", "docs/c.md", "docs/moved.md"]);
     commit(&f.repo, "two");
-    write(&f.repo.join("a.txt"), "a2\n");
+    git(&f.repo, &["mv", "a.txt", "docs/a b.txt"]);
     write(&f.repo.join("new.txt"), "new\n");
-    let short = &base[..12];
     assert_eq!(
         f.paths(Tier::Push),
         (
-            strings(&["a.txt", "b.txt", "docs/c.md", "new.txt"]),
-            format!(
-                "the changes since the merge base {short} with origin/main, and the untracked files"
-            )
+            strings(&[
+                "a.txt",
+                "b.txt",
+                "docs/a b.txt",
+                "docs/c.md",
+                "docs/moved.md",
+                "new.txt"
+            ]),
+            since_the_merge_base(&base)
+        )
+    );
+}
+
+/// The phrase of tier `push` for the merge base `base`.
+fn since_the_merge_base(base: &str) -> String {
+    let short = &base[..12];
+    format!("the changes since the merge base {short} with origin/main, and the untracked files")
+}
+
+/// A committed change that the working tree reverts is a change of the
+/// branch, so tier `push` sees it.  So does a committed rename that the
+/// working tree reverts.
+#[test]
+fn tier_push_sees_a_committed_change_that_the_tree_reverts() {
+    let f = Fixture::committed("push-revert");
+    let base = git(&f.repo, &["rev-parse", "HEAD"]);
+    git(&f.repo, &["update-ref", "refs/remotes/origin/main", &base]);
+    git(&f.repo, &["switch", "-q", "-c", "branch"]);
+    write(&f.repo.join("b.txt"), "b2\n");
+    git(&f.repo, &["mv", "a.txt", "moved.txt"]);
+    commit(&f.repo, "one");
+    write(&f.repo.join("b.txt"), "b\n");
+    git(&f.repo, &["mv", "moved.txt", "a.txt"]);
+    assert_eq!(
+        f.paths(Tier::Push),
+        (
+            strings(&["a.txt", "b.txt", "moved.txt"]),
+            since_the_merge_base(&base)
         )
     );
 }
@@ -408,7 +463,7 @@ fn the_dry_run_of_tier_push_with_no_origin_main_warns() {
     assert_eq!(head[3], "check: tier push runs: the tier that was asked");
     assert!(
         stdout.contains(
-            "check: run: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (no path is known, so a GPU change cannot be ruled out)"
+            "check: run: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (no path changed, or no path is known, so a GPU change cannot be ruled out)"
         ),
         "{stdout}"
     );
@@ -465,7 +520,7 @@ fn the_callers_stemyla_require_gives_the_gpu_test_line_its_form() {
     assert_eq!(
         gpu,
         [
-            "check: run: STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release (no path is known, so a GPU change cannot be ruled out; STEMYLA_REQUIRE=gpu from the environment replaces gpu,f16)"
+            "check: run: STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release (no path changed, or no path is known, so a GPU change cannot be ruled out; STEMYLA_REQUIRE=gpu from the environment replaces gpu,f16)"
         ],
         "{stdout}"
     );
