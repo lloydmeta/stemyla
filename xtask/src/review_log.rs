@@ -794,15 +794,20 @@ mod tests {
             problems_of(&[
                 "1 | 1-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
                 "2 | 2-1 | docs-reviewer | nit | - | none | unvalidated | 1-1 | reported, not fixed",
+                "3 | 3-1 | docs-reviewer | nit | - | none | unvalidated | 1-1 | reported, not fixed",
                 "4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
                 "4 | 4-2 | docs-reviewer | nit | - | none | unvalidated | 4-1 | reported, not fixed",
                 "4 | 4-3 | docs-reviewer | nit | - | none | unvalidated | 5-1 | reported, not fixed",
+                "4 | 4-4 | docs-reviewer | nit | - | none | unvalidated | 1-1 | reported, not fixed",
                 "5 | 5-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
                 "5 | 5-2 | docs-reviewer | nit | - | none | unvalidated | 1-1 | reported, not fixed",
             ]),
             [
                 format!(
                     "2-1: Repeat of names the reported row `1-1`, but round 2 is before round 4.  {NEW}"
+                ),
+                format!(
+                    "3-1: Repeat of names the reported row `1-1`, but round 3 is before round 4.  {NEW}"
                 ),
                 format!(
                     "4-2: Repeat of names `4-1`, which is no row of an earlier round of this log.  {unknown}"

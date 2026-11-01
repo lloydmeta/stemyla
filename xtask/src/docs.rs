@@ -2051,11 +2051,14 @@ mod tests {
             let text = milestone_plan(&[1, 2, 3, 4], section);
             assert_eq!(plan_runs_problems(file, &text), [], "{section}");
         }
-        let text = milestone_plan(&[1, 2, 3, 4], "#### How the work runs");
-        assert_eq!(
-            plan_runs_problems(file, &text),
-            [Problem::new("plans", file, NO_RUNS.into())]
-        );
+        for section in ["#### How the work runs", "# How the work runs"] {
+            let text = milestone_plan(&[1, 2, 3, 4], section);
+            assert_eq!(
+                plan_runs_problems(file, &text),
+                [Problem::new("plans", file, NO_RUNS.into())],
+                "{section}"
+            );
+        }
     }
 
     #[test]
@@ -2089,10 +2092,20 @@ mod tests {
             plan_runs_problems(file, &milestone_plan(&[1, 2, 3], others)),
             []
         );
-        let text = milestone_plan(&[1, 2, 3], &format!("{others}# M4\n"));
+        for fourth in ["# M4\n", "### M4 cleanup\n"] {
+            let text = milestone_plan(&[1, 2, 3], &format!("{others}{fourth}"));
+            assert_eq!(
+                plan_runs_problems(file, &text),
+                [Problem::new("plans", file, NO_RUNS.into())],
+                "{fourth}"
+            );
+        }
+        // A fence closes only at a marker of its own character and of at
+        // least its length, so these headings stay in the fence.
+        let fenced = "````markdown\n```\n## M4: inside\n~~~~\n## M5\n````\n";
         assert_eq!(
-            plan_runs_problems(file, &text),
-            [Problem::new("plans", file, NO_RUNS.into())]
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3], fenced)),
+            []
         );
     }
 
@@ -2101,6 +2114,8 @@ mod tests {
         let file = "docs/plans/active/a.md";
         let text = milestone_plan(&[1, 2, 2, 3], "");
         assert_eq!(plan_runs_problems(file, &text), []);
+        let text = milestone_plan(&[1, 2, 3], "### M02: again\n");
+        assert_eq!(plan_runs_problems(file, &text), [], "M02 is M2");
         let text = milestone_plan(&[1, 2, 2, 3], "## M4");
         assert_eq!(
             plan_runs_problems(file, &text),
@@ -2219,6 +2234,7 @@ mod tests {
             "4 | 4-4 | reviewer | should-fix | yes | none | pre-existing | none | no change: its own PR",
             "4 | 4-5 | reviewer | should-fix | - | MEM-1 | refuted | none | refuted",
             "4 | 4-6 | reviewer | blocker | - | none | unvalidated | none | reported, not fixed",
+            "4 | 4-12 | reviewer | should-fix | no | none | pre-existing | none | abc1234 review round 4 fixes",
         ];
         assert_eq!(
             last_round_problems(&round_log(&[1, 2, 3, 4], &good)),

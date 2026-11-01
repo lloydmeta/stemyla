@@ -3049,7 +3049,7 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "Bash"];
 
 /// What is wrong with an agent's `description`, which must be one plain
 /// YAML scalar.
-fn description_faults(description: &str) -> Vec<&'static str> {
+pub fn description_faults(description: &str) -> Vec<&'static str> {
     [
         (description.is_empty(), "is empty"),
         (
