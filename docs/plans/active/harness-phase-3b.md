@@ -267,7 +267,7 @@ Kick-off prompt:
 * [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
 * [x] 2026-10-31, plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.  Round 3 found no blocker and 4 should-fix; all fixed.  The review stops at its cap of 3 rounds.
 * [x] 2026-10-31, M1: cleanup (`plans/completed/harness-phase-3b-m1.md`, `reviews/harness-phase-3b-m1.md`).  `xtask clean`, `xtask review clean <round>` and the pid file of `xtask serve`.  4 review rounds, 36 agents, about 1.94M final-context tokens, 106 wall minutes.  Round 1 found 1 blocker, 8 should-fix and 20 missed mutants; rounds 2 and 3 found 4 and 3 should-fix; round 4 none.  Debt: TD-67, TD-68.  The intent review added a fourth branch proof for agent branches (`dfe3aa4`); fix-range review rounds 5 to 7 took 12 agents, about 0.49M tokens and 34 wall minutes.
-* [ ] M2: less mutants noise.  2026-10-31: the measurement is done and the filter is cut.  Steps 1 to 4 are committed (`eee072f` to `e3a081e`); the skill change is the orchestrator's commit.  Next: review round 1.
+* [x] 2026-10-31, M2: less mutants noise (`plans/completed/harness-phase-3b-m2.md`, `reviews/harness-phase-3b-m2.md`).  The measurement (261 missed lines in 22 rounds after `6d0a39d`) cut the wasm32 filter: 11 of 193 lines left.  `KNOWN_MISSED` (12 entries of TD-39 and TD-66), `missed.txt` and `known.txt`, `, known <k>`, the clean-tree check, and the `known` verdict of the skill.  3 review rounds, 30 agents, about 1.49M final-context tokens, 45.3 wall minutes.  Round 1 found 4 should-fix and 6 missed mutants; round 2 found 6 should-fix (2-5 significant); round 3 found 1 that is not significant.  No new debt.
 * [ ] M3: the fix rule and the stop rule.
 * [ ] M4: local checks by tier.
 * [ ] M5: a model and effort for each agent role.
@@ -287,6 +287,7 @@ Kick-off prompt:
 * 2026-10-31, M1: the first fix of the intent review (any merged PR's head) deleted a stacked PR's base branch.  Only the supply-chain-reviewer found it (round 5).
 * 2026-10-31, M1: after the run folder is removed (TD-37), later rounds on the same branch need a new run with its own base and round numbers.  Its rows went into the milestone's log as rounds 5 to 7.
 * 2026-10-31, M2: PR #39's M8, M9 and catch-up logs have 22 rounds after `6d0a39d`, with 261 missed lines.  68 are in files that today's `.cargo/mutants.toml` leaves out.  11 are in wasm32-only items with no skip.  None are in wasm32 blocks.  29 went to TD-39 or TD-66 (11 of them repeats).  153 are the rest; the validator refuted 35 of those, 16 in `protocol/src/lib.rs`.
+* 2026-10-31, M2: reviewers name their worktrees outside the pattern `<round>-<agent>-<n>` of `review clean`, such as `1-correctness-1` and `3-gpu-1` (six in 3 rounds).  Each agent removed its own, so nothing was left.  M6 makes the agents use the name of their role, or `review clean` matches more.
 
 ## Decision log
 

@@ -1,0 +1,45 @@
+# Review log
+
+## Findings
+
+| Date | Round | Commit | Finding | Reviewers | Severity | Kind | Rule | Where | Claim | Verdict | Repeat of | Action |
+| - | - | - | - | - | - | - | - | - | - | - | - | - |
+| 2026-10-31 | 1 | c078a83 | 1-1 | reviewer, docs-reviewer, cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1375 | No test reaches the fallback of fn_bodies for a fn with no closing brace at its indent | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-2 | reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1716 | The run test passes when line_at reads HEAD or the working tree, not the round's head | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-3 | wire-reviewer, docs-reviewer, reviewer | should-fix | doc | DOC-1 | docs/tech-debt.md:554 | TD-66 says each mutant of note_run is an entry; 5 of its 9 are | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-4 | docs-reviewer, wire-reviewer, reviewer, supply-chain-reviewer | should-fix | doc | none | .claude/skills/review-rounds/SKILL.md:258 | Steps 7 and 10 define a found finding in two ways | confirmed | none | the orchestrator's commit of m2-r1-skill.diff |
+| 2026-10-31 | 1 | c078a83 | 1-5 | wire-reviewer, supply-chain-reviewer, cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs is_open_debt | No test fails without the Closed scope, the const and unsafe forms, the _ refusal or a tab indent | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-6 | docs-reviewer | nit | doc | none | docs/README.md:21 | The M2 line has 28 words, and gives the skill's work to xtask | unvalidated | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-7 | docs-reviewer | nit | doc | none | xtask/src/review.rs:1399 | The doc comment of known_problems names 3 of its 7 problems | unvalidated | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-8 | docs-reviewer | nit | doc | none | docs/tech-debt.md:186 | TD-33 does not say that no test checks an entry's text or offset against --list | unvalidated | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-9 | supply-chain-reviewer | nit | weak-test | VERIFY-1 | xtask/src/review.rs:3953 | The indent test passes when fn_bodies ends at the first closing brace | unvalidated | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-10 | supply-chain-reviewer | nit | doc | DOC-1 | docs/tech-debt.md:278 | TD-39 covers the WAITS_S mutants, which are not entries | unvalidated | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-11 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1375 | no test fails with this mutant: xtask/src/review.rs:1375:53: replace + with * in fn_bodies | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-12 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1375 | no test fails with this mutant: xtask/src/review.rs:1375:37: replace - with / in fn_bodies | confirmed | none | merged into 1-1; afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-13 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1714 | no test fails with this mutant: xtask/src/review.rs:1714:19: replace match guard e.kind() == std::io::ErrorKind::NotFound with true in split_missed | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-14 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1391 | no test fails with this mutant: xtask/src/review.rs:1391:41: replace == with != in is_open_debt | confirmed | none | merged into 1-5; afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-15 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1375 | no test fails with this mutant: xtask/src/review.rs:1375:49: replace + with * in fn_bodies | confirmed | none | afd5725 review round 1 fixes |
+| 2026-10-31 | 1 | c078a83 | 1-16 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1375 | no test fails with this mutant: xtask/src/review.rs:1375:37: replace - with + in fn_bodies | confirmed | none | merged into 1-1; afd5725 review round 1 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-1 | docs-reviewer, supply-chain-reviewer, wire-reviewer | should-fix | doc | DOC-1 | .claude/skills/review-rounds/SKILL.md:170 | Step 7's compare prompt and List B placeholder still say found findings, which leaves the known findings out | confirmed | none | the orchestrator's commit of m2-r2-skill.diff |
+| 2026-10-31 | 2 | dfa133a | 2-2 | docs-reviewer, supply-chain-reviewer, reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:1367 | No test has a fn line that ends with a semicolon, so that one-line body rule has no check | confirmed | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-3 | docs-reviewer | should-fix | doc | none | docs/tech-debt.md:186 | TD-33 says a wrong entry only sends its own mutant to the validator; a wrong offset can hide another | confirmed | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-4 | supply-chain-reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/review.rs:4413 | The unclosed pub( case of the_fn_line_forms never reaches the None branch of is_fn_line | confirmed | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-5 | reviewer | should-fix | bug | none | xtask/src/review.rs:1711 | No check that the tree is at the round's head, so a moved tree can let an entry hide a mutant | confirmed | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-6 | wire-reviewer, supply-chain-reviewer | should-fix | weak-test | VERIFY-1 | .claude/skills/review-rounds/SKILL.md:163 | The new definition of a found finding is not pinned | confirmed | none | the orchestrator's commit of m2-r2-skill.diff |
+| 2026-10-31 | 2 | dfa133a | 2-7 | supply-chain-reviewer, wire-reviewer | nit | doc | DOC-1 | docs/plans/active/harness-phase-3b-m2.md:157 | The plan still says a found finding is also a known one | unvalidated | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-8 | docs-reviewer, wire-reviewer | nit | doc | none | docs/plans/active/harness-phase-3b-m2.md:145 | The plan says one sentence each for TD-39 and TD-66; each has two | unvalidated | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 2 | dfa133a | 2-9 | docs-reviewer | nit | doc | none | docs/tech-debt.md:278 | TD-39's changed sentence has about 28 words | unvalidated | none | 6d861b2 review round 2 fixes |
+| 2026-10-31 | 3 | 51241db | 3-1 | reviewer | should-fix | doc | DOC-1 | xtask/src/review.rs:1147 | The doc of KNOWN_MISSED says its test keeps each entry true; an entry can go stale with no failing test | confirmed | none | f17cb5f review round 3 fixes |
+| 2026-10-31 | 3 | 51241db | 3-2 | docs-reviewer | nit | doc | DOC-1 | docs/working-with-agents.md:154 | The Tools row does not say that a tree that is not at the round's head sends each line to missed.txt | unvalidated | none | f17cb5f review round 3 fixes |
+| 2026-10-31 | 3 | 51241db | 3-3 | docs-reviewer | nit | doc | none | xtask/tests/rules.rs:1131 | The doc comment of REVIEW_SKILL_TEXT does not name the step 7 pins | unvalidated | none | the orchestrator's commit of m2-r3-rules.diff |
+| 2026-10-31 | 3 | 51241db | 3-4 | docs-reviewer | nit | doc | none | xtask/src/review.rs:1724 | NOT_AT_HEAD says each missed line goes to the validator; a repeat-of line gets none | unvalidated | none | f17cb5f review round 3 fixes |
+| 2026-10-31 | 3 | 51241db | 3-5 | supply-chain-reviewer | nit | weak-test | VERIFY-1 | xtask/src/review.rs:1732 | The untracked-files part of tree_is_at has no test | unvalidated | none | f17cb5f review round 3 fixes |
+| 2026-10-31 | 3 | 51241db | 3-6 | wire-reviewer | nit | doc | none | docs/plans/active/harness-phase-3b-m2.md:102 | The plan says cargo-mutants copies the tree as it starts; with -j2 it copies it again after the baseline | unvalidated | none | f17cb5f review round 3 fixes |
+
+## Rounds
+
+| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
+| 1 | 11 | 623094 | 18.4 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 84 (caught 77, missed 6, unviable 1), timeouts 0, not tested 0, known 0 | - | - | - | - | - | - |
+| 2 | 12 | 501710 | 15.3 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
+| 3 | 7 | 364647 | 11.6 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 14 (caught 14, missed 0, unviable 0), timeouts 0, not tested 0, known 0 | - | - | - | - | - | - |

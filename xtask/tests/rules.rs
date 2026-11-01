@@ -1131,7 +1131,9 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// reads `missed.txt` and `known.txt` of the round, or the old
 /// `mutants.out/missed.txt` of an older `xtask`.  Each line of `known.txt`
 /// is a finding with the verdict `known` and its TD as `repeat-of`, with no
-/// validator, and step 10 does not fix it (harness phase 3b, M2).
+/// validator, and step 10 does not fix it.  Step 7 finds a finding by its
+/// verdict `confirmed` or `pre-existing`, and List B of its template also
+/// holds each `known` finding (harness phase 3b, M2).
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
