@@ -356,6 +356,7 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: review round 3 fixes: 3-1, 3-2, 3-3, 3-5, 3-7 and 3-8 (implementer).  3-4 and 3-6 go to the team leader as the diff `m4/m4-r3-claude.diff` in the scratchpad.  The parent plan lines of 3-1 and 3-3 go to the orchestrator.
 * [x] 2026-11-01: review round 4 fixes, as the late rule allows (team leader): 4-1 (pre-existing, on VERIFY-1) gets a TD-70 bullet: each tier runs its checks on the working tree.  4-2 (not significant) and 4-3 are `reported, not fixed`.
 * [x] 2026-11-01: review round 5 fixes, as the late rule allows (team leader): 5-1 (on VERIFY-1) and 5-2 (significant).  The TD-70 bullet names an unstaged or untracked change that the commit leaves out, and says that only CI finds the gap of the working tree.  5-3 to 5-5 are `reported, not fixed`.
+* [x] 2026-11-01: review round 6 fixes, as the late rule allows (team leader): 6-1 (on VERIFY-1), 6-2 and 6-3.  The TD-70 bullet names the two checks that narrow the gap of the working tree, and what each one misses.  6-4 and 6-5 are `reported, not fixed`.
 * [ ] Step 5: review rounds to the stop rule.
 
 ## Surprises and discoveries
