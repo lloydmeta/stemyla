@@ -20,7 +20,7 @@ The state at the start of M4, on 2026-11-01, at commit `e474fb2` on branch `harn
 
 * GIT-2 (`docs/invariants.md`, near line 159) says that fmt, clippy, the tests and `docs-check` pass before every commit.  `CLAUDE.md` (88 lines; the map limit is 100) says the same on its GIT-2 line (line 78).
 * `CLAUDE.md`'s Commands block has these lines that M4 runs: `cargo fmt --all --check`; five `cargo clippy` lines (workspace, `synth`, `app` twice, wasm32); the workspace test line `cargo test --workspace --exclude roformer-gpu`; `cargo test -p roformer-gpu --lib`; `cargo run -p xtask -- docs-check`; `(cd app && trunk build --release)`.  The comment of the `--lib` line says that CI also runs `--doc`.  CI's `test` job runs `cargo test --locked -p roformer-gpu --doc`.
-* The GPU test line `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` needs a real GPU.  CI does not run it.  This Mac has a real GPU.
+* The GPU test line `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` needs a GPU adapter.  A pass counts for GPU-3 only on a real GPU, named in the PR.  CI does not run it.  This Mac has a real GPU.
 * Lines that M4 never runs: `serve`, `web-test`, `e2e` and `publish`.
 * `.claude/agents/baseline.md` (line 17) also says "fmt, clippy, the tests and `docs-check`".  `BASELINE_HASH` (`xtask/tests/rules.rs`, near line 1003) freezes that file, and the parent's M5 keeps it as it is.
 * Other places that state the GIT-2 checks: the recipe "Fix a bug" (`docs/working-with-agents.md`, near line 43), and "the checks CI gates on" in `README.md` (near line 63).
@@ -106,12 +106,12 @@ The strict-rule path table.  `pub const STRICT_PATHS: &[(&str, &[&str])]` has on
 | - | - | - |
 | PROTO-1 | `protocol/src/**`, `xtask/e2e/*.js`, `xtask/src/e2e.rs`, `xtask/src/e2e/**` | the encoders and decoders; the hand-written worker messages, as `e2e_messages_use_protocol_types` reads them |
 | PROTO-2 | `protocol/src/lib.rs`, `app/src/separator.rs`, `worker/src/web.rs` | the site check of `?model_url=`, and its two callers |
-| MEM-1 | `engine/src/song.rs`, `**/clippy.toml` | `Samples`; the `disallowed-methods` lints |
+| MEM-1 | `engine/src/song.rs`, `engine/src/test_alloc.rs`, `**/clippy.toml` | `Samples`; the heap counter of the MEM-1 tests; the `disallowed-methods` lints |
 | MEM-2 | `protocol/src/**`, `app/src/separator.rs`, `app/src/decoder/client.rs`, `worker/src/web.rs`, `decoder/src/web.rs` | the transfer lists |
-| MEM-3 | `roformer-gpu/src/lib.rs`, `roformer-gpu/clippy.toml` | `GpuBuffer`, `Gpu` and its lints |
+| MEM-3 | `roformer-gpu/src/lib.rs`, `roformer-gpu/src/net.rs`, `roformer-gpu/clippy.toml` | `GpuBuffer`, `Gpu` and its lints; the GPU buffers of the network |
 | MEM-4 | `roformer/src/lib.rs`, `roformer/src/weights.rs`, `roformer-gpu/src/lib.rs` | `CHUNK`; the weight format (`WeightFormat`) |
 | MEM-5 | `app/src/store.rs`, `app/src/export.rs`, `app/src/streamtest.rs`, `worker/src/web.rs`, `worker/src/web/encode.rs`, `worker/src/web/stems.rs`, `decoder/src/web.rs` | the OPFS writes |
-| RT-1 | `engine/src/slot.rs`, `engine/src/source.rs`, `engine/src/player.rs`, `engine/src/live.rs`, `engine/src/readahead.rs`, `engine/src/readahead/**`, `engine/src/stretch/**`, `engine/src/test_alloc.rs` | the audio callback, its slot and sources, the read-ahead buffer, the warm-up of the stretchers, the counting allocator |
+| RT-1 | `engine/src/slot.rs`, `engine/src/source.rs`, `engine/src/player.rs`, `engine/src/live.rs`, `engine/src/readahead.rs`, `engine/src/readahead/**`, `engine/src/stretch/**`, `engine/src/params.rs`, `engine/tests/realtime.rs` | the audio callback, its slot and sources, the read-ahead buffer, the warm-up of the stretchers, the parameters that the player reads on each buffer; the counting allocator and the RT-1 tests |
 | GPU-1 | `roformer-gpu/src/shaders/**`, `roformer-gpu/src/lib.rs` | the kernels; `Limits::defaults()` and the layouts |
 | GPU-2 | `roformer-gpu/src/shaders/**`, `roformer-gpu/src/bench.rs`, `roformer-gpu/src/lib.rs` | the kernels; `calibrate` and `decide`, which choose the default kernels; `TILES` and `DEFAULT_WEIGHTS` |
 | GPU-3 | as GPU-2 | as GPU-2 |
@@ -150,13 +150,13 @@ The plan.  `pub fn plan(tier: Tier, paths: &[String], graph: Option<&Graph>) -> 
 
 Tier `push` runs every line of `lines()` but one case of the GPU test line:
 
-* The GPU test line runs when the branch's paths change `roformer/`, `roformer-gpu/`, `test-support/` or a workspace file.  Its tests test only those folders.
-* Else the plan skips it.  The reason says that the branch changes no GPU code.
+* The GPU test line runs when its paths change `roformer/`, `roformer-gpu/`, `test-support/` or a workspace file.  Its tests test only those folders.
+* Else the plan skips it.  The reason says that the paths change no GPU code.
 * The paths also give the strict hits of the branch, for the report.
 
 The skips that the plan always prints, each with its reason:
 
-* In tier `commit`, the GPU test line: it needs a real GPU, and tier `push` runs it.  GPU-2 asks for it on a kernel change.
+* In tier `commit`, the GPU test line: it needs a GPU adapter, and tier `push` runs it.  GPU-2 asks for it on a kernel change.  A pass counts for GPU-3 only on a real GPU, named in the PR.  A commit that a strict path sends to tier `push` gets the GPU test line by the rule of tier `push`.
 * `serve`, `web-test`, `e2e`: CI runs the browser tests.  Run a scenario by hand only when CI failed it (decision 0026).
 * `publish`: a person only (GIT-1).
 * In tier `commit`, the Trunk build: tier `push` runs it.
@@ -350,6 +350,7 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: step 4, the implementer's part: the diff `m4/m4-git2.diff` in the team leader's scratchpad, checked on `4b7925c` (implementer).  The team leader checks it again on `HEAD`.
 * [x] 2026-11-01: checkpoint: the orchestrator lands the diff before round 1, unchanged (`98f212a`), and installs the `wasm32-unknown-unknown` target and Trunk 0.21.14.
 * [x] 2026-11-01: a full timed run of tier `push` passes on `b3e5452` (team leader).
+* [x] 2026-11-01: review round 1 fixes: 1-1, 1-2, 1-4 to 1-11, 1-13, 1-15 to 1-19, 1-22 and 1-23 (implementer).  1-3 goes to the team leader as the diff `m4/m4-r1-claude.diff` in the scratchpad.  1-12 and 1-14 are lines of the parent plan, which the team leader gives to the orchestrator.
 * [ ] Step 5: review rounds to the stop rule.
 
 ## Surprises and discoveries
@@ -400,6 +401,19 @@ The team leader gives these to the orchestrator as text:
   * The implementer removed the worktree and its target folder (5.9 GB).
 * 2026-11-01, implementer, step 1: the `grep` of each strict row found the code in each file of the table.  `decoder/src/pass.rs` and `app/src/reset.rs` name OPFS, but `pass.rs` writes through a trait that `decoder/src/web.rs` gives, and `reset.rs` only removes files.  So they stay out of MEM-5.  `app/src/export.rs` posts with a transfer list, and MEM-5 already holds it.
 
+* 2026-11-01, implementer, review round 1 fixes: each new or changed test failed first on an assert, on the code before the fix or on the named mutant:
+  * 1-2: `rt_1_has_the_audio_callback_and_its_sources` failed with "engine/src/params.rs hits RT-1".  `mem_1_has_samples_and_the_clippy_files` failed with "engine/src/test_alloc.rs hits MEM-1".
+  * 1-5: `mem_3_has_gpu_buffer_and_its_lints` failed with "roformer-gpu/src/net.rs hits MEM-3".
+  * 1-6: `the_callers_stemyla_require_replaces_gpu_f16_and_the_reason_says_so` and `the_override_also_names_the_skipped_gpu_line_of_tier_commit` failed on a stub of `with_gpu_require` that gives the plan as it gets it: `left` had `STEMYLA_REQUIRE=gpu,f16`, `right` had `STEMYLA_REQUIRE=gpu`.  `the_callers_stemyla_require_gives_the_gpu_test_line_its_form` (`xtask/tests/check.rs`) runs the binary with `STEMYLA_REQUIRE=gpu`, so a `main` that does not call `with_gpu_require` fails it.
+  * 1-7: `tier_commit_always_skips_the_gpu_line_and_trunk_with_their_reasons` failed on the old reason, "it needs a real GPU, and tier push runs it; GPU-2 asks for it on a kernel change".
+  * 1-10: `run_checks_runs_each_run_check_and_gives_0` with a check of 150 ms failed on the exact compare: `left` had `check: ok in 0.2 s`, `right` had `check: ok in 0.0 s`.  The `run_checks` tests now compare with each time as `in <t> s`.
+  * 1-1 and 1-23: `a_real_run_stops_at_the_first_failure_and_changes_no_file` failed on the mutant `let _ = (&plan, &root); 0` of `main` with `left: Some(0)`, and on the deleted arm `["--tier", tier]` of `parse_args` with `left: Some(2)`.  It takes less than 1 s.
+  * 1-15: `parse_args_takes_the_tier_and_dry_run_in_either_order` failed on the split-arm mutant with `left: Some((Commit, false))`, and on the deleted arm.  On the split-arm mutant, `the_callers_stemyla_require_gives_the_gpu_test_line_its_form` also failed with `left: Some(1)`, since it gives `--dry-run` first.
+  * 1-4: `gpu_folders_are_the_closure_of_roformer_gpu` failed on a new `dsp` edge of `roformer-gpu` in the fixture, with `left` `{"dsp/", "roformer-gpu/", "roformer/", "test-support/"}`.
+  * 1-16: `a_path_is_in_the_member_with_the_longest_folder` failed on `min_by_key` with `left: Some("outer")`.
+  * 1-18, 1-19 and 1-22: `one_line_joins_the_trimmed_lines_that_are_not_empty` failed on each of the three mutants of `one_line`, such as `left: "; "` for the deleted `!`.  `a_graph_that_fails_gives_a_warning_and_tier_push` now checks the whole warning line, and it also failed on each of the three.
+* 2026-11-01, implementer, review round 1 fixes: the binary inherits a caller's `STEMYLA_REQUIRE`, so a test run with `STEMYLA_REQUIRE` set could change the GPU test line of the dry-run tests.  The tests of the binary now remove it from the environment.
+
 * 2026-11-01, team leader: the full timed runs, on `b3e5452`, after the orchestrator installed the `wasm32-unknown-unknown` target and Trunk 0.21.14:
   * Tier `push`, first run: 11 passed in 225.2 s (3 min 46 s with the build of `xtask`).  The wasm32 clippy line took 48.2 s and the Trunk build 53.6 s, since both built from cold.  The workspace test line took 119.4 s.
   * Tier `push`, second run, warm: 11 passed in 126.1 s.  The workspace test line took 117.5 s, the Trunk build 4.6 s, and each other line 1.1 s or less.  The GPU test line was skipped, since the branch changes no GPU code.
@@ -411,9 +425,9 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, team leader: tier `commit` runs fmt, `docs-check`, the workspace clippy and the `xtask` repo tests on each change.  Reason: each takes seconds, and each reads files of the whole repo.  The parent runs `docs-check` only when a doc, `CLAUDE.md`, `.claude/` or `xtask/` changed.
 * 2026-11-01, team leader: the wasm32 clippy runs when a changed member is in the closure of its five packages.  Reason: a change in `decoder`, `dsp`, `synth`, `roformer`, `roformer-gpu` or `test-support` can fail that line too.  The parent names `app`, `worker`, `protocol` or `engine`.
 * 2026-11-01, team leader: the crate tests are one `cargo test` command (plan review round 1).  Reason: cargo turns on features only across the packages of one run.
-* 2026-11-01, team leader: tier `push` runs every line, but the GPU test line on a branch with no GPU change.  Its paths give the report and that one choice.  Reason: decision 0026 and the maintainer ask for the full set before a push and a review round.
-* 2026-11-01, team leader: tier `push` runs the GPU test line only when the paths change `roformer/`, `roformer-gpu/`, `test-support/` or a workspace file (plan review round 2).  Reason: the line's tests test only those folders.  The line needs a real GPU, and a release build takes minutes.  Decision 0026 names each test line, so the PR asks the maintainer to confirm.
-* 2026-11-01, team leader: tier `commit` skips the GPU test line.  Reason: it needs a real GPU, and a commit that changes a kernel or a GPU buffer matches GPU-1 to GPU-3 or MEM-3, so it runs tier `push`.
+* 2026-11-01, team leader: tier `push` runs every line, but the GPU test line when its paths change no GPU code.  Its paths give the report and that one choice.  Reason: decision 0026 and the maintainer ask for the full set before a push and a review round.
+* 2026-11-01, team leader: tier `push` runs the GPU test line only when the paths change `roformer/`, `roformer-gpu/`, `test-support/` or a workspace file (plan review round 2).  Reason: the line's tests test only those folders.  The line needs a GPU adapter, and a release build takes minutes.  Decision 0026 names each test line, so the PR asks the maintainer to confirm.
+* 2026-11-01, team leader: tier `commit` with no strict hit skips the GPU test line.  Reason: it needs a GPU adapter, and a release build takes minutes.  A commit that changes a kernel, or `roformer-gpu/src/lib.rs`, `net.rs` or `bench.rs`, hits GPU-1 to GPU-3 or MEM-3.  These are the files that make GPU buffers.  So such a commit runs tier `push`, which runs the GPU test line by its rule (review round 1: `net.rs` was in no strict row).
 * 2026-11-01, team leader: `CLAUDE.md` gets the line `cargo test -p roformer-gpu --doc`.  Reason: CI runs it, MEM-3 has doctests, and a test checks that `CLAUDE.md` names each line of tier `push`.
 * 2026-11-01, team leader: `check` reads the graph with `rules::workspace_metadata` and `rules::workspace` (plan review rounds 1 and 2).  Reason: the repo then has one runner and one parser of `cargo metadata`.  `--locked` stays, so `check` never writes `Cargo.lock`.  A manifest edit matches DEPS-1 and runs tier `push`, which needs no graph.  If the graph fails, tier `commit` runs tier `push`.
 * 2026-11-01, team leader: no table of cross reads (plan review round 1).  Reason: the one case today, `app/Cargo.toml`, matches DEPS-1, so a row for it could not fail a test.  The new TD records the gap.
@@ -425,6 +439,11 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, implementer: the output of `check` has these lines: `check: tier <tier>`, then `check: paths: <n>, from <where>`, then the strict hits, then `check: tier <tier> runs: <why>`, then the checks.  On a failure, the last line is `check: <line> failed, after <n> passed, in <s> s`.  `--dry-run` can come before or after `--tier <tier>`.  `repo_root` and `run_command` are `pub`, so the tests call them.
 * 2026-11-01, implementer: the timed run of tier `push` in step 3 ran on this Mac as it is, with no `wasm32-unknown-unknown` target and no Trunk.  It stopped at the wasm32 clippy line, and the implementer timed the 3 test lines after it by hand.  Reason: an install changes the maintainer's toolchain, and nobody asked for it.  Tier `push` cannot pass on this Mac until a person runs the two installs of `README.md`.
 * 2026-11-01, implementer: a commit that tier `commit` sends to tier `push` (a strict hit, or no graph) gets the GPU test line by the rule of tier `push`, from the commit's own paths.  Reason: D2 says that such a commit runs tier `push`.  So a change to `roformer-gpu/src/lib.rs` runs the GPU test line, and a change to `engine/src/slot.rs` does not.
+
+* 2026-11-01, implementer: review round 1, 1-6: a non-empty `STEMYLA_REQUIRE` in the environment replaces `gpu,f16` in the GPU test line.  The line and its reason say so.  `lines()` keeps the line of `CLAUDE.md`, so the pin test does not change.  The pure function `with_gpu_require` makes the change, and `main` calls it with the value of the environment.  A value that is empty, only spaces, or `gpu,f16` changes nothing.  Reason: GPU-2 asks for `gpu` alone on an adapter without `SHADER_F16_IN_F32`.  Before, `.envs` replaced the caller's value, so tier `push` could not pass on such an adapter.  The other lines get the caller's environment as before.
+* 2026-11-01, implementer: review round 1, 1-1: one test runs `xtask check --tier commit` without `--dry-run`, in a temporary workspace outside the repo with its own `CARGO_TARGET_DIR`.  This replaces the earlier choice that no test runs it.  Reason: the team leader's rule is about runs in this repo, and the run in the temporary workspace stops at fmt, so it runs no test of this repo.
+* 2026-11-01, implementer: review round 1, 1-10: the `run_checks` tests replace each time at the end of a line with `in <t> s` before the compare.  They do not pass a clock.  Reason: the API of `run_checks` stays the same, and `timeless` still checks that each time has the form `<n>.<n>`.
+* 2026-11-01, implementer: review round 1, 1-2: `engine/src/test_alloc.rs` is in the MEM-1 row, and `engine/tests/realtime.rs` and `engine/src/params.rs` are in the RT-1 row.  Reason: `test_alloc.rs` is the heap counter of the MEM-1 tests of `song.rs`, `decode.rs` and `hpss.rs`.  `realtime.rs` holds the counting allocator and the RT-1 tests, and the player reads `params.rs` on each buffer.
 
 ## Outcomes and retrospective
 

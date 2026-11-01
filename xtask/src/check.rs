@@ -9,9 +9,10 @@
 //!
 //! The code has parts, so the tests can check the rules without a run.
 //! [`plan`] is a pure function of the tier, the paths and the workspace
-//! graph.  [`changed_paths`] and [`graph`] read the repo.  [`run_checks`]
-//! runs a plan with a runner that the caller gives, and [`run_command`] is
-//! the real runner.
+//! graph.  [`with_gpu_require`] gives the GPU test line the caller's
+//! `STEMYLA_REQUIRE`.  [`changed_paths`] and [`graph`] read the repo.
+//! [`run_checks`] runs a plan with a runner that the caller gives, and
+//! [`run_command`] is the real runner.
 //!
 //! `plans/active/harness-phase-3b-m4.md` gives the tables and the reasons.
 
@@ -103,6 +104,13 @@ const WASM_PACKAGES: [&str; 5] = [
 /// The package that the workspace test line leaves out.
 const ROFORMER_GPU: &str = "roformer-gpu";
 
+/// The variable that names what a test must not skip (`test-support`).
+const REQUIRE: &str = "STEMYLA_REQUIRE";
+
+/// The GPU test line's value of [`REQUIRE`] in `CLAUDE.md`'s Commands.
+/// [`with_gpu_require`] can replace it.
+const GPU_FORM: &str = "gpu,f16";
+
 /// The 12 lines of tier `push`, in the order that it runs them.
 pub fn lines() -> Vec<Check> {
     let wasm = format!(
@@ -126,7 +134,7 @@ pub fn lines() -> Vec<Check> {
     .iter()
     .map(|words| Check::root(words))
     .collect();
-    lines[GPU_TESTS].env = vec![("STEMYLA_REQUIRE".to_string(), "gpu,f16".to_string())];
+    lines[GPU_TESTS].env = vec![(REQUIRE.to_string(), GPU_FORM.to_string())];
     lines[TRUNK].folder = "app".to_string();
     lines
 }
@@ -204,7 +212,14 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
             "worker/src/web.rs",
         ],
     ),
-    ("MEM-1", &["engine/src/song.rs", "**/clippy.toml"]),
+    (
+        "MEM-1",
+        &[
+            "engine/src/song.rs",
+            "engine/src/test_alloc.rs",
+            "**/clippy.toml",
+        ],
+    ),
     (
         "MEM-2",
         &[
@@ -217,7 +232,11 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
     ),
     (
         "MEM-3",
-        &["roformer-gpu/src/lib.rs", "roformer-gpu/clippy.toml"],
+        &[
+            "roformer-gpu/src/lib.rs",
+            "roformer-gpu/src/net.rs",
+            "roformer-gpu/clippy.toml",
+        ],
     ),
     (
         "MEM-4",
@@ -249,7 +268,8 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
             "engine/src/readahead.rs",
             "engine/src/readahead/**",
             "engine/src/stretch/**",
-            "engine/src/test_alloc.rs",
+            "engine/src/params.rs",
+            "engine/tests/realtime.rs",
         ],
     ),
     (
@@ -492,8 +512,7 @@ fn run_if(check: Check, yes: bool, run_reason: &str, skip_reason: &str) -> Choic
     }
 }
 
-const COMMIT_GPU: &str =
-    "it needs a real GPU, and tier push runs it; GPU-2 asks for it on a kernel change";
+const COMMIT_GPU: &str = "it needs a GPU adapter, and tier push runs it; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR";
 const COMMIT_TRUNK: &str = "tier push runs it";
 
 /// Each line of tier `push`.  The GPU test line runs only when `paths`
@@ -629,6 +648,28 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
     choices.push(skip(line(GPU_TESTS), COMMIT_GPU));
     choices.push(skip(line(TRUNK), COMMIT_TRUNK));
     choices
+}
+
+/// `plan` with the GPU test line in the form that the caller asks for.
+/// A non-empty `require`, the caller's `STEMYLA_REQUIRE`, replaces
+/// `gpu,f16`.  An example is `gpu` on an adapter without
+/// `SHADER_F16_IN_F32` (GPU-2).  The line and its reason then say so.
+pub fn with_gpu_require(mut plan: Plan, require: Option<&str>) -> Plan {
+    let require = require.map_or("", str::trim);
+    if require.is_empty() || require == GPU_FORM {
+        return plan;
+    }
+    let default = &lines()[GPU_TESTS];
+    for choice in &mut plan.choices {
+        if choice.check == *default {
+            choice.check.env = vec![(REQUIRE.to_string(), require.to_string())];
+            choice.reason = format!(
+                "{}; {REQUIRE}={require} from the environment replaces {GPU_FORM}",
+                choice.reason
+            );
+        }
+    }
+    plan
 }
 
 /// The root of the worktree that holds `dir`
@@ -932,7 +973,8 @@ pub fn main(args: &[String]) -> i32 {
     } else {
         None
     };
-    let plan = plan(tier, &paths, graph.as_ref());
+    let require = std::env::var(REQUIRE).ok();
+    let plan = with_gpu_require(plan(tier, &paths, graph.as_ref()), require.as_deref());
     for (rule, path) in &plan.strict {
         println!("check: strict {rule}: {path}");
     }
@@ -1376,6 +1418,56 @@ mod tests {
         assert_eq!(decisions(&plan), push_list(run(GPU)));
     }
 
+    const GPU_ALONE: &str = "STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release";
+    const FROM_ENV: &str = "; STEMYLA_REQUIRE=gpu from the environment replaces gpu,f16";
+
+    #[test]
+    fn the_callers_stemyla_require_replaces_gpu_f16_and_the_reason_says_so() {
+        let before = plan(Tier::Push, &[], None);
+        let after = with_gpu_require(before.clone(), Some("gpu"));
+        assert_eq!(decisions(&after), push_list(run(GPU_ALONE)));
+        let reason = |plan: &Plan, line: &str| {
+            plan.choices
+                .iter()
+                .find(|c| c.check.line() == line)
+                .map(|c| c.reason.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            reason(&after, GPU_ALONE),
+            format!("{}{FROM_ENV}", reason(&before, GPU))
+        );
+        assert_eq!((after.tier, &after.why), (before.tier, &before.why));
+        for (old, new) in before.choices.iter().zip(&after.choices) {
+            if old.check.line() != GPU {
+                assert_eq!(old, new);
+            }
+        }
+    }
+
+    #[test]
+    fn the_override_also_names_the_skipped_gpu_line_of_tier_commit() {
+        let before = commit(&["docs/x.md"]);
+        let after = with_gpu_require(before.clone(), Some(" gpu "));
+        let mut want = no_member_list();
+        want[11] = skip(GPU_ALONE);
+        assert_eq!(decisions(&after), want);
+        assert_eq!(
+            after.choices[11].reason,
+            format!("{}{FROM_ENV}", before.choices[11].reason)
+        );
+    }
+
+    #[test]
+    fn no_or_an_empty_stemyla_require_keeps_gpu_f16() {
+        for given in [&[][..], &["docs/x.md"]] {
+            let plan = super::plan(Tier::Push, &paths(given), None);
+            for require in [None, Some(""), Some("  "), Some("gpu,f16")] {
+                assert_eq!(with_gpu_require(plan.clone(), require), plan, "{require:?}");
+            }
+        }
+    }
+
     #[test]
     fn tier_commit_always_skips_the_gpu_line_and_trunk_with_their_reasons() {
         let plan = commit(&["roformer-gpu/src/x.rs"]);
@@ -1386,7 +1478,16 @@ mod tests {
                 .map(|c| c.reason.clone())
                 .unwrap_or_default()
         };
-        assert!(reason(GPU).contains("real GPU"), "{}", reason(GPU));
+        assert!(
+            reason(GPU).starts_with("it needs a GPU adapter, and tier push runs it;"),
+            "{}",
+            reason(GPU)
+        );
+        assert!(
+            reason(GPU).contains("counts for GPU-3 only on a real GPU named in the PR"),
+            "{}",
+            reason(GPU)
+        );
         assert!(
             reason(TRUNK).contains("tier push runs it"),
             "{}",
@@ -1464,6 +1565,75 @@ mod tests {
         assert_eq!(Graph::from_workspace(&workspace), fixture());
     }
 
+    /// `GPU_FOLDERS` is the closure of `roformer-gpu` in the real graph, so
+    /// a new edge of `roformer-gpu` fails this test or
+    /// `the_fixture_graph_is_the_real_graph`.
+    #[test]
+    fn gpu_folders_are_the_closure_of_roformer_gpu() {
+        let graph = fixture();
+        let closure = graph.closure(&BTreeSet::from([ROFORMER_GPU.to_string()]));
+        let folders: BTreeSet<String> = closure
+            .iter()
+            .map(|name| format!("{}/", graph.members[name].0))
+            .collect();
+        let want: BTreeSet<String> = GPU_FOLDERS.iter().map(|f| f.to_string()).collect();
+        assert_eq!(folders, want);
+    }
+
+    #[test]
+    fn a_path_is_in_the_member_with_the_longest_folder() {
+        let graph = Graph::new(&[("a", "outer", &[]), ("a/b", "inner", &[])]);
+        assert_eq!(graph.member_of("a/b/x.rs"), Some("inner"));
+        assert_eq!(graph.member_of("a/x.rs"), Some("outer"));
+        assert_eq!(graph.member_of("a/bc/x.rs"), Some("outer"));
+        assert_eq!(graph.member_of("ab/x.rs"), None);
+        assert_eq!(graph.member_of("a"), None);
+        let graph = Graph::new(&[("a/b", "inner", &[]), ("a", "zouter", &[])]);
+        assert_eq!(graph.member_of("a/b/x.rs"), Some("inner"));
+    }
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_takes_the_tier_and_dry_run_in_either_order() {
+        for (words, want) in [
+            (&["--tier", "commit"][..], Some((Tier::Commit, false))),
+            (&["--tier", "push"], Some((Tier::Push, false))),
+            (
+                &["--tier", "commit", "--dry-run"],
+                Some((Tier::Commit, true)),
+            ),
+            (
+                &["--dry-run", "--tier", "commit"],
+                Some((Tier::Commit, true)),
+            ),
+            (&["--tier", "push", "--dry-run"], Some((Tier::Push, true))),
+            (&["--dry-run", "--tier", "push"], Some((Tier::Push, true))),
+            (&[], None),
+            (&["--dry-run"], None),
+            (&["--tier"], None),
+            (&["--tier", "nothing"], None),
+            (&["--dry-run", "--tier", "nothing"], None),
+            (&["--tier", "commit", "--now"], None),
+            (&["--tier", "commit", "--dry-run", "--dry-run"], None),
+            (&["commit"], None),
+        ] {
+            assert_eq!(parse_args(&args(words)), want, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn one_line_joins_the_trimmed_lines_that_are_not_empty() {
+        assert_eq!(
+            one_line("cargo metadata failed: error: no\n\n   Caused by:\n  \t\n  a b  \nend"),
+            "cargo metadata failed: error: no; Caused by:; a b; end"
+        );
+        assert_eq!(one_line("one"), "one");
+        assert_eq!(one_line("\n \n"), "");
+    }
+
     /// The rules that `path` hits.
     fn hits(path: &str) -> Vec<String> {
         strict_hits(&paths(&[path]))
@@ -1530,8 +1700,13 @@ mod tests {
     fn mem_1_has_samples_and_the_clippy_files() {
         assert_row(
             "MEM-1",
-            &["engine/src/song.rs", "app/clippy.toml", "clippy.toml"],
-            &["engine/src/songs.rs", "app/clippy.txt"],
+            &[
+                "engine/src/song.rs",
+                "engine/src/test_alloc.rs",
+                "app/clippy.toml",
+                "clippy.toml",
+            ],
+            &["engine/src/songs.rs", "app/clippy.txt", "engine/tests/x.rs"],
         );
     }
 
@@ -1554,8 +1729,12 @@ mod tests {
     fn mem_3_has_gpu_buffer_and_its_lints() {
         assert_row(
             "MEM-3",
-            &["roformer-gpu/src/lib.rs", "roformer-gpu/clippy.toml"],
-            &["roformer-gpu/src/net.rs", "roformer-gpu/tests/x.rs"],
+            &[
+                "roformer-gpu/src/lib.rs",
+                "roformer-gpu/src/net.rs",
+                "roformer-gpu/clippy.toml",
+            ],
+            &["roformer-gpu/src/x.rs", "roformer-gpu/tests/x.rs"],
         );
     }
 
@@ -1605,9 +1784,14 @@ mod tests {
                 "engine/src/readahead.rs",
                 "engine/src/readahead/x.rs",
                 "engine/src/stretch/a/b.rs",
-                "engine/src/test_alloc.rs",
+                "engine/src/params.rs",
+                "engine/tests/realtime.rs",
             ],
-            &["engine/src/decode.rs", "engine/tests/realtime.rs"],
+            &[
+                "engine/src/decode.rs",
+                "engine/src/test_alloc.rs",
+                "engine/tests/x.rs",
+            ],
         );
     }
 
@@ -1747,8 +1931,52 @@ mod tests {
         }
     }
 
+    /// `text` with each time `in <n>.<n> s` at the end of a line as
+    /// `in <t> s`, so a compare does not depend on the speed of the
+    /// machine.  A line with a time in another form stays as it is.
+    fn timeless(text: &str) -> String {
+        let mut out = String::new();
+        for line in text.lines() {
+            let timed = line.rsplit_once(" in ").filter(|(_, time)| {
+                time.strip_suffix(" s")
+                    .and_then(|time| time.split_once('.'))
+                    .is_some_and(|(whole, tenths)| {
+                        !whole.is_empty()
+                            && whole.bytes().all(|b| b.is_ascii_digit())
+                            && tenths.len() == 1
+                            && tenths.bytes().all(|b| b.is_ascii_digit())
+                    })
+            });
+            match timed {
+                Some((head, _)) => out.push_str(&format!("{head} in <t> s\n")),
+                None => out.push_str(&format!("{line}\n")),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn timeless_replaces_only_a_time_at_the_end_of_a_line() {
+        assert_eq!(
+            timeless("check: ok in 12.3 s\ncheck: 3 passed in 0.0 s\n"),
+            "check: ok in <t> s\ncheck: 3 passed in <t> s\n"
+        );
+        for kept in [
+            "check: ok in 1.23 s",
+            "check: ok in .2 s",
+            "check: ok in 1. s",
+            "check: ok in 1.2s",
+            "check: ok in x.2 s",
+            "check: ok in 1.x s",
+            "check: start: true in one",
+        ] {
+            assert_eq!(timeless(kept), format!("{kept}\n"));
+        }
+    }
+
     /// The text of `run_checks` with a fake runner that reads the outcome
-    /// from the first word.
+    /// from the first word, with each time as `in <t> s`.  `slow` takes
+    /// 150 ms, so its time is not `0.0`.
     fn fake_run(plan: &Plan) -> (i32, String) {
         let mut out = Vec::new();
         let mut ran = Vec::new();
@@ -1756,12 +1984,16 @@ mod tests {
             ran.push(check.line());
             match check.argv[0].as_str() {
                 "true" => Ok(Outcome::Exit(0)),
+                "slow" => {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    Ok(Outcome::Exit(0))
+                }
                 "false" => Ok(Outcome::Exit(3)),
                 "killed" => Ok(Outcome::Signal(9)),
                 _ => bail!("no such program"),
             }
         });
-        let text = String::from_utf8(out).unwrap();
+        let text = timeless(&String::from_utf8(out).unwrap());
         assert!(
             !ran.contains(&"false skipped".to_string()),
             "a skip never runs"
@@ -1771,17 +2003,17 @@ mod tests {
 
     #[test]
     fn run_checks_runs_each_run_check_and_gives_0() {
-        let (code, text) = fake_run(&three_checks("true two"));
+        let (code, text) = fake_run(&three_checks("slow two"));
         assert_eq!(code, 0);
         assert_eq!(
             text,
             "check: start: true one\n\
-             check: ok in 0.0 s\n\
-             check: start: true two\n\
-             check: ok in 0.0 s\n\
+             check: ok in <t> s\n\
+             check: start: slow two\n\
+             check: ok in <t> s\n\
              check: start: true three\n\
-             check: ok in 0.0 s\n\
-             check: 3 passed in 0.0 s\n"
+             check: ok in <t> s\n\
+             check: 3 passed in <t> s\n"
         );
     }
 
@@ -1792,11 +2024,11 @@ mod tests {
         assert_eq!(
             text,
             "check: start: true one\n\
-             check: ok in 0.0 s\n\
+             check: ok in <t> s\n\
              check: start: false two\n\
-             check: failed (exit 3) in 0.0 s\n\
+             check: failed (exit 3) in <t> s\n\
              check: not run: true three\n\
-             check: false two failed, after 1 passed, in 0.0 s\n"
+             check: false two failed, after 1 passed, in <t> s\n"
         );
     }
 
@@ -1807,27 +2039,28 @@ mod tests {
         assert_eq!(
             text,
             "check: start: true one\n\
-             check: ok in 0.0 s\n\
+             check: ok in <t> s\n\
              check: start: killed two\n\
-             check: failed (signal 9) in 0.0 s\n\
+             check: failed (signal 9) in <t> s\n\
              check: not run: true three\n\
-             check: killed two failed, after 1 passed, in 0.0 s\n"
+             check: killed two failed, after 1 passed, in <t> s\n"
         );
         let (code, text) = fake_run(&three_checks("missing two"));
         assert_eq!(code, 1);
         assert_eq!(
             text,
             "check: start: true one\n\
-             check: ok in 0.0 s\n\
+             check: ok in <t> s\n\
              check: start: missing two\n\
-             check: failed (no such program) in 0.0 s\n\
+             check: failed (no such program) in <t> s\n\
              check: not run: true three\n\
-             check: missing two failed, after 1 passed, in 0.0 s\n"
+             check: missing two failed, after 1 passed, in <t> s\n"
         );
     }
 
-    /// The real runner, on `sh` in a folder of the temporary folder.  No
-    /// test runs `xtask check` without `--dry-run`.
+    /// The real runner, on `sh` in a folder of the temporary folder.  One
+    /// test of `xtask/tests/check.rs` runs `xtask check` without
+    /// `--dry-run`, in a temporary workspace.
     #[test]
     fn run_command_gives_the_exit_code_the_signal_and_a_start_error() {
         let root = std::env::temp_dir().join(format!("xtask-check-run-{}", std::process::id()));

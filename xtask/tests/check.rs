@@ -1,6 +1,7 @@
 //! `xtask check` on temporary repos: the changed paths of each tier, and
-//! the binary with `--dry-run`.  No test runs on this repo, and no test
-//! runs `xtask check` without `--dry-run`.
+//! the binary.  No test runs on this repo.  One test runs `xtask check`
+//! without `--dry-run`, in a temporary workspace with its own target
+//! folder, where the first check fails.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -236,15 +237,25 @@ fn tier_push_with_no_origin_main_gives_a_warning_and_no_path() {
     assert!(source.ends_with("so tier push runs every line"), "{source}");
 }
 
-/// Runs the binary in `dir` with `args`, and the git config of
-/// [`GIT_ENV`].
-fn xtask(dir: &Path, args: &[&str], target: Option<&Path>) -> Output {
+/// The binary in `dir` with `args`, and the git config of [`GIT_ENV`].
+/// It has no `STEMYLA_REQUIRE`, so the GPU test line has its form of
+/// `CLAUDE.md`.
+fn command(dir: &Path, args: &[&str], target: Option<&Path>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
-    command.args(args).current_dir(dir).envs(GIT_ENV);
+    command
+        .args(args)
+        .current_dir(dir)
+        .envs(GIT_ENV)
+        .env_remove("STEMYLA_REQUIRE");
     if let Some(target) = target {
         command.env("CARGO_TARGET_DIR", target);
     }
-    command.output().unwrap()
+    command
+}
+
+/// Runs the binary of [`command`].
+fn xtask(dir: &Path, args: &[&str], target: Option<&Path>) -> Output {
+    command(dir, args, target).output().unwrap()
 }
 
 #[test]
@@ -341,7 +352,7 @@ check: run: cargo test -p xtask --lib --test rules --test docs --test review (th
 check: run: cargo test --workspace --exclude roformer-gpu (the changed members and their dependents are every member but roformer-gpu)
 check: skip: cargo test -p roformer-gpu --lib (roformer-gpu is not a dependent of a changed member)
 check: skip: cargo test -p roformer-gpu --doc (roformer-gpu is not a dependent of a changed member)
-check: skip: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (it needs a real GPU, and tier push runs it; GPU-2 asks for it on a kernel change)
+check: skip: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (it needs a GPU adapter, and tier push runs it; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR)
 check: skip: (cd app && trunk build --release) (tier push runs it)
 check: skip: cargo run -p xtask --release -- serve app/dist --port 8080 (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
 check: skip: cargo run -p xtask -- web-test (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
@@ -418,8 +429,12 @@ fn a_graph_that_fails_gives_a_warning_and_tier_push() {
         head[1],
         "check: paths: 1, from the changes against HEAD and the untracked files"
     );
-    assert!(
-        head[2].starts_with("warning: cannot read the workspace graph: "),
+    assert_eq!(
+        head[2],
+        format!(
+            "warning: cannot read the workspace graph: cargo metadata failed: error: could not find `Cargo.toml` in `{}` or any parent directory",
+            f.repo.display()
+        ),
         "{stdout}"
     );
     assert_eq!(
@@ -432,4 +447,103 @@ fn a_graph_that_fails_gives_a_warning_and_tier_push() {
             "{line}"
         );
     }
+}
+
+#[test]
+fn the_callers_stemyla_require_gives_the_gpu_test_line_its_form() {
+    let f = Fixture::committed("push-require");
+    let out = command(&f.repo, &["check", "--dry-run", "--tier", "push"], None)
+        .env("STEMYLA_REQUIRE", "gpu")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    let gpu: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("cargo test -p roformer-gpu --release"))
+        .collect();
+    assert_eq!(
+        gpu,
+        [
+            "check: run: STEMYLA_REQUIRE=gpu cargo test -p roformer-gpu --release (no path is known, so a GPU change cannot be ruled out; STEMYLA_REQUIRE=gpu from the environment replaces gpu,f16)"
+        ],
+        "{stdout}"
+    );
+}
+
+/// `text` with each time `in <n>.<n> s` at the end of a line as
+/// `in <t> s`.
+fn timeless(line: &str) -> String {
+    match line.rsplit_once(" in ") {
+        Some((head, time))
+            if time.strip_suffix(" s").is_some_and(|time| {
+                time.split_once('.').is_some_and(|(whole, tenth)| {
+                    !whole.is_empty()
+                        && whole.bytes().all(|b| b.is_ascii_digit())
+                        && tenth.len() == 1
+                        && tenth.bytes().all(|b| b.is_ascii_digit())
+                })
+            }) =>
+        {
+            format!("{head} in <t> s")
+        }
+        _ => line.to_string(),
+    }
+}
+
+/// The one real run of `xtask check`.  It runs in a temporary workspace
+/// outside this repo, with its own target folder, so it never runs the
+/// tests of this repo.  Its first check fails, so it runs one check only.
+#[test]
+fn a_real_run_stops_at_the_first_failure_and_changes_no_file() {
+    let (f, target) = small_workspace("real-run");
+    let bad = "pub fn  f( ) {}\n";
+    write(&f.repo.join("small/src/lib.rs"), bad);
+    let lock = std::fs::read(f.repo.join("Cargo.lock")).unwrap();
+    let out = xtask(&f.repo, &["check", "--tier", "commit"], Some(&target));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    let run: Vec<String> = stdout
+        .lines()
+        .filter(|line| {
+            [
+                "check: start:",
+                "check: ok",
+                "check: failed",
+                "check: not run:",
+            ]
+            .iter()
+            .any(|start| line.starts_with(start))
+                || line.contains(" failed, after ")
+        })
+        .map(timeless)
+        .collect();
+    assert_eq!(
+        run,
+        [
+            "check: start: cargo fmt --all --check",
+            "check: failed (exit 1) in <t> s",
+            "check: not run: cargo run -p xtask -- docs-check",
+            "check: not run: cargo clippy --workspace --all-targets -- -D warnings",
+            "check: not run: cargo test -p xtask --lib --test rules --test docs --test review",
+            "check: not run: cargo test --workspace --exclude roformer-gpu",
+            "check: cargo fmt --all --check failed, after 0 passed, in <t> s",
+        ],
+        "{stdout}{stderr}"
+    );
+    assert_eq!(
+        stdout.lines().last().map(timeless).as_deref(),
+        Some("check: cargo fmt --all --check failed, after 0 passed, in <t> s"),
+        "{stdout}"
+    );
+    assert_eq!(
+        git(&f.repo, &["status", "--porcelain"]),
+        "M small/src/lib.rs"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("small/src/lib.rs")).unwrap(),
+        bad
+    );
+    assert_eq!(std::fs::read(f.repo.join("Cargo.lock")).unwrap(), lock);
 }

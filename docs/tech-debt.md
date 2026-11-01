@@ -429,9 +429,11 @@ Tier `commit` runs the checks that the changed paths of one commit need (`plans/
 * The crate tests are one `cargo test` command for the chosen packages.  Cargo turns on features only across those packages, so the command can pass where the workspace test line fails.
 * A test that reads a file in another folder is not seen.  The one case today is `engine/tests/realtime.rs`, which reads `app/Cargo.toml`.  That path matches DEPS-1, so it runs tier `push`.
 * The strict paths (`STRICT_PATHS` in `xtask/src/check.rs`) are a narrow list that a person keeps.  `app/src/lib.rs` is in no row, but it holds `MEMORY_PATH_MAX_FRAMES` and some transfer code.
-* Tier `commit` skips the GPU test line and the Trunk build, and each tier skips the browser tests.
+* Tier `commit` skips the GPU test line and the Trunk build, unless a strict path sends the commit to tier `push`.  Each tier skips the browser tests.
+* Tier `push` skips the GPU test line when its paths change no GPU code: nothing in `roformer/`, `roformer-gpu/` or `test-support/`, and no workspace file.  CI does not run that line either.
+* The GPU test line has `STEMYLA_REQUIRE=gpu,f16`, so it fails on an adapter without `SHADER_F16_IN_F32`.  On such an adapter, run `check` with `STEMYLA_REQUIRE=gpu`.  A non-empty `STEMYLA_REQUIRE` in the environment replaces `gpu,f16` in the line, and the printed reason says so.
 
-Tier `push`, which runs before each push and each review round, or CI finds each of these before review.
+Tier `push`, which runs before each push and each review round, or CI finds the gaps of tier `commit` before review.  No automated check runs the GPU test line when tier `push` skips it.
 
 * Fix: no fix is planned.  Add a strict path when a rule's code moves to a new file.
 
