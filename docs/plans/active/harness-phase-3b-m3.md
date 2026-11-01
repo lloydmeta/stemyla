@@ -304,8 +304,8 @@ The team leader gives these to the orchestrator as text.
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent): no blocker, 7 should-fix (6 significant) and 5 nits.  All are fixed in this plan.  The review stops at its cap of 2 rounds.
 * [x] 2026-10-31: step 1: `review_log.rs`, `strict_rules` and `fix_rule_problems`, with their tests (implementer, `9f22a7e`).
 * [x] 2026-10-31: step 2: `docs-check` runs the check; the Conventions bullet and the Tools row (implementer, `7c7b2c6`).
-* [ ] Step 3: `xtask review log-check <file>` (implementer).
-* [ ] Step 4: the diff for the orchestrator, checked on `HEAD` (implementer, team leader).
+* [x] 2026-10-31: step 3: `xtask review log-check <file>` (implementer, `7846ccb`).
+* [x] 2026-10-31: step 4, the implementer's part: the diff `m3/m3-skill.diff` in the team leader's scratchpad, checked on `7846ccb` (implementer).  The team leader checks it again on `HEAD`.
 * [ ] Checkpoint: the orchestrator lands the diff before round 1.
 * [ ] Step 5: review rounds to the stop rule.
 * [ ] M3 done: the log in `docs/reviews/harness-phase-3b-m3.md`, and this plan in `plans/completed/`.
@@ -325,6 +325,14 @@ The team leader gives these to the orchestrator as text.
   * `log_check_passes_a_log_that_follows_the_fix_rule`: `(0, [])`, not the line `log-check: the log follows the fix rule`.
   * `log_check_fails_a_fixed_nit_in_round_4` and `log_check_fails_a_log_with_no_significant_column`: `(0, [])`, not exit 3 and the problem.
   * `log_check_fails_a_missing_file`: exit 0, not 3.
+* 2026-10-31, implementer, step 4: the diff changes the skill, `CLAUDE.md`, `docs/working-with-agents.md`, decision 0011, `docs/tech-debt.md` and `xtask/tests/rules.rs`.  The checks of the diff, at `7846ccb`, in a scratch worktree with its own target folder:
+  * `git apply --check` passes at the repo root.
+  * With only the `xtask/tests/rules.rs` part, `cargo test -p xtask --test rules` fails 4 tests, each on an assert.  The other 23 pass.
+  * `the_review_skill_starts_with_xtask`: 34 problems, one for each new pin of `REVIEW_SKILL_TEXT`.  No old pin fails.
+  * `the_fix_rule_says_the_same_in_each_place`: 4 problems: `CLAUDE.md`, the skill, `docs/working-with-agents.md` and decision 0011.
+  * `the_review_skill_names_the_strict_rules`: the skill does not hold `STRICT_RULES_TEXT`.
+  * `the_review_skill_log_passes_the_fix_rule_check`: the template has no `Significant` column.
+  * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  `CLAUDE.md` stays at 88 lines.
 
 ## Decision log
 
@@ -341,6 +349,9 @@ The team leader gives these to the orchestrator as text.
 * 2026-10-31, implementer: a row with a bad value (problems 2 to 5) gives only those problems, not problems 6 to 11.  Reason: problems 6 to 11 read those values, so they would add only noise.
 * 2026-10-31, implementer: `review_log.rs` also has `pub fn has_significant_column`.  Reason: `log_check` (step 3) must tell a log with no column from a good log.  Its stub gives `false`.
 * 2026-10-31, implementer: problem 7 looks for a part `known: <TD>` of the Action cell, not the whole cell.  The TD must equal Repeat of.
+* 2026-10-31, implementer: step 10 of the skill also says that a late round fixes a `pre-existing` or `unproven` finding only of the three kinds.  Reason: the log check (problem 11) and the stop rule use this rule.
+* 2026-10-31, implementer: step 9 of the skill gives decision 0024's test of significance.  Reason: the skill then needs no other file to fill the field.
+* 2026-10-31, implementer: each step ticks the step before it with its SHA, since a commit cannot hold its own SHA.  The last commit ticks steps 3 and 4.
 
 ## Outcomes and retrospective
 
