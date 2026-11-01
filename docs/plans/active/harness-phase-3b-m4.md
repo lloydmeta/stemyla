@@ -348,8 +348,8 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: step 2: the paths, the graph, the run and the command (implementer, `32f7a35`).
 * [x] 2026-11-01: step 3: the measurements (implementer, `4b7925c`).
 * [x] 2026-11-01: step 4, the implementer's part: the diff `m4/m4-git2.diff` in the team leader's scratchpad, checked on `4b7925c` (implementer).  The team leader checks it again on `HEAD`.
-* [ ] Step 4: the orchestrator lands the diff.
-* [ ] Checkpoint: the orchestrator lands the diff before round 1.
+* [x] 2026-11-01: checkpoint: the orchestrator lands the diff before round 1, unchanged (`98f212a`), and installs the `wasm32-unknown-unknown` target and Trunk 0.21.14.
+* [x] 2026-11-01: a full timed run of tier `push` passes on `b3e5452` (team leader).
 * [ ] Step 5: review rounds to the stop rule.
 
 ## Surprises and discoveries
@@ -399,6 +399,12 @@ The team leader gives these to the orchestrator as text:
   * The implementer ran the 3 test lines by hand in that worktree: `cargo test --workspace --exclude roformer-gpu` passes in 166 s, `cargo test -p roformer-gpu --lib` in 16 s and `cargo test -p roformer-gpu --doc` in 1 s.
   * The implementer removed the worktree and its target folder (5.9 GB).
 * 2026-11-01, implementer, step 1: the `grep` of each strict row found the code in each file of the table.  `decoder/src/pass.rs` and `app/src/reset.rs` name OPFS, but `pass.rs` writes through a trait that `decoder/src/web.rs` gives, and `reset.rs` only removes files.  So they stay out of MEM-5.  `app/src/export.rs` posts with a transfer list, and MEM-5 already holds it.
+
+* 2026-11-01, team leader: the full timed runs, on `b3e5452`, after the orchestrator installed the `wasm32-unknown-unknown` target and Trunk 0.21.14:
+  * Tier `push`, first run: 11 passed in 225.2 s (3 min 46 s with the build of `xtask`).  The wasm32 clippy line took 48.2 s and the Trunk build 53.6 s, since both built from cold.  The workspace test line took 119.4 s.
+  * Tier `push`, second run, warm: 11 passed in 126.1 s.  The workspace test line took 117.5 s, the Trunk build 4.6 s, and each other line 1.1 s or less.  The GPU test line was skipped, since the branch changes no GPU code.
+  * Tier `commit` on the same commit (`HEAD^..HEAD`, a plan change): 4 passed in 10.7 s.  The `xtask` repo tests took 8.8 s.
+  * So, warm, tier `commit` takes 11 s on a docs change and 68 s on an `xtask` change, and tier `push` takes about 2 min.
 
 ## Decision log
 
