@@ -2,7 +2,7 @@
 
 Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
 
-Amended on 2026-11-01 by the agent, after M5 of `plans/active/harness-phase-3b.md`: decision 0025's measurement found no cheaper model that passes, so each role keeps `inherit`.  So decision 0025 lowers no cost yet.  A lower cost of the mode may come from decisions 0024 and 0026, which M8 measures.  The decision is unchanged.
+Amended on 2026-11-01 by the agent, after M5 of `plans/active/harness-phase-3b.md`: decision 0025's measurement found no cheaper model that passes, so each role keeps `inherit`.  So decision 0025 lowers no cost yet.  A lower cost of the mode may come from decisions 0024 and 0026.  The next big task after the merge measures it, and phase 6 compares the numbers.  The decision is unchanged.
 
 ## Context
 
