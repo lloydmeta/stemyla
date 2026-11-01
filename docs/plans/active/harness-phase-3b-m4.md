@@ -356,6 +356,17 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, team leader: `cargo test -p xtask` takes 64 s warm, but its `--lib`, `rules`, `docs` and `review` targets take about 8 s.  So tier `commit` runs those targets on each change.  It runs the whole `xtask` tests only when `xtask` or a member that it depends on changes.
 * 2026-11-01, plan review round 1: `cargo test -p engine` alone does not build `engine`'s `cpal` tests.  Only `app`'s default feature turns `cpal` on.  So the crate tests of tier `commit` are one command.
 * 2026-11-01, plan review round 1: a rough grep of the draft strict table hits 78 of PR #39's 194 commits (40%).  Step 3 measures it with the real table.
+* 2026-11-01, implementer, step 1: each new test failed on its stub, on an assert.  The 36 tests are in `xtask/src/check.rs`:
+  * `lines_are_the_twelve_of_the_push_tier`: `left: []`, not the 12 lines.
+  * The 18 tests of the plan, such as `a_dsp_path_tests_its_dependents_in_one_command` and `tier_push_runs_the_gpu_line_for_a_gpu_path`: `left: []`, not the whole expected list.  `tier_commit_always_skips_the_gpu_line_and_trunk_with_their_reasons`: an empty reason.
+  * `check_never_runs_the_browser_or_publish`: "Commit [] runs a check".
+  * The 12 tests of the strict-rule rows: "<path> hits <rule>", such as "engine/src/slot.rs hits RT-1".  `verify_1_and_git_1_have_no_path`: the assert that DEPS-1 has paths.  `strict_hits_follow_the_rules_then_the_paths`: `left: []`.
+  * `the_strict_path_table_follows_strict_rules`: `left: []`, not the 15 IDs.
+  * `the_fixture_graph_is_the_real_graph`: `Graph { members: {} }`.
+  * `the_crate_tests_of_every_member_but_roformer_gpu_are_the_workspace_test_line`: the stub of `dependents` gives the set that it gets, so the assert of the 11 members failed.
+  * `a_deleted_path_counts_as_a_change_of_its_member` first failed on an index out of bounds, not on an assert.  The implementer changed it to compare the whole list, and it then failed on the assert.
+* 2026-11-01, implementer, step 1: no one member of this repo has all 11 members as its dependents.  `dsp` has 5 (`app`, `decode-worker`, `dsp`, `engine`, `xtask`), and `test-support` has 5 (`roformer`, `roformer-gpu`, `stem-worker`, `test-support`, `xtask`).  So the test of the workspace test line uses the paths of four members: `dsp`, `test-support`, `stem-protocol` and `synth`.  The test also checks that no one member gives all 11.
+* 2026-11-01, implementer, step 1: the `grep` of each strict row found the code in each file of the table.  `decoder/src/pass.rs` and `app/src/reset.rs` name OPFS, but `pass.rs` writes through a trait that `decoder/src/web.rs` gives, and `reset.rs` only removes files.  So they stay out of MEM-5.  `app/src/export.rs` posts with a transfer list, and MEM-5 already holds it.
 
 ## Decision log
 
@@ -369,6 +380,9 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, team leader: `check` reads the graph with `rules::workspace_metadata` and `rules::workspace` (plan review rounds 1 and 2).  Reason: the repo then has one runner and one parser of `cargo metadata`.  `--locked` stays, so `check` never writes `Cargo.lock`.  A manifest edit matches DEPS-1 and runs tier `push`, which needs no graph.  If the graph fails, tier `commit` runs tier `push`.
 * 2026-11-01, team leader: no table of cross reads (plan review round 1).  Reason: the one case today, `app/Cargo.toml`, matches DEPS-1, so a row for it could not fail a test.  The new TD records the gap.
 * 2026-11-01, team leader: the GIT-2 text of `docs/invariants.md`, the recipe "Fix a bug" and `README.md` go in the orchestrator's diff with `CLAUDE.md`.  Reason: decision 0026 says that GIT-2 changes in the same commit everywhere.
+* 2026-11-01, implementer: a plan lists each line of `lines()` as `run` or `skip`, then `serve`, `web-test`, `e2e` and `publish` as `skip`.  Tier `commit` also lists the `xtask` repo tests after the wasm32 clippy line, and the crate tests just before the workspace test line.  Reason: the output then names each line of `CLAUDE.md`'s Commands, with its reason.
+* 2026-11-01, implementer: tier `push` with no path runs the GPU test line.  Reason: no path can mean that the merge base is not known, and then the plan cannot rule out a GPU change.  A branch with no change since the merge base also gets it, which costs one run.
+* 2026-11-01, implementer: a commit that tier `commit` sends to tier `push` (a strict hit, or no graph) gets the GPU test line by the rule of tier `push`, from the commit's own paths.  Reason: D2 says that such a commit runs tier `push`.  So a change to `roformer-gpu/src/lib.rs` runs the GPU test line, and a change to `engine/src/slot.rs` does not.
 
 ## Outcomes and retrospective
 

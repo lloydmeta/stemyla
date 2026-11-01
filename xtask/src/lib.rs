@@ -1,6 +1,7 @@
 //! Offline tooling: synthetic song, metrics, benches, model conversion, the static server.
 
 pub mod bench;
+pub mod check;
 pub mod clean;
 pub mod docs;
 pub mod drivers;

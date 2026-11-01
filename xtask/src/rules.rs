@@ -1654,10 +1654,10 @@ fn is_python_file(path: &str) -> bool {
 }
 
 /// Extensions of audio and of model weights, in lower case.
-const AUDIO_EXTENSIONS: [&str; 9] = [
+pub(crate) const AUDIO_EXTENSIONS: [&str; 9] = [
     "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "aif", "aiff",
 ];
-const WEIGHT_EXTENSIONS: [&str; 9] = [
+pub(crate) const WEIGHT_EXTENSIONS: [&str; 9] = [
     "safetensors",
     "ckpt",
     "pt",
@@ -1668,6 +1668,15 @@ const WEIGHT_EXTENSIONS: [&str; 9] = [
     "npz",
     "gguf",
 ];
+
+/// True when `path` has an extension of [`AUDIO_EXTENSIONS`] or
+/// [`WEIGHT_EXTENSIONS`], in any case (ASSET-1).
+pub(crate) fn is_audio_or_weight(path: &str) -> bool {
+    extension(path).is_some_and(|extension| {
+        AUDIO_EXTENSIONS.contains(&extension.as_str())
+            || WEIGHT_EXTENSIONS.contains(&extension.as_str())
+    })
+}
 
 /// The largest file that the index may hold: about twice the largest file on
 /// 2026-10-20 (a UI snapshot of 486,664 bytes), and well under a song or a
@@ -1683,10 +1692,7 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
         .flat_map(|file| {
             let path = &file.path;
             let asset = extension(path)
-                .filter(|extension| {
-                    AUDIO_EXTENSIONS.contains(&extension.as_str())
-                        || WEIGHT_EXTENSIONS.contains(&extension.as_str())
-                })
+                .filter(|_| is_audio_or_weight(path))
                 .map(|extension| format!(
                     "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached '{path}'.  Keep it in an ignored folder (audio/, stems/ or third_party/).  Link to its source."
                 ));

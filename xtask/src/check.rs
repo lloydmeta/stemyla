@@ -1,0 +1,1345 @@
+//! `xtask check --tier commit|push [--dry-run]`: the local checks of
+//! GIT-2, by tier (decision 0026).
+//!
+//! Tier `commit` reads the changed paths of one commit, and picks the
+//! checks that those paths need.  Tier `push` runs the fmt, clippy, test,
+//! `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  A commit
+//! that touches a strict path ([`STRICT_PATHS`]) runs tier `push`.  No
+//! check is a browser test or `publish`, and CI stays the authority.
+//!
+//! [`plan`] is a pure function of the tier, the paths and the workspace
+//! graph, so the tests can check the rules without a run.
+//!
+//! `plans/active/harness-phase-3b-m4.md` gives the tables and the reasons.
+
+use crate::docs::glob_matches;
+use crate::review_log::strict_rules;
+use crate::rules;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The tier of a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    Commit,
+    Push,
+}
+
+/// One command: its argv, its environment and its folder, relative to the
+/// repo root (`""` is the root).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub folder: String,
+}
+
+impl Check {
+    /// A command in the repo root with no environment, from its words.
+    fn root(words: &str) -> Check {
+        Check {
+            argv: words.split_whitespace().map(str::to_string).collect(),
+            env: Vec::new(),
+            folder: String::new(),
+        }
+    }
+
+    /// The command as `CLAUDE.md`'s Commands gives it: the environment and
+    /// the argv, joined by spaces, in `(cd <folder> && ...)` for a folder.
+    pub fn line(&self) -> String {
+        let words: Vec<String> = self
+            .env
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .chain(self.argv.iter().cloned())
+            .collect();
+        let words = words.join(" ");
+        if self.folder.is_empty() {
+            words
+        } else {
+            format!("(cd {} && {words})", self.folder)
+        }
+    }
+}
+
+/// The index of each line of [`lines`] that the plan reads by name.
+const FMT: usize = 0;
+const DOCS_CHECK: usize = 1;
+const CLIPPY: usize = 2;
+const SYNTH_CLIPPY: usize = 3;
+const APP_CLIPPY: usize = 4;
+const APP_ALL_CLIPPY: usize = 5;
+const WASM_CLIPPY: usize = 6;
+const WORKSPACE_TESTS: usize = 7;
+const GPU_LIB: usize = 8;
+const GPU_DOC: usize = 9;
+const GPU_TESTS: usize = 10;
+const TRUNK: usize = 11;
+
+/// The packages of the wasm32 clippy line.
+const WASM_PACKAGES: [&str; 5] = [
+    "app",
+    "stem-worker",
+    "decode-worker",
+    "stem-protocol",
+    "engine",
+];
+
+/// The package that the workspace test line leaves out.
+const ROFORMER_GPU: &str = "roformer-gpu";
+
+/// The 12 lines of tier `push`, in the order that it runs them.
+pub fn lines() -> Vec<Check> {
+    let wasm = format!(
+        "cargo clippy --target wasm32-unknown-unknown -p {} --all-targets -- -D warnings",
+        WASM_PACKAGES.join(" -p ")
+    );
+    let mut lines: Vec<Check> = [
+        "cargo fmt --all --check",
+        "cargo run -p xtask -- docs-check",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo clippy -p synth --all-targets -- -D warnings",
+        "cargo clippy -p app -- -D warnings",
+        "cargo clippy -p app --all-targets -- -D warnings",
+        &wasm,
+        "cargo test --workspace --exclude roformer-gpu",
+        "cargo test -p roformer-gpu --lib",
+        "cargo test -p roformer-gpu --doc",
+        "cargo test -p roformer-gpu --release",
+        "trunk build --release",
+    ]
+    .iter()
+    .map(|words| Check::root(words))
+    .collect();
+    lines[GPU_TESTS].env = vec![("STEMYLA_REQUIRE".to_string(), "gpu,f16".to_string())];
+    lines[TRUNK].folder = "app".to_string();
+    lines
+}
+
+/// The tests of `xtask` that read the whole repo.  They take seconds; the
+/// other tests of `xtask` take about a minute.
+fn xtask_repo_tests() -> Check {
+    Check::root("cargo test -p xtask --lib --test rules --test docs --test review")
+}
+
+/// The lines of `CLAUDE.md`'s Commands that no tier runs, with the reason.
+fn never_run() -> Vec<(Check, &'static str)> {
+    const BROWSER: &str =
+        "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026)";
+    vec![
+        (
+            Check::root("cargo run -p xtask --release -- serve app/dist --port 8080"),
+            BROWSER,
+        ),
+        (Check::root("cargo run -p xtask -- web-test"), BROWSER),
+        (Check::root("cargo run -p xtask -- e2e <scenario>"), BROWSER),
+        (
+            Check::root("cargo run -p xtask --release -- publish"),
+            "a person only (GIT-1)",
+        ),
+    ]
+}
+
+/// The paths outside every member that change every build, at the root
+/// only.
+const WORKSPACE_FILES: [&str; 9] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo/config.toml",
+    ".cargo/config",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    "clippy.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+];
+
+fn is_workspace_file(path: &str) -> bool {
+    WORKSPACE_FILES.contains(&path)
+}
+
+/// The folders whose tests the GPU test line runs.
+const GPU_FOLDERS: [&str; 3] = ["roformer/", "roformer-gpu/", "test-support/"];
+
+/// The strict-rule path table: the globs of the files that hold the code
+/// of each strict rule (decision 0024), in the order of
+/// [`strict_rules`].  The globs are narrower than the `paths:` of
+/// `.claude/rules/`.  VERIFY-1 is on most findings and GIT-1 has no code,
+/// so their rows are empty.  [`strict_hits`] also gives ASSET-1 each path
+/// with an audio or weight extension.
+///
+/// `app/src/lib.rs` is in no row, but it holds `MEMORY_PATH_MAX_FRAMES` and
+/// some transfer code.  Most commits of the app change it, so a row with it
+/// would send most commits to tier `push`.
+pub const STRICT_PATHS: &[(&str, &[&str])] = &[
+    (
+        "PROTO-1",
+        &[
+            "protocol/src/**",
+            "xtask/e2e/*.js",
+            "xtask/src/e2e.rs",
+            "xtask/src/e2e/**",
+        ],
+    ),
+    (
+        "PROTO-2",
+        &[
+            "protocol/src/lib.rs",
+            "app/src/separator.rs",
+            "worker/src/web.rs",
+        ],
+    ),
+    ("MEM-1", &["engine/src/song.rs", "**/clippy.toml"]),
+    (
+        "MEM-2",
+        &[
+            "protocol/src/**",
+            "app/src/separator.rs",
+            "app/src/decoder/client.rs",
+            "worker/src/web.rs",
+            "decoder/src/web.rs",
+        ],
+    ),
+    (
+        "MEM-3",
+        &["roformer-gpu/src/lib.rs", "roformer-gpu/clippy.toml"],
+    ),
+    (
+        "MEM-4",
+        &[
+            "roformer/src/lib.rs",
+            "roformer/src/weights.rs",
+            "roformer-gpu/src/lib.rs",
+        ],
+    ),
+    (
+        "MEM-5",
+        &[
+            "app/src/store.rs",
+            "app/src/export.rs",
+            "app/src/streamtest.rs",
+            "worker/src/web.rs",
+            "worker/src/web/encode.rs",
+            "worker/src/web/stems.rs",
+            "decoder/src/web.rs",
+        ],
+    ),
+    (
+        "RT-1",
+        &[
+            "engine/src/slot.rs",
+            "engine/src/source.rs",
+            "engine/src/player.rs",
+            "engine/src/live.rs",
+            "engine/src/readahead.rs",
+            "engine/src/readahead/**",
+            "engine/src/stretch/**",
+            "engine/src/test_alloc.rs",
+        ],
+    ),
+    (
+        "GPU-1",
+        &["roformer-gpu/src/shaders/**", "roformer-gpu/src/lib.rs"],
+    ),
+    ("GPU-2", GPU_DEFAULTS),
+    ("GPU-3", GPU_DEFAULTS),
+    ("VERIFY-1", &[]),
+    ("GIT-1", &[]),
+    ("DEPS-1", &["**/Cargo.toml", "Cargo.lock", "THIRD-PARTY.md"]),
+    ("ASSET-1", &[".gitignore"]),
+];
+
+/// The kernels, and the code that chooses the default kernels and
+/// weights (GPU-2, GPU-3).
+const GPU_DEFAULTS: &[&str] = &[
+    "roformer-gpu/src/shaders/**",
+    "roformer-gpu/src/bench.rs",
+    "roformer-gpu/src/lib.rs",
+];
+
+/// The strict paths of `rule`, or none.
+pub fn strict_paths(rule: &str) -> &'static [&'static str] {
+    STRICT_PATHS
+        .iter()
+        .find(|(id, _)| *id == rule)
+        .map_or(&[], |(_, globs)| globs)
+}
+
+/// Each (rule, path) pair where `path` is a strict path of `rule`, in the
+/// order of [`strict_rules`], then of `paths`.
+pub fn strict_hits(paths: &[String]) -> Vec<(String, String)> {
+    let mut hits = Vec::new();
+    for rule in strict_rules() {
+        let globs = strict_paths(&rule);
+        for path in paths {
+            let by_glob = globs.iter().any(|glob| glob_matches(glob, path));
+            let by_extension = rule == "ASSET-1" && rules::is_audio_or_weight(path);
+            if by_glob || by_extension {
+                hits.push((rule.clone(), path.clone()));
+            }
+        }
+    }
+    hits
+}
+
+/// The workspace members and the edges between them.  The edges are of
+/// all kinds (normal, dev, build) and for all targets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Graph {
+    /// Each member by package name: its folder, and the members that it
+    /// depends on.
+    members: BTreeMap<String, (String, BTreeSet<String>)>,
+}
+
+impl Graph {
+    /// A graph from (folder, package name, the members that it depends on).
+    pub fn new(members: &[(&str, &str, &[&str])]) -> Graph {
+        Graph {
+            members: members
+                .iter()
+                .map(|(folder, name, deps)| {
+                    (
+                        name.to_string(),
+                        (
+                            folder.to_string(),
+                            deps.iter().map(|d| d.to_string()).collect(),
+                        ),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The graph of `workspace`, which `rules::workspace` reads.
+    pub fn from_workspace(workspace: &rules::Workspace) -> Graph {
+        Graph {
+            members: workspace
+                .crates
+                .iter()
+                .map(|member| {
+                    let folder = member
+                        .manifest
+                        .rsplit_once('/')
+                        .map_or("", |(folder, _)| folder);
+                    let deps = member.edges.iter().map(|edge| edge.to.clone()).collect();
+                    (member.name.clone(), (folder.to_string(), deps))
+                })
+                .collect(),
+        }
+    }
+
+    /// The package names of the members.
+    pub fn names(&self) -> BTreeSet<String> {
+        self.members.keys().cloned().collect()
+    }
+
+    /// The member that holds `path`: the one with the longest folder that
+    /// `path` starts with, then `/`.
+    pub fn member_of(&self, path: &str) -> Option<&str> {
+        self.members
+            .iter()
+            .filter(|(_, (folder, _))| {
+                !folder.is_empty()
+                    && path
+                        .strip_prefix(folder.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by_key(|(_, (folder, _))| folder.len())
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// `set`, and each member that it depends on, again and again.
+    pub fn closure(&self, set: &BTreeSet<String>) -> BTreeSet<String> {
+        self.reach(set, |from, to| {
+            self.members
+                .get(from)
+                .is_some_and(|(_, deps)| deps.contains(to))
+        })
+    }
+
+    /// `set`, and each member that depends on one of them, again and again.
+    pub fn dependents(&self, set: &BTreeSet<String>) -> BTreeSet<String> {
+        self.reach(set, |from, to| {
+            self.members
+                .get(to)
+                .is_some_and(|(_, deps)| deps.contains(from))
+        })
+    }
+
+    /// `set`, and each member `to` with `step(from, to)` for a member
+    /// `from` of the result, again and again.
+    fn reach(&self, set: &BTreeSet<String>, step: impl Fn(&str, &str) -> bool) -> BTreeSet<String> {
+        let mut found = set.clone();
+        let mut next: Vec<String> = set.iter().cloned().collect();
+        while let Some(from) = next.pop() {
+            for to in self.members.keys() {
+                if !found.contains(to) && step(&from, to) {
+                    found.insert(to.clone());
+                    next.push(to.clone());
+                }
+            }
+        }
+        found
+    }
+}
+
+/// What a plan does with one check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Run,
+    Skip,
+}
+
+/// One check of a plan, with its decision and the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub check: Check,
+    pub decision: Decision,
+    pub reason: String,
+}
+
+/// The checks of one run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Plan {
+    /// The tier that runs.
+    pub tier: Tier,
+    /// Why that tier runs.
+    pub why: String,
+    /// Each (rule, path) pair of [`strict_hits`].
+    pub strict: Vec<(String, String)>,
+    /// Each check, in order.
+    pub choices: Vec<Choice>,
+}
+
+/// The checks of `tier` for `paths`.  Tier `commit` needs `graph` to choose
+/// the crates; with no graph, it runs tier `push`.
+pub fn plan(tier: Tier, paths: &[String], graph: Option<&Graph>) -> Plan {
+    let strict = strict_hits(paths);
+    let workspace_file = paths.iter().any(|path| is_workspace_file(path));
+    let (choices, tier, why) = match (tier, graph) {
+        (Tier::Push, _) => (push_choices(paths), Tier::Push, "asked"),
+        (Tier::Commit, _) if !strict.is_empty() => (
+            push_choices(paths),
+            Tier::Push,
+            "a path is a strict path (D2)",
+        ),
+        (Tier::Commit, None) => (
+            push_choices(paths),
+            Tier::Push,
+            "there is no workspace graph, so tier commit cannot choose the crates",
+        ),
+        (Tier::Commit, Some(_)) if workspace_file => (
+            workspace_file_choices(),
+            Tier::Commit,
+            "a workspace file changed",
+        ),
+        (Tier::Commit, Some(graph)) => (commit_choices(paths, graph), Tier::Commit, "asked"),
+    };
+    let mut choices = choices;
+    choices.extend(
+        never_run()
+            .into_iter()
+            .map(|(check, reason)| skip(check, reason)),
+    );
+    Plan {
+        tier,
+        why: why.to_string(),
+        strict,
+        choices,
+    }
+}
+
+fn run(check: Check, reason: &str) -> Choice {
+    Choice {
+        check,
+        decision: Decision::Run,
+        reason: reason.to_string(),
+    }
+}
+
+fn skip(check: Check, reason: &str) -> Choice {
+    Choice {
+        check,
+        decision: Decision::Skip,
+        reason: reason.to_string(),
+    }
+}
+
+fn run_if(check: Check, yes: bool, run_reason: &str, skip_reason: &str) -> Choice {
+    if yes {
+        run(check, run_reason)
+    } else {
+        skip(check, skip_reason)
+    }
+}
+
+const COMMIT_GPU: &str =
+    "it needs a real GPU, and tier push runs it; GPU-2 asks for it on a kernel change";
+const COMMIT_TRUNK: &str = "tier push runs it";
+
+/// Each line of tier `push`.  The GPU test line runs only when `paths`
+/// change GPU code, or when no path is known.
+fn push_choices(paths: &[String]) -> Vec<Choice> {
+    let gpu = paths.is_empty()
+        || paths.iter().any(|path| {
+            is_workspace_file(path) || GPU_FOLDERS.iter().any(|folder| path.starts_with(folder))
+        });
+    let gpu_reason = if paths.is_empty() {
+        "no path is known, so a GPU change cannot be ruled out"
+    } else {
+        "a path is in roformer/, roformer-gpu/ or test-support/, or is a workspace file"
+    };
+    lines()
+        .into_iter()
+        .enumerate()
+        .map(|(index, check)| {
+            if index == GPU_TESTS {
+                run_if(
+                    check,
+                    gpu,
+                    gpu_reason,
+                    "the paths change no GPU code: nothing in roformer/, roformer-gpu/ or test-support/, and no workspace file",
+                )
+            } else {
+                run(check, "tier push runs every line")
+            }
+        })
+        .collect()
+}
+
+/// Tier `commit` when a workspace file changed: each line but the GPU test
+/// line and the Trunk build.
+fn workspace_file_choices() -> Vec<Choice> {
+    lines()
+        .into_iter()
+        .enumerate()
+        .map(|(index, check)| match index {
+            GPU_TESTS => skip(check, COMMIT_GPU),
+            TRUNK => skip(check, COMMIT_TRUNK),
+            _ => run(check, "a workspace file changed"),
+        })
+        .collect()
+}
+
+/// Tier `commit`: the checks that the changed members need.
+fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
+    let changed: BTreeSet<String> = paths
+        .iter()
+        .filter_map(|path| graph.member_of(path))
+        .map(str::to_string)
+        .collect();
+    let dependents = graph.dependents(&changed);
+    let in_closure = |packages: &[&str]| {
+        let packages: BTreeSet<String> = packages.iter().map(|p| p.to_string()).collect();
+        let closure = graph.closure(&packages);
+        changed.iter().any(|member| closure.contains(member))
+    };
+    let tested: BTreeSet<&String> = dependents
+        .iter()
+        .filter(|name| name.as_str() != ROFORMER_GPU)
+        .collect();
+    let all_but_gpu: BTreeSet<String> = graph
+        .names()
+        .into_iter()
+        .filter(|name| name != ROFORMER_GPU)
+        .collect();
+    let every_member = !tested.is_empty() && tested.len() == all_but_gpu.len();
+
+    let lines = lines();
+    let line = |index: usize| lines[index].clone();
+    let mut choices: Vec<Choice> = [FMT, DOCS_CHECK, CLIPPY]
+        .map(|index| run(line(index), "every change"))
+        .to_vec();
+    choices.push(run_if(
+        line(SYNTH_CLIPPY),
+        in_closure(&["synth"]),
+        "a changed member is in the closure of synth",
+        "no changed member is in the closure of synth",
+    ));
+    let app = in_closure(&["app"]);
+    for index in [APP_CLIPPY, APP_ALL_CLIPPY] {
+        choices.push(run_if(
+            line(index),
+            app,
+            "a changed member is in the closure of app",
+            "no changed member is in the closure of app",
+        ));
+    }
+    choices.push(run_if(
+        line(WASM_CLIPPY),
+        in_closure(&WASM_PACKAGES),
+        "a changed member is in the closure of the wasm32 packages",
+        "no changed member is in the closure of the wasm32 packages",
+    ));
+    choices.push(run_if(
+        xtask_repo_tests(),
+        !dependents.contains("xtask"),
+        "these tests read the whole repo, and xtask is not a dependent of a changed member",
+        "the crate tests run every test of xtask",
+    ));
+    if every_member {
+        choices.push(run(
+            line(WORKSPACE_TESTS),
+            "the changed members and their dependents are every member but roformer-gpu",
+        ));
+    } else if tested.is_empty() {
+        choices.push(skip(
+            line(WORKSPACE_TESTS),
+            "no changed path is in a member",
+        ));
+    } else {
+        let words: Vec<String> = tested.iter().map(|name| format!("-p {name}")).collect();
+        choices.push(run(
+            Check::root(&format!("cargo test {}", words.join(" "))),
+            "the changed members and their dependents, in one command",
+        ));
+        choices.push(skip(
+            line(WORKSPACE_TESTS),
+            "the crate tests cover the changed members and their dependents; tier push runs it",
+        ));
+    }
+    let gpu = dependents.contains(ROFORMER_GPU);
+    for index in [GPU_LIB, GPU_DOC] {
+        choices.push(run_if(
+            line(index),
+            gpu,
+            "roformer-gpu is a dependent of a changed member",
+            "roformer-gpu is not a dependent of a changed member",
+        ));
+    }
+    choices.push(skip(line(GPU_TESTS), COMMIT_GPU));
+    choices.push(skip(line(TRUNK), COMMIT_TRUNK));
+    choices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FMT: &str = "cargo fmt --all --check";
+    const DOCS: &str = "cargo run -p xtask -- docs-check";
+    const CLIPPY: &str = "cargo clippy --workspace --all-targets -- -D warnings";
+    const SYNTH: &str = "cargo clippy -p synth --all-targets -- -D warnings";
+    const APP: &str = "cargo clippy -p app -- -D warnings";
+    const APP_ALL: &str = "cargo clippy -p app --all-targets -- -D warnings";
+    const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings";
+    const XTASK_REPO: &str = "cargo test -p xtask --lib --test rules --test docs --test review";
+    const TESTS: &str = "cargo test --workspace --exclude roformer-gpu";
+    const GPU_LIB: &str = "cargo test -p roformer-gpu --lib";
+    const GPU_DOC: &str = "cargo test -p roformer-gpu --doc";
+    const GPU: &str = "STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release";
+    const TRUNK: &str = "(cd app && trunk build --release)";
+    const SERVE: &str = "cargo run -p xtask --release -- serve app/dist --port 8080";
+    const WEB_TEST: &str = "cargo run -p xtask -- web-test";
+    const E2E: &str = "cargo run -p xtask -- e2e <scenario>";
+    const PUBLISH: &str = "cargo run -p xtask --release -- publish";
+
+    /// The 11 members of this repo and their real edges, of all kinds.
+    fn fixture() -> Graph {
+        Graph::new(&[
+            ("app", "app", &["dsp", "engine", "synth", "stem-protocol"]),
+            (
+                "decoder",
+                "decode-worker",
+                &["dsp", "engine", "stem-protocol"],
+            ),
+            ("dsp", "dsp", &[]),
+            ("engine", "engine", &["dsp"]),
+            ("protocol", "stem-protocol", &[]),
+            ("roformer", "roformer", &["test-support"]),
+            (
+                "roformer-gpu",
+                "roformer-gpu",
+                &["roformer", "test-support"],
+            ),
+            ("synth", "synth", &[]),
+            ("test-support", "test-support", &[]),
+            (
+                "worker",
+                "stem-worker",
+                &["roformer", "roformer-gpu", "stem-protocol"],
+            ),
+            ("xtask", "xtask", &["dsp", "engine", "roformer", "synth"]),
+        ])
+    }
+
+    fn paths(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// The plan as `run: <line>` and `skip: <line>`, in order.
+    fn decisions(plan: &Plan) -> Vec<String> {
+        plan.choices
+            .iter()
+            .map(|choice| match choice.decision {
+                Decision::Run => format!("run: {}", choice.check.line()),
+                Decision::Skip => format!("skip: {}", choice.check.line()),
+            })
+            .collect()
+    }
+
+    fn commit(given: &[&str]) -> Plan {
+        plan(Tier::Commit, &paths(given), Some(&fixture()))
+    }
+
+    fn run(line: &str) -> String {
+        format!("run: {line}")
+    }
+
+    fn skip(line: &str) -> String {
+        format!("skip: {line}")
+    }
+
+    /// The skips at the end of each plan of tier `commit`.
+    fn commit_tail() -> Vec<String> {
+        [GPU, TRUNK, SERVE, WEB_TEST, E2E, PUBLISH]
+            .map(skip)
+            .to_vec()
+    }
+
+    /// The skips at the end of each plan of tier `push`.
+    fn push_tail() -> Vec<String> {
+        [SERVE, WEB_TEST, E2E, PUBLISH].map(skip).to_vec()
+    }
+
+    fn with_tail(head: Vec<String>, tail: Vec<String>) -> Vec<String> {
+        head.into_iter().chain(tail).collect()
+    }
+
+    /// Tier `push` with the GPU test line decided as `gpu`.
+    fn push_list(gpu: String) -> Vec<String> {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            run(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            run(TESTS),
+            run(GPU_LIB),
+            run(GPU_DOC),
+            gpu,
+            run(TRUNK),
+        ];
+        with_tail(head, push_tail())
+    }
+
+    /// Tier `commit` for paths in no member: the first four rows.
+    fn no_member_list() -> Vec<String> {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            skip(APP),
+            skip(APP_ALL),
+            skip(WASM),
+            run(XTASK_REPO),
+            skip(TESTS),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        with_tail(head, commit_tail())
+    }
+
+    #[test]
+    fn lines_are_the_twelve_of_the_push_tier() {
+        let got: Vec<String> = lines().iter().map(Check::line).collect();
+        assert_eq!(
+            got,
+            [
+                FMT, DOCS, CLIPPY, SYNTH, APP, APP_ALL, WASM, TESTS, GPU_LIB, GPU_DOC, GPU, TRUNK
+            ]
+        );
+        let gpu = &lines()[10];
+        assert_eq!(
+            gpu.env,
+            [("STEMYLA_REQUIRE".to_string(), "gpu,f16".to_string())]
+        );
+        assert_eq!(lines()[11].folder, "app");
+        assert_eq!(lines()[11].argv, ["trunk", "build", "--release"]);
+    }
+
+    #[test]
+    fn a_docs_path_runs_the_first_four_rows_and_no_crate_tests() {
+        let plan = commit(&["docs/x.md"]);
+        assert_eq!(plan.tier, Tier::Commit);
+        assert_eq!(decisions(&plan), no_member_list());
+    }
+
+    #[test]
+    fn no_path_runs_the_first_four_rows_only() {
+        assert_eq!(decisions(&commit(&[])), no_member_list());
+    }
+
+    /// Tier `commit` for a change in `dsp`.
+    fn dsp_list() -> Vec<String> {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p dsp -p engine -p xtask"),
+            skip(TESTS),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        with_tail(head, commit_tail())
+    }
+
+    #[test]
+    fn a_dsp_path_tests_its_dependents_in_one_command() {
+        assert_eq!(decisions(&commit(&["dsp/src/lib.rs"])), dsp_list());
+    }
+
+    #[test]
+    fn a_deleted_path_counts_as_a_change_of_its_member() {
+        assert_eq!(decisions(&commit(&["dsp/src/gone.rs"])), dsp_list());
+    }
+
+    #[test]
+    fn a_synth_path_runs_the_synth_app_and_wasm32_clippy_lines() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            run(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p synth -p xtask"),
+            skip(TESTS),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        assert_eq!(
+            decisions(&commit(&["synth/src/lib.rs"])),
+            with_tail(head, commit_tail())
+        );
+    }
+
+    #[test]
+    fn a_roformer_path_is_in_roformer_and_runs_the_roformer_gpu_tests() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            skip(APP),
+            skip(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p roformer -p stem-worker -p xtask"),
+            skip(TESTS),
+            run(GPU_LIB),
+            run(GPU_DOC),
+        ];
+        assert_eq!(
+            decisions(&commit(&["roformer/src/x.rs"])),
+            with_tail(head, commit_tail())
+        );
+    }
+
+    #[test]
+    fn a_roformer_gpu_path_is_in_roformer_gpu_only() {
+        assert_eq!(
+            fixture().member_of("roformer-gpu/src/x.rs"),
+            Some("roformer-gpu")
+        );
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            skip(APP),
+            skip(APP_ALL),
+            run(WASM),
+            run(XTASK_REPO),
+            run("cargo test -p stem-worker"),
+            skip(TESTS),
+            run(GPU_LIB),
+            run(GPU_DOC),
+        ];
+        assert_eq!(
+            decisions(&commit(&["roformer-gpu/src/x.rs"])),
+            with_tail(head, commit_tail())
+        );
+    }
+
+    #[test]
+    fn an_engine_path_tests_engine_and_app_in_one_command() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p engine -p xtask"),
+            skip(TESTS),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        let plan = commit(&["engine/src/decode.rs"]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+        let tests: Vec<&Choice> = plan
+            .choices
+            .iter()
+            .filter(|c| {
+                c.decision == Decision::Run && c.check.argv.get(1).is_some_and(|w| w == "test")
+            })
+            .collect();
+        assert_eq!(tests.len(), 1, "the crate tests are one command");
+    }
+
+    #[test]
+    fn a_path_with_a_space_stays_whole() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            run(XTASK_REPO),
+            run("cargo test -p app"),
+            skip(TESTS),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        assert_eq!(
+            decisions(&commit(&["app/src/a b.rs"])),
+            with_tail(head, commit_tail())
+        );
+    }
+
+    /// No one member of this repo has all 11 members as its dependents.
+    /// So the paths of four members give the workspace test line.
+    #[test]
+    fn the_crate_tests_of_every_member_but_roformer_gpu_are_the_workspace_test_line() {
+        let graph = fixture();
+        for name in graph.names() {
+            let one = BTreeSet::from([name.clone()]);
+            assert_ne!(graph.dependents(&one), graph.names(), "{name}");
+        }
+        let all =
+            BTreeSet::from(["dsp", "test-support", "stem-protocol", "synth"].map(str::to_string));
+        assert_eq!(graph.dependents(&all), graph.names());
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            run(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run(TESTS),
+            run(GPU_LIB),
+            run(GPU_DOC),
+        ];
+        let plan = commit(&[
+            "dsp/src/lib.rs",
+            "test-support/src/lib.rs",
+            "protocol/tests/x.rs",
+            "synth/src/lib.rs",
+        ]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    #[test]
+    fn a_workspace_file_runs_every_line_but_the_gpu_line_and_trunk() {
+        let plan = commit(&[".cargo/config.toml"]);
+        assert_eq!(plan.tier, Tier::Commit);
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            run(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            run(TESTS),
+            run(GPU_LIB),
+            run(GPU_DOC),
+        ];
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    #[test]
+    fn a_strict_path_runs_tier_push() {
+        let plan = commit(&["Cargo.lock"]);
+        assert_eq!(plan.tier, Tier::Push);
+        assert_eq!(
+            plan.strict,
+            [("DEPS-1".to_string(), "Cargo.lock".to_string())]
+        );
+        // `Cargo.lock` is a workspace file, so the GPU test line runs.
+        assert_eq!(decisions(&plan), push_list(run(GPU)));
+    }
+
+    #[test]
+    fn an_rt_1_path_runs_tier_push_with_no_gpu_line() {
+        let plan = commit(&["engine/src/slot.rs"]);
+        assert_eq!(plan.tier, Tier::Push);
+        assert_eq!(
+            plan.strict,
+            [("RT-1".to_string(), "engine/src/slot.rs".to_string())]
+        );
+        assert_eq!(decisions(&plan), push_list(skip(GPU)));
+    }
+
+    #[test]
+    fn tier_commit_with_no_graph_runs_tier_push() {
+        let plan = plan(Tier::Commit, &paths(&["docs/x.md"]), None);
+        assert_eq!(plan.tier, Tier::Push);
+        assert!(plan.strict.is_empty());
+        assert_eq!(decisions(&plan), push_list(skip(GPU)));
+    }
+
+    #[test]
+    fn tier_push_runs_the_gpu_line_for_a_gpu_path() {
+        let plan = plan(Tier::Push, &paths(&["roformer-gpu/src/x.rs"]), None);
+        assert_eq!(plan.tier, Tier::Push);
+        assert_eq!(decisions(&plan), push_list(run(GPU)));
+        for folder in [
+            "roformer/x.rs",
+            "test-support/src/lib.rs",
+            "rust-toolchain.toml",
+        ] {
+            let plan = super::plan(Tier::Push, &paths(&[folder]), None);
+            assert_eq!(decisions(&plan), push_list(run(GPU)), "{folder}");
+        }
+    }
+
+    #[test]
+    fn tier_push_skips_the_gpu_line_for_a_docs_path_with_its_reason() {
+        let plan = plan(Tier::Push, &paths(&["docs/x.md"]), Some(&fixture()));
+        assert_eq!(decisions(&plan), push_list(skip(GPU)));
+        let gpu = plan.choices.iter().find(|c| c.check.line() == GPU).unwrap();
+        assert!(gpu.reason.contains("no GPU code"), "{}", gpu.reason);
+    }
+
+    /// With no path, tier `push` cannot rule out a GPU change.
+    #[test]
+    fn tier_push_with_no_path_runs_the_gpu_line() {
+        let plan = plan(Tier::Push, &[], None);
+        assert_eq!(decisions(&plan), push_list(run(GPU)));
+    }
+
+    #[test]
+    fn tier_commit_always_skips_the_gpu_line_and_trunk_with_their_reasons() {
+        let plan = commit(&["roformer-gpu/src/x.rs"]);
+        let reason = |line: &str| {
+            plan.choices
+                .iter()
+                .find(|c| c.check.line() == line)
+                .map(|c| c.reason.clone())
+                .unwrap_or_default()
+        };
+        assert!(reason(GPU).contains("real GPU"), "{}", reason(GPU));
+        assert!(
+            reason(TRUNK).contains("tier push runs it"),
+            "{}",
+            reason(TRUNK)
+        );
+        assert!(reason(E2E).contains("decision 0026"), "{}", reason(E2E));
+        assert!(reason(PUBLISH).contains("GIT-1"), "{}", reason(PUBLISH));
+    }
+
+    /// Each set of paths of these tests.
+    const ALL_PATHS: &[&[&str]] = &[
+        &[],
+        &["docs/x.md"],
+        &["docs/a b.md"],
+        &["dsp/src/lib.rs"],
+        &["synth/src/lib.rs"],
+        &["roformer/src/x.rs"],
+        &["roformer-gpu/src/x.rs"],
+        &["engine/src/decode.rs"],
+        &["app/src/a b.rs"],
+        &[".cargo/config.toml"],
+        &["Cargo.lock"],
+        &["engine/src/slot.rs"],
+        &[
+            "dsp/src/lib.rs",
+            "test-support/src/lib.rs",
+            "protocol/tests/x.rs",
+            "synth/src/lib.rs",
+        ],
+    ];
+
+    #[test]
+    fn check_never_runs_the_browser_or_publish() {
+        let graph = fixture();
+        for tier in [Tier::Commit, Tier::Push] {
+            for graph in [Some(&graph), None] {
+                for given in ALL_PATHS {
+                    let plan = plan(tier, &paths(given), graph);
+                    let runs: Vec<&Choice> = plan
+                        .choices
+                        .iter()
+                        .filter(|c| c.decision == Decision::Run)
+                        .collect();
+                    assert!(!runs.is_empty(), "{tier:?} {given:?} runs a check");
+                    for choice in runs {
+                        for word in &choice.check.argv {
+                            assert!(
+                                !["serve", "web-test", "e2e", "publish"].contains(&word.as_str()),
+                                "{tier:?} {given:?} runs {}",
+                                choice.check.line()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_strict_path_table_follows_strict_rules() {
+        let ids: Vec<String> = STRICT_PATHS.iter().map(|(id, _)| id.to_string()).collect();
+        assert_eq!(ids, strict_rules());
+        for (id, globs) in STRICT_PATHS {
+            let empty = ["VERIFY-1", "GIT-1"].contains(id);
+            assert_eq!(globs.is_empty(), empty, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_fixture_graph_is_the_real_graph() {
+        let metadata =
+            rules::workspace_metadata(&crate::workspace_root()).expect("cargo metadata runs");
+        let workspace =
+            rules::workspace(&metadata).expect("cargo metadata's JSON gives the workspace");
+        assert_eq!(Graph::from_workspace(&workspace), fixture());
+    }
+
+    /// The rules that `path` hits.
+    fn hits(path: &str) -> Vec<String> {
+        strict_hits(&paths(&[path]))
+            .into_iter()
+            .map(|(rule, hit)| {
+                assert_eq!(hit, path);
+                rule
+            })
+            .collect()
+    }
+
+    /// Each path of `hit` hits `rule`, and each path of `near` does not.
+    fn assert_row(rule: &str, hit: &[&str], near: &[&str]) {
+        for path in hit {
+            assert!(hits(path).contains(&rule.to_string()), "{path} hits {rule}");
+        }
+        for path in near {
+            assert!(
+                !hits(path).contains(&rule.to_string()),
+                "{path} does not hit {rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn proto_1_has_the_codecs_and_the_hand_written_messages() {
+        assert_row(
+            "PROTO-1",
+            &[
+                "protocol/src/lib.rs",
+                "protocol/src/decode.rs",
+                "xtask/e2e/worker.js",
+                "xtask/e2e/save_spy.js",
+                "xtask/src/e2e.rs",
+                "xtask/src/e2e/decode.rs",
+                "xtask/src/e2e/weights.rs",
+            ],
+            &[
+                "protocol/tests/x.rs",
+                "xtask/e2e/blank.html",
+                "xtask/src/e2e_x.rs",
+            ],
+        );
+    }
+
+    #[test]
+    fn proto_2_has_the_site_check_and_its_callers() {
+        assert_row(
+            "PROTO-2",
+            &[
+                "protocol/src/lib.rs",
+                "app/src/separator.rs",
+                "worker/src/web.rs",
+            ],
+            &[
+                "protocol/src/decode.rs",
+                "app/src/separator_x.rs",
+                "worker/src/web/x.rs",
+            ],
+        );
+    }
+
+    #[test]
+    fn mem_1_has_samples_and_the_clippy_files() {
+        assert_row(
+            "MEM-1",
+            &["engine/src/song.rs", "app/clippy.toml", "clippy.toml"],
+            &["engine/src/songs.rs", "app/clippy.txt"],
+        );
+    }
+
+    #[test]
+    fn mem_2_has_the_transfer_lists() {
+        assert_row(
+            "MEM-2",
+            &[
+                "protocol/src/decode.rs",
+                "app/src/separator.rs",
+                "app/src/decoder/client.rs",
+                "worker/src/web.rs",
+                "decoder/src/web.rs",
+            ],
+            &["app/src/decoder/x.rs", "decoder/src/pass.rs"],
+        );
+    }
+
+    #[test]
+    fn mem_3_has_gpu_buffer_and_its_lints() {
+        assert_row(
+            "MEM-3",
+            &["roformer-gpu/src/lib.rs", "roformer-gpu/clippy.toml"],
+            &["roformer-gpu/src/net.rs", "roformer-gpu/tests/x.rs"],
+        );
+    }
+
+    #[test]
+    fn mem_4_has_the_chunk_and_the_weight_format() {
+        assert_row(
+            "MEM-4",
+            &[
+                "roformer/src/lib.rs",
+                "roformer/src/weights.rs",
+                "roformer-gpu/src/lib.rs",
+            ],
+            &["roformer/src/stft.rs", "roformer-gpu/src/net.rs"],
+        );
+    }
+
+    #[test]
+    fn mem_5_has_the_opfs_writes() {
+        assert_row(
+            "MEM-5",
+            &[
+                "app/src/store.rs",
+                "app/src/export.rs",
+                "app/src/streamtest.rs",
+                "worker/src/web.rs",
+                "worker/src/web/encode.rs",
+                "worker/src/web/stems.rs",
+                "decoder/src/web.rs",
+            ],
+            &[
+                "app/src/reset.rs",
+                "app/src/lib.rs",
+                "worker/src/web/tests.rs",
+            ],
+        );
+    }
+
+    #[test]
+    fn rt_1_has_the_audio_callback_and_its_sources() {
+        assert_row(
+            "RT-1",
+            &[
+                "engine/src/slot.rs",
+                "engine/src/source.rs",
+                "engine/src/player.rs",
+                "engine/src/live.rs",
+                "engine/src/readahead.rs",
+                "engine/src/readahead/x.rs",
+                "engine/src/stretch/a/b.rs",
+                "engine/src/test_alloc.rs",
+            ],
+            &["engine/src/decode.rs", "engine/tests/realtime.rs"],
+        );
+    }
+
+    #[test]
+    fn gpu_1_has_the_kernels_and_the_limits() {
+        assert_row(
+            "GPU-1",
+            &["roformer-gpu/src/shaders/x.wgsl", "roformer-gpu/src/lib.rs"],
+            &["roformer-gpu/src/bench.rs", "roformer-gpu/src/net.rs"],
+        );
+    }
+
+    #[test]
+    fn gpu_2_and_gpu_3_have_the_kernels_and_the_choice_of_defaults() {
+        for rule in ["GPU-2", "GPU-3"] {
+            assert_row(
+                rule,
+                &[
+                    "roformer-gpu/src/shaders/x.wgsl",
+                    "roformer-gpu/src/bench.rs",
+                    "roformer-gpu/src/lib.rs",
+                ],
+                &["roformer-gpu/src/net.rs", "roformer/src/lib.rs"],
+            );
+        }
+    }
+
+    #[test]
+    fn verify_1_and_git_1_have_no_path() {
+        for given in ALL_PATHS.iter().flat_map(|p| p.iter()) {
+            for rule in hits(given) {
+                assert!(rule != "VERIFY-1" && rule != "GIT-1", "{given} hits {rule}");
+            }
+        }
+        assert!(strict_paths("VERIFY-1").is_empty());
+        assert!(strict_paths("GIT-1").is_empty());
+        assert!(!strict_paths("DEPS-1").is_empty());
+    }
+
+    #[test]
+    fn deps_1_has_the_manifests_the_lock_file_and_the_licences() {
+        assert_row(
+            "DEPS-1",
+            &[
+                "Cargo.toml",
+                "app/Cargo.toml",
+                "Cargo.lock",
+                "THIRD-PARTY.md",
+            ],
+            &["docs/THIRD-PARTY.md", "app/Cargo.lock", "Cargo.toml.orig"],
+        );
+    }
+
+    #[test]
+    fn asset_1_has_the_ignore_file_and_each_audio_or_weight_path() {
+        assert_row(
+            "ASSET-1",
+            &[".gitignore", "wav/a.WAV", "model.safetensors", "a/b.mp3"],
+            &["app/.gitignore", "docs/wav.md", "a/mp3"],
+        );
+    }
+
+    #[test]
+    fn strict_hits_follow_the_rules_then_the_paths() {
+        let got = strict_hits(&paths(&["docs/x.md", "worker/src/web.rs", "Cargo.lock"]));
+        let want: Vec<(String, String)> = [
+            ("PROTO-2", "worker/src/web.rs"),
+            ("MEM-2", "worker/src/web.rs"),
+            ("MEM-5", "worker/src/web.rs"),
+            ("DEPS-1", "Cargo.lock"),
+        ]
+        .map(|(r, p)| (r.to_string(), p.to_string()))
+        .to_vec();
+        assert_eq!(got, want);
+    }
+}
