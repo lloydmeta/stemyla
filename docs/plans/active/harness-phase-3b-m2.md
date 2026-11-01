@@ -83,7 +83,7 @@ Put the list and its match in `xtask/src/review.rs`, in a section with a heading
   * `line_at(file, line)`, trimmed, equals the entry's `code`;
   * `<col>` minus the indent of that line equals the entry's `offset`.
 * Else the line goes to the validator.  This holds also for a line that does not parse, and for a file that `line_at` cannot read.  So an old entry sends its mutant to the validator.
-* An entry hides only a mutant with the same file, text, code line and offset.  Step 3's `known_problems` refuses a code line that the file has more than once.  So a copy of a known line cannot be hidden.
+* An entry hides only a mutant with the same file, text, code line and offset.  Step 3's `known_problems` refuses a code line that the functions of the mutation's name hold more than once.  The text names the function, so a copy of a known line cannot be hidden (Decision log).
 * The doc comment says why each part is there.  Line numbers move.  The text alone does not tell two operator mutants of one function apart.  The offset tells two mutants on one line apart.
 
 Tests of step 1, in `xtask/src/review.rs`, with a fixture list (not `KNOWN_MISSED`) and a fake `line_at`:
@@ -125,7 +125,7 @@ Tests of step 1, in `xtask/src/review.rs`, with a fixture list (not `KNOWN_MISSE
   * a `mutation` whose function name (see below) is not a Rust identifier;
   * a file with no `fn <name>` line for that function;
   * a `code` line that is in the body of no function of that name;
-  * a `code` line that the file has more than once, trimmed;
+  * a `code` line that the bodies of the functions of that name hold more than once, trimmed (Decision log);
   * two entries that are the same.
 * A `fn <name>` line has `fn`, a space, the name, then `(` or `<`.  `pub`, `pub(…)` or `async` can come before `fn`.  So `fn restore` does not match `fn restore_check(`.
 * The body of a function runs from its `fn` line to the first later line that is `}` at the `fn` line's indent.  A function that ends on its `fn` line has that one line.  Any function of the name counts.
@@ -204,7 +204,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent), at `77ba7b8`: 1 blocker, 6 should-fix (2 significant) and 5 nits.  The blocker: a commit with failing tests breaks GIT-2.  All findings are fixed in this plan.  The review stops at its cap of 2 rounds.
 * [x] 2026-10-31: step 1, `Known`, an empty `KNOWN_MISSED` and `split`, with 7 tests (implementer).
 * [x] 2026-10-31: step 2, `review mutants` writes `missed.txt` and `known.txt`, and the mutants line ends `, known <k>` (implementer).
-* [ ] Step 3: the entries and their test.
+* [x] 2026-10-31: step 3, the 12 entries of `KNOWN_MISSED`, `known_problems` and its tests (implementer).
 * [ ] Step 4: the docs, and the diff for the orchestrator.
 * [ ] Review rounds.
 * [ ] M2 done: this plan moves to `plans/completed/`.
@@ -220,6 +220,11 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, implementer: step 1 adds a seventh test, `split_reads_no_file_for_a_line_that_no_entry_names`.  `split` calls `line_at` only for a line that an entry names, so step 2 runs no `git show` for most lines.  The test also failed on the stub.
 * 2026-10-31, implementer: step 2's tests failed first on the stubs, on `assert_eq`.  The stubs were a `Line` that printed no `known`, a `mutants_with` that wrote no file, and the old `clear_old_output`.  21 tests failed: the 17 tests that pin the line of `classify`, the two run tests, the clear test and the split test.  With `known` in the line, three tests still failed: no `missed.txt` (`None`, not `Some("")`) in the two run tests, and "nor the missed lines of the last run" in the clear test.  `mutants_splits_the_missed_lines_by_the_list` failed with `known 0`, not `known 1`.
 * 2026-10-31, implementer: the fake `cargo` copies `missed.txt` from its own folder to `mutants.out`, if it is there.  So a test gives the missed lines without an environment variable, which tests that run at the same time would share.
+* 2026-10-31, implementer: step 3's tests of `known_problems` failed first on the stubs, on `assert_eq`.  The stub of `known_problems` gave `"stub"` for each entry, and a stub of `mutation_function` gave `"stub"`.  All 12 tests failed.  `the_real_list_knows_2_17_and_not_1_41_or_1_54` failed with the empty `KNOWN_MISSED`: the line of 2-17 went to the validator.  `each_known_missed_entry_is_open_and_in_the_code` passed with the empty list, as the plan says.
+* 2026-10-31, implementer: at `759abfa`, `xtask/src/e2e/save.rs` has `restore(p, seconds)?;` twice (lines 1113 and 1166, in `save_once` and `save_playing`).  It has `let mark = p.mark();` three times (1090, 1122 and 1179).  So the rule "a code line that the file has more than once" refuses the entries of 2-17 and of `click_save`.  The plan's own acceptance needs the entry of 2-17.  So the rule counts the code line only in the functions of the mutation's name (Decision log).
+* 2026-10-31, implementer: the 12 entries of `KNOWN_MISSED`, each from `cargo mutants --list --line-col=true -f <file>` at `759abfa`.  TD-39: `restore` (M8 2-15, `save.rs:1004:5`), `save_once` (M8 2-17, `save.rs:1113:5`), `click_save` with `Ok(String::new())` and with `Ok("xyzzy".into())` (M8 speed 2, 2-16 and 2-17, `save.rs:1090:5`), `save_playing` (M8 speed 2, 2-18, `save.rs:1165:5`), `main` (catch-up 1-28, `app/src/main.rs:4:5`) and `drop_and_open` (catch-up 1-30, `decode.rs:324:5`).  TD-66: `note_run` with `Ok(vec![String::new()])` and `Ok(vec![])` (M9 1-21 and 1-28, `weights.rs:257:5`), `&&` to `||` in `note_run` (M9 1-31, `weights.rs:259:48`, offset 40), and `||` to `&&` in `note_run` (M9 1-37 and 1-44, `weights.rs:280:13` and `282:13`).
+* 2026-10-31, implementer: the 17 rows left out.  11 repeat an earlier row: `save_once` 5 (M8 speed 1 1-48, speed 2 2-14, speed 3 3-14, speed 4 4-20, speed 5 5-19), `save_playing` 4 (speed 3 3-12, speed 4 4-19, speed 5 5-18, speed 6 6-14) and `click_save` 2 (speed 3 3-13 and 3-15).  5 mutate the constant `WAITS_S` outside a function (M8 speed 1, 1-19, 1-20, 1-30, 1-31 and 1-38, `2c7c29b:xtask/src/e2e/save.rs:156`).  M9 1-33 (`replace == with != in run`, line 488 at `0789e6b`) has no column, and its line has two `==`, so the validator sees both.  No row's fix commit added a test for its mutant, and `--list` still shows each mutant of the 12 entries.
+* 2026-10-31, implementer: a check with the real list on the `--list` output of the four files (623 mutants) at `759abfa` found 12 known lines, one for each entry.  So no entry matches a second mutant.  The third `||` of `note_run` (`weights.rs:281:13`, `f16 weights`) has no row, so it stays with the validator.
 
 ## Decision log
 
@@ -233,6 +238,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, team leader: the stubs stay in the working tree, and no commit holds a failing test (GIT-2).  Plan review round 2 found the first form, a committed stub, a blocker.  Each stub gives a wrong answer, so each test fails on it.
 * 2026-10-31, team leader: the test of the mutants line changes in step 2, and the skill's pins change in the orchestrator's commit.  The parent plan asks for one commit.  Reason: the skill is the orchestrator's to edit.  The pins do not pin the mutants line, so each commit passes its tests.
 * 2026-10-31, team leader: the plan review stopped at its cap of 2 rounds.  Round 2's findings are fixed in this plan, with no third review.
+* 2026-10-31, implementer: `known_problems` counts a code line in the bodies of the functions of the mutation's name, not in the whole file.  Reason: the rule of the whole file refuses the entry of 2-17, which the parent plan's acceptance needs, since `save_playing` has the same first line.  The mutation text names the function, so a copy of the line in another function cannot give a known line.  A copy in a function of the same name is still refused.
 
 ## Outcomes and retrospective
 
