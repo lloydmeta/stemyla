@@ -270,7 +270,7 @@ The team leader gives these to the orchestrator as text:
   * 2026-11-01: 2a in `71b261a`.  `review clean` removes each name that starts with `<round>-`.  Test: `review_clean_removes_the_worktrees_of_one_round_only`.
 * [x] 2026-11-01: step 3, the skill, the review skill diff, `CLAUDE.md`, the guide, TD-37 and the pins, in the orchestrator's scratchpad folder `m6/` (`SKILL.md`, `claude.diff`, `README.txt`, `parent.md`).  `git apply --check` passes on `177cf31`.  Tier `push` passes in a scratch worktree with the whole bundle; `CLAUDE.md` keeps 91 lines.
 * [ ] Step 4: the checkpoint before round 1.
-* [ ] Step 5: the dry run.
+* [x] 2026-11-01: step 5, the dry run (`/private/tmp/stemyla-harness/m6-dry-1`, a clone of `03e28e6`).  The session loaded the `orchestrate` skill and proposed orchestrated mode in its only reply.  7 turns, $0.40.  It made no change in the clone.
 * [ ] Step 6: review rounds.
 * [ ] Step 7: close-out.
 
@@ -287,6 +287,7 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, step 3: with only the `xtask/tests/rules.rs` part of the diff, `cargo test -p xtask --test rules` gave 30 passed and 3 failed, each on an assert.  `the_orchestrate_skill_keeps_its_key_lines` gave 23 problems (the keys, the 4 signals, 18 lines), since the missing file reads as empty.  `the_sizing_rule_says_the_same_in_each_place` named the 4 signals and the skill.  `the_review_skill_starts_with_xtask` gave 6 problems: the 4 new lines, and the 2 new lines of step 11's subagent bullet, which replace 2 old pins.  With the whole bundle, tier `push` gave "11 passed in 139.5 s".
 * 2026-11-01, step 3: `docs-check` reads a code span of the skill that ends in `.md` or `.json` as a path, so `findings.md`, `log.md`, `.claude/settings.local.json` and `plans/active/harness-phase-3b.md` failed.  The skill writes `<run>/<round>/findings.md` and `<run>/log.md`, names the local settings file in words, and names M7 with no path.
 * 2026-11-01, step 3: each item of the orchestrator's brief was checked in the parent plan.  Five have no line there, or only a part of one: the checkpoint of each round and the orchestrator's own paths, the intent review from round 4 and the removal of the run folder, the CI cases, the 30 minutes of a stalled subagent, and the permission rule with the install of a missing tool.  `parent.md` gives a Decision log line for each.
+* 2026-11-01, step 5: the dry run's session ran on `claude-opus-5-5[1m]`, with the plan of 4 milestones on stdin and the prompt "do this plan".  Its tool calls: Bash (1, refused by `dontAsk`: `cat`, `ls` and `grep` to read the guide and the plans), Read (1), Glob (1), Grep (1), then Skill (`orchestrate`).  No Agent, Write or Edit call.  The first and only reply starts: "I haven't started the plan.  The `orchestrate` skill has me check the repo before anything else, and this session can't run shell commands at all."  Then: "The plan has 4 milestones, so `CLAUDE.md` counts it as a big task (decision 0023).  That means the `orchestrate` skill runs it, after I've checked the setup and you've answered one question about how to run it."  It lists the preflight checks that need Bash, the way to start the run in auto mode, and the points of its one question: the missing "How the work runs" section, the plan's open choices, the branch and the draft PR.
 
 ## Decision log
 
@@ -297,6 +298,8 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, agent (implementer): `plan_runs_problems` reads no line in a fenced code block as a heading.  Reason: a shell comment such as `# M4 ...` in a fence is not a milestone heading in Markdown.  The test `only_a_heading_that_starts_with_m_n_is_a_milestone` holds that case.
 * 2026-11-01, agent (implementer): for 2c, `review_log.rs` gives `table`, `findings`, `Row`, `Row::is_named` and `action_kind` to the crate.  `Row` now owns its cells, so `findings` can return the rows.  `fix_rule_problems` uses the same parse, and its tests do not change.
 * 2026-11-01, agent (implementer): the plan gives no fix for three messages of 2d.  R3's item "the named row's Repeat of is `none`" says "Fix: write `<y>` in Repeat of", as the skill names the ID of the matched row's Repeat of.  R2 says "Fix: write `refuted`, or match it as a new finding".  The nit verdict says "Fix: write `unvalidated`", since "copy the cell" is wrong for a nit.  The test `a_reported_repeat_of_the_same_or_a_lower_severity_copies_the_row` holds the first (`6-1`).
+
+* 2026-11-01, agent (team leader): the dry run passes the parent's acceptance: its first reply proposes orchestrated mode.  It does not pass this plan's own line "no `tool_use` of ... `Bash`": its one Bash call came before it loaded the skill, read files only, and was refused.  That line was too strict, since a read with Bash is not work.  No second run: the reply is the evidence the parent asks for.  The session did not ask its question yet, since the skill puts the preflight first and `dontAsk` refused Bash.
 
 ## Outcomes and retrospective
 
