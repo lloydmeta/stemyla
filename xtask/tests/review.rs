@@ -231,6 +231,64 @@ fn review_clean_removes_the_worktrees_of_one_round_only() {
     assert_eq!(text(&out.stdout), "no worktrees of round 1\n");
 }
 
+/// A run's log with these rows (`round | finding | reviewers | severity |
+/// significant | rule | verdict | repeat of | action`) in its findings
+/// table.
+fn run_log(rows: &[&str]) -> String {
+    let rows: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let c: Vec<&str> = r.split(" | ").collect();
+            format!(
+                "| 2026-11-01 | {} | 1234abc | {} | {} | {} | {} | doc | {} | x.rs:1 | a claim | {} | {} | {} |\n",
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]
+            )
+        })
+        .collect();
+    format!(
+        "# Review log\n\n## Findings\n\n| Date | Round | Commit | Finding | Reviewers | Severity | Significant | Kind | Rule | Where | Claim | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n{}\n## Rounds\n",
+        rows.concat()
+    )
+}
+
+#[test]
+fn review_log_check_checks_a_reported_repeat() {
+    let repo = Repo::new("log-check-repeat");
+    let reported =
+        "4 | 4-1 | reviewer | should-fix | no | none | confirmed | none | reported, not fixed";
+    std::fs::write(
+        repo.0.join("good.md"),
+        run_log(&[
+            reported,
+            "5 | 5-1 | reviewer | should-fix | no | none | confirmed | 4-1 | reported, not fixed",
+        ]),
+    )
+    .unwrap();
+    let out = repo.xtask(&["review", "log-check", "good.md"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        text(&out.stdout),
+        "log-check: the log follows the fix rule\n"
+    );
+
+    std::fs::write(
+        repo.0.join("bad.md"),
+        run_log(&[
+            reported,
+            "5 | 5-1 | reviewer | should-fix | no | none | confirmed | 3-9 | reported, not fixed",
+        ]),
+    )
+    .unwrap();
+    let out = repo.xtask(&["review", "log-check", "bad.md"]);
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(
+        text(&out.stderr).contains(
+            "5-1: Repeat of names `3-9`, which is no row of an earlier round of this log."
+        ),
+        "{out:?}"
+    );
+}
+
 #[test]
 fn review_clean_refuses_a_bad_round() {
     let repo = Repo::new("clean-round");

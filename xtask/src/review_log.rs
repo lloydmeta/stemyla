@@ -5,6 +5,12 @@
 //! only blockers, significant should-fix and confirmed findings on a strict
 //! rule.  The check reads only a log that has a `Significant` column, so the
 //! logs before harness phase 3b, M3 pass.  These are pure functions of text.
+//!
+//! A row whose Repeat of is a finding ID repeats an earlier row of the same
+//! log.  A reported repeat (from round 4, of a row with the action
+//! `reported, not fixed`) gets no validator.  So it copies the verdict, the
+//! Significant value and the action of that row, and a nit keeps
+//! `unvalidated` ([`repeat_problems`]).
 
 /// The strict rules, as decision 0024 gives them.
 pub const STRICT_RULES_TEXT: &str =
@@ -115,6 +121,23 @@ fn is_td(text: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// A finding ID: `<round>-<n>`, or `<round>-b<n>` for a finding of the
+/// baseline.
+fn is_finding_id(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    text.split_once('-')
+        .is_some_and(|(round, n)| digits(round) && digits(n.strip_prefix('b').unwrap_or(n)))
+}
+
+/// The rank of a severity: `blocker` is higher than `should-fix`, which is
+/// higher than `nit`.
+fn severity_rank(severity: &str) -> usize {
+    SEVERITIES.len() - SEVERITIES.iter().position(|s| *s == severity).unwrap_or(0)
+}
+
+/// The action of a reported row.
+const REPORTED: &str = "reported, not fixed";
+
 /// A word of 7 to 40 hex characters with at least one digit.
 fn is_sha(word: &str) -> bool {
     (7..=40).contains(&word.len())
@@ -177,15 +200,27 @@ impl Row {
     /// source.  The cell splits at each character that is not a letter, a
     /// digit or `-`, so `MEM-1/MEM-2` and `RT-1's rule` name rules.
     pub(crate) fn is_strict(&self, strict: &[String]) -> bool {
-        let named = self
+        !self.strict_rules_named(strict).is_empty() || self.has_mutants()
+    }
+
+    /// The strict rules that the Rule cell names, in the order of `strict`.
+    fn strict_rules_named<'s>(&self, strict: &'s [String]) -> Vec<&'s str> {
+        let tokens: Vec<&str> = self
             .rule
             .split(|c: char| !c.is_alphanumeric() && c != '-')
-            .any(|token| strict.iter().any(|id| id == token));
-        named
-            || self
-                .reviewers
-                .split(',')
-                .any(|source| source.trim() == "cargo-mutants")
+            .collect();
+        strict
+            .iter()
+            .filter(|id| tokens.contains(&id.as_str()))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// cargo-mutants is a source of the finding.
+    fn has_mutants(&self) -> bool {
+        self.reviewers
+            .split(',')
+            .any(|source| source.trim() == "cargo-mutants")
     }
 
     /// A finding of the three kinds that the fix rule names from round 4: a
@@ -194,7 +229,19 @@ impl Row {
         self.severity == "blocker" || self.significant == "yes" || self.is_strict(strict)
     }
 
-    /// The problems of the row's values: problems 2 to 5.
+    /// R0: Repeat of is `none`, a TD ID or a finding ID.
+    fn repeat_of_problem(&self) -> Option<String> {
+        let x = self.repeat_of.as_str();
+        if x == "none" || is_td(x) || is_finding_id(x) {
+            return None;
+        }
+        Some(format!(
+            "{}: Repeat of is `{x}`, not `none`, a TD or a finding ID.  Fix: write one of them.",
+            self.id
+        ))
+    }
+
+    /// The problems of the row's values: problems 2 to 5, and R0.
     fn value_problems(&self) -> Vec<String> {
         let id = &self.id;
         let mut problems = Vec::new();
@@ -213,6 +260,7 @@ impl Row {
                 self.significant
             ));
         }
+        problems.extend(self.repeat_of_problem());
         problems
     }
 
@@ -269,6 +317,97 @@ impl Row {
         }
         problems
     }
+}
+
+/// R1 to R4: the problems of `row`, whose Repeat of is a finding ID,
+/// against the row that it names.  `rows` holds each row of the log.
+fn repeat_problems(row: &Row, rows: &[&Row], strict: &[String]) -> Vec<String> {
+    let (id, x) = (&row.id, row.repeat_of.as_str());
+    if !is_finding_id(x) {
+        return Vec::new();
+    }
+    let round = |r: &Row| r.round.parse::<u32>().unwrap_or(0);
+    let Some(named) = rows
+        .iter()
+        .rev()
+        .find(|r| r.id == x && round(r) < round(row))
+    else {
+        return vec![format!(
+            "{id}: Repeat of names `{x}`, which is no row of an earlier round of this log.  Fix: name a row of this log, or write `none`.  A row of another log can have the same ID."
+        )];
+    };
+    let new = "Fix: match it as a new finding: write `none` in Repeat of, and validate it.";
+    let copy = "Fix: copy the cell of the named row";
+    let mut problems = Vec::new();
+    if named.verdict == "refuted" && row.verdict != "refuted" {
+        problems.push(format!("{id}: Repeat of names `{x}`, which is `refuted`, but the verdict is `{}`.  Fix: write `refuted`, or match it as a new finding: write `none` in Repeat of, and validate it.", row.verdict));
+    }
+    if named.action == REPORTED {
+        if round(row) < 4 {
+            problems.push(format!(
+                "{id}: Repeat of names the reported row `{x}`, but round {} is before round 4.  {new}",
+                row.round
+            ));
+        }
+        if named.repeat_of != "none" {
+            problems.push(format!(
+                "{id}: Repeat of names `{x}`, whose own Repeat of is `{}`.  Fix: write `{}` in Repeat of.",
+                named.repeat_of, named.repeat_of
+            ));
+        }
+        if severity_rank(&row.severity) > severity_rank(&named.severity) {
+            problems.push(format!(
+                "{id}: the severity `{}` is higher than `{}` of the reported row `{x}`.  {new}",
+                row.severity, named.severity
+            ));
+        }
+        let known = named.strict_rules_named(strict);
+        let more: Vec<&str> = row
+            .strict_rules_named(strict)
+            .into_iter()
+            .filter(|rule| !known.contains(rule))
+            .collect();
+        if !more.is_empty() {
+            problems.push(format!(
+                "{id}: the Rule cell names `{}`, which the reported row `{x}` does not name.  {new}",
+                more.join("`, `")
+            ));
+        }
+        if row.has_mutants() && !named.has_mutants() {
+            problems.push(format!(
+                "{id}: the Reviewers name `cargo-mutants`, but the reported row `{x}` does not.  {new}"
+            ));
+        }
+        if row.action != REPORTED {
+            problems.push(format!(
+                "{id}: the action is `{}`, but a repeat of the reported row `{x}` is not fixed.  {copy}: `{REPORTED}`.",
+                row.action
+            ));
+        }
+        if row.severity == "nit" {
+            if row.verdict != "unvalidated" {
+                problems.push(format!("{id}: a nit that repeats the reported row `{x}` has the verdict `{}`.  Fix: write `unvalidated`, since a nit stays `unvalidated` (decision 0024).", row.verdict));
+            }
+        } else {
+            if row.verdict != named.verdict {
+                problems.push(format!(
+                    "{id}: the verdict is `{}`, but the reported row `{x}` has `{}`.  {copy}.",
+                    row.verdict, named.verdict
+                ));
+            }
+            if row.significant != named.significant {
+                problems.push(format!(
+                    "{id}: Significant is `{}`, but the reported row `{x}` has `{}`.  {copy}.",
+                    row.significant, named.significant
+                ));
+            }
+        }
+    } else if named.verdict != "refuted" {
+        problems.push(format!(
+            "{id}: Repeat of names `{x}`, which is neither `refuted` nor `reported, not fixed`.  {new}"
+        ));
+    }
+    problems
 }
 
 /// The findings table of a log with a `Significant` column.
@@ -334,8 +473,9 @@ pub(crate) fn findings(text: &str) -> Option<Findings> {
     })
 }
 
-/// The problems of one log's findings table against the fix rule.  Each
-/// problem names the finding and its fix.  A log with no `Significant`
+/// The problems of one log's findings table against the fix rule, and of
+/// each repeat of an earlier row.  Each problem names the finding and its
+/// fix.  A log with no `Significant`
 /// column gives no problem.
 pub fn fix_rule_problems(text: &str) -> Vec<String> {
     let Some(findings) = findings(text) else {
@@ -345,6 +485,11 @@ pub fn fix_rule_problems(text: &str) -> Vec<String> {
         return findings.header_problems;
     }
     let strict = strict_rules();
+    let good: Vec<&Row> = findings
+        .rows
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .collect();
     let mut problems = Vec::new();
     for row in &findings.rows {
         let row = match row {
@@ -357,6 +502,7 @@ pub fn fix_rule_problems(text: &str) -> Vec<String> {
         let values = row.value_problems();
         if values.is_empty() {
             problems.extend(row.rule_problems(&strict));
+            problems.extend(repeat_problems(row, &good, &strict));
         } else {
             problems.extend(values);
         }
@@ -545,13 +691,194 @@ mod tests {
                 "4 | 4-1 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | refuted",
                 "4 | 4-2 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-66 | known: TD-39",
                 "4 | 4-3 | cargo-mutants | should-fix | - | VERIFY-1 | known | none | known: none",
-                "4 | 4-4 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-x | known: TD-x",
+                "4 | 4-4 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | known: TD-x",
             ]),
             [
                 "4-1: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
                 "4-2: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
                 "4-3: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
                 "4-4: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
+            ]
+        );
+    }
+
+    /// The fix of a new finding, in an R3 message.
+    const NEW: &str = "Fix: match it as a new finding: write `none` in Repeat of, and validate it.";
+
+    #[test]
+    fn a_reported_repeat_of_the_same_or_a_lower_severity_copies_the_row() {
+        let good = [
+            "4 | 4-1 | reviewer | should-fix | no | none | confirmed | none | reported, not fixed",
+            "4 | 4-2 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
+            "4 | 4-3 | reviewer | should-fix | no | none | unproven | none | reported, not fixed",
+            "5 | 5-1 | reviewer | should-fix | no | none | confirmed | 4-1 | reported, not fixed",
+            "5 | 5-2 | docs-reviewer | nit | - | none | unvalidated | 4-1 | reported, not fixed",
+            "5 | 5-3 | docs-reviewer | nit | - | none | unvalidated | 4-2 | reported, not fixed",
+        ];
+        assert_eq!(problems_of(&good), Vec::<String>::new());
+        let bad = [
+            "5 | 5-4 | docs-reviewer | nit | - | none | confirmed | 4-1 | reported, not fixed",
+            "5 | 5-5 | reviewer | should-fix | no | none | unproven | 4-1 | reported, not fixed",
+            "5 | 5-6 | reviewer | should-fix | yes | none | unproven | 4-3 | reported, not fixed",
+            "5 | 5-7 | reviewer | should-fix | no | none | confirmed | 4-1 | no change: later",
+            "6 | 6-1 | reviewer | should-fix | no | none | confirmed | 5-1 | reported, not fixed",
+        ];
+        let rows: Vec<&str> = good.iter().chain(&bad).copied().collect();
+        assert_eq!(
+            problems_of(&rows),
+            [
+                "5-4: a nit that repeats the reported row `4-1` has the verdict `confirmed`.  Fix: write `unvalidated`, since a nit stays `unvalidated` (decision 0024).",
+                "5-5: the verdict is `unproven`, but the reported row `4-1` has `confirmed`.  Fix: copy the cell of the named row.",
+                "5-6: Significant is `yes`, but the reported row `4-3` has `no`.  Fix: copy the cell of the named row.",
+                "5-7: the action is `no change: later`, but a repeat of the reported row `4-1` is not fixed.  Fix: copy the cell of the named row: `reported, not fixed`.",
+                "6-1: Repeat of names `5-1`, whose own Repeat of is `4-1`.  Fix: write `4-1` in Repeat of.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeat_with_a_higher_severity_a_new_strict_rule_or_a_new_source_is_a_new_finding() {
+        let good = [
+            "4 | 4-1 | reviewer | should-fix | no | none | unproven | none | reported, not fixed",
+            "5 | 5-4 | reviewer | blocker | no | none | unproven | none | abc1234 review round 5 fixes",
+            "5 | 5-5 | memory-reviewer | should-fix | no | MEM-1 | unproven | none | abc1234 review round 5 fixes",
+            "5 | 5-6 | cargo-mutants | should-fix | no | none | unproven | none | abc1234 review round 5 fixes",
+        ];
+        assert_eq!(problems_of(&good), Vec::<String>::new());
+        let bad = [
+            "5 | 5-1 | reviewer | blocker | no | none | unproven | 4-1 | reported, not fixed",
+            "5 | 5-2 | memory-reviewer | should-fix | no | MEM-1 | unproven | 4-1 | reported, not fixed",
+            "5 | 5-3 | cargo-mutants | should-fix | no | none | unproven | 4-1 | reported, not fixed",
+        ];
+        let rows: Vec<&str> = good.iter().chain(&bad).copied().collect();
+        assert_eq!(
+            problems_of(&rows),
+            [
+                format!(
+                    "5-1: the severity `blocker` is higher than `should-fix` of the reported row `4-1`.  {NEW}"
+                ),
+                format!(
+                    "5-2: the Rule cell names `MEM-1`, which the reported row `4-1` does not name.  {NEW}"
+                ),
+                format!(
+                    "5-3: the Reviewers name `cargo-mutants`, but the reported row `4-1` does not.  {NEW}"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missed_mutant_repeats_a_reported_mutant() {
+        let good = [
+            "4 | 4-1 | cargo-mutants | should-fix | no | VERIFY-1 | unproven | none | reported, not fixed",
+            "5 | 5-1 | cargo-mutants | should-fix | no | VERIFY-1 | unproven | 4-1 | reported, not fixed",
+        ];
+        assert_eq!(problems_of(&good), Vec::<String>::new());
+        let bad = [
+            "4 | 4-2 | reviewer | should-fix | no | VERIFY-1 | unproven | none | reported, not fixed",
+            "5 | 5-2 | cargo-mutants | should-fix | no | VERIFY-1 | unproven | 4-2 | reported, not fixed",
+        ];
+        let rows: Vec<&str> = good.iter().chain(&bad).copied().collect();
+        assert_eq!(
+            problems_of(&rows),
+            [format!(
+                "5-2: the Reviewers name `cargo-mutants`, but the reported row `4-2` does not.  {NEW}"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_reported_repeat_is_from_round_4_and_of_an_earlier_round() {
+        let unknown = "Fix: name a row of this log, or write `none`.  A row of another log can have the same ID.";
+        assert_eq!(
+            problems_of(&[
+                "1 | 1-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
+                "2 | 2-1 | docs-reviewer | nit | - | none | unvalidated | 1-1 | reported, not fixed",
+                "4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
+                "4 | 4-2 | docs-reviewer | nit | - | none | unvalidated | 4-1 | reported, not fixed",
+                "4 | 4-3 | docs-reviewer | nit | - | none | unvalidated | 5-1 | reported, not fixed",
+                "5 | 5-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
+                "5 | 5-2 | docs-reviewer | nit | - | none | unvalidated | 1-1 | reported, not fixed",
+            ]),
+            [
+                format!(
+                    "2-1: Repeat of names the reported row `1-1`, but round 2 is before round 4.  {NEW}"
+                ),
+                format!(
+                    "4-2: Repeat of names `4-1`, which is no row of an earlier round of this log.  {unknown}"
+                ),
+                format!(
+                    "4-3: Repeat of names `5-1`, which is no row of an earlier round of this log.  {unknown}"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeat_names_a_row_of_this_log() {
+        assert_eq!(
+            problems_of(&[
+                "5 | 5-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed",
+                "6 | 6-1 | docs-reviewer | nit | - | none | unvalidated | 5-2 | reported, not fixed",
+                "6 | 6-2 | docs-reviewer | nit | - | none | unvalidated | 5-1 | reported, not fixed",
+            ]),
+            [
+                "6-1: Repeat of names `5-2`, which is no row of an earlier round of this log.  Fix: name a row of this log, or write `none`.  A row of another log can have the same ID."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeat_of_a_refuted_row_is_refuted() {
+        assert_eq!(
+            problems_of(&[
+                "4 | 4-1 | reviewer | should-fix | - | none | refuted | none | refuted",
+                "5 | 5-1 | reviewer | should-fix | - | none | refuted | 4-1 | refuted",
+                "5 | 5-2 | docs-reviewer | nit | - | none | confirmed | 4-1 | reported, not fixed",
+            ]),
+            [
+                "5-2: Repeat of names `4-1`, which is `refuted`, but the verdict is `confirmed`.  Fix: write `refuted`, or match it as a new finding: write `none` in Repeat of, and validate it."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeat_names_a_refuted_or_a_reported_row() {
+        assert_eq!(
+            problems_of(&[
+                "2 | 2-1 | reviewer | should-fix | no | none | confirmed | none | abc1234 review round 2 fixes",
+                "2 | 2-2 | reviewer | should-fix | - | none | refuted | none | refuted",
+                "4 | 4-1 | reviewer | should-fix | no | none | confirmed | 2-1 | reported, not fixed",
+                "4 | 4-2 | reviewer | should-fix | - | none | refuted | 2-2 | refuted",
+            ]),
+            [format!(
+                "4-1: Repeat of names `2-1`, which is neither `refuted` nor `reported, not fixed`.  {NEW}"
+            )]
+        );
+    }
+
+    #[test]
+    fn repeat_of_is_none_a_td_or_a_finding_id() {
+        let good = [
+            "4 | 4-1 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | known: TD-39",
+            "4 | 4-b1 | baseline | should-fix | - | none | refuted | none | refuted",
+            "5 | 5-1 | reviewer | should-fix | - | none | refuted | 4-b1 | refuted",
+        ];
+        assert_eq!(problems_of(&good), Vec::<String>::new());
+        let bad = [
+            "5 | 5-2 | docs-reviewer | nit | - | none | unvalidated | 5-2 (M3) | reported, not fixed",
+            "5 | 5-3 | docs-reviewer | nit | - | none | unvalidated | 4- | reported, not fixed",
+            "5 | 5-4 | docs-reviewer | nit | - | none | unvalidated | - | reported, not fixed",
+            "5 | 5-5 | docs-reviewer | nit | - | none | unvalidated | TD-x | reported, not fixed",
+        ];
+        let rows: Vec<&str> = good.iter().chain(&bad).copied().collect();
+        assert_eq!(
+            problems_of(&rows),
+            [
+                "5-2: Repeat of is `5-2 (M3)`, not `none`, a TD or a finding ID.  Fix: write one of them.",
+                "5-3: Repeat of is `4-`, not `none`, a TD or a finding ID.  Fix: write one of them.",
+                "5-4: Repeat of is `-`, not `none`, a TD or a finding ID.  Fix: write one of them.",
+                "5-5: Repeat of is `TD-x`, not `none`, a TD or a finding ID.  Fix: write one of them."
             ]
         );
     }
