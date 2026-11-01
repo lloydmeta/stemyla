@@ -302,7 +302,7 @@ The team leader gives these to the orchestrator as text.
 * [x] 2026-10-31: plan written (team leader).
 * [x] 2026-10-31: plan review round 1 (one `Plan` agent): no blocker, 11 should-fix (7 significant) and 7 nits.  All are fixed in this plan, but the order of `review clean` (nit 17, Decision log).
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent): no blocker, 7 should-fix (6 significant) and 5 nits.  All are fixed in this plan.  The review stops at its cap of 2 rounds.
-* [ ] Step 1: `review_log.rs`, `strict_rules` and `fix_rule_problems`, with their tests (implementer).
+* [x] 2026-10-31: step 1: `review_log.rs`, `strict_rules` and `fix_rule_problems`, with their tests (implementer, `9f22a7e`).
 * [ ] Step 2: `docs-check` runs the check; the Conventions bullet and the Tools row (implementer).
 * [ ] Step 3: `xtask review log-check <file>` (implementer).
 * [ ] Step 4: the diff for the orchestrator, checked on `HEAD` (implementer, team leader).
@@ -318,6 +318,9 @@ The team leader gives these to the orchestrator as text.
   * `the_strict_rules_are_the_15_ids_in_order`: `left: []`.
   * `a_good_log_gives_no_problem`: the assert of `has_significant_column` failed (its stub gives `false`).
   * The other 9 tests of `review_log.rs`: `left: ["stub"]`, against the expected problems or `[]`.
+* 2026-10-31, implementer, step 2: each new test failed on its stub, on an assert:
+  * `only_a_review_log_is_checked_against_the_fix_rule`: two `stub` problems, one for each file, not the one problem of the log.
+  * `a_review_log_that_follows_the_fix_rule_gives_no_problem`: one `stub` problem, not `[]`.
 
 ## Decision log
 

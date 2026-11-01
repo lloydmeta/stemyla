@@ -150,7 +150,7 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 
 | Command | What it does | Needs |
 | - | - | - |
-| `docs-check` | checks that the map and docs match the code | nothing |
+| `docs-check` | checks that the map and docs match the code.  It also checks each review log that has a `Significant` column against the fix rule of decision 0024 | nothing |
 | `review start`, `review check`, `review mutants`, `review clean` | `review start <base> <round>` chooses the reviewers of a diff, and records the state of the repo.  `review check <round>` names each change since that record.  `review mutants <round>` runs cargo-mutants on the round's `since` diff for at most 60 minutes.  It writes the missed mutants that `KNOWN_MISSED` in `xtask/src/review.rs` matches to `known.txt`, and the rest to `missed.txt`.  The mutants line counts the known lines.  If the tree is not clean at the round's head, each line goes to `missed.txt`, and the mutants line says why.  `review clean <round>` removes the worktrees of the round's agents, `target/review/<round>-<agent>-<n>`, also with changes | cargo-mutants 27.1.0, for `review mutants` (`README.md`) |
 | `clean` | lists what runs leave in the repo, with sizes, and changes nothing.  The items are worktrees and run folders under `target/review/`, the worktrees of Claude Code agents, and local branches.  They also include build output and the pid files of `serve`.  `clean --yes` removes only the items that it can prove safe.  It stops each running `serve` of this repo.  `clean --also <path>` adds a scratch root in the temporary folder | `gh`, `ps` and `lsof`; it keeps an item whose fact it cannot read |
 | `serve` | serves the built page (`serve app/dist --port 8080`) | `trunk build` first |

@@ -175,6 +175,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
     problems.extend(rules_match_files(&markdown, &files));
     problems.extend(decisions_well_formed(&markdown));
     problems.extend(plans_well_formed(&markdown));
+    problems.extend(review_logs_follow_the_fix_rule(&markdown));
     Ok(problems)
 }
 
@@ -1227,6 +1228,20 @@ fn plans_well_formed(markdown: &[(String, String)]) -> Vec<Problem> {
     problems
 }
 
+/// Each review log with a `Significant` column follows the fix rule of
+/// decision 0024 (`crate::review_log`).
+fn review_logs_follow_the_fix_rule(markdown: &[(String, String)]) -> Vec<Problem> {
+    markdown
+        .iter()
+        .filter(|(file, _)| file.starts_with("docs/reviews/"))
+        .flat_map(|(file, text)| {
+            crate::review_log::fix_rule_problems(text)
+                .into_iter()
+                .map(|message| Problem::new("reviews", file, message))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1945,5 +1960,40 @@ mod tests {
         )]);
         let problems = id_references("docs/reviews/x.md", "closes TD-1, keeps TD-2", &ids);
         assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    /// A review log with a `Significant` column, and one nit in round 4
+    /// with `action`.
+    fn fix_rule_log(action: &str) -> String {
+        format!(
+            "# Review log\n\n## Findings\n\n| Round | Finding | Reviewers | Severity | Significant | Rule | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - |\n| 4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | {action} |\n"
+        )
+    }
+
+    #[test]
+    fn only_a_review_log_is_checked_against_the_fix_rule() {
+        let bad = fix_rule_log("abc1234 review round 4 fixes");
+        let files = [
+            ("docs/reviews/a.md".to_string(), bad.clone()),
+            ("docs/plans/active/a.md".to_string(), bad),
+        ];
+        let problems = review_logs_follow_the_fix_rule(&files);
+        assert_eq!(
+            problems,
+            [Problem::new(
+                "reviews",
+                "docs/reviews/a.md",
+                "4-1: round 4 must not fix this finding, but the action is `abc1234 review round 4 fixes`.  Fix: undo the fix, and write `reported, not fixed` (decision 0024).".into(),
+            )]
+        );
+    }
+
+    #[test]
+    fn a_review_log_that_follows_the_fix_rule_gives_no_problem() {
+        let good = fix_rule_log("reported, not fixed");
+        assert_eq!(
+            review_logs_follow_the_fix_rule(&[("docs/reviews/a.md".to_string(), good)]),
+            []
+        );
     }
 }

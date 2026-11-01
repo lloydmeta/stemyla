@@ -91,3 +91,4 @@ These are what `docs-check` holds the docs to:
 * Every rule in `.claude/rules/` has `paths:` frontmatter whose globs match files.
 * `CLAUDE.md` stays within 100 lines, and its rules section lists exactly the current rules in `invariants.md`.
 * `working-with-agents.md` names every `xtask` command and every project skill, subagent and command in `.claude/`.
+* A review log in `reviews/` with a `Significant` column follows the fix rule of decision 0024.  Each row gives a fix or a reason for no fix, as its round and its finding allow.
