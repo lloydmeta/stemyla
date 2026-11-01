@@ -70,6 +70,30 @@
 | 2026-10-31 | 4 | 281cacf | 4-4 | docs-reviewer | nit | doc | none | xtask/src/clean.rs:95-99 | claude_root has no doc comment | unvalidated | none | f0c5ea2 review round 4 fixes |
 | 2026-10-31 | 4 | 281cacf | 4-5 | reviewer | nit | doc | none | docs/plans/active/harness-phase-3b-m1.md:76 | the Kept reasons leave out "cannot read its status" | unvalidated | none | f0c5ea2 review round 4 fixes |
 | 2026-10-31 | 4 | 281cacf | 4-6 | reviewer | nit | other | none | xtask/src/clean.rs:770 | the last line copies the raw --also arguments | unvalidated | none | no fix: the printed command still works |
+| 2026-10-31 | 5 | dfe3aa4 | 5-1 | supply-chain-reviewer | should-fix | bug | none | xtask/src/clean.rs:1114 | proofs 3 and 4 accept a merged PR of any base, so a stacked PR's base branch is deleted | confirmed | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-2 | reviewer, supply-chain-reviewer, docs-reviewer | nit | bug | none | xtask/src/clean.rs:1157-1181 | cat-file blocks above a few thousand oids | unvalidated | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-3 | supply-chain-reviewer, cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:1128 | no test of a headRefOid that is not 40 hex digits | confirmed | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-4 | reviewer, supply-chain-reviewer, docs-reviewer | nit | doc | DOC-1 | docs/plans/active/harness-phase-3b.md:93 | the parent plan does not name the fourth proof | unvalidated | none | 49b2e90 (orchestrator) |
+| 2026-10-31 | 5 | dfe3aa4 | 5-5 | docs-reviewer | nit | doc | TD-21 | docs/plans/completed/harness-phase-3b-m1.md:87 | the kept-branch sentence is too broad | unvalidated | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-6 | docs-reviewer | nit | other | none | docs/plans/completed/harness-phase-3b-m1.md:285 | no Decision log entry for the fourth proof | unvalidated | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-7 | reviewer | nit | doc | none | docs/plans/completed/harness-phase-3b-m1.md:86 | the plan leaves out the rev-list walk | unvalidated | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-8 | docs-reviewer | nit | rule | none | commit dfe3aa4 | a 26-word sentence in the commit message | unvalidated | none | no fix: a history rewrite |
+| 2026-10-31 | 5 | dfe3aa4 | 5-9 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:1117 | no test fails with this mutant: or with and in find_merged_heads | refuted | none | refuted |
+| 2026-10-31 | 5 | dfe3aa4 | 5-10 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:1120 | no test fails with this mutant: == with != (col 60) in find_merged_heads | confirmed | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-11 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:1120 | no test fails with this mutant: and with or (col 52) in find_merged_heads | confirmed | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 5 | dfe3aa4 | 5-12 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:1118 | no test fails with this mutant: or with and (line 1118) in find_merged_heads | refuted | none | refuted |
+| 2026-10-31 | 5 | dfe3aa4 | 5-13 | cargo-mutants | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:1120 | no test fails with this mutant: == with != (col 42) in find_merged_heads | confirmed | none | 45f9ca5 review round 5 fixes: PRs into main |
+| 2026-10-31 | 6 | 49b2e90 | 6-1 | reviewer | should-fix | bug | none | xtask/src/clean.rs:313-319 | a .claude/worktrees worktree goes while its branch stays (open PR, or open PRs unknown) | confirmed | none | cd7c143 review round 6 fixes: one branch gate |
+| 2026-10-31 | 6 | 49b2e90 | 6-2 | reviewer | should-fix | weak-test | VERIFY-1 | xtask/src/clean.rs:396 | no test of the ancestor git proof with open PRs unknown | confirmed | none | cd7c143 review round 6 fixes: one branch gate |
+| 2026-10-31 | 6 | 49b2e90 | 6-3 | reviewer | nit | doc | none | docs/working-with-agents.md:98 | the untracked tests/ folder is not named | unvalidated | none | cd7c143 review round 6 fixes: one branch gate |
+| 2026-10-31 | 7 | cd7c143 | 7-1 | reviewer | should-fix | doc | DOC-1 | docs/plans/completed/harness-phase-3b-m1.md:55 | the plan names the old merged-PR gh command | confirmed | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-2 | reviewer | should-fix | weak-test | VERIFY-1 | xtask/tests/clean.rs:331 | the fake gh ignores --json, so dropping baseRefName passes | confirmed | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-3 | reviewer | nit | weak-test | VERIFY-1 | xtask/src/clean.rs:1145 | no test of the hex half of the oid filter | unvalidated | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-4 | reviewer | nit | bug | none | xtask/src/clean.rs:1506 | an open-PR list at its limit fails open | unvalidated | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-5 | reviewer, docs-reviewer | nit | doc | none | xtask/src/clean.rs:313 | the agent-worktree comment leaves out the HEAD-on-main case | unvalidated | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-6 | docs-reviewer | nit | doc | TD-21 | docs/plans/completed/harness-phase-3b-m1.md:244 | the Progress line overstates the guide change | unvalidated | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-7 | docs-reviewer | nit | doc | DOC-1 | docs/plans/completed/harness-phase-3b-m1.md:74 | rule 2 does not describe the branch gate | unvalidated | none | 3d73329 review round 7 fixes: gh fields and limits |
+| 2026-10-31 | 7 | cd7c143 | 7-8 | docs-reviewer | nit | weak-test | VERIFY-1 | xtask/src/clean.rs:1706 | a test assertion passes with the old code | unvalidated | none | 3d73329 review round 7 fixes: gh fields and limits |
 
 ## Rounds
 
@@ -79,3 +103,6 @@
 | 2 | 10 | 554241 | 19.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: partial: tested 33 (caught 31, missed 0, unviable 2), timeouts 2, not tested 0; timeouts have no result | - | - | - | - | - | - |
 | 3 | 9 | 386676 | 11.1 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 19 (caught 18, missed 0, unviable 1), timeouts 0, not tested 0 | - | - | - | - | - | - |
 | 4 | 2 | 206203 | 9.1 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 18 (caught 15, missed 0, unviable 3), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 5 | 5 | 221308 | 12.1 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 21 (caught 15, missed 6, unviable 0), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 6 | 3 | 109666 | 11.0 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 19 (caught 18, missed 0, unviable 1), timeouts 0, not tested 0 | - | - | - | - | - | - |
+| 7 | 4 | 154028 | 10.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 10 (caught 9, missed 0, unviable 1), timeouts 0, not tested 0 | - | - | - | - | - | - |

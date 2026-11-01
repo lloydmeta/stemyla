@@ -263,7 +263,7 @@ Kick-off prompt:
 * [x] 2026-10-30: this plan and decisions 0023 to 0027 written as proposed.
 * [x] 2026-10-31: preflight passed; D1 to D8 answered (Decision log); decisions 0023 to 0027 accepted.
 * [x] 2026-10-31, plan review: at most 3 rounds on this plan and decisions 0023 to 0027.  Round 1 (two reviewers: the code, the evidence) found 4 blockers and 16 should-fix; all fixed in the plan.  Round 2 (one reviewer) found no blocker and 6 should-fix; all fixed.  Round 3 found no blocker and 4 should-fix; all fixed.  The review stops at its cap of 3 rounds.
-* [x] 2026-10-31, M1: cleanup (`plans/completed/harness-phase-3b-m1.md`, `reviews/harness-phase-3b-m1.md`).  `xtask clean`, `xtask review clean <round>` and the pid file of `xtask serve`.  4 review rounds, 36 agents, about 1.94M final-context tokens, 106 wall minutes.  Round 1 found 1 blocker, 8 should-fix and 20 missed mutants; rounds 2 and 3 found 4 and 3 should-fix; round 4 none.  Debt: TD-67, TD-68.
+* [x] 2026-10-31, M1: cleanup (`plans/completed/harness-phase-3b-m1.md`, `reviews/harness-phase-3b-m1.md`).  `xtask clean`, `xtask review clean <round>` and the pid file of `xtask serve`.  4 review rounds, 36 agents, about 1.94M final-context tokens, 106 wall minutes.  Round 1 found 1 blocker, 8 should-fix and 20 missed mutants; rounds 2 and 3 found 4 and 3 should-fix; round 4 none.  Debt: TD-67, TD-68.  The intent review added a fourth branch proof for agent branches (`dfe3aa4`); fix-range review rounds 5 to 7 took 12 agents, about 0.49M tokens and 34 wall minutes.
 * [ ] M2: less mutants noise.
 * [ ] M3: the fix rule and the stop rule.
 * [ ] M4: local checks by tier.
@@ -281,6 +281,8 @@ Kick-off prompt:
 * 2026-10-31, M1: one docs-reviewer stalled for about 45 minutes on one Bash call.  Its team leader could not stop it; the orchestrator did, with TaskStop.
 * 2026-10-31, M1: the only blocker came from the baseline agent (a merged worktree that holds a dirty nested worktree).  The routed round found 2 of the baseline's 4 findings.  Evidence for the phase 3 gate (M8).
 * 2026-10-31, M1: round 3 found a significant bug (a worktree with no `.git` file), so round 4 ran.  Evidence for decision 0024's rule that rounds go past round 3.
+* 2026-10-31, M1: the first fix of the intent review (any merged PR's head) deleted a stacked PR's base branch.  Only the supply-chain-reviewer found it (round 5).
+* 2026-10-31, M1: after the run folder is removed (TD-37), later rounds on the same branch need a new run with its own base and round numbers.  Its rows went into the milestone's log as rounds 5 to 7.
 
 ## Decision log
 
