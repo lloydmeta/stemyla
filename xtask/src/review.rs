@@ -1396,10 +1396,16 @@ fn is_open_debt(tech_debt: &str, debt: &str) -> bool {
     !closed && tech_debt.lines().any(|line| line.starts_with(&heading))
 }
 
-/// The problems of the entries of `list`: a TD that is not open in
-/// `tech_debt`, a file that `read` cannot read, or a code line that is not
-/// once in a function of the mutation's name.  So an entry stays true as
-/// the code and the tech debt change.
+/// The problems of the entries of `list`, so an entry stays true as the code
+/// and the tech debt change.  The problems are:
+///
+/// * a TD that is not open in `tech_debt`;
+/// * an entry that is in the list twice;
+/// * a file that `read` cannot read;
+/// * a mutation whose function name is not a Rust identifier;
+/// * a file with no `fn` line of that name;
+/// * a code line in no function of that name;
+/// * a code line in the functions of that name more than once.
 pub fn known_problems(
     list: &[Known],
     tech_debt: &str,
@@ -3898,6 +3904,19 @@ exit 2
         let cargo = fake_cargo(&bin, 0);
         let missed = format!("{LINE_1_41}\n{LINE_2_17}\n");
         std::fs::write(bin.join("missed.txt"), &missed).unwrap();
+        // Line 503 changes in a new commit, and again in the tree.  The
+        // code line still comes from the round's head.
+        write(
+            &dir,
+            SAVE_RS,
+            &save.replace(CODE_503, "    committed_later();"),
+        );
+        commit_all(&dir, "after review start");
+        write(
+            &dir,
+            SAVE_RS,
+            &save.replace(CODE_503, "    changed_in_the_tree();"),
+        );
         let top = toplevel(&dir).unwrap();
         let (code, lines) =
             mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
@@ -4301,8 +4320,9 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     #[test]
     fn the_body_ends_at_the_brace_of_the_fn_lines_indent() {
         // `save_once` ends on its `fn` line, and the line after it is in
-        // `other`.  In `impl A`, `run` ends at its own brace.
-        let file = "fn save_once() -> Result<Save> { Ok(Save::default()) }\nfn other() {\n    restore(p, seconds)?;\n}\nimpl A {\n    fn run() {\n        go();\n    }\n    fn after() {\n        stop();\n    }\n}\n";
+        // `other`.  In `impl A`, `run` ends at its own brace, not at the
+        // brace of its `if`.
+        let file = "fn save_once() -> Result<Save> { Ok(Save::default()) }\nfn other() {\n    restore(p, seconds)?;\n}\nimpl A {\n    fn run() {\n        if ready {\n            go();\n        }\n        start();\n    }\n    fn after() {\n        stop();\n    }\n}\n";
         let one_line = known_problems(&[ENTRY_2_17], TECH_DEBT, reader(file));
         let run = Known {
             mutation: "replace == with != in run",
@@ -4311,7 +4331,7 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         };
         let in_run = Known {
             mutation: "replace == with != in run",
-            code: "go();",
+            code: "start();",
             ..ENTRY_2_17
         };
         assert_eq!(
@@ -4328,6 +4348,118 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
                 ]
             )
         );
+    }
+
+    #[test]
+    fn a_body_without_its_closing_brace_runs_to_the_end_of_the_file() {
+        let file = "fn save_once() {\n    restore(p, seconds)?;\n";
+        assert_eq!(
+            known_problems(&[ENTRY_2_17], TECH_DEBT, reader(file)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_body_holds_its_fn_line_to_its_closing_brace() {
+        let file = "fn save_once() {\n    if ready {\n        go();\n    }\n    restore(p, seconds)?;\n}\nfn other() {}\n";
+        assert_eq!(
+            fn_bodies(file, "save_once"),
+            [[
+                "fn save_once() {",
+                "    if ready {",
+                "        go();",
+                "    }",
+                "    restore(p, seconds)?;",
+                "}",
+            ]]
+        );
+        assert_eq!(
+            fn_bodies("fn save_once() {\n    go();\n", "save_once"),
+            [["fn save_once() {", "    go();"]]
+        );
+    }
+
+    #[test]
+    fn a_debt_bullet_outside_closed_keeps_the_debt_open() {
+        let tech_debt = "## Enforcement gaps\n\n### TD-39: e2e\n\n* TD-39: a bullet that names it.\n\n## Known breaches\n\n* TD-39: another bullet.\n\n## Closed\n\n* TD-5: closed.\n";
+        assert!(is_open_debt(tech_debt, "TD-39"));
+    }
+
+    #[test]
+    fn a_debt_with_a_heading_and_a_closed_bullet_is_not_open() {
+        let tech_debt =
+            "## Enforcement gaps\n\n### TD-39: e2e\n\n## Closed\n\n* TD-39: closed by a test.\n";
+        assert!(!is_open_debt(tech_debt, "TD-39"));
+        assert_eq!(
+            known_problems(&[ENTRY_2_17], tech_debt, reader(SAVE_FILE)),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): TD-39 is not an open TD"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fn_line_forms() {
+        let starts: Vec<bool> = [
+            "fn save_once(p: &mut Page) {",
+            "    pub fn save_once<T>(p: T) {",
+            "pub(crate) fn save_once() {",
+            "pub(in crate::e2e) async fn save_once() {",
+            "const fn save_once() -> u8 {",
+            "pub const unsafe fn save_once() {",
+            "unsafe fn save_once() {",
+            "fn save_once_all() {",
+            "// fn save_once() {",
+            "pub(crate fn save_once() {",
+            "let save_once = 1;",
+        ]
+        .iter()
+        .map(|line| is_fn_line(line, "save_once"))
+        .collect();
+        assert_eq!(
+            starts,
+            [
+                true, true, true, true, true, true, true, false, false, false, false
+            ]
+        );
+    }
+
+    #[test]
+    fn an_underscore_is_not_a_function() {
+        let entry = Known {
+            mutation: "replace _ with ()",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            problems_of(entry),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace _ with (): the function \"_\" is not a Rust identifier"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tab_counts_in_the_indent_of_the_offset() {
+        const LINES: &[(&str, usize, &str)] = &[(SAVE_RS, 503, "\t\trestore(p, seconds)?;")];
+        let line = "xtask/src/e2e/save.rs:503:3: replace save_once -> Result<Save> with Ok(Default::default())";
+        let missed = format!("{line}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(LINES)),
+            Split {
+                to_validate: vec![],
+                known: vec![(line, "TD-39")],
+            }
+        );
+    }
+
+    #[test]
+    fn a_missed_file_that_cannot_be_read_is_an_error() {
+        let dir = Scratch::new("split-unreadable");
+        std::fs::create_dir_all(dir.join("mutants.out/missed.txt")).unwrap();
+        let result = split_missed(&dir, "HEAD", &dir, &[ENTRY_2_17]);
+        assert!(result.is_err(), "{result:?}");
+        assert!(!dir.join("missed.txt").exists(), "no lists after an error");
+        assert!(!dir.join("known.txt").exists(), "no lists after an error");
     }
 
     #[test]

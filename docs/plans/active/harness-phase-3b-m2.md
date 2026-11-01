@@ -142,7 +142,7 @@ The implementer commits only text that says what `xtask` does:
   * A bullet: `xtask review mutants` writes the lines that `KNOWN_MISSED` (`xtask/src/review.rs`) matches to `known.txt`, and the rest to `missed.txt`.
   * A bullet: native code that only the wasm32 tests reach shows as missed, such as the JS readers of `protocol/src/lib.rs`.  The validator refutes it (16 lines in the measurement).
   * The first bullet says "A new `wasm32`-only function without the attribute shows as missed".  After it, add the count of the measurement: 11 lines in 22 rounds.
-* TD-39 and TD-66: one sentence each.  The mutants that PR #39's rounds sent to the TD, and that `--list` still shows, are entries of `KNOWN_MISSED`.
+* TD-39 and TD-66: one sentence each.  The mutants inside a function that PR #39's rounds sent to the TD, and that `--list` still shows, are entries of `KNOWN_MISSED`.  The other mutants of the same functions go to the validator.
 * `docs/working-with-agents.md`, the Tools table, the `review mutants` cell: it writes `missed.txt` and `known.txt`, and the mutants line counts the known lines.  The changelog line for M2 says the same, and no more.
 * `docs/harness.md`: if its row for `xtask review mutants` names what the run gives the validator, the diff below changes it.
 
@@ -207,6 +207,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: step 3, the 12 entries of `KNOWN_MISSED`, `known_problems` and its tests (implementer).
 * [x] 2026-10-31: step 4, the docs of what `xtask review mutants` does: TD-33, TD-39, TD-66, and the Tools table and changelog of `docs/working-with-agents.md`.  The diff of the skill, its pins and its docs goes to the team leader (implementer).
 * [x] 2026-10-31: checkpoint: the xtask code and its docs are done (`eee072f` to `e3a081e`).  The team leader checked that the diff applies (`git apply --check`), and gave it to the orchestrator with the changes to the parent plan.  Next: the orchestrator lands them, then round 1.
+* [x] 2026-10-31: review round 1 fixes (implementer): tests for 1-1, 1-2, 1-5, 1-9, 1-11, 1-13 and 1-15; the texts of 1-3, 1-6, 1-7, 1-8 and 1-10.
 * [ ] Review rounds.
 * [ ] M2 done: this plan moves to `plans/completed/`.
 
@@ -227,6 +228,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, implementer: the 17 rows left out.  11 repeat an earlier row: `save_once` 5 (M8 speed 1 1-48, speed 2 2-14, speed 3 3-14, speed 4 4-20, speed 5 5-19), `save_playing` 4 (speed 3 3-12, speed 4 4-19, speed 5 5-18, speed 6 6-14) and `click_save` 2 (speed 3 3-13 and 3-15).  5 mutate the constant `WAITS_S` outside a function (M8 speed 1, 1-19, 1-20, 1-30, 1-31 and 1-38, `2c7c29b:xtask/src/e2e/save.rs:156`).  M9 1-33 (`replace == with != in run`, line 488 at `0789e6b`) has no column, and its line has two `==`, so the validator sees both.  No row's fix commit added a test for its mutant, and `--list` still shows each mutant of the 12 entries.
 * 2026-10-31, implementer: a check with the real list on the `--list` output of the four files (623 mutants) at `759abfa` found 12 known lines, one for each entry.  So no entry matches a second mutant.  The third `||` of `note_run` (`weights.rs:281:13`, `f16 weights`) has no row, so it stays with the validator.
 * 2026-10-31, implementer: the row of `docs/harness.md` for `xtask review mutants` does not name what the run gives the validator.  So neither step 4's commit nor the diff changes it.
+* 2026-10-31, implementer: the code of round 1's findings was right, so each new test failed first with its mutant, in the working tree.  `fn_bodies` with `lines.len() / 1` or `lines.len() + 1` panicked on a body without its `}` (1-1).  `at * 1 + n` and `at + 1 * n` lost the `}` line (1-11, 1-15).  The `NotFound` guard as `true` gave empty files for an unreadable `missed.txt` (1-13).  `HEAD:` or a read of the tree in `line_at` sent 2-17 to the validator (1-2).  For 1-5, these failed: `!=` for `== "## Closed"`, no `!closed &&`, no `const ` or `unsafe `, no `name != "_"`, and an indent of spaces only.  An end at the first `}` of any indent failed the nested fixture of 1-9.
 
 ## Decision log
 
