@@ -247,6 +247,7 @@ Checkpoint B gives the orchestrator the results table, the tokens used, and a di
 * The implementer writes a test in `xtask/tests/rules.rs` that pins the `model` and `effort` of each agent file to the results table (a constant table in the test).  It gives the test to the team leader as a diff, not a commit.  The team leader gives the orchestrator one diff with the agent files and the test, and the orchestrator commits them together.
 * The implementer shows that the test fails without the agent change: in a `git worktree` under `target/`, it applies only the test part, and runs `cargo test -p xtask --test rules <the test>` there.  It records the failure in Surprises.
 * If no role passes, no agent file changes, and the test pins `inherit` and no `effort` for each file.  Then the test passes without a change.  So the implementer plants `model: sonnet` in one agent file in a `git worktree` under `target/`, runs the test there, shows that it fails, and records it in Surprises.
+* No role passed (step 4), so no agent file changes.  The test pins `inherit` and no `effort` for each file.  Nothing under `.claude/` changes, so the implementer committed the test and the tech-debt entry, signed.  The orchestrator agreed.
 * `docs/tech-debt.md` gets an entry for the gaps of the measurement: one run for each arm, the reconstructed finding blocks, no check of a subagent's effort in the stream, and the roles that keep `inherit` for want of evidence.  The re-run when the model line-up changes is phase 6's (decision 0025).
 
 ### Step 6: review rounds
@@ -285,7 +286,7 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: step 2, the agents rule accepts a model and an effort.  `agent_problems` accepts `model` from `AGENT_MODELS` and an optional `effort` from `AGENT_EFFORTS` before `hooks`.  Tests: `each_model_and_effort_gives_its_problems` (9 cases) in `mod agents_tests`; the case "another model" of `each_plant_is_named` is removed, since `model: opus` now has no problem.
 * [x] 2026-11-01: step 3, checkpoint A.  H rebuilt at `f3a4f8f`; the ground truth and the pass rule are in the parent's Decision log (`ed5e4cb`), with the orchestrator's change: every session runs at `--effort high`.
 * [x] 2026-11-01: step 4, checkpoint B.  2 dry runs and 29 counted runs, 40.85M `modelUsage` tokens.  No role passes (Surprises, the results).  The `haiku` validator stopped after 3 of 6 cases.
-* [ ] Step 5: the agent files and their pin.
+* [x] 2026-11-01: step 5, the agent files and their pin.  No agent file changes.  `the_agent_models_are_the_measured_ones` in `xtask/tests/rules.rs` pins `model: inherit` and no `effort` for each of the eight agents, and TD-71 records the gaps of the measurement.
 * [ ] Step 6: review rounds.
 
 ## Surprises and discoveries
@@ -674,6 +675,8 @@ The team leader gives these to the orchestrator as text:
     fi
   done
   ```
+
+* 2026-11-01, M5 step 5, implementer: in a worktree at `819066d` with the new test, the plant `model: sonnet` in `docs-reviewer.md` failed `the_agent_models_are_the_measured_ones` on its assert.  The message was: "`.claude/agents/docs-reviewer.md` has the model lines `["sonnet"]`, not one `model: inherit`".  The first run in the main checkout also failed, on `.gitkeep`, which has no row.  So the test now skips `IGNORED_IN_AGENTS`, as `agents_folder_problems` does.
 
 ## Decision log
 

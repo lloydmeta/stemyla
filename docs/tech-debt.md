@@ -438,6 +438,21 @@ Tier `push`, which runs before each push and each review round, or CI finds the 
 
 * Fix: no fix is planned.  Add a strict path when a rule's code moves to a new file.
 
+### TD-71: the measurement of the agents' models has gaps
+
+This entry concerns no rule.  It concerns decision 0025, and the pin `the_agent_models_are_the_measured_ones` in `xtask/tests/rules.rs`.
+
+M5 of harness phase 3b compared cheaper models with a control for the validator and the docs-reviewer, on logged findings.  The results are in the Surprises of `plans/active/harness-phase-3b-m5.md` ("step 4, the results").  No role passed, so each agent file keeps `model: inherit` with no `effort` key.  The measurement has these gaps:
+
+* Each arm had one run on each case.  So the measure does not separate run noise from the model's effect.
+* The team leader rebuilt the finding block of each validator run from its row in the log.  So the block had no evidence and no fix.
+* No field of the `claude -p` stream shows the effort of a subagent.  So no check showed that `effort: high` took effect in a candidate arm.
+* The `haiku` validator stopped after 3 of its 6 cases, for its cost.  So its result has 25 items and no interval.
+* The measurement did not reach the gpu-reviewer, the wire-reviewer and the supply-chain-reviewer.  They keep `inherit` because there is no evidence, not because they failed.
+* The measure is recall, or agreement with the log, on logged findings only.  It does not measure precision.
+
+* Fix: decision 0025 runs the measurement again when the model line-up changes (phase 6).  Until then, the pin keeps each role on `inherit`.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits

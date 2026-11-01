@@ -1083,6 +1083,100 @@ fn the_agents_are_read_only_by_tools() {
     );
 }
 
+/// The `model` and the `effort` of each agent file, from the results of the
+/// measurement of decision 0025 (`docs/plans/active/harness-phase-3b-m5.md`,
+/// Surprises, "step 4, the results").  No role passed, so each row is
+/// `model: inherit` with no `effort` key.  `None` is no `effort` key.
+const AGENT_MODELS_MEASURED: &[(&str, &str, Option<&str>)] = &[
+    ("baseline.md", "inherit", None),
+    ("docs-reviewer.md", "inherit", None),
+    ("gpu-reviewer.md", "inherit", None),
+    ("memory-reviewer.md", "inherit", None),
+    ("reviewer.md", "inherit", None),
+    ("supply-chain-reviewer.md", "inherit", None),
+    ("validator.md", "inherit", None),
+    ("wire-reviewer.md", "inherit", None),
+];
+
+/// Each agent file but `IGNORED_IN_AGENTS` has the `model` and the
+/// `effort` of its row in `AGENT_MODELS_MEASURED`, and each row has its
+/// file.  A change of model or effort needs a new measurement by decision
+/// 0025.
+#[test]
+fn the_agent_models_are_the_measured_ones() {
+    let root = xtask::workspace_root();
+    let folder = root.join(xtask::rules::AGENTS_FOLDER);
+    let mut names: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", folder.display()))
+        .map(|entry| {
+            entry
+                .expect("the folder can be listed")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| !xtask::rules::IGNORED_IN_AGENTS.contains(&name.as_str()))
+        .collect();
+    names.sort();
+    let fix = "Fix: change a model or an effort only with a new measurement (decision 0025), and then update AGENT_MODELS_MEASURED in xtask/tests/rules.rs in the same commit.";
+    let mut problems: Vec<String> = Vec::new();
+    for name in &names {
+        let file = format!("{}{name}", xtask::rules::AGENTS_FOLDER);
+        let Some((_, model, effort)) = AGENT_MODELS_MEASURED
+            .iter()
+            .find(|(known, _, _)| known == name)
+        else {
+            problems.push(format!(
+                "{file} has no row in AGENT_MODELS_MEASURED.  {fix}"
+            ));
+            continue;
+        };
+        let text = std::fs::read_to_string(folder.join(name))
+            .unwrap_or_else(|e| panic!("reading {file}: {e}"));
+        let frontmatter: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .take_while(|line| *line != "---")
+            .collect();
+        let found_model: Vec<&str> = frontmatter
+            .iter()
+            .filter_map(|line| line.strip_prefix("model: "))
+            .collect();
+        let found_effort: Vec<&str> = frontmatter
+            .iter()
+            .filter_map(|line| line.strip_prefix("effort: "))
+            .collect();
+        if found_model != [*model] {
+            problems.push(format!(
+                "{file} has the model lines {found_model:?}, not one `model: {model}`.  {fix}"
+            ));
+        }
+        let wanted_effort: Vec<&str> = effort.iter().copied().collect();
+        if found_effort != wanted_effort {
+            let wanted = effort.map_or("no `effort` key".to_string(), |e| {
+                format!("one `effort: {e}`")
+            });
+            problems.push(format!(
+                "{file} has the effort lines {found_effort:?}, not {wanted}.  {fix}"
+            ));
+        }
+    }
+    for (known, _, _) in AGENT_MODELS_MEASURED {
+        if !names.iter().any(|name| name == known) {
+            problems.push(format!(
+                "{}{known} is missing, but it has a row in AGENT_MODELS_MEASURED.  {fix}",
+                xtask::rules::AGENTS_FOLDER
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} agent model problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
 /// The worktree path of a validator holds the ID of its input, so two
 /// validators that run at the same time never choose the same path.
 const VALIDATOR_WORKTREE_TEXT: &[&str] = &[
