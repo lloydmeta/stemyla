@@ -183,9 +183,9 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 ### M6: orchestrated mode as a skill (decision 0023)
 
 * `.claude/skills/orchestrate/SKILL.md` holds the generic parts of the two "How the work runs" sections (`plans/completed/harness-phase-3.md` and `plans/completed/stream-from-storage.md`): roles, agent rules, preflight, the loop for each milestone, the stop rule (by reference to step 11 of the `review-rounds` skill, which applies decision 0024), who edits what, stop-and-wait conditions, close-out with `xtask clean`, and the report format.  A review run folder of the orchestrated branch stays while that branch is checked out, so the skill keeps its manual removal after the log copy (TD-37).  M7 adds the PR body steps, because M7 defines the body.
-* In round 4 or later, step 4 of `review-rounds` matches a repeat of a `reported, not fixed` finding.  So that finding does not get a validator and a new judgement each time it comes back, as M3's 5-2 did as 6-1.  The M6 team designs the match, and changes step 4 and step 6, item 6, of the skill.  Its tests must cover these cases, and `review log-check` must pass on each log:
+* In round 4 or later, step 4, item 4, of `review-rounds` matches a repeat of a `reported, not fixed` finding.  So that finding does not get a validator and a new judgement each time it comes back, as M3's 5-2 did as 6-1.  The M6 team designs the match, and changes step 4, item 4, and step 6, item 6, of the skill.  Its tests must cover these cases, and `review log-check` must pass on each log:
   * a repeat of the same or a lower severity, a nit included;
-  * a repeat with a higher severity, or with a strict rule or a `cargo-mutants` source that the row did not have;
+  * a repeat with a higher severity, or with a strict rule or a `cargo-mutants` source that the row did not have; it gets a validator and the fix rule of step 10, not a copied row;
   * a repeat of a missed mutant;
   * a finding in rounds 1 to 3 that is the same as a reported row;
   * a row of an earlier milestone's log with the same ID as a row of this run.
