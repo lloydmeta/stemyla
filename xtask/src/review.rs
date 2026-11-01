@@ -1,5 +1,6 @@
 //! `xtask review`: chooses the reviewers from a diff, guards a review round,
-//! runs cargo-mutants on a round's diff, and removes a round's worktrees.
+//! runs cargo-mutants on a round's diff, removes a round's worktrees, and
+//! checks a run's log against the fix rule of decision 0024.
 //!
 //! Each failure exits 3, so a skill that runs the command stops on it.
 
@@ -162,7 +163,7 @@ pub const SIGNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const USAGE: &str = "usage: xtask review start <base> <round> | check <round> | mutants <round> [--config <file>] | clean <round>";
+const USAGE: &str = "usage: xtask review start <base> <round> | check <round> | mutants <round> [--config <file>] | clean <round> | log-check <file>";
 
 /// The exit code of every failure, refusal and usage error.
 const REFUSED: i32 = 3;
@@ -527,6 +528,7 @@ pub fn run_with(
             ["mutants", round, "--config", file] => parse_round(round)
                 .and_then(|round| mutants(&toplevel(dir)?, dir, round, Some(file), cargo)),
             ["clean", round] => parse_round(round).and_then(|round| clean(&toplevel(dir)?, round)),
+            ["log-check", file] => log_check(&dir.join(file)),
             _ => Ok((REFUSED, vec![USAGE.to_string()])),
         };
     outcome.unwrap_or_else(|e| (REFUSED, vec![format!("{e:#}")]))
@@ -1876,6 +1878,29 @@ fn clean(toplevel: &Path, round: u32) -> Result<(i32, Vec<String>)> {
         lines.push(format!("no worktrees of round {round}"));
     }
     Ok((code, lines))
+}
+
+/// `review log-check <file>`: checks the findings table of a run's log
+/// against the fix rule of decision 0024 (`crate::review_log`).  A log
+/// with no `Significant` column fails, since the skill writes the column.
+fn log_check(path: &Path) -> Result<(i32, Vec<String>)> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if !crate::review_log::has_significant_column(&text) {
+        return Ok((
+            REFUSED,
+            vec!["log-check: the findings table has no `Significant` column.  Fix: write the log in the form of step 11 of the review-rounds skill.".to_string()],
+        ));
+    }
+    let problems = crate::review_log::fix_rule_problems(&text);
+    if problems.is_empty() {
+        Ok((
+            0,
+            vec!["log-check: the log follows the fix rule".to_string()],
+        ))
+    } else {
+        Ok((REFUSED, problems))
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -4657,5 +4682,72 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         );
         assert_eq!(code, 3);
         assert_eq!(lines, [USAGE]);
+    }
+
+    /// Runs `review log-check` on `text`, written to a file in a scratch
+    /// folder; or on a missing file if `text` is `None`.
+    fn log_check_of(name: &str, text: Option<&str>) -> (i32, Vec<String>) {
+        let dir = Scratch::new(&format!("log-check-{name}"));
+        if let Some(text) = text {
+            std::fs::write(dir.join("log.md"), text).unwrap();
+        }
+        run(
+            &["log-check".to_string(), "log.md".to_string()],
+            &dir,
+            &dir,
+            SystemTime::UNIX_EPOCH,
+        )
+    }
+
+    /// A log with a `Significant` column and one nit in round 4.
+    fn log_with_nit(action: &str) -> String {
+        format!(
+            "# Review log\n\n## Findings\n\n| Round | Finding | Reviewers | Severity | Significant | Rule | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - |\n| 4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | {action} |\n"
+        )
+    }
+
+    #[test]
+    fn log_check_passes_a_log_that_follows_the_fix_rule() {
+        assert_eq!(
+            log_check_of("good", Some(&log_with_nit("reported, not fixed"))),
+            (
+                0,
+                vec!["log-check: the log follows the fix rule".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn log_check_fails_a_fixed_nit_in_round_4() {
+        assert_eq!(
+            log_check_of("nit", Some(&log_with_nit("abc1234 review round 4 fixes"))),
+            (
+                3,
+                vec!["4-1: round 4 must not fix this finding, but the action is `abc1234 review round 4 fixes`.  Fix: undo the fix, and write `reported, not fixed` (decision 0024).".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn log_check_fails_a_log_with_no_significant_column() {
+        let old = "# Review log\n\n## Findings\n\n| Round | Finding | Action |\n| - | - | - |\n| 4 | 4-1 | abc1234 review round 4 fixes |\n";
+        assert_eq!(
+            log_check_of("old", Some(old)),
+            (
+                3,
+                vec!["log-check: the findings table has no `Significant` column.  Fix: write the log in the form of step 11 of the review-rounds skill.".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn log_check_fails_a_missing_file() {
+        let (code, lines) = log_check_of("missing", None);
+        assert_eq!(code, 3);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("reading ") && lines[0].contains("log.md"),
+            "{lines:?}"
+        );
     }
 }
