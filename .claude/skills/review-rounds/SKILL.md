@@ -167,7 +167,7 @@ Else start one new subagent with `subagent_type` set to `general-purpose`.  Fill
 ```text
 Compare two lists of review findings.  Use only the two lists below.  Do not read files, and do not run commands.
 
-List A holds the found findings of a baseline review.  List B holds the found findings of a review round on the same commit.
+List A holds the found findings of a baseline review.  List B holds the found findings and the `known` findings of a review round on the same commit.
 
 For each finding in list A, find a finding in list B that reports the same defect at the same place.  A finding in list B can match more than one finding in list A.
 
@@ -182,7 +182,7 @@ List A:
 <the found findings of the baseline: ID, where and claim of each>
 
 List B:
-<the found findings of the round: ID, where and claim of each>
+<the found findings and each `known` finding of the round: ID, where and claim of each>
 ```
 
 Record the mark of each baseline finding, with the match.  Count x, the baseline findings marked `found`, and y, all found baseline findings.  Record "of y baseline findings, the round found x", with the numbers.
