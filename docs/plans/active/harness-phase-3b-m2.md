@@ -207,6 +207,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: step 3, the 12 entries of `KNOWN_MISSED`, `known_problems` and its tests (implementer).
 * [x] 2026-10-31: step 4, the docs of what `xtask review mutants` does: TD-33, TD-39, TD-66, and the Tools table and changelog of `docs/working-with-agents.md`.  The diff of the skill, its pins and its docs goes to the team leader (implementer).
 * [x] 2026-10-31: checkpoint: the xtask code and its docs are done (`eee072f` to `e3a081e`).  The team leader checked that the diff applies (`git apply --check`), and gave it to the orchestrator with the changes to the parent plan.  Next: the orchestrator lands them, then round 1.
+* [x] 2026-10-31: review round 1 (at `c078a83`, no `--baseline`): 4 should-fix confirmed (1-1 to 1-4) and 6 nits, no blocker.  The mutants line: `full: tested 84 (caught 77, missed 6, unviable 1), timeouts 0, not tested 0, known 0`.  The round folder had `missed.txt` and `known.txt` (empty): the first live use of the split.  The 6 missed mutants are confirmed; 1-12 and 1-16 merge into 1-1, and 1-14 into 1-5.  1-4 is in the skill, so its fix goes to the orchestrator as a diff.  11 agents, 623094 tokens, 18.4 wall minutes.
 * [x] 2026-10-31: review round 1 fixes (implementer): tests for 1-1, 1-2, 1-5, 1-9, 1-11, 1-13 and 1-15; the texts of 1-3, 1-6, 1-7, 1-8 and 1-10.
 * [ ] Review rounds.
 * [ ] M2 done: this plan moves to `plans/completed/`.
