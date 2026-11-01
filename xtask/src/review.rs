@@ -1112,6 +1112,91 @@ impl std::fmt::Display for Line {
     }
 }
 
+// Known-missed mutants: the missed mutants that a review round sent to tech
+// debt.  `review mutants` logs them as known, and sends the rest to the
+// validator.
+
+/// One missed mutant that a review round sent to tech debt.
+///
+/// An entry matches a missed line by four parts, and each must be equal.
+/// Line numbers move with each edit, so an entry has no line number.  The
+/// mutation text alone does not tell two operator mutants of one function
+/// apart, so the entry also has the code line.  The code line does not tell
+/// two mutants on one line apart, so the entry also has the offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Known {
+    /// The TD ID of `docs/tech-debt.md` that holds the gap.
+    pub debt: &'static str,
+    /// The file, as a path from the repo root.
+    pub file: &'static str,
+    /// The text of the missed line after `<file>:<line>:<col>: `.
+    pub mutation: &'static str,
+    /// The line of the file at `<line>`, with the spaces at its ends removed.
+    pub code: &'static str,
+    /// `<col>` minus the spaces and tabs at the start of that line.  It
+    /// stays the same when the code line moves or its indent changes.
+    pub offset: usize,
+}
+
+/// The known-missed list.
+pub const KNOWN_MISSED: &[Known] = &[];
+
+/// The missed lines of a run, split in two.  Each list keeps the order of
+/// the input.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Split<'a> {
+    /// The lines for the validator.
+    pub to_validate: Vec<&'a str>,
+    /// Each known line, with the TD of its entry.
+    pub known: Vec<(&'a str, &'static str)>,
+}
+
+/// Splits the missed lines of cargo-mutants (`missed.txt`) by `list`.
+/// `line_at(file, n)` gives line `n` of the file, untrimmed.  A line that
+/// does not parse, or whose file `line_at` cannot read, goes to the
+/// validator.  So an old entry sends its mutant to the validator.
+pub fn split<'a>(
+    missed: &'a str,
+    list: &[Known],
+    line_at: impl Fn(&str, usize) -> Option<String>,
+) -> Split<'a> {
+    let mut out = Split::default();
+    for line in missed.lines().filter(|line| !line.trim().is_empty()) {
+        match known_debt(line, list, &line_at) {
+            Some(debt) => out.known.push((line, debt)),
+            None => out.to_validate.push(line),
+        }
+    }
+    out
+}
+
+/// The TD of the entry of `list` that matches `line`, if one does.
+fn known_debt(
+    line: &str,
+    list: &[Known],
+    line_at: &impl Fn(&str, usize) -> Option<String>,
+) -> Option<&'static str> {
+    let (place, mutation) = line.split_once(": ")?;
+    let mut parts = place.rsplitn(3, ':');
+    let col: usize = parts.next()?.parse().ok()?;
+    let number: usize = parts.next()?.parse().ok()?;
+    let file = parts.next()?;
+    let entries: Vec<&Known> = list
+        .iter()
+        .filter(|e| e.file == file && e.mutation == mutation)
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let code = line_at(file, number)?;
+    let indent = code.len() - code.trim_start_matches([' ', '\t']).len();
+    let offset = col.checked_sub(indent)?;
+    entries
+        .iter()
+        .find(|e| e.code == code.trim() && e.offset == offset)
+        .map(|e| e.debt)
+}
+
 /// Removes the round's old `mutants.out`, `mutants.out.old` and
 /// `mutants.txt`.  A diff with no mutants leaves an old `mutants.out` as it
 /// was, and an old line would show until the new run ends.
@@ -3537,6 +3622,157 @@ exit 2
         assert_eq!(
             config_path(top, dir, Some("/elsewhere/x.toml")),
             PathBuf::from("/elsewhere/x.toml")
+        );
+    }
+
+    // Known-missed mutants.
+
+    const SAVE_RS: &str = "xtask/src/e2e/save.rs";
+
+    /// Finding 2-17 of round 2 of M8, which went to TD-39.
+    const LINE_2_17: &str = "xtask/src/e2e/save.rs:503:5: replace save_once -> Result<Save> with Ok(Default::default())";
+
+    /// Findings 1-41 and 1-54 of round 1 of M8, which `2fdecda` fixed with
+    /// tests.
+    const LINE_1_41: &str = "xtask/src/e2e/save.rs:427:39: replace * with + in save_once";
+    const LINE_1_54: &str = "xtask/src/e2e/save.rs:427:39: replace * with / in save_once";
+
+    /// The code of `save.rs:503` at `9c69f22`, and of `save.rs:427` at
+    /// `f28d22d`.
+    const CODE_503: &str = "    restore(p, seconds)?;";
+    const CODE_427: &str = "    let item_y = o.item_y + o.item_dy * row as f64;";
+
+    /// A fixture entry for the mutant of 2-17.
+    const ENTRY_2_17: Known = Known {
+        debt: "TD-39",
+        file: SAVE_RS,
+        mutation: "replace save_once -> Result<Save> with Ok(Default::default())",
+        code: "restore(p, seconds)?;",
+        offset: 1,
+    };
+
+    /// A fake `line_at` that knows the lines of `lines` only.
+    fn lines_of(
+        lines: &'static [(&'static str, usize, &'static str)],
+    ) -> impl Fn(&str, usize) -> Option<String> {
+        move |file, n| {
+            lines
+                .iter()
+                .find(|(f, line, _)| *f == file && *line == n)
+                .map(|(_, _, code)| code.to_string())
+        }
+    }
+
+    const SAVE_LINES: &[(&str, usize, &str)] =
+        &[(SAVE_RS, 503, CODE_503), (SAVE_RS, 427, CODE_427)];
+
+    #[test]
+    fn the_mutant_of_2_17_is_known() {
+        let missed = format!("{LINE_2_17}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![],
+                known: vec![(LINE_2_17, "TD-39")],
+            }
+        );
+    }
+
+    #[test]
+    fn the_mutants_of_1_41_and_1_54_go_to_the_validator() {
+        let missed = format!("{LINE_1_41}\n{LINE_1_54}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![LINE_1_41, LINE_1_54],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn another_code_line_or_another_file_goes_to_the_validator() {
+        let moved = "xtask/src/e2e/save.rs:427:5: replace save_once -> Result<Save> with Ok(Default::default())";
+        let elsewhere = "xtask/src/e2e/load.rs:503:5: replace save_once -> Result<Save> with Ok(Default::default())";
+        const LINES: &[(&str, usize, &str)] = &[
+            (SAVE_RS, 427, CODE_427),
+            ("xtask/src/e2e/load.rs", 503, CODE_503),
+        ];
+        let missed = format!("{moved}\n{elsewhere}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(LINES)),
+            Split {
+                to_validate: vec![moved, elsewhere],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn the_offset_tells_two_mutants_on_one_line_apart() {
+        // `xtask/src/e2e/weights.rs:498` at `759abfa`.
+        const LINES: &[(&str, usize, &str)] = &[(
+            "xtask/src/e2e/weights.rs",
+            498,
+            "        k16.as_ref().is_some_and(|(m, a, _)| *m == mm && *a == attn),",
+        )];
+        let first = "xtask/src/e2e/weights.rs:498:49: replace == with != in run";
+        let second = "xtask/src/e2e/weights.rs:498:61: replace == with != in run";
+        let entry = Known {
+            debt: "TD-66",
+            file: "xtask/src/e2e/weights.rs",
+            mutation: "replace == with != in run",
+            code: "k16.as_ref().is_some_and(|(m, a, _)| *m == mm && *a == attn),",
+            offset: 53,
+        };
+        let missed = format!("{first}\n{second}\n");
+        assert_eq!(
+            split(&missed, &[entry], lines_of(LINES)),
+            Split {
+                to_validate: vec![first],
+                known: vec![(second, "TD-66")],
+            }
+        );
+    }
+
+    #[test]
+    fn an_unread_file_or_a_line_without_a_place_goes_to_the_validator() {
+        let no_place =
+            "xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default())";
+        let missed = format!("{LINE_2_17}\n{no_place}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], |_: &str, _| None),
+            Split {
+                to_validate: vec![LINE_2_17, no_place],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn split_reads_no_file_for_a_line_that_no_entry_names() {
+        let missed = format!("{LINE_1_41}\n");
+        let read = |file: &str, n: usize| -> Option<String> {
+            panic!("read {file}:{n}, which no entry names")
+        };
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], read),
+            Split {
+                to_validate: vec![LINE_1_41],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn split_keeps_the_order_and_drops_empty_lines() {
+        let missed = format!("{LINE_1_41}\n\n{LINE_2_17}\n\n{LINE_1_54}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![LINE_1_41, LINE_1_54],
+                known: vec![(LINE_2_17, "TD-39")],
+            }
         );
     }
 

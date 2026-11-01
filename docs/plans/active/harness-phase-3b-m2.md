@@ -202,7 +202,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: plan written (`0b84126`).
 * [x] 2026-10-31: plan review round 1 (one `Plan` agent): no blocker, 9 should-fix and 9 nits.  The agent recounted the measurement and found one count wrong (9 rounds, not 10).  All findings are fixed in this plan.
 * [x] 2026-10-31: plan review round 2 (a new `Plan` agent), at `77ba7b8`: 1 blocker, 6 should-fix (2 significant) and 5 nits.  The blocker: a commit with failing tests breaks GIT-2.  All findings are fixed in this plan.  The review stops at its cap of 2 rounds.
-* [ ] Step 1: the list and its match.
+* [x] 2026-10-31: step 1, `Known`, an empty `KNOWN_MISSED` and `split`, with 7 tests (implementer).
 * [ ] Step 2: `review mutants` writes `missed.txt` and `known.txt`.
 * [ ] Step 3: the entries and their test.
 * [ ] Step 4: the docs, and the diff for the orchestrator.
@@ -216,6 +216,8 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, team leader: the wasm32 variants of `mapped_floats`, `base_latency` and `main` are items of their own, with `#[cfg(target_arch = "wasm32")]`.  `.cargo/mutants.toml` keeps them without `mutants::skip`.  That rule comes from `exclude_re`, which matched by name and so hid the native variant too (`plans/completed/stream-from-storage-catchup.md`, D4).  With the attribute on one item, the native variant keeps its mutants.  M2 does not change this (Decision log).
 * 2026-10-31, team leader: the refuted mutants of `protocol/src/lib.rs` (16) are in functions that compile natively, with no `cfg`.  Only the wasm32 tests in `protocol/tests/web.rs` reach them.
 * 2026-10-31, team leader: at `759abfa`, `note_run` of `xtask/src/e2e/weights.rs` has three `replace || with && in note_run` mutants (lines 280 to 282).  At `0789e6b`, TD-66 named two (lines 254 and 256).  Step 3 maps each row to the code of today.
+* 2026-10-31, implementer: step 1's tests failed first on the stub of `split`, on `assert_eq`.  All 6 tests of the plan failed: the stub gave each line as known, with the debt `""`.
+* 2026-10-31, implementer: step 1 adds a seventh test, `split_reads_no_file_for_a_line_that_no_entry_names`.  `split` calls `line_at` only for a line that an entry names, so step 2 runs no `git show` for most lines.  The test also failed on the stub.
 
 ## Decision log
 
