@@ -128,8 +128,8 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 * The skill copies the log to `docs/reviews/` after the last round, not after round 3.  So `xtask clean` keeps a run folder until the copy exists.
 * The findings log gets a `significant` column, filled by the team leader or orchestrator, not by the reviewer.  The log's "reported, not fixed" list feeds the PR's `<details>` section.
 * `repeat-of` also matches a confirmed finding that went to tech debt, so a deferred finding is not fixed or validated again.  From M2, `repeat-of` can hold a TD ID, as for a `known` mutant.
-* A mutant whose `repeat-of` is a TD ID gets the verdict `known`, not `refuted`.  Step 6 of the skill sets `refuted` on a mutant with `repeat-of` today, and M5's validator set reads refuted mutants from the logs.
-* A mutant that a team sends to tech debt gets a `KNOWN_MISSED` entry in the milestone's last commit, not between rounds.  The skill and TD-33 say so.  Reason: `xtask/src/review.rs` routes all reviewers, so an entry between rounds widens the next round.
+* A finding whose `repeat-of` is a TD ID gets the verdict `known`, not `refuted`, in step 4, item 4, and in step 6, item 6, of the skill.  Today both items set `refuted` on a finding with `repeat-of`.  So a deferred finding would show as refuted in the logs, and the refuted counts would be wrong.
+* A mutant that a team sends to tech debt gets a `KNOWN_MISSED` entry in the milestone's last commit, not between rounds.  M3 makes the skill and TD-33 say so.  Reason: `xtask/src/review.rs` routes all reviewers, so an entry between rounds widens the next round.
 * A `known` finding is not a confirmed finding.  It gets no fix and no `significant` value, and it does not keep the rounds open.  Mutant findings have rule VERIFY-1, a strict rule (D3), so the log check must accept a `known` row with the action `known: <TD>`.
 * Expected effect, from the logs: from round 4, about 71 nit fixes stop.  29 of the 53 confirmed late findings are on VERIFY-1, so they are still fixed.
 * Acceptance:
@@ -171,7 +171,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * Pass rule for a reviewer: recall within 0.15 of the control, and no bug missed.
   * Pass rule for a validator: no confirmed bug refuted, and at least as many refutations of the refuted items as the control.
   * A role whose interval is wider than 0.3 keeps `inherit`, for want of evidence.  gpu-reviewer has only about 6 confirmed findings, so it will likely keep `inherit`.
-  * A replay runs the `xtask` of its replayed commit, so `KNOWN_MISSED` marks no mutant `known`.  If a replay's mutants line has `known <k>` with k above 0, the results table records it.
+  * A replay runs `H/bin/xtask`, which `make-harness.sh` builds from this branch, so `KNOWN_MISSED` applies.  Give each `known` ground-truth mutant to the validator directly, and record `known <k>` for each run.
   * Tokens: read from each run's `modelUsage` (used tokens, not final context; TD-44).
   * Scratch: each replay clone goes in its own folder under the temp folder.  After the measure, the orchestrator runs `xtask clean --yes --also <clone>` for each clone folder, never for the harness root, whose `bin/` the runs need.  If auto mode refuses that command, the orchestrator records the folder for M8's list and goes on.
   * Budget: about 45M `modelUsage` tokens.  One milestone's rounds 1 to 3 in the PR #39 logs used about 2.7M final-context tokens (1.6M to 2.9M).  A whole case uses about 16 times its final context.
@@ -183,6 +183,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 ### M6: orchestrated mode as a skill (decision 0023)
 
 * `.claude/skills/orchestrate/SKILL.md` holds the generic parts of the two "How the work runs" sections (`plans/completed/harness-phase-3.md` and `plans/completed/stream-from-storage.md`): roles, agent rules, preflight, the loop for each milestone, the stop rule (by reference to decision 0024), who edits what, stop-and-wait conditions, close-out with `xtask clean`, and the report format.  A review run folder of the orchestrated branch stays while that branch is checked out, so the skill keeps its manual removal after the log copy (TD-37).  M7 adds the PR body steps, because M7 defines the body.
+* Each review agent names its worktree `<round>-<agent>-<n>`, so `review clean` finds it, or `review clean` matches the names that agents use (M2's Surprises).  A test covers the names that M2's rounds made.
 * `PLANS.md` gets an optional section "How the work runs" with fixed sub-headings: mode, branch and PR, maintainer steps, preflight items of the plan, decision points asked at the start, review rule, kick-off prompt, extra stop conditions.  A big task's plan must have it.
 * `docs-check` fails a plan in `plans/active/` with more than 3 `M<n>` milestone headings and no "How the work runs" heading.  It accepts that heading at level 2 or 3.  It does not check `plans/completed/`, because four completed plans have more than 3 milestones and no such section, and PLANS.md forbids their edit.
 * `working-with-agents.md` names the `orchestrate` skill.
@@ -210,7 +211,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 
 ### M8: close-out
 
-* `harness.md`: a row for each new component, with the failure it addresses, the known-missed list (M2) included.  Report the list's yield: the `known <k>` counts of the rounds of M3 to M7.  `working-with-agents.md`: recipes and a changelog line.  `tech-debt.md`: each gap left.
+* `harness.md`: a row for each new component, with the failure it addresses, the known-missed list (M2) included.  Report the list's yield: the `known <k>` counts of the rounds of M3 to M7.  Expect 0, since no diff of this phase touches the 4 files that the list names.  The yield on past rounds is the 29 lines of PR #39's logs after `6d0a39d` (M2's Surprises).  `working-with-agents.md`: recipes and a changelog line.  `tech-debt.md`: each gap left.
 * `harness-engineering.md`: re-check phases 4 to 6 and the phase 3 gate against M3 and M5.  Propose (do not decide) whether the `--baseline` gate is replaced by M5's measurement (D5).
 * Re-check D4 against the late bugs outside the fix range of the round before (catch-up 4-1, M7 6-1, M7 6-2).  Propose a change if the narrow range would miss such bugs.
 * Run `xtask clean --yes`.  Move this plan to `completed/` with its retrospective.
@@ -326,6 +327,7 @@ Kick-off prompt:
 * 2026-10-31, agent: the M1 intent review found that `xtask clean --yes` alone leaves the replay clones and, after a squash merge, the `worktree-agent-*` branches.  The M1 team adds a proof for agent branches.  For clones, M5 names each one with `--also`.  If auto mode refuses that form, its removal is a maintainer step at close-out.  An agent does not widen the D7 entry, which is the maintainer's setting.
 * 2026-10-31, agent: M2 cuts the `proc-macro2` filter and its acceptance bullet, and keeps the known-missed list.  Reason: the filter would remove 11 of 193 lines, in 2 of 22 rounds, and 4 of those lines are there by design.
 * 2026-10-31, agent: the M2 intent review (round 1) found no change for M2's code.  It added three M3 bullets (a TD `repeat-of` gives `known`, when to add a `KNOWN_MISSED` entry, a `known` row and the log check), one line each to M5, M7 and M8, and fixed the stale filter line.
+* 2026-10-31, agent: the M2 intent review (round 2) corrected round 1's M5 line: replays run `H/bin/xtask` from this branch, so `KNOWN_MISSED` applies to them.  It widened the M3 `known` bullet to reviewer findings, and added an M6 bullet for the worktree names.
 * 2026-10-31, agent: the M1 intent reviews changed the stop rule.  A refused cleanup command is not a stop: a refused `review clean` is left to the next `clean --yes`, and a refused `--also` folder goes on M8's list of maintainer steps.  Reason: a refused cleanup harms nothing, and a stop would halt the hands-off run.
 
 ## Outcomes and retrospective
