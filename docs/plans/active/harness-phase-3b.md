@@ -212,7 +212,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 * Re-check D4 against the late bugs outside the fix range of the round before (catch-up 4-1, M7 6-1, M7 6-2).  Propose a change if the narrow range would miss such bugs.
 * Run `xtask clean --yes`.  Move this plan to `completed/` with its retrospective.
 * The PR body lists the maintainer's steps after the merge:
-  * `git switch main` and `git fetch`, then `cargo run -p xtask -- clean --yes`.  The current branch always stays, so the switch comes first.
+  * `git switch main` and `git pull --ff-only`, then `cargo run -p xtask -- clean --yes`.  The current branch always stays, so the switch comes first.  The pull brings `xtask clean` to `main`, and moves `origin/main` for the proofs.
   * Stop `caffeinate`.  Remove the untracked `tests/` folder, if an agent left one.
   * Remove each scratch folder that auto mode refused to remove, and the harness root `/private/tmp/stemyla-harness` when no later run needs it.
   * Run `cargo clean` if `target/` is large.
@@ -244,7 +244,7 @@ This plan uses the prose recipe until M6 makes the skill.  It follows `plans/com
 * Review rule: M1 and M2 by decision 0011 as amended in practice (to the stop rule).  From M3, decision 0024 as accepted.
 * Only the orchestrator edits `CLAUDE.md` and `.claude/**`, and writes review files that the Write tool refuses to a subagent.
 * Push only between review rounds.  Wait for CI before the next team.
-* Stop and wait: an invariant would break; auto mode refuses an action, except a cleanup command (`review clean`, `clean --yes --also`), whose refusal becomes a maintainer step at close-out; a step needs a person; the M5 budget is spent; the weekly usage limit is near; the D8 timebox ends.
+* Stop and wait: an invariant would break; auto mode refuses an action, except a cleanup command.  A refused `review clean` is not a stop, since the next `clean --yes` removes those worktrees.  A refused `clean --yes --also` folder goes on M8's list; a step needs a person; the M5 budget is spent; the weekly usage limit is near; the D8 timebox ends.
 
 Decision points (the maintainer answers these at the start):
 
@@ -319,6 +319,7 @@ Kick-off prompt:
 * 2026-10-31, agent: plan review round 2 cut M5's design to fit the 45M budget.  The validator goes first, then the docs-reviewer on 4 rounds; `haiku` and the effort arms run only if budget is left.  A design of all the arms costs over 100M.
 * 2026-10-31, agent: in `bedfd00`, M1's bullet on `review clean` says that the skill also runs it after the findings file with `--review-only`.  A subagent whose file the Write tool refuses gives the command to its caller.  Review round 2 (2-6, 2-9) found that the bullet named only the log.
 * 2026-10-31, agent: the M1 intent review found that `xtask clean --yes` alone leaves the replay clones and, after a squash merge, the `worktree-agent-*` branches.  The M1 team adds a proof for agent branches.  For clones, M5 names each one with `--also`.  If auto mode refuses that form, its removal is a maintainer step at close-out.  An agent does not widen the D7 entry, which is the maintainer's setting.
+* 2026-10-31, agent: the M1 intent reviews changed the stop rule.  A refused cleanup command is not a stop: a refused `review clean` is left to the next `clean --yes`, and a refused `--also` folder goes on M8's list of maintainer steps.  Reason: a refused cleanup harms nothing, and a stop would halt the hands-off run.
 
 ## Outcomes and retrospective
 
