@@ -357,7 +357,18 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: review round 4 fixes, as the late rule allows (team leader): 4-1 (pre-existing, on VERIFY-1) gets a TD-70 bullet: each tier runs its checks on the working tree.  4-2 (not significant) and 4-3 are `reported, not fixed`.
 * [x] 2026-11-01: review round 5 fixes, as the late rule allows (team leader): 5-1 (on VERIFY-1) and 5-2 (significant).  The TD-70 bullet names an unstaged or untracked change that the commit leaves out, and says that only CI finds the gap of the working tree.  5-3 to 5-5 are `reported, not fixed`.
 * [x] 2026-11-01: review round 6 fixes, as the late rule allows (team leader): 6-1 (on VERIFY-1), 6-2 and 6-3.  The TD-70 bullet names the two checks that narrow the gap of the working tree, and what each one misses.  6-4 and 6-5 are `reported, not fixed`.
-* [ ] Step 5: review rounds to the stop rule.
+* [x] 2026-11-01: GIT-2 in `docs/invariants.md` gives the whole rule of the GPU test line, also when no path changed or no path is known (`ef602b3`).  The orchestrator asked for it before round 5, because two round 4 reviewers noted the drift out of scope.
+* [x] 2026-11-01: review round 7 had no fix: 7-1 (not significant) and 7-2 to 7-4 are `reported, not fixed`.
+* [x] 2026-11-01: step 5: review rounds to the stop rule.  Each line gives the agents, the final-context tokens and the wall minutes of the round.
+  * Round 1, at `2752148`: 16 agents, 917403 tokens, 19.1 minutes.  13 confirmed findings (10 significant: 1-1 to 1-6, 1-8, 1-9, 1-15 and 1-23), 2 refuted mutants (`#[cfg(not(unix))]` code) and 8 nits.  Each was fixed but the refuted ones.  Mutants: full, tested 121, missed 6.
+  * Round 2, at `8ea8a7d`: 7 agents, 469636 tokens, 10.9 minutes.  2-1 and 2-3 confirmed and significant, 2-2 pre-existing and significant, and 5 nits.  Each was fixed.  Mutants: full, tested 9, missed 0.
+  * Round 3, at `2aeecc9`: 8 agents, 505115 tokens, 12.3 minutes.  3-1 to 3-4 confirmed and significant (3-1 a real bug: the index was not read), and 4 nits.  Each was fixed.  Mutants: full, tested 2, missed 0.
+  * Round 4, at `44a1eb0`, the first late round, with the fix range and the `Scope:` line: 6 agents, 361777 tokens, 6.8 minutes.  4-1 pre-existing on VERIFY-1, fixed.  4-2 confirmed, not significant.  4-2 and 4-3 are `reported, not fixed`.  Mutants: full, tested 8, missed 0.
+  * Round 5, at `ef602b3`: 4 agents, 147724 tokens, 3.7 minutes.  5-1 (on VERIFY-1) and 5-2 confirmed and significant, fixed.  5-3 to 5-5 are `reported, not fixed`.  Mutants: none in the diff.
+  * Round 6, at `01f699f`: 5 agents, 127219 tokens, 4.2 minutes.  6-1 (on VERIFY-1), 6-2 and 6-3 confirmed and significant, fixed.  6-4 and 6-5 are `reported, not fixed`.  Mutants: none in the diff.
+  * Round 7, at `22a8db2`: 3 agents, 137879 tokens, 3.5 minutes.  7-1 confirmed, not significant.  7-1 to 7-4 are `reported, not fixed`.  The stop rule holds, so the rounds stop.  Mutants: none in the diff.
+  * Totals: 7 rounds, 49 round agents, 2,666,753 tokens, 60.5 wall minutes and 0 interventions.  Before round 1: 2 `Plan` agents (244,326 tokens) and 1 implementer (256,779).  The fixes of rounds 1 to 3 used 3 implementers (439,514 tokens).
+* [x] 2026-11-01: M4 done: this plan in `plans/completed/`.  The orchestrator writes the log in `docs/reviews/harness-phase-3b-m4.md`.
 
 ## Surprises and discoveries
 
@@ -476,4 +487,28 @@ The team leader gives these to the orchestrator as text:
 
 ## Outcomes and retrospective
 
-To be written when the plan completes.
+What M4 achieved:
+
+* `xtask check --tier commit|push [--dry-run]` runs the local checks of GIT-2 by tier (decision 0026).  It prints each check that it runs or skips, with the reason, and the time of each check.
+* Tier `commit` reads the changed paths of one commit: the index, the tree and the untracked files, or `HEAD^..HEAD` on a clean tree.  It runs the checks that those paths need.  A strict path, or a graph that fails, sends it to tier `push`.
+* Tier `push` runs the fmt, clippy, test, `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  It runs the GPU test line when its paths change GPU code, or when no path changed or is known.
+* `STRICT_PATHS` has one row for each ID of `strict_rules()`, and a test ties the two.  The table sends 96 of PR #39's 194 commits to tier `push` (49.5%).
+* GIT-2 in `CLAUDE.md`, `docs/invariants.md`, the skill, the guide and `README.md` names the tiers.  `the_push_tier_runs_the_lines_of_claude_md` and `git_2_names_the_tiers` pin them.
+* No check is a browser test or `publish`.  `check_never_runs_the_browser_or_publish` pins it.
+* Warm, tier `commit` takes 11 s on a docs change and 68 s on an `xtask` change.  Tier `push` takes about 2 min (126 s), against the 16 min that PR #39's close-out commit took.
+
+The review in numbers: the totals of step 5 in Progress.  Rounds 4 to 7 fixed 6 findings (4-1, 5-1, 5-2, 6-1 to 6-3), and logged 11 as `reported, not fixed`.  Each of the 6 was a doc line of TD-70.  5-1 to 6-3 were on the line that the round before had added.
+
+What did not go well:
+
+* The tier `push` acceptance needed a toolchain that this Mac did not have (the wasm32 target and Trunk).  The plan did not check for it in preflight.
+* Round 3 found a real bug that rounds 1 and 2 missed: `git diff HEAD` ignores the index.
+* Rounds 4 to 7 each found a new reading of one TD-70 sentence, as M3's rounds 3 to 6 did for the stop rule.
+
+What to do differently:
+
+* Check each tool that an acceptance command needs in the preflight of the plan.
+* In a late round, write a doc fix as the smallest true claim, and name no check that the fix did not read in the code.
+* Add the `reported, not fixed` rows to the `repeat-of` check (M6): 6-4 repeated 5-3.
+
+Debt: TD-70 is new.  TD-16 and TD-39 now name the GPU scenarios that CI does not run.  No mutant went to tech debt, so `KNOWN_MISSED` has no new entry.

@@ -424,7 +424,7 @@ This entry concerns VERIFY-1, through `xtask docs-check`.
 
 This entry concerns GIT-2 and VERIFY-1, through `xtask check` (decision 0026).
 
-Tier `commit` runs the checks that the changed paths of one commit need (`plans/active/harness-phase-3b-m4.md`).  It has these gaps:
+Tier `commit` runs the checks that the changed paths of one commit need (`plans/completed/harness-phase-3b-m4.md`).  It has these gaps:
 
 * The crate tests are one `cargo test` command for the chosen packages.  Cargo turns on features only across those packages, so the command can pass where the workspace test line fails.
 * A test that reads a file in another folder is not seen.  The one case today is `engine/tests/realtime.rs`, which reads `app/Cargo.toml`.  That path matches DEPS-1, so it runs tier `push`.

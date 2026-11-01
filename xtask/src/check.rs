@@ -15,7 +15,7 @@
 //! [`run_checks`] runs a plan with a runner that the caller gives, and
 //! [`run_command`] is the real runner.
 //!
-//! `plans/active/harness-phase-3b-m4.md` gives the tables and the reasons.
+//! `plans/completed/harness-phase-3b-m4.md` gives the tables and the reasons.
 
 use crate::docs::glob_matches;
 use crate::review_log::strict_rules;
