@@ -27,7 +27,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
-* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.  Then the caller decides the next step: step 10, step 11 or the next round.
+* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.  If the caller writes the log, it runs `target/debug/xtask review log-check <run>/log.md` before `review clean`.  Then the caller decides the next step: step 10, step 11 or the next round.
 
 ## Names
 
@@ -73,7 +73,12 @@ Target folder: <target>
 The six reviewers are `reviewer`, `gpu-reviewer`, `memory-reviewer`, `wire-reviewer`, `supply-chain-reviewer` and `docs-reviewer`.  Choose the reviewers and their ranges:
 
 * Round 1: start each reviewer of the branch route.  The range of each is `<base>..HEAD`.  Its reasons come from the branch route.
-* A round above 1: start `reviewer` on `<base>..HEAD`, with its reasons from the branch route.  Also start each other reviewer of the since route on `<since>..HEAD`, with its reasons from the since route.  If the since range is empty, start `reviewer` only.
+* Rounds 2 and 3: start `reviewer` on `<base>..HEAD`, with its reasons from the branch route.  Also start each other reviewer of the since route on `<since>..HEAD`, with its reasons from the since route.  If the since range is empty, start `reviewer` only.
+* From round 4:
+  * Start each reviewer of the since route on `<since>..HEAD`, `reviewer` included.
+  * Its reasons come from the since route.
+  * It reads the fix range and the files that it touches (decision 0024).
+  * If the since range is empty, start no reviewer.  The round has no findings, so it is the last round.
 
 Start each reviewer, and the baseline, in one message.  Use the Agent tool, with `subagent_type` set to the name of the reviewer.  Each one is a new subagent.  Never start a fork, because a fork gets your context.
 
@@ -98,7 +103,13 @@ Each finding of a reviewer is one block with the fields `severity`, `kind`, `whe
 1. Two blocks are the same finding when they have the same `where` and the same claim.  The same `where` is the same file, at the same line or in the same function.  The same claim is the same defect, in other words.
 2. Merge each set of blocks that are the same finding into one finding.  Its sources are each reviewer that reported it.  Its severity is the highest severity of the blocks: `blocker`, then `should-fix`, then `nit`.
 3. Give each finding the ID `$1-<n>`, with `<n>` from 1.
-4. Read `<run>/<r>/findings.md` for each round `<r>` below $1.  Find each finding there with the verdict `refuted`.  If a finding of this round is the same finding as one of them, give it `repeat-of:` and the ID of that finding.  Give it the verdict `refuted`.  It gets no validator.
+4. Do the `repeat-of` check:
+   * Read `<run>/<r>/findings.md` for each round `<r>` below $1.  Find each finding there with the verdict `refuted`.
+   * Also read `<run>/log.md`, `docs/reviews/<branch>.md` and each `docs/reviews/<branch>-m<n>.md`.  `<branch>` is the last part of the `<run>` path.
+   * Find each row of these logs whose Action is a TD ID or `known: <TD>`.  Skip a TD that `docs/tech-debt.md` lists under `## Closed`.
+   * If a finding of this round is the same finding as a `refuted` one, give it `repeat-of:` and the ID of that finding.  Give it the verdict `refuted`.
+   * If it is the same finding as a row with a TD, give it `repeat-of:` and that TD.  Give it the verdict `known`.
+   * A finding with `repeat-of` gets no validator.
 5. Keep the baseline's findings in a separate list.  Merge them only with each other.  Give each the ID `$1-b<n>`, with `<n>` from 1.
 6. If a baseline finding is the same finding as a reviewer's finding, give it `same-as:` and the ID of the reviewer's finding.
 
@@ -139,7 +150,7 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
 3. Read `<run>/$1/missed.txt` and `<run>/$1/known.txt`.  If neither file exists, the run is from an older `xtask`.  Then read `<run>/$1/mutants.out/missed.txt` as `missed.txt`.  If both files are empty or missing, go to item 9.
 4. Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.  Make no finding of a line of `known.txt` in this item.
 5. Each line of `known.txt` becomes a finding with the next ID `$1-<n>`.  Its fields are those of item 4, from the text before the tab.  Its verdict is `known`, and its `repeat-of` is the TD after the tab.  It gets no validator.  Its action in the log is "known: <TD>".
-6. Do the `repeat-of` check of step 4, item 4, for each finding of item 4.  A finding with `repeat-of` gets the verdict `refuted`.  Leave its line out of the validator's prompt.  If no line is left, go to item 8.
+6. Do the `repeat-of` check of step 4, item 4, for each finding of item 4.  A finding whose `repeat-of` is an ID gets the verdict `refuted`.  A finding whose `repeat-of` is a TD gets the verdict `known`, and its action in the log is "known: <TD>".  Neither gets a validator.  Leave its line out of the validator's prompt.  If no line is left, go to item 8.
 7. Start one `validator` with this prompt template, filled in.  The prompt holds each line that has no `repeat-of`.  The range is `<since>..HEAD`, because the mutants run tests the since diff:
 
    ```text
@@ -155,7 +166,7 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
    ```
 
    The verdict of each of these findings is the verdict of the validator for its line.
-8. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
+8. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  Its rule also names VERIFY-1.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
 9. Run `jq -n now`, and record the output as the end of the round.  Run `jq .started <run>/$1/state.json` for the start of the round.
 
 ### 7. Compare with the baseline (`--baseline` only)
@@ -229,6 +240,7 @@ Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Wri
 
 * sources: <each reviewer, cargo-mutants>
 * severity: <blocker, should-fix or nit>
+* significant: <yes or no; or ->
 * kind: <bug, weak-test, rule, doc or other>
 * where: <file:line>
 * rule: <ID and quote, or none>
@@ -249,19 +261,35 @@ Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Wri
 of <y> baseline findings, the round found <x>
 ```
 
+* Fill the `significant` field yourself.  A reviewer does not fill it.
+* A blocker or should-fix with the verdict `confirmed`, `pre-existing` or `unproven` gets `yes` or `no`, by the test of decision 0024.
+* The test: a rule or decision fails in a case that a user can reach, or later work goes wrong.  A contradiction or a misleading measure is significant too.
+* Each other finding gets `-`.  This includes each `known` finding.
 * List each agent that the round started: the reviewers, the baseline, and each validator.  A validator's Findings cell names the IDs that it judged.
 * Without `--baseline`, leave out the two baseline sections.
 * With `--review-only`, run `target/debug/xtask review clean $1`.  Then stop here.  If auto mode or a person refuses it, give the command to the person.  Give the person the path of the findings file and a summary: the mutants line, and the count of findings for each verdict.
 
 ### 10. Fix the findings
 
-* Fix each found finding, the baseline's included.  A found finding has the verdict `confirmed` or `pre-existing`.
+The fix rule is decision 0024:
+
+* Rounds 1 to 3: fix each found finding, the baseline's included.  A found finding has the verdict `confirmed` or `pre-existing`.
+* From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
+* From round 4, log each other finding as `reported, not fixed`, nits included.  Do not fix it.
+* From round 4, fix a `pre-existing` or `unproven` finding only if it is one of those three kinds.
+* A significant should-fix has `yes` in its `significant` field.
+* The strict rules are PROTO-1, PROTO-2, MEM-1 to MEM-5, RT-1, GPU-1 to GPU-3, VERIFY-1, GIT-1, DEPS-1, ASSET-1.
+* A finding is on a strict rule when its rule names one of them.  Each finding of `cargo-mutants` is on VERIFY-1.
+
+Then:
+
 * Where the finding is about behaviour, first write a test that fails before the fix.
 * A `pre-existing` finding can go to `docs/tech-debt.md`, or to its own PR, in place of a fix.
+* A mutant that the team sends to tech debt gets a `KNOWN_MISSED` entry in the milestone's last commit, not in a round's fixes.  Reason: a change to `xtask/src/review.rs` routes all six reviewers (`ROUTE_ALL`).
 * Do not fix a `refuted` finding.
 * Do not fix a `known` finding.  Its gap is in its TD.
 * Decide each `unproven` finding, and record the reason.
-* A nit has the verdict `unvalidated`.  Fix it only if you agree with it.
+* A nit has the verdict `unvalidated`.  In rounds 1 to 3, fix it only if you agree with it.
 * Before the commit, run fmt, clippy, the tests and `docs-check` (GIT-2).
 * Commit the fixes, signed, with the subject "review round $1 fixes".
 
@@ -283,15 +311,15 @@ First, get the approval counts of the round.  They are cost, not interventions. 
 * If you asked, wait for the answer.  Do not guess the counts.
 * Write the first count in the `approvals` field of `<run>/$1/findings.md`.  Write the second count in its `baseline approvals` field, in place of "not asked".  With one total, the `approvals` field holds the total, which then includes the baseline's, and the `baseline approvals` field holds "in approvals".
 
-The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, with the command `target/debug/xtask review clean $1`, and stop.  The caller writes the log, then runs that command.  If the file does not exist, write it in this form first:
+The log `<run>/log.md` has two tables.  If the Write tool refuses it, do not write it in another way.  Give the path and the whole text of the file in your final answer, with the command `target/debug/xtask review log-check <run>/log.md` and with the command `target/debug/xtask review clean $1`, and stop.  The caller writes the log, then runs `review log-check`, then `review clean`.  If the file does not exist, write it in this form first:
 
 ```markdown
 # Review log
 
 ## Findings
 
-| Date | Round | Commit | Finding | Reviewers | Severity | Kind | Rule | Where | Claim | Verdict | Repeat of | Action |
-| - | - | - | - | - | - | - | - | - | - | - | - | - |
+| Date | Round | Commit | Finding | Reviewers | Severity | Significant | Kind | Rule | Where | Claim | Verdict | Repeat of | Action |
+| - | - | - | - | - | - | - | - | - | - | - | - | - | - |
 
 ## Rounds
 
@@ -303,7 +331,13 @@ Add one row to the findings table for each finding of the round, the baseline's 
 
 * Date: today, as `YYYY-MM-DD`.  Commit: the short SHA of `HEAD` at `review start`.
 * Reviewers: the sources of the finding.  Rule: the rule ID, or none.  Claim: one line.
-* Action: the fix commit and its subject; or the reason for no change, such as "refuted", or the tech-debt ID.
+* Significant: the `significant` field of the finding.
+* Action: one of these forms:
+  * the fix commit and its subject, or the diff that holds the fix;
+  * `reported, not fixed`; `refuted`; `known: <TD>`; a TD ID;
+  * `no change:` and the reason, such as its own PR;
+  * `merged into <ID>;`, then the action of that finding.
+* A `no change:` reason names no commit SHA.
 
 Add one row to the rounds table:
 
@@ -316,15 +350,28 @@ Add one row to the rounds table:
 * Mutants: the mutants line.
 * With `--baseline`: the baseline agents are the baseline and the validators that step 5 started for its findings.  Their tokens are the sum of their tokens.  Their wall minutes are the duration of the baseline, plus the longest duration of those validators.  Their interventions are the messages of a person for those agents.  Baseline approvals: the count that the person gave for the baseline, or "in approvals" if the person gave one total.  Baseline found is "of y baseline findings, the round found x".  Without `--baseline`, write "-" in each baseline cell.
 
+Then check the log:
+
+* Run `target/debug/xtask review log-check <run>/log.md`.
+* If it names a problem, correct the row or the fix before the next round.
+
 Then remove the worktrees of the round's agents:
 
 * Run `target/debug/xtask review clean $1`.  It removes each worktree `target/review/$1-<agent>-<n>` of this round, also with changes.
 * It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
 * If auto mode or a person refuses it, give the command to the person, and go on.
 
-After round 3:
+Then decide if this round is the last round (decision 0024).  The round is the last round when all of these are true:
+
+* Its number is 3 or more.
+* It has no `confirmed` blocker, no `confirmed` should-fix with `yes`, and no `confirmed` finding on a strict rule.
+* It fixed no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.
+
+A `known` finding does not count.  A finding that went to a TD in this round counts, so the next round runs.  There is no cap.  If the round is not the last round, the next round follows.
+
+After the last round:
 
 * Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.
 * Write a Progress line for each round in the plan of the work.
 * Run the checks, and commit, signed.
-* Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, and each `repeat-of` of a finding that is not `known`.  Then it lists each `known` mutant once, with its TD.  It also gives the mutants line of each round.
+* Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, and each `repeat-of` of a finding that is not `known`.  Then it lists each `known` finding once, with its TD.  This includes each `known` mutant.  In its `<details>` section, it lists each `reported, not fixed` finding.  It also gives the mutants line of each round.

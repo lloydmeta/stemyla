@@ -1134,6 +1134,15 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// validator, and step 10 does not fix it.  Step 7 finds a finding by its
 /// verdict `confirmed` or `pre-existing`, and List B of its template also
 /// holds each `known` finding (harness phase 3b, M2).
+/// Harness phase 3b, M3 (decision 0024) adds these:
+/// * the pinned sentence of the fix rule, and the stop rule of step 11;
+/// * the late range of step 3, and its empty case;
+/// * the `known` verdict of a TD `repeat-of`, and the logs that step 4 reads;
+/// * the VERIFY-1 rule of a merged finding;
+/// * the `significant` field, and the time of a `KNOWN_MISSED` entry;
+/// * `review log-check` after the log, also for the caller where the Write
+///   tool refuses the log;
+/// * "After the last round", and the `reported, not fixed` line of the PR.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1203,12 +1212,49 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "So write each count as `0 (auto mode; a fallback prompt is not counted)`.",
     "Leave the approvals fields as step 9 wrote them.",
     "Baseline approvals: the count that the person gave for the baseline",
+    FIX_RULE_SENTENCE,
+    "* From round 4, log each other finding as `reported, not fixed`, nits included.  Do not fix it.",
+    "* From round 4, fix a `pre-existing` or `unproven` finding only if it is one of those three kinds.",
+    "Each finding of `cargo-mutants` is on VERIFY-1.",
+    "The round is the last round when all of these are true:",
+    "* Its number is 3 or more.",
+    "* It has no `confirmed` blocker, no `confirmed` should-fix with `yes`, and no `confirmed` finding on a strict rule.",
+    "* It fixed no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.",
+    "A `known` finding does not count.  A finding that went to a TD in this round counts, so the next round runs.  There is no cap.",
+    "* Rounds 2 and 3: start `reviewer` on `<base>..HEAD`",
+    "  * Start each reviewer of the since route on `<since>..HEAD`, `reviewer` included.",
+    "  * Its reasons come from the since route.",
+    "  * It reads the fix range and the files that it touches (decision 0024).",
+    "  * If the since range is empty, start no reviewer.  The round has no findings, so it is the last round.",
+    "Also read `<run>/log.md`, `docs/reviews/<branch>.md` and each `docs/reviews/<branch>-m<n>.md`.",
+    "Find each row of these logs whose Action is a TD ID or `known: <TD>`.  Skip a TD that `docs/tech-debt.md` lists under `## Closed`.",
+    "If it is the same finding as a row with a TD, give it `repeat-of:` and that TD.  Give it the verdict `known`.",
+    "A finding whose `repeat-of` is a TD gets the verdict `known`",
+    "Its rule also names VERIFY-1.",
+    "* significant: <yes or no; or ->",
+    "* Fill the `significant` field yourself.  A reviewer does not fill it.",
+    "gets `yes` or `no`, by the test of decision 0024.",
+    "* Each other finding gets `-`.  This includes each `known` finding.",
+    "* Significant: the `significant` field of the finding.",
+    "gets a `KNOWN_MISSED` entry in the milestone's last commit, not in a round's fixes.",
+    "* `reported, not fixed`; `refuted`; `known: <TD>`; a TD ID;",
+    "* A `no change:` reason names no commit SHA.",
+    "* Run `target/debug/xtask review log-check <run>/log.md`.",
+    "If the caller writes the log, it runs `target/debug/xtask review log-check <run>/log.md` before `review clean`.",
+    "with the command `target/debug/xtask review log-check <run>/log.md` and with the command",
+    "The caller writes the log, then runs `review log-check`, then `review clean`.",
+    "After the last round:",
+    "Then it lists each `known` finding once, with its TD.",
+    "In its `<details>` section, it lists each `reported, not fixed` finding.",
     concat!(
         "| Round | Agents | Tokens | Wall minutes | Interventions | Late review commands | Approvals | Mutants | Baseline agents | Baseline tokens | Baseline wall minutes | Baseline interventions | Baseline approvals | Baseline found |\n",
         "| - | - | - | - | - | - | - | - | - | - | - | - | - | - |\n",
         "```",
     ),
 ];
+
+/// The sentence of the fix rule that each place says (decision 0024).
+const FIX_RULE_SENTENCE: &str = "From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.";
 
 /// The problems of the review skill's text: each names the line or the
 /// name that it wants.
@@ -1293,6 +1339,72 @@ fn the_review_skill_starts_with_xtask() {
 }
 
 const FIX_RULE_DECISION: &str = "docs/decisions/0024-what-a-review-round-fixes.md";
+
+/// The places that say the fix rule of decision 0024.  Each holds its
+/// sentence, so a drift in one place fails.
+#[test]
+fn the_fix_rule_says_the_same_in_each_place() {
+    let root = xtask::workspace_root();
+    let problems: Vec<String> = [
+        "CLAUDE.md",
+        REVIEW_SKILL,
+        "docs/working-with-agents.md",
+        "docs/decisions/0011-review-agents.md",
+        FIX_RULE_DECISION,
+    ]
+    .iter()
+    .filter(|file| {
+        !std::fs::read_to_string(root.join(file)).is_ok_and(|text| text.contains(FIX_RULE_SENTENCE))
+    })
+    .map(|file| format!("{file} does not hold `{FIX_RULE_SENTENCE}`.  Fix: say the fix rule of decision 0024 with this sentence (DOC-1)."))
+    .collect();
+    assert!(
+        problems.is_empty(),
+        "{} fix rule problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// The review skill gives the strict rules of the log check, word for word.
+#[test]
+fn the_review_skill_names_the_strict_rules() {
+    let text = std::fs::read_to_string(xtask::workspace_root().join(REVIEW_SKILL))
+        .unwrap_or_else(|e| panic!("reading {REVIEW_SKILL}: {e}.  Fix: restore the skill."));
+    let strict = xtask::review_log::STRICT_RULES_TEXT;
+    assert!(
+        text.contains(strict),
+        "{REVIEW_SKILL} does not hold `{strict}`.  Fix: give the strict rules of decision 0024 in step 10, word for word."
+    );
+}
+
+/// The findings table template of the review skill has the `Significant`
+/// column, and the log check reads it with no problem.  So the template
+/// and the check use the same column names.
+#[test]
+fn the_review_skill_log_passes_the_fix_rule_check() {
+    let text = std::fs::read_to_string(xtask::workspace_root().join(REVIEW_SKILL))
+        .unwrap_or_else(|e| panic!("reading {REVIEW_SKILL}: {e}.  Fix: restore the skill."));
+    let lines: Vec<&str> = text.lines().collect();
+    let header = lines
+        .iter()
+        .position(|line| line.starts_with("| Date | Round |"));
+    let template = header
+        .and_then(|i| lines.get(i..i + 2))
+        .map(|pair| format!("# Review log\n\n## Findings\n\n{}\n", pair.join("\n")))
+        .unwrap_or_default();
+    assert!(
+        xtask::review_log::has_significant_column(&template),
+        "{REVIEW_SKILL}: the findings table template has no `Significant` column: {template:?}.  Fix: put it after `Severity` in the header of step 11."
+    );
+    let problems = xtask::review_log::fix_rule_problems(&template);
+    assert!(
+        problems.is_empty(),
+        "{REVIEW_SKILL}: the log check reads the template with {} problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
 
 /// The strict rules of the log check are the 15 rules of decision 0024,
 /// and each is a rule of `docs/invariants.md`.
