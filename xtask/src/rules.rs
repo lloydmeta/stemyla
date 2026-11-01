@@ -3212,7 +3212,7 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
     let effort = not_one_of(
         "effort",
         &AGENT_EFFORTS,
-        "set `effort` to one of these values, or remove the key; without it, the agent takes the effort that the session's settings give its model.",
+        "set `effort` to one of these values, or remove the key; without it, the effort level of the session applies, as the sub-agents page of the Claude Code docs says.",
     );
     let hooks_line = find("hooks").map(|(number, _, _)| number);
     let hooks_last = keys
@@ -7049,7 +7049,7 @@ mod agents_tests {
         let hooks = format!("{AGENT_HOOK_BLOCK}\n");
         let model_fix =
             "set `model` to one of these values; decision 0025 gives the model of each role.";
-        let effort_fix = "set `effort` to one of these values, or remove the key; without it, the agent takes the effort that the session's settings give its model.";
+        let effort_fix = "set `effort` to one of these values, or remove the key; without it, the effort level of the session applies, as the sub-agents page of the Claude Code docs says.";
         let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last; an optional `effort` key comes once, before `hooks`.";
         let efforts = "which is not one of `low`, `medium`, `high`, `xhigh` and `max`";
         let cases: [(&str, String, Vec<String>); 9] = [
