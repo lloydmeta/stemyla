@@ -208,7 +208,7 @@ The implementer writes one diff file, not a commit, and gives its path to the te
     * its number is 3 or more;
     * it has no `confirmed` blocker, no `confirmed` should-fix with `yes`, and no `confirmed` finding on a strict rule;
     * it fixed, or sent to a TD, no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.
-  * A `known` finding does not count.  A `confirmed` finding that went to a TD in this round counts too, so the next round runs.  There is no cap.
+  * A `known` finding does not count.  A `confirmed` finding of the three kinds counts whatever its action, a TD included.  There is no cap.
   * "After round 3" becomes "After the last round".  Else, the next round follows.
   * The PR text lists each `reported, not fixed` finding.  It lists each `known` finding once with its TD, not only each `known` mutant.
 
@@ -314,6 +314,7 @@ The team leader gives these to the orchestrator as text.
 * [x] 2026-11-01: review round 2 fixes (implementer): 2-1 to 2-4, 2-7, 2-8, 2-12 to 2-14 and 2-16.  The diff `m3/m3-r2-skill.diff` holds 2-5, 2-6, 2-9 to 2-11 and 2-15.
 * [x] 2026-11-01: review round 3 fixes (implementer): 3-2 (the guide line), 3-5, 3-7 and 3-9.  The diff `m3/m3-r3-skill.diff` holds 3-1, 3-2 (the skill line), 3-3, 3-4, 3-6 and 3-8.
 * [x] 2026-11-01: review round 4 fixes (4-1), as the late rule allows (implementer).  The diff `m3/m3-r4-skill.diff` holds the skill and guide lines.  4-2 to 4-5 are `reported, not fixed`.
+* [x] 2026-11-01: review round 5 fixes (5-1), as the late rule allows (implementer).  The diff `m3/m3-r5-skill.diff` holds the skill line.  5-2 to 5-5 are `reported, not fixed`.
 * [ ] A `KNOWN_MISSED` entry for TD-69 (finding 1-19) in M3's last commit.
 * [ ] Step 5: review rounds to the stop rule.
 * [ ] M3 done: the log in `docs/reviews/harness-phase-3b-m3.md`, and this plan in `plans/completed/`.
@@ -379,7 +380,7 @@ The team leader gives these to the orchestrator as text.
 ## Decision log
 
 * 2026-10-31, team leader: an action is a fix when a part of it, between `;`, holds a commit SHA or the word `diff`, and does not start with a not-fixed form.  Reason: the Action cells of the logs are free text.  A prefix alone passes `TD-39; abc1234 review round 4 fixes` (plan review round 1).  A SHA anywhere fails `no change: ... (9cf2fd0)` (plan review round 2).
-* 2026-10-31, team leader: a TD ID passes problem 10 on a finding that the round must fix.  Reason: a team can send a confirmed mutant to tech debt, as for TD-39 and TD-66.  The PR lists it, and the stop rule still counts it.
+* 2026-10-31, team leader: a TD ID passes problem 10 on a finding that the round must fix.  Reason: a team can send a confirmed mutant to tech debt, as for TD-39 and TD-66.  The PR lists it, and the stop rule still counts it if it is of the three kinds.
 * 2026-10-31, team leader: a row with `cargo-mutants` in its Reviewers is on VERIFY-1, and the skill's merge step names VERIFY-1 too.  Reason: a merged row can keep the reviewer's rule `none` (1-4 of M1's log).
 * 2026-10-31, team leader: the stop rule counts the `confirmed` findings that the round must fix, as decision 0024's sentence does.  It also counts a `pre-existing` or `unproven` finding of the three kinds that the round fixed, or sent to a TD (finding 4-1 of review round 4).  Reason: no later reviewer would read that fix (plan review round 2).
 * 2026-10-31, team leader: a `confirmed` nit on a strict rule, such as a baseline nit with `same-as`, is on a strict rule.  So a late round must fix it.  An `unvalidated` nit is never fixed in a late round.
