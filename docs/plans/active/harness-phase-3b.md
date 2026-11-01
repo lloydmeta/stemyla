@@ -63,7 +63,7 @@ Cleanup:
 
 * `.claude/skills/review-rounds/SKILL.md`: the fix rule, the stop rule, the narrow range of late rounds, a cleanup step.  `the_review_skill_starts_with_xtask` pins about 55 of its lines.
 * `.claude/skills/orchestrate/SKILL.md` (new): the hands-off mode.
-* `.claude/agents/*.md`: `model` and `effort` for each role.  `agents_folder_problems` (`xtask/src/rules.rs`, near line 3159) required `model: inherit` before M5; since M5, it takes `model` from `inherit`, `opus`, `sonnet` and `haiku`, and an optional `effort`.  `baseline.md` is frozen by a hash.
+* `.claude/agents/*.md`: `model` and `effort` for each role.  `agent_problems` (`xtask/src/rules.rs`), which `agents_folder_problems` runs on each file, required `model: inherit` before M5.  Since M5, it takes `model` from `inherit`, `opus`, `sonnet` and `haiku`, and an optional `effort`.  `baseline.md` is frozen by a hash.
 * `xtask/src/review.rs`: the known-missed list (`KNOWN_MISSED`).
 * `xtask/src/` (new subcommands): `clean`, `review clean`, `check`, `pr-body`, `attention`.  `xtask/src/docs.rs`: the check of M6.
 * `docs/working-with-agents.md` in each milestone that adds a subcommand or a skill, because `guide_covers` (`xtask/src/docs.rs`) fails without it.
