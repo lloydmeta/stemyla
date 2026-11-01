@@ -379,7 +379,7 @@ Then decide if this round is the last round (decision 0024).  The round is the l
 * It has no `confirmed` blocker, no `confirmed` should-fix with `yes`, and no `confirmed` finding on a strict rule.
 * It fixed, or sent to a TD, no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.
 
-A `known` finding does not count.  A `confirmed` finding that went to a TD in this round counts too, so the next round runs.  There is no cap.  If the round is not the last round, the next round follows.
+A `known` finding does not count.  A `confirmed` finding of the three kinds counts whatever its action, a TD included.  There is no cap.  If the round is not the last round, the next round follows.
 
 After the last round:
 

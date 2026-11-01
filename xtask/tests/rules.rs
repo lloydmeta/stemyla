@@ -1270,7 +1270,7 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "* Its number is 3 or more.",
     "* It has no `confirmed` blocker, no `confirmed` should-fix with `yes`, and no `confirmed` finding on a strict rule.",
     "* It fixed, or sent to a TD, no `pre-existing` or `unproven` blocker, should-fix with `yes`, or finding on a strict rule.",
-    "A `known` finding does not count.  A `confirmed` finding that went to a TD in this round counts too, so the next round runs.  There is no cap.",
+    "A `known` finding does not count.  A `confirmed` finding of the three kinds counts whatever its action, a TD included.  There is no cap.",
     "* Rounds 2 and 3: start `reviewer` on `<base>..HEAD`",
     "  * Start each reviewer of the since route on `<since>..HEAD`, `reviewer` included.",
     "  * Its reasons come from the since route.",
