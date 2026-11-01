@@ -66,7 +66,7 @@ Do the preflight before the question of "Start".  Stop at once, and tell the mai
 * `cargo build -p xtask` passes.
 * Each preflight item of the plan's section.
 
-Record the session's model and effort in the plan's Surprises.  A subagent with `model: inherit` runs on the session's model.  Read the model from your system prompt, or from `/status`.  Name where each value comes from:
+Record the session's model and effort in the plan's Surprises.  A subagent with `model: inherit` runs on the session's model.  Read the model from your system prompt.  Name where each value comes from.  If none of these gives the effort, ask the maintainer for it in the question of "Start":
 
 * the start command's `--model` and `--effort`;
 * the environment variable `ANTHROPIC_MODEL`;
@@ -95,7 +95,7 @@ Start a new `general-purpose` subagent with the brief of "The brief of a team le
 
 At each checkpoint of a team leader:
 
-1. Read the report and each diff.  You commit the diff, so check it.  A change to a permission, a tool, a rule's meaning or an accepted decision goes in the PR under "Needs your attention".
+1. Read the report and each diff.  You commit the diff, so check it.  Do not apply a change to a permission setting, an `autoMode` entry or a ruleset ("Who edits what").  Stop, and ask the maintainer.  A change to a tool, a rule's meaning or an accepted decision goes in the PR under "Needs your attention".
 2. Run `git apply --check` on each diff, then apply it.  Write each file that the team gave as text.
 3. Run `cargo run -p xtask -- check --tier commit`.  Commit only your own paths, signed.
 4. Push only between review rounds.  Run `cargo run -p xtask -- check --tier push` before the push.
@@ -125,7 +125,7 @@ At each checkpoint of a team leader:
 * Start a new `Plan` agent.  It checks the milestone against the plan's Purpose, the milestone's section and the later milestones.
 * Each round is a new `Plan` agent.  The rounds follow the stop rule of step 11 of the `review-rounds` skill.  From round 4, the agent reads only the fix commit of the round before and the files that it touches.
 * Write each change of plan text yourself, with a Decision log line.  Commit it, signed.
-* Send each change of code or of a doc that is not the plan to the team leader, with a test that fails first.  Then run the next review round of the same run: `/review-rounds <base> <N+1>`, so the late rule applies.  Copy the log again after the last round.
+* Send each change of code or of a doc that is not the plan to the team leader, with a test that fails first.  Then run the next review round of the same run: `/review-rounds <base> <N+1> "<criteria>"`, with the criteria of "The review rounds", so the late rule applies.  Copy the log again after the last round.
 * If each round finds a new case in the same bullet, write the bullet again as a goal and a list of test cases.  The milestone that owns the bullet designs the rest.
 * When the intent review ends, remove the run folder by hand (TD-37).  `xtask clean` keeps it while the branch has an open PR.  First, check that `<run>/log.md` equals its copy in `docs/reviews/`.  If auto mode refuses the removal, stop and ask: round 1 of the next milestone needs an empty run folder.
 
@@ -153,7 +153,7 @@ Stop at a clean point, commit, push, and tell the maintainer, only when:
 
 These are not stops:
 
-* A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  The next `clean --yes` removes a round's worktrees after a refused `review clean`.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
+* A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  After a refused `review clean`, the next `clean --yes` removes only a worktree of the round with no changes.  For a worktree with changes, put `target/debug/xtask review clean <round>` on the list of the maintainer's steps.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
 * A hand run on a GPU that the protocol rule asks for (`stored-stems`, `worker-check` or `weights`) is not a stop.  List it in the PR under "Needs your attention", and go on.
 
 ## Close-out
@@ -188,7 +188,7 @@ Your job:
 2. Start an implementer with that plan's path.  Each new test fails first, on an assert.
 3. Give the orchestrator each change of .claude/**, CLAUDE.md or the plan as a file or a unified diff in <scratchpad>/m<n>/.  `git apply --check` must pass on HEAD.
 4. Give a checkpoint before review round 1.  Then wait.
-5. Run /review-rounds <base> from round 1, as the orchestrate skill says ("The review rounds").  Give a checkpoint after each round.
+5. Run /review-rounds <base> <round> "<criteria>" from round 1, as the orchestrate skill says ("The review rounds").  Give a checkpoint after each round.
 6. After the last round, move the milestone plan to completed/, and give a close-out file.
 
 Run `cargo run -p xtask -- check --tier commit` before each commit.  Sign each commit (`git commit -S`).  Write in ASD-STE100.  Never push, merge or run xtask publish.  Start each report with one line that says what you need.

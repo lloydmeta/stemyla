@@ -378,7 +378,7 @@ Then check the log:
 * If it names a problem, correct the row or the fix before the next round.
 * It runs after the findings file, so the counts of the round do not include its approval.
 
-Then remove the worktrees of the round's agents:
+Then remove the worktrees and folders of the round:
 
 * Run `target/debug/xtask review clean $1`.  It removes each worktree or folder under `target/review/` whose name starts with `$1-`, also with changes.
 * It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
