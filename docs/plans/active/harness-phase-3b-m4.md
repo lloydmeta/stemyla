@@ -346,8 +346,9 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: plan review round 2 (a new `Plan` agent): no blocker, 7 should-fix and 8 nits.  All are fixed in this plan.  The review stops at its cap of 2 rounds.
 * [x] 2026-11-01: step 1: the tables and the plan, as pure functions (implementer, `d327d8d`).
 * [x] 2026-11-01: step 2: the paths, the graph, the run and the command (implementer, `32f7a35`).
-* [ ] Step 3: the measurements.
-* [ ] Step 4: the diff for the orchestrator.
+* [x] 2026-11-01: step 3: the measurements (implementer, `4b7925c`).
+* [x] 2026-11-01: step 4, the implementer's part: the diff `m4/m4-git2.diff` in the team leader's scratchpad, checked on `4b7925c` (implementer).  The team leader checks it again on `HEAD`.
+* [ ] Step 4: the orchestrator lands the diff.
 * [ ] Checkpoint: the orchestrator lands the diff before round 1.
 * [ ] Step 5: review rounds to the stop rule.
 
@@ -386,6 +387,17 @@ The team leader gives these to the orchestrator as text:
   * `time cargo run -p xtask -- check --tier push`: exit 1 in 26.5 s.  fmt 0.4 s, `docs-check` 1.0 s, the workspace clippy 0.4 s, the `synth` clippy 0.3 s, `cargo clippy -p app` 16.6 s, `cargo clippy -p app --all-targets` 4.3 s.  Then the wasm32 clippy line failed in 2.4 s: "can't find crate for `core`".  This Mac has no `wasm32-unknown-unknown` target (`rustup target list --installed` gives only `aarch64-apple-darwin`), and no `trunk` on `PATH`.  The run named the 4 checks that did not run.  The GPU test line was skipped, since the branch changes no GPU code.
   * The implementer did not install the target or Trunk, since that changes the maintainer's toolchain.  `README.md` gives both installs.  It ran the 3 test lines after the wasm32 line by hand, in order: `cargo test --workspace --exclude roformer-gpu` 153 s, `cargo test -p roformer-gpu --lib` 17 s, `cargo test -p roformer-gpu --doc` 2 s.  Each passed.
   * So tier `push` with no wasm32 clippy and no Trunk build takes about 200 s here.  Tier `commit` on an `xtask` change takes 68 s, and on a docs change it runs fmt, `docs-check`, the workspace clippy and the `xtask` repo tests (about 8 s for those tests).
+* 2026-11-01, implementer, step 4: the grep for "fmt, clippy, the tests" gives these places that state GIT-2 today:
+  * `CLAUDE.md` (the GIT-2 line), `docs/invariants.md` (GIT-2), the recipe "Fix a bug" of `docs/working-with-agents.md`, and lines 22 and 302 of `.claude/skills/review-rounds/SKILL.md`.  The diff changes each of them, and also "Run the checks" after the last round of the skill, the "Review:" line of `CLAUDE.md` and "the checks CI gates on" in `README.md`.
+  * `.claude/agents/baseline.md` (line 17) stays as it is.  `BASELINE_HASH` freezes it, and the parent's M5 keeps it.
+  * Decision 0026 (its Context) and `plans/active/harness-engineering.md` (line 19, the CI of 2026-10-19) tell history, so they stay.  So do this plan, the plans in `docs/plans/completed/` and the logs in `docs/reviews/` (PLANS.md).
+* 2026-11-01, implementer, step 4: the diff changes `CLAUDE.md`, the `review-rounds` skill, `docs/invariants.md`, `docs/working-with-agents.md`, `README.md` and `xtask/tests/rules.rs`.  The checks of the diff, at `4b7925c`, in the scratch worktree `target/m4-diff` with the target folder `target/m4-diff-target`:
+  * `git apply --check` passes at the repo root.
+  * With only the `xtask/tests/rules.rs` part, `cargo test -p xtask --test rules` fails 3 of 30 tests, each on its assert.  `git_2_names_the_tiers`: 4 problems, since the GIT-2 line of `CLAUDE.md` and the GIT-2 section of `docs/invariants.md` each lack `check --tier commit` and `--tier push`.  `the_push_tier_runs_the_lines_of_claude_md`: "CLAUDE.md's Commands has no line `cargo test -p roformer-gpu --doc`".  `the_review_skill_starts_with_xtask`: the 3 new skill lines of `REVIEW_SKILL_TEXT` are missing.
+  * With the whole diff, `CLAUDE.md` has 91 lines.  `docs-check` passes, and `cargo test -p xtask --test rules` passes 30 of 30.
+  * With the whole diff, `cargo run -p xtask -- check --tier push` gives exit 1 in 40.3 s, cold.  fmt, `docs-check` and the 4 clippy lines before wasm32 pass.  The wasm32 clippy line fails with "can't find crate for `core`", since this Mac has no `wasm32-unknown-unknown` target (step 3).  So the 3 test lines and the Trunk build do not run, and Trunk is not on `PATH` either.  The GPU test line is skipped, since the branch changes no GPU code.
+  * The implementer ran the 3 test lines by hand in that worktree: `cargo test --workspace --exclude roformer-gpu` passes in 166 s, `cargo test -p roformer-gpu --lib` in 16 s and `cargo test -p roformer-gpu --doc` in 1 s.
+  * The implementer removed the worktree and its target folder (5.9 GB).
 * 2026-11-01, implementer, step 1: the `grep` of each strict row found the code in each file of the table.  `decoder/src/pass.rs` and `app/src/reset.rs` name OPFS, but `pass.rs` writes through a trait that `decoder/src/web.rs` gives, and `reset.rs` only removes files.  So they stay out of MEM-5.  `app/src/export.rs` posts with a transfer list, and MEM-5 already holds it.
 
 ## Decision log
