@@ -10,7 +10,8 @@
 //! The code has parts, so the tests can check the rules without a run.
 //! [`plan`] is a pure function of the tier, the paths and the workspace
 //! graph.  [`with_gpu_require`] gives the GPU test line the caller's
-//! `STEMYLA_REQUIRE`.  [`changed_paths`] and [`graph`] read the repo.
+//! `STEMYLA_REQUIRE` when it names a GPU need.  [`changed_paths`] and
+//! [`graph`] read the repo.
 //! [`run_checks`] runs a plan with a runner that the caller gives, and
 //! [`run_command`] is the real runner.
 //!
@@ -512,7 +513,7 @@ fn run_if(check: Check, yes: bool, run_reason: &str, skip_reason: &str) -> Choic
     }
 }
 
-const COMMIT_GPU: &str = "it needs a GPU adapter, and tier push runs it; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR";
+const COMMIT_GPU: &str = "it needs a GPU adapter, and tier push runs it when its paths change GPU code; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR";
 const COMMIT_TRUNK: &str = "tier push runs it";
 
 /// Each line of tier `push`.  The GPU test line runs only when `paths`
@@ -650,21 +651,38 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
     choices
 }
 
+/// The words of [`REQUIRE`] that need a GPU adapter in `test-support`:
+/// `gpu`, and the words that imply it.
+const GPU_WORDS: [&str; 3] = ["gpu", "f16", "timestamps"];
+
 /// `plan` with the GPU test line in the form that the caller asks for.
-/// A non-empty `require`, the caller's `STEMYLA_REQUIRE`, replaces
-/// `gpu,f16`.  An example is `gpu` on an adapter without
-/// `SHADER_F16_IN_F32` (GPU-2).  The line and its reason then say so.
+/// `require` is the caller's `STEMYLA_REQUIRE`.  It replaces `gpu,f16`
+/// only when one of its words is in [`GPU_WORDS`].  An example is `gpu`
+/// on an adapter without `SHADER_F16_IN_F32` (GPU-2).  Another non-empty
+/// value keeps `gpu,f16`, so the line cannot pass with no adapter
+/// (VERIFY-1).  The reason of the line says which of the two occurs.
 pub fn with_gpu_require(mut plan: Plan, require: Option<&str>) -> Plan {
     let require = require.map_or("", str::trim);
     if require.is_empty() || require == GPU_FORM {
         return plan;
     }
+    let needs_gpu = require
+        .split(',')
+        .any(|word| GPU_WORDS.contains(&word.trim()));
     let default = &lines()[GPU_TESTS];
     for choice in &mut plan.choices {
-        if choice.check == *default {
+        if choice.check != *default {
+            continue;
+        }
+        if needs_gpu {
             choice.check.env = vec![(REQUIRE.to_string(), require.to_string())];
             choice.reason = format!(
                 "{}; {REQUIRE}={require} from the environment replaces {GPU_FORM}",
+                choice.reason
+            );
+        } else {
+            choice.reason = format!(
+                "{}; {REQUIRE}={require} from the environment is not used, since it names no GPU need (gpu, f16 or timestamps)",
                 choice.reason
             );
         }
@@ -1393,6 +1411,10 @@ mod tests {
         let plan = plan(Tier::Push, &paths(&["roformer-gpu/src/x.rs"]), None);
         assert_eq!(plan.tier, Tier::Push);
         assert_eq!(decisions(&plan), push_list(run(GPU)));
+        assert_eq!(
+            reason_of(&plan, GPU),
+            "a path is in roformer/, roformer-gpu/ or test-support/, or is a workspace file"
+        );
         for folder in [
             "roformer/x.rs",
             "test-support/src/lib.rs",
@@ -1468,6 +1490,80 @@ mod tests {
         }
     }
 
+    /// The reason of the check with `line` in `plan`, or an empty string.
+    fn reason_of(plan: &Plan, line: &str) -> String {
+        plan.choices
+            .iter()
+            .find(|c| c.check.line() == line)
+            .map(|c| c.reason.clone())
+            .unwrap_or_default()
+    }
+
+    /// A value that names no GPU need keeps `gpu,f16`.  Else the GPU test
+    /// line could pass with no adapter (VERIFY-1).
+    #[test]
+    fn a_stemyla_require_with_no_gpu_word_keeps_gpu_f16_and_the_reason_says_so() {
+        let before = plan(Tier::Push, &[], None);
+        for (given, shown) in [
+            ("fixtures", "fixtures"),
+            (" fixtures,gpus ", "fixtures,gpus"),
+            ("x, gpu f16", "x, gpu f16"),
+        ] {
+            let after = with_gpu_require(before.clone(), Some(given));
+            assert_eq!(decisions(&after), push_list(run(GPU)), "{given:?}");
+            assert_eq!(
+                reason_of(&after, GPU),
+                format!(
+                    "{}; STEMYLA_REQUIRE={shown} from the environment is not used, since it names no GPU need (gpu, f16 or timestamps)",
+                    reason_of(&before, GPU)
+                ),
+                "{given:?}"
+            );
+            assert_eq!((after.tier, &after.why), (before.tier, &before.why));
+            for (old, new) in before.choices.iter().zip(&after.choices) {
+                if old.check.line() != GPU {
+                    assert_eq!(old, new, "{given:?}");
+                }
+            }
+        }
+    }
+
+    /// [`GPU_WORDS`] is `gpu` and the words of `IMPLY_GPU` in
+    /// `test-support`.  A change of `IMPLY_GPU` fails this test.
+    #[test]
+    fn gpu_words_are_gpu_and_the_words_that_imply_it() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-support/src/lib.rs");
+        let text = std::fs::read_to_string(path).unwrap();
+        let imply: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("const IMPLY_GPU"))
+            .collect();
+        assert_eq!(
+            imply,
+            ["const IMPLY_GPU: [Need; 2] = [Need::Timestamps, Need::F16];"]
+        );
+        assert_eq!(GPU_WORDS, ["gpu", "f16", "timestamps"]);
+    }
+
+    /// A value replaces `gpu,f16` when one of its words, trimmed, is
+    /// `gpu`, `f16` or `timestamps`.
+    #[test]
+    fn a_stemyla_require_with_a_gpu_word_replaces_gpu_f16() {
+        let before = plan(Tier::Push, &[], None);
+        for given in ["gpu,fixtures", "fixtures, f16", "timestamps"] {
+            let line = format!("STEMYLA_REQUIRE={given} cargo test -p roformer-gpu --release");
+            let after = with_gpu_require(before.clone(), Some(given));
+            assert_eq!(decisions(&after), push_list(run(&line)), "{given:?}");
+            assert_eq!(
+                reason_of(&after, &line),
+                format!(
+                    "{}; STEMYLA_REQUIRE={given} from the environment replaces gpu,f16",
+                    reason_of(&before, GPU)
+                )
+            );
+        }
+    }
+
     #[test]
     fn tier_commit_always_skips_the_gpu_line_and_trunk_with_their_reasons() {
         let plan = commit(&["roformer-gpu/src/x.rs"]);
@@ -1479,7 +1575,9 @@ mod tests {
                 .unwrap_or_default()
         };
         assert!(
-            reason(GPU).starts_with("it needs a GPU adapter, and tier push runs it;"),
+            reason(GPU).starts_with(
+                "it needs a GPU adapter, and tier push runs it when its paths change GPU code;"
+            ),
             "{}",
             reason(GPU)
         );
@@ -1978,6 +2076,12 @@ mod tests {
     /// from the first word, with each time as `in <t> s`.  `slow` takes
     /// 150 ms, so its time is not `0.0`.
     fn fake_run(plan: &Plan) -> (i32, String) {
+        let (code, raw) = fake_run_raw(plan);
+        (code, timeless(&raw))
+    }
+
+    /// [`fake_run`] with the times as `run_checks` prints them.
+    fn fake_run_raw(plan: &Plan) -> (i32, String) {
         let mut out = Vec::new();
         let mut ran = Vec::new();
         let code = run_checks(plan, &mut out, |check| {
@@ -1993,7 +2097,7 @@ mod tests {
                 _ => bail!("no such program"),
             }
         });
-        let text = timeless(&String::from_utf8(out).unwrap());
+        let text = String::from_utf8(out).unwrap();
         assert!(
             !ran.contains(&"false skipped".to_string()),
             "a skip never runs"
@@ -2001,9 +2105,26 @@ mod tests {
         (code, text)
     }
 
+    /// The time in seconds at the end of `line`, `... in <time> s`.
+    fn time_of(line: &str) -> f64 {
+        let (_, time) = line.rsplit_once(" in ").unwrap();
+        time.strip_suffix(" s").unwrap().parse().unwrap()
+    }
+
     #[test]
     fn run_checks_runs_each_run_check_and_gives_0() {
-        let (code, text) = fake_run(&three_checks("slow two"));
+        let (code, raw) = fake_run_raw(&three_checks("slow two"));
+        let ok: Vec<f64> = raw
+            .lines()
+            .filter(|line| line.starts_with("check: ok in "))
+            .map(time_of)
+            .collect();
+        assert_eq!(ok.len(), 3, "{raw}");
+        assert!(ok[0] < 0.1, "{raw}");
+        assert!(ok[1] >= 0.1, "{raw}");
+        assert!(ok[2] < 0.1, "{raw}");
+        assert!(time_of(raw.lines().last().unwrap()) >= 0.1, "{raw}");
+        let text = timeless(&raw);
         assert_eq!(code, 0);
         assert_eq!(
             text,

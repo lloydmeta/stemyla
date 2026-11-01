@@ -352,7 +352,7 @@ check: run: cargo test -p xtask --lib --test rules --test docs --test review (th
 check: run: cargo test --workspace --exclude roformer-gpu (the changed members and their dependents are every member but roformer-gpu)
 check: skip: cargo test -p roformer-gpu --lib (roformer-gpu is not a dependent of a changed member)
 check: skip: cargo test -p roformer-gpu --doc (roformer-gpu is not a dependent of a changed member)
-check: skip: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (it needs a GPU adapter, and tier push runs it; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR)
+check: skip: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (it needs a GPU adapter, and tier push runs it when its paths change GPU code; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR)
 check: skip: (cd app && trunk build --release) (tier push runs it)
 check: skip: cargo run -p xtask --release -- serve app/dist --port 8080 (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
 check: skip: cargo run -p xtask -- web-test (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
