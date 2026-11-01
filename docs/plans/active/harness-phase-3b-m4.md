@@ -354,6 +354,7 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: review round 1 fixes: 1-1, 1-2, 1-4 to 1-11, 1-13, 1-15 to 1-19, 1-22 and 1-23 (implementer).  1-3 goes to the team leader as the diff `m4/m4-r1-claude.diff` in the scratchpad.  1-12 and 1-14 are lines of the parent plan, which the team leader gives to the orchestrator.
 * [x] 2026-11-01: review round 2 fixes: 2-1, 2-3, 2-4, 2-5, 2-7 (the lines of this plan and `docs/ARCHITECTURE.md`) and 2-8 (implementer).  2-2 goes to the team leader as the diff `m4/m4-r2-claude.diff` in the scratchpad.  2-6 and the parent plan lines of 2-7 go to the orchestrator.
 * [x] 2026-11-01: review round 3 fixes: 3-1, 3-2, 3-3, 3-5, 3-7 and 3-8 (implementer).  3-4 and 3-6 go to the team leader as the diff `m4/m4-r3-claude.diff` in the scratchpad.  The parent plan lines of 3-1 and 3-3 go to the orchestrator.
+* [x] 2026-11-01: review round 4 fixes, as the late rule allows (team leader): 4-1 (pre-existing, on VERIFY-1) gets a TD-70 bullet: each tier runs its checks on the working tree.  4-2 (not significant) and 4-3 are `reported, not fixed`.
 * [ ] Step 5: review rounds to the stop rule.
 
 ## Surprises and discoveries
