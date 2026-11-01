@@ -370,6 +370,10 @@ The team leader gives these to the orchestrator as text.
 * 2026-11-01, implementer, review round 3 fixes: each new or changed test fails on the code at `00035e1`, on an assert (3-7):
   * `a_changed_review_rs_warns`: a base with no blob and a head with one, or the other way round, give no warning, not the `adds` or `removes` line.
   * `start_warns_when_the_branch_adds_review_log_rs`: a branch that adds `xtask/src/review_log.rs` gets no warning.
+* 2026-11-01, implementer: the checks of `m3/m3-r3-skill.diff`, at `64e6f4c`, in a scratch worktree with its own target folder:
+  * `git apply --check` passes at the repo root.
+  * With only the `xtask/tests/rules.rs` part, two tests fail on their asserts.  `the_review_skill_starts_with_xtask` gives 2 problems, one for each new or changed pin.  `each_reviewer_reads_the_late_scope` gives one problem for each of the six reviewers.  The other 26 rules tests pass.
+  * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  `CLAUDE.md` stays at 88 lines.
 
 ## Decision log
 
