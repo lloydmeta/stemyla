@@ -3019,8 +3019,27 @@ pub const AGENT_HOOK_BLOCK: &str = r#"hooks:
           command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/read-only-bash.sh'
           onFailure: block"#;
 
-/// The keys of an agent's frontmatter, each present once, `hooks` last.
+/// The keys that an agent's frontmatter must have, each present once, `hooks` last.
 pub const AGENT_KEYS: [&str; 5] = ["name", "description", "tools", "model", "hooks"];
+
+/// The keys that an agent's frontmatter can have, each at most once, before
+/// `hooks` (decision 0025).
+pub const AGENT_OPTIONAL_KEYS: [&str; 1] = ["effort"];
+
+/// The values of an agent's `model` (decision 0025).  `inherit` gives the
+/// model of the main session.
+pub const AGENT_MODELS: [&str; 4] = ["inherit", "opus", "sonnet", "haiku"];
+
+/// The values of an agent's optional `effort` (decision 0025).
+pub const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The values as a list in text: "`a`, `b` and `c`".  Each list has two
+/// values or more.
+fn one_of(values: &[&str]) -> String {
+    let (last, rest) = values.split_last().expect("a list of two values or more");
+    let rest: Vec<String> = rest.iter().map(|value| format!("`{value}`")).collect();
+    format!("{} and `{last}`", rest.join(", "))
+}
 
 /// The tools that an agent may have.  None of them writes a file.
 pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "Bash"];
@@ -3114,11 +3133,11 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
                 "write each key as `key: value`, with one space after the colon, or as `key:` before a list or a block.",
             )
         });
-    let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last.";
+    let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last; an optional `effort` key comes once, before `hooks`.";
 
     let unknown = keys
         .iter()
-        .filter(|(_, key, _)| !AGENT_KEYS.contains(key))
+        .filter(|(_, key, _)| !AGENT_KEYS.contains(key) && !AGENT_OPTIONAL_KEYS.contains(key))
         .map(|(number, key, _)| {
             problem(
                 Some(*number),
@@ -3165,15 +3184,33 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
                 "write the description on one line, as a plain YAML scalar: start it with a capital letter, and put no `: `, no ` #`, no quote and no `:` at its end in it.",
             )
         });
-    let model = find("model")
-        .filter(|(_, _, model)| *model != "inherit")
-        .map(|(number, _, model)| {
-            problem(
-                Some(number),
-                format!("has `model: {model}`, not `model: inherit`"),
-                "set `model: inherit`; every agent takes the model of the main session.",
-            )
-        });
+    // A key whose value is not in its list.  The text drops the space of an
+    // empty value: "has `effort:`".
+    let not_one_of = |key: &str, values: &[&str], fix: &str| {
+        find(key)
+            .filter(|(_, _, value)| !values.contains(value))
+            .map(|(number, _, value)| {
+                problem(
+                    Some(number),
+                    format!(
+                        "has `{}`, which is not one of {}",
+                        format!("{key}: {value}").trim_end(),
+                        one_of(values)
+                    ),
+                    fix,
+                )
+            })
+    };
+    let model = not_one_of(
+        "model",
+        &AGENT_MODELS,
+        "set `model` to one of these values; decision 0025 gives the model of each role.",
+    );
+    let effort = not_one_of(
+        "effort",
+        &AGENT_EFFORTS,
+        "set `effort` to one of these values, or remove the key; without it, the agent takes the effort of the main session.",
+    );
     let hooks_line = find("hooks").map(|(number, _, _)| number);
     let hooks_last = keys
         .last()
@@ -3269,6 +3306,7 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
         .chain(name)
         .chain(description)
         .chain(model)
+        .chain(effort)
         .chain(hooks_last)
         .chain(tool_problems)
         .chain(indented)
@@ -6916,11 +6954,6 @@ mod agents_tests {
                 "has a `description` that does not start with a capital letter",
             ),
             (
-                "another model",
-                with("model: inherit", "model: opus"),
-                "has `model: opus`, not `model: inherit`",
-            ),
-            (
                 "a key after hooks",
                 with(&hooks, &format!("{hooks}color: red\n")),
                 "has the key `color` after `hooks`",
@@ -6993,6 +7026,95 @@ mod agents_tests {
                 "{plant}: no problem names {named:?} in {problems:#?}"
             );
         }
+    }
+
+    /// The message of a problem of the agents rule in `reviewer.md`.
+    fn message(what: &str, fix: &str) -> String {
+        format!("agents: .claude/agents/reviewer.md {what}.  Fix: {fix}")
+    }
+
+    /// Each case of `model` and `effort` (decision 0025) gives exactly its
+    /// list of messages.  The test names each case that fails.
+    #[test]
+    fn each_model_and_effort_gives_its_problems() {
+        let hooks = format!("{AGENT_HOOK_BLOCK}\n");
+        let model_fix =
+            "set `model` to one of these values; decision 0025 gives the model of each role.";
+        let effort_fix = "set `effort` to one of these values, or remove the key; without it, the agent takes the effort of the main session.";
+        let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last; an optional `effort` key comes once, before `hooks`.";
+        let efforts = "which is not one of `low`, `medium`, `high`, `xhigh` and `max`";
+        let cases: [(&str, String, Vec<String>); 9] = [
+            ("model: opus", with("model: inherit", "model: opus"), vec![]),
+            (
+                "model: sonnet",
+                with("model: inherit", "model: sonnet"),
+                vec![],
+            ),
+            (
+                "model: haiku",
+                with("model: inherit", "model: haiku"),
+                vec![],
+            ),
+            (
+                "model: sonnet with effort: medium before hooks",
+                with("model: inherit\n", "model: sonnet\neffort: medium\n"),
+                vec![],
+            ),
+            (
+                "model: gpt",
+                with("model: inherit", "model: gpt"),
+                vec![message(
+                    "has `model: gpt`, which is not one of `inherit`, `opus`, `sonnet` and `haiku`",
+                    model_fix,
+                )],
+            ),
+            (
+                "effort: extreme",
+                with("model: inherit\n", "model: inherit\neffort: extreme\n"),
+                vec![message(
+                    &format!("has `effort: extreme`, {efforts}"),
+                    effort_fix,
+                )],
+            ),
+            (
+                "effort with no value",
+                with("model: inherit\n", "model: inherit\neffort:\n"),
+                vec![message(&format!("has `effort:`, {efforts}"), effort_fix)],
+            ),
+            (
+                "effort twice",
+                with(
+                    "model: inherit\n",
+                    "model: inherit\neffort: high\neffort: high\n",
+                ),
+                vec![message("has the key `effort` twice", keep_the_keys)],
+            ),
+            (
+                "effort after the hook block",
+                with(&hooks, &format!("{hooks}effort: high\n")),
+                vec![
+                    message(
+                        "has the key `effort` after `hooks`, but `hooks` must be the last key",
+                        "put `hooks` last; the hook block runs to the closing `---`.",
+                    ),
+                    message(
+                        "has a hook block that is not `AGENT_HOOK_BLOCK`",
+                        "copy AGENT_HOOK_BLOCK from xtask/src/rules.rs: the guard on each Bash call, with `onFailure: block`, and no other hook.",
+                    ),
+                ],
+            ),
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .filter_map(|(case, text, expected)| {
+                let got: Vec<String> = agent_problems(FILE, text)
+                    .into_iter()
+                    .map(|problem| problem.message)
+                    .collect();
+                (got != *expected).then(|| format!("{case}: expected {expected:#?}, got {got:#?}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

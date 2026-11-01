@@ -282,7 +282,7 @@ The team leader gives these to the orchestrator as text:
 ## Progress
 
 * [x] 2026-11-01: step 1, this plan.  Two `Plan` review rounds: round 1 found 1 blocker, 8 should-fix and 3 nits; round 2 found 1 blocker, 3 should-fix and 3 nits.  All fixed.
-* [ ] Step 2: the agents rule accepts a model and an effort.
+* [x] 2026-11-01: step 2, the agents rule accepts a model and an effort.  `agent_problems` accepts `model` from `AGENT_MODELS` and an optional `effort` from `AGENT_EFFORTS` before `hooks`.  Tests: `each_model_and_effort_gives_its_problems` (9 cases) in `mod agents_tests`; the case "another model" of `each_plant_is_named` is removed, since `model: opus` now has no problem.
 * [ ] Step 3: the harness, the ground truth and the pass rule (checkpoint A).
 * [ ] Step 4: the measurement (checkpoint B).
 * [ ] Step 5: the agent files and their pin.
@@ -291,6 +291,8 @@ The team leader gives these to the orchestrator as text:
 ## Surprises and discoveries
 
 * 2026-11-01: the docs of Claude Code say that a foreground subagent's text is not in the stream without `--forward-subagent-text`.  So the run command passes it.
+* 2026-11-01, M5 step 2, implementer: on the old code, each of the 9 cases of `each_model_and_effort_gives_its_problems` failed on its assert.  `model: opus`, `sonnet` and `haiku` gave "not `model: inherit`".  `model: gpt` gave the old message.  Each `effort` case gave "has the key `effort`, which the check does not allow", plus its other problems.
+* 2026-11-01, M5 step 2, implementer: no doc outside `docs/plans/` and `docs/decisions/` states the old `model: inherit` rule (`grep -rn inherit docs`).  The plans and decision 0025 tell the state before M5, so they stay as they are.
 
 ## Decision log
 
