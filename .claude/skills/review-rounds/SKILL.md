@@ -41,7 +41,7 @@ Take each value from the lines of `review start`.  Do not make a path from the b
 * The since route: the reviewer lines below the line `since <since>..<head>:`.  The line "no changes" means that the since range is empty.
 * The reasons of a reviewer: the text after its name and the colon on its line of a route, in `<run>/$1/route.txt`.  That file holds the lines of the two routes with all their reasons.  The lines above show at most 5 paths of a reviewer, then "(+n more)".
 
-The round's folder is `<run>/$1`.  `review start` wrote `branch.diff`, `since.diff`, `route.txt` and `state.json` there.  The mutants run writes `mutants.txt` and `mutants.out/` there.  Step 9 writes the findings file `<run>/$1/findings.md`.  The log of the branch is `<run>/log.md`.
+The round's folder is `<run>/$1`.  `review start` wrote `branch.diff`, `since.diff`, `route.txt` and `state.json` there.  The mutants run writes `mutants.txt`, `missed.txt`, `known.txt` and `mutants.out/` there.  Step 9 writes the findings file `<run>/$1/findings.md`.  The log of the branch is `<run>/log.md`.
 
 ## Steps
 
@@ -135,11 +135,12 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
 ### 6. Validate the missed mutants
 
 1. If the notice that the mutants command ended has come, the wait for it is 0 seconds.  Else, run `jq -n now`, and record its output as the start of the wait.  Then wait for the notice.  When it comes, run `jq -n now` again, and record the end of the wait.
-2. Read the mutants line in the notice.  If the notice does not show it, read `<run>/$1/mutants.txt`.  Read that file only after the notice has come, because the run writes the file when it ends.  The line starts with `mutants: full:`, `mutants: partial:` or `mutants: none:`.  If the notice shows no `mutants:` line and the file does not exist, the command refused to run.  Then record its error line as the mutants line, and go to item 8.
-3. Read `<run>/$1/mutants.out/missed.txt`.  If the file does not exist or has no lines, go to item 8.
-4. Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.
-5. Do the `repeat-of` check of step 4, item 4, for each of these findings.  A finding with `repeat-of` gets the verdict `refuted`.  Leave its line out of the validator's prompt.  If no line is left, go to item 7.
-6. Start one `validator` with this prompt template, filled in.  The prompt holds each line that has no `repeat-of`.  The range is `<since>..HEAD`, because the mutants run tests the since diff:
+2. Read the mutants line in the notice.  If the notice does not show it, read `<run>/$1/mutants.txt`.  Read that file only after the notice has come, because the run writes the file when it ends.  The line starts with `mutants: full:`, `mutants: partial:` or `mutants: none:`.  If the notice shows no `mutants:` line and the file does not exist, the command refused to run.  Then record its error line as the mutants line, and go to item 9.
+3. Read `<run>/$1/missed.txt` and `<run>/$1/known.txt`.  If neither file exists, the run is from an older `xtask`.  Then read `<run>/$1/mutants.out/missed.txt` as `missed.txt`.  If both files are empty or missing, go to item 9.
+4. Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.  Make no finding of a line of `known.txt` in this item.
+5. Each line of `known.txt` becomes a finding with the next ID `$1-<n>`.  Its fields are those of item 4, from the text before the tab.  Its verdict is `known`, and its `repeat-of` is the TD after the tab.  It gets no validator.  Its action in the log is "known: <TD>".
+6. Do the `repeat-of` check of step 4, item 4, for each finding of item 4.  A finding with `repeat-of` gets the verdict `refuted`.  Leave its line out of the validator's prompt.  If no line is left, go to item 8.
+7. Start one `validator` with this prompt template, filled in.  The prompt holds each line that has no `repeat-of`.  The range is `<since>..HEAD`, because the mutants run tests the since diff:
 
    ```text
    Validate these missed mutants as your instructions say.  Give one block for each line, with the line as its id.
@@ -154,12 +155,12 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
    ```
 
    The verdict of each of these findings is the verdict of the validator for its line.
-7. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
-8. Run `jq -n now`, and record the output as the end of the round.  Run `jq .started <run>/$1/state.json` for the start of the round.
+8. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
+9. Run `jq -n now`, and record the output as the end of the round.  Run `jq .started <run>/$1/state.json` for the start of the round.
 
 ### 7. Compare with the baseline (`--baseline` only)
 
-A finding is found when its verdict is `confirmed` or `pre-existing`.  If the baseline has no found finding, skip this step.  Record "of 0 baseline findings, the round found 0".
+A finding is found when its verdict is `confirmed`, `pre-existing` or `known`.  If the baseline has no found finding, skip this step.  Record "of 0 baseline findings, the round found 0".
 
 Else start one new subagent with `subagent_type` set to `general-purpose`.  Fill in this prompt template, and give the subagent only that text.  List A holds each found finding of the baseline.  List B holds each found finding of the reviewers and of cargo-mutants.  Give each finding as its ID, its `where` and its claim:
 
@@ -232,8 +233,8 @@ Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Wri
 * where: <file:line>
 * rule: <ID and quote, or none>
 * claim: <the claim>
-* verdict: <confirmed, pre-existing, refuted, unproven or unvalidated>
-* repeat-of: <ID, or none>
+* verdict: <confirmed, pre-existing, refuted, unproven, unvalidated or known>
+* repeat-of: <ID, TD, or none>
 * evidence: <the evidence of the validator, in a few words>
 
 ## Baseline findings
@@ -258,6 +259,7 @@ of <y> baseline findings, the round found <x>
 * Where the finding is about behaviour, first write a test that fails before the fix.
 * A `pre-existing` finding can go to `docs/tech-debt.md`, or to its own PR, in place of a fix.
 * Do not fix a `refuted` finding.
+* Do not fix a `known` finding.  Its gap is in its TD.
 * Decide each `unproven` finding, and record the reason.
 * A nit has the verdict `unvalidated`.  Fix it only if you agree with it.
 * Before the commit, run fmt, clippy, the tests and `docs-check` (GIT-2).
@@ -325,4 +327,4 @@ After round 3:
 * Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.
 * Write a Progress line for each round in the plan of the work.
 * Run the checks, and commit, signed.
-* Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, each `repeat-of`, and the mutants line of each round.
+* Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, and each `repeat-of` of a finding that is not `known`.  Then it lists each `known` mutant once, with its TD.  It also gives the mutants line of each round.

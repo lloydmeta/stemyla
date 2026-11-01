@@ -1127,7 +1127,11 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// the header fails.  After the log, step 11 removes the worktrees of the
 /// round's agents with `review clean`.  A refused log gives the command to
 /// the caller, and `--review-only` runs it at step 9.  A file that the Write
-/// tool refuses to a subagent also gives the command to the caller.
+/// tool refuses to a subagent also gives the command to the caller.  Step 6
+/// reads `missed.txt` and `known.txt` of the round, or the old
+/// `mutants.out/missed.txt` of an older `xtask`.  Each line of `known.txt`
+/// is a finding with the verdict `known` and its TD as `repeat-of`, with no
+/// validator, and step 10 does not fix it (harness phase 3b, M2).
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1141,6 +1145,13 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "Read that file only after the notice has come",
     "record its error line as the mutants line",
     "Do the `repeat-of` check of step 4",
+    "Read `<run>/$1/missed.txt` and `<run>/$1/known.txt`.",
+    "Then read `<run>/$1/mutants.out/missed.txt` as `missed.txt`.",
+    "If both files are empty or missing, go to item 9.",
+    "Make no finding of a line of `known.txt` in this item.",
+    "Each line of `known.txt` becomes a finding with the next ID",
+    "Its verdict is `known`, and its `repeat-of` is the TD after the tab.  It gets no validator.",
+    "* Do not fix a `known` finding.  Its gap is in its TD.",
     "but not one with `same-as` a finding that has a validator",
     "Wait for each validator before step 6",
     "do not write it in another way",
