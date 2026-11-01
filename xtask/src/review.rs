@@ -1676,6 +1676,9 @@ fn mutants_with(
             )],
         ));
     };
+    // cargo-mutants copies the tree, and `split_missed` reads the code lines
+    // at the round's head.  So the list applies only to a tree at that head.
+    let at_head = tree_is_at(toplevel, &state.head)?;
     let installed = Command::new(cargo)
         .args(["mutants", "--version"])
         .current_dir(toplevel)
@@ -1700,7 +1703,14 @@ fn mutants_with(
         }
     };
     let mut line = classify(end, read_counts(&round_folder.join("mutants.out")));
+    let list = if at_head { list } else { &[] };
     line.known = split_missed(toplevel, &state.head, &round_folder, list)?;
+    if !at_head {
+        line.reason = Some(match line.reason {
+            Some(reason) => format!("{reason}; {NOT_AT_HEAD}"),
+            None => NOT_AT_HEAD.to_string(),
+        });
+    }
     let line = line.to_string();
     let saved = round_folder.join("mutants.txt");
     std::fs::write(&saved, format!("{line}\n"))
@@ -1708,11 +1718,26 @@ fn mutants_with(
     Ok((0, vec![line]))
 }
 
+/// The reason in the mutants line when the tree was not at the round's head
+/// as the run started.
+const NOT_AT_HEAD: &str =
+    "the tree was not clean at the round's head, so each missed line goes to the validator";
+
+/// If `HEAD` is `head`, and the tree has no change, by the check of
+/// `review start`.
+fn tree_is_at(toplevel: &Path, head: &str) -> Result<bool> {
+    let now = git(toplevel, &["rev-parse", "HEAD"])?;
+    let dirty = git(
+        toplevel,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?;
+    Ok(now.trim() == head && dirty.trim().is_empty())
+}
+
 /// Splits `mutants.out/missed.txt` of the round, if it exists, and writes
 /// `missed.txt` and `known.txt`, empty if need be.  It reads each file at
-/// `head`, which `review start` found clean.  cargo-mutants copied that
-/// tree.  If the two differ, a line only goes to the validator.  Returns
-/// the number of known lines.
+/// `head`.  `mutants_with` gives it an empty list unless the tree was clean
+/// at `head` as cargo-mutants copied it.  Returns the number of known lines.
 fn split_missed(toplevel: &Path, head: &str, round_folder: &Path, list: &[Known]) -> Result<usize> {
     let from = round_folder.join("mutants.out/missed.txt");
     let missed = match std::fs::read_to_string(&from) {
@@ -3797,7 +3822,8 @@ mod tests {
     /// writes counts to `<output>/mutants.out`, keeps the `--config` that
     /// it got in `<output>/config-seen.txt` and the `--in-diff` in
     /// `<output>/in-diff-seen.txt`, and exits 2 (missed mutants).  If its
-    /// folder holds `missed.txt`, the run copies it to `mutants.out`.
+    /// folder holds `missed.txt`, the run copies it to `mutants.out`.  If its
+    /// folder holds `during.sh`, the run runs it at the toplevel.
     const FAKE_CARGO: &str = r#"#!/bin/sh
 if [ "$2" = "--version" ]; then exit VERSION_EXIT; fi
 out=""
@@ -3817,6 +3843,7 @@ printf '%s' "$config" > "$out/config-seen.txt"
 printf '%s' "$diff" > "$out/in-diff-seen.txt"
 here=$(dirname "$0")
 if [ -f "$here/missed.txt" ]; then cp "$here/missed.txt" "$out/mutants.out/missed.txt"; fi
+if [ -f "$here/during.sh" ]; then sh "$here/during.sh"; fi
 exit 2
 "#;
 
@@ -3886,9 +3913,12 @@ exit 2
         assert_eq!(read("known.txt").as_deref(), Some(known), "known.txt");
     }
 
-    #[test]
-    fn mutants_splits_the_missed_lines_by_the_list() {
-        let dir = scratch("mutants-split");
+    /// A round 1 of a change to `SAVE_RS`, whose lines 427 and 503 hold the
+    /// code of 1-41 and of 2-17, and a fake `cargo` that misses both.
+    /// Returns the repo, the text of `SAVE_RS`, the fake's folder and the
+    /// fake.
+    fn round_1_that_misses_2_17(name: &str) -> (Scratch, String, Scratch, PathBuf) {
+        let dir = scratch(name);
         git_in(&dir, &["checkout", "-q", "-b", "feature"]);
         let save: String = (1..=503)
             .map(|n| match n {
@@ -3900,26 +3930,43 @@ exit 2
         write(&dir, SAVE_RS, &save);
         commit_all(&dir, "round 1");
         assert_eq!(start_in(&dir, "main", "1").0, 0);
-        let bin = Scratch::new("mutants-split-bin");
+        let bin = Scratch::new(&format!("{name}-bin"));
         let cargo = fake_cargo(&bin, 0);
-        let missed = format!("{LINE_1_41}\n{LINE_2_17}\n");
-        std::fs::write(bin.join("missed.txt"), &missed).unwrap();
-        // Line 503 changes in a new commit, and again in the tree.  The
-        // code line still comes from the round's head.
-        write(
-            &dir,
-            SAVE_RS,
-            &save.replace(CODE_503, "    committed_later();"),
-        );
-        commit_all(&dir, "after review start");
-        write(
-            &dir,
-            SAVE_RS,
-            &save.replace(CODE_503, "    changed_in_the_tree();"),
-        );
+        std::fs::write(
+            bin.join("missed.txt"),
+            format!("{LINE_1_41}\n{LINE_2_17}\n"),
+        )
+        .unwrap();
+        (dir, save, bin, cargo)
+    }
+
+    #[test]
+    fn mutants_splits_the_missed_lines_by_the_list() {
+        let (dir, save, bin, cargo) = round_1_that_misses_2_17("mutants-split");
+        // As cargo-mutants runs, line 503 changes in a new commit, and again
+        // in the tree.  The code line still comes from the round's head.
+        std::fs::write(
+            bin.join("later.rs"),
+            save.replace(CODE_503, "    committed_later();"),
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("tree.rs"),
+            save.replace(CODE_503, "    changed_in_the_tree();"),
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("during.sh"),
+            format!(
+                "here=$(dirname \"$0\")\ncp \"$here/later.rs\" {SAVE_RS}\ngit -c commit.gpgsign=false -c user.name=t -c user.email=t@example.com commit -q --no-verify -am later\ncp \"$here/tree.rs\" {SAVE_RS}\n"
+            ),
+        )
+        .unwrap();
+        let head = sha(&dir, "HEAD");
         let top = toplevel(&dir).unwrap();
         let (code, lines) =
             mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        assert_ne!(sha(&dir, "HEAD"), head, "the fake made a commit");
         let expected = "mutants: full: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 1";
         assert_eq!((code, lines), (0, vec![expected.to_string()]));
         let round_folder = top.join("target/review/run/feature/1");
@@ -3934,8 +3981,65 @@ exit 2
         );
         assert_eq!(
             std::fs::read_to_string(round_folder.join("mutants.out/missed.txt")).unwrap(),
-            missed,
+            format!("{LINE_1_41}\n{LINE_2_17}\n"),
             "mutants.out stays as cargo-mutants wrote it"
+        );
+    }
+
+    /// Runs the round of [`round_1_that_misses_2_17`] after `change`, which
+    /// moves the tree off the round's head before cargo-mutants starts.
+    /// Each missed line goes to the validator, and the line says why.
+    fn assert_a_moved_tree_knows_no_line(name: &str, change: impl Fn(&Path, &str)) {
+        let (dir, save, _bin, cargo) = round_1_that_misses_2_17(name);
+        change(&dir, &save);
+        let top = toplevel(&dir).unwrap();
+        let (code, lines) =
+            mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        let expected = format!(
+            "mutants: full: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 0; {NOT_AT_HEAD}"
+        );
+        assert_eq!((code, lines), (0, vec![expected]));
+        assert_lists(
+            &top.join("target/review/run/feature/1"),
+            &format!("{LINE_1_41}\n{LINE_2_17}\n"),
+            "",
+        );
+    }
+
+    #[test]
+    fn a_change_in_the_tree_before_the_run_knows_no_line() {
+        // The code of 2-17 stays at line 503; another line changes.
+        assert_a_moved_tree_knows_no_line("mutants-dirty", |dir, save| {
+            write(dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
+        });
+    }
+
+    #[test]
+    fn a_commit_before_the_run_knows_no_line() {
+        assert_a_moved_tree_knows_no_line("mutants-moved", |dir, save| {
+            write(dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
+            commit_all(dir, "a fix after review start");
+        });
+    }
+
+    #[test]
+    fn a_reason_and_a_moved_tree_are_both_in_the_line() {
+        let (dir, save, bin, _) = round_1_that_misses_2_17("mutants-moved-partial");
+        // The fake exits 3 (timeouts), so the line has its own reason.
+        let cargo = fake_cargo(&bin, 0);
+        let script = std::fs::read_to_string(&cargo)
+            .unwrap()
+            .replace("\nexit 2\n", "\nexit 3\n");
+        std::fs::write(&cargo, script).unwrap();
+        write(&dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
+        let top = toplevel(&dir).unwrap();
+        let (_, lines) =
+            mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        assert_eq!(
+            lines,
+            [format!(
+                "mutants: partial: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 0; timeouts have no result; {NOT_AT_HEAD}"
+            )]
         );
     }
 
@@ -4411,6 +4515,7 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
             "fn save_once_all() {",
             "// fn save_once() {",
             "pub(crate fn save_once() {",
+            "pub(crate fn save_once(){",
             "let save_once = 1;",
         ]
         .iter()
@@ -4419,8 +4524,17 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
         assert_eq!(
             starts,
             [
-                true, true, true, true, true, true, true, false, false, false, false
+                true, true, true, true, true, true, true, false, false, false, false, false
             ]
+        );
+    }
+
+    #[test]
+    fn a_fn_line_that_ends_with_a_semicolon_is_its_own_body() {
+        let file = "trait T {\n    fn save_once(&self) -> Result<Save>;\n    fn other(&self) {\n        restore(p, seconds)?;\n    }\n}\n";
+        assert_eq!(
+            fn_bodies(file, "save_once"),
+            [["    fn save_once(&self) -> Result<Save>;"]]
         );
     }
 
