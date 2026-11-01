@@ -99,7 +99,7 @@ Tests of step 1, in `xtask/src/review.rs`, with a fixture list (not `KNOWN_MISSE
 
 * `prepare_mutants` returns the round folder and the round's state, so `mutants` has `head`.
 * After cargo-mutants ends, `mutants` reads `<round>/mutants.out/missed.txt`, if it exists.  It calls `split` with `KNOWN_MISSED`.
-* `line_at` reads the file at the round's `head` with `git show <head>:<file>`.  cargo-mutants copies the working tree as it starts.  So before the run, `mutants` checks that `HEAD` is the round's `head` and that the tree is clean, as `review start` does.  If not, it splits with an empty list: each line goes to `missed.txt`, and the mutants line gives the reason (review round 2, finding 2-5).
+* `line_at` reads the file at the round's `head` with `git show <head>:<file>`.  cargo-mutants reads the source as it starts, and finds its mutants there: their lines, columns and texts.  With `-j2` it copies the tree again after the baseline, but the mutants stay those of the start.  So before the run, `mutants` checks that `HEAD` is the round's `head` and that the tree is clean, as `review start` does.  If not, it splits with an empty list: each line goes to `missed.txt`, and the mutants line gives the reason (review round 2, finding 2-5).
 * It writes `<round>/missed.txt` (the lines to validate) and `<round>/known.txt` (each line, a tab, and its TD).  Each line ends with a newline.  It writes both files, empty if need be, also when cargo-mutants wrote no `missed.txt`.  It does not change anything in `mutants.out/`.
 * `clear_old_output` also removes an old `missed.txt` and `known.txt` of the round.
 * The mutants line gets `, known <k>` after `not tested <n>`, and before the reason.  `<k>` is the number of known lines.  The line is the same in `mutants.txt` and on stdout.  It is `known 0` when the run made no `missed.txt`, also for the class `none`.
@@ -212,6 +212,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: review round 1 fixes (implementer): tests for 1-1, 1-2, 1-5, 1-9, 1-11, 1-13 and 1-15; the texts of 1-3, 1-6, 1-7, 1-8 and 1-10.
 * [x] 2026-10-31: review round 2 (at `dfa133a`): 6 should-fix confirmed (2-1 to 2-6) and 3 nits, no blocker.  2-5 is significant: a rerun of `review mutants` after HEAD moves could hide a mutant that has no entry.  The mutants line: `none: ... known 0; no mutants in the diff`.  2-1 and 2-6 are in the skill, so their fix goes to the orchestrator as a diff.  12 agents, 501710 tokens, 15.3 wall minutes.  Round 3 follows.
 * [x] 2026-10-31: review round 2 fixes (implementer): the check that the tree is clean at the round's head before the run (2-5), tests for 2-2 and 2-4, and the texts of 2-3, 2-7, 2-8 and 2-9.
+* [x] 2026-10-31: review round 3 fixes (implementer): a test of an untracked file before the run (3-5), and the texts of 3-1, 3-2, 3-4 and 3-6.
 * [ ] Review rounds.
 * [ ] M2 done: this plan moves to `plans/completed/`.
 
@@ -236,6 +237,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, implementer: the code of round 2's findings 2-2 and 2-4 was right, so their tests failed first with the mutants: no `';'` in the one-line rule, and `None => return true` in `is_fn_line`.  For 2-5, `a_change_in_the_tree_before_the_run_knows_no_line` and `a_commit_before_the_run_knows_no_line` failed on the old code (no check, which is the mutant `at_head = true`), with `known 1`.  They also failed with `||` for `&&` in `tree_is_at`, and with no reason in the line.  `a_reason_and_a_moved_tree_are_both_in_the_line` failed with only the new reason.  The test of 1-2 now changes `HEAD` and the tree in the fake `cargo`, after the check.  It still fails with `HEAD:` or a read of the tree, and with `!=` in the check of `HEAD`.
 
 * 2026-10-31, team leader: four review agents named their worktrees outside the form `<round>-<agent>-<n>` that `review clean` removes: `1-correctness-1` (reviewer), `2-correctness-reviewer-1` (reviewer), `2-docs-1` (docs-reviewer) and `2-build-1` (supply-chain-reviewer).  Each agent removed its own worktree, so nothing was left.  M6 can make the agents use their own name, or make `review clean` match each folder of the round.
+* 2026-10-31, implementer: the test of round 3's finding 3-5, `an_untracked_file_before_the_run_knows_no_line`, covers code that was right.  It failed first with the mutant `--untracked-files=no` in `tree_is_at`: the untracked file left the tree "clean", and the line of 2-17 was known.  3-1, 3-2, 3-4 and 3-6 change only text.
 
 ## Decision log
 

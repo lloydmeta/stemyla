@@ -1144,7 +1144,12 @@ pub struct Known {
 /// The known-missed list: the missed mutants of TD-39 and TD-66 that the
 /// review rounds of PR #39 sent to tech debt, and that `cargo mutants
 /// --list` still shows.  Each comment names the round's log and finding.
-/// `each_known_missed_entry_is_open_and_in_the_code` keeps each entry true.
+/// `each_known_missed_entry_is_open_and_in_the_code` checks that each TD is
+/// open, and that each code line is once in a function of the mutation's
+/// name.  It does not check that the mutant is still at that code line.  An
+/// edit can keep the line and move the mutant, such as a new first
+/// statement in front of a body mutant.  Then the entry goes stale, and its
+/// mutant goes to the validator, so nothing is hidden.
 pub const KNOWN_MISSED: &[Known] = &[
     // M8, round 2, finding 2-15.
     Known {
@@ -1676,8 +1681,10 @@ fn mutants_with(
             )],
         ));
     };
-    // cargo-mutants copies the tree, and `split_missed` reads the code lines
-    // at the round's head.  So the list applies only to a tree at that head.
+    // cargo-mutants reads the source as it starts, and finds its mutants
+    // there: their lines, columns and texts.  `split_missed` reads the code
+    // lines at the round's head.  So the list applies only to a source that
+    // is the tree at that head as the run starts.
     let at_head = tree_is_at(toplevel, &state.head)?;
     let installed = Command::new(cargo)
         .args(["mutants", "--version"])
@@ -1721,7 +1728,7 @@ fn mutants_with(
 /// The reason in the mutants line when the tree was not at the round's head
 /// as the run started.
 const NOT_AT_HEAD: &str =
-    "the tree was not clean at the round's head, so each missed line goes to the validator";
+    "the tree was not clean at the round's head, so each missed line goes to missed.txt";
 
 /// If `HEAD` is `head`, and the tree has no change, by the check of
 /// `review start`.
@@ -4019,6 +4026,13 @@ exit 2
         assert_a_moved_tree_knows_no_line("mutants-moved", |dir, save| {
             write(dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
             commit_all(dir, "a fix after review start");
+        });
+    }
+
+    #[test]
+    fn an_untracked_file_before_the_run_knows_no_line() {
+        assert_a_moved_tree_knows_no_line("mutants-untracked", |dir, _| {
+            write(dir, "notes.txt", "not ignored\n");
         });
     }
 
