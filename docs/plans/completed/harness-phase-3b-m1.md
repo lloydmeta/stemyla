@@ -243,6 +243,7 @@ Add the arm `["clean", round]` to `review::run_with`, and add `clean <round>` to
 * [x] 2026-10-31: review round 5 fixes (implementer): the PR proofs read only PRs merged into `main`, the head of an open PR stays, the merged-head proof has tests for its missed mutants, and `git cat-file` gets its input from a thread.
 * [x] 2026-10-31: review round 6 fixes (implementer): one branch gate for the branch loop and the proofs of `.claude/worktrees/` worktrees; a git-proof case in the test of unknown open PRs; the guide says that the `tests/` folder is at the repo root.
 * [x] 2026-10-31: review round 7 fixes (implementer): the fake `gh` needs the exact `--json` fields; a 40-character oid that is not hex proves nothing; a PR list as long as its limit is unknown; the comment of the agent-worktree rule, the 6-1 test, and the plan's texts of `merged_prs`, rule 2 and Progress.
+* [x] 2026-10-31: the fix-range review of the intent review fix ran three rounds, logged as rounds 5 to 7 (`docs/reviews/harness-phase-3b-m1.md`).  Rounds 5 and 6 each found a significant should-fix (5-1, 6-1); round 7 found 2 should-fix that are not significant, so the rounds stop there.  Every confirmed finding is fixed (`45f9ca5`, `cd7c143`, `3d73329`).
 
 ## Surprises and discoveries
 
