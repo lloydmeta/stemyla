@@ -1285,7 +1285,8 @@ fn plan_runs_problems(file: &str, text: &str) -> Vec<Problem> {
 }
 
 /// Each review log with a `Significant` column follows the fix rule of
-/// decision 0024 (`crate::review_log`).
+/// decision 0024 (`crate::review_log`), and its last round meets the stop
+/// rule ([`last_round_problems`]).
 fn review_logs_follow_the_fix_rule(markdown: &[(String, String)]) -> Vec<Problem> {
     markdown
         .iter()
@@ -1293,9 +1294,71 @@ fn review_logs_follow_the_fix_rule(markdown: &[(String, String)]) -> Vec<Problem
         .flat_map(|(file, text)| {
             crate::review_log::fix_rule_problems(text)
                 .into_iter()
+                .chain(last_round_problems(text))
                 .map(|message| Problem::new("reviews", file, message))
         })
         .collect()
+}
+
+/// The problems of a copied log whose last round does not meet the stop
+/// rule of step 11 of the review-rounds skill (decision 0024).  The last
+/// round is the Round cell of the last row of the Rounds table.  A log with
+/// no `Significant` column gives no problem.  `review log-check` does not
+/// run this, since a run's log is not at its last round after each round.
+pub fn last_round_problems(text: &str) -> Vec<String> {
+    use crate::review_log::{Action, action_kind, findings, strict_rules, table};
+    let Some(findings) = findings(text) else {
+        return Vec::new();
+    };
+    let rows: Vec<_> = findings
+        .rows
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .collect();
+    let (header, rounds) = table(text, "## Rounds").unwrap_or_default();
+    let column = header.iter().position(|c| c == "Round").unwrap_or(0);
+    let Some(cell) = rounds
+        .last()
+        .map(|row| row.get(column).cloned().unwrap_or_default())
+    else {
+        return vec![
+            "the Rounds table has no row.  Fix: add the row of each round to the Rounds table."
+                .into(),
+        ];
+    };
+    let Ok(last) = cell.parse::<u32>() else {
+        return vec![format!(
+            "the last row of the Rounds table has the round `{cell}`, not a whole number.  Fix: write the number of the round."
+        )];
+    };
+    let mut problems = Vec::new();
+    let highest = rows
+        .iter()
+        .filter_map(|r| r.round.parse::<u32>().ok())
+        .max();
+    if let Some(highest) = highest.filter(|h| *h > last) {
+        problems.push(format!("the Findings table has rows of round {highest}, but the Rounds table ends at round {last}.  Fix: add the row of each round to the Rounds table."));
+    }
+    if last < 3 {
+        problems.push(format!("the last round is {last}, but the rounds stop at round 3 at the earliest.  Fix: run the next round (decision 0024)."));
+    }
+    let strict = strict_rules();
+    for row in rows.iter().filter(|r| r.round.parse() == Ok(last)) {
+        let named = row.is_named(&strict);
+        let fixed = matches!(
+            action_kind(&row.action),
+            Action::Fix | Action::NotFixed { td: true, .. }
+        );
+        let open = match row.verdict.as_str() {
+            "confirmed" => named,
+            "pre-existing" | "unproven" => named && fixed,
+            _ => false,
+        };
+        if open {
+            problems.push(format!("{}: round {last} is the last round of the log, but this finding keeps the rounds open.  Fix: run the next round (step 11 of the review-rounds skill).", row.id));
+        }
+    }
+    problems
 }
 
 #[cfg(test)]
@@ -2103,11 +2166,128 @@ mod tests {
     }
 
     /// A review log with a `Significant` column, and one nit in round 4
-    /// with `action`.
+    /// with `action`.  Its Rounds table ends at round 4.
     fn fix_rule_log(action: &str) -> String {
-        format!(
-            "# Review log\n\n## Findings\n\n| Round | Finding | Reviewers | Severity | Significant | Rule | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - |\n| 4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | {action} |\n"
+        round_log(
+            &[1, 2, 3, 4],
+            &[&format!(
+                "4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | {action}"
+            )],
         )
+    }
+
+    /// A review log with a `Significant` column, a row in its Findings
+    /// table for each of `rows` (`round | finding | reviewers | severity |
+    /// significant | rule | verdict | repeat of | action`), and a row in its
+    /// Rounds table for each of `rounds`.
+    fn round_log(rounds: &[u32], rows: &[&str]) -> String {
+        let findings: Vec<String> = rows.iter().map(|r| format!("| {r} |\n")).collect();
+        let rounds: Vec<String> = rounds.iter().map(|r| format!("| {r} | 3 |\n")).collect();
+        format!(
+            "# Review log\n\n## Findings\n\n| Round | Finding | Reviewers | Severity | Significant | Rule | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - |\n{}\n## Rounds\n\n| Round | Agents |\n| - | - |\n{}",
+            findings.concat(),
+            rounds.concat()
+        )
+    }
+
+    fn keeps_open(id: &str, round: u32) -> String {
+        format!(
+            "{id}: round {round} is the last round of the log, but this finding keeps the rounds open.  Fix: run the next round (step 11 of the review-rounds skill)."
+        )
+    }
+
+    #[test]
+    fn a_log_ends_at_round_3_or_later() {
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2], &[])),
+            [
+                "the last round is 2, but the rounds stop at round 3 at the earliest.  Fix: run the next round (decision 0024)."
+            ]
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3], &[])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_last_round_with_a_finding_of_the_three_kinds_keeps_the_rounds_open() {
+        let good = [
+            "4 | 4-1 | docs-reviewer | nit | - | none | confirmed | none | reported, not fixed",
+            "4 | 4-2 | reviewer | should-fix | no | none | confirmed | none | reported, not fixed",
+            "4 | 4-3 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | known: TD-39",
+            "4 | 4-4 | reviewer | should-fix | yes | none | pre-existing | none | no change: its own PR",
+            "4 | 4-5 | reviewer | should-fix | - | MEM-1 | refuted | none | refuted",
+            "4 | 4-6 | reviewer | blocker | - | none | unvalidated | none | reported, not fixed",
+        ];
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &good)),
+            Vec::<String>::new()
+        );
+        let bad = [
+            "4 | 4-7 | reviewer | blocker | no | none | confirmed | none | abc1234 review round 4 fixes",
+            "4 | 4-8 | reviewer | should-fix | yes | none | confirmed | none | TD-39",
+            "4 | 4-9 | memory-reviewer | should-fix | no | MEM-1 | confirmed | none | abc1234 review round 4 fixes",
+            "4 | 4-10 | reviewer | should-fix | yes | none | pre-existing | none | abc1234 review round 4 fixes",
+            "4 | 4-11 | reviewer | should-fix | yes | none | unproven | none | TD-39",
+        ];
+        let rows: Vec<&str> = good.iter().chain(&bad).copied().collect();
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &rows)),
+            ["4-7", "4-8", "4-9", "4-10", "4-11"].map(|id| keeps_open(id, 4))
+        );
+    }
+
+    #[test]
+    fn only_the_last_round_keeps_the_rounds_open() {
+        let row = "3 | 3-1 | reviewer | blocker | no | none | confirmed | none | abc1234 review round 3 fixes";
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &[row])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3], &[row])),
+            [keeps_open("3-1", 3)]
+        );
+    }
+
+    #[test]
+    fn a_log_has_a_rounds_row_for_each_round_of_its_findings() {
+        let row =
+            "5 | 5-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed";
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4, 5], &[row])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[], &[row])),
+            ["the Rounds table has no row.  Fix: add the row of each round to the Rounds table."]
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &[row])),
+            [
+                "the Findings table has rows of round 5, but the Rounds table ends at round 4.  Fix: add the row of each round to the Rounds table."
+            ]
+        );
+        let speed = round_log(&[1, 2, 3, 4], &[row]).replace("| 4 | 3 |", "| speed 4 | 3 |");
+        assert_eq!(
+            last_round_problems(&speed),
+            [
+                "the last row of the Rounds table has the round `speed 4`, not a whole number.  Fix: write the number of the round."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_log_with_no_significant_column_has_no_last_round() {
+        let text = round_log(&[1, 2], &[]);
+        assert_eq!(last_round_problems(&text).len(), 1);
+        let old = text.replace("| Significant ", "").replace(
+            "| - | - | - | - | - | - | - | - | - |",
+            "| - | - | - | - | - | - | - | - |",
+        );
+        assert!(!crate::review_log::has_significant_column(&old));
+        assert_eq!(last_round_problems(&old), Vec::<String>::new());
     }
 
     #[test]

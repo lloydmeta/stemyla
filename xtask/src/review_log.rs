@@ -79,9 +79,10 @@ fn cells(line: &str) -> Vec<String> {
     cells
 }
 
-/// The header and the rows of the first table under `## Findings`.
-fn findings_table(text: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-    let section = crate::docs::section(text, "## Findings")?;
+/// The header and the rows of the first table under `heading`, such as
+/// `## Findings` or `## Rounds`.
+pub(crate) fn table(text: &str, heading: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    let section = crate::docs::section(text, heading)?;
     let mut lines = section
         .lines()
         .skip_while(|line| !line.trim_start().starts_with('|'))
@@ -90,6 +91,11 @@ fn findings_table(text: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
     // The separator line below the header.
     lines.next();
     Some((header, lines.map(cells).collect()))
+}
+
+/// The header and the rows of the first table under `## Findings`.
+fn findings_table(text: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    table(text, "## Findings")
 }
 
 /// The findings table of `text` has a `Significant` column.
@@ -118,7 +124,7 @@ fn is_sha(word: &str) -> bool {
 
 /// The kind of an Action cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
+pub(crate) enum Action {
     /// A part names a fix commit or a diff.
     Fix,
     /// No part names a fix, and a part names the reason.  `td`: a part
@@ -128,7 +134,7 @@ enum Action {
     Other,
 }
 
-fn action_kind(action: &str) -> Action {
+pub(crate) fn action_kind(action: &str) -> Action {
     let parts: Vec<&str> = action.split(';').map(str::trim).collect();
     let not_fixed =
         |part: &&str| NOT_FIXED.iter().any(|s| part.starts_with(s)) || starts_with_td(part);
@@ -152,24 +158,25 @@ fn action_kind(action: &str) -> Action {
     }
 }
 
-/// The cells of one row, by column name.
-struct Row<'a> {
-    round: &'a str,
-    id: &'a str,
-    reviewers: &'a str,
-    severity: &'a str,
-    significant: &'a str,
-    rule: &'a str,
-    verdict: &'a str,
-    repeat_of: &'a str,
-    action: &'a str,
+/// The cells of one row, by column name.  `id` is `row <n>` when the
+/// Finding cell is empty.
+pub(crate) struct Row {
+    pub(crate) round: String,
+    pub(crate) id: String,
+    pub(crate) reviewers: String,
+    pub(crate) severity: String,
+    pub(crate) significant: String,
+    pub(crate) rule: String,
+    pub(crate) verdict: String,
+    pub(crate) repeat_of: String,
+    pub(crate) action: String,
 }
 
-impl Row<'_> {
+impl Row {
     /// The Rule cell names a strict rule, or cargo-mutants (VERIFY-1) is a
     /// source.  The cell splits at each character that is not a letter, a
     /// digit or `-`, so `MEM-1/MEM-2` and `RT-1's rule` name rules.
-    fn is_strict(&self, strict: &[String]) -> bool {
+    pub(crate) fn is_strict(&self, strict: &[String]) -> bool {
         let named = self
             .rule
             .split(|c: char| !c.is_alphanumeric() && c != '-')
@@ -181,20 +188,26 @@ impl Row<'_> {
                 .any(|source| source.trim() == "cargo-mutants")
     }
 
+    /// A finding of the three kinds that the fix rule names from round 4: a
+    /// blocker, a should-fix with `yes`, or a finding on a strict rule.
+    pub(crate) fn is_named(&self, strict: &[String]) -> bool {
+        self.severity == "blocker" || self.significant == "yes" || self.is_strict(strict)
+    }
+
     /// The problems of the row's values: problems 2 to 5.
     fn value_problems(&self) -> Vec<String> {
-        let id = self.id;
+        let id = &self.id;
         let mut problems = Vec::new();
         if !self.round.parse::<u32>().is_ok_and(|r| r >= 1) {
             problems.push(format!("{id}: the round `{}` is not a whole number of 1 or more.  Fix: write the number of the round.", self.round));
         }
-        if !SEVERITIES.contains(&self.severity) {
+        if !SEVERITIES.contains(&self.severity.as_str()) {
             problems.push(format!("{id}: the severity `{}` is not `blocker`, `should-fix` or `nit`.  Fix: write one of them.", self.severity));
         }
-        if !VERDICTS.contains(&self.verdict) {
+        if !VERDICTS.contains(&self.verdict.as_str()) {
             problems.push(format!("{id}: the verdict `{}` is not a verdict of the review-rounds skill.  Fix: write `confirmed`, `pre-existing`, `refuted`, `unproven`, `unvalidated` or `known`.", self.verdict));
         }
-        if !["yes", "no", "-"].contains(&self.significant) {
+        if !["yes", "no", "-"].contains(&self.significant.as_str()) {
             problems.push(format!(
                 "{id}: Significant is `{}`, not `yes`, `no` or `-`.  Fix: write one of them.",
                 self.significant
@@ -205,7 +218,7 @@ impl Row<'_> {
 
     /// The problems of the fix rule: problems 6 to 11.  The values are good.
     fn rule_problems(&self, strict: &[String]) -> Vec<String> {
-        let (id, verdict, action) = (self.id, self.verdict, self.action);
+        let (id, verdict, action) = (&self.id, self.verdict.as_str(), self.action.as_str());
         let round: u32 = self.round.parse().unwrap_or(1);
         let late = round >= 4;
         let mut problems = Vec::new();
@@ -232,8 +245,7 @@ impl Row<'_> {
         if kind == Action::Fix && (verdict == "refuted" || verdict == "known") {
             problems.push(format!("{id}: a `{verdict}` finding has the fix `{action}`.  Fix: do not fix it, and write the reason for no change."));
         }
-        let named =
-            self.severity == "blocker" || self.significant == "yes" || self.is_strict(strict);
+        let named = self.is_named(strict);
         let must_fix = verdict == "confirmed" && (!late || named);
         if must_fix && matches!(kind, Action::NotFixed { td: false, .. }) {
             problems.push(format!("{id}: round {round} must fix this finding, but the action is `{action}`.  Fix: fix it, or send it to a TD (decision 0024)."));
@@ -259,15 +271,20 @@ impl Row<'_> {
     }
 }
 
-/// The problems of one log's findings table against the fix rule.  Each
-/// problem names the finding and its fix.  A log with no `Significant`
-/// column gives no problem.
-pub fn fix_rule_problems(text: &str) -> Vec<String> {
-    let Some((header, rows)) = findings_table(text) else {
-        return Vec::new();
-    };
+/// The findings table of a log with a `Significant` column.
+pub(crate) struct Findings {
+    /// A problem for each column of [`COLUMNS`] that the header lacks.
+    /// If there is one, `rows` is empty.
+    pub(crate) header_problems: Vec<String>,
+    /// Each row, or the problem of its count of cells.
+    pub(crate) rows: Vec<Result<Row, String>>,
+}
+
+/// The findings table of `text`, if it has a `Significant` column.
+pub(crate) fn findings(text: &str) -> Option<Findings> {
+    let (header, rows) = findings_table(text)?;
     if !header.iter().any(|c| c == "Significant") {
-        return Vec::new();
+        return None;
     }
     let index: Vec<Option<usize>> = COLUMNS
         .iter()
@@ -280,31 +297,62 @@ pub fn fix_rule_problems(text: &str) -> Vec<String> {
         .map(|(name, _)| format!("findings table: the header has no `{name}` column.  Fix: use the header of step 11 of the review-rounds skill."))
         .collect();
     if !missing.is_empty() {
-        return missing;
+        return Some(Findings {
+            header_problems: missing,
+            rows: Vec::new(),
+        });
     }
     let index: Vec<usize> = index.into_iter().flatten().collect();
+    let rows = rows
+        .iter()
+        .enumerate()
+        .map(|(n, cells)| {
+            let cell = |column: usize| cells.get(index[column]).cloned().unwrap_or_default();
+            let id = match cell(1) {
+                id if id.is_empty() => format!("row {}", n + 1),
+                id => id,
+            };
+            if cells.len() != header.len() {
+                return Err(format!("{id}: the row has {} cells, and the header has {}.  Fix: give the row one cell for each column, and write a `|` in a cell as `\\|`.", cells.len(), header.len()));
+            }
+            Ok(Row {
+                round: cell(0),
+                id,
+                reviewers: cell(2),
+                severity: cell(3),
+                significant: cell(4),
+                rule: cell(5),
+                verdict: cell(6),
+                repeat_of: cell(7),
+                action: cell(8),
+            })
+        })
+        .collect();
+    Some(Findings {
+        header_problems: Vec::new(),
+        rows,
+    })
+}
+
+/// The problems of one log's findings table against the fix rule.  Each
+/// problem names the finding and its fix.  A log with no `Significant`
+/// column gives no problem.
+pub fn fix_rule_problems(text: &str) -> Vec<String> {
+    let Some(findings) = findings(text) else {
+        return Vec::new();
+    };
+    if !findings.header_problems.is_empty() {
+        return findings.header_problems;
+    }
     let strict = strict_rules();
     let mut problems = Vec::new();
-    for (n, cells) in rows.iter().enumerate() {
-        let cell = |column: usize| cells.get(index[column]).map_or("", String::as_str);
-        let id = match cell(1) {
-            "" => format!("row {}", n + 1),
-            id => id.to_string(),
-        };
-        if cells.len() != header.len() {
-            problems.push(format!("{id}: the row has {} cells, and the header has {}.  Fix: give the row one cell for each column, and write a `|` in a cell as `\\|`.", cells.len(), header.len()));
-            continue;
-        }
-        let row = Row {
-            round: cell(0),
-            id: &id,
-            reviewers: cell(2),
-            severity: cell(3),
-            significant: cell(4),
-            rule: cell(5),
-            verdict: cell(6),
-            repeat_of: cell(7),
-            action: cell(8),
+    for row in &findings.rows {
+        let row = match row {
+            Ok(row) => row,
+            Err(problem) => {
+                problems.push(problem.clone());
+                continue;
+            }
         };
         let values = row.value_problems();
         if values.is_empty() {
