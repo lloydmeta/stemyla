@@ -288,7 +288,9 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: step 4, checkpoint B.  2 dry runs and 29 counted runs, 40.85M `modelUsage` tokens.  No role passes (Surprises, the results).  The `haiku` validator stopped after 3 of 6 cases.
 * [x] 2026-11-01: step 5, the agent files and their pin.  No agent file changes.  `the_agent_models_are_the_measured_ones` in `xtask/tests/rules.rs` pins `model: inherit` and no `effort` for each of the eight agents, and TD-71 records the gaps of the measurement.
   * 2026-11-01: the orchestrator removed the 35 clone folders of the measurement with `xtask clean --yes --also` (29.1 GiB).  The harness root stays.
-* [ ] Step 6: review rounds.
+* [x] 2026-11-01: step 6, review round 1 of `8c228fe..d077706` (reviewer, supply-chain-reviewer, docs-reviewer, 1 validator; 298,416 tokens; 10.1 wall minutes).  1 confirmed significant should-fix (1-1: the plan did not record the data of the scripts) and 5 nits, all fixed in `686cfe1`.  The parent's line on `agents_folder_problems` went to the orchestrator as a diff (`ed5f898`).  Mutants: 10 tested, 0 missed.
+* [x] 2026-11-01: step 6, review round 2 (reviewer, supply-chain-reviewer, 1 validator; 165,452 tokens; 5.5 wall minutes).  1 confirmed significant should-fix (2-1: the haiku arm refuted 4 of 10 R and Mr items, not 4 of 11) and 2 nits, fixed in `b2626ff` and the orchestrator's `9d705bd`.  Mutants: 4 tested, 0 missed.
+* [x] 2026-11-01: step 6, review round 3 (reviewer, supply-chain-reviewer; 109,354 tokens; 5.5 wall minutes).  2 nits, fixed in `8613d58` (the model fix text points to `AGENT_MODELS_MEASURED`; the haiku row gets its interval).  No confirmed blocker, significant should-fix or strict finding, so round 3 is the last round (decision 0024).  Mutants: 2 tested, 0 missed.
 
 ## Surprises and discoveries
 
@@ -807,4 +809,19 @@ The team leader gives these to the orchestrator as text:
 
 ## Outcomes and retrospective
 
-To be written when the plan completes.
+Done on 2026-11-01.
+
+* `agent_problems` accepts `model` from `inherit`, `opus`, `sonnet` and `haiku`, and an optional `effort` before `hooks` (`f3a4f8f`).  `the_agent_models_are_the_measured_ones` pins each agent file to the results (`d077706`).
+* The measurement used 40.85M of the 45M `modelUsage` tokens.  No candidate passed its pass rule:
+  * the `sonnet` validator refuted 11 of 16 refuted items, against the control's 13;
+  * the `sonnet` docs-reviewer found 8 of 40 items, against the control's 17, more than 0.15 below;
+  * the `haiku` validator stopped after 3 of 6 cases, and could not pass item 2.
+* So each agent keeps `model: inherit`.  The gpu-reviewer, wire-reviewer and supply-chain-reviewer were not measured, for want of items or budget.  TD-71 records the gaps.
+* The cheaper arms used about half the tokens: `sonnet` validator 3.35M against 6.46M, `sonnet` docs-reviewer 6.25M against 17.30M.  The loss in recall was larger than the saving allows.
+* 3 review rounds, 9 round agents, about 0.57M final-context tokens, 21.1 wall minutes, 0 interventions.
+
+What to do differently:
+
+* Keep the data of a measurement with its scripts from the start (round 1, 1-1).  A scratch folder under `/private/tmp` is gone at a restart.
+* Check each count of a results table against the ground truth before the checkpoint (round 2, 2-1).
+* A driver prompt that starts only the agents under test cost 0.14M to 4.0M a run, and made the budget fit.  A whole skill run would not have fit.

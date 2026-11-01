@@ -442,7 +442,7 @@ Tier `push`, which runs before each push and each review round, or CI finds the 
 
 This entry concerns no rule.  It concerns decision 0025, and the pin `the_agent_models_are_the_measured_ones` in `xtask/tests/rules.rs`.
 
-M5 of harness phase 3b compared cheaper models with a control for the validator and the docs-reviewer, on logged findings.  The results are in the Surprises of `plans/active/harness-phase-3b-m5.md` ("step 4, the results").  No role passed, so each agent file keeps `model: inherit` with no `effort` key.  The measurement has these gaps:
+M5 of harness phase 3b compared cheaper models with a control for the validator and the docs-reviewer, on logged findings.  The results are in the Surprises of `plans/completed/harness-phase-3b-m5.md` ("step 4, the results").  No role passed, so each agent file keeps `model: inherit` with no `effort` key.  The measurement has these gaps:
 
 * Each arm had one run on each case.  So the measure does not separate run noise from the model's effect.
 * The team leader rebuilt the finding block of each validator run from its row in the log.  So the block had no evidence and no fix.

@@ -1084,7 +1084,7 @@ fn the_agents_are_read_only_by_tools() {
 }
 
 /// The `model` and the `effort` of each agent file, from the results of the
-/// measurement of decision 0025 (`docs/plans/active/harness-phase-3b-m5.md`,
+/// measurement of decision 0025 (`docs/plans/completed/harness-phase-3b-m5.md`,
 /// Surprises, "step 4, the results").  No role passed, so each row is
 /// `model: inherit` with no `effort` key.  `None` is no `effort` key.
 const AGENT_MODELS_MEASURED: &[(&str, &str, Option<&str>)] = &[
