@@ -18,7 +18,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/harness-phase-3b.md`: phase 3b of that plan: orchestrated mode by default for big tasks, a stricter fix rule, a model for each agent role, local checks by tier, cleanup, and PR bodies with attention comments.
-* `plans/active/harness-phase-3b-m3.md`: M3 of that plan: the fix rule and the stop rule of decision 0024 in the review skill, and a check of each review log.
+* `plans/completed/harness-phase-3b-m3.md`: M3 of that plan, done on 2026-11-01: the review rounds follow the fix rule and the stop rule of decision 0024, and a check reads each log.
 * `plans/completed/harness-phase-3b-m2.md`: M2 of that plan, done on 2026-10-31: `xtask review mutants` writes known missed mutants to `known.txt`, and the skill gives them no validator.
 * `plans/completed/harness-phase-3b-m1.md`: M1 of that plan, done on 2026-10-31: `xtask clean` lists and removes what runs leave, `xtask review clean` removes a round's worktrees, and `xtask serve` writes a pid file.
 * `plans/completed/stream-from-storage.md`: done on 2026-10-30: a song's audio moves to browser storage, so the tab's memory does not grow with the song (MEM-4, TD-54).

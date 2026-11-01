@@ -416,7 +416,7 @@ This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
 
 This entry concerns VERIFY-1, through `xtask docs-check`.
 
-`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of M3 of harness phase 3b).  The unit tests check each check alone, but not that `check` calls it.
+`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of M3 of harness phase 3b).  This mutant is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`), so `xtask review mutants` writes it to `known.txt`.  The unit tests check each check alone, but not that `check` calls it.
 
 * Fix: add a test that runs `check` on a small fixture repo with one known problem of each check, and wants each problem.
 

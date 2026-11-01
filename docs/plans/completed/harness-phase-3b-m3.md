@@ -315,9 +315,16 @@ The team leader gives these to the orchestrator as text.
 * [x] 2026-11-01: review round 3 fixes (implementer): 3-2 (the guide line), 3-5, 3-7 and 3-9.  The diff `m3/m3-r3-skill.diff` holds 3-1, 3-2 (the skill line), 3-3, 3-4, 3-6 and 3-8.
 * [x] 2026-11-01: review round 4 fixes (4-1), as the late rule allows (implementer).  The diff `m3/m3-r4-skill.diff` holds the skill and guide lines.  4-2 to 4-5 are `reported, not fixed`.
 * [x] 2026-11-01: review round 5 fixes (5-1), as the late rule allows (implementer).  The diff `m3/m3-r5-skill.diff` holds the skill line.  5-2 to 5-5 are `reported, not fixed`.
-* [ ] A `KNOWN_MISSED` entry for TD-69 (finding 1-19) in M3's last commit.
-* [ ] Step 5: review rounds to the stop rule.
-* [ ] M3 done: the log in `docs/reviews/harness-phase-3b-m3.md`, and this plan in `plans/completed/`.
+* [x] 2026-11-01: a `KNOWN_MISSED` entry for TD-69 (finding 1-19), in M3's last commit (implementer).
+* [x] 2026-11-01: step 5: review rounds to the stop rule.  Each line gives the agents, the final-context tokens and the wall minutes of the round.
+  * Round 1, at `9de7009`: 13 agents, 645209 tokens, 24.7 minutes.  11 confirmed should-fix (1-2, 1-5 and 1-6 significant), 1 pre-existing (1-19, to TD-69) and 11 nits.  Mutants: full, tested 129, missed 5.
+  * Round 2, at `0e1037d`: 14 agents, 596367 tokens, 14.8 minutes.  7 confirmed should-fix (2-1, 2-5 and 2-6 significant), 1 pre-existing (2-8, fixed) and 8 nits.  Mutants: full, tested 30, missed 0.
+  * Round 3, at `00035e1`: 9 agents, 472008 tokens, 9.0 minutes.  2 confirmed should-fix (3-1 and 3-3 significant; 3-1 also on a strict rule), 1 unproven (3-2, fixed as a doc line) and 6 nits.  Mutants: full, tested 23, missed 0.
+  * Round 4, at `4a371dd`, the first late round, with the fix range and the `Scope:` line: 8 agents, 372608 tokens, 9.9 minutes.  4-1 confirmed, significant and fixed.  4-2 confirmed, not significant.  4-2 to 4-5 are `reported, not fixed`.  Mutants: full, tested 5, missed 0.
+  * Round 5, at `380a9bf`: 8 agents, 360409 tokens, 7.9 minutes.  5-1 pre-existing, significant and fixed.  5-2 to 5-5 are `reported, not fixed`.  Mutants: none in the diff.
+  * Round 6, at `9492433`: 7 agents, 267189 tokens, 4.8 minutes.  6-1 confirmed, not significant.  6-1 to 6-3 are `reported, not fixed`.  The stop rule holds, so the rounds stop.  Mutants: none in the diff.
+  * Totals: 6 rounds, 59 round agents, 2,713,790 tokens, 71.1 wall minutes and 0 interventions.  Before round 1: 2 `Plan` agents (270,467 tokens) and 1 implementer (about 349k final context over all its work).
+* [x] 2026-11-01: M3 done: this plan in `plans/completed/`.  The orchestrator writes the log in `docs/reviews/harness-phase-3b-m3.md`.
 
 ## Surprises and discoveries
 
@@ -376,6 +383,12 @@ The team leader gives these to the orchestrator as text.
   * `git apply --check` passes at the repo root.
   * With only the `xtask/tests/rules.rs` part, two tests fail on their asserts.  `the_review_skill_starts_with_xtask` gives 2 problems, one for each new or changed pin.  `each_reviewer_reads_the_late_scope` gives one problem for each of the six reviewers.  The other 26 rules tests pass.
   * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  `CLAUDE.md` stays at 88 lines.
+* 2026-11-01, team leader: review agents again named worktrees outside `<round>-<agent>-<n>`.  These were `5-gpu-1`, `5-memory-1`, `5-reviewer-1` (of a `wire-reviewer`), `5-harness-1`, `6-reviewer-2` (of a `wire-reviewer`) and `6-harness-1`.  Each agent removed its own worktree, so `review clean` found none (M6's item).
+* 2026-11-01, team leader: rounds 3 to 6 each found a second reading of the stop rule (3-3, 4-1, 5-1 and 6-1).  Each fix of one sentence left a nearby sentence wider or narrower.  This is evidence for M8's check of D4 again.  The late fix range found each one at about 0.27M to 0.37M tokens a round.
+* 2026-11-01, team leader: a finding logged as `reported, not fixed` came back in a later round, and got a validator again.  5-2 came back as 6-1, on the same Decision log line.  The `repeat-of` check matches only `refuted` findings and TD rows.
+* 2026-11-01, team leader: agent definitions load at the start of a session.  In rounds 4 to 6, reviewers said that their own instructions still had the old scope line.  Only the `Scope:` line of the prompt reached them (3-2).
+* 2026-11-01, team leader: the Write tool refused `findings.md` and `log.md` to the team leader in each round, as in M1 and M2.  The orchestrator wrote them from scratchpad files.  `review log-check` ran on the scratch copy first.
+* 2026-11-01, team leader: this was the first live use of the log check.  `review log-check` passed on the log after each of the 6 rounds.  The log has 61 rows with the `Significant` column.
 
 ## Decision log
 
@@ -402,4 +415,25 @@ The team leader gives these to the orchestrator as text.
 
 ## Outcomes and retrospective
 
-To be written when M3 completes.
+What M3 achieved:
+
+* The skill, `CLAUDE.md`, the guide and decision 0011 say the fix rule of decision 0024.  `the_fix_rule_says_the_same_in_each_place` pins one sentence in each place, and in 0024.
+* The stop rule has no cap.  Late rounds review the fix range, with a `Scope:` line in the prompt.
+* The log has a `Significant` column.  `fix_rule_problems` checks it in `docs-check` and in `xtask review log-check`.
+* A `repeat-of` that names a TD gives the verdict `known`.
+* A change to `xtask/src/review_log.rs` routes all six reviewers.  `review start` warns when a branch changes, adds or removes it.
+
+The review in numbers: the totals of step 5 in Progress.  Rounds 4 to 6 fixed 2 findings (4-1 and 5-1), and logged 11 as `reported, not fixed`.  That is what the late rule intends.
+
+What did not go well:
+
+* The text of the stop rule took four rounds to have one reading.
+* The orchestrator applied 6 diffs of `.claude/`.
+* The Decision log of this plan keeps two lines with old words (5-2 and 6-1).  The PR lists them.
+
+What to do differently:
+
+* Write a rule in one place, and make the other places point to it.  Then a fix changes one sentence.
+* Add the `reported, not fixed` rows to the `repeat-of` check.  This is a later change, not part of M3.
+
+Debt: TD-69 is new, with its entry in `KNOWN_MISSED`.  TD-31 now names the log check.  M3 adds no other TD.
