@@ -420,6 +420,21 @@ This entry concerns VERIFY-1, through `xtask docs-check`.
 
 * Fix: add a test that runs `check` on a small fixture repo with one known problem of each check, and wants each problem.
 
+### TD-70: tier `commit` of `xtask check` can pass where the full checks fail
+
+This entry concerns GIT-2 and VERIFY-1, through `xtask check` (decision 0026).
+
+Tier `commit` runs the checks that the changed paths of one commit need (`plans/active/harness-phase-3b-m4.md`).  It has these gaps:
+
+* The crate tests are one `cargo test` command for the chosen packages.  Cargo turns on features only across those packages, so the command can pass where the workspace test line fails.
+* A test that reads a file in another folder is not seen.  The one case today is `engine/tests/realtime.rs`, which reads `app/Cargo.toml`.  That path matches DEPS-1, so it runs tier `push`.
+* The strict paths (`STRICT_PATHS` in `xtask/src/check.rs`) are a narrow list that a person keeps.  `app/src/lib.rs` is in no row, but it holds `MEMORY_PATH_MAX_FRAMES` and some transfer code.
+* Tier `commit` skips the GPU test line and the Trunk build, and each tier skips the browser tests.
+
+Tier `push`, which runs before each push and each review round, or CI finds each of these before review.
+
+* Fix: no fix is planned.  Add a strict path when a rule's code moves to a new file.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits

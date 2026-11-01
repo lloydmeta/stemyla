@@ -7,15 +7,31 @@
 //! that touches a strict path ([`STRICT_PATHS`]) runs tier `push`.  No
 //! check is a browser test or `publish`, and CI stays the authority.
 //!
+//! The code has parts, so the tests can check the rules without a run.
 //! [`plan`] is a pure function of the tier, the paths and the workspace
-//! graph, so the tests can check the rules without a run.
+//! graph.  [`changed_paths`] and [`graph`] read the repo.  [`run_checks`]
+//! runs a plan with a runner that the caller gives, and [`run_command`] is
+//! the real runner.
 //!
 //! `plans/active/harness-phase-3b-m4.md` gives the tables and the reasons.
 
 use crate::docs::glob_matches;
 use crate::review_log::strict_rules;
 use crate::rules;
+use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
+
+pub const USAGE: &str = "usage: xtask check --tier commit|push [--dry-run]";
+
+/// The exit code of a failed check.
+const FAILED: i32 = 1;
+
+/// The exit code of a usage error, and of an error that stops the plan.
+const REFUSED: i32 = 2;
 
 /// The tier of a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,11 +432,11 @@ pub fn plan(tier: Tier, paths: &[String], graph: Option<&Graph>) -> Plan {
     let strict = strict_hits(paths);
     let workspace_file = paths.iter().any(|path| is_workspace_file(path));
     let (choices, tier, why) = match (tier, graph) {
-        (Tier::Push, _) => (push_choices(paths), Tier::Push, "asked"),
+        (Tier::Push, _) => (push_choices(paths), Tier::Push, "the tier that was asked"),
         (Tier::Commit, _) if !strict.is_empty() => (
             push_choices(paths),
             Tier::Push,
-            "a path is a strict path (D2)",
+            "a strict path changed (D2)",
         ),
         (Tier::Commit, None) => (
             push_choices(paths),
@@ -432,7 +448,11 @@ pub fn plan(tier: Tier, paths: &[String], graph: Option<&Graph>) -> Plan {
             Tier::Commit,
             "a workspace file changed",
         ),
-        (Tier::Commit, Some(graph)) => (commit_choices(paths, graph), Tier::Commit, "asked"),
+        (Tier::Commit, Some(graph)) => (
+            commit_choices(paths, graph),
+            Tier::Commit,
+            "the changed paths choose the checks",
+        ),
     };
     let mut choices = choices;
     choices.extend(
@@ -609,6 +629,327 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
     choices.push(skip(line(GPU_TESTS), COMMIT_GPU));
     choices.push(skip(line(TRUNK), COMMIT_TRUNK));
     choices
+}
+
+/// The root of the worktree that holds `dir`
+/// (`git rev-parse --show-toplevel`).
+pub fn repo_root(dir: &Path) -> Result<PathBuf> {
+    let top = git(dir, &["rev-parse", "--show-toplevel"])?;
+    Ok(PathBuf::from(top.trim_end_matches('\n')))
+}
+
+/// Runs git in `dir`, and gives its output.
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    String::from_utf8(out.stdout)
+        .with_context(|| format!("git {} gave text that is not UTF-8", args.join(" ")))
+}
+
+/// `text` on one line: its lines, trimmed, joined by `; `.  So each line
+/// of `check` starts with `check:` or `warning:`.
+fn one_line(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.join("; ")
+}
+
+/// True when git in `dir` reads `rev` as a commit.
+fn has_commit(dir: &Path, rev: &str) -> bool {
+    git(
+        dir,
+        &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")],
+    )
+    .is_ok()
+}
+
+/// The paths of the `-z` output of git, in `found`.
+fn add_paths(found: &mut BTreeSet<String>, output: &str) {
+    found.extend(
+        output
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string),
+    );
+}
+
+/// The changed paths of `tier`, relative to `root`, sorted, and a phrase
+/// that says where they came from.  A phrase that starts with `warning:`
+/// says that tier `push` found no merge base, so it reads no path.
+///
+/// Tier `commit` reads the staged and unstaged changes against `HEAD`, and
+/// the untracked files.  On a clean tree, it reads the last commit, against
+/// its first parent, or each file of a root commit.  Tier `push` reads the
+/// changes since the merge base of `HEAD` and `origin/main`, and the
+/// untracked files.  A rename gives both paths.
+pub fn changed_paths(root: &Path, tier: Tier) -> Result<(Vec<String>, String)> {
+    if !has_commit(root, "HEAD") {
+        bail!("the repo has no commit, so there is no HEAD to compare with");
+    }
+    let untracked = ["ls-files", "--others", "--exclude-standard", "-z"];
+    let mut found = BTreeSet::new();
+    let source = match tier {
+        Tier::Commit => {
+            add_paths(
+                &mut found,
+                &git(root, &["diff", "--name-only", "--no-renames", "-z", "HEAD"])?,
+            );
+            add_paths(&mut found, &git(root, &untracked)?);
+            if !found.is_empty() {
+                "the changes against HEAD and the untracked files".to_string()
+            } else if has_commit(root, "HEAD^") {
+                add_paths(
+                    &mut found,
+                    &git(
+                        root,
+                        &["diff", "--name-only", "--no-renames", "-z", "HEAD^", "HEAD"],
+                    )?,
+                );
+                "the last commit (HEAD^..HEAD)".to_string()
+            } else {
+                add_paths(
+                    &mut found,
+                    &git(
+                        root,
+                        &[
+                            "diff-tree",
+                            "-r",
+                            "--root",
+                            "--no-commit-id",
+                            "--name-only",
+                            "--no-renames",
+                            "-z",
+                            "HEAD",
+                        ],
+                    )?,
+                );
+                "the root commit".to_string()
+            }
+        }
+        Tier::Push => match git(root, &["merge-base", "HEAD", "origin/main"]) {
+            Err(e) => {
+                return Ok((
+                    Vec::new(),
+                    format!(
+                        "warning: no merge base of HEAD and origin/main ({}), so tier push runs every line",
+                        one_line(&format!("{e:#}"))
+                    ),
+                ));
+            }
+            Ok(base) => {
+                let base = base.trim();
+                add_paths(
+                    &mut found,
+                    &git(root, &["diff", "--name-only", "--no-renames", "-z", base])?,
+                );
+                add_paths(&mut found, &git(root, &untracked)?);
+                let short = base.get(..12).unwrap_or(base);
+                format!(
+                    "the changes since the merge base {short} with origin/main, and the untracked files"
+                )
+            }
+        },
+    };
+    Ok((found.into_iter().collect(), source))
+}
+
+/// The workspace graph of `root`, from `cargo metadata --locked`.
+pub fn graph(root: &Path) -> Result<Graph> {
+    let metadata = rules::workspace_metadata(root)?;
+    Ok(Graph::from_workspace(&rules::workspace(&metadata)?))
+}
+
+/// How a check ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// It exited with this code.
+    Exit(i32),
+    /// A signal stopped it.
+    Signal(i32),
+}
+
+/// Runs each `run` check of `plan` in order, with `run`, and writes the
+/// progress to `out`.  It stops at the first failure, names each check
+/// that did not run, and gives 1.  Else it gives 0.  A runner error is a
+/// failure.
+pub fn run_checks(
+    plan: &Plan,
+    out: &mut impl Write,
+    mut run: impl FnMut(&Check) -> Result<Outcome>,
+) -> i32 {
+    let started = Instant::now();
+    let runs: Vec<&Check> = plan
+        .choices
+        .iter()
+        .filter(|choice| choice.decision == Decision::Run)
+        .map(|choice| &choice.check)
+        .collect();
+    // A write to the terminal that fails cannot be reported there.
+    let mut say = |line: String| {
+        let _ = writeln!(out, "{line}");
+    };
+    for (index, check) in runs.iter().enumerate() {
+        say(format!("check: start: {}", check.line()));
+        let one = Instant::now();
+        let failure = match run(check) {
+            Ok(Outcome::Exit(0)) => None,
+            Ok(Outcome::Exit(code)) => Some(format!("exit {code}")),
+            Ok(Outcome::Signal(signal)) => Some(format!("signal {signal}")),
+            Err(e) => Some(format!("{e:#}")),
+        };
+        let seconds = one.elapsed().as_secs_f64();
+        let Some(failure) = failure else {
+            say(format!("check: ok in {seconds:.1} s"));
+            continue;
+        };
+        say(format!("check: failed ({failure}) in {seconds:.1} s"));
+        for rest in &runs[index + 1..] {
+            say(format!("check: not run: {}", rest.line()));
+        }
+        say(format!(
+            "check: {} failed, after {index} passed, in {:.1} s",
+            check.line(),
+            started.elapsed().as_secs_f64()
+        ));
+        return FAILED;
+    }
+    say(format!(
+        "check: {} passed in {:.1} s",
+        runs.len(),
+        started.elapsed().as_secs_f64()
+    ));
+    0
+}
+
+/// Runs `check` in its folder under `root`, with the terminal as its
+/// output.
+pub fn run_command(root: &Path, check: &Check) -> Result<Outcome> {
+    let (program, args) = check
+        .argv
+        .split_first()
+        .context("the check has no program")?;
+    let status = Command::new(program)
+        .args(args)
+        .envs(check.env.iter().map(|(key, value)| (key, value)))
+        .current_dir(root.join(&check.folder))
+        .status()
+        .with_context(|| format!("starting {}", check.line()))?;
+    Ok(match status.code() {
+        Some(code) => Outcome::Exit(code),
+        None => Outcome::Signal(signal_of(&status)),
+    })
+}
+
+#[cfg(unix)]
+fn signal_of(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn signal_of(_: &std::process::ExitStatus) -> i32 {
+    0
+}
+
+/// The tier and `--dry-run` of the arguments, or `None` on a usage error.
+fn parse_args(args: &[String]) -> Option<(Tier, bool)> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (tier, dry_run) = match words.as_slice() {
+        ["--tier", tier] => (*tier, false),
+        ["--tier", tier, "--dry-run"] | ["--dry-run", "--tier", tier] => (*tier, true),
+        _ => return None,
+    };
+    let tier = match tier {
+        "commit" => Tier::Commit,
+        "push" => Tier::Push,
+        _ => return None,
+    };
+    Some((tier, dry_run))
+}
+
+fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Commit => "commit",
+        Tier::Push => "push",
+    }
+}
+
+/// Runs `xtask check` from the shell, and gives the exit code.
+pub fn main(args: &[String]) -> i32 {
+    let Some((tier, dry_run)) = parse_args(args) else {
+        eprintln!("{USAGE}");
+        return REFUSED;
+    };
+    let root = match std::env::current_dir()
+        .context("reading the current folder")
+        .and_then(|dir| repo_root(&dir))
+    {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("{e:#}");
+            return REFUSED;
+        }
+    };
+    println!("check: tier {}", tier_name(tier));
+    let (paths, source) = match changed_paths(&root, tier) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e:#}");
+            return REFUSED;
+        }
+    };
+    if source.starts_with("warning:") {
+        println!("{source}");
+        println!("check: paths: {}", paths.len());
+    } else {
+        println!("check: paths: {}, from {source}", paths.len());
+    }
+    // Tier `push` and a strict hit need no graph.
+    let graph = if tier == Tier::Commit && strict_hits(&paths).is_empty() {
+        match graph(&root) {
+            Ok(graph) => Some(graph),
+            Err(e) => {
+                println!(
+                    "warning: cannot read the workspace graph: {}",
+                    one_line(&format!("{e:#}"))
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let plan = plan(tier, &paths, graph.as_ref());
+    for (rule, path) in &plan.strict {
+        println!("check: strict {rule}: {path}");
+    }
+    println!("check: tier {} runs: {}", tier_name(plan.tier), plan.why);
+    for choice in &plan.choices {
+        let word = match choice.decision {
+            Decision::Run => "run",
+            Decision::Skip => "skip",
+        };
+        println!("check: {word}: {} ({})", choice.check.line(), choice.reason);
+    }
+    if dry_run {
+        return 0;
+    }
+    run_checks(&plan, &mut std::io::stdout(), |check| {
+        run_command(&root, check)
+    })
 }
 
 #[cfg(test)]
@@ -1341,5 +1682,185 @@ mod tests {
         .map(|(r, p)| (r.to_string(), p.to_string()))
         .to_vec();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn the_graph_of_a_workspace_has_its_members_and_edges_of_all_kinds() {
+        let id = |name: &str, folder: &str| format!("path+file://{folder}#{name}@0.1.0");
+        let dep = |name: &str, path: &str, kind: Option<&str>, target: Option<&str>| serde_json::json!({ "name": name, "source": null, "rename": null, "kind": kind, "target": target, "path": path });
+        let package = |name: &str, folder: &str, deps: Vec<serde_json::Value>| {
+            serde_json::json!({
+                "id": id(name, folder), "name": name, "source": null,
+                "manifest_path": format!("{folder}/Cargo.toml"),
+                "dependencies": deps, "features": {},
+            })
+        };
+        let serde = serde_json::json!({
+            "name": "serde", "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "rename": null, "kind": null, "target": null, "req": "^1",
+        });
+        let members = [id("a", "/x/a"), id("b", "/x/b"), id("c", "/x/nested/c")];
+        let nodes: Vec<serde_json::Value> = members
+            .iter()
+            .map(|m| serde_json::json!({ "id": m, "deps": [], "features": [] }))
+            .collect();
+        let metadata = serde_json::json!({
+            "packages": [
+                package("a", "/x/a", vec![serde]),
+                package("b", "/x/b", vec![dep("a", "/x/a", Some("dev"), None)]),
+                package("c", "/x/nested/c", vec![dep("b", "/x/b", None, Some("cfg(unix)"))]),
+            ],
+            "workspace_members": members,
+            "workspace_root": "/x",
+            "resolve": { "nodes": nodes },
+        })
+        .to_string();
+        let workspace = rules::workspace(&metadata).unwrap();
+        assert_eq!(
+            Graph::from_workspace(&workspace),
+            Graph::new(&[
+                ("a", "a", &[]),
+                ("b", "b", &["a"]),
+                ("nested/c", "c", &["b"]),
+            ])
+        );
+    }
+
+    /// A plan that runs `true`, then the given checks, then `true`, and
+    /// skips `false`.
+    fn three_checks(second: &str) -> Plan {
+        let choice = |words: &str, decision| Choice {
+            check: Check::root(words),
+            decision,
+            reason: String::new(),
+        };
+        Plan {
+            tier: Tier::Commit,
+            why: String::new(),
+            strict: Vec::new(),
+            choices: vec![
+                choice("true one", Decision::Run),
+                choice("false skipped", Decision::Skip),
+                choice(second, Decision::Run),
+                choice("true three", Decision::Run),
+            ],
+        }
+    }
+
+    /// The text of `run_checks` with a fake runner that reads the outcome
+    /// from the first word.
+    fn fake_run(plan: &Plan) -> (i32, String) {
+        let mut out = Vec::new();
+        let mut ran = Vec::new();
+        let code = run_checks(plan, &mut out, |check| {
+            ran.push(check.line());
+            match check.argv[0].as_str() {
+                "true" => Ok(Outcome::Exit(0)),
+                "false" => Ok(Outcome::Exit(3)),
+                "killed" => Ok(Outcome::Signal(9)),
+                _ => bail!("no such program"),
+            }
+        });
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !ran.contains(&"false skipped".to_string()),
+            "a skip never runs"
+        );
+        (code, text)
+    }
+
+    #[test]
+    fn run_checks_runs_each_run_check_and_gives_0() {
+        let (code, text) = fake_run(&three_checks("true two"));
+        assert_eq!(code, 0);
+        assert_eq!(
+            text,
+            "check: start: true one\n\
+             check: ok in 0.0 s\n\
+             check: start: true two\n\
+             check: ok in 0.0 s\n\
+             check: start: true three\n\
+             check: ok in 0.0 s\n\
+             check: 3 passed in 0.0 s\n"
+        );
+    }
+
+    #[test]
+    fn run_checks_stops_at_a_failed_check_and_names_the_rest() {
+        let (code, text) = fake_run(&three_checks("false two"));
+        assert_eq!(code, 1);
+        assert_eq!(
+            text,
+            "check: start: true one\n\
+             check: ok in 0.0 s\n\
+             check: start: false two\n\
+             check: failed (exit 3) in 0.0 s\n\
+             check: not run: true three\n\
+             check: false two failed, after 1 passed, in 0.0 s\n"
+        );
+    }
+
+    #[test]
+    fn run_checks_fails_a_signal_and_a_runner_error() {
+        let (code, text) = fake_run(&three_checks("killed two"));
+        assert_eq!(code, 1);
+        assert_eq!(
+            text,
+            "check: start: true one\n\
+             check: ok in 0.0 s\n\
+             check: start: killed two\n\
+             check: failed (signal 9) in 0.0 s\n\
+             check: not run: true three\n\
+             check: killed two failed, after 1 passed, in 0.0 s\n"
+        );
+        let (code, text) = fake_run(&three_checks("missing two"));
+        assert_eq!(code, 1);
+        assert_eq!(
+            text,
+            "check: start: true one\n\
+             check: ok in 0.0 s\n\
+             check: start: missing two\n\
+             check: failed (no such program) in 0.0 s\n\
+             check: not run: true three\n\
+             check: missing two failed, after 1 passed, in 0.0 s\n"
+        );
+    }
+
+    /// The real runner, on `sh` in a folder of the temporary folder.  No
+    /// test runs `xtask check` without `--dry-run`.
+    #[test]
+    fn run_command_gives_the_exit_code_the_signal_and_a_start_error() {
+        let root = std::env::temp_dir().join(format!("xtask-check-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let sh = |script: &str, folder: &str| Check {
+            argv: ["sh", "-c", script].map(str::to_string).to_vec(),
+            env: vec![("CHECK_WORD".to_string(), "seen".to_string())],
+            folder: folder.to_string(),
+        };
+        let marked = "test \"$CHECK_WORD\" = seen && test \"$(basename \"$PWD\")\" = sub";
+        assert_eq!(
+            run_command(&root, &sh(marked, "sub")).unwrap(),
+            Outcome::Exit(0)
+        );
+        assert_eq!(
+            run_command(&root, &sh(marked, "")).unwrap(),
+            Outcome::Exit(1)
+        );
+        assert_eq!(
+            run_command(&root, &sh("exit 4", "")).unwrap(),
+            Outcome::Exit(4)
+        );
+        assert_eq!(
+            run_command(&root, &sh("kill -9 $$", "")).unwrap(),
+            Outcome::Signal(9)
+        );
+        let missing = Check::root("no-such-program-for-xtask-check");
+        let error = run_command(&root, &missing).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("starting no-such-program-for-xtask-check"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -344,7 +344,7 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: plan written (team leader).
 * [x] 2026-11-01: plan review round 1 (one `Plan` agent): no blocker, 12 should-fix and 7 nits.  All are fixed in this plan.
 * [x] 2026-11-01: plan review round 2 (a new `Plan` agent): no blocker, 7 should-fix and 8 nits.  All are fixed in this plan.  The review stops at its cap of 2 rounds.
-* [ ] Step 1: the tables and the plan, as pure functions.
+* [x] 2026-11-01: step 1: the tables and the plan, as pure functions (implementer, `d327d8d`).
 * [ ] Step 2: the paths, the graph, the run and the command.
 * [ ] Step 3: the measurements.
 * [ ] Step 4: the diff for the orchestrator.
@@ -366,6 +366,16 @@ The team leader gives these to the orchestrator as text:
   * `the_crate_tests_of_every_member_but_roformer_gpu_are_the_workspace_test_line`: the stub of `dependents` gives the set that it gets, so the assert of the 11 members failed.
   * `a_deleted_path_counts_as_a_change_of_its_member` first failed on an index out of bounds, not on an assert.  The implementer changed it to compare the whole list, and it then failed on the assert.
 * 2026-11-01, implementer, step 1: no one member of this repo has all 11 members as its dependents.  `dsp` has 5 (`app`, `decode-worker`, `dsp`, `engine`, `xtask`), and `test-support` has 5 (`roformer`, `roformer-gpu`, `stem-worker`, `test-support`, `xtask`).  So the test of the workspace test line uses the paths of four members: `dsp`, `test-support`, `stem-protocol` and `synth`.  The test also checks that no one member gives all 11.
+* 2026-11-01, implementer, step 2: each new test failed on its stub, on an assert:
+  * `run_checks_runs_each_run_check_and_gives_0`: `left: ""`, not the text.  `run_checks_stops_at_a_failed_check_and_names_the_rest` and `run_checks_fails_a_signal_and_a_runner_error`: `left: 0`, not 1.
+  * `run_command_gives_the_exit_code_the_signal_and_a_start_error`: `left: Exit(0)` for the check that must give `Exit(1)`.
+  * `the_graph_of_a_workspace_has_its_members_and_edges_of_all_kinds`: `Graph { members: {} }`.  `Graph::from_workspace` was real from step 1, so the implementer made it a stub again for this run.
+  * The 7 tests of `changed_paths` in `xtask/tests/check.rs`: `left: ([], "")`.  `a_run_from_a_subfolder_reads_the_whole_repo`: `left: ".../repo/docs"`, the stub of `repo_root`.
+  * `a_bad_tier_gives_exit_2_and_the_usage`: `left: Some(0)`.  `the_dry_run_prints_the_whole_plan_and_changes_no_file`: `left: ""`.  `the_dry_run_prints_each_strict_hit_and_tier_push`: `left: []`.
+  * `a_repo_with_no_commit_gives_exit_2`, `the_dry_run_of_tier_push_with_no_origin_main_warns` and `a_graph_that_fails_gives_a_warning_and_tier_push` first failed on an `unwrap_err` or an index, not on an assert.  The implementer added an assert before each, and they then failed on it.
+* 2026-11-01, implementer, step 2: the error of `cargo metadata` has more than one line.  So the first real run of `a_graph_that_fails_gives_a_warning_and_tier_push` failed: the `warning:` line broke in two.  `check` now joins the lines of an error in a warning with `; `.  The test checks that each line of the output starts with `check:` or `warning:`.
+* 2026-11-01, implementer, step 2: `guide_covers` passed before the new Tools row, since `review check` already puts the word `check` in a code span of the guide.  The Tools row names `check --tier commit` and `check --tier push`.
+* 2026-11-01, implementer, step 2: `check --tier commit --dry-run` on the change of step 2 runs fmt, `docs-check`, the workspace clippy and `cargo test -p xtask`.  So it adds no check to the list of "How the team works".
 * 2026-11-01, implementer, step 1: the `grep` of each strict row found the code in each file of the table.  `decoder/src/pass.rs` and `app/src/reset.rs` name OPFS, but `pass.rs` writes through a trait that `decoder/src/web.rs` gives, and `reset.rs` only removes files.  So they stay out of MEM-5.  `app/src/export.rs` posts with a transfer list, and MEM-5 already holds it.
 
 ## Decision log
@@ -382,6 +392,9 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, team leader: the GIT-2 text of `docs/invariants.md`, the recipe "Fix a bug" and `README.md` go in the orchestrator's diff with `CLAUDE.md`.  Reason: decision 0026 says that GIT-2 changes in the same commit everywhere.
 * 2026-11-01, implementer: a plan lists each line of `lines()` as `run` or `skip`, then `serve`, `web-test`, `e2e` and `publish` as `skip`.  Tier `commit` also lists the `xtask` repo tests after the wasm32 clippy line, and the crate tests just before the workspace test line.  Reason: the output then names each line of `CLAUDE.md`'s Commands, with its reason.
 * 2026-11-01, implementer: tier `push` with no path runs the GPU test line.  Reason: no path can mean that the merge base is not known, and then the plan cannot rule out a GPU change.  A branch with no change since the merge base also gets it, which costs one run.
+* 2026-11-01, implementer: the end-to-end test of the binary runs only `check --dry-run`.  It does not run `check --tier commit` for real in the temporary workspace, as step 2 says.  Reason: the team leader's rule is that no test runs `xtask check` without `--dry-run`.  `run_command_gives_the_exit_code_the_signal_and_a_start_error` tests the real runner on `sh` in the temporary folder, and the `run_checks` tests use a fake runner.  No test runs the call from `main` to `run_checks`.
+* 2026-11-01, implementer: when `graph` fails, `main` prints a `warning:` line and runs tier `push`, as step 2 says for `graph`.  It does not give exit 2, as the bullet of `main` could read for "a `cargo metadata` error".  Reason: the step gives the rule for this case.
+* 2026-11-01, implementer: the output of `check` has these lines: `check: tier <tier>`, then `check: paths: <n>, from <where>`, then the strict hits, then `check: tier <tier> runs: <why>`, then the checks.  On a failure, the last line is `check: <line> failed, after <n> passed, in <s> s`.  `--dry-run` can come before or after `--tier <tier>`.  `repo_root` and `run_command` are `pub`, so the tests call them.
 * 2026-11-01, implementer: a commit that tier `commit` sends to tier `push` (a strict hit, or no graph) gets the GPU test line by the rule of tier `push`, from the commit's own paths.  Reason: D2 says that such a commit runs tier `push`.  So a change to `roformer-gpu/src/lib.rs` runs the GPU test line, and a change to `engine/src/slot.rs` does not.
 
 ## Outcomes and retrospective
