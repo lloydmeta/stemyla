@@ -121,8 +121,9 @@ fn is_sha(word: &str) -> bool {
 enum Action {
     /// A part names a fix commit or a diff.
     Fix,
-    /// No part names a fix, and a part names the reason.
-    NotFixed { td: bool },
+    /// No part names a fix, and a part names the reason.  `td`: a part
+    /// is a TD ID.  `no_change`: a part starts with `no change`.
+    NotFixed { td: bool, no_change: bool },
     /// Neither.
     Other,
 }
@@ -144,6 +145,7 @@ fn action_kind(action: &str) -> Action {
     } else if parts.iter().any(not_fixed) && parts.iter().all(|p| not_fixed(p) || merge(p)) {
         Action::NotFixed {
             td: parts.iter().any(|part| starts_with_td(part)),
+            no_change: parts.iter().any(|part| part.starts_with("no change")),
         }
     } else {
         Action::Other
@@ -165,13 +167,13 @@ struct Row<'a> {
 
 impl Row<'_> {
     /// The Rule cell names a strict rule, or cargo-mutants (VERIFY-1) is a
-    /// source.
+    /// source.  The cell splits at each character that is not a letter, a
+    /// digit or `-`, so `MEM-1/MEM-2` and `RT-1's rule` name rules.
     fn is_strict(&self, strict: &[String]) -> bool {
         let named = self
             .rule
-            .split_whitespace()
-            .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
-            .any(|word| strict.iter().any(|id| id == word));
+            .split(|c: char| !c.is_alphanumeric() && c != '-')
+            .any(|token| strict.iter().any(|id| id == token));
         named
             || self
                 .reviewers
@@ -233,11 +235,25 @@ impl Row<'_> {
         let named =
             self.severity == "blocker" || self.significant == "yes" || self.is_strict(strict);
         let must_fix = verdict == "confirmed" && (!late || named);
-        if must_fix && kind == (Action::NotFixed { td: false }) {
+        if must_fix && matches!(kind, Action::NotFixed { td: false, .. }) {
             problems.push(format!("{id}: round {round} must fix this finding, but the action is `{action}`.  Fix: fix it, or send it to a TD (decision 0024)."));
         }
+        // A `pre-existing` finding can also go to its own PR (`no change:`).
+        let must_handle =
+            verdict == "pre-existing" && if late { named } else { self.severity != "nit" };
+        if must_handle
+            && kind
+                == (Action::NotFixed {
+                    td: false,
+                    no_change: false,
+                })
+        {
+            problems.push(format!("{id}: round {round} must fix this `pre-existing` finding, but the action is `{action}`.  Fix: fix it, send it to a TD, or write `no change:` and its own PR (decision 0024)."));
+        }
+        // Problem 9 covers a fix of a `refuted` or `known` finding.
         let may_fix = MAY_BE_REAL.contains(&verdict) && named;
-        if late && !may_fix && kind == Action::Fix {
+        let answered = verdict == "refuted" || verdict == "known";
+        if late && !may_fix && !answered && kind == Action::Fix {
             problems.push(format!("{id}: round {round} must not fix this finding, but the action is `{action}`.  Fix: undo the fix, and write `reported, not fixed` (decision 0024)."));
         }
         problems
@@ -368,6 +384,10 @@ mod tests {
         let mut rows: Vec<String> = [
             "2 | 2-1 | reviewer | should-fix | no | DOC-1 | confirmed | none | abc1234 review round 2 fixes",
             "2 | 2-2 | docs-reviewer | nit | - | none | unvalidated | none | abc1234 review round 2 fixes",
+            "2 | 2-3 | reviewer | should-fix | no | none | pre-existing | none | no change: its own PR",
+            "2 | 2-4 | reviewer | should-fix | no | none | pre-existing | none | TD-39",
+            "3 | 3-1 | docs-reviewer | nit | - | none | unvalidated | none | abc1234 review round 3 fixes",
+            "3 | 3-2 | docs-reviewer | should-fix | no | DOC-1 | confirmed | none | abc1234 review round 3 fixes",
             "4 | 4-1 | reviewer | blocker | no | none | confirmed | none | def5678 review round 4 fixes",
             "4 | 4-2 | reviewer | should-fix | yes | none | confirmed | none | def5678 review round 4 fixes",
             "4 | 4-3 | reviewer | should-fix | no | VERIFY-1 | confirmed | none | def5678 review round 4 fixes",
@@ -386,6 +406,9 @@ mod tests {
             "4 | 4-16 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | known: TD-39",
             "4 | 4-17 | reviewer | should-fix | - | none | refuted | none | refuted",
             "4 | 4-18 | reviewer | should-fix | yes | none | confirmed | none | the orchestrator's commit of m3-r4.diff",
+            "4 | 4-20 | reviewer | should-fix | no | VERIFY-1; D9 a quote | confirmed | none | def5678 review round 4 fixes",
+            "4 | 4-21 | reviewer | blocker | no | none | pre-existing | none | no change: its own PR",
+            "4 | 4-22 | reviewer | should-fix | no | VERIFY-1 | pre-existing | none | TD-39",
         ]
         .iter()
         .map(|r| row(r))
@@ -423,11 +446,40 @@ mod tests {
                 "4 | 4-1 | baseline | nit | - | VERIFY-1 | confirmed | none | reported, not fixed",
                 "4 | 4-2 | reviewer | should-fix | no | VERIFY-1 | confirmed | none | reported, not fixed",
                 "2 | 2-1 | reviewer | should-fix | no | none | confirmed | none | reported, not fixed",
+                "3 | 3-1 | reviewer | should-fix | no | none | confirmed | none | reported, not fixed",
+                "4 | 4-3 | memory-reviewer | should-fix | no | MEM-1/MEM-2 | confirmed | none | reported, not fixed",
+                "4 | 4-4 | reviewer | should-fix | no | RT-1's rule | confirmed | none | reported, not fixed",
+                "4 | 4-5 | wire-reviewer | should-fix | no | PROTO-1/PROTO-2 | confirmed | none | reported, not fixed",
+                "4 | 4-6 | memory-reviewer | should-fix | no | MEM-1,MEM-5 | confirmed | none | reported, not fixed",
+                "4 | 4-7 | reviewer | should-fix | no | VERIFY-1; D9 a quote | confirmed | none | reported, not fixed",
             ]),
             [
                 "4-1: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
                 "4-2: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
                 "2-1: round 2 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+                "3-1: round 3 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+                "4-3: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+                "4-4: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+                "4-5: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+                "4-6: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+                "4-7: round 4 must fix this finding, but the action is `reported, not fixed`.  Fix: fix it, or send it to a TD (decision 0024).",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_round_fixes_a_pre_existing_finding_that_the_rule_names_or_gives_the_reason() {
+        assert_eq!(
+            problems_of(&[
+                "2 | 2-1 | reviewer | should-fix | no | none | pre-existing | none | reported, not fixed",
+                "4 | 4-1 | reviewer | blocker | no | none | pre-existing | none | reported, not fixed",
+                "4 | 4-2 | reviewer | should-fix | no | VERIFY-1 | pre-existing | none | reported, not fixed",
+                "4 | 4-3 | reviewer | should-fix | no | none | pre-existing | none | reported, not fixed",
+            ]),
+            [
+                "2-1: round 2 must fix this `pre-existing` finding, but the action is `reported, not fixed`.  Fix: fix it, send it to a TD, or write `no change:` and its own PR (decision 0024).",
+                "4-1: round 4 must fix this `pre-existing` finding, but the action is `reported, not fixed`.  Fix: fix it, send it to a TD, or write `no change:` and its own PR (decision 0024).",
+                "4-2: round 4 must fix this `pre-existing` finding, but the action is `reported, not fixed`.  Fix: fix it, send it to a TD, or write `no change:` and its own PR (decision 0024).",
             ]
         );
     }
@@ -438,10 +490,14 @@ mod tests {
             problems_of(&[
                 "4 | 4-1 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | refuted",
                 "4 | 4-2 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-66 | known: TD-39",
+                "4 | 4-3 | cargo-mutants | should-fix | - | VERIFY-1 | known | none | known: none",
+                "4 | 4-4 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-x | known: TD-x",
             ]),
             [
                 "4-1: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
                 "4-2: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
+                "4-3: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
+                "4-4: a `known` row needs the action `known: <TD>`, with that TD in Repeat of.  Fix: write the TD in both cells.",
             ]
         );
     }
@@ -452,10 +508,12 @@ mod tests {
             problems_of(&[
                 "1 | 1-1 | reviewer | should-fix | - | none | refuted | none | abc1234 review round 1 fixes",
                 "1 | 1-2 | reviewer | should-fix | - | none | refuted | none | refuted; abc1234 review round 1 fixes",
+                "4 | 4-1 | reviewer | should-fix | - | none | refuted | none | def5678 review round 4 fixes",
             ]),
             [
                 "1-1: a `refuted` finding has the fix `abc1234 review round 1 fixes`.  Fix: do not fix it, and write the reason for no change.",
                 "1-2: a `refuted` finding has the fix `refuted; abc1234 review round 1 fixes`.  Fix: do not fix it, and write the reason for no change.",
+                "4-1: a `refuted` finding has the fix `def5678 review round 4 fixes`.  Fix: do not fix it, and write the reason for no change.",
             ]
         );
     }
@@ -467,11 +525,23 @@ mod tests {
             problems_of(&[
                 "1 | 1-1 | reviewer | should-fix | no | none | pre-existing | none | own PR",
                 "1 | 1-2 | cargo-mutants | should-fix | no | VERIFY-1 | pre-existing | none | merged into 1-1",
+                "1 | 1-3 | reviewer | should-fix | no | none | pre-existing | none | own PR (defaced)",
+                "1 | 1-4 | reviewer | should-fix | no | none | pre-existing | none | own PR #41",
+                "1 | 1-5 | reviewer | should-fix | no | none | pre-existing | none | see round 4",
             ]),
             [
                 format!("1-1: the action `own PR` names no fix and no reason for no fix.  {fix}"),
                 format!(
                     "1-2: the action `merged into 1-1` names no fix and no reason for no fix.  {fix}"
+                ),
+                format!(
+                    "1-3: the action `own PR (defaced)` names no fix and no reason for no fix.  {fix}"
+                ),
+                format!(
+                    "1-4: the action `own PR #41` names no fix and no reason for no fix.  {fix}"
+                ),
+                format!(
+                    "1-5: the action `see round 4` names no fix and no reason for no fix.  {fix}"
                 ),
             ]
         );
@@ -506,6 +576,7 @@ mod tests {
             [
                 "speed 1 | 1-2 | reviewer | nit | - | none | unvalidated | none | reported, not fixed",
                 "1 | 1-3 | reviewer | major | yes | none | confirmd | none | own PR",
+                "0 | 1-4 | reviewer | nit | - | none | unvalidated | none | reported, not fixed",
             ]
             .iter()
             .map(|r| row(r)),
@@ -517,6 +588,7 @@ mod tests {
                 "1-2: the round `speed 1` is not a whole number of 1 or more.  Fix: write the number of the round.",
                 "1-3: the severity `major` is not `blocker`, `should-fix` or `nit`.  Fix: write one of them.",
                 "1-3: the verdict `confirmd` is not a verdict of the review-rounds skill.  Fix: write `confirmed`, `pre-existing`, `refuted`, `unproven`, `unvalidated` or `known`.",
+                "1-4: the round `0` is not a whole number of 1 or more.  Fix: write the number of the round.",
             ]
         );
     }

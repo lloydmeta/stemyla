@@ -100,13 +100,16 @@ Add `xtask/src/review_log.rs`, and `pub mod review_log` in `xtask/src/lib.rs`.  
   7. A `known` row has no Action `known: <TD>`, or its Repeat of is not that TD.
   8. The Action is neither a fix action nor a not-fixed action, such as `own PR` or `merged into 1-1` alone.
   9. A `refuted` or `known` row has a fix action.
-  10. A row that the round must fix has a not-fixed action other than a TD ID.  A TD ID passes, since a team can send a confirmed mutant to tech debt (TD-39).
-  11. In a late round, a row that the round may not fix has a fix action.
+  10. A row that the round must fix has a not-fixed action other than a TD ID.  A TD ID passes, since a team can send a confirmed mutant to tech debt (TD-39).  A `pre-existing` row that the round must handle has a not-fixed action with no TD ID and no `no change:` part.
+  11. In a late round, a row that the round may not fix has a fix action.  A `refuted` or `known` row gets problem 9 only.
 * What a round must fix:
   * In rounds 1 to 3: each `confirmed` row.
   * In a late round: each `confirmed` row that is a blocker, has `yes`, or is on a strict rule.
+* What a round must handle: a fix, a TD or its own PR (`no change:`).
+  * In rounds 1 to 3: each `pre-existing` blocker or should-fix.
+  * In a late round: each `pre-existing` row that is a blocker, has `yes`, or is on a strict rule.
 * What a late round may fix: each row with the verdict `confirmed`, `pre-existing` or `unproven` that is a blocker, has `yes`, or is on a strict rule.  An `unvalidated` nit is never fixed in a late round, also on VERIFY-1.  A `confirmed` nit on a strict rule, such as a baseline nit with `same-as`, must be fixed.
-* A Rule cell is on a strict rule when a word of it, without the punctuation at its ends, is an ID of `strict_rules()`.  `VERIFY-1`, `MEM-1, MEM-5` and `GPU-2 (a quote)` are on a strict rule.  `DOC-1`, `TD-33` and `none` are not.
+* A Rule cell is on a strict rule when a token of it is an ID of `strict_rules()`.  The cell splits into tokens at each character that is not a letter, a digit or `-`.  `VERIFY-1`, `MEM-1, MEM-5`, `MEM-1/MEM-2`, `RT-1's rule`, `VERIFY-1; D9 a quote` and `GPU-2 (a quote)` are on a strict rule.  `DOC-1`, `TD-33` and `none` are not.
 * In `xtask/tests/rules.rs`, add `the_strict_rules_are_those_of_decision_0024`, with the stub of `strict_rules`.  It checks three things:
   * `strict_rules()` has 15 IDs;
   * decision 0024's file holds `STRICT_RULES_TEXT`;
@@ -306,7 +309,8 @@ The team leader gives these to the orchestrator as text.
 * [x] 2026-10-31: step 2: `docs-check` runs the check; the Conventions bullet and the Tools row (implementer, `7c7b2c6`).
 * [x] 2026-10-31: step 3: `xtask review log-check <file>` (implementer, `7846ccb`).
 * [x] 2026-10-31: step 4, the implementer's part: the diff `m3/m3-skill.diff` in the team leader's scratchpad, checked on `7846ccb` (implementer).  The team leader checks it again on `HEAD`.
-* [ ] Checkpoint: the orchestrator lands the diff before round 1.
+* [x] 2026-10-31: checkpoint: the orchestrator lands the diff before round 1, with the 0011 hunk (`c1e02e3`).
+* [x] 2026-11-01: review round 1 fixes (implementer): 1-1, 1-2, 1-3, 1-4, 1-6, 1-8, 1-10 to 1-13, 1-15, 1-18, 1-19 (TD-69) and 1-20 to 1-23.  The diff `m3/m3-r1-skill.diff` holds 1-5, 1-7, 1-9, 1-14, 1-16 and 1-17.
 * [ ] Step 5: review rounds to the stop rule.
 * [ ] M3 done: the log in `docs/reviews/harness-phase-3b-m3.md`, and this plan in `plans/completed/`.
 
@@ -333,6 +337,17 @@ The team leader gives these to the orchestrator as text.
   * `the_review_skill_names_the_strict_rules`: the skill does not hold `STRICT_RULES_TEXT`.
   * `the_review_skill_log_passes_the_fix_rule_check`: the template has no `Significant` column.
   * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  `CLAUDE.md` stays at 88 lines.
+* 2026-11-01, implementer, review round 1 fixes: each new or changed test fails on the code at `9de7009` or on the named mutant, on an assert:
+  * `a_round_must_fix_each_finding_that_the_rule_names`: at `9de7009`, `MEM-1/MEM-2`, `RT-1's rule`, `PROTO-1/PROTO-2` and `MEM-1,MEM-5` give no problem (1-2).  With `round >= 3`, 3-1 gives no problem (1-1).  With a split on whitespace, with or without the trim, 4-7 (`VERIFY-1; D9 a quote`) gives no problem (1-3).
+  * `a_good_log_gives_no_problem`: with `round >= 3`, 3-1 and 3-2 give problem 11 (1-1).  With a split on whitespace alone, 4-20 gives problem 11 (1-3).
+  * `a_round_fixes_a_pre_existing_finding_that_the_rule_names_or_gives_the_reason`: at `9de7009`, no problem (1-15).
+  * `a_refuted_finding_has_no_fix`: at `9de7009`, 4-1 also gives problem 11 (1-13).
+  * `an_action_names_a_fix_or_a_reason_for_no_fix`: each of the four mutants of `is_sha` makes one of `own PR (defaced)`, `own PR #41` and `see round 4` a fix (1-8, 1-10, 1-21, 1-23).
+  * `a_known_row_names_its_td_in_the_action_and_in_repeat_of`: with `is_td` as `true`, or with its `&&` as `||`, `known: TD-x` or `known: none` gives no problem (1-11, 1-20, 1-22).
+  * `a_row_with_bad_cells_gives_only_those_problems`: with `r >= 0`, the round `0` gives no problem (1-1).
+  * `review_log_rs_routes_all_six`: without the `ROUTE_ALL` entry, the route is `["reviewer"]` (1-6).
+  * `the_review_skill_names_the_strict_rules` and `the_strict_rules_are_those_of_decision_0024`: with `, LAYER-1, DOC-1` after `ASSET-1` in the skill or in decision 0024, each fails on its line (1-4).  The old tests passed this change.
+  * `a_good_log_gives_no_problem` row 2-3 (1-12) passes at `9de7009` too.  It keeps the `no change:` case of 1-15.
 
 ## Decision log
 
@@ -352,6 +367,10 @@ The team leader gives these to the orchestrator as text.
 * 2026-10-31, implementer: step 10 of the skill also says that a late round fixes a `pre-existing` or `unproven` finding only of the three kinds.  Reason: the log check (problem 11) and the stop rule use this rule.
 * 2026-10-31, implementer: step 9 of the skill gives decision 0024's test of significance.  Reason: the skill then needs no other file to fill the field.
 * 2026-10-31, implementer: each step ticks the step before it with its SHA, since a commit cannot hold its own SHA.  The last commit ticks steps 3 and 4.
+* 2026-10-31, orchestrator (recorded by the implementer): the orchestrator accepted the 0011 hunk in `c1e02e3`, and added "by the agent" to its line.
+* 2026-11-01, implementer: problem 10 also applies to a `pre-existing` row that the round must handle (finding 1-15).  A fix, a TD ID or `no change:` passes it.  Reason: step 10 of the skill lets such a finding go to tech debt or to its own PR, not to `reported, not fixed`.  In rounds 1 to 3, a `pre-existing` nit is not checked.
+* 2026-11-01, implementer: a Rule cell splits at each character that is not a letter, a digit or `-` (finding 1-2).  Reason: real cells hold `MEM-1/MEM-2`, `PROTO-1;` and `RT-1's`.
+* 2026-11-01, implementer: problem 11 skips a `refuted` or `known` row (finding 1-13).  Reason: problem 9 already names its fix, and the two fixes contradict.
 
 ## Outcomes and retrospective
 

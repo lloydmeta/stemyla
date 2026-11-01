@@ -1366,15 +1366,19 @@ fn the_fix_rule_says_the_same_in_each_place() {
     );
 }
 
-/// The review skill gives the strict rules of the log check, word for word.
+/// The review skill gives the strict rules of the log check, word for word,
+/// as a whole line, so a longer list fails.
 #[test]
 fn the_review_skill_names_the_strict_rules() {
     let text = std::fs::read_to_string(xtask::workspace_root().join(REVIEW_SKILL))
         .unwrap_or_else(|e| panic!("reading {REVIEW_SKILL}: {e}.  Fix: restore the skill."));
-    let strict = xtask::review_log::STRICT_RULES_TEXT;
+    let line = format!(
+        "* The strict rules are {}.",
+        xtask::review_log::STRICT_RULES_TEXT
+    );
     assert!(
-        text.contains(strict),
-        "{REVIEW_SKILL} does not hold `{strict}`.  Fix: give the strict rules of decision 0024 in step 10, word for word."
+        text.lines().any(|l| l == line),
+        "{REVIEW_SKILL} has no line `{line}`.  Fix: give the strict rules of decision 0024 in step 10, word for word, and no other rule."
     );
 }
 
@@ -1407,7 +1411,8 @@ fn the_review_skill_log_passes_the_fix_rule_check() {
 }
 
 /// The strict rules of the log check are the 15 rules of decision 0024,
-/// and each is a rule of `docs/invariants.md`.
+/// and each is a rule of `docs/invariants.md`.  The decision's line must be
+/// whole, so a longer list there fails.
 #[test]
 fn the_strict_rules_are_those_of_decision_0024() {
     let root = xtask::workspace_root();
@@ -1426,8 +1431,9 @@ fn the_strict_rules_are_those_of_decision_0024() {
             rules.len()
         ));
     }
-    if !read(FIX_RULE_DECISION).contains(text) {
-        problems.push(format!("{FIX_RULE_DECISION} does not hold `{text}`.  Fix: make STRICT_RULES_TEXT the text of the decision."));
+    let line = format!("* Strict rules (decision point D3 of the plan): {text}.");
+    if !read(FIX_RULE_DECISION).lines().any(|l| l == line) {
+        problems.push(format!("{FIX_RULE_DECISION} has no line `{line}`.  Fix: make STRICT_RULES_TEXT the list of the decision, with no other rule."));
     }
     problems.extend(
         rules

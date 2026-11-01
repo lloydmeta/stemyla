@@ -112,6 +112,7 @@ pub const REVIEWERS: &[Reviewer] = &[
 /// it routes every reviewer.
 pub const ROUTE_ALL: &[&str] = &[
     "xtask/src/review.rs",
+    "xtask/src/review_log.rs",
     ".claude/agents/**",
     ".claude/skills/**",
     ".claude/hooks/**",
@@ -2263,6 +2264,11 @@ mod tests {
     #[test]
     fn review_rs_routes_all_six() {
         assert_routes_all_six("xtask/src/review.rs");
+    }
+
+    #[test]
+    fn review_log_rs_routes_all_six() {
+        assert_routes_all_six("xtask/src/review_log.rs");
     }
 
     #[test]
