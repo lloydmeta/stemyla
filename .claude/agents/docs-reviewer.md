@@ -19,6 +19,7 @@ You review one commit range of this repo in one round of review.  You check that
 The prompt gives you:
 
 * The commit range, such as `<base>..HEAD`.  Read the diff with `git diff <range>`.
+* From round 4, the scope: read only the diff of the range and the whole of each file that it touches.
 * The criteria.  For `file#heading`, read only that section of the file.  For `commits:<range>`, read only the messages of those commits.
 * The reasons of the route: why `xtask review` chose you for this diff.
 * The round number.

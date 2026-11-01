@@ -973,6 +973,32 @@ fn every_reviewer_has_an_agent_file() {
     );
 }
 
+/// The bullet of each reviewer's input that gives the late scope (decision
+/// 0024): from round 4, a reviewer reads only the fix range and its files.
+const REVIEWER_SCOPE: &str = "* From round 4, the scope: read only the diff of the range and the whole of each file that it touches.";
+
+/// Each reviewer's agent file gives the late scope in its input, so the
+/// `Scope:` line of the skill's prompt has a reader.
+#[test]
+fn each_reviewer_reads_the_late_scope() {
+    let root = xtask::workspace_root();
+    let problems: Vec<String> = xtask::review::REVIEWERS
+        .iter()
+        .map(|reviewer| format!(".claude/agents/{}.md", reviewer.name))
+        .filter(|file| {
+            !std::fs::read_to_string(root.join(file))
+                .is_ok_and(|text| text.lines().any(|line| line == REVIEWER_SCOPE))
+        })
+        .map(|file| format!("{file} has no line `{REVIEWER_SCOPE}`.  Fix: put it in the input list (decision 0024)."))
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "{} scope problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
 /// The `git hash-object --no-filters` of `.claude/agents/baseline.md`.
 const BASELINE_HASH: &str = "abfa256fe04826fc47165e101c18cbbbf03edac7";
 
@@ -1150,6 +1176,12 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// * the approvals of `review log-check` and `review clean`, which the
 ///   counts of the round do not include;
 /// * the two commands of a refused log, in their own sentence.
+///
+/// Review round 2 of M3 adds these:
+/// * the late fix rule for a `pre-existing` and an `unproven` finding, and
+///   the verdicts that a late round logs as `reported, not fixed`;
+/// * the action `known: <TD>` of a `known` finding, in step 4 and step 11;
+/// * the Rule cell of a finding whose rule is a TD.
 const REVIEW_SKILL_TEXT: &[&str] = &[
     "in `<run>/$1/route.txt`",
     "target/debug/xtask review mutants $1",
@@ -1220,8 +1252,11 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "Leave the approvals fields as step 9 wrote them.",
     "Baseline approvals: the count that the person gave for the baseline",
     FIX_RULE_SENTENCE,
-    "* From round 4, log each other finding as `reported, not fixed`, nits included.  Do not fix it.",
-    "* From round 4, fix a `pre-existing` or `unproven` finding only if it is one of those three kinds.",
+    "* From round 4, log each other `confirmed`, `pre-existing`, `unproven` or `unvalidated` finding as `reported, not fixed`, nits included.  Do not fix it.",
+    "* From round 4, fix each `pre-existing` finding that is a blocker, has `yes`, or is on a strict rule.  Or send it to a TD or to its own PR.",
+    "* From round 4, fix an `unproven` finding only if it is one of those three kinds.",
+    "Give it the verdict `known`.  Its action in the log is `known: <TD>`.",
+    "* A `known` finding has the action `known: <TD>`.",
     "Each finding of `cargo-mutants` is on VERIFY-1.",
     "The round is the last round when all of these are true:",
     "* Its number is 3 or more.",
@@ -1250,7 +1285,7 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "If the caller writes the log, it runs `target/debug/xtask review log-check <run>/log.md` before `review clean`.",
     "From round 4, put this line after the `Range:` line of the template:",
     "Scope: read the diff of the range and the whole of each file that it touches.  Do not review the rest of the branch.",
-    "* For a TD, also write the rule that the TD concerns in the Rule cell, such as `PROTO-1` for TD-16.",
+    "* If the rule of a finding is a TD, also write the rule that the TD concerns in the Rule cell, such as `PROTO-1` for TD-16.",
     "`review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.",
     "* It runs after the findings file, so the counts of the round do not include its approval.",
     "The caller writes the log, then runs `review log-check`, then `review clean`.",

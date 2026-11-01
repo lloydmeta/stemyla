@@ -114,7 +114,7 @@ Each finding of a reviewer is one block with the fields `severity`, `kind`, `whe
    * Also read `<run>/log.md`, `docs/reviews/<branch>.md` and each `docs/reviews/<branch>-m<n>.md`.  `<branch>` is the last part of the `<run>` path.
    * Find each row of these logs whose Action is a TD ID or `known: <TD>`.  Skip a TD that `docs/tech-debt.md` lists under `## Closed`.
    * If a finding of this round is the same finding as a `refuted` one, give it `repeat-of:` and the ID of that finding.  Give it the verdict `refuted`.
-   * If it is the same finding as a row with a TD, give it `repeat-of:` and that TD.  Give it the verdict `known`.
+   * If it is the same finding as a row with a TD, give it `repeat-of:` and that TD.  Give it the verdict `known`.  Its action in the log is `known: <TD>`.
    * A finding with `repeat-of` gets no validator.
 5. Keep the baseline's findings in a separate list.  Merge them only with each other.  Give each the ID `$1-b<n>`, with `<n>` from 1.
 6. If a baseline finding is the same finding as a reviewer's finding, give it `same-as:` and the ID of the reviewer's finding.
@@ -229,7 +229,7 @@ Write `<run>/$1/findings.md` with the Write tool, in the form below.  If the Wri
 * warnings: <each warning: line of review start, or none>
 * times: started <started>, wait <seconds>, end <end>; wall minutes <(end - started - wait) / 60, to 1 decimal>
 * interventions: <the number of messages of a person since review start, but not the message that gives the approval counts of step 11.  An approval is not an intervention>
-* late review commands: <the number of `target/debug/xtask review` commands that the skill ran or tried to run after the turn in which it loaded>
+* late review commands: <the number of `target/debug/xtask review` commands that the skill ran or tried to run after the turn in which it loaded, until you write this file>
 * approvals: <not asked.  Step 11 writes the count that the person gives for the round>
 * baseline approvals: <not asked.  Step 11 writes the count that the person gives for the baseline.  Without --baseline, write "-">
 
@@ -281,8 +281,9 @@ The fix rule is decision 0024:
 
 * Rounds 1 to 3: fix each found finding, the baseline's included.  A found finding has the verdict `confirmed` or `pre-existing`.
 * From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
-* From round 4, log each other finding as `reported, not fixed`, nits included.  Do not fix it.
-* From round 4, fix a `pre-existing` or `unproven` finding only if it is one of those three kinds.
+* From round 4, log each other `confirmed`, `pre-existing`, `unproven` or `unvalidated` finding as `reported, not fixed`, nits included.  Do not fix it.
+* From round 4, fix each `pre-existing` finding that is a blocker, has `yes`, or is on a strict rule.  Or send it to a TD or to its own PR.
+* From round 4, fix an `unproven` finding only if it is one of those three kinds.
 * A significant should-fix has `yes` in its `significant` field.
 * The strict rules are PROTO-1, PROTO-2, MEM-1 to MEM-5, RT-1, GPU-1 to GPU-3, VERIFY-1, GIT-1, DEPS-1, ASSET-1.
 * A finding is on a strict rule when its rule names one of them.  Each finding of `cargo-mutants` is on VERIFY-1.
@@ -337,7 +338,7 @@ Add one row to the findings table for each finding of the round, the baseline's 
 
 * Date: today, as `YYYY-MM-DD`.  Commit: the short SHA of `HEAD` at `review start`.
 * Reviewers: the sources of the finding.  Rule: the rule ID, or none.  Claim: one line.
-* For a TD, also write the rule that the TD concerns in the Rule cell, such as `PROTO-1` for TD-16.
+* If the rule of a finding is a TD, also write the rule that the TD concerns in the Rule cell, such as `PROTO-1` for TD-16.
 * Significant: the `significant` field of the finding.
 * Action: one of these forms:
   * the fix commit and its subject, or the diff that holds the fix;
@@ -345,6 +346,7 @@ Add one row to the findings table for each finding of the round, the baseline's 
   * `no change:` and the reason, such as its own PR;
   * `merged into <ID>;`, then the action of that finding.
 * A `no change:` reason names no commit SHA.
+* A `known` finding has the action `known: <TD>`.
 
 Add one row to the rounds table:
 
