@@ -90,7 +90,7 @@ These are what `docs-check` holds the docs to:
 * The tests an invariant names on its `* Enforced by:` line exist.
 * Every workspace crate is listed in the layout of `CLAUDE.md` and `README.md` and under the crates of `ARCHITECTURE.md`.
 * Decisions are numbered `0001-...` with no gaps and carry a `Status:` line.
-* Plans live in `plans/active/` or `plans/completed/` and keep the living sections listed in `plans/PLANS.md`.
+* Plans live in `plans/active/` or `plans/completed/` and keep the living sections listed in `plans/PLANS.md`.  An active plan of more than 3 milestones also has a "How the work runs" section (decision 0023).
 * Every rule in `.claude/rules/` has `paths:` frontmatter whose globs match files.
 * `CLAUDE.md` stays within 100 lines, and its rules section lists exactly the current rules in `invariants.md`.
 * `working-with-agents.md` names every `xtask` command and every project skill, subagent and command in `.claude/`.

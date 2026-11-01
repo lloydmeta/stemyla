@@ -264,6 +264,7 @@ The team leader gives these to the orchestrator as text:
   * 2026-11-01: review round 2 found no blocker, 6 should-fix (the verdict of a nit repeat, the fixtures of 2d, tests of pass cases only, the dry run's `timeout`, a repeat of a repeat, the PLANS.md rule) and 4 nits.  All fixed.  The review stops at its cap of 2 rounds.
   * 2026-11-01: review round 1 found 1 blocker (a nit cannot copy `no`), 4 should-fix (two docs.rs fixtures, the rounds 1 to 3 case, three old skill lines, a repeat of a fixed row) and 4 nits.  All fixed in this plan.
 * [ ] Step 2: `review clean`, the plan check, the last-round check, the repeat check (2a to 2d).
+  * 2026-11-01: 2a in `71b261a`.  `review clean` removes each name that starts with `<round>-`.  Test: `review_clean_removes_the_worktrees_of_one_round_only`.
 * [ ] Step 3: the skill, the review skill diff, `CLAUDE.md`, the pins.
 * [ ] Step 4: the checkpoint before round 1.
 * [ ] Step 5: the dry run.
@@ -273,6 +274,7 @@ The team leader gives these to the orchestrator as text:
 ## Surprises and discoveries
 
 * 2026-11-01, 2a: on the stub (the old `of_round`), `review_clean_removes_the_worktrees_of_one_round_only` failed on its list of removed names.  The old code removed `1-reviewer-2` too, since `reviewer` is an agent of `round_agents`.  It kept the other new names and `1-stranger-1`.
+* 2026-11-01, 2b: on the stub (no problem), each new test failed on its first fail case, `left: []`, with the one `has 4 milestones` problem on the right: `an_active_plan_of_more_than_3_milestones_needs_how_the_work_runs`, `a_completed_plan_needs_no_how_the_work_runs`, `only_a_heading_that_starts_with_m_n_is_a_milestone` and `a_milestone_number_counts_once`.
 
 ## Decision log
 
@@ -280,6 +282,7 @@ The team leader gives these to the orchestrator as text:
 * 2026-11-01, agent (team leader): a blocker or should-fix that is a reported repeat copies the verdict and the Significant value of its row.  A nit keeps `unvalidated` and `-`.  Each keeps its own severity, kind, where and claim.  Reason: the repeat gets no validator and no new judgement, `review log-check` can compare the cells, and decision 0024 keeps each nit `unvalidated`.
 * 2026-11-01, agent (team leader): the review skill's bullet on a refused file follows what the team leaders did in M1 to M5: they ran on to step 11 and gave the files.  Reason: the orchestrate skill describes that loop, and the two skills must not contradict.
 * 2026-11-01, agent (team leader): the guide lines that name the `orchestrate` skill land with the skill, in the orchestrator's commit.  Reason: M1's retrospective ("land the `.claude/` part of a change in the same commit as the docs that describe it").
+* 2026-11-01, agent (implementer): `plan_runs_problems` reads no line in a fenced code block as a heading.  Reason: a shell comment such as `# M4 ...` in a fence is not a milestone heading in Markdown.  The test `only_a_heading_that_starts_with_m_n_is_a_milestone` holds that case.
 
 ## Outcomes and retrospective
 

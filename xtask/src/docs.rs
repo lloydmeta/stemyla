@@ -1224,8 +1224,64 @@ fn plans_well_formed(markdown: &[(String, String)]) -> Vec<Problem> {
                 format!("lacks the living section `{heading}`.  Fix: add it (see docs/plans/PLANS.md) and keep it current at every stopping point."),
             ));
         }
+        if file.starts_with("docs/plans/active/") {
+            problems.extend(plan_runs_problems(file, text));
+        }
     }
     problems
+}
+
+/// An active plan of more than 3 milestones has a `How the work runs`
+/// section at level 2 or 3 (decision 0023).  A milestone is a heading whose
+/// text starts with `M<n>`, then a `:`, a space or the end of the line.
+/// A line in a fenced code block is no heading.
+fn plan_runs_problems(file: &str, text: &str) -> Vec<Problem> {
+    let mut milestones = BTreeSet::new();
+    let mut has_section = false;
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some((c, n)) = fence {
+            if fence_marker(trimmed).is_some_and(|(m, k)| m == c && k >= n) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = fence_marker(trimmed) {
+            fence = Some(marker);
+            continue;
+        }
+        let level = line.chars().take_while(|c| *c == '#').count();
+        let Some(heading) = line[level..].strip_prefix(' ') else {
+            continue;
+        };
+        if !(1..=6).contains(&level) {
+            continue;
+        }
+        if (2..=3).contains(&level) && heading.starts_with("How the work runs") {
+            has_section = true;
+        }
+        if let Some(rest) = heading.strip_prefix('M') {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let after = &rest[digits.len()..];
+            if !digits.is_empty()
+                && (after.is_empty() || after.starts_with(':') || after.starts_with(' '))
+            {
+                milestones.insert(digits.trim_start_matches('0').to_string());
+            }
+        }
+    }
+    if milestones.len() <= 3 || has_section {
+        return Vec::new();
+    }
+    vec![Problem::new(
+        "plans",
+        file,
+        format!(
+            "has {} milestones (`M<n>` headings) and no `How the work runs` section.  Fix: add it at level 2 or 3, as docs/plans/PLANS.md says (decision 0023).",
+            milestones.len()
+        ),
+    )]
 }
 
 /// Each review log with a `Significant` column follows the fix rule of
@@ -1902,6 +1958,90 @@ mod tests {
                 "docs/plans/completed/c.md",
                 "docs/plans/completed/c.md"
             ]
+        );
+    }
+
+    /// A plan with a heading `### M<n>` for each of `milestones`, and the
+    /// lines of `more`.
+    fn milestone_plan(milestones: &[u32], more: &str) -> String {
+        let headings: Vec<String> = milestones
+            .iter()
+            .map(|n| format!("### M{n}: work\n"))
+            .collect();
+        format!(
+            "# A plan\n\n{}{more}\n{}\n",
+            headings.concat(),
+            PLAN_SECTIONS.join("\n\n")
+        )
+    }
+
+    const NO_RUNS: &str = "has 4 milestones (`M<n>` headings) and no `How the work runs` section.  Fix: add it at level 2 or 3, as docs/plans/PLANS.md says (decision 0023).";
+
+    #[test]
+    fn an_active_plan_of_more_than_3_milestones_needs_how_the_work_runs() {
+        let file = "docs/plans/active/a.md";
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3, 4], "")),
+            [Problem::new("plans", file, NO_RUNS.into())]
+        );
+        for section in ["## How the work runs", "### How the work runs (M3 to M10)"] {
+            let text = milestone_plan(&[1, 2, 3, 4], section);
+            assert_eq!(plan_runs_problems(file, &text), [], "{section}");
+        }
+        let text = milestone_plan(&[1, 2, 3, 4], "#### How the work runs");
+        assert_eq!(
+            plan_runs_problems(file, &text),
+            [Problem::new("plans", file, NO_RUNS.into())]
+        );
+    }
+
+    #[test]
+    fn a_completed_plan_needs_no_how_the_work_runs() {
+        let text = milestone_plan(&[1, 2, 3, 4], "");
+        let markdown = vec![
+            ("docs/plans/active/a.md".to_string(), text.clone()),
+            ("docs/plans/completed/b.md".to_string(), text.clone()),
+            ("docs/plans/PLANS.md".to_string(), text),
+        ];
+        assert_eq!(
+            plans_well_formed(&markdown),
+            [Problem::new(
+                "plans",
+                "docs/plans/active/a.md",
+                NO_RUNS.into()
+            )]
+        );
+    }
+
+    #[test]
+    fn only_a_heading_that_starts_with_m_n_is_a_milestone() {
+        let file = "docs/plans/active/a.md";
+        let others =
+            "* M4: a bullet\n### Step 4: M4's text\n### M4x\n```bash\n# M4 in a fence\n```\n";
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3], "")),
+            []
+        );
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3], others)),
+            []
+        );
+        let text = milestone_plan(&[1, 2, 3], &format!("{others}# M4\n"));
+        assert_eq!(
+            plan_runs_problems(file, &text),
+            [Problem::new("plans", file, NO_RUNS.into())]
+        );
+    }
+
+    #[test]
+    fn a_milestone_number_counts_once() {
+        let file = "docs/plans/active/a.md";
+        let text = milestone_plan(&[1, 2, 2, 3], "");
+        assert_eq!(plan_runs_problems(file, &text), []);
+        let text = milestone_plan(&[1, 2, 2, 3], "## M4");
+        assert_eq!(
+            plan_runs_problems(file, &text),
+            [Problem::new("plans", file, NO_RUNS.into())]
         );
     }
 
