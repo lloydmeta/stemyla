@@ -213,8 +213,8 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: review round 2 (at `dfa133a`): 6 should-fix confirmed (2-1 to 2-6) and 3 nits, no blocker.  2-5 is significant: a rerun of `review mutants` after HEAD moves could hide a mutant that has no entry.  The mutants line: `none: ... known 0; no mutants in the diff`.  2-1 and 2-6 are in the skill, so their fix goes to the orchestrator as a diff.  12 agents, 501710 tokens, 15.3 wall minutes.  Round 3 follows.
 * [x] 2026-10-31: review round 2 fixes (implementer): the check that the tree is clean at the round's head before the run (2-5), tests for 2-2 and 2-4, and the texts of 2-3, 2-7, 2-8 and 2-9.
 * [x] 2026-10-31: review round 3 fixes (implementer): a test of an untracked file before the run (3-5), and the texts of 3-1, 3-2, 3-4 and 3-6.
-* [ ] Review rounds.
-* [ ] M2 done: this plan moves to `plans/completed/`.
+* [x] 2026-10-31: review round 3 (at `51241db`): 1 should-fix confirmed (3-1, not significant: an entry can go stale, and its mutant then goes to the validator) and 5 nits, no blocker.  The mutants line: `full: tested 14 (caught 14, missed 0, unviable 0), timeouts 0, not tested 0, known 0`.  The rounds stop here by the stop rule.  3-3 is in `xtask/tests/rules.rs`, so its fix goes to the orchestrator as a diff.  7 agents, 364647 tokens, 11.6 wall minutes.
+* [x] 2026-10-31: M2 done.  The orchestrator writes the review log to `docs/reviews/harness-phase-3b-m2.md`, and this plan moves to `plans/completed/`.
 
 ## Surprises and discoveries
 
@@ -236,7 +236,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * 2026-10-31, implementer: the code of round 1's findings was right, so each new test failed first with its mutant, in the working tree.  `fn_bodies` with `lines.len() / 1` or `lines.len() + 1` panicked on a body without its `}` (1-1).  `at * 1 + n` and `at + 1 * n` lost the `}` line (1-11, 1-15).  The `NotFound` guard as `true` gave empty files for an unreadable `missed.txt` (1-13).  `HEAD:` or a read of the tree in `line_at` sent 2-17 to the validator (1-2).  For 1-5, these failed: `!=` for `== "## Closed"`, no `!closed &&`, no `const ` or `unsafe `, no `name != "_"`, and an indent of spaces only.  An end at the first `}` of any indent failed the nested fixture of 1-9.
 * 2026-10-31, implementer: the code of round 2's findings 2-2 and 2-4 was right, so their tests failed first with the mutants: no `';'` in the one-line rule, and `None => return true` in `is_fn_line`.  For 2-5, `a_change_in_the_tree_before_the_run_knows_no_line` and `a_commit_before_the_run_knows_no_line` failed on the old code (no check, which is the mutant `at_head = true`), with `known 1`.  They also failed with `||` for `&&` in `tree_is_at`, and with no reason in the line.  `a_reason_and_a_moved_tree_are_both_in_the_line` failed with only the new reason.  The test of 1-2 now changes `HEAD` and the tree in the fake `cargo`, after the check.  It still fails with `HEAD:` or a read of the tree, and with `!=` in the check of `HEAD`.
 
-* 2026-10-31, team leader: four review agents named their worktrees outside the form `<round>-<agent>-<n>` that `review clean` removes: `1-correctness-1` (reviewer), `2-correctness-reviewer-1` (reviewer), `2-docs-1` (docs-reviewer) and `2-build-1` (supply-chain-reviewer).  Each agent removed its own worktree, so nothing was left.  M6 can make the agents use their own name, or make `review clean` match each folder of the round.
+* 2026-10-31, team leader: review agents named six worktrees outside the form `<round>-<agent>-<n>` that `review clean` removes.  They are `1-correctness-1` and `2-correctness-reviewer-1` (reviewer), `2-docs-1` (docs-reviewer), `2-build-1` (supply-chain-reviewer), `3-gpu-1` (gpu-reviewer) and `3-harness-reviewer-1` (wire-reviewer).  Each agent removed its own worktree, so nothing was left.  M6 can make the agents use their own name, or make `review clean` match each folder of the round.
 * 2026-10-31, implementer: the test of round 3's finding 3-5, `an_untracked_file_before_the_run_knows_no_line`, covers code that was right.  It failed first with the mutant `--untracked-files=no` in `tree_is_at`: the untracked file left the tree "clean", and the line of 2-17 was known.  3-1, 3-2, 3-4 and 3-6 change only text.
 
 ## Decision log
@@ -257,4 +257,32 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 
 ## Outcomes and retrospective
 
-To be written when M2 completes.
+What M2 achieved:
+
+* The measurement of the noise left after PR #39 (261 missed lines in 22 rounds).  It showed that the parser filter of wasm32 items removes 11 of 193 lines.  So M2 cut that filter, and recorded the gap in TD-33.
+* `KNOWN_MISSED` in `xtask/src/review.rs` holds 12 entries of TD-39 and TD-66.  Each entry matches by file, mutation text, code line and offset.  On the `--list` output of its four files (623 mutants), the list matches exactly 12 lines.
+* `xtask review mutants` writes `missed.txt` and `known.txt`, and the mutants line ends `, known <k>`.  If the tree is not clean at the round's head, each line goes to `missed.txt`, and the line says why.
+* The `review-rounds` skill logs each line of `known.txt` as `known`, with its TD as `repeat-of`, and gives it no validator.  Step 7 keeps one meaning of a found finding.
+* `known_problems` fails when an entry names a closed TD, or a code line that is not once in a function of its name.
+* The acceptance holds: the mutant of 2-17 is known with TD-39, and the mutants of 1-41 and 1-54 go to the validator.
+
+The review, in numbers (`docs/reviews/harness-phase-3b-m2.md`):
+
+* 3 rounds, 30 agents, about 1.49M final-context tokens and 45.3 wall minutes.  The plan review took 2 more agents and about 0.26M tokens.
+* Round 1 found 4 should-fix and 6 missed mutants, all confirmed.  Round 2 found 6 should-fix, and 2-5 was significant.  Round 3 found 1 should-fix that is not significant, so the rounds stopped.
+* No round had a known line, since M2's diff changes no file of the list.  The first live yield of the list comes in a later milestone.
+
+What did not go well:
+
+* The Write tool refused the findings file and the log to the team leader again.  So each round stopped for the orchestrator, as in M1.
+* The skill needed three diffs (1-4, 2-1 and 2-6).  A change to the meaning of "found" in one sentence left the template and the pins behind.
+* The plan assumed that the tree is clean at the round's head, and the code did not check it (2-5).  A rerun of `review mutants` after a fix commit could hide a mutant.
+* Review agents named six worktrees outside the form that `review clean` removes (Surprises).  Each agent removed its own, so nothing was left.
+
+What to do differently:
+
+* When a change gives a word a new meaning, search for each use of the word in the same commit.
+* Make each assumption that a doc comment states a check in the code, with a test.
+* Measure before building: the measurement cut a parser and a `cfg` evaluator from M2.
+
+Debt: no new TD.  TD-33 now names the gaps that M2 leaves: wasm32 items with no `mutants::skip`, native code that only wasm32 tests reach, an entry with a wrong text or offset, and an entry that goes stale.
