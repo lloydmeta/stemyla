@@ -70,7 +70,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 ### Change a message between the page and the worker
 
 * The agent loads `.claude/rules/protocol.md`, and changes the hand-written e2e scripts in the same commit (PROTO-1).
-* Check: `cargo run -p xtask -- web-test`, `cargo run -p xtask -- e2e storage` and `cargo test -p xtask --test rules` pass.
+* Check: `cargo test -p xtask --test rules` and `cargo run -p xtask -- check --tier commit` pass.  Then CI's browser tests pass.  Run an `e2e` scenario by hand only when CI failed it (decision 0026).
 
 ### Review a change
 
