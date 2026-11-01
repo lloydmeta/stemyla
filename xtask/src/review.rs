@@ -896,19 +896,30 @@ fn start(
     save("route.txt", &(ranges(None).join("\n") + "\n"))?;
     save("state.json", &serde_json::to_string_pretty(&state)?)?;
 
-    const SOURCE: &str = "xtask/src/review.rs";
-    let source_time = std::fs::metadata(toplevel.join(SOURCE))
-        .and_then(|m| m.modified())
-        .ok();
-    let blob = |rev: &str| {
-        git(
-            toplevel,
-            &["rev-parse", "--verify", "-q", &format!("{rev}:{SOURCE}")],
-        )
-        .ok()
-        .map(|sha| sha.trim().to_string())
-    };
-    let (base_blob, head_blob) = (blob(&base), blob(&head));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xtask"));
+    let mut source_warnings = Vec::new();
+    for (source, what) in WATCHED_SOURCES {
+        let source_time = std::fs::metadata(toplevel.join(source))
+            .and_then(|m| m.modified())
+            .ok();
+        let blob = |rev: &str| {
+            git(
+                toplevel,
+                &["rev-parse", "--verify", "-q", &format!("{rev}:{source}")],
+            )
+            .ok()
+            .map(|sha| sha.trim().to_string())
+        };
+        source_warnings.extend(warnings(
+            &exe,
+            source,
+            what,
+            exe_time,
+            source_time,
+            blob(&base).as_deref(),
+            blob(&head).as_deref(),
+        ));
+    }
     let lines = [
         format!("base: {base} (merge base of {base_name} and HEAD)"),
         format!("since: {since}"),
@@ -920,13 +931,7 @@ fn start(
     ]
     .into_iter()
     .chain(ranges(Some(PATH_REASONS_SHOWN)))
-    .chain(warnings(
-        &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xtask")),
-        exe_time,
-        source_time,
-        base_blob.as_deref(),
-        head_blob.as_deref(),
-    ))
+    .chain(source_warnings)
     .collect();
     Ok((0, lines))
 }
@@ -971,9 +976,20 @@ fn route_lines(route: &Route, cap: Option<usize>) -> Vec<String> {
         .collect()
 }
 
-/// The warnings of `review start`, which do not change its exit code.
+/// The sources of `xtask review` that a branch can change, each with what
+/// then comes from the branch.  `review start` warns on each.
+const WATCHED_SOURCES: &[(&str, &str)] = &[
+    ("xtask/src/review.rs", "the route"),
+    ("xtask/src/review_log.rs", "the log check"),
+];
+
+/// The warnings of `review start` for one source, such as
+/// `xtask/src/review.rs`, which do not change its exit code.  `what` comes
+/// from the branch when the branch changes the source.
 pub fn warnings(
     exe: &Path,
+    source: &str,
+    what: &str,
     exe_time: SystemTime,
     source_time: Option<SystemTime>,
     base_blob: Option<&str>,
@@ -983,15 +999,14 @@ pub fn warnings(
         .is_some_and(|source| exe_time < source)
         .then(|| {
             format!(
-                "warning: {} is older than xtask/src/review.rs; run cargo build -p xtask",
+                "warning: {} is older than {source}; run cargo build -p xtask",
                 exe.display()
             )
         });
     let changed = match (base_blob, head_blob) {
-        (Some(base), Some(head)) if base != head => Some(
-            "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
-                .to_string(),
-        ),
+        (Some(base), Some(head)) if base != head => Some(format!(
+            "warning: this branch changes {source}, so {what} comes from the branch"
+        )),
         _ => None,
     };
     old_binary.into_iter().chain(changed).collect()
@@ -3216,6 +3231,8 @@ mod tests {
         assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 earlier,
                 Some(now),
                 None,
@@ -3228,6 +3245,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 Some(earlier),
                 None,
@@ -3238,6 +3257,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 earlier,
                 None,
                 None,
@@ -3253,6 +3274,8 @@ mod tests {
         assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 Some("b1"),
@@ -3265,6 +3288,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 Some("b1"),
@@ -3275,6 +3300,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 None,
@@ -3285,12 +3312,69 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 Some("b1"),
                 None
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_log_check_source_warns_on_its_own() {
+        let now = SystemTime::now();
+        let earlier = now - Duration::from_secs(60);
+        assert_eq!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                "xtask/src/review_log.rs",
+                "the log check",
+                earlier,
+                Some(now),
+                Some("b1"),
+                Some("b2")
+            ),
+            [
+                "warning: /r/target/debug/xtask is older than xtask/src/review_log.rs; run cargo build -p xtask",
+                "warning: this branch changes xtask/src/review_log.rs, so the log check comes from the branch",
+            ]
+        );
+    }
+
+    #[test]
+    fn start_warns_when_the_branch_changes_review_log_rs_or_the_binary_is_older() {
+        let dir = scratch("start-changed-log-source");
+        write(&dir, "xtask/src/review_log.rs", "fn a() {}\n");
+        commit_all(&dir, "the log check");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "xtask/src/review_log.rs", "fn b() {}\n");
+        commit_all(&dir, "a new log check");
+        let (code, lines) = run(
+            &["start".to_string(), "main".to_string(), "1".to_string()],
+            &dir,
+            &dir.join("target/no-home"),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(code, 0, "{lines:?}");
+        let warnings: Vec<String> = lines
+            .iter()
+            .filter(|l| l.starts_with("warning"))
+            .map(|l| {
+                l.replace(
+                    &std::env::current_exe().unwrap().display().to_string(),
+                    "<exe>",
+                )
+            })
+            .collect();
+        assert_eq!(
+            warnings,
+            [
+                "warning: <exe> is older than xtask/src/review_log.rs; run cargo build -p xtask",
+                "warning: this branch changes xtask/src/review_log.rs, so the log check comes from the branch",
+            ]
         );
     }
 

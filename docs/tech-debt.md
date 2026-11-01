@@ -153,7 +153,7 @@ This entry concerns which reviewers read a diff.  So it touches each rule that a
 
 Since M6, review round 1, the paths of `memory-reviewer` include `roformer/src/`, `roformer-gpu/src/` and `synth/src/`.  So a change to the GPU memory budget (MEM-4) or to the model read (MEM-1) routes it.  Since M6, review round 2, they also include `dsp/src/`.  Its code runs in the audio callback (RT-1) and builds the song-length mix (MEM-4).  `e2e_messages_use_protocol_types` enforces PROTO-1.  A change to its list `SCRIPT_ONLY_TYPES` in `xtask/src/rules.rs` routes only `supply-chain-reviewer` and `reviewer`.  Neither agent lists PROTO-1, so no reviewer checks PROTO-1 on a change to that list.
 
-The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  `xtask review start` warns when the branch changes `xtask/src/review.rs`, and when the binary is older than that file.
+The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  `xtask review start` warns when the branch changes `xtask/src/review.rs` or `xtask/src/review_log.rs`, and when the binary is older than one of them.  So a branch can also change the check of `xtask review log-check`, with a warning.
 
 * Fix: review; `reviewer` reads every diff.  Phase 5 routes with the base branch's `xtask`.
 
@@ -416,7 +416,7 @@ This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
 
 This entry concerns VERIFY-1, through `xtask docs-check`.
 
-`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of `plans/active/harness-phase-3b-m3.md`).  The unit tests check each check alone, but not that `check` calls it.
+`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of M3 of harness phase 3b).  The unit tests check each check alone, but not that `check` calls it.
 
 * Fix: add a test that runs `check` on a small fixture repo with one known problem of each check, and wants each problem.
 
