@@ -160,9 +160,9 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
 
 ### 7. Compare with the baseline (`--baseline` only)
 
-A finding is found when its verdict is `confirmed`, `pre-existing` or `known`.  If the baseline has no found finding, skip this step.  Record "of 0 baseline findings, the round found 0".
+A finding is found when its verdict is `confirmed` or `pre-existing`.  If the baseline has no found finding, skip this step.  Record "of 0 baseline findings, the round found 0".
 
-Else start one new subagent with `subagent_type` set to `general-purpose`.  Fill in this prompt template, and give the subagent only that text.  List A holds each found finding of the baseline.  List B holds each found finding of the reviewers and of cargo-mutants.  Give each finding as its ID, its `where` and its claim:
+Else start one new subagent with `subagent_type` set to `general-purpose`.  Fill in this prompt template, and give the subagent only that text.  List A holds each found finding of the baseline.  List B holds each found finding of the reviewers and of cargo-mutants, and each `known` finding.  Give each finding as its ID, its `where` and its claim:
 
 ```text
 Compare two lists of review findings.  Use only the two lists below.  Do not read files, and do not run commands.

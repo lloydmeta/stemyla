@@ -1152,6 +1152,7 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "Each line of `known.txt` becomes a finding with the next ID",
     "Its verdict is `known`, and its `repeat-of` is the TD after the tab.  It gets no validator.",
     "* Do not fix a `known` finding.  Its gap is in its TD.",
+    "List B holds each found finding of the reviewers and of cargo-mutants, and each `known` finding.",
     "but not one with `same-as` a finding that has a validator",
     "Wait for each validator before step 6",
     "do not write it in another way",
