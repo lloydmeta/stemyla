@@ -206,6 +206,7 @@ The team leader gives these to the orchestrator, which edits the parent plan.  T
 * [x] 2026-10-31: step 2, `review mutants` writes `missed.txt` and `known.txt`, and the mutants line ends `, known <k>` (implementer).
 * [x] 2026-10-31: step 3, the 12 entries of `KNOWN_MISSED`, `known_problems` and its tests (implementer).
 * [x] 2026-10-31: step 4, the docs of what `xtask review mutants` does: TD-33, TD-39, TD-66, and the Tools table and changelog of `docs/working-with-agents.md`.  The diff of the skill, its pins and its docs goes to the team leader (implementer).
+* [x] 2026-10-31: checkpoint: the xtask code and its docs are done (`eee072f` to `e3a081e`).  The team leader checked that the diff applies (`git apply --check`), and gave it to the orchestrator with the changes to the parent plan.  Next: the orchestrator lands them, then round 1.
 * [ ] Review rounds.
 * [ ] M2 done: this plan moves to `plans/completed/`.
 
