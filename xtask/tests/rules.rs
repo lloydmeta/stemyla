@@ -1292,6 +1292,49 @@ fn the_review_skill_starts_with_xtask() {
     );
 }
 
+const FIX_RULE_DECISION: &str = "docs/decisions/0024-what-a-review-round-fixes.md";
+
+/// The strict rules of the log check are the 15 rules of decision 0024,
+/// and each is a rule of `docs/invariants.md`.
+#[test]
+fn the_strict_rules_are_those_of_decision_0024() {
+    let root = xtask::workspace_root();
+    let read = |rel: &str| {
+        std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("reading {rel}: {e}.  Fix: restore the file."))
+    };
+    let rules = xtask::review_log::strict_rules();
+    let text = xtask::review_log::STRICT_RULES_TEXT;
+    let ids =
+        xtask::docs::defined_ids(&[("docs/invariants.md".to_string(), read("docs/invariants.md"))]);
+    let mut problems = Vec::new();
+    if rules.len() != 15 {
+        problems.push(format!(
+            "strict_rules() gives {} IDs, not 15: {rules:?}.  Fix: give each ID of `{text}`.",
+            rules.len()
+        ));
+    }
+    if !read(FIX_RULE_DECISION).contains(text) {
+        problems.push(format!("{FIX_RULE_DECISION} does not hold `{text}`.  Fix: make STRICT_RULES_TEXT the text of the decision."));
+    }
+    problems.extend(
+        rules
+            .iter()
+            .filter(|id| !ids.defined.contains(*id))
+            .map(|id| {
+                format!(
+                    "`{id}` has no heading in docs/invariants.md.  Fix: correct STRICT_RULES_TEXT."
+                )
+            }),
+    );
+    assert!(
+        problems.is_empty(),
+        "{} strict rule problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
 /// The tracked files that git's ignore rules match, at the workspace root,
 /// with `extra` passed to git before `ls-files`.
 fn ignored_tracked_files(extra: &[&str]) -> Vec<String> {

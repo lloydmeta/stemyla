@@ -313,6 +313,11 @@ The team leader gives these to the orchestrator as text.
 ## Surprises and discoveries
 
 * 2026-10-31, team leader: the strict list of decision 0024 has 15 IDs, not 16 as the first draft said (plan review round 1).
+* 2026-10-31, implementer, step 1: each new test failed on its stub, on an assert:
+  * `the_strict_rules_are_those_of_decision_0024`: "strict_rules() gives 0 IDs, not 15".
+  * `the_strict_rules_are_the_15_ids_in_order`: `left: []`.
+  * `a_good_log_gives_no_problem`: the assert of `has_significant_column` failed (its stub gives `false`).
+  * The other 9 tests of `review_log.rs`: `left: ["stub"]`, against the expected problems or `[]`.
 
 ## Decision log
 
@@ -326,6 +331,9 @@ The team leader gives these to the orchestrator as text.
 * 2026-10-31, team leader: `xtask review log-check` checks a run's log after each round.  Reason: `docs-check` sees the log only after the last round, when a wrong fix is in the history (plan review round 1).
 * 2026-10-31, team leader: step 4 of the skill also reads the logs of the branch's earlier milestones in `docs/reviews/`.  Reason: each milestone starts a new run, so its own log does not hold the TDs of M1 and M2 (plan review round 1).
 * 2026-10-31, team leader: the team leader runs `review clean` before the orchestrator writes the files, as the orchestrator asked.  Reason: `review clean` removes only the round's worktrees, so the order changes no count.
+* 2026-10-31, implementer: a row with a bad value (problems 2 to 5) gives only those problems, not problems 6 to 11.  Reason: problems 6 to 11 read those values, so they would add only noise.
+* 2026-10-31, implementer: `review_log.rs` also has `pub fn has_significant_column`.  Reason: `log_check` (step 3) must tell a log with no column from a good log.  Its stub gives `false`.
+* 2026-10-31, implementer: problem 7 looks for a part `known: <TD>` of the Action cell, not the whole cell.  The TD must equal Repeat of.
 
 ## Outcomes and retrospective
 
