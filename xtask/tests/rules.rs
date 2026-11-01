@@ -1148,7 +1148,7 @@ fn the_agent_models_are_the_measured_ones() {
             .collect();
         if found_model != [*model] {
             problems.push(format!(
-                "{file} has the model lines {found_model:?}, not one `model: {model}`.  {fix}"
+                "{file} has the model lines {found_model:?}, but its row wants one `model: {model}`.  {fix}"
             ));
         }
         let wanted_effort: Vec<&str> = effort.iter().copied().collect();
@@ -1157,7 +1157,7 @@ fn the_agent_models_are_the_measured_ones() {
                 format!("one `effort: {e}`")
             });
             problems.push(format!(
-                "{file} has the effort lines {found_effort:?}, not {wanted}.  {fix}"
+                "{file} has the effort lines {found_effort:?}, but its row wants {wanted}.  {fix}"
             ));
         }
     }

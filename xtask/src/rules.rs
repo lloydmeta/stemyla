@@ -3033,10 +3033,13 @@ pub const AGENT_MODELS: [&str; 4] = ["inherit", "opus", "sonnet", "haiku"];
 /// The values of an agent's optional `effort` (decision 0025).
 pub const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// The values as a list in text: "`a`, `b` and `c`".  Each list has two
-/// values or more.
+/// The values as a list in text: "`x`" for one value, and "`a`, `b` and
+/// `c`" for more.  The list must not be empty.
 fn one_of(values: &[&str]) -> String {
-    let (last, rest) = values.split_last().expect("a list of two values or more");
+    let (last, rest) = values.split_last().expect("a list of one value or more");
+    if rest.is_empty() {
+        return format!("`{last}`");
+    }
     let rest: Vec<String> = rest.iter().map(|value| format!("`{value}`")).collect();
     format!("{} and `{last}`", rest.join(", "))
 }
@@ -3209,7 +3212,7 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
     let effort = not_one_of(
         "effort",
         &AGENT_EFFORTS,
-        "set `effort` to one of these values, or remove the key; without it, the agent takes the effort of the main session.",
+        "set `effort` to one of these values, or remove the key; without it, the agent takes the effort that the session's settings give its model.",
     );
     let hooks_line = find("hooks").map(|(number, _, _)| number);
     let hooks_last = keys
@@ -6807,6 +6810,12 @@ mod agents_tests {
     }
 
     #[test]
+    fn one_of_names_one_value_and_two_values() {
+        assert_eq!(one_of(&["x"]), "`x`");
+        assert_eq!(one_of(&["a", "b"]), "`a` and `b`");
+    }
+
+    #[test]
     fn a_read_only_agent_has_no_problem() {
         let listed = with("tools: Read, Bash\n", "tools:\n  - Read\n  - Bash\n");
         let unindented = with("tools: Read, Bash\n", "tools:\n- Read\n- Bash\n");
@@ -7040,7 +7049,7 @@ mod agents_tests {
         let hooks = format!("{AGENT_HOOK_BLOCK}\n");
         let model_fix =
             "set `model` to one of these values; decision 0025 gives the model of each role.";
-        let effort_fix = "set `effort` to one of these values, or remove the key; without it, the agent takes the effort of the main session.";
+        let effort_fix = "set `effort` to one of these values, or remove the key; without it, the agent takes the effort that the session's settings give its model.";
         let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last; an optional `effort` key comes once, before `hooks`.";
         let efforts = "which is not one of `low`, `medium`, `high`, `xhigh` and `max`";
         let cases: [(&str, String, Vec<String>); 9] = [
