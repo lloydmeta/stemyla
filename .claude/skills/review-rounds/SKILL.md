@@ -26,8 +26,10 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  `review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
+* Do not pass `model` or `effort` to the Agent tool.  The agent file decides them (decision 0025).
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
-* In that case, stop after step 9, also without `--review-only`.  A subagent cannot do step 11 alone.  The caller writes each file at its path.  Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.  If the caller writes the log, it runs `target/debug/xtask review log-check <run>/log.md` before `review clean`.  Then the caller decides the next step: step 10, step 11 or the next round.
+* In that case, keep the text of each refused file, and go on.  Do the fixes and the commit of step 10.  Do step 11 up to the log, and write the log's text.  Leave the approvals fields as step 9 wrote them.  If you can write a scratch file, run `target/debug/xtask review log-check` on a copy of the log there.  Then stop.  With `--review-only`, stop after step 9.
+* The caller writes each file at its path.  Also give the command `target/debug/xtask review clean $1` in your final answer.  The caller runs it after it writes the files.  If the caller writes the log, it runs `target/debug/xtask review log-check <run>/log.md` before `review clean`.  Then the caller decides the next step: the next round, or the steps after the last round.
 
 ## Names
 
@@ -117,6 +119,14 @@ Each finding of a reviewer is one block with the fields `severity`, `kind`, `whe
    * Find each row of these logs whose Action is a TD ID or `known: <TD>`.  Skip a TD that `docs/tech-debt.md` lists under `## Closed`.
    * If a finding of this round is the same finding as a `refuted` one, give it `repeat-of:` and the ID of that finding.  Give it the verdict `refuted`.
    * If it is the same finding as a row with a TD, give it `repeat-of:` and that TD.  Give it the verdict `known`.  Its action in the log is `known: <TD>`.
+   * From round 4, also find each row of `<run>/log.md` whose Action is `reported, not fixed`.  It can be a row of any earlier round, a nit of rounds 1 to 3 included.  Read no other log for these rows, since a row of another log can have the same ID.
+   * A finding of this round that is the same finding as such a row is a reported repeat, unless one of these is true:
+     * its severity is higher than the row's;
+     * it names a strict rule that the row's Rule cell does not name;
+     * its sources include `cargo-mutants`, and the row's Reviewers do not.
+   * Give a reported repeat `repeat-of:` and the ID of that row.  If more than one such row fits, use the row of the latest round.  If that row's Repeat of holds an ID, use that ID.
+   * A reported repeat that is a blocker or should-fix gets the row's verdict and Significant value.  A nit keeps the verdict `unvalidated` and `-`.  Its action in the log is `reported, not fixed`.
+   * If one of the three is true, the finding is a new finding.  Give it no `repeat-of`.  Steps 5 and 6 validate it as any finding.
    * A finding with `repeat-of` gets no validator.
 5. Keep the baseline's findings in a separate list.  Merge them only with each other.  Give each the ID `$1-b<n>`, with `<n>` from 1.
 6. If a baseline finding is the same finding as a reviewer's finding, give it `same-as:` and the ID of the reviewer's finding.
@@ -158,7 +168,7 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
 3. Read `<run>/$1/missed.txt` and `<run>/$1/known.txt`.  If neither file exists, the run is from an older `xtask`.  Then read `<run>/$1/mutants.out/missed.txt` as `missed.txt`.  If both files are empty or missing, go to item 9.
 4. Each line of `missed.txt` becomes a finding with the next ID `$1-<n>`.  Its source is `cargo-mutants`, its severity `should-fix` and its kind `weak-test`.  Its `where` is the file and line at the start of the line.  Its rule is `VERIFY-1`, and its claim is "no test fails with this mutant", with the line.  Make no finding of a line of `known.txt` in this item.
 5. Each line of `known.txt` becomes a finding with the next ID `$1-<n>`.  Its fields are those of item 4, from the text before the tab.  Its verdict is `known`, and its `repeat-of` is the TD after the tab.  It gets no validator.  Its action in the log is "known: <TD>".
-6. Do the `repeat-of` check of step 4, item 4, for each finding of item 4.  A finding whose `repeat-of` is an ID gets the verdict `refuted`.  A finding whose `repeat-of` is a TD gets the verdict `known`, and its action in the log is "known: <TD>".  Neither gets a validator.  Leave its line out of the validator's prompt.  If no line is left, go to item 8.
+6. Do the `repeat-of` check of step 4, item 4, for each finding of item 4.  A finding whose `repeat-of` is a `refuted` finding gets the verdict `refuted`.  A finding whose `repeat-of` is a TD gets the verdict `known`, and its action in the log is "known: <TD>".  A missed mutant is a reported repeat only of a row whose Reviewers name `cargo-mutants`.  It gets the row's verdict and Significant value, and its action in the log is `reported, not fixed`.  None of these gets a validator.  Leave its line out of the validator's prompt.  If no line is left, go to item 8.
 7. Start one `validator` with this prompt template, filled in.  The prompt holds each line that has no `repeat-of`.  The range is `<since>..HEAD`, because the mutants run tests the since diff:
 
    ```text
@@ -174,7 +184,7 @@ Wait for each validator before step 6.  Step 6 takes its wait for the mutants ru
    ```
 
    The verdict of each of these findings is the verdict of the validator for its line.
-8. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  Its rule also names VERIFY-1.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.
+8. If a finding of a reviewer and a finding of item 4 are the same finding, as step 4 says, merge the two.  The merged finding keeps the reviewer's ID, and gets `cargo-mutants` in its sources.  Its rule also names VERIFY-1.  If its two verdicts differ, it keeps `confirmed` or `pre-existing` over the others.  If the reviewer's finding is a reported repeat of a row whose Reviewers do not name `cargo-mutants`, the merged finding is a new finding.  It loses its `repeat-of` and the values that it copied from the row.  Its verdict is the verdict of the finding of item 4.
 9. Run `jq -n now`, and record the output as the end of the round.  Run `jq .started <run>/$1/state.json` for the start of the round.
 
 ### 7. Compare with the baseline (`--baseline` only)
@@ -297,6 +307,7 @@ Then:
 * A mutant that the team sends to tech debt gets a `KNOWN_MISSED` entry in the milestone's last commit, not in a round's fixes.  Reason: a change to `xtask/src/review.rs` routes all six reviewers (`ROUTE_ALL`).
 * Do not fix a `refuted` finding.
 * Do not fix a `known` finding.  Its gap is in its TD.
+* Do not fix a reported repeat (step 4, item 4).  Its action is `reported, not fixed`.
 * Decide each `unproven` finding, and record the reason.
 * A nit has the verdict `unvalidated`.  In rounds 1 to 3, fix it only if you agree with it.
 * Before the commit, run `cargo run -p xtask -- check --tier commit` (GIT-2).
@@ -312,7 +323,7 @@ First, get the approval counts of the round.  They are cost, not interventions. 
   * In auto mode in an interactive session, the mode can fall back to a prompt that waits for a person.  You do not see an approval of that prompt (TD-38).  So write each count as `0 (auto mode; a fallback prompt is not counted)`.
   * In another mode in an interactive session, ask the maintainer the questions below.
   * Without `--baseline`, keep "-" in the `baseline approvals` field.  This applies in each mode.
-* If you are not the orchestrator, and you are a subagent or no person can answer, as in a `claude -p` run, do not ask.  Leave the approvals fields as step 9 wrote them.  Stop here, and give the questions below in your final answer.  The caller asks them, and does the rest of this step.
+* If you are not the orchestrator, and you are a subagent or no person can answer, as in a `claude -p` run, do not ask.  Leave the approvals fields as step 9 wrote them.  Give the questions below in your final answer.  The caller asks them, and writes the counts.  If the Write tool refused a file to you, write the log's text, as "Before the steps" says.  Else stop here, and the caller does the rest of this step.
 * In any other case, ask the person:
   1. "How many tool calls did you approve for the round's agents and for me, from `review start` until the findings file?  Do not count the `baseline` agent and its validators."
   2. With `--baseline`: "How many tool calls did you approve for the `baseline` agent and its validators in that time?"
@@ -369,7 +380,7 @@ Then check the log:
 
 Then remove the worktrees of the round's agents:
 
-* Run `target/debug/xtask review clean $1`.  It removes each worktree `target/review/$1-<agent>-<n>` of this round, also with changes.
+* Run `target/debug/xtask review clean $1`.  It removes each worktree or folder under `target/review/` whose name starts with `$1-`, also with changes.
 * It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
 * If auto mode or a person refuses it, give the command to the person, and go on.
 
@@ -383,7 +394,7 @@ A `known` finding does not count.  A `confirmed` finding of the three kinds coun
 
 After the last round:
 
-* Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.
+* Copy `<run>/log.md` to the reviews folder under `docs`, as `<branch>.md`.  `<branch>` is the last part of the `<run>` path.  In a run of the `orchestrate` skill, the copy is `<branch>-m<n>.md`, for milestone `<n>`.
 * Write a Progress line for each round in the plan of the work.
 * Run the checks with `cargo run -p xtask -- check --tier push`, and commit, signed.
 * Give the person the text for the PR description.  It lists each `refuted` finding, each `unproven` blocker or should-fix, and each `repeat-of` of a finding that is not `known`.  Then it lists each `known` finding once, with its TD.  This includes each `known` mutant.  In its `<details>` section, it lists each `reported, not fixed` finding.  It also gives the mutants line of each round.

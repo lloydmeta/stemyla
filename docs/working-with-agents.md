@@ -28,7 +28,7 @@ Phase 3 added eight read-only review agents in `.claude/agents/`: `reviewer`, `g
 ## How a task flows
 
 1. Say what you want and why, in one or two sentences.  Name the result, not the steps.
-2. A small task: the agent does it, runs the checks and commits.  A larger task: the agent writes a plan first.
+2. A small task: the agent does it, runs the checks and commits.  A larger task: the agent writes a plan first.  A big task (decision 0023): the agent proposes orchestrated mode in one question, then runs the plan hands-off with the `orchestrate` skill.
 3. Review the plan before the code.  One wrong line in a plan becomes many wrong lines of code.
 4. The agent makes small signed commits, then runs review rounds with `/review-rounds` until the stop rule of decision 0024 holds.
 5. Do what only a person can do (see below).  Push, or ask the agent to push, then merge.
@@ -49,6 +49,14 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 * The agent: writes a plan with milestones, and one command per milestone that shows it works.
 * Check: read the plan and correct it.  Then: "Do the plan, one milestone at a time."
 * To continue in a new session: "Resume docs/plans/active/<plan>.md."  The agent reads the plan's progress first.
+
+### Run a big task hands-off
+
+* A task is big when one of these holds at the start: a plan of more than 3 milestones, a decision point in more than one milestone, work longer than one session, or you are away for the run (decision 0023).
+* Before the start: a signing cache that lasts the run, `caffeinate -dims`, and `autoContinueAtUsageLimit` on.  Give the `autoMode.allow` entries that the plan's "How the work runs" section names in `~/.claude/settings.json`.  Start `claude --permission-mode auto` at the repo root.
+* Prompt: "Do docs/plans/active/<plan>.md."  The agent loads the `orchestrate` skill, does the preflight, and asks you one question: the mode, the branch and PR, and each decision point of the plan.  Answer it once.
+* The agent: as orchestrator, it starts one team for each milestone, on one branch and one draft PR.  Each team writes a milestone plan, implements it and runs review rounds until the stop rule holds.  Between milestones, the orchestrator waits for CI, runs `cargo run -p xtask -- clean --yes` and updates the PR body.  It stops only for the reasons of the skill's "Stop and wait", or of the plan's section.
+* Check: the PR's "Needs your attention", each decision that an agent made alone (the plan's Decision log), and the scratch folders that the close-out lists for `clean --yes --also`.
 
 ### Change a GPU kernel
 
@@ -90,7 +98,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 * The skill runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` asks for approval once in each round, and a late `review mutants` can ask too.  `review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.  Approve each one once, not with "don't ask again".  Step 11 of the skill counts the late review commands before the findings file in their own cell (TD-36).  "Don't ask again" changes the local settings file of Claude Code, and `review check` then fails the round.
 * In a mode that can ask for approval, count the tool calls that you approve in each round.  This is the default mode, or auto mode when it falls back to a prompt.  Count from `review start` until the agent writes the findings file.  In round 1 with `--baseline`, count those for the `baseline` agent and its validators apart.  Give one total if you cannot split them.  Step 11 asks for the counts and waits: give them then (TD-38).  An orchestrator that runs the skill in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask.  It writes 0 with the mode.  In a `-p` run where a host or a prompt tool answers prompts, it writes the approvals that the run records, or `not counted`.  In auto mode in an interactive session, it also marks that a fallback prompt is not counted.  The log records approvals as cost.  An intervention is a message of a person in the round, but not the message with the counts.
 * If `review check` names a change, the round stops.  Examine `git reflog`, the stash and the changed files, then start the round again.
-* A branch has one set of rounds and one log.  So "the run folder holds a log" from round 1 means that an earlier set ran (TD-37).
+* A branch has one set of rounds and one log.  So "the run folder holds a log" from round 1 means that an earlier set ran (TD-37).  In orchestrated mode, the `orchestrate` skill gives each milestone its own run, and copies its log as `<branch>-m<n>.md`.
 
 ### Clean up after runs
 
@@ -198,3 +206,4 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 * 2026-10-31, phase 3b (M2): `xtask review mutants <round>` writes the missed mutants that `KNOWN_MISSED` in `xtask/src/review.rs` matches to `known.txt`, each with its TD.  It writes the rest to `missed.txt`.  The mutants line counts the known lines, as `, known <k>`.  The `review-rounds` skill logs each known line as `known`, with its TD, and gives it no validator.
 * 2026-10-31, phase 3b (M3): the review rounds follow decision 0024.  Rounds 1 to 3 fix each found finding.  From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.  It logs each other `confirmed`, `pre-existing` or `unproven` finding, and each `unvalidated` finding, as `reported, not fixed`.  The PR lists them.  The rounds stop at the first round from round 3 on with no `confirmed` finding of the three kinds, and no `pre-existing` or `unproven` one that the round fixed or sent to a TD.  From round 4, the reviewers read only the fix range and the files that it touches.  The log has a `Significant` column, which the agent fills.  `xtask review log-check` checks the log after each round, and `docs-check` checks the log in the reviews folder.  A finding that repeats one that went to tech debt gets the verdict `known`.
 * 2026-11-01, phase 3b (M4): `xtask check --tier commit` runs the checks that the changed paths of one commit need, and prints each skip with its reason.  A commit that touches a strict path runs tier `push`.  `xtask check --tier push` runs the fmt, clippy, test, `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  `--dry-run` prints the plan and runs nothing.  GIT-2 runs tier `commit` before each commit, and tier `push` before each push and each review round.  CI stays the authority, and the browser tests stay in CI (TD-70).
+* 2026-11-01, phase 3b (M6): the project skill `orchestrate` runs a big task hands-off (decision 0023).  `CLAUDE.md` gives the sizing rule, and the recipe "Run a big task hands-off" gives the prompt.  `docs-check` fails an active plan of more than 3 milestones with no "How the work runs" section, and a copied log whose last round does not meet the stop rule.  From round 4, `review-rounds` matches a repeat of a `reported, not fixed` finding, and `review log-check` checks it.  `review clean <round>` removes each name under `target/review/` that starts with `<round>-`.

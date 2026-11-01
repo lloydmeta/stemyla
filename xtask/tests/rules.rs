@@ -1245,8 +1245,8 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// person, for the round or the baseline, but not the message that gives
 /// the approval counts.  The rounds table's header, its separator line and
 /// the end of its block are one entry, so a separator with fewer cells than
-/// the header fails.  After the log, step 11 removes the worktrees of the
-/// round's agents with `review clean`.  A refused log gives the command to
+/// the header fails.  After the log, step 11 removes the worktrees and
+/// folders of the round with `review clean`.  A refused log gives the command to
 /// the caller, and `--review-only` runs it at step 9.  A file that the Write
 /// tool refuses to a subagent also gives the command to the caller.  Step 6
 /// reads `missed.txt` and `known.txt` of the round, or the old
@@ -1287,7 +1287,16 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// M4 of harness phase 3b adds the checks by tier of decision 0026:
 /// `check --tier push` before the skill and after the last round, and
 /// `check --tier commit` before the commit of step 10.
+///
+/// M6 of harness phase 3b adds these: the rule that an Agent call passes no
+/// `model` or `effort` ([`AGENT_CALL_RULE`]), the match of a reported
+/// repeat in step 4, item 4, and its no-fix line in step 10, and the names
+/// that `review clean` removes.
 const REVIEW_SKILL_TEXT: &[&str] = &[
+    AGENT_CALL_RULE,
+    "* From round 4, also find each row of `<run>/log.md` whose Action is `reported, not fixed`.",
+    "* Do not fix a reported repeat (step 4, item 4).  Its action is `reported, not fixed`.",
+    "It removes each worktree or folder under `target/review/` whose name starts with `$1-`, also with changes.",
     "* Run this skill only after `cargo run -p xtask -- check --tier push` and `cargo build -p xtask` pass.",
     "* Before the commit, run `cargo run -p xtask -- check --tier commit` (GIT-2).",
     "* Run the checks with `cargo run -p xtask -- check --tier push`, and commit, signed.",
@@ -1352,8 +1361,8 @@ const REVIEW_SKILL_TEXT: &[&str] = &[
     "* If you are not the orchestrator, and you are a subagent or no person can answer, as in a `claude -p` run, do not ask.",
     "* approvals: <not asked.",
     "Without --baseline, write \"-\">",
-    "Stop here, and give the questions below in your final answer.",
-    "The caller asks them, and does the rest of this step.",
+    "Give the questions below in your final answer.  The caller asks them, and writes the counts.",
+    "If the Write tool refused a file to you, write the log's text, as \"Before the steps\" says.  Else stop here, and the caller does the rest of this step.",
     "or \"in approvals\" if the person gave one total",
     "which then includes the baseline's",
     "So write each count as `0 (auto mode; a fallback prompt is not counted)`.",
@@ -1594,6 +1603,138 @@ fn the_review_skill_starts_with_xtask() {
         "{} review skill problem(s):\n{}",
         problems.len(),
         problems.join("\n")
+    );
+}
+
+/// The rule for each Agent call of the two project skills: no `model` and
+/// no `effort`, so the agent files and decision 0025's measurement decide
+/// them (harness phase 3b, M6).
+const AGENT_CALL_RULE: &str = "Do not pass `model` or `effort` to the Agent tool.  The agent file decides them (decision 0025).";
+
+const ORCHESTRATE_SKILL: &str = ".claude/skills/orchestrate/SKILL.md";
+
+/// The keys of the orchestrate skill's frontmatter, each exactly once.
+/// `disable-model-invocation` would stop the model from loading it on a
+/// big task, and `context: fork` would run it in a fork (decision 0023).
+const ORCHESTRATE_SKILL_KEYS: &[&str] = &["name", "description", "argument-hint"];
+
+/// The signals of a big task (decision 0023).  `CLAUDE.md`'s "Plans:"
+/// line and the skill's description each name all four, so the model
+/// loads the skill on the signals that the map gives.
+const SIZING_SIGNALS: &[&str] = &[
+    "a plan of more than 3 milestones",
+    "a decision point in more than one milestone",
+    "work longer than one session",
+    "the maintainer away for the run",
+];
+
+/// Text of the orchestrate skill that the loop of harness phase 3b needs
+/// (M6): no fork, the subagent cap, signed commits, the checks by tier,
+/// the stop rule by its reference to step 11 of `review-rounds`, the
+/// clean step, no `model` or `effort` in an Agent call, the tools of tier
+/// `push` and the session's model and effort in the preflight, the two
+/// cases that are not a stop, the files that the Write tool refuses to a
+/// team leader, the orchestrator's own paths, the approvals in auto mode,
+/// and the manual removal of the run folder (TD-37).
+const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
+    "name: orchestrate",
+    AGENT_CALL_RULE,
+    "Never start a fork, because a fork gets your context.",
+    "* Keep at most 15 subagents running at once.",
+    "* Commit only signed, with `git commit -S`.",
+    "* Before each commit, run `cargo run -p xtask -- check --tier commit` (GIT-2).",
+    "* Before each review round and each push, run `cargo run -p xtask -- check --tier push`.",
+    "* The stop rule is step 11 of the `review-rounds` skill (decision 0024).",
+    "Run `cargo run -p xtask -- clean --yes`.",
+    "`rustup target list --installed` shows `wasm32-unknown-unknown`, and `trunk --version` runs.",
+    "* the start command's `--model` and `--effort`;",
+    "* the settings keys `model` and `effortLevel`",
+    "* A refused cleanup command is not a stop.",
+    "is not a stop.  List it in the PR under \"Needs your attention\", and go on.",
+    "The Write tool refuses `<run>/<round>/findings.md` and `<run>/log.md` to the team leader.",
+    "Do not run `git add -A` or `git commit -a` while the team has work that is not committed.",
+    "`0 (auto mode; a fallback prompt is not counted)`",
+    "* When the intent review ends, remove the run folder by hand (TD-37).",
+];
+
+/// The problems of the orchestrate skill's text: each names what it wants.
+/// A missing file is an empty text, so each line fails on its own.
+fn orchestrate_skill_problems(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let frontmatter: &[&str] = match lines.split_first() {
+        Some((&"---", rest)) => rest
+            .iter()
+            .position(|line| *line == "---")
+            .map_or(&[], |end| &rest[..end]),
+        _ => &[],
+    };
+    let keys: Vec<&str> = frontmatter
+        .iter()
+        .map(|line| line.split_once(':').map_or(*line, |(key, _)| key).trim())
+        .collect();
+    let keys_are_exact = keys.len() == ORCHESTRATE_SKILL_KEYS.len()
+        && ORCHESTRATE_SKILL_KEYS
+            .iter()
+            .all(|wanted| keys.iter().filter(|key| *key == wanted).count() == 1);
+    let key_problems = (!keys_are_exact).then(|| {
+        format!("{ORCHESTRATE_SKILL}: the frontmatter keys are {keys:?}, not each of {ORCHESTRATE_SKILL_KEYS:?} once.  Fix: remove the other keys, so the model can load the skill and does not run it in a fork (decision 0023).")
+    });
+    let description = frontmatter
+        .iter()
+        .find_map(|line| line.strip_prefix("description:"))
+        .unwrap_or_default();
+    let signal_problems = SIZING_SIGNALS
+        .iter()
+        .filter(|signal| !description.contains(*signal))
+        .map(|signal| {
+            format!("{ORCHESTRATE_SKILL}: the description does not name `{signal}`.  Fix: name each signal of decision 0023, so the model loads the skill on a big task.")
+        });
+    let text_problems = ORCHESTRATE_SKILL_TEXT
+        .iter()
+        .filter(|wanted| !text.contains(*wanted))
+        .map(|wanted| {
+            format!("{ORCHESTRATE_SKILL}: the text does not hold `{wanted}`.  Fix: put back the rule that needs it (harness phase 3b, M6).")
+        });
+    key_problems
+        .into_iter()
+        .chain(signal_problems)
+        .chain(text_problems)
+        .collect()
+}
+
+/// The orchestrate skill keeps the key lines of the loop that harness
+/// phase 3b ran (decision 0023).
+#[test]
+fn the_orchestrate_skill_keeps_its_key_lines() {
+    let text = std::fs::read_to_string(xtask::workspace_root().join(ORCHESTRATE_SKILL))
+        .unwrap_or_default();
+    let problems = orchestrate_skill_problems(&text);
+    assert!(
+        problems.is_empty(),
+        "{} orchestrate skill problem(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// `CLAUDE.md`'s "Plans:" line names each signal of a big task, as the
+/// orchestrate skill's description does.
+#[test]
+fn the_sizing_rule_says_the_same_in_each_place() {
+    let claude =
+        std::fs::read_to_string(xtask::workspace_root().join("CLAUDE.md")).unwrap_or_default();
+    let line = claude
+        .lines()
+        .find(|line| line.starts_with("* Plans:"))
+        .unwrap_or_default();
+    let missing: Vec<&str> = SIZING_SIGNALS
+        .iter()
+        .copied()
+        .filter(|signal| !line.contains(signal))
+        .collect();
+    assert!(
+        missing.is_empty() && line.contains("`orchestrate`"),
+        "CLAUDE.md: the \"Plans:\" line lacks {missing:?}, or does not name the `orchestrate` skill: {line:?}.  Fix: give the sizing rule of decision 0023 there, with each signal."
     );
 }
 

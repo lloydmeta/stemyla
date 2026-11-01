@@ -249,9 +249,9 @@ Since M4, the log counts the late review commands before the findings file in th
 
 This entry concerns no rule.  It concerns the log of the review rounds.
 
-`CLAUDE.md` tells the agent to run review rounds after each change that it implements, until the stop rule of decision 0024 holds.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/completed/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After the last round" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
+`CLAUDE.md` tells the agent to run review rounds after each change that it implements, until the stop rule of decision 0024 holds.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/completed/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After the last round" writes over the `<branch>.md` copy in the reviews folder.  In orchestrated mode, the `orchestrate` skill gives each milestone its own run and its own copy, `<branch>-m<n>.md`.  After the intent review, the orchestrator removes the run folder by hand, since `xtask clean` keeps it while the branch has an open PR.  No doc tells the agent what to do for another branch with more than one cycle of implementation and review.
 
-* Fix: the orchestrator or the maintainer decides how such a branch keeps the log of each set.
+* Fix: the agent or the maintainer decides how such a branch keeps the log of each set, as the `orchestrate` skill does.
 
 ### TD-38: the review log cannot count a person's approvals
 
