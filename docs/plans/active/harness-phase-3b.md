@@ -170,7 +170,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
   * Pass rule for a validator: no confirmed bug refuted, and at least as many refutations of the refuted items as the control.
   * A role whose interval is wider than 0.3 keeps `inherit`, for want of evidence.  gpu-reviewer has only about 6 confirmed findings, so it will likely keep `inherit`.
   * Tokens: read from each run's `modelUsage` (used tokens, not final context; TD-44).
-  * Scratch: each replay clone goes in its own folder under the temp folder.  After the measure, the orchestrator runs `xtask clean --yes --also <clone>` for each clone folder, never for the harness root, whose `bin/` the runs need.
+  * Scratch: each replay clone goes in its own folder under the temp folder.  After the measure, the orchestrator runs `xtask clean --yes --also <clone>` for each clone folder, never for the harness root, whose `bin/` the runs need.  If auto mode refuses that command, the orchestrator records the folder for M8's list and goes on.
   * Budget: about 45M `modelUsage` tokens.  One milestone's rounds 1 to 3 in the PR #39 logs used about 2.7M final-context tokens (1.6M to 2.9M).  A whole case uses about 16 times its final context.
   * The team checks the budget after each run, in the order above.  It stops at the budget with what it has.
 * Not changed, whatever the result: reviewer, memory-reviewer, the intent reviewer, the orchestrator and baseline stay on the strongest model.
@@ -211,7 +211,11 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 * `harness-engineering.md`: re-check phases 4 to 6 and the phase 3 gate against M3 and M5.  Propose (do not decide) whether the `--baseline` gate is replaced by M5's measurement (D5).
 * Re-check D4 against the late bugs outside the fix range of the round before (catch-up 4-1, M7 6-1, M7 6-2).  Propose a change if the narrow range would miss such bugs.
 * Run `xtask clean --yes`.  Move this plan to `completed/` with its retrospective.
-* The PR body lists the maintainer's steps after the merge: `git fetch`, then `cargo run -p xtask -- clean --yes` for this phase's own branch and worktrees; stop `caffeinate`; remove any scratch folder that auto mode refused to remove.
+* The PR body lists the maintainer's steps after the merge:
+  * `git switch main` and `git fetch`, then `cargo run -p xtask -- clean --yes`.  The current branch always stays, so the switch comes first.
+  * Stop `caffeinate`.  Remove the untracked `tests/` folder, if an agent left one.
+  * Remove each scratch folder that auto mode refused to remove, and the harness root `/private/tmp/stemyla-harness` when no later run needs it.
+  * Run `cargo clean` if `target/` is large.
 
 ## Validation and acceptance
 
@@ -240,7 +244,7 @@ This plan uses the prose recipe until M6 makes the skill.  It follows `plans/com
 * Review rule: M1 and M2 by decision 0011 as amended in practice (to the stop rule).  From M3, decision 0024 as accepted.
 * Only the orchestrator edits `CLAUDE.md` and `.claude/**`, and writes review files that the Write tool refuses to a subagent.
 * Push only between review rounds.  Wait for CI before the next team.
-* Stop and wait: an invariant would break; auto mode refuses; a step needs a person; the M5 budget is spent; the weekly usage limit is near; the D8 timebox ends.
+* Stop and wait: an invariant would break; auto mode refuses an action, except a cleanup command (`review clean`, `clean --yes --also`), whose refusal becomes a maintainer step at close-out; a step needs a person; the M5 budget is spent; the weekly usage limit is near; the D8 timebox ends.
 
 Decision points (the maintainer answers these at the start):
 
