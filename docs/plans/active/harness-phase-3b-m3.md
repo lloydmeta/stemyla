@@ -348,6 +348,10 @@ The team leader gives these to the orchestrator as text.
   * `review_log_rs_routes_all_six`: without the `ROUTE_ALL` entry, the route is `["reviewer"]` (1-6).
   * `the_review_skill_names_the_strict_rules` and `the_strict_rules_are_those_of_decision_0024`: with `, LAYER-1, DOC-1` after `ASSET-1` in the skill or in decision 0024, each fails on its line (1-4).  The old tests passed this change.
   * `a_good_log_gives_no_problem` row 2-3 (1-12) passes at `9de7009` too.  It keeps the `no change:` case of 1-15.
+* 2026-11-01, implementer: the checks of `m3/m3-r1-skill.diff`, at `363bb83`, in a scratch worktree with its own target folder:
+  * `git apply --check` passes at the repo root.
+  * With only the `xtask/tests/rules.rs` part, `the_review_skill_starts_with_xtask` fails on its assert, with 6 problems, one for each new pin.  The other 26 rules tests pass.
+  * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  `CLAUDE.md` stays at 88 lines.
 
 ## Decision log
 
