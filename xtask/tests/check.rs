@@ -471,10 +471,15 @@ fn the_dry_run_of_tier_push_with_no_origin_main_warns() {
 
 #[test]
 fn a_graph_that_fails_gives_a_warning_and_tier_push() {
-    // No `Cargo.toml`, so `cargo metadata` fails.
+    // No `Cargo.toml`, so `cargo metadata` fails.  CI sets
+    // `CARGO_TERM_COLOR=always`, so the test sets it too: the warning must
+    // not hold colour codes.
     let f = Fixture::committed("no-graph");
     write(&f.repo.join("docs/c.md"), "c2\n");
-    let out = xtask(&f.repo, &["check", "--tier", "commit", "--dry-run"], None);
+    let out = command(&f.repo, &["check", "--tier", "commit", "--dry-run"], None)
+        .env("CARGO_TERM_COLOR", "always")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     let head: Vec<&str> = stdout.lines().take(4).collect();

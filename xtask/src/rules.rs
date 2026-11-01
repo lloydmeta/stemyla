@@ -379,11 +379,12 @@ pub struct Workspace {
 /// The layers of LAYER-1, lowest first.  The layers table must use these.
 pub const LAYERS: [&str; 5] = ["Test support", "Pure", "Engine and GPU", "Shells", "Tools"];
 
-/// Runs `cargo metadata --format-version 1 --all-features --locked` in
+/// Runs `cargo metadata --format-version 1 --all-features --locked --color never` in
 /// `root`.  Without `--no-deps`, so that `packages` also holds patched and
 /// excluded path crates; with `--all-features`, so that it holds crates
 /// behind a feature that is off; `--locked`, so a test never writes
-/// `Cargo.lock`.
+/// `Cargo.lock`; `--color never`, so an error holds no colour codes when
+/// `CARGO_TERM_COLOR=always`, as in CI.
 pub fn workspace_metadata(root: &Path) -> Result<String> {
     let output = Command::new(env!("CARGO"))
         .current_dir(root)
@@ -393,6 +394,8 @@ pub fn workspace_metadata(root: &Path) -> Result<String> {
             "1",
             "--all-features",
             "--locked",
+            "--color",
+            "never",
         ])
         .output()
         .context("running cargo metadata")?;
