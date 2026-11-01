@@ -985,7 +985,7 @@ const WATCHED_SOURCES: &[(&str, &str)] = &[
 
 /// The warnings of `review start` for one source, such as
 /// `xtask/src/review.rs`, which do not change its exit code.  `what` comes
-/// from the branch when the branch changes the source.
+/// from the branch when the branch changes, adds or removes the source.
 pub fn warnings(
     exe: &Path,
     source: &str,
@@ -1006,6 +1006,12 @@ pub fn warnings(
     let changed = match (base_blob, head_blob) {
         (Some(base), Some(head)) if base != head => Some(format!(
             "warning: this branch changes {source}, so {what} comes from the branch"
+        )),
+        (None, Some(_)) => Some(format!(
+            "warning: this branch adds {source}, so {what} comes from the branch"
+        )),
+        (Some(_), None) => Some(format!(
+            "warning: this branch removes {source}, so {what} comes from the branch"
         )),
         _ => None,
     };
@@ -3297,7 +3303,7 @@ mod tests {
             )
             .is_empty()
         );
-        assert!(
+        assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
                 "xtask/src/review.rs",
@@ -3306,8 +3312,22 @@ mod tests {
                 None,
                 None,
                 Some("b2")
-            )
-            .is_empty()
+            ),
+            ["warning: this branch adds xtask/src/review.rs, so the route comes from the branch"]
+        );
+        assert_eq!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
+                now,
+                None,
+                Some("b1"),
+                None
+            ),
+            [
+                "warning: this branch removes xtask/src/review.rs, so the route comes from the branch"
+            ]
         );
         assert!(
             warnings(
@@ -3316,7 +3336,7 @@ mod tests {
                 "the route",
                 now,
                 None,
-                Some("b1"),
+                None,
                 None
             )
             .is_empty()
@@ -3374,6 +3394,29 @@ mod tests {
             [
                 "warning: <exe> is older than xtask/src/review_log.rs; run cargo build -p xtask",
                 "warning: this branch changes xtask/src/review_log.rs, so the log check comes from the branch",
+            ]
+        );
+    }
+
+    #[test]
+    fn start_warns_when_the_branch_adds_review_log_rs() {
+        let dir = scratch("start-added-log-source");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "xtask/src/review_log.rs", "fn a() {}\n");
+        commit_all(&dir, "a log check");
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        let (code, lines) = run(
+            &["start".to_string(), "main".to_string(), "1".to_string()],
+            &dir,
+            &dir.join("target/no-home"),
+            later,
+        );
+        assert_eq!(code, 0, "{lines:?}");
+        let warnings: Vec<&String> = lines.iter().filter(|l| l.starts_with("warning")).collect();
+        assert_eq!(
+            warnings,
+            [
+                "warning: this branch adds xtask/src/review_log.rs, so the log check comes from the branch"
             ]
         );
     }

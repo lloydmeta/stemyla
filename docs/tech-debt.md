@@ -145,17 +145,17 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 
 * Fix: review; a changed PNG or threshold is a UI change, and the `reviewer` agent looks at it.  No check is planned.
 
-### TD-31: the route of `xtask review` is a short denylist, from the branch's own code
+### TD-31: the route of `xtask review` is a short denylist, and the route and the log check come from the branch's own code
 
-This entry concerns which reviewers read a diff.  So it touches each rule that a reviewer checks, not one rule only.
+This entry concerns which reviewers read a diff, and the check of a review log against the fix rule of decision 0024.  So it touches each rule that a reviewer checks, not one rule only.
 
 `xtask/src/review.rs` chooses the reviewers of a diff from its paths and from content signs.  The content signs are a short denylist, not a full list.  A sign matches as a whole token only.  So `create_buffer` does not match `create_buffer_init`, which `roformer-gpu/src/lib.rs` calls.  A sign counts only on an added line of a Rust file outside a `tests` folder and outside the reviewer's own paths.  A copy or a GPU buffer that a macro, an alias or a helper makes routes nothing.
 
 Since M6, review round 1, the paths of `memory-reviewer` include `roformer/src/`, `roformer-gpu/src/` and `synth/src/`.  So a change to the GPU memory budget (MEM-4) or to the model read (MEM-1) routes it.  Since M6, review round 2, they also include `dsp/src/`.  Its code runs in the audio callback (RT-1) and builds the song-length mix (MEM-4).  `e2e_messages_use_protocol_types` enforces PROTO-1.  A change to its list `SCRIPT_ONLY_TYPES` in `xtask/src/rules.rs` routes only `supply-chain-reviewer` and `reviewer`.  Neither agent lists PROTO-1, so no reviewer checks PROTO-1 on a change to that list.
 
-The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  `xtask review start` warns when the branch changes `xtask/src/review.rs` or `xtask/src/review_log.rs`, and when the binary is older than one of them.  So a branch can also change the check of `xtask review log-check`, with a warning.
+The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  The log check of `xtask review log-check` and `docs-check` also comes from the branch, in `xtask/src/review_log.rs`.  So a branch can change the fix rule that its own log must follow.  `xtask review start` warns when the branch changes, adds or removes `xtask/src/review.rs` or `xtask/src/review_log.rs`.  It also warns when the binary is older than one of them.
 
-* Fix: review; `reviewer` reads every diff.  Phase 5 routes with the base branch's `xtask`.
+* Fix: review; `reviewer` reads every diff, and a change to `xtask/src/review_log.rs` routes every reviewer.  Phase 5 routes with the base branch's `xtask`, and checks the log with it.
 
 ### TD-32: `xtask review check` sees only what its record holds
 

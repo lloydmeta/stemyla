@@ -49,7 +49,7 @@ Terms:
 * Late round: a round from round 4 on.
 * Part of an Action cell: the text between two `;`, trimmed.  A cell with no `;` has one part.
 * Word: a run of letters and digits.  So `m3-r4.diff` holds the words `m3`, `r4` and `diff`.
-* Not-fixed part: a part that starts with `reported, not fixed`, `refuted`, `known: `, `no change` or a TD ID (`TD-` and digits).
+* Not-fixed part: a part that starts with `reported, not fixed`, `refuted`, `known: `, `no change:` or a TD ID (`TD-` and digits).
 * Merge part: a part that starts with `merged into `.
 * Fix part: another part that holds a commit SHA or the word `diff`.  A commit SHA is a word of 7 to 40 hex characters with at least one digit.
 * Fix action: an Action cell with a fix part.
@@ -312,6 +312,7 @@ The team leader gives these to the orchestrator as text.
 * [x] 2026-10-31: checkpoint: the orchestrator lands the diff before round 1, with the 0011 hunk (`c1e02e3`).
 * [x] 2026-11-01: review round 1 fixes (implementer): 1-1, 1-2, 1-3, 1-4, 1-6, 1-8, 1-10 to 1-13, 1-15, 1-18, 1-19 (TD-69) and 1-20 to 1-23.  The diff `m3/m3-r1-skill.diff` holds 1-5, 1-7, 1-9, 1-14, 1-16 and 1-17.
 * [x] 2026-11-01: review round 2 fixes (implementer): 2-1 to 2-4, 2-7, 2-8, 2-12 to 2-14 and 2-16.  The diff `m3/m3-r2-skill.diff` holds 2-5, 2-6, 2-9 to 2-11 and 2-15.
+* [x] 2026-11-01: review round 3 fixes (implementer): 3-2 (the guide line), 3-5, 3-7 and 3-9.  The diff `m3/m3-r3-skill.diff` holds 3-1, 3-2 (the skill line), 3-3, 3-4, 3-6 and 3-8.
 * [ ] A `KNOWN_MISSED` entry for TD-69 (finding 1-19) in M3's last commit.
 * [ ] Step 5: review rounds to the stop rule.
 * [ ] M3 done: the log in `docs/reviews/harness-phase-3b-m3.md`, and this plan in `plans/completed/`.
@@ -358,7 +359,7 @@ The team leader gives these to the orchestrator as text.
   * `a_round_fixes_a_pre_existing_finding_that_the_rule_names_or_gives_the_reason`: at `0e1037d`, the round 2 `pre-existing` nit 2-2 gives no problem (2-1).
   * `a_refuted_finding_has_no_fix`: with `let answered = verdict == "refuted";`, the `known` row 4-2 also gives problem 11 (2-2).
   * `a_round_must_fix_each_finding_that_the_rule_names`: with `{ td: false, no_change: false }`, 2-2 and 4-8 (`no change: later`) give no problem (2-4).
-  * `an_action_names_a_fix_or_a_reason_for_no_fix`: without the `all(...)` clause, `reported, not fixed; see round 4` gives no problem (2-7).  Without the merge case of that clause, `merged into 1-1; reported, not fixed` gives problem 8.  At `0e1037d`, `no change needed` gives no problem (2-13).
+  * `an_action_names_a_fix_or_a_reason_for_no_fix`: without the `all(...)` clause, `reported, not fixed; see round 4` gives problem 10, not problem 8, since 1-6 is a round 1 `pre-existing` row (2-7).  Without the merge case of that clause, `merged into 1-1; reported, not fixed` gives problem 8.  At `0e1037d`, `no change needed` gives no problem (2-13).
   * `a_row_with_bad_cells_gives_only_those_problems`: with `row {n}` in place of `row {n + 1}`, the problem starts `row 4:` (2-14).
   * `a_good_log_gives_no_problem`: when only the first part of the action is read for `known: `, 4-23 (`merged into 4-1; known: TD-39`) gives problem 7 (2-14).
   * `start_warns_when_the_branch_changes_review_log_rs_or_the_binary_is_older`: without the `review_log.rs` entry of `WATCHED_SOURCES`, it gets no warning, as at `0e1037d` (2-8).  It and `the_log_check_source_warns_on_its_own` fail when either warning names `xtask/src/review.rs` or `the route` in place of the source.
@@ -366,6 +367,9 @@ The team leader gives these to the orchestrator as text.
   * `git apply --check` passes at the repo root.
   * With only the `xtask/tests/rules.rs` part, two tests fail on their asserts.  `the_review_skill_starts_with_xtask` gives 6 problems, one for each new or changed pin.  `each_reviewer_reads_the_late_scope` gives one problem for each of the six reviewers.  The other 26 rules tests pass.
   * With the whole diff, `cargo fmt --all --check`, `cargo test -p xtask` and `cargo run -p xtask -- docs-check` pass.  The agent tests, such as `every_reviewer_has_an_agent_file` and `the_agents_are_read_only_by_tools`, pass.  `CLAUDE.md` stays at 88 lines.
+* 2026-11-01, implementer, review round 3 fixes: each new or changed test fails on the code at `00035e1`, on an assert (3-7):
+  * `a_changed_review_rs_warns`: a base with no blob and a head with one, or the other way round, give no warning, not the `adds` or `removes` line.
+  * `start_warns_when_the_branch_adds_review_log_rs`: a branch that adds `xtask/src/review_log.rs` gets no warning.
 
 ## Decision log
 
