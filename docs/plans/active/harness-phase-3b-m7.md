@@ -99,6 +99,13 @@ The classes, in their order of output:
    * Its line is the entry line, if that line is an added line of the diff.  Else it has no line, and the output says "no diff line; list it in the PR".
    * Reason: the author and the first 80 characters of the text.
 
+The rule for renames, once for all classes (`class_path`):
+
+* Each class (`hand-run`, `change`, `hot-spot`) reads both paths of a rename.  It reads the new path first.  If the new path meets no class, it reads the old path, with the reason "renamed from <old>: <reason>".
+* A path with no hunk can meet only `change` or `hot-spot`.  It is never a `hand-run` candidate, since no message text changed.
+* For `hand-run` with a hunk, the path picks the rule (`protocol/src/lib.rs`, `worker.js`, `weights.rs`, `e2e.rs`).  The line tests read the text at `HEAD` of the new path.
+* The test `each_class_reads_both_paths_of_a_rename` holds one row for each case.  Each row is a diff section and its exact candidates.
+
 Then the candidates are merged and sorted:
 
 * Candidates with the same path, line and side become one, with the first class and each reason once.
@@ -107,7 +114,7 @@ Then the candidates are merged and sorted:
 `pub fn main(args: &[String]) -> i32`, for `xtask attention <base> <plan>`:
 
 * It runs `git diff --no-color --no-ext-diff -M -U0 <base>...HEAD` at the repo root.  It reads each changed path at `HEAD` with `git show`.  A path that is not at `HEAD` (a deleted file) gets an empty text, not an error.  The plans are `<plan>` and each `docs/plans/{active,completed}/<stem>-m<n>.md` at `HEAD`.
-* It prints one line for each candidate: `<class> <path>:<line> <side>: <reasons>`, or `<class> <path> (<note>; list it in the PR): <reasons>`.  The note is `no diff line` or `no hunk`.  The last line gives the count and "pick at most 10, the hand-run lines first (decision 0027)".  It exits 0.  A wrong argument count or a `<base>` that starts with `-` exits 2.  A git error or a plan outside the repo exits 1.  A path with no hunk gives a candidate with no line when it meets the `change` or `hot-spot` class.  Examples are a pure rename, a mode change, a new empty file and a binary file.  It is never a `hand-run` candidate, since it changes no message text.  A rename that its new path does not class is classed by its old path, with the reason "renamed from <old>: <reason>".
+* It prints one line for each candidate: `<class> <path>:<line> <side>: <reasons>`, or `<class> <path> (<note>; list it in the PR): <reasons>`.  The note is `no diff line` or `no hunk`.  The last line gives the count and "pick at most 10, the hand-run lines first (decision 0027)".  It exits 0.  A wrong argument count or a `<base>` that starts with `-` exits 2.  A git error or a plan outside the repo exits 1.  A path with no hunk gives a candidate with no line when it meets the `change` or `hot-spot` class.  Examples are a pure rename, a mode change, a new empty file and a binary file.
 
 Tests in `mod tests`, each on a stub that gives no candidate.  Each negative case is in a diff with a positive case, and each test asserts the exact list of candidates, so it fails on the stub:
 
@@ -171,6 +178,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-02, agent (implementer), review round 2: on the old code, these new cases failed on an assert.  A removal just above `#[cfg(test)]` gave no line.  A removal just before `fn stored_stems(` gave a line.  A line of `fn stem_protocol_file` gave no line.  A plan path through a symlink exited 1 with "not in the repo".  The `..` tests of `repo_path` passed on the old code.
 * 2026-11-02, agent (implementer), review round 3: on the old code, two new tests failed on an assert.  A line of `const STORED_STEMS_SESSION` and of `fn stored_stems_clip` gave no line.  A path with no hunk gave no candidate.  The test of a removal at the line of a not-in-the-diff entry passed on the old code.
 * 2026-11-02, agent (implementer), review round 4: on the old code, three new tests failed on an assert.  A rename out of a class path gave no candidate.  A path with no hunk gave a `hand-run` candidate.  `fn open_on_the_worker_check` gave a `hand-run` line.  The `git mv`, last-section, ` b/` and one-line `const` tests passed on the old code.
+* 2026-11-02, agent (implementer), review round 5: on the old code, 3 of the 36 rows of `each_class_reads_both_paths_of_a_rename` failed on an assert.  Each was a rename with a hunk out of a `hand-run` path: `protocol/src/lib.rs`, `xtask/e2e/worker.js` and `weights.rs` (5-2).  The `change` rows with a hunk passed on the old code (5-1).
 
 ## Decision log
 
@@ -184,6 +192,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-02, agent (implementer): `repo_path` makes a plan path canonical when it exists, and removes `..` parts by text when it does not.  I removed its `.` arm, since `components` drops each `.` part, and a comment says so.  Each changed line has one span (low, high).  A removal of a removal-only hunk spans the gap.  `inside` and the `#[cfg(test)]` check of `weights.rs` use that span.
 * 2026-11-02, agent (implementer): the hand-run rule of `e2e.rs` is a goal, not a list of names.  It takes each top-level item whose name starts with `stored_stems` or `worker_check`, and `fn stem_protocol_file`.  Reason: each review round found one more helper (`stored_stems_checks`, `stem_protocol_file`, `STORED_STEMS_SESSION`).  `pub fn` and `static` items have tests too.
 * 2026-11-02, agent (implementer): a path with no hunk gives one candidate, with the first class that it meets and the reasons of each class.  It is never a `hand-run` candidate, since it changes no message text (review round 4).  A rename is classed by its new path, and by its old path when the new path meets no class.  Its note is `no hunk`, so the list tells it from a judgement with `no diff line`.
+* 2026-11-02, agent (implementer): the rename rule is one goal for all classes, and one helper, `class_path`, applies it.  Each class reads a path only through `class_path`: the new path, else the old path.  Reason: rounds 3, 4 and 5 each found one more rename or no-hunk case.  A table test holds a row for each class and each kind of change.
 
 ## Outcomes and retrospective
 

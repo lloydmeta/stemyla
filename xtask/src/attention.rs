@@ -7,9 +7,17 @@
 //! reads them with `git`.  The orchestrator picks at most 10 candidates,
 //! the `hand-run` lines first.
 //!
-//! A file with no hunk, such as a pure rename or a mode change, has no
-//! changed line.  When its path meets a class, it gives a candidate with
-//! no line ([`no_hunk_paths`]).
+//! The rule for renames, once for each class ([`class_path`]):
+//!
+//! * Each class (`hand-run`, `change`, `hot-spot`) reads both paths of a
+//!   rename.  It reads the new path first.  If the new path meets no
+//!   class, it reads the old path, with the reason
+//!   "renamed from <old>: <reason>".
+//! * A path with no hunk can meet only `change` or `hot-spot`
+//!   ([`no_hunk_paths`]).  It is never a `hand-run` candidate, since no
+//!   message text changed.
+//! * For `hand-run` with a hunk, the path picks the rule.  The line tests
+//!   read the text at `HEAD` of the new path.
 //!
 //! `plans/active/harness-phase-3b-m7.md` (step 2) gives the classes and
 //! their rules.
@@ -287,8 +295,14 @@ pub fn candidates(
     let hunks: Vec<&[Changed]> = lines.chunk_by(|a, b| a.hunk == b.hunk).collect();
     let mut found = Vec::new();
     for hunk in &hunks {
-        if let Some(first) = hand_run_line(hunk, text_of(&hunk[0].path)) {
-            found.push(candidate(Class::HandRun, first, vec![HAND_RUN.to_string()]));
+        let text = text_of(&hunk[0].path);
+        let hit = class_path(&hunk[0], |path| hand_run_line(path, hunk, text));
+        if let Some((first, from)) = hit {
+            found.push(candidate(
+                Class::HandRun,
+                first,
+                renamed(vec![HAND_RUN.to_string()], from),
+            ));
         }
     }
     let mut seen: Vec<&str> = Vec::new();
@@ -298,45 +312,57 @@ pub fn candidates(
         }
         seen.push(&changed.path);
         let text = text_of(&changed.path);
-        let reasons = by_path(&changed.path, changed.renamed_from.as_deref(), |path| {
-            change_reason(path, text)
-                .map(str::to_string)
-                .into_iter()
-                .collect()
-        });
-        if !reasons.is_empty() {
-            found.push(candidate(Class::Change, changed, reasons));
-        }
-    }
-    for hunk in &hunks {
-        if hunk[0].path != "xtask/src/rules.rs" {
-            continue;
-        }
-        let allowlist = block(text_of(&hunk[0].path), "const SKIP_ALLOWLIST", "];");
-        if let Some(first) = hunk.iter().find(|c| inside(allowlist, c)) {
+        if let Some((reason, from)) = class_path(changed, |path| change_reason(path, text)) {
             found.push(candidate(
                 Class::Change,
-                first,
-                vec![ALLOWLISTED.to_string()],
+                changed,
+                renamed(vec![reason.to_string()], from),
             ));
         }
     }
     for hunk in &hunks {
-        let reasons = by_path(&hunk[0].path, hunk[0].renamed_from.as_deref(), hot_reasons);
-        if !reasons.is_empty() {
-            found.push(candidate(Class::HotSpot, &hunk[0], reasons));
+        let allowlist = block(text_of(&hunk[0].path), "const SKIP_ALLOWLIST", "];");
+        let hit = class_path(&hunk[0], |path| {
+            let rules = path == "xtask/src/rules.rs";
+            hunk.iter().find(|c| rules && inside(allowlist, c))
+        });
+        if let Some((first, from)) = hit {
+            found.push(candidate(
+                Class::Change,
+                first,
+                renamed(vec![ALLOWLISTED.to_string()], from),
+            ));
+        }
+    }
+    for hunk in &hunks {
+        let hit = class_path(&hunk[0], |path| {
+            Some(hot_reasons(path)).filter(|r| !r.is_empty())
+        });
+        if let Some((reasons, from)) = hit {
+            found.push(candidate(Class::HotSpot, &hunk[0], renamed(reasons, from)));
         }
     }
     for changed in lines.iter().filter(|c| c.side == Side::Right) {
-        if changed.path.ends_with(".rs") && has_unsafe(&changed.text) {
-            found.push(candidate(Class::HotSpot, changed, vec![UNSAFE.to_string()]));
-        }
-        let manifest = changed.path == "Cargo.toml" || changed.path.ends_with("/Cargo.toml");
-        if manifest && is_dependency(text_of(&changed.path), changed.line, &changed.text) {
+        let text = text_of(&changed.path);
+        let hit = class_path(changed, |path| {
+            (path.ends_with(".rs") && has_unsafe(&changed.text)).then_some(UNSAFE)
+        });
+        if let Some((reason, from)) = hit {
             found.push(candidate(
                 Class::HotSpot,
                 changed,
-                vec![DEPENDENCY.to_string()],
+                renamed(vec![reason.to_string()], from),
+            ));
+        }
+        let hit = class_path(changed, |path| {
+            let manifest = path == "Cargo.toml" || path.ends_with("/Cargo.toml");
+            (manifest && is_dependency(text, changed.line, &changed.text)).then_some(DEPENDENCY)
+        });
+        if let Some((reason, from)) = hit {
+            found.push(candidate(
+                Class::HotSpot,
+                changed,
+                renamed(vec![reason.to_string()], from),
             ));
         }
     }
@@ -361,18 +387,29 @@ pub fn candidates(
     // `hand-run` candidate.
     for (path, from) in no_hunk_paths(diff) {
         let text = text_of(&path);
+        // A file with no hunk, as a changed line with no line, so that
+        // `class_path` reads it as it reads the others.
+        let file = Changed {
+            path: path.clone(),
+            side: Side::Right,
+            line: 0,
+            hunk_new: 0,
+            hunk_new_count: 0,
+            hunk: 0,
+            text: String::new(),
+            renamed_from: from,
+        };
         let mut classes = Vec::new();
-        let change = by_path(&path, from.as_deref(), |p| {
-            change_reason(p, text)
-                .map(str::to_string)
-                .into_iter()
-                .collect()
-        });
-        for reason in change {
-            classes.push((Class::Change, reason));
+        if let Some((reason, from)) = class_path(&file, |p| change_reason(p, text)) {
+            for reason in renamed(vec![reason.to_string()], from) {
+                classes.push((Class::Change, reason));
+            }
         }
-        for reason in by_path(&path, from.as_deref(), hot_reasons) {
-            classes.push((Class::HotSpot, reason));
+        let hot = class_path(&file, |p| Some(hot_reasons(p)).filter(|r| !r.is_empty()));
+        if let Some((reasons, from)) = hot {
+            for reason in renamed(reasons, from) {
+                classes.push((Class::HotSpot, reason));
+            }
         }
         if let Some((class, _)) = classes.first() {
             found.push(Candidate {
@@ -387,21 +424,30 @@ pub fn candidates(
     merge_and_sort(found)
 }
 
-/// The reasons that `reasons` gives for `path`.  When it gives none and
-/// the file is a rename, the reasons for the old path, each as
-/// `renamed from <old>: <reason>`.
-fn by_path(
-    path: &str,
-    renamed_from: Option<&str>,
-    reasons: impl Fn(&str) -> Vec<String>,
-) -> Vec<String> {
-    let found = reasons(path);
-    match renamed_from {
-        Some(old) if found.is_empty() => reasons(old)
+/// The class path of `changed`: what `meets` gives for its new path, or
+/// else for the old path of a rename.  The second value is the old path
+/// when the old path gave the answer.  Each class reads a path only
+/// through this function, so no class can forget the old path.
+fn class_path<T>(
+    changed: &Changed,
+    meets: impl Fn(&str) -> Option<T>,
+) -> Option<(T, Option<&str>)> {
+    if let Some(found) = meets(&changed.path) {
+        return Some((found, None));
+    }
+    let old = changed.renamed_from.as_deref()?;
+    meets(old).map(|found| (found, Some(old)))
+}
+
+/// `reasons`, each as `renamed from <old>: <reason>` when the old path
+/// `from` gave them.
+fn renamed(reasons: Vec<String>, from: Option<&str>) -> Vec<String> {
+    match from {
+        Some(old) => reasons
             .into_iter()
             .map(|reason| format!("renamed from {old}: {reason}"))
             .collect(),
-        _ => found,
+        None => reasons,
     }
 }
 
@@ -430,10 +476,10 @@ fn span(changed: &Changed) -> (usize, usize) {
 }
 
 /// The first line of `hunk` that changes a message that `stored-stems`,
-/// `worker-check` or `weights` writes by hand.  `text` is the file at
-/// `HEAD`.
-fn hand_run_line<'a>(hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
-    match hunk[0].path.as_str() {
+/// `worker-check` or `weights` writes by hand.  `path` picks the rule, and
+/// `text` is the file at `HEAD` of the new path.
+fn hand_run_line<'a>(path: &str, hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
+    match path {
         "protocol/src/lib.rs" | "xtask/e2e/worker.js" => hunk.first(),
         "xtask/src/e2e/weights.rs" => {
             let tests = text
@@ -1502,6 +1548,164 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// A rename with one hunk at line 3, from `from` to `to`.
+    fn renamed(from: &str, to: &str) -> String {
+        format!(
+            "diff --git a/{from} b/{to}\nsimilarity index 90%\nrename from {from}\nrename to {to}\nindex 1..2 100644\n--- a/{from}\n+++ b/{to}\n@@ -3 +3 @@\n-a\n+b\n"
+        )
+    }
+
+    /// A rename with no hunk, from `from` to `to`.
+    fn pure_rename(from: &str, to: &str) -> String {
+        format!(
+            "diff --git a/{from} b/{to}\nsimilarity index 100%\nrename from {from}\nrename to {to}\n"
+        )
+    }
+
+    /// A mode change of `path`, with no hunk.
+    fn mode_change(path: &str) -> String {
+        format!("diff --git a/{path} b/{path}\nold mode 100644\nnew mode 100755\n")
+    }
+
+    /// Each class reads the new path of a rename, then its old path.  A
+    /// path with no hunk is never `hand-run`.  Each row is one diff section
+    /// and its exact candidates.
+    #[test]
+    fn each_class_reads_both_paths_of_a_rename() {
+        let files = [("xtask/src/e2e/weights.rs", WEIGHTS), ("x/w.rs", WEIGHTS)];
+        let none = "(no hunk; list it in the PR)";
+        let proto = format!("{}; {}; {MESSAGES}", strict("PROTO-2"), strict("MEM-2"));
+        let proto_from = |old: &str| {
+            format!(
+                "renamed from {old}: {}; renamed from {old}: {}; renamed from {old}: {MESSAGES}",
+                strict("PROTO-2"),
+                strict("MEM-2")
+            )
+        };
+        let mem1 = strict("MEM-1");
+        let mut rows: Vec<(String, Vec<String>)> = vec![
+            (
+                renamed("x/a.rs", "protocol/src/lib.rs"),
+                vec![format!(
+                    "hand-run protocol/src/lib.rs:3 LEFT: {HAND_RUN}; {proto}"
+                )],
+            ),
+            (
+                renamed("protocol/src/lib.rs", "x/a.rs"),
+                vec![format!(
+                    "hand-run x/a.rs:3 LEFT: renamed from protocol/src/lib.rs: {HAND_RUN}; {}",
+                    proto_from("protocol/src/lib.rs")
+                )],
+            ),
+            (
+                pure_rename("protocol/src/lib.rs", "x/a.rs"),
+                vec![format!(
+                    "hot-spot x/a.rs {none}: {}",
+                    proto_from("protocol/src/lib.rs")
+                )],
+            ),
+            (
+                mode_change("protocol/src/lib.rs"),
+                vec![format!("hot-spot protocol/src/lib.rs {none}: {proto}")],
+            ),
+            (
+                renamed("x/w.js", "xtask/e2e/worker.js"),
+                vec![format!("hand-run xtask/e2e/worker.js:3 LEFT: {HAND_RUN}")],
+            ),
+            (
+                renamed("xtask/e2e/worker.js", "x/w.js"),
+                vec![format!(
+                    "hand-run x/w.js:3 LEFT: renamed from xtask/e2e/worker.js: {HAND_RUN}"
+                )],
+            ),
+            (pure_rename("xtask/e2e/worker.js", "x/w.js"), vec![]),
+            (mode_change("xtask/e2e/worker.js"), vec![]),
+            (
+                renamed("x/w.rs", "xtask/src/e2e/weights.rs"),
+                vec![format!(
+                    "hand-run xtask/src/e2e/weights.rs:3 LEFT: {HAND_RUN}"
+                )],
+            ),
+            (
+                renamed("xtask/src/e2e/weights.rs", "x/w.rs"),
+                vec![format!(
+                    "hand-run x/w.rs:3 LEFT: renamed from xtask/src/e2e/weights.rs: {HAND_RUN}"
+                )],
+            ),
+            (pure_rename("xtask/src/e2e/weights.rs", "x/w.rs"), vec![]),
+            (mode_change("xtask/src/e2e/weights.rs"), vec![]),
+        ];
+        for (path, other, reason, class) in [
+            (
+                ".claude/rules/x.md",
+                "x/r.md",
+                HARNESS.to_string(),
+                "change",
+            ),
+            ("docs/invariants.md", "x/i.md", RULE.to_string(), "change"),
+            (
+                ".github/workflows/ci.yml",
+                "x/ci.yml",
+                CI.to_string(),
+                "change",
+            ),
+            ("engine/clippy.toml", "x/c.toml", mem1.clone(), "hot-spot"),
+            ("engine/src/song.rs", "x/s.rs", mem1.clone(), "hot-spot"),
+        ] {
+            rows.extend([
+                (
+                    renamed(other, path),
+                    vec![format!("{class} {path}:3 LEFT: {reason}")],
+                ),
+                (
+                    renamed(path, other),
+                    vec![format!(
+                        "{class} {other}:3 LEFT: renamed from {path}: {reason}"
+                    )],
+                ),
+                (
+                    pure_rename(path, other),
+                    vec![format!(
+                        "{class} {other} {none}: renamed from {path}: {reason}"
+                    )],
+                ),
+                (
+                    mode_change(path),
+                    vec![format!("{class} {path} {none}: {reason}")],
+                ),
+            ]);
+        }
+        rows.extend([
+            (
+                renamed(".claude/rules/a.md", ".claude/rules/b.md"),
+                vec![format!("change .claude/rules/b.md:3 LEFT: {HARNESS}")],
+            ),
+            (
+                pure_rename("engine/src/song.rs", "engine/src/player.rs"),
+                vec![format!(
+                    "hot-spot engine/src/player.rs {none}: {}",
+                    strict("RT-1")
+                )],
+            ),
+            (renamed("x/a.md", "x/b.md"), vec![]),
+            (pure_rename("x/a.md", "x/b.md"), vec![]),
+        ]);
+        let mut failed = Vec::new();
+        for (diff, want) in &rows {
+            let got = rendered(diff, &files, &[]);
+            if got != *want {
+                failed.push(format!("{diff}\n  got  {got:?}\n  want {want:?}"));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "{} rows failed:\n{}",
+            failed.len(),
+            failed.join("\n")
+        );
+        assert_eq!(rows.len(), 36);
     }
 
     #[test]
