@@ -1670,6 +1670,7 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.",
     "The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.",
     "* Record each answer, with the date, in that section, and each new choice with it.",
+    "Add one Decision log line, as the maintainer's decision, that points to them.",
     "no \"How the work runs\" or \"Decisions for the maintainer\" section, write each missing section first.",
     "`/review-rounds <base> <N+1> \"<criteria>\"`",
     "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
@@ -1747,8 +1748,8 @@ fn the_orchestrate_skill_keeps_its_key_lines() {
 /// a GPU hand run widened to any failure of a browser test, the
 /// permission rule removed, and a description that YAML cannot read
 /// (review round 1 of harness phase 3b, M6: 1-1, 1-2 and 1-3).  Also the
-/// pins of round 2 (2-1), of round 3 (3-1) and of round 4 (4-3 and
-/// 4-7).
+/// pins of round 2 (2-1), of round 3 (3-1), of round 4 (4-3 and 4-7) and
+/// of round 5 (5-1).
 #[test]
 fn the_orchestrate_pins_fail_on_a_changed_skill() {
     let text = std::fs::read_to_string(xtask::workspace_root().join(ORCHESTRATE_SKILL))
@@ -1810,6 +1811,10 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
             "no \"How the work runs\" or \"Decisions for the maintainer\" section, write each missing section first.",
             "no \"How the work runs\" section, write that section first.",
         ),
+        (
+            "* The answers go in the section \"Decisions for the maintainer\" (\"When to use it\").  Add one Decision log line, as the maintainer's decision, that points to them.",
+            "* Record each answer in the plan's Decision log, as the maintainer's decision, with the date.",
+        ),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
         let changed = text.replacen(from, to, 1);
@@ -1830,6 +1835,14 @@ fn the_sizing_rule_says_the_same_in_each_place() {
         .lines()
         .find(|line| line.starts_with("* Plans:"))
         .unwrap_or_default();
+    let plans = std::fs::read_to_string(xtask::workspace_root().join("docs/plans/PLANS.md"))
+        .unwrap_or_default();
+    assert!(
+        plans.contains(
+            "This section is the one record of the answers; a Decision log line points to it."
+        ),
+        "docs/plans/PLANS.md: the section \"Decisions for the maintainer\" does not say that it is the one record of the answers.  Fix: say it, as the orchestrate skill's \"Start\" does (review round 5 of harness phase 3b, M6: 5-1)."
+    );
     let missing: Vec<&str> = SIZING_SIGNALS
         .iter()
         .copied()
