@@ -101,7 +101,7 @@ The classes, in their order of output:
 
 The rule for renames, once for all classes (`class_path`):
 
-* Each class (`hand-run`, `change`, `hot-spot`) reads both paths of a rename.  It reads the new path first.  If the new path meets no class, it reads the old path, with the reason "renamed from <old>: <reason>".
+* Each class (`hand-run`, `change`, `hot-spot`) reads both paths of a rename.  It reads the new path first.  If the new path does not meet the class, it reads the old path, with the reason "renamed from <old>: <reason>".
 * A path with no hunk can meet only `change` or `hot-spot`.  It is never a `hand-run` candidate, since no message text changed.
 * For `hand-run` with a hunk, the path picks the rule (`protocol/src/lib.rs`, `worker.js`, `weights.rs`, `e2e.rs`).  The line tests read the text at `HEAD` of the new path.
 * The test `each_class_reads_both_paths_of_a_rename` holds one row for each case.  Each row is a diff section and its exact candidates.
@@ -179,6 +179,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-02, agent (implementer), review round 3: on the old code, two new tests failed on an assert.  A line of `const STORED_STEMS_SESSION` and of `fn stored_stems_clip` gave no line.  A path with no hunk gave no candidate.  The test of a removal at the line of a not-in-the-diff entry passed on the old code.
 * 2026-11-02, agent (implementer), review round 4: on the old code, three new tests failed on an assert.  A rename out of a class path gave no candidate.  A path with no hunk gave a `hand-run` candidate.  `fn open_on_the_worker_check` gave a `hand-run` line.  The `git mv`, last-section, ` b/` and one-line `const` tests passed on the old code.
 * 2026-11-02, agent (implementer), review round 5: on the old code, 3 of the 36 rows of `each_class_reads_both_paths_of_a_rename` failed on an assert.  Each was a rename with a hunk out of a `hand-run` path: `protocol/src/lib.rs`, `xtask/e2e/worker.js` and `weights.rs` (5-2).  The `change` rows with a hunk passed on the old code (5-1).
+* 2026-11-02, agent (implementer), review round 6: the 4 new rows of `each_class_reads_both_paths_of_a_rename` passed on the old code, as they pin its behaviour.  A hand-made mutant that reads the old path's text failed 2 rows, and one that reads only the new path failed 18 rows.
 
 ## Decision log
 
@@ -191,7 +192,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-02, agent (implementer): `xtask attention` makes `<plan>` relative to the repo root: it joins it to the current folder, removes `.` and `..` parts, and removes the root.  So `./<plan>`, an absolute path and a path from a subfolder give the same output.  `git` resolves `HEAD:./<path>` from the current folder too, but the plan path must match the diff path.
 * 2026-11-02, agent (implementer): `repo_path` makes a plan path canonical when it exists, and removes `..` parts by text when it does not.  I removed its `.` arm, since `components` drops each `.` part, and a comment says so.  Each changed line has one span (low, high).  A removal of a removal-only hunk spans the gap.  `inside` and the `#[cfg(test)]` check of `weights.rs` use that span.
 * 2026-11-02, agent (implementer): the hand-run rule of `e2e.rs` is a goal, not a list of names.  It takes each top-level item whose name starts with `stored_stems` or `worker_check`, and `fn stem_protocol_file`.  Reason: each review round found one more helper (`stored_stems_checks`, `stem_protocol_file`, `STORED_STEMS_SESSION`).  `pub fn` and `static` items have tests too.
-* 2026-11-02, agent (implementer): a path with no hunk gives one candidate, with the first class that it meets and the reasons of each class.  It is never a `hand-run` candidate, since it changes no message text (review round 4).  A rename is classed by its new path, and by its old path when the new path meets no class.  Its note is `no hunk`, so the list tells it from a judgement with `no diff line`.
+* 2026-11-02, agent (implementer): a path with no hunk gives one candidate, with the first class that it meets and the reasons of each class.  It is never a `hand-run` candidate, since it changes no message text (review round 4).  For each class, a rename is classed by its new path.  If the new path does not meet the class, it reads the old path.  Its note is `no hunk`, so the list tells it from a judgement with `no diff line`.
 * 2026-11-02, agent (implementer): the rename rule is one goal for all classes, and one helper, `class_path`, applies it.  Each class reads a path only through `class_path`: the new path, else the old path.  Reason: rounds 3, 4 and 5 each found one more rename or no-hunk case.  A table test holds a row for each class and each kind of change.
 
 ## Outcomes and retrospective

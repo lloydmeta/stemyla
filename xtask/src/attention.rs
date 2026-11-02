@@ -10,8 +10,8 @@
 //! The rule for renames, once for each class ([`class_path`]):
 //!
 //! * Each class (`hand-run`, `change`, `hot-spot`) reads both paths of a
-//!   rename.  It reads the new path first.  If the new path meets no
-//!   class, it reads the old path, with the reason
+//!   rename.  It reads the new path first.  If the new path does not
+//!   meet the class, it reads the old path, with the reason
 //!   "renamed from <old>: <reason>".
 //! * A path with no hunk can meet only `change` or `hot-spot`
 //!   ([`no_hunk_paths`]).  It is never a `hand-run` candidate, since no
@@ -1574,7 +1574,29 @@ mod tests {
     /// and its exact candidates.
     #[test]
     fn each_class_reads_both_paths_of_a_rename() {
-        let files = [("xtask/src/e2e/weights.rs", WEIGHTS), ("x/w.rs", WEIGHTS)];
+        // The old and the new path of a rename have different texts, so a
+        // line test that reads the old path's text fails a row.
+        let files = [
+            ("xtask/src/e2e/weights.rs", WEIGHTS),
+            ("x/w.rs", "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n"),
+            ("x/w2.rs", WEIGHTS),
+            (
+                "xtask/src/e2e.rs",
+                "fn smoke() {\n    let a = 1;\n    let m = 1;\n}\n",
+            ),
+            (
+                "x/e.rs",
+                "fn stored_stems(o: &Opts) {\n    let a = 1;\n    let m = 1;\n}\n",
+            ),
+            (
+                "x/rules.rs",
+                "const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[\n    (\"a\", \"b\", \"c\"),\n    (\"d\", \"e\", \"f\"),\n];\n",
+            ),
+            (
+                "engine/Cargo.toml.off",
+                "[package]\nname = \"x\"\n\n[dependencies]\nfoo = \"1\"\n",
+            ),
+        ];
         let none = "(no hunk; list it in the PR)";
         let proto = format!("{}; {}; {MESSAGES}", strict("PROTO-2"), strict("MEM-2"));
         let proto_from = |old: &str| {
@@ -1629,9 +1651,9 @@ mod tests {
                 )],
             ),
             (
-                renamed("xtask/src/e2e/weights.rs", "x/w.rs"),
+                renamed("xtask/src/e2e/weights.rs", "x/w2.rs"),
                 vec![format!(
-                    "hand-run x/w.rs:3 LEFT: renamed from xtask/src/e2e/weights.rs: {HAND_RUN}"
+                    "hand-run x/w2.rs:3 LEFT: renamed from xtask/src/e2e/weights.rs: {HAND_RUN}"
                 )],
             ),
             (pure_rename("xtask/src/e2e/weights.rs", "x/w.rs"), vec![]),
@@ -1691,6 +1713,28 @@ mod tests {
             ),
             (renamed("x/a.md", "x/b.md"), vec![]),
             (pure_rename("x/a.md", "x/b.md"), vec![]),
+            (
+                renamed("xtask/src/e2e.rs", "x/e.rs"),
+                vec![format!(
+                    "hand-run x/e.rs:3 LEFT: renamed from xtask/src/e2e.rs: {HAND_RUN}"
+                )],
+            ),
+            (
+                renamed("xtask/src/rules.rs", "x/rules.rs"),
+                vec![format!(
+                    "change x/rules.rs:3 LEFT: renamed from xtask/src/rules.rs: {ALLOWLISTED}"
+                )],
+            ),
+            (
+                "diff --git a/x/u.rs b/x/u.txt\nsimilarity index 90%\nrename from x/u.rs\nrename to x/u.txt\nindex 1..2 100644\n--- a/x/u.rs\n+++ b/x/u.txt\n@@ -3 +3 @@\n-a\n+    unsafe { f() }\n".to_string(),
+                vec![format!("hot-spot x/u.txt:3 RIGHT: renamed from x/u.rs: {UNSAFE}")],
+            ),
+            (
+                "diff --git a/engine/Cargo.toml b/engine/Cargo.toml.off\nsimilarity index 90%\nrename from engine/Cargo.toml\nrename to engine/Cargo.toml.off\nindex 1..2 100644\n--- a/engine/Cargo.toml\n+++ b/engine/Cargo.toml.off\n@@ -5 +5 @@\n-bar = \"1\"\n+foo = \"1\"\n".to_string(),
+                vec![format!(
+                    "hot-spot engine/Cargo.toml.off:5 RIGHT: renamed from engine/Cargo.toml: {DEPENDENCY}"
+                )],
+            ),
         ]);
         let mut failed = Vec::new();
         for (diff, want) in &rows {
@@ -1705,7 +1749,7 @@ mod tests {
             failed.len(),
             failed.join("\n")
         );
-        assert_eq!(rows.len(), 36);
+        assert_eq!(rows.len(), 40);
     }
 
     #[test]
