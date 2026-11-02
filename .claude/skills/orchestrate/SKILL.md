@@ -22,7 +22,7 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 * The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
 * If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message.
-* If the plan has more than 3 milestones and no "How the work runs" section, write that section first.  `docs-check` fails such a plan.
+* If the plan has more than 3 milestones and no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan.
 * No hook starts this skill.  A hook cannot start a skill.
 
 ## Roles
@@ -79,7 +79,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 ## Start
 
 * Send the message of "When to use it" once.  It holds each open choice that depends on the maintainer, with its options and your recommendation.
-* Record each answer in the plan's Decision log, as the maintainer's decision, with the date.
+* The answers go in the section "Decisions for the maintainer" ("When to use it").  Add one Decision log line, as the maintainer's decision, that points to them.
 * Make the branch and the draft PR as the plan's section says.  Commit the plan, signed, as the first commit of the new branch.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
 * Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.  M7 of harness phase 3b adds the form of the body.
 

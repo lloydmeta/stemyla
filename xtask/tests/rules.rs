@@ -1667,6 +1667,10 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "List each design or implementation choice whose answer depends on the maintainer's judgement.",
     "* For each choice, give the options, your recommendation and the reason.",
     "The plan's section \"Decisions for the maintainer\" holds these choices (`docs/plans/PLANS.md`, \"Optional sections\").  Ask only its open entries.",
+    "* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.",
+    "The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.",
+    "* Record each answer, with the date, in that section, and each new choice with it.",
+    "no \"How the work runs\" or \"Decisions for the maintainer\" section, write each missing section first.",
     "`/review-rounds <base> <N+1> \"<criteria>\"`",
     "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
     "or shows only the plan that you wrote or changed for \"When to use it\"",
@@ -1743,7 +1747,8 @@ fn the_orchestrate_skill_keeps_its_key_lines() {
 /// a GPU hand run widened to any failure of a browser test, the
 /// permission rule removed, and a description that YAML cannot read
 /// (review round 1 of harness phase 3b, M6: 1-1, 1-2 and 1-3).  Also the
-/// pins of round 2 (2-1) and of round 3 (3-1).
+/// pins of round 2 (2-1), of round 3 (3-1) and of round 4 (4-3 and
+/// 4-7).
 #[test]
 fn the_orchestrate_pins_fail_on_a_changed_skill() {
     let text = std::fs::read_to_string(xtask::workspace_root().join(ORCHESTRATE_SKILL))
@@ -1792,6 +1797,19 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
             "*",
         ),
         ("  Ask only its open entries.", ""),
+        (
+            "ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.",
+            "ask the maintainer's decisions.",
+        ),
+        ("  Send it once.", ""),
+        (
+            "* Record each answer, with the date, in that section, and each new choice with it.",
+            "*",
+        ),
+        (
+            "no \"How the work runs\" or \"Decisions for the maintainer\" section, write each missing section first.",
+            "no \"How the work runs\" section, write that section first.",
+        ),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
         let changed = text.replacen(from, to, 1);
