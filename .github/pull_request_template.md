@@ -12,7 +12,7 @@
 
 ## Verification
 
-<!-- Give 2 or 3 lines: the checks that ran and their results.  If a kernel becomes a default, name the real GPU that passed (GPU-3). -->
+<!-- Give 2 or 3 lines: the checks that ran and their results.  If a kernel becomes a default, give the CPU check and the browser selftest (GPU-2), and name the real GPU that passed (GPU-3). -->
 
 <details><summary>For agents</summary>
 

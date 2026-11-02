@@ -21,7 +21,7 @@ use std::process::Command;
 
 pub const USAGE: &str = "usage: xtask attention <base> <plan>";
 
-/// The exit code of a git error.
+/// The exit code of a git error or a plan outside the repo.
 const FAILED: i32 = 1;
 
 /// The exit code of a usage error.
@@ -312,15 +312,16 @@ fn candidate(class: Class, changed: &Changed, reasons: Vec<String>) -> Candidate
     }
 }
 
-/// The line at `HEAD` that a changed line is at: its own line for an
-/// added line, and its hunk's new-side position for a removed line.  A
-/// hunk that only removes lines gives the line after its position, since
-/// `+<n>,0` names the line before the removed lines.
-fn position(changed: &Changed) -> usize {
+/// The lines at `HEAD` that a changed line is between, as (low, high).
+/// An added line is at its own line, so low and high are that line.  A
+/// removed line of a hunk with new lines is at the hunk's new-side
+/// position.  A hunk that only removes lines (`+<n>,0`) is the gap between
+/// the lines `n` and `n + 1`.
+fn span(changed: &Changed) -> (usize, usize) {
     match changed.side {
-        Side::Right => changed.line,
-        Side::Left if changed.hunk_new_count == 0 => changed.hunk_new + 1,
-        Side::Left => changed.hunk_new,
+        Side::Right => (changed.line, changed.line),
+        Side::Left if changed.hunk_new_count == 0 => (changed.hunk_new, changed.hunk_new + 1),
+        Side::Left => (changed.hunk_new, changed.hunk_new),
     }
 }
 
@@ -335,13 +336,15 @@ fn hand_run_line<'a>(hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
                 .lines()
                 .position(|line| line.trim() == "#[cfg(test)]")
                 .map_or(usize::MAX, |i| i + 1);
-            hunk.iter().find(|c| position(c) < tests)
+            hunk.iter().find(|c| span(c).0 < tests)
         }
         "xtask/src/e2e.rs" => {
-            // `stored_stems_checks` reads the replies of `stored-stems`.
+            // `stored_stems_checks` reads the replies of `stored-stems`, and
+            // `stem_protocol_file` copies `stem_protocol::stem_file` by hand.
             let bodies = [
                 block(text, "fn stored_stems(", "}"),
                 block(text, "fn stored_stems_checks(", "}"),
+                block(text, "fn stem_protocol_file(", "}"),
                 block(text, "fn worker_check(", "}"),
             ];
             hunk.iter()
@@ -362,9 +365,11 @@ fn block(text: &str, start: &str, end: &str) -> Option<(usize, usize)> {
     Some((first + 1, last + 1))
 }
 
-/// True when `changed` is at a line of `block`.
+/// True when `changed` is inside `block`: its span starts at or after the
+/// first line, and ends at or before the last line.
 fn inside(block: Option<(usize, usize)>, changed: &Changed) -> bool {
-    block.is_some_and(|(first, last)| (first..=last).contains(&position(changed)))
+    let (low, high) = span(changed);
+    block.is_some_and(|(first, last)| first <= low && high <= last)
 }
 
 /// The reason of a changed file in the `change` class, or none.  `text`
@@ -595,18 +600,24 @@ fn gather(base: &str, plan: &str) -> Result<(String, Texts, Texts)> {
 }
 
 /// `plan`, which is relative to `dir` or absolute, as a `/`-separated
-/// path relative to `root`.  The path need not exist.
+/// path relative to `root`.  A path that exists is made canonical first,
+/// since `root` from git has no symlink.  A path that does not exist loses
+/// its `..` parts.
 pub fn repo_path(root: &Path, dir: &Path, plan: &str) -> Result<String> {
-    let mut path = std::path::PathBuf::new();
-    for part in dir.join(plan).components() {
-        match part {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                path.pop();
+    let joined = dir.join(plan);
+    let path = joined.canonicalize().unwrap_or_else(|_| {
+        let mut path = std::path::PathBuf::new();
+        // `components` drops each `.` part.
+        for part in joined.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    path.pop();
+                }
+                other => path.push(other),
             }
-            other => path.push(other),
         }
-    }
+        path
+    });
     let relative = path
         .strip_prefix(root)
         .with_context(|| format!("{plan} is not in the repo {}", root.display()))?;
@@ -721,7 +732,7 @@ mod tests {
         );
     }
 
-    const E2E: &str = "fn stored_stems_clip(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n";
+    const E2E: &str = "fn stored_stems_clip(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n\nfn stem_protocol_file(name: &str) -> String {\n    format!(\"{name}.wav\")\n}\n";
 
     const WEIGHTS: &str = "pub fn run() {\n    let m = json!({\n        \"type\": \"init\",\n        \"settings\": s,\n    });\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() { let m = json!({ \"type\": \"x\" }); }\n}\n";
 
@@ -760,6 +771,7 @@ mod tests {
                 24,
                 "    let ok = r[\"type\"] == \"ok\";",
             ),
+            added("xtask/src/e2e.rs", 28, "    format!(\"{name}.flac\")"),
             added("xtask/src/e2e/weights.rs", 4, "        \"settings\": t,"),
             added("xtask/src/e2e/weights.rs", 7, "// before the tests"),
             added("xtask/src/e2e/weights.rs", 8, "#[cfg(test)]"),
@@ -776,6 +788,7 @@ mod tests {
                 format!("hand-run xtask/src/e2e.rs:9 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e.rs:15 LEFT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e.rs:24 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:28 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e/weights.rs:4 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e/weights.rs:7 RIGHT: {HAND_RUN}"),
             ]
@@ -793,6 +806,43 @@ mod tests {
         assert_eq!(
             rendered(&diff, &files, &[]),
             vec![format!("hand-run xtask/src/e2e.rs:10 LEFT: {HAND_RUN}")]
+        );
+    }
+
+    #[test]
+    fn a_removal_is_the_gap_between_two_new_lines() {
+        let files = [
+            ("xtask/src/e2e.rs", E2E),
+            ("xtask/src/e2e/weights.rs", WEIGHTS),
+        ];
+        let diff = [
+            hunk("xtask/src/e2e/weights.rs", 8, &["    let x = 1;"], 7, &[]),
+            hunk("xtask/src/e2e.rs", 5, &["// gone"], 4, &[]),
+            hunk("xtask/src/e2e.rs", 4, &["// old"], 4, &["// new"]),
+            hunk("xtask/src/e2e.rs", 10, &["}"], 10, &["} "]),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![
+                format!("hand-run xtask/src/e2e.rs:10 LEFT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e/weights.rs:8 LEFT: {HAND_RUN}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn repo_path_removes_dot_dot_and_refuses_a_path_above_the_root() {
+        let root = Path::new("/no/such/repo");
+        assert_eq!(repo_path(root, root, "a/../b").unwrap(), "b");
+        assert_eq!(
+            repo_path(root, &root.join("docs"), "../docs/./p.md").unwrap(),
+            "docs/p.md"
+        );
+        let e = repo_path(root, root, "../x.md").unwrap_err();
+        assert_eq!(
+            format!("{e:#}"),
+            "../x.md is not in the repo /no/such/repo: prefix not found"
         );
     }
 

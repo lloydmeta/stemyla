@@ -139,9 +139,9 @@ fn without_comments(text: &str) -> String {
 
 /// True when `line` is a heading of level 1 or 2 with text.
 fn is_top_heading(line: &str) -> bool {
+    // A trimmed line that starts with `# ` or `## ` has text after it.
     let line = line.trim();
-    let text = line.strip_prefix("# ").or_else(|| line.strip_prefix("## "));
-    text.is_some_and(|t| !t.trim().is_empty())
+    line.starts_with("# ") || line.starts_with("## ")
 }
 
 /// The lines after the first line that is `heading`, to the next heading

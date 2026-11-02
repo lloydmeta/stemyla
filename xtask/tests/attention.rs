@@ -130,8 +130,26 @@ fn the_hand_run_line_comes_first_and_a_docs_line_is_none() {
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{plan}");
     }
-    let out = run(&dir.join("docs"), &[&base, "plans/active/p.md"]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), want, "from docs/");
+    for plan in ["plans/active/p.md", "../docs/plans/active/p.md"] {
+        let out = run(&dir.join("docs"), &[&base, plan]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "docs/ {plan}");
+    }
+    #[cfg(unix)]
+    {
+        let link =
+            std::env::temp_dir().join(format!("xtask-attention-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(dir, &link).unwrap();
+        let plan = link.join("docs/plans/active/p.md");
+        let out = run(dir, &[&base, plan.to_str().unwrap()]);
+        let _ = std::fs::remove_file(&link);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            want,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     let out = run(dir, &["no-such-base", "docs/plans/active/p.md"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
