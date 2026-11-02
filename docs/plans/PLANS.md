@@ -43,3 +43,9 @@ A plan has these only when it needs them.
     * Review rule: the decision that the review rounds of each milestone follow.
     * Kick-off prompt: the text that a person pastes to start the run.
     * Extra stop conditions: the stops of this plan that the skill does not name.
+* "Decisions for the maintainer": a big task's plan has it, by any of the four signals of decision 0023.
+  * It lists each design or implementation choice whose answer depends on the maintainer's judgement.  For each, it gives the options, a recommendation and the reason.  Then it gives the maintainer's answer, with the date.
+  * The session that writes the plan asks these questions while it writes the plan, before it calls the plan done.
+  * The `orchestrate` skill's "Start" asks only the entries that are still open, and each new choice that it finds in the plan and the code.
+  * A decision during the run stays as it is: the agent decides, records it in the Decision log as "agent", and the PR lists it under "Needs your attention".
+  * The section heading is at level 2 or 3.  `docs-check` fails a plan in `active/` of more than 3 milestones without it.

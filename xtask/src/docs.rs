@@ -1232,12 +1232,14 @@ fn plans_well_formed(markdown: &[(String, String)]) -> Vec<Problem> {
 }
 
 /// An active plan of more than 3 milestones has a `How the work runs`
-/// section at level 2 or 3 (decision 0023).  A milestone is a heading whose
+/// section and a `Decisions for the maintainer` section, each at level 2
+/// or 3 (decision 0023, and `docs/plans/PLANS.md`).  A milestone is a heading whose
 /// text starts with `M<n>`, then a `:`, a space or the end of the line.
 /// A line in a fenced code block is no heading.
 fn plan_runs_problems(file: &str, text: &str) -> Vec<Problem> {
     let mut milestones = BTreeSet::new();
     let mut has_section = false;
+    let mut has_decisions = false;
     let mut fence: Option<(char, usize)> = None;
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -1261,6 +1263,9 @@ fn plan_runs_problems(file: &str, text: &str) -> Vec<Problem> {
         if (2..=3).contains(&level) && heading.starts_with("How the work runs") {
             has_section = true;
         }
+        if (2..=3).contains(&level) && heading.starts_with("Decisions for the maintainer") {
+            has_decisions = true;
+        }
         if let Some(rest) = heading.strip_prefix('M') {
             let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
             let after = &rest[digits.len()..];
@@ -1271,17 +1276,31 @@ fn plan_runs_problems(file: &str, text: &str) -> Vec<Problem> {
             }
         }
     }
-    if milestones.len() <= 3 || has_section {
+    if milestones.len() <= 3 {
         return Vec::new();
     }
-    vec![Problem::new(
-        "plans",
-        file,
-        format!(
-            "has {} milestones (`M<n>` headings) and no `How the work runs` section.  Fix: add it at level 2 or 3, as docs/plans/PLANS.md says (decision 0023).",
-            milestones.len()
-        ),
-    )]
+    let mut problems = Vec::new();
+    if !has_section {
+        problems.push(Problem::new(
+            "plans",
+            file,
+            format!(
+                "has {} milestones (`M<n>` headings) and no `How the work runs` section.  Fix: add it at level 2 or 3, as docs/plans/PLANS.md says (decision 0023).",
+                milestones.len()
+            ),
+        ));
+    }
+    if !has_decisions {
+        problems.push(Problem::new(
+            "plans",
+            file,
+            format!(
+                "has {} milestones (`M<n>` headings) and no `Decisions for the maintainer` section.  Fix: add it at level 2 or 3, with each choice that hinges on the maintainer, as docs/plans/PLANS.md says (decision 0023).",
+                milestones.len()
+            ),
+        ));
+    }
+    problems
 }
 
 /// Each review log with a `Significant` column follows the fix rule of
@@ -2032,7 +2051,7 @@ mod tests {
             .map(|n| format!("### M{n}: work\n"))
             .collect();
         format!(
-            "# A plan\n\n{}{more}\n{}\n",
+            "# A plan\n\n## Decisions for the maintainer\n\n{}{more}\n{}\n",
             headings.concat(),
             PLAN_SECTIONS.join("\n\n")
         )
@@ -2056,6 +2075,49 @@ mod tests {
             assert_eq!(
                 plan_runs_problems(file, &text),
                 [Problem::new("plans", file, NO_RUNS.into())],
+                "{section}"
+            );
+        }
+    }
+
+    const NO_DECISIONS: &str = "has 4 milestones (`M<n>` headings) and no `Decisions for the maintainer` section.  Fix: add it at level 2 or 3, with each choice that hinges on the maintainer, as docs/plans/PLANS.md says (decision 0023).";
+
+    /// An active plan of more than 3 milestones lists the choices for the
+    /// maintainer (the maintainer's correction of 2026-11-01).
+    #[test]
+    fn an_active_plan_of_more_than_3_milestones_needs_decisions_for_the_maintainer() {
+        let file = "docs/plans/active/a.md";
+        // The plan of `milestones` with `more`, and no other section.
+        let plan = |milestones: &[u32], more: &str| {
+            milestone_plan(milestones, "@more@")
+                .replacen("## Decisions for the maintainer\n", "", 1)
+                .replace("@more@", more)
+        };
+        let runs = "## How the work runs\n";
+        assert_eq!(
+            plan_runs_problems(file, &plan(&[1, 2, 3, 4], runs)),
+            [Problem::new("plans", file, NO_DECISIONS.into())]
+        );
+        assert_eq!(
+            plan_runs_problems(file, &plan(&[1, 2, 3], "")),
+            [],
+            "3 milestones"
+        );
+        for section in [
+            "## Decisions for the maintainer",
+            "### Decisions for the maintainer (D1 to D8)",
+        ] {
+            let text = plan(&[1, 2, 3, 4], &format!("{runs}{section}\n"));
+            assert_eq!(plan_runs_problems(file, &text), [], "{section}");
+        }
+        for section in [
+            "#### Decisions for the maintainer",
+            "# Decisions for the maintainer",
+        ] {
+            let text = plan(&[1, 2, 3, 4], &format!("{runs}{section}\n"));
+            assert_eq!(
+                plan_runs_problems(file, &text),
+                [Problem::new("plans", file, NO_DECISIONS.into())],
                 "{section}"
             );
         }

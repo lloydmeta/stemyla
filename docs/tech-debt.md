@@ -453,13 +453,13 @@ M5 of harness phase 3b compared cheaper models with a control for the validator 
 
 * Fix: decision 0025 runs the measurement again when the model line-up changes (phase 6).  Until then, the pin keeps each role on `inherit`.
 
-### TD-72: no run shows that a big task gets one question
+### TD-72: no run shows that a big task asks its decisions up front
 
-This entry concerns no rule.  It concerns decision 0023, the "Plans:" line of `CLAUDE.md` and the recipe "Run a big task hands-off" in `docs/working-with-agents.md`.
+This entry concerns no rule.  It concerns decision 0023, the "Plans:" line of `CLAUDE.md`, the section "Decisions for the maintainer" of `docs/plans/PLANS.md` and the recipe "Run a big task hands-off" in `docs/working-with-agents.md`.
 
-The `orchestrate` skill says that the agent proposes orchestrated mode in one question, after its preflight.  M6 of harness phase 3b ran two `claude -p` dry runs on a plan of 4 milestones (`plans/active/harness-phase-3b-m6.md`, step 5).  Each session proposed the mode in its first reply, but asked no question.  The `dontAsk` mode refused the Bash that the preflight needs, and the skill stops at a failed check before the question.  Auto mode refused a run with Bash allowed.  So no run shows the question.
+The `orchestrate` skill says that the agent sends one message up front, before any work.  The message proposes the mode and lists each choice that hinges on the maintainer, with its options and a recommendation.  M6 of harness phase 3b ran two `claude -p` dry runs on a plan of 4 milestones (`plans/active/harness-phase-3b-m6.md`, step 5).  Each session proposed the mode in its first reply.  Neither sent the decisions as that message, since the `dontAsk` mode refused the Bash that the preflight needs, and the skill stops at a failed check.  Auto mode refused a run with Bash allowed.  So no run shows the message.
 
-* Fix: a person starts a session in auto mode with a big plan and the prompt of the recipe, "Do docs/plans/active/<plan>.md.", and records the first reply.
+* Fix: a person starts a session in auto mode with a big plan and the prompt of the recipe, "Do docs/plans/active/<plan>.md.", and records the first reply.  It passes when the reply lists the plan's decisions, each with its options and a recommendation.  A reply that only proposes the mode does not pass.
 
 ## Known breaches
 
