@@ -1,8 +1,8 @@
 # 0023: a big task runs in orchestrated mode, after one question
 
-Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
+Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/completed/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
 
-Amended on 2026-11-01 by the agent, after M5 of `plans/active/harness-phase-3b.md`: decision 0025's measurement found no cheaper model that passes, so each role keeps `inherit`.  So decision 0025 lowers no cost yet.  A lower cost of the mode may come from decisions 0024 and 0026.  The next big task after the merge measures it, and phase 6 compares the numbers.  The decision is unchanged.
+Amended on 2026-11-01 by the agent, after M5 of `plans/completed/harness-phase-3b.md`: decision 0025's measurement found no cheaper model that passes, so each role keeps `inherit`.  So decision 0025 lowers no cost yet.  A lower cost of the mode may come from decisions 0024 and 0026.  The next big task after the merge measures it, and phase 6 compares the numbers.  The decision is unchanged.
 
 Amended on 2026-11-01 by the maintainer's instruction: "for big tasks, what we agreed on is to have it ask important questions up front about design and implementation that hinge on my decisions".  So the one question of this decision is one message up front, before any work.  The message holds each design or implementation choice that hinges on the maintainer, each with its options, a recommendation and the reason, with the mode, the branch and the PR.  A big task's plan lists these choices in a section "Decisions for the maintainer" (`plans/PLANS.md`), and the session that writes the plan asks them before it calls the plan done.  A decision during the run stays the agent's, in the Decision log and the PR.
 

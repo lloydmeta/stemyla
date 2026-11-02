@@ -1,6 +1,6 @@
 # 0025: each agent role gets a model and an effort, chosen by a measurement
 
-Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
+Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/completed/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
 
 ## Context
 

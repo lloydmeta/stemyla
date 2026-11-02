@@ -338,7 +338,7 @@ In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For ex
 
 D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
 
-Harness phase 3b has the same gap for its measure "cost per milestone against PR #39".  The Progress lines of `plans/active/harness-phase-3b.md` give the final contexts of the round agents and of some other agents.  Only M5's measurement gives `modelUsage` tokens.  No log gives the tokens that the orchestrator used, or a total for the run.  So each cost per milestone in the plan is a lower bound.
+Harness phase 3b has the same gap for its measure "cost per milestone against PR #39".  The Progress lines of `plans/completed/harness-phase-3b.md` give the final contexts of the round agents and of some other agents.  Only M5's measurement gives `modelUsage` tokens.  No log gives the tokens that the orchestrator used, or a total for the run.  So each cost per milestone in the plan is a lower bound.
 
 * Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
 
@@ -467,7 +467,7 @@ The `orchestrate` skill says that the agent sends one message up front, before a
 
 ### TD-73: from round 4, a reviewer reads only the fix range
 
-This entry concerns no rule.  It concerns decision 0024, and D4 of `plans/active/harness-phase-3b.md`.
+This entry concerns no rule.  It concerns decision 0024, and D4 of `plans/completed/harness-phase-3b.md`.
 
 From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the 14 older review logs, rounds 4 and later found 13 bugs.  At least 3 of them were in files that the fix range of the round before did not touch.  They are catch-up 4-1, M7 6-1 and M7 6-2, all in PR #39.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
 

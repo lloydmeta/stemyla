@@ -463,7 +463,91 @@ Kick-off prompt:
 * 2026-11-02, agent (orchestrator): the M7 intent review (round 1) found that `xtask attention` left out the 43 `team leader:` entries of the Decision logs of M1 to M4, though decision 0027 asks for each agent's judgement call.  The orchestrator fixed it with a test that failed first (`bc52f6c`), and added the pick order of the close-out to the skill (`cd96fc5`).  M8's review round 1 reviews both, since its base is `48667e8`; no M7 round 8 runs.  At close-out the orchestrator skips the 8 `unsafe` hot spots that are test strings, rewords the PR summary, updates the plan paths in the body, and writes the line of a refused review in the PR body, not in the plan.
 * 2026-11-02, agent (orchestrator): the M7 intent review (round 2) found 46 more left-out entries: `implementer:` (44) and `orchestrator:` (2).  `xtask attention` now takes the authors `agent`, `team leader`, `implementer` and `orchestrator`, with test rows that failed first.  This replaces the M7 team leader's line above that only `agent` authors count.  The skill's pick order now stays within the 10 and ends with the hot spots and the judgement calls.
 * 2026-11-02, agent (orchestrator): the M7 intent review (round 3) found no blocker and no significant should-fix, so it stopped.  It took 3 rounds (3 agents); its code fixes (`bc52f6c`, `3a48544`) and the skill's pick order (`cd96fc5`) are in M8's review range.
+* 2026-11-01, maintainer: the run paused after M6's review round 1 for the maintainer's travel (`d376200`), and resumed on the maintainer's "continue".
+* 2026-11-02, agent (orchestrator): the M8 intent review (round 1) found two significant gaps: a false line on the known-missed list in the retrospective, and no step after the merge for the refs `refs/remotes/origin/pr/35`, `/37` and `/39`, which P2's re-run needs.  Both are fixed, with P3's reason, which no longer says that the late rounds found no bug outside a range they did not read.
 
 ## Outcomes and retrospective
 
-To be written when the plan completes.
+Done on 2026-11-02, in PR #41.  The numbers come from the Progress lines, the review logs in `reviews/` and the commit times.  Token figures from the logs are final contexts, not tokens used (TD-44).
+
+### What each milestone delivered
+
+* M1: `xtask clean` lists what runs leave, with sizes, and `--yes` removes only the items with a proof.  `xtask review clean <round>` removes one round's worktrees, and `xtask serve` writes a pid file.  The intent review added a fourth proof for agent branches.
+* M2: the measurement of the mutants noise left after PR #39 cut the planned wasm32 filter (11 of 193 lines).  `KNOWN_MISSED` holds the mutants of TD-39 and TD-66, and the skill gives a `known` line no validator.
+* M3: the review rounds follow decision 0024 in the skill, `CLAUDE.md`, the guide and decision 0011, and one test pins one sentence in each.  The log has a `Significant` column, and `xtask review log-check` and `docs-check` check it.  From round 4, reviewers read the fix range.
+* M4: `xtask check --tier commit|push` runs the local checks of GIT-2 by tier and by the changed paths, with a table of the paths of each strict rule.
+* M5: an agent file can name its model and effort.  The measurement found no cheaper model that passes, so each agent keeps `model: inherit`, and `the_agent_models_are_the_measured_ones` pins that.
+* M6: the `orchestrate` skill holds orchestrated mode as M1 to M5 ran it.  After the maintainer's correction, a big task asks its decisions up front.  `docs-check` checks big plans and the last round of a copied log.  `review log-check` checks a repeat of a reported finding.
+* M7: `.github/pull_request_template.md` gives a PR body its form, and `xtask pr-body` checks it.  `xtask attention <base> <plan>` lists the lines for the close-out `COMMENT` review, the hand-run lines first.  The `orchestrate` skill has the PR body steps and the attention review.
+* M8: the rows of this phase in `harness.md`, the guide's recipe and changelog lines, TD-73 to TD-78, a wider TD-44 and TD-50, this retrospective, and the proposals P1 to P7 in `plans/active/harness-engineering.md`.
+
+### Against the Purpose
+
+* A big task runs hands-off by default: the `orchestrate` skill and the sizing line of `CLAUDE.md` do it.  This PR ran M1 to M8 on one branch, with 0 interventions in the 40 review rounds of M1 to M7.  No run shows the up-front message yet (TD-72).
+* The fix rule after round 3: the late rounds of M3 to M7 fixed 27 findings, and logged 48 as `reported, not fixed`.  3 of the 27 were bugs (M7), each in a file that the fix range touched.  The fixes after each late round fell, from about 3.4 in PR #39 to 1.8.  But the rounds after round 3 did not fall: 3.0 for each milestone, against 2.4 in PR #39 (P4).
+* Cheaper models: the measurement ran inside its budget, and no candidate passed.  So the cost of each role did not fall.
+* Local checks by changed paths: warm, tier `commit` takes 11 s to 68 s, and tier `push` about 2 minutes.  The full set took 16 minutes on a PR #39 commit.
+* Cleanup: `xtask clean` exists, and M5 removed 35 clone folders (29.1 GiB) with `--also`.  The orchestrator ran `clean --yes` between milestones, and the PR body lists the steps left after the merge.
+* PR bodies and inline comments: the body of PR #41 follows the template, and `xtask pr-body` passes on it.  <review>.
+
+### The cost
+
+| Milestone | Review rounds | Round agents | Final-context tokens | Review wall minutes | Wall time | Late fixes | Reported, not fixed | New debt |
+| - | - | - | - | - | - | - | - | - |
+| M1 | 7: rounds 1 to 4, and 5 to 7 after the intent review | 48 | 2.42M | 140 | 6.3 h | 26, by the old rule | - | TD-67, TD-68 |
+| M2 | 3 | 30 | 1.49M | 45 | 2.3 h | - | - | none |
+| M3 | 6 | 59 | 2.71M | 71 | 3.5 h | 2 | 11 | TD-69 |
+| M4 | 7 | 49 | 2.67M | 61 | 3.8 h | 6 | 11 | TD-70 |
+| M5 | 3 | 9 | 0.57M, and 40.85M `modelUsage` for the measurement | 21 | 2.8 h | - | - | TD-71 |
+| M6 | 7 | 62 | 2.84M | 78 | 4.1 h, and a pause of 11.6 h | 7 | 17 | TD-72 |
+| M7 | 7 | 60 | 2.98M | 84 | 3.5 h | 12 | 9 | none |
+| M8 | 4 | 25 | 1.33M | 33 | 1.3 h after M7, and 1.3 h of drafts while M7 ran | 0 | 6 | TD-73 to TD-78 |
+
+* M1 to M7: 40 review rounds, 317 round agents, about 15.68M final-context tokens and 500 review wall minutes.  Interventions: 0 in each round.  The rounds after round 3 of M3 to M7 used 4.07M of their 11.77M tokens (35%).
+* Other agents that Progress names (Plan agents, implementers, M5's comparers and team leader): about 3.4M final-context tokens.  The intent reviews took 26 rounds, one `Plan` agent each.  The two dry runs of M6 cost $0.86.  No log gives the orchestrator's tokens (TD-44).
+* Wall time, by the commit times: 26.8 hours of work from the plan commit to M7's close-out (`48667e8`), and 38.4 hours elapsed with the pause.  Each milestone's wall time runs from the end of the milestone before.  M8 took 1.3 hours after M7 closed, to `fa98a82`.
+* PR #39 took 4.6 days, 194 commits and about 80% of a week's usage limit.  This PR had 200 commits at the end of M7.  No one measured its share of the weekly usage limit, since the orchestrator cannot see it.  Rounds 1 to 3 of one milestone used 0.57M to 1.89M, against 1.6M to 2.9M in PR #39.  This PR changes the harness and PR #39 the app, so these are not like for like.
+* By the orchestrator's count, the maintainer sent 11 messages in the run.  3 of them changed the work: the pause for travel, the correction of the up-front questions, and the new end at 08:00 EST.  The others gave D1 to D8 and the permissions at the start, and the resume.
+
+### The maintainer's correction and the pause
+
+* The plan read the maintainer's decision of 2026-10-30 ("confirmed by one question") as one question about the mode.  On 2026-11-01, during M6, the maintainer corrected it: "for big tasks, what we agreed on is to have it ask important questions up front about design and implementation that hinge on my decisions".  M6 changed the skill, `PLANS.md`, `CLAUDE.md`, decision 0023 and the guide to match.  M6's rounds 4 to 7 reviewed the change, and its intent review took 5 rounds to give the rule for no message one reading.
+* The run paused at a clean point at 09:41 EST on 2026-11-01, after M6's review round 1, for the maintainer's travel.  The Progress line of M6 held the steps of the resume.  The run resumed by 21:14 EST from that line, with no lost work.  The mutants run of round 1 stopped after 2 of 146 mutants at the pause.  So after the resume, the team ran cargo-mutants on M6's whole diff: 142 caught, 4 unviable, 0 missed.
+* The maintainer then moved the end of the run to 08:00 EST on 2026-11-02, in place of D8's 12:47.
+
+### What went well
+
+* The loop of M1 to M5 became the skill of M6 with few changes, and each milestone ran with 0 interventions in its rounds.
+* Measure first: M2's count cut a parser from M2, and M5's pass rule, ground truth and budget were fixed before any run.  M5 used 40.85M of its 45M.
+* The late rule did what decision 0024 intends: 48 findings logged and not fixed in M3 to M7.  M6's match of a reported repeat worked live in round 7 (7-1).
+* Rounds 3 and later still found real bugs: M1's round 3 (a worktree with no `.git` file), and M4's 3-1 (`git diff HEAD` ignores the index).  So the stop rule, not a cap, ends the rounds.
+* The intent review found gaps that no review round could see: M1's agent branches, and the four gaps after the maintainer's correction (P3).
+* The resume after the pause worked from the plan alone.
+
+### What went wrong
+
+* The plan turned the maintainer's decision into a question about the mode, not about the design (above).
+* The Write tool refused the review files to each team leader, so each round waited for the orchestrator (TD-74).
+* In M3, M4 and M6, each late fix of one sentence or pin gave the next round a new reading of it.  10 of their 15 late fixes were on such a line.  In M7, two rules grew by one case in each round.  So the rounds after round 3 did not fall.
+* No cheaper model passed, so decision 0025 saved nothing yet.  One run of each arm could not tell the `sonnet` validator's gap of 2 refutations from noise (TD-71, P2).
+* The known-missed list matched nothing in the 31 rounds of M2 to M7, since no round's diff touched an entry's function after the entry came in.
+* The preflight missed tools: cargo-mutants at the start, then the `wasm32-unknown-unknown` target and Trunk, which tier `push` needs (M4).  The orchestrator installed each as `README.md` says.
+* CI failed once for real at `8c228fe`: CI's colour codes in a `cargo metadata` error.  `10e7a03` fixed it with a test.
+* A docs-reviewer stalled for about 45 minutes in M1, and its team leader could not stop it (TD-74).
+* Two M1 commits describe the skill's `review clean` step before the commit that adds it (DOC-1, finding 1-11 of M1).
+
+### Lessons
+
+* Quote a maintainer's decision in the plan in the maintainer's words, and repeat it in the up-front message.  A summary can change its meaning.
+* Write a rule in one place, and make the other places point to it (M3).
+* In a late round, write a doc fix as the smallest true claim, and pin a whole line, not a part of it (M4, M6).
+* Check each tool of each acceptance command in the preflight (M4).
+* Measure before building, and measure with more than one run when a gap is small (M2, M5).
+* Keep the data of a measurement with its scripts, outside `/private/tmp` (M5).
+* Write a rule that grows by cases as one goal and a table test from the start (M7).
+* Give each test of a "keep it safe" rule a mutant that must fail (M1).
+
+### For the maintainer
+
+* The proposals P1 to P7 in `plans/active/harness-engineering.md`: the phase 3 gate (D5), the re-run of decision 0025, the late review range (D4), the measure after round 3, and phases 4 to 6.
+* The steps after the merge, in the PR body.

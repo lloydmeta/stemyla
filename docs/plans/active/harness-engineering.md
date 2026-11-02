@@ -73,7 +73,7 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 
 ### Phase 3b: runs that drive themselves, at less cost
 
-Added on 2026-10-30, after PR #39, before phase 4 (`plans/active/harness-phase-3b.md`, built in PR #41).  A big task gets orchestrated mode after one message up front, which asks each choice that hinges on the maintainer (decision 0023, amended on 2026-11-01).  Late review rounds fix only what matters (0024).  Each agent role gets a model chosen by a measurement, and no cheaper model passed (0025).  Local checks run by tier (0026).  PR bodies and inline comments serve people first (0027).  `xtask clean` removes what runs leave.  Measured by: maintainer messages to start a big run, rounds after round 3, cost per milestone against PR #39, and leftovers after close-out.  Its last milestone re-checked phases 4 to 6 and the phase 3 gate, and gives its proposals in "Proposals of harness phase 3b" below.
+Added on 2026-10-30, after PR #39, before phase 4 (`plans/completed/harness-phase-3b.md`, built in PR #41).  A big task gets orchestrated mode after one message up front, which asks each choice that hinges on the maintainer (decision 0023, amended on 2026-11-01).  Late review rounds fix only what matters (0024).  Each agent role gets a model chosen by a measurement, and no cheaper model passed (0025).  Local checks run by tier (0026).  PR bodies and inline comments serve people first (0027).  `xtask clean` removes what runs leave.  Measured by: maintainer messages to start a big run, rounds after round 3, cost per milestone against PR #39, and leftovers after close-out.  Its last milestone re-checked phases 4 to 6 and the phase 3 gate, and gives its proposals in "Proposals of harness phase 3b" below.
 
 ### Phase 4: legibility, the evaluator, and long-running sessions
 
@@ -107,14 +107,14 @@ Each stage needs the previous one's gate.  Agents run in GitHub Actions with `an
 
 ### Proposals of harness phase 3b
 
-Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phase-3b.md` (M8).  Each item is a proposal, not a decision.  The maintainer decides each one, and records the answer in the Decision log below.  Until then, the phases above stay as they are.  Token figures from the review logs are final contexts (TD-44); `modelUsage` figures are tokens used.
+Added on 2026-11-02 by the agent, at the close-out of `plans/completed/harness-phase-3b.md` (M8).  Each item is a proposal, not a decision.  The maintainer decides each one, and records the answer in the Decision log below.  Until then, the phases above stay as they are.  Token figures from the review logs are final contexts (TD-44); `modelUsage` figures are tokens used.
 
 #### P1: the phase 3 gate, and D5 of harness phase 3b
 
 * The question (D5): does M5's measurement replace the `--baseline` gate?
 * Evidence:
   * The record of round 1 with `--baseline`: PR #36 found 4 of 4 baseline findings, PR #37 2 of 2, PR #39 (M3) 1 of 3, and PR #41 (M1) 2 of 4.  In PR #41, the only blocker of M1 came from the baseline.
-  * PR #36 and PR #37 are two PRs in a row that found each baseline finding.  But D4's token bar has no reliable measure (TD-44).  PR #39 and PR #41 each missed baseline findings.  By the gate's rule, a miss gives the maintainer the choice: keep, rework the agents, or revert.
+  * PR #36 and PR #37 are two PRs in a row that found each baseline finding.  But phase 3's D4 token bar has no reliable measure (TD-44).  PR #39 and PR #41 each missed baseline findings.  By the gate's rule, a miss gives the maintainer the choice: keep, rework the agents, or revert.
   * M5 compared one role with that role's own logged findings, in one run of each arm.  It measured neither the routed review nor `baseline`.  So it cannot replace the gate as it is.
   * M5 also shows that one run is noisy.  One control run of the docs-reviewer found 0.425 [0.285, 0.578] of its own confirmed findings (TD-75).
   * M3 does not change the gate, since the gate reads round 1 only.
@@ -159,7 +159,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phas
   * B: keep D4, and add one sentence to the `Scope:` line of the skill.  The sentence: "Report each bug or strict-rule breach that you see out of scope, in a list of its own."  The team leader logs each one as a finding of the round, and the fix rule applies.
   * C: keep D4 for the routed reviewers, and give the `reviewer` agent the whole range of the milestone in each late round.  Cost: one more reviewer context in each late round.
   * D: go back to the whole branch from round 4.
-* Recommendation: B.  Reason: the late rounds of this phase found no bug outside the fix range, and D4 cut their cost.  Their 3 bugs (M7) were inside it.  Reviewers already see some drift out of scope (M4, round 4), and B costs no agent.  B lets a team log a bug of the PR #39 kind when a reviewer sees it.  C is the fallback if a late bug reaches `main`.
+* Recommendation: B.  Reason: D4 cut the cost of a late round to 0.06M to 0.62M tokens.  The late rounds read only the fix range, so they could not report a bug outside it, and their 3 bugs (M7) were inside it.  M1's intent review found a gap outside the late range (the `worktree-agent-*` branches).  Reviewers already see some drift out of scope (M4, round 4), and B costs no agent.  B lets a team log a bug of the PR #39 kind when a reviewer sees it.  C is the fallback if a late bug reaches `main`.
 * B changes the `review-rounds` skill, `the_review_skill_starts_with_xtask`, decision 0024's line on the late range and TD-73.
 
 #### P4: the overall measure, in place of "fewer review rounds per PR"
@@ -217,7 +217,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-22: phase 3, execution plan written (`plans/completed/harness-phase-3.md`), as one PR with a commit for each milestone.
 * [x] 2026-10-24: phase 3, built in PR #34 (`plans/completed/harness-phase-3.md`), without the gate.  The replay found 8 of 26 old findings (0.31, 95% interval 0.17 to 0.50), so it misses its bar (D5 of that plan).  The PR's own three rounds ran with the `review-rounds` skill (`docs/reviews/ai-agent-harness-phase-3.md`).
 * [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).  Round 1 found each baseline finding in PR #36 (4) and PR #37 (2).  It found 1 of 3 in PR #39 (M3), and 2 of 4 in PR #41 (M1).  P1 proposes a new pass rule (TD-75).
-* [x] 2026-11-02: phase 3b, built in PR #41 (`plans/active/harness-phase-3b.md`).  Plan and decisions 0023 to 0027 written on 2026-10-30, as proposed; the decisions accepted on 2026-10-31.  No cheaper model passed the measurement of decision 0025.  The close-out proposes P1 to P7 above, for the maintainer.  The next big task after the merge measures the phase.
+* [x] 2026-11-02: phase 3b, built in PR #41 (`plans/completed/harness-phase-3b.md`).  Plan and decisions 0023 to 0027 written on 2026-10-30, as proposed; the decisions accepted on 2026-10-31.  No cheaper model passed the measurement of decision 0025.  The close-out proposes P1 to P7 above, for the maintainer.  The next big task after the merge measures the phase.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
 * [ ] Phase 6.
