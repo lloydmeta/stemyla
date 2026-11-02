@@ -86,7 +86,15 @@ fn the_hand_run_line_comes_first_and_a_docs_line_is_none() {
         &dir.join("docs/plans/completed/p-m1.md"),
         "## Decision log\n\n* 2026-10-31, agent: old.\n",
     );
+    write(
+        &dir.join("docs/decisions/0029-y.md"),
+        "# Y\n\nStatus: proposed (2026-11-01, by an agent)\n",
+    );
     let base = commit(dir, "start");
+    git(
+        dir,
+        &["mv", "docs/decisions/0029-y.md", "docs/decisions/0030-y.md"],
+    );
     write(
         &dir.join("protocol/src/lib.rs"),
         "pub struct A;\npub struct B;\n",
@@ -109,10 +117,11 @@ fn the_hand_run_line_comes_first_and_a_docs_line_is_none() {
     let want = format!(
         "hand-run protocol/src/lib.rs:2 RIGHT: {HAND_RUN}; a strict path of PROTO-2; a strict path of MEM-2; {MESSAGES}\n\
          change docs/decisions/0028-x.md:1 RIGHT: {PROPOSED}\n\
+         change docs/decisions/0030-y.md (no hunk; list it in the PR): {PROPOSED}\n\
          hot-spot Cargo.toml:5 RIGHT: {DEPENDENCY}\n\
          judgement docs/plans/active/p.md:6 RIGHT: agent (implementer): a choice.\n\
          judgement docs/plans/completed/p-m1.md (no diff line; list it in the PR): agent: old.\n\
-         attention: 5 candidates; pick at most 10, the hand-run lines first (decision 0027)\n"
+         attention: 6 candidates; pick at most 10, the hand-run lines first (decision 0027)\n"
     );
     let absolute = dir.join("docs/plans/active/p.md");
     for plan in [

@@ -63,6 +63,8 @@ pub struct Changed {
     pub hunk: usize,
     /// The line's text, without the `+` or `-`.
     pub text: String,
+    /// The old path of a renamed file (`rename from`), or none.
+    pub renamed_from: Option<String>,
 }
 
 /// The classes of a candidate, in their order of output.
@@ -157,6 +159,7 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
     let (mut old_path, mut path) = (String::new(), String::new());
     let (mut old_line, mut new_line, mut hunk_new, mut hunks) = (0, 0, 0, 0);
     let mut hunk_new_count = 0;
+    let mut renamed_from: Option<String> = None;
     // The lines left in the current hunk, on each side.  Inside a hunk, a
     // line such as `--- x` is a removed line, not a header.
     let (mut old_left, mut new_left) = (0usize, 0usize);
@@ -171,6 +174,7 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
                     hunk_new_count,
                     hunk: hunks - 1,
                     text: text.to_string(),
+                    renamed_from: renamed_from.clone(),
                 });
                 *line += 1;
             };
@@ -200,6 +204,9 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
         if line.starts_with("diff --git ") {
             old_path.clear();
             path.clear();
+            renamed_from = None;
+        } else if let Some(from) = line.strip_prefix("rename from ") {
+            renamed_from = Some(from.to_string());
         } else if let Some(p) = line.strip_prefix("--- ") {
             old_path = p.strip_prefix("a/").unwrap_or(p).to_string();
         } else if let Some(p) = line.strip_prefix("+++ ") {
@@ -217,30 +224,34 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
     out
 }
 
-/// The path of each file section of `diff` that has no hunk: a pure
-/// rename, a mode change, a new empty file or a binary file.
-pub fn no_hunk_paths(diff: &str) -> Vec<String> {
+/// The path of each file section of `diff` that has no hunk, with the old
+/// path of a rename: a pure rename, a mode change, a new empty file or a
+/// binary file.
+pub fn no_hunk_paths(diff: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    // The path of the current file section, and if it has a hunk.  A line
-    // of a hunk starts with `+`, `-`, ` ` or `\\`, so it is not a header.
-    let mut section: Option<(String, bool)> = None;
+    // The current file section: its path, its old path, and if it has a
+    // hunk.  A line of a hunk starts with `+`, `-`, ` ` or `\\`, so it is
+    // not a header.
+    let mut section: Option<(String, Option<String>, bool)> = None;
     for line in diff.lines() {
         if let Some(paths) = line.strip_prefix("diff --git ") {
-            if let Some((path, false)) = section.take() {
-                out.push(path);
+            if let Some((path, from, false)) = section.take() {
+                out.push((path, from));
             }
             let path = paths.rsplit_once(" b/").map_or(paths, |(_, b)| b);
-            section = Some((path.to_string(), false));
-        } else if let Some((path, has_hunk)) = section.as_mut() {
+            section = Some((path.to_string(), None, false));
+        } else if let Some((path, from, has_hunk)) = section.as_mut() {
             if let Some(to) = line.strip_prefix("rename to ") {
                 *path = to.to_string();
+            } else if let Some(old) = line.strip_prefix("rename from ") {
+                *from = Some(old.to_string());
             } else if line.starts_with("@@ ") {
                 *has_hunk = true;
             }
         }
     }
-    if let Some((path, false)) = section {
-        out.push(path);
+    if let Some((path, from, false)) = section {
+        out.push((path, from));
     }
     out
 }
@@ -286,8 +297,15 @@ pub fn candidates(
             continue;
         }
         seen.push(&changed.path);
-        if let Some(reason) = change_reason(&changed.path, text_of(&changed.path)) {
-            found.push(candidate(Class::Change, changed, vec![reason.to_string()]));
+        let text = text_of(&changed.path);
+        let reasons = by_path(&changed.path, changed.renamed_from.as_deref(), |path| {
+            change_reason(path, text)
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        });
+        if !reasons.is_empty() {
+            found.push(candidate(Class::Change, changed, reasons));
         }
     }
     for hunk in &hunks {
@@ -304,7 +322,7 @@ pub fn candidates(
         }
     }
     for hunk in &hunks {
-        let reasons = hot_reasons(&hunk[0].path);
+        let reasons = by_path(&hunk[0].path, hunk[0].renamed_from.as_deref(), hot_reasons);
         if !reasons.is_empty() {
             found.push(candidate(Class::HotSpot, &hunk[0], reasons));
         }
@@ -339,15 +357,21 @@ pub fn candidates(
             });
         }
     }
-    for path in no_hunk_paths(diff) {
+    // A path with no hunk changes no message text, so it is never a
+    // `hand-run` candidate.
+    for (path, from) in no_hunk_paths(diff) {
+        let text = text_of(&path);
         let mut classes = Vec::new();
-        if HAND_RUN_PATHS.contains(&path.as_str()) {
-            classes.push((Class::HandRun, HAND_RUN.to_string()));
+        let change = by_path(&path, from.as_deref(), |p| {
+            change_reason(p, text)
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        });
+        for reason in change {
+            classes.push((Class::Change, reason));
         }
-        if let Some(reason) = change_reason(&path, text_of(&path)) {
-            classes.push((Class::Change, reason.to_string()));
-        }
-        for reason in hot_reasons(&path) {
+        for reason in by_path(&path, from.as_deref(), hot_reasons) {
             classes.push((Class::HotSpot, reason));
         }
         if let Some((class, _)) = classes.first() {
@@ -363,13 +387,23 @@ pub fn candidates(
     merge_and_sort(found)
 }
 
-/// The paths whose hunks can give a `hand-run` line.
-const HAND_RUN_PATHS: [&str; 4] = [
-    "protocol/src/lib.rs",
-    "xtask/e2e/worker.js",
-    "xtask/src/e2e/weights.rs",
-    "xtask/src/e2e.rs",
-];
+/// The reasons that `reasons` gives for `path`.  When it gives none and
+/// the file is a rename, the reasons for the old path, each as
+/// `renamed from <old>: <reason>`.
+fn by_path(
+    path: &str,
+    renamed_from: Option<&str>,
+    reasons: impl Fn(&str) -> Vec<String>,
+) -> Vec<String> {
+    let found = reasons(path);
+    match renamed_from {
+        Some(old) if found.is_empty() => reasons(old)
+            .into_iter()
+            .map(|reason| format!("renamed from {old}: {reason}"))
+            .collect(),
+        _ => found,
+    }
+}
 
 /// A candidate at the line of `changed`.
 fn candidate(class: Class, changed: &Changed, reasons: Vec<String>) -> Candidate {
@@ -420,7 +454,7 @@ fn hand_run_line<'a>(hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
 /// The lines, from 1, of each top-level item of `e2e.rs` that writes or
 /// reads a message of `stored-stems` or `worker-check` by hand.  An item
 /// starts at column 0 with `fn`, `pub fn`, `const` or `static`.  Its name
-/// holds `stored_stems` or `worker_check` in any case, or is
+/// starts with `stored_stems` or `worker_check` in any case, or is
 /// `stem_protocol_file`.  A `fn` ends at the next line that is exactly
 /// `}`.  A `const` or `static` ends at its first line that ends with `;`.
 fn hand_run_items(text: &str) -> Vec<(usize, usize)> {
@@ -445,8 +479,8 @@ fn hand_run_items(text: &str) -> Vec<(usize, usize)> {
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect::<String>()
             .to_lowercase();
-        if !(name.contains("stored_stems")
-            || name.contains("worker_check")
+        if !(name.starts_with("stored_stems")
+            || name.starts_with("worker_check")
             || name == "stem_protocol_file")
         {
             continue;
@@ -682,7 +716,7 @@ fn gather(base: &str, plan: &str) -> Result<(String, Texts, Texts)> {
     let paths = changed_lines(&diff)
         .into_iter()
         .map(|changed| changed.path)
-        .chain(no_hunk_paths(&diff));
+        .chain(no_hunk_paths(&diff).into_iter().map(|(path, _)| path));
     for path in paths {
         if files.iter().any(|(p, _)| *p == path) {
             continue;
@@ -847,7 +881,7 @@ mod tests {
         );
     }
 
-    const E2E: &str = "fn smoke(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n\nfn stem_protocol_file(name: &str) -> String {\n    format!(\"{name}.wav\")\n}\n\nconst STORED_STEMS_SESSION: &str =\n    \"sessions/1\";\n\nfn stored_stems_clip(out: &Path) -> Result<()> {\n    let a = 1;\n}\n\nconst OTHER: &str = \"x\";\n\npub fn worker_check_reply() -> Value {\n    json!({})\n}\n\nstatic WORKER_CHECK_ARGS: &[&str] = &[\"a\"];\n";
+    const E2E: &str = "fn smoke(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n\nfn stem_protocol_file(name: &str) -> String {\n    format!(\"{name}.wav\")\n}\n\nconst STORED_STEMS_SESSION: &str =\n    \"sessions/1\";\n\nfn stored_stems_clip(out: &Path) -> Result<()> {\n    let a = 1;\n}\n\nconst OTHER: &str = \"x\";\n\npub fn worker_check_reply() -> Value {\n    json!({})\n}\n\nstatic WORKER_CHECK_ARGS: &[&str] = &[\"a\"];\n\nfn open_on_the_worker_check(log: &str) -> bool {\n    log.contains(\"open\")\n}\n\nconst STORED_STEMS_X: &str = \"x\";\nfn smoke_two() {\n    let a = 1;\n}\n";
 
     const WEIGHTS: &str = "pub fn run() {\n    let m = json!({\n        \"type\": \"init\",\n        \"settings\": s,\n    });\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() { let m = json!({ \"type\": \"x\" }); }\n}\n";
 
@@ -892,6 +926,8 @@ mod tests {
             added("xtask/src/e2e.rs", 35, "    let a = 2;"),
             added("xtask/src/e2e.rs", 38, "const OTHER: &str = \"y\";"),
             added("xtask/src/e2e.rs", 41, "    json!({ \"a\": 1 })"),
+            added("xtask/src/e2e.rs", 47, "    log.contains(\"opened\")"),
+            added("xtask/src/e2e.rs", 52, "    let a = 2;"),
             added(
                 "xtask/src/e2e.rs",
                 44,
@@ -1350,6 +1386,7 @@ mod tests {
             hunk_new_count: at.1,
             hunk,
             text: text.to_string(),
+            renamed_from: None,
         }
     }
 
@@ -1391,8 +1428,8 @@ mod tests {
             mode("docs/README.md"),
             mode("protocol/src/lib.rs"),
             mode("xtask/src/e2e.rs"),
-            mode("engine/src/song.rs"),
             added("CLAUDE.md", 2, "A line."),
+            mode("engine/src/song.rs"),
         ]
         .concat();
         let files = [("docs/decisions/0028-b.md", "# B\n\nStatus: proposed\n")];
@@ -1400,43 +1437,87 @@ mod tests {
         assert_eq!(
             rendered(&diff, &files, &[]),
             vec![
-                format!(
-                    "hand-run protocol/src/lib.rs {none}: {HAND_RUN}; {}; {}; {MESSAGES}",
-                    strict("PROTO-2"),
-                    strict("MEM-2")
-                ),
-                format!("hand-run xtask/src/e2e.rs {none}: {HAND_RUN}"),
                 format!("change CLAUDE.md:2 RIGHT: {MAP}"),
                 format!("change .claude/empty.md {none}: {HARNESS}"),
                 format!("change .claude/hooks/h.sh {none}: {HARNESS}"),
                 format!("change .github/workflows/x.bin {none}: {CI}"),
                 format!("change docs/decisions/0028-b.md {none}: {PROPOSED}"),
                 format!("hot-spot engine/src/song.rs {none}: {}", strict("MEM-1")),
+                format!(
+                    "hot-spot protocol/src/lib.rs {none}: {}; {}; {MESSAGES}",
+                    strict("PROTO-2"),
+                    strict("MEM-2")
+                ),
             ]
         );
         assert_eq!(
             no_hunk_paths(&diff),
+            [
+                ("docs/decisions/0028-b.md", Some("docs/decisions/0028-a.md")),
+                (".claude/hooks/h.sh", None),
+                (".claude/empty.md", None),
+                (".github/workflows/x.bin", None),
+                ("docs/README.md", None),
+                ("protocol/src/lib.rs", None),
+                ("xtask/src/e2e.rs", None),
+                ("engine/src/song.rs", None),
+            ]
+            .map(|(path, from)| (path.to_string(), from.map(str::to_string)))
+        );
+        let spaced = "diff --git a/a/p b/q b/a/p b/r\nsimilarity index 100%\nrename from a/p b/q\nrename to a/p b/r\n";
+        assert_eq!(
+            no_hunk_paths(spaced),
+            vec![("a/p b/r".to_string(), Some("a/p b/q".to_string()))]
+        );
+    }
+
+    #[test]
+    fn a_rename_out_of_a_class_path_is_classed_by_its_old_path() {
+        let rename = |from: &str, to: &str| {
+            format!(
+                "diff --git a/{from} b/{to}\nsimilarity index 100%\nrename from {from}\nrename to {to}\n"
+            )
+        };
+        let diff = [
+            rename("engine/clippy.toml", "engine/clippy.toml.off"),
+            rename(".claude/skills/x/SKILL.md", "old/SKILL.md"),
+            "diff --git a/engine/src/song.rs b/engine/src/tune.rs\nsimilarity index 90%\nrename from engine/src/song.rs\nrename to engine/src/tune.rs\nindex 1..2 100644\n--- a/engine/src/song.rs\n+++ b/engine/src/tune.rs\n@@ -3 +3 @@\n-a\n+b\n".to_string(),
+            rename("docs/a.md", "docs/b.md"),
+        ]
+        .concat();
+        let none = "(no hunk; list it in the PR)";
+        assert_eq!(
+            rendered(&diff, &[], &[]),
             vec![
-                "docs/decisions/0028-b.md",
-                ".claude/hooks/h.sh",
-                ".claude/empty.md",
-                ".github/workflows/x.bin",
-                "docs/README.md",
-                "protocol/src/lib.rs",
-                "xtask/src/e2e.rs",
-                "engine/src/song.rs",
+                format!(
+                    "change old/SKILL.md {none}: renamed from .claude/skills/x/SKILL.md: {HARNESS}"
+                ),
+                format!(
+                    "hot-spot engine/src/tune.rs:3 LEFT: renamed from engine/src/song.rs: {}",
+                    strict("MEM-1")
+                ),
+                format!(
+                    "hot-spot engine/clippy.toml.off {none}: renamed from engine/clippy.toml: {}",
+                    strict("MEM-1")
+                ),
             ]
         );
     }
 
     #[test]
-    fn a_rename_gives_the_new_path_and_a_deleted_file_the_old_path() {
+    fn a_rename_gives_the_new_path_and_its_old_path_and_a_deleted_file_the_old_path() {
         let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\nindex 1..2 100644\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone.rs\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-x\ndiff --git a/new.md b/new.md\nnew file mode 100644\nindex 0..1\n--- /dev/null\n+++ b/new.md\n@@ -0,0 +1 @@\n+y\ndiff --git a/i.png b/i.png\nindex 1..2 100644\nBinary files a/i.png and b/i.png differ\n";
         assert_eq!(
             changed_lines(diff),
             vec![
-                changed("new.rs", Side::Left, 1, (1, 1), 0, "a"),
-                changed("new.rs", Side::Right, 1, (1, 1), 0, "b"),
+                Changed {
+                    renamed_from: Some("old.rs".to_string()),
+                    ..changed("new.rs", Side::Left, 1, (1, 1), 0, "a")
+                },
+                Changed {
+                    renamed_from: Some("old.rs".to_string()),
+                    ..changed("new.rs", Side::Right, 1, (1, 1), 0, "b")
+                },
                 changed("gone.rs", Side::Left, 1, (0, 0), 1, "x"),
                 changed("new.md", Side::Right, 1, (1, 1), 2, "y"),
             ]
