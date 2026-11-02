@@ -2,6 +2,8 @@
 
 Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/completed/harness-phase-3b.md`; proposed by the agent on 2026-10-30)
 
+Amended on 2026-11-02 by the maintainer, after M8 of `plans/completed/harness-phase-3b.md`: phase 6 runs the measurement again, also when the model line-up does not change.  Each arm has at least 3 runs on each case, so the runs of the control give the run noise.  The pass rule and the ground truth are written before any run.  Reason: the `sonnet` validator missed one item of the pass rule by 2 refutations, and one run cannot tell that gap from noise.
+
 ## Context
 
 Every file in `.claude/agents/` says `model: inherit`, and `agents_folder_problems` requires it.  So PR #39 ran every reviewer and validator on Opus 5.5 at high effort, and used about 80% of a week's usage limit.  A subagent can take `model` and `effort` in its frontmatter ([sub-agents](https://code.claude.com/docs/en/sub-agents)).  Sonnet 5.5 costs half of Opus 5.5 for each token, and Haiku 5.5 a fortieth up to 100k-token prompts ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)).
@@ -28,4 +30,4 @@ C, as the maintainer asked on 2026-10-30.
 ## Consequences
 
 * A role that fails keeps `inherit`.
-* The measurement is re-run when the model line-up changes (phase 6).
+* The measurement runs again in phase 6, with at least 3 runs of each arm, and again when the model line-up changes.

@@ -103,11 +103,12 @@ Each stage needs the previous one's gate.  Agents run in GitHub Actions with `an
 
 * Review every component in `harness.md` against what it caught; remove those that catch nothing, re-test the rest when the model changes ("every component encodes an assumption about what the model can't do on its own").
 * Write the transfer guide for the IAM codebase from the "For IAM" lessons and the measurements.
+* Run decision 0025's measurement again, with at least 3 runs of each arm (P2, accepted on 2026-11-02).
 * Acceptance: each component has a measured reason to stay, or is gone.
 
 ### Proposals of harness phase 3b
 
-Added on 2026-11-02 by the agent, at the close-out of `plans/completed/harness-phase-3b.md` (M8).  Each item is a proposal, not a decision.  The maintainer decides each one, and records the answer in the Decision log below.  Until then, the phases above stay as they are.  Token figures from the review logs are final contexts (TD-44); `modelUsage` figures are tokens used.
+Added on 2026-11-02 by the agent, at the close-out of `plans/completed/harness-phase-3b.md` (M8).  Each item was a proposal.  On 2026-11-02 the maintainer accepted P1 to P7 as recommended (Decision log below).  Until then, the phases above stay as they are.  Token figures from the review logs are final contexts (TD-44); `modelUsage` figures are tokens used.
 
 #### P1: the phase 3 gate, and D5 of harness phase 3b
 
@@ -136,7 +137,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/completed/harness-p
 * Its Consequences line changes.  Today: "The measurement is re-run when the model line-up changes (phase 6)."  Proposed: "The measurement runs again in phase 6, with at least 3 runs of each arm, and again when the model line-up changes."
 * Cost: one run of both validator arms used 9.81M `modelUsage` tokens, and one of both docs-reviewer arms 23.55M.  At 3 runs, the validator costs about 29M, and the docs-reviewer about 71M.  Recommendation: the validator first, with a budget of about 30M.  The docs-reviewer only with a budget of its own, since its gap is large.
 * With k runs, the pass rule compares the mean of each count of the candidate with the mean of the control.  The range of the control's runs gives the noise.  The other gaps of TD-71 stay: the finding blocks of the validator runs have no evidence, and no stream field shows a subagent's effort.
-* If accepted, phase 6 gets the bullet: "Run decision 0025's measurement again, with at least 3 runs of each arm (P2)."
+* If accepted, phase 6 gets the bullet: "Run decision 0025's measurement again, with at least 3 runs of each arm (P2)."  Accepted on 2026-11-02, and decision 0025 is amended.
 
 #### P3: D4 of harness phase 3b, the late review range
 
@@ -247,6 +248,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-20, maintainer: each check is sized to its stakes and to failures seen.  Phase 2 trims M7 to a token scan, M14 to deny rules and M15 to a `rustfmt` hook, and moves the test-count guard to phase 5b.
 * 2026-10-22, maintainer: phase 3 lands as one PR, not one PR for each milestone.  Its parts depend on each other, and none changes code that ships.
 * 2026-10-22, maintainer, changed 2026-10-24 by the orchestrator: phase 3's gate asks for bounded effort, not "lower effort" (D4 of `plans/completed/harness-phase-3.md`).  The agent starts the rounds, so a person's effort is close to zero either way.  Round 1's tokens are at most 2 times the baseline's for each routed reviewer, its wall time at most 60 minutes more, and a person sends no more messages.  On 2026-10-24 an approval of a tool call became cost, not an intervention, since approvals grow with the route.  The log's token figure is each agent's final context, not the tokens it used (TD-44), so the maintainer decides at the gate how to measure the token bar.
+* 2026-11-02, maintainer: the proposals of harness phase 3b, P1 to P7, are accepted as recommended: P1 option B (keep `--baseline` in round 1, with pooled counts and 95% intervals), P2 (decision 0025 is amended: phase 6 measures again with at least 3 runs of each arm), P3 option B (one sentence in the `Scope:` line for an out-of-scope bug or strict-rule breach), P4 (the measure after round 3), and P5 to P7 for phases 4 to 6.  The maintainer also accepted each item of "Needs your attention" of PR #41 as the agent took it.  P1, P3 and P4 change the skill, the gate and the measures; that work is the next PR's.
 
 ## Outcomes and retrospective
 
