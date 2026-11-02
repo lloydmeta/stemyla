@@ -4,7 +4,7 @@
 
 The maintainer wants a big task to run hands-off as one PR, with an orchestrator and a team for each milestone, as PR #39 did.  Today that mode exists only as prose that a person copies into each plan.  Review rounds after round 3 mostly fix nits.  Every agent runs on the strongest model.  Each commit runs every local check.  Nothing removes the build output, worktrees and branches that a run leaves.
 
-This phase makes the hands-off mode the default for a big task, with one up-front message to the maintainer that asks each choice that hinges on them.  It makes the fix rule stricter after round 3, measures cheaper models for each agent role, runs local checks by changed paths, and cleans up after each run.  It also gives each PR a short summary for people, a `<details>` section for agents, and inline comments where a person must look.
+This phase makes the hands-off mode the default for a big task.  One up-front message asks the maintainer each choice that hinges on them.  It makes the fix rule stricter after round 3, measures cheaper models for each agent role, runs local checks by changed paths, and cleans up after each run.  It also gives each PR a short summary for people, a `<details>` section for agents, and inline comments where a person must look.
 
 Readers: the orchestrator session that runs this plan, its teams, and the maintainer.
 
@@ -239,7 +239,7 @@ PR #39 already left out the test files and the wasm32-only files (`.cargo/mutant
 
 * Each milestone's acceptance above, run by the orchestrator through its team.
 * `cargo run -p xtask -- docs-check` and `cargo run -p xtask -- check --tier push` pass on the last commit, and CI is green.
-* The next big task after the merge measures this phase: the maintainer's only message before the work answers the up-front message; with no open choice, the up-front message holds only the mode, the branch and the PR, and none is sent when the maintainer already asked for the mode; the next big task's first message holds the open choices (this closes TD-72); the round count after round 3 is lower, the cost per milestone is lower than PR #39's, and nothing is left for the maintainer to clean.  Phase 6 compares those numbers.
+* The next big task after the merge measures this phase.  If that task sends an up-front message, the maintainer's only message before the work answers it.  With no open choice, the up-front message holds only the mode, the branch and the PR.  No message is sent when the maintainer already asked for the mode.  The first message of a big task with an open choice holds the open choices (this closes TD-72).  The round count after round 3 is lower.  The cost per milestone is lower than PR #39's.  Nothing is left for the maintainer to clean.  Phase 6 compares those numbers.
 
 ## Idempotence and recovery
 
