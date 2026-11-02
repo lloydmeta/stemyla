@@ -453,6 +453,14 @@ M5 of harness phase 3b compared cheaper models with a control for the validator 
 
 * Fix: decision 0025 runs the measurement again when the model line-up changes (phase 6).  Until then, the pin keeps each role on `inherit`.
 
+### TD-72: no run shows that a big task gets one question
+
+This entry concerns no rule.  It concerns decision 0023, the "Plans:" line of `CLAUDE.md` and the recipe "Run a big task hands-off" in `docs/working-with-agents.md`.
+
+The `orchestrate` skill says that the agent proposes orchestrated mode in one question, after its preflight.  M6 of harness phase 3b ran two `claude -p` dry runs on a plan of 4 milestones (`plans/active/harness-phase-3b-m6.md`, step 5).  Each session proposed the mode in its first reply, but asked no question.  The `dontAsk` mode refused the Bash that the preflight needs, and the skill stops at a failed check before the question.  Auto mode refused a run with Bash allowed.  So no run shows the question.
+
+* Fix: a person starts a session in auto mode with a big plan and the prompt of the recipe, "Do docs/plans/active/<plan>.md.", and records the first reply.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
@@ -623,14 +631,6 @@ Commit signing is set in the maintainer's own git config only (GIT-2).  The agen
 The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force pushes and deletion of `gh-pages` for everyone (GIT-3).  It does not restrict a fast-forward push, so a plain push to `gh-pages` publishes the site (GIT-1).  A rule that only CI may push needs a credential that the agent cannot use, such as a deploy key in an environment limited to `main`.  The maintainer's local `xtask publish` would then stop working.
 
 * Fix: in phase 5 of the plan, the other ruleset changes and the agents' own identity.  Phase 2 denies a push that names `main` or `gh-pages`, publish and merge (decision 0010), and set the two rulesets above.
-
-### TD-72: no run shows that a big task gets one question
-
-This entry concerns no rule.  It concerns decision 0023, the "Plans:" line of `CLAUDE.md` and the recipe "Run a big task hands-off" in `docs/working-with-agents.md`.
-
-The `orchestrate` skill says that the agent proposes orchestrated mode in one question, after its preflight.  M6 of harness phase 3b ran two `claude -p` dry runs on a plan of 4 milestones (`plans/active/harness-phase-3b-m6.md`, step 5).  Each session proposed the mode in its first reply, but asked no question.  The `dontAsk` mode refused the Bash that the preflight needs, and the skill stops at a failed check before the question.  Auto mode refused a run with Bash allowed.  So no run shows the question.
-
-* Fix: a person starts a session in auto mode with a big plan and the prompt "do this plan", and records the first reply.  Or the next big task records it (the "Validation and acceptance" of `plans/active/harness-phase-3b.md`).
 
 ## Closed
 
