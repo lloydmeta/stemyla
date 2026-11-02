@@ -467,7 +467,7 @@ The `orchestrate` skill says that the agent sends one message up front, before a
 
 This entry concerns no rule.  It concerns decision 0024, and D4 of `plans/active/harness-phase-3b.md`.
 
-From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the logs of PR #39, rounds 4 and later found 13 bugs.  At least 3 of them were in files that the fix range of the round before did not touch: catch-up 4-1, M7 6-1 and M7 6-2.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
+From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the 14 older review logs, rounds 4 and later found 13 bugs.  At least 3 of them, all in PR #39, were in files that the fix range of the round before did not touch: catch-up 4-1, M7 6-1 and M7 6-2.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
 
 In harness phase 3b, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`.  M1's late bugs 5-1 and 6-1 were in `xtask/src/clean.rs`.  The fix range of the round before touched each of these files.  In M4, two reviewers of round 4 noted a stale GIT-2 sentence out of scope, and the orchestrator put its fix in round 5's range (`ef602b3`).  No rule tells a reviewer to report such a finding, or a team leader to log it.
 
@@ -491,9 +491,9 @@ The gate compares one run of round 1 with one run of the `baseline` agent on the
 
 ### TD-76: `xtask attention` finds a hand-run line by the name of its item
 
-This entry concerns PROTO-1, through the hand-run class of `xtask attention` (decision 0027).
+This entry concerns no rule.  It concerns the hand-run class of `xtask attention` (decision 0027), which reaches PROTO-1 only through TD-16.
 
-`xtask attention` lists first each diff line that changes a message that `stored-stems`, `worker-check` or `weights` writes by hand (TD-16).  In `xtask/src/e2e.rs`, it finds such a line by the name of its item: a name that starts with `stored_stems` or `worker_check`, or the name `stem_protocol_file`.  A helper with another name that writes such a message gives no hand-run line.  Its change then comes later in the list, or not at all, and the orchestrator can leave it out of the 10 comments.  M7's rounds found one more helper in each round, and the rule became a list of names (`plans/completed/harness-phase-3b-m7.md`).
+`xtask attention` lists first one line of each hunk that changes a message that `stored-stems`, `worker-check` or `weights` writes by hand (TD-16).  In `xtask/src/e2e.rs`, it finds such a hunk by the name of its item.  The name starts with `stored_stems` or `worker_check`, in any case, or it is `stem_protocol_file`.  A helper with another name that writes such a message gives no hand-run line.  Its change then comes later in the list, or not at all, and the orchestrator can leave it out of the 10 comments.  M7's rounds found one more helper in each round.  M7 then wrote the rule as two name prefixes and one name (`plans/completed/harness-phase-3b-m7.md`, Decision log).
 
 * Fix: when a new helper writes a hand-written message, add its name to the rule, with a test.  The wire-reviewer reads each change to the e2e scripts.
 
@@ -501,7 +501,7 @@ This entry concerns PROTO-1, through the hand-run class of `xtask attention` (de
 
 This entry concerns no rule.  It concerns decision 0027, and `xtask pr-body`.
 
-`xtask pr-body` checks the headings, the length of the summary, the lines of Verification and the `<details>` block.  It does not check what "Needs your attention" holds.  So an item for the maintainer to decide or to do can be missing, and an item there can have no link to its inline comment.  The body passes.
+`xtask pr-body` checks the headings, the length of the summary, the lines of Verification and the `<details>` block.  It does not check what "Needs your attention" holds.  So an item for the maintainer to decide or to do can be missing.  An item there can also have no link to its inline comment.  The body passes.
 
 * Fix: no check is planned.  The orchestrate skill says what the section holds, and the maintainer reads it.
 

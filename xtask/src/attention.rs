@@ -20,7 +20,8 @@
 //!   read the text at `HEAD` of the new path.
 //!
 //! `plans/completed/harness-phase-3b-m7.md` (step 2) gives the classes and
-//! their rules.
+//! their rules.  Its judgement rule takes only `agent` authors.
+//! `is_agent` replaced it, as the M7 section of the parent plan says.
 
 use crate::check::{repo_root, strict_paths};
 use crate::docs::glob_matches;

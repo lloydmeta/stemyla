@@ -27,7 +27,7 @@ Terms:
 
 * `docs/harness.md`: one row for each part of phase 3b, with the failure that it addresses.  The rows include `xtask clean`, `review clean`, the known-missed list with its yield, the fix rule with `review log-check`, the late range, `xtask check`, the pin `the_agent_models_are_the_measured_ones`, the `orchestrate` skill, the plan rules of `docs-check`, `pr-body` and `attention`.  A section "Phase 3b, measured" gives the numbers.
 * `docs/working-with-agents.md`: the Status line of phase 3b, a pause and resume line in the recipe "Run a big task hands-off", the model line of "Review agents", the `docs-check` row, and the changelog lines of M5 and M8.
-* `docs/tech-debt.md`: TD-73 (the late range), TD-74 (a team leader cannot write the review files or stop its subagents) and TD-75 (the phase 3 gate compares one run of each review).  Round 1 adds TD-76 (the hand-run class of `xtask attention` goes by name), TD-77 (`xtask pr-body` checks the form only) and TD-78 (the skill has no pause or resume step).  TD-44 also names the orchestrator's tokens.
+* `docs/tech-debt.md`: TD-73 (the late range), TD-74 (a team leader cannot write the review files or stop its subagents) and TD-75 (the phase 3 gate compares one run of each review).  Round 1 adds TD-76 to TD-78.  TD-76: the hand-run class of `xtask attention` goes by name.  TD-77: `xtask pr-body` checks the form only.  TD-78: the skill has no pause or resume step.  TD-44 also names the orchestrator's tokens.
 * `docs/README.md`: this plan's line, and the `harness.md` line names the numbers of phase 3b.
 
 ### Step 2: the proposals (one commit)
@@ -55,7 +55,8 @@ Each step is one commit that `git revert` undoes.  No step changes code.
 * [x] 2026-11-02: Step 2: the proposals P1 to P7 in `plans/active/harness-engineering.md`.
 * [x] 2026-11-02: Step 3: the text for the orchestrator, in the scratchpad folder `m8/`: `final.diff` (the retrospective, the `git mv` of the parent plan and its path fixes; `docs-check` passes on it in a clone) and `pr-body-m8.md`.
 * [x] 2026-11-02: review round 1 of `48667e8..ab10c34` (6 reviewers and 2 validators; 474,123 tokens; 11.4 wall minutes; 0 interventions).  2 confirmed should-fix (1-1 significant: the guide gave a pause and resume that the skill does not have; 1-2: the gaps of M7's sensors had no TD) and 5 nits.  Mutants: 14 tested, 14 caught, 0 missed.  The fixes are in "review round 1 fixes".  The skill sentence of 1-4 and its pin are a diff for the orchestrator (`m8/r1-claude.diff`).
-* [ ] Review rounds 2 and later.
+* [x] 2026-11-02: review round 2 of `48667e8..e88f11f` (6 reviewers; 374,998 tokens; 8.6 wall minutes; 0 interventions).  No blocker or should-fix, and 7 nits, each fixed in "review round 2 fixes".  Mutants: none in the since diff.
+* [ ] Review rounds 3 and later.
 
 ## Surprises and discoveries
 

@@ -164,7 +164,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phas
 
 #### P4: the overall measure, in place of "fewer review rounds per PR"
 
-* Decision 0024 has no cap, and a late fix of one line can cause the next round.  In this phase, the rounds after round 3 did not fall: 3.0 for each milestone in M3 to M7, against 2.4 for each log in 7 logs of PR #39.  The count leaves out PR #39's M8 log, since its 8 "speed" rounds are a second set of rounds after a CI fix.  The fixes after each late round fell: 27 in 15 rounds (1.8), against about 58 in 17 rounds (3.4, an approximate count of the Action cells).  3 of the 27 were bugs, each in a file that the fix range touched.
+* Decision 0024 has no cap, and a late fix of one line can cause the next round.  In this phase, the rounds after round 3 did not fall.  M3 to M7 had 3.0 for each milestone.  7 logs of PR #39 had 2.4 for each log.  The count leaves out PR #39's M8 log, since its 8 "speed" rounds are a second set of rounds after a CI fix.  The fixes after each late round fell: 27 in 15 rounds (1.8), against about 58 in 17 rounds (3.4, an approximate count of the Action cells).  3 of the 27 were bugs, each in a file that the fix range touched.
 * Proposal: for each milestone, measure:
   * the findings fixed after round 3, by kind: bug, strict rule, significant should-fix;
   * the bugs found after round 3, as a sign of what rounds 1 to 3 missed;
