@@ -1683,7 +1683,8 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "* \"Needs your attention\" holds only the items for the maintainer to decide or to do, such as a hand run or a tool install.  A decision item says what to decide and the default that the agent took.",
     "* The `<details>` block lists every agent decision of the Decision logs, and the review rounds with their mutants lines.  It also lists each `reported, not fixed` finding, and each `known` finding once, with its TD.",
     "6. Update the PR body with `gh pr edit --body-file`, after `xtask pr-body` passes on the file.",
-    "4. After the last fix and the last push, run `cargo run -p xtask -- attention origin/main <plan>`, with the plan's new path.",
+    "4. After the last fix and the last push, run `git fetch origin main`.  Then run `cargo run -p xtask -- attention origin/main <plan>`, with the plan's new path.",
+    "  List each candidate with no line in the PR.",
     "5. Pick at most 10 candidates, the hand-run lines first.  Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.",
     "6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the plan's Surprises.",
     "7. Link each item of \"Needs your attention\" to its comment, where one exists.  Run `xtask pr-body` on the body, then `gh pr edit --body-file`.",
@@ -1852,6 +1853,10 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
             "6. If GitHub refuses the review, stop.",
         ),
         ("4. After the last fix and the last push, run", "4. Run"),
+        (
+            "  Then run `cargo run -p xtask -- attention",
+            "  Run `cargo run -p xtask -- attention",
+        ),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
         let changed = text.replacen(from, to, 1);
