@@ -1670,7 +1670,7 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.",
     "The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.",
     "* Record each answer, with the date, in that section, and each new choice with it.",
-    "Add one Decision log line, as the maintainer's decision, that points to them.",
+    "* The answers go in the section \"Decisions for the maintainer\" (\"When to use it\").  Add one Decision log line, as the maintainer's decision, that points to them.",
     "no \"How the work runs\" or \"Decisions for the maintainer\" section, write each missing section first.",
     "`/review-rounds <base> <N+1> \"<criteria>\"`",
     "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
@@ -1748,8 +1748,8 @@ fn the_orchestrate_skill_keeps_its_key_lines() {
 /// a GPU hand run widened to any failure of a browser test, the
 /// permission rule removed, and a description that YAML cannot read
 /// (review round 1 of harness phase 3b, M6: 1-1, 1-2 and 1-3).  Also the
-/// pins of round 2 (2-1), of round 3 (3-1), of round 4 (4-3 and 4-7) and
-/// of round 5 (5-1).
+/// pins of round 2 (2-1), of round 3 (3-1), of round 4 (4-3 and 4-7), and
+/// of rounds 5 and 6 (5-1, 6-1: the whole Start line on the answers).
 #[test]
 fn the_orchestrate_pins_fail_on_a_changed_skill() {
     let text = std::fs::read_to_string(xtask::workspace_root().join(ORCHESTRATE_SKILL))
@@ -1814,6 +1814,10 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
         (
             "* The answers go in the section \"Decisions for the maintainer\" (\"When to use it\").  Add one Decision log line, as the maintainer's decision, that points to them.",
             "* Record each answer in the plan's Decision log, as the maintainer's decision, with the date.",
+        ),
+        (
+            "* The answers go in the section \"Decisions for the maintainer\" (\"When to use it\").",
+            "* The answers go in the plan's Decision log, with the date.",
         ),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
