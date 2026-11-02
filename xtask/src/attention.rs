@@ -1305,7 +1305,7 @@ mod tests {
         assert!(count >= 30, "{count}");
     }
 
-    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: six.\n* 2026-11-01, team leader (M2): seven.\n* 2026-11-01, team leaders: no.\n* 2026-11-01, implementer: eight.\n* 2026-11-01, orchestrator (M3): nine.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n* 2026-11-0x, agent: not a date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
+    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: six.\n* 2026-11-01, team leader (M2): seven.\n* 2026-11-01, team leaders: no.\n* 2026-11-01, implementer: eight.\n* 2026-11-01, orchestrator (M3): nine.\n* 2026-11-01, implementers: no.\n* 2026-11-01, orchestrators: no.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n* 2026-11-0x, agent: not a date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
 
     #[test]
     fn each_agent_form_in_the_decision_log_is_a_judgement() {
