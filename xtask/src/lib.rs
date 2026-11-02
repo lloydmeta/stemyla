@@ -7,6 +7,7 @@ pub mod docs;
 pub mod drivers;
 pub mod e2e;
 pub mod metrics;
+pub mod pr_body;
 pub mod publish;
 pub mod review;
 pub mod review_log;

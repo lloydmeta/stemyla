@@ -1,14 +1,15 @@
 use anyhow::{Result, bail};
 use std::path::PathBuf;
 use xtask::{
-    bench, check, clean, docs, e2e, publish, review, roformer_cli, separate, serve, synth, web_test,
+    bench, check, clean, docs, e2e, pr_body, publish, review, roformer_cli, separate, serve, synth,
+    web_test,
 };
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
         bail!(
-            "usage: xtask <serve|web-test|e2e|docs-check|check|review|clean|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
+            "usage: xtask <serve|web-test|e2e|docs-check|check|review|clean|pr-body|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
         );
     };
     match cmd.as_str() {
@@ -45,6 +46,7 @@ fn main() -> Result<()> {
         "review" => std::process::exit(review::main(&args[1..])),
         "check" => std::process::exit(check::main(&args[1..])),
         "clean" => std::process::exit(clean::main(&args[1..])),
+        "pr-body" => std::process::exit(pr_body::main(&args[1..])),
         "publish" => publish::main(&args[1..])?,
         other => bail!("unknown command {other}"),
     }
