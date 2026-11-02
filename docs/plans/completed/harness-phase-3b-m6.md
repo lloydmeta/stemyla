@@ -272,7 +272,6 @@ The team leader gives these to the orchestrator as text:
 * [x] 2026-11-01: step 4, the checkpoint before round 1.  The orchestrator landed the bundle in `7fa2b7a`, with three changes of its own to the skill (Roles, "A checkpoint" item 1, "Between milestones" item 4), and the parent's lines in `03e28e6`.
 * [ ] Step 5: the dry run.  Done in part, on 2026-11-01 (`/private/tmp/stemyla-harness/m6-dry-1`, a clone of `03e28e6`).  The session loaded the `orchestrate` skill and proposed orchestrated mode in its only reply (7 turns, $0.40).  So the parent's acceptance holds.  The pass line of the maintainer's correction is not verified (TD-72).  This reply named two choices of the sample plan (one readout or one in each lane, and the keys when a text field has focus), but with a recommendation for one only, and it did not send them as the up-front message.  The allow list refused the Bash that the preflight needs before the question (review round 1, 1-6).
   * 2026-11-01: second run (`/private/tmp/stemyla-harness/m6-dry-2`, a clone of `d376200`), with the read-only preflight commands allowed.  It proposed orchestrated mode again, and asked no question (9 turns, $0.46).  Its first Bash call was a compound read (`ls`; `wc`; `cat`), which the allow list did not match.  From that refusal it decided that all Bash was refused, and it ran no preflight check.  A third run with Bash allowed in a clone with no remote was refused by auto mode ("Create Unsafe Agents").  So the up-front message stays not verified (TD-72).  Next: a person's run, as TD-72 says.  No agent runs it again.
-* [ ] Step 6: review rounds.
   * 2026-11-01: review round 1 of `7470b8d..9b129b1` (6 reviewers and 10 validators; 666,928 tokens; 20.6 wall minutes; 0 interventions).  13 confirmed should-fix (1-1 to 1-9, 1-14) and 4 nits.  1-2, 1-6 and 1-7 are significant.  The test and doc fixes are in "review round 1 fixes"; the skill, review-rounds and `CLAUDE.md` fixes are a diff for the orchestrator (`m6/r1-claude.diff`).  The mutants run was stopped after 2 of 146 mutants for the pause; both missed lines are fixed (1-4, 1-14).
   * Done after the pause, on 2026-11-01: the orchestrator wrote the round 1 files and landed `m6/r1-claude.diff` (`599e151`).  The second dry run and round 2 followed.
   * 2026-11-01: review round 2 of `7470b8d..14e31d1` (reviewer on the branch, 5 reviewers on `9b129b1..14e31d1`, 4 validators; 534,193 tokens; 17.3 wall minutes; 0 interventions).  4 confirmed should-fix (2-1 to 2-4) and 6 nits.  2-3 (no TD for the question) and 2-4 (stale resume steps) are significant.  The test, TD-72 and doc fixes are in "review round 2 fixes".  The skill and `CLAUDE.md` fixes are a diff for the orchestrator (`target/harness-phase-3b-resume/r2-claude.diff`).
@@ -280,9 +279,12 @@ The team leader gives these to the orchestrator as text:
   * Done: the orchestrator wrote the round 2 files and landed `r2-claude.diff` in `5f4fccf`, and the parent's lines in `2db8630`.
   * 2026-11-01: review round 3 of `7470b8d..2db8630` (reviewer on the branch, 5 reviewers on `14e31d1..2db8630`, 3 validators; 511,167 tokens; 9.7 wall minutes; 0 interventions).  3 confirmed should-fix (3-1 to 3-3) and 7 nits.  3-1 (the skill writes a plan before a preflight that needs a clean tree) and 3-2 (a stale next step) are significant, so round 4 follows.  Mutants: none in the since diff.  The fixes are in "review round 3 fixes", and the skill and `CLAUDE.md` fixes are in `target/harness-phase-3b-resume/r3-claude.diff`.
   * 2026-11-01: the maintainer's correction (Decision log).  Done: the orchestrator landed `r3-claude.diff` in `4e9b619`, and `r3b-claude.diff` with the decision 0023 line in `0b7cb9d`.  The team leader committed `r3c.diff` in `d6357ec`: the PLANS.md section "Decisions for the maintainer", its `docs-check` rule (`an_active_plan_of_more_than_3_milestones_needs_decisions_for_the_maintainer`, which failed first on a stub), TD-72 and this plan's pass line.
-  * 2026-11-01: review round 4 of `2db8630..d6357ec` (the fix range).  See the next line.
-  * Next step: after round 4's checkpoint, the next round of the stop rule.
-* [ ] Step 7: close-out.
+  * 2026-11-01: review round 4 of the fix range `2db8630..d6357ec` (6 reviewers, 7 validators; 548,682 tokens; 13.5 wall minutes; 0 interventions).  6 confirmed should-fix, 1 refuted (4-4), and 6 nits.  4-1, 4-2, 4-3 and 4-6 are significant, and 4-7 is on VERIFY-1, so they are fixed in `74493d4` and the orchestrator's `538dbfc`.  4-5 and the nits are reported, not fixed.  Mutants: 6 tested, 5 caught, 1 unviable.
+  * 2026-11-01: review round 5 of `d6357ec..b087013` (6 reviewers, 3 validators; 426,973 tokens; 8.3 wall minutes).  3 confirmed should-fix, none significant by M3's strict reading; 5-1 is on VERIFY-1 and is fixed in `ecea0a2`.  5-2, 5-3 and 5 nits are reported, not fixed.
+  * 2026-11-01: review round 6 of `b087013..ecea0a2` (2 reviewers, 1 validator; 90,903 tokens; 5.9 wall minutes).  6-1, on VERIFY-1, is fixed in `410ecb5`: the pin holds the whole Start line on the answers.  2 nits are reported, not fixed.
+  * 2026-11-01: review round 7 of `ecea0a2..410ecb5` (2 reviewers; 58,427 tokens; 3.0 wall minutes).  One nit, 7-1, a reported repeat of 6-3 (the first live match of step 4, item 4).  No finding of the three kinds, so round 7 is the last round (decision 0024).  Mutants: none in the diff.
+* [x] 2026-11-01: step 6, review rounds 1 to 7: 62 agents, 2,837,273 tokens, 78.3 wall minutes, 0 interventions in the rounds.
+* [x] 2026-11-01: step 7, close-out.  This plan moves to `plans/completed/`.  The run folder stays for the intent review.
 
 ## Surprises and discoveries
 
@@ -316,4 +318,25 @@ The team leader gives these to the orchestrator as text:
 
 ## Outcomes and retrospective
 
-To be written when the milestone completes.
+Done on 2026-11-01.
+
+What M6 achieved:
+
+* The project skill `orchestrate` holds orchestrated mode as M1 to M5 ran it: one checkpoint for each review round, the orchestrator's own paths, the intent review, the run folder kept until the intent review ends, CI between milestones, and the stop list.  `the_orchestrate_skill_keeps_its_key_lines` and `the_orchestrate_pins_fail_on_a_changed_skill` pin its key lines, and each pin fails on a changed skill.
+* The maintainer's correction of 2026-11-01: a big task's decisions come up front, in one message, each with its options and a recommendation.  The plan's section "Decisions for the maintainer" (`PLANS.md`) holds them and their answers.  `CLAUDE.md`, the skill, the guide and decision 0023 say the same.
+* `docs-check` fails an active plan of more than 3 milestones with no "How the work runs" or no "Decisions for the maintainer" section, and a copied log whose last round does not meet the stop rule.
+* `review log-check` checks a reported repeat (R0 to R4), and the `review-rounds` skill matches one from round 4.  Round 7's 7-1 was the first live match.
+* `review clean <round>` removes each name under `target/review/` that starts with `<round>-`.  In this milestone's rounds, it covered names such as `2-perf-reviewer-1` and `5-harness-1`.
+* The mutants of the whole diff are tested: 146 mutants, 142 caught, 4 unviable, 0 missed.
+
+What M6 did not achieve:
+
+* No dry run shows the up-front message (TD-72).  Both `claude -p` runs proposed the mode, but the `dontAsk` mode refused the Bash of the preflight, and auto mode refused a run with Bash allowed.  The command for a person is in the orchestrator's resume folder.
+
+The cost: 2 `Plan` agents for this plan (about 0.31M tokens), 1 implementer (about 0.16M), 7 review rounds (62 agents, about 2.84M final-context tokens, 78.3 wall minutes), 2 dry runs ($0.86) and one 24-minute mutants run.
+
+What to do differently:
+
+* Pin a whole line of a skill, not one sentence of it.  Rounds 4 to 6 each found a pin that held only a part of a line (4-7, 5-1, 6-1).
+* Keep a Progress line current in the same commit as the work that it records.  Rounds 2 to 5 each found a stale next step (2-4, 3-2, 4-2, 5-2).
+* Build each diff for the orchestrator in a scratch worktree, and remove the worktree before `review check`.  Round 4's check named the team leader's own worktree.
