@@ -14,17 +14,17 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
   * a decision point in more than one milestone;
   * work longer than one session;
   * the maintainer away for the run: the maintainer says the run is to go on without them.
-* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.
+* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer, if you send a message.
 * The plan's section "Decisions for the maintainer" holds these choices (`docs/plans/PLANS.md`, "Optional sections").  Ask only its open entries.
 * First, read the plan and the code that it names.  List each design or implementation choice whose answer depends on the maintainer's judgement.  These are the open entries of that section, and each new such choice that you find in the plan and the code.
 * For each choice, give the options, your recommendation and the reason.
 * Record each answer, with the date, in that section, and each new choice with it.
 * The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
 * If no entry is open, you find no new choice, and the effort is known, the message holds only the mode, the branch and the PR.
-* If the maintainer also started this skill by name or asked for orchestrated mode, send no message.  Start the work, and record that as an agent decision in the Decision log and the PR.
+* If no choice is open and the maintainer started this skill by name or asked for orchestrated mode, send no message.  Start the work, and record that as an agent decision in the Decision log and the PR.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
 * If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message, unless no message is needed (see above).
-* If the task is big and the plan has no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan.
+* If the task is big and the plan has no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan of more than 3 milestones.
 * No hook starts this skill.  A hook cannot start a skill.
 
 ## Roles
