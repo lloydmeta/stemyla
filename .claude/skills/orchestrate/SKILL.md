@@ -3,7 +3,7 @@ name: orchestrate
 description: Run a big task hands-off as orchestrator, with one team for each milestone, on one branch and one PR (decision 0023).  Use it for a big task, with a plan of more than 3 milestones, a decision point in more than one milestone, work longer than one session, or the maintainer away for the run.
 argument-hint: <plan>
 ---
-This skill runs a big task in orchestrated mode (decision 0023).  You are the orchestrator: the main session.  The plan is `$ARGUMENTS`.  Its section "How the work runs" holds what is particular to it (`docs/plans/PLANS.md`).  This skill holds the rest.  If the plan's section and this skill do not agree, the plan's section applies.  Name each such difference in the message of "Start".
+This skill runs a big task in orchestrated mode (decision 0023).  You are the orchestrator: the main session.  The plan is `$ARGUMENTS`.  Its section "How the work runs" holds what is particular to it (`docs/plans/PLANS.md`).  This skill holds the rest.  If the plan's section and this skill do not agree, the plan's section applies.  Name each such difference in the message of "Start", or in the Decision log and the PR if no message is sent.
 
 A "team" is a team leader and its subagents.  It is not the agent-teams feature of Claude Code.
 
@@ -20,10 +20,11 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 * For each choice, give the options, your recommendation and the reason.
 * Record each answer, with the date, in that section, and each new choice with it.
 * The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
-* If no entry is open, you find no new choice, and the effort is known, send no message.  Start the work, and record that in the Decision log and the PR.
+* If no entry is open, you find no new choice, and the effort is known, the message holds only the mode, the branch and the PR.
+* If the maintainer also started this skill by name or asked for orchestrated mode, send no message.  Start the work, and record that as an agent decision in the Decision log and the PR.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
-* If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message.
-* If the plan has more than 3 milestones and no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan.
+* If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message, unless no message is needed (see above).
+* If the task is big and the plan has no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan.
 * No hook starts this skill.  A hook cannot start a skill.
 
 ## Roles
@@ -79,7 +80,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 
 ## Start
 
-* Send the message of "When to use it" once.  It holds each open choice that depends on the maintainer, with its options and your recommendation.
+* Send the message of "When to use it" once, unless no message is needed there.  It holds each open choice that depends on the maintainer, with its options and your recommendation.
 * The answers go in the section "Decisions for the maintainer" ("When to use it").  Add one Decision log line, as the maintainer's decision, that points to them.
 * Make the branch and the draft PR as the plan's section says.  Commit the plan, signed, as the first commit of the new branch.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
 * Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.  M7 of harness phase 3b adds the form of the body.
