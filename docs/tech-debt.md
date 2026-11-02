@@ -338,6 +338,8 @@ In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For ex
 
 D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
 
+Harness phase 3b has the same gap for its measure "cost per milestone against PR #39".  The Progress lines of `plans/active/harness-phase-3b.md` give the final contexts of the round agents and of some other agents.  Only M5's measurement gives `modelUsage` tokens.  No log gives the tokens that the orchestrator used, or a total for the run.  So each cost per milestone in the plan is a lower bound.
+
 * Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
 
 ### TD-46: in `dontAsk` mode, the agents' probe forms are denied
@@ -460,6 +462,32 @@ This entry concerns no rule.  It concerns decision 0023, the "Plans:" line of `C
 The `orchestrate` skill says that the agent sends one message up front, before any work.  The message proposes the mode and lists each choice that hinges on the maintainer, with its options and a recommendation.  M6 of harness phase 3b ran two `claude -p` dry runs on a plan of 4 milestones (`plans/completed/harness-phase-3b-m6.md`, step 5).  Each session proposed the mode in its first reply.  Neither sent the decisions as that message, since the `dontAsk` mode refused the Bash that the preflight needs, and the skill stops at a failed check.  Auto mode refused a run with Bash allowed.  So no run shows the message.  Also, when there is no open choice and the effort is known, the message holds only the mode, the branch and the PR.  If the maintainer also asked for the mode, the agent sends no message.
 
 * Fix: a person starts a session in auto mode with a big plan and the prompt of the recipe, "Do docs/plans/active/<plan>.md.", and records the first reply.  The plan has at least one open entry in "Decisions for the maintainer", and the prompt does not ask for the mode.  It passes when the reply lists the plan's decisions, each with its options and a recommendation.  A reply that only proposes the mode does not pass.
+
+### TD-73: from round 4, a reviewer reads only the fix range
+
+This entry concerns no rule.  It concerns decision 0024, and D4 of `plans/active/harness-phase-3b.md`.
+
+From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the logs of PR #39, rounds 4 and later found 13 bugs.  At least 3 of them were in files that the fix range of the round before did not touch: catch-up 4-1, M7 6-1 and M7 6-2.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
+
+In harness phase 3b, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`.  M1's late bugs 5-1 and 6-1 were in `xtask/src/clean.rs`.  The fix range of the round before touched each of these files.  In M4, two reviewers of round 4 noted a stale GIT-2 sentence out of scope, and the orchestrator put its fix in round 5's range (`ef602b3`).  No rule tells a reviewer to report such a finding, or a team leader to log it.
+
+* Fix: the maintainer decides on the proposal of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").
+
+### TD-74: a team leader cannot write the review files or stop its subagents
+
+This entry concerns no rule.  It concerns the `orchestrate` skill and the `review-rounds` skill.
+
+In orchestrated mode, a team leader is a subagent.  From M1 of harness phase 3b, the Write tool refused `<run>/<round>/findings.md` and `<run>/log.md` to the team leader.  So in each review round of M1 to M7, the orchestrator wrote them.  So the team leader gives the text of both files at a checkpoint, and the orchestrator writes them and runs `review log-check` and `review clean`.  Each round waits for the orchestrator.  A team leader also cannot stop a stalled subagent.  In M1, a docs-reviewer stalled for about 45 minutes on one Bash call, and only the orchestrator could stop it, with TaskStop.  So the skill calls a subagent stalled after 30 minutes with no result, and the orchestrator stops it.
+
+* Fix: no fix is planned.  If Claude Code lets a subagent write these files and stop its own subagents, remove the checkpoint of each round from the `orchestrate` skill.
+
+### TD-75: the phase 3 gate compares one run of each review
+
+This entry concerns no rule.  It concerns the gate of phase 3 in `plans/active/harness-engineering.md`, and the `--baseline` flag of the `review-rounds` skill.
+
+The gate compares one run of round 1 with one run of the `baseline` agent on the same commit: "of y baseline findings, the round found x".  M5 of harness phase 3b found that one control run of the docs-reviewer found 0.425 [0.285, 0.578] of that agent's own confirmed findings in the logs.  So two runs of one review find different sets, and a miss of a baseline finding in one run can be run noise.  The record of round 1 with `--baseline`: PR #36 found 4 of 4, PR #37 2 of 2, PR #39 (M3) 1 of 3 and PR #41 (M1) 2 of 4.  Together that is 9 of 13, 0.692 [0.424, 0.873].  The gate has no count of the round's findings that the baseline did not find.  D4's token bar has no reliable measure (TD-44).
+
+* Fix: the maintainer decides on the proposal of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").
 
 ## Known breaches
 
