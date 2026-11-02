@@ -4,7 +4,7 @@
 
 ## Needs your attention
 
-<!-- Put here only the items for the maintainer to decide or to do.  A tool install and a hand run are items to do.  An agent decision that changes a rule, a permission, a tool or an accepted decision is an item to decide (`docs/plans/PLANS.md`).  For a decision, say what to decide and the default that the agent took.  Link each item to its inline comment, where one exists.  If there is no item, write "Nothing". -->
+<!-- Put here only the items for the maintainer to decide or to do.  A tool install that the agent did is an item to note.  An agent decision that changes a rule, a permission, a tool or an accepted decision is an item to decide (`docs/plans/PLANS.md`).  For a decision, say what to decide and the default that the agent took.  Link each item to its inline comment, where one exists.  If there is no item, write "Nothing". -->
 
 ## Not verified
 

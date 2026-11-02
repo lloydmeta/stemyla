@@ -134,7 +134,7 @@ impl Candidate {
 }
 
 /// The reason of a `hand-run` candidate.
-pub const HAND_RUN: &str = "a message that stored-stems, worker-check or weights writes by hand; CI does not run them (TD-16): ask a person for the run";
+pub const HAND_RUN: &str = "a message that stored-stems, worker-check or weights writes by hand; CI does not run them (TD-16): the agent runs it on a GPU with the model file";
 
 /// The reason of a path under `protocol/src/`.
 pub const MESSAGES: &str = "the page-worker messages (protocol/src/**)";

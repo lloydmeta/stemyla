@@ -85,7 +85,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 * Make the branch and the draft PR as the plan's section says.  Commit the plan, signed, as the first commit of the new branch.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
 * Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.
 * The body follows `.github/pull_request_template.md` (decision 0027).  Before each `gh pr create` and `gh pr edit`, run `cargo run -p xtask -- pr-body <file>`.  Fix each problem that it names.
-* "Needs your attention" holds only the items for the maintainer to decide or to do, such as a hand run or a tool install.  A decision item says what to decide and the default that the agent took.
+* "Needs your attention" holds only the items for the maintainer to decide or to do, such as a tool install that the agent did.  A decision item says what to decide and the default that the agent took.
 * The `<details>` block lists every agent decision of the Decision logs, and the review rounds with their mutants lines.  It also lists each `reported, not fixed` finding, and each `known` finding once, with its TD.
 
 ## The loop for each milestone
@@ -163,7 +163,7 @@ Stop at a clean point, commit, push, and tell the maintainer, only when:
 These are not stops:
 
 * A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  After a refused `review clean`, put `target/debug/xtask review clean <round>` on the list of the maintainer's steps.  The next `clean --yes` removes only some worktrees of the round, and no other folder of the round.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
-* A hand run on a GPU that the protocol rule asks for (`stored-stems`, `worker-check` or `weights`) is not a stop.  List it in the PR under "Needs your attention", and go on.
+* A GPU run that the protocol rule asks for (`stored-stems`, `worker-check` or `weights`) is the agent's step, not a stop and not the maintainer's.  Run it on this machine with the local model file.  If no GPU or model file is there, list it under "Not verified" in the PR, and go on.
 
 ## Close-out
 
