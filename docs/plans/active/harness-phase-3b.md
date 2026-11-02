@@ -348,7 +348,7 @@ Kick-off prompt:
 * 2026-11-01, M6: rounds 4 to 6 each found a pin that held only a part of one skill line (4-7, 5-1, 6-1), and rounds 2 to 5 each found a stale next step in a Progress line (2-4, 3-2, 4-2, 5-2).  This is the pattern of M3 and M4.  The fix of 6-1 pins the whole line, and round 7 found no new gap.  Evidence for M8's re-check of D4.
 * 2026-11-01, M6: round 7's 7-1 was the first live reported repeat (of 6-3): it got no validator and kept its row's values, and `review log-check` passed it.
 * 2026-11-01, M6: `review check 4` named the team leader's own scratch worktree under `target/`, made to build a diff.  The team leader removed it, and the second check gave no change.
-* 2026-11-02, M7: in round 2, the reviewer's `sed` ran in another agent's worktree (`target/review/2-reviewer-1`) and changed one line there.  The reviewer put the line back at once, and `review clean 2` removed the worktree.  Read-only review agents can still write in a worktree that is not theirs.
+* 2026-11-02, M7: in round 2, the reviewer's `sed` ran in another agent's worktree (`target/review/2-reviewer-1`) and changed one line there.  The reviewer put the line back at once, and `review clean 2` removed the worktree.  Read-only review agents can still write in a worktree that is not theirs (TD-34).
 
 ## Decision log
 
