@@ -460,6 +460,7 @@ Kick-off prompt:
 * 2026-11-02, agent (M7 team leader): `xtask attention` takes only Decision log authors that start with `agent`, then `:`, ` (` or `,`, as the M7 section says.  The `team leader:` entries of M1 to M4 give no candidate.  The PR body names those plans' Decision logs for the agent decisions.
 * 2026-11-02, agent (M7 team leader): a path with no hunk, such as a pure rename or a mode change, is never a `hand-run` candidate, since no message text changed.  It can be a `change` or `hot-spot` candidate with no line, and the PR lists it.
 * 2026-11-02, agent (M7 team leader): each class reads the new path of a rename.  If the new path does not meet the class, it reads the old path, and the reason says "renamed from <old>".
+* 2026-11-02, agent (orchestrator): the M7 intent review (round 1) found that `xtask attention` left out the 59 `team leader:` entries of M1 to M4, though decision 0027 asks for each agent's judgement call.  The orchestrator fixed it with a test that failed first (`bc52f6c`), and added the pick order of the close-out to the skill (`cd96fc5`).  M8's review round 1 reviews both, since its base is `48667e8`; no M7 round 8 runs.  At close-out the orchestrator skips the 8 `unsafe` hot spots that are test strings, rewords the PR summary, updates the plan paths in the body, and writes the line of a refused review in the PR body, not in the plan.
 
 ## Outcomes and retrospective
 
