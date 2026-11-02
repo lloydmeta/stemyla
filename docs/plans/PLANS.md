@@ -47,5 +47,5 @@ A plan has these only when it needs them.
   * It lists each design or implementation choice whose answer depends on the maintainer's judgement.  For each, it gives the options, a recommendation and the reason.  Then it gives the maintainer's answer, with the date.  This section is the one record of the answers; a Decision log line points to it.
   * The session that writes the plan asks these questions while it writes the plan, before it calls the plan done.  A session that then runs the plan with the `orchestrate` skill asks them in the skill's one message, not in a second one.
   * The `orchestrate` skill's "Start" asks only the entries that are still open, and each new choice that it finds in the plan and the code.
-  * A decision during the run stays as it is: the agent decides, records it in the Decision log as "agent", and the PR lists it under "Needs your attention".
+  * A decision during the run stays as it is: the agent decides, records it in the Decision log as "agent", and the PR lists it.  An agent decision that changes a rule, a permission, a tool or an accepted decision goes under "Needs your attention".
   * The section heading is at level 2 or 3.  `docs-check` fails a plan in `active/` of more than 3 milestones without it.

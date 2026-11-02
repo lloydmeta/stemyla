@@ -1669,6 +1669,7 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "The plan's section \"Decisions for the maintainer\" holds these choices (`docs/plans/PLANS.md`, \"Optional sections\").  Ask only its open entries.",
     "* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.",
     "The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.",
+    "* If no entry is open, you find no new choice, and the effort is known, send no message.  Start the work, and record that in the Decision log and the PR.",
     "* Record each answer, with the date, in that section, and each new choice with it.",
     "* The answers go in the section \"Decisions for the maintainer\" (\"When to use it\").  Add one Decision log line, as the maintainer's decision, that points to them.",
     "no \"How the work runs\" or \"Decisions for the maintainer\" section, write each missing section first.",

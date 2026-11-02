@@ -20,6 +20,7 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 * For each choice, give the options, your recommendation and the reason.
 * Record each answer, with the date, in that section, and each new choice with it.
 * The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
+* If no entry is open, you find no new choice, and the effort is known, send no message.  Start the work, and record that in the Decision log and the PR.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
 * If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message.
 * If the plan has more than 3 milestones and no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan.
