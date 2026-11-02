@@ -1656,6 +1656,10 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "Do not run `git add -A` or `git commit -a` while the team has work that is not committed.",
     "`0 (auto mode; a fallback prompt is not counted)`",
     "* When the intent review ends, remove the run folder by hand (TD-37).",
+    "Do not apply a change to a permission setting, an `autoMode` entry or a ruleset (\"Who edits what\").  Stop, and ask the maintainer.",
+    "If none of these gives the effort, ask the maintainer for it in the question of \"Start\"",
+    "`/review-rounds <base> <N+1> \"<criteria>\"`",
+    "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
 ];
 
 /// The problems of the orchestrate skill's text: each names what it wants.
@@ -1743,6 +1747,22 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
         ),
         (permission, "*"),
         (description, "description: Orchestrator: run a big task"),
+        (
+            "Do not apply a change to a permission setting, an `autoMode` entry or a ruleset (\"Who edits what\").  Stop, and ask the maintainer.  A change to a tool",
+            "A change to a permission, a tool",
+        ),
+        (
+            "  If none of these gives the effort, ask the maintainer for it in the question of \"Start\"",
+            "",
+        ),
+        (
+            "`/review-rounds <base> <N+1> \"<criteria>\"`",
+            "`/review-rounds <base> <N+1>`",
+        ),
+        (
+            "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
+            "5. Run /review-rounds <base> from round 1",
+        ),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
         let changed = text.replacen(from, to, 1);

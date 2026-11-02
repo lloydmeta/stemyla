@@ -2082,8 +2082,7 @@ mod tests {
     #[test]
     fn only_a_heading_that_starts_with_m_n_is_a_milestone() {
         let file = "docs/plans/active/a.md";
-        let others =
-            "* M4: a bullet\n### Step 4: M4's text\n### M4x\n```bash\n# M4 in a fence\n```\n";
+        let others = "* M4: a bullet\n### Step 4: M4's text\n### M4x\n M4: one space\n####### M4\n```bash\n# M4 in a fence\n```\n";
         assert_eq!(
             plan_runs_problems(file, &milestone_plan(&[1, 2, 3], "")),
             []
@@ -2330,6 +2329,21 @@ mod tests {
         assert_eq!(
             review_logs_follow_the_fix_rule(&[("docs/reviews/a.md".to_string(), good)]),
             []
+        );
+    }
+
+    /// `docs-check` runs the last-round check on each copied log (review
+    /// round 2 of harness phase 3b, M6: 2-2).
+    #[test]
+    fn a_copied_log_that_ends_before_round_3_fails_docs_check() {
+        let early = round_log(&[1, 2], &[]);
+        assert_eq!(
+            review_logs_follow_the_fix_rule(&[("docs/reviews/a.md".to_string(), early)]),
+            [Problem::new(
+                "reviews",
+                "docs/reviews/a.md",
+                "the last round is 2, but the rounds stop at round 3 at the earliest.  Fix: run the next round (decision 0024).".into(),
+            )]
         );
     }
 }
