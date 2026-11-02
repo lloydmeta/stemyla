@@ -20,8 +20,8 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 * For each choice, give the options, your recommendation and the reason.
 * Record each answer, with the date, in that section, and each new choice with it.
 * The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
-* If no entry is open, you find no new choice, and the effort is known, the message holds only the mode, the branch and the PR.
-* If no choice is open, the effort is known, and the maintainer started this skill by name or asked for orchestrated mode, send no message.  Start the work, and record that as an agent decision in the Decision log and the PR.
+* With no open entry, no new choice and a known effort, the message holds only the mode, the branch and the PR.
+* Send no message when no choice is open, the effort is known, and the maintainer asked for this mode.  The maintainer asks for it by the name of the skill or of the mode.  Start the work.  Record that as an agent decision in the Decision log and the PR.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
 * If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message, unless no message is needed (see above).
 * If the task is big and the plan has no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan of more than 3 milestones.
@@ -86,7 +86,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 * Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.
 * The body follows `.github/pull_request_template.md` (decision 0027).  Before each `gh pr create` and `gh pr edit`, run `cargo run -p xtask -- pr-body <file>`.  Fix each problem that it names.
 * "Needs your attention" holds only the items for the maintainer to decide or to do, such as a hand run or a tool install.  A decision item says what to decide and the default that the agent took.
-* The `<details>` block lists every agent decision of the Decision logs, the review rounds with their mutants lines, each `reported, not fixed` finding, and each `known` finding once, with its TD.
+* The `<details>` block lists every agent decision of the Decision logs, and the review rounds with their mutants lines.  It also lists each `reported, not fixed` finding, and each `known` finding once, with its TD.
 
 ## The loop for each milestone
 
