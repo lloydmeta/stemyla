@@ -3,7 +3,7 @@ name: orchestrate
 description: Run a big task hands-off as orchestrator, with one team for each milestone, on one branch and one PR (decision 0023).  Use it for a big task, with a plan of more than 3 milestones, a decision point in more than one milestone, work longer than one session, or the maintainer away for the run.
 argument-hint: <plan>
 ---
-This skill runs a big task in orchestrated mode (decision 0023).  You are the orchestrator: the main session.  The plan is `$ARGUMENTS`.  Its section "How the work runs" holds what is particular to it (`docs/plans/PLANS.md`).  This skill holds the rest.  If the plan's section and this skill do not agree, the plan's section applies.  Name each such difference in the question of "Start".
+This skill runs a big task in orchestrated mode (decision 0023).  You are the orchestrator: the main session.  The plan is `$ARGUMENTS`.  Its section "How the work runs" holds what is particular to it (`docs/plans/PLANS.md`).  This skill holds the rest.  If the plan's section and this skill do not agree, the plan's section applies.  Name each such difference in the message of "Start".
 
 A "team" is a team leader and its subagents.  It is not the agent-teams feature of Claude Code.
 
@@ -14,10 +14,14 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
   * a decision point in more than one milestone;
   * work longer than one session;
   * the maintainer away for the run: the maintainer says the run is to go on without them.
-* For a big task, propose orchestrated mode in one question.  Do not start the work before the answer.
-* The question names the mode, the branch, the PR and each decision point of the plan.  Ask it once, in one message.
+* For a big task, ask the maintainer's decisions up front, in one message.  Do not start the work before the answer.
+* The plan's section "Decisions for the maintainer" holds these choices (`docs/plans/PLANS.md`, "Optional sections").  Ask only its open entries.
+* First, read the plan and the code that it names.  List each design or implementation choice whose answer depends on the maintainer's judgement.  These are the open entries of that section, and each new such choice that you find in the plan and the code.
+* For each choice, give the options, your recommendation and the reason.
+* Record each answer, with the date, in that section, and each new choice with it.
+* The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
-* If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then ask the question.
+* If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message.
 * If the plan has more than 3 milestones and no "How the work runs" section, write that section first.  `docs-check` fails such a plan.
 * No hook starts this skill.  A hook cannot start a skill.
 
@@ -55,7 +59,7 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 
 ## Preflight
 
-Do the preflight before the question of "Start".  Stop at once, and tell the maintainer, if a check fails:
+Do the preflight before the message of "Start".  Stop at once, and tell the maintainer, if a check fails:
 
 * `git status --porcelain` is empty, or shows only the plan that you wrote or changed for "When to use it".  The branch is the plan's branch, or the base that the plan names if the branch does not exist yet.
 * `gh auth status` passes.
@@ -66,7 +70,7 @@ Do the preflight before the question of "Start".  Stop at once, and tell the mai
 * `cargo build -p xtask` passes.
 * Each preflight item of the plan's section.
 
-Record the session's model and effort in the plan's Surprises.  A subagent with `model: inherit` runs on the session's model.  Read the model from your system prompt.  Name where each value comes from.  If none of these gives the effort, ask the maintainer for it in the question of "Start":
+Record the session's model and effort in the plan's Surprises.  A subagent with `model: inherit` runs on the session's model.  Read the model from your system prompt.  Name where each value comes from.  If none of these gives the effort, ask the maintainer for it in the message of "Start":
 
 * the start command's `--model` and `--effort`;
 * the environment variable `ANTHROPIC_MODEL`;
@@ -74,7 +78,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 
 ## Start
 
-* Ask the question of "When to use it" once.  Put each decision point of the plan in the same message.
+* Send the message of "When to use it" once.  It holds each open choice that depends on the maintainer, with its options and your recommendation.
 * Record each answer in the plan's Decision log, as the maintainer's decision, with the date.
 * Make the branch and the draft PR as the plan's section says.  Commit the plan, signed, as the first commit of the new branch.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
 * Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.  M7 of harness phase 3b adds the form of the body.

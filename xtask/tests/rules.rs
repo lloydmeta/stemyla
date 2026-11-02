@@ -1639,7 +1639,9 @@ const SIZING_SIGNALS: &[&str] = &[
 /// M6 adds the stop at a diff that changes a permission, the question for
 /// the effort, and the criteria of both `/review-rounds` calls (2-1).
 /// Review round 3 adds the plan as the only change that the preflight
-/// accepts, and its commit on the new branch (3-1).
+/// accepts, and its commit on the new branch (3-1).  The maintainer's
+/// correction of 2026-11-01 adds the list of choices that hinge on the
+/// maintainer, each with its options and a recommendation.
 const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "name: orchestrate",
     AGENT_CALL_RULE,
@@ -1661,7 +1663,10 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "`0 (auto mode; a fallback prompt is not counted)`",
     "* When the intent review ends, remove the run folder by hand (TD-37).",
     "Do not apply a change to a permission setting, an `autoMode` entry or a ruleset (\"Who edits what\").  Stop, and ask the maintainer.",
-    "If none of these gives the effort, ask the maintainer for it in the question of \"Start\"",
+    "If none of these gives the effort, ask the maintainer for it in the message of \"Start\"",
+    "List each design or implementation choice whose answer depends on the maintainer's judgement.",
+    "* For each choice, give the options, your recommendation and the reason.",
+    "The plan's section \"Decisions for the maintainer\" holds these choices (`docs/plans/PLANS.md`, \"Optional sections\").  Ask only its open entries.",
     "`/review-rounds <base> <N+1> \"<criteria>\"`",
     "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
     "or shows only the plan that you wrote or changed for \"When to use it\"",
@@ -1759,7 +1764,7 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
             "A change to a permission, a tool",
         ),
         (
-            "  If none of these gives the effort, ask the maintainer for it in the question of \"Start\"",
+            "  If none of these gives the effort, ask the maintainer for it in the message of \"Start\"",
             "",
         ),
         (
@@ -1778,6 +1783,15 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
             "  Commit the plan, signed, as the first commit of the new branch.",
             "",
         ),
+        (
+            "  List each design or implementation choice whose answer depends on the maintainer's judgement.",
+            "",
+        ),
+        (
+            "* For each choice, give the options, your recommendation and the reason.",
+            "*",
+        ),
+        ("  Ask only its open entries.", ""),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
         let changed = text.replacen(from, to, 1);
@@ -1804,8 +1818,12 @@ fn the_sizing_rule_says_the_same_in_each_place() {
         .filter(|signal| !line.contains(signal))
         .collect();
     assert!(
-        missing.is_empty() && line.contains("`orchestrate`"),
-        "CLAUDE.md: the \"Plans:\" line lacks {missing:?}, or does not name the `orchestrate` skill: {line:?}.  Fix: give the sizing rule of decision 0023 there, with each signal."
+        missing.is_empty()
+            && line.contains("`orchestrate`")
+            && line.contains("each choice that hinges on the maintainer")
+            && line.contains("options and a recommendation")
+            && line.contains("\"Decisions for the maintainer\""),
+        "CLAUDE.md: the \"Plans:\" line lacks {missing:?}, or does not name the `orchestrate` skill and the up-front choices: {line:?}.  Fix: give the sizing rule of decision 0023 there, with each signal, and each choice that hinges on the maintainer, with options and a recommendation."
     );
 }
 

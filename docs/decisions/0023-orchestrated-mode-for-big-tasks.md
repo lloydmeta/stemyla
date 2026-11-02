@@ -4,6 +4,8 @@ Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/active/harness-
 
 Amended on 2026-11-01 by the agent, after M5 of `plans/active/harness-phase-3b.md`: decision 0025's measurement found no cheaper model that passes, so each role keeps `inherit`.  So decision 0025 lowers no cost yet.  A lower cost of the mode may come from decisions 0024 and 0026.  The next big task after the merge measures it, and phase 6 compares the numbers.  The decision is unchanged.
 
+Amended on 2026-11-01 by the maintainer's instruction: "for big tasks, what we agreed on is to have it ask important questions up front about design and implementation that hinge on my decisions".  So the one question of this decision is one message up front, before any work.  The message holds each design or implementation choice that hinges on the maintainer, each with its options, a recommendation and the reason, with the mode, the branch and the PR.  A big task's plan lists these choices in a section "Decisions for the maintainer" (`plans/PLANS.md`), and the session that writes the plan asks them before it calls the plan done.  A decision during the run stays the agent's, in the Decision log and the PR.
+
 ## Context
 
 PR #34 and PR #39 ran hands-off: one orchestrator session, one team for each milestone, one PR.  The mode lives only as a "How the work runs" section that a person copies into each plan.  Harness phase 2 had no such section: 21 milestones took about 17 sessions, 18 PRs and at least 54 maintainer messages.  PR #39's planning session started the work inline and opened extra branches, until the maintainer stepped in three times.

@@ -28,7 +28,7 @@ Phase 3 added eight read-only review agents in `.claude/agents/`: `reviewer`, `g
 ## How a task flows
 
 1. Say what you want and why, in one or two sentences.  Name the result, not the steps.
-2. A small task: the agent does it, runs the checks and commits.  A larger task: the agent writes a plan first.  A big task (decision 0023): the agent proposes orchestrated mode in one question, then runs the plan hands-off with the `orchestrate` skill.
+2. A small task: the agent does it, runs the checks and commits.  A larger task: the agent writes a plan first.  A big task (decision 0023): the agent sends one message up front with orchestrated mode and each design or implementation choice that hinges on you, with options and a recommendation.  Then it runs the plan hands-off with the `orchestrate` skill.
 3. Review the plan before the code.  One wrong line in a plan becomes many wrong lines of code.
 4. The agent makes small signed commits, then runs review rounds with `/review-rounds` until the stop rule of decision 0024 holds.
 5. Do what only a person can do (see below).  Push, or ask the agent to push, then merge.
@@ -54,7 +54,7 @@ Each recipe gives a prompt to start from, what the agent does, and what to check
 
 * A task is big when one of these holds at the start: a plan of more than 3 milestones, a decision point in more than one milestone, work longer than one session, or you are away for the run (decision 0023).
 * Before the start: a signing cache that lasts the run, `caffeinate -dims`, and `autoContinueAtUsageLimit` on.  Give the `autoMode.allow` entries that the plan's "How the work runs" section names in `~/.claude/settings.json`.  Start `claude --permission-mode auto` at the repo root.
-* Prompt: "Do docs/plans/active/<plan>.md."  The agent loads the `orchestrate` skill, does the preflight, and asks you one question: the mode, the branch and PR, and each decision point of the plan.  Answer it once.
+* Prompt: "Do docs/plans/active/<plan>.md."  The agent loads the `orchestrate` skill, does the preflight, and sends you one message: the mode, the branch and PR, and each design or implementation choice that hinges on you.  Each choice has its options and a recommendation.  Answer it once.
 * The agent: as orchestrator, it starts one team for each milestone, on one branch and one draft PR.  Each team writes a milestone plan, implements it and runs review rounds until the stop rule holds.  Between milestones, the orchestrator waits for CI, runs `cargo run -p xtask -- clean --yes` and updates the PR body.  It stops only for the reasons of the skill's "Stop and wait", or of the plan's section.
 * Check: the PR's "Needs your attention", each decision that an agent made alone (the plan's Decision log), and the scratch folders that the close-out lists for `clean --yes --also`.
 
