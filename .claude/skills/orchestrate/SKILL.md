@@ -20,8 +20,8 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 * For each choice, give the options, your recommendation and the reason.
 * Record each answer, with the date, in that section, and each new choice with it.
 * The message also proposes orchestrated mode, and names the branch and the PR.  Send it once.
-* With no open entry, no new choice and a known effort, the message holds only the mode, the branch and the PR.
-* Send no message when no choice is open, the effort is known, and the maintainer asked for this mode.  The maintainer asks for it by the name of the skill or of the mode.  Start the work.  Record that as an agent decision in the Decision log and the PR.
+* An open choice is an open entry or a new choice.  With no open choice and a known effort, the message holds only the mode, the branch and the PR.
+* Send no message when there is no open choice, the effort is known, and the maintainer asked for this mode.  The maintainer asks for it by the name of the skill or of the mode.  Start the work.  Record that as an agent decision in the Decision log and the PR.
 * After the answer, run hands-off.  Ask again only for a reason of "Stop and wait".
 * If no plan exists, write it first, as `docs/plans/PLANS.md` says.  Then send the message, unless no message is needed (see above).
 * If the task is big and the plan has no "How the work runs" or "Decisions for the maintainer" section, write each missing section first.  `docs-check` fails such a plan of more than 3 milestones.
