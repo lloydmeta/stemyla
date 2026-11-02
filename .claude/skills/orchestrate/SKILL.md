@@ -173,7 +173,7 @@ After the last milestone, with CI green:
 2. Commit, signed.  Push, and wait for CI.
 3. Run `cargo run -p xtask -- clean --yes`.  List each scratch folder for `cargo run -p xtask -- clean --yes --also <path>`.
 4. After the last fix and the last push, run `git fetch origin main`.  Then run `cargo run -p xtask -- attention origin/main <plan>`, with the plan's new path.  It lists the candidate lines of the PR's diff and the agent decisions, the hand-run lines first.  List each candidate with no line in the PR.
-5. Pick at most 10 candidates, the hand-run lines first.  Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.
+5. Pick at most 10 candidates, the hand-run lines first.  Then pick the lines that back an item of "Needs your attention", then the proposed decisions and rule changes.  Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.
 6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the plan's Surprises.
 7. Link each item of "Needs your attention" to its comment, where one exists.  Run `xtask pr-body` on the body, then `gh pr edit --body-file`.
 8. Mark the PR ready with `gh pr ready` if the plan allows it.  Never merge (GIT-1).
