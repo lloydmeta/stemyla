@@ -7,8 +7,9 @@
 //! reads them with `git`.  The orchestrator picks at most 10 candidates,
 //! the `hand-run` lines first.
 //!
-//! A change with no hunk, such as a pure rename or a mode change, has no
-//! changed line, so it gives no candidate.
+//! A file with no hunk, such as a pure rename or a mode change, has no
+//! changed line.  When its path meets a class, it gives a candidate with
+//! no line ([`no_hunk_paths`]).
 //!
 //! `plans/active/harness-phase-3b-m7.md` (step 2) gives the classes and
 //! their rules.
@@ -90,22 +91,32 @@ impl Class {
 }
 
 /// One line that can get an inline comment.  A judgement whose entry line
-/// is not in the diff has no line and no side.
+/// is not in the diff has no line and no side.  So has a file with no
+/// hunk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub class: Class,
     pub path: String,
     pub line: Option<(usize, Side)>,
+    /// Why a candidate has no line: [`NO_DIFF_LINE`] or [`NO_HUNK`].
+    pub no_line: &'static str,
     pub reasons: Vec<String>,
 }
 
+/// The note of a judgement whose entry line is not in the diff.
+pub const NO_DIFF_LINE: &str = "no diff line";
+
+/// The note of a file with no hunk.
+pub const NO_HUNK: &str = "no hunk";
+
 impl Candidate {
     /// The output line: `<class> <path>:<line> <side>: <reasons>`, or
-    /// `<class> <path> (no diff line; list it in the PR): <reasons>`.
+    /// `<class> <path> (<note>; list it in the PR): <reasons>`.  The note
+    /// is `no diff line` or `no hunk`.
     pub fn render(&self) -> String {
         let place = match self.line {
             Some((line, side)) => format!("{}:{line} {}", self.path, side.name()),
-            None => format!("{} (no diff line; list it in the PR)", self.path),
+            None => format!("{} ({}; list it in the PR)", self.path, self.no_line),
         };
         format!("{} {place}: {}", self.class.name(), self.reasons.join("; "))
     }
@@ -206,6 +217,34 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
     out
 }
 
+/// The path of each file section of `diff` that has no hunk: a pure
+/// rename, a mode change, a new empty file or a binary file.
+pub fn no_hunk_paths(diff: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // The path of the current file section, and if it has a hunk.  A line
+    // of a hunk starts with `+`, `-`, ` ` or `\\`, so it is not a header.
+    let mut section: Option<(String, bool)> = None;
+    for line in diff.lines() {
+        if let Some(paths) = line.strip_prefix("diff --git ") {
+            if let Some((path, false)) = section.take() {
+                out.push(path);
+            }
+            let path = paths.rsplit_once(" b/").map_or(paths, |(_, b)| b);
+            section = Some((path.to_string(), false));
+        } else if let Some((path, has_hunk)) = section.as_mut() {
+            if let Some(to) = line.strip_prefix("rename to ") {
+                *path = to.to_string();
+            } else if line.starts_with("@@ ") {
+                *has_hunk = true;
+            }
+        }
+    }
+    if let Some((path, false)) = section {
+        out.push(path);
+    }
+    out
+}
+
 /// The old and new (start, count) of a line `@@ -a[,b] +c[,d] @@`.  A
 /// missing count is 1.
 fn hunk_ranges(line: &str) -> Option<((usize, usize), (usize, usize))> {
@@ -292,6 +331,7 @@ pub fn candidates(
                 class: Class::Judgement,
                 path: path.clone(),
                 line: in_diff.then_some((n, Side::Right)),
+                no_line: NO_DIFF_LINE,
                 reasons: vec![format!(
                     "{author}: {}",
                     said.chars().take(80).collect::<String>()
@@ -299,8 +339,37 @@ pub fn candidates(
             });
         }
     }
+    for path in no_hunk_paths(diff) {
+        let mut classes = Vec::new();
+        if HAND_RUN_PATHS.contains(&path.as_str()) {
+            classes.push((Class::HandRun, HAND_RUN.to_string()));
+        }
+        if let Some(reason) = change_reason(&path, text_of(&path)) {
+            classes.push((Class::Change, reason.to_string()));
+        }
+        for reason in hot_reasons(&path) {
+            classes.push((Class::HotSpot, reason));
+        }
+        if let Some((class, _)) = classes.first() {
+            found.push(Candidate {
+                class: *class,
+                path,
+                line: None,
+                no_line: NO_HUNK,
+                reasons: classes.into_iter().map(|(_, reason)| reason).collect(),
+            });
+        }
+    }
     merge_and_sort(found)
 }
+
+/// The paths whose hunks can give a `hand-run` line.
+const HAND_RUN_PATHS: [&str; 4] = [
+    "protocol/src/lib.rs",
+    "xtask/e2e/worker.js",
+    "xtask/src/e2e/weights.rs",
+    "xtask/src/e2e.rs",
+];
 
 /// A candidate at the line of `changed`.
 fn candidate(class: Class, changed: &Changed, reasons: Vec<String>) -> Candidate {
@@ -308,6 +377,7 @@ fn candidate(class: Class, changed: &Changed, reasons: Vec<String>) -> Candidate
         class,
         path: changed.path.clone(),
         line: Some((changed.line, changed.side)),
+        no_line: NO_DIFF_LINE,
         reasons,
     }
 }
@@ -339,19 +409,58 @@ fn hand_run_line<'a>(hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
             hunk.iter().find(|c| span(c).0 < tests)
         }
         "xtask/src/e2e.rs" => {
-            // `stored_stems_checks` reads the replies of `stored-stems`, and
-            // `stem_protocol_file` copies `stem_protocol::stem_file` by hand.
-            let bodies = [
-                block(text, "fn stored_stems(", "}"),
-                block(text, "fn stored_stems_checks(", "}"),
-                block(text, "fn stem_protocol_file(", "}"),
-                block(text, "fn worker_check(", "}"),
-            ];
+            let items = hand_run_items(text);
             hunk.iter()
-                .find(|c| bodies.iter().any(|body| inside(*body, c)))
+                .find(|c| items.iter().any(|item| inside(Some(*item), c)))
         }
         _ => None,
     }
+}
+
+/// The lines, from 1, of each top-level item of `e2e.rs` that writes or
+/// reads a message of `stored-stems` or `worker-check` by hand.  An item
+/// starts at column 0 with `fn`, `pub fn`, `const` or `static`.  Its name
+/// holds `stored_stems` or `worker_check` in any case, or is
+/// `stem_protocol_file`.  A `fn` ends at the next line that is exactly
+/// `}`.  A `const` or `static` ends at its first line that ends with `;`.
+fn hand_run_items(text: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut items = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let (rest, is_fn) = if let Some(rest) = line
+            .strip_prefix("fn ")
+            .or_else(|| line.strip_prefix("pub fn "))
+        {
+            (rest, true)
+        } else if let Some(rest) = line
+            .strip_prefix("const ")
+            .or_else(|| line.strip_prefix("static "))
+        {
+            (rest, false)
+        } else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .to_lowercase();
+        if !(name.contains("stored_stems")
+            || name.contains("worker_check")
+            || name == "stem_protocol_file")
+        {
+            continue;
+        }
+        let end = (i..lines.len()).find(|j| {
+            if is_fn {
+                *j > i && lines[*j] == "}"
+            } else {
+                lines[*j].trim_end().ends_with(';')
+            }
+        });
+        items.push((i + 1, end.unwrap_or(lines.len().saturating_sub(1)) + 1));
+    }
+    items
 }
 
 /// The lines, from 1, from the first line of `text` that holds `start` to
@@ -518,7 +627,8 @@ fn merge_and_sort(found: Vec<Candidate>) -> Vec<Candidate> {
 }
 
 /// Runs `xtask attention <base> <plan>` in the repo of the current folder.
-/// It gives 0 after the list, 1 for a git error and 2 for a usage error.
+/// It gives 0 after the list, 1 for a git error or a plan outside the
+/// repo, and 2 for a usage error.
 pub fn main(args: &[String]) -> i32 {
     // A `<base>` that starts with `-` would be read as an option of git.
     let [base, plan] = args else {
@@ -568,14 +678,18 @@ fn gather(base: &str, plan: &str) -> Result<(String, Texts, Texts)> {
             &format!("{base}...HEAD"),
         ],
     )?;
-    let mut files = Vec::new();
-    for changed in changed_lines(&diff) {
-        if files.iter().any(|(path, _)| *path == changed.path) {
+    let mut files: Texts = Vec::new();
+    let paths = changed_lines(&diff)
+        .into_iter()
+        .map(|changed| changed.path)
+        .chain(no_hunk_paths(&diff));
+    for path in paths {
+        if files.iter().any(|(p, _)| *p == path) {
             continue;
         }
         // A deleted file has no text at HEAD, so it gets an empty text.
-        let text = git(&root, &["show", &format!("HEAD:{}", changed.path)]).unwrap_or_default();
-        files.push((changed.path, text));
+        let text = git(&root, &["show", &format!("HEAD:{path}")]).unwrap_or_default();
+        files.push((path, text));
     }
     let mut plans = vec![(
         plan.to_string(),
@@ -607,7 +721,8 @@ pub fn repo_path(root: &Path, dir: &Path, plan: &str) -> Result<String> {
     let joined = dir.join(plan);
     let path = joined.canonicalize().unwrap_or_else(|_| {
         let mut path = std::path::PathBuf::new();
-        // `components` drops each `.` part.
+        // `components` drops each `.` after the first part, and `dir` is
+        // absolute.
         for part in joined.components() {
             match part {
                 std::path::Component::ParentDir => {
@@ -732,7 +847,7 @@ mod tests {
         );
     }
 
-    const E2E: &str = "fn stored_stems_clip(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n\nfn stem_protocol_file(name: &str) -> String {\n    format!(\"{name}.wav\")\n}\n";
+    const E2E: &str = "fn smoke(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n\nfn stem_protocol_file(name: &str) -> String {\n    format!(\"{name}.wav\")\n}\n\nconst STORED_STEMS_SESSION: &str =\n    \"sessions/1\";\n\nfn stored_stems_clip(out: &Path) -> Result<()> {\n    let a = 1;\n}\n\nconst OTHER: &str = \"x\";\n\npub fn worker_check_reply() -> Value {\n    json!({})\n}\n\nstatic WORKER_CHECK_ARGS: &[&str] = &[\"a\"];\n";
 
     const WEIGHTS: &str = "pub fn run() {\n    let m = json!({\n        \"type\": \"init\",\n        \"settings\": s,\n    });\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() { let m = json!({ \"type\": \"x\" }); }\n}\n";
 
@@ -772,6 +887,16 @@ mod tests {
                 "    let ok = r[\"type\"] == \"ok\";",
             ),
             added("xtask/src/e2e.rs", 28, "    format!(\"{name}.flac\")"),
+            added("xtask/src/e2e.rs", 32, "    \"sessions/2\";"),
+            added("xtask/src/e2e.rs", 33, "// after the const"),
+            added("xtask/src/e2e.rs", 35, "    let a = 2;"),
+            added("xtask/src/e2e.rs", 38, "const OTHER: &str = \"y\";"),
+            added("xtask/src/e2e.rs", 41, "    json!({ \"a\": 1 })"),
+            added(
+                "xtask/src/e2e.rs",
+                44,
+                "static WORKER_CHECK_ARGS: &[&str] = &[\"b\"];",
+            ),
             added("xtask/src/e2e/weights.rs", 4, "        \"settings\": t,"),
             added("xtask/src/e2e/weights.rs", 7, "// before the tests"),
             added("xtask/src/e2e/weights.rs", 8, "#[cfg(test)]"),
@@ -789,6 +914,10 @@ mod tests {
                 format!("hand-run xtask/src/e2e.rs:15 LEFT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e.rs:24 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e.rs:28 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:32 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:35 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:41 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:44 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e/weights.rs:4 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e/weights.rs:7 RIGHT: {HAND_RUN}"),
             ]
@@ -1081,7 +1210,7 @@ mod tests {
         assert!(count >= 30, "{count}");
     }
 
-    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: no.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
+    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: no.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n* 2026-11-0x, agent: not a date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
 
     #[test]
     fn each_agent_form_in_the_decision_log_is_a_judgement() {
@@ -1109,6 +1238,7 @@ mod tests {
         );
         let diff = [
             added(path, 4, "* 2026-11-02, agent: in the diff."),
+            hunk(path, 5, &["* 2026-11-03, agent: gone."], 4, &[]),
             added(
                 "docs/plans/active/q.md",
                 3,
@@ -1246,6 +1376,57 @@ mod tests {
             .map(|c| (c.side, c.line))
             .collect();
         assert_eq!(found, vec![(Side::Left, 11), (Side::Right, 20)]);
+    }
+
+    #[test]
+    fn a_path_with_no_hunk_gives_a_candidate_with_no_line() {
+        let mode = |path: &str| {
+            format!("diff --git a/{path} b/{path}\nold mode 100644\nnew mode 100755\n")
+        };
+        let diff = [
+            "diff --git a/docs/decisions/0028-a.md b/docs/decisions/0028-b.md\nsimilarity index 100%\nrename from docs/decisions/0028-a.md\nrename to docs/decisions/0028-b.md\n".to_string(),
+            mode(".claude/hooks/h.sh"),
+            "diff --git a/.claude/empty.md b/.claude/empty.md\nnew file mode 100644\nindex 0000000..e69de29\n".to_string(),
+            "diff --git a/.github/workflows/x.bin b/.github/workflows/x.bin\nindex 1..2 100644\nBinary files a/.github/workflows/x.bin and b/.github/workflows/x.bin differ\n".to_string(),
+            mode("docs/README.md"),
+            mode("protocol/src/lib.rs"),
+            mode("xtask/src/e2e.rs"),
+            mode("engine/src/song.rs"),
+            added("CLAUDE.md", 2, "A line."),
+        ]
+        .concat();
+        let files = [("docs/decisions/0028-b.md", "# B\n\nStatus: proposed\n")];
+        let none = "(no hunk; list it in the PR)";
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![
+                format!(
+                    "hand-run protocol/src/lib.rs {none}: {HAND_RUN}; {}; {}; {MESSAGES}",
+                    strict("PROTO-2"),
+                    strict("MEM-2")
+                ),
+                format!("hand-run xtask/src/e2e.rs {none}: {HAND_RUN}"),
+                format!("change CLAUDE.md:2 RIGHT: {MAP}"),
+                format!("change .claude/empty.md {none}: {HARNESS}"),
+                format!("change .claude/hooks/h.sh {none}: {HARNESS}"),
+                format!("change .github/workflows/x.bin {none}: {CI}"),
+                format!("change docs/decisions/0028-b.md {none}: {PROPOSED}"),
+                format!("hot-spot engine/src/song.rs {none}: {}", strict("MEM-1")),
+            ]
+        );
+        assert_eq!(
+            no_hunk_paths(&diff),
+            vec![
+                "docs/decisions/0028-b.md",
+                ".claude/hooks/h.sh",
+                ".claude/empty.md",
+                ".github/workflows/x.bin",
+                "docs/README.md",
+                "protocol/src/lib.rs",
+                "xtask/src/e2e.rs",
+                "engine/src/song.rs",
+            ]
+        );
     }
 
     #[test]
