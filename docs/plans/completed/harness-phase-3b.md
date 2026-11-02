@@ -490,7 +490,7 @@ Done on 2026-11-02, in PR #41.  The numbers come from the Progress lines, the re
 * Cheaper models: the measurement ran inside its budget, and no candidate passed.  So the cost of each role did not fall.
 * Local checks by changed paths: warm, tier `commit` takes 11 s to 68 s, and tier `push` about 2 minutes.  The full set took 16 minutes on a PR #39 commit.
 * Cleanup: `xtask clean` exists, and M5 removed 35 clone folders (29.1 GiB) with `--also`.  The orchestrator ran `clean --yes` between milestones, and the PR body lists the steps left after the merge.
-* PR bodies and inline comments: the body of PR #41 follows the template, and `xtask pr-body` passes on it.  <review>.
+* PR bodies and inline comments: the body of PR #41 follows the template, and `xtask pr-body` passes on it.  The COMMENT review is posted on PR #41 (review 5734865128), with 10 inline comments, one for each item to decide; GitHub took a COMMENT review on the author's own PR.
 
 ### The cost
 
