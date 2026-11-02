@@ -1,0 +1,1082 @@
+//! `xtask attention <base> <plan>`: lists the diff lines and the agent
+//! decisions that can get an inline comment at close-out (decision 0027).
+//!
+//! The code has two parts, so the tests can check the rules without a
+//! repo.  [`changed_lines`] and [`candidates`] are pure functions of the
+//! diff, the text at `HEAD` of each changed path, and the plans.  [`main`]
+//! reads them with `git`.  The orchestrator picks at most 10 candidates,
+//! the `hand-run` lines first.
+//!
+//! `plans/active/harness-phase-3b-m7.md` (step 2) gives the classes and
+//! their rules.
+
+use crate::check::{repo_root, strict_paths};
+use crate::docs::glob_matches;
+use anyhow::{Context, Result, bail};
+use std::path::Path;
+use std::process::Command;
+
+pub const USAGE: &str = "usage: xtask attention <base> <plan>";
+
+/// The exit code of a git error.
+const FAILED: i32 = 1;
+
+/// The exit code of a usage error.
+const REFUSED: i32 = 2;
+
+/// The side of a diff line, as GitHub names it for a review comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Side {
+    /// A removed line, on the old side.
+    Left,
+    /// An added line, on the new side.
+    Right,
+}
+
+impl Side {
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Left => "LEFT",
+            Side::Right => "RIGHT",
+        }
+    }
+}
+
+/// One changed line of a diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changed {
+    /// The new path, or the old path of a deleted file.
+    pub path: String,
+    pub side: Side,
+    /// The line on its side, from 1.
+    pub line: usize,
+    /// The new-side position of the line's hunk (the `+<n>` of `@@`).
+    pub hunk_new: usize,
+    /// The number of the line's hunk in the diff, from 0.
+    pub hunk: usize,
+    /// The line's text, without the `+` or `-`.
+    pub text: String,
+}
+
+/// The classes of a candidate, in their order of output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Class {
+    /// A message that `stored-stems`, `worker-check` or `weights` writes
+    /// by hand.
+    HandRun,
+    /// A change to a decision, a rule, the agent harness or CI.
+    Change,
+    /// A trust boundary or a correctness hot spot.
+    HotSpot,
+    /// An agent's judgement call, from a Decision log.
+    Judgement,
+}
+
+impl Class {
+    pub fn name(self) -> &'static str {
+        match self {
+            Class::HandRun => "hand-run",
+            Class::Change => "change",
+            Class::HotSpot => "hot-spot",
+            Class::Judgement => "judgement",
+        }
+    }
+}
+
+/// One line that can get an inline comment.  A judgement whose entry line
+/// is not in the diff has no line and no side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub class: Class,
+    pub path: String,
+    pub line: Option<(usize, Side)>,
+    pub reasons: Vec<String>,
+}
+
+impl Candidate {
+    /// The output line: `<class> <path>:<line> <side>: <reasons>`, or
+    /// `<class> <path> (no diff line; list it in the PR): <reasons>`.
+    pub fn render(&self) -> String {
+        let place = match self.line {
+            Some((line, side)) => format!("{}:{line} {}", self.path, side.name()),
+            None => format!("{} (no diff line; list it in the PR)", self.path),
+        };
+        format!("{} {place}: {}", self.class.name(), self.reasons.join("; "))
+    }
+}
+
+/// The reason of a `hand-run` candidate.
+pub const HAND_RUN: &str = "a message that stored-stems, worker-check or weights writes by hand; CI does not run them (TD-16): ask a person for the run";
+
+/// The reason of a path under `protocol/src/`.
+pub const MESSAGES: &str = "the page-worker messages (protocol/src/**)";
+
+/// The reason of `app/src/lib.rs`.
+pub const APP_LIB: &str =
+    "app/src/lib.rs holds memory and transfer code, and no strict row holds it (TD-70)";
+
+/// The reasons of the `change` class.
+pub const PROPOSED: &str = "a proposed decision: accept or reject it";
+pub const DECISION: &str = "a change to a decision";
+pub const RULE: &str = "a change to a rule (docs/invariants.md)";
+pub const MAP: &str = "a change to the map (CLAUDE.md)";
+pub const HARNESS: &str = "a change to the agent harness (.claude/)";
+pub const CI: &str = "a change to CI";
+pub const ALLOWLISTED: &str = "a change to an allowlisted skip (SKIP_ALLOWLIST, VERIFY-1)";
+
+/// The reasons of an added line in the `hot-spot` class.
+pub const UNSAFE: &str = "an added `unsafe`";
+pub const DEPENDENCY: &str = "an added dependency (DEPS-1)";
+
+/// The rules whose strict paths are hot spots.
+pub const HOT_RULES: [&str; 7] = [
+    "PROTO-2", "MEM-1", "MEM-2", "MEM-3", "MEM-4", "MEM-5", "RT-1",
+];
+
+/// Each changed line of a unified diff that `git diff -U0` gives.  It
+/// skips `\ No newline at end of file` and a binary file.
+pub fn changed_lines(diff: &str) -> Vec<Changed> {
+    let mut out = Vec::new();
+    let (mut old_path, mut path) = (String::new(), String::new());
+    let (mut old_line, mut new_line, mut hunk_new, mut hunks) = (0, 0, 0, 0);
+    // The lines left in the current hunk, on each side.  Inside a hunk, a
+    // line such as `--- x` is a removed line, not a header.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
+    for line in diff.lines() {
+        if old_left > 0 || new_left > 0 {
+            let mut push = |side, line: &mut usize, text: &str| {
+                out.push(Changed {
+                    path: path.clone(),
+                    side,
+                    line: *line,
+                    hunk_new,
+                    hunk: hunks - 1,
+                    text: text.to_string(),
+                });
+                *line += 1;
+            };
+            if let Some(text) = line.strip_prefix('-') {
+                push(Side::Left, &mut old_line, text);
+                old_left = old_left.saturating_sub(1);
+                continue;
+            }
+            if let Some(text) = line.strip_prefix('+') {
+                push(Side::Right, &mut new_line, text);
+                new_left = new_left.saturating_sub(1);
+                continue;
+            }
+            if line.starts_with('\\') {
+                continue;
+            }
+            if line.starts_with(' ') {
+                old_line += 1;
+                new_line += 1;
+                old_left = old_left.saturating_sub(1);
+                new_left = new_left.saturating_sub(1);
+                continue;
+            }
+            // A line of no hunk: the hunk is over.
+            (old_left, new_left) = (0, 0);
+        }
+        if line.starts_with("diff --git ") {
+            old_path.clear();
+            path.clear();
+        } else if let Some(p) = line.strip_prefix("--- ") {
+            old_path = p.strip_prefix("a/").unwrap_or(p).to_string();
+        } else if let Some(p) = line.strip_prefix("+++ ") {
+            path = match p {
+                "/dev/null" => old_path.clone(),
+                _ => p.strip_prefix("b/").unwrap_or(p).to_string(),
+            };
+        } else if let Some(((old_at, old_n), (new_at, new_n))) = hunk_ranges(line) {
+            (old_line, old_left) = (old_at, old_n);
+            (new_line, new_left, hunk_new) = (new_at, new_n, new_at);
+            hunks += 1;
+        }
+    }
+    out
+}
+
+/// The old and new (start, count) of a line `@@ -a[,b] +c[,d] @@`.  A
+/// missing count is 1.
+fn hunk_ranges(line: &str) -> Option<((usize, usize), (usize, usize))> {
+    fn range(text: &str) -> Option<(usize, usize)> {
+        let (start, count) = text.split_once(',').unwrap_or((text, "1"));
+        Some((start.parse().ok()?, count.parse().ok()?))
+    }
+    let mut words = line.strip_prefix("@@ ")?.split(' ');
+    let old = range(words.next()?.strip_prefix('-')?)?;
+    let new = range(words.next()?.strip_prefix('+')?)?;
+    Some((old, new))
+}
+
+/// Each candidate of `diff`, merged and sorted.  `files` holds the text at
+/// `HEAD` of each changed path.  `plans` holds the plan and its milestone
+/// plans, as (path, text).
+pub fn candidates(
+    diff: &str,
+    files: &[(String, String)],
+    plans: &[(String, String)],
+) -> Vec<Candidate> {
+    let lines = changed_lines(diff);
+    let text_of = |path: &str| {
+        files
+            .iter()
+            .find(|(p, _)| p == path)
+            .map_or("", |(_, text)| text.as_str())
+    };
+    let hunks: Vec<&[Changed]> = lines.chunk_by(|a, b| a.hunk == b.hunk).collect();
+    let mut found = Vec::new();
+    for hunk in &hunks {
+        if let Some(first) = hand_run_line(hunk, text_of(&hunk[0].path)) {
+            found.push(candidate(Class::HandRun, first, vec![HAND_RUN.to_string()]));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for changed in &lines {
+        if seen.contains(&changed.path.as_str()) {
+            continue;
+        }
+        seen.push(&changed.path);
+        if let Some(reason) = change_reason(&changed.path, text_of(&changed.path)) {
+            found.push(candidate(Class::Change, changed, vec![reason.to_string()]));
+        }
+    }
+    for hunk in &hunks {
+        if hunk[0].path != "xtask/src/rules.rs" {
+            continue;
+        }
+        let allowlist = block(text_of(&hunk[0].path), "const SKIP_ALLOWLIST", "];");
+        if let Some(first) = hunk.iter().find(|c| inside(allowlist, c)) {
+            found.push(candidate(
+                Class::Change,
+                first,
+                vec![ALLOWLISTED.to_string()],
+            ));
+        }
+    }
+    for hunk in &hunks {
+        let reasons = hot_reasons(&hunk[0].path);
+        if !reasons.is_empty() {
+            found.push(candidate(Class::HotSpot, &hunk[0], reasons));
+        }
+    }
+    for changed in lines.iter().filter(|c| c.side == Side::Right) {
+        if changed.path.ends_with(".rs") && has_unsafe(&changed.text) {
+            found.push(candidate(Class::HotSpot, changed, vec![UNSAFE.to_string()]));
+        }
+        let manifest = changed.path == "Cargo.toml" || changed.path.ends_with("/Cargo.toml");
+        if manifest && is_dependency(text_of(&changed.path), changed.line, &changed.text) {
+            found.push(candidate(
+                Class::HotSpot,
+                changed,
+                vec![DEPENDENCY.to_string()],
+            ));
+        }
+    }
+    for (path, text) in plans {
+        for (n, author, said) in agent_entries(text) {
+            let in_diff = lines
+                .iter()
+                .any(|c| c.path == *path && c.side == Side::Right && c.line == n);
+            found.push(Candidate {
+                class: Class::Judgement,
+                path: path.clone(),
+                line: in_diff.then_some((n, Side::Right)),
+                reasons: vec![format!(
+                    "{author}: {}",
+                    said.chars().take(80).collect::<String>()
+                )],
+            });
+        }
+    }
+    merge_and_sort(found)
+}
+
+/// A candidate at the line of `changed`.
+fn candidate(class: Class, changed: &Changed, reasons: Vec<String>) -> Candidate {
+    Candidate {
+        class,
+        path: changed.path.clone(),
+        line: Some((changed.line, changed.side)),
+        reasons,
+    }
+}
+
+/// The line at `HEAD` that a changed line is at: its own line for an
+/// added line, and its hunk's new-side position for a removed line.
+fn position(changed: &Changed) -> usize {
+    match changed.side {
+        Side::Right => changed.line,
+        Side::Left => changed.hunk_new,
+    }
+}
+
+/// The first line of `hunk` that changes a message that `stored-stems`,
+/// `worker-check` or `weights` writes by hand.  `text` is the file at
+/// `HEAD`.
+fn hand_run_line<'a>(hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
+    match hunk[0].path.as_str() {
+        "protocol/src/lib.rs" | "xtask/e2e/worker.js" => hunk.first(),
+        "xtask/src/e2e/weights.rs" => {
+            let tests = text
+                .lines()
+                .position(|line| line.trim() == "#[cfg(test)]")
+                .map_or(usize::MAX, |i| i + 1);
+            hunk.iter().find(|c| position(c) < tests)
+        }
+        "xtask/src/e2e.rs" => {
+            let bodies = [
+                block(text, "fn stored_stems(", "}"),
+                block(text, "fn worker_check(", "}"),
+            ];
+            hunk.iter()
+                .find(|c| bodies.iter().any(|body| inside(*body, c)))
+        }
+        _ => None,
+    }
+}
+
+/// The lines, from 1, from the first line of `text` that holds `start` to
+/// the next line that is exactly `end`, or to the end of `text`.
+fn block(text: &str, start: &str, end: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let first = lines.iter().position(|line| line.contains(start))?;
+    let last = (first + 1..lines.len())
+        .find(|i| lines[*i] == end)
+        .unwrap_or(lines.len().saturating_sub(1));
+    Some((first + 1, last + 1))
+}
+
+/// True when `changed` is at a line of `block`.
+fn inside(block: Option<(usize, usize)>, changed: &Changed) -> bool {
+    block.is_some_and(|(first, last)| (first..=last).contains(&position(changed)))
+}
+
+/// The reason of a changed file in the `change` class, or none.  `text`
+/// is the file at `HEAD`.
+fn change_reason(path: &str, text: &str) -> Option<&'static str> {
+    if glob_matches("docs/decisions/*.md", path) {
+        return Some(if text.contains("Status: proposed") {
+            PROPOSED
+        } else {
+            DECISION
+        });
+    }
+    match path {
+        "docs/invariants.md" => Some(RULE),
+        "CLAUDE.md" => Some(MAP),
+        _ if glob_matches(".claude/**", path) => Some(HARNESS),
+        _ if glob_matches(".github/{workflows,actions}/**", path) => Some(CI),
+        _ => None,
+    }
+}
+
+/// The reasons of a changed path in the `hot-spot` class: each hot rule
+/// whose strict paths hold it, `app/src/lib.rs`, and the page-worker
+/// messages.
+fn hot_reasons(path: &str) -> Vec<String> {
+    let mut reasons: Vec<String> = HOT_RULES
+        .iter()
+        .filter(|rule| {
+            strict_paths(rule)
+                .iter()
+                .any(|glob| glob_matches(glob, path))
+        })
+        .map(|rule| format!("a strict path of {rule}"))
+        .collect();
+    if path == "app/src/lib.rs" {
+        reasons.push(APP_LIB.to_string());
+    }
+    if glob_matches("protocol/src/**", path) {
+        reasons.push(MESSAGES.to_string());
+    }
+    reasons
+}
+
+/// True when `line` holds `unsafe` after the line start, a space, `(` or
+/// `{`, and before a space or `{`, and `line` is not a `//` line.
+fn has_unsafe(line: &str) -> bool {
+    if line.trim_start().starts_with("//") {
+        return false;
+    }
+    line.match_indices("unsafe").any(|(i, word)| {
+        let before = line[..i].chars().next_back();
+        let after = line[i + word.len()..].chars().next();
+        matches!(before, None | Some(' ' | '(' | '{')) && matches!(after, Some(' ' | '{'))
+    })
+}
+
+/// True when the added line `added`, at `line` of a `Cargo.toml` whose
+/// text at `HEAD` is `text`, is in a dependency table and is not blank or
+/// a comment.
+fn is_dependency(text: &str, line: usize, added: &str) -> bool {
+    let added = added.trim();
+    if added.is_empty() || added.starts_with('#') {
+        return false;
+    }
+    let header = text
+        .lines()
+        .take(line)
+        .map(str::trim)
+        .filter(|l| l.starts_with('['))
+        .last();
+    header.is_some_and(|h| h.ends_with("dependencies]") || h.contains("dependencies."))
+}
+
+/// Each agent entry of the `## Decision log` section of a plan: its line
+/// (from 1), its author and its text.
+fn agent_entries(plan: &str) -> Vec<(usize, &str, &str)> {
+    let mut entries = Vec::new();
+    let mut in_log = false;
+    for (i, line) in plan.lines().enumerate() {
+        if line.starts_with("## ") {
+            in_log = line.trim_end() == "## Decision log";
+            continue;
+        }
+        if !in_log {
+            continue;
+        }
+        let Some((author, said)) = entry(line) else {
+            continue;
+        };
+        if author == "agent" || author.starts_with("agent (") || author.starts_with("agent,") {
+            entries.push((i + 1, author, said));
+        }
+    }
+    entries
+}
+
+/// The author and the text of an entry line `* <YYYY-MM-DD>, <author>: <text>`.
+fn entry(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("* ")?;
+    let date = rest.get(..10)?;
+    let is_date = date.char_indices().all(|(i, c)| match i {
+        4 | 7 => c == '-',
+        _ => c.is_ascii_digit(),
+    });
+    if !is_date {
+        return None;
+    }
+    let (author, said) = rest[10..].strip_prefix(", ")?.split_once(':')?;
+    Some((author, said.trim()))
+}
+
+/// Merges the candidates with the same path, line and side, with the
+/// first class and each reason once.  Sorts them by class, then path, then
+/// line, with no line last in its class.
+fn merge_and_sort(found: Vec<Candidate>) -> Vec<Candidate> {
+    let mut merged: Vec<Candidate> = Vec::new();
+    for c in found {
+        let same = merged
+            .iter_mut()
+            .find(|m| c.line.is_some() && m.path == c.path && m.line == c.line);
+        match same {
+            Some(m) => {
+                m.class = m.class.min(c.class);
+                for reason in c.reasons {
+                    if !m.reasons.contains(&reason) {
+                        m.reasons.push(reason);
+                    }
+                }
+            }
+            None => merged.push(c),
+        }
+    }
+    merged.sort_by(|a, b| {
+        (a.class, a.line.is_none(), &a.path, a.line).cmp(&(
+            b.class,
+            b.line.is_none(),
+            &b.path,
+            b.line,
+        ))
+    });
+    merged
+}
+
+/// Runs `xtask attention <base> <plan>` in the repo of the current folder.
+/// It gives 0 after the list, 1 for a git error and 2 for a usage error.
+pub fn main(args: &[String]) -> i32 {
+    let [base, plan] = args else {
+        eprintln!("{USAGE}");
+        return REFUSED;
+    };
+    match gather(base, plan) {
+        Ok((diff, files, plans)) => {
+            let found = candidates(&diff, &files, &plans);
+            for candidate in &found {
+                println!("{}", candidate.render());
+            }
+            println!(
+                "attention: {} candidates; pick at most 10, the hand-run lines first (decision 0027)",
+                found.len()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("{e:#}");
+            FAILED
+        }
+    }
+}
+
+/// Files as (path, text).
+type Texts = Vec<(String, String)>;
+
+/// The diff of `<base>...HEAD`, the text at `HEAD` of each changed path,
+/// and the plans: `plan` and each `docs/plans/{active,completed}/<stem>-m<n>.md`.
+fn gather(base: &str, plan: &str) -> Result<(String, Texts, Texts)> {
+    let dir = std::env::current_dir().context("reading the current folder")?;
+    let root = repo_root(&dir)?;
+    let diff = git(
+        &root,
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "-M",
+            "-U0",
+            &format!("{base}...HEAD"),
+        ],
+    )?;
+    let mut files = Vec::new();
+    for changed in changed_lines(&diff) {
+        if files.iter().any(|(path, _)| *path == changed.path) {
+            continue;
+        }
+        // A deleted file has no text at HEAD, so it gets an empty text.
+        let text = git(&root, &["show", &format!("HEAD:{}", changed.path)]).unwrap_or_default();
+        files.push((changed.path, text));
+    }
+    let mut plans = vec![(
+        plan.to_string(),
+        git(&root, &["show", &format!("HEAD:{plan}")])?,
+    )];
+    let listing = git(
+        &root,
+        &[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            "docs/plans/active",
+            "docs/plans/completed",
+        ],
+    )?;
+    for path in milestone_plans(plan, &listing) {
+        let text = git(&root, &["show", &format!("HEAD:{path}")])?;
+        plans.push((path, text));
+    }
+    Ok((diff, files, plans))
+}
+
+/// The paths of `listing` that are `docs/plans/{active,completed}/<stem>-m<n>.md`,
+/// where `<stem>` is the file stem of `plan`.
+pub fn milestone_plans(plan: &str, listing: &str) -> Vec<String> {
+    let stem = Path::new(plan)
+        .file_stem()
+        .map_or(String::new(), |s| s.to_string_lossy().into_owned());
+    let prefix = format!("{stem}-m");
+    listing
+        .lines()
+        .filter(|path| {
+            let name = path
+                .strip_prefix("docs/plans/active/")
+                .or_else(|| path.strip_prefix("docs/plans/completed/"));
+            let number = name
+                .and_then(|n| n.strip_prefix(&prefix))
+                .and_then(|n| n.strip_suffix(".md"));
+            number.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Runs git in `dir`, and gives its output.
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A diff of `path` with one hunk: `old` lines removed at `old_at`,
+    /// and `new` lines added at `new_at`.
+    fn hunk(path: &str, old_at: usize, old: &[&str], new_at: usize, new: &[&str]) -> String {
+        let mut out = format!(
+            "diff --git a/{path} b/{path}\nindex 1111111..2222222 100644\n--- a/{path}\n+++ b/{path}\n@@ -{old_at},{} +{new_at},{} @@\n",
+            old.len(),
+            new.len()
+        );
+        for line in old {
+            out.push_str(&format!("-{line}\n"));
+        }
+        for line in new {
+            out.push_str(&format!("+{line}\n"));
+        }
+        out
+    }
+
+    /// A diff that adds `text` at `line` of `path`.
+    fn added(path: &str, line: usize, text: &str) -> String {
+        hunk(path, line - 1, &[], line, &[text])
+    }
+
+    fn texts(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect()
+    }
+
+    /// The rendered candidates of `diff`.
+    fn rendered(diff: &str, files: &[(&str, &str)], plans: &[(&str, &str)]) -> Vec<String> {
+        candidates(diff, &texts(files), &texts(plans))
+            .iter()
+            .map(Candidate::render)
+            .collect()
+    }
+
+    fn strict(rule: &str) -> String {
+        format!("a strict path of {rule}")
+    }
+
+    #[test]
+    fn a_protocol_or_worker_js_hunk_is_one_hand_run_line() {
+        let diff = [
+            hunk("protocol/src/lib.rs", 7, &["old"], 7, &["new", "more"]),
+            added("xtask/e2e/worker.js", 3, "let x = 1;"),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &[], &[]),
+            vec![
+                format!(
+                    "hand-run protocol/src/lib.rs:7 LEFT: {HAND_RUN}; {}; {}; {MESSAGES}",
+                    strict("PROTO-2"),
+                    strict("MEM-2")
+                ),
+                format!("hand-run xtask/e2e/worker.js:3 RIGHT: {HAND_RUN}"),
+            ]
+        );
+    }
+
+    const E2E: &str = "fn stored_stems_checks(o: &Opts) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n";
+
+    const WEIGHTS: &str = "pub fn run() {\n    let m = json!({\n        \"type\": \"init\",\n        \"settings\": s,\n    });\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() { let m = json!({ \"type\": \"x\" }); }\n}\n";
+
+    #[test]
+    fn a_line_of_stored_stems_worker_check_or_weights_is_a_hand_run_line() {
+        let files = [
+            ("xtask/src/e2e.rs", E2E),
+            ("xtask/src/e2e/weights.rs", WEIGHTS),
+        ];
+        let diff = [
+            added(
+                "xtask/src/e2e.rs",
+                2,
+                "    let m = json!({ \"type\": \"y\" });",
+            ),
+            added(
+                "xtask/src/e2e.rs",
+                9,
+                "    let m = json!({ \"type\": \"init\" });",
+            ),
+            hunk(
+                "xtask/src/e2e.rs",
+                15,
+                &["        \"weights\": old,"],
+                14,
+                &[],
+            ),
+            added(
+                "xtask/src/e2e.rs",
+                20,
+                "    let m = json!({ \"type\": \"y\" });",
+            ),
+            added("xtask/src/e2e/weights.rs", 4, "        \"settings\": t,"),
+            added(
+                "xtask/src/e2e/weights.rs",
+                10,
+                "    fn t() { let m = json!({ \"type\": \"y\" }); }",
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![
+                format!("hand-run xtask/src/e2e.rs:9 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:15 LEFT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e/weights.rs:4 RIGHT: {HAND_RUN}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hunk_gives_its_first_line_in_a_body() {
+        let files = [("xtask/src/e2e.rs", E2E)];
+        let diff = hunk(
+            "xtask/src/e2e.rs",
+            2,
+            &[
+                "    let m = json!({ \"type\": \"x\" });",
+                "}",
+                "",
+                "fn stored_stems(o: &Opts) -> Result<()> {",
+            ],
+            2,
+            &[
+                "    let m = 2;",
+                "}",
+                "",
+                "fn stored_stems(o: Opts) -> Result<()> {",
+            ],
+        );
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![format!("hand-run xtask/src/e2e.rs:5 RIGHT: {HAND_RUN}")]
+        );
+    }
+
+    #[test]
+    fn a_decision_a_rule_the_map_the_harness_and_ci_are_change_lines() {
+        let diff = [
+            hunk(
+                "docs/decisions/0028-new.md",
+                0,
+                &[],
+                1,
+                &["# New", "", "Status: proposed"],
+            ),
+            added("docs/decisions/0001-old.md", 5, "More."),
+            added("docs/invariants.md", 9, "* A rule."),
+            added("CLAUDE.md", 2, "A line."),
+            hunk(".claude/skills/x/SKILL.md", 3, &["old"], 3, &["new"]),
+            added(".claude/skills/x/SKILL.md", 9, "later"),
+            added(".github/workflows/ci.yml", 4, "  run: x"),
+            added(".github/actions/test/action.yml", 4, "  run: x"),
+            added(".github/dependabot.yml", 4, "  x"),
+            added("docs/working-with-agents.md", 3, "unsafe { x }"),
+            added("docs/README.md", 3, "* `x.md`: x."),
+        ]
+        .concat();
+        let files = [
+            ("docs/decisions/0028-new.md", "# New\n\nStatus: proposed\n"),
+            (
+                "docs/decisions/0001-old.md",
+                "# Old\n\nStatus: accepted (2026-10-19, by the maintainer)\n",
+            ),
+        ];
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![
+                format!("change .claude/skills/x/SKILL.md:3 LEFT: {HARNESS}"),
+                format!("change .github/actions/test/action.yml:4 RIGHT: {CI}"),
+                format!("change .github/workflows/ci.yml:4 RIGHT: {CI}"),
+                format!("change CLAUDE.md:2 RIGHT: {MAP}"),
+                format!("change docs/decisions/0001-old.md:5 RIGHT: {DECISION}"),
+                format!("change docs/decisions/0028-new.md:1 RIGHT: {PROPOSED}"),
+                format!("change docs/invariants.md:9 RIGHT: {RULE}"),
+            ]
+        );
+    }
+
+    const RULES: &str = "const A: &[&str] = &[\n    \"a\",\n];\n\nconst SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[\n    (\"f\", \"skipped: x\", \"why\"),\n];\n\nconst B: &[&str] = &[\n    \"b\",\n];\n";
+
+    #[test]
+    fn a_line_in_skip_allowlist_is_a_change_line_and_a_line_outside_is_none() {
+        let files = [("xtask/src/rules.rs", RULES)];
+        let diff = [
+            added("xtask/src/rules.rs", 2, "    \"c\","),
+            hunk(
+                "xtask/src/rules.rs",
+                7,
+                &["    (\"h\", \"skipped\", \"why\"),"],
+                6,
+                &[],
+            ),
+            hunk(
+                "xtask/src/rules.rs",
+                9,
+                &[],
+                9,
+                &["    \"c\",", "    \"d\","],
+            ),
+            hunk(
+                "xtask/src/rules.rs",
+                5,
+                &[],
+                6,
+                &["    (\"g\", \"skipped: y\", \"why\"),", ""],
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![
+                format!("change xtask/src/rules.rs:6 RIGHT: {ALLOWLISTED}"),
+                format!("change xtask/src/rules.rs:7 LEFT: {ALLOWLISTED}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn hot_paths_unsafe_and_a_dependency_are_hot_spot_lines() {
+        let cargo = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nfoo = \"1\"\n\n# a comment\n\n[target.'cfg(unix)'.dev-dependencies]\nbar = \"1\"\n\n[dependencies.baz]\nversion = \"1\"\n";
+        let diff = [
+            added("app/src/separator.rs", 3, "x"),
+            added("engine/src/song.rs", 3, "x"),
+            added("engine/src/player.rs", 3, "x"),
+            added("app/src/lib.rs", 3, "x"),
+            added("dsp/src/lib.rs", 1, "#![forbid(unsafe_code)]"),
+            added("dsp/src/lib.rs", 2, "    // unsafe { f() }"),
+            added("dsp/src/lib.rs", 3, "    let unsafely = 1;"),
+            added("dsp/src/lib.rs", 4, "    \"--enable-unsafe-webgpu\","),
+            added("dsp/src/lib.rs", 5, "    unsafe { f() }"),
+            added("dsp/src/lib.rs", 6, "pub unsafe fn g() {}"),
+            added("dsp/src/lib.rs", 7, "    let x = (unsafe{ f() });"),
+            added("dsp/src/web.js", 7, "unsafe { f() }"),
+            hunk(
+                "engine/Cargo.toml",
+                2,
+                &["version = \"0.0.1\""],
+                3,
+                &["version = \"0.1.0\""],
+            ),
+            hunk("engine/Cargo.toml", 5, &[], 6, &["foo = \"1\""]),
+            hunk("engine/Cargo.toml", 7, &[], 8, &["# a comment"]),
+            hunk("engine/Cargo.toml", 8, &[], 9, &[""]),
+            hunk("engine/Cargo.toml", 10, &[], 11, &["bar = \"1\""]),
+            hunk("engine/Cargo.toml", 13, &[], 14, &["version = \"1\""]),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &[("engine/Cargo.toml", cargo)], &[]),
+            vec![
+                format!("hot-spot app/src/lib.rs:3 RIGHT: {APP_LIB}"),
+                format!(
+                    "hot-spot app/src/separator.rs:3 RIGHT: {}; {}",
+                    strict("PROTO-2"),
+                    strict("MEM-2")
+                ),
+                format!("hot-spot dsp/src/lib.rs:5 RIGHT: {UNSAFE}"),
+                format!("hot-spot dsp/src/lib.rs:6 RIGHT: {UNSAFE}"),
+                format!("hot-spot dsp/src/lib.rs:7 RIGHT: {UNSAFE}"),
+                format!("hot-spot engine/Cargo.toml:6 RIGHT: {DEPENDENCY}"),
+                format!("hot-spot engine/Cargo.toml:11 RIGHT: {DEPENDENCY}"),
+                format!("hot-spot engine/Cargo.toml:14 RIGHT: {DEPENDENCY}"),
+                format!("hot-spot engine/src/player.rs:3 RIGHT: {}", strict("RT-1")),
+                format!("hot-spot engine/src/song.rs:3 RIGHT: {}", strict("MEM-1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_glob_of_the_hot_rules_gives_a_hot_spot() {
+        let mut count = 0;
+        for rule in HOT_RULES {
+            for glob in strict_paths(rule) {
+                let path = glob.replace("**", "a/b").replace('*', "x");
+                let found = candidates(&added(&path, 1, "x"), &[], &[]);
+                assert_eq!(found.len(), 1, "{rule} {path}: {found:?}");
+                assert!(
+                    found[0].class <= Class::HotSpot && found[0].reasons.contains(&strict(rule)),
+                    "{rule} {path}: {found:?}"
+                );
+                count += 1;
+            }
+        }
+        assert!(count >= 30, "{count}");
+    }
+
+    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: no.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
+
+    #[test]
+    fn each_agent_form_in_the_decision_log_is_a_judgement() {
+        let path = "docs/plans/active/p.md";
+        let all: Vec<&str> = PLAN.lines().collect();
+        let diff = hunk(path, 0, &[], 1, &all);
+        assert_eq!(
+            rendered(&diff, &[(path, PLAN)], &[(path, PLAN)]),
+            vec![
+                format!("judgement {path}:9 RIGHT: agent: one."),
+                format!("judgement {path}:10 RIGHT: agent (orchestrator): two."),
+                format!("judgement {path}:11 RIGHT: agent (team leader): three."),
+                format!("judgement {path}:12 RIGHT: agent (implementer): four."),
+                format!("judgement {path}:13 RIGHT: agent, M5, before any run: five."),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_agent_entry_that_is_not_in_the_diff_has_no_line() {
+        let path = "docs/plans/active/p-m1.md";
+        let long = "x".repeat(100);
+        let plan = format!(
+            "## Decision log\n\n* 2026-11-01, agent: {long}\n* 2026-11-02, agent: in the diff.\n"
+        );
+        let diff = [
+            added(path, 4, "* 2026-11-02, agent: in the diff."),
+            added(
+                "docs/plans/active/q.md",
+                3,
+                "* 2026-11-01, agent: another plan.",
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &[], &[(path, &plan)]),
+            vec![
+                format!("judgement {path}:4 RIGHT: agent: in the diff."),
+                format!(
+                    "judgement {path} (no diff line; list it in the PR): agent: {}",
+                    "x".repeat(80)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_output_is_hand_run_change_hot_spot_then_judgement() {
+        let path = "docs/plans/active/p.md";
+        let milestone = "docs/plans/active/p-m1.md";
+        let old = "## Decision log\n\n* 2026-10-31, agent (team leader): old.\n";
+        let all: Vec<&str> = PLAN.lines().collect();
+        let mut diff = String::new();
+        for n in 0..6 {
+            diff.push_str(&added(&format!(".claude/skills/s{n}/SKILL.md"), 1, "x"));
+        }
+        diff.push_str(&added("app/src/lib.rs", 3, "x"));
+        diff.push_str(&hunk(path, 0, &[], 1, &all));
+        diff.push_str(&added("protocol/src/lib.rs", 40, "pub struct X;"));
+        let found = rendered(&diff, &[], &[(path, PLAN), (milestone, old)]);
+        let mut want = vec![format!(
+            "hand-run protocol/src/lib.rs:40 RIGHT: {HAND_RUN}; {}; {}; {MESSAGES}",
+            strict("PROTO-2"),
+            strict("MEM-2")
+        )];
+        for n in 0..6 {
+            want.push(format!(
+                "change .claude/skills/s{n}/SKILL.md:1 RIGHT: {HARNESS}"
+            ));
+        }
+        want.push(format!("hot-spot app/src/lib.rs:3 RIGHT: {APP_LIB}"));
+        want.extend([
+            format!("judgement {path}:9 RIGHT: agent: one."),
+            format!("judgement {path}:10 RIGHT: agent (orchestrator): two."),
+            format!("judgement {path}:11 RIGHT: agent (team leader): three."),
+            format!("judgement {path}:12 RIGHT: agent (implementer): four."),
+            format!("judgement {path}:13 RIGHT: agent, M5, before any run: five."),
+            format!(
+                "judgement {milestone} (no diff line; list it in the PR): agent (team leader): old."
+            ),
+        ]);
+        assert_eq!(found, want);
+    }
+
+    #[test]
+    fn one_hunk_of_worker_web_gives_one_candidate_with_each_rule() {
+        assert_eq!(
+            rendered(
+                &hunk("worker/src/web.rs", 10, &["a"], 10, &["b", "c"]),
+                &[],
+                &[]
+            ),
+            vec![format!(
+                "hot-spot worker/src/web.rs:10 LEFT: {}; {}; {}",
+                strict("PROTO-2"),
+                strict("MEM-2"),
+                strict("MEM-5")
+            )]
+        );
+    }
+
+    #[test]
+    fn two_hunks_of_one_file_give_two_candidates_in_line_order() {
+        let diff = [
+            hunk("engine/src/song.rs", 30, &[], 31, &["b"]),
+            hunk("engine/src/song.rs", 4, &[], 5, &["a"]),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &[], &[]),
+            vec![
+                format!("hot-spot engine/src/song.rs:5 RIGHT: {}", strict("MEM-1")),
+                format!("hot-spot engine/src/song.rs:31 RIGHT: {}", strict("MEM-1")),
+            ]
+        );
+    }
+
+    fn changed(
+        path: &str,
+        side: Side,
+        line: usize,
+        hunk_new: usize,
+        hunk: usize,
+        text: &str,
+    ) -> Changed {
+        Changed {
+            path: path.to_string(),
+            side,
+            line,
+            hunk_new,
+            hunk,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_parse_gives_each_side_line_hunk_and_text() {
+        let diff = "diff --git a/a.rs b/a.rs\nindex 1..2 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -3,2 +2,0 @@\n-gone\n--- also gone\n@@ -9 +8,3 @@ fn f() {\n-old\n+new\n \n++++ new too\n\\ No newline at end of file\n";
+        assert_eq!(
+            changed_lines(diff),
+            vec![
+                changed("a.rs", Side::Left, 3, 2, 0, "gone"),
+                changed("a.rs", Side::Left, 4, 2, 0, "-- also gone"),
+                changed("a.rs", Side::Left, 9, 8, 1, "old"),
+                changed("a.rs", Side::Right, 8, 8, 1, "new"),
+                changed("a.rs", Side::Right, 10, 8, 1, "+++ new too"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rename_gives_the_new_path_and_a_deleted_file_the_old_path() {
+        let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\nindex 1..2 100644\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1..0\n--- a/gone.rs\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-x\ndiff --git a/new.md b/new.md\nnew file mode 100644\nindex 0..1\n--- /dev/null\n+++ b/new.md\n@@ -0,0 +1 @@\n+y\ndiff --git a/i.png b/i.png\nindex 1..2 100644\nBinary files a/i.png and b/i.png differ\n";
+        assert_eq!(
+            changed_lines(diff),
+            vec![
+                changed("new.rs", Side::Left, 1, 1, 0, "a"),
+                changed("new.rs", Side::Right, 1, 1, 0, "b"),
+                changed("gone.rs", Side::Left, 1, 0, 1, "x"),
+                changed("new.md", Side::Right, 1, 1, 2, "y"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_milestone_plans_of_a_plan_are_found() {
+        let listing = "docs/plans/active/p.md\ndocs/plans/active/p-m7.md\ndocs/plans/completed/p-m1.md\ndocs/plans/completed/p-m12.md\ndocs/plans/completed/p-mx.md\ndocs/plans/completed/p-m.md\ndocs/plans/completed/q-m1.md\ndocs/plans/completed/p-m1.txt\ndocs/plans/other/p-m2.md\n";
+        assert_eq!(
+            milestone_plans("docs/plans/active/p.md", listing),
+            vec![
+                "docs/plans/active/p-m7.md",
+                "docs/plans/completed/p-m1.md",
+                "docs/plans/completed/p-m12.md",
+            ]
+        );
+    }
+}

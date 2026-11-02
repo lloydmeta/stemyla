@@ -154,7 +154,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 
 * [x] 2026-11-01: this plan.
 * [x] 2026-11-01: Step 1: the template and `xtask pr-body`.
-* [ ] Step 2: `xtask attention`.
+* [x] 2026-11-01: Step 2: `xtask attention`.
 * [ ] Step 3: the texts for the orchestrator.
 * [ ] Review rounds.
 
@@ -163,6 +163,8 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-01, plan review round 1 (one `Plan` agent): 8 should-fix and 2 nits, all fixed in this plan: the hand-run lines, the body of a function, stubs that pass, a deleted file, the agent decisions of the older plans, the PR body's own form, the skill's key lines, the merge and order tests, the `unsafe` match and the start commit.
 * 2026-11-01, agent (implementer), step 1: on the stub `["stub"]`, all 17 tests of `pr_body::tests` failed on an assert.  In `xtask/tests/pr_body.rs`, the good body and the template failed on an assert; the usage test passed, as it does not call `problems`.
 * 2026-11-01, agent (implementer), step 1: `xtask pr-body target/harness-phase-3b-resume/pr-body.md` passes (exit 0).  The template exits 1 with two problems: the summary is empty, and the Verification section is empty.
+* 2026-11-01, agent (implementer), step 2: on the stubs, all 15 tests of `attention::tests` failed on an assert.  Two fixtures in my tests were wrong, and I corrected them before the code was written.
+* 2026-11-01, agent (implementer), step 2: `xtask attention origin/main docs/plans/active/harness-phase-3b.md` at 33c9ca6 gives 98 candidates: `hand-run` 0, `change` 18, `hot-spot` 2 (an `unsafe` in a test string of `review.rs`, and `set_var` in `tests/clean.rs`), `judgement` 78 (55 of the parent, 9 of M5, 9 of M6, 5 of M7).  Each agent entry is a new line of this branch, so none has "no diff line".  M1 to M4 write `team leader:`, so they give none.
 
 ## Decision log
 
@@ -171,6 +173,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-01, agent (team leader): a hand-run line is any changed line in the body of `fn stored_stems(` or `fn worker_check(`, or in `weights.rs` above its tests, not only a line with a `type` key.  Reason: the plan review found field lines with no `type` key, and TD-16 says that a renamed field fails nothing.
 * 2026-11-01, agent (team leader): `xtask pr-body` checks that the Verification section has 1 to 3 lines, besides the parent's three checks.  Decision 0027 asks for 2 or 3, but the maintainer's draft has one full line, and the orchestrator's brief says that the check passes on a real body.  The check does not check the links of "Needs your attention", since a comment exists only after close-out.
 * 2026-11-01, agent (implementer): the template gives two problems, not one: the summary is empty, and the Verification section is empty.  Reason: the check takes 1 to 3 Verification lines, so 0 is a problem, and the template has only a comment there.  The tests assert both problems.
+* 2026-11-01, agent (implementer): a judgement with no diff line prints `(no diff line; list it in the PR)`.  Reason: the plan gives both `(no diff line)` and "no diff line; list it in the PR", and this text holds both.
 
 ## Outcomes and retrospective
 

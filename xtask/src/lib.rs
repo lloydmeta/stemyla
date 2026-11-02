@@ -1,5 +1,6 @@
 //! Offline tooling: synthetic song, metrics, benches, model conversion, the static server.
 
+pub mod attention;
 pub mod bench;
 pub mod check;
 pub mod clean;
