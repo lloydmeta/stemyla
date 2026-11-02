@@ -1685,7 +1685,7 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "6. Update the PR body with `gh pr edit --body-file`, after `xtask pr-body` passes on the file.",
     "4. After the last fix and the last push, run `git fetch origin main`.  Then run `cargo run -p xtask -- attention origin/main <plan>`, with the plan's new path.",
     "  List each candidate with no line in the PR.",
-    "Then pick the lines that back an item of \"Needs your attention\", then the proposed decisions and rule changes.",
+    "Within the 10, then pick the lines that back an item of \"Needs your attention\", then the proposed decisions and rule changes, then the hot spots and the judgement calls.",
     "5. Pick at most 10 candidates, the hand-run lines first.",
     "Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.",
     "6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the plan's Surprises.",

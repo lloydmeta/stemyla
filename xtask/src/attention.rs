@@ -659,15 +659,17 @@ fn agent_entries(plan: &str) -> Vec<(usize, &str, &str)> {
     entries
 }
 
-/// An agent author: `agent` or `team leader`, alone or with ` (` or `,`
-/// after it.  The milestone plans of M1 to M4 of harness phase 3b write
-/// `team leader:`, and a team leader is an agent (decision 0027).
+/// An agent author: `agent`, `team leader`, `implementer` or `orchestrator`,
+/// alone or with ` (` or `,` after it.  The plans of harness phase 3b use
+/// each of these, and each is an agent (decision 0027).
 fn is_agent(author: &str) -> bool {
-    ["agent", "team leader"].iter().any(|name| {
-        author == *name
-            || author.starts_with(&format!("{name} ("))
-            || author.starts_with(&format!("{name},"))
-    })
+    ["agent", "team leader", "implementer", "orchestrator"]
+        .iter()
+        .any(|name| {
+            author == *name
+                || author.starts_with(&format!("{name} ("))
+                || author.starts_with(&format!("{name},"))
+        })
 }
 
 /// The author and the text of an entry line `* <YYYY-MM-DD>, <author>: <text>`.
@@ -1303,7 +1305,7 @@ mod tests {
         assert!(count >= 30, "{count}");
     }
 
-    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: six.\n* 2026-11-01, team leader (M2): seven.\n* 2026-11-01, team leaders: no.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n* 2026-11-0x, agent: not a date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
+    const PLAN: &str = "# Plan\n\n## Progress\n\n* 2026-11-01, agent: in Progress.\n\n## Decision log\n\n* 2026-11-01, agent: one.\n* 2026-11-01, agent (orchestrator): two.\n* 2026-11-01, agent (team leader): three.\n* 2026-11-01, agent (implementer): four.\n* 2026-11-01, agent, M5, before any run: five.\n* 2026-11-01, maintainer: no.\n* 2026-11-01, maintainer, D1: no.\n* 2026-11-01, team leader: six.\n* 2026-11-01, team leader (M2): seven.\n* 2026-11-01, team leaders: no.\n* 2026-11-01, implementer: eight.\n* 2026-11-01, orchestrator (M3): nine.\n* 2026-11-01, agents: no.\n* 2026-11-01, agentic: no.\n* agent: no date.\n* 2026-1-01, agent: a short date.\n* 2026-11-0x, agent: not a date.\n\n## Outcomes and retrospective\n\n* 2026-11-01, agent: after the log.\n";
 
     #[test]
     fn each_agent_form_in_the_decision_log_is_a_judgement() {
@@ -1320,6 +1322,8 @@ mod tests {
                 format!("judgement {path}:13 RIGHT: agent, M5, before any run: five."),
                 format!("judgement {path}:16 RIGHT: team leader: six."),
                 format!("judgement {path}:17 RIGHT: team leader (M2): seven."),
+                format!("judgement {path}:19 RIGHT: implementer: eight."),
+                format!("judgement {path}:20 RIGHT: orchestrator (M3): nine."),
             ]
         );
     }
@@ -1389,6 +1393,8 @@ mod tests {
             format!("judgement {path}:13 RIGHT: agent, M5, before any run: five."),
             format!("judgement {path}:16 RIGHT: team leader: six."),
             format!("judgement {path}:17 RIGHT: team leader (M2): seven."),
+            format!("judgement {path}:19 RIGHT: implementer: eight."),
+            format!("judgement {path}:20 RIGHT: orchestrator (M3): nine."),
             format!(
                 "judgement {milestone} (no diff line; list it in the PR): agent (team leader): old."
             ),
