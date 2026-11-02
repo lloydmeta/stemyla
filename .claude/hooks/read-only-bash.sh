@@ -2,8 +2,9 @@
 # The read-only guard of the review agents (.claude/agents/), a PreToolUse
 # hook on Bash.  It refuses a command that would change the repo, a remote or
 # a published package, by git, cargo, gh and a short list of other commands.
-# It refuses `xtask publish`, and `xtask review`, which changes the state of a
-# review round.  It refuses them through `cargo run` of xtask too.
+# It refuses `xtask publish`, `xtask review`, which changes the state of a
+# review round, and `xtask clean`, which removes worktrees, branches and
+# folders.  It refuses them through `cargo run` of xtask too.
 # It matches text, so it stops mistakes, not an agent that tries to escape.
 # Redirections and `sed -i` still pass.  Known gaps: TD-34 in docs/tech-debt.md.
 # For bash 3.2 (macOS): no `declare -A`, no `${x,,}`, no `mapfile`.
@@ -216,10 +217,11 @@ names_xtask() {
   return 1
 }
 
-# Refuses an xtask command that pushes (`publish`) or that changes the state
-# of a review round (`review`), if a word from $1 to $2 (exclusive) is one.
+# Refuses an xtask command that pushes (`publish`), that changes the state
+# of a review round (`review`), or that removes worktrees, branches and
+# folders (`clean`), if a word from $1 to $2 (exclusive) is one.
 check_xtask_words() {
-  if has_word publish $1 $2 || has_word review $1 $2; then refuse command "$text"; fi
+  if has_word publish $1 $2 || has_word review $1 $2 || has_word clean $1 $2; then refuse command "$text"; fi
 }
 
 check_cargo() {

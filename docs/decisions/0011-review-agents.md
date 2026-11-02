@@ -2,6 +2,8 @@
 
 Status: accepted (2026-10-22, by the maintainer)
 
+Amended on 2026-10-31 by the agent, as decision 0024 says: decision 0024 amends the rounds (D6).  `plans/completed/harness-phase-3b.md` (M3) moves the log to after the last round (D2).  From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
+
 ## Context
 
 Before phase 3, the agent wrote the prompt of each reviewer by hand (`plans/active/harness-engineering.md`, failure 5).  One general reviewer read every diff.  In 14 of 18 PRs, the reviewers of phase 2 found a test that could pass on wrong code.

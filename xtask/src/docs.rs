@@ -175,6 +175,7 @@ pub fn check(root: &Path) -> Result<Vec<Problem>> {
     problems.extend(rules_match_files(&markdown, &files));
     problems.extend(decisions_well_formed(&markdown));
     problems.extend(plans_well_formed(&markdown));
+    problems.extend(review_logs_follow_the_fix_rule(&markdown));
     Ok(problems)
 }
 
@@ -1223,6 +1224,158 @@ fn plans_well_formed(markdown: &[(String, String)]) -> Vec<Problem> {
                 format!("lacks the living section `{heading}`.  Fix: add it (see docs/plans/PLANS.md) and keep it current at every stopping point."),
             ));
         }
+        if file.starts_with("docs/plans/active/") {
+            problems.extend(plan_runs_problems(file, text));
+        }
+    }
+    problems
+}
+
+/// An active plan of more than 3 milestones has a `How the work runs`
+/// section and a `Decisions for the maintainer` section, each at level 2
+/// or 3 (decision 0023, and `docs/plans/PLANS.md`).  A milestone is a heading whose
+/// text starts with `M<n>`, then a `:`, a space or the end of the line.
+/// A line in a fenced code block is no heading.
+fn plan_runs_problems(file: &str, text: &str) -> Vec<Problem> {
+    let mut milestones = BTreeSet::new();
+    let mut has_section = false;
+    let mut has_decisions = false;
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some((c, n)) = fence {
+            if fence_marker(trimmed).is_some_and(|(m, k)| m == c && k >= n) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = fence_marker(trimmed) {
+            fence = Some(marker);
+            continue;
+        }
+        let level = line.chars().take_while(|c| *c == '#').count();
+        let Some(heading) = line[level..].strip_prefix(' ') else {
+            continue;
+        };
+        if !(1..=6).contains(&level) {
+            continue;
+        }
+        if (2..=3).contains(&level) && heading.starts_with("How the work runs") {
+            has_section = true;
+        }
+        if (2..=3).contains(&level) && heading.starts_with("Decisions for the maintainer") {
+            has_decisions = true;
+        }
+        if let Some(rest) = heading.strip_prefix('M') {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let after = &rest[digits.len()..];
+            if !digits.is_empty()
+                && (after.is_empty() || after.starts_with(':') || after.starts_with(' '))
+            {
+                milestones.insert(digits.trim_start_matches('0').to_string());
+            }
+        }
+    }
+    if milestones.len() <= 3 {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    if !has_section {
+        problems.push(Problem::new(
+            "plans",
+            file,
+            format!(
+                "has {} milestones (`M<n>` headings) and no `How the work runs` section.  Fix: add it at level 2 or 3, as docs/plans/PLANS.md says (decision 0023).",
+                milestones.len()
+            ),
+        ));
+    }
+    if !has_decisions {
+        problems.push(Problem::new(
+            "plans",
+            file,
+            format!(
+                "has {} milestones (`M<n>` headings) and no `Decisions for the maintainer` section.  Fix: add it at level 2 or 3, with each choice that hinges on the maintainer, as docs/plans/PLANS.md says (decision 0023).",
+                milestones.len()
+            ),
+        ));
+    }
+    problems
+}
+
+/// Each review log with a `Significant` column follows the fix rule of
+/// decision 0024 (`crate::review_log`), and its last round meets the stop
+/// rule ([`last_round_problems`]).
+fn review_logs_follow_the_fix_rule(markdown: &[(String, String)]) -> Vec<Problem> {
+    markdown
+        .iter()
+        .filter(|(file, _)| file.starts_with("docs/reviews/"))
+        .flat_map(|(file, text)| {
+            crate::review_log::fix_rule_problems(text)
+                .into_iter()
+                .chain(last_round_problems(text))
+                .map(|message| Problem::new("reviews", file, message))
+        })
+        .collect()
+}
+
+/// The problems of a copied log whose last round does not meet the stop
+/// rule of step 11 of the review-rounds skill (decision 0024).  The last
+/// round is the Round cell of the last row of the Rounds table.  A log with
+/// no `Significant` column gives no problem.  `review log-check` does not
+/// run this, since a run's log is not at its last round after each round.
+pub fn last_round_problems(text: &str) -> Vec<String> {
+    use crate::review_log::{Action, action_kind, findings, strict_rules, table};
+    let Some(findings) = findings(text) else {
+        return Vec::new();
+    };
+    let rows: Vec<_> = findings
+        .rows
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .collect();
+    let (header, rounds) = table(text, "## Rounds").unwrap_or_default();
+    let column = header.iter().position(|c| c == "Round").unwrap_or(0);
+    let Some(cell) = rounds
+        .last()
+        .map(|row| row.get(column).cloned().unwrap_or_default())
+    else {
+        return vec![
+            "the Rounds table has no row.  Fix: add the row of each round to the Rounds table."
+                .into(),
+        ];
+    };
+    let Ok(last) = cell.parse::<u32>() else {
+        return vec![format!(
+            "the last row of the Rounds table has the round `{cell}`, not a whole number.  Fix: write the number of the round."
+        )];
+    };
+    let mut problems = Vec::new();
+    let highest = rows
+        .iter()
+        .filter_map(|r| r.round.parse::<u32>().ok())
+        .max();
+    if let Some(highest) = highest.filter(|h| *h > last) {
+        problems.push(format!("the Findings table has rows of round {highest}, but the Rounds table ends at round {last}.  Fix: add the row of each round to the Rounds table."));
+    }
+    if last < 3 {
+        problems.push(format!("the last round is {last}, but the rounds stop at round 3 at the earliest.  Fix: run the next round (decision 0024)."));
+    }
+    let strict = strict_rules();
+    for row in rows.iter().filter(|r| r.round.parse() == Ok(last)) {
+        let named = row.is_named(&strict);
+        let fixed = matches!(
+            action_kind(&row.action),
+            Action::Fix | Action::NotFixed { td: true, .. }
+        );
+        let open = match row.verdict.as_str() {
+            "confirmed" => named,
+            "pre-existing" | "unproven" => named && fixed,
+            _ => false,
+        };
+        if open {
+            problems.push(format!("{}: round {last} is the last round of the log, but this finding keeps the rounds open.  Fix: run the next round (step 11 of the review-rounds skill).", row.id));
+        }
     }
     problems
 }
@@ -1890,6 +2043,147 @@ mod tests {
         );
     }
 
+    /// A plan with a heading `### M<n>` for each of `milestones`, and the
+    /// lines of `more`.
+    fn milestone_plan(milestones: &[u32], more: &str) -> String {
+        let headings: Vec<String> = milestones
+            .iter()
+            .map(|n| format!("### M{n}: work\n"))
+            .collect();
+        format!(
+            "# A plan\n\n## Decisions for the maintainer\n\n{}{more}\n{}\n",
+            headings.concat(),
+            PLAN_SECTIONS.join("\n\n")
+        )
+    }
+
+    const NO_RUNS: &str = "has 4 milestones (`M<n>` headings) and no `How the work runs` section.  Fix: add it at level 2 or 3, as docs/plans/PLANS.md says (decision 0023).";
+
+    #[test]
+    fn an_active_plan_of_more_than_3_milestones_needs_how_the_work_runs() {
+        let file = "docs/plans/active/a.md";
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3, 4], "")),
+            [Problem::new("plans", file, NO_RUNS.into())]
+        );
+        for section in ["## How the work runs", "### How the work runs (M3 to M10)"] {
+            let text = milestone_plan(&[1, 2, 3, 4], section);
+            assert_eq!(plan_runs_problems(file, &text), [], "{section}");
+        }
+        for section in ["#### How the work runs", "# How the work runs"] {
+            let text = milestone_plan(&[1, 2, 3, 4], section);
+            assert_eq!(
+                plan_runs_problems(file, &text),
+                [Problem::new("plans", file, NO_RUNS.into())],
+                "{section}"
+            );
+        }
+    }
+
+    const NO_DECISIONS: &str = "has 4 milestones (`M<n>` headings) and no `Decisions for the maintainer` section.  Fix: add it at level 2 or 3, with each choice that hinges on the maintainer, as docs/plans/PLANS.md says (decision 0023).";
+
+    /// An active plan of more than 3 milestones lists the choices for the
+    /// maintainer (the maintainer's correction of 2026-11-01).
+    #[test]
+    fn an_active_plan_of_more_than_3_milestones_needs_decisions_for_the_maintainer() {
+        let file = "docs/plans/active/a.md";
+        // The plan of `milestones` with `more`, and no other section.
+        let plan = |milestones: &[u32], more: &str| {
+            milestone_plan(milestones, "@more@")
+                .replacen("## Decisions for the maintainer\n", "", 1)
+                .replace("@more@", more)
+        };
+        let runs = "## How the work runs\n";
+        assert_eq!(
+            plan_runs_problems(file, &plan(&[1, 2, 3, 4], runs)),
+            [Problem::new("plans", file, NO_DECISIONS.into())]
+        );
+        assert_eq!(
+            plan_runs_problems(file, &plan(&[1, 2, 3], "")),
+            [],
+            "3 milestones"
+        );
+        for section in [
+            "## Decisions for the maintainer",
+            "### Decisions for the maintainer (D1 to D8)",
+        ] {
+            let text = plan(&[1, 2, 3, 4], &format!("{runs}{section}\n"));
+            assert_eq!(plan_runs_problems(file, &text), [], "{section}");
+        }
+        for section in [
+            "#### Decisions for the maintainer",
+            "# Decisions for the maintainer",
+        ] {
+            let text = plan(&[1, 2, 3, 4], &format!("{runs}{section}\n"));
+            assert_eq!(
+                plan_runs_problems(file, &text),
+                [Problem::new("plans", file, NO_DECISIONS.into())],
+                "{section}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_completed_plan_needs_no_how_the_work_runs() {
+        let text = milestone_plan(&[1, 2, 3, 4], "");
+        let markdown = vec![
+            ("docs/plans/active/a.md".to_string(), text.clone()),
+            ("docs/plans/completed/b.md".to_string(), text.clone()),
+            ("docs/plans/PLANS.md".to_string(), text),
+        ];
+        assert_eq!(
+            plans_well_formed(&markdown),
+            [Problem::new(
+                "plans",
+                "docs/plans/active/a.md",
+                NO_RUNS.into()
+            )]
+        );
+    }
+
+    #[test]
+    fn only_a_heading_that_starts_with_m_n_is_a_milestone() {
+        let file = "docs/plans/active/a.md";
+        let others = "* M4: a bullet\n### Step 4: M4's text\n### M4x\n M4: one space\n####### M4\n```bash\n# M4 in a fence\n```\n";
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3], "")),
+            []
+        );
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3], others)),
+            []
+        );
+        for fourth in ["# M4\n", "### M4 cleanup\n"] {
+            let text = milestone_plan(&[1, 2, 3], &format!("{others}{fourth}"));
+            assert_eq!(
+                plan_runs_problems(file, &text),
+                [Problem::new("plans", file, NO_RUNS.into())],
+                "{fourth}"
+            );
+        }
+        // A fence closes only at a marker of its own character and of at
+        // least its length, so these headings stay in the fence.
+        let fenced = "````markdown\n```\n## M4: inside\n~~~~\n## M5\n````\n";
+        assert_eq!(
+            plan_runs_problems(file, &milestone_plan(&[1, 2, 3], fenced)),
+            []
+        );
+    }
+
+    #[test]
+    fn a_milestone_number_counts_once() {
+        let file = "docs/plans/active/a.md";
+        let text = milestone_plan(&[1, 2, 2, 3], "");
+        assert_eq!(plan_runs_problems(file, &text), []);
+        let text = milestone_plan(&[1, 2, 3], "### M02: again\n");
+        assert_eq!(plan_runs_problems(file, &text), [], "M02 is M2");
+        let text = milestone_plan(&[1, 2, 2, 3], "## M4");
+        assert_eq!(
+            plan_runs_problems(file, &text),
+            [Problem::new("plans", file, NO_RUNS.into())]
+        );
+    }
+
     #[test]
     fn the_map_has_a_line_budget() {
         assert!(map_within_budget(&"x\n".repeat(MAP_LINE_BUDGET)).is_empty());
@@ -1945,5 +2239,173 @@ mod tests {
         )]);
         let problems = id_references("docs/reviews/x.md", "closes TD-1, keeps TD-2", &ids);
         assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    /// A review log with a `Significant` column, and one nit in round 4
+    /// with `action`.  Its Rounds table ends at round 4.
+    fn fix_rule_log(action: &str) -> String {
+        round_log(
+            &[1, 2, 3, 4],
+            &[&format!(
+                "4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | {action}"
+            )],
+        )
+    }
+
+    /// A review log with a `Significant` column, a row in its Findings
+    /// table for each of `rows` (`round | finding | reviewers | severity |
+    /// significant | rule | verdict | repeat of | action`), and a row in its
+    /// Rounds table for each of `rounds`.
+    fn round_log(rounds: &[u32], rows: &[&str]) -> String {
+        let findings: Vec<String> = rows.iter().map(|r| format!("| {r} |\n")).collect();
+        let rounds: Vec<String> = rounds.iter().map(|r| format!("| {r} | 3 |\n")).collect();
+        format!(
+            "# Review log\n\n## Findings\n\n| Round | Finding | Reviewers | Severity | Significant | Rule | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - |\n{}\n## Rounds\n\n| Round | Agents |\n| - | - |\n{}",
+            findings.concat(),
+            rounds.concat()
+        )
+    }
+
+    fn keeps_open(id: &str, round: u32) -> String {
+        format!(
+            "{id}: round {round} is the last round of the log, but this finding keeps the rounds open.  Fix: run the next round (step 11 of the review-rounds skill)."
+        )
+    }
+
+    #[test]
+    fn a_log_ends_at_round_3_or_later() {
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2], &[])),
+            [
+                "the last round is 2, but the rounds stop at round 3 at the earliest.  Fix: run the next round (decision 0024)."
+            ]
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3], &[])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_last_round_with_a_finding_of_the_three_kinds_keeps_the_rounds_open() {
+        let good = [
+            "4 | 4-1 | docs-reviewer | nit | - | none | confirmed | none | reported, not fixed",
+            "4 | 4-2 | reviewer | should-fix | no | none | confirmed | none | reported, not fixed",
+            "4 | 4-3 | cargo-mutants | should-fix | - | VERIFY-1 | known | TD-39 | known: TD-39",
+            "4 | 4-4 | reviewer | should-fix | yes | none | pre-existing | none | no change: its own PR",
+            "4 | 4-5 | reviewer | should-fix | - | MEM-1 | refuted | none | refuted",
+            "4 | 4-6 | reviewer | blocker | - | none | unvalidated | none | reported, not fixed",
+            "4 | 4-12 | reviewer | should-fix | no | none | pre-existing | none | abc1234 review round 4 fixes",
+        ];
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &good)),
+            Vec::<String>::new()
+        );
+        let bad = [
+            "4 | 4-7 | reviewer | blocker | no | none | confirmed | none | abc1234 review round 4 fixes",
+            "4 | 4-8 | reviewer | should-fix | yes | none | confirmed | none | TD-39",
+            "4 | 4-9 | memory-reviewer | should-fix | no | MEM-1 | confirmed | none | abc1234 review round 4 fixes",
+            "4 | 4-10 | reviewer | should-fix | yes | none | pre-existing | none | abc1234 review round 4 fixes",
+            "4 | 4-11 | reviewer | should-fix | yes | none | unproven | none | TD-39",
+        ];
+        let rows: Vec<&str> = good.iter().chain(&bad).copied().collect();
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &rows)),
+            ["4-7", "4-8", "4-9", "4-10", "4-11"].map(|id| keeps_open(id, 4))
+        );
+    }
+
+    #[test]
+    fn only_the_last_round_keeps_the_rounds_open() {
+        let row = "3 | 3-1 | reviewer | blocker | no | none | confirmed | none | abc1234 review round 3 fixes";
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &[row])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3], &[row])),
+            [keeps_open("3-1", 3)]
+        );
+    }
+
+    #[test]
+    fn a_log_has_a_rounds_row_for_each_round_of_its_findings() {
+        let row =
+            "5 | 5-1 | docs-reviewer | nit | - | none | unvalidated | none | reported, not fixed";
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4, 5], &[row])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[], &[row])),
+            ["the Rounds table has no row.  Fix: add the row of each round to the Rounds table."]
+        );
+        assert_eq!(
+            last_round_problems(&round_log(&[1, 2, 3, 4], &[row])),
+            [
+                "the Findings table has rows of round 5, but the Rounds table ends at round 4.  Fix: add the row of each round to the Rounds table."
+            ]
+        );
+        let speed = round_log(&[1, 2, 3, 4], &[row]).replace("| 4 | 3 |", "| speed 4 | 3 |");
+        assert_eq!(
+            last_round_problems(&speed),
+            [
+                "the last row of the Rounds table has the round `speed 4`, not a whole number.  Fix: write the number of the round."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_log_with_no_significant_column_has_no_last_round() {
+        let text = round_log(&[1, 2], &[]);
+        assert_eq!(last_round_problems(&text).len(), 1);
+        let old = text.replace("| Significant ", "").replace(
+            "| - | - | - | - | - | - | - | - | - |",
+            "| - | - | - | - | - | - | - | - |",
+        );
+        assert!(!crate::review_log::has_significant_column(&old));
+        assert_eq!(last_round_problems(&old), Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_a_review_log_is_checked_against_the_fix_rule() {
+        let bad = fix_rule_log("abc1234 review round 4 fixes");
+        let files = [
+            ("docs/reviews/a.md".to_string(), bad.clone()),
+            ("docs/plans/active/a.md".to_string(), bad),
+        ];
+        let problems = review_logs_follow_the_fix_rule(&files);
+        assert_eq!(
+            problems,
+            [Problem::new(
+                "reviews",
+                "docs/reviews/a.md",
+                "4-1: round 4 must not fix this finding, but the action is `abc1234 review round 4 fixes`.  Fix: undo the fix, and write `reported, not fixed` (decision 0024).".into(),
+            )]
+        );
+    }
+
+    #[test]
+    fn a_review_log_that_follows_the_fix_rule_gives_no_problem() {
+        let good = fix_rule_log("reported, not fixed");
+        assert_eq!(
+            review_logs_follow_the_fix_rule(&[("docs/reviews/a.md".to_string(), good)]),
+            []
+        );
+    }
+
+    /// `docs-check` runs the last-round check on each copied log (review
+    /// round 2 of harness phase 3b, M6: 2-2).
+    #[test]
+    fn a_copied_log_that_ends_before_round_3_fails_docs_check() {
+        let early = round_log(&[1, 2], &[]);
+        assert_eq!(
+            review_logs_follow_the_fix_rule(&[("docs/reviews/a.md".to_string(), early)]),
+            [Problem::new(
+                "reviews",
+                "docs/reviews/a.md",
+                "the last round is 2, but the rounds stop at round 3 at the earliest.  Fix: run the next round (decision 0024).".into(),
+            )]
+        );
     }
 }

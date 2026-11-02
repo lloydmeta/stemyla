@@ -1,12 +1,17 @@
 //! Offline tooling: synthetic song, metrics, benches, model conversion, the static server.
 
+pub mod attention;
 pub mod bench;
+pub mod check;
+pub mod clean;
 pub mod docs;
 pub mod drivers;
 pub mod e2e;
 pub mod metrics;
+pub mod pr_body;
 pub mod publish;
 pub mod review;
+pub mod review_log;
 pub mod roformer_cli;
 pub mod rules;
 pub mod separate;

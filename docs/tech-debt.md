@@ -145,17 +145,17 @@ A larger `threshold` or `max_failed_pixels`, in a `kittest.toml` or in `Snapshot
 
 * Fix: review; a changed PNG or threshold is a UI change, and the `reviewer` agent looks at it.  No check is planned.
 
-### TD-31: the route of `xtask review` is a short denylist, from the branch's own code
+### TD-31: the route of `xtask review` is a short denylist, and the route and the log check come from the branch's own code
 
-This entry concerns which reviewers read a diff.  So it touches each rule that a reviewer checks, not one rule only.
+This entry concerns which reviewers read a diff, and the check of a review log against the fix rule of decision 0024.  So it touches each rule that a reviewer checks, not one rule only.
 
 `xtask/src/review.rs` chooses the reviewers of a diff from its paths and from content signs.  The content signs are a short denylist, not a full list.  A sign matches as a whole token only.  So `create_buffer` does not match `create_buffer_init`, which `roformer-gpu/src/lib.rs` calls.  A sign counts only on an added line of a Rust file outside a `tests` folder and outside the reviewer's own paths.  A copy or a GPU buffer that a macro, an alias or a helper makes routes nothing.
 
 Since M6, review round 1, the paths of `memory-reviewer` include `roformer/src/`, `roformer-gpu/src/` and `synth/src/`.  So a change to the GPU memory budget (MEM-4) or to the model read (MEM-1) routes it.  Since M6, review round 2, they also include `dsp/src/`.  Its code runs in the audio callback (RT-1) and builds the song-length mix (MEM-4).  `e2e_messages_use_protocol_types` enforces PROTO-1.  A change to its list `SCRIPT_ONLY_TYPES` in `xtask/src/rules.rs` routes only `supply-chain-reviewer` and `reviewer`.  Neither agent lists PROTO-1, so no reviewer checks PROTO-1 on a change to that list.
 
-The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  `xtask review start` warns when the branch changes `xtask/src/review.rs`, and when the binary is older than that file.
+The route comes from the branch's own `xtask`.  So a branch can change the route, or remove the rule that a change to `xtask/src/review.rs` routes every reviewer.  The log check of `xtask review log-check` and `docs-check` also comes from the branch, in `xtask/src/review_log.rs`.  So a branch can change the fix rule that its own log must follow.  `xtask review start` warns when the branch changes, adds or removes `xtask/src/review.rs` or `xtask/src/review_log.rs`.  It also warns when the binary is older than one of them.
 
-* Fix: review; `reviewer` reads every diff.  Phase 5 routes with the base branch's `xtask`.
+* Fix: review; `reviewer` reads every diff, and a change to `xtask/src/review_log.rs` routes every reviewer.  Phase 5 routes with the base branch's `xtask`, and checks the log with it.
 
 ### TD-32: `xtask review check` sees only what its record holds
 
@@ -179,9 +179,11 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 
 `xtask review mutants` runs cargo-mutants on the Rust files of a round's diff.  It does not test some changes, and it reports some mutants that no native test can catch:
 
-* cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  A `wasm32`-only function, impl or module in a shared file has `#[cfg_attr(mutants, mutants::skip)]`, so cargo-mutants makes no mutant of it, struct-field deletions included.  No build sets `cfg(mutants)`, so no crate is needed, and `[workspace.lints.rust]` in `Cargo.toml` declares the cfg for `unexpected_cfgs`.  A new `wasm32`-only function without the attribute shows as missed, until a change adds the attribute.  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, `main` in `app/src/main.rs` and `mapped_floats` in `roformer-gpu/src/lib.rs`, has no attribute.  The validator decides its `wasm32` mutants.  On 2026-10-28 (review round 1 of `plans/completed/stream-from-storage-catchup.md`), a scan of `cargo mutants --list --all-features` found no other `wasm32`-only function, impl or module that shows mutants.
+* cargo-mutants builds and tests natively.  A `wasm32`-only block in a shared function shows as a missed mutant.  A `wasm32`-only function, impl or module in a shared file has `#[cfg_attr(mutants, mutants::skip)]`, so cargo-mutants makes no mutant of it, struct-field deletions included.  No build sets `cfg(mutants)`, so no crate is needed, and `[workspace.lints.rust]` in `Cargo.toml` declares the cfg for `unexpected_cfgs`.  A new `wasm32`-only function without the attribute shows as missed, until a change adds the attribute.  The 22 rounds of PR #39 after `6d0a39d` had 11 such lines, in 2 rounds (harness phase 3b, M2).  A function with a native variant too, such as `base_latency` in `engine/src/live.rs`, `main` in `app/src/main.rs` and `mapped_floats` in `roformer-gpu/src/lib.rs`, has no attribute.  The validator decides its `wasm32` mutants.  On 2026-10-28 (review round 1 of `plans/completed/stream-from-storage-catchup.md`), a scan of `cargo mutants --list --all-features` found no other `wasm32`-only function, impl or module that shows mutants.
 * `exclude_globs` in `.cargo/mutants.toml` leaves out `app/src/decode_tests.rs`, `app/src/decoder/client.rs`, `app/src/picker.rs`, `app/src/playback.rs`, `app/src/playback_tests.rs`, `app/src/separator.rs`, `app/src/store.rs`, `app/src/streamtest.rs`, `decoder/src/web.rs`, `decoder/src/web/`, `worker/src/web.rs` and `worker/src/web/`, which compile for `wasm32` only.  So the run never tests the wire files of either worker: `app/src/separator.rs` and `worker/src/web.rs` for the stem worker, and `app/src/decoder/client.rs` and `decoder/src/web.rs` for the decode worker.
 * `mutants_command` sets no `STEMYLA_REQUIRE`, and passes on the caller's own.  So without it, where no GPU opens, the GPU tests skip, and a mutant that only they cover shows as missed.
+* Native code that only the `wasm32` tests reach shows as missed, such as the JS readers of `protocol/src/lib.rs`.  The validator refutes it: 16 lines in the 22 rounds of PR #39 after `6d0a39d`.
+* `xtask review mutants` writes the missed lines that `KNOWN_MISSED` (`xtask/src/review.rs`) matches to `known.txt`, each with its TD.  It writes the rest to `missed.txt`.  A test fails when an entry names a closed TD, or code that is gone.  It does not check that the mutant is still at the entry's code line.  An edit can keep the line and move the mutant, such as a new first statement in a function.  Then the entry goes stale, and its mutant goes to `missed.txt`, so nothing is hidden.  No test checks an entry's mutation text or offset against `cargo mutants --list`.  A wrong text or offset can send its own mutant to the validator.  A wrong offset can also hide another mutant with the same text on the same line.  If the tree is not clean at the round's head as the run starts, each missed line goes to `missed.txt`, and the mutants line says why.  The `review-rounds` skill logs each line of `known.txt` as `known`, with its TD, and gives it no validator.  A mutant that a team sends to tech debt gets its `KNOWN_MISSED` entry in the milestone's last commit, not in a round's fixes.  Reason: a change to `xtask/src/review.rs` routes all six reviewers, so an entry between rounds widens the next round.
 * A diff of tests only, WGSL or JavaScript gives no mutants.
 * A run that stops at its limit tests only some mutants, so its result is partial evidence.
 * cargo-mutants copies the tree with the ignore rules, the person's global ignore file included.  A tracked file that a rule matches is missing from the copy.  `no_tracked_file_is_ignored` finds such a file with the rules of the machine that runs it, and with a global rule for `Cargo.lock`.  CI has no global rules, so it sees only that one.
@@ -237,9 +239,9 @@ A review agent runs `cargo test` and `cargo build` on the diff.  `xtask review m
 
 ### TD-36: in the default permission mode, each review round has an approval that the skill forces
 
-The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  The baseline review runs no `xtask review` command.
+The `review-rounds` skill (harness phase 3, M3) runs `xtask review` with no approval only in the turn in which it loads.  The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks a person for approval once in each round.  A late `review mutants` can ask too.  `review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.  The baseline review runs no `xtask review` command.
 
-Since M4, the log counts these late review commands in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask (TD-38).  It writes 0, except in a `-p` run where a host or a prompt tool answers prompts.  There it writes the approvals that the run records, or `not counted`.  So the approvals that the skill forces do not fail D4 of `plans/completed/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
+Since M4, the log counts the late review commands before the findings file in their own field and cell.  Since M6, an approval is not an intervention.  Step 11 asks the person for the approvals of each round, and the log records them as cost (TD-38).  An orchestrator in a `claude -p` run, in auto mode or in `dontAsk` mode does not ask (TD-38).  It writes 0, except in a `-p` run where a host or a prompt tool answers prompts.  There it writes the approvals that the run records, or `not counted`.  So the approvals that the skill forces do not fail D4 of `plans/completed/harness-phase-3.md`.  The count of late review commands equals their approvals only in the default permission mode.
 
 * Fix: a project allow rule for `Bash(target/debug/xtask review *)` removes the approval.  That rule widens a permission of the project, so the maintainer decides (the Decision log of `plans/completed/harness-phase-3-m3.md`).
 
@@ -247,9 +249,9 @@ Since M4, the log counts these late review commands in their own field and cell.
 
 This entry concerns no rule.  It concerns the log of the review rounds.
 
-`CLAUDE.md` tells the agent to run review rounds 1, 2 and 3 after each change that it implements.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/completed/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After round 3" writes over the `<branch>.md` copy in the reviews folder.  No doc tells the agent what to do for a branch with more than one cycle of implementation and review.
+`CLAUDE.md` tells the agent to run review rounds after each change that it implements, until the stop rule of decision 0024 holds.  But the `review-rounds` skill keeps one log for each branch, `<run>/log.md`.  So a branch has one set of rounds (`plans/completed/harness-phase-3.md`, "How the work runs").  Round 1 of a second set refuses the run: "the run folder holds a log: copy it out, or remove it".  If the agent removes the log and starts again, step "After the last round" writes over the `<branch>.md` copy in the reviews folder.  In orchestrated mode, the `orchestrate` skill gives each milestone its own run and its own copy, `<branch>-m<n>.md`.  After the intent review, the orchestrator removes the run folder by hand, since `xtask clean` keeps it while the branch is checked out or has an open PR.  No doc tells the agent what to do for another branch with more than one cycle of implementation and review.
 
-* Fix: the orchestrator or the maintainer decides how such a branch keeps the log of each set.
+* Fix: the agent or the maintainer decides how such a branch keeps the log of each set, as the `orchestrate` skill does.
 
 ### TD-38: the review log cannot count a person's approvals
 
@@ -263,7 +265,7 @@ Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `
 
 Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled the deferred rows of M3 to M6.  `xtask/tests/e2e_cli.rs` runs `e2e smoke`, `separate`, `memory-budget`, `stored-stems`, `weights` and `old-session` with a `CHROMEDRIVER` that is not a file.  Review round 1 of M9 added `weights`.  Review round 2 of M9 added `selftest`, which stops on the missing reference files.  Review round 1 of that plan added `audio-resume`, `bench` and `playback`.  Review round 1 of M8 added `flac` and `save`.  Each run must fail on the driver, before a browser starts.  So a scenario body or an e2e `run` that returns `Ok(())` fails a test.  The 4-hour wait for the model is the constant `MODEL_RUN_SECS`, with a test.  The waits of `e2e decode` and the model wait of `memory-budget` use `holds_or_error`, with a test.  `roformer_refuses_bad_input_before_the_model` runs `xtask roformer`.  `StemApp::audio_stats_lines` and `StemApp::open_folder` have native tests.  What is left, each with its reason:
 
-* the scenario bodies after the driver starts, such as `storage`, `smoke`, `bench`, `separate`, `decode`, `playback`, `old-session`, `memory-budget`, `stored-stems` and `weights`: their steps and waits need a browser (not run).  So do `restore`, `save_once` and `wait_for_offer` of `xtask/src/e2e/save.rs`, and `__e2e_progress` of `xtask/e2e/save_spy.js` (findings 2-15 and 2-17 of review round 2 of M8).  Since step 6 of M8, `click_save`, `save_playing` and the reads of the WebAssembly memory and the long tasks in `save_once` are on this list too (findings 3-12 to 3-15 of review round speed 3 of M8, 4-19 and 4-20 of round speed 4, and 5-18 and 5-19 of round speed 5: a `save_once` or a `save_playing` that returns a default survives `cargo test`).  Their pure parts, `growth`, `long_tasks`, `slice_line`, `slice_of`, `slice_check`, `read_end_line`, `read_end_of`, `read_end_check`, `mean_frame_ms`, `not_frame_bound`, `throttled`, `save_checks` and `playing_checks`, have tests.  Also in `save_spy.js`: `__e2e_long_in_save`, `__e2e_long_calibrate`, the throttle and the long frames (`__e2e_long_frame_ms`) of the animation frames, and the heap readings at each write.  CI's run of `e2e save` reaches them.  Their pure parts are functions with tests.  CI's `browser-tests` job runs `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save`.  `separate`, `memory-budget`, `stored-stems`, `bench`, `selftest` and `worker-check` also need a GPU and the model, which CI does not have, so a person runs them.  Their checks are pure functions with unit tests (`all_from_storage`, `stored_stems_checks`, `flac_checks`, the growth checks, `old_session_checks` and others).  For example, deleting the `!` of the last `if !ok` in `memory_budget` still survives `cargo test`;
+* the scenario bodies after the driver starts, such as `storage`, `smoke`, `bench`, `separate`, `decode`, `playback`, `old-session`, `memory-budget`, `stored-stems` and `weights`: their steps and waits need a browser (not run).  So do `restore`, `save_once` and `wait_for_offer` of `xtask/src/e2e/save.rs`, and `__e2e_progress` of `xtask/e2e/save_spy.js` (findings 2-15 and 2-17 of review round 2 of M8).  Since step 6 of M8, `click_save`, `save_playing` and the reads of the WebAssembly memory and the long tasks in `save_once` are on this list too (findings 3-12 to 3-15 of review round speed 3 of M8, 4-19 and 4-20 of round speed 4, and 5-18 and 5-19 of round speed 5: a `save_once` or a `save_playing` that returns a default survives `cargo test`).  Their pure parts, `growth`, `long_tasks`, `slice_line`, `slice_of`, `slice_check`, `read_end_line`, `read_end_of`, `read_end_check`, `mean_frame_ms`, `not_frame_bound`, `throttled`, `save_checks` and `playing_checks`, have tests.  Also in `save_spy.js`: `__e2e_long_in_save`, `__e2e_long_calibrate`, the throttle and the long frames (`__e2e_long_frame_ms`) of the animation frames, and the heap readings at each write.  CI's run of `e2e save` reaches them.  Their pure parts are functions with tests.  CI's `browser-tests` job runs `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save`.  `separate`, `memory-budget`, `stored-stems`, `bench`, `selftest`, `worker-check` and `weights` also need a GPU and the model, which CI does not have, so a person runs them.  Their checks are pure functions with unit tests (`all_from_storage`, `stored_stems_checks`, `flac_checks`, the growth checks, `old_session_checks` and others).  For example, deleting the `!` of the last `if !ok` in `memory_budget` still survives `cargo test`;
 * `drop_and_open` of `xtask/src/e2e/decode.rs`: only a browser reaches it, after the driver starts, so a body that returns `Ok(())` survives `cargo test`.  CI's `browser-tests` job runs `e2e decode`, which fails without it;
 * the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
 * `Driver::start` after the driver is found, `free_port`, `Session::execute` and the `set_viewport` wrapper, which need a driver (not run);
@@ -272,6 +274,8 @@ Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled 
 * a request with no headers in `drip`, since the test always sends a Host header (not run);
 * `run` in `xtask/src/roformer_cli.rs` after the model loads: the separation needs the model weights, which CI does not have.  Its refusals of bad input have a test;
 * `main` in `app/src/main.rs` (native): `eframe::run_native` needs a window, and no test can open one.  Its folder argument is `StemApp::open_folder`, which has a test.  So a `main` that returns `Ok(())`, or that deletes the `viewport` field, survives `cargo test`.
+
+PR #39's review rounds sent some mutants inside functions to TD-39.  Each one that `cargo mutants --list` still shows is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`).  The mutants of the constant `WAITS_S` in `xtask/src/e2e/save.rs` are not entries, so they go to the validator.
 
 `sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
 
@@ -334,6 +338,8 @@ In `-p` mode, the result's `modelUsage` gives the session's tokens used.  For ex
 
 D4's token bar has no reliable measure in the log.  The maintainer decides how to measure it at the gate.
 
+Harness phase 3b has the same gap for its measure "cost per milestone against PR #39".  The Progress lines of `plans/completed/harness-phase-3b.md` give the final contexts of the round agents and of some other agents.  Only M5's measurement gives `modelUsage` tokens.  No log gives the tokens that the orchestrator used, or a total for the run.  So each cost per milestone in the plan is a lower bound.
+
 * Fix: the skill and D4 stay as they are.  A later phase can read `modelUsage` where it exists.
 
 ### TD-46: in `dontAsk` mode, the agents' probe forms are denied
@@ -370,7 +376,9 @@ This entry concerns VERIFY-1 for the files of the harness, such as the guard and
 
 The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But auto mode's classifier can refuse it.  In M6 review round 3, the classifier refused a reviewer's edit of `.claude/hooks/read-only-bash.sh` in its own worktree, with the reason "Self-Modification".  So in auto mode, a reviewer cannot change a harness file to show that a test fails on wrong code.  It reads the harness file and its tests only.  `xtask review mutants` does not test these files either, since cargo-mutants changes only Rust code (TD-33).
 
-* Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.
+Auto mode can also refuse the worktree itself.  In M8 review round 2 of harness phase 3b, it refused the supply-chain-reviewer's `git worktree add`, with the reason "Security Weaken".  That reviewer then could run no mutant of its own, of Rust code or of a harness file, and it reasoned about its test with no run.  The other reviewers of that round made their worktrees.
+
+* Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.  The `cargo-mutants` run of the round still tests the Rust code of the since diff.
 
 ### TD-51: engine's tests do not run on wasm32
 
@@ -391,6 +399,121 @@ Since review round speed 2, the check that fails the run is each save's longest 
 A slice covers the steps of the job.  These are the mix of each block, the copy of each full write into its JS array, and the start of each write and each read.  The work that the save's promises do after a slice is not in a slice.  The end of each read copies the bytes into WebAssembly memory and decodes a span of each lane into its slot.  Since review round speed 4, the save's store measures the decode, and the page logs the longest (`longest read end`).  `e2e save` fails a save whose longest read end is over `SLICE_LIMIT_MS` (`a_waking_store_keeps_the_longest_read_end`).  Up to 2 reads can end in one task.  A slice of the save can follow them in the same task, because wasm-bindgen-futures wakes the save's task from a microtask (finding 5-6 of review round speed 5).  So one task can hold two read ends and a slice.  The copy into WebAssembly memory, the end of each write, and the end stage in the UI frame are not measured.  The end stage is the last write, the close, and the offer or the encode request.  In the saves of `e2e save` with no playback, of 3 lanes, Chrome logged no long task.  What is left: no check bounds a whole task, the copy at a read's end, the ends of the writes or the end stage.  Two read ends and a slice in one task can pass the margin of about 70 ms while each check passes.  No check sees a late audio callback that comes from outside the save.
 
 * Fix: count the audio callbacks that start late, from the times of cpal's callbacks, in the `playback:` line, and make `e2e save` fail on one.
+
+### TD-67: `xtask clean` sees a process only by its open files
+
+This entry concerns no rule.  It concerns `xtask clean` (`plans/completed/harness-phase-3b-m1.md`).
+
+`xtask clean` keeps a worktree or a scratch root that a process uses.  It reads the uses with `lsof -w -n -P -F n`: the working folder and the open files of each process.  An agent that builds a worktree from the main checkout keeps no file open in it between its commands.  So `xtask clean` does not see that agent.  Only the test of the open round keeps the worktrees of a review round that runs.  It does not keep the worktree of a review with no state record.  Without root, `lsof` does not show the processes of other users.  Without `lsof` or `gh`, `xtask clean` keeps each item that needs the missing fact, so it removes less.
+
+* Fix: no check is planned.  Run `xtask clean --yes` between milestones, when no agent runs.
+
+### TD-68: a stopped `xtask serve` leaves its pid file
+
+This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
+
+`xtask serve` writes its pid file in `target/xtask-serve/` of the repo (`serve::pid_file`).  It uses the standard library only, so it cannot remove the file when a signal stops it.  So each stopped server leaves a stale file.  `xtask clean` lists such a file as stale, and `--yes` removes it.  A new server on the same port writes over the file.
+
+* Fix: no fix is planned.  A signal handler needs a new crate (DEPS-1) or unsafe code.
+
+### TD-69: no test runs `docs::check` on a fixture tree
+
+This entry concerns VERIFY-1, through `xtask docs-check`.
+
+`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of M3 of harness phase 3b).  This mutant is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`), so `xtask review mutants` writes it to `known.txt`.  The unit tests check each check alone, but not that `check` calls it.
+
+* Fix: add a test that runs `check` on a small fixture repo with one known problem of each check, and wants each problem.
+
+### TD-70: tier `commit` of `xtask check` can pass where the full checks fail
+
+This entry concerns GIT-2 and VERIFY-1, through `xtask check` (decision 0026).
+
+Tier `commit` runs the checks that the changed paths of one commit need (`plans/completed/harness-phase-3b-m4.md`).  It has these gaps:
+
+* The crate tests are one `cargo test` command for the chosen packages.  Cargo turns on features only across those packages, so the command can pass where the workspace test line fails.
+* A test that reads a file in another folder is not seen.  The one case today is `engine/tests/realtime.rs`, which reads `app/Cargo.toml`.  That path matches DEPS-1, so it runs tier `push`.
+* The strict paths (`STRICT_PATHS` in `xtask/src/check.rs`) are a narrow list that a person keeps.  `app/src/lib.rs` is in no row, but it holds `MEMORY_PATH_MAX_FRAMES` and some transfer code.
+* Tier `commit` skips the GPU test line and the Trunk build.  A strict path, or a graph that fails, sends the commit to tier `push` instead.  Each tier skips the browser tests.
+* Tier `push` skips the GPU test line when its paths change no GPU code: nothing in `roformer/`, `roformer-gpu/` or `test-support/`, and no workspace file.  When no path changed, or no path is known, it runs the line.  CI does not run that line either.
+* The GPU test line has `STEMYLA_REQUIRE=gpu,f16`, so it fails on an adapter without `SHADER_F16_IN_F32`.  On such an adapter, run `check` with `STEMYLA_REQUIRE=gpu`.  A `STEMYLA_REQUIRE` in the environment replaces `gpu,f16` in the line when one of its words is `gpu`, `f16` or `timestamps`.  Another value, such as `fixtures`, keeps `gpu,f16`, so the line cannot pass with no adapter.  The printed reason says which of the two occurs.
+* Each tier runs its checks on the working tree, not on the index or `HEAD`.  So an unstaged edit or an untracked file that the commit leaves out can make the checks pass where the commit fails.  A staged change that the tree undoes, or a committed change that the tree reverts, is not tested.  The paths of such a change still choose the checks.  Tier `push` has the same gap.  Two checks narrow it, but neither tests each commit.  `xtask review start` refuses a tree with changes, so a review round reviews the commit.  CI runs only on a pull request, on the branch merged into `main`, and it does not run the GPU test line.
+
+Tier `push`, which runs before each push and each review round, or CI finds the other gaps of tier `commit` before review.  No automated check runs the GPU test line when tier `push` skips it.
+
+* Fix: no fix is planned.  Add a strict path when a rule's code moves to a new file.
+
+### TD-71: the measurement of the agents' models has gaps
+
+This entry concerns no rule.  It concerns decision 0025, and the pin `the_agent_models_are_the_measured_ones` in `xtask/tests/rules.rs`.
+
+M5 of harness phase 3b compared cheaper models with a control for the validator and the docs-reviewer, on logged findings.  The results are in the Surprises of `plans/completed/harness-phase-3b-m5.md` ("step 4, the results").  No role passed, so each agent file keeps `model: inherit` with no `effort` key.  The measurement has these gaps:
+
+* Each arm had one run on each case.  So the measure does not separate run noise from the model's effect.
+* The team leader rebuilt the finding block of each validator run from its row in the log.  So the block had no evidence and no fix.
+* No field of the `claude -p` stream shows the effort of a subagent.  So no check showed that `effort: high` took effect in a candidate arm.
+* The `haiku` validator stopped after 3 of its 6 cases, for its cost.  So its result has 25 items, and item 0 of the pass rule cannot hold; its agreement interval is 0.363 wide.
+* The measurement did not reach the gpu-reviewer, the wire-reviewer and the supply-chain-reviewer.  They keep `inherit` because there is no evidence, not because they failed.
+* The measure is recall, or agreement with the log, on logged findings only.  It does not measure precision.
+
+* Fix: decision 0025 runs the measurement again when the model line-up changes (phase 6).  Until then, the pin keeps each role on `inherit`.
+
+### TD-72: no run shows that a big task asks its decisions up front
+
+This entry concerns no rule.  It concerns decision 0023, the "Plans:" line of `CLAUDE.md`, the section "Decisions for the maintainer" of `docs/plans/PLANS.md` and the recipe "Run a big task hands-off" in `docs/working-with-agents.md`.
+
+The `orchestrate` skill says that the agent sends one message up front, before any work.  The message proposes the mode and lists each choice that hinges on the maintainer, with its options and a recommendation.  M6 of harness phase 3b ran two `claude -p` dry runs on a plan of 4 milestones (`plans/completed/harness-phase-3b-m6.md`, step 5).  Each session proposed the mode in its first reply.  Neither sent the decisions as that message, since the `dontAsk` mode refused the Bash that the preflight needs, and the skill stops at a failed check.  Auto mode refused a run with Bash allowed.  So no run shows the message.  Also, when there is no open choice and the effort is known, the message holds only the mode, the branch and the PR.  If the maintainer also asked for the mode, the agent sends no message.
+
+* Fix: a person starts a session in auto mode with a big plan and the prompt of the recipe, "Do docs/plans/active/<plan>.md.", and records the first reply.  The plan has at least one open entry in "Decisions for the maintainer", and the prompt does not ask for the mode.  It passes when the reply lists the plan's decisions, each with its options and a recommendation.  A reply that only proposes the mode does not pass.
+
+### TD-73: from round 4, a reviewer reads only the fix range
+
+This entry concerns no rule.  It concerns decision 0024, and D4 of `plans/completed/harness-phase-3b.md`.
+
+From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the 14 older review logs, rounds 4 and later found 13 bugs.  At least 3 of them were in files that the fix range of the round before did not touch.  They are catch-up 4-1, M7 6-1 and M7 6-2, all in PR #39.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
+
+In harness phase 3b, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`.  M1's late bugs 5-1 and 6-1 were in `xtask/src/clean.rs`.  The fix range of the round before touched each of these files.  In M4, two reviewers of round 4 noted a stale GIT-2 sentence out of scope, and the orchestrator put its fix in round 5's range (`ef602b3`).  No rule tells a reviewer to report such a finding, or a team leader to log it.
+
+* Fix: the maintainer decides on the proposal of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").
+
+### TD-74: a team leader cannot write the review files or stop its subagents
+
+This entry concerns no rule.  It concerns the `orchestrate` skill and the `review-rounds` skill.
+
+In orchestrated mode, a team leader is a subagent.  From M1 of harness phase 3b, the Write tool refused `<run>/<round>/findings.md` and `<run>/log.md` to the team leader.  So in each review round of M1 to M7, the orchestrator wrote them.  So the team leader gives the text of both files at a checkpoint, and the orchestrator writes them and runs `review log-check` and `review clean`.  Each round waits for the orchestrator.  A team leader also cannot stop a stalled subagent.  In M1, a docs-reviewer stalled for about 45 minutes on one Bash call, and only the orchestrator could stop it, with TaskStop.  So the skill calls a subagent stalled after 30 minutes with no result, and the orchestrator stops it.
+
+* Fix: no fix is planned.  If Claude Code lets a subagent write these files and stop its own subagents, remove the checkpoint of each round from the `orchestrate` skill.
+
+### TD-75: the phase 3 gate compares one run of each review
+
+This entry concerns no rule.  It concerns the gate of phase 3 in `plans/active/harness-engineering.md`, and the `--baseline` flag of the `review-rounds` skill.
+
+The gate compares one run of round 1 with one run of the `baseline` agent on the same commit: "of y baseline findings, the round found x".  M5 of harness phase 3b found that one control run of the docs-reviewer found 0.425 [0.285, 0.578] of that agent's own confirmed findings in the logs.  So two runs of one review find different sets, and a miss of a baseline finding in one run can be run noise.  The record of round 1 with `--baseline`: PR #36 found 4 of 4, PR #37 2 of 2, PR #39 (M3) 1 of 3 and PR #41 (M1) 2 of 4.  Together that is 9 of 13, 0.692 [0.424, 0.873].  The gate has no count of the round's findings that the baseline did not find.  D4's token bar has no reliable measure (TD-44).
+
+* Fix: the maintainer decides on the proposal of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").
+
+### TD-76: `xtask attention` finds a hand-run line by the name of its item
+
+This entry concerns no rule.  It concerns the hand-run class of `xtask attention` (decision 0027), which reaches PROTO-1 only through TD-16.
+
+`xtask attention` lists first one line of each hunk that changes a message that `stored-stems`, `worker-check` or `weights` writes by hand (TD-16).  In `xtask/src/e2e.rs`, it finds such a hunk by the name of its item.  The name starts with `stored_stems` or `worker_check`, in upper or lower case, or it is `stem_protocol_file`.  A helper with another name that writes such a message gives no hand-run line.  Its change then comes later in the list, or not at all, and the orchestrator can leave it out of the 10 comments.  M7's rounds found one more helper in each round.  M7 then wrote the rule as two name prefixes and one name (`plans/completed/harness-phase-3b-m7.md`, Decision log).
+
+* Fix: when a new helper writes a hand-written message, add its name to the rule, with a test.  The wire-reviewer reads each change to the e2e scripts.
+
+### TD-77: `xtask pr-body` checks the form of a body, not what "Needs your attention" holds
+
+This entry concerns no rule.  It concerns decision 0027, and `xtask pr-body`.
+
+`xtask pr-body` checks the headings, the length of the summary, the lines of Verification and the `<details>` block.  It does not check what "Needs your attention" holds.  So an item for the maintainer to decide or to do can be missing.  An item there can also have no link to its inline comment.  The body passes.
+
+* Fix: no check is planned.  The orchestrate skill says what the section holds, and the maintainer reads it.
+
+### TD-78: the `orchestrate` skill has no pause or resume step
+
+This entry concerns no rule.  It concerns decision 0023, and the `orchestrate` skill.
+
+The skill's "Stop and wait" lists the reasons to stop, and a request of the maintainer to pause is not one of them.  The skill has no step for a resume.  Its "Start" makes the branch and the draft PR, commits the plan and sends the message up front.  On 2026-11-01, harness phase 3b paused after a review round of M6, with the steps of the resume in the plan's Progress (`d376200`).  The resume followed those steps, not the skill.
+
+* Fix: the maintainer decides on P5 of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").  Until then, the guide's recipe "Run a big task hands-off" says how to pause and resume.
 
 ## Known breaches
 
@@ -445,7 +568,7 @@ Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 
 
 `xtask/e2e/worker.js`, and the scripts in `xtask/src/e2e.rs` and in the Rust files under `xtask/src/e2e/`, repeat field names by hand.  Nothing checks them.  `e2e_messages_use_protocol_types` checks the message types, but only in the shapes it reads.  It does not read, for example, a `switch` and its `case`s, an assignment `m.type = "x"`, `d["type"]`, `"x" === d?.type`, a variable, a template literal or a regex literal, whose quote hides the rest of its line.  In Rust it does not read, for example, `.as_str() == Some("x")` or `json!("x") == r["type"]`.  In a plain Rust literal, a `\n` escape after a `//` comment hides the rest of the literal.  In a plain Rust literal, an escape other than `\\` and `\"` stays as a `\` and its text.  So an escape such as `\n` or `\t` joins its letter to the next word, and `\ntype` reads as `ntype` (`docs/reviews/replay.md`, case `m10`, finding 1-1).  Outside a JS string, a `\'` opens a string that hides the rest of its line.  So the check does not read a type such as `\'x\'`.  It reads no script outside `xtask/e2e/*.js`, `xtask/src/e2e.rs` and the Rust files under `xtask/src/e2e/`.  Some text in a type's place is not a message, such as `{ type: '{kind}' }` in a `format!` string, a `Blob`'s MIME type, or `"string"` in `typeof d?.type === "string"`: the check fails it, and `SCRIPT_ONLY_TYPES` takes it with a reason.  A reply missing a field decodes as `""`, `0` or `false`.  There is no version handshake between page and worker (PROTO-1).
 
-The decode worker's messages (`stem_protocol::decode`, M5) refuse a missing or wrong field, so this entry concerns the stem worker's messages only.  `e2e_messages_use_protocol_types` checks each hand-written type against the union of both workers' kinds, so a decode kind in a script for the stem worker passes (review round 1 of M5, finding 1-16).
+The decode worker's messages (`stem_protocol::decode`, M5) refuse a missing or wrong field, so this entry concerns the stem worker's messages only.  `e2e_messages_use_protocol_types` checks each hand-written type against the union of both workers' kinds, so a decode kind in a script for the stem worker passes (review round 1 of M5, finding 1-16).  CI's `browser-tests` job does not run `e2e stored-stems`, `e2e worker-check` or `e2e weights`, since they need a GPU and the weights.  These three scenarios also write stem worker messages by hand.  When a change touches their messages, the agent runs the changed scenario on its machine's GPU with the local model file, and the PR names the run.  If no GPU or model file is there, the PR lists the scenario as not verified.
 
 * Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not.  It looks on each diff that routes it (TD-31).
 
@@ -531,7 +654,7 @@ This entry concerns VERIFY-1 and GPU-2.
 
 This entry concerns VERIFY-1.
 
-The review rounds of M9 (`plans/completed/stream-from-storage-m9.md`) ran cargo-mutants in part only.  Round 1 tested 95 of 472 mutants (64 caught, 25 missed, 6 unviable) and stopped at its limit of 60 minutes, so 377 were not tested.  Round 2 tested none of its 21: the baseline `cargo test` timed out at 300 s twice while reviewers and builds loaded the Mac.  The missed mutants of round 1 got tests, except the checks that only a live WebDriver page reaches: `note_run` and `run` in `xtask/src/e2e/weights.rs` (lines 231, 233, 254, 256 and 488 at `0789e6b`).
+The review rounds of M9 (`plans/completed/stream-from-storage-m9.md`) ran cargo-mutants in part only.  Round 1 tested 95 of 472 mutants (64 caught, 25 missed, 6 unviable) and stopped at its limit of 60 minutes, so 377 were not tested.  Round 2 tested none of its 21: the baseline `cargo test` timed out at 300 s twice while reviewers and builds loaded the Mac.  The missed mutants of round 1 got tests, except the checks that only a live WebDriver page reaches: `note_run` and `run` in `xtask/src/e2e/weights.rs` (lines 231, 233, 254, 256 and 488 at `0789e6b`).  The mutants of `note_run` that round 1 sent to this TD are entries of `KNOWN_MISSED` (`xtask/src/review.rs`).  The other mutants of `note_run` go to the validator.  Line 488 has two `==`, and its row has no column, so it has no entry.
 
 No test with a rejected f16 variant goes through the worker's `gpu` and `load_format` (`worker/src/web.rs`), so their log lines are not tested.  Review round 3 found this; it was there before the round.
 

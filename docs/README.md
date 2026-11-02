@@ -14,9 +14,18 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 ## How work is done
 
 * `working-with-agents.md`: for the person who directs the agent: recipes for common tasks, what a person must still do, and the tools.  Read it first when you start to work here.
-* `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and phase 2's numbers.
+* `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and the numbers of phases 2 and 3b.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/completed/harness-phase-3b.md`: phase 3b of that plan, done on 2026-11-02 in PR #41: orchestrated mode by default for big tasks, a stricter fix rule, a model for each agent role, local checks by tier, cleanup, and PR bodies with attention comments.  Its retrospective gives the cost, what went well and what went wrong.
+* `plans/completed/harness-phase-3b-m8.md`: M8 of that plan, done on 2026-11-02, the close-out: the parts of phase 3b in `harness.md`, the gaps that it leaves, and proposals for the later phases.
+* `plans/completed/harness-phase-3b-m7.md`: M7 of that plan, done on 2026-11-02: a PR template, `xtask pr-body` checks a PR body, and `xtask attention` lists the lines for inline comments (decision 0027).
+* `plans/completed/harness-phase-3b-m6.md`: M6 of that plan, done on 2026-11-01: the `orchestrate` skill holds orchestrated mode (decision 0023), a big task's decisions come up front, and `docs-check` and `review log-check` check plans and logs for it.
+* `plans/completed/harness-phase-3b-m5.md`: M5 of that plan, done on 2026-11-01: a measurement on logged findings found no cheaper model or effort that passes, so each agent keeps `model: inherit` (decision 0025).
+* `plans/completed/harness-phase-3b-m4.md`: M4 of that plan, done on 2026-11-01: `xtask check` runs the local checks by tier and by the changed paths (decision 0026).
+* `plans/completed/harness-phase-3b-m3.md`: M3 of that plan, done on 2026-11-01: the review rounds follow the fix rule and the stop rule of decision 0024, and a check reads each log.
+* `plans/completed/harness-phase-3b-m2.md`: M2 of that plan, done on 2026-10-31: `xtask review mutants` writes known missed mutants to `known.txt`, and the skill gives them no validator.
+* `plans/completed/harness-phase-3b-m1.md`: M1 of that plan, done on 2026-10-31: `xtask clean` lists and removes what runs leave, `xtask review clean` removes a round's worktrees, and `xtask serve` writes a pid file.
 * `plans/completed/stream-from-storage.md`: done on 2026-10-30: a song's audio moves to browser storage, so the tab's memory does not grow with the song (MEM-4, TD-54).
 * `plans/completed/stream-from-storage-m3.md`: M3 of that plan: the worker writes the stems to their session files, and the page falls back to memory when storage is unavailable or full.
 * `plans/completed/stream-from-storage-m4.md`: M4 of that plan: the page keeps the mix in a session file, and the worker reads it in blocks.
@@ -59,6 +68,11 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0020-memory-path-limit-shares-lanes.md`: the memory path's limit shrinks with the lanes that the page holds in memory, and an open that decodes on the page keeps it (accepted).
 * `decisions/0021-saves-go-through-browser-storage.md`: every save writes a 16-bit WAV save file in browser storage, the worker encodes FLAC and MP3 from it into a save file of its own, and the page offers the file (accepted).
 * `decisions/0022-a-gpu-that-changes-f16-weights-keeps-f32.md`: a GPU whose f16 weight kernels do not give the f32 kernels' output bit for bit keeps f32 weights (accepted).
+* `decisions/0023-orchestrated-mode-for-big-tasks.md`: a big task runs in orchestrated mode after one message up front with the maintainer's open choices (accepted, amended on 2026-11-01).
+* `decisions/0024-what-a-review-round-fixes.md`: rounds 1 to 3 fix every confirmed finding; later rounds fix only blockers, significant should-fix and strict-rule findings (accepted).
+* `decisions/0025-a-model-for-each-agent-role.md`: each agent role gets a model and an effort, chosen by a measurement on logged findings (accepted).
+* `decisions/0026-local-checks-by-tier.md`: local checks run by tier and by changed paths; the full set before a push (accepted).
+* `decisions/0027-pr-body-and-attention-comments.md`: a PR body with a summary for people and a section for agents, and inline comments where a person must look (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
@@ -78,7 +92,8 @@ These are what `docs-check` holds the docs to:
 * The tests an invariant names on its `* Enforced by:` line exist.
 * Every workspace crate is listed in the layout of `CLAUDE.md` and `README.md` and under the crates of `ARCHITECTURE.md`.
 * Decisions are numbered `0001-...` with no gaps and carry a `Status:` line.
-* Plans live in `plans/active/` or `plans/completed/` and keep the living sections listed in `plans/PLANS.md`.
+* Plans live in `plans/active/` or `plans/completed/` and keep the living sections listed in `plans/PLANS.md`.  An active plan of more than 3 milestones also has a "How the work runs" section (decision 0023).
 * Every rule in `.claude/rules/` has `paths:` frontmatter whose globs match files.
 * `CLAUDE.md` stays within 100 lines, and its rules section lists exactly the current rules in `invariants.md`.
 * `working-with-agents.md` names every `xtask` command and every project skill, subagent and command in `.claude/`.
+* A review log in `reviews/` with a `Significant` column follows the fix rule of decision 0024.  Each row gives a fix or a reason for no fix, as its round and its finding allow.

@@ -1,5 +1,6 @@
 //! `xtask review`: chooses the reviewers from a diff, guards a review round,
-//! and runs cargo-mutants on a round's diff.
+//! runs cargo-mutants on a round's diff, removes a round's worktrees, and
+//! checks a run's log against the fix rule of decision 0024.
 //!
 //! Each failure exits 3, so a skill that runs the command stops on it.
 
@@ -111,6 +112,7 @@ pub const REVIEWERS: &[Reviewer] = &[
 /// it routes every reviewer.
 pub const ROUTE_ALL: &[&str] = &[
     "xtask/src/review.rs",
+    "xtask/src/review_log.rs",
     ".claude/agents/**",
     ".claude/skills/**",
     ".claude/hooks/**",
@@ -162,8 +164,7 @@ pub const SIGNS: &[(&str, &[&str])] = &[
     ),
 ];
 
-const USAGE: &str =
-    "usage: xtask review start <base> <round> | check <round> | mutants <round> [--config <file>]";
+const USAGE: &str = "usage: xtask review start <base> <round> | check <round> | mutants <round> [--config <file>] | clean <round> | log-check <file>";
 
 /// The exit code of every failure, refusal and usage error.
 const REFUSED: i32 = 3;
@@ -527,6 +528,8 @@ pub fn run_with(
                 .and_then(|round| mutants(&toplevel(dir)?, dir, round, None, cargo)),
             ["mutants", round, "--config", file] => parse_round(round)
                 .and_then(|round| mutants(&toplevel(dir)?, dir, round, Some(file), cargo)),
+            ["clean", round] => parse_round(round).and_then(|round| clean(&toplevel(dir)?, round)),
+            ["log-check", file] => log_check(&dir.join(file)),
             _ => Ok((REFUSED, vec![USAGE.to_string()])),
         };
     outcome.unwrap_or_else(|e| (REFUSED, vec![format!("{e:#}")]))
@@ -893,19 +896,30 @@ fn start(
     save("route.txt", &(ranges(None).join("\n") + "\n"))?;
     save("state.json", &serde_json::to_string_pretty(&state)?)?;
 
-    const SOURCE: &str = "xtask/src/review.rs";
-    let source_time = std::fs::metadata(toplevel.join(SOURCE))
-        .and_then(|m| m.modified())
-        .ok();
-    let blob = |rev: &str| {
-        git(
-            toplevel,
-            &["rev-parse", "--verify", "-q", &format!("{rev}:{SOURCE}")],
-        )
-        .ok()
-        .map(|sha| sha.trim().to_string())
-    };
-    let (base_blob, head_blob) = (blob(&base), blob(&head));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xtask"));
+    let mut source_warnings = Vec::new();
+    for (source, what) in WATCHED_SOURCES {
+        let source_time = std::fs::metadata(toplevel.join(source))
+            .and_then(|m| m.modified())
+            .ok();
+        let blob = |rev: &str| {
+            git(
+                toplevel,
+                &["rev-parse", "--verify", "-q", &format!("{rev}:{source}")],
+            )
+            .ok()
+            .map(|sha| sha.trim().to_string())
+        };
+        source_warnings.extend(warnings(
+            &exe,
+            source,
+            what,
+            exe_time,
+            source_time,
+            blob(&base).as_deref(),
+            blob(&head).as_deref(),
+        ));
+    }
     let lines = [
         format!("base: {base} (merge base of {base_name} and HEAD)"),
         format!("since: {since}"),
@@ -917,13 +931,7 @@ fn start(
     ]
     .into_iter()
     .chain(ranges(Some(PATH_REASONS_SHOWN)))
-    .chain(warnings(
-        &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xtask")),
-        exe_time,
-        source_time,
-        base_blob.as_deref(),
-        head_blob.as_deref(),
-    ))
+    .chain(source_warnings)
     .collect();
     Ok((0, lines))
 }
@@ -968,9 +976,20 @@ fn route_lines(route: &Route, cap: Option<usize>) -> Vec<String> {
         .collect()
 }
 
-/// The warnings of `review start`, which do not change its exit code.
+/// The sources of `xtask review` that a branch can change, each with what
+/// then comes from the branch.  `review start` warns on each.
+const WATCHED_SOURCES: &[(&str, &str)] = &[
+    ("xtask/src/review.rs", "the route"),
+    ("xtask/src/review_log.rs", "the log check"),
+];
+
+/// The warnings of `review start` for one source, such as
+/// `xtask/src/review.rs`, which do not change its exit code.  `what` comes
+/// from the branch when the branch changes, adds or removes the source.
 pub fn warnings(
     exe: &Path,
+    source: &str,
+    what: &str,
     exe_time: SystemTime,
     source_time: Option<SystemTime>,
     base_blob: Option<&str>,
@@ -980,15 +999,20 @@ pub fn warnings(
         .is_some_and(|source| exe_time < source)
         .then(|| {
             format!(
-                "warning: {} is older than xtask/src/review.rs; run cargo build -p xtask",
+                "warning: {} is older than {source}; run cargo build -p xtask",
                 exe.display()
             )
         });
     let changed = match (base_blob, head_blob) {
-        (Some(base), Some(head)) if base != head => Some(
-            "warning: this branch changes xtask/src/review.rs, so the route comes from the branch"
-                .to_string(),
-        ),
+        (Some(base), Some(head)) if base != head => Some(format!(
+            "warning: this branch changes {source}, so {what} comes from the branch"
+        )),
+        (None, Some(_)) => Some(format!(
+            "warning: this branch adds {source}, so {what} comes from the branch"
+        )),
+        (Some(_), None) => Some(format!(
+            "warning: this branch removes {source}, so {what} comes from the branch"
+        )),
         _ => None,
     };
     old_binary.into_iter().chain(changed).collect()
@@ -1032,6 +1056,8 @@ pub struct Line {
     pub class: Class,
     pub counts: Counts,
     pub reason: Option<String>,
+    /// The number of missed lines that the known-missed list matches.
+    pub known: usize,
 }
 
 /// The class of a run, and why.
@@ -1073,6 +1099,7 @@ pub fn classify(end: RunEnd, counts: Option<Counts>) -> Line {
         class,
         counts: counted,
         reason,
+        known: 0,
     }
 }
 
@@ -1102,8 +1129,8 @@ impl std::fmt::Display for Line {
             .map_or(0, |listed| listed.saturating_sub(tested + c.timeout));
         write!(
             f,
-            "mutants: {class}: tested {tested} (caught {}, missed {}, unviable {}), timeouts {}, not tested {not_tested}",
-            c.caught, c.missed, c.unviable, c.timeout
+            "mutants: {class}: tested {tested} (caught {}, missed {}, unviable {}), timeouts {}, not tested {not_tested}, known {}",
+            c.caught, c.missed, c.unviable, c.timeout, self.known
         )?;
         match &self.reason {
             Some(reason) => write!(f, "; {reason}"),
@@ -1112,9 +1139,357 @@ impl std::fmt::Display for Line {
     }
 }
 
-/// Removes the round's old `mutants.out`, `mutants.out.old` and
-/// `mutants.txt`.  A diff with no mutants leaves an old `mutants.out` as it
-/// was, and an old line would show until the new run ends.
+// Known-missed mutants: the missed mutants that a review round sent to tech
+// debt.  `review mutants` logs them as known, and sends the rest to the
+// validator.
+
+/// One missed mutant that a review round sent to tech debt.
+///
+/// An entry matches a missed line by four parts, and each must be equal.
+/// Line numbers move with each edit, so an entry has no line number.  The
+/// mutation text alone does not tell two operator mutants of one function
+/// apart, so the entry also has the code line.  The code line does not tell
+/// two mutants on one line apart, so the entry also has the offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Known {
+    /// The TD ID of `docs/tech-debt.md` that holds the gap.
+    pub debt: &'static str,
+    /// The file, as a path from the repo root.
+    pub file: &'static str,
+    /// The text of the missed line after `<file>:<line>:<col>: `.
+    pub mutation: &'static str,
+    /// The line of the file at `<line>`, with the spaces at its ends removed.
+    pub code: &'static str,
+    /// `<col>` minus the spaces and tabs at the start of that line.  It
+    /// stays the same when the code line moves or its indent changes.
+    pub offset: usize,
+}
+
+/// The known-missed list: the missed mutants of TD-39 and TD-66 that the
+/// review rounds of PR #39 sent to tech debt, and the mutant of TD-69 of
+/// harness phase 3b, M3.  `cargo mutants --list` still shows each.  Each comment names the round's log and finding.
+/// `each_known_missed_entry_is_open_and_in_the_code` checks that each TD is
+/// open, and that each code line is once in a function of the mutation's
+/// name.  It does not check that the mutant is still at that code line.  An
+/// edit can keep the line and move the mutant, such as a new first
+/// statement in front of a body mutant.  Then the entry goes stale, and its
+/// mutant goes to the validator, so nothing is hidden.
+pub const KNOWN_MISSED: &[Known] = &[
+    // M8, round 2, finding 2-15.
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace restore -> Result<()> with Ok(())",
+        code: "let id = session_id(seconds);",
+        offset: 1,
+    },
+    // M8, round 2, finding 2-17.
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace save_once -> Result<Save> with Ok(Default::default())",
+        code: "restore(p, seconds)?;",
+        offset: 1,
+    },
+    // M8, round speed 2, finding 2-16.
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace click_save -> Result<String> with Ok(String::new())",
+        code: "let mark = p.mark();",
+        offset: 1,
+    },
+    // M8, round speed 2, finding 2-17.
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace click_save -> Result<String> with Ok(\"xyzzy\".into())",
+        code: "let mark = p.mark();",
+        offset: 1,
+    },
+    // M8, round speed 2, finding 2-18.
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace save_playing -> Result<Playing> with Ok(Default::default())",
+        code: "let seconds = SECONDS[1];",
+        offset: 1,
+    },
+    // M9, round 1, finding 1-21.
+    Known {
+        debt: "TD-66",
+        file: "xtask/src/e2e/weights.rs",
+        mutation: "replace note_run -> Result<Vec<String>> with Ok(vec![String::new()])",
+        code: "p.note(&format!(\"{label}: replies {:?}\", texts(&run[\"replies\"])));",
+        offset: 1,
+    },
+    // M9, round 1, finding 1-28.
+    Known {
+        debt: "TD-66",
+        file: "xtask/src/e2e/weights.rs",
+        mutation: "replace note_run -> Result<Vec<String>> with Ok(vec![])",
+        code: "p.note(&format!(\"{label}: replies {:?}\", texts(&run[\"replies\"])));",
+        offset: 1,
+    },
+    // M9, round 1, finding 1-31.
+    Known {
+        debt: "TD-66",
+        file: "xtask/src/e2e/weights.rs",
+        mutation: "replace && with || in note_run",
+        code: "run[\"replies\"][0][\"ok\"] == json!(true) && run[\"replies\"][1][\"type\"] == json!(\"done\"),",
+        offset: 40,
+    },
+    // M9, round 1, finding 1-37.
+    Known {
+        debt: "TD-66",
+        file: "xtask/src/e2e/weights.rs",
+        mutation: "replace || with && in note_run",
+        code: "|| line.contains(\"kernels: \")",
+        offset: 1,
+    },
+    // M9, round 1, finding 1-44.
+    Known {
+        debt: "TD-66",
+        file: "xtask/src/e2e/weights.rs",
+        mutation: "replace || with && in note_run",
+        code: "|| line.contains(\"weights: \")",
+        offset: 1,
+    },
+    // Catch-up, round 1, finding 1-28.
+    Known {
+        debt: "TD-39",
+        file: "app/src/main.rs",
+        mutation: "replace main -> eframe::Result<()> with Ok(())",
+        code: "let folder = std::env::args().nth(1);",
+        offset: 1,
+    },
+    // Catch-up, round 1, finding 1-30.
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/decode.rs",
+        mutation: "replace drop_and_open -> Result<()> with Ok(())",
+        code: "let drop: Vec<(&str, &str, &str)> = files",
+        offset: 1,
+    },
+    // Harness phase 3b, M3, round 1, finding 1-19.
+    Known {
+        debt: "TD-69",
+        file: "xtask/src/docs.rs",
+        mutation: "replace check -> Result<Vec<Problem>> with Ok(vec![])",
+        code: "let files = repo_files(root)?;",
+        offset: 1,
+    },
+];
+
+/// The missed lines of a run, split in two.  Each list keeps the order of
+/// the input.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Split<'a> {
+    /// The lines for the validator.
+    pub to_validate: Vec<&'a str>,
+    /// Each known line, with the TD of its entry.
+    pub known: Vec<(&'a str, &'static str)>,
+}
+
+/// Splits the missed lines of cargo-mutants (`missed.txt`) by `list`.
+/// `line_at(file, n)` gives line `n` of the file, untrimmed.  A line that
+/// does not parse, or whose file `line_at` cannot read, goes to the
+/// validator.  So an old entry sends its mutant to the validator.
+pub fn split<'a>(
+    missed: &'a str,
+    list: &[Known],
+    line_at: impl Fn(&str, usize) -> Option<String>,
+) -> Split<'a> {
+    let mut out = Split::default();
+    for line in missed.lines().filter(|line| !line.trim().is_empty()) {
+        match known_debt(line, list, &line_at) {
+            Some(debt) => out.known.push((line, debt)),
+            None => out.to_validate.push(line),
+        }
+    }
+    out
+}
+
+/// The TD of the entry of `list` that matches `line`, if one does.
+fn known_debt(
+    line: &str,
+    list: &[Known],
+    line_at: &impl Fn(&str, usize) -> Option<String>,
+) -> Option<&'static str> {
+    let (place, mutation) = line.split_once(": ")?;
+    let mut parts = place.rsplitn(3, ':');
+    let col: usize = parts.next()?.parse().ok()?;
+    let number: usize = parts.next()?.parse().ok()?;
+    let file = parts.next()?;
+    let entries: Vec<&Known> = list
+        .iter()
+        .filter(|e| e.file == file && e.mutation == mutation)
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let code = line_at(file, number)?;
+    let indent = code.len() - code.trim_start_matches([' ', '\t']).len();
+    let offset = col.checked_sub(indent)?;
+    entries
+        .iter()
+        .find(|e| e.code == code.trim() && e.offset == offset)
+        .map(|e| e.debt)
+}
+
+/// The function that a mutation names: the text after the last ` in `,
+/// else the text after `replace ` up to ` -> ` or ` with `.  It is the last
+/// part after `::`, without a `<…>` part.
+pub fn mutation_function(mutation: &str) -> &str {
+    let path = match mutation.rsplit_once(" in ") {
+        Some((_, function)) => function,
+        None => {
+            let rest = mutation.strip_prefix("replace ").unwrap_or(mutation);
+            let end = [" -> ", " with "]
+                .iter()
+                .filter_map(|stop| rest.find(stop))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        }
+    };
+    let last = path.rsplit("::").next().unwrap_or(path);
+    last.split('<').next().unwrap_or(last)
+}
+
+/// A Rust identifier, such as `save_once`.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name != "_"
+}
+
+/// If `line` starts the function `name`: `fn`, a space, the name, then `(`
+/// or `<`.  `pub`, `pub(…)`, `async`, `const` or `unsafe` can come first.
+fn is_fn_line(line: &str, name: &str) -> bool {
+    let mut rest = line.trim_start();
+    loop {
+        if let Some(inside) = rest.strip_prefix("pub(") {
+            match inside.split_once(") ") {
+                Some((_, after)) => rest = after,
+                None => return false,
+            }
+        } else if let Some(after) = ["pub ", "async ", "const ", "unsafe "]
+            .iter()
+            .find_map(|word| rest.strip_prefix(word))
+        {
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    rest.strip_prefix("fn ")
+        .and_then(|after| after.strip_prefix(name))
+        .is_some_and(|after| after.starts_with(['(', '<']))
+}
+
+/// The lines of each function `name` in `text`.  A body runs from its `fn`
+/// line to the first later line that is `}` at the `fn` line's indent.  A
+/// function that ends on its `fn` line has that one line.
+fn fn_bodies<'a>(text: &'a str, name: &str) -> Vec<Vec<&'a str>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut bodies = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        if !is_fn_line(line, name) {
+            continue;
+        }
+        let end = if line.trim_end().ends_with(['}', ';']) {
+            at
+        } else {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let close = format!("{indent}}}");
+            lines[at + 1..]
+                .iter()
+                .position(|later| later.trim_end() == close)
+                .map_or(lines.len() - 1, |n| at + 1 + n)
+        };
+        bodies.push(lines[at..=end].to_vec());
+    }
+    bodies
+}
+
+/// If `docs/tech-debt.md` (`tech_debt`) has a `### <debt>: ` heading, and
+/// no bullet `* <debt>:` under `## Closed`.
+fn is_open_debt(tech_debt: &str, debt: &str) -> bool {
+    let heading = format!("### {debt}: ");
+    let bullet = format!("* {debt}:");
+    let mut closed = false;
+    let mut in_closed = false;
+    for line in tech_debt.lines() {
+        if line.starts_with("## ") {
+            in_closed = line.trim_end() == "## Closed";
+        } else if in_closed && line.starts_with(&bullet) {
+            closed = true;
+        }
+    }
+    !closed && tech_debt.lines().any(|line| line.starts_with(&heading))
+}
+
+/// The problems of the entries of `list`, so an entry stays true as the code
+/// and the tech debt change.  The problems are:
+///
+/// * a TD that is not open in `tech_debt`;
+/// * an entry that is in the list twice;
+/// * a file that `read` cannot read;
+/// * a mutation whose function name is not a Rust identifier;
+/// * a file with no `fn` line of that name;
+/// * a code line in no function of that name;
+/// * a code line in the functions of that name more than once.
+pub fn known_problems(
+    list: &[Known],
+    tech_debt: &str,
+    read: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (at, entry) in list.iter().enumerate() {
+        let id = format!("{} {}: {}", entry.debt, entry.file, entry.mutation);
+        let mut problem = |text: String| problems.push(format!("{id}: {text}"));
+        if !is_open_debt(tech_debt, entry.debt) {
+            problem(format!("{} is not an open TD", entry.debt));
+        }
+        if list[..at].contains(entry) {
+            problem("the entry is there twice".to_string());
+        }
+        let Some(text) = read(entry.file) else {
+            problem(format!("cannot read {}", entry.file));
+            continue;
+        };
+        let name = mutation_function(entry.mutation);
+        if !is_identifier(name) {
+            problem(format!("the function {name:?} is not a Rust identifier"));
+            continue;
+        }
+        let bodies = fn_bodies(&text, name);
+        if bodies.is_empty() {
+            problem(format!("no `fn {name}` line"));
+            continue;
+        }
+        let count = bodies
+            .iter()
+            .flatten()
+            .filter(|line| line.trim() == entry.code)
+            .count();
+        match count {
+            0 => problem(format!("the code line is in no `fn {name}`")),
+            1 => {}
+            _ => problem(format!("the code line is in `fn {name}` more than once")),
+        }
+    }
+    problems
+}
+
+/// Removes the round's old `mutants.out`, `mutants.out.old`, `mutants.txt`,
+/// `missed.txt` and `known.txt`.  A diff with no mutants leaves an old
+/// `mutants.out` as it was, and an old line would show until the new run
+/// ends.
 pub fn clear_old_output(round_folder: &Path) -> Result<()> {
     for old in ["mutants.out", "mutants.out.old"] {
         let path = round_folder.join(old);
@@ -1123,9 +1498,11 @@ pub fn clear_old_output(round_folder: &Path) -> Result<()> {
                 .with_context(|| format!("removing {}", path.display()))?;
         }
     }
-    let line = round_folder.join("mutants.txt");
-    if line.exists() {
-        std::fs::remove_file(&line).with_context(|| format!("removing {}", line.display()))?;
+    for old in ["mutants.txt", "missed.txt", "known.txt"] {
+        let path = round_folder.join(old);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -1286,7 +1663,7 @@ pub fn mutants_command(cargo: &OsStr, toplevel: &Path, args: &[OsString]) -> Com
 
 /// The round's folder, with its old output removed and `mutants.diff`
 /// written from the round's `since` to its `head`; none without a record.
-pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<PathBuf>> {
+pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<(PathBuf, State)>> {
     let round_folder = run_folder(toplevel)?.join(round.to_string());
     let record = round_folder.join("state.json");
     if !record.exists() {
@@ -1300,11 +1677,13 @@ pub fn prepare_mutants(toplevel: &Path, round: u32) -> Result<Option<PathBuf>> {
         &state.head,
         &round_folder.join("mutants.diff"),
     )?;
-    Ok(Some(round_folder))
+    Ok(Some((round_folder, state)))
 }
 
 /// `review mutants <round> [--config <file>]`: runs cargo-mutants on the
-/// round's `since` diff, under the limit, and prints one line.
+/// round's `since` diff, under the limit, and prints one line.  It splits
+/// the missed lines by [`KNOWN_MISSED`] into `missed.txt` and `known.txt`
+/// of the round folder.
 fn mutants(
     toplevel: &Path,
     dir: &Path,
@@ -1312,8 +1691,20 @@ fn mutants(
     config: Option<&str>,
     cargo: &OsStr,
 ) -> Result<(i32, Vec<String>)> {
+    mutants_with(toplevel, dir, round, config, cargo, KNOWN_MISSED)
+}
+
+/// [`mutants`], with the known-missed list, so a test can pass its own.
+fn mutants_with(
+    toplevel: &Path,
+    dir: &Path,
+    round: u32,
+    config: Option<&str>,
+    cargo: &OsStr,
+    list: &[Known],
+) -> Result<(i32, Vec<String>)> {
     let limit = parse_limit(std::env::var("STEMYLA_MUTANTS_MINUTES").ok().as_deref())?;
-    let Some(round_folder) = prepare_mutants(toplevel, round)? else {
+    let Some((round_folder, state)) = prepare_mutants(toplevel, round)? else {
         return Ok((
             REFUSED,
             vec![format!(
@@ -1322,6 +1713,11 @@ fn mutants(
             )],
         ));
     };
+    // cargo-mutants reads the source as it starts, and finds its mutants
+    // there: their lines, columns and texts.  `split_missed` reads the code
+    // lines at the round's head.  So the list applies only to a source that
+    // is the tree at that head as the run starts.
+    let at_head = tree_is_at(toplevel, &state.head)?;
     let installed = Command::new(cargo)
         .args(["mutants", "--version"])
         .current_dir(toplevel)
@@ -1345,11 +1741,69 @@ fn mutants(
             ..RunEnd::default()
         }
     };
-    let line = classify(end, read_counts(&round_folder.join("mutants.out"))).to_string();
+    let mut line = classify(end, read_counts(&round_folder.join("mutants.out")));
+    let list = if at_head { list } else { &[] };
+    line.known = split_missed(toplevel, &state.head, &round_folder, list)?;
+    if !at_head {
+        line.reason = Some(match line.reason {
+            Some(reason) => format!("{reason}; {NOT_AT_HEAD}"),
+            None => NOT_AT_HEAD.to_string(),
+        });
+    }
+    let line = line.to_string();
     let saved = round_folder.join("mutants.txt");
     std::fs::write(&saved, format!("{line}\n"))
         .with_context(|| format!("writing {}", saved.display()))?;
     Ok((0, vec![line]))
+}
+
+/// The reason in the mutants line when the tree was not at the round's head
+/// as the run started.
+const NOT_AT_HEAD: &str =
+    "the tree was not clean at the round's head, so each missed line goes to missed.txt";
+
+/// If `HEAD` is `head`, and the tree has no change, by the check of
+/// `review start`.
+fn tree_is_at(toplevel: &Path, head: &str) -> Result<bool> {
+    let now = git(toplevel, &["rev-parse", "HEAD"])?;
+    let dirty = git(
+        toplevel,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?;
+    Ok(now.trim() == head && dirty.trim().is_empty())
+}
+
+/// Splits `mutants.out/missed.txt` of the round, if it exists, and writes
+/// `missed.txt` and `known.txt`, empty if need be.  It reads each file at
+/// `head`.  `mutants_with` gives it an empty list unless the tree was clean
+/// at `head` as cargo-mutants copied it.  Returns the number of known lines.
+fn split_missed(toplevel: &Path, head: &str, round_folder: &Path, list: &[Known]) -> Result<usize> {
+    let from = round_folder.join("mutants.out/missed.txt");
+    let missed = match std::fs::read_to_string(&from) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", from.display())),
+    };
+    let line_at = |file: &str, n: usize| -> Option<String> {
+        let text = git(toplevel, &["show", &format!("{head}:{file}")]).ok()?;
+        text.lines().nth(n.checked_sub(1)?).map(str::to_string)
+    };
+    let parts = split(&missed, list, line_at);
+    let to_validate: String = parts
+        .to_validate
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let known: String = parts
+        .known
+        .iter()
+        .map(|(line, debt)| format!("{line}\t{debt}\n"))
+        .collect();
+    for (name, text) in [("missed.txt", to_validate), ("known.txt", known)] {
+        let path = round_folder.join(name);
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(parts.known.len())
 }
 
 /// `review check <round>`: the changes since the round's record.
@@ -1369,6 +1823,102 @@ fn check(toplevel: &Path, home: &Path, round: u32) -> Result<(i32, Vec<String>)>
         Ok((0, vec!["no change".to_string()]))
     } else {
         Ok((REFUSED, found))
+    }
+}
+
+/// If `name` starts with `<round>-`.  It does not read the agent's name,
+/// since reviewers also make worktrees with names of their own, such as
+/// `1-correctness-1`.  `10-reviewer-1` is not of round 1, and `run` starts
+/// with no digit.
+fn of_round(name: &str, round: u32) -> bool {
+    name.starts_with(&format!("{round}-"))
+}
+
+/// `review clean <round>`: removes each worktree under `target/review/`
+/// whose name starts with `<round>-`, with `--force`, since a reviewer's
+/// trial changes are scratch by design.  It also removes a folder of such
+/// a name that is not a worktree.  It runs no `git worktree prune`, so it
+/// acts on no other worktree.
+fn clean(toplevel: &Path, round: u32) -> Result<(i32, Vec<String>)> {
+    // The same canonical form as the listed paths, also through a linked
+    // `target/`.
+    let review = crate::clean::canonical(&toplevel.join("target/review"));
+    let listing = git(toplevel, &["worktree", "list", "--porcelain", "-z"])?;
+    let mut registered: Vec<PathBuf> = listing
+        .split('\0')
+        .filter_map(|field| field.strip_prefix("worktree "))
+        .map(|path| crate::clean::canonical(Path::new(path)))
+        .filter(|path| path.parent() == Some(review.as_path()))
+        .collect();
+    registered.sort();
+    let name_of = |path: &Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut code = 0;
+    let mut lines = Vec::new();
+    for path in registered.iter().filter(|p| of_round(&name_of(p), round)) {
+        let shown = format!("target/review/{}", name_of(path));
+        let text = path.to_str().context("a worktree path is UTF-8")?;
+        match git(toplevel, &["worktree", "remove", "--force", text]) {
+            Ok(_) => lines.push(format!("removed {shown}")),
+            Err(e) => {
+                code = REFUSED;
+                lines.push(format!("failed {shown}: {e:#}"));
+            }
+        }
+    }
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(&review)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort();
+    for path in folders
+        .iter()
+        .filter(|p| of_round(&name_of(p), round) && !registered.contains(p))
+    {
+        let shown = format!("target/review/{}", name_of(path));
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => lines.push(format!("removed {shown}")),
+            Err(e) => {
+                code = REFUSED;
+                lines.push(format!("failed {shown}: {e}"));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(format!("no worktrees of round {round}"));
+    }
+    Ok((code, lines))
+}
+
+/// `review log-check <file>`: checks the findings table of a run's log
+/// against the fix rule of decision 0024 (`crate::review_log`).  A log
+/// with no `Significant` column fails, since the skill writes the column.
+fn log_check(path: &Path) -> Result<(i32, Vec<String>)> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if !crate::review_log::has_significant_column(&text) {
+        return Ok((
+            REFUSED,
+            vec!["log-check: the findings table has no `Significant` column.  Fix: write the log in the form of step 11 of the review-rounds skill.".to_string()],
+        ));
+    }
+    let problems = crate::review_log::fix_rule_problems(&text);
+    if problems.is_empty() {
+        Ok((
+            0,
+            vec!["log-check: the log follows the fix rule".to_string()],
+        ))
+    } else {
+        Ok((REFUSED, problems))
     }
 }
 
@@ -1732,6 +2282,11 @@ mod tests {
     #[test]
     fn review_rs_routes_all_six() {
         assert_routes_all_six("xtask/src/review.rs");
+    }
+
+    #[test]
+    fn review_log_rs_routes_all_six() {
+        assert_routes_all_six("xtask/src/review_log.rs");
     }
 
     #[test]
@@ -2679,6 +3234,8 @@ mod tests {
         assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 earlier,
                 Some(now),
                 None,
@@ -2691,6 +3248,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 Some(earlier),
                 None,
@@ -2701,6 +3260,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 earlier,
                 None,
                 None,
@@ -2716,6 +3277,8 @@ mod tests {
         assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 Some("b1"),
@@ -2728,6 +3291,8 @@ mod tests {
         assert!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 Some("b1"),
@@ -2735,25 +3300,121 @@ mod tests {
             )
             .is_empty()
         );
-        assert!(
+        assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 None,
                 Some("b2")
-            )
-            .is_empty()
+            ),
+            ["warning: this branch adds xtask/src/review.rs, so the route comes from the branch"]
         );
-        assert!(
+        assert_eq!(
             warnings(
                 Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
                 now,
                 None,
                 Some("b1"),
                 None
+            ),
+            [
+                "warning: this branch removes xtask/src/review.rs, so the route comes from the branch"
+            ]
+        );
+        assert!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                "xtask/src/review.rs",
+                "the route",
+                now,
+                None,
+                None,
+                None
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_log_check_source_warns_on_its_own() {
+        let now = SystemTime::now();
+        let earlier = now - Duration::from_secs(60);
+        assert_eq!(
+            warnings(
+                Path::new("/r/target/debug/xtask"),
+                "xtask/src/review_log.rs",
+                "the log check",
+                earlier,
+                Some(now),
+                Some("b1"),
+                Some("b2")
+            ),
+            [
+                "warning: /r/target/debug/xtask is older than xtask/src/review_log.rs; run cargo build -p xtask",
+                "warning: this branch changes xtask/src/review_log.rs, so the log check comes from the branch",
+            ]
+        );
+    }
+
+    #[test]
+    fn start_warns_when_the_branch_changes_review_log_rs_or_the_binary_is_older() {
+        let dir = scratch("start-changed-log-source");
+        write(&dir, "xtask/src/review_log.rs", "fn a() {}\n");
+        commit_all(&dir, "the log check");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "xtask/src/review_log.rs", "fn b() {}\n");
+        commit_all(&dir, "a new log check");
+        let (code, lines) = run(
+            &["start".to_string(), "main".to_string(), "1".to_string()],
+            &dir,
+            &dir.join("target/no-home"),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(code, 0, "{lines:?}");
+        let warnings: Vec<String> = lines
+            .iter()
+            .filter(|l| l.starts_with("warning"))
+            .map(|l| {
+                l.replace(
+                    &std::env::current_exe().unwrap().display().to_string(),
+                    "<exe>",
+                )
+            })
+            .collect();
+        assert_eq!(
+            warnings,
+            [
+                "warning: <exe> is older than xtask/src/review_log.rs; run cargo build -p xtask",
+                "warning: this branch changes xtask/src/review_log.rs, so the log check comes from the branch",
+            ]
+        );
+    }
+
+    #[test]
+    fn start_warns_when_the_branch_adds_review_log_rs() {
+        let dir = scratch("start-added-log-source");
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        write(&dir, "xtask/src/review_log.rs", "fn a() {}\n");
+        commit_all(&dir, "a log check");
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        let (code, lines) = run(
+            &["start".to_string(), "main".to_string(), "1".to_string()],
+            &dir,
+            &dir.join("target/no-home"),
+            later,
+        );
+        assert_eq!(code, 0, "{lines:?}");
+        let warnings: Vec<&String> = lines.iter().filter(|l| l.starts_with("warning")).collect();
+        assert_eq!(
+            warnings,
+            [
+                "warning: this branch adds xtask/src/review_log.rs, so the log check comes from the branch"
+            ]
         );
     }
 
@@ -2887,8 +3548,10 @@ mod tests {
         })
     }
 
-    const COUNTED: &str = "tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5";
-    const NOTHING: &str = "tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0";
+    const COUNTED: &str =
+        "tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 0";
+    const NOTHING: &str =
+        "tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0";
 
     fn assert_line(end: RunEnd, counts: Option<Counts>, expected: &str) {
         assert_eq!(classify(end, counts).to_string(), expected);
@@ -3026,7 +3689,7 @@ mod tests {
         assert_line(
             end,
             unviable,
-            "mutants: partial: tested 2 (caught 0, missed 0, unviable 2), timeouts 0, not tested 3; stopped at the limit",
+            "mutants: partial: tested 2 (caught 0, missed 0, unviable 2), timeouts 0, not tested 3, known 0; stopped at the limit",
         );
     }
 
@@ -3045,7 +3708,7 @@ mod tests {
         assert_line(
             end,
             only_timeouts,
-            "mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 2, not tested 5; stopped before a mutant finished",
+            "mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 2, not tested 5, known 0; stopped before a mutant finished",
         );
     }
 
@@ -3076,7 +3739,7 @@ mod tests {
         assert_line(
             ended(0),
             counts,
-            "mutants: full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0",
+            "mutants: full: tested 1 (caught 1, missed 0, unviable 0), timeouts 0, not tested 0, known 0",
         );
     }
 
@@ -3110,11 +3773,17 @@ mod tests {
         std::fs::create_dir_all(&round_folder).unwrap();
         let old_line = round_folder.join("mutants.txt");
         std::fs::write(&old_line, format!("mutants: full: {COUNTED}\n")).unwrap();
+        let old_missed = round_folder.join("missed.txt");
+        std::fs::write(&old_missed, format!("{LINE_1_41}\n")).unwrap();
+        let old_known = round_folder.join("known.txt");
+        std::fs::write(&old_known, format!("{LINE_2_17}\tTD-39\n")).unwrap();
         clear_old_output(&round_folder).unwrap();
         assert!(
             !old_line.exists(),
             "a round started again must not show the line of the last run"
         );
+        assert!(!old_missed.exists(), "nor the missed lines of the last run");
+        assert!(!old_known.exists(), "nor the known lines of the last run");
         assert!(round_folder.exists());
     }
 
@@ -3304,7 +3973,7 @@ mod tests {
         commit_all(&dir, "a fix");
         assert_eq!(start_in(&dir, "main", "2").0, 0);
         let top = toplevel(&dir).unwrap();
-        let round_folder = prepare_mutants(&top, 2).unwrap().unwrap();
+        let (round_folder, _) = prepare_mutants(&top, 2).unwrap().unwrap();
         let diff = std::fs::read_to_string(round_folder.join("mutants.diff")).unwrap();
         assert!(diff.contains("+++ b/b.rs"), "{diff}");
         assert!(!diff.contains("a.rs"), "{diff}");
@@ -3314,7 +3983,9 @@ mod tests {
     /// A fake `cargo` in POSIX sh.  `mutants --version` passes.  A run
     /// writes counts to `<output>/mutants.out`, keeps the `--config` that
     /// it got in `<output>/config-seen.txt` and the `--in-diff` in
-    /// `<output>/in-diff-seen.txt`, and exits 2 (missed mutants).
+    /// `<output>/in-diff-seen.txt`, and exits 2 (missed mutants).  If its
+    /// folder holds `missed.txt`, the run copies it to `mutants.out`.  If its
+    /// folder holds `during.sh`, the run runs it at the toplevel.
     const FAKE_CARGO: &str = r#"#!/bin/sh
 if [ "$2" = "--version" ]; then exit VERSION_EXIT; fi
 out=""
@@ -3332,6 +4003,9 @@ printf '{"caught": 3, "missed": 2, "timeout": 1, "unviable": 4}' > "$out/mutants
 printf '[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}]' > "$out/mutants.out/mutants.json"
 printf '%s' "$config" > "$out/config-seen.txt"
 printf '%s' "$diff" > "$out/in-diff-seen.txt"
+here=$(dirname "$0")
+if [ -f "$here/missed.txt" ]; then cp "$here/missed.txt" "$out/mutants.out/missed.txt"; fi
+if [ -f "$here/during.sh" ]; then sh "$here/during.sh"; fi
 exit 2
 "#;
 
@@ -3391,6 +4065,151 @@ exit 2
             round_folder.join("mutants.diff"),
             "the round's mutants.diff reached cargo"
         );
+        assert_lists(&round_folder, "", "");
+    }
+
+    /// `missed.txt` and `known.txt` of the round hold `missed` and `known`.
+    fn assert_lists(round_folder: &Path, missed: &str, known: &str) {
+        let read = |name: &str| std::fs::read_to_string(round_folder.join(name)).ok();
+        assert_eq!(read("missed.txt").as_deref(), Some(missed), "missed.txt");
+        assert_eq!(read("known.txt").as_deref(), Some(known), "known.txt");
+    }
+
+    /// A round 1 of a change to `SAVE_RS`, whose lines 427 and 503 hold the
+    /// code of 1-41 and of 2-17, and a fake `cargo` that misses both.
+    /// Returns the repo, the text of `SAVE_RS`, the fake's folder and the
+    /// fake.
+    fn round_1_that_misses_2_17(name: &str) -> (Scratch, String, Scratch, PathBuf) {
+        let dir = scratch(name);
+        git_in(&dir, &["checkout", "-q", "-b", "feature"]);
+        let save: String = (1..=503)
+            .map(|n| match n {
+                427 => format!("{CODE_427}\n"),
+                503 => format!("{CODE_503}\n"),
+                _ => format!("// line {n}\n"),
+            })
+            .collect();
+        write(&dir, SAVE_RS, &save);
+        commit_all(&dir, "round 1");
+        assert_eq!(start_in(&dir, "main", "1").0, 0);
+        let bin = Scratch::new(&format!("{name}-bin"));
+        let cargo = fake_cargo(&bin, 0);
+        std::fs::write(
+            bin.join("missed.txt"),
+            format!("{LINE_1_41}\n{LINE_2_17}\n"),
+        )
+        .unwrap();
+        (dir, save, bin, cargo)
+    }
+
+    #[test]
+    fn mutants_splits_the_missed_lines_by_the_list() {
+        let (dir, save, bin, cargo) = round_1_that_misses_2_17("mutants-split");
+        // As cargo-mutants runs, line 503 changes in a new commit, and again
+        // in the tree.  The code line still comes from the round's head.
+        std::fs::write(
+            bin.join("later.rs"),
+            save.replace(CODE_503, "    committed_later();"),
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("tree.rs"),
+            save.replace(CODE_503, "    changed_in_the_tree();"),
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("during.sh"),
+            format!(
+                "here=$(dirname \"$0\")\ncp \"$here/later.rs\" {SAVE_RS}\ngit -c commit.gpgsign=false -c user.name=t -c user.email=t@example.com commit -q --no-verify -am later\ncp \"$here/tree.rs\" {SAVE_RS}\n"
+            ),
+        )
+        .unwrap();
+        let head = sha(&dir, "HEAD");
+        let top = toplevel(&dir).unwrap();
+        let (code, lines) =
+            mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        assert_ne!(sha(&dir, "HEAD"), head, "the fake made a commit");
+        let expected = "mutants: full: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 1";
+        assert_eq!((code, lines), (0, vec![expected.to_string()]));
+        let round_folder = top.join("target/review/run/feature/1");
+        assert_eq!(
+            std::fs::read_to_string(round_folder.join("mutants.txt")).unwrap(),
+            format!("{expected}\n")
+        );
+        assert_lists(
+            &round_folder,
+            &format!("{LINE_1_41}\n"),
+            &format!("{LINE_2_17}\tTD-39\n"),
+        );
+        assert_eq!(
+            std::fs::read_to_string(round_folder.join("mutants.out/missed.txt")).unwrap(),
+            format!("{LINE_1_41}\n{LINE_2_17}\n"),
+            "mutants.out stays as cargo-mutants wrote it"
+        );
+    }
+
+    /// Runs the round of [`round_1_that_misses_2_17`] after `change`, which
+    /// moves the tree off the round's head before cargo-mutants starts.
+    /// Each missed line goes to the validator, and the line says why.
+    fn assert_a_moved_tree_knows_no_line(name: &str, change: impl Fn(&Path, &str)) {
+        let (dir, save, _bin, cargo) = round_1_that_misses_2_17(name);
+        change(&dir, &save);
+        let top = toplevel(&dir).unwrap();
+        let (code, lines) =
+            mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        let expected = format!(
+            "mutants: full: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 0; {NOT_AT_HEAD}"
+        );
+        assert_eq!((code, lines), (0, vec![expected]));
+        assert_lists(
+            &top.join("target/review/run/feature/1"),
+            &format!("{LINE_1_41}\n{LINE_2_17}\n"),
+            "",
+        );
+    }
+
+    #[test]
+    fn a_change_in_the_tree_before_the_run_knows_no_line() {
+        // The code of 2-17 stays at line 503; another line changes.
+        assert_a_moved_tree_knows_no_line("mutants-dirty", |dir, save| {
+            write(dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
+        });
+    }
+
+    #[test]
+    fn a_commit_before_the_run_knows_no_line() {
+        assert_a_moved_tree_knows_no_line("mutants-moved", |dir, save| {
+            write(dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
+            commit_all(dir, "a fix after review start");
+        });
+    }
+
+    #[test]
+    fn an_untracked_file_before_the_run_knows_no_line() {
+        assert_a_moved_tree_knows_no_line("mutants-untracked", |dir, _| {
+            write(dir, "notes.txt", "not ignored\n");
+        });
+    }
+
+    #[test]
+    fn a_reason_and_a_moved_tree_are_both_in_the_line() {
+        let (dir, save, bin, _) = round_1_that_misses_2_17("mutants-moved-partial");
+        // The fake exits 3 (timeouts), so the line has its own reason.
+        let cargo = fake_cargo(&bin, 0);
+        let script = std::fs::read_to_string(&cargo)
+            .unwrap()
+            .replace("\nexit 2\n", "\nexit 3\n");
+        std::fs::write(&cargo, script).unwrap();
+        write(&dir, SAVE_RS, &save.replace("// line 1\n", "// one\n"));
+        let top = toplevel(&dir).unwrap();
+        let (_, lines) =
+            mutants_with(&top, &dir, 1, None, cargo.as_os_str(), &[ENTRY_2_17]).unwrap();
+        assert_eq!(
+            lines,
+            [format!(
+                "mutants: partial: tested 9 (caught 3, missed 2, unviable 4), timeouts 1, not tested 5, known 0; timeouts have no result; {NOT_AT_HEAD}"
+            )]
+        );
     }
 
     #[test]
@@ -3409,6 +4228,7 @@ exit 2
             format!("{expected}\n")
         );
         assert!(!round_folder.join("mutants.out").exists(), "nothing ran");
+        assert_lists(&round_folder, "", "");
     }
 
     #[test]
@@ -3418,10 +4238,9 @@ exit 2
         let round_folder = top.join("target/review/run/feature/1");
         std::fs::create_dir_all(round_folder.join("mutants.out")).unwrap();
         std::fs::create_dir_all(round_folder.join("mutants.out.old")).unwrap();
-        assert_eq!(
-            prepare_mutants(&top, 1).unwrap(),
-            Some(round_folder.clone())
-        );
+        let (folder, state) = prepare_mutants(&top, 1).unwrap().unwrap();
+        assert_eq!(folder, round_folder);
+        assert_eq!(state.head, sha(&dir, "HEAD"), "the round's state");
         assert!(!round_folder.join("mutants.out").exists());
         assert!(!round_folder.join("mutants.out.old").exists());
     }
@@ -3456,6 +4275,531 @@ exit 2
         );
     }
 
+    // Known-missed mutants.
+
+    const SAVE_RS: &str = "xtask/src/e2e/save.rs";
+
+    /// Finding 2-17 of round 2 of M8, which went to TD-39.
+    const LINE_2_17: &str = "xtask/src/e2e/save.rs:503:5: replace save_once -> Result<Save> with Ok(Default::default())";
+
+    /// Findings 1-41 and 1-54 of round 1 of M8, which `2fdecda` fixed with
+    /// tests.
+    const LINE_1_41: &str = "xtask/src/e2e/save.rs:427:39: replace * with + in save_once";
+    const LINE_1_54: &str = "xtask/src/e2e/save.rs:427:39: replace * with / in save_once";
+
+    /// The code of `save.rs:503` at `9c69f22`, and of `save.rs:427` at
+    /// `f28d22d`.
+    const CODE_503: &str = "    restore(p, seconds)?;";
+    const CODE_427: &str = "    let item_y = o.item_y + o.item_dy * row as f64;";
+
+    /// A fixture entry for the mutant of 2-17.
+    const ENTRY_2_17: Known = Known {
+        debt: "TD-39",
+        file: SAVE_RS,
+        mutation: "replace save_once -> Result<Save> with Ok(Default::default())",
+        code: "restore(p, seconds)?;",
+        offset: 1,
+    };
+
+    /// A fake `line_at` that knows the lines of `lines` only.
+    fn lines_of(
+        lines: &'static [(&'static str, usize, &'static str)],
+    ) -> impl Fn(&str, usize) -> Option<String> {
+        move |file, n| {
+            lines
+                .iter()
+                .find(|(f, line, _)| *f == file && *line == n)
+                .map(|(_, _, code)| code.to_string())
+        }
+    }
+
+    const SAVE_LINES: &[(&str, usize, &str)] =
+        &[(SAVE_RS, 503, CODE_503), (SAVE_RS, 427, CODE_427)];
+
+    #[test]
+    fn the_mutant_of_2_17_is_known() {
+        let missed = format!("{LINE_2_17}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![],
+                known: vec![(LINE_2_17, "TD-39")],
+            }
+        );
+    }
+
+    #[test]
+    fn the_mutants_of_1_41_and_1_54_go_to_the_validator() {
+        let missed = format!("{LINE_1_41}\n{LINE_1_54}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![LINE_1_41, LINE_1_54],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn another_code_line_or_another_file_goes_to_the_validator() {
+        let moved = "xtask/src/e2e/save.rs:427:5: replace save_once -> Result<Save> with Ok(Default::default())";
+        let elsewhere = "xtask/src/e2e/load.rs:503:5: replace save_once -> Result<Save> with Ok(Default::default())";
+        const LINES: &[(&str, usize, &str)] = &[
+            (SAVE_RS, 427, CODE_427),
+            ("xtask/src/e2e/load.rs", 503, CODE_503),
+        ];
+        let missed = format!("{moved}\n{elsewhere}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(LINES)),
+            Split {
+                to_validate: vec![moved, elsewhere],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn the_offset_tells_two_mutants_on_one_line_apart() {
+        // `xtask/src/e2e/weights.rs:498` at `759abfa`.
+        const LINES: &[(&str, usize, &str)] = &[(
+            "xtask/src/e2e/weights.rs",
+            498,
+            "        k16.as_ref().is_some_and(|(m, a, _)| *m == mm && *a == attn),",
+        )];
+        let first = "xtask/src/e2e/weights.rs:498:49: replace == with != in run";
+        let second = "xtask/src/e2e/weights.rs:498:61: replace == with != in run";
+        let entry = Known {
+            debt: "TD-66",
+            file: "xtask/src/e2e/weights.rs",
+            mutation: "replace == with != in run",
+            code: "k16.as_ref().is_some_and(|(m, a, _)| *m == mm && *a == attn),",
+            offset: 53,
+        };
+        let missed = format!("{first}\n{second}\n");
+        assert_eq!(
+            split(&missed, &[entry], lines_of(LINES)),
+            Split {
+                to_validate: vec![first],
+                known: vec![(second, "TD-66")],
+            }
+        );
+    }
+
+    #[test]
+    fn an_unread_file_or_a_line_without_a_place_goes_to_the_validator() {
+        let no_place =
+            "xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default())";
+        let missed = format!("{LINE_2_17}\n{no_place}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], |_: &str, _| None),
+            Split {
+                to_validate: vec![LINE_2_17, no_place],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn split_reads_no_file_for_a_line_that_no_entry_names() {
+        let missed = format!("{LINE_1_41}\n");
+        let read = |file: &str, n: usize| -> Option<String> {
+            panic!("read {file}:{n}, which no entry names")
+        };
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], read),
+            Split {
+                to_validate: vec![LINE_1_41],
+                known: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn split_keeps_the_order_and_drops_empty_lines() {
+        let missed = format!("{LINE_1_41}\n\n{LINE_2_17}\n\n{LINE_1_54}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![LINE_1_41, LINE_1_54],
+                known: vec![(LINE_2_17, "TD-39")],
+            }
+        );
+    }
+
+    // The problems of known-missed entries.
+
+    /// Tech debt with TD-39 open and TD-5 closed.
+    const TECH_DEBT: &str = "# Tech debt\n\n## Enforcement gaps\n\n### TD-39: e2e has no cargo test coverage\n\nText.\n\n## Closed\n\n* TD-5: closed by a test.\n";
+
+    /// A file with `save_once`, and `restore(p, seconds)?;` in two
+    /// functions.
+    const SAVE_FILE: &str = "\
+fn restore(p: &mut Page, seconds: u32) -> Result<()> {
+    let id = session_id(seconds);
+    Ok(())
+}
+
+fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> Result<Save> {
+    restore(p, seconds)?;
+    p.idle(3.0)?;
+}
+
+pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
+    restore(p, seconds)?;
+}
+";
+
+    /// A reader that knows `SAVE_RS` only, with `text`.
+    fn reader(text: &'static str) -> impl Fn(&str) -> Option<String> {
+        move |file| (file == SAVE_RS).then(|| text.to_string())
+    }
+
+    /// The problems of `entry`, with [`TECH_DEBT`] and [`SAVE_FILE`].
+    fn problems_of(entry: Known) -> Vec<String> {
+        known_problems(&[entry], TECH_DEBT, reader(SAVE_FILE))
+    }
+
+    #[test]
+    fn a_good_entry_has_no_problem() {
+        // `save_playing` has `pub(super)` before its `fn`, and the same code
+        // line as `save_once`.
+        let playing = Known {
+            mutation: "replace save_playing -> Result<Playing> with Ok(Default::default())",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            known_problems(&[ENTRY_2_17, playing], TECH_DEBT, reader(SAVE_FILE)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_missing_or_closed_debt_is_a_problem() {
+        let missing = Known {
+            debt: "TD-99",
+            ..ENTRY_2_17
+        };
+        let closed = Known {
+            debt: "TD-5",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            known_problems(&[missing, closed], TECH_DEBT, reader(SAVE_FILE)),
+            [
+                "TD-99 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): TD-99 is not an open TD",
+                "TD-5 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): TD-5 is not an open TD",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_a_problem() {
+        let entry = Known {
+            file: "xtask/src/e2e/gone.rs",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            problems_of(entry),
+            [
+                "TD-39 xtask/src/e2e/gone.rs: replace save_once -> Result<Save> with Ok(Default::default()): cannot read xtask/src/e2e/gone.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_function_that_is_not_an_identifier_is_a_problem() {
+        // A mutant outside a function, such as one of the constant
+        // `WAITS_S` at `2c7c29b:xtask/src/e2e/save.rs:156`.
+        let entry = Known {
+            mutation: "replace * with /",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            problems_of(entry),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace * with /: the function \"*\" is not a Rust identifier"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_function_that_is_not_in_the_file_is_a_problem() {
+        let entry = Known {
+            mutation: "replace restore_all -> Result<()> with Ok(())",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            problems_of(entry),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace restore_all -> Result<()> with Ok(()): no `fn restore_all` line"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_longer_function_name_is_not_the_function() {
+        let file = "fn restore_check(p: &mut Page) -> Result<()> {\n    let id = session_id(seconds);\n}\n";
+        let entry = Known {
+            mutation: "replace restore -> Result<()> with Ok(())",
+            code: "let id = session_id(seconds);",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            known_problems(&[entry], TECH_DEBT, reader(file)),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace restore -> Result<()> with Ok(()): no `fn restore` line"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_line_in_no_function_of_the_name_is_a_problem() {
+        // `restore(p, seconds)?;` is in `save_once` and `save_playing`, and
+        // the entry names `restore`.
+        let entry = Known {
+            mutation: "replace restore -> Result<()> with Ok(())",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            problems_of(entry),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace restore -> Result<()> with Ok(()): the code line is in no `fn restore`"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_line_twice_in_the_function_is_a_problem() {
+        let file = "fn save_once() -> Result<Save> {\n    restore(p, seconds)?;\n    if again {\n        restore(p, seconds)?;\n    }\n}\n";
+        assert_eq!(
+            known_problems(&[ENTRY_2_17], TECH_DEBT, reader(file)),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): the code line is in `fn save_once` more than once"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_code_line_twice_in_two_functions_of_the_name_is_a_problem() {
+        let file = "impl A {\n    pub fn save_once() {\n        restore(p, seconds)?;\n    }\n}\n\nimpl B {\n    async fn save_once() {\n        restore(p, seconds)?;\n    }\n}\n";
+        assert_eq!(
+            known_problems(&[ENTRY_2_17], TECH_DEBT, reader(file)),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): the code line is in `fn save_once` more than once"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_body_ends_at_the_brace_of_the_fn_lines_indent() {
+        // `save_once` ends on its `fn` line, and the line after it is in
+        // `other`.  In `impl A`, `run` ends at its own brace, not at the
+        // brace of its `if`.
+        let file = "fn save_once() -> Result<Save> { Ok(Save::default()) }\nfn other() {\n    restore(p, seconds)?;\n}\nimpl A {\n    fn run() {\n        if ready {\n            go();\n        }\n        start();\n    }\n    fn after() {\n        stop();\n    }\n}\n";
+        let one_line = known_problems(&[ENTRY_2_17], TECH_DEBT, reader(file));
+        let run = Known {
+            mutation: "replace == with != in run",
+            code: "stop();",
+            ..ENTRY_2_17
+        };
+        let in_run = Known {
+            mutation: "replace == with != in run",
+            code: "start();",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            (
+                one_line,
+                known_problems(&[run, in_run], TECH_DEBT, reader(file))
+            ),
+            (
+                vec![
+                    "TD-39 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): the code line is in no `fn save_once`".to_string()
+                ],
+                vec![
+                    "TD-39 xtask/src/e2e/save.rs: replace == with != in run: the code line is in no `fn run`".to_string()
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn a_body_without_its_closing_brace_runs_to_the_end_of_the_file() {
+        let file = "fn save_once() {\n    restore(p, seconds)?;\n";
+        assert_eq!(
+            known_problems(&[ENTRY_2_17], TECH_DEBT, reader(file)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_body_holds_its_fn_line_to_its_closing_brace() {
+        let file = "fn save_once() {\n    if ready {\n        go();\n    }\n    restore(p, seconds)?;\n}\nfn other() {}\n";
+        assert_eq!(
+            fn_bodies(file, "save_once"),
+            [[
+                "fn save_once() {",
+                "    if ready {",
+                "        go();",
+                "    }",
+                "    restore(p, seconds)?;",
+                "}",
+            ]]
+        );
+        assert_eq!(
+            fn_bodies("fn save_once() {\n    go();\n", "save_once"),
+            [["fn save_once() {", "    go();"]]
+        );
+    }
+
+    #[test]
+    fn a_debt_bullet_outside_closed_keeps_the_debt_open() {
+        let tech_debt = "## Enforcement gaps\n\n### TD-39: e2e\n\n* TD-39: a bullet that names it.\n\n## Known breaches\n\n* TD-39: another bullet.\n\n## Closed\n\n* TD-5: closed.\n";
+        assert!(is_open_debt(tech_debt, "TD-39"));
+    }
+
+    #[test]
+    fn a_debt_with_a_heading_and_a_closed_bullet_is_not_open() {
+        let tech_debt =
+            "## Enforcement gaps\n\n### TD-39: e2e\n\n## Closed\n\n* TD-39: closed by a test.\n";
+        assert!(!is_open_debt(tech_debt, "TD-39"));
+        assert_eq!(
+            known_problems(&[ENTRY_2_17], tech_debt, reader(SAVE_FILE)),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): TD-39 is not an open TD"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fn_line_forms() {
+        let starts: Vec<bool> = [
+            "fn save_once(p: &mut Page) {",
+            "    pub fn save_once<T>(p: T) {",
+            "pub(crate) fn save_once() {",
+            "pub(in crate::e2e) async fn save_once() {",
+            "const fn save_once() -> u8 {",
+            "pub const unsafe fn save_once() {",
+            "unsafe fn save_once() {",
+            "fn save_once_all() {",
+            "// fn save_once() {",
+            "pub(crate fn save_once() {",
+            "pub(crate fn save_once(){",
+            "let save_once = 1;",
+        ]
+        .iter()
+        .map(|line| is_fn_line(line, "save_once"))
+        .collect();
+        assert_eq!(
+            starts,
+            [
+                true, true, true, true, true, true, true, false, false, false, false, false
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fn_line_that_ends_with_a_semicolon_is_its_own_body() {
+        let file = "trait T {\n    fn save_once(&self) -> Result<Save>;\n    fn other(&self) {\n        restore(p, seconds)?;\n    }\n}\n";
+        assert_eq!(
+            fn_bodies(file, "save_once"),
+            [["    fn save_once(&self) -> Result<Save>;"]]
+        );
+    }
+
+    #[test]
+    fn an_underscore_is_not_a_function() {
+        let entry = Known {
+            mutation: "replace _ with ()",
+            ..ENTRY_2_17
+        };
+        assert_eq!(
+            problems_of(entry),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace _ with (): the function \"_\" is not a Rust identifier"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tab_counts_in_the_indent_of_the_offset() {
+        const LINES: &[(&str, usize, &str)] = &[(SAVE_RS, 503, "\t\trestore(p, seconds)?;")];
+        let line = "xtask/src/e2e/save.rs:503:3: replace save_once -> Result<Save> with Ok(Default::default())";
+        let missed = format!("{line}\n");
+        assert_eq!(
+            split(&missed, &[ENTRY_2_17], lines_of(LINES)),
+            Split {
+                to_validate: vec![],
+                known: vec![(line, "TD-39")],
+            }
+        );
+    }
+
+    #[test]
+    fn a_missed_file_that_cannot_be_read_is_an_error() {
+        let dir = Scratch::new("split-unreadable");
+        std::fs::create_dir_all(dir.join("mutants.out/missed.txt")).unwrap();
+        let result = split_missed(&dir, "HEAD", &dir, &[ENTRY_2_17]);
+        assert!(result.is_err(), "{result:?}");
+        assert!(!dir.join("missed.txt").exists(), "no lists after an error");
+        assert!(!dir.join("known.txt").exists(), "no lists after an error");
+    }
+
+    #[test]
+    fn the_function_of_a_mutation() {
+        let names: Vec<&str> = [
+            "replace StemApp::can_encode -> bool with true",
+            "replace == with != in run",
+            "replace save_once -> Result<Save> with Ok(Default::default())",
+            "replace * with + in <impl Display for Line>::fmt",
+            "replace Wrap<T>::get<U> with ()",
+            "replace main with ()",
+            "replace * with /",
+        ]
+        .iter()
+        .map(|m| mutation_function(m))
+        .collect();
+        assert_eq!(
+            names,
+            ["can_encode", "run", "save_once", "fmt", "get", "main", "*"]
+        );
+    }
+
+    #[test]
+    fn the_same_entry_twice_is_a_problem() {
+        assert_eq!(
+            known_problems(&[ENTRY_2_17, ENTRY_2_17], TECH_DEBT, reader(SAVE_FILE)),
+            [
+                "TD-39 xtask/src/e2e/save.rs: replace save_once -> Result<Save> with Ok(Default::default()): the entry is there twice"
+            ]
+        );
+    }
+
+    // The real known-missed list.
+
+    #[test]
+    fn each_known_missed_entry_is_open_and_in_the_code() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let tech_debt = std::fs::read_to_string(root.join("docs/tech-debt.md")).unwrap();
+        let read = |file: &str| std::fs::read_to_string(root.join(file)).ok();
+        assert_eq!(
+            known_problems(KNOWN_MISSED, &tech_debt, read),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_real_list_knows_2_17_and_not_1_41_or_1_54() {
+        let missed = format!("{LINE_1_41}\n{LINE_2_17}\n{LINE_1_54}\n");
+        assert_eq!(
+            split(&missed, KNOWN_MISSED, lines_of(SAVE_LINES)),
+            Split {
+                to_validate: vec![LINE_1_41, LINE_1_54],
+                known: vec![(LINE_2_17, "TD-39")],
+            }
+        );
+    }
+
     // The command.
 
     #[test]
@@ -3468,5 +4812,72 @@ exit 2
         );
         assert_eq!(code, 3);
         assert_eq!(lines, [USAGE]);
+    }
+
+    /// Runs `review log-check` on `text`, written to a file in a scratch
+    /// folder; or on a missing file if `text` is `None`.
+    fn log_check_of(name: &str, text: Option<&str>) -> (i32, Vec<String>) {
+        let dir = Scratch::new(&format!("log-check-{name}"));
+        if let Some(text) = text {
+            std::fs::write(dir.join("log.md"), text).unwrap();
+        }
+        run(
+            &["log-check".to_string(), "log.md".to_string()],
+            &dir,
+            &dir,
+            SystemTime::UNIX_EPOCH,
+        )
+    }
+
+    /// A log with a `Significant` column and one nit in round 4.
+    fn log_with_nit(action: &str) -> String {
+        format!(
+            "# Review log\n\n## Findings\n\n| Round | Finding | Reviewers | Severity | Significant | Rule | Verdict | Repeat of | Action |\n| - | - | - | - | - | - | - | - | - |\n| 4 | 4-1 | docs-reviewer | nit | - | none | unvalidated | none | {action} |\n"
+        )
+    }
+
+    #[test]
+    fn log_check_passes_a_log_that_follows_the_fix_rule() {
+        assert_eq!(
+            log_check_of("good", Some(&log_with_nit("reported, not fixed"))),
+            (
+                0,
+                vec!["log-check: the log follows the fix rule".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn log_check_fails_a_fixed_nit_in_round_4() {
+        assert_eq!(
+            log_check_of("nit", Some(&log_with_nit("abc1234 review round 4 fixes"))),
+            (
+                3,
+                vec!["4-1: round 4 must not fix this finding, but the action is `abc1234 review round 4 fixes`.  Fix: undo the fix, and write `reported, not fixed` (decision 0024).".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn log_check_fails_a_log_with_no_significant_column() {
+        let old = "# Review log\n\n## Findings\n\n| Round | Finding | Action |\n| - | - | - |\n| 4 | 4-1 | abc1234 review round 4 fixes |\n";
+        assert_eq!(
+            log_check_of("old", Some(old)),
+            (
+                3,
+                vec!["log-check: the findings table has no `Significant` column.  Fix: write the log in the form of step 11 of the review-rounds skill.".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn log_check_fails_a_missing_file() {
+        let (code, lines) = log_check_of("missing", None);
+        assert_eq!(code, 3);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("reading ") && lines[0].contains("log.md"),
+            "{lines:?}"
+        );
     }
 }

@@ -379,11 +379,12 @@ pub struct Workspace {
 /// The layers of LAYER-1, lowest first.  The layers table must use these.
 pub const LAYERS: [&str; 5] = ["Test support", "Pure", "Engine and GPU", "Shells", "Tools"];
 
-/// Runs `cargo metadata --format-version 1 --all-features --locked` in
+/// Runs `cargo metadata --format-version 1 --all-features --locked --color never` in
 /// `root`.  Without `--no-deps`, so that `packages` also holds patched and
 /// excluded path crates; with `--all-features`, so that it holds crates
 /// behind a feature that is off; `--locked`, so a test never writes
-/// `Cargo.lock`.
+/// `Cargo.lock`; `--color never`, so an error holds no colour codes when
+/// `CARGO_TERM_COLOR=always`, as in CI.
 pub fn workspace_metadata(root: &Path) -> Result<String> {
     let output = Command::new(env!("CARGO"))
         .current_dir(root)
@@ -393,6 +394,8 @@ pub fn workspace_metadata(root: &Path) -> Result<String> {
             "1",
             "--all-features",
             "--locked",
+            "--color",
+            "never",
         ])
         .output()
         .context("running cargo metadata")?;
@@ -1654,10 +1657,10 @@ fn is_python_file(path: &str) -> bool {
 }
 
 /// Extensions of audio and of model weights, in lower case.
-const AUDIO_EXTENSIONS: [&str; 9] = [
+pub(crate) const AUDIO_EXTENSIONS: [&str; 9] = [
     "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "aif", "aiff",
 ];
-const WEIGHT_EXTENSIONS: [&str; 9] = [
+pub(crate) const WEIGHT_EXTENSIONS: [&str; 9] = [
     "safetensors",
     "ckpt",
     "pt",
@@ -1668,6 +1671,15 @@ const WEIGHT_EXTENSIONS: [&str; 9] = [
     "npz",
     "gguf",
 ];
+
+/// True when `path` has an extension of [`AUDIO_EXTENSIONS`] or
+/// [`WEIGHT_EXTENSIONS`], in any case (ASSET-1).
+pub(crate) fn is_audio_or_weight(path: &str) -> bool {
+    extension(path).is_some_and(|extension| {
+        AUDIO_EXTENSIONS.contains(&extension.as_str())
+            || WEIGHT_EXTENSIONS.contains(&extension.as_str())
+    })
+}
 
 /// The largest file that the index may hold: about twice the largest file on
 /// 2026-10-20 (a UI snapshot of 486,664 bytes), and well under a song or a
@@ -1683,10 +1695,7 @@ pub fn assets_in_the_index(tracked: &[TrackedFile]) -> Vec<Problem> {
         .flat_map(|file| {
             let path = &file.path;
             let asset = extension(path)
-                .filter(|extension| {
-                    AUDIO_EXTENSIONS.contains(&extension.as_str())
-                        || WEIGHT_EXTENSIONS.contains(&extension.as_str())
-                })
+                .filter(|_| is_audio_or_weight(path))
                 .map(|extension| format!(
                     "ASSET-1: {path} has the audio or model weight extension .{extension}.  Fix: remove it from the index with git rm --cached '{path}'.  Keep it in an ignored folder (audio/, stems/ or third_party/).  Link to its source."
                 ));
@@ -3010,15 +3019,37 @@ pub const AGENT_HOOK_BLOCK: &str = r#"hooks:
           command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/read-only-bash.sh'
           onFailure: block"#;
 
-/// The keys of an agent's frontmatter, each present once, `hooks` last.
+/// The keys that an agent's frontmatter must have, each present once, `hooks` last.
 pub const AGENT_KEYS: [&str; 5] = ["name", "description", "tools", "model", "hooks"];
+
+/// The keys that an agent's frontmatter can have, each at most once, before
+/// `hooks` (decision 0025).
+pub const AGENT_OPTIONAL_KEYS: [&str; 1] = ["effort"];
+
+/// The values of an agent's `model` (decision 0025).  `inherit` gives the
+/// model of the main session.
+pub const AGENT_MODELS: [&str; 4] = ["inherit", "opus", "sonnet", "haiku"];
+
+/// The values of an agent's optional `effort` (decision 0025).
+pub const AGENT_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The values as a list in text: "`x`" for one value, and "`a`, `b` and
+/// `c`" for more.  The list must not be empty.
+fn one_of(values: &[&str]) -> String {
+    let (last, rest) = values.split_last().expect("a list of one value or more");
+    if rest.is_empty() {
+        return format!("`{last}`");
+    }
+    let rest: Vec<String> = rest.iter().map(|value| format!("`{value}`")).collect();
+    format!("{} and `{last}`", rest.join(", "))
+}
 
 /// The tools that an agent may have.  None of them writes a file.
 pub const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "Bash"];
 
 /// What is wrong with an agent's `description`, which must be one plain
 /// YAML scalar.
-fn description_faults(description: &str) -> Vec<&'static str> {
+pub fn description_faults(description: &str) -> Vec<&'static str> {
     [
         (description.is_empty(), "is empty"),
         (
@@ -3105,11 +3136,11 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
                 "write each key as `key: value`, with one space after the colon, or as `key:` before a list or a block.",
             )
         });
-    let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last.";
+    let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last; an optional `effort` key comes once, before `hooks`.";
 
     let unknown = keys
         .iter()
-        .filter(|(_, key, _)| !AGENT_KEYS.contains(key))
+        .filter(|(_, key, _)| !AGENT_KEYS.contains(key) && !AGENT_OPTIONAL_KEYS.contains(key))
         .map(|(number, key, _)| {
             problem(
                 Some(*number),
@@ -3156,15 +3187,33 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
                 "write the description on one line, as a plain YAML scalar: start it with a capital letter, and put no `: `, no ` #`, no quote and no `:` at its end in it.",
             )
         });
-    let model = find("model")
-        .filter(|(_, _, model)| *model != "inherit")
-        .map(|(number, _, model)| {
-            problem(
-                Some(number),
-                format!("has `model: {model}`, not `model: inherit`"),
-                "set `model: inherit`; every agent takes the model of the main session.",
-            )
-        });
+    // A key whose value is not in its list.  The text drops the space of an
+    // empty value: "has `effort:`".
+    let not_one_of = |key: &str, values: &[&str], fix: &str| {
+        find(key)
+            .filter(|(_, _, value)| !values.contains(value))
+            .map(|(number, _, value)| {
+                problem(
+                    Some(number),
+                    format!(
+                        "has `{}`, which is not one of {}",
+                        format!("{key}: {value}").trim_end(),
+                        one_of(values)
+                    ),
+                    fix,
+                )
+            })
+    };
+    let model = not_one_of(
+        "model",
+        &AGENT_MODELS,
+        "set `model` to one of these values; `AGENT_MODELS_MEASURED` in `xtask/tests/rules.rs` gives the model of each role (decision 0025).",
+    );
+    let effort = not_one_of(
+        "effort",
+        &AGENT_EFFORTS,
+        "set `effort` to one of these values, or remove the key; without it, the effort level of the session applies, as the sub-agents page of the Claude Code docs says.",
+    );
     let hooks_line = find("hooks").map(|(number, _, _)| number);
     let hooks_last = keys
         .last()
@@ -3260,6 +3309,7 @@ pub fn agent_problems(file_name: &str, text: &str) -> Vec<Problem> {
         .chain(name)
         .chain(description)
         .chain(model)
+        .chain(effort)
         .chain(hooks_last)
         .chain(tool_problems)
         .chain(indented)
@@ -6760,6 +6810,12 @@ mod agents_tests {
     }
 
     #[test]
+    fn one_of_names_one_value_and_two_values() {
+        assert_eq!(one_of(&["x"]), "`x`");
+        assert_eq!(one_of(&["a", "b"]), "`a` and `b`");
+    }
+
+    #[test]
     fn a_read_only_agent_has_no_problem() {
         let listed = with("tools: Read, Bash\n", "tools:\n  - Read\n  - Bash\n");
         let unindented = with("tools: Read, Bash\n", "tools:\n- Read\n- Bash\n");
@@ -6907,11 +6963,6 @@ mod agents_tests {
                 "has a `description` that does not start with a capital letter",
             ),
             (
-                "another model",
-                with("model: inherit", "model: opus"),
-                "has `model: opus`, not `model: inherit`",
-            ),
-            (
                 "a key after hooks",
                 with(&hooks, &format!("{hooks}color: red\n")),
                 "has the key `color` after `hooks`",
@@ -6984,6 +7035,94 @@ mod agents_tests {
                 "{plant}: no problem names {named:?} in {problems:#?}"
             );
         }
+    }
+
+    /// The message of a problem of the agents rule in `reviewer.md`.
+    fn message(what: &str, fix: &str) -> String {
+        format!("agents: .claude/agents/reviewer.md {what}.  Fix: {fix}")
+    }
+
+    /// Each case of `model` and `effort` (decision 0025) gives exactly its
+    /// list of messages.  The test names each case that fails.
+    #[test]
+    fn each_model_and_effort_gives_its_problems() {
+        let hooks = format!("{AGENT_HOOK_BLOCK}\n");
+        let model_fix = "set `model` to one of these values; `AGENT_MODELS_MEASURED` in `xtask/tests/rules.rs` gives the model of each role (decision 0025).";
+        let effort_fix = "set `effort` to one of these values, or remove the key; without it, the effort level of the session applies, as the sub-agents page of the Claude Code docs says.";
+        let keep_the_keys = "keep only `name`, `description`, `tools`, `model` and `hooks`, each once, with `hooks` last; an optional `effort` key comes once, before `hooks`.";
+        let efforts = "which is not one of `low`, `medium`, `high`, `xhigh` and `max`";
+        let cases: [(&str, String, Vec<String>); 9] = [
+            ("model: opus", with("model: inherit", "model: opus"), vec![]),
+            (
+                "model: sonnet",
+                with("model: inherit", "model: sonnet"),
+                vec![],
+            ),
+            (
+                "model: haiku",
+                with("model: inherit", "model: haiku"),
+                vec![],
+            ),
+            (
+                "model: sonnet with effort: medium before hooks",
+                with("model: inherit\n", "model: sonnet\neffort: medium\n"),
+                vec![],
+            ),
+            (
+                "model: gpt",
+                with("model: inherit", "model: gpt"),
+                vec![message(
+                    "has `model: gpt`, which is not one of `inherit`, `opus`, `sonnet` and `haiku`",
+                    model_fix,
+                )],
+            ),
+            (
+                "effort: extreme",
+                with("model: inherit\n", "model: inherit\neffort: extreme\n"),
+                vec![message(
+                    &format!("has `effort: extreme`, {efforts}"),
+                    effort_fix,
+                )],
+            ),
+            (
+                "effort with no value",
+                with("model: inherit\n", "model: inherit\neffort:\n"),
+                vec![message(&format!("has `effort:`, {efforts}"), effort_fix)],
+            ),
+            (
+                "effort twice",
+                with(
+                    "model: inherit\n",
+                    "model: inherit\neffort: high\neffort: high\n",
+                ),
+                vec![message("has the key `effort` twice", keep_the_keys)],
+            ),
+            (
+                "effort after the hook block",
+                with(&hooks, &format!("{hooks}effort: high\n")),
+                vec![
+                    message(
+                        "has the key `effort` after `hooks`, but `hooks` must be the last key",
+                        "put `hooks` last; the hook block runs to the closing `---`.",
+                    ),
+                    message(
+                        "has a hook block that is not `AGENT_HOOK_BLOCK`",
+                        "copy AGENT_HOOK_BLOCK from xtask/src/rules.rs: the guard on each Bash call, with `onFailure: block`, and no other hook.",
+                    ),
+                ],
+            ),
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .filter_map(|(case, text, expected)| {
+                let got: Vec<String> = agent_problems(FILE, text)
+                    .into_iter()
+                    .map(|problem| problem.message)
+                    .collect();
+                (got != *expected).then(|| format!("{case}: expected {expected:#?}, got {got:#?}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

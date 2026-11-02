@@ -67,9 +67,13 @@ Turn every mechanisable rule into a check whose message names the rule ID and th
 * Every reviewer is read-only, sees the diff and the acceptance criteria but not the author's reasoning (self-preference and sycophancy: [arXiv 2404.13076](https://arxiv.org/abs/2404.13076), [arXiv 2310.13548](https://arxiv.org/abs/2310.13548)), cites a rule ID and quotes it, and must name how to break each new test ("would this test fail if the code were wrong?"), aimed at failure 1.  Reviewer files hold the method; the rules stay in `invariants.md`.  Reviewers also look for a test that returns early without `test_support::skip`, which `every_skip_can_be_required` cannot see (TD-8).
 * Mutation testing of the changed functions with cargo-mutants ([mutants.rs](https://mutants.rs/)) as a computational check for tests that cannot fail.
 * Acceptance: replaying six old review rounds finds the bugs those rounds found.  The cases are PR #9 and phase 2's M2, M9, M10, M11 and M18a (D1 of `plans/completed/harness-phase-3.md`, which gives why PRs #10 to #12 are left out); each reviewer's findings are logged with whether they were confirmed.
-* Measured by: confirmed findings per round, false-positive rate per reviewer, rounds per PR, vacuous tests found before merge.  Rounds per PR stay three until a later phase changes the rule (D6 of `plans/completed/harness-phase-3.md`).
+* Measured by: confirmed findings per round, false-positive rate per reviewer, rounds per PR (before harness phase 3b), vacuous tests found before merge.  Since harness phase 3b (M3), the rounds follow the stop rule of decision 0024, with no cap.  So compare the rounds after round 3, not the rounds per PR.
 * Gate: two consecutive PRs where the routed review finds what manual review would, at lower effort (D4 of `plans/completed/harness-phase-3.md` bounds the effort, and counts approvals as cost).
 * For IAM: a security reviewer is an extra sensor, never a control: it runs alongside the deterministic checks and a human, and its hit rate is measured like any other test.
+
+### Phase 3b: runs that drive themselves, at less cost
+
+Added on 2026-10-30, after PR #39, before phase 4 (`plans/completed/harness-phase-3b.md`, built in PR #41).  A big task gets orchestrated mode after one message up front, which asks each choice that hinges on the maintainer (decision 0023, amended on 2026-11-01).  Late review rounds fix only what matters (0024).  Each agent role gets a model chosen by a measurement, and no cheaper model passed (0025).  Local checks run by tier (0026).  PR bodies and inline comments serve people first (0027).  `xtask clean` removes what runs leave.  Measured by: maintainer messages to start a big run, rounds after round 3, cost per milestone against PR #39, and leftovers after close-out.  Its last milestone re-checked phases 4 to 6 and the phase 3 gate, and gives its proposals in "Proposals of harness phase 3b" below.
 
 ### Phase 4: legibility, the evaluator, and long-running sessions
 
@@ -99,7 +103,96 @@ Each stage needs the previous one's gate.  Agents run in GitHub Actions with `an
 
 * Review every component in `harness.md` against what it caught; remove those that catch nothing, re-test the rest when the model changes ("every component encodes an assumption about what the model can't do on its own").
 * Write the transfer guide for the IAM codebase from the "For IAM" lessons and the measurements.
+* Run decision 0025's measurement again, with at least 3 runs of each arm (P2, accepted on 2026-11-02).
 * Acceptance: each component has a measured reason to stay, or is gone.
+
+### Proposals of harness phase 3b
+
+Added on 2026-11-02 by the agent, at the close-out of `plans/completed/harness-phase-3b.md` (M8).  Each item was a proposal.  On 2026-11-02 the maintainer accepted P1 to P7 as recommended (Decision log below).  Until then, the phases above stay as they are.  Token figures from the review logs are final contexts (TD-44); `modelUsage` figures are tokens used.
+
+#### P1: the phase 3 gate, and D5 of harness phase 3b
+
+* The question (D5): does M5's measurement replace the `--baseline` gate?
+* Evidence:
+  * The record of round 1 with `--baseline`: PR #36 found 4 of 4 baseline findings, PR #37 2 of 2, PR #39 (M3) 1 of 3, and PR #41 (M1) 2 of 4.  In PR #41, the only blocker of M1 came from the baseline.
+  * PR #36 and PR #37 are two PRs in a row that found each baseline finding.  But phase 3's D4 token bar has no reliable measure (TD-44).  PR #39 and PR #41 each missed baseline findings.  By the gate's rule, a miss gives the maintainer the choice: keep, rework the agents, or revert.
+  * M5 compared one role with that role's own logged findings, in one run of each arm.  It measured neither the routed review nor `baseline`.  So it cannot replace the gate as it is.
+  * M5 also shows that one run is noisy.  One control run of the docs-reviewer found 0.425 [0.285, 0.578] of its own confirmed findings (TD-75).
+  * M3 does not change the gate, since the gate reads round 1 only.
+  * The baseline agents of round 1 used 0.12M to 0.25M tokens a PR.
+* Options:
+  * A: keep the gate as it is.
+  * B: keep `--baseline` in round 1, and change the pass rule to pooled counts over each PR that counts, with 95% intervals.  The first count is the baseline findings that round 1 found: today 9 of 13, 0.692 [0.424, 0.873].  The second count is round 1's confirmed blockers and should-fix that the baseline found.  The maintainer sets the bar before the next PR.
+  * C: replace the gate with a measurement of M5's form in phase 6.  Round 1 and the baseline each run at least 3 times on fixed logged cases, with the pass rule written before any run.  A whole round of one case used 6M to 17M `modelUsage` tokens (M5's Decision log), so 6 cases at 3 runs cost over 100M.
+  * D: decide the gate now from the record: keep the routed review, close the gate, and stop `--baseline`.
+* Recommendation: B.  Reason: it uses the runs that each PR already makes, so it costs no new runs.  A pooled count is less noisy than "two PRs in a row".  The second count reads the other direction, which the gate does not read today.  Use C only if B's interval stays too wide.
+
+#### P2: decision 0025, measured again in phase 6 with more than one run
+
+* Evidence: the `sonnet` validator found every bug and used about half the tokens (3.35M against 6.46M `modelUsage`).  It missed item 2 of the pass rule by 2 refutations (11 against 13).  One run cannot tell a gap of 2 from run noise (TD-71).  The `sonnet` docs-reviewer found 8 of 40 items against 17, a large gap.
+* Proposal: an amendment of decision 0025, for the maintainer to accept.  M8 does not edit 0025.  The text after its Status line:
+
+  > Amended on <date> by the maintainer, after M8 of `plans/completed/harness-phase-3b.md`: phase 6 runs the measurement again, also when the model line-up does not change.  Each arm has at least 3 runs on each case, so the runs of the control give the run noise.  The pass rule and the ground truth are written before any run.  Reason: the `sonnet` validator missed one item of the pass rule by 2 refutations, and one run cannot tell that gap from noise.
+
+* Its Consequences line changes.  Today: "The measurement is re-run when the model line-up changes (phase 6)."  Proposed: "The measurement runs again in phase 6, with at least 3 runs of each arm, and again when the model line-up changes."
+* Cost: one run of both validator arms used 9.81M `modelUsage` tokens, and one of both docs-reviewer arms 23.55M.  At 3 runs, the validator costs about 29M, and the docs-reviewer about 71M.  Recommendation: the validator first, with a budget of about 30M.  The docs-reviewer only with a budget of its own, since its gap is large.
+* With k runs, the pass rule compares the mean of each count of the candidate with the mean of the control.  The range of the control's runs gives the noise.  The other gaps of TD-71 stay: the finding blocks of the validator runs have no evidence, and no stream field shows a subagent's effort.
+* If accepted, phase 6 gets the bullet: "Run decision 0025's measurement again, with at least 3 runs of each arm (P2)."  Accepted on 2026-11-02, and decision 0025 is amended.
+
+#### P3: D4 of harness phase 3b, the late review range
+
+* Evidence against the late range: in PR #39, three late bugs were in files that the fix range of the round before did not touch.  They are catch-up 4-1 (MEM-4, `app/src/lib.rs`), and M7 6-1 and 6-2 (`app/src/store.rs`).  Earlier rounds read the whole branch and did not find them.  Late rounds of the whole branch found them.  With D4, no round reads those files again (TD-73).
+* Evidence for the late range:
+  * In this phase, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`, which the fix range touched.  The other late fixes were doc lines, pins and tests.  M3, M4 and M6 had 15 late fixes.  10 of them were on a sentence or a pin that the round before had changed.  They are M3 4-1 and 5-1, M4 5-1 to 6-3, and M6 4-7, 5-1 and 6-1.  In M7, two rules grew by one case in each round.
+  * M1's late bugs 5-1 and 6-1 were in `xtask/src/clean.rs`, which the fix range touched.
+  * A late round of M3 to M7 used 0.06M to 0.62M tokens, against 0.30M to 0.92M for a round 1.
+  * In M4, two reviewers of round 4 noted a stale GIT-2 sentence out of scope.  The orchestrator put its fix in round 5's range (`ef602b3`).
+* The intent-review findings of this phase outside the late fix range:
+  * M1: no proof for `worktree-agent-*` branches after a squash merge (`xtask/src/clean.rs`, fixed in `dfe3aa4`).  Also, `xtask clean --yes` left the replay clones.
+  * M2: plan text for M3 and M5 to M8: the `known` verdict of a TD `repeat-of`, when to add a `KNOWN_MISSED` entry, and replays that run `H/bin/xtask`.
+  * M3: the stale three-round line of this plan, a file outside M3's diff.  Also, the match of a reported repeat and the check of a log's last round, for M6.
+  * M4: the check note of the replay prompt (M5), the tier `push` preflight and the GPU hand run (M6), and `STRICT_PATHS` for `xtask attention` (M7).
+  * M5: the evidence for D5, no `model` on an Agent call (M6), and an amendment of decision 0023.
+  * M6: four gaps after the maintainer's correction of 2026-11-01 (I-1 to I-4).  They are the message with no open choice, every agent decision in the PR, the Purpose and the measure, and the forms of an agent entry.
+* Only M1's first item is a bug in the milestone's own code.  Rounds 1 to 3 read the whole milestone range, and did not find it.  The other items are in later milestones, in files outside the diff, or in criteria that the rounds did not have.  So a wider late range would not find them.  The intent review is the sensor for this class, at one `Plan` agent a round.
+* Options:
+  * A: keep D4 as it is.
+  * B: keep D4, and add one sentence to the `Scope:` line of the skill.  The sentence: "Report each bug or strict-rule breach that you see out of scope, in a list of its own."  The team leader logs each one as a finding of the round, and the fix rule applies.
+  * C: keep D4 for the routed reviewers, and give the `reviewer` agent the whole range of the milestone in each late round.  Cost: one more reviewer context in each late round.
+  * D: go back to the whole branch from round 4.
+* Recommendation: B.  Reason: D4 cut the cost of a late round to 0.06M to 0.62M tokens.  The late rounds read only the fix range, so they could not report a bug outside it, and their 3 bugs (M7) were inside it.  M1's intent review found a gap outside the late range (the `worktree-agent-*` branches).  Reviewers already see some drift out of scope (M4, round 4), and B costs no agent.  B lets a team log a bug of the PR #39 kind when a reviewer sees it.  C is the fallback if a late bug reaches `main`.
+* B changes the `review-rounds` skill, `the_review_skill_starts_with_xtask`, decision 0024's line on the late range and TD-73.
+
+#### P4: the overall measure, in place of "fewer review rounds per PR"
+
+* Decision 0024 has no cap, and a late fix of one line can cause the next round.  In this phase, the rounds after round 3 did not fall.  M3 to M7 had 3.0 for each milestone.  7 logs of PR #39 had 2.4 for each log.  The count leaves out PR #39's M8 log, since its 8 "speed" rounds are a second set of rounds after a CI fix.  The fixes after each late round fell: 27 in 15 rounds (1.8), against about 58 in 17 rounds (3.4, an approximate count of the Action cells).  3 of the 27 were bugs, each in a file that the fix range touched.
+* Proposal: for each milestone, measure:
+  * the findings fixed after round 3, by kind: bug, strict rule, significant should-fix;
+  * the bugs found after round 3, as a sign of what rounds 1 to 3 missed;
+  * the rounds after round 3, and their tokens (`modelUsage` where it exists), as cost.
+* The aim is fewer fixes and fewer bugs after round 3.  The count of rounds after round 3 is a cost to watch, not an aim.
+* The baselines: PR #39 (above), and M3 to M7 of this phase (15 rounds, 27 fixes, 3 bugs, 4.07M tokens).
+* If accepted, change "Validation and acceptance" below, the "Measured by" lines of phases 3 and 3b, and the "Measuring" section of `harness.md`.
+
+#### P5: phase 4, re-checked against M3 and M5
+
+* M5: no cheaper model passed, so phase 4's evaluator runs on the session's model, and adds that cost to each task.  Proposal: phase 4 records the evaluator's `modelUsage` tokens for each task.  Its acceptance runs the planted-bug case at least 3 times, since one run is noisy (TD-75).
+* M3: phase 4 does not say how a verdict of the evaluator enters the fix rule.  Proposal: a failed criterion of the evaluator's contract is a blocker in any round.
+* The `orchestrate` skill gives a long run a plan in `plans/active/` and a Progress at each stopping point.  It has no pause or resume step (TD-78).  On 2026-11-01, a run paused after a review round (`d376200`), and resumed after 11.6 hours from the steps in its Progress line.  Proposal: phase 4 adds a pause and resume step to the skill.  The bullet on long-running sessions keeps the handover skill only if a run loses work at compaction.  `xtask clean` already removes the worktrees and the `serve` pid files of a task.
+* The gate of phase 4 stays as it is.
+
+#### P6: phase 5, re-checked against M3 and M5
+
+* M3: decision 0024 has no cap.  A background job that runs review rounds (5b, 5d) can go on with no person to stop it.  Proposal: each job gets a token budget, and stops at it, as M5 did with its 45M.
+* M5: no role got a cheaper model, so each agent of a job runs on the model of its session.  Proposal: each job records its `modelUsage` tokens, since the logs give final contexts only (TD-44).
+* M3 added a log check from the branch's own code (TD-31).  Proposal: phase 5 routes a diff and checks its log with the base branch's `xtask`, as TD-31 says.
+* TD-74: in a job, a team leader is a subagent too.  Proposal: the design of each job says which agent writes the review files.
+
+#### P7: phase 6, re-checked against M3 and M5
+
+* The known-missed list gave `known 0` in each of the 31 rounds of M2 to M7 that ran `review mutants`.  Proposal: phase 6 reads its yield over the PRs after the merge.  If it is still 0, phase 6 removes it, with `known.txt` and `known_problems`, as `harness.md` says of a component that catches nothing.
+* Phase 6 takes P2's measurement, P1's gate if the answer is C, and P4's measure.
+* The measure of phase 3b (the next big task after the merge) needs the `modelUsage` tokens of the whole run.  Else each cost per milestone stays a lower bound (TD-44).
 
 ## Validation and acceptance
 
@@ -124,7 +217,8 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * [x] 2026-10-22: M19 merged as PR #33 (`fa41c9f`).  CI run 39766123914 on `main` passed, `publish` included.
 * [x] 2026-10-22: phase 3, execution plan written (`plans/completed/harness-phase-3.md`), as one PR with a commit for each milestone.
 * [x] 2026-10-24: phase 3, built in PR #34 (`plans/completed/harness-phase-3.md`), without the gate.  The replay found 8 of 26 old findings (0.31, 95% interval 0.17 to 0.50), so it misses its bar (D5 of that plan).  The PR's own three rounds ran with the `review-rounds` skill (`docs/reviews/ai-agent-harness-phase-3.md`).
-* [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).
+* [ ] Phase 3 gate: pending.  From the PR after phase 3's, round 1 runs with `--baseline` until two PRs in a row meet D4.  The maintainer decides how to measure D4's token bar (TD-44).  Round 1 found each baseline finding in PR #36 (4) and PR #37 (2).  It found 1 of 3 in PR #39 (M3), and 2 of 4 in PR #41 (M1).  P1 proposes a new pass rule (TD-75).
+* [x] 2026-11-02: phase 3b, built in PR #41 (`plans/completed/harness-phase-3b.md`).  Plan and decisions 0023 to 0027 written on 2026-10-30, as proposed; the decisions accepted on 2026-10-31.  No cheaper model passed the measurement of decision 0025.  The close-out proposes P1 to P7 above, for the maintainer.  The next big task after the merge measures the phase.
 * [ ] Phase 4.
 * [ ] Phase 5a, 5b, 5c, 5d.
 * [ ] Phase 6.
@@ -137,6 +231,8 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-19: the maintainer's global gitignore ignores `.claude/`, so project rules would silently not be committed; the repo's `.gitignore` now re-includes it.
 * 2026-10-19: claude-code-action and GitHub's Copilot coding agent cannot approve PRs, so auto-merge with one maintainer needs a second identity by design.  Copilot code review can approve since 2026-09-01 (opt-in), and the `main` ruleset already runs it on every push; turning its approval on would let an LLM verdict alone merge.
 * 2026-10-22: phase 2's plan grew to 2,539 lines and 505,910 bytes at `cf7437d`.  It has a design for each milestone from M3 on, and a Progress line for each step.  Claude Code's `Read` tool refuses more than 25,000 tokens at once by default, so each session read the plan in parts.  Evidence: `wc -lc` on the file; the `Read` error in M19's planning session.
+* 2026-11-02: in harness phase 3b, the rounds after round 3 did not fall, but their fixes did (P4).  In M3, M4 and M6, 10 of the 15 late fixes were on a sentence or a pin that the round before had changed.  Evidence: `reviews/harness-phase-3b-m3.md`, `-m4.md` and `-m6.md`.
+* 2026-11-02: in harness phase 3b, one run of an agent found less than half of that agent's own logged findings (M5: 0.425 for the docs-reviewer's control).  So a measure from one run of each arm is noisy, and so is the phase 3 gate's count (P1, P2).
 
 ## Decision log
 
@@ -152,6 +248,7 @@ Every phase lands as small PRs that can be reverted on their own.  The docs chec
 * 2026-10-20, maintainer: each check is sized to its stakes and to failures seen.  Phase 2 trims M7 to a token scan, M14 to deny rules and M15 to a `rustfmt` hook, and moves the test-count guard to phase 5b.
 * 2026-10-22, maintainer: phase 3 lands as one PR, not one PR for each milestone.  Its parts depend on each other, and none changes code that ships.
 * 2026-10-22, maintainer, changed 2026-10-24 by the orchestrator: phase 3's gate asks for bounded effort, not "lower effort" (D4 of `plans/completed/harness-phase-3.md`).  The agent starts the rounds, so a person's effort is close to zero either way.  Round 1's tokens are at most 2 times the baseline's for each routed reviewer, its wall time at most 60 minutes more, and a person sends no more messages.  On 2026-10-24 an approval of a tool call became cost, not an intervention, since approvals grow with the route.  The log's token figure is each agent's final context, not the tokens it used (TD-44), so the maintainer decides at the gate how to measure the token bar.
+* 2026-11-02, maintainer: the proposals of harness phase 3b, P1 to P7, are accepted as recommended: P1 option B (keep `--baseline` in round 1, with pooled counts and 95% intervals), P2 (decision 0025 is amended: phase 6 measures again with at least 3 runs of each arm), P3 option B (one sentence in the `Scope:` line for an out-of-scope bug or strict-rule breach), P4 (the measure after round 3), and P5 to P7 for phases 4 to 6.  The maintainer also accepted each item of "Needs your attention" of PR #41 as the agent took it.  P1, P3 and P4 change the skill, the gate and the measures; that work is the next PR's.
 
 ## Outcomes and retrospective
 
