@@ -57,7 +57,8 @@ Each step is one commit that `git revert` undoes.  No step changes code.
 * [x] 2026-11-02: review round 1 of `48667e8..ab10c34` (6 reviewers and 2 validators; 474,123 tokens; 11.4 wall minutes; 0 interventions).  2 confirmed should-fix (1-1 significant: the guide gave a pause and resume that the skill does not have; 1-2: the gaps of M7's sensors had no TD) and 5 nits.  Mutants: 14 tested, 14 caught, 0 missed.  The fixes are in "review round 1 fixes".  The skill sentence of 1-4 and its pin are a diff for the orchestrator (`m8/r1-claude.diff`).
 * [x] 2026-11-02: review round 2 of `48667e8..e88f11f` (6 reviewers; 374,998 tokens; 8.6 wall minutes; 0 interventions).  No blocker or should-fix, and 7 nits, each fixed in "review round 2 fixes".  Mutants: none in the since diff.
 * [x] 2026-11-02: review round 3 of `48667e8..8acc3f1` (2 reviewers and 2 validators; 189,504 tokens; 7.4 wall minutes; 0 interventions).  3-1 confirmed (a refused worktree with no TD, on VERIFY-1): TD-50 now records it.  3-2 pre-existing and significant (step 6 of the skill edits the plan after the comments): a diff for the orchestrator (`m8/r3-claude.diff`).  4 nits, fixed.  Mutants: none in the since diff.  3-1 is on a strict rule, so round 4 follows.
-* [ ] Review rounds 4 and later.
+* [x] 2026-11-02: review round 4 of `8acc3f1..65a5f26`, the fix range (6 reviewers and 1 validator; 286,544 tokens; 5.5 wall minutes; 0 interventions).  4-5 confirmed and not significant: `m8/final.diff` was stale after the round 3 fixes, and the checkpoint rebuilt it on the last commit.  5 nits.  Round 4 fixed none, and logged 6 as `reported, not fixed`.  Mutants: none in the since diff.  The stop rule holds, so round 4 is the last round.
+* [x] 2026-11-02: the milestone is done.  `final.diff` is rebuilt on the last commit, with the parent plan's M8 Progress line and the M8 row of its cost table.
 
 ## Surprises and discoveries
 
@@ -72,4 +73,28 @@ Each step is one commit that `git revert` undoes.  No step changes code.
 
 ## Outcomes and retrospective
 
-To be written when the milestone completes.
+Done on 2026-11-02.
+
+What M8 achieved:
+
+* `docs/harness.md` has a row for each part of phase 3b, with the failure that it addresses, and a section "Phase 3b, measured".
+* The guide has the Status of phase 3b, a pause and resume line, the model line of the review agents, and the changelog lines of M5 and M8.  Its `docs-check` row names "Decisions for the maintainer".
+* TD-73 to TD-78 record the gaps that the phase leaves.  TD-44 names the orchestrator's tokens, and TD-50 the refused worktree.
+* `plans/active/harness-engineering.md` has the proposals P1 to P7 for the maintainer, and decides none of them.
+* The orchestrator's last commit gets one diff: the retrospective of the parent plan, its move to `plans/completed/`, and the path fixes.
+
+The review, in numbers: 4 rounds, 25 round agents, about 1.33M final-context tokens, 32.9 wall minutes, 0 interventions.  Round 1 found 2 confirmed should-fix and 5 nits; round 2 found 7 nits; round 3 found 3-1 on VERIFY-1 and the pre-existing 3-2, so round 4 ran.  Round 4 fixed none, and logged 6 as `reported, not fixed`.  The orchestrator landed two diffs of the orchestrate skill (`e88f11f`, `65a5f26`).  Mutants: 14 tested and 14 caught in round 1, and none in the later diffs.
+
+What did not go well:
+
+* The drafts of phase 1 said that the late rounds of the phase found no bug.  M7's rounds then found 3, and each figure had to change (Surprises).
+* Most findings were on the text that the round before had changed: a claim that the skill did not hold (1-1), a sentence over the word limit, or a figure without its source.  This is the pattern of M3, M4 and M6.
+* The step 3 diff went stale after the round 3 fixes (4-5).  A diff of files that the rounds change must be rebuilt after each round.
+
+What to do differently:
+
+* Check each claim about a skill or a tool against its text before the commit, not only the numbers.
+* Count the words of each new sentence before the commit.
+* Rebuild a diff for the orchestrator at each checkpoint, and run `git apply --check` on it.
+
+Debt: TD-73 to TD-78 are new.  TD-44 and TD-50 are wider.
