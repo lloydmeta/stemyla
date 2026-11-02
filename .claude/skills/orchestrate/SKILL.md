@@ -127,7 +127,7 @@ At each checkpoint of a team leader:
 * Write each change of plan text yourself, with a Decision log line.  Commit it, signed.
 * Send each change of code or of a doc that is not the plan to the team leader, with a test that fails first.  Then run the next review round of the same run: `/review-rounds <base> <N+1> "<criteria>"`, with the criteria of "The review rounds", so the late rule applies.  Copy the log again after the last round.
 * If each round finds a new case in the same bullet, write the bullet again as a goal and a list of test cases.  The milestone that owns the bullet designs the rest.
-* When the intent review ends, remove the run folder by hand (TD-37).  `xtask clean` keeps it while the branch has an open PR.  First, check that `<run>/log.md` equals its copy in `docs/reviews/`.  If auto mode refuses the removal, stop and ask: round 1 of the next milestone needs an empty run folder.
+* When the intent review ends, remove the run folder by hand (TD-37).  `xtask clean` keeps it while the branch is checked out or has an open PR.  First, check that `<run>/log.md` equals its copy in `docs/reviews/`.  If auto mode refuses the removal, stop and ask: round 1 of the next milestone needs an empty run folder.
 
 ### 7. Between milestones
 
@@ -153,7 +153,7 @@ Stop at a clean point, commit, push, and tell the maintainer, only when:
 
 These are not stops:
 
-* A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  After a refused `review clean`, the next `clean --yes` removes only a worktree of the round with no changes.  For a worktree with changes, put `target/debug/xtask review clean <round>` on the list of the maintainer's steps.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
+* A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  After a refused `review clean`, put `target/debug/xtask review clean <round>` on the list of the maintainer's steps.  The next `clean --yes` removes only some worktrees of the round, and no other folder.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
 * A hand run on a GPU that the protocol rule asks for (`stored-stems`, `worker-check` or `weights`) is not a stop.  List it in the PR under "Needs your attention", and go on.
 
 ## Close-out
