@@ -1635,7 +1635,11 @@ const SIZING_SIGNALS: &[&str] = &[
 /// `push` and the session's model and effort in the preflight, the two
 /// cases that are not a stop, the files that the Write tool refuses to a
 /// team leader, the orchestrator's own paths, the approvals in auto mode,
-/// and the manual removal of the run folder (TD-37).
+/// and the manual removal of the run folder (TD-37).  Review round 2 of
+/// M6 adds the stop at a diff that changes a permission, the question for
+/// the effort, and the criteria of both `/review-rounds` calls (2-1).
+/// Review round 3 adds the plan as the only change that the preflight
+/// accepts, and its commit on the new branch (3-1).
 const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "name: orchestrate",
     AGENT_CALL_RULE,
@@ -1660,6 +1664,8 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "If none of these gives the effort, ask the maintainer for it in the question of \"Start\"",
     "`/review-rounds <base> <N+1> \"<criteria>\"`",
     "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
+    "or shows only the plan that you wrote or changed for \"When to use it\"",
+    "Commit the plan, signed, as the first commit of the new branch.",
 ];
 
 /// The problems of the orchestrate skill's text: each names what it wants.
@@ -1731,7 +1737,8 @@ fn the_orchestrate_skill_keeps_its_key_lines() {
 /// Each pin of the orchestrate skill fails on a skill that drops its rule:
 /// a GPU hand run widened to any failure of a browser test, the
 /// permission rule removed, and a description that YAML cannot read
-/// (review round 1 of harness phase 3b, M6: 1-1, 1-2 and 1-3).
+/// (review round 1 of harness phase 3b, M6: 1-1, 1-2 and 1-3).  Also the
+/// pins of round 2 (2-1) and of round 3 (3-1).
 #[test]
 fn the_orchestrate_pins_fail_on_a_changed_skill() {
     let text = std::fs::read_to_string(xtask::workspace_root().join(ORCHESTRATE_SKILL))
@@ -1762,6 +1769,14 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
         (
             "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
             "5. Run /review-rounds <base> from round 1",
+        ),
+        (
+            ", or shows only the plan that you wrote or changed for \"When to use it\"",
+            "",
+        ),
+        (
+            "  Commit the plan, signed, as the first commit of the new branch.",
+            "",
         ),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");

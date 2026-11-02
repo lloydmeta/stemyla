@@ -41,7 +41,7 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 ## Rules for every agent
 
 * Start each subagent with a named `subagent_type`.  Never start a fork, because a fork gets your context.
-* Do not pass `model` or `effort` to the Agent tool.  The agent file decides them (decision 0025).
+* Do not pass `model` or `effort` to the Agent tool.  The agent file decides them (decision 0025).  The built-in `general-purpose` and `Plan` agents have no agent file, so they run on the session's model.
 * Keep at most 15 subagents running at once.  Start validators in batches.
 * One team runs at a time.  The teams share one branch and one working tree.
 * The deepest agents are two layers below the main session.
@@ -57,7 +57,7 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 
 Do the preflight before the question of "Start".  Stop at once, and tell the maintainer, if a check fails:
 
-* `git status --porcelain` is empty.  The branch is the plan's branch, or the base that the plan names if the branch does not exist yet.
+* `git status --porcelain` is empty, or shows only the plan that you wrote or changed for "When to use it".  The branch is the plan's branch, or the base that the plan names if the branch does not exist yet.
 * `gh auth status` passes.
 * A signed object can be made with no dialog: `git commit-tree -S HEAD^{tree} -p HEAD -m preflight`.  No branch moves.
 * `cargo mutants --version` runs.
@@ -76,7 +76,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 
 * Ask the question of "When to use it" once.  Put each decision point of the plan in the same message.
 * Record each answer in the plan's Decision log, as the maintainer's decision, with the date.
-* Make the branch and the draft PR as the plan's section says.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
+* Make the branch and the draft PR as the plan's section says.  Commit the plan, signed, as the first commit of the new branch.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
 * Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.  M7 of harness phase 3b adds the form of the body.
 
 ## The loop for each milestone
@@ -153,7 +153,7 @@ Stop at a clean point, commit, push, and tell the maintainer, only when:
 
 These are not stops:
 
-* A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  After a refused `review clean`, put `target/debug/xtask review clean <round>` on the list of the maintainer's steps.  The next `clean --yes` removes only some worktrees of the round, and no other folder.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
+* A refused cleanup command is not a stop.  Only the removal of the run folder is a stop, since the next milestone needs it ("The intent review").  After a refused `review clean`, put `target/debug/xtask review clean <round>` on the list of the maintainer's steps.  The next `clean --yes` removes only some worktrees of the round, and no other folder of the round.  A folder that auto mode refuses to `clean --yes --also` goes on the list of the maintainer's steps.
 * A hand run on a GPU that the protocol rule asks for (`stored-stems`, `worker-check` or `weights`) is not a stop.  List it in the PR under "Needs your attention", and go on.
 
 ## Close-out
