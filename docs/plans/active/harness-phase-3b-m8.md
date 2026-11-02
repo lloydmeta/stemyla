@@ -61,6 +61,7 @@ Each step is one commit that `git revert` undoes.  No step changes code.
 ## Surprises and discoveries
 
 * 2026-11-02: M7's late rounds found 3 bugs (4-1, 4-7, 5-2), each in `xtask/src/attention.rs`, which the fix range touched.  The drafts of phase 1 had said that the late rounds of this phase found no bug.  The figures now cover M3 to M7.
+* 2026-11-02: in review round 2, auto mode refused the supply-chain-reviewer's `git worktree add` ("Security Weaken").  The reviewer did not try another form, made no worktree, and reasoned its mutant without a run.  The other reviewers of rounds 1 and 2 made their worktrees with no refusal.
 
 ## Decision log
 
