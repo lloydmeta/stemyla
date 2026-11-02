@@ -1688,7 +1688,7 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "After the hand-run lines, pick the lines that back an item of \"Needs your attention\".  Then pick the proposed decisions and rule changes.  Then pick the hot spots and the judgement calls.",
     "5. Pick at most 10 candidates, the hand-run lines first.",
     "Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.",
-    "6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the plan's Surprises.",
+    "6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the PR body, not in the plan, since a new plan line moves the lines of the comments.",
     "7. Link each item of \"Needs your attention\" to its comment, where one exists.  Run `xtask pr-body` on the body, then `gh pr edit --body-file`.",
 ];
 
