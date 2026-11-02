@@ -56,12 +56,13 @@ Each step is one commit that `git revert` undoes.  No step changes code.
 * [x] 2026-11-02: Step 3: the text for the orchestrator, in the scratchpad folder `m8/`: `final.diff` (the retrospective, the `git mv` of the parent plan and its path fixes; `docs-check` passes on it in a clone) and `pr-body-m8.md`.
 * [x] 2026-11-02: review round 1 of `48667e8..ab10c34` (6 reviewers and 2 validators; 474,123 tokens; 11.4 wall minutes; 0 interventions).  2 confirmed should-fix (1-1 significant: the guide gave a pause and resume that the skill does not have; 1-2: the gaps of M7's sensors had no TD) and 5 nits.  Mutants: 14 tested, 14 caught, 0 missed.  The fixes are in "review round 1 fixes".  The skill sentence of 1-4 and its pin are a diff for the orchestrator (`m8/r1-claude.diff`).
 * [x] 2026-11-02: review round 2 of `48667e8..e88f11f` (6 reviewers; 374,998 tokens; 8.6 wall minutes; 0 interventions).  No blocker or should-fix, and 7 nits, each fixed in "review round 2 fixes".  Mutants: none in the since diff.
-* [ ] Review rounds 3 and later.
+* [x] 2026-11-02: review round 3 of `48667e8..8acc3f1` (2 reviewers and 2 validators; 189,504 tokens; 7.4 wall minutes; 0 interventions).  3-1 confirmed (a refused worktree with no TD, on VERIFY-1): TD-50 now records it.  3-2 pre-existing and significant (step 6 of the skill edits the plan after the comments): a diff for the orchestrator (`m8/r3-claude.diff`).  4 nits, fixed.  Mutants: none in the since diff.  3-1 is on a strict rule, so round 4 follows.
+* [ ] Review rounds 4 and later.
 
 ## Surprises and discoveries
 
 * 2026-11-02: M7's late rounds found 3 bugs (4-1, 4-7, 5-2), each in `xtask/src/attention.rs`, which the fix range touched.  The drafts of phase 1 had said that the late rounds of this phase found no bug.  The figures now cover M3 to M7.
-* 2026-11-02: in review round 2, auto mode refused the supply-chain-reviewer's `git worktree add` ("Security Weaken").  The reviewer did not try another form, made no worktree, and reasoned its mutant without a run.  The other reviewers of rounds 1 and 2 made their worktrees with no refusal.
+* 2026-11-02: in review round 2, auto mode refused the supply-chain-reviewer's `git worktree add` ("Security Weaken").  The reviewer did not try another form, made no worktree, and reasoned its mutant without a run.  TD-50 records the gap.  The other reviewers of rounds 1 and 2 made their worktrees with no refusal.
 
 ## Decision log
 

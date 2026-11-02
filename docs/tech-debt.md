@@ -376,7 +376,9 @@ This entry concerns VERIFY-1 for the files of the harness, such as the guard and
 
 The guard (TD-34) does not refuse an edit in a reviewer's own worktree.  But auto mode's classifier can refuse it.  In M6 review round 3, the classifier refused a reviewer's edit of `.claude/hooks/read-only-bash.sh` in its own worktree, with the reason "Self-Modification".  So in auto mode, a reviewer cannot change a harness file to show that a test fails on wrong code.  It reads the harness file and its tests only.  `xtask review mutants` does not test these files either, since cargo-mutants changes only Rust code (TD-33).
 
-* Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.
+Auto mode can also refuse the worktree itself.  In M8 review round 2 of harness phase 3b, it refused the supply-chain-reviewer's `git worktree add`, with the reason "Security Weaken".  That reviewer then could run no mutant of its own, of Rust code or of a harness file, and it reasoned about its test with no run.  The other reviewers of that round made their worktrees.
+
+* Fix: phase 5 runs the reviewers in a sandbox, in a mode without the classifier.  Until then, a person runs such a mutant by hand when a test of the harness is in doubt.  The `cargo-mutants` run of the round still tests the Rust code of the since diff.
 
 ### TD-51: engine's tests do not run on wasm32
 
@@ -467,7 +469,7 @@ The `orchestrate` skill says that the agent sends one message up front, before a
 
 This entry concerns no rule.  It concerns decision 0024, and D4 of `plans/active/harness-phase-3b.md`.
 
-From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the 14 older review logs, rounds 4 and later found 13 bugs.  At least 3 of them, all in PR #39, were in files that the fix range of the round before did not touch: catch-up 4-1, M7 6-1 and M7 6-2.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
+From round 4, the `review-rounds` skill limits each reviewer with a `Scope:` line.  The scope is the diff of the fix range, and the whole of each file that it touches.  A bug in another file of the branch is out of scope.  In the 14 older review logs, rounds 4 and later found 13 bugs.  At least 3 of them were in files that the fix range of the round before did not touch.  They are catch-up 4-1, M7 6-1 and M7 6-2, all in PR #39.  Earlier rounds read the whole branch, and did not find them.  With the late range, no later round reads those files again.
 
 In harness phase 3b, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`.  M1's late bugs 5-1 and 6-1 were in `xtask/src/clean.rs`.  The fix range of the round before touched each of these files.  In M4, two reviewers of round 4 noted a stale GIT-2 sentence out of scope, and the orchestrator put its fix in round 5's range (`ef602b3`).  No rule tells a reviewer to report such a finding, or a team leader to log it.
 
@@ -493,7 +495,7 @@ The gate compares one run of round 1 with one run of the `baseline` agent on the
 
 This entry concerns no rule.  It concerns the hand-run class of `xtask attention` (decision 0027), which reaches PROTO-1 only through TD-16.
 
-`xtask attention` lists first one line of each hunk that changes a message that `stored-stems`, `worker-check` or `weights` writes by hand (TD-16).  In `xtask/src/e2e.rs`, it finds such a hunk by the name of its item.  The name starts with `stored_stems` or `worker_check`, in any case, or it is `stem_protocol_file`.  A helper with another name that writes such a message gives no hand-run line.  Its change then comes later in the list, or not at all, and the orchestrator can leave it out of the 10 comments.  M7's rounds found one more helper in each round.  M7 then wrote the rule as two name prefixes and one name (`plans/completed/harness-phase-3b-m7.md`, Decision log).
+`xtask attention` lists first one line of each hunk that changes a message that `stored-stems`, `worker-check` or `weights` writes by hand (TD-16).  In `xtask/src/e2e.rs`, it finds such a hunk by the name of its item.  The name starts with `stored_stems` or `worker_check`, in upper or lower case, or it is `stem_protocol_file`.  A helper with another name that writes such a message gives no hand-run line.  Its change then comes later in the list, or not at all, and the orchestrator can leave it out of the 10 comments.  M7's rounds found one more helper in each round.  M7 then wrote the rule as two name prefixes and one name (`plans/completed/harness-phase-3b-m7.md`, Decision log).
 
 * Fix: when a new helper writes a hand-written message, add its name to the rule, with a test.  The wire-reviewer reads each change to the e2e scripts.
 

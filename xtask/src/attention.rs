@@ -501,7 +501,7 @@ fn hand_run_line<'a>(path: &str, hunk: &'a [Changed], text: &str) -> Option<&'a 
 /// The lines, from 1, of each top-level item of `e2e.rs` that writes or
 /// reads a message of `stored-stems` or `worker-check` by hand.  An item
 /// starts at column 0 with `fn`, `pub fn`, `const` or `static`.  Its name
-/// starts with `stored_stems` or `worker_check` in any case, or is
+/// starts with `stored_stems` or `worker_check` in upper or lower case, or is
 /// `stem_protocol_file`.  A `fn` ends at the next line that is exactly
 /// `}`.  A `const` or `static` ends at its first line that ends with `;`.
 fn hand_run_items(text: &str) -> Vec<(usize, usize)> {
