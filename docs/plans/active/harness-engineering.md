@@ -142,7 +142,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phas
 
 * Evidence against the late range: in PR #39, three late bugs were in files that the fix range of the round before did not touch.  They are catch-up 4-1 (MEM-4, `app/src/lib.rs`), and M7 6-1 and 6-2 (`app/src/store.rs`).  Earlier rounds read the whole branch and did not find them.  Late rounds of the whole branch found them.  With D4, no round reads those files again (TD-73).
 * Evidence for the late range:
-  * In this phase, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`, which the fix range touched.  The other late fixes were doc lines, pins and tests.  In M3, M4 and M6, 10 of the 15 late fixes were on a sentence or a pin that the round before had changed: M3 4-1 and 5-1, M4 5-1 to 6-3, and M6 4-7, 5-1 and 6-1.  In M7, two rules grew by one case in each round.
+  * In this phase, the 15 late rounds of M3, M4, M6 and M7 found 3 bugs: M7 4-1, 4-7 and 5-2, in `xtask/src/attention.rs`, which the fix range touched.  The other late fixes were doc lines, pins and tests.  M3, M4 and M6 had 15 late fixes.  10 of them were on a sentence or a pin that the round before had changed.  They are M3 4-1 and 5-1, M4 5-1 to 6-3, and M6 4-7, 5-1 and 6-1.  In M7, two rules grew by one case in each round.
   * M1's late bugs 5-1 and 6-1 were in `xtask/src/clean.rs`, which the fix range touched.
   * A late round of M3 to M7 used 0.06M to 0.62M tokens, against 0.30M to 0.92M for a round 1.
   * In M4, two reviewers of round 4 noted a stale GIT-2 sentence out of scope.  The orchestrator put its fix in round 5's range (`ef602b3`).
@@ -156,7 +156,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phas
 * Only M1's first item is a bug in the milestone's own code.  Rounds 1 to 3 read the whole milestone range, and did not find it.  The other items are in later milestones, in files outside the diff, or in criteria that the rounds did not have.  So a wider late range would not find them.  The intent review is the sensor for this class, at one `Plan` agent a round.
 * Options:
   * A: keep D4 as it is.
-  * B: keep D4, and add one sentence to the `Scope:` line of the skill: "Report each bug or strict-rule breach that you see out of scope, in a list of its own."  The team leader logs each one as a finding of the round, and the fix rule applies.
+  * B: keep D4, and add one sentence to the `Scope:` line of the skill.  The sentence: "Report each bug or strict-rule breach that you see out of scope, in a list of its own."  The team leader logs each one as a finding of the round, and the fix rule applies.
   * C: keep D4 for the routed reviewers, and give the `reviewer` agent the whole range of the milestone in each late round.  Cost: one more reviewer context in each late round.
   * D: go back to the whole branch from round 4.
 * Recommendation: B.  Reason: the late rounds of this phase found no bug outside the fix range, and D4 cut their cost.  Their 3 bugs (M7) were inside it.  Reviewers already see some drift out of scope (M4, round 4), and B costs no agent.  B lets a team log a bug of the PR #39 kind when a reviewer sees it.  C is the fallback if a late bug reaches `main`.
@@ -164,7 +164,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phas
 
 #### P4: the overall measure, in place of "fewer review rounds per PR"
 
-* Decision 0024 has no cap, and a late fix of one line can cause the next round.  In this phase, the rounds after round 3 did not fall: 3.0 for each milestone in M3 to M7, against 2.4 for each log in 7 logs of PR #39 (all but M8).  The fixes after each late round fell: 27 in 15 rounds (1.8), against about 58 in 17 rounds (3.4, an approximate count of the Action cells).  3 of the 27 were bugs, each in a file that the fix range touched.
+* Decision 0024 has no cap, and a late fix of one line can cause the next round.  In this phase, the rounds after round 3 did not fall: 3.0 for each milestone in M3 to M7, against 2.4 for each log in 7 logs of PR #39.  The count leaves out PR #39's M8 log, since its 8 "speed" rounds are a second set of rounds after a CI fix.  The fixes after each late round fell: 27 in 15 rounds (1.8), against about 58 in 17 rounds (3.4, an approximate count of the Action cells).  3 of the 27 were bugs, each in a file that the fix range touched.
 * Proposal: for each milestone, measure:
   * the findings fixed after round 3, by kind: bug, strict rule, significant should-fix;
   * the bugs found after round 3, as a sign of what rounds 1 to 3 missed;
@@ -177,7 +177,7 @@ Added on 2026-11-02 by the agent, at the close-out of `plans/active/harness-phas
 
 * M5: no cheaper model passed, so phase 4's evaluator runs on the session's model, and adds that cost to each task.  Proposal: phase 4 records the evaluator's `modelUsage` tokens for each task.  Its acceptance runs the planted-bug case at least 3 times, since one run is noisy (TD-75).
 * M3: phase 4 does not say how a verdict of the evaluator enters the fix rule.  Proposal: a failed criterion of the evaluator's contract is a blocker in any round.
-* The `orchestrate` skill gives a long run a plan in `plans/active/`, a Progress at each stopping point, and a resume from it.  The pause of 2026-11-01 resumed from its Progress line after 11.6 hours.  Proposal: the bullet on long-running sessions keeps the handover skill only if a run loses work at compaction.  `xtask clean` already removes the worktrees and the `serve` pid files of a task.
+* The `orchestrate` skill gives a long run a plan in `plans/active/` and a Progress at each stopping point.  It has no pause or resume step (TD-78).  On 2026-11-01, a run paused after a review round (`d376200`), and resumed after 11.6 hours from the steps in its Progress line.  Proposal: phase 4 adds a pause and resume step to the skill.  The bullet on long-running sessions keeps the handover skill only if a run loses work at compaction.  `xtask clean` already removes the worktrees and the `serve` pid files of a task.
 * The gate of phase 4 stays as it is.
 
 #### P6: phase 5, re-checked against M3 and M5

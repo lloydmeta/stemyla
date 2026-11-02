@@ -489,6 +489,30 @@ The gate compares one run of round 1 with one run of the `baseline` agent on the
 
 * Fix: the maintainer decides on the proposal of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").
 
+### TD-76: `xtask attention` finds a hand-run line by the name of its item
+
+This entry concerns PROTO-1, through the hand-run class of `xtask attention` (decision 0027).
+
+`xtask attention` lists first each diff line that changes a message that `stored-stems`, `worker-check` or `weights` writes by hand (TD-16).  In `xtask/src/e2e.rs`, it finds such a line by the name of its item: a name that starts with `stored_stems` or `worker_check`, or the name `stem_protocol_file`.  A helper with another name that writes such a message gives no hand-run line.  Its change then comes later in the list, or not at all, and the orchestrator can leave it out of the 10 comments.  M7's rounds found one more helper in each round, and the rule became a list of names (`plans/completed/harness-phase-3b-m7.md`).
+
+* Fix: when a new helper writes a hand-written message, add its name to the rule, with a test.  The wire-reviewer reads each change to the e2e scripts.
+
+### TD-77: `xtask pr-body` checks the form of a body, not what "Needs your attention" holds
+
+This entry concerns no rule.  It concerns decision 0027, and `xtask pr-body`.
+
+`xtask pr-body` checks the headings, the length of the summary, the lines of Verification and the `<details>` block.  It does not check what "Needs your attention" holds.  So an item for the maintainer to decide or to do can be missing, and an item there can have no link to its inline comment.  The body passes.
+
+* Fix: no check is planned.  The orchestrate skill says what the section holds, and the maintainer reads it.
+
+### TD-78: the `orchestrate` skill has no pause or resume step
+
+This entry concerns no rule.  It concerns decision 0023, and the `orchestrate` skill.
+
+The skill's "Stop and wait" lists the reasons to stop, and a request of the maintainer to pause is not one of them.  The skill has no step for a resume.  Its "Start" makes the branch and the draft PR, commits the plan and sends the message up front.  On 2026-11-01, harness phase 3b paused after a review round of M6, with the steps of the resume in the plan's Progress (`d376200`).  The resume followed those steps, not the skill.
+
+* Fix: the maintainer decides on P5 of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").  Until then, the guide's recipe "Run a big task hands-off" says how to pause and resume.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
