@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use xtask::attention::{HAND_RUN, MESSAGES};
+use xtask::attention::{DEPENDENCY, HAND_RUN, MESSAGES, PROPOSED};
 
 /// A committer identity, and no user or system git config, for each git
 /// command that the tests and the binary run.
@@ -77,6 +77,10 @@ fn the_hand_run_line_comes_first_and_a_docs_line_is_none() {
     write(&dir.join("protocol/src/lib.rs"), "pub struct A;\n");
     write(&dir.join("docs/README.md"), "# Docs\n");
     write(&dir.join("gone.txt"), "gone\n");
+    write(
+        &dir.join("Cargo.toml"),
+        "[workspace]\nmembers = []\n\n[workspace.dependencies]\n",
+    );
     write(&dir.join("docs/plans/active/p.md"), PLAN);
     write(
         &dir.join("docs/plans/completed/p-m1.md"),
@@ -90,26 +94,44 @@ fn the_hand_run_line_comes_first_and_a_docs_line_is_none() {
     write(&dir.join("docs/README.md"), "# Docs\n\nMore.\n");
     std::fs::remove_file(dir.join("gone.txt")).unwrap();
     write(
+        &dir.join("Cargo.toml"),
+        "[workspace]\nmembers = []\n\n[workspace.dependencies]\nserde = \"1\"\n",
+    );
+    write(
+        &dir.join("docs/decisions/0028-x.md"),
+        "# X\n\nStatus: proposed\n",
+    );
+    write(
         &dir.join("docs/plans/active/p.md"),
         &format!("{PLAN}* 2026-11-02, agent (implementer): a choice.\n"),
     );
     commit(dir, "change");
-    let out = run(dir, &[&base, "docs/plans/active/p.md"]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    let want = format!(
+        "hand-run protocol/src/lib.rs:2 RIGHT: {HAND_RUN}; a strict path of PROTO-2; a strict path of MEM-2; {MESSAGES}\n\
+         change docs/decisions/0028-x.md:1 RIGHT: {PROPOSED}\n\
+         hot-spot Cargo.toml:5 RIGHT: {DEPENDENCY}\n\
+         judgement docs/plans/active/p.md:6 RIGHT: agent (implementer): a choice.\n\
+         judgement docs/plans/completed/p-m1.md (no diff line; list it in the PR): agent: old.\n\
+         attention: 5 candidates; pick at most 10, the hand-run lines first (decision 0027)\n"
     );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        format!(
-            "hand-run protocol/src/lib.rs:2 RIGHT: {HAND_RUN}; a strict path of PROTO-2; a strict path of MEM-2; {MESSAGES}\n\
-             judgement docs/plans/active/p.md:6 RIGHT: agent (implementer): a choice.\n\
-             judgement docs/plans/completed/p-m1.md (no diff line; list it in the PR): agent: old.\n\
-             attention: 3 candidates; pick at most 10, the hand-run lines first (decision 0027)\n"
-        )
-    );
+    let absolute = dir.join("docs/plans/active/p.md");
+    for plan in [
+        "docs/plans/active/p.md",
+        "./docs/plans/active/p.md",
+        "././docs/plans/./active/p.md",
+        absolute.to_str().unwrap(),
+    ] {
+        let out = run(dir, &[&base, plan]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{plan}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "{plan}");
+    }
+    let out = run(&dir.join("docs"), &[&base, "plans/active/p.md"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), want, "from docs/");
     let out = run(dir, &["no-such-base", "docs/plans/active/p.md"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
@@ -124,4 +146,13 @@ fn no_argument_exits_2() {
         "usage: xtask attention <base> <plan>\n"
     );
     assert_eq!(run(&std::env::temp_dir(), &["a"]).status.code(), Some(2));
+    let out = run(
+        &std::env::temp_dir(),
+        &["--output=x", "docs/plans/active/p.md"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "usage: xtask attention <base> <plan>\n"
+    );
 }

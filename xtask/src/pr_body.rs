@@ -137,13 +137,22 @@ fn without_comments(text: &str) -> String {
     out
 }
 
+/// True when `line` is a heading of level 1 or 2 with text.
+fn is_top_heading(line: &str) -> bool {
+    let line = line.trim();
+    let text = line.strip_prefix("# ").or_else(|| line.strip_prefix("## "));
+    text.is_some_and(|t| !t.trim().is_empty())
+}
+
 /// The lines after the first line that is `heading`, to the next heading
-/// line (`#`) or the end of `lines`.  `None` when no line is `heading`.
+/// line of level 1 or 2 (`# ` or `## `, then text) or the end of `lines`.
+/// So `### More` and `#39` stay in the section.  `None` when no line is
+/// `heading`.
 fn section<'a>(lines: &'a [&'a str], heading: &str) -> Option<&'a [&'a str]> {
     let start = lines.iter().position(|line| line.trim() == heading)? + 1;
     let len = lines[start..]
         .iter()
-        .position(|line| line.trim_start().starts_with('#'))
+        .position(|line| is_top_heading(line))
         .unwrap_or(lines.len() - start);
     Some(&lines[start..start + len])
 }
@@ -247,12 +256,20 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_ends_at_the_next_heading_of_any_level() {
+    fn the_summary_ends_only_at_a_heading_of_level_1_or_2() {
         let body = good().replace(
             "## Needs your attention",
-            &format!("### More\n\n{}\n\n## Needs your attention", words(200)),
+            &format!(
+                "### More\n\n#39 and #40\n{}\n\n## Needs your attention",
+                words(140)
+            ),
         );
-        assert_eq!(problems(&body), Vec::<String>::new());
+        assert_eq!(problems(&body), vec![long_summary(152)]);
+        let top = good().replace(
+            "## Needs your attention",
+            &format!("# Top\n\n{}\n\n## Needs your attention", words(200)),
+        );
+        assert_eq!(problems(&top), Vec::<String>::new());
     }
 
     #[test]
@@ -318,6 +335,20 @@ mod tests {
             .replace(&format!("{DETAILS_END}\n"), "")
             .replace("## Summary", &format!("{DETAILS_END}\n\n## Summary"));
         assert_eq!(problems(&before), vec![NO_DETAILS_END.to_string()]);
+        let just_before = good().replace(&format!("{DETAILS_END}\n"), "").replace(
+            &format!("{DETAILS}\n"),
+            &format!("{DETAILS_END}\n{DETAILS}\n"),
+        );
+        assert_eq!(problems(&just_before), vec![NO_DETAILS_END.to_string()]);
+    }
+
+    #[test]
+    fn a_body_that_starts_with_the_details_line_has_no_part_for_people() {
+        let body = format!("{DETAILS}\n\n* M1.\n\n{DETAILS_END}\n");
+        assert_eq!(
+            problems(&body),
+            HEADINGS.iter().map(|h| missing(h)).collect::<Vec<_>>()
+        );
     }
 
     #[test]

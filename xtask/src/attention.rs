@@ -7,6 +7,9 @@
 //! reads them with `git`.  The orchestrator picks at most 10 candidates,
 //! the `hand-run` lines first.
 //!
+//! A change with no hunk, such as a pure rename or a mode change, has no
+//! changed line, so it gives no candidate.
+//!
 //! `plans/active/harness-phase-3b-m7.md` (step 2) gives the classes and
 //! their rules.
 
@@ -52,6 +55,9 @@ pub struct Changed {
     pub line: usize,
     /// The new-side position of the line's hunk (the `+<n>` of `@@`).
     pub hunk_new: usize,
+    /// The new-side count of the line's hunk (the `,<m>` of `+<n>,<m>`).
+    /// It is 0 for a hunk that only removes lines.
+    pub hunk_new_count: usize,
     /// The number of the line's hunk in the diff, from 0.
     pub hunk: usize,
     /// The line's text, without the `+` or `-`.
@@ -139,6 +145,7 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
     let mut out = Vec::new();
     let (mut old_path, mut path) = (String::new(), String::new());
     let (mut old_line, mut new_line, mut hunk_new, mut hunks) = (0, 0, 0, 0);
+    let mut hunk_new_count = 0;
     // The lines left in the current hunk, on each side.  Inside a hunk, a
     // line such as `--- x` is a removed line, not a header.
     let (mut old_left, mut new_left) = (0usize, 0usize);
@@ -150,6 +157,7 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
                     side,
                     line: *line,
                     hunk_new,
+                    hunk_new_count,
                     hunk: hunks - 1,
                     text: text.to_string(),
                 });
@@ -191,6 +199,7 @@ pub fn changed_lines(diff: &str) -> Vec<Changed> {
         } else if let Some(((old_at, old_n), (new_at, new_n))) = hunk_ranges(line) {
             (old_line, old_left) = (old_at, old_n);
             (new_line, new_left, hunk_new) = (new_at, new_n, new_at);
+            hunk_new_count = new_n;
             hunks += 1;
         }
     }
@@ -304,10 +313,13 @@ fn candidate(class: Class, changed: &Changed, reasons: Vec<String>) -> Candidate
 }
 
 /// The line at `HEAD` that a changed line is at: its own line for an
-/// added line, and its hunk's new-side position for a removed line.
+/// added line, and its hunk's new-side position for a removed line.  A
+/// hunk that only removes lines gives the line after its position, since
+/// `+<n>,0` names the line before the removed lines.
 fn position(changed: &Changed) -> usize {
     match changed.side {
         Side::Right => changed.line,
+        Side::Left if changed.hunk_new_count == 0 => changed.hunk_new + 1,
         Side::Left => changed.hunk_new,
     }
 }
@@ -326,8 +338,10 @@ fn hand_run_line<'a>(hunk: &'a [Changed], text: &str) -> Option<&'a Changed> {
             hunk.iter().find(|c| position(c) < tests)
         }
         "xtask/src/e2e.rs" => {
+            // `stored_stems_checks` reads the replies of `stored-stems`.
             let bodies = [
                 block(text, "fn stored_stems(", "}"),
+                block(text, "fn stored_stems_checks(", "}"),
                 block(text, "fn worker_check(", "}"),
             ];
             hunk.iter()
@@ -395,7 +409,8 @@ fn hot_reasons(path: &str) -> Vec<String> {
 }
 
 /// True when `line` holds `unsafe` after the line start, a space, `(` or
-/// `{`, and before a space or `{`, and `line` is not a `//` line.
+/// `{`, and before a space or `{`, and `line` is not a `//` line.  An
+/// attribute `#[unsafe(...)]` is a hit too.
 fn has_unsafe(line: &str) -> bool {
     if line.trim_start().starts_with("//") {
         return false;
@@ -403,7 +418,10 @@ fn has_unsafe(line: &str) -> bool {
     line.match_indices("unsafe").any(|(i, word)| {
         let before = line[..i].chars().next_back();
         let after = line[i + word.len()..].chars().next();
-        matches!(before, None | Some(' ' | '(' | '{')) && matches!(after, Some(' ' | '{'))
+        let word =
+            matches!(before, None | Some(' ' | '(' | '{')) && matches!(after, Some(' ' | '{'));
+        let attribute = before == Some('[') && after == Some('(');
+        word || attribute
     })
 }
 
@@ -497,10 +515,15 @@ fn merge_and_sort(found: Vec<Candidate>) -> Vec<Candidate> {
 /// Runs `xtask attention <base> <plan>` in the repo of the current folder.
 /// It gives 0 after the list, 1 for a git error and 2 for a usage error.
 pub fn main(args: &[String]) -> i32 {
+    // A `<base>` that starts with `-` would be read as an option of git.
     let [base, plan] = args else {
         eprintln!("{USAGE}");
         return REFUSED;
     };
+    if base.starts_with('-') {
+        eprintln!("{USAGE}");
+        return REFUSED;
+    }
     match gather(base, plan) {
         Ok((diff, files, plans)) => {
             let found = candidates(&diff, &files, &plans);
@@ -528,6 +551,7 @@ type Texts = Vec<(String, String)>;
 fn gather(base: &str, plan: &str) -> Result<(String, Texts, Texts)> {
     let dir = std::env::current_dir().context("reading the current folder")?;
     let root = repo_root(&dir)?;
+    let plan = &repo_path(&root, &dir, plan)?;
     let diff = git(
         &root,
         &[
@@ -568,6 +592,29 @@ fn gather(base: &str, plan: &str) -> Result<(String, Texts, Texts)> {
         plans.push((path, text));
     }
     Ok((diff, files, plans))
+}
+
+/// `plan`, which is relative to `dir` or absolute, as a `/`-separated
+/// path relative to `root`.  The path need not exist.
+pub fn repo_path(root: &Path, dir: &Path, plan: &str) -> Result<String> {
+    let mut path = std::path::PathBuf::new();
+    for part in dir.join(plan).components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                path.pop();
+            }
+            other => path.push(other),
+        }
+    }
+    let relative = path
+        .strip_prefix(root)
+        .with_context(|| format!("{plan} is not in the repo {}", root.display()))?;
+    let parts: Vec<String> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    Ok(parts.join("/"))
 }
 
 /// The paths of `listing` that are `docs/plans/{active,completed}/<stem>-m<n>.md`,
@@ -674,7 +721,7 @@ mod tests {
         );
     }
 
-    const E2E: &str = "fn stored_stems_checks(o: &Opts) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n";
+    const E2E: &str = "fn stored_stems_clip(o: &Path) {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems(o: &Opts) -> Result<()> {\n    if x {\n        y();\n    }\n    let m = json!({ \"type\": \"init\" });\n}\n\nfn worker_check(o: &Opts) -> Result<()> {\n    let m = json!({\n        \"type\": \"init\",\n        \"weights\": w,\n    });\n}\n\nfn after() {\n    let m = json!({ \"type\": \"x\" });\n}\n\nfn stored_stems_checks(r: &Value) {\n    let ok = r[\"type\"] == \"done\";\n}\n";
 
     const WEIGHTS: &str = "pub fn run() {\n    let m = json!({\n        \"type\": \"init\",\n        \"settings\": s,\n    });\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() { let m = json!({ \"type\": \"x\" }); }\n}\n";
 
@@ -707,7 +754,15 @@ mod tests {
                 20,
                 "    let m = json!({ \"type\": \"y\" });",
             ),
+            added("xtask/src/e2e.rs", 4, "// before stored_stems"),
+            added(
+                "xtask/src/e2e.rs",
+                24,
+                "    let ok = r[\"type\"] == \"ok\";",
+            ),
             added("xtask/src/e2e/weights.rs", 4, "        \"settings\": t,"),
+            added("xtask/src/e2e/weights.rs", 7, "// before the tests"),
+            added("xtask/src/e2e/weights.rs", 8, "#[cfg(test)]"),
             added(
                 "xtask/src/e2e/weights.rs",
                 10,
@@ -720,8 +775,24 @@ mod tests {
             vec![
                 format!("hand-run xtask/src/e2e.rs:9 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e.rs:15 LEFT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e.rs:24 RIGHT: {HAND_RUN}"),
                 format!("hand-run xtask/src/e2e/weights.rs:4 RIGHT: {HAND_RUN}"),
+                format!("hand-run xtask/src/e2e/weights.rs:7 RIGHT: {HAND_RUN}"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_removal_just_after_a_body_is_not_in_it() {
+        let files = [("xtask/src/e2e.rs", E2E)];
+        let diff = [
+            hunk("xtask/src/e2e.rs", 11, &["    let late = 1;"], 10, &[]),
+            hunk("xtask/src/e2e.rs", 10, &["    let last = 1;"], 9, &[]),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![format!("hand-run xtask/src/e2e.rs:10 LEFT: {HAND_RUN}")]
         );
     }
 
@@ -834,6 +905,27 @@ mod tests {
     }
 
     #[test]
+    fn a_block_at_the_first_line_of_a_file_is_read() {
+        let files = [(
+            "xtask/src/rules.rs",
+            "const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[\n    (\"f\", \"skipped: x\", \"why\"),\n];\n\nconst B: &[&str] = &[];\n",
+        )];
+        let diff = [
+            added(
+                "xtask/src/rules.rs",
+                2,
+                "    (\"g\", \"skipped: y\", \"why\"),",
+            ),
+            added("xtask/src/rules.rs", 5, "const B: &[&str] = &[];"),
+        ]
+        .concat();
+        assert_eq!(
+            rendered(&diff, &files, &[]),
+            vec![format!("change xtask/src/rules.rs:2 RIGHT: {ALLOWLISTED}")]
+        );
+    }
+
+    #[test]
     fn hot_paths_unsafe_and_a_dependency_are_hot_spot_lines() {
         let cargo = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nfoo = \"1\"\n\n# a comment\n\n[target.'cfg(unix)'.dev-dependencies]\nbar = \"1\"\n\n[dependencies.baz]\nversion = \"1\"\n";
         let diff = [
@@ -848,6 +940,12 @@ mod tests {
             added("dsp/src/lib.rs", 5, "    unsafe { f() }"),
             added("dsp/src/lib.rs", 6, "pub unsafe fn g() {}"),
             added("dsp/src/lib.rs", 7, "    let x = (unsafe{ f() });"),
+            added("dsp/src/lib.rs", 8, "#[unsafe(no_mangle)]"),
+            added("dsp/src/lib.rs", 9, "#[unsafe(export_name = \"g\")]"),
+            added("dsp/src/lib.rs", 10, "    let a = [unsafe_b];"),
+            added("roformer-gpu/src/net.rs", 3, "x"),
+            added("roformer/src/weights.rs", 3, "x"),
+            hunk("Cargo.toml", 4, &[], 5, &["serde = \"1\""]),
             added("dsp/src/web.js", 7, "unsafe { f() }"),
             hunk(
                 "engine/Cargo.toml",
@@ -864,8 +962,19 @@ mod tests {
         ]
         .concat();
         assert_eq!(
-            rendered(&diff, &[("engine/Cargo.toml", cargo)], &[]),
+            rendered(
+                &diff,
+                &[
+                    ("engine/Cargo.toml", cargo),
+                    (
+                        "Cargo.toml",
+                        "[workspace]\nmembers = []\n\n[workspace.dependencies]\nserde = \"1\"\n"
+                    )
+                ],
+                &[]
+            ),
             vec![
+                format!("hot-spot Cargo.toml:5 RIGHT: {DEPENDENCY}"),
                 format!("hot-spot app/src/lib.rs:3 RIGHT: {APP_LIB}"),
                 format!(
                     "hot-spot app/src/separator.rs:3 RIGHT: {}; {}",
@@ -875,11 +984,31 @@ mod tests {
                 format!("hot-spot dsp/src/lib.rs:5 RIGHT: {UNSAFE}"),
                 format!("hot-spot dsp/src/lib.rs:6 RIGHT: {UNSAFE}"),
                 format!("hot-spot dsp/src/lib.rs:7 RIGHT: {UNSAFE}"),
+                format!("hot-spot dsp/src/lib.rs:8 RIGHT: {UNSAFE}"),
+                format!("hot-spot dsp/src/lib.rs:9 RIGHT: {UNSAFE}"),
                 format!("hot-spot engine/Cargo.toml:6 RIGHT: {DEPENDENCY}"),
                 format!("hot-spot engine/Cargo.toml:11 RIGHT: {DEPENDENCY}"),
                 format!("hot-spot engine/Cargo.toml:14 RIGHT: {DEPENDENCY}"),
                 format!("hot-spot engine/src/player.rs:3 RIGHT: {}", strict("RT-1")),
                 format!("hot-spot engine/src/song.rs:3 RIGHT: {}", strict("MEM-1")),
+                format!(
+                    "hot-spot roformer-gpu/src/net.rs:3 RIGHT: {}",
+                    strict("MEM-3")
+                ),
+                format!(
+                    "hot-spot roformer/src/weights.rs:3 RIGHT: {}",
+                    strict("MEM-4")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hot_rules_are_the_fixed_list() {
+        assert_eq!(
+            HOT_RULES,
+            [
+                "PROTO-2", "MEM-1", "MEM-2", "MEM-3", "MEM-4", "MEM-5", "RT-1"
             ]
         );
     }
@@ -926,7 +1055,7 @@ mod tests {
         let path = "docs/plans/active/p-m1.md";
         let long = "x".repeat(100);
         let plan = format!(
-            "## Decision log\n\n* 2026-11-01, agent: {long}\n* 2026-11-02, agent: in the diff.\n"
+            "## Decision log\n\n* 2026-11-01, agent: {long}\n* 2026-11-02, agent: in the diff.\n* 2026-11-03, agent (implementer): not in the diff.\n"
         );
         let diff = [
             added(path, 4, "* 2026-11-02, agent: in the diff."),
@@ -944,6 +1073,9 @@ mod tests {
                 format!(
                     "judgement {path} (no diff line; list it in the PR): agent: {}",
                     "x".repeat(80)
+                ),
+                format!(
+                    "judgement {path} (no diff line; list it in the PR): agent (implementer): not in the diff."
                 ),
             ]
         );
@@ -1020,11 +1152,13 @@ mod tests {
         );
     }
 
+    /// A changed line.  `at` is the new-side position and count of its
+    /// hunk.
     fn changed(
         path: &str,
         side: Side,
         line: usize,
-        hunk_new: usize,
+        at: (usize, usize),
         hunk: usize,
         text: &str,
     ) -> Changed {
@@ -1032,7 +1166,8 @@ mod tests {
             path: path.to_string(),
             side,
             line,
-            hunk_new,
+            hunk_new: at.0,
+            hunk_new_count: at.1,
             hunk,
             text: text.to_string(),
         }
@@ -1044,13 +1179,23 @@ mod tests {
         assert_eq!(
             changed_lines(diff),
             vec![
-                changed("a.rs", Side::Left, 3, 2, 0, "gone"),
-                changed("a.rs", Side::Left, 4, 2, 0, "-- also gone"),
-                changed("a.rs", Side::Left, 9, 8, 1, "old"),
-                changed("a.rs", Side::Right, 8, 8, 1, "new"),
-                changed("a.rs", Side::Right, 10, 8, 1, "+++ new too"),
+                changed("a.rs", Side::Left, 3, (2, 0), 0, "gone"),
+                changed("a.rs", Side::Left, 4, (2, 0), 0, "-- also gone"),
+                changed("a.rs", Side::Left, 9, (8, 3), 1, "old"),
+                changed("a.rs", Side::Right, 8, (8, 3), 1, "new"),
+                changed("a.rs", Side::Right, 10, (8, 3), 1, "+++ new too"),
             ]
         );
+    }
+
+    #[test]
+    fn a_context_line_moves_both_sides() {
+        let diff = "--- a/a.rs\n+++ b/a.rs\n@@ -10,3 +10,2 @@\n ctx\n-removed\n ctx\n@@ -20,2 +19,3 @@\n ctx\n+added\n ctx\n";
+        let found: Vec<(Side, usize)> = changed_lines(diff)
+            .iter()
+            .map(|c| (c.side, c.line))
+            .collect();
+        assert_eq!(found, vec![(Side::Left, 11), (Side::Right, 20)]);
     }
 
     #[test]
@@ -1059,10 +1204,10 @@ mod tests {
         assert_eq!(
             changed_lines(diff),
             vec![
-                changed("new.rs", Side::Left, 1, 1, 0, "a"),
-                changed("new.rs", Side::Right, 1, 1, 0, "b"),
-                changed("gone.rs", Side::Left, 1, 0, 1, "x"),
-                changed("new.md", Side::Right, 1, 1, 2, "y"),
+                changed("new.rs", Side::Left, 1, (1, 1), 0, "a"),
+                changed("new.rs", Side::Right, 1, (1, 1), 0, "b"),
+                changed("gone.rs", Side::Left, 1, (0, 0), 1, "x"),
+                changed("new.md", Side::Right, 1, (1, 1), 2, "y"),
             ]
         );
     }
