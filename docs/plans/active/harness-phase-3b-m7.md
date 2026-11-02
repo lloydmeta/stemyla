@@ -155,7 +155,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * [x] 2026-11-01: this plan.
 * [x] 2026-11-01: Step 1: the template and `xtask pr-body`.
 * [x] 2026-11-01: Step 2: `xtask attention`.
-* [ ] Step 3: the texts for the orchestrator.
+* [x] 2026-11-02: Step 3: the texts for the orchestrator (`m7/claude.diff`, `m7/pr-body.md`).  The orchestrate pins pass with the diff applied, and `xtask pr-body` passes on both bodies.  Tier `push` passed before review round 1 (11 checks, 172 s).
 * [ ] Review rounds.
 
 ## Surprises and discoveries
@@ -165,6 +165,7 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * 2026-11-01, agent (implementer), step 1: `xtask pr-body target/harness-phase-3b-resume/pr-body.md` passes (exit 0).  The template exits 1 with two problems: the summary is empty, and the Verification section is empty.
 * 2026-11-01, agent (implementer), step 2: on the stubs, all 15 tests of `attention::tests` failed on an assert.  Two fixtures in my tests were wrong, and I corrected them before the code was written.
 * 2026-11-01, agent (implementer), step 2: `xtask attention origin/main docs/plans/active/harness-phase-3b.md` at 33c9ca6 gives 98 candidates: `hand-run` 0, `change` 18, `hot-spot` 2 (an `unsafe` in a test string of `review.rs`, and `set_var` in `tests/clean.rs`), `judgement` 78 (55 of the parent, 9 of M5, 9 of M6, 5 of M7).  Each agent entry is a new line of this branch, so none has "no diff line".  M1 to M4 write `team leader:`, so they give none.
+* 2026-11-02, agent (team leader): at `419c38b`, the same command gives 103 candidates: `change` 18, `hot-spot` 6, `judgement` 79.  The extra hot spots are the `unsafe` matches in the new tests of `attention.rs`, which hold `unsafe` in test strings.
 
 ## Decision log
 
