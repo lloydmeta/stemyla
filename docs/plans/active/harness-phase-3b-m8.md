@@ -8,7 +8,7 @@ Readers: the review agents of M8's rounds, the orchestrator, and the maintainer.
 
 ## Context and orientation
 
-The state at the start, on 2026-11-02, at commit `48667e8` on branch `harness-phase-3b`, with M7 done.  The review base of M8 is `48667e8`.
+The state at the start, on 2026-11-02, at commit `48667e8` on branch `harness-phase-3b`, with M7 done.  The review base of M8 is `48667e8`.  The range from it also holds the orchestrator's commits of M7's intent review: the code fixes `bc52f6c`, `3a48544` and `c719c58`, the pick order of the `orchestrate` skill in `cd96fc5`, and plan text in `8a16005` and `951bc2f`.  Round 1 reviews them too.
 
 * `docs/harness.md` has no row for a part of phase 3b.
 * `docs/working-with-agents.md` has no changelog line for M5, and its `docs-check` row does not name "Decisions for the maintainer" (M6 finding 4-5).
