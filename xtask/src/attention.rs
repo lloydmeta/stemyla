@@ -19,7 +19,7 @@
 //! * For `hand-run` with a hunk, the path picks the rule.  The line tests
 //!   read the text at `HEAD` of the new path.
 //!
-//! `plans/active/harness-phase-3b-m7.md` (step 2) gives the classes and
+//! `plans/completed/harness-phase-3b-m7.md` (step 2) gives the classes and
 //! their rules.
 
 use crate::check::{repo_root, strict_paths};

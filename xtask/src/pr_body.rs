@@ -7,7 +7,7 @@
 //! [`VERIFICATION_LIMIT`] lines.  [`problems`] is a pure function of the
 //! body's text, and [`main`] reads the file.
 //!
-//! `plans/active/harness-phase-3b-m7.md` (step 1) gives the rules.
+//! `plans/completed/harness-phase-3b-m7.md` (step 1) gives the rules.
 
 pub const USAGE: &str = "usage: xtask pr-body <file>";
 

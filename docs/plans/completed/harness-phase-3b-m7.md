@@ -164,7 +164,13 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 * [x] 2026-11-01: Step 1: the template and `xtask pr-body`.
 * [x] 2026-11-01: Step 2: `xtask attention`.
 * [x] 2026-11-02: Step 3: the texts for the orchestrator (`m7/claude.diff`, `m7/pr-body.md`).  The orchestrate pins pass with the diff applied, and `xtask pr-body` passes on both bodies.  Tier `push` passed before review round 1 (11 checks, 172 s).
-* [ ] Review rounds.
+* [x] 2026-11-02: review round 1 (13 agents, about 0.70M tokens, 18.2 wall minutes).  27 findings: 19 confirmed, 3 refuted (equivalent mutants), 5 nits.  Significant: 1-2 (`stored_stems_checks` not hand-run), 1-4 (`#[unsafe(...)]` missed), 1-5 (a `./` plan path lost each line), 1-6 (TD-72 against the skill).  Fixes in `33b31a8`; the skill's word limits in `c1e09c9`.
+* [x] 2026-11-02: review round 2 (13 agents, about 0.62M tokens, 14.8 wall minutes).  14 findings: 6 confirmed, 1 pre-existing, 7 nits.  Significant: 2-1 (round 1's removal fix broke two edges), 2-3 (TD-72's conditions).  Fixes in `b315231` and `4354d25`.
+* [x] 2026-11-02: review round 3 (9 agents, about 0.50M tokens, 11.7 wall minutes).  11 findings: 1 confirmed, 2 pre-existing, 8 nits.  Significant: 3-2 (`STORED_STEMS_SESSION` not hand-run).  The hand-run rule of `e2e.rs` became a goal.  Fixes in `5ac6b0f`, `a6699b4` and `cb32859`.
+* [x] 2026-11-02: review round 4, the first late round (14 agents, about 0.62M tokens, 13.8 wall minutes).  7 confirmed, all fixed in `584980a`: 4-1 (a rename out of a class path, on MEM-1), 4-6 (a no-hunk path was hand-run), 4-7 (`open_on_the_worker_check`) are significant, and 4-2 to 4-5 are weak tests.  4 nits reported, not fixed; 1 refuted mutant.
+* [x] 2026-11-02: review round 5 (5 agents, about 0.22M tokens, 10.9 wall minutes).  3 confirmed, fixed in `634ac33`: 5-1 (a weak test), 5-2 (a hunked rename out of a hand-run path), 5-3 (the docs on no-hunk paths).  The rename rule became one goal, `class_path`, and one table test.  2 nits reported, not fixed.
+* [x] 2026-11-02: review round 6 (4 agents, about 0.20M tokens, 10.1 wall minutes).  2 confirmed, fixed in `b1f5aa5`: 6-1 (4 missing table rows), 6-2 (the rule is for each class).  2 nits reported, not fixed.
+* [x] 2026-11-02: review round 7 (2 agents, about 0.13M tokens, 4.3 wall minutes).  1 nit, reported, not fixed.  The stop rule holds, so round 7 is the last round.
 
 ## Surprises and discoveries
 
@@ -197,4 +203,11 @@ Each step is one commit that `git revert` undoes.  `pr-body` and `attention` cha
 
 ## Outcomes and retrospective
 
-To be filled in at the end.
+2026-11-02, agent (team leader):
+
+* Achieved: the PR template, `xtask pr-body` and `xtask attention`, with the orchestrate skill's PR body steps and attention review (`86d705c` and later skill commits).  `xtask pr-body` passes on the maintainer's draft and on the reformatted body.  `xtask attention origin/main <parent plan>` lists about 110 candidates on this branch.
+* 7 review rounds: 60 round agents, about 2.98M tokens, 83.8 wall minutes, 0 interventions.  Before round 1: 1 `Plan` agent (about 0.08M tokens) and 1 implementer, which also made each round's fixes (about 0.30M).
+* Late rounds 4 to 7 fixed 12 findings and logged 9 nits as `reported, not fixed`.  4 mutants were refuted as equivalent.
+* Not achieved: the parent's "first step", the probe review on this PR.  The orchestrator posts the real `COMMENT` review at the phase's close-out.
+* The Verification check takes 1 to 3 lines, but decision 0027 says 2 or 3.  The maintainer's draft has one full line.
+* What to do differently: two rules grew by one case in each round (the hand-run items of `e2e.rs`, and the rename and no-hunk rules).  Each became stable only when it was written as one goal with a table test.  Write such a rule as a goal and a table from the start.
