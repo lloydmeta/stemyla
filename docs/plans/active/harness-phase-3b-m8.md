@@ -52,7 +52,7 @@ Each step is one commit that `git revert` undoes.  No step changes code.
 
 * [x] 2026-11-02: this plan.  No `Plan` agent reviewed it, for time (Decision log).
 * [x] 2026-11-02: Step 1: the docs (`harness.md`, the guide, TD-73 to TD-75 and TD-44, the index).
-* [ ] Step 2: the proposals.
+* [x] 2026-11-02: Step 2: the proposals P1 to P7 in `plans/active/harness-engineering.md`.
 * [ ] Step 3: the text for the orchestrator.
 * [ ] Review rounds.
 
