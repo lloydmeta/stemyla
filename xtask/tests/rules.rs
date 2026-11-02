@@ -1642,6 +1642,7 @@ const SIZING_SIGNALS: &[&str] = &[
 /// accepts, and its commit on the new branch (3-1).  The maintainer's
 /// correction of 2026-11-01 adds the list of choices that hinge on the
 /// maintainer, each with its options and a recommendation.
+/// M7 adds the PR body steps and the attention review (decision 0027).
 const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "name: orchestrate",
     AGENT_CALL_RULE,
@@ -1678,6 +1679,14 @@ const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
     "5. Run /review-rounds <base> <round> \"<criteria>\" from round 1",
     "or shows only the plan that you wrote or changed for \"When to use it\"",
     "Commit the plan, signed, as the first commit of the new branch.",
+    "* The body follows `.github/pull_request_template.md` (decision 0027).  Before each `gh pr create` and `gh pr edit`, run `cargo run -p xtask -- pr-body <file>`.",
+    "* \"Needs your attention\" holds only the items for the maintainer to decide or to do, such as a hand run or a tool install.  A decision item says what to decide and the default that the agent took.",
+    "* The `<details>` block lists every agent decision of the Decision logs,",
+    "6. Update the PR body with `gh pr edit --body-file`, after `xtask pr-body` passes on the file.",
+    "4. After the last fix and the last push, run `cargo run -p xtask -- attention origin/main <plan>`, with the plan's new path.",
+    "5. Pick at most 10 candidates, the hand-run lines first.  Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.",
+    "6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the plan's Surprises.",
+    "7. Link each item of \"Needs your attention\" to its comment, where one exists.  Run `xtask pr-body` on the body, then `gh pr edit --body-file`.",
 ];
 
 /// The problems of the orchestrate skill's text: each names what it wants.
@@ -1752,6 +1761,7 @@ fn the_orchestrate_skill_keeps_its_key_lines() {
 /// (review round 1 of harness phase 3b, M6: 1-1, 1-2 and 1-3).  Also the
 /// pins of round 2 (2-1), of round 3 (3-1), of round 4 (4-3 and 4-7), and
 /// of rounds 5 and 6 (5-1, 6-1: the whole Start line on the answers).
+/// M7 adds the PR body check and the attention review (decision 0027).
 #[test]
 fn the_orchestrate_pins_fail_on_a_changed_skill() {
     let text = std::fs::read_to_string(xtask::workspace_root().join(ORCHESTRATE_SKILL))
@@ -1821,6 +1831,27 @@ fn the_orchestrate_pins_fail_on_a_changed_skill() {
             "* The answers go in the section \"Decisions for the maintainer\" (\"When to use it\").",
             "* The answers go in the plan's Decision log, with the date.",
         ),
+        (
+            "  Before each `gh pr create` and `gh pr edit`, run `cargo run -p xtask -- pr-body <file>`.",
+            "",
+        ),
+        (
+            "Post one review with event `COMMENT`, with one inline comment on each line",
+            "Post one comment for each line",
+        ),
+        (
+            "5. Pick at most 10 candidates, the hand-run lines first.",
+            "5. Pick the candidates.",
+        ),
+        (
+            "holds only the items for the maintainer to decide or to do",
+            "holds each agent decision",
+        ),
+        (
+            "6. If GitHub refuses the review, post plain PR comments that link to the lines.",
+            "6. If GitHub refuses the review, stop.",
+        ),
+        ("4. After the last fix and the last push, run", "4. Run"),
     ] {
         assert!(text.contains(from), "the skill holds `{from}`");
         let changed = text.replacen(from, to, 1);

@@ -83,7 +83,10 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 * Send the message of "When to use it" once, unless no message is needed there.  It holds each open choice that depends on the maintainer, with its options and your recommendation.
 * The answers go in the section "Decisions for the maintainer" ("When to use it").  Add one Decision log line, as the maintainer's decision, that points to them.
 * Make the branch and the draft PR as the plan's section says.  Commit the plan, signed, as the first commit of the new branch.  Only the orchestrator runs `gh pr create`, `gh pr edit` and `gh pr ready`.
-* Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.  M7 of harness phase 3b adds the form of the body.
+* Write each PR body file outside the tree, just before the call, and pass it with `--body-file`.
+* The body follows `.github/pull_request_template.md` (decision 0027).  Before each `gh pr create` and `gh pr edit`, run `cargo run -p xtask -- pr-body <file>`.  Fix each problem that it names.
+* "Needs your attention" holds only the items for the maintainer to decide or to do, such as a hand run or a tool install.  A decision item says what to decide and the default that the agent took.
+* The `<details>` block lists every agent decision of the Decision logs, the review rounds with their mutants lines, each `reported, not fixed` finding, and each `known` finding once, with its TD.
 
 ## The loop for each milestone
 
@@ -142,7 +145,7 @@ At each checkpoint of a team leader:
 3. A test that fails by wall-clock timing on a shared runner, in the browser job, gets one rerun of the failed job: `gh run rerun <id> --failed`.
 4. Each other failure is real.  Fix it with a test that fails first, or give it to the team leader of the next milestone.  Commit only its paths, and push again.
 5. Run `cargo run -p xtask -- clean --yes`.
-6. Update the PR body with `gh pr edit --body-file`.
+6. Update the PR body with `gh pr edit --body-file`, after `xtask pr-body` passes on the file.
 7. Start the next milestone.
 
 ## Stop and wait
@@ -169,8 +172,12 @@ After the last milestone, with CI green:
 1. Write the plan's retrospective.  Move the plan to `docs/plans/completed/`.  Fix each doc line that names its old path.
 2. Commit, signed.  Push, and wait for CI.
 3. Run `cargo run -p xtask -- clean --yes`.  List each scratch folder for `cargo run -p xtask -- clean --yes --also <path>`.
-4. Mark the PR ready with `gh pr ready` if the plan allows it.  Never merge (GIT-1).
-5. Give the maintainer the report.
+4. After the last fix and the last push, run `cargo run -p xtask -- attention origin/main <plan>`, with the plan's new path.  It lists the candidate lines of the PR's diff and the agent decisions, the hand-run lines first.
+5. Pick at most 10 candidates, the hand-run lines first.  Post one review with event `COMMENT`, with one inline comment on each line (decision 0027).  Use the GitHub MCP server's pending review or `gh api`.  Each comment says what to decide and the default that the agent took.
+6. If GitHub refuses the review, post plain PR comments that link to the lines.  Record that in the plan's Surprises.
+7. Link each item of "Needs your attention" to its comment, where one exists.  Run `xtask pr-body` on the body, then `gh pr edit --body-file`.
+8. Mark the PR ready with `gh pr ready` if the plan allows it.  Never merge (GIT-1).
+9. Give the maintainer the report.
 
 ## The report format
 
