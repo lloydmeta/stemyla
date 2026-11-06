@@ -2621,10 +2621,11 @@ fn turns_off(attribute: &proc_macro2::Group) -> bool {
 }
 
 /// The body of each function named `name` in `text`, as tokens, so a name
-/// in a comment does not count.  A function is left out when an attribute
-/// turns it off ([`turns_off`]): its own, one on a `mod` around it, or an
-/// inner `#![...]` of the file or of a module.  A file that does not
-/// tokenise gives none.
+/// in a comment does not count.  An item ends with its brace body or its
+/// `;`.  When an attribute on an item turns it off ([`turns_off`]), its body
+/// is skipped, whatever the item is: a `fn`, a `mod`, an `impl`, a `trait`
+/// or a block.  An inner `#![...]` that turns off a file or a module skips
+/// all of it.  A file that does not tokenise gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
     fn walk(stream: TokenStream, name: &str, out: &mut Vec<TokenStream>) {
         let trees: Vec<TokenTree> = stream.into_iter().collect();
@@ -2640,8 +2641,10 @@ fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
             }
             index += 3;
         }
+        // The state of the item so far: an attribute turned it off, and it
+        // is `fn <name>`.
         let mut off = false;
-        let mut index = 0;
+        let mut named = false;
         while let Some(tree) = trees.get(index) {
             if punct_spacing(Some(tree), '#').is_some()
                 && let Some(TokenTree::Group(attribute)) = trees.get(index + 1)
@@ -2651,40 +2654,33 @@ fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
                 index += 2;
                 continue;
             }
-            let word = ident_name(Some(tree));
-            let item = matches!(word.as_deref(), Some("fn" | "mod"));
-            if item {
-                let body = trees[index + 1..].iter().find_map(|tree| match tree {
-                    TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
-                        Some(group.stream())
+            if ident_name(Some(tree)).as_deref() == Some("fn")
+                && ident_name(trees.get(index + 1)).as_deref() == Some(name)
+            {
+                named = true;
+            }
+            match tree {
+                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
+                    // The body ends the item.
+                    if !off {
+                        if named {
+                            out.push(group.stream());
+                        }
+                        walk(group.stream(), name, out);
                     }
-                    _ => None,
-                });
-                let named = word.as_deref() == Some("fn")
-                    && ident_name(trees.get(index + 1)).as_deref() == Some(name);
-                if let (false, Some(body)) = (off, body) {
-                    if named {
-                        out.push(body.clone());
-                    }
-                    walk(body, name, out);
+                    off = false;
+                    named = false;
                 }
-                // Past the item's body, so it is not walked again.
-                let skip = trees[index + 1..]
-                    .iter()
-                    .position(|tree| {
-                        matches!(tree, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)
-                            || punct_spacing(Some(tree), ';').is_some()
-                    })
-                    .map_or(trees.len(), |at| index + 1 + at + 1);
-                index = skip;
-                off = false;
-                continue;
-            }
-            if let TokenTree::Group(group) = tree {
-                walk(group.stream(), name, out);
-            }
-            if punct_spacing(Some(tree), ';').is_some() {
-                off = false;
+                TokenTree::Group(group) => {
+                    if !off {
+                        walk(group.stream(), name, out);
+                    }
+                }
+                _ if punct_spacing(Some(tree), ';').is_some() => {
+                    off = false;
+                    named = false;
+                }
+                _ => {}
             }
             index += 1;
         }
@@ -8042,6 +8038,18 @@ mod mem1_tests {
     #[test]
     fn a_repo_that_lints_every_copy_passes() {
         assert_eq!(problems(|_, _| {}), Vec::<String>::new());
+        // A `#[cfg]` or `#[cfg_attr]` on an item with a brace body ends
+        // with that body, so it does not turn off the canary after it.
+        let after = problems(|_, f| {
+            file(
+                f,
+                "engine/src/song.rs",
+                &format!(
+                    "#[cfg_attr(feature = \"x\", derive(Debug))]\nstruct S {{ a: u8 }}\n#[cfg(feature = \"x\")]\nimpl S {{}}\n{CANARY}"
+                ),
+            )
+        });
+        assert_eq!(after, Vec::<String>::new());
     }
 
     #[test]
@@ -8256,6 +8264,20 @@ mod mem1_tests {
                 )
             }),
         ));
+        // Round 5: a `#[cfg]` on an `impl`, a `trait` or a block around the
+        // canary turns it off too.
+        for wrap in ["impl S", "trait T", "const _: () ="] {
+            cases.push((
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(move |_, f| {
+                    file(
+                        f,
+                        "engine/src/song.rs",
+                        &format!("#[cfg(any())]\n{wrap} {{\n    fn mem1_lint_is_on() {{\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }}\n}}\n"),
+                    )
+                }),
+            ));
+        }
         for (want, change) in cases {
             let found = problems(change);
             assert_eq!(found.len(), 1, "{want}\n{found:#?}");
