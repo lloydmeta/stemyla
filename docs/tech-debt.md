@@ -269,11 +269,9 @@ Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled 
 
 PR #39's review rounds sent some mutants inside functions to TD-39.  Each one that `cargo mutants --list` still shows is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`).  The mutants of the constant `WAITS_S` in `xtask/src/e2e/save.rs` are not entries, so they go to the validator.
 
-`sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
-
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.  The review logs of M3 to M6 of the branch `iphone-crashes-2026-10-25` (`docs/reviews/iphone-crashes-2026-10-25-m3.md` to `-m6.md`), with a `catch-up` row for each deferred finding.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
+* Fix: a fake driver for `Driver` and `Session`.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
 
 ### TD-41: the GPU-1 layout test pairs shaders from a hand copy
 

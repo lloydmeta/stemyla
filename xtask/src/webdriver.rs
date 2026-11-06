@@ -696,6 +696,8 @@ mod tests {
         (port, rx)
     }
 
+    /// The fake holds the socket open for 30 s, and the timeout is 5 s, so
+    /// a client that reads to the end of the stream fails this test.
     #[test]
     fn sends_json_and_reads_a_sized_reply() {
         let (port, rx) = fake("200 OK", r#"{"value":"lloyd"}"#);
@@ -704,7 +706,7 @@ mod tests {
             "POST",
             "/session/1/url",
             Some(&json!({"url": "x"})),
-            COMMAND_TIMEOUT,
+            Duration::from_secs(5),
         )
         .unwrap();
         assert_eq!((status, body), (200, json!({"value": "lloyd"})));
