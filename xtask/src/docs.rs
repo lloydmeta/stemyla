@@ -2408,4 +2408,126 @@ mod tests {
             )]
         );
     }
+
+    /// A copy of this repo's tracked files in a new folder.
+    fn repo_copy(name: &str) -> std::path::PathBuf {
+        let from = crate::workspace_root();
+        let to = std::env::temp_dir().join(format!("xtask-docs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&to);
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&from)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git ls-files failed");
+        for rel in String::from_utf8(out.stdout)
+            .expect("UTF-8 paths")
+            .split('\0')
+        {
+            if rel.is_empty() || !from.join(rel).is_file() {
+                continue;
+            }
+            let target = to.join(rel);
+            std::fs::create_dir_all(target.parent().expect("a file has a folder")).unwrap();
+            std::fs::copy(from.join(rel), target).unwrap();
+        }
+        to
+    }
+
+    fn edit(root: &Path, rel: &str, change: impl FnOnce(String) -> String) {
+        let path = root.join(rel);
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::create_dir_all(path.parent().expect("a file has a folder")).unwrap();
+        std::fs::write(&path, change(text)).unwrap();
+    }
+
+    /// `check` runs each check: a copy of the repo gives no problem, and
+    /// one planted problem for each check gives that check's problem.  The
+    /// unit tests above test each check alone, but not that `check` calls
+    /// it (finding 1-19 of review round 1 of M3 of harness phase 3b).
+    #[test]
+    fn check_runs_each_check_on_a_repo() {
+        let root = repo_copy("check");
+        let clean = check(&root).expect("the copy can be read");
+        assert_eq!(clean, Vec::<Problem>::new(), "the copy of the repo");
+
+        // The check, the file of its problem, and the plant.
+        type Plant<'a> = (&'a str, &'a str, &'a dyn Fn(&Path));
+        let plants: &[Plant] = &[
+            ("budget", "CLAUDE.md", &|r| {
+                edit(r, "CLAUDE.md", |t| t + &"\n".repeat(MAP_LINE_BUDGET))
+            }),
+            ("crates", "CLAUDE.md", &|r| {
+                edit(r, "CLAUDE.md", |t| {
+                    t.lines()
+                        .filter(|l| !l.starts_with("* `dsp/`"))
+                        .map(|l| format!("{l}\n"))
+                        .collect()
+                })
+            }),
+            ("rules", "CLAUDE.md", &|r| {
+                edit(r, "CLAUDE.md", |t| {
+                    t.replacen("* BUILD-1:", "* MEM-99: x\n* BUILD-1:", 1)
+                })
+            }),
+            ("ids", "docs/tech-debt.md", &|r| {
+                edit(r, "docs/tech-debt.md", |t| {
+                    t.replacen("\n## Closed\n", "\n### TD-3: again\n\n## Closed\n", 1)
+                })
+            }),
+            ("ids", "docs/harness.md", &|r| {
+                edit(r, "docs/harness.md", |t| t + "\nSee TD-9999.\n")
+            }),
+            ("paths", "docs/harness.md", &|r| {
+                edit(r, "docs/harness.md", |t| {
+                    t + "\nSee `docs/no-such-file.md`.\n"
+                })
+            }),
+            ("tests", "docs/invariants.md", &|r| {
+                edit(r, "docs/invariants.md", |t| {
+                    t.replacen(
+                        "* Enforced by: ",
+                        "* Enforced by: `no_such_test_at_all`, ",
+                        1,
+                    )
+                })
+            }),
+            ("guide", GUIDE, &|r| {
+                edit(r, ".claude/agents/zz-unnamed.md", |_| "x\n".into())
+            }),
+            ("index", "docs/README.md", &|r| {
+                edit(r, "docs/unindexed.md", |_| "# Unindexed\n".into())
+            }),
+            ("rules", ".claude/rules/zz.md", &|r| {
+                edit(r, ".claude/rules/zz.md", |_| "No frontmatter.\n".into())
+            }),
+            ("decisions", "docs/decisions/9999-zz.md", &|r| {
+                edit(r, "docs/decisions/9999-zz.md", |_| "# 9999\n".into())
+            }),
+            ("plans", "docs/plans/active/zz.md", &|r| {
+                edit(r, "docs/plans/active/zz.md", |_| "# Zz\n".into())
+            }),
+            ("reviews", "docs/reviews/zz.md", &|r| {
+                edit(r, "docs/reviews/zz.md", |_| {
+                    fix_rule_log("abc1234 review round 4 fixes")
+                })
+            }),
+        ];
+        for (_, _, plant) in plants {
+            plant(&root);
+        }
+        let found = check(&root).expect("the planted copy can be read");
+        for (kind, file, _) in plants {
+            assert!(
+                found.iter().any(|p| p.check == *kind && p.file == *file),
+                "no `{kind}` problem in {file}; found:\n{}",
+                found
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

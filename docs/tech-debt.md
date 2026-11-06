@@ -397,14 +397,6 @@ This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
 
 * Fix: no fix is planned.  A signal handler needs a new crate (DEPS-1) or unsafe code.
 
-### TD-69: no test runs `docs::check` on a fixture tree
-
-This entry concerns VERIFY-1, through `xtask docs-check`.
-
-`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of M3 of harness phase 3b).  This mutant is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`), so `xtask review mutants` writes it to `known.txt`.  The unit tests check each check alone, but not that `check` calls it.
-
-* Fix: add a test that runs `check` on a small fixture repo with one known problem of each check, and wants each problem.
-
 ### TD-70: tier `commit` of `xtask check` can pass where the full checks fail
 
 This entry concerns GIT-2 and VERIFY-1, through `xtask check` (decision 0026).
@@ -683,6 +675,7 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-22: closed by a step of CI's `test` job, `cargo +nightly-2026-10-30 test --locked -p roformer-gpu --doc` (tech-debt rung 1).  Nightly rustdoc checks the error code of a `compile_fail` doctest.  With `E0308` in place of `E0505` on `Rec`'s doctest, the step failed: "Some expected error codes were not found".  Stable passed it (MEM-3).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.
+* TD-69: closed by `check_runs_each_check_on_a_repo` in `xtask/src/docs.rs` (tech-debt rung 1).  It runs `docs::check` on a copy of the repo's tracked files, and wants no problem.  Then it plants one problem for each check, and wants each one.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` fails it, so its `KNOWN_MISSED` entry is gone (VERIFY-1).
 * TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
 * TD-42: closed by new cases in the tests of `e2e_messages_use_protocol_types` (tech-debt rung 1): `a_script_only_type_in_the_rust_alone_is_not_stale`, `a_type_after_a_comment_of_several_lines_has_its_line`, a misspelt type first in `includes`, and `<=` and `format!` after `"type"` in Rust.  Each of the five mutants that the entry named fails a test (PROTO-1).
 * TD-56: closed by M7 of `plans/completed/stream-from-storage.md` (D12 of `plans/completed/stream-from-storage-m7.md`).  One counter gives a token to every open (a drop, a pick, a Storage open, the startup restore and Demo).  Only the newest open shows its song, and only `apply_inbox` makes a session current.  `a_late_drop_does_not_show_over_a_newer_song`, `a_late_drop_does_not_show_over_demo`, `two_opens_that_end_in_one_frame_show_the_newer` and `a_stale_restore_on_the_page_does_not_make_its_session_current` check it.
