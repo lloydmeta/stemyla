@@ -121,6 +121,52 @@ fn crates_depend_only_downwards() {
     );
 }
 
+/// The members that ship no MEM-1 lint, each with the reason.
+const MEM1_EXEMPT: [(&str, &str); 3] = [
+    ("dsp", "DSP-1's method list bans the copies"),
+    ("xtask", "it does not ship"),
+    ("test-support", "it does not ship"),
+];
+
+/// MEM-1: each member that ships has a `clippy.toml` that fails
+/// `slice::to_vec`, and a `mem1_lint_is_on` or a
+/// `mem1_lint_is_on_for_js_arrays` canary, so a new crate cannot
+/// ship without the lint (TD-26).
+#[test]
+fn each_shipped_crate_lints_mem1_copies() {
+    let root = xtask::workspace_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+    let members = xtask::docs::workspace_members(&manifest);
+    let files = xtask::rules::rust_files(&root).expect("the Rust files can be read");
+    let mut problems = Vec::new();
+    for dir in &members {
+        if MEM1_EXEMPT.iter().any(|(exempt, _)| exempt == dir) {
+            continue;
+        }
+        let config =
+            std::fs::read_to_string(root.join(dir).join("clippy.toml")).unwrap_or_default();
+        if !config.contains("path = \"slice::to_vec\"") {
+            problems.push(format!("MEM-1: {dir}/clippy.toml does not fail `slice::to_vec`.  Fix: copy the `disallowed-methods` entry of engine/clippy.toml, or add {dir} to `MEM1_EXEMPT` with a reason."));
+        }
+        let canary = files.iter().any(|(file, text)| {
+            file.starts_with(&format!("{dir}/"))
+                && (text.contains("fn mem1_lint_is_on()")
+                    || text.contains("fn mem1_lint_is_on_for_js_arrays()"))
+        });
+        if !canary {
+            problems.push(format!("MEM-1: {dir} has no `mem1_lint_is_on`, so nothing proves that its lint path resolves.  Fix: add the canary of engine/src/song.rs, or `mem1_lint_is_on_for_js_arrays` of app/tests/web.rs for a crate with the JS-array paths."));
+        }
+    }
+    for (exempt, _) in MEM1_EXEMPT {
+        if !members.iter().any(|dir| dir == exempt) {
+            problems.push(format!(
+                "MEM-1: `MEM1_EXEMPT` names {exempt}, which is not a member.  Fix: remove it."
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// LAYER-1 in the source, not only in the manifests (TD-23): no `#[path]`
 /// or `include!` takes code from outside its crate, no target takes its
 /// source from another folder, and no tracked file is a symbolic link.
