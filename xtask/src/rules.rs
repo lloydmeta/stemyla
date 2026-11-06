@@ -2436,8 +2436,9 @@ fn source_includes(stream: TokenStream, out: &mut Vec<(usize, &'static str, Opti
 /// folder, so the check can fail a path that stays in the crate, but
 /// never passes one that leaves it.  A file that does not tokenise gives
 /// no problem, since Cargo cannot build it either.  `include_str!` and
-/// `include_bytes!` read data, not code, so they pass.  The check finds
-/// `include!` by its name, so a renamed import passes (TD-23).
+/// `include_bytes!` pass from any folder, in every crate, so they can
+/// bring in a file of another crate (TD-23).  The check finds `include!`
+/// by its name, so a renamed import passes (TD-23).
 pub fn source_stays_in_its_crate(
     files: &[(String, String)],
     member_dirs: &[String],
@@ -2627,12 +2628,34 @@ fn fn_bodies(text: &str, name: &str) -> Vec<String> {
     out
 }
 
+/// The copies that `body` expects the lint to fail: for each statement
+/// with `#[expect(clippy::disallowed_methods ...)]` that calls `to_vec`,
+/// the JS-array type it names, or `"slice"`.  The body is the text of its
+/// tokens, so spaces are left out before the search.
+fn expected_copies(body: &str) -> Vec<&'static str> {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    flat.split(';')
+        .filter(|statement| {
+            statement.contains("#[expect(clippy::disallowed_methods")
+                && statement.contains(".to_vec()")
+        })
+        .map(|statement| {
+            ["Uint8Array", "Float32Array"]
+                .into_iter()
+                .find(|name| statement.contains(name))
+                .unwrap_or("slice")
+        })
+        .collect()
+}
+
 /// MEM-1 and MEM-2: each member that ships has a `clippy.toml` that fails
-/// `slice::to_vec`, and a canary whose `#[expect]` proves the path (TD-26).
-/// Each crate of [`MEM1_JS_CRATES`] also fails the two JS-array copies,
-/// with the canary `mem1_lint_is_on_for_js_arrays`, which expects all
-/// three.  `configs` holds each member's `clippy.toml` text, or `None`;
-/// `files` holds the Rust files with their text.
+/// `slice::to_vec`, and a canary that proves the path (TD-26).  A canary
+/// proves a path with a `to_vec` under `#[expect(clippy::disallowed_methods)]`,
+/// which fails clippy if the path stops resolving.  Each crate of
+/// [`MEM1_JS_CRATES`] also fails the two JS-array copies, and its canary
+/// `mem1_lint_is_on_for_js_arrays` expects all three.  `configs` holds each
+/// member's `clippy.toml` text, or `None`; `files` holds the Rust files
+/// with their text.
 pub fn mem1_lint_problems(
     members: &[String],
     configs: &[(String, Option<String>)],
@@ -2655,6 +2678,11 @@ pub fn mem1_lint_problems(
             .find(|(member, _)| member == dir)
             .and_then(|(_, text)| text.as_deref())
             .unwrap_or_default();
+        let config: String = config
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
         let js = MEM1_JS_CRATES.contains(&dir.as_str());
         let wanted: Vec<&str> = std::iter::once(MEM1_SLICE)
             .chain(MEM1_JS.into_iter().filter(|_| js))
@@ -2664,7 +2692,8 @@ pub fn mem1_lint_problems(
                 problems.push(mem1(
                     &config_file,
                     format!(
-                        "MEM-1: {config_file} lacks `{path}`.  Fix: copy the `disallowed-methods` entry of app/clippy.toml, or add {dir} to `MEM1_EXEMPT` in {RULES_FILE} with a reason."
+                        "MEM-1: {config_file} lacks `{path}`.  Fix: copy the `disallowed-methods` entry of {}, or add {dir} to `MEM1_EXEMPT` in {RULES_FILE} with a reason.",
+                        if js { "app/clippy.toml" } else { "engine/clippy.toml" }
                     ),
                 ));
             }
@@ -2672,16 +2701,19 @@ pub fn mem1_lint_problems(
         let (canary, proves): (&str, &[&str]) = if js {
             (
                 "mem1_lint_is_on_for_js_arrays",
-                &["disallowed_methods", "to_vec", "Uint8Array", "Float32Array"],
+                &["slice", "Uint8Array", "Float32Array"],
             )
         } else {
-            ("mem1_lint_is_on", &["disallowed_methods", "to_vec"])
+            ("mem1_lint_is_on", &["slice"])
         };
         let proven = files
             .iter()
             .filter(|(file, _)| file.starts_with(&format!("{dir}/")))
             .flat_map(|(_, text)| fn_bodies(text, canary))
-            .any(|body| body.contains("expect") && proves.iter().all(|word| body.contains(word)));
+            .any(|body| {
+                let copies = expected_copies(&body);
+                proves.iter().all(|kind| copies.contains(kind))
+            });
         if !proven {
             problems.push(mem1(
                 dir,
@@ -7850,7 +7882,7 @@ mod mem1_tests {
 
     #[test]
     fn each_missing_path_or_canary_is_a_problem() {
-        let cases: Vec<(&str, Box<Change>)> = vec![
+        let mut cases: Vec<(&str, Box<Change>)> = vec![
             (
                 "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
                 Box::new(|c, _| set(c, "engine", None)),
@@ -7924,6 +7956,46 @@ mod mem1_tests {
                 }),
             ),
         ];
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "fn mem1_lint_is_on() {\n    #[allow(clippy::disallowed_methods)]\n    let copy = [1.0_f32].to_vec();\n    let _ = Some(copy).expect(\"x\");\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "protocol: MEM-1: protocol has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "protocol/tests/web.rs",
+                    "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    let _b = js_sys::Uint8Array::new_with_length(1);\n    let _c = js_sys::Float32Array::new_with_length(1);\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`.  Fix: copy the `disallowed-methods` entry of engine/clippy.toml",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "engine",
+                    Some("# { path = \"slice::to_vec\", reason = \"x\" },\ndisallowed-methods = []\n"),
+                )
+            }),
+        ));
+        cases.push((
+            "app/clippy.toml: MEM-1: app/clippy.toml lacks `path = \"js_sys::Uint8Array::to_vec\"`.  Fix: copy the `disallowed-methods` entry of app/clippy.toml",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "app",
+                    Some(&ALL.replace("  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n", "")),
+                )
+            }),
+        ));
         for (want, change) in cases {
             let found = problems(change);
             assert_eq!(found.len(), 1, "{want}\n{found:#?}");

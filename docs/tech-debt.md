@@ -60,7 +60,8 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 * A crate from a registry or git, under another name, can hold a copy of a workspace crate, such as `roformer`.
 * The check finds `include!` by its name only, so a renamed import, such as `use std::include as inc;`, passes it.
-* Fix: the `supply-chain-reviewer` agent looks for a copied crate, on each diff that routes it (TD-31).
+* `include_str!` and `include_bytes!` pass in every crate, from any folder.  So a crate can take a file of another crate, such as a WGSL shader, with no dependency.  Today only `xtask` and `engine/tests/realtime.rs` read files of other crates, as text.
+* Fix: the `supply-chain-reviewer` agent looks for each of these forms, on each diff that routes it (TD-31).
 
 ### TD-25: RT-1's allocation test runs natively only
 
@@ -81,7 +82,7 @@ Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-pro
 
 Since tech-debt rung 1, `each_shipped_crate_lints_mem1_copies` fails a shipped crate whose `clippy.toml` lacks `slice::to_vec`.  It fails a crate of `MEM1_JS_CRATES` that lacks either JS-array path.  It also fails a crate without a canary whose `#[expect]` proves the paths.  `dsp`, `xtask` and `test-support` are exempt, each with its reason.  What it does not see:
 
-* a new crate that reads JS arrays but is not in `MEM1_JS_CRATES` (`xtask/src/rules.rs`), which needs only the `slice::to_vec` path.  `engine` takes `js-sys` for `cpal`, and is not in the list either.
+* a new crate that reads JS arrays but is not in `MEM1_JS_CRATES` (`xtask/src/rules.rs`), which needs only the `slice::to_vec` path.  `engine` takes `js-sys` for `cpal`, and is not in the list.  `roformer-gpu` reads a mapped `Float32Array` through `wgpu::web_sys` in `mapped_floats`, and is not in the list either.
 
 * Fix: none planned.  The `memory-reviewer` agent looks for a new copy of any form, on each diff that routes it (TD-31).
 

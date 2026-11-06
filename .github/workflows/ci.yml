@@ -124,7 +124,8 @@ jobs:
       # doctest, so a doctest that fails with another error passes.  Nightly
       # rustdoc checks it (MEM-3).  The pin keeps a new release out of CI.
       # To bump it, change DOC_NIGHTLY in xtask/src/check.rs.  Its tests then
-      # name the two lines below and the line of CLAUDE.md to change.
+      # name the two lines below, the line of CLAUDE.md and the test constant
+      # NIGHTLY_DOC to change.
       - run: rustup toolchain install nightly-2026-10-30 --profile minimal
       - run: cargo +nightly-2026-10-30 test --locked -p roformer-gpu --doc
       # The images of a snapshot that did not match, to see what changed.
