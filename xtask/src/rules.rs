@@ -2598,27 +2598,95 @@ const MEM1_JS: [&str; 2] = [
     "path = \"js_sys::Float32Array::to_vec\"",
 ];
 
+/// The `cfg` conditions under which a canary still compiles in the clippy
+/// steps: a test, and the web build.
+const CANARY_CFGS: [&str; 2] = ["test", "target_arch=\"wasm32\""];
+
+/// True when the attribute group `attribute` (the part in `[...]`) turns
+/// the item off in a clippy step: a `cfg` whose condition is not one of
+/// [`CANARY_CFGS`], or any `cfg_attr`.
+fn turns_off(attribute: &proc_macro2::Group) -> bool {
+    let inner: Vec<TokenTree> = attribute.stream().into_iter().collect();
+    match ident_name(inner.first()).as_deref() {
+        Some("cfg") => {
+            let condition = match inner.get(1) {
+                Some(TokenTree::Group(args)) => args.stream().to_string().replace(' ', ""),
+                _ => String::new(),
+            };
+            !CANARY_CFGS.contains(&condition.as_str())
+        }
+        Some("cfg_attr") => true,
+        _ => false,
+    }
+}
+
 /// The body of each function named `name` in `text`, as tokens, so a name
-/// in a comment does not count.  A file that does not tokenise gives none.
+/// in a comment does not count.  A function is left out when an attribute
+/// turns it off ([`turns_off`]): its own, one on a `mod` around it, or an
+/// inner `#![...]` of the file or of a module.  A file that does not
+/// tokenise gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
     fn walk(stream: TokenStream, name: &str, out: &mut Vec<TokenStream>) {
         let trees: Vec<TokenTree> = stream.into_iter().collect();
-        for (index, tree) in trees.iter().enumerate() {
+        // An inner attribute, `#![...]`, applies to all of this stream.
+        let mut index = 0;
+        while punct_spacing(trees.get(index), '#').is_some()
+            && punct_spacing(trees.get(index + 1), '!').is_some()
+        {
+            if let Some(TokenTree::Group(attribute)) = trees.get(index + 2)
+                && turns_off(attribute)
+            {
+                return;
+            }
+            index += 3;
+        }
+        let mut off = false;
+        let mut index = 0;
+        while let Some(tree) = trees.get(index) {
+            if punct_spacing(Some(tree), '#').is_some()
+                && let Some(TokenTree::Group(attribute)) = trees.get(index + 1)
+                && attribute.delimiter() == Delimiter::Bracket
+            {
+                off |= turns_off(attribute);
+                index += 2;
+                continue;
+            }
+            let word = ident_name(Some(tree));
+            let item = matches!(word.as_deref(), Some("fn" | "mod"));
+            if item {
+                let body = trees[index + 1..].iter().find_map(|tree| match tree {
+                    TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
+                        Some(group.stream())
+                    }
+                    _ => None,
+                });
+                let named = word.as_deref() == Some("fn")
+                    && ident_name(trees.get(index + 1)).as_deref() == Some(name);
+                if let (false, Some(body)) = (off, body) {
+                    if named {
+                        out.push(body.clone());
+                    }
+                    walk(body, name, out);
+                }
+                // Past the item's body, so it is not walked again.
+                let skip = trees[index + 1..]
+                    .iter()
+                    .position(|tree| {
+                        matches!(tree, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)
+                            || punct_spacing(Some(tree), ';').is_some()
+                    })
+                    .map_or(trees.len(), |at| index + 1 + at + 1);
+                index = skip;
+                off = false;
+                continue;
+            }
             if let TokenTree::Group(group) = tree {
                 walk(group.stream(), name, out);
             }
-            let named = ident_name(Some(tree)).as_deref() == Some("fn")
-                && ident_name(trees.get(index + 1)).as_deref() == Some(name);
-            if !named {
-                continue;
+            if punct_spacing(Some(tree), ';').is_some() {
+                off = false;
             }
-            let body = trees[index + 2..].iter().find_map(|tree| match tree {
-                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
-                    Some(group.stream())
-                }
-                _ => None,
-            });
-            out.extend(body);
+            index += 1;
         }
     }
     let mut out = Vec::new();
@@ -2665,7 +2733,16 @@ fn expected_copies(body: TokenStream) -> Vec<&'static str> {
         if !expected || configured || !ends_in_to_vec {
             continue;
         }
-        let receiver = &rest[..n - 3];
+        // A `let` names its pattern and type before `=`; only the value
+        // after it is the receiver.
+        let value = if ident_name(rest.first()).as_deref() == Some("let") {
+            rest.iter()
+                .position(|tree| punct_spacing(Some(tree), '=') == Some(Spacing::Alone))
+                .map_or(n - 3, |at| at + 1)
+        } else {
+            0
+        };
+        let receiver = &rest[value.min(n - 3)..n - 3];
         let kind = ["Uint8Array", "Float32Array"]
             .into_iter()
             .find(|name| {
@@ -8123,6 +8200,59 @@ mod mem1_tests {
                     c,
                     "engine",
                     Some("disallowed-methods = []\ndisallowed-macros = [{ path = \"slice::to_vec\" }]\n"),
+                )
+            }),
+        ));
+        // Round 4: a JS type in the pattern or the type of a `let`, a
+        // `#[cfg]` on the canary, its module or its file, and a path in a
+        // comment inside the array.
+        cases.push((
+            "worker: MEM-1: worker has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "worker/tests/web.rs",
+                    "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let b: Vec<js_sys::Uint8Array> = [x].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let c: Vec<js_sys::Float32Array> = [y].to_vec();\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "#[cfg(any())]\nfn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    &format!("#[cfg(any())]\nmod off {{\n{CANARY}}}\n"),
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    &format!("#![cfg(feature = \"never\")]\n{CANARY}"),
+                )
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "engine",
+                    Some("disallowed-methods = [\n  # { path = \"slice::to_vec\", reason = \"x\" },\n]\n"),
                 )
             }),
         ));

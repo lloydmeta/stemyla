@@ -2409,7 +2409,10 @@ mod tests {
         );
     }
 
-    /// A copy of the files of this repo that `check` reads, in a new folder.
+    /// A copy of the files of this repo that `check` walks, in a new folder.
+    /// `check` reads only the text of `.md`, `.rs` and `.toml` files, and
+    /// the names of the rest.  So each other file is copied empty, and a
+    /// large ignored file, such as model weights, costs nothing.
     fn repo_copy(name: &str) -> std::path::PathBuf {
         let from = crate::workspace_root();
         let to = std::env::temp_dir().join(format!("xtask-docs-{name}-{}", std::process::id()));
@@ -2419,7 +2422,12 @@ mod tests {
         for rel in repo_files(&from).expect("the repo can be walked") {
             let target = to.join(&rel);
             std::fs::create_dir_all(target.parent().expect("a file has a folder")).unwrap();
-            std::fs::copy(from.join(&rel), target).unwrap();
+            let read = [".md", ".rs", ".toml"].iter().any(|ext| rel.ends_with(ext));
+            if read {
+                std::fs::copy(from.join(&rel), target).unwrap();
+            } else {
+                std::fs::write(target, "").unwrap();
+            }
         }
         to
     }
@@ -2439,6 +2447,9 @@ mod tests {
     fn check_runs_each_check_on_a_repo() {
         let root = repo_copy("check");
         let clean = check(&root);
+        // A file that `check` does not read is copied empty.
+        let png = "app/tests/snapshots/empty_state.png";
+        let copied = std::fs::metadata(root.join(png)).map(|m| m.len());
 
         // The check, the file of its problem, and the plant.
         type Plant<'a> = (&'a str, &'a str, &'a dyn Fn(&Path));
@@ -2522,6 +2533,7 @@ mod tests {
         let found = check(&root);
         // Removed before the asserts, so a failed run leaves no copy.
         std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(copied.ok(), Some(0), "{png} is copied empty");
         let clean = clean.expect("the copy can be read");
         assert_eq!(clean, Vec::<Problem>::new(), "the copy of the repo");
         let found = found.expect("the planted copy can be read");
