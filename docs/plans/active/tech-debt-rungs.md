@@ -76,23 +76,31 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 ## Decisions for the maintainer
 
-1. TD-22, the nightly in CI.  Options: A, a pinned nightly in a new CI step; B, `trybuild` as a dev-dependency (a new crate, DEPS-1); C, leave TD-22 open.  Recommendation: A.  Reason: no new crate, and the pin keeps CI stable.  Answer: open.
+1. TD-22, the nightly in CI.  Options: A, a pinned nightly in a new CI step; B, `trybuild` as a dev-dependency (a new crate, DEPS-1); C, leave TD-22 open.  Recommendation: A.  Reason: no new crate, and the pin keeps CI stable.  Answer: none on 2026-11-06; the agent applied A, with `nightly-2026-10-30` (Decision log).
 2. TD-7, a new tool in CI.  Options: A, `cargo-deny` from a pinned release binary; B, from `cargo install --locked` with a pinned version; C, leave TD-7 open.  Recommendation: A, after the DEPS-1 vet.  Reason: a release binary does not build a large tree in CI.  Answer: open.
 3. TD-16, a protocol version.  Options: A, a version in `Alive`, and the page refuses a mismatch; B, required fields only, with no version.  Recommendation: A.  Reason: a page and a worker of two builds can meet through a cached worker script.  Answer: open.
-4. The mode.  Recommendation: not orchestrated.  Each milestone is one PR and about one session, with the maintainer present for M2's GPU runs.  Answer: open.
+4. The mode.  Recommendation: not orchestrated.  Each milestone is one PR and about one session, with the maintainer present for M2's GPU runs.  Answer: 2026-11-06, the maintainer: do M1 while away, with no PR, and give the work as patches.
 
 ## Progress
 
 * [x] 2026-11-06: triage of the open entries, and this plan.
-* [ ] M1: rung 1.
+* [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed, each with its mutant runs: `e3c7448` TD-22, `db1d8fb` TD-42, `68039b3` TD-69, `a8dce36` TD-40, `88ca4b1` TD-23, `df7a1bd` TD-41, `b6f0946` TD-26 and `548c960` TD-39.  Next: tier `push`, then the review rounds.
 * [ ] M2: rung 2.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
 
+* 2026-11-06: `a_failed_worktree_removal_keeps_its_branch_and_run_folder` (`xtask/tests/clean.rs`) fails in a cloud container, also at `15c118d`.  The container runs as root, and a read-only folder does not stop root.  The local runs of M1 skip that test only.
+* 2026-11-06: `cargo metadata` gives a target's `src_path` with the `..` of its `path`, such as `decoder/../dsp/src/lib.rs`.  So a check that compares the start of the path passes it.  A plant found this, and `targets_stay_in_their_crate` normalises the path.
+* 2026-11-06: the nightly doctests and the default build filled the container's disk.  Builds then ran with `CARGO_INCREMENTAL=0`.
+
 * 2026-11-06: TD-73 and TD-75 wait on a choice that the maintainer made on 2026-11-02 (P1 and P3 of `plans/active/harness-engineering.md`).  The work is the next harness PR's.  So this plan does not take them.
 
 ## Decision log
+
+* 2026-11-06, agent: no answer came to question 1, so step 1 applied the recommendation, a pinned nightly.  `nightly-2026-10-30` ran the doctests in this container.
+* 2026-11-06, agent: the nightly line goes in `never_run` of `xtask check`, not in tier `push`.  Reason: a machine without the nightly can then still run tier `push`; CI runs the line.
+* 2026-11-06, agent: TD-41 stays open for the hand-copied pairs.  Reason: to take the pairs from `Kernels::new` changes how the kernels are built, which needs GPU-2's checks on a real GPU.
 
 * 2026-11-06, agent: the skill items TD-47 and TD-48 go with the next harness PR, not rung 1.  Reason: a change to the `review-rounds` skill belongs with P1 and P3, which change the same skill.
 
