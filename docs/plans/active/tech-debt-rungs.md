@@ -26,7 +26,7 @@ The triage of each open entry, on 2026-11-06, at `15c118d`:
 | Upstream or not possible | TD-52, TD-59, TD-65 | They wait for `flacenc`, `rusty_mp3`, or a way to plant an internal GPU error. |
 | No fix planned | TD-3, TD-25, TD-27, TD-29, TD-32, TD-33, TD-38, TD-43, TD-67, TD-68, TD-70, TD-74, TD-76, TD-77 | Each entry says that review or a person covers it. |
 
-Files that rung 1 touches: `.github/workflows/ci.yml`, `roformer-gpu/src/lib.rs` (tests only), `engine/tests/realtime.rs`, `engine/src/player.rs` and `engine/src/stretch/mod.rs` (tests only), `xtask/src/rules.rs`, `xtask/tests/rules.rs`, `xtask/tests/docs.rs`, `xtask/src/review.rs` (`KNOWN_MISSED`), `xtask/src/webdriver.rs` (tests only), `synth/clippy.toml` (new), `docs/tech-debt.md`.
+Files that rung 1 touches: `.github/workflows/ci.yml`, `CLAUDE.md`, `README.md`, `roformer-gpu/src/lib.rs` (tests only), `engine/src/player.rs` (tests only), `engine/tests/realtime.rs`, `synth/clippy.toml` (new), `synth/src/lib.rs` (the canary), `xtask/src/check.rs`, `xtask/src/docs.rs`, `xtask/src/rules.rs`, `xtask/src/review.rs` (`KNOWN_MISSED`), `xtask/src/webdriver.rs` (tests only), `xtask/tests/check.rs`, `xtask/tests/rules.rs`, `.claude/agents/supply-chain-reviewer.md`, `.claude/rules/`, and the docs: `docs/README.md`, `docs/harness.md`, `docs/invariants.md` and `docs/tech-debt.md`.
 
 A change to `xtask/src/review.rs` routes all six reviewers (TD-33).  So the removal of TD-69's `KNOWN_MISSED` entry goes in the last commit of M1.
 
@@ -100,6 +100,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 * 2026-11-06, agent: no answer came to question 1, so step 1 applied the recommendation, a pinned nightly.  `nightly-2026-10-30` ran the doctests in this container.
 * 2026-11-06, agent: the nightly line goes in `never_run` of `xtask check`, not in tier `push`.  Reason: a machine without the nightly can then still run tier `push`; CI runs the line.
+* 2026-11-06, agent: step 3 removed the TD-69 entry of `KNOWN_MISSED` in its own commit, not in the last commit of M1.  Reason: `each_known_missed_entry_is_open_and_in_the_code` fails an entry whose TD is closed, so the entry goes with the close.  No review round had started, so the route of a round did not widen.
 * 2026-11-06, agent: TD-41 stays open for the hand-copied pairs.  Reason: to take the pairs from `Kernels::new` changes how the kernels are built, which needs GPU-2's checks on a real GPU.
 
 * 2026-11-06, agent: the skill items TD-47 and TD-48 go with the next harness PR, not rung 1.  Reason: a change to the `review-rounds` skill belongs with P1 and P3, which change the same skill.

@@ -122,8 +122,9 @@ jobs:
       - run: cargo test --locked -p roformer-gpu --doc
       # Stable rustdoc does not check the error code of a compile_fail
       # doctest, so a doctest that fails with another error passes.  Nightly
-      # rustdoc checks it (MEM-3).  The nightly is pinned, so a new nightly
-      # cannot break CI.  Bump it deliberately, with the line in CLAUDE.md.
+      # rustdoc checks it (MEM-3).  The pin keeps a new release out of CI.
+      # To bump it, change DOC_NIGHTLY in xtask/src/check.rs.  Its tests then
+      # name the two lines below and the line of CLAUDE.md to change.
       - run: rustup toolchain install nightly-2026-10-30 --profile minimal
       - run: cargo +nightly-2026-10-30 test --locked -p roformer-gpu --doc
       # The images of a snapshot that did not match, to see what changed.

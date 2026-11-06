@@ -146,6 +146,13 @@ fn xtask_repo_tests() -> Check {
     Check::root("cargo test -p xtask --lib --test rules --test docs --test review")
 }
 
+/// The nightly that CI's `test` job runs the `roformer-gpu` doctests on,
+/// since stable rustdoc does not check the error code of a `compile_fail`
+/// doctest (MEM-3).  `the_ci_runs_the_doctests_on_the_pinned_nightly`
+/// keeps `.github/workflows/ci.yml` on it, and
+/// `the_push_tier_runs_the_lines_of_claude_md` keeps `CLAUDE.md` on it.
+pub const DOC_NIGHTLY: &str = "nightly-2026-10-30";
+
 /// The lines of `CLAUDE.md`'s Commands that no tier runs, with the reason.
 /// Each plan skips them.
 pub fn never_run() -> Vec<(Check, &'static str)> {
@@ -159,7 +166,7 @@ pub fn never_run() -> Vec<(Check, &'static str)> {
         (Check::root("cargo run -p xtask -- web-test"), BROWSER),
         (Check::root("cargo run -p xtask -- e2e <scenario>"), BROWSER),
         (
-            Check::root("cargo +nightly-2026-10-30 test -p roformer-gpu --doc"),
+            Check::root(&format!("cargo +{DOC_NIGHTLY} test -p roformer-gpu --doc")),
             "CI runs it; it needs the pinned nightly, and the stable doctest line runs the same doctests",
         ),
         (
@@ -1670,6 +1677,41 @@ mod tests {
             "synth/src/lib.rs",
         ],
     ];
+
+    /// CI installs the pinned nightly and runs the doctests on it, and
+    /// names no other nightly, so a step that goes, or a pin bumped in one
+    /// place only, fails here.
+    #[test]
+    fn the_ci_runs_the_doctests_on_the_pinned_nightly() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let install = format!("- run: rustup toolchain install {DOC_NIGHTLY} --profile minimal\n");
+        let doctests = format!("- run: cargo +{DOC_NIGHTLY} test --locked -p roformer-gpu --doc\n");
+        assert_eq!(
+            ci.matches(&install).count(),
+            1,
+            "ci.yml has no `{}`",
+            install.trim()
+        );
+        assert_eq!(
+            ci.matches(&doctests).count(),
+            1,
+            "ci.yml has no `{}`",
+            doctests.trim()
+        );
+        assert_eq!(
+            ci.matches("nightly").count(),
+            2,
+            "ci.yml names another nightly"
+        );
+        assert!(
+            ci.find(&install) < ci.find(&doctests),
+            "the install comes first"
+        );
+        assert_eq!(
+            NIGHTLY_DOC,
+            format!("cargo +{DOC_NIGHTLY} test -p roformer-gpu --doc")
+        );
+    }
 
     #[test]
     fn check_never_runs_the_browser_or_publish() {

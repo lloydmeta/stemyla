@@ -2434,9 +2434,10 @@ fn source_includes(stream: TokenStream, out: &mut Vec<(usize, &'static str, Opti
 /// read from the file's folder, as Rust reads a `#[path]` outside an
 /// inline module.  Inside an inline module, Rust reads it from a deeper
 /// folder, so the check can fail a path that stays in the crate, but
-/// never passes one that leaves it.  A file that does not tokenise gives no problem, since
-/// Cargo cannot build it either.  `include_str!` and `include_bytes!`
-/// read data, not code, so they pass.
+/// never passes one that leaves it.  A file that does not tokenise gives
+/// no problem, since Cargo cannot build it either.  `include_str!` and
+/// `include_bytes!` read data, not code, so they pass.  The check finds
+/// `include!` by its name, so a renamed import passes (TD-23).
 pub fn source_stays_in_its_crate(
     files: &[(String, String)],
     member_dirs: &[String],
@@ -2577,6 +2578,135 @@ pub fn no_tracked_link(root: &Path) -> Result<Vec<Problem>> {
             )
         })
         .collect())
+}
+
+/// The members that ship no MEM-1 lint, each with the reason.
+pub const MEM1_EXEMPT: [(&str, &str); 3] = [
+    ("dsp", "DSP-1's method list bans the copies"),
+    ("xtask", "it does not ship"),
+    ("test-support", "it does not ship"),
+];
+
+/// The members whose lint also fails a copy of a JS array (MEM-1, MEM-2):
+/// the crates of the page and the workers that read JS arrays.
+pub const MEM1_JS_CRATES: [&str; 4] = ["app", "worker", "decoder", "protocol"];
+
+const MEM1_SLICE: &str = "path = \"slice::to_vec\"";
+const MEM1_JS: [&str; 2] = [
+    "path = \"js_sys::Uint8Array::to_vec\"",
+    "path = \"js_sys::Float32Array::to_vec\"",
+];
+
+/// The body of each function named `name` in `text`, as tokens, so a name
+/// in a comment does not count.  A file that does not tokenise gives none.
+fn fn_bodies(text: &str, name: &str) -> Vec<String> {
+    fn walk(stream: TokenStream, name: &str, out: &mut Vec<String>) {
+        let trees: Vec<TokenTree> = stream.into_iter().collect();
+        for (index, tree) in trees.iter().enumerate() {
+            if let TokenTree::Group(group) = tree {
+                walk(group.stream(), name, out);
+            }
+            let named = ident_name(Some(tree)).as_deref() == Some("fn")
+                && ident_name(trees.get(index + 1)).as_deref() == Some(name);
+            if !named {
+                continue;
+            }
+            let body = trees[index + 2..].iter().find_map(|tree| match tree {
+                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
+                    Some(group.stream().to_string())
+                }
+                _ => None,
+            });
+            out.extend(body);
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(tokens) = TokenStream::from_str(text) {
+        walk(tokens, name, &mut out);
+    }
+    out
+}
+
+/// MEM-1 and MEM-2: each member that ships has a `clippy.toml` that fails
+/// `slice::to_vec`, and a canary whose `#[expect]` proves the path (TD-26).
+/// Each crate of [`MEM1_JS_CRATES`] also fails the two JS-array copies,
+/// with the canary `mem1_lint_is_on_for_js_arrays`, which expects all
+/// three.  `configs` holds each member's `clippy.toml` text, or `None`;
+/// `files` holds the Rust files with their text.
+pub fn mem1_lint_problems(
+    members: &[String],
+    configs: &[(String, Option<String>)],
+    files: &[(String, String)],
+) -> Vec<Problem> {
+    let mem1 = |file: &str, message: String| Problem {
+        rule: "MEM-1",
+        file: file.to_string(),
+        line: None,
+        message,
+    };
+    let mut problems = Vec::new();
+    for dir in members {
+        if MEM1_EXEMPT.iter().any(|(exempt, _)| exempt == dir) {
+            continue;
+        }
+        let config_file = format!("{dir}/clippy.toml");
+        let config = configs
+            .iter()
+            .find(|(member, _)| member == dir)
+            .and_then(|(_, text)| text.as_deref())
+            .unwrap_or_default();
+        let js = MEM1_JS_CRATES.contains(&dir.as_str());
+        let wanted: Vec<&str> = std::iter::once(MEM1_SLICE)
+            .chain(MEM1_JS.into_iter().filter(|_| js))
+            .collect();
+        for path in &wanted {
+            if !config.contains(path) {
+                problems.push(mem1(
+                    &config_file,
+                    format!(
+                        "MEM-1: {config_file} lacks `{path}`.  Fix: copy the `disallowed-methods` entry of app/clippy.toml, or add {dir} to `MEM1_EXEMPT` in {RULES_FILE} with a reason."
+                    ),
+                ));
+            }
+        }
+        let (canary, proves): (&str, &[&str]) = if js {
+            (
+                "mem1_lint_is_on_for_js_arrays",
+                &["disallowed_methods", "to_vec", "Uint8Array", "Float32Array"],
+            )
+        } else {
+            ("mem1_lint_is_on", &["disallowed_methods", "to_vec"])
+        };
+        let proven = files
+            .iter()
+            .filter(|(file, _)| file.starts_with(&format!("{dir}/")))
+            .flat_map(|(_, text)| fn_bodies(text, canary))
+            .any(|body| body.contains("expect") && proves.iter().all(|word| body.contains(word)));
+        if !proven {
+            problems.push(mem1(
+                dir,
+                format!(
+                    "MEM-1: {dir} has no `{canary}` whose `#[expect(clippy::disallowed_methods)]` copies with each lint path, so nothing proves that the paths resolve.  Fix: add the canary of {}.",
+                    if js { "app/tests/web.rs" } else { "engine/src/song.rs" }
+                ),
+            ));
+        }
+    }
+    for name in MEM1_EXEMPT
+        .iter()
+        .map(|(exempt, _)| *exempt)
+        .chain(MEM1_JS_CRATES)
+    {
+        if !members.iter().any(|dir| dir == name) {
+            problems.push(mem1(
+                RULES_FILE,
+                format!(
+                    "MEM-1: {RULES_FILE} names {name}, which is not a member.  Fix: remove it."
+                ),
+            ));
+        }
+    }
+    problems
 }
 
 const PROTOCOL_LIB: &str = "protocol/src/lib.rs";
@@ -6804,6 +6934,7 @@ fn f() {
             "const { type, of } = d;",
             "// { type: 'x' }",
             "/* d.type === 'x' */",
+            "/* a * { type: 'x' } b/c */",
             "`${ { type: 'x' } }`",
         ];
         for case in js_cases {
@@ -6852,6 +6983,11 @@ fn f() {
     fn a_type_after_a_comment_of_several_lines_has_its_line() {
         let js = format!("{JS_OK}\n/* a * b\n * c\n ** d\n*/ x({{ type: 'segmnt' }});");
         assert_one_each("PROTO-1", &[(WORKER_JS, check(&js, RUST_OK, &[]), Some(5))]);
+        let first = format!("{JS_OK}\n/*\n a\n */ x({{ type: 'segmnt' }});");
+        assert_one_each(
+            "PROTO-1",
+            &[(WORKER_JS, check(&first, RUST_OK, &[]), Some(4))],
+        );
         let unclosed = format!("{JS_OK}\n/* a\n b {{ type: 'segmnt' }}");
         assert_eq!(check(&unclosed, RUST_OK, &[]), vec![]);
     }
@@ -7599,6 +7735,52 @@ mod source_tests {
         assert_eq!(back, vec![], "a `..` that stays in the folder");
     }
 
+    /// `no_tracked_link` reads a repo's index: a link staged in a new repo
+    /// gives one problem, and a plain file gives none.
+    #[test]
+    fn a_tracked_link_in_a_repo_is_a_problem() {
+        let root = std::env::temp_dir().join(format!("xtask-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("engine/src")).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("engine/src/lib.rs"), "fn f() {}\n").unwrap();
+        git(&["add", "engine/src/lib.rs"]);
+        let plain = no_tracked_link(&root);
+        std::fs::write(root.join("target.txt"), "../dsp/src/lib.rs").unwrap();
+        let blob = git(&["hash-object", "-w", "target.txt"]);
+        git(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("120000,{blob},engine/src/link.rs"),
+        ]);
+        let linked = no_tracked_link(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(plain.unwrap(), vec![]);
+        let linked = linked.unwrap();
+        assert_eq!(linked.len(), 1, "{linked:#?}");
+        assert_eq!(linked[0].file, "engine/src/link.rs");
+        assert!(
+            linked[0]
+                .message
+                .starts_with("LAYER-1: engine/src/link.rs is a symbolic link in git")
+        );
+    }
+
     #[test]
     fn links_are_read_from_the_index() {
         let output = [
@@ -7610,5 +7792,160 @@ mod source_tests {
         .join("\0");
         assert_eq!(links_in_index(&output), ["src/link.rs"]);
         assert_eq!(links_in_index(""), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod mem1_tests {
+    use super::*;
+
+    const SLICE: &str =
+        "disallowed-methods = [\n  { path = \"slice::to_vec\", reason = \"x\" },\n]\n";
+    const ALL: &str = "disallowed-methods = [\n  { path = \"slice::to_vec\", reason = \"x\" },\n  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n  { path = \"js_sys::Float32Array::to_vec\", reason = \"x\" },\n]\n";
+    const CANARY: &str = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"MEM-1 canary\")]\n        let copy = [1.0_f32].to_vec();\n        assert_eq!(copy, [1.0]);\n    }\n}\n";
+    const JS_CANARY: &str = "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let b = js_sys::Uint8Array::from(&[2_u8][..]).to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let c = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();\n}\n";
+
+    /// A repo of the exempt crates, the JS crates and `engine`, each as it
+    /// should be, with `change` applied to the files.
+    fn problems(
+        change: impl FnOnce(&mut Vec<(String, Option<String>)>, &mut Vec<(String, String)>),
+    ) -> Vec<String> {
+        let mut members: Vec<String> = MEM1_EXEMPT.iter().map(|(dir, _)| dir.to_string()).collect();
+        members.extend(MEM1_JS_CRATES.iter().map(|dir| dir.to_string()));
+        members.push("engine".into());
+        let mut configs: Vec<(String, Option<String>)> = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
+        for dir in MEM1_JS_CRATES {
+            configs.push((dir.into(), Some(ALL.into())));
+            files.push((format!("{dir}/tests/web.rs"), JS_CANARY.into()));
+        }
+        configs.push(("engine".into(), Some(SLICE.into())));
+        files.push(("engine/src/song.rs".into(), CANARY.into()));
+        change(&mut configs, &mut files);
+        mem1_lint_problems(&members, &configs, &files)
+            .into_iter()
+            .map(|p| format!("{}: {}", p.file, p.message))
+            .collect()
+    }
+
+    /// A change to the configs and the files of the repo of [`problems`].
+    type Change = dyn FnOnce(&mut Vec<(String, Option<String>)>, &mut Vec<(String, String)>);
+
+    fn set(configs: &mut [(String, Option<String>)], dir: &str, text: Option<&str>) {
+        let entry = configs
+            .iter_mut()
+            .find(|(d, _)| d == dir)
+            .expect("a member");
+        entry.1 = text.map(str::to_string);
+    }
+
+    fn file(files: &mut [(String, String)], path: &str, text: &str) {
+        files.iter_mut().find(|(f, _)| f == path).expect("a file").1 = text.into();
+    }
+
+    #[test]
+    fn a_repo_that_lints_every_copy_passes() {
+        assert_eq!(problems(|_, _| {}), Vec::<String>::new());
+    }
+
+    #[test]
+    fn each_missing_path_or_canary_is_a_problem() {
+        let cases: Vec<(&str, Box<Change>)> = vec![
+            (
+                "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+                Box::new(|c, _| set(c, "engine", None)),
+            ),
+            (
+                "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+                Box::new(|c, _| set(c, "engine", Some("disallowed-methods = []\n"))),
+            ),
+            (
+                "decoder/clippy.toml: MEM-1: decoder/clippy.toml lacks `path = \"js_sys::Uint8Array::to_vec\"`",
+                Box::new(|c, _| {
+                    set(
+                        c,
+                        "decoder",
+                        Some(&ALL.replace(
+                            "  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n",
+                            "",
+                        )),
+                    )
+                }),
+            ),
+            (
+                "app/clippy.toml: MEM-1: app/clippy.toml lacks `path = \"js_sys::Float32Array::to_vec\"`",
+                Box::new(|c, _| {
+                    set(
+                        c,
+                        "app",
+                        Some(&ALL.replace(
+                            "  { path = \"js_sys::Float32Array::to_vec\", reason = \"x\" },\n",
+                            "",
+                        )),
+                    )
+                }),
+            ),
+            (
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(|_, f| file(f, "engine/src/song.rs", "fn other() {}\n")),
+            ),
+            (
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(|_, f| {
+                    file(
+                        f,
+                        "engine/src/song.rs",
+                        "// fn mem1_lint_is_on() { expect disallowed_methods to_vec }\nfn x() {}\n",
+                    )
+                }),
+            ),
+            (
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(|_, f| {
+                    file(
+                        f,
+                        "engine/src/song.rs",
+                        "fn mem1_lint_is_on() { let copy = [1.0_f32].to_vec(); }\n",
+                    )
+                }),
+            ),
+            (
+                "worker: MEM-1: worker has no `mem1_lint_is_on_for_js_arrays`",
+                Box::new(|_, f| file(f, "worker/tests/web.rs", CANARY)),
+            ),
+            (
+                "protocol: MEM-1: protocol has no `mem1_lint_is_on_for_js_arrays`",
+                Box::new(|_, f| {
+                    file(
+                        f,
+                        "protocol/tests/web.rs",
+                        &JS_CANARY.replace("Float32Array", "Int16Array"),
+                    )
+                }),
+            ),
+        ];
+        for (want, change) in cases {
+            let found = problems(change);
+            assert_eq!(found.len(), 1, "{want}\n{found:#?}");
+            assert!(found[0].starts_with(want), "{want}\n{found:#?}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_member_is_a_problem() {
+        let members: Vec<String> = ["engine".to_string()].into();
+        let configs = [("engine".to_string(), Some(SLICE.to_string()))];
+        let files = [("engine/src/song.rs".to_string(), CANARY.to_string())];
+        let found = mem1_lint_problems(&members, &configs, &files);
+        assert_eq!(
+            found.len(),
+            MEM1_EXEMPT.len() + MEM1_JS_CRATES.len(),
+            "{found:#?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|p| p.file == RULES_FILE && p.message.contains("which is not a member"))
+        );
     }
 }

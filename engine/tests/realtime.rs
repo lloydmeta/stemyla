@@ -735,7 +735,8 @@ fn wsola_gives_the_same_output_for_a_push_of_max_push_frames() {
 /// frames of stereo silence.  On 2026-11-06 it allocated 2.03 to 2.07
 /// times that push in bytes, from 8 to 192 kHz: the push and wsola's
 /// input buffer.  A larger push costs the tab memory that it never gets
-/// back (MEM-4), so the bound is 2.5 times.
+/// back (MEM-4), so the bound is 2.5 times.  A push of up to about 1.2
+/// times the formula passes it, and a doubled push fails it.
 #[test]
 fn wsola_warms_up_with_a_bounded_push() {
     for rate in [8_000, 44_100, 48_000, 192_000] {

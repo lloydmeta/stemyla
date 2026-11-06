@@ -2448,8 +2448,7 @@ mod tests {
     #[test]
     fn check_runs_each_check_on_a_repo() {
         let root = repo_copy("check");
-        let clean = check(&root).expect("the copy can be read");
-        assert_eq!(clean, Vec::<Problem>::new(), "the copy of the repo");
+        let clean = check(&root);
 
         // The check, the file of its problem, and the plant.
         type Plant<'a> = (&'a str, &'a str, &'a dyn Fn(&Path));
@@ -2463,6 +2462,20 @@ mod tests {
                         .filter(|l| !l.starts_with("* `dsp/`"))
                         .map(|l| format!("{l}\n"))
                         .collect()
+                })
+            }),
+            ("crates", "README.md", &|r| {
+                edit(r, "README.md", |t| {
+                    t.lines()
+                        .filter(|l| !l.starts_with("| `dsp/`"))
+                        .map(|l| format!("{l}\n"))
+                        .collect()
+                })
+            }),
+            ("crates", "docs/ARCHITECTURE.md", &|r| {
+                // `dsp` is named in more lines of `## Crates`; `xtask` in two.
+                edit(r, "docs/ARCHITECTURE.md", |t| {
+                    t.replace("`xtask`", "`xtask-gone`")
                 })
             }),
             ("rules", "CLAUDE.md", &|r| {
@@ -2516,7 +2529,12 @@ mod tests {
         for (_, _, plant) in plants {
             plant(&root);
         }
-        let found = check(&root).expect("the planted copy can be read");
+        let found = check(&root);
+        // Removed before the asserts, so a failed run leaves no copy.
+        std::fs::remove_dir_all(&root).unwrap();
+        let clean = clean.expect("the copy can be read");
+        assert_eq!(clean, Vec::<Problem>::new(), "the copy of the repo");
+        let found = found.expect("the planted copy can be read");
         for (kind, file, _) in plants {
             assert!(
                 found.iter().any(|p| p.check == *kind && p.file == *file),
@@ -2528,6 +2546,5 @@ mod tests {
                     .join("\n")
             );
         }
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }
