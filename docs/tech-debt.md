@@ -80,7 +80,7 @@ Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-pro
 * a new `to_vec` in a statement that already has an `#[expect]`, and a new test in a test module with a module-level `#[expect]` or `#![expect]`;
 * a path that no longer resolves, except through the canaries, which prove their paths only while the clippy steps keep `--all-targets`.  Nothing fails if the `wasm32` step goes.
 
-Since tech-debt rung 1, `each_shipped_crate_lints_mem1_copies` fails a shipped crate whose `clippy.toml` lacks `slice::to_vec`.  It fails a crate of `MEM1_JS_CRATES` that lacks either JS-array path.  It also fails a crate without a canary whose `#[expect]` proves the paths.  `dsp`, `xtask` and `test-support` are exempt, each with its reason.  What it does not see:
+Since tech-debt rung 1, `each_shipped_crate_lints_mem1_copies` fails a shipped crate whose `clippy.toml` lacks `slice::to_vec`.  It fails a crate of `MEM1_JS_CRATES` that lacks either JS-array path.  It also fails a crate without a canary that proves the paths: one statement for each path, under `#[expect(clippy::disallowed_methods)]` and with no `#[cfg]`, that ends in `.to_vec()` on that type.  `dsp`, `xtask` and `test-support` are exempt, each with its reason.  What it does not see:
 
 * a new crate that reads JS arrays but is not in `MEM1_JS_CRATES` (`xtask/src/rules.rs`), which needs only the `slice::to_vec` path.  `engine` takes `js-sys` for `cpal`, and is not in the list.  `roformer-gpu` reads a mapped `Float32Array` through `wgpu::web_sys` in `mapped_floats`, and is not in the list either.
 

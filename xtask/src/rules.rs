@@ -2600,8 +2600,8 @@ const MEM1_JS: [&str; 2] = [
 
 /// The body of each function named `name` in `text`, as tokens, so a name
 /// in a comment does not count.  A file that does not tokenise gives none.
-fn fn_bodies(text: &str, name: &str) -> Vec<String> {
-    fn walk(stream: TokenStream, name: &str, out: &mut Vec<String>) {
+fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
+    fn walk(stream: TokenStream, name: &str, out: &mut Vec<TokenStream>) {
         let trees: Vec<TokenTree> = stream.into_iter().collect();
         for (index, tree) in trees.iter().enumerate() {
             if let TokenTree::Group(group) = tree {
@@ -2614,7 +2614,7 @@ fn fn_bodies(text: &str, name: &str) -> Vec<String> {
             }
             let body = trees[index + 2..].iter().find_map(|tree| match tree {
                 TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
-                    Some(group.stream().to_string())
+                    Some(group.stream())
                 }
                 _ => None,
             });
@@ -2628,24 +2628,110 @@ fn fn_bodies(text: &str, name: &str) -> Vec<String> {
     out
 }
 
-/// The copies that `body` expects the lint to fail: for each statement
-/// with `#[expect(clippy::disallowed_methods ...)]` that calls `to_vec`,
-/// the JS-array type it names, or `"slice"`.  The body is the text of its
-/// tokens, so spaces are left out before the search.
-fn expected_copies(body: &str) -> Vec<&'static str> {
-    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    flat.split(';')
-        .filter(|statement| {
-            statement.contains("#[expect(clippy::disallowed_methods")
-                && statement.contains(".to_vec()")
+/// The copies that `body` expects the lint to fail.  A statement counts
+/// when one of its own attributes is `#[expect(clippy::disallowed_methods
+/// ...)]`, none is a `#[cfg]` or `#[cfg_attr]`, and the statement ends in
+/// `.to_vec()`.  The kind is the JS-array type that the receiver names
+/// outside any bracket, so `js_sys::Uint8Array::from(..).to_vec()` is
+/// `"Uint8Array"`, and `[..].to_vec()` is `"slice"`.  A word in a reason
+/// or in a nested group does not count.
+fn expected_copies(body: TokenStream) -> Vec<&'static str> {
+    let trees: Vec<TokenTree> = body.into_iter().collect();
+    let mut copies = Vec::new();
+    for statement in trees.split(|tree| punct_spacing(Some(tree), ';').is_some()) {
+        let mut index = 0;
+        let mut expected = false;
+        let mut configured = false;
+        while punct_spacing(statement.get(index), '#').is_some() {
+            let Some(TokenTree::Group(attribute)) = statement.get(index + 1) else {
+                break;
+            };
+            let inner: Vec<TokenTree> = attribute.stream().into_iter().collect();
+            let name = ident_name(inner.first()).unwrap_or_default();
+            let lint = match inner.get(1) {
+                Some(TokenTree::Group(args)) => args.stream().to_string().replace(' ', ""),
+                _ => String::new(),
+            };
+            expected |= name == "expect" && lint.starts_with("clippy::disallowed_methods");
+            configured |= name == "cfg" || name == "cfg_attr";
+            index += 2;
+        }
+        let rest = &statement[index..];
+        let n = rest.len();
+        let ends_in_to_vec = n >= 3
+            && punct_spacing(rest.get(n - 3), '.').is_some()
+            && ident_name(rest.get(n - 2)).as_deref() == Some("to_vec")
+            && matches!(rest.get(n - 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis && g.stream().is_empty());
+        if !expected || configured || !ends_in_to_vec {
+            continue;
+        }
+        let receiver = &rest[..n - 3];
+        let kind = ["Uint8Array", "Float32Array"]
+            .into_iter()
+            .find(|name| {
+                receiver
+                    .iter()
+                    .any(|tree| ident_name(Some(tree)).as_deref() == Some(*name))
+            })
+            .unwrap_or("slice");
+        copies.push(kind);
+    }
+    copies
+}
+
+/// The text of the `disallowed-methods` array of a `clippy.toml`, with each
+/// `#` comment removed, or `""` if it has none.  A `#` inside a string is
+/// not a comment.
+fn disallowed_methods(config: &str) -> String {
+    let mut text = String::new();
+    for line in config.lines() {
+        let mut quote: Option<char> = None;
+        for c in line.chars() {
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '#' => break,
+                None => {}
+            }
+            text.push(c);
+        }
+        text.push('\n');
+    }
+    let Some(start) = text
+        .lines()
+        .scan(0, |at, line| {
+            let here = *at;
+            *at += line.len() + 1;
+            Some((here, line))
         })
-        .map(|statement| {
-            ["Uint8Array", "Float32Array"]
-                .into_iter()
-                .find(|name| statement.contains(name))
-                .unwrap_or("slice")
-        })
-        .collect()
+        .find(|(_, line)| line.trim_start().starts_with("disallowed-methods"))
+        .map(|(at, _)| at)
+    else {
+        return String::new();
+    };
+    let rest = &text[start..];
+    let Some(open) = rest.find('[') else {
+        return String::new();
+    };
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    for (at, c) in rest[open..].char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '[' => depth += 1,
+            None if c == ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[open..open + at + 1].to_string();
+                }
+            }
+            None => {}
+        }
+    }
+    String::new()
 }
 
 /// MEM-1 and MEM-2: each member that ships has a `clippy.toml` that fails
@@ -2678,11 +2764,7 @@ pub fn mem1_lint_problems(
             .find(|(member, _)| member == dir)
             .and_then(|(_, text)| text.as_deref())
             .unwrap_or_default();
-        let config: String = config
-            .lines()
-            .filter(|line| !line.trim_start().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let config = disallowed_methods(config);
         let js = MEM1_JS_CRATES.contains(&dir.as_str());
         let wanted: Vec<&str> = std::iter::once(MEM1_SLICE)
             .chain(MEM1_JS.into_iter().filter(|_| js))
@@ -2693,7 +2775,12 @@ pub fn mem1_lint_problems(
                     &config_file,
                     format!(
                         "MEM-1: {config_file} lacks `{path}`.  Fix: copy the `disallowed-methods` entry of {}, or add {dir} to `MEM1_EXEMPT` in {RULES_FILE} with a reason.",
-                        if js { "app/clippy.toml" } else { "engine/clippy.toml" }
+                        match (js, dir.as_str()) {
+                            (true, "app") => "worker/clippy.toml",
+                            (true, _) => "app/clippy.toml",
+                            (false, "engine") => "roformer/clippy.toml",
+                            (false, _) => "engine/clippy.toml",
+                        }
                     ),
                 ));
             }
@@ -2711,7 +2798,7 @@ pub fn mem1_lint_problems(
             .filter(|(file, _)| file.starts_with(&format!("{dir}/")))
             .flat_map(|(_, text)| fn_bodies(text, canary))
             .any(|body| {
-                let copies = expected_copies(&body);
+                let copies = expected_copies(body);
                 proves.iter().all(|kind| copies.contains(kind))
             });
         if !proven {
@@ -7977,7 +8064,7 @@ mod mem1_tests {
             }),
         ));
         cases.push((
-            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`.  Fix: copy the `disallowed-methods` entry of engine/clippy.toml",
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`.  Fix: copy the `disallowed-methods` entry of roformer/clippy.toml",
             Box::new(|c, _| {
                 set(
                     c,
@@ -7987,12 +8074,55 @@ mod mem1_tests {
             }),
         ));
         cases.push((
-            "app/clippy.toml: MEM-1: app/clippy.toml lacks `path = \"js_sys::Uint8Array::to_vec\"`.  Fix: copy the `disallowed-methods` entry of app/clippy.toml",
+            "app/clippy.toml: MEM-1: app/clippy.toml lacks `path = \"js_sys::Uint8Array::to_vec\"`.  Fix: copy the `disallowed-methods` entry of worker/clippy.toml",
             Box::new(|c, _| {
                 set(
                     c,
                     "app",
                     Some(&ALL.replace("  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n", "")),
+                )
+            }),
+        ));
+        // Round 3: an expected statement with no copy, a type named only
+        // in a reason or inside a slice, a statement under `#[cfg]`, and a
+        // path in a trailing comment or under another key.
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(f, "engine/src/song.rs", "fn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let _x = [1.0_f32].len();\n}\n")
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(f, "engine/src/song.rs", "fn mem1_lint_is_on() {\n    #[cfg(any())]\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n}\n")
+            }),
+        ));
+        cases.push((
+            "app: MEM-1: app has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(f, "app/tests/web.rs", "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"Uint8Array\")]\n    let b = [2_u8].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"Float32Array\")]\n    let c = [3.0_f32].to_vec();\n}\n")
+            }),
+        ));
+        cases.push((
+            "worker: MEM-1: worker has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(f, "worker/tests/web.rs", "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let b = [js_sys::Uint8Array::new_with_length(1)].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let c = [js_sys::Float32Array::new_with_length(1)].to_vec();\n}\n")
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`.  Fix: copy the `disallowed-methods` entry of roformer/clippy.toml",
+            Box::new(|c, _| {
+                set(c, "engine", Some("disallowed-methods = [] # { path = \"slice::to_vec\" }\n"))
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "engine",
+                    Some("disallowed-methods = []\ndisallowed-macros = [{ path = \"slice::to_vec\" }]\n"),
                 )
             }),
         ));

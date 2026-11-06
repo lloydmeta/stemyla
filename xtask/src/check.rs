@@ -1709,7 +1709,8 @@ mod tests {
         );
         assert_eq!(
             NIGHTLY_DOC,
-            format!("cargo +{DOC_NIGHTLY} test -p roformer-gpu --doc")
+            format!("cargo +{DOC_NIGHTLY} test -p roformer-gpu --doc"),
+            "change NIGHTLY_DOC to match DOC_NIGHTLY"
         );
     }
 

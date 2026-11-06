@@ -2409,27 +2409,17 @@ mod tests {
         );
     }
 
-    /// A copy of this repo's tracked files in a new folder.
+    /// A copy of the files of this repo that `check` reads, in a new folder.
     fn repo_copy(name: &str) -> std::path::PathBuf {
         let from = crate::workspace_root();
         let to = std::env::temp_dir().join(format!("xtask-docs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&to);
-        let out = std::process::Command::new("git")
-            .args(["ls-files", "-z"])
-            .current_dir(&from)
-            .output()
-            .expect("git runs");
-        assert!(out.status.success(), "git ls-files failed");
-        for rel in String::from_utf8(out.stdout)
-            .expect("UTF-8 paths")
-            .split('\0')
-        {
-            if rel.is_empty() || !from.join(rel).is_file() {
-                continue;
-            }
-            let target = to.join(rel);
+        // The files that `check` reads: the same walk, so the copy and the
+        // repo hold the same files, tracked or not.
+        for rel in repo_files(&from).expect("the repo can be walked") {
+            let target = to.join(&rel);
             std::fs::create_dir_all(target.parent().expect("a file has a folder")).unwrap();
-            std::fs::copy(from.join(rel), target).unwrap();
+            std::fs::copy(from.join(&rel), target).unwrap();
         }
         to
     }
