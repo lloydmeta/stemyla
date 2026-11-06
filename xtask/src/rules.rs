@@ -2622,7 +2622,8 @@ fn turns_off(attribute: &proc_macro2::Group) -> bool {
 
 /// The body of each function named `name` in `text`, as tokens, so a name
 /// in a comment does not count.  An item ends with its brace body or its
-/// `;`.  When an attribute on an item turns it off ([`turns_off`]), its body
+/// `;`.  Its body is the first brace group outside the `<` and `>` of its
+/// header, and an `if` block with an `else` does not end its statement.  When an attribute on an item turns it off ([`turns_off`]), its body
 /// is skipped, whatever the item is: a `fn`, a `mod`, an `impl`, a `trait`
 /// or a block.  An inner `#![...]` that turns off a file or a module skips
 /// all of it.  A file that does not tokenise gives none.
@@ -2645,6 +2646,12 @@ fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
         // is `fn <name>`.
         let mut off = false;
         let mut named = false;
+        // The depth of `<` in the header of the item, so a brace group in
+        // a generic argument, such as `impl S<{ 1 }>`, is not its body.
+        let mut angle: usize = 0;
+        // Only the header of an item counts `<`, so `a < b` in a body does
+        // not.
+        let mut header = false;
         while let Some(tree) = trees.get(index) {
             if punct_spacing(Some(tree), '#').is_some()
                 && let Some(TokenTree::Group(attribute)) = trees.get(index + 1)
@@ -2659,7 +2666,33 @@ fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
             {
                 named = true;
             }
+            if matches!(
+                ident_name(Some(tree)).as_deref(),
+                Some("impl" | "trait" | "fn" | "struct" | "enum" | "union" | "type")
+            ) {
+                header = true;
+            }
             match tree {
+                TokenTree::Punct(punct) if header && punct.as_char() == '<' => angle += 1,
+                TokenTree::Punct(punct) if header && punct.as_char() == '>' => {
+                    // `->` and `=>` are not the end of a generic argument.
+                    let arrow = index > 0
+                        && (joint(trees.get(index - 1), '-') || joint(trees.get(index - 1), '='));
+                    if !arrow {
+                        angle = angle.saturating_sub(1);
+                    }
+                }
+                TokenTree::Group(group)
+                    if group.delimiter() == Delimiter::Brace
+                        && (angle > 0
+                            || ident_name(trees.get(index + 1)).as_deref() == Some("else")) =>
+                {
+                    // A brace group in a generic argument, or an `if` block
+                    // before its `else`: the item goes on.
+                    if !off {
+                        walk(group.stream(), name, out);
+                    }
+                }
                 TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
                     // The body ends the item.
                     if !off {
@@ -2670,6 +2703,8 @@ fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
                     }
                     off = false;
                     named = false;
+                    angle = 0;
+                    header = false;
                 }
                 TokenTree::Group(group) => {
                     if !off {
@@ -2679,6 +2714,8 @@ fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
                 _ if punct_spacing(Some(tree), ';').is_some() => {
                     off = false;
                     named = false;
+                    angle = 0;
+                    header = false;
                 }
                 _ => {}
             }
@@ -8050,6 +8087,24 @@ mod mem1_tests {
             )
         });
         assert_eq!(after, Vec::<String>::new());
+        // A `#[cfg]` on an item that ends in `;` ends there too.
+        let after_use = problems(|_, f| {
+            file(
+                f,
+                "engine/src/song.rs",
+                &format!("#[cfg(feature = \"x\")]\nuse std::fmt;\n{CANARY}"),
+            )
+        });
+        assert_eq!(after_use, Vec::<String>::new());
+        // A `<` in a body is a comparison, not a generic argument.
+        let compare = problems(|_, f| {
+            file(
+                f,
+                "engine/src/song.rs",
+                "fn f(a: u8, b: u8) {\n    if a < b {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            )
+        });
+        assert_eq!(compare, Vec::<String>::new());
     }
 
     #[test]
@@ -8266,7 +8321,13 @@ mod mem1_tests {
         ));
         // Round 5: a `#[cfg]` on an `impl`, a `trait` or a block around the
         // canary turns it off too.
-        for wrap in ["impl S", "trait T", "const _: () ="] {
+        for wrap in [
+            "impl S",
+            "trait T",
+            "const _: () =",
+            "impl S<{ 1 }>",
+            "impl Tr<{ 0 }> for S",
+        ] {
             cases.push((
                 "engine: MEM-1: engine has no `mem1_lint_is_on`",
                 Box::new(move |_, f| {
@@ -8278,6 +8339,38 @@ mod mem1_tests {
                 }),
             ));
         }
+        // Round 6: an `if` with an `else` is one statement, and a canary
+        // name holds only for its own item.
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "fn f() {\n    #[cfg(any())]\n    let _ = if c { 1 } else { fn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n} 2 };\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "fn mem1_lint_is_on() {}\nfn other() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "trait U {\n    fn mem1_lint_is_on();\n    fn other() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n    }\n}\n",
+                )
+            }),
+        ));
         for (want, change) in cases {
             let found = problems(change);
             assert_eq!(found.len(), 1, "{want}\n{found:#?}");
