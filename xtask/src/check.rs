@@ -159,6 +159,10 @@ pub fn never_run() -> Vec<(Check, &'static str)> {
         (Check::root("cargo run -p xtask -- web-test"), BROWSER),
         (Check::root("cargo run -p xtask -- e2e <scenario>"), BROWSER),
         (
+            Check::root("cargo +nightly-2026-10-30 test -p roformer-gpu --doc"),
+            "CI runs it; it needs the pinned nightly, and the stable doctest line runs the same doctests",
+        ),
+        (
             Check::root("cargo run -p xtask --release -- publish"),
             "a person only (GIT-1)",
         ),
@@ -1058,6 +1062,7 @@ mod tests {
     const SERVE: &str = "cargo run -p xtask --release -- serve app/dist --port 8080";
     const WEB_TEST: &str = "cargo run -p xtask -- web-test";
     const E2E: &str = "cargo run -p xtask -- e2e <scenario>";
+    const NIGHTLY_DOC: &str = "cargo +nightly-2026-10-30 test -p roformer-gpu --doc";
     const PUBLISH: &str = "cargo run -p xtask --release -- publish";
 
     /// The 11 members of this repo and their real edges, of all kinds.
@@ -1118,14 +1123,16 @@ mod tests {
 
     /// The skips at the end of each plan of tier `commit`.
     fn commit_tail() -> Vec<String> {
-        [GPU, TRUNK, SERVE, WEB_TEST, E2E, PUBLISH]
+        [GPU, TRUNK, SERVE, WEB_TEST, E2E, NIGHTLY_DOC, PUBLISH]
             .map(skip)
             .to_vec()
     }
 
     /// The skips at the end of each plan of tier `push`.
     fn push_tail() -> Vec<String> {
-        [SERVE, WEB_TEST, E2E, PUBLISH].map(skip).to_vec()
+        [SERVE, WEB_TEST, E2E, NIGHTLY_DOC, PUBLISH]
+            .map(skip)
+            .to_vec()
     }
 
     fn with_tail(head: Vec<String>, tail: Vec<String>) -> Vec<String> {
@@ -1634,6 +1641,11 @@ mod tests {
             reason(TRUNK)
         );
         assert!(reason(E2E).contains("decision 0026"), "{}", reason(E2E));
+        assert!(
+            reason(NIGHTLY_DOC).contains("CI runs it"),
+            "{}",
+            reason(NIGHTLY_DOC)
+        );
         assert!(reason(PUBLISH).contains("GIT-1"), "{}", reason(PUBLISH));
     }
 

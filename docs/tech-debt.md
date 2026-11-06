@@ -54,12 +54,6 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 * Fix: the drift job in phase 5a of the plan, which compares each doc with the code it describes.
 
-### TD-22: a compile-fail doctest passes on any compile error
-
-MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E0616`, `E0624`) pass on any compile error, since stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  `Rec`'s `no_run` doctest compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.  The `Gpu` doctests have no such twin, since a `no_run` doctest cannot call a private item.  So a rename that also makes an item public (`pub dev`) fails them with another error, and they pass.
-
-* Fix: run `cargo +nightly test -p roformer-gpu --doc` in CI, since nightly rustdoc checks the error code; or check it with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
-
 ### TD-23: LAYER-1 sees crates, not code
 
 `crates_depend_only_downwards` reads the dependencies between crates, not the source (LAYER-1).
@@ -699,6 +693,7 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-14: closed by `an_mp3_is_encoded_in_blocks` (harness phase 2, M18b).  The worker reads the channels from JS in blocks, so an encode holds a few times the size of the MP3, not the PCM (MEM-1).
 * TD-15: closed by `the_callback_does_not_allocate_after_warm_up` (harness phase 2, M11).  wsola 0.2.0, a warm-up of each stretcher, chipmunk decimation in place and a bound on the playhead's anchors removed the allocations in the audio callback (RT-1).
 * TD-17: closed by `a_view_is_written_whole` (harness phase 2, M18a).  `st_write` copies a view into a whole array, as the worker's `whole()` does (MEM-5).
+* TD-22: closed by a step of CI's `test` job, `cargo +nightly-2026-10-30 test --locked -p roformer-gpu --doc` (tech-debt rung 1).  Nightly rustdoc checks the error code of a `compile_fail` doctest.  With `E0308` in place of `E0505` on `Rec`'s doctest, the step failed: "Some expected error codes were not found".  Stable passed it (MEM-3).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.
 * TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
