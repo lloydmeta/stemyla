@@ -54,15 +54,12 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 * Fix: the drift job in phase 5a of the plan, which compares each doc with the code it describes.
 
-### TD-23: LAYER-1 sees crates, not code
+### TD-23: LAYER-1 does not see a copy of a workspace crate from a registry
 
-`crates_depend_only_downwards` reads the dependencies between crates, not the source (LAYER-1).
+`crates_depend_only_downwards` reads the dependencies between crates (LAYER-1).  Since tech-debt rung 1, `code_stays_in_its_crate` also reads the source.  It fails a `#[path]` or an `include!` that takes code from outside its crate, a target whose source is outside its package folder, and a tracked symbolic link.  What is left:
 
 * A crate from a registry or git, under another name, can hold a copy of a workspace crate, such as `roformer`.
-* Source can reach across crates without a dependency: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
-* A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
-* A symbolic link in a crate's folder can point to another crate's source.
-* Fix: the `supply-chain-reviewer` agent looks for all four, on each diff that routes it (TD-31).  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
+* Fix: the `supply-chain-reviewer` agent looks for a copied crate, on each diff that routes it (TD-31).
 
 ### TD-25: RT-1's allocation test runs natively only
 

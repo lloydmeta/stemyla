@@ -60,7 +60,7 @@ If the prompt does not give one of these, say so in the output, and review with 
 
 * DEPS-1, BUILD-1, ASSET-1 and GIT-1.  Read each rule in `docs/invariants.md`.
 * The licence and the registry of each new crate.  Check them with `cargo info <crate>` (TD-7).
-* The four forms of TD-23.
+* What TD-23 leaves to review: a copy of a workspace crate from a registry or git, under another name.  `code_stays_in_its_crate` checks the other forms.
 * A change to CI, to a check in `xtask`, to `.claude/` or to `.mcp.json`.
 
 ## Output

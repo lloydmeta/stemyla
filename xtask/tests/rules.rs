@@ -121,6 +121,28 @@ fn crates_depend_only_downwards() {
     );
 }
 
+/// LAYER-1 in the source, not only in the manifests (TD-23): no `#[path]`
+/// or `include!` takes code from outside its crate, no target takes its
+/// source from another folder, and no tracked file is a symbolic link.
+#[test]
+fn code_stays_in_its_crate() {
+    let root = xtask::workspace_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+    let members = xtask::docs::workspace_members(&manifest);
+    let files = xtask::rules::rust_files(&root).expect("the Rust files can be read");
+    let mut problems = xtask::rules::source_stays_in_its_crate(&files, &members);
+    problems.extend(xtask::rules::targets_stay_in_their_crate(metadata()).expect("metadata"));
+    problems.extend(xtask::rules::no_tracked_link(&root).expect("git ls-files runs"));
+    let report: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        problems.is_empty(),
+        "{} problem(s) with code outside its crate:\n{}",
+        problems.len(),
+        report.join("\n")
+    );
+    assert!(members.len() >= 10, "members {members:?}");
+}
+
 #[test]
 fn the_page_and_the_worker_meet_only_through_stem_protocol() {
     let problems = xtask::rules::shells_meet_only_through_the_protocol(&workspace().crates);

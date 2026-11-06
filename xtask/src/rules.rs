@@ -2345,6 +2345,240 @@ fn table_differences(table: &[(usize, LicenceRow)], rows: &BTreeSet<LicenceRow>)
     twice.chain(changed_or_stale).chain(missing).collect()
 }
 
+/// `path` with its `.` and `..` parts resolved, as `/`-separated text.  A
+/// `..` above the start stays as `..`, so the path does not start with any
+/// folder.
+fn normalised(path: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if parts.last().is_some_and(|last| last != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..".into());
+                }
+            }
+            std::path::Component::Normal(name) => parts.push(name.to_string_lossy().into()),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                parts.clear();
+                parts.push(String::new());
+            }
+        }
+    }
+    parts.join("/")
+}
+
+/// The string that a `#[path = "..."]` attribute group names, at any depth
+/// of the group, so `#[cfg_attr(x, path = "...")]` counts too.
+fn attribute_paths(stream: TokenStream, out: &mut Vec<(usize, String)>) {
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => attribute_paths(group.stream(), out),
+            TokenTree::Ident(ident) if ident == "path" => {
+                if punct_spacing(trees.get(index + 1), '=').is_some()
+                    && let Some((line, value)) = rust_string(trees.get(index + 2))
+                {
+                    out.push((line, value));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a source file names as code from another file: each `#[path]`
+/// attribute and each `include!`, with its line.  `None` in place of a
+/// path is an `include!` whose argument is not one string literal.
+fn source_includes(stream: TokenStream, out: &mut Vec<(usize, &'static str, Option<String>)>) {
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+        let TokenTree::Group(group) = tree else {
+            let is_include = ident_name(Some(tree))
+                .is_some_and(|name| name.trim_start_matches("r#") == "include")
+                && punct_spacing(trees.get(index + 1), '!').is_some();
+            if let (true, Some(TokenTree::Group(args))) = (is_include, trees.get(index + 2)) {
+                let inner: Vec<TokenTree> = args.stream().into_iter().collect();
+                let line = args.span().start().line;
+                let path = match inner.as_slice() {
+                    [only] => rust_string(Some(only)).map(|(_, value)| value),
+                    _ => None,
+                };
+                out.push((line, "include!", path));
+            }
+            continue;
+        };
+        let after_hash = index >= 1
+            && (punct_spacing(trees.get(index - 1), '#').is_some()
+                || (index >= 2
+                    && punct_spacing(trees.get(index - 1), '!').is_some()
+                    && punct_spacing(trees.get(index - 2), '#').is_some()));
+        if group.delimiter() == Delimiter::Bracket && after_hash {
+            let mut paths = Vec::new();
+            attribute_paths(group.stream(), &mut paths);
+            out.extend(
+                paths
+                    .into_iter()
+                    .map(|(line, value)| (line, "#[path]", Some(value))),
+            );
+        }
+        source_includes(group.stream(), out);
+    }
+}
+
+/// LAYER-1: no source of a member reaches into another folder through a
+/// `#[path]` attribute or an `include!` (TD-23).  `files` holds each Rust
+/// file with its text, and `member_dirs` the members' folders.  A path is
+/// read from the file's folder, as Rust reads a `#[path]` outside an
+/// inline module.  Inside an inline module, Rust reads it from a deeper
+/// folder, so the check can fail a path that stays in the crate, but
+/// never passes one that leaves it.  A file that does not tokenise gives no problem, since
+/// Cargo cannot build it either.  `include_str!` and `include_bytes!`
+/// read data, not code, so they pass.
+pub fn source_stays_in_its_crate(
+    files: &[(String, String)],
+    member_dirs: &[String],
+) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (file, text) in files {
+        let Some(dir) = member_dirs
+            .iter()
+            .filter(|dir| file.starts_with(&format!("{dir}/")))
+            .max_by_key(|dir| dir.len())
+        else {
+            continue;
+        };
+        let Ok(tokens) = TokenStream::from_str(text) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        source_includes(tokens, &mut found);
+        let folder = Path::new(file).parent().unwrap_or(Path::new(""));
+        for (line, form, path) in found {
+            let message = match path {
+                None => format!(
+                    "LAYER-1: {file}:{line} has an `include!` whose argument is not one string literal, so the check cannot read where it goes.  Fix: name the file as a literal in {dir}/, or move the code into the crate."
+                ),
+                Some(path) => {
+                    let target = normalised(&folder.join(&path));
+                    if target.starts_with(&format!("{dir}/")) {
+                        continue;
+                    }
+                    format!(
+                        "LAYER-1: {file}:{line} takes code from `{path}` with {form}, which is outside {dir}/.  Fix: depend on the crate that holds the code, down through the layers of docs/ARCHITECTURE.md."
+                    )
+                }
+            };
+            problems.push(Problem {
+                rule: "LAYER-1",
+                file: file.clone(),
+                line: Some(line),
+                message,
+            });
+        }
+    }
+    problems
+}
+
+/// The parts of `cargo metadata`'s JSON that the target check reads.
+#[derive(Deserialize)]
+struct TargetMetadata {
+    packages: Vec<TargetPackage>,
+    workspace_members: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TargetPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+    targets: Vec<Target>,
+}
+
+#[derive(Deserialize)]
+struct Target {
+    name: String,
+    src_path: PathBuf,
+}
+
+/// LAYER-1: each target of each member takes its source from the member's
+/// own folder, so no `[lib] path = "../other/src/lib.rs"` builds another
+/// crate's code (TD-23).
+pub fn targets_stay_in_their_crate(metadata: &str) -> Result<Vec<Problem>> {
+    let metadata: TargetMetadata =
+        serde_json::from_str(metadata).context("reading cargo metadata's JSON")?;
+    Ok(metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .flat_map(|package| {
+            let folder = package.manifest_path.parent().unwrap_or(Path::new(""));
+            // Cargo gives a `path` such as `../dsp/src/lib.rs` joined to the
+            // folder, with its `..` (finding of tech-debt rung 1).
+            let inside = format!("{}/", normalised(folder));
+            package
+                .targets
+                .iter()
+                .filter(move |target| !normalised(&target.src_path).starts_with(&inside))
+                .map(move |target| {
+                    layer1(
+                        &format!("{}/Cargo.toml", folder.display()),
+                        format!(
+                            "LAYER-1: target `{}` of {} takes its source from {}, outside {}.  Fix: keep each target's source in its own crate's folder, and depend on the other crate.",
+                            target.name,
+                            package.name,
+                            target.src_path.display(),
+                            folder.display()
+                        ),
+                    )
+                })
+        })
+        .collect())
+}
+
+/// The paths of the symbolic links in `git ls-files -s -z`'s output, whose
+/// entries are a mode, an object, a stage, a tab and a path.
+pub fn links_in_index(output: &str) -> Vec<String> {
+    output
+        .split_terminator('\0')
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            meta.starts_with("120000 ").then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// LAYER-1: no tracked file is a symbolic link, which could point into
+/// another crate's source (TD-23).
+pub fn no_tracked_link(root: &Path) -> Result<Vec<Problem>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-s", "-z"])
+        .output()
+        .context("running git ls-files -s")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git ls-files -s failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let text =
+        String::from_utf8(output.stdout).context("git ls-files gave a path that is not UTF-8")?;
+    Ok(links_in_index(&text)
+        .into_iter()
+        .map(|path| {
+            layer1(
+                &path,
+                format!(
+                    "LAYER-1: {path} is a symbolic link in git, so it can bring another crate's source into a crate.  Fix: commit the file itself, or depend on the crate that holds it."
+                ),
+            )
+        })
+        .collect())
+}
+
 const PROTOCOL_LIB: &str = "protocol/src/lib.rs";
 const E2E_SCRIPTS: &str = "xtask/e2e";
 const E2E_RUST: &str = "xtask/src/e2e.rs";
@@ -7249,5 +7483,132 @@ mod agents_tests {
                 "{plant}: no problem names {named:?} in {problems:#?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn found(file: &str, text: &str) -> Vec<(Option<usize>, String)> {
+        let members = ["engine".to_string(), "roformer".to_string()];
+        source_stays_in_its_crate(&[(file.to_string(), text.to_string())], &members)
+            .into_iter()
+            .map(|p| (p.line, p.message))
+            .collect()
+    }
+
+    #[test]
+    fn code_from_the_crate_itself_passes() {
+        let text = "#[path = \"web/x.rs\"]\nmod x;\nmod y { include!(\"y.rs\"); }\nconst S: &str = \"#[path = \\\"../../roformer/src/a.rs\\\"]\";\nconst T: &str = include_str!(\"../../roformer/src/a.rs\");\nfn f() { let path = \"../../x\"; }\n";
+        assert_eq!(found("engine/src/lib.rs", text), vec![]);
+        assert_eq!(
+            found("xtask/src/x.rs", "include!(\"../../roformer/src/a.rs\");"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn code_from_another_folder_is_a_breach() {
+        let cases = [
+            "#[path = \"../../roformer/src/x.rs\"]\nmod x;",
+            "#![allow(unused)]\nfn f() { include!(\"../../roformer/src/x.rs\"); }",
+            "#[cfg_attr(unix, path = \"../../dsp/src/a.rs\")]\nmod a;",
+            "fn f() {\n    r#include!(\"../../x.rs\");\n}",
+            "mod m {\n    include!(\"/etc/x.rs\");\n}",
+            "macro_rules! m { () => { include!(\"../../x.rs\"); } }\nconst A: u8 = 0;",
+            "fn f() {\n    include!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\n}",
+        ];
+        for case in cases {
+            let problems = found("engine/src/lib.rs", case);
+            assert_eq!(problems.len(), 1, "{case}\n{problems:#?}");
+            let (line, message) = &problems[0];
+            assert!(line.is_some(), "{case}");
+            assert!(
+                message.starts_with("LAYER-1: engine/src/lib.rs:"),
+                "{message}"
+            );
+        }
+        let unreadable = found(
+            "engine/src/lib.rs",
+            "fn f() {\n    include!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\n}",
+        );
+        assert!(
+            unreadable[0].1.contains("not one string literal"),
+            "{unreadable:?}"
+        );
+        assert_eq!(unreadable[0].0, Some(2));
+        let path = found(
+            "engine/src/lib.rs",
+            "#[path = \"../../roformer/src/x.rs\"]\nmod x;",
+        );
+        assert!(
+            path[0].1.contains(
+                "takes code from `../../roformer/src/x.rs` with #[path], which is outside engine/."
+            ),
+            "{path:?}"
+        );
+    }
+
+    #[test]
+    fn paths_are_normalised() {
+        assert_eq!(normalised(Path::new("engine/src/../x.rs")), "engine/x.rs");
+        assert_eq!(normalised(Path::new("engine/src/../../x.rs")), "x.rs");
+        assert_eq!(normalised(Path::new("engine/../../x.rs")), "../x.rs");
+        assert_eq!(normalised(Path::new("./engine/./x.rs")), "engine/x.rs");
+        assert_eq!(
+            normalised(Path::new("engine/src/../../engine/x.rs")),
+            "engine/x.rs"
+        );
+        assert_eq!(normalised(Path::new("/etc/../etc/x.rs")), "/etc/x.rs");
+    }
+
+    fn metadata(src: &str) -> String {
+        format!(
+            r#"{{"workspace_members": ["engine 0.1.0", "app 0.1.0"], "packages": [
+                {{"id": "engine 0.1.0", "name": "engine", "manifest_path": "/r/engine/Cargo.toml",
+                  "targets": [{{"name": "engine", "src_path": "/r/engine/src/lib.rs"}},
+                              {{"name": "build-script-build", "src_path": "/r/engine/build.rs"}}]}},
+                {{"id": "app 0.1.0", "name": "app", "manifest_path": "/r/app/Cargo.toml",
+                  "targets": [{{"name": "app", "src_path": "{src}"}}]}},
+                {{"id": "dep 1.0.0", "name": "dep", "manifest_path": "/c/dep/Cargo.toml",
+                  "targets": [{{"name": "dep", "src_path": "/elsewhere/lib.rs"}}]}}
+            ]}}"#
+        )
+    }
+
+    #[test]
+    fn a_target_takes_its_source_from_its_own_folder() {
+        assert_eq!(
+            targets_stay_in_their_crate(&metadata("/r/app/src/main.rs")).unwrap(),
+            vec![]
+        );
+        let problems = targets_stay_in_their_crate(&metadata("/r/engine/src/lib.rs")).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert_eq!(problems[0].file, "/r/app/Cargo.toml");
+        assert!(
+            problems[0].message.starts_with("LAYER-1: target `app` of app takes its source from /r/engine/src/lib.rs, outside /r/app."),
+            "{}",
+            problems[0].message
+        );
+        let sibling = targets_stay_in_their_crate(&metadata("/r/app-other/src/main.rs")).unwrap();
+        assert_eq!(sibling.len(), 1, "a folder that only starts with the name");
+        let dotted = targets_stay_in_their_crate(&metadata("/r/app/../engine/src/lib.rs")).unwrap();
+        assert_eq!(dotted.len(), 1, "cargo keeps the `..` of a `path`");
+        let back = targets_stay_in_their_crate(&metadata("/r/app/src/../main.rs")).unwrap();
+        assert_eq!(back, vec![], "a `..` that stays in the folder");
+    }
+
+    #[test]
+    fn links_are_read_from_the_index() {
+        let output = [
+            "100644 aaaa 0\tsrc/a.rs",
+            "120000 bbbb 0\tsrc/link.rs",
+            "100755 cccc 0\ttools/x 120000",
+            "",
+        ]
+        .join("\0");
+        assert_eq!(links_in_index(&output), ["src/link.rs"]);
+        assert_eq!(links_in_index(""), Vec::<String>::new());
     }
 }
