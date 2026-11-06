@@ -782,6 +782,38 @@ mod tests {
         assert!(l.iter().all(|v| (0.0..0.15 + 1e-3).contains(v)));
     }
 
+    /// Before each wrap, the playhead reaches the loop's end, not its
+    /// start.  An anchor is dropped only when the queue is full, so the
+    /// anchor being heard stays while the stretcher plays the frames
+    /// before the wrap (RT-1).
+    #[test]
+    fn the_playhead_reaches_the_loop_end_before_each_wrap() {
+        let s = song(vec![("a", noise(20_000, 5))]);
+        let mut p = player(s, 0);
+        p.params.set_loop(1_000, 3_000);
+        let mut highest = 0;
+        let mut laps = Vec::new();
+        let mut last = 0;
+        for _ in 0..(5 * 2_000 / 32) {
+            p.render(32);
+            let h = p.params.playhead();
+            assert!(
+                (1_000..3_000).contains(&h) || laps.is_empty(),
+                "playhead {h}"
+            );
+            if h < last {
+                laps.push(highest);
+                highest = 0;
+            }
+            highest = highest.max(h);
+            last = h;
+        }
+        assert!(laps.len() >= 3, "laps {laps:?}");
+        for top in &laps[1..] {
+            assert!(*top >= 3_000 - 32, "a lap ended at {top}: {laps:?}");
+        }
+    }
+
     fn with_hop(hop: usize) -> Player {
         let s = song(vec![("a", vec![0.0; 1_000])]);
         let params = Arc::new(SharedParams::new(1));

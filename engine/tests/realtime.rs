@@ -37,12 +37,17 @@ struct CountingAllocator;
 thread_local! {
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
     static FREES: Cell<u64> = const { Cell::new(0) };
+    static BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+fn add(counter: &'static LocalKey<Cell<u64>>, amount: usize) {
+    // A `const` `Cell` has no destructor, so `try_with` never fails; it
+    // keeps a panic out of the allocator all the same.
+    let _ = counter.try_with(|c| c.set(c.get() + amount as u64));
 }
 
 fn add_one(counter: &'static LocalKey<Cell<u64>>) {
-    // A `const` `Cell` has no destructor, so `try_with` never fails; it
-    // keeps a panic out of the allocator all the same.
-    let _ = counter.try_with(|c| c.set(c.get() + 1));
+    add(counter, 1);
 }
 
 // SAFETY: every call is forwarded unchanged to `System`; counting touches
@@ -50,18 +55,21 @@ fn add_one(counter: &'static LocalKey<Cell<u64>>) {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         add_one(&ALLOCATIONS);
+        add(&BYTES, layout.size());
         // SAFETY: the caller's contract is the same as `System`'s.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         add_one(&ALLOCATIONS);
+        add(&BYTES, layout.size());
         // SAFETY: the caller's contract is the same as `System`'s.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         add_one(&ALLOCATIONS);
+        add(&BYTES, new_size);
         // SAFETY: the caller's contract is the same as `System`'s.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -80,12 +88,16 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 struct Counts {
     allocations: u64,
     frees: u64,
+    /// The bytes that each allocation asked for, and each `realloc` its
+    /// new size.
+    bytes: u64,
 }
 
 fn counts_so_far() -> Counts {
     Counts {
         allocations: ALLOCATIONS.with(Cell::get),
         frees: FREES.with(Cell::get),
+        bytes: BYTES.with(Cell::get),
     }
 }
 
@@ -97,6 +109,7 @@ fn counted<T>(f: impl FnOnce() -> T) -> (T, Counts) {
     let counts = Counts {
         allocations: after.allocations - before.allocations,
         frees: after.frees - before.frees,
+        bytes: after.bytes - before.bytes,
     };
     (value, counts)
 }
@@ -114,7 +127,8 @@ fn the_counter_sees_an_allocation() {
         counts,
         Counts {
             allocations: 3,
-            frees: 2
+            frees: 2,
+            bytes: 64 + 4_096 + 64,
         },
         "the counter must see `alloc`, `realloc`, `alloc_zeroed` and `dealloc`, or the RT-1 test checks nothing"
     );
@@ -661,6 +675,11 @@ engine = { path = "../engine", default-features = false, features = ["stretch-ws
         base.replace(r#""engine/cpal""#, r#""engine?/default""#),
         format!("{base}\n[target.'cfg(unix)'.dependencies.engine]\npath = \"../engine\"\n"),
         format!("{base}engine.path = \"../engine\"\n"),
+        base.replace(
+            r#"features = ["stretch-wsola"]"#,
+            r#"features = ["default", "stretch-wsola"]"#,
+        ),
+        base.replace("engine = { path", "engine-other = { path"),
     ];
     for breach in breaches {
         let problems = app_stretcher_problems(&breach);
@@ -673,4 +692,61 @@ engine = { path = "../engine", default-features = false, features = ["stretch-ws
 fn the_app_ships_only_these_stretchers() {
     let problems = app_stretcher_problems(include_str!("../../app/Cargo.toml"));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The output of wsola, at tempo `tempo`, for pushes of `push` frames
+/// while `can_pull` of 512 is false, and 200 pulls of 512.
+fn wsola_output(tempo: f64, push: usize) -> Vec<f32> {
+    let input = noise(200_000, 7);
+    let mut stretcher = StretcherKind::Wsola.build(44_100);
+    stretcher.set_tempo(tempo);
+    let (mut left, mut right) = (vec![0.0; 512], vec![0.0; 512]);
+    let mut fed = 0;
+    let mut out = Vec::new();
+    for _ in 0..200 {
+        while !stretcher.can_pull(512) && fed + push <= input.len() {
+            stretcher.push(&input[fed..fed + push], &input[fed..fed + push]);
+            fed += push;
+        }
+        stretcher.pull(&mut left, &mut right);
+        out.extend_from_slice(&left);
+        out.extend_from_slice(&right);
+    }
+    out
+}
+
+/// A push of `MAX_PUSH_FRAMES` gives the same output as the pushes of 256
+/// frames that the player makes, so `can_pull` and `push` read the whole
+/// push (RT-1).
+#[test]
+fn wsola_gives_the_same_output_for_a_push_of_max_push_frames() {
+    for tempo in [0.75, 1.0, 1.5] {
+        let small = wsola_output(tempo, 256);
+        let large = wsola_output(tempo, MAX_PUSH_FRAMES);
+        assert_eq!(small.len(), large.len());
+        let differ = small.iter().zip(&large).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "tempo {tempo}: {differ} samples differ");
+        let silent = large.iter().filter(|v| **v == 0.0).count();
+        assert!(silent < 8, "tempo {tempo}: {silent} silent samples");
+    }
+}
+
+/// wsola's `warm_up` pushes `65,536 + sample_rate / 4 + MAX_PUSH_FRAMES`
+/// frames of stereo silence.  On 2026-11-06 it allocated 2.03 to 2.07
+/// times that push in bytes, from 8 to 192 kHz: the push and wsola's
+/// input buffer.  A larger push costs the tab memory that it never gets
+/// back (MEM-4), so the bound is 2.5 times.
+#[test]
+fn wsola_warms_up_with_a_bounded_push() {
+    for rate in [8_000, 44_100, 48_000, 192_000] {
+        let mut stretcher = StretcherKind::Wsola.build(rate);
+        let ((), counts) = counted(|| stretcher.warm_up(1.5, 512));
+        let push_bytes = ((1 << 16) + rate as usize / 4 + MAX_PUSH_FRAMES) * 2 * 4;
+        let limit = push_bytes as u64 * 5 / 2;
+        assert!(
+            counts.bytes <= limit,
+            "MEM-4: wsola's warm-up at {rate} Hz allocated {} bytes, over {limit}.  Fix: keep the push at the size that its doc comment gives.",
+            counts.bytes
+        );
+    }
 }

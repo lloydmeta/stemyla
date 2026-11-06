@@ -93,7 +93,7 @@ The audio callback reads the player through `engine::slot`'s `try_lock`, renders
 
 * Why: a callback that blocks or frees a song's buffers misses its deadline and is heard as a click; on the web, cpal's callback is never freed, so anything it holds leaks.  An allocator can take a lock or fault a page, so its time has no bound (`decisions/0007-no-allocation-in-the-audio-callback.md`).
 * Enforced by: `replacing_the_player_frees_the_previous_song`; `the_callback_does_not_allocate_after_warm_up`, `a_stretcher_keeps_its_warm_up_promise` and `the_app_ships_only_these_stretchers` (CI `test` job).  The first runs the callback under a counting allocator, through tempo, chipmunk, seek, loop and mix changes, for each stretcher the app ships.  The second checks what `Stretcher::warm_up` promises, at rates from 8 to 192 kHz.  `Player::with_sources` and `Varispeed::warm_up` panic on a configuration that the warm-up cannot cover.  The third fails when `app/Cargo.toml` turns on a stretcher that the first does not cover.  The first also plays the stems as stored lanes over a `ReadAhead`, with the phases "reader stalls", "seek holds", "loop behind the head", "seek held at the end" and "lane fails".  `a_held_slot_never_blocks_the_callback` (CI `test` job) checks that the callback takes a slot of the read-ahead buffer with a try-lock only.  `a_slot_whose_block_changed_is_not_read` checks the block number again under the lock.  `xtask e2e save` (CI `browser-tests` job, in Chrome) plays a stored song during a 10-minute save (D11 of M8).  It checks that the read-ahead buffer counts no underrun.  It also checks that each save's longest slice, and its longest end of a read, which the page logs, are at most 35 ms.
-* Gaps: TD-25, TD-40, TD-62.
+* Gaps: TD-25, TD-62.
 
 ## GPU
 
@@ -146,7 +146,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
-* Gaps: TD-8, TD-19, TD-29, TD-39, TD-40, TD-43, TD-51, TD-53, TD-60, TD-63, TD-65, TD-66.
+* Gaps: TD-8, TD-19, TD-29, TD-39, TD-43, TD-51, TD-53, TD-60, TD-63, TD-65, TD-66.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 
