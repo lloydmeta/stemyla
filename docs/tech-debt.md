@@ -301,19 +301,6 @@ Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
 
 * Fix: take the pairs from the pipelines that the code makes, and add the three missing cases.
 
-### TD-42: weak tests of the e2e message-type scan
-
-`e2e_messages_use_protocol_types` (PROTO-1) has tests that do not fail on some wrong scans.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
-
-* No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses.  So a stale check that reads only the JavaScript passes.
-* No test has `["type"] <=` in Rust, or a macro other than `json!` after `"type":` (not run).
-* Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes (not run).
-* `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.  The checker ran a scratch copy of `js_tokens` with this mutant.
-
-Source: `docs/reviews/replay.md`, case `m10`, outside findings 1-3, 1-11, 1-12 and 1-13, and finding 1-10, which matches `m10-2`.
-
-* Fix: add each missing case to the tests in `xtask/src/rules.rs`.
-
 ### TD-43: the file picker path has no automated check
 
 `pick_song` keeps each chosen `File` and saves it as a Blob, but no automated check runs it (VERIFY-1).  WebDriver cannot drive the browser's file picker.
@@ -697,4 +684,5 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.
 * TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
+* TD-42: closed by new cases in the tests of `e2e_messages_use_protocol_types` (tech-debt rung 1): `a_script_only_type_in_the_rust_alone_is_not_stale`, `a_type_after_a_comment_of_several_lines_has_its_line`, a misspelt type first in `includes`, and `<=` and `format!` after `"type"` in Rust.  Each of the five mutants that the entry named fails a test (PROTO-1).
 * TD-56: closed by M7 of `plans/completed/stream-from-storage.md` (D12 of `plans/completed/stream-from-storage-m7.md`).  One counter gives a token to every open (a drop, a pick, a Storage open, the startup restore and Demo).  Only the newest open shows its song, and only `apply_inbox` makes a session current.  `a_late_drop_does_not_show_over_a_newer_song`, `a_late_drop_does_not_show_over_demo`, `two_opens_that_end_in_one_frame_show_the_newer` and `a_stale_restore_on_the_page_does_not_make_its_session_current` check it.

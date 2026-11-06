@@ -6521,6 +6521,7 @@ fn f() {
             "if ('segmnt' != type) {}",
             "if (['alive', 'segmnt', 'done',].includes(d.type)) {}",
             "if (['alive', 'segmnt', 'done'].includes(type)) {}",
+            "if (['segmnt', 'alive'].includes(d.type)) {}",
             "if (typeof d === 'object' && d.type === 'segmnt') {}",
             "{ type: 'text' }",
         ];
@@ -6583,6 +6584,8 @@ fn f() {
     let opts = json!({ "mm": "s64" });
     p.check(c["state"] == "running" && f("type") == "x");
     let pairs = m!["type": "x"];
+    p.check(r["end"]["type"] <= "x");
+    let made = json!({ "type": format!("x") });
     p.check(l.contains("Restored \"song\" from this browser"), "the page's song");
 }"#;
         assert_eq!(check(JS_OK, &format!("{rust}\n{RUST_OK}"), &[]), vec![]);
@@ -6595,6 +6598,28 @@ fn f() {
                 Some(3),
             )],
         );
+    }
+
+    /// An entry of `SCRIPT_ONLY_TYPES` that only the Rust of
+    /// `xtask e2e` uses is not stale.  A check that reads only the
+    /// JavaScript fails this test.
+    #[test]
+    fn a_script_only_type_in_the_rust_alone_is_not_stale() {
+        let worker_error = ("worker-error", "the reply that `e2e.ask` makes");
+        let rust = format!(
+            "{RUST_OK}\nfn g() {{ in_page(\"out.replies.push({{ type: 'worker-error' }});\"); }}"
+        );
+        assert_eq!(check(JS_OK, &rust, &[worker_error]), vec![]);
+    }
+
+    /// The lines of a `/*` comment count, so a type after it has
+    /// its own line.
+    #[test]
+    fn a_type_after_a_comment_of_several_lines_has_its_line() {
+        let js = format!("{JS_OK}\n/* a * b\n * c\n ** d\n*/ x({{ type: 'segmnt' }});");
+        assert_one_each("PROTO-1", &[(WORKER_JS, check(&js, RUST_OK, &[]), Some(5))]);
+        let unclosed = format!("{JS_OK}\n/* a\n b {{ type: 'segmnt' }}");
+        assert_eq!(check(&unclosed, RUST_OK, &[]), vec![]);
     }
 
     #[test]

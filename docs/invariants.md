@@ -129,7 +129,7 @@ A new kernel is never made the default on the strength of SwiftShader (or any so
 
 * Why: the page and the worker are built together but run as separate wasm modules; a mismatch fails at runtime only.
 * Enforced by: `replies_arrive_intact`, `requests_and_their_settings_arrive_intact`, `hand_written_requests_are_read`, `decode_messages_arrive_intact_with_nothing_transferred`, `a_message_for_one_worker_is_not_read_as_one_for_the_other`, `worker_requests_and_the_new_replies_arrive_intact_with_nothing_transferred`, `an_overviews_or_classic_request_with_a_missing_or_wrong_field_is_refused`, `a_stored_encode_names_its_files_and_transfers_nothing`, `an_encode_must_name_one_source_with_whole_frames_and_an_output`, `a_stored_encode_reply_names_its_file_or_why_it_failed` (CI `browser-tests` job), and `e2e_messages_use_protocol_types` (CI `test` job).  The last compares the message types in `xtask/e2e/*.js`, and in the scripts of `xtask/src/e2e.rs` and of each Rust file under `xtask/src/e2e/`, with `stem_protocol::kind` and `stem_protocol::decode::kind`.  It does not read field names.
-* Gaps: TD-16, TD-42.
+* Gaps: TD-16.
 
 ### PROTO-2: a model URL only from the page's own site
 
