@@ -274,16 +274,13 @@ Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant 
 
 * Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
 
-### TD-41: gaps in the GPU-1 limit checker's tests, and docs that claim more
+### TD-41: the GPU-1 layout test pairs shaders from a hand copy
 
-`every_kernel_fits_the_default_limits` and its tests do not cover all of the checker (GPU-1, DOC-1):
-
-* `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new`.  The last sentence of its doc comment claims more than it checks: "The entry points that `Kernels::new` names exist."  The test checks a hand copy of the entry names.
-* No test covers the count of read-only storage buffers, the y-axis limit, or a breach of the invocation limit that only z causes.
+`every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new` (GPU-1).  So a `Kernels::new` that gives a pipeline the wrong layout passes it; only wgpu's validation sees that.  Tech-debt rung 1 corrected the doc comment, which claimed that the test checks the names of `Kernels::new`.  It also added tests of the read-only storage count, the y-axis limit, and a breach of the invocation limit that only z causes.
 
 Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
 
-* Fix: take the pairs from the pipelines that the code makes, and add the three missing cases.
+* Fix: take the pairs from the pipelines that the code makes, for example from a table that `Kernels::new` reads.  That changes how the kernels are built, so it needs GPU-2's checks.
 
 ### TD-43: the file picker path has no automated check
 
