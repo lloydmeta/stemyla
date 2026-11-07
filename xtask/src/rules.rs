@@ -2633,8 +2633,8 @@ fn attrs_turn_off(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// The outer attributes of an expression that can hold a canary.  Other
-/// kinds give none.  syn gives the attributes of an `Assign`, `Binary`,
-/// `Cast` or `Range` to its left operand.  A `Continue`, `Infer` or `Lit`
+/// kinds give none.  syn gives the attributes of an `Assign`, `Binary` or
+/// `Cast` to its left operand.  A `Continue`, `Infer` or `Lit`
 /// holds no code.  The check does not read a `Macro`, and only a macro
 /// makes a `Group`.
 fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
@@ -2658,6 +2658,7 @@ fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
         MethodCall(e) => &e.attrs,
         Paren(e) => &e.attrs,
         Path(e) => &e.attrs,
+        Range(e) => &e.attrs,
         RawAddr(e) => &e.attrs,
         Reference(e) => &e.attrs,
         Repeat(e) => &e.attrs,
@@ -8663,6 +8664,7 @@ mod mem1_tests {
         "fn f() {\n    ATTR\n    a.g(BODY);\n}\n",
         "fn f() {\n    ATTR\n    (BODY);\n}\n",
         "fn f() {\n    ATTR\n    <[u8; BODY]>::X;\n}\n",
+        "fn f() {\n    ATTR\n    0..BODY;\n}\n",
         "fn f() {\n    ATTR\n    &raw const BODY;\n}\n",
         "fn f() {\n    ATTR\n    &BODY;\n}\n",
         "fn f() {\n    ATTR\n    [0; BODY];\n}\n",
@@ -8683,6 +8685,7 @@ mod mem1_tests {
         "enum E {\n    ATTR\n    A = BODY,\n}\n",
         "fn f() {\n    S {\n        ATTR\n        a: BODY,\n    };\n}\n",
         "struct S<ATTR const N: usize = BODY>;\n",
+        "struct S<ATTR T = [u8; BODY]>;\n",
         // Parameters of a function, a function pointer, a closure and a
         // C-variadic function.
         "fn f(ATTR x: [u8; BODY]) {}\n",
