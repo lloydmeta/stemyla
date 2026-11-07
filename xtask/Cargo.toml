@@ -25,6 +25,7 @@ safetensors = "0.7.0"
 # to the version that `Cargo.lock` already holds (DEPS-1).
 sha2 = "=0.10.9"
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+quote = { version = "1.0.47", default-features = false }
 syn = { version = "2.0.119", default-features = false, features = ["full", "visit", "parsing", "printing"] }
 
 [dev-dependencies]

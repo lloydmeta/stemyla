@@ -2623,7 +2623,7 @@ fn turns_off(attribute: &proc_macro2::Group) -> bool {
 /// True when one of `attrs` turns its item off in a clippy step
 /// ([`turns_off`]).
 fn attrs_turn_off(attrs: &[syn::Attribute]) -> bool {
-    use syn::__private::ToTokens;
+    use quote::ToTokens;
     attrs.iter().any(|attr| {
         let tokens: Vec<TokenTree> = attr.to_token_stream().into_iter().collect();
         tokens.iter().any(|tree| {
@@ -2711,7 +2711,7 @@ struct CanaryFinder<'n> {
 
 impl CanaryFinder<'_> {
     fn found(&mut self, ident: &syn::Ident, block: &syn::Block) {
-        use syn::__private::ToTokens;
+        use quote::ToTokens;
         if ident == self.name {
             let mut body = TokenStream::new();
             for stmt in &block.stmts {
@@ -2781,14 +2781,66 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::visit::visit_arm(self, arm);
         }
     }
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if !attrs_turn_off(&field.attrs) {
+            syn::visit::visit_field(self, field);
+        }
+    }
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        if !attrs_turn_off(&variant.attrs) {
+            syn::visit::visit_variant(self, variant);
+        }
+    }
+    fn visit_field_value(&mut self, value: &'ast syn::FieldValue) {
+        if !attrs_turn_off(&value.attrs) {
+            syn::visit::visit_field_value(self, value);
+        }
+    }
+    fn visit_generic_param(&mut self, param: &'ast syn::GenericParam) {
+        let attrs = match param {
+            syn::GenericParam::Lifetime(p) => &p.attrs,
+            syn::GenericParam::Type(p) => &p.attrs,
+            syn::GenericParam::Const(p) => &p.attrs,
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_generic_param(self, param);
+        }
+    }
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::ForeignItem::Fn(i) => &i.attrs,
+            syn::ForeignItem::Static(i) => &i.attrs,
+            syn::ForeignItem::Type(i) => &i.attrs,
+            syn::ForeignItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_foreign_item(self, item);
+        }
+    }
+    fn visit_fn_arg(&mut self, arg: &'ast syn::FnArg) {
+        let attrs = match arg {
+            syn::FnArg::Receiver(r) => &r.attrs,
+            syn::FnArg::Typed(t) => &t.attrs,
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_fn_arg(self, arg);
+        }
+    }
+    fn visit_bare_fn_arg(&mut self, arg: &'ast syn::BareFnArg) {
+        if !attrs_turn_off(&arg.attrs) {
+            syn::visit::visit_bare_fn_arg(self, arg);
+        }
+    }
 }
 
 /// The body of each function named `name` in `text`, as tokens, that a
 /// clippy step compiles.  The file is parsed with syn, so a name in a
 /// comment or a string does not count.  A function is left out when an
-/// attribute turns it off ([`turns_off`]) on it, on any item, statement,
-/// expression or match arm around it, or as an inner `#![...]` of its
-/// file or `mod`.  A function in a macro call is not read.  A file that
+/// attribute turns it off ([`turns_off`]) on it or on a node around it.
+/// Such a node is an item, a statement, an expression, a match arm, a
+/// field, a variant, a field value, a generic parameter, a foreign item or
+/// an argument.  An inner `#![...]` of its file or `mod` also counts.  A function in a macro call is not read.  A file that
 /// syn cannot parse gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
     let Ok(file) = syn::parse_file(text) else {
@@ -8476,6 +8528,25 @@ mod mem1_tests {
             cases.push((
                 "engine: MEM-1: engine has no `mem1_lint_is_on`",
                 Box::new(move |_, f| file(f, "engine/src/song.rs", form)),
+            ));
+        }
+        // Round 8: a `#[cfg]` on a field, a variant, a field value, a
+        // generic parameter, a foreign item or an argument turns it off.
+        const BODY: &str = "{ fn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n} 1 }";
+        for form in [
+            "struct S {\n    #[cfg(any())]\n    a: [u8; BODY],\n}\n",
+            "struct S(#[cfg(any())] [u8; BODY]);\n",
+            "enum E {\n    #[cfg(any())]\n    A = BODY,\n}\n",
+            "fn f() {\n    let s = S {\n        #[cfg(any())]\n        a: BODY,\n    };\n}\n",
+            "struct S<#[cfg(any())] const N: usize = BODY>;\n",
+            "extern \"C\" {\n    #[cfg(any())]\n    static X: [u8; BODY];\n}\n",
+            "fn f(#[cfg(any())] x: [u8; BODY]) {}\n",
+            "type F = fn(#[cfg(any())] [u8; BODY]);\n",
+        ] {
+            let text = form.replace("BODY", BODY);
+            cases.push((
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(move |_, f| file(f, "engine/src/song.rs", &text)),
             ));
         }
         for (want, change) in cases {

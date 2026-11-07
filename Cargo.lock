@@ -9950,6 +9950,7 @@ dependencies = [
  "half",
  "hound",
  "proc-macro2",
+ "quote",
  "roformer",
  "rusty_mp3",
  "safetensors 0.7.0",
