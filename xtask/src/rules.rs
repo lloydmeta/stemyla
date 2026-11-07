@@ -2679,6 +2679,31 @@ fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
     }
 }
 
+/// The outer attributes of a pattern, which syn keeps on each kind.  A
+/// closure parameter with no type keeps its attributes here.
+fn pat_attrs(pat: &syn::Pat) -> &[syn::Attribute] {
+    use syn::Pat::*;
+    match pat {
+        Const(p) => &p.attrs,
+        Ident(p) => &p.attrs,
+        Lit(p) => &p.attrs,
+        Macro(p) => &p.attrs,
+        Or(p) => &p.attrs,
+        Paren(p) => &p.attrs,
+        Path(p) => &p.attrs,
+        Range(p) => &p.attrs,
+        Reference(p) => &p.attrs,
+        Rest(p) => &p.attrs,
+        Slice(p) => &p.attrs,
+        Struct(p) => &p.attrs,
+        Tuple(p) => &p.attrs,
+        TupleStruct(p) => &p.attrs,
+        Type(p) => &p.attrs,
+        Wild(p) => &p.attrs,
+        _ => &[],
+    }
+}
+
 /// The attributes of an item, inner ones included for a `mod`.
 fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
     use syn::Item::*;
@@ -2832,9 +2857,14 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::visit::visit_bare_fn_arg(self, arg);
         }
     }
-    fn visit_pat_type(&mut self, pat: &'ast syn::PatType) {
-        if !attrs_turn_off(&pat.attrs) {
-            syn::visit::visit_pat_type(self, pat);
+    fn visit_pat(&mut self, pat: &'ast syn::Pat) {
+        if !attrs_turn_off(pat_attrs(pat)) {
+            syn::visit::visit_pat(self, pat);
+        }
+    }
+    fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
+        if !attrs_turn_off(&field.attrs) {
+            syn::visit::visit_field_pat(self, field);
         }
     }
 }
@@ -2845,9 +2875,10 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
 /// attribute turns it off ([`turns_off`]) on it or on a node around it.
 /// Such a node is an item, a statement, an expression or a match arm.  It
 /// is also a field, a variant, a field value or a generic parameter.  It
-/// is also a foreign item, or a function or closure parameter.  An inner
-/// `#![...]` of its file or `mod` also counts.  A function in a macro
-/// call is not read.  A file that syn cannot parse gives none.
+/// is also a foreign item, a function or closure parameter, or a field
+/// pattern.  An inner `#![...]` of its file or `mod` also counts.  A
+/// function in a macro call is not read.  A file that syn cannot parse
+/// gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
     let Ok(file) = syn::parse_file(text) else {
         return Vec::new();
@@ -8550,6 +8581,10 @@ mod mem1_tests {
             "type F = fn(#[cfg(any())] [u8; BODY]);\n",
             // Round 9: a closure parameter.
             "fn f() {\n    let c = |#[cfg(any())] x: [u8; BODY]| ();\n}\n",
+            // Round 10: a closure parameter with no type, and a field pattern.
+            "fn f() {\n    let c = |#[cfg(any())] None::<[u8; BODY]>| ();\n}\n",
+            "fn f() {\n    let c = |#[cfg(any())] Some::<[u8; BODY]>(x)| ();\n}\n",
+            "fn f(s: S) {\n    let S {\n        #[cfg(any())]\n        a: None::<[u8; BODY]>,\n        ..\n    } = s;\n}\n",
         ] {
             let text = form.replace("BODY", BODY);
             cases.push((
