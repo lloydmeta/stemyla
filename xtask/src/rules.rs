@@ -2832,16 +2832,22 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::visit::visit_bare_fn_arg(self, arg);
         }
     }
+    fn visit_pat_type(&mut self, pat: &'ast syn::PatType) {
+        if !attrs_turn_off(&pat.attrs) {
+            syn::visit::visit_pat_type(self, pat);
+        }
+    }
 }
 
 /// The body of each function named `name` in `text`, as tokens, that a
 /// clippy step compiles.  The file is parsed with syn, so a name in a
 /// comment or a string does not count.  A function is left out when an
 /// attribute turns it off ([`turns_off`]) on it or on a node around it.
-/// Such a node is an item, a statement, an expression, a match arm, a
-/// field, a variant, a field value, a generic parameter, a foreign item or
-/// an argument.  An inner `#![...]` of its file or `mod` also counts.  A function in a macro call is not read.  A file that
-/// syn cannot parse gives none.
+/// Such a node is an item, a statement, an expression or a match arm.  It
+/// is also a field, a variant, a field value or a generic parameter.  It
+/// is also a foreign item, or a function or closure parameter.  An inner
+/// `#![...]` of its file or `mod` also counts.  A function in a macro
+/// call is not read.  A file that syn cannot parse gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
     let Ok(file) = syn::parse_file(text) else {
         return Vec::new();
@@ -8542,6 +8548,8 @@ mod mem1_tests {
             "extern \"C\" {\n    #[cfg(any())]\n    static X: [u8; BODY];\n}\n",
             "fn f(#[cfg(any())] x: [u8; BODY]) {}\n",
             "type F = fn(#[cfg(any())] [u8; BODY]);\n",
+            // Round 9: a closure parameter.
+            "fn f() {\n    let c = |#[cfg(any())] x: [u8; BODY]| ();\n}\n",
         ] {
             let text = form.replace("BODY", BODY);
             cases.push((
