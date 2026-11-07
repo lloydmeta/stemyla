@@ -2620,113 +2620,189 @@ fn turns_off(attribute: &proc_macro2::Group) -> bool {
     }
 }
 
-/// The body of each function named `name` in `text`, as tokens, so a name
-/// in a comment does not count.  An item ends with its brace body or its
-/// `;`.  Its body is the first brace group outside the `<` and `>` of its
-/// header, and an `if` block with an `else` does not end its statement.  When an attribute on an item turns it off ([`turns_off`]), its body
-/// is skipped, whatever the item is: a `fn`, a `mod`, an `impl`, a `trait`
-/// or a block.  An inner `#![...]` that turns off a file or a module skips
-/// all of it.  A file that does not tokenise gives none.
+/// True when one of `attrs` turns its item off in a clippy step
+/// ([`turns_off`]).
+fn attrs_turn_off(attrs: &[syn::Attribute]) -> bool {
+    use syn::__private::ToTokens;
+    attrs.iter().any(|attr| {
+        let tokens: Vec<TokenTree> = attr.to_token_stream().into_iter().collect();
+        tokens.iter().any(|tree| {
+            matches!(tree, TokenTree::Group(group) if group.delimiter() == Delimiter::Bracket && turns_off(group))
+        })
+    })
+}
+
+/// The outer attributes of an expression, which syn keeps on each kind.
+fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
+    use syn::Expr::*;
+    match expr {
+        Array(e) => &e.attrs,
+        Assign(e) => &e.attrs,
+        Async(e) => &e.attrs,
+        Await(e) => &e.attrs,
+        Binary(e) => &e.attrs,
+        Block(e) => &e.attrs,
+        Break(e) => &e.attrs,
+        Call(e) => &e.attrs,
+        Cast(e) => &e.attrs,
+        Closure(e) => &e.attrs,
+        Const(e) => &e.attrs,
+        Continue(e) => &e.attrs,
+        Field(e) => &e.attrs,
+        ForLoop(e) => &e.attrs,
+        Group(e) => &e.attrs,
+        If(e) => &e.attrs,
+        Index(e) => &e.attrs,
+        Infer(e) => &e.attrs,
+        Let(e) => &e.attrs,
+        Lit(e) => &e.attrs,
+        Loop(e) => &e.attrs,
+        Macro(e) => &e.attrs,
+        Match(e) => &e.attrs,
+        MethodCall(e) => &e.attrs,
+        Paren(e) => &e.attrs,
+        Path(e) => &e.attrs,
+        Range(e) => &e.attrs,
+        RawAddr(e) => &e.attrs,
+        Reference(e) => &e.attrs,
+        Repeat(e) => &e.attrs,
+        Return(e) => &e.attrs,
+        Struct(e) => &e.attrs,
+        Try(e) => &e.attrs,
+        TryBlock(e) => &e.attrs,
+        Tuple(e) => &e.attrs,
+        Unary(e) => &e.attrs,
+        Unsafe(e) => &e.attrs,
+        While(e) => &e.attrs,
+        Yield(e) => &e.attrs,
+        _ => &[],
+    }
+}
+
+/// The attributes of an item, inner ones included for a `mod`.
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    use syn::Item::*;
+    match item {
+        Const(i) => &i.attrs,
+        Enum(i) => &i.attrs,
+        ExternCrate(i) => &i.attrs,
+        Fn(i) => &i.attrs,
+        ForeignMod(i) => &i.attrs,
+        Impl(i) => &i.attrs,
+        Macro(i) => &i.attrs,
+        Mod(i) => &i.attrs,
+        Static(i) => &i.attrs,
+        Struct(i) => &i.attrs,
+        Trait(i) => &i.attrs,
+        TraitAlias(i) => &i.attrs,
+        Type(i) => &i.attrs,
+        Union(i) => &i.attrs,
+        Use(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+/// Finds the bodies of the functions named `name` that a clippy step
+/// compiles: it does not go into a node that an attribute turns off.
+struct CanaryFinder<'n> {
+    name: &'n str,
+    out: Vec<TokenStream>,
+}
+
+impl CanaryFinder<'_> {
+    fn found(&mut self, ident: &syn::Ident, block: &syn::Block) {
+        use syn::__private::ToTokens;
+        if ident == self.name {
+            let mut body = TokenStream::new();
+            for stmt in &block.stmts {
+                stmt.to_tokens(&mut body);
+            }
+            self.out.push(body);
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !attrs_turn_off(item_attrs(item)) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.found(&item.sig.ident, &item.block);
+        syn::visit::visit_item_fn(self, item);
+    }
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            syn::ImplItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        self.found(&item.sig.ident, &item.block);
+        syn::visit::visit_impl_item_fn(self, item);
+    }
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            syn::TraitItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_trait_item(self, item);
+        }
+    }
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        if let Some(block) = &item.default {
+            self.found(&item.sig.ident, block);
+        }
+        syn::visit::visit_trait_item_fn(self, item);
+    }
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if !attrs_turn_off(&local.attrs) {
+            syn::visit::visit_local(self, local);
+        }
+    }
+    fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+        if !attrs_turn_off(expr_attrs(expr)) {
+            syn::visit::visit_expr(self, expr);
+        }
+    }
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if !attrs_turn_off(&arm.attrs) {
+            syn::visit::visit_arm(self, arm);
+        }
+    }
+}
+
+/// The body of each function named `name` in `text`, as tokens, that a
+/// clippy step compiles.  The file is parsed with syn, so a name in a
+/// comment or a string does not count.  A function is left out when an
+/// attribute turns it off ([`turns_off`]) on it, on any item, statement,
+/// expression or match arm around it, or as an inner `#![...]` of its
+/// file or `mod`.  A function in a macro call is not read.  A file that
+/// syn cannot parse gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
-    fn walk(stream: TokenStream, name: &str, out: &mut Vec<TokenStream>) {
-        let trees: Vec<TokenTree> = stream.into_iter().collect();
-        // An inner attribute, `#![...]`, applies to all of this stream.
-        let mut index = 0;
-        while punct_spacing(trees.get(index), '#').is_some()
-            && punct_spacing(trees.get(index + 1), '!').is_some()
-        {
-            if let Some(TokenTree::Group(attribute)) = trees.get(index + 2)
-                && turns_off(attribute)
-            {
-                return;
-            }
-            index += 3;
-        }
-        // The state of the item so far: an attribute turned it off, and it
-        // is `fn <name>`.
-        let mut off = false;
-        let mut named = false;
-        // The depth of `<` in the header of the item, so a brace group in
-        // a generic argument, such as `impl S<{ 1 }>`, is not its body.
-        let mut angle: usize = 0;
-        // Only the header of an item counts `<`, so `a < b` in a body does
-        // not.
-        let mut header = false;
-        while let Some(tree) = trees.get(index) {
-            if punct_spacing(Some(tree), '#').is_some()
-                && let Some(TokenTree::Group(attribute)) = trees.get(index + 1)
-                && attribute.delimiter() == Delimiter::Bracket
-            {
-                off |= turns_off(attribute);
-                index += 2;
-                continue;
-            }
-            if ident_name(Some(tree)).as_deref() == Some("fn")
-                && ident_name(trees.get(index + 1)).as_deref() == Some(name)
-            {
-                named = true;
-            }
-            if matches!(
-                ident_name(Some(tree)).as_deref(),
-                Some("impl" | "trait" | "fn" | "struct" | "enum" | "union" | "type")
-            ) {
-                header = true;
-            }
-            match tree {
-                TokenTree::Punct(punct) if header && punct.as_char() == '<' => angle += 1,
-                TokenTree::Punct(punct) if header && punct.as_char() == '>' => {
-                    // `->` and `=>` are not the end of a generic argument.
-                    let arrow = index > 0
-                        && (joint(trees.get(index - 1), '-') || joint(trees.get(index - 1), '='));
-                    if !arrow {
-                        angle = angle.saturating_sub(1);
-                    }
-                }
-                TokenTree::Group(group)
-                    if group.delimiter() == Delimiter::Brace
-                        && (angle > 0
-                            || ident_name(trees.get(index + 1)).as_deref() == Some("else")) =>
-                {
-                    // A brace group in a generic argument, or an `if` block
-                    // before its `else`: the item goes on.
-                    if !off {
-                        walk(group.stream(), name, out);
-                    }
-                }
-                TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
-                    // The body ends the item.
-                    if !off {
-                        if named {
-                            out.push(group.stream());
-                        }
-                        walk(group.stream(), name, out);
-                    }
-                    off = false;
-                    named = false;
-                    angle = 0;
-                    header = false;
-                }
-                TokenTree::Group(group) => {
-                    if !off {
-                        walk(group.stream(), name, out);
-                    }
-                }
-                _ if punct_spacing(Some(tree), ';').is_some() => {
-                    off = false;
-                    named = false;
-                    angle = 0;
-                    header = false;
-                }
-                _ => {}
-            }
-            index += 1;
-        }
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    if attrs_turn_off(&file.attrs) {
+        return Vec::new();
     }
-    let mut out = Vec::new();
-    if let Ok(tokens) = TokenStream::from_str(text) {
-        walk(tokens, name, &mut out);
-    }
-    out
+    let mut finder = CanaryFinder {
+        name,
+        out: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut finder, &file);
+    finder.out
 }
 
 /// The copies that `body` expects the lint to fail.  A statement counts
@@ -8105,6 +8181,18 @@ mod mem1_tests {
             )
         });
         assert_eq!(compare, Vec::<String>::new());
+        // A turbofish, a comparison and an item that ends in `;` before a
+        // good canary do not hide it.
+        for text in [
+            "fn g() {\n    if size_of::<fn()>() < 8 {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "fn g() {\n    let h: fn(u8) -> u8 = k;\n    if a < b {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "trait T {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "impl S {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "fn g() {\n    fn h() -> Vec<u8> { Vec::new() }\n    if a < b {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+        ] {
+            let found = problems(|_, f| file(f, "engine/src/song.rs", text));
+            assert_eq!(found, Vec::<String>::new(), "{text}");
+        }
     }
 
     #[test]
@@ -8371,6 +8459,25 @@ mod mem1_tests {
                 )
             }),
         ));
+        // Round 7: syn parses the file, so each kind of item, statement,
+        // expression and match arm that a `#[cfg]` turns off is skipped.
+        for form in [
+            "#[cfg(any())]\nconst _: S<{ 1 }> = {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    0\n};\n",
+            "#[cfg(any())]\nstatic X: S<{ 1 }> = {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    0\n};\n",
+            "fn f() {\n    #[cfg(any())]\n    let _: S<{ 1 }> = {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    0\n    };\n}\n",
+            "fn f() {\n    #[cfg(any())]\n    let _ = match x { _ => 1 } + {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    2\n    };\n}\n",
+            "fn f() {\n    #[cfg(any())]\n    let _ = S { a: 1 }.g({\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    2\n    });\n}\n",
+            "#[cfg(any())]\nimpl X for S<fn() -> u8, { 1 }> {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "fn f() {\n    #[cfg(any())]\n    {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    }\n}\n",
+            "fn f() {\n    match x {\n        #[cfg(any())]\n        _ => {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n        }\n    }\n}\n",
+            "impl S {\n    #[cfg(any())]\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "trait T {\n    #[cfg(any())]\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+        ] {
+            cases.push((
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(move |_, f| file(f, "engine/src/song.rs", form)),
+            ));
+        }
         for (want, change) in cases {
             let found = problems(change);
             assert_eq!(found.len(), 1, "{want}\n{found:#?}");
