@@ -100,6 +100,10 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] Review round 10: 1 should-fix, untyped patterns and field patterns, fixed in `d89fa18`.
   * [x] Review round 11: 1 pre-existing should-fix, variadic parameters, fixed in `c9bc622`.
   * [x] Review round 12: no findings.  The stop rule of decision 0024 holds.  Log: `docs/reviews/claude-tech-debt-planning-thr8px.md`.
+  * [x] Review round 13, on the maintainer's Mac, of `5fe83fc`, `4ab3a1a` and `52afb99`: 2 should-fix and 1 nit; the should-fix fixed in `250851c`.  The `Range` arm stays, and `NODES` gets a type generic parameter.  Round 12's record was seeded by hand with head `c9bc622`, because rounds 1 to 12 ran in the cloud container.
+  * [x] Review round 14: no findings, and no missed mutant.  The stop rule of decision 0024 holds.  The log stays in the same file.
+  * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
+  * [ ] CI on the last commit of M1.
 * [ ] M2: rung 2.
 * [ ] M3: rung 3.
 

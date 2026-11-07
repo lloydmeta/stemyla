@@ -71,6 +71,9 @@
 | 2026-11-07 | 10 | a4f3ed2 | 10-2 | reviewer | nit | - | doc | none | xtask/src/rules.rs:8540 | The round 8 test comment says "an argument", unlike the docs. | unvalidated | none | reported, not fixed |
 | 2026-11-07 | 11 | d89fa18 | 11-1 | reviewer | should-fix | yes | bug | MEM-1 | xtask/src/rules.rs:2846 (CanaryFinder) | A turned-off C-variadic parameter still hides a canary in its pattern. | pre-existing | none | c9bc622 review round 11 fixes |
 | 2026-11-07 | 11 | d89fa18 | 11-2 | supply-chain-reviewer | nit | - | weak-test | VERIFY-1 | xtask/src/rules.rs:2688 (pat_attrs) | No case catches the loss of the `Ident` or `Tuple` arm of `pat_attrs`. | unvalidated | none | reported, not fixed |
+| 2026-11-08 | 13 | 52afb99 | 13-1 | reviewer, memory-reviewer, supply-chain-reviewer | should-fix | yes | bug | VERIFY-1 | xtask/src/rules.rs:2635 (expr_attrs) | The removed `Range` arm changes what `fn_bodies` returns, and its stated reason is false: syn keeps a range statement's attributes on the `Range`. | confirmed | none | 250851c review round 13 fixes |
+| 2026-11-08 | 13 | 52afb99 | 13-2 | memory-reviewer | should-fix | yes | weak-test | VERIFY-1 | xtask/src/rules.rs:8620 (NODES) | NODES has no type generic parameter with a default, so a visitor that ignores `GenericParam::Type` passes every test. | confirmed | none | 250851c review round 13 fixes |
+| 2026-11-08 | 13 | 52afb99 | 13-3 | supply-chain-reviewer | nit | - | doc | none | docs/plans/active/tech-debt-rungs.md:87-89 | The M1 Progress lines record CI and the push tier on commits before `52afb99` changed the code. | unvalidated | none | reported, not fixed |
 
 ## Rounds
 
@@ -88,3 +91,5 @@
 | 10 | 4 | 113821 | 21.4 | 0 | 1 | not asked | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 2, known 0; exit 4: the baseline failed | - | - | - | - | - | - |
 | 11 | 4 | 138581 | 28.1 | 0 | 1 | not asked | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 22, known 0; exit 4: the baseline failed | - | - | - | - | - | - |
 | 12 | 3 | 100724 | 17.5 | 0 | 1 | not asked | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 2, known 0; exit 4: the baseline failed | - | - | - | - | - | - |
+| 13 | 5 | 331502 | 65.5 | 0 | 2 | not asked | mutants: full: tested 38 (caught 35, missed 0, unviable 3), timeouts 0, not tested 0, known 0 | - | - | - | - | - | - |
+| 14 | 2 | 124484 | 13.0 | 0 | 1 | not asked | mutants: full: tested 3 (caught 2, missed 0, unviable 1), timeouts 0, not tested 0, known 0 | - | - | - | - | - | - |
