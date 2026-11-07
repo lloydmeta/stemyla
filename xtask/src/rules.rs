@@ -2632,37 +2632,32 @@ fn attrs_turn_off(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// The outer attributes of an expression, which syn keeps on each kind.
+/// The outer attributes of an expression that can hold a canary.  Other
+/// kinds give none.  syn gives the attributes of an `Assign`, `Binary`,
+/// `Cast` or `Range` to its left operand.  A `Continue`, `Infer` or `Lit`
+/// holds no code.  The check does not read a `Macro`, and only a macro
+/// makes a `Group`.
 fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
     use syn::Expr::*;
     match expr {
         Array(e) => &e.attrs,
-        Assign(e) => &e.attrs,
         Async(e) => &e.attrs,
         Await(e) => &e.attrs,
-        Binary(e) => &e.attrs,
         Block(e) => &e.attrs,
         Break(e) => &e.attrs,
         Call(e) => &e.attrs,
-        Cast(e) => &e.attrs,
         Closure(e) => &e.attrs,
         Const(e) => &e.attrs,
-        Continue(e) => &e.attrs,
         Field(e) => &e.attrs,
         ForLoop(e) => &e.attrs,
-        Group(e) => &e.attrs,
         If(e) => &e.attrs,
         Index(e) => &e.attrs,
-        Infer(e) => &e.attrs,
         Let(e) => &e.attrs,
-        Lit(e) => &e.attrs,
         Loop(e) => &e.attrs,
-        Macro(e) => &e.attrs,
         Match(e) => &e.attrs,
         MethodCall(e) => &e.attrs,
         Paren(e) => &e.attrs,
         Path(e) => &e.attrs,
-        Range(e) => &e.attrs,
         RawAddr(e) => &e.attrs,
         Reference(e) => &e.attrs,
         Repeat(e) => &e.attrs,
@@ -2679,42 +2674,39 @@ fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
     }
 }
 
-/// The outer attributes of a pattern, which syn keeps on each kind.  A
-/// closure parameter with no type keeps its attributes here.
+/// The outer attributes of a pattern that can hold a canary.  A closure
+/// parameter with no type keeps its attributes here.  Other kinds give
+/// none.  A `Lit`, `Rest` or `Wild` holds no code, and the check does not
+/// read a `Macro`.  syn does not parse an `Or` as a closure parameter.
 fn pat_attrs(pat: &syn::Pat) -> &[syn::Attribute] {
     use syn::Pat::*;
     match pat {
         Const(p) => &p.attrs,
         Ident(p) => &p.attrs,
-        Lit(p) => &p.attrs,
-        Macro(p) => &p.attrs,
-        Or(p) => &p.attrs,
         Paren(p) => &p.attrs,
         Path(p) => &p.attrs,
         Range(p) => &p.attrs,
         Reference(p) => &p.attrs,
-        Rest(p) => &p.attrs,
         Slice(p) => &p.attrs,
         Struct(p) => &p.attrs,
         Tuple(p) => &p.attrs,
         TupleStruct(p) => &p.attrs,
         Type(p) => &p.attrs,
-        Wild(p) => &p.attrs,
         _ => &[],
     }
 }
 
-/// The attributes of an item, inner ones included for a `mod`.
+/// The attributes of an item that can hold a canary, inner ones included
+/// for a `mod`.  Other kinds give none.  An `ExternCrate` or `Use` holds
+/// no code, and the check does not read a `Macro`.
 fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
     use syn::Item::*;
     match item {
         Const(i) => &i.attrs,
         Enum(i) => &i.attrs,
-        ExternCrate(i) => &i.attrs,
         Fn(i) => &i.attrs,
         ForeignMod(i) => &i.attrs,
         Impl(i) => &i.attrs,
-        Macro(i) => &i.attrs,
         Mod(i) => &i.attrs,
         Static(i) => &i.attrs,
         Struct(i) => &i.attrs,
@@ -2722,7 +2714,6 @@ fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
         TraitAlias(i) => &i.attrs,
         Type(i) => &i.attrs,
         Union(i) => &i.attrs,
-        Use(i) => &i.attrs,
         _ => &[],
     }
 }
@@ -2762,7 +2753,6 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::ImplItem::Const(i) => &i.attrs,
             syn::ImplItem::Fn(i) => &i.attrs,
             syn::ImplItem::Type(i) => &i.attrs,
-            syn::ImplItem::Macro(i) => &i.attrs,
             _ => &[],
         };
         if !attrs_turn_off(attrs) {
@@ -2778,7 +2768,6 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::TraitItem::Const(i) => &i.attrs,
             syn::TraitItem::Fn(i) => &i.attrs,
             syn::TraitItem::Type(i) => &i.attrs,
-            syn::TraitItem::Macro(i) => &i.attrs,
             _ => &[],
         };
         if !attrs_turn_off(attrs) {
@@ -2836,7 +2825,6 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::ForeignItem::Fn(i) => &i.attrs,
             syn::ForeignItem::Static(i) => &i.attrs,
             syn::ForeignItem::Type(i) => &i.attrs,
-            syn::ForeignItem::Macro(i) => &i.attrs,
             _ => &[],
         };
         if !attrs_turn_off(attrs) {
@@ -8035,7 +8023,7 @@ mod source_tests {
 
     #[test]
     fn code_from_the_crate_itself_passes() {
-        let text = "#[path = \"web/x.rs\"]\nmod x;\nmod y { include!(\"y.rs\"); }\nconst S: &str = \"#[path = \\\"../../roformer/src/a.rs\\\"]\";\nconst T: &str = include_str!(\"../../roformer/src/a.rs\");\nfn f() { let path = \"../../x\"; }\n";
+        let text = "#[path = \"web/x.rs\"]\nmod x;\nmod y { include!(\"y.rs\"); }\nconst S: &str = \"#[path = \\\"../../roformer/src/a.rs\\\"]\";\nconst T: &str = include_str!(\"../../roformer/src/a.rs\");\nfn f() { let path = \"../../x\"; }\n#[doc = \"../../roformer/src/a.rs\"]\nfn g() {}\nm![path = \"../../roformer/src/a.rs\"];\n";
         assert_eq!(found("engine/src/lib.rs", text), vec![]);
         assert_eq!(
             found("xtask/src/x.rs", "include!(\"../../roformer/src/a.rs\");"),
@@ -8049,6 +8037,7 @@ mod source_tests {
             "#[path = \"../../roformer/src/x.rs\"]\nmod x;",
             "#![allow(unused)]\nfn f() { include!(\"../../roformer/src/x.rs\"); }",
             "#[cfg_attr(unix, path = \"../../dsp/src/a.rs\")]\nmod a;",
+            "mod m {\n    #![cfg_attr(unix, path = \"../../dsp/src/a.rs\")]\n}",
             "fn f() {\n    r#include!(\"../../x.rs\");\n}",
             "mod m {\n    include!(\"/etc/x.rs\");\n}",
             "macro_rules! m { () => { include!(\"../../x.rs\"); } }\nconst A: u8 = 0;",
@@ -8623,5 +8612,153 @@ mod mem1_tests {
                 .iter()
                 .all(|p| p.file == RULES_FILE && p.message.contains("which is not a member"))
         );
+    }
+
+    /// A block that holds a canary, for the `BODY` of [`NODES`].
+    const NODE_BODY: &str = "{ fn mem1_lint_is_on() {} 1 }";
+
+    /// Each kind of node that keeps its attributes, with `ATTR` on the
+    /// node and `BODY` inside it.
+    const NODES: &[&str] = &[
+        // Items.
+        "ATTR\nconst C: u8 = BODY;\n",
+        "ATTR\nenum E { A = BODY }\n",
+        "ATTR\nextern \"C\" {\n    static X: [u8; BODY];\n}\n",
+        "ATTR\nfn f() {\n    BODY;\n}\n",
+        "ATTR\nimpl S {\n    const C: u8 = BODY;\n}\n",
+        "ATTR\nmod m {\n    const C: u8 = BODY;\n}\n",
+        "ATTR\nstatic X: u8 = BODY;\n",
+        "ATTR\nstruct S {\n    a: [u8; BODY],\n}\n",
+        "ATTR\ntrait T {\n    const C: u8 = BODY;\n}\n",
+        "ATTR\ntrait A = B<[u8; BODY]>;\n",
+        "ATTR\ntype T = [u8; BODY];\n",
+        "ATTR\nunion U {\n    a: [u8; BODY],\n}\n",
+        // Items in an `impl`, a `trait` and an `extern` block.
+        "impl S {\n    ATTR\n    const C: u8 = BODY;\n}\n",
+        "impl S {\n    ATTR\n    fn f() {\n        BODY;\n    }\n}\n",
+        "impl S {\n    ATTR\n    type T = [u8; BODY];\n}\n",
+        "trait T {\n    ATTR\n    const C: u8 = BODY;\n}\n",
+        "trait T {\n    ATTR\n    fn f() {\n        BODY;\n    }\n}\n",
+        "trait T {\n    ATTR\n    type A = [u8; BODY];\n}\n",
+        "extern \"C\" {\n    ATTR\n    fn g(x: [u8; BODY]);\n}\n",
+        "extern \"C\" {\n    ATTR\n    static X: [u8; BODY];\n}\n",
+        "extern \"C\" {\n    ATTR\n    type T<const N: usize = BODY>;\n}\n",
+        // A `let` statement, and each kind of expression.
+        "fn f() {\n    ATTR\n    let x = BODY;\n}\n",
+        "fn f() {\n    ATTR\n    [BODY];\n}\n",
+        "fn f() {\n    ATTR\n    async BODY;\n}\n",
+        "fn f() {\n    ATTR\n    BODY.await;\n}\n",
+        "fn f() {\n    ATTR\n    BODY;\n}\n",
+        "fn f() {\n    ATTR\n    break BODY;\n}\n",
+        "fn f() {\n    ATTR\n    g(BODY);\n}\n",
+        "fn f() {\n    ATTR\n    || BODY;\n}\n",
+        "fn f() {\n    ATTR\n    const BODY;\n}\n",
+        "fn f() {\n    ATTR\n    BODY.a;\n}\n",
+        "fn f() {\n    ATTR\n    for x in y BODY\n}\n",
+        "fn f() {\n    ATTR\n    if c BODY\n}\n",
+        "fn f() {\n    ATTR\n    a[BODY];\n}\n",
+        "fn f() {\n    if ATTR let x = BODY {}\n}\n",
+        "fn f() {\n    ATTR\n    loop BODY\n}\n",
+        "fn f() {\n    ATTR\n    match BODY {}\n}\n",
+        "fn f() {\n    ATTR\n    a.g(BODY);\n}\n",
+        "fn f() {\n    ATTR\n    (BODY);\n}\n",
+        "fn f() {\n    ATTR\n    <[u8; BODY]>::X;\n}\n",
+        "fn f() {\n    ATTR\n    &raw const BODY;\n}\n",
+        "fn f() {\n    ATTR\n    &BODY;\n}\n",
+        "fn f() {\n    ATTR\n    [0; BODY];\n}\n",
+        "fn f() {\n    ATTR\n    return BODY;\n}\n",
+        "fn f() {\n    ATTR\n    S { a: BODY };\n}\n",
+        "fn f() {\n    ATTR\n    BODY?;\n}\n",
+        "fn f() {\n    ATTR\n    try BODY;\n}\n",
+        "fn f() {\n    ATTR\n    (BODY, 1);\n}\n",
+        "fn f() {\n    ATTR\n    -BODY;\n}\n",
+        "fn f() {\n    ATTR\n    unsafe BODY;\n}\n",
+        "fn f() {\n    ATTR\n    while c BODY\n}\n",
+        "fn f() {\n    ATTR\n    yield BODY;\n}\n",
+        // A match arm, a field, a variant, a field value and a generic
+        // parameter.
+        "fn f() {\n    match x {\n        ATTR\n        _ => BODY,\n    }\n}\n",
+        "struct S {\n    ATTR\n    a: [u8; BODY],\n}\n",
+        "struct S(ATTR [u8; BODY]);\n",
+        "enum E {\n    ATTR\n    A = BODY,\n}\n",
+        "fn f() {\n    S {\n        ATTR\n        a: BODY,\n    };\n}\n",
+        "struct S<ATTR const N: usize = BODY>;\n",
+        // Parameters of a function, a function pointer, a closure and a
+        // C-variadic function.
+        "fn f(ATTR x: [u8; BODY]) {}\n",
+        "impl S {\n    fn f(ATTR self: S<[u8; BODY]>) {}\n}\n",
+        "type F = fn(ATTR [u8; BODY]);\n",
+        "fn f() {\n    |ATTR x: [u8; BODY]| ();\n}\n",
+        "unsafe extern \"C\" fn g(x: u8, ATTR None::<[u8; BODY]>: ...) {}\n",
+        // Each kind of pattern of a closure parameter with no type, and a
+        // field pattern.
+        "fn f() {\n    |ATTR const BODY| ();\n}\n",
+        "fn f() {\n    |ATTR x @ Some::<[u8; BODY]>(y)| ();\n}\n",
+        "fn f() {\n    |ATTR (Some::<[u8; BODY]>(y))| ();\n}\n",
+        "fn f() {\n    |ATTR None::<[u8; BODY]>| ();\n}\n",
+        "fn f() {\n    |ATTR 0..=const BODY| ();\n}\n",
+        "fn f() {\n    |ATTR &Some::<[u8; BODY]>(y)| ();\n}\n",
+        "fn f() {\n    |ATTR [Some::<[u8; BODY]>(y)]| ();\n}\n",
+        "fn f() {\n    |ATTR S::<[u8; BODY]> { a }| ();\n}\n",
+        "fn f() {\n    |ATTR (Some::<[u8; BODY]>(y), z)| ();\n}\n",
+        "fn f() {\n    |ATTR Some::<[u8; BODY]>(y)| ();\n}\n",
+        "fn f(s: S) {\n    let S {\n        ATTR\n        a: None::<[u8; BODY]>,\n        ..\n    } = s;\n}\n",
+    ];
+
+    #[test]
+    fn a_node_that_an_attribute_turns_off_hides_its_canary() {
+        for form in NODES {
+            let text = |attr: &str| form.replace("ATTR", attr).replace("BODY", NODE_BODY);
+            let off = text("#[cfg(any())]");
+            assert_eq!(fn_bodies(&off, "mem1_lint_is_on").len(), 0, "{off}");
+            let on = text("#[cfg(test)]");
+            assert_eq!(fn_bodies(&on, "mem1_lint_is_on").len(), 1, "{on}");
+        }
+    }
+
+    #[test]
+    fn only_a_cfg_of_a_clippy_step_keeps_a_node_on() {
+        let form = "ATTR\nconst C: u8 = BODY;\n";
+        for (attr, found) in [
+            ("#[cfg(test)]", 1),
+            ("#[cfg(target_arch = \"wasm32\")]", 1),
+            ("#[allow(unused)]", 1),
+            ("#[cfg(any())]", 0),
+            ("#[cfg(unix)]", 0),
+            ("#[cfg_attr(test, allow(unused))]", 0),
+        ] {
+            let text = form.replace("ATTR", attr).replace("BODY", NODE_BODY);
+            assert_eq!(fn_bodies(&text, "mem1_lint_is_on").len(), found, "{text}");
+        }
+    }
+
+    #[test]
+    fn disallowed_methods_gives_the_array_without_its_comments() {
+        for (config, array) in [
+            ("disallowed-methods = [\"a\"]\n", "[\"a\"]"),
+            (
+                "a = 1\nb = 2\ndisallowed-types = []\ndisallowed-methods = [\"a\"]\n",
+                "[\"a\"]",
+            ),
+            (
+                "disallowed-methods = [\n  { path = \"a\" }, # { path = \"b\" }\n]\n",
+                "[\n  { path = \"a\" }, \n]",
+            ),
+            (
+                "disallowed-methods = [\n  { path = \"a\", reason = \"x ] # y\" },\n  { path = 'b', reason = 'z ]' },\n]\n",
+                "[\n  { path = \"a\", reason = \"x ] # y\" },\n  { path = 'b', reason = 'z ]' },\n]",
+            ),
+            ("disallowed-types = [\"a\"]\n", ""),
+        ] {
+            assert_eq!(disallowed_methods(config), array, "{config}");
+        }
+    }
+
+    #[test]
+    fn the_type_of_a_let_is_not_the_receiver() {
+        let body: TokenStream = "#[expect(clippy::disallowed_methods, reason = \"c\")]\nlet x: js_sys::Uint8Array = [1_u8].to_vec();"
+            .parse()
+            .expect("tokens");
+        assert_eq!(expected_copies(body), vec!["slice"]);
     }
 }

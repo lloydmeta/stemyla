@@ -87,7 +87,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed: `efe2b8d` TD-22, `979fbe4` TD-42, `913b306` TD-69, `967c181` TD-40, `01bc133` TD-23, `b40b89e` TD-41, `9358c14` TD-26 and `c1224c1` TD-39.  The code and the review rounds are done.
   * [x] 2026-11-07: CI passed on `5fe83fc` of PR 42, the nightly step included.
   * [x] 2026-11-07: `check --tier push` passed on the maintainer's Mac, as a user that is not root.  The root-only test and the GPU line ran too.
-  * [ ] 2026-11-07: cargo-mutants on the diff of the branch, on the maintainer's Mac.
+  * [x] 2026-11-08: cargo-mutants on the diff of the branch, on the maintainer's Mac: 270 mutants, 156 caught, 103 missed, 10 unviable, 1 timeout.  Of the missed mutants, 82 were in the MEM-1 canary visitor.  No test put a cfg that stays on around a canary, and many node kinds had no case.  New tests and the removal of 20 arms that cannot change the result fix them.  New cases also catch 17 mutants of `disallowed_methods`, `source_includes`, `attribute_paths`, `turns_off` and `expected_copies`.  A second run on the changed functions gave 4 missed, all equivalent (Decision log).
   * [x] Review round 1: 8 should-fix and 8 nits; fixes in `f961fdc`.
   * [x] Review round 2: 4 should-fix and 4 nits; fixes in `31adccf`.
   * [x] Review round 3: 6 should-fix, 2 of them refuted, and 4 nits; fixes in `3fde93b`.
@@ -122,10 +122,12 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 * 2026-11-07, maintainer: accepted `syn` 2.0.119 and `quote` 1.0.47 as dependencies of `xtask` (DEPS-1).  Accepted the `nightly-2026-10-30` pin of TD-22.
 * 2026-11-07, agent: the commits of M1 were applied again from patches, so each commit has a new hash.  This plan and the review log now give the new hashes.
+* 2026-11-08, agent: the MEM-1 canary visitor loses 20 match arms, and each kind falls to `_ => &[]`.  Reason: the mutant of each arm survived a test of every node kind.  syn gives the attributes of an `Assign`, `Binary`, `Cast` or `Range` to its left operand (`syn` 2.0.119, `stmt.rs` and `expr.rs`).  A literal, `continue`, `_`, `..`, `extern crate` or `use` holds no code.  The check does not read a macro, and only a macro makes a `Group`.  syn does not parse an or-pattern as a closure parameter.
+* 2026-11-08, agent: 4 mutants of `expected_copies` stay missed, as equivalent.  A `let` that ends in `.to_vec()` always has an `=` before it, so `map_or(n - 3, ..)` and `.min(n - 3)` change nothing.  `at * 1` adds only the `=`, which is not a type name.  The timeout of `index *= 2` is a loop that never ends.
 
 * 2026-11-06, agent: the skill items TD-47 and TD-48 go with the next harness PR, not rung 1.  Reason: a change to the `review-rounds` skill belongs with P1 and P3, which change the same skill.
 
 ## Outcomes and retrospective
 
 * M1, 2026-11-07: the 8 steps landed, and 12 review rounds ran.  Rounds 4 to 11 each found a `#[cfg]` form that the MEM-1 canary check missed.  The `syn` visitor of round 7 stopped the parse errors.  Rounds 8 to 11 then added each `syn` node kind that holds attributes and can hold a canary.  Lesson: a check that reads Rust source starts with a parser, not a token walker.
-* The mutants runs of M1 tested no mutant in this container, because the baseline fails as root.  Each fix has a hand mutation that the new test catches.
+* The mutants runs of M1 tested no mutant in this container, because the baseline fails as root.  Each fix has a hand mutation that the new test catches.  The first local run on 2026-11-08 then missed 103 of 270 mutants.  Lesson: a hand mutation shows that a test fails, but not that each branch has a test.  A test of a skip also needs its kept case, or a mutant that skips everything passes.
