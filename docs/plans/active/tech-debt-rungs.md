@@ -84,7 +84,19 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 ## Progress
 
 * [x] 2026-11-06: triage of the open entries, and this plan.
-* [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed, each with its mutant runs: `e3c7448` TD-22, `db1d8fb` TD-42, `68039b3` TD-69, `a8dce36` TD-40, `88ca4b1` TD-23, `df7a1bd` TD-41, `b6f0946` TD-26 and `548c960` TD-39.  Next: tier `push`, then the review rounds.
+* [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed, each with its mutant runs: `e3c7448` TD-22, `db1d8fb` TD-42, `68039b3` TD-69, `a8dce36` TD-40, `88ca4b1` TD-23, `df7a1bd` TD-41, `b6f0946` TD-26 and `548c960` TD-39.  The code and the review rounds are done.  Open: CI, the nightly step included, runs only on a PR.
+  * [x] Review round 1: 8 should-fix and 8 nits; fixes in `1cc9d83`.
+  * [x] Review round 2: 4 should-fix and 4 nits; fixes in `a35f31b`.
+  * [x] Review round 3: 6 should-fix, 2 of them refuted, and 4 nits; fixes in `e6b32f0`.
+  * [x] Review round 4: 4 should-fix and 3 nits; the should-fix fixed in `283d234`.
+  * [x] Review round 5: 2 should-fix in the canary walker, fixed in `8bf9717`.
+  * [x] Review round 6: 3 should-fix in the canary walker, fixed in `6e2759c`.
+  * [x] Review round 7: 3 should-fix; `eb4779e` replaces the walker with a `syn` visitor.
+  * [x] Review round 8: 2 should-fix, fixed in `b8b9e06`: more nodes, and `quote::ToTokens`.
+  * [x] Review round 9: 1 should-fix, closure parameters, fixed in `7bb47a4`.
+  * [x] Review round 10: 1 should-fix, untyped patterns and field patterns, fixed in `f30b61e`.
+  * [x] Review round 11: 1 pre-existing should-fix, variadic parameters, fixed in `b9557d8`.
+  * [x] Review round 12: no findings.  The stop rule of decision 0024 holds.  Log: `docs/reviews/claude-tech-debt-planning-thr8px.md`.
 * [ ] M2: rung 2.
 * [ ] M3: rung 3.
 
@@ -109,4 +121,5 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 ## Outcomes and retrospective
 
-Not started.
+* M1, 2026-11-07: the 8 steps landed, and 12 review rounds ran.  Rounds 4 to 11 each found a `#[cfg]` form that the MEM-1 canary check missed.  The `syn` visitor of round 7 stopped the parse errors.  Rounds 8 to 11 then added each `syn` node kind that holds attributes and can hold a canary.  Lesson: a check that reads Rust source starts with a parser, not a token walker.
+* The mutants runs of M1 tested no mutant in this container, because the baseline fails as root.  Each fix has a hand mutation that the new test catches.
