@@ -2862,6 +2862,11 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
             syn::visit::visit_pat(self, pat);
         }
     }
+    fn visit_variadic(&mut self, variadic: &'ast syn::Variadic) {
+        if !attrs_turn_off(&variadic.attrs) {
+            syn::visit::visit_variadic(self, variadic);
+        }
+    }
     fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
         if !attrs_turn_off(&field.attrs) {
             syn::visit::visit_field_pat(self, field);
@@ -2875,8 +2880,8 @@ impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
 /// attribute turns it off ([`turns_off`]) on it or on a node around it.
 /// Such a node is an item, a statement, an expression or a match arm.  It
 /// is also a field, a variant, a field value or a generic parameter.  It
-/// is also a foreign item, a function or closure parameter, or a field
-/// pattern.  An inner `#![...]` of its file or `mod` also counts.  A
+/// is also a foreign item, a function, closure or variadic parameter, or
+/// a field pattern.  An inner `#![...]` of its file or `mod` also counts.  A
 /// function in a macro call is not read.  A file that syn cannot parse
 /// gives none.
 fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
@@ -8585,6 +8590,9 @@ mod mem1_tests {
             "fn f() {\n    let c = |#[cfg(any())] None::<[u8; BODY]>| ();\n}\n",
             "fn f() {\n    let c = |#[cfg(any())] Some::<[u8; BODY]>(x)| ();\n}\n",
             "fn f(s: S) {\n    let S {\n        #[cfg(any())]\n        a: None::<[u8; BODY]>,\n        ..\n    } = s;\n}\n",
+            // Round 11: a C-variadic parameter.
+            "extern \"C\" {\n    fn g(x: u8, #[cfg(any())] None::<[u8; BODY]>: ...);\n}\n",
+            "unsafe extern \"C\" fn g(x: u8, #[cfg(any())] None::<[u8; BODY]>: ...) {}\n",
         ] {
             let text = form.replace("BODY", BODY);
             cases.push((
