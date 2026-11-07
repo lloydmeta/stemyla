@@ -17,6 +17,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and the numbers of phases 2 and 3b.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
 * `plans/completed/harness-phase-3b.md`: phase 3b of that plan, done on 2026-11-02 in PR #41: orchestrated mode by default for big tasks, a stricter fix rule, a model for each agent role, local checks by tier, cleanup, and PR bodies with attention comments.  Its retrospective gives the cost, what went well and what went wrong.
 * `plans/completed/harness-phase-3b-m8.md`: M8 of that plan, done on 2026-11-02, the close-out: the parts of phase 3b in `harness.md`, the gaps that it leaves, and proposals for the later phases.
 * `plans/completed/harness-phase-3b-m7.md`: M7 of that plan, done on 2026-11-02: a PR template, `xtask pr-body` checks a PR body, and `xtask attention` lists the lines for inline comments (decision 0027).

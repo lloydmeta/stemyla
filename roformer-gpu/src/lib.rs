@@ -3077,6 +3077,79 @@ mod tests {
         );
     }
 
+    /// Read-only storage buffers count towards
+    /// maxStorageBuffersPerShaderStage, as read-write ones do, and uniform
+    /// buffers count towards their own limit.
+    #[test]
+    fn read_only_storage_and_uniform_buffers_are_counted() {
+        let limits = wgpu::Limits::defaults();
+        let module = |count: u32, space: &str, ty: &str| {
+            let mut src = String::new();
+            let mut uses = String::new();
+            for i in 0..count {
+                src += &format!("@group(0) @binding({i}) var<{space}> b{i}: {ty};\n");
+                uses += &format!("_ = b{i}[0]; ");
+            }
+            src + &format!("@compute @workgroup_size(1) fn main() {{ {uses}}}")
+        };
+        let read = module(9, "storage, read", "array<f32>");
+        let breaches = limit_breaches("read", &read, &limits);
+        assert_eq!(breaches.len(), 1, "{breaches:#?}");
+        assert!(
+            breaches[0].starts_with("GPU-1: read declares 9 storage buffers, over maxStorageBuffersPerShaderStage (8).  Fix: "),
+            "{}",
+            breaches[0]
+        );
+        let eight = module(8, "storage, read", "array<f32>");
+        assert_eq!(
+            limit_breaches("eight", &eight, &limits),
+            Vec::<String>::new()
+        );
+        let uniform = module(13, "uniform", "array<vec4<f32>, 1>");
+        let breaches = limit_breaches("uniform", &uniform, &limits);
+        assert_eq!(breaches.len(), 1, "{breaches:#?}");
+        assert!(
+            breaches[0].contains("13 uniform buffers, over maxUniformBuffersPerShaderStage (12)"),
+            "{}",
+            breaches[0]
+        );
+    }
+
+    /// The y axis has its own limit.  The default y limit equals the
+    /// invocation limit, so a y breach alone needs lower limits.
+    #[test]
+    fn a_y_axis_over_its_limit_is_reported() {
+        let limits = wgpu::Limits {
+            max_compute_workgroup_size_y: 8,
+            ..wgpu::Limits::defaults()
+        };
+        let src = "@compute @workgroup_size(1, 16, 1) fn main() {}";
+        let breaches = limit_breaches("tall", src, &limits);
+        assert_eq!(breaches.len(), 1, "{breaches:#?}");
+        assert!(
+            breaches[0].starts_with("GPU-1: tall `main`: workgroup size y is 16, over maxComputeWorkgroupSizeY (8).  Fix: "),
+            "{}",
+            breaches[0]
+        );
+    }
+
+    /// z counts in the invocations: 8 * 1 * 64 is over 256 although each
+    /// axis is within its limit.
+    #[test]
+    fn invocations_that_only_z_takes_over_the_limit_are_reported() {
+        let limits = wgpu::Limits::defaults();
+        let src = "@compute @workgroup_size(8, 1, 64) fn main() {}";
+        let breaches = limit_breaches("deep", src, &limits);
+        assert_eq!(breaches.len(), 1, "{breaches:#?}");
+        assert!(
+            breaches[0].contains("8 * 1 * 64 = 512 invocations per workgroup, over maxComputeInvocationsPerWorkgroup (256)"),
+            "{}",
+            breaches[0]
+        );
+        let fits = "@compute @workgroup_size(4, 1, 64) fn main() {}";
+        assert_eq!(limit_breaches("fits", fits, &limits), Vec::<String>::new());
+    }
+
     #[test]
     fn a_fifth_bind_group_is_reported() {
         let limits = wgpu::Limits::defaults();
@@ -3130,8 +3203,8 @@ mod tests {
     /// declare, so the module-wide buffer counts in [`limit_breaches`] are
     /// the counts of the lists.  The test pairs them as `Kernels::new`
     /// does, but does not read it: only wgpu's validation sees a pipeline
-    /// given the wrong list.  The entry points that `Kernels::new` names
-    /// exist.
+    /// given the wrong list.  The entry points of the hand copy exist; the
+    /// test does not read the entry names from `Kernels::new` (TD-41).
     #[test]
     fn every_layout_matches_its_shaders() {
         let file = |src: &str| src.to_string();

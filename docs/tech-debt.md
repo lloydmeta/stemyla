@@ -54,21 +54,14 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 * Fix: the drift job in phase 5a of the plan, which compares each doc with the code it describes.
 
-### TD-22: a compile-fail doctest passes on any compile error
+### TD-23: LAYER-1 does not see a copy of a workspace crate from a registry
 
-MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E0616`, `E0624`) pass on any compile error, since stable rustdoc does not check the error code.  A `compile_fail,E0505` doctest that fails with E0308 passes on rustc 1.99.0 (checked 2026-10-19).  `Rec`'s `no_run` doctest compiles the same calls, so an API change still fails a test; a different error in the `compile_fail` copy alone does not.  The `Gpu` doctests have no such twin, since a `no_run` doctest cannot call a private item.  So a rename that also makes an item public (`pub dev`) fails them with another error, and they pass.
-
-* Fix: run `cargo +nightly test -p roformer-gpu --doc` in CI, since nightly rustdoc checks the error code; or check it with a UI-test harness such as `trybuild` (a new crate, DEPS-1).
-
-### TD-23: LAYER-1 sees crates, not code
-
-`crates_depend_only_downwards` reads the dependencies between crates, not the source (LAYER-1).
+`crates_depend_only_downwards` reads the dependencies between crates (LAYER-1).  Since tech-debt rung 1, `code_stays_in_its_crate` also reads the source.  It fails a `#[path]` or an `include!` that takes code from outside its crate.  It also fails a target whose source is outside its package folder, and a tracked symbolic link.  What is left:
 
 * A crate from a registry or git, under another name, can hold a copy of a workspace crate, such as `roformer`.
-* Source can reach across crates without a dependency: `#[path = "../../roformer/src/x.rs"] mod x;` or `include!`.
-* A workspace crate's target can take its source from another crate's folder: `[lib] path = "../roformer/src/lib.rs"`.
-* A symbolic link in a crate's folder can point to another crate's source.
-* Fix: the `supply-chain-reviewer` agent looks for all four, on each diff that routes it (TD-31).  A later check could ban `#[path]` and `include!` with a path outside the crate.  It could check that each workspace crate's `targets[].src_path` is in its own folder.  It could also fail a tracked symbolic link, which `git ls-files -s` shows with mode `120000`.
+* The check finds `include!` by its name only, so a renamed import, such as `use std::include as inc;`, passes it.
+* `include_str!` and `include_bytes!` pass in every crate, from any folder.  So a crate can take a file of another crate, such as a WGSL shader, with no dependency.  Today only `xtask` and `engine/tests/realtime.rs` read files of other crates, as text.
+* Fix: the `supply-chain-reviewer` agent looks for each of these forms, on each diff that routes it (TD-31).
 
 ### TD-25: RT-1's allocation test runs natively only
 
@@ -78,15 +71,20 @@ MEM-3's compile-fail doctests on `Rec` (`compile_fail,E0505`) and on `Gpu` (`E06
 
 ### TD-26: MEM-1's lint sees only `to_vec`
 
-Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-protocol`, `engine`, `roformer` and `roformer-gpu`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first four (MEM-1, MEM-2).  It does not see:
+Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-protocol`, `engine`, `roformer`, `roformer-gpu` and `synth`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first four (MEM-1, MEM-2).  It does not see:
 
 * other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec`;
 * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;
 * a `#[wasm_bindgen]` export that takes a `Vec<f32>` or a `&[f32]`, which copies a JS array in;
 * an `#[allow]` in place of an `#[expect]`, as clippy's own help line suggests, and a reason that does not say why;
 * a new `to_vec` in a statement that already has an `#[expect]`, and a new test in a test module with a module-level `#[expect]` or `#![expect]`;
-* crates whose `clippy.toml` lacks the MEM-1 paths: `synth`, which makes the demo song in the web app, and any new crate.  `dsp` is covered by DSP-1's method list; `xtask` and `test-support` do not ship;
 * a path that no longer resolves, except through the canaries, which prove their paths only while the clippy steps keep `--all-targets`.  Nothing fails if the `wasm32` step goes.
+
+Since tech-debt rung 1, `each_shipped_crate_lints_mem1_copies` fails a shipped crate whose `clippy.toml` lacks `slice::to_vec`.  It fails a crate of `MEM1_JS_CRATES` that lacks either JS-array path.  It also fails a crate without a canary that proves the paths: one statement for each path, under `#[expect(clippy::disallowed_methods)]` and with no `#[cfg]`, that ends in `.to_vec()` on that type.  The check parses each file with `syn`.  It skips a node that a `#[cfg]` turns off.  Such a node is an item, a statement, an expression or a match arm.  It is also a field, a variant, a field value or a generic parameter.  It is also a foreign item, a function, closure or variadic parameter, or a field pattern.  Only `test` and `target_arch = "wasm32"` keep a node.  It also skips a file or `mod` whose inner `#![cfg]` turns it off.  `dsp`, `xtask` and `test-support` are exempt, each with its reason.  What it does not see:
+
+* a new crate that reads JS arrays but is not in `MEM1_JS_CRATES` (`xtask/src/rules.rs`), which needs only the `slice::to_vec` path.  `engine` takes `js-sys` for `cpal`, and is not in the list.  `roformer-gpu` reads a mapped `Float32Array` through `wgpu::web_sys` in `mapped_floats`, and is not in the list either.
+* a `#[cfg]` on the `mod` line, in another file, that brings in the canary's file.  The check reads each file alone.
+* a canary in a macro call, which `syn` does not parse.  Such a canary counts as missing, so the check fails safe.
 
 * Fix: none planned.  The `memory-reviewer` agent looks for a new copy of any form, on each diff that routes it (TD-31).
 
@@ -277,48 +275,17 @@ Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled 
 
 PR #39's review rounds sent some mutants inside functions to TD-39.  Each one that `cargo mutants --list` still shows is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`).  The mutants of the constant `WAITS_S` in `xtask/src/e2e/save.rs` are not entries, so they go to the validator.
 
-`sends_json_and_reads_a_sized_reply` passes when the client reads to the end of the stream.  The fake closes the socket after 30 s, within the test's 120 s (not run).
-
 Source: `docs/reviews/replay.md`, case `pr9`, finding 1-1 and each `pr9` mutant still on `main`.  The review logs of M3 to M6 of the branch `iphone-crashes-2026-10-25` (`docs/reviews/iphone-crashes-2026-10-25-m3.md` to `-m6.md`), with a `catch-up` row for each deferred finding.
 
-* Fix: a fake driver for `Driver` and `Session`, and a time limit under 30 s on the sized-reply test.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
+* Fix: a fake driver for `Driver` and `Session`.  Add unit tests of the pure parts of the scenarios.  For the scenarios that need the model, a GPU runner in CI.
 
-### TD-40: gaps in the RT-1 tests
+### TD-41: the GPU-1 layout test pairs shaders from a hand copy
 
-The tests of RT-1 count allocations, and do not check all that the stretchers and the player do.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
-
-* No test reaches two branches of `app_stretcher_problems`: `"default"` in the features of an `engine =` line, and a manifest with no `engine =` line.
-* `a_stretcher_keeps_its_warm_up_promise` counts allocations only.  No test checks the output of `WsolaStretcher::can_pull` for a push over 256 frames (not run).
-* No test bounds the size of the warm-up push in `WsolaStretcher::warm_up` (not run).
-* The loop tests check only that the playhead stays inside the loop.  A wrong comparison in `Player::drop_oldest_anchor_when_full` shows the loop start before each wrap, and passes (not run).
-
-Source: `docs/reviews/replay.md`, case `m11`, findings 1-1, 1-8, 1-10 and 1-14.
-
-* Fix: add a breach case for each branch of `app_stretcher_problems`.  Check the stretcher's output and the warm-up size.  Test the playhead before a loop wrap.
-
-### TD-41: gaps in the GPU-1 limit checker's tests, and docs that claim more
-
-`every_kernel_fits_the_default_limits` and its tests do not cover all of the checker (GPU-1, DOC-1):
-
-* `every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new`.  The last sentence of its doc comment claims more than it checks: "The entry points that `Kernels::new` names exist."  The test checks a hand copy of the entry names.
-* No test covers the count of read-only storage buffers, the y-axis limit, or a breach of the invocation limit that only z causes.
+`every_layout_matches_its_shaders` pairs shaders, layouts and entry names from its own hand copy, not from `Kernels::new` (GPU-1).  So a `Kernels::new` that gives a pipeline the wrong layout passes it; only wgpu's validation sees that.  Tech-debt rung 1 corrected the doc comment, which claimed that the test checks the names of `Kernels::new`.  It also added tests of the read-only storage count, the y-axis limit, and a breach of the invocation limit that only z causes.
 
 Source: `docs/reviews/replay.md`, case `m2`, findings 1-2 and 1-4.
 
-* Fix: take the pairs from the pipelines that the code makes, and add the three missing cases.
-
-### TD-42: weak tests of the e2e message-type scan
-
-`e2e_messages_use_protocol_types` (PROTO-1) has tests that do not fail on some wrong scans.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only:
-
-* No test has a `SCRIPT_ONLY_TYPES` entry that only `xtask/src/e2e.rs` uses.  So a stale check that reads only the JavaScript passes.
-* No test has `["type"] <=` in Rust, or a macro other than `json!` after `"type":` (not run).
-* Both `includes` cases put the misspelt type second.  So a scan that skips the first string passes (not run).
-* `js_is_lexed` passes when `js_tokens` counts the lines of a `/*` comment wrongly.  The checker ran a scratch copy of `js_tokens` with this mutant.
-
-Source: `docs/reviews/replay.md`, case `m10`, outside findings 1-3, 1-11, 1-12 and 1-13, and finding 1-10, which matches `m10-2`.
-
-* Fix: add each missing case to the tests in `xtask/src/rules.rs`.
+* Fix: take the pairs from the pipelines that the code makes, for example from a table that `Kernels::new` reads.  That changes how the kernels are built, so it needs GPU-2's checks.
 
 ### TD-43: the file picker path has no automated check
 
@@ -415,14 +382,6 @@ This entry concerns no rule.  It concerns `xtask serve` and `xtask clean`.
 `xtask serve` writes its pid file in `target/xtask-serve/` of the repo (`serve::pid_file`).  It uses the standard library only, so it cannot remove the file when a signal stops it.  So each stopped server leaves a stale file.  `xtask clean` lists such a file as stale, and `--yes` removes it.  A new server on the same port writes over the file.
 
 * Fix: no fix is planned.  A signal handler needs a new crate (DEPS-1) or unsafe code.
-
-### TD-69: no test runs `docs::check` on a fixture tree
-
-This entry concerns VERIFY-1, through `xtask docs-check`.
-
-`docs::check` runs each check of `docs-check` on a repo.  Its only test, `the_map_and_docs_match_the_code` (`xtask/tests/docs.rs`), runs it on this repo and wants no problem.  So a `check` that gives no problem passes.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` passes each test (finding 1-19 of review round 1 of M3 of harness phase 3b).  This mutant is an entry of `KNOWN_MISSED` (`xtask/src/review.rs`), so `xtask review mutants` writes it to `known.txt`.  The unit tests check each check alone, but not that `check` calls it.
-
-* Fix: add a test that runs `check` on a small fixture repo with one known problem of each check, and wants each problem.
 
 ### TD-70: tier `commit` of `xtask check` can pass where the full checks fail
 
@@ -699,7 +658,11 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-14: closed by `an_mp3_is_encoded_in_blocks` (harness phase 2, M18b).  The worker reads the channels from JS in blocks, so an encode holds a few times the size of the MP3, not the PCM (MEM-1).
 * TD-15: closed by `the_callback_does_not_allocate_after_warm_up` (harness phase 2, M11).  wsola 0.2.0, a warm-up of each stretcher, chipmunk decimation in place and a bound on the playhead's anchors removed the allocations in the audio callback (RT-1).
 * TD-17: closed by `a_view_is_written_whole` (harness phase 2, M18a).  `st_write` copies a view into a whole array, as the worker's `whole()` does (MEM-5).
+* TD-22: closed by a step of CI's `test` job, `cargo +nightly-2026-10-30 test --locked -p roformer-gpu --doc` (tech-debt rung 1).  Nightly rustdoc checks the error code of a `compile_fail` doctest.  With `E0308` in place of `E0505` on `Rec`'s doctest, the step failed: "Some expected error codes were not found".  Stable passed it (MEM-3).
 * TD-24: closed by DSP-1's new list of types (harness phase 2, M7).  The list now names every type that `dsp` uses.
 * TD-30: closed by `set_viewport` in `xtask/src/webdriver.rs` (harness phase 2, M17).  A read at once after a resize could still give the old size, so `xtask e2e` sometimes could not size Chrome's viewport.  Each try now decides on a read taken once the page's outer size equals the new window.  `settle` starts no new read after 2 s.  A read that gives the target is read again, and five tries correct a late read.  In the CI runs with the fix, every read at once was already right.  So only the unit tests show a late read handled: `the_viewport_fits_despite_a_stale_read_at_once` and `a_late_settled_read_is_corrected_by_the_next_try`.  The e2e log line `viewport: ...` shows the race if it comes back.
-* TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
+* TD-40: closed by new RT-1 tests (tech-debt rung 1).  `the_manifest_check_finds_a_stretcher` has a breach case for `"default"` in an `engine =` line and for a manifest with no `engine =` line.  `wsola_gives_the_same_output_for_a_push_of_max_push_frames` checks wsola's output for pushes of 4,096 frames.  `wsola_warms_up_with_a_bounded_push` bounds the bytes of the warm-up, with a new byte count in the test allocator.  `the_playhead_reaches_the_loop_end_before_each_wrap` fails the `!=` and `<=` mutants of `drop_oldest_anchor_when_full`.
+* TD-42: closed by new cases in the tests of `e2e_messages_use_protocol_types` (tech-debt rung 1): `a_script_only_type_in_the_rust_alone_is_not_stale`, `a_type_after_a_comment_of_several_lines_has_its_line`, a misspelt type first in `includes`, and `<=` and `format!` after `"type"` in Rust.  Each of the five mutants that the entry named fails a test (PROTO-1).
 * TD-56: closed by M7 of `plans/completed/stream-from-storage.md` (D12 of `plans/completed/stream-from-storage-m7.md`).  One counter gives a token to every open (a drop, a pick, a Storage open, the startup restore and Demo).  Only the newest open shows its song, and only `apply_inbox` makes a session current.  `a_late_drop_does_not_show_over_a_newer_song`, `a_late_drop_does_not_show_over_demo`, `two_opens_that_end_in_one_frame_show_the_newer` and `a_stale_restore_on_the_page_does_not_make_its_session_current` check it.
+* TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
+* TD-69: closed by `check_runs_each_check_on_a_repo` in `xtask/src/docs.rs` (tech-debt rung 1).  It runs `docs::check` on a copy of the repo's tracked files, and wants no problem.  Then it plants one problem for each check, and wants each one.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` fails it, so its `KNOWN_MISSED` entry is gone (VERIFY-1).

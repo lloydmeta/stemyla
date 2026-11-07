@@ -392,3 +392,16 @@ pub fn write_song(song: &Song, dir: &std::path::Path, mp3: bool) -> anyhow::Resu
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mem1_lint_is_on() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1 canary: clippy fails here if this path is off"
+        )]
+        let copy = [1.0_f32].to_vec();
+        assert_eq!(copy, [1.0]);
+    }
+}
