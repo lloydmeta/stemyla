@@ -76,7 +76,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 ## Decisions for the maintainer
 
-1. TD-22, the nightly in CI.  Options: A, a pinned nightly in a new CI step; B, `trybuild` as a dev-dependency (a new crate, DEPS-1); C, leave TD-22 open.  Recommendation: A.  Reason: no new crate, and the pin keeps CI stable.  Answer: none on 2026-11-06; the agent applied A, with `nightly-2026-10-30` (Decision log).
+1. TD-22, the nightly in CI.  Options: A, a pinned nightly in a new CI step; B, `trybuild` as a dev-dependency (a new crate, DEPS-1); C, leave TD-22 open.  Recommendation: A.  Reason: no new crate, and the pin keeps CI stable.  Answer: none on 2026-11-06; the agent applied A, with `nightly-2026-10-30` (Decision log).  On 2026-11-07, the maintainer accepted A and the pin.
 2. TD-7, a new tool in CI.  Options: A, `cargo-deny` from a pinned release binary; B, from `cargo install --locked` with a pinned version; C, leave TD-7 open.  Recommendation: A, after the DEPS-1 vet.  Reason: a release binary does not build a large tree in CI.  Answer: open.
 3. TD-16, a protocol version.  Options: A, a version in `Alive`, and the page refuses a mismatch; B, required fields only, with no version.  Recommendation: A.  Reason: a page and a worker of two builds can meet through a cached worker script.  Answer: open.
 4. The mode.  Recommendation: not orchestrated.  Each milestone is one PR and about one session, with the maintainer present for M2's GPU runs.  Answer: 2026-11-06, the maintainer: do M1 while away, with no PR, and give the work as patches.
@@ -84,18 +84,21 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 ## Progress
 
 * [x] 2026-11-06: triage of the open entries, and this plan.
-* [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed, each with its mutant runs: `e3c7448` TD-22, `db1d8fb` TD-42, `68039b3` TD-69, `a8dce36` TD-40, `88ca4b1` TD-23, `df7a1bd` TD-41, `b6f0946` TD-26 and `548c960` TD-39.  The code and the review rounds are done.  Open: CI, the nightly step included, runs only on a PR.
-  * [x] Review round 1: 8 should-fix and 8 nits; fixes in `1cc9d83`.
-  * [x] Review round 2: 4 should-fix and 4 nits; fixes in `a35f31b`.
-  * [x] Review round 3: 6 should-fix, 2 of them refuted, and 4 nits; fixes in `e6b32f0`.
-  * [x] Review round 4: 4 should-fix and 3 nits; the should-fix fixed in `283d234`.
-  * [x] Review round 5: 2 should-fix in the canary walker, fixed in `8bf9717`.
-  * [x] Review round 6: 3 should-fix in the canary walker, fixed in `6e2759c`.
-  * [x] Review round 7: 3 should-fix; `eb4779e` replaces the walker with a `syn` visitor.
-  * [x] Review round 8: 2 should-fix, fixed in `b8b9e06`: more nodes, and `quote::ToTokens`.
-  * [x] Review round 9: 1 should-fix, closure parameters, fixed in `7bb47a4`.
-  * [x] Review round 10: 1 should-fix, untyped patterns and field patterns, fixed in `f30b61e`.
-  * [x] Review round 11: 1 pre-existing should-fix, variadic parameters, fixed in `b9557d8`.
+* [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed: `efe2b8d` TD-22, `979fbe4` TD-42, `913b306` TD-69, `967c181` TD-40, `01bc133` TD-23, `b40b89e` TD-41, `9358c14` TD-26 and `c1224c1` TD-39.  The code and the review rounds are done.
+  * [x] 2026-11-07: CI passed on `5fe83fc` of PR 42, the nightly step included.
+  * [x] 2026-11-07: `check --tier push` passed on the maintainer's Mac, as a user that is not root.  The root-only test and the GPU line ran too.
+  * [ ] 2026-11-07: cargo-mutants on the diff of the branch, on the maintainer's Mac.
+  * [x] Review round 1: 8 should-fix and 8 nits; fixes in `f961fdc`.
+  * [x] Review round 2: 4 should-fix and 4 nits; fixes in `31adccf`.
+  * [x] Review round 3: 6 should-fix, 2 of them refuted, and 4 nits; fixes in `3fde93b`.
+  * [x] Review round 4: 4 should-fix and 3 nits; the should-fix fixed in `5c47302`.
+  * [x] Review round 5: 2 should-fix in the canary walker, fixed in `d2fb3e7`.
+  * [x] Review round 6: 3 should-fix in the canary walker, fixed in `2bd1a58`.
+  * [x] Review round 7: 3 should-fix; `06b1595` replaces the walker with a `syn` visitor.
+  * [x] Review round 8: 2 should-fix, fixed in `9fc0845`: more nodes, and `quote::ToTokens`.
+  * [x] Review round 9: 1 should-fix, closure parameters, fixed in `a4f3ed2`.
+  * [x] Review round 10: 1 should-fix, untyped patterns and field patterns, fixed in `d89fa18`.
+  * [x] Review round 11: 1 pre-existing should-fix, variadic parameters, fixed in `c9bc622`.
   * [x] Review round 12: no findings.  The stop rule of decision 0024 holds.  Log: `docs/reviews/claude-tech-debt-planning-thr8px.md`.
 * [ ] M2: rung 2.
 * [ ] M3: rung 3.
@@ -114,8 +117,11 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-06, agent: the nightly line goes in `never_run` of `xtask check`, not in tier `push`.  Reason: a machine without the nightly can then still run tier `push`; CI runs the line.
 * 2026-11-06, agent: step 3 removed the TD-69 entry of `KNOWN_MISSED` in its own commit, not in the last commit of M1.  Reason: `each_known_missed_entry_is_open_and_in_the_code` fails an entry whose TD is closed, so the entry goes with the close.  No review round had started, so the route of a round did not widen.
 * 2026-11-06, agent: TD-23 keeps three items, not only the registry copy of step 6: a renamed `include!`, and an `include_str!` or `include_bytes!` of another crate's file.  Reason: review rounds 1 and 2 found them, and a check of either needs name resolution or a list of allowed text files.
-* 2026-11-07, agent: review round 7 replaced the token walker of the MEM-1 canary check with a `syn` visitor.  Reason: rounds 4 to 7 each found a new form that the walker missed, such as a brace in a generic argument or a `match` in a statement.  DEPS-1: `syn` 2.0.119 was already in `Cargo.lock`, through `serde_derive`.  The lock gains only the edge from `xtask`, which does not ship.
+* 2026-11-07, agent: review round 7 replaced the token walker of the MEM-1 canary check with a `syn` visitor.  Reason: rounds 4 to 7 each found a new form that the walker missed, such as a brace in a generic argument or a `match` in a statement.  DEPS-1: `syn` 2.0.119 was already in `Cargo.lock`, through `burn-derive`, `zerocopy-derive` and other derive crates.  The lock gains only the edge from `xtask`, which does not ship.
 * 2026-11-06, agent: TD-41 stays open for the hand-copied pairs.  Reason: to take the pairs from `Kernels::new` changes how the kernels are built, which needs GPU-2's checks on a real GPU.
+
+* 2026-11-07, maintainer: accepted `syn` 2.0.119 and `quote` 1.0.47 as dependencies of `xtask` (DEPS-1).  Accepted the `nightly-2026-10-30` pin of TD-22.
+* 2026-11-07, agent: the commits of M1 were applied again from patches, so each commit has a new hash.  This plan and the review log now give the new hashes.
 
 * 2026-11-06, agent: the skill items TD-47 and TD-48 go with the next harness PR, not rung 1.  Reason: a change to the `review-rounds` skill belongs with P1 and P3, which change the same skill.
 
