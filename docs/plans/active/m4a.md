@@ -110,7 +110,7 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 * The writer makes `ftyp`, `moov` (`mvhd`, `trak`, `tkhd`, `mdia`, `mdhd`, `hdlr`, `minf`, `smhd`, `dinf`, `stbl` with `stsd`, `stts`, `stsc`, `stsz`, `stco`) and `mdat`.  The sample entry is `alac` with its 24-byte `ALACSpecificConfig`.
 * The writer gives a fast-start file.  The packet count comes from the frame count, so the size of `moov` is known before the first packet.  The writer reserves that size, writes `mdat`, and then writes `moov` at the reserved place.  This is the same order as `FlacOut::replace_header`.
 * The writer can also write an `elst` entry, for the tests of M2 and for M4.
-* `stco` holds 32-bit offsets.  The writer refuses a file of 4 GiB or more.  A 1 GiB decode limit keeps a 16-bit save far below that.
+* `stco` holds 32-bit offsets.  The writer refuses a file whose worst case is 4 GiB or more (`plans/completed/m4a-m1.md`, Decision log).  A 1 GiB decode limit keeps a 16-bit save far below that.
 * Write decision 0028 as `accepted`: M4A with ALAC as the save format, the location of the writer, and the safe port.  The maintainer's answers to D1, D2 and D6 accept it (Decision log).
 * `THIRD-PARTY.md` names each new crate (DEPS-1).
 * Acceptance: native tests that fail before the change.
@@ -121,12 +121,18 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 ### M2: open M4A (and AIFF if D5 says so)
 
 * Turn on the Symphonia features `isomp4`, `alac` and `aac` in `engine` (and `aiff` by D5).
+* First, extend the `m4a` crate (D6: no copy of the writer in a test).  Each change gets a test that fails first.
+  * An `esds` sample entry for AAC, with its `AudioSpecificConfig` and channel count.  `Layout` gets the codec's frames per packet, packet bound and channel count, in place of the ALAC constants.  The AAC-LC, HE-AAC and 6-channel fixtures use it; their packets come from D3 or are dummies where only the message is tested.
+  * An optional `iTunSMPB` tag (`udta`, `meta`, `ilst`), counted in the head's length.  M4 can use it too.
+  * Fix the comment of `SampleEntry` and the Consequences of decision 0028, which give `esds` to M4.
+* Fixtures that the writer does not make are crafted in the test from the writer's output: a `drms` or `enca` entry (patch the 4-byte type), and a video track (a second `trak` whose `hdlr` is `vide`, appended to a `MoovLast` file; and a single track patched from `soun` to `vide`).
+* The over-limit ALAC fixture uses `Layout` and `AlacEncoder` directly: one silent packet, its size repeated.  It does not call `alac_file`, which needs the whole input.
 * `most_frames`: an ALAC case and an AAC case, with the cap of decision 0013 on the stated length.
-* `head_length`: an `mp4_length` case that reads `mdhd` (and `elst`) when `moov` is in the head.  Otherwise it gives `HeadLength::Unstated`.
+* `head_length`: an `mp4_length` case that reads `mdhd`, `hdlr`, `stsd` (and `elst`) from a `moov` that starts in the head.  These boxes sit in the first few hundred bytes of `moov`.  The `moov` can end after the 64 KiB head: the writer adds 8 bytes for each packet, so a save of more than about 12.6 minutes at 44.1 kHz passes the head, and so does the over-limit fixture.  So `mp4_length` reads a `moov` cut off at the end of the head.  Only a file whose `moov` starts after the head gives `HeadLength::Unstated`.
 * The encoder delay and the padding: `engine::decode` reads `elst`, then `iTunSMPB` (by D7), through the same seekable source, and trims both.  So the decoded length equals the source's length.
 * Messages: a DRM file gives "protected, cannot open".  An HE-AAC file gives "HE-AAC is not supported; use AAC-LC".  A file with more than 2 AAC channels gives its own message.
 * `SONG_FILES`, the `WELCOME` texts, the hover text of "Open song…", `Song::load_folder`, `xtask serve` (`audio/mp4`, `audio/aac`, and `audio/aiff` by D5).
-* The fixtures come from the M1 writer (ALAC) and from D3 (AAC).  No audio goes into git (ASSET-1).
+* The fixtures come from the `m4a` writer (ALAC, and AAC with the `esds` entry above) and from D3 (the AAC packets).  No audio goes into git (ASSET-1).
 * An extra local check, not in CI: the maintainer's real AAC-LC file (see Surprises; its path is in the M2 brief, not in the repo).  It adds to the acceptance checks below and replaces none of them.  It has no `iTunSMPB` and a delay of 1024 frames, so the synthetic fixtures still cover `iTunSMPB`, the delay of 2112 and each other case.  `engine::decode` gives 13,413,120 frames, as Apple's `afinfo` says.  Its cross-correlation with Apple's decode (`afconvert -f WAVE -d LEI16`) peaks at lag 0.  Never copy the file into the repo (ASSET-1).
 * Measure the size of the wasm bundle before and after (`trunk build --release`).  Put both numbers in Surprises.
 * Acceptance:
@@ -139,14 +145,17 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 * `stem-protocol`: a request and a reply of kind `alac`, as `flac` has, with one encoder and one decoder (PROTO-1).  The hand-written scripts of `xtask e2e` change in the same commit (TD-16).
 * `stem-worker`: an `alac` encode on the memory path (a `Blob` of parts) and on the storage path (an `OutFile`, the `moov` written last at the reserved place).  Each write is a whole new `Uint8Array` (MEM-5).  The encode holds no song-sized buffer (MEM-1, MEM-4).
 * `app`: `Format::M4a` with the label "M4A (16-bit Apple Lossless)", in `Format::ALL` and in the Save menu.
+* Licence: from M3, the web app ships the Apache-2.0-only code of `m4a` (decision 0029, `proposed`).  Do the Consequences of 0029, such as the licence list, in M3.  The maintainer accepts 0029 at the review of the PR; the run does not wait for it.
 * Acceptance:
-  * `worker/src/web/tests.rs`: an ALAC encode in blocks decodes to the same 16 bits as `engine::wav::encode_pcm16`, on both paths, and its peak memory does not grow with the length.
+  * `worker/src/web/tests.rs`: an ALAC encode in blocks decodes to the same 16 bits as `engine::wav::encode_pcm16`, on both paths.  Its peak memory grows with the length by the packet table only: the worker keeps 4 bytes for each packet, and `head()` makes `moov` at about 8 bytes for each packet.  That is about 12 bytes for each 4096 frames, or about 75 KB for 10 minutes.  The test allows that and nothing more.  Do not stream `moov`.
   * `cargo run -p xtask -- e2e save --browser chrome`: the M4A saves of 1 and 10 minutes meet the same limits as FLAC.  These are the JS heap, the WebAssembly memory, the longest slice and the worker's memory.  Each saved file decodes to the WAV save's samples, bit for bit.
   * The extension test in `app/src/export.rs` lists `m4a`.
 
 ### M4: save as AAC-LC (by D1)
 
-Only if D1 takes the AAC save.  The stem worker encodes with WebCodecs `AudioEncoder` (`mp4a.40.2`, 256 kbps), and the M1 writer makes the M4A with an `esds` sample entry and an `elst` for the encoder delay.
+Only if D1 takes the AAC save.  The stem worker encodes with WebCodecs `AudioEncoder` (`mp4a.40.2`, 256 kbps), and the `m4a` writer makes the M4A with M2's `esds` sample entry and an `elst` for the encoder delay.
+
+* The packet count of an AAC encode is not known exactly before the encode, because the encoder adds priming and flush packets.  So M4 reserves the head for an upper bound of packets and fills the rest with a `free` box, or writes `moov` last (`Order::MoovLast`).  M4 picks one and records it.
 
 * The menu shows "M4A (AAC 256 kbps)" only when `AudioEncoder.isConfigSupported` passes and a short test encode gives a packet.
 * The encode respects the encoder's queue (`encodeQueueSize`, `dequeue`), so its memory does not grow with the song.
@@ -246,6 +255,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, agent: the branch is `feature/m4a`, which the maintainer started, and not `claude/next-file-format-support-u3ib64`.  Reason: one branch and one PR for each plan.
 * 2026-11-08, maintainer: decision 0028 is accepted, because the answers to D1, D2 and D6 choose its content.
 * 2026-11-08, maintainer: the run does not block on the maintainer.  The plan's stop conditions become decisions of the orchestrator.
+* 2026-11-08, orchestrator (intent review of M1, round 1): the `esds` entry and the `iTunSMPB` tag move into M2, in the `m4a` crate, since M2's AAC and `iTunSMPB` fixtures need them and D6 forbids writer copies.  M2's `mp4_length` reads a cut-off `moov`.  M3's memory test allows the packet table.  M3 does the Consequences of 0029.  M4 plans for an unknown packet count.
 * 2026-11-08, agent (M1): `m4a` is Apache-2.0 only, by decision 0029, `proposed`.  The rest of the workspace stays MIT or Apache-2.0.
 * 2026-11-08, agent (M1): CI and tier `push` run `cargo test -p engine` alone, a new CI step and a new line of `xtask check`.
 * 2026-11-08, agent: an audio-only `.mp4` opens (D4).  Reason: the maintainer's real file is one, and the D4 answer excludes only video.
