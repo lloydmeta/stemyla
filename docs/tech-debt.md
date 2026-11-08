@@ -643,6 +643,14 @@ This entry concerns the HE-AAC text of M2 of `plans/active/m4a.md`.
 
 * Fix: Symphonia's HE-AAC decode, or a check of the first packets for SBR fill elements (`EXT_SBR_DATA` in a `fill_element`) before the decoder is made.
 
+### TD-82: an M4A with a movie timescale of 0 does not open
+
+This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.1.
+
+`symphonia-format-isomp4` 0.6.1 refuses an `mvhd` timescale of 0 ("malformed stream: isomp4 (mvhd): timescale is zero"), so the decode shows "unsupported or unrecognised format" with that text.  The trim of such a file would drop the delay and keep every frame after it (`trim_of`).  The test `only_the_common_form_of_elst_gives_a_trim` checks the refusal, and `trim_of_a_movie_timescale_of_0_is_skip_only` checks the trim without a decode.  A timescale of 0 is not valid in ISO/IEC 14496-12, so real files are rare.
+
+* Fix: a Symphonia that takes the file, or a patch of the timescale before the probe.  The plan forbids a patch or a fork of Symphonia.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings

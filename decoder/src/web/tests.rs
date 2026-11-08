@@ -389,6 +389,43 @@ async fn a_wav_a_flac_and_an_mp3_decode_into_session_files() {
     }
 }
 
+/// M2 of the M4A plan: an ALAC M4A with `moov` last (so the source
+/// seeks), with an `elst` delay of 2112 frames, decodes in blocks to the
+/// native decode, with the frames of its source, not of its track.
+#[wasm_bindgen_test]
+async fn an_m4a_with_an_edit_decodes_into_session_files() {
+    const DELAY: usize = 2112;
+    const FRAMES: usize = 30_007;
+    let (left, right) = (tone(DELAY + FRAMES + 500, 0), tone(DELAY + FRAMES + 500, 1));
+    let samples: Vec<i16> = left
+        .iter()
+        .zip(&right)
+        .flat_map(|(l, r)| [l, r].map(|x| (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16))
+        .collect();
+    let edit = m4a::Edit {
+        skip: DELAY as u32,
+        frames: FRAMES as u64,
+    };
+    let bytes = m4a::alac_file(&samples, 44_100, Some(edit), m4a::Order::MoovLast)
+        .expect("the writer takes it");
+    fresh().await;
+    plant_at(&format!("{SESSION}/src/0.m4a"), &bytes).await;
+    let reply = decode(&one_source("m4a")).await;
+    assert_eq!(
+        reply,
+        DecodeReply::Decoded {
+            frames: FRAMES as u64,
+            new_mix: true,
+            channels: vec![2],
+        }
+    );
+    let whole = decode_bytes(bytes, Some("m4a")).unwrap();
+    let song = Song::from_audio(vec![("source".into(), whole)]).unwrap();
+    let stem = &song.stems[0];
+    let mix = file("mix.f32.decode.part").await.expect("the mix part");
+    assert!(mix == interleaved(&stem.left, &stem.right), "the mix");
+}
+
 #[wasm_bindgen_test]
 async fn decode_writes_pass_whole_arrays() {
     fresh().await;

@@ -5,6 +5,7 @@
 //! on and not hold the file's samples.  Both keep the limit of
 //! [`MAX_DECODED_BYTES`].  `decode_bytes` is built on `Decoder`.
 
+use crate::mp4_boxes::{Found, SoundTrack};
 use crate::resample::SONG_RATE;
 use anyhow::{Context, Result, anyhow};
 use std::io::{Cursor, SeekFrom};
@@ -140,6 +141,75 @@ fn check_aac(params: &AudioCodecParameters) -> Result<()> {
         return Err(anyhow!(AAC_KIND_TEXT));
     }
     Ok(())
+}
+
+/// The frames that a decode drops at the start (`skip`), and the most that
+/// it gives after them (`keep`, if known): the encoder delay and the
+/// padding of an M4A (D7 of `plans/active/m4a.md`).  The frames are at
+/// the file's rate, before any conversion to [`SONG_RATE`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Trim {
+    skip: u64,
+    keep: Option<u64>,
+}
+
+/// 1.0 as the 16.16 rate of an `elst` entry.
+const EDIT_RATE_ONE: i32 = 0x1_0000;
+
+/// The trim of the walker's sound track at `rate`: from `elst`, else from
+/// `iTunSMPB`, else none (D7 of `plans/active/m4a.md`).
+fn trim_of(found: &Found, sound: &SoundTrack, rate: Option<u32>) -> Trim {
+    edit_trim(found, sound, rate)
+        .or_else(|| itunsmpb_trim(found.itunsmpb.as_deref()?, sound.duration))
+        .unwrap_or_default()
+}
+
+/// The trim of an `elst` of one entry with `media_time >= 0` and rate 1.0,
+/// after any leading empty edits, whose media timescale is `rate`.  `keep`
+/// is `segment_duration` in the media timescale, to the nearest frame.  A
+/// movie timescale or a `segment_duration` of 0 gives no `keep`.
+fn edit_trim(found: &Found, sound: &SoundTrack, rate: Option<u32>) -> Option<Trim> {
+    let media_scale = sound.media_timescale.filter(|scale| Some(*scale) == rate)?;
+    let edits = sound.edits.as_deref()?;
+    let first = edits.iter().position(|edit| edit.media_time != -1)?;
+    let [edit] = &edits[first..] else {
+        return None;
+    };
+    if edit.media_time < 0 || edit.rate != EDIT_RATE_ONE {
+        return None;
+    }
+    let keep = found
+        .movie_timescale
+        .filter(|scale| *scale > 0 && edit.segment_duration > 0)
+        .map(|movie_scale| {
+            let ticks = u128::from(edit.segment_duration) * u128::from(media_scale);
+            let movie_scale = u128::from(movie_scale);
+            u64::try_from((ticks + movie_scale / 2) / movie_scale).unwrap_or(u64::MAX)
+        });
+    Some(Trim {
+        skip: edit.media_time as u64,
+        keep,
+    })
+}
+
+/// The trim of an `iTunSMPB` text of at least 4 fields of hexadecimal:
+/// `skip` is field 2 and `keep` field 4.  A field 4 of 0 gives `keep` as
+/// `duration` less `skip` and field 3 (the padding), if that is above 0.
+fn itunsmpb_trim(text: &str, duration: Option<u64>) -> Option<Trim> {
+    let fields: Vec<u64> = text
+        .split_whitespace()
+        .map(|field| u64::from_str_radix(field, 16).ok())
+        .collect::<Option<_>>()?;
+    let [_, skip, padding, frames, ..] = fields[..] else {
+        return None;
+    };
+    let keep = match frames {
+        0 => duration
+            .and_then(|d| d.checked_sub(skip)?.checked_sub(padding))
+            .filter(|keep| *keep > 0),
+        frames => Some(frames),
+    };
+    Some(Trim { skip, keep })
 }
 
 /// What the head of a file states about its length.
@@ -422,6 +492,7 @@ struct Opened {
     track_id: u32,
     params: AudioCodecParameters,
     reserve: usize,
+    trim: Trim,
 }
 
 /// The frames of each of `channels` channels that fit in `limit` bytes of
@@ -496,6 +567,15 @@ fn open_within(
     if params.codec == CODEC_ID_AAC {
         check_aac(&params)?;
     }
+    // The walker keeps the first sound track.  Symphonia takes the first
+    // track of a known codec.  When they differ, no trim.
+    let trim = boxes
+        .as_ref()
+        .and_then(|found| {
+            let sound = found.sound.as_ref()?;
+            (sound.track_id == Some(track_id)).then(|| trim_of(found, sound, params.sample_rate))
+        })
+        .unwrap_or_default();
     let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
     let stated_exactly = params.codec != CODEC_ID_MP3 && !estimated;
     if stated_exactly
@@ -521,12 +601,14 @@ fn open_within(
         .zip(rate)
         .map_or(u64::MAX, |(max, rate)| source_frames_within(max, rate));
     let within_limit = (frames_within(limit, channels) as u64).min(within_song);
-    let reserve = frames_to_reserve(track.num_frames, most.map(|m| m.min(within_limit)));
+    let stated = trim.keep.or(track.num_frames);
+    let reserve = frames_to_reserve(stated, most.map(|m| m.min(within_limit)));
     Ok(Opened {
         format,
         track_id,
         params,
         reserve,
+        trim,
     })
 }
 
@@ -549,6 +631,11 @@ pub struct Decoder {
     /// packet's.
     sample_rate: u32,
     frames: u64,
+    /// The frames still to drop at the start (the encoder delay).
+    skip: u64,
+    /// The frames still to give, if the file states them; the rest is
+    /// padding.
+    keep: Option<u64>,
     planes: Vec<Vec<f32>>,
 }
 
@@ -595,6 +682,7 @@ impl Decoder {
             track_id,
             params,
             reserve,
+            trim,
         } = open_within(source, ext, limit, max_song_frames)?;
         let codec = symphonia::default::get_codecs()
             .make_audio_decoder(&params, &AudioDecoderOptions::default())
@@ -608,15 +696,23 @@ impl Decoder {
             max_song_frames,
             sample_rate: params.sample_rate.unwrap_or(0),
             frames: 0,
+            skip: trim.skip,
+            keep: trim.keep,
             planes: Vec::new(),
         })
     }
 
     /// The samples of the next packet of the audio track, or `None` at the
     /// end of the file.  A corrupt packet is skipped, as players do.  An
-    /// error comes before the frames so far pass the limit.
+    /// error comes before the frames so far pass the limit.  It drops the
+    /// encoder delay and the padding that an M4A states (D7 of
+    /// `plans/active/m4a.md`), so a packet can give fewer frames, and the
+    /// limits count the frames given.
     pub fn next_packet(&mut self) -> Result<Option<Packet<'_>>> {
         loop {
+            if self.keep == Some(0) {
+                return Ok(None);
+            }
             let packet = match self.format.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => return Ok(None),
@@ -634,7 +730,10 @@ impl Decoder {
                         self.sample_rate = buf.spec().rate();
                     }
                     buf.copy_to_vecs_planar::<f32>(&mut self.planes);
-                    let packet_frames = self.planes.first().map_or(0, Vec::len) as u64;
+                    let packet_frames = self.trim_packet();
+                    if packet_frames == 0 {
+                        continue;
+                    }
                     let frames = self.frames + packet_frames;
                     if passes(self.limit, self.planes.len(), frames) {
                         return Err(too_long(self.limit));
@@ -656,7 +755,27 @@ impl Decoder {
         }
     }
 
-    /// The frames of each channel decoded so far.
+    /// Drops the frames of the packet in `planes` that the trim does not
+    /// give, and gives the frames left.
+    fn trim_packet(&mut self) -> u64 {
+        let decoded = self.planes.first().map_or(0, Vec::len) as u64;
+        let dropped = self.skip.min(decoded);
+        self.skip -= dropped;
+        let mut given = decoded - dropped;
+        if let Some(keep) = self.keep {
+            given = given.min(keep);
+            self.keep = Some(keep - given);
+        }
+        if given < decoded {
+            for plane in &mut self.planes {
+                plane.drain(..dropped as usize);
+                plane.truncate(given as usize);
+            }
+        }
+        given
+    }
+
+    /// The frames of each channel given so far.
     pub fn frames(&self) -> u64 {
         self.frames
     }
@@ -2002,5 +2121,374 @@ mod tests {
         let audio = decode_bytes(file, Some("m4a"));
         assert!(audio.is_ok(), "{audio:?}");
         assert_eq!(audio.unwrap().frames() as u64, aac_track_frames(88_200));
+    }
+
+    /// The frames of `channels` from `from`, `count` of them.
+    fn frames_of(channels: &[Vec<f32>], from: usize, count: usize) -> Vec<Vec<f32>> {
+        channels
+            .iter()
+            .map(|c| Vec::from(&c[from..from + count]))
+            .collect()
+    }
+
+    /// A stereo ALAC M4A at 44.1 kHz of `delay` frames, then `source`, then
+    /// `padding` frames, with an edit of `delay` and the source's frames.
+    /// The delay and the padding are a chirp, not silence.
+    fn alac_with_edit(
+        source: &[Vec<f32>],
+        delay: usize,
+        padding: usize,
+        order: m4a::Order,
+    ) -> Vec<u8> {
+        use crate::test_m4a::{alac_m4a, chirp};
+        let frames = source[0].len();
+        let around = chirp(1, delay + padding, 44_100);
+        let input: Vec<Vec<f32>> = source
+            .iter()
+            .map(|c| [&around[..delay], c, &around[delay..]].concat())
+            .collect();
+        let edit = m4a::Edit {
+            skip: delay as u32,
+            frames: frames as u64,
+        };
+        alac_m4a(&input[0], &input[1], 44_100, Some(edit), order)
+    }
+
+    /// D7 of the M4A plan: an ALAC M4A with an `elst` delay of 2112 frames
+    /// decodes to its source, bit for bit, whole and in blocks.
+    #[test]
+    fn an_alac_m4a_with_an_edit_decodes_to_its_source() {
+        use m4a::Order;
+        let source = short_tone();
+        let want = decoded16(&[&source[0], &source[1]]);
+        for order in [Order::FastStart, Order::MoovLast] {
+            let file = alac_with_edit(&source, 2112, 700, order);
+            let audio = decode_bytes(file.clone(), Some("m4a"));
+            assert!(audio.is_ok(), "{order:?}: {audio:?}");
+            let audio = audio.unwrap();
+            assert_eq!(audio.frames(), 4096, "{order:?}");
+            assert!(audio.channels == want, "{order:?}: the samples differ");
+            let blocks = in_blocks(file, "m4a");
+            assert!(blocks.is_ok(), "{order:?}: {blocks:?}");
+            assert!(blocks.unwrap() == want, "{order:?}: the blocks differ");
+        }
+    }
+
+    /// Checks that `file` decodes to the frames of `source`, whole and in
+    /// blocks, and that its cross-correlation with it peaks at lag 0.
+    fn assert_trimmed_to(file: Vec<u8>, source: &[Vec<f32>], case: &str) {
+        use crate::test_m4a::peak_lag;
+        let audio = decode_bytes(file.clone(), Some("m4a"));
+        assert!(audio.is_ok(), "{case}: {audio:?}");
+        let audio = audio.unwrap();
+        assert_eq!(audio.frames(), source[0].len(), "{case}");
+        let lag = peak_lag(&sum(source), &sum(&audio.channels), 20_000, 10_000, 4096);
+        assert_eq!(lag, 0, "{case}");
+        let blocks = in_blocks(file, "m4a");
+        assert!(blocks.is_ok(), "{case}: {blocks:?}");
+        assert!(
+            blocks.unwrap() == audio.channels,
+            "{case}: the blocks differ"
+        );
+    }
+
+    /// D7 of the M4A plan: an AAC-LC M4A of Apple's delay, trimmed from
+    /// `elst`, or from `iTunSMPB` alone, and one of the encoder's own
+    /// delay (as the maintainer's file has) trimmed from `elst`.
+    #[test]
+    fn an_aac_m4a_decodes_to_the_length_of_its_source() {
+        use crate::test_m4a::{
+            APPLE_DELAY, ENCODER_DELAY, aac_m4a, aac_track_frames, with_apple_delay,
+        };
+        use m4a::{Edit, Gapless, Order};
+        let source = chirps();
+        let frames = 88_200;
+        let delayed = with_apple_delay(&source);
+        let track = aac_track_frames(frames + APPLE_DELAY - ENCODER_DELAY);
+        let apple_edit = Edit {
+            skip: APPLE_DELAY as u32,
+            frames: frames as u64,
+        };
+        let gapless = Gapless {
+            delay: APPLE_DELAY as u32,
+            padding: (track - (APPLE_DELAY + frames) as u64) as u32,
+            frames: frames as u64,
+        };
+        let own_edit = Edit {
+            skip: ENCODER_DELAY as u32,
+            frames: frames as u64,
+        };
+        for order in [Order::FastStart, Order::MoovLast] {
+            let cases = [
+                (
+                    "elst of Apple's delay",
+                    aac_m4a(&delayed, 44_100, Some(apple_edit), None, order),
+                ),
+                (
+                    "iTunSMPB of Apple's delay",
+                    aac_m4a(&delayed, 44_100, None, Some(gapless), order),
+                ),
+                (
+                    "elst of the encoder's delay",
+                    aac_m4a(&source, 44_100, Some(own_edit), None, order),
+                ),
+            ];
+            for (case, file) in cases {
+                assert_trimmed_to(file, &source, &format!("{case}, {order:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn an_aac_m4a_with_no_edit_and_no_tag_keeps_every_frame() {
+        use crate::test_m4a::{aac_m4a, aac_track_frames};
+        let audio = decode_bytes(
+            aac_m4a(&chirps(), 44_100, None, None, m4a::Order::FastStart),
+            Some("m4a"),
+        );
+        assert!(audio.is_ok(), "{audio:?}");
+        assert_eq!(audio.unwrap().frames() as u64, aac_track_frames(88_200));
+    }
+
+    /// D7 of the M4A plan: `elst` wins over an `iTunSMPB` that disagrees.
+    #[test]
+    fn an_elst_wins_over_an_itunsmpb_that_disagrees() {
+        use crate::test_m4a::{APPLE_DELAY, ENCODER_DELAY, aac_m4a, aac_track_frames};
+        use m4a::{Edit, Gapless};
+        let source = chirps();
+        let frames = 88_200;
+        let track = aac_track_frames(frames);
+        let edit = Edit {
+            skip: ENCODER_DELAY as u32,
+            frames: frames as u64,
+        };
+        let other = Gapless {
+            delay: APPLE_DELAY as u32,
+            padding: (track - (APPLE_DELAY + frames - 2000) as u64) as u32,
+            frames: (frames - 2000) as u64,
+        };
+        let file = aac_m4a(
+            &source,
+            44_100,
+            Some(edit),
+            Some(other),
+            m4a::Order::FastStart,
+        );
+        assert_trimmed_to(file, &source, "elst and iTunSMPB");
+    }
+
+    /// The decode of `file`, which must succeed.
+    fn decoded(file: Vec<u8>, case: &str) -> Audio {
+        let audio = decode_bytes(file, Some("m4a"));
+        assert!(audio.is_ok(), "{case}: {audio:?}");
+        audio.unwrap()
+    }
+
+    /// The maintainer's file states `segment_duration` in an `mvhd`
+    /// timescale of 1000.  `keep` is its conversion to the nearest frame.
+    #[test]
+    fn a_movie_timescale_of_1000_gives_keep_to_the_nearest_frame() {
+        use crate::test_m4a::with_movie_timescale;
+        let source: Vec<Vec<f32>> = (0..2)
+            .map(|c| crate::test_m4a::chirp(c, 100_000, 44_100))
+            .collect();
+        let want = decoded16(&[&source[0], &source[1]]);
+        // 2000 ms is 88,200 frames; 2007 ms is 88,508.7, so 88,509.
+        for (milliseconds, keep) in [(2000, 88_200), (2007, 88_509)] {
+            let file = with_movie_timescale(
+                alac_with_edit(&source, 2112, 0, m4a::Order::FastStart),
+                1000,
+                milliseconds,
+            );
+            let audio = decoded(file, &format!("{milliseconds} ms"));
+            assert!(
+                audio.channels == frames_of(&want, 0, keep),
+                "{milliseconds} ms"
+            );
+        }
+    }
+
+    /// D7 of the M4A plan: `elst` gives a trim only in its common form.
+    /// Two entries, a rate of 0.5, and a negative `media_time` other than
+    /// -1 give none.  A leading empty edit is skipped.  A
+    /// `segment_duration` of 0, or a movie timescale of 0, gives `skip`
+    /// only.
+    #[test]
+    fn only_the_common_form_of_elst_gives_a_trim() {
+        use crate::test_m4a::{with_elst, with_movie_timescale};
+        const ONE: u32 = 0x1_0000;
+        let source = short_tone();
+        let input_frames = 2112 + 4096 + 700;
+        let file = alac_with_edit(&source, 2112, 700, m4a::Order::MoovLast);
+        let all = decoded(file.clone(), "the whole track").channels;
+        assert_eq!(all[0].len(), 4096, "the edit of the writer");
+        let want = decoded16(&[&source[0], &source[1]]);
+        // Each case: its `elst` entries, and the frames of the whole track
+        // that it gives (from, count).
+        type Case<'a> = (&'a str, &'a [(u32, i32, u32)], usize, usize);
+        let cases: [Case; 6] = [
+            (
+                "two entries",
+                &[(4096, 2112, ONE), (100, 0, ONE)],
+                0,
+                input_frames,
+            ),
+            ("a rate of 0.5", &[(4096, 2112, ONE / 2)], 0, input_frames),
+            ("a media_time of -2", &[(4096, -2, ONE)], 0, input_frames),
+            (
+                "a leading empty edit",
+                &[(500, -1, ONE), (4096, 2112, ONE)],
+                2112,
+                4096,
+            ),
+            (
+                "a segment_duration of 0",
+                &[(0, 2112, ONE)],
+                2112,
+                input_frames - 2112,
+            ),
+            (
+                "a keep past the end",
+                &[(9000, 2112, ONE)],
+                2112,
+                input_frames - 2112,
+            ),
+        ];
+        let whole = decoded(
+            with_elst(file.clone(), &[(input_frames as u32, 0, ONE)]),
+            "no trim",
+        )
+        .channels;
+        assert_eq!(whole[0].len(), input_frames);
+        assert!(frames_of(&whole, 2112, 4096) == want);
+        for (case, entries, from, count) in cases {
+            let audio = decoded(with_elst(file.clone(), entries), case);
+            assert!(
+                audio.channels == frames_of(&whole, from, count),
+                "{case}: {} frames",
+                audio.frames()
+            );
+        }
+        // Symphonia 0.6.1 refuses a movie timescale of 0 (TD-82), so
+        // `trim_of_a_movie_timescale_of_0_is_skip_only` checks the trim.
+        let no_movie_scale = decode_bytes(with_movie_timescale(file.clone(), 0, 4096), Some("m4a"));
+        assert!(
+            no_movie_scale
+                .as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("timescale is zero")),
+            "a movie timescale of 0: {no_movie_scale:?}"
+        );
+        let past = decode_bytes(
+            with_elst(file, &[(10, input_frames as i32 + 10, ONE)]),
+            Some("m4a"),
+        );
+        assert!(
+            past.as_ref()
+                .is_err_and(|e| format!("{e:#}").contains("file decoded to no audio")),
+            "a skip past the end: {past:?}"
+        );
+    }
+
+    /// A movie timescale of 0 gives `skip` with no `keep`.  Symphonia
+    /// 0.6.1 does not open such a file (TD-82), so this checks `trim_of`.
+    #[test]
+    fn trim_of_a_movie_timescale_of_0_is_skip_only() {
+        use crate::mp4_boxes::EditEntry;
+        let sound = SoundTrack {
+            track_id: Some(1),
+            entry: Some(*b"alac"),
+            media_timescale: Some(44_100),
+            duration: Some(10_000),
+            edits: Some(vec![EditEntry {
+                segment_duration: 4096,
+                media_time: 2112,
+                rate: EDIT_RATE_ONE,
+            }]),
+        };
+        let found = |movie_timescale| Found {
+            movie_timescale,
+            sound: Some(sound.clone()),
+            ..Found::default()
+        };
+        let skip_only = Trim {
+            skip: 2112,
+            keep: None,
+        };
+        assert_eq!(trim_of(&found(Some(0)), &sound, Some(44_100)), skip_only);
+        assert_eq!(trim_of(&found(None), &sound, Some(44_100)), skip_only);
+        assert_eq!(
+            trim_of(&found(Some(44_100)), &sound, Some(44_100)),
+            Trim {
+                skip: 2112,
+                keep: Some(4096)
+            }
+        );
+        // A media timescale other than the rate: no trim from `elst`.
+        assert_eq!(
+            trim_of(&found(Some(44_100)), &sound, Some(48_000)),
+            Trim::default()
+        );
+    }
+
+    /// With a form of `elst` that gives no trim, `iTunSMPB` gives it.
+    #[test]
+    fn an_itunsmpb_trims_when_the_elst_gives_no_trim() {
+        use crate::test_m4a::{ENCODER_DELAY, aac_m4a, aac_track_frames, with_elst};
+        use m4a::{Edit, Gapless};
+        let source = chirps();
+        let frames = 88_200;
+        let edit = Edit {
+            skip: ENCODER_DELAY as u32,
+            frames: frames as u64,
+        };
+        let gapless = Gapless {
+            delay: ENCODER_DELAY as u32,
+            padding: (aac_track_frames(frames) - (ENCODER_DELAY + frames) as u64) as u32,
+            frames: frames as u64,
+        };
+        let file = aac_m4a(
+            &source,
+            44_100,
+            Some(edit),
+            Some(gapless),
+            m4a::Order::MoovLast,
+        );
+        let two = with_elst(file, &[(88_200, 1024, 0x1_0000), (100, 0, 0x1_0000)]);
+        assert_trimmed_to(two, &source, "two entries and iTunSMPB");
+    }
+
+    /// A malformed `iTunSMPB` is ignored.  A field 4 of 0 takes the
+    /// frames from the `mdhd` duration, less the delay and the padding.
+    #[test]
+    fn a_malformed_itunsmpb_is_ignored() {
+        use crate::test_m4a::{ENCODER_DELAY, aac_m4a, aac_track_frames, with_itunsmpb_text};
+        use m4a::Gapless;
+        let source = chirps();
+        let frames = 88_200;
+        let track = aac_track_frames(frames);
+        let gapless = Gapless {
+            delay: ENCODER_DELAY as u32,
+            padding: (track - (ENCODER_DELAY + frames) as u64) as u32,
+            frames: frames as u64,
+        };
+        let file = aac_m4a(&source, 44_100, None, Some(gapless), m4a::Order::FastStart);
+        let not_hex = with_itunsmpb_text(file.clone(), |text| text[12] = b'G');
+        assert_eq!(decoded(not_hex, "not hexadecimal").frames() as u64, track);
+        let few = with_itunsmpb_text(file.clone(), |text| text[18..].fill(b' '));
+        assert_eq!(decoded(few, "too few fields").frames() as u64, track);
+        let no_frames = with_itunsmpb_text(file, |text| text[28..44].fill(b'0'));
+        assert_trimmed_to(no_frames, &source, "a field 4 of 0");
+    }
+
+    /// When Symphonia takes another track than the walker's first sound
+    /// track, the decode does no trim: it gives every frame of its track.
+    #[test]
+    fn no_trim_when_symphonia_takes_another_track() {
+        use crate::test_m4a::{with_first_entry, with_second_trak};
+        let source = short_tone();
+        let file = alac_with_edit(&source, 2112, 700, m4a::Order::MoovLast);
+        let two = with_first_entry(with_second_trak(file, b"soun", 7), b"lloy");
+        let audio = decoded(two, "the second track");
+        assert_eq!(audio.frames(), 2112 + 4096 + 700);
     }
 }

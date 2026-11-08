@@ -11,6 +11,9 @@ pub const AAC_FRAMES: usize = 1024;
 /// The delay of `oxideav-aac`: its first packet decodes to silence.
 pub const ENCODER_DELAY: usize = 1024;
 
+/// Apple's AAC encoder delay: 2112 frames.
+pub const APPLE_DELAY: usize = 2112;
+
 /// `x` as a 16-bit sample, rounded as `wav::write_pcm16` rounds.
 pub fn pcm16(x: f32) -> i16 {
     (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16
@@ -205,6 +208,20 @@ pub fn aac_m4a_of(
     file_of(&layout, &entry, packets)
 }
 
+/// `channels` after 1088 frames of silence, so the delay of an encode is
+/// 1024 + 1088 = 2112 frames, Apple's delay.
+pub fn with_apple_delay(channels: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    const SILENCE: usize = APPLE_DELAY - ENCODER_DELAY;
+    channels
+        .iter()
+        .map(|channel| {
+            let mut delayed = vec![0.0; SILENCE + channel.len()];
+            delayed[SILENCE..].copy_from_slice(channel);
+            delayed
+        })
+        .collect()
+}
+
 /// The lag in `-reach..=reach` at which `decoded` best matches `source`:
 /// the largest cross-correlation over `window` frames from `from`.  A lag
 /// of `d` means that `decoded[i + d]` matches `source[i]`.
@@ -328,4 +345,67 @@ pub fn he_aac(channels: &[Vec<f32>], rate: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let explicit = encoder.audio_specific_config(true);
     let compatible = encoder.audio_specific_config(false);
     (stream, explicit, compatible)
+}
+
+/// `file`, which has `moov` last and one `elst`, with the `elst` entries
+/// `entries` (`segment_duration`, `media_time`, rate as 16.16), all of
+/// version 0.  The sizes of `elst`, `edts`, `trak` and `moov` change to
+/// match.  The packets do not move, since `moov` is last.
+pub fn with_elst(mut file: Vec<u8>, entries: &[(u32, i32, u32)]) -> Vec<u8> {
+    let (moov, moov_size) = top_box(&file, b"moov");
+    assert_eq!(moov + moov_size, file.len(), "moov is last");
+    let (trak, _) = child_box(&file, moov, b"trak");
+    let (edts, _) = child_box(&file, trak, b"edts");
+    let (elst, elst_size) = child_box(&file, edts, b"elst");
+    let mut body = vec![0, 0, 0, 0];
+    body.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    for &(segment, media_time, rate) in entries {
+        body.extend_from_slice(&segment.to_be_bytes());
+        body.extend_from_slice(&media_time.to_be_bytes());
+        body.extend_from_slice(&rate.to_be_bytes());
+    }
+    let mut new_elst = Vec::from(((8 + body.len()) as u32).to_be_bytes());
+    new_elst.extend_from_slice(b"elst");
+    new_elst.extend_from_slice(&body);
+    let delta = new_elst.len() as i64 - elst_size as i64;
+    file.splice(elst..elst + elst_size, new_elst);
+    for at in [edts, trak, moov] {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap());
+        let size = (i64::from(size) + delta) as u32;
+        file[at..at + 4].copy_from_slice(&size.to_be_bytes());
+    }
+    file
+}
+
+/// `file` with a movie timescale of `scale`, and `segment` as the
+/// duration of `mvhd` and the `segment_duration` of its one `elst` entry,
+/// in that timescale.  The writer makes the movie timescale the rate;
+/// Apple's files use 1000.
+pub fn with_movie_timescale(mut file: Vec<u8>, scale: u32, segment: u32) -> Vec<u8> {
+    // After the type of `mvhd`: version and flags, two times, then the
+    // timescale and the duration.
+    let mvhd = place_once(&file, b"mvhd") + 4;
+    file[mvhd + 12..mvhd + 16].copy_from_slice(&scale.to_be_bytes());
+    file[mvhd + 16..mvhd + 20].copy_from_slice(&segment.to_be_bytes());
+    // After the type of `elst`: version and flags, the count, then the
+    // first `segment_duration`.
+    let elst = place_once(&file, b"elst") + 4;
+    file[elst + 8..elst + 12].copy_from_slice(&segment.to_be_bytes());
+    file
+}
+
+/// `file` with the type of its first sample entry as `to`, in a file of
+/// more than one track.
+pub fn with_first_entry(mut file: Vec<u8>, to: &[u8; 4]) -> Vec<u8> {
+    let at = places(&file, b"stsd")[0] + 4 + 4 + 4 + 4;
+    file[at..at + 4].copy_from_slice(to);
+    file
+}
+
+/// `file` with its `iTunSMPB` text changed by `change`.
+pub fn with_itunsmpb_text(mut file: Vec<u8>, change: impl FnOnce(&mut [u8])) -> Vec<u8> {
+    // After the name: the `data` box header, its type and its locale.
+    let at = place_once(&file, b"iTunSMPB") + 8 + 8 + 8;
+    change(&mut file[at..at + 116]);
+    file
 }

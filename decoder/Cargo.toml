@@ -34,6 +34,8 @@ wasm-bindgen-test = "0.3.79"
 # `stem-worker` ships (DEPS-1).
 flacenc = { version = "=0.5.1", default-features = false }
 rusty_mp3 = "=1.0.0"
+# Makes the M4A files of the browser tests (TD-52).
+m4a = { version = "0.1.0", path = "../m4a" }
 
 [lints]
 workspace = true
