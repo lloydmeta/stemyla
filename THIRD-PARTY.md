@@ -2,12 +2,13 @@
 
 The web app (the `app`, `stem-worker` and `decode-worker` WebAssembly modules) is built from the Rust crates below.  Every one is under a permissive licence or, for some, a choice of licences including a permissive one.  Notes on the ones that need attention:
 
-* Symphonia (`symphonia*`, MPL-2.0) decodes WAV, MP3 and FLAC.  MPL-2.0 is file-level copyleft; it is used unmodified, and its source is at https://github.com/pdeljanov/Symphonia.
+* Symphonia (`symphonia*`, MPL-2.0) decodes WAV, MP3, FLAC, M4A (AAC-LC and ALAC), raw AAC (ADTS) and AIFF.  MPL-2.0 is file-level copyleft; it is used unmodified, and its source is at https://github.com/pdeljanov/Symphonia.
 * `epaint_default_fonts` carries egui's bundled fonts: Ubuntu-Light (Ubuntu Font Licence 1.0), Hack and the emoji icon font (MIT), Noto Emoji (OFL-1.1).  Their licence texts are in that crate's `fonts` folder.
 * `self_cell` is offered under Apache-2.0 or GPL-2.0; this project uses it under Apache-2.0.
 * `rusty_mp3` (Apache-2.0) encodes MP3 downloads.
 * `flacenc` (Apache-2.0) encodes FLAC downloads, at 16 bits.
-* The workspace crate `m4a` holds a port of the encoder of `alac-encoder` 0.3.0 (MIT OR Apache-2.0, "Copyright (c) 2019 Linus Unnebäck").  That crate is itself a port of Apple's ALAC reference (Apache-2.0, "Copyright (c) 2011 Apple Inc.").  `m4a` takes them under Apache-2.0, so `m4a` is Apache-2.0 only (decision 0029).  `m4a/src/alac.rs` holds both notices.  `alac-encoder`, `symphonia-format-isomp4`, `symphonia-codec-alac` and `symphonia-codec-aac` are test-only crates of `m4a`: they do not ship, so the tables do not list them.  No shipped crate takes `m4a` yet.
+* The workspace crate `m4a` holds a port of the encoder of `alac-encoder` 0.3.0 (MIT OR Apache-2.0, "Copyright (c) 2019 Linus Unnebäck").  That crate is itself a port of Apple's ALAC reference (Apache-2.0, "Copyright (c) 2011 Apple Inc.").  `m4a` takes them under Apache-2.0, so `m4a` is Apache-2.0 only (decision 0029).  `m4a/src/alac.rs` holds both notices.  `alac-encoder` is a test-only crate of `m4a`: it does not ship, so the tables do not list it.  `symphonia-format-isomp4`, `symphonia-codec-alac` and `symphonia-codec-aac` ship through `engine`, so the tables list them.  `engine` takes `m4a` for its tests only, so no shipped crate takes `m4a` yet.
+* `oxideav-aac` 0.1.7 (MIT) and its dependency `oxideav-core` are test-only crates of `engine`: they make the AAC packets of its decode tests.  They do not ship, so the tables do not list them.
 
 The separation model's weights are not part of this repository or of the published app; see "The model" in the README.
 
@@ -136,9 +137,12 @@ The test `third_party_lists_what_ships` compares the table with this command's o
 | symphonia | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-bundle-flac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-bundle-mp3 | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-codec-aac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-codec-alac | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-codec-pcm | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-common | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-core | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
+| symphonia-format-isomp4 | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-format-riff | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | symphonia-metadata | 0.6.1 | MPL-2.0 | https://github.com/pdeljanov/Symphonia |
 | syn | 2.0.119 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |

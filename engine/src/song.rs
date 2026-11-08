@@ -152,7 +152,8 @@ impl Song {
         })
     }
 
-    /// Loads every WAV, MP3 and FLAC in a folder as a stem (skipping
+    /// Loads every WAV, MP3, FLAC, M4A (`.m4a`, `.mp4`), raw AAC (`.aac`)
+    /// and AIFF (`.aif`, `.aiff`, `.aifc`) in a folder as a stem (skipping
     /// `mix.*`).
     pub fn load_folder(dir: &Path) -> Result<Song> {
         let mut items = Vec::new();
@@ -164,7 +165,10 @@ impl Song {
                 .extension()
                 .and_then(|x| x.to_str())
                 .map(str::to_ascii_lowercase);
-            if !matches!(ext.as_deref(), Some("wav" | "mp3" | "flac")) {
+            if !matches!(
+                ext.as_deref(),
+                Some("wav" | "mp3" | "flac" | "m4a" | "mp4" | "aac" | "aif" | "aiff" | "aifc")
+            ) {
                 continue;
             }
             let name = stem_name(&path.to_string_lossy());
@@ -829,6 +833,44 @@ mod tests {
         let names: Vec<_> = s.stems.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["drums", "bass"]);
         assert_eq!(s.frames, 4410);
+    }
+
+    /// M2 of the M4A plan: a folder loads each M4A, MP4, raw AAC, AIFF
+    /// and AIFC stem, in any case of its extension.
+    #[test]
+    fn a_folder_loads_m4a_aac_and_aiff_stems() {
+        use crate::test_audio::{Aiff, aiff};
+        use crate::test_m4a::{adts, alac_m4a};
+        let dir = std::env::temp_dir().join(format!("stemyla-m4a-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tone: Vec<f32> = (0..4410).map(|i| 0.25 * (0.05 * i as f32).sin()).collect();
+        let stereo = [tone.clone(), tone.clone()];
+        let alac = alac_m4a(&tone, &tone, SONG_RATE, None, m4a::Order::FastStart);
+        let files = [
+            ("bass.m4a", alac.clone()),
+            ("drums.MP4", alac),
+            ("vocals.aac", adts(&stereo, SONG_RATE)),
+            ("guitar.aif", aiff(&stereo, SONG_RATE, 16, Aiff::Plain)),
+            ("piano.AIFF", aiff(&stereo, SONG_RATE, 24, Aiff::Plain)),
+            (
+                "other.aifc",
+                aiff(&stereo, SONG_RATE, 16, Aiff::UncompressedAifc),
+            ),
+            ("notes.txt", b"not audio".into()),
+        ];
+        for (name, bytes) in &files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        let loaded = Song::load_folder(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(loaded.is_ok(), "{:?}", loaded.err());
+        let s = loaded.unwrap();
+        let mut names: Vec<_> = s.stems.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["bass", "drums", "guitar", "other", "piano", "vocals"]
+        );
     }
 
     #[test]

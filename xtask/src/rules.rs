@@ -1657,8 +1657,8 @@ fn is_python_file(path: &str) -> bool {
 }
 
 /// Extensions of audio and of model weights, in lower case.
-pub(crate) const AUDIO_EXTENSIONS: [&str; 9] = [
-    "mp3", "wav", "flac", "ogg", "opus", "m4a", "aac", "aif", "aiff",
+pub(crate) const AUDIO_EXTENSIONS: [&str; 11] = [
+    "mp3", "wav", "flac", "ogg", "opus", "m4a", "mp4", "aac", "aif", "aiff", "aifc",
 ];
 pub(crate) const WEIGHT_EXTENSIONS: [&str; 9] = [
     "safetensors",
@@ -6383,6 +6383,8 @@ mod tracked_tests {
             "song.aac",
             "song.aif",
             "song.aiff",
+            "song.aifc",
+            "a/Song.MP4",
             "a/Model.SafeTensors",
             "bs_roformer_sw.f32.safetensors",
             "model.ckpt",

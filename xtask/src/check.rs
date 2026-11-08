@@ -107,8 +107,8 @@ const WASM_PACKAGES: [&str; 5] = [
 const ROFORMER_GPU: &str = "roformer-gpu";
 
 /// The package that a line tests alone, since a test build with other
-/// members merges their features into its dependencies.  An example is
-/// `m4a`'s dev-dependency on Symphonia with `isomp4` and `alac`.
+/// members merges their features into it and its dependencies.  An
+/// example is `app`, whose default feature `audio` turns on `engine/cpal`.
 const ENGINE: &str = "engine";
 
 /// The variable that names what a test must not skip (`test-support`).
@@ -679,12 +679,14 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
 
 /// True when `tested` holds `engine` and a member outside the closure and
 /// the dependents of `engine`.  Then one test build has both, so the
-/// features of that member can reach the dependencies of `engine`.  An
-/// example is the Symphonia features of the tests of `m4a`.  A dependent of
-/// `engine` can also turn on features of `engine`: `app` turns on
-/// `engine/cpal` with its default feature `audio`.  `xtask` does so only
-/// with its own `cpal` feature, which is not a default.  Tier `push` and CI
-/// run `cargo test -p engine` alone, so they cover that case.
+/// features of that member can reach the dependencies of `engine`.  No
+/// member does so today: `engine`'s own Symphonia features hold those of
+/// the tests of `m4a`, which is in the closure.  The check stays for a
+/// new member or feature.  A dependent of `engine` can also turn on
+/// features of `engine`: `app` turns on `engine/cpal` with its default
+/// feature `audio`.  `xtask` does so only with its own `cpal` feature,
+/// which is not a default.  Tier `push` and CI run `cargo test -p engine`
+/// alone, so they cover that case.
 fn merges_into_engine(graph: &Graph, tested: &BTreeSet<&String>) -> bool {
     let engine = BTreeSet::from([ENGINE.to_string()]);
     let family: BTreeSet<String> = graph
@@ -1115,7 +1117,7 @@ mod tests {
                 &["dsp", "engine", "stem-protocol"],
             ),
             ("dsp", "dsp", &[]),
-            ("engine", "engine", &["dsp"]),
+            ("engine", "engine", &["dsp", "m4a"]),
             ("m4a", "m4a", &[]),
             ("protocol", "stem-protocol", &[]),
             ("roformer", "roformer", &["test-support"]),
@@ -1442,10 +1444,35 @@ mod tests {
         assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
     }
 
-    /// The crate tests of `dsp` and `m4a` build `engine` with `m4a`'s
-    /// dev-dependencies, so the features of `m4a` can reach `engine`.
+    /// The crate tests of `engine` and `synth` build `engine` with `synth`,
+    /// a member outside the closure and the dependents of `engine`, so the
+    /// features of `synth` can reach `engine`.
     #[test]
     fn crate_tests_with_a_member_outside_engines_family_run_engine_alone() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            run(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p engine -p synth -p xtask"),
+            skip(TESTS),
+            run(ENGINE),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        let plan = commit(&["engine/src/lib.rs", "synth/src/lib.rs"]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    /// `m4a` is in the closure of `engine`, since `engine` takes it for
+    /// its tests.  So the crate tests of `dsp` and `m4a` stay in the family
+    /// of `engine`, and do not run `engine` alone.
+    #[test]
+    fn crate_tests_of_engines_family_do_not_run_engine_alone() {
         let head = vec![
             run(FMT),
             run(DOCS),
@@ -1457,7 +1484,7 @@ mod tests {
             skip(XTASK_REPO),
             run("cargo test -p app -p decode-worker -p dsp -p engine -p m4a -p xtask"),
             skip(TESTS),
-            run(ENGINE),
+            skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
@@ -1784,8 +1811,9 @@ mod tests {
         );
     }
 
-    /// `m4a`'s dev-dependency turns on Symphonia features in a workspace
-    /// build, so CI also tests `engine` alone, as tier `push` does.
+    /// A workspace build turns on features of `engine` from other
+    /// members, such as `app`'s `engine/cpal`, so CI also tests `engine`
+    /// alone, as tier `push` does.
     #[test]
     fn the_ci_runs_the_engine_tests_alone() {
         let ci = include_str!("../../.github/workflows/ci.yml");

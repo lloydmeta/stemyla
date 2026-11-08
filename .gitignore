@@ -18,9 +18,11 @@ target/
 *.ogg
 *.opus
 *.m4a
+*.mp4
 *.aac
 *.aif
 *.aiff
+*.aifc
 *.safetensors
 *.ckpt
 *.pt

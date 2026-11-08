@@ -22,6 +22,8 @@ mod test_alloc;
 mod test_audio;
 #[cfg(test)]
 mod test_flac;
+#[cfg(test)]
+mod test_m4a;
 pub mod wav;
 
 pub use decode::{Audio, decode_bytes, decode_path};

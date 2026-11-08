@@ -627,6 +627,14 @@ This entry concerns DEPS-1.  It is a known breach of "confirm that it exists and
 
 * Fix: remove the dev-dependency when the port no longer needs the reference.  For example, keep a SHA-256 digest of the reference packets of each test signal as test data.  Do not store the packets: they are encoded audio (ASSET-1).  Until then, do not update the pin.
 
+### TD-80: a raw AAC file (ADTS) keeps its encoder delay
+
+This entry concerns D7 of `plans/active/m4a.md`: the decode trims the AAC encoder delay and padding.
+
+A raw `.aac` file is a stream of ADTS frames, with no container.  No box states its delay or its padding, so `engine::decode` cannot trim them.  The decode gives the encoder delay as silence at the start (1024 frames from `oxideav-aac`, 2112 frames from Apple's encoder), and the padding at the end.  So a raw AAC stem starts late against a WAV lane.  The test `a_raw_adts_stream_decodes_with_its_delay` shows it.
+
+* Fix: no standard field holds the delay of ADTS.  An open could take a delay that the caller gives, or the delay of a known encoder.  An M4A of the same audio has no gap.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings

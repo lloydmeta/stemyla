@@ -343,7 +343,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * [x] 2026-11-08: Step 2: the `iTunSMPB` tag.  First failures, with a stub `with_gapless` that keeps no tag and refuses nothing: each of the 4 new tests failed on an assert.  `a_gapless_tag_is_an_itunsmpb_item_in_moov_udta` at the children of `moov`, `the_head_with_a_gapless_tag_has_its_reserved_length` at the 249 bytes of the tag, `a_gapless_tag_that_is_not_the_frames_of_the_track_is_refused` at `GaplessFrames`, and `a_file_with_a_gapless_tag_decodes_bit_for_bit` at "the file holds the tag".  A fifth test, `a_gapless_tag_that_takes_the_file_to_4_gib_is_refused`, failed at "2 channels, 49 bytes" with the tag left out of the 4 GiB count.
 * [x] 2026-11-08: plan review round 1 (a `Plan` agent): 4 blockers, 11 should-fix and 5 nits.  The plan takes each (Decision log).
 * [x] 2026-11-08: plan review round 2 (a new `Plan` agent): 2 blockers, 9 should-fix and 6 nits.  The plan takes each (Decision log).  Round 2 is the last plan review round.
-* [ ] Step 3: the engine decodes ALAC, ADTS and AIFF.
+* [x] 2026-11-08: Step 3: the engine decodes ALAC, ADTS and AIFF.  First failures, with the Symphonia features of `ba4b231` and the old `most_frames` and `open_within`: each of the 10 new or extended engine tests failed on an assert.  For example, `an_alac_m4a_decodes_bit_for_bit` and `an_aiff_decodes_exactly` at `is_ok` ("no suitable format reader found"), `an_alac_is_reserved_for_16_times_its_pcm` and `an_aac_is_reserved_for_at_most_its_length_at_32_kbit_s` at their first value, `a_block_decode_keeps_its_memory_flat` at "m4a at 44100 Hz", and `a_folder_loads_m4a_aac_and_aiff_stems` at "no stems to load" (also with the features on).  With the features on and the ADTS stream counted as stated exactly, `a_raw_adts_stream_past_the_limit_opens_and_stops_at_the_limit` failed at `is_ok` ("too long to open").  In `xtask`, `assets_are_named` failed at "song.aifc", and `crate_tests_of_engines_family_do_not_run_engine_alone` failed with the fixture graph of `ba4b231`.
 * [ ] Step 4: the box reader and the messages.
 * [ ] Step 5: the trim of the delay and the padding.
 * [ ] Step 6: the head check.
@@ -379,6 +379,12 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, agent (implementer): the tag comes from `Layout::with_gapless(self, Gapless)`, not from one more argument of `new`.  Reason: M3's ALAC save needs no tag, so the callers of `new` do not change; `with_gapless` checks the frames and the 4 GiB limit again.
 * 2026-11-08, agent (implementer): the `hdlr` of the tag's `meta` has an empty name of one zero byte.  Reason: the plan gives no name, and a reader needs only the handler type `mdir`.
 * 2026-11-08, agent (implementer): `MAX_CONFIG_LEN` (64) is public.  Reason: a caller can check an AudioSpecificConfig before it makes a `Layout`.
+
+* 2026-11-08, agent (implementer): `open_within` tells a raw ADTS stream by the probed format, `format_info().format == FORMAT_ID_ADTS`, not by the box walk.  Reason: the walk comes in Step 4, and the format is what states the estimate, not the codec.
+* 2026-11-08, agent (implementer): an ALAC cookie of fewer than 24 bytes counts as missing.  An AAC rate outside 8 to 96 kHz counts as 96 kHz.  Reason: the forms of the MP3 and FLAC cases.
+* 2026-11-08, agent (implementer): `m4a` joins the family of `engine`, since `engine` takes it.  `crate_tests_with_a_member_outside_engines_family_run_engine_alone` now uses `synth`, and a new test shows that the crate tests of `dsp` and `m4a` do not run `engine` alone.  Reason: `cargo tree -p engine -p m4a -e features` adds no Symphonia feature to `engine`'s, so the old reason no longer holds.  `cargo tree --workspace -e features -i engine` shows `engine/cpal` from `app`'s default `audio`, the new reason.
+* 2026-11-08, agent (implementer): the helpers `assert_decodes_as` and `a_block_decode_keeps_its_memory_flat` assert `is_ok` before they unwrap.  Reason: their first failure for AIFF and M4A was a panic in `unwrap`, and the plan asks for an assert.
+* 2026-11-08, agent (implementer): the over-limit ALAC fixture states 2^27 + 4096 frames, 32,769 silent packets: 1 GiB of stereo `f32` plus one packet.
 
 ## Outcomes and retrospective
 

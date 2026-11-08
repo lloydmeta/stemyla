@@ -10,10 +10,13 @@ use anyhow::{Context, Result, anyhow};
 use std::io::Cursor;
 use std::path::Path;
 use symphonia::core::audio::Channels;
-use symphonia::core::codecs::audio::well_known::{CODEC_ID_FLAC, CODEC_ID_MP3};
+use symphonia::core::codecs::audio::well_known::{
+    CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3,
+};
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::well_known::FORMAT_ID_ADTS;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 /// What a [`Decoder`] reads: `Read + Seek + Send + Sync`, with its length
 /// if known.  Re-exported so a caller can give its own source.
@@ -42,10 +45,15 @@ impl Audio {
 /// about 80 kB can hold 2 hours of silence.
 pub const MAX_DECODED_BYTES: u64 = 1 << 30;
 
-/// How many times smaller than PCM at its stated bits a FLAC is trusted to
-/// be, for its reservation.  The demo song's stems are 2.2 to 11.3 times
-/// smaller at 16 bits.
+/// How many times smaller than PCM at its stated bits a FLAC or an ALAC is
+/// trusted to be, for its reservation.  The demo song's stems are 2.2 to
+/// 11.3 times smaller at 16 bits as FLAC.
 const FLAC_MOST_RATIO: u64 = 16;
+
+/// The bytes of one second of AAC at 32 kbit/s, the lowest bitrate that
+/// an AAC is trusted to have, for its reservation.  Music is at 96 kbit/s
+/// or more.
+const AAC_LEAST_BYTES_PER_SECOND: u64 = 32_000 / 8;
 
 /// The frames at [`SONG_RATE`] that `frames` frames at `rate` give: as
 /// `resample::to_rate` gives them, the frames times [`SONG_RATE`] over
@@ -214,7 +222,8 @@ pub fn largest_file(length: HeadLength, max_frames: usize) -> u64 {
         .saturating_add(TAG_ROOM)
 }
 
-/// Decodes a file on disk (WAV, MP3 or FLAC).
+/// Decodes a file on disk: WAV, MP3, FLAC, M4A (AAC-LC or ALAC, also as
+/// `.mp4`), raw AAC (ADTS) or AIFF.
 pub fn decode_path(path: &Path) -> Result<Audio> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
@@ -248,12 +257,23 @@ fn frames_to_reserve(stated: Option<u64>, most: Option<u64>) -> usize {
 /// bitrate file with no length tag, whose length symphonia estimates from
 /// its first frames, which a quiet start makes small) then reserves at most
 /// 1.5 times a 192 kbit/s file, where the smallest legal packet would allow
-/// six times it.  A FLAC is reserved for at most `FLAC_MOST_RATIO` times
-/// what its bytes hold as PCM at its stated bits: a constant subframe holds
-/// a whole block in one sample, so its bytes give no real bound.  Every
-/// other codec here stores each sample in `bits_per_coded_sample` bits, or
-/// in at least a byte (A-law, mu-law and float WAVs do not state it).
+/// six times it.  An AAC is reserved for at most its length at 32 kbit/s,
+/// in the same form.  A FLAC is reserved for at most `FLAC_MOST_RATIO`
+/// times what its bytes hold as PCM at its stated bits: a constant subframe
+/// holds a whole block in one sample, so its bytes give no real bound.  An
+/// ALAC is reserved as a FLAC is, at the bits of byte 5 of its cookie,
+/// since Symphonia states no bits for ALAC.  Every other codec here (WAV,
+/// AIFF) stores each sample in `bits_per_coded_sample` bits, or in at
+/// least a byte (A-law, mu-law and float WAVs do not state it).
 fn most_frames(params: &AudioCodecParameters, byte_len: u64) -> u64 {
+    if params.codec == CODEC_ID_AAC {
+        // An unknown or impossible rate counts as the highest AAC has.
+        let rate = params
+            .sample_rate
+            .filter(|r| (8_000..=96_000).contains(r))
+            .map_or(96_000, u64::from);
+        return byte_len.saturating_mul(rate) / AAC_LEAST_BYTES_PER_SECOND;
+    }
     if params.codec == CODEC_ID_MP3 {
         // An unknown or impossible rate counts as the highest MP3 has.
         let rate = params
@@ -270,6 +290,18 @@ fn most_frames(params: &AudioCodecParameters, byte_len: u64) -> u64 {
             .bits_per_sample
             .filter(|b| (4..=32).contains(b))
             .map_or(4, u64::from);
+        return byte_len.saturating_mul(8 * FLAC_MOST_RATIO) / (bits * channels);
+    }
+    if params.codec == CODEC_ID_ALAC {
+        // The `ALACSpecificConfig` cookie: its byte 5 is the bit depth.
+        // ALAC has 16 to 32 bits; an unknown depth counts as 16.
+        let bits = params
+            .extra_data
+            .as_deref()
+            .filter(|cookie| cookie.len() >= 24)
+            .map(|cookie| u64::from(cookie[5]))
+            .filter(|b| (16..=32).contains(b))
+            .unwrap_or(16);
         return byte_len.saturating_mul(8 * FLAC_MOST_RATIO) / (bits * channels);
     }
     let bits = params.bits_per_coded_sample.filter(|b| *b > 0).unwrap_or(8);
@@ -348,14 +380,15 @@ fn source_frames_within(max_song_frames: usize, rate: u32) -> u64 {
     u64::try_from(product / u128::from(SONG_RATE)).unwrap_or(u64::MAX)
 }
 
-/// Opens `source`.  It refuses a WAV or FLAC whose stated length passes
-/// `limit` bytes of samples.  An MP3 states only an estimate without a
-/// Xing or VBRI tag: a quiet start can make it 10 times too long.  So an
-/// MP3 is never refused here; the decoder stops it at the limit.  The
-/// reservation of any file is within `limit`.  With `max_song_frames`,
-/// it also refuses a WAV or FLAC whose stated
-/// length passes that many frames at [`SONG_RATE`] ([`TooLong`]), and
-/// reserves no more than that.
+/// Opens `source`.  It refuses a WAV, FLAC, M4A or AIFF whose stated
+/// length passes `limit` bytes of samples.  An MP3 states only an estimate
+/// without a Xing or VBRI tag: a quiet start can make it 10 times too long.
+/// A raw AAC stream (ADTS) states only an estimate from its bitrate.  So an
+/// MP3 or an ADTS stream is never refused here; the decoder stops it at the
+/// limit.  The reservation of any file is within `limit`.  With
+/// `max_song_frames`, it also refuses a file of a stated length that passes
+/// that many frames at [`SONG_RATE`] ([`TooLong`]), and reserves no more
+/// than that.
 fn open_within(
     source: Box<dyn MediaSource>,
     ext: Option<&str>,
@@ -376,6 +409,7 @@ fn open_within(
             MetadataOptions::default(),
         )
         .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?;
+    let estimated = format.format_info().format == FORMAT_ID_ADTS;
     let track = format
         .default_track(TrackType::Audio)
         .ok_or_else(|| anyhow!("no audio track"))?;
@@ -387,7 +421,7 @@ fn open_within(
         .clone();
     let track_id = track.id;
     let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
-    let stated_exactly = params.codec != CODEC_ID_MP3;
+    let stated_exactly = params.codec != CODEC_ID_MP3 && !estimated;
     if stated_exactly
         && track
             .num_frames
@@ -652,7 +686,9 @@ mod tests {
         bits: u32,
     ) {
         let half_step = 0.5 / (1_u32 << (bits - 1)) as f32;
-        let audio = decode_bytes(bytes, ext).unwrap();
+        let audio = decode_bytes(bytes, ext);
+        assert!(audio.is_ok(), "{ext:?}, {bits} bits: {audio:?}");
+        let audio = audio.unwrap();
         assert_eq!(audio.channels.len(), 2);
         for (channel, want) in audio.channels.iter().zip([left, right]) {
             assert_eq!(channel.len(), want.len());
@@ -1122,6 +1158,10 @@ mod tests {
         match ext {
             "wav" => wav(&tones, rate, WavSamples::Pcm16),
             "flac" => flac(&tones, rate),
+            "m4a" => {
+                crate::test_m4a::alac_m4a(&tones[0], &tones[1], rate, None, m4a::Order::FastStart)
+            }
+            "aiff" => crate::test_audio::aiff(&tones, rate, 16, crate::test_audio::Aiff::Plain),
             _ => mp3(&tones, rate),
         }
     }
@@ -1130,9 +1170,11 @@ mod tests {
     fn a_block_decode_keeps_its_memory_flat() {
         const MIB: usize = 1 << 20;
         for rate in [44_100, 48_000] {
-            for ext in ["wav", "flac", "mp3"] {
+            for ext in ["wav", "flac", "mp3", "m4a", "aiff"] {
                 let (short, long) = (file_of(ext, 2, rate), file_of(ext, 60, rate));
-                let want = decode_bytes(long.clone(), Some(ext)).unwrap().frames();
+                let whole = decode_bytes(long.clone(), Some(ext));
+                assert!(whole.is_ok(), "{ext} at {rate} Hz: {whole:?}");
+                let want = whole.unwrap().frames();
                 let blocks = |bytes: Vec<u8>| {
                     peak_of(|| {
                         let decoder = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext));
@@ -1521,5 +1563,225 @@ mod tests {
         assert_eq!(MAX_DECODED_BYTES, 1 << 30);
         let minutes = MAX_DECODED_BYTES as f64 / (8.0 * 44_100.0 * 60.0);
         assert!((minutes - 50.7).abs() < 0.05, "{minutes}");
+    }
+
+    /// The decoded channels of `bytes`, from `Decoder` one packet at a
+    /// time.
+    fn in_blocks(bytes: Vec<u8>, ext: &str) -> Result<Vec<Vec<f32>>> {
+        let mut decoder = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext))?;
+        let mut channels: Vec<Vec<f32>> = Vec::new();
+        while let Some(packet) = decoder.next_packet()? {
+            channels.resize(packet.planes.len(), Vec::new());
+            for (channel, plane) in channels.iter_mut().zip(packet.planes) {
+                channel.extend_from_slice(plane);
+            }
+        }
+        Ok(channels)
+    }
+
+    /// `channels` as the decoder gives 16-bit samples of them.
+    fn decoded16(channels: &[&[f32]]) -> Vec<Vec<f32>> {
+        use crate::test_m4a::as_decoded16;
+        channels
+            .iter()
+            .map(|c| c.iter().map(|x| as_decoded16(*x)).collect())
+            .collect()
+    }
+
+    /// M2 of the M4A plan: an ALAC M4A decodes bit for bit, with `moov`
+    /// first or last, at 44.1 kHz and 48 kHz, whole and in blocks.
+    #[test]
+    fn an_alac_m4a_decodes_bit_for_bit() {
+        use crate::test_m4a::alac_m4a;
+        use m4a::Order;
+        let (left, right, _) = stereo_wav();
+        let want = decoded16(&[&left, &right]);
+        for rate in [44_100, 48_000] {
+            for order in [Order::FastStart, Order::MoovLast] {
+                let case = format!("{rate} Hz, {order:?}");
+                let file = alac_m4a(&left, &right, rate, None, order);
+                let audio = decode_bytes(file.clone(), Some("m4a"));
+                assert!(audio.is_ok(), "{case}: {audio:?}");
+                let audio = audio.unwrap();
+                assert_eq!(audio.sample_rate, rate, "{case}");
+                assert!(audio.channels == want, "{case}: the samples differ");
+                let blocks = in_blocks(file, "m4a");
+                assert!(blocks.is_ok(), "{case}: {blocks:?}");
+                assert!(blocks.unwrap() == want, "{case}: the blocks differ");
+            }
+        }
+    }
+
+    /// Two seconds of a stereo chirp at 44.1 kHz.
+    fn chirps() -> Vec<Vec<f32>> {
+        use crate::test_m4a::chirp;
+        (0..2).map(|c| chirp(c, 88_200, 44_100)).collect()
+    }
+
+    /// The sum of the two channels of `channels`.
+    fn sum(channels: &[Vec<f32>]) -> Vec<f32> {
+        channels[0]
+            .iter()
+            .zip(&channels[1])
+            .map(|(l, r)| l + r)
+            .collect()
+    }
+
+    /// No container states the delay of a raw ADTS stream, so it decodes
+    /// with it (TD-80).
+    #[test]
+    fn a_raw_adts_stream_decodes_with_its_delay() {
+        use crate::test_m4a::{ENCODER_DELAY, aac_track_frames, adts, peak_lag};
+        let source = chirps();
+        let audio = decode_bytes(adts(&source, 44_100), Some("aac"));
+        assert!(audio.is_ok(), "{audio:?}");
+        let audio = audio.unwrap();
+        assert_eq!(audio.sample_rate, 44_100);
+        assert_eq!(audio.frames() as u64, aac_track_frames(88_200));
+        let lag = peak_lag(&sum(&source), &sum(&audio.channels), 20_000, 10_000, 2048);
+        assert_eq!(lag, ENCODER_DELAY as isize);
+    }
+
+    /// A raw ADTS stream states only an estimate of its length, as an MP3
+    /// does: it opens past the limit, and its decode stops at the limit.
+    /// An AAC M4A states its length exactly, so the same limit refuses it.
+    #[test]
+    fn a_raw_adts_stream_past_the_limit_opens_and_stops_at_the_limit() {
+        use crate::test_m4a::{aac_m4a, adts};
+        let source = chirps();
+        let limit = 8 * 44_100;
+        let opened = open_within(
+            Box::new(Cursor::new(adts(&source, 44_100))),
+            Some("aac"),
+            limit,
+            None,
+        );
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        let decoder = Decoder::within(
+            Box::new(Cursor::new(adts(&source, 44_100))),
+            Some("aac"),
+            limit,
+        );
+        assert!(decoder.is_ok(), "{:?}", decoder.err());
+        assert!(is_too_long(every_packet(decoder.unwrap())));
+        let m4a = aac_m4a(&source, 44_100, None, None, m4a::Order::FastStart);
+        let refused = open_within(Box::new(Cursor::new(m4a)), Some("m4a"), limit, None);
+        assert!(is_too_long(refused.map(|_| ())));
+    }
+
+    /// An AIFF of 16 and 24 bits, and an AIFC of compression type `NONE`,
+    /// decode exactly, as the FLAC tests do.
+    #[test]
+    fn an_aiff_decodes_exactly() {
+        use crate::test_audio::{Aiff, aiff};
+        let (left, right, _) = stereo_wav();
+        let channels = [left.clone(), right.clone()];
+        for (bits, kind) in [
+            (16, Aiff::Plain),
+            (24, Aiff::Plain),
+            (16, Aiff::UncompressedAifc),
+            (24, Aiff::UncompressedAifc),
+        ] {
+            let bytes = aiff(&channels, 44_100, bits, kind);
+            for ext in ["aiff", "aif", "aifc"] {
+                assert_decodes_as(bytes.clone(), Some(ext), &left, &right, bits);
+            }
+        }
+    }
+
+    /// An ALAC M4A that states more frames than the limit is refused
+    /// before it decodes, from a file below 2 MB.
+    #[test]
+    fn an_alac_m4a_past_the_limit_is_refused_before_it_decodes() {
+        use crate::test_m4a::silent_alac_m4a;
+        let frames = MAX_DECODED_BYTES / 8 + 4096;
+        let file = silent_alac_m4a(frames);
+        assert!(file.len() < 2_000_000, "{} bytes", file.len());
+        let opened = open_within(
+            Box::new(Cursor::new(file)),
+            Some("m4a"),
+            MAX_DECODED_BYTES,
+            None,
+        );
+        assert!(is_too_long(opened.map(|_| ())));
+    }
+
+    fn alac_at(bits: Option<u8>) -> AudioCodecParameters {
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(symphonia::core::codecs::audio::well_known::CODEC_ID_ALAC)
+            .with_channels(Channels::Discrete(2));
+        if let Some(bits) = bits {
+            let mut cookie = [0; 24];
+            cookie[5] = bits;
+            params.with_extra_data(cookie.into());
+        }
+        params
+    }
+
+    /// An ALAC is reserved as a FLAC is: 16 times what its bytes hold as
+    /// PCM at its bits, from byte 5 of its cookie.
+    #[test]
+    fn an_alac_is_reserved_for_16_times_its_pcm() {
+        assert_eq!(most_frames(&alac_at(Some(16)), 1000), 4000);
+        assert_eq!(most_frames(&alac_at(Some(24)), 1200), 3200);
+        assert_eq!(most_frames(&alac_at(Some(32)), 1000), 2000);
+        // A missing cookie, or bits outside 16 to 32, count as 16.
+        for bits in [None, Some(0), Some(15), Some(33)] {
+            assert_eq!(most_frames(&alac_at(bits), 1000), 4000, "{bits:?}");
+        }
+        let mut short = alac_at(None);
+        short.with_extra_data(vec![0, 0, 0, 0, 0, 24].into());
+        assert_eq!(most_frames(&short, 1000), 4000, "a short cookie");
+    }
+
+    fn aac_at(rate: Option<u32>) -> AudioCodecParameters {
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(symphonia::core::codecs::audio::well_known::CODEC_ID_AAC)
+            .with_channels(Channels::Discrete(2));
+        if let Some(rate) = rate {
+            params.with_sample_rate(rate);
+        }
+        params
+    }
+
+    /// An AAC is reserved for at most its length at 32 kbit/s.
+    #[test]
+    fn an_aac_is_reserved_for_at_most_its_length_at_32_kbit_s() {
+        // 4,000 bytes is a second at 32 kbit/s.
+        assert_eq!(most_frames(&aac_at(Some(44_100)), 4_000), 44_100);
+        assert_eq!(most_frames(&aac_at(Some(8_000)), 8_000), 16_000);
+        assert_eq!(most_frames(&aac_at(Some(96_000)), 4_000), 96_000);
+        // An unknown or impossible rate counts as 96 kHz.
+        for rate in [None, Some(0), Some(7_999), Some(96_001)] {
+            assert_eq!(most_frames(&aac_at(rate), 4_000), 96_000, "{rate:?}");
+        }
+    }
+
+    /// An AIFF is reserved as the other codecs: its stated bits for each
+    /// sample.
+    #[test]
+    fn an_aiff_is_reserved_for_the_frames_that_its_bytes_hold() {
+        use crate::test_audio::{Aiff, aiff};
+        let (left, right, _) = stereo_wav();
+        for bits in [16, 24] {
+            let bytes = aiff(&[left.clone(), right.clone()], 44_100, bits, Aiff::Plain);
+            let byte_len = bytes.len();
+            let opened = open_within(
+                Box::new(Cursor::new(bytes)),
+                Some("aiff"),
+                MAX_DECODED_BYTES,
+                None,
+            );
+            assert!(opened.is_ok(), "{bits} bits: {:?}", opened.err());
+            let opened = opened.unwrap();
+            assert_eq!(
+                most_frames(&opened.params, byte_len as u64),
+                (byte_len * 8 / (bits as usize * 2)) as u64,
+                "{bits} bits"
+            );
+            assert_eq!(opened.reserve, FRAMES, "{bits} bits");
+        }
     }
 }

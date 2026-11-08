@@ -1,5 +1,6 @@
-//! WAV, FLAC and MP3 files for the tests, made in memory (ASSET-1).  `flac`
-//! uses the writers of `test_flac`.
+//! WAV, FLAC, MP3 and AIFF files for the tests, made in memory (ASSET-1).
+//! `flac` uses the writers of `test_flac`.  `test_m4a` makes M4A and raw
+//! AAC files.
 
 use crate::test_flac::{Blocks, by_hand, compressed, step};
 
@@ -92,5 +93,78 @@ pub fn mp3(channels: &[Vec<f32>], rate: u32) -> Vec<u8> {
     while let Ok(packet) = encoder.next_packet() {
         out.extend_from_slice(&packet);
     }
+    out
+}
+
+/// `rate` as the 80-bit extended float of an AIFF `COMM` chunk: a sign
+/// and 15-bit exponent, then a 64-bit mantissa with its top bit set.
+fn extended(rate: u32) -> [u8; 10] {
+    let mut out = [0; 10];
+    if rate == 0 {
+        return out;
+    }
+    let top = 31 - rate.leading_zeros();
+    let exponent = 16_383 + top as u16;
+    out[..2].copy_from_slice(&exponent.to_be_bytes());
+    let mantissa = u64::from(rate) << (63 - top);
+    out[2..].copy_from_slice(&mantissa.to_be_bytes());
+    out
+}
+
+/// The kind of an AIFF file.
+#[derive(Clone, Copy, Debug)]
+pub enum Aiff {
+    /// `FORM` of type `AIFF`.
+    Plain,
+    /// `FORM` of type `AIFC`, with compression type `NONE`.
+    UncompressedAifc,
+}
+
+/// An AIFF file of `channels`, all the same length, at `rate`, with
+/// big-endian samples of `bits` (16 or 24) bits.
+pub fn aiff(channels: &[Vec<f32>], rate: u32, bits: u32, kind: Aiff) -> Vec<u8> {
+    let count = channels.len() as u16;
+    let frames = channels[0].len();
+    let bytes = (bits / 8) as usize;
+    let mut comm = Vec::new();
+    comm.extend_from_slice(&count.to_be_bytes());
+    comm.extend_from_slice(&(frames as u32).to_be_bytes());
+    comm.extend_from_slice(&(bits as u16).to_be_bytes());
+    comm.extend_from_slice(&extended(rate));
+    if let Aiff::UncompressedAifc = kind {
+        comm.extend_from_slice(b"NONE");
+        // An empty Pascal string, with its pad byte.
+        comm.extend_from_slice(&[0, 0]);
+    }
+    let mut ssnd = vec![0; 8];
+    for i in 0..frames {
+        for channel in channels {
+            let sample = step(channel[i], bits).to_be_bytes();
+            ssnd.extend_from_slice(&sample[4 - bytes..]);
+        }
+    }
+    let mut chunks: Vec<(&[u8; 4], Vec<u8>)> = Vec::new();
+    let form_type = match kind {
+        Aiff::Plain => b"AIFF",
+        Aiff::UncompressedAifc => {
+            // The version of AIFC of 1990-05-23.
+            chunks.push((b"FVER", 0xA280_5140_u32.to_be_bytes().into()));
+            b"AIFC"
+        }
+    };
+    chunks.push((b"COMM", comm));
+    chunks.push((b"SSND", ssnd));
+    let mut body = Vec::from(*form_type);
+    for (id, chunk) in chunks {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        body.extend_from_slice(&chunk);
+        if chunk.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut out = Vec::from(*b"FORM");
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
     out
 }
