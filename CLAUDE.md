@@ -9,7 +9,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `dsp/`: beginner-style pure audio functions with zero dependencies (DSP-1).
 * `engine/`: decoding, playback, mixing, time-stretch, classic drum separation, WAV writing.
 * `synth/`: the demo song, synthesised so its stems are known exactly; used by the app and as test audio.
-* `m4a/`: the bytes of an M4A file of 16-bit stereo Apple Lossless (ALAC), with a safe port of an ALAC encoder; no I/O.
+* `m4a/`: the bytes of an M4A file: 16-bit stereo Apple Lossless (ALAC), with a safe port of an ALAC encoder, or AAC from given packets; no I/O.
 * `app/`: eframe/egui UI, native and web.  Trunk's entry point is `app/index.html`.
 * `roformer/`: STFT, chunking, weights, and the CPU reference network (Burn, ndarray).
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
@@ -44,7 +44,7 @@ cargo clippy -p app -- -D warnings              # app's lib and binary without a
 cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
 cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
-cargo test -p engine                            # engine alone: a workspace build merges m4a's Symphonia features into it
+cargo test -p engine                            # engine alone: a workspace build merges the features of other members, such as app's engine/cpal, into it
 cargo test -p roformer-gpu --lib                # CI runs it too; it needs no GPU
 cargo test -p roformer-gpu --doc                # CI runs it too; it needs no GPU
 cargo +nightly-2026-10-30 test -p roformer-gpu --doc  # CI runs it; nightly checks each compile_fail error code
