@@ -275,6 +275,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-09, orchestrator: the round 2 log counts 4 messages of the maintainer as interventions.  The two lines above record three of them: the second line holds both the refusal and its size limit.  The first message, to hide the M4A art, is in the Decision log of `plans/active/m4a-m2.md`.
 * 2026-11-09, orchestrator: after round 2 of M2 (finding 2-5), the orchestrate skill gives one flow for a step's change of `CLAUDE.md` or `.claude/rules/**`: a step checkpoint, then the team's step commit holds the change.
 * 2026-11-09, orchestrator: after round 3 of M2 (finding 3-1), a file is not refused for its count of tag containers alone.  The refusal holds only when the tags that Symphonia keeps pass a limit from the memory budget, counted as bytes plus the overhead of each tag.  Reason: the maintainer's rule of 2026-11-09 refuses only a file whose tags put memory at risk.
+* 2026-11-09, orchestrator: after round 5 of M2, a file that opened on `main` behind junk bytes opens again.  The engine scans the same window as Symphonia's probe for each known start, then opens that reader there with the hiding.  Reason: the maintainer's rule refuses a file only when it puts memory at risk, and junk bytes do not.
 
 ## Outcomes and retrospective
 
