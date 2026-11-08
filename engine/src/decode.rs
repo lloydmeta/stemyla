@@ -118,8 +118,8 @@ pub const PROTECTED_TEXT: &str = "This file is protected (DRM), so it cannot ope
 pub const HE_AAC_TEXT: &str = "HE-AAC is not supported.  Open an AAC-LC file.";
 
 /// The text of an AAC of an object type other than AAC-LC, of a program
-/// config element, of 960 frames, or of an AudioSpecificConfig that does
-/// not parse.
+/// config element, of 960 frames, of an AudioSpecificConfig that does not
+/// parse, or of a sample entry rate that is not the rate of its config.
 pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC file.";
 
 /// The text of an AAC file of more than 2 channels.
@@ -143,13 +143,17 @@ fn check_aac(params: &AudioCodecParameters) -> Result<()> {
     };
     // An entry that states twice the rate of the core is implicit SBR: the
     // entry gives the rate of the output.  An entry of rate 0 cannot hold
-    // the rate (88.2 or 96 kHz), so it is no sign.
-    let implicit_sbr = config
+    // the rate (88.2 or 96 kHz), so it is unknown.  Any other rate of the
+    // entry would play the core at the wrong speed.
+    let rates = config
         .rate
-        .zip(params.sample_rate)
-        .is_some_and(|(core, entry)| u64::from(entry) == 2 * u64::from(core));
+        .zip(params.sample_rate.filter(|entry| *entry > 0));
+    let implicit_sbr = rates.is_some_and(|(core, entry)| u64::from(entry) == 2 * u64::from(core));
     if config.sbr || implicit_sbr {
         return Err(anyhow!(HE_AAC_TEXT));
+    }
+    if rates.is_some_and(|(core, entry)| core != entry) {
+        return Err(anyhow!(AAC_KIND_TEXT));
     }
     if let Some(channels) = crate::aac_config::channels_of(config.channel_config)
         && channels > 2
@@ -1506,14 +1510,40 @@ mod tests {
         }
     }
 
+    /// Checks that a block decode of a minute of `ext` at 44.1 kHz and
+    /// 48 kHz keeps its memory flat.
+    fn block_decode_is_flat_for(ext: &str) {
+        for rate in [44_100, 48_000] {
+            let (short, long) = (file_of(ext, 2, rate), file_of(ext, 60, rate));
+            assert_block_decode_is_flat(short, long, ext, &format!("{ext} at {rate} Hz"));
+        }
+    }
+
+    /// A WAV.  Each other format has its own test, so the formats run in
+    /// parallel: each takes 10 to 16 s in a test build.
     #[test]
     fn a_block_decode_keeps_its_memory_flat() {
-        for rate in [44_100, 48_000] {
-            for ext in ["wav", "flac", "mp3", "m4a", "aiff"] {
-                let (short, long) = (file_of(ext, 2, rate), file_of(ext, 60, rate));
-                assert_block_decode_is_flat(short, long, ext, &format!("{ext} at {rate} Hz"));
-            }
-        }
+        block_decode_is_flat_for("wav");
+    }
+
+    #[test]
+    fn a_block_decode_of_flac_keeps_its_memory_flat() {
+        block_decode_is_flat_for("flac");
+    }
+
+    #[test]
+    fn a_block_decode_of_mp3_keeps_its_memory_flat() {
+        block_decode_is_flat_for("mp3");
+    }
+
+    #[test]
+    fn a_block_decode_of_alac_m4a_keeps_its_memory_flat() {
+        block_decode_is_flat_for("m4a");
+    }
+
+    #[test]
+    fn a_block_decode_of_aiff_keeps_its_memory_flat() {
+        block_decode_is_flat_for("aiff");
     }
 
     /// Checks that a decode of `long` in blocks peaks within 1 MiB of one
@@ -1552,8 +1582,8 @@ mod tests {
 
     /// Finding 1-20 of review round 1: a block decode of AAC keeps its
     /// memory flat too, in an M4A with an `elst` trim and as a raw ADTS
-    /// stream.  An encode of AAC is slow in a test build, so the long file
-    /// is 20 s, and each length is encoded once.
+    /// stream.  An encode of AAC is slow, so the long file is 8 s, and
+    /// each length is encoded once.
     #[test]
     fn a_block_decode_of_aac_keeps_its_memory_flat() {
         use crate::test_audio::tone;
@@ -1576,7 +1606,7 @@ mod tests {
             );
             (m4a, stream)
         };
-        let ((short_m4a, short_adts), (long_m4a, long_adts)) = (files(2), files(20));
+        let ((short_m4a, short_adts), (long_m4a, long_adts)) = (files(2), files(8));
         assert_block_decode_is_flat(short_m4a, long_m4a, "m4a", "an AAC M4A with an elst");
         assert_block_decode_is_flat(short_adts, long_adts, "aac", "a raw ADTS stream");
     }
@@ -2981,6 +3011,22 @@ mod tests {
         assert_eq!(
             audio.frames() as u64,
             crate::test_m4a::aac_track_frames(88_200)
+        );
+    }
+
+    /// Finding 2-12 of review round 2: an `mp4a` entry rate other than the
+    /// rate of the AudioSpecificConfig, 0 and twice it, would play at the
+    /// wrong speed, so it gives the AAC-LC text.
+    #[test]
+    fn an_mp4a_entry_of_another_rate_gives_the_aac_lc_text() {
+        use crate::test_m4a::config;
+        for entry in [48_000, 32_000] {
+            let file = dummy_aac(&config(2, 44_100, 2), 2, entry);
+            assert_eq!(refusal(file, "m4a"), AAC_KIND_TEXT, "{entry} Hz");
+        }
+        assert_eq!(
+            refusal(dummy_aac(&config(2, 22_050, 2), 2, 44_100), "m4a"),
+            HE_AAC_TEXT
         );
     }
 

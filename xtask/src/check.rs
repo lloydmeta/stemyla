@@ -1889,25 +1889,33 @@ mod tests {
         assert_eq!(Graph::from_workspace(&workspace), fixture());
     }
 
-    /// The Symphonia features of the dependency of `package` of `kind`
-    /// (`None` for a normal one), from `cargo metadata`'s JSON.
-    fn symphonia_features(
-        metadata: &serde_json::Value,
+    /// The Symphonia dependency of `package` of `kind` (`None` for a
+    /// normal one), from `cargo metadata`'s JSON.
+    fn symphonia_dependency<'a>(
+        metadata: &'a serde_json::Value,
         package: &str,
         kind: Option<&str>,
-    ) -> BTreeSet<String> {
+    ) -> &'a serde_json::Value {
         let packages = metadata["packages"].as_array().expect("packages");
         let found = packages
             .iter()
             .find(|p| p["name"] == package)
             .unwrap_or_else(|| panic!("no package {package}"));
-        let dependency = found["dependencies"]
+        found["dependencies"]
             .as_array()
             .expect("dependencies")
             .iter()
             .find(|d| d["name"] == "symphonia" && d["kind"].as_str() == kind)
-            .unwrap_or_else(|| panic!("no symphonia dependency of {package} of kind {kind:?}"));
-        dependency["features"]
+            .unwrap_or_else(|| panic!("no symphonia dependency of {package} of kind {kind:?}"))
+    }
+
+    /// The Symphonia features of the dependency of `package` of `kind`.
+    fn symphonia_features(
+        metadata: &serde_json::Value,
+        package: &str,
+        kind: Option<&str>,
+    ) -> BTreeSet<String> {
+        symphonia_dependency(metadata, package, kind)["features"]
             .as_array()
             .expect("features")
             .iter()
@@ -1927,6 +1935,15 @@ mod tests {
             serde_json::from_str(&metadata).expect("cargo metadata gives JSON");
         let engine = symphonia_features(&metadata, "engine", None);
         let m4a = symphonia_features(&metadata, "m4a", Some("dev"));
+        // Finding 2-4 of review round 2: Symphonia's default features would
+        // reach `engine` too.
+        for (package, kind) in [("engine", None), ("m4a", Some("dev"))] {
+            assert_eq!(
+                symphonia_dependency(&metadata, package, kind)["uses_default_features"],
+                false,
+                "the Symphonia dependency of {package} turns on its default features"
+            );
+        }
         let missing: Vec<&String> = m4a.difference(&engine).collect();
         assert!(
             missing.is_empty(),

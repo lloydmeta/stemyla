@@ -104,19 +104,45 @@ pub fn silent_alac_m4a(frames: u64) -> Vec<u8> {
 
 /// The ADTS stream of `channels` at `rate` from `StreamEncoder`, at
 /// 128 kbit/s for each 2 channels, as it is: `ceil(frames / 1024) + 1`
-/// frames, with a delay of [`ENCODER_DELAY`].
+/// frames, with a delay of [`ENCODER_DELAY`].  An encode is slow, about
+/// 1.6 s for each second of stereo, so each input is encoded once and
+/// kept for the other tests ([`ENCODES`]).
 pub fn adts(channels: &[Vec<f32>], rate: u32) -> Vec<u8> {
-    let count = channels.len() as u8;
-    let mut encoder = StreamEncoder::new(EncoderConfig {
-        sample_rate: rate,
-        channels: count,
-        bitrate: 128_000 * u32::from(count) / 2,
-    })
-    .expect("oxideav-aac takes the config");
-    encoder
-        .encode_all(&interleaved16(channels))
-        .expect("oxideav-aac encodes")
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let samples = interleaved16(channels);
+    let mut hasher = DefaultHasher::new();
+    samples.hash(&mut hasher);
+    let key = (hasher.finish(), samples.len(), channels.len(), rate);
+    let once = {
+        let mut encodes = ENCODES.lock().unwrap_or_else(|e| e.into_inner());
+        std::sync::Arc::clone(encodes.entry(key).or_default())
+    };
+    let stream = once.get_or_init(|| {
+        let count = channels.len() as u8;
+        let mut encoder = StreamEncoder::new(EncoderConfig {
+            sample_rate: rate,
+            channels: count,
+            bitrate: 128_000 * u32::from(count) / 2,
+        })
+        .expect("oxideav-aac takes the config");
+        encoder.encode_all(&samples).expect("oxideav-aac encodes")
+    });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "MEM-1: each test takes its own copy of a short encoded fixture"
+    )]
+    let copy = stream.to_vec();
+    copy
 }
+
+/// The kept encodes of [`adts`], by (hash, length, channels, rate) of the
+/// input.  A test that waits on another's encode of the same input gets
+/// its result.
+type Encodes = std::collections::BTreeMap<
+    (u64, usize, usize, u32),
+    std::sync::Arc<std::sync::OnceLock<Vec<u8>>>,
+>;
+static ENCODES: std::sync::Mutex<Encodes> = std::sync::Mutex::new(Encodes::new());
 
 /// The raw AAC packets of an ADTS stream: each frame without its header
 /// of 7 bytes, or 9 bytes when `protection_absent` is 0.
@@ -457,20 +483,25 @@ pub fn version_1() -> Vec<u8> {
     bx(b"moov", &[&mvhd, &trak])
 }
 
+/// A `meta` box of iTunes tags with a cover image of `bytes` bytes, in
+/// `meta/ilst/covr/data`.
+pub fn cover_meta(bytes: usize) -> Vec<u8> {
+    let image = vec![0xFF; bytes];
+    // The `data` type 13 is JPEG; the locale is 0.
+    let data = bx(b"data", &[&[0, 0, 0, 13, 0, 0, 0, 0], &image]);
+    let hdlr = bx(b"hdlr", &[&[0; 8], b"mdir", b"appl", &[0; 9]]);
+    bx(
+        b"meta",
+        &[&[0; 4], &hdlr, &bx(b"ilst", &[&bx(b"covr", &[&data])])],
+    )
+}
+
 /// `file`, which has `moov` last, with a cover image of `bytes` bytes in
 /// `moov/udta/meta/ilst/covr/data`.
 pub fn with_cover(mut file: Vec<u8>, bytes: usize) -> Vec<u8> {
     let (moov, moov_size) = top_box(&file, b"moov");
     assert_eq!(moov + moov_size, file.len(), "moov is last");
-    let image = vec![0xFF; bytes];
-    // The `data` type 13 is JPEG; the locale is 0.
-    let data = bx(b"data", &[&[0, 0, 0, 13, 0, 0, 0, 0], &image]);
-    let hdlr = bx(b"hdlr", &[&[0; 8], b"mdir", b"appl", &[0; 9]]);
-    let meta = bx(
-        b"meta",
-        &[&[0; 4], &hdlr, &bx(b"ilst", &[&bx(b"covr", &[&data])])],
-    );
-    let udta = bx(b"udta", &[&meta]);
+    let udta = bx(b"udta", &[&cover_meta(bytes)]);
     file.extend_from_slice(&udta);
     let size = (moov_size + udta.len()) as u32;
     file[moov..moov + 4].copy_from_slice(&size.to_be_bytes());

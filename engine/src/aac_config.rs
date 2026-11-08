@@ -133,7 +133,8 @@ pub(crate) fn read(bytes: &[u8]) -> Option<AacConfig> {
         }
     }
     if !sbr && bits.left() >= 16 && bits.read(11)? == SYNC_EXTENSION && bits.object_type()? == SBR {
-        sbr = bits.read(1)? == 1;
+        // With no bit left, the flag counts as 0.
+        sbr = bits.read(1) == Some(1);
     }
     Some(AacConfig {
         object_type,
@@ -185,6 +186,9 @@ mod tests {
         // A rate index of 15: a rate of 24 bits.
         let explicit_rate = read(&[0x17, 0x80, 0x56, 0x22, 0x10]);
         assert_eq!(explicit_rate.and_then(|c| c.rate), Some(44_100));
+        // Finding 2-13 of review round 2: a sync extension of object type 5
+        // with no bit left for its SBR flag counts as a flag of 0.
+        assert_eq!(read(&[0x11, 0x90, 0x56, 0xE5]), Some(lc(48_000, 2)));
         // An object type of 31 needs 6 more bits.
         assert_eq!(read(&[0xF8]), None);
         assert_eq!(read(&[]), None);
