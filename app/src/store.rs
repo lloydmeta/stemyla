@@ -946,6 +946,9 @@ async fn rebuild(base: &str, meta: &Meta, memory_limit: usize) -> Result<Song> {
                     .ok_or_else(|| missing(orig))?;
                 heads.push((orig.clone(), head, size));
             }
+            if let Some(file) = crate::video_in_heads(&heads) {
+                return Err(anyhow::Error::new(crate::Refused(crate::video_text(file))));
+            }
             if let Some(why) = crate::refusal_of_heads(&heads, limit) {
                 return Err(refusal(why));
             }

@@ -288,6 +288,7 @@ dependencies = [
  "flacenc",
  "js-sys",
  "log",
+ "m4a",
  "stem-protocol",
  "synth",
  "wasm-bindgen",

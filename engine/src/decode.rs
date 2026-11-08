@@ -215,14 +215,23 @@ fn itunsmpb_trim(text: &str, duration: Option<u64>) -> Option<Trim> {
 /// What the head of a file states about its length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadLength {
-    /// A WAV or a FLAC that states its length: its frames at
-    /// [`SONG_RATE`].  A WAV counts at most the frames that its file holds.
+    /// A WAV, FLAC, M4A or AIFF that states its length: its frames at
+    /// [`SONG_RATE`].  A WAV or an AIFF counts at most the frames that its
+    /// file holds.  An M4A states the `mdhd` duration of its first sound
+    /// track, which counts the AAC encoder delay.
     Frames(u64),
-    /// A WAV or a FLAC that states no length: a streaming WAV, a WAV whose
-    /// data chunk is not in the head, or a FLAC with a total of 0.
+    /// A file that states no length, but whose samples can be as large as
+    /// PCM: a streaming WAV, a WAV whose data chunk is not in the head, a
+    /// FLAC with a total of 0, an MP4 whose head does not show the `mdhd`
+    /// of its first sound track (a `moov` after the head, or after large
+    /// cover art), a raw AAC stream (ADTS), or an AIFF whose `COMM` is not
+    /// in the head.
     UnstatedPcm,
     /// Any other file, such as an MP3, which states an estimate at most.
     Unstated,
+    /// An MP4 whose head shows a track of video (D4 of
+    /// `plans/active/m4a.md`).  A caller refuses it with [`VIDEO_TEXT`].
+    Video,
 }
 
 /// The bytes of a file's head that [`head_length`] needs at most.  A WAV
@@ -250,11 +259,113 @@ pub fn head_length(head: &[u8], file_bytes: u64) -> HeadLength {
     if head.starts_with(b"RIFF") || head.starts_with(b"RF64") {
         return wav_length(head, file_bytes);
     }
+    if head.starts_with(b"FORM") && matches!(head.get(8..12), Some(b"AIFF" | b"AIFC")) {
+        return aiff_length(head, file_bytes);
+    }
+    // A slice never fails a read, so the walk gives no error.
+    if let Ok(Some(found)) = crate::mp4_boxes::walk(&mut { head }) {
+        return mp4_length(&found);
+    }
     let start = id3_size(head).unwrap_or(0);
     match head.get(start..) {
         Some(rest) if rest.starts_with(b"fLaC") => flac_length(rest),
+        Some(rest) if is_adts(rest) => HeadLength::UnstatedPcm,
         _ => HeadLength::Unstated,
     }
+}
+
+/// [`head_length`] of an MP4 file, from the boxes in its head.  The `moov`
+/// can end after the head; the walker reads the boxes that are in it.
+fn mp4_length(found: &Found) -> HeadLength {
+    if found.video {
+        return HeadLength::Video;
+    }
+    let stated = found.sound.as_ref().and_then(|sound| {
+        let scale = sound.media_timescale.filter(|scale| *scale > 0)?;
+        Some(song_frames(sound.duration?, scale))
+    });
+    stated.map_or(HeadLength::UnstatedPcm, HeadLength::Frames)
+}
+
+/// Whether `bytes` start with the header of an ADTS frame: a sync word of
+/// 12 bits of 1, the ID bit, then a layer of 00.  An MP3 frame has a layer
+/// other than 00.
+fn is_adts(bytes: &[u8]) -> bool {
+    matches!(bytes, [0xFF, second, ..] if second & 0xF6 == 0xF0)
+}
+
+/// The big-endian `u32` at `at` in `bytes`.
+fn be_u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// The rate of the 80-bit extended float of an AIFF `COMM` chunk, in whole
+/// Hz: 0 if it is not a positive rate below 2^32.
+fn extended_rate(bytes: &[u8; 10]) -> u32 {
+    if bytes[0] & 0x80 != 0 {
+        return 0;
+    }
+    let exponent = i32::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+    let mantissa = u64::from_be_bytes([
+        bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+    ]);
+    let shift = 16_383 + 63 - exponent;
+    if !(0..64).contains(&shift) {
+        return 0;
+    }
+    u32::try_from(mantissa >> shift).unwrap_or(0)
+}
+
+/// [`head_length`] of an AIFF or AIFC: the frames and the rate of its
+/// `COMM` chunk.  When `SSND` is in the head, an AIFF counts at most the
+/// frames that its file holds, as a WAV does.  An AIFC can be compressed,
+/// so its frames stay as stated.  A missing `COMM`, a rate of 0 or a frame
+/// count of 0 states no length.
+fn aiff_length(head: &[u8], file_bytes: u64) -> HeadLength {
+    let plain = head.get(8..12) == Some(b"AIFF");
+    // The frames, the rate and the bytes of a frame, from `COMM`.
+    let mut format: Option<(u64, u32, u64)> = None;
+    // The bytes of samples that the file holds, from `SSND`.
+    let mut held: Option<u64> = None;
+    let mut at = 12;
+    while let (Some(id), Some(size)) = (head.get(at..at + 4), be_u32_at(head, at + 4)) {
+        let body = at + 8;
+        if id == b"COMM" {
+            let Some(comm) = head.get(body..body + 18) else {
+                break;
+            };
+            let channels = u64::from(u16::from_be_bytes([comm[0], comm[1]]));
+            let frames = u64::from(u32::from_be_bytes([comm[2], comm[3], comm[4], comm[5]]));
+            let bits = u64::from(u16::from_be_bytes([comm[6], comm[7]]));
+            let mut rate = [0; 10];
+            rate.copy_from_slice(&comm[8..18]);
+            let rate = extended_rate(&rate);
+            if rate == 0 || frames == 0 {
+                return HeadLength::UnstatedPcm;
+            }
+            format = Some((frames, rate, channels * bits.div_ceil(8)));
+        } else if id == b"SSND" {
+            // The samples start after `offset` and `blockSize`.
+            let offset = u64::from(be_u32_at(head, body).unwrap_or(0));
+            let start = body as u64 + 8 + offset;
+            let stated = u64::from(size).saturating_sub(8 + offset);
+            held = Some(stated.min(file_bytes.saturating_sub(start)));
+        }
+        // A chunk's body has an even length: an odd one has a pad byte.
+        let next = body as u64 + u64::from(size) + u64::from(size & 1);
+        match usize::try_from(next) {
+            Ok(next) if next < head.len() => at = next,
+            _ => break,
+        }
+    }
+    let Some((frames, rate, block)) = format else {
+        return HeadLength::UnstatedPcm;
+    };
+    let frames = match held {
+        Some(held) if plain && block > 0 => frames.min(held / block),
+        _ => frames,
+    };
+    HeadLength::Frames(song_frames(frames, rate))
 }
 
 /// The bytes of the ID3v2 tag at the start of `head`, if it has one.
@@ -342,6 +453,9 @@ pub fn largest_file(length: HeadLength, max_frames: usize) -> u64 {
         HeadLength::Frames(frames) => (frames.min(max_frames as u64), PCM_BYTES_PER_SECOND),
         HeadLength::UnstatedPcm => (max_frames as u64, PCM_BYTES_PER_SECOND),
         HeadLength::Unstated => (max_frames as u64, MP3_BYTES_PER_SECOND),
+        // A caller refuses a video before it asks; one that forgets
+        // refuses any file larger than the room for tags.
+        HeadLength::Video => (0, 0),
     };
     let bytes = (u128::from(frames) * u128::from(per_second)).div_ceil(u128::from(SONG_RATE));
     u64::try_from(bytes)
@@ -2490,5 +2604,193 @@ mod tests {
         let two = with_first_entry(with_second_trak(file, b"soun", 7), b"lloy");
         let audio = decoded(two, "the second track");
         assert_eq!(audio.frames(), 2112 + 4096 + 700);
+    }
+
+    /// The head of `file`: at most `HEAD_BYTES` of it.
+    fn head_of(file: &[u8]) -> HeadLength {
+        head_length(&file[..HEAD_BYTES.min(file.len())], file.len() as u64)
+    }
+
+    /// `file`, an M4A with `moov` first, with a `free` box of `size` bytes
+    /// put in `moov` before its `trak`.  The packets move, so the file is
+    /// for the head check only.
+    fn with_free_before_trak(file: &[u8], size: usize) -> Vec<u8> {
+        use crate::test_m4a::{child_box, top_box};
+        let (moov, moov_size) = top_box(file, b"moov");
+        let (trak, _) = child_box(file, moov, b"trak");
+        let mut free = Vec::from((size as u32).to_be_bytes());
+        free.extend_from_slice(b"free");
+        free.resize(size, 0);
+        let mut out = Vec::from(&file[..trak]);
+        out.extend_from_slice(&free);
+        out.extend_from_slice(&file[trak..]);
+        out[moov..moov + 4].copy_from_slice(&((moov_size + size) as u32).to_be_bytes());
+        out
+    }
+
+    /// An `ftyp`, then an `mdat` of 100 bytes with the size `size_field`
+    /// (and a 64-bit size when it is 1), then the `moov` of `file`.
+    fn with_mdat_first(file: &[u8], size_field: u32) -> Vec<u8> {
+        use crate::test_m4a::top_box;
+        let (ftyp, ftyp_size) = top_box(file, b"ftyp");
+        let (moov, moov_size) = top_box(file, b"moov");
+        let mut out = Vec::from(&file[ftyp..ftyp + ftyp_size]);
+        out.extend_from_slice(&size_field.to_be_bytes());
+        out.extend_from_slice(b"mdat");
+        if size_field == 1 {
+            out.extend_from_slice(&(16_u64 + 100).to_be_bytes());
+        }
+        out.resize(out.len() + 100, 7);
+        out.extend_from_slice(&file[moov..moov + moov_size]);
+        out
+    }
+
+    /// M2 of the M4A plan: the head of an M4A states the length of its
+    /// first sound track from its `mdhd`, if the head shows it.
+    #[test]
+    fn a_head_states_the_length_of_an_m4a() {
+        use crate::test_m4a::{
+            aac_m4a, aac_track_frames, patched, silent_alac_m4a, version_1, with_second_trak,
+        };
+        use m4a::Order;
+        let tone = short_tone();
+        for rate in [44_100, 48_000] {
+            let file = crate::test_m4a::alac_m4a(&tone[0], &tone[1], rate, None, Order::FastStart);
+            let want = HeadLength::Frames(song_frames(4096, rate));
+            assert_eq!(head_of(&file), want, "{rate} Hz");
+            assert_eq!(
+                head_of(&with_mdat_first(&file, 1)),
+                want,
+                "a 64-bit mdat first, {rate} Hz"
+            );
+            assert_eq!(
+                head_of(&with_mdat_first(&file, 0)),
+                HeadLength::UnstatedPcm,
+                "an mdat of size 0 first"
+            );
+        }
+        // A moov after an mdat that passes the head.
+        let two_seconds = chirps();
+        let moov_last = crate::test_m4a::alac_m4a(
+            &two_seconds[0],
+            &two_seconds[1],
+            44_100,
+            None,
+            Order::MoovLast,
+        );
+        assert!(crate::test_m4a::top_box(&moov_last, b"moov").0 > HEAD_BYTES);
+        assert_eq!(head_of(&moov_last), HeadLength::UnstatedPcm, "moov last");
+        // A moov that ends after the head: its mdhd is near its start.
+        let frames = MAX_DECODED_BYTES / 8 + 4096;
+        let long = silent_alac_m4a(frames);
+        assert!(crate::test_m4a::top_box(&long, b"moov").1 > HEAD_BYTES);
+        assert_eq!(head_of(&long), HeadLength::Frames(frames));
+        let behind_free = with_free_before_trak(&alac_of(Order::FastStart), 70 * 1024);
+        assert_eq!(
+            head_of(&behind_free),
+            HeadLength::UnstatedPcm,
+            "a free box of 70 KiB"
+        );
+        assert_eq!(
+            head_of(&version_1()),
+            HeadLength::Frames(song_frames(3 << 32, 48_000))
+        );
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, Order::FastStart);
+        assert_eq!(
+            head_of(&aac),
+            HeadLength::Frames(aac_track_frames(4096)),
+            "AAC, with its delay"
+        );
+        let only_video = patched(alac_of(Order::FastStart), b"soun", b"vide");
+        assert_eq!(head_of(&only_video), HeadLength::Video);
+        let second = with_second_trak(alac_of(Order::MoovLast), b"vide", 2);
+        assert_eq!(head_of(&second), HeadLength::Video);
+    }
+
+    /// A raw ADTS stream states no length, also after an ID3 tag; an MP3
+    /// stays `Unstated`.
+    #[test]
+    fn a_head_of_a_raw_adts_stream_states_no_length() {
+        use crate::test_audio::{mp3, tone};
+        let adts = crate::test_m4a::adts(&short_tone(), 44_100);
+        assert_eq!(head_of(&adts), HeadLength::UnstatedPcm);
+        let mut tagged = vec![b'I', b'D', b'3', 4, 0, 0, 0, 0, 1, 0];
+        tagged.extend_from_slice(&[0; 128]);
+        tagged.extend_from_slice(&adts);
+        assert_eq!(head_of(&tagged), HeadLength::UnstatedPcm);
+        let mp3 = mp3(&[tone(0, 44_100, 44_100), tone(1, 44_100, 44_100)], 44_100);
+        assert_eq!(head_of(&mp3), HeadLength::Unstated);
+    }
+
+    /// An AIFF or AIFC states its frames and rate in `COMM`.  When `SSND`
+    /// is in the head, an AIFF counts at most the frames that the file
+    /// holds.
+    #[test]
+    fn a_head_states_the_length_of_an_aiff() {
+        use crate::test_audio::{Aiff, aiff};
+        let (left, right, _) = stereo_wav();
+        let channels = [left, right];
+        for rate in [22_050, 44_100, 48_000] {
+            let want = HeadLength::Frames(song_frames(FRAMES as u64, rate));
+            for (bits, kind) in [
+                (16, Aiff::Plain),
+                (24, Aiff::Plain),
+                (16, Aiff::UncompressedAifc),
+            ] {
+                let file = aiff(&channels, rate, bits, kind);
+                assert_eq!(head_of(&file), want, "{bits} bits, {kind:?}, {rate} Hz");
+            }
+        }
+        let file = aiff(&channels, 44_100, 16, Aiff::Plain);
+        // A file that holds 100 frames of what it states.
+        let short = file.len() - (FRAMES - 100) * 4;
+        assert_eq!(
+            head_length(&file[..short], short as u64),
+            HeadLength::Frames(100)
+        );
+        // A COMM after a chunk of 70 KiB: past the head.
+        let mut late = Vec::from(&file[..12]);
+        late.extend_from_slice(b"APPL");
+        late.extend_from_slice(&(70_u32 * 1024).to_be_bytes());
+        late.resize(late.len() + 70 * 1024, 0);
+        late.extend_from_slice(&file[12..]);
+        assert_eq!(head_of(&late), HeadLength::UnstatedPcm);
+        // A rate of 0 states no length.
+        let mut no_rate = file.clone();
+        let comm = crate::test_m4a::place_once(&no_rate, b"COMM") + 8;
+        no_rate[comm + 8..comm + 18].fill(0);
+        assert_eq!(head_of(&no_rate), HeadLength::UnstatedPcm);
+    }
+
+    /// The head check never panics, on any prefix of each fixture.
+    #[test]
+    fn every_prefix_of_a_head_gives_a_length() {
+        use crate::test_audio::{Aiff, aiff};
+        use crate::test_m4a::{aac_m4a, version_1};
+        let (left, right, _) = stereo_wav();
+        let fixtures = [
+            alac_of(m4a::Order::FastStart),
+            aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart),
+            version_1(),
+            aiff(
+                &[Vec::from(&left[..500]), Vec::from(&right[..500])],
+                44_100,
+                16,
+                Aiff::UncompressedAifc,
+            ),
+            crate::test_m4a::adts(&short_tone(), 44_100),
+        ];
+        for file in fixtures {
+            for end in 0..=file.len() {
+                let _ = head_length(&file[..end], file.len() as u64);
+            }
+        }
+    }
+
+    /// A caller refuses a video before it asks for the largest file; one
+    /// that forgets gets the room for tags only.
+    #[test]
+    fn the_largest_file_of_a_video_is_the_room_for_tags() {
+        assert_eq!(largest_file(HeadLength::Video, 100 * 44_100), TAG_ROOM);
     }
 }

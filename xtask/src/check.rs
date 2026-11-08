@@ -1110,7 +1110,11 @@ mod tests {
     /// The 12 members of this repo and their real edges, of all kinds.
     fn fixture() -> Graph {
         Graph::new(&[
-            ("app", "app", &["dsp", "engine", "synth", "stem-protocol"]),
+            (
+                "app",
+                "app",
+                &["dsp", "engine", "m4a", "synth", "stem-protocol"],
+            ),
             (
                 "decoder",
                 "decode-worker",

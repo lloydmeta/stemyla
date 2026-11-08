@@ -951,6 +951,9 @@ async fn open_on_the_page(
             .map_err(|e| anyhow::anyhow!(e))?;
         heads.push((n.clone(), head, file.size() as u64));
     }
+    if let Some(file) = video_in_heads(&heads) {
+        return Err(anyhow::Error::new(Refused(video_text(file))));
+    }
     if let Some(why) = refusal_of_heads(&heads, limit) {
         let refusal = PageRefusal {
             why,
@@ -1667,6 +1670,24 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// The name of the first file of `heads` (name, first bytes, size) whose
+/// head shows a track of video (D4 of `plans/active/m4a.md`).  The page
+/// refuses such a song before any whole read, with [`video_text`].
+pub fn video_in_heads(heads: &[(String, Vec<u8>, u64)]) -> Option<&str> {
+    use engine::decode::{HeadLength, head_length};
+    heads
+        .iter()
+        .find(|(_, head, bytes)| head_length(head, *bytes) == HeadLength::Video)
+        .map(|(file, _, _)| file.as_str())
+}
+
+/// The status line of a song whose file `file` holds video.  It is a
+/// [`Refused`] line, shown as it is: the words of [`PageRefusal`] say "too
+/// long", which is wrong for a video.
+pub fn video_text(file: &str) -> String {
+    format!("Not opened: {file}.  {}", engine::decode::VIDEO_TEXT)
+}
+
 /// The refusal before any whole read of a song, from the head of each of
 /// its files (`heads`: name, first bytes, size), for the `limit` of its
 /// lanes.  It refuses a WAV or FLAC whose head states a length past the
@@ -1681,6 +1702,8 @@ pub fn refusal_of_heads(heads: &[(String, Vec<u8>, u64)], limit: usize) -> Optio
         let length = head_length(head, *bytes);
         let cap = largest_file(length, limit);
         match length {
+            // Not a length: `video_in_heads` refuses it first.
+            HeadLength::Video => {}
             HeadLength::Frames(frames) if frames > limit as u64 => {
                 longest = longest.max(Some(frames));
             }
@@ -6302,6 +6325,78 @@ mod tests {
             refusal_of_heads(&[mp3(mp3_cap + 1)], limit),
             Some(TooLongToOpen::Large { .. })
         ));
+    }
+
+    /// A short ALAC M4A whose one track is patched to a video track, as
+    /// `app/src/decode_tests.rs` makes it: (name, head, size).
+    fn video_head(name: &str) -> (String, Vec<u8>, u64) {
+        let mut file = m4a::alac_file(&[0; 2 * 4096], 44_100, None, m4a::Order::FastStart)
+            .expect("the writer takes it");
+        let handler = file
+            .windows(4)
+            .position(|w| w == b"soun")
+            .expect("a sound handler");
+        file[handler..handler + 4].copy_from_slice(b"vide");
+        let size = file.len() as u64;
+        (name.to_string(), file, size)
+    }
+
+    /// D4 of the M4A plan: a head that shows a video track refuses the
+    /// song with a status line of its own, for a song of one file and of
+    /// 3 files.  `refusal_of_heads` does not take a video as a length.
+    #[test]
+    fn a_video_in_the_heads_refuses_the_song() {
+        let wav = |name: &str| {
+            (
+                name.to_string(),
+                wav_head(44_100, 4 * 44_100),
+                44 + 4 * 44_100,
+            )
+        };
+        assert_eq!(
+            video_in_heads(&[video_head("lloyd.mp4")]),
+            Some("lloyd.mp4")
+        );
+        let three = [
+            wav("lloyd.wav"),
+            video_head("acme.mp4"),
+            video_head("beachape.m4a"),
+        ];
+        assert_eq!(video_in_heads(&three), Some("acme.mp4"));
+        assert_eq!(video_in_heads(&[wav("lloyd.wav")]), None);
+        let error = anyhow::Error::new(Refused(video_text("acme.mp4")));
+        assert_eq!(
+            open_error_text("Could not load", &error),
+            "Not opened: acme.mp4.  This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC."
+        );
+        assert_eq!(refusal_of_heads(&[video_head("lloyd.mp4")], 1), None);
+    }
+
+    /// The head of an ALAC M4A that states more than the limit refuses it,
+    /// from the `mdhd` in its head, though its `moov` ends after the head.
+    #[test]
+    fn the_head_of_a_long_m4a_states_its_length() {
+        let frames = (1_u64 << 27) + 4096;
+        let layout = m4a::Layout::new(
+            m4a::Codec::Alac,
+            frames,
+            44_100,
+            None,
+            m4a::Order::FastStart,
+        )
+        .expect("the writer takes it");
+        let entry = m4a::SampleEntry::Alac { cookie: [0; 24] };
+        let sizes = vec![20; layout.packets()];
+        let head = layout.head(&entry, &sizes).expect("the head");
+        assert!(head.len() > engine::decode::HEAD_BYTES);
+        let size = (head.len() + 20 * layout.packets()) as u64;
+        let first = Vec::from(&head[..engine::decode::HEAD_BYTES]);
+        assert_eq!(
+            refusal_of_heads(&[("lloyd.m4a".to_string(), first, size)], 100 * 44_100),
+            Some(TooLongToOpen::Stated {
+                frames: frames as usize
+            })
+        );
     }
 
     /// Finding 1-3 of review round 1: when `meta` gives the song's length,

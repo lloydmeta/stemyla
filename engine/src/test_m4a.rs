@@ -251,7 +251,7 @@ pub fn peak_lag(
 }
 
 /// The places of `pattern` in `bytes`.
-fn places(bytes: &[u8], pattern: &[u8]) -> Vec<usize> {
+pub fn places(bytes: &[u8], pattern: &[u8]) -> Vec<usize> {
     bytes
         .windows(pattern.len())
         .enumerate()
@@ -408,4 +408,51 @@ pub fn with_itunsmpb_text(mut file: Vec<u8>, change: impl FnOnce(&mut [u8])) -> 
     let at = place_once(&file, b"iTunSMPB") + 8 + 8 + 8;
     change(&mut file[at..at + 116]);
     file
+}
+
+/// A box of `kind` with `body`.
+pub fn bx(kind: &[u8; 4], body: &[&[u8]]) -> Vec<u8> {
+    let body = body.concat();
+    let mut out = Vec::from(((8 + body.len()) as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A file of one sound track with an `mdhd` and an `elst` of version 1
+/// (64-bit times), and a `tkhd` and an `mvhd` of version 1.
+pub fn version_1() -> Vec<u8> {
+    let full = |version: u8| [version, 0, 0, 0];
+    let mvhd = bx(
+        b"mvhd",
+        &[&full(1), &[0; 16], &1000_u32.to_be_bytes(), &[0; 8]],
+    );
+    let tkhd = bx(b"tkhd", &[&full(1), &[0; 16], &9_u32.to_be_bytes()]);
+    let elst = bx(
+        b"elst",
+        &[
+            &full(1),
+            &1_u32.to_be_bytes(),
+            &(5_u64 << 32).to_be_bytes(),
+            &(1024_u64 << 32).to_be_bytes(),
+            &0x1_0000_u32.to_be_bytes(),
+        ],
+    );
+    let mdhd = bx(
+        b"mdhd",
+        &[
+            &full(1),
+            &[0; 16],
+            &48_000_u32.to_be_bytes(),
+            &(3_u64 << 32).to_be_bytes(),
+        ],
+    );
+    let hdlr = bx(b"hdlr", &[&full(0), &[0; 4], b"soun"]);
+    let entry = bx(b"mp4a", &[&[0; 28]]);
+    let stsd = bx(b"stsd", &[&full(0), &1_u32.to_be_bytes(), &entry]);
+    let stbl = bx(b"stbl", &[&stsd]);
+    let minf = bx(b"minf", &[&stbl]);
+    let mdia = bx(b"mdia", &[&mdhd, &hdlr, &minf]);
+    let trak = bx(b"trak", &[&tkhd, &bx(b"edts", &[&elst]), &mdia]);
+    bx(b"moov", &[&mvhd, &trak])
 }

@@ -2156,6 +2156,76 @@ async fn a_drop_with_no_storage_refuses_a_long_wav_from_its_head() {
     assert_eq!(app.status, text);
 }
 
+/// A short ALAC M4A whose one track is patched to a video track, then
+/// zeros, in a file named `name` of `size` bytes.
+fn video_file(name: &str, size: usize) -> (String, web_sys::File) {
+    let mut file = m4a::alac_file(&[0; 2 * 4096], 44_100, None, m4a::Order::FastStart)
+        .expect("the writer takes it");
+    let handler = file
+        .windows(4)
+        .position(|w| w == b"soun")
+        .expect("a sound handler");
+    file[handler..handler + 4].copy_from_slice(b"vide");
+    (name.to_string(), dt_big_file(&file, size as f64, name))
+}
+
+/// D4 of the M4A plan: with no browser storage, a drop of an `.mp4` with
+/// a video track is refused from its head, with the video text.  The page
+/// shows it as it is.
+#[wasm_bindgen_test]
+async fn a_drop_with_no_storage_refuses_a_video_from_its_head() {
+    store::test_wipe().await;
+    let fake = Fake::new();
+    let chosen = vec![video_file("lloyd.mp4", 4 * engine::decode::HEAD_BYTES)];
+    dt_refuse_writes(QUOTA_EXCEEDED);
+    let (opened, largest, over) = reads_of(open_chosen_now(&chosen, &fake.client, SECOND)).await;
+    dt_allow_writes();
+    store::test_wipe().await;
+    assert_eq!(
+        over, 0,
+        "no read past the head: the largest was {largest} bytes"
+    );
+    let text = shown_error(&opened);
+    assert_eq!(text, crate::video_text("lloyd.mp4"));
+    let mut app = StemApp {
+        want_device: false,
+        ..StemApp::default()
+    };
+    let token = app.next_open();
+    app.pending.borrow_mut().put_song(token, opened);
+    app.apply_inbox(&egui::Context::default());
+    assert_eq!(app.status, text);
+}
+
+/// D4 of the M4A plan: a stored session of 21 sources opens on the page
+/// (D2 of the M7 plan).  When one source holds video, the page refuses
+/// the song from the heads, before any whole read.  The session stays.
+#[wasm_bindgen_test]
+async fn a_restore_on_the_page_refuses_a_video_from_its_head() {
+    store::test_wipe().await;
+    let mut chosen: Chosen = (0..20)
+        .map(|k| wav_file(&format!("lloyd {k}.wav"), 1_000, k))
+        .collect();
+    chosen.push(video_file("acme.mp4", 4 * engine::decode::HEAD_BYTES));
+    let id = saved(&chosen).await;
+    let fake = Fake::new();
+    let (restored, largest, over) =
+        reads_of(restore_stored(&id, &fake.client, MEMORY_PATH_MAX_FRAMES)).await;
+    let kept = meta_of(&id).await;
+    store::test_wipe().await;
+    assert_eq!(fake.posts.length(), 0, "no decode is posted");
+    assert_eq!(
+        over, 0,
+        "no read past a head: the largest was {largest} bytes"
+    );
+    let error = restored.expect("a session").err().expect("refused");
+    assert_eq!(
+        open_error_text("Could not load", &error),
+        crate::video_text("acme.mp4")
+    );
+    assert!(kept.is_some(), "the session stays");
+}
+
 /// Finding 5-3 of review round 5: a drop whose save fails for a reason
 /// other than a full quota refuses a long song.  More free browser storage
 /// does not help, so the status line does not offer it.
