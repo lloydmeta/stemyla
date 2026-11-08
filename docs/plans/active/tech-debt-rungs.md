@@ -84,7 +84,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 ## Progress
 
 * [x] 2026-11-06: triage of the open entries, and this plan.
-* [ ] M1: rung 1.  On 2026-11-06, the 8 steps are committed: `efe2b8d` TD-22, `979fbe4` TD-42, `913b306` TD-69, `967c181` TD-40, `01bc133` TD-23, `b40b89e` TD-41, `9358c14` TD-26 and `c1224c1` TD-39.  The code and the review rounds are done.
+* [x] M1: rung 1.  On 2026-11-06, the 8 steps are committed: `efe2b8d` TD-22, `979fbe4` TD-42, `913b306` TD-69, `967c181` TD-40, `01bc133` TD-23, `b40b89e` TD-41, `9358c14` TD-26 and `c1224c1` TD-39.  The code and the review rounds are done.
   * [x] 2026-11-07: CI passed on `5fe83fc` of PR 42, the nightly step included.
   * [x] 2026-11-07: `check --tier push` passed on the maintainer's Mac, as a user that is not root.  The root-only test and the GPU line ran too.
   * [x] 2026-11-08: cargo-mutants on the diff of the branch, on the maintainer's Mac: 270 mutants, 156 caught, 103 missed, 10 unviable, 1 timeout.  Of the missed mutants, 82 were in the MEM-1 canary visitor.  No test put a cfg that stays on around a canary, and many node kinds had no case.  New tests and the removal of 19 arms that cannot change the result fix them.  New cases also catch 17 mutants of `disallowed_methods`, `source_includes`, `attribute_paths`, `turns_off` and `expected_copies`.  A second run on the changed functions gave 4 missed, all equivalent (Decision log).
@@ -103,7 +103,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] Review round 13, on the maintainer's Mac, of `5fe83fc`, `4ab3a1a` and `52afb99`: 2 should-fix and 1 nit; the should-fix fixed in `250851c`.  The `Range` arm stays, and `NODES` gets a type generic parameter.  Round 12's record was seeded by hand with head `c9bc622`, because rounds 1 to 12 ran in the cloud container.
   * [x] Review round 14: no findings, and no missed mutant.  The stop rule of decision 0024 holds.  The log stays in the same file.
   * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
-  * [ ] CI on the last commit of M1.
+  * [x] 2026-11-08: CI passed on `5b3fbf6`, the last code commit of M1, the nightly step included (run 42405974754).
 * [ ] M2: rung 2.
 * [ ] M3: rung 3.
 
