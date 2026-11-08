@@ -147,6 +147,7 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | `engine/` | decoding, playback, time-stretch, classic drum separation |
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
+| `m4a/` | the bytes of an M4A file of 16-bit stereo Apple Lossless (ALAC), with a safe port of an ALAC encoder |
 | `protocol/` | the messages between the page and its workers (`stem-protocol`) |
 | `test-support/` | `skip` and `STEMYLA_REQUIRE`, which make a test that cannot run fail where evidence is claimed |
 | `xtask/` | the static server, the browser test runners and other tools |
@@ -155,4 +156,4 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 
 ## Licence
 
-MIT or Apache-2.0, at your option (`LICENSE-MIT`, `LICENSE-APACHE`).  Third-party crates and their licences are listed in `THIRD-PARTY.md`.  The model weights are not covered; see "The model".
+MIT or Apache-2.0, at your option (`LICENSE-MIT`, `LICENSE-APACHE`), except `m4a/`.  `m4a/` is Apache-2.0 only (`LICENSE-APACHE`), because its ALAC encoder is a port of Apple's ALAC reference, which is Apache-2.0 only (decision 0028).  Third-party crates and their licences are listed in `THIRD-PARTY.md`.  The model weights are not covered; see "The model".

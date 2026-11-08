@@ -51,6 +51,7 @@ pub const REVIEWERS: &[Reviewer] = &[
             "roformer-gpu/src/**",
             "synth/src/**",
             "dsp/src/**",
+            "m4a/src/**",
             "**/clippy.toml",
             ".claude/rules/memory.md",
         ],
@@ -2111,6 +2112,7 @@ mod tests {
             ),
             ("synth/src/lib.rs", "memory-reviewer", "synth/src/**"),
             ("dsp/src/mix.rs", "memory-reviewer", "dsp/src/**"),
+            ("m4a/src/lib.rs", "memory-reviewer", "m4a/src/**"),
             ("dsp/clippy.toml", "memory-reviewer", "**/clippy.toml"),
             (
                 ".claude/rules/memory.md",

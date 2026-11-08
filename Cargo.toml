@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["dsp", "engine", "app", "xtask", "synth", "roformer", "roformer-gpu", "worker", "decoder", "protocol", "test-support"]
+members = ["dsp", "engine", "app", "xtask", "synth", "roformer", "roformer-gpu", "worker", "decoder", "protocol", "test-support", "m4a"]
 
 [workspace.package]
 edition = "2024"

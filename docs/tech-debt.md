@@ -71,7 +71,7 @@ The worker logs its wasm memory and live GPU bytes and the page its wasm memory,
 
 ### TD-26: MEM-1's lint sees only `to_vec`
 
-Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-protocol`, `engine`, `roformer`, `roformer-gpu` and `synth`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first four (MEM-1, MEM-2).  It does not see:
+Clippy fails `slice::to_vec` in `app`, `stem-worker`, `decode-worker`, `stem-protocol`, `engine`, `roformer`, `roformer-gpu`, `synth` and `m4a`, and `to_vec` on a `Uint8Array` or a `Float32Array` in the first four (MEM-1, MEM-2).  It does not see:
 
 * other forms of copy: `to_owned`, `Vec::from`, `Box::from`, `into`, `concat`, `collect`, `extend_from_slice`, `copy_to` into a new buffer, and `clone` of a `Vec`;
 * `to_vec` on the other typed arrays, such as `Int16Array`, and a wasm-bindgen import that returns a `Vec<u8>`;

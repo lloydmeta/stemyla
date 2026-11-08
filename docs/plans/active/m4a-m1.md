@@ -216,7 +216,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 ## Progress
 
 * [x] 2026-11-08: plan written by the team leader.
-* [ ] Step 1: the crate and its place in the layers.
+* [x] 2026-11-08, Step 1: the crate and its place in the layers.  First failures: `each_shipped_crate_lints_mem1_copies` failed with "m4a/clippy.toml lacks `path = "slice::to_vec"`" before `m4a/clippy.toml` existed.  `cargo clippy -p m4a --all-targets` failed with "this lint expectation is unfulfilled" on the canary.  `each_include_glob_routes_its_reviewer` failed with "m4a/src/lib.rs should route memory-reviewer ..., got []" before the change to `REVIEWERS`.  `the_fixture_graph_is_the_real_graph` failed on the new member before the change to `fixture()`.  `check_runs_each_check_on_a_repo` failed on the missing `m4a` lines of `README.md` and `docs/ARCHITECTURE.md`.  `every_reviewer_has_an_agent_file` failed until `git add` of `m4a/src/lib.rs`.
 * [ ] Step 2: the bit writer and the ALAC encoder.
 * [ ] Step 3: the box writer.
 * [ ] Step 4: the round trip through Symphonia.

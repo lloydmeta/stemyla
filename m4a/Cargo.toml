@@ -1,0 +1,13 @@
+[package]
+name = "m4a"
+version = "0.1.0"
+edition.workspace = true
+# The ALAC encoder is a port of `alac-encoder` 0.3.0, which is a port of
+# Apple's ALAC reference.  Apple's reference is Apache-2.0 only, so this
+# crate is Apache-2.0 only (decision 0028).
+license = "Apache-2.0"
+
+[dependencies]
+
+[lints]
+workspace = true

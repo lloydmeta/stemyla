@@ -1072,7 +1072,7 @@ mod tests {
     const NIGHTLY_DOC: &str = "cargo +nightly-2026-10-30 test -p roformer-gpu --doc";
     const PUBLISH: &str = "cargo run -p xtask --release -- publish";
 
-    /// The 11 members of this repo and their real edges, of all kinds.
+    /// The 12 members of this repo and their real edges, of all kinds.
     fn fixture() -> Graph {
         Graph::new(&[
             ("app", "app", &["dsp", "engine", "synth", "stem-protocol"]),
@@ -1083,6 +1083,7 @@ mod tests {
             ),
             ("dsp", "dsp", &[]),
             ("engine", "engine", &["dsp"]),
+            ("m4a", "m4a", &[]),
             ("protocol", "stem-protocol", &[]),
             ("roformer", "roformer", &["test-support"]),
             (
@@ -1362,8 +1363,8 @@ mod tests {
         );
     }
 
-    /// No one member of this repo has all 11 members as its dependents.
-    /// So the paths of four members give the workspace test line.
+    /// No one member of this repo has all 12 members as its dependents.
+    /// So the paths of five members give the workspace test line.
     #[test]
     fn the_crate_tests_of_every_member_but_roformer_gpu_are_the_workspace_test_line() {
         let graph = fixture();
@@ -1371,8 +1372,9 @@ mod tests {
             let one = BTreeSet::from([name.clone()]);
             assert_ne!(graph.dependents(&one), graph.names(), "{name}");
         }
-        let all =
-            BTreeSet::from(["dsp", "test-support", "stem-protocol", "synth"].map(str::to_string));
+        let all = BTreeSet::from(
+            ["dsp", "test-support", "stem-protocol", "synth", "m4a"].map(str::to_string),
+        );
         assert_eq!(graph.dependents(&all), graph.names());
         let head = vec![
             run(FMT),
@@ -1392,6 +1394,7 @@ mod tests {
             "test-support/src/lib.rs",
             "protocol/tests/x.rs",
             "synth/src/lib.rs",
+            "m4a/src/lib.rs",
         ]);
         assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
     }

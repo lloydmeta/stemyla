@@ -37,6 +37,7 @@ flowchart LR
 * `dsp`: small audio functions (peaks, mixing, median, fades, loop wrapping) written in a deliberately plain style, loops and indexing only, as a first reading exercise.
 * `engine`: decoding of WAV, MP3 and FLAC (Symphonia), with at most 1 GiB of samples from each file (decision 0013).  It also converts each song to 44.1 kHz (`engine::resample`, decision 0012).  It can decode a source in blocks into a sink, with the samples of a whole decode, bit for bit (`engine::decode::Decoder`, `engine::resample::Resampler`, `engine::song::decode_into`).  `engine::overview` makes the waveform columns of a lane, from whole channels or from blocks.  It has the player and mixer.  The player holds no song: it reads each lane through `engine::source::StemSource`, and a lane in memory is an `engine::source::MemorySource`.  A lane in a session file is an `engine::readahead::StoredSource`, which reads only from a read-ahead buffer of fixed size (`engine::readahead::ReadAhead`).  A reader fills that buffer.  It also has pitch-preserving time-stretch (WSOLA), the classic drum separation (harmonic/percussive median filtering), whole or in blocks with the same output (`engine::hpss::BlockHpss`), and a 16-bit WAV writer.  `engine::mixdown` reads a stem or a mix of stems one block at a time.
 * `synth`: the built-in demo song, synthesised so its stems are known exactly.  Its `files` feature adds writers for the song's WAV files and `truth.json`, for tools and tests.
+* `m4a`: the bytes of an M4A file that holds 16-bit stereo Apple Lossless (ALAC).  It has a safe port of the encoder of `alac-encoder` 0.3.0, and does no input or output.  It is Apache-2.0 only (decision 0028).
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
@@ -61,6 +62,7 @@ Each workspace crate depends only on the workspace crates that its row lists, an
 | Pure | `synth` | no workspace crate |
 | Pure | `roformer` | no workspace crate |
 | Pure | `stem-protocol` | no workspace crate |
+| Pure | `m4a` | no workspace crate |
 | Engine and GPU | `engine` | `dsp` |
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |

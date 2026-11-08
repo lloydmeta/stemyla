@@ -1,0 +1,7 @@
+# MEM-1 (docs/invariants.md).  Clippy reads only this file for this crate.
+# Each path has a canary: `mem1_lint_is_on` in `m4a/src/lib.rs`.  M3's save
+# runs this crate on song-length input in the worker, so a copy stays in
+# its wasm memory.
+disallowed-methods = [
+  { path = "slice::to_vec", reason = 'MEM-1: a copy of a song- or model-sized buffer stays in wasm memory for good.  Fix: borrow the slice, or write into the buffer of the caller.  For a needed copy, add #[expect(clippy::disallowed_methods, reason = "MEM-1: why")] to its statement, field or match arm.' },
+]
