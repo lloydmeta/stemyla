@@ -679,10 +679,12 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
 
 /// True when `tested` holds `engine` and a member outside the closure and
 /// the dependents of `engine`.  Then one test build has both, so the
-/// features of that member can reach the dependencies of `engine`.  No
-/// member does so today: `engine`'s own Symphonia features hold those of
-/// the tests of `m4a`, which is in the closure.  The check stays for a
-/// new member or feature.  A dependent of `engine` can also turn on
+/// features of that member can reach the dependencies of `engine`.  It
+/// cannot see a member in the closure of `engine`, such as `m4a`, which
+/// `engine` takes for its tests.  So a new Symphonia feature of the tests
+/// of `m4a` passes it.  The test
+/// `the_symphonia_features_of_the_tests_of_m4a_are_engines` and tier
+/// `push` cover that gap.  A dependent of `engine` can also turn on
 /// features of `engine`: `app` turns on `engine/cpal` with its default
 /// feature `audio`.  `xtask` does so only with its own `cpal` feature,
 /// which is not a default.  Tier `push` and CI run `cargo test -p engine`
@@ -1885,6 +1887,51 @@ mod tests {
         let workspace =
             rules::workspace(&metadata).expect("cargo metadata's JSON gives the workspace");
         assert_eq!(Graph::from_workspace(&workspace), fixture());
+    }
+
+    /// The Symphonia features of the dependency of `package` of `kind`
+    /// (`None` for a normal one), from `cargo metadata`'s JSON.
+    fn symphonia_features(
+        metadata: &serde_json::Value,
+        package: &str,
+        kind: Option<&str>,
+    ) -> BTreeSet<String> {
+        let packages = metadata["packages"].as_array().expect("packages");
+        let found = packages
+            .iter()
+            .find(|p| p["name"] == package)
+            .unwrap_or_else(|| panic!("no package {package}"));
+        let dependency = found["dependencies"]
+            .as_array()
+            .expect("dependencies")
+            .iter()
+            .find(|d| d["name"] == "symphonia" && d["kind"].as_str() == kind)
+            .unwrap_or_else(|| panic!("no symphonia dependency of {package} of kind {kind:?}"));
+        dependency["features"]
+            .as_array()
+            .expect("features")
+            .iter()
+            .filter_map(|f| f.as_str().map(String::from))
+            .collect()
+    }
+
+    /// Finding 1-13 of review round 1: `m4a` is in the closure of `engine`,
+    /// so `merges_into_engine` cannot see a Symphonia feature of the tests
+    /// of `m4a`.  This test sees it: each such feature is one of `engine`'s
+    /// own.
+    #[test]
+    fn the_symphonia_features_of_the_tests_of_m4a_are_engines() {
+        let metadata =
+            rules::workspace_metadata(&crate::workspace_root()).expect("cargo metadata runs");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).expect("cargo metadata gives JSON");
+        let engine = symphonia_features(&metadata, "engine", None);
+        let m4a = symphonia_features(&metadata, "m4a", Some("dev"));
+        let missing: Vec<&String> = m4a.difference(&engine).collect();
+        assert!(
+            missing.is_empty(),
+            "features of m4a's tests that engine does not turn on: {missing:?}"
+        );
     }
 
     /// `GPU_FOLDERS` is the closure of `roformer-gpu` in the real graph, so

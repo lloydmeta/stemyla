@@ -113,9 +113,9 @@ jobs:
       # from clippy --all-targets and a wasm compile check from the trunk
       # build below.
       - run: cargo test --locked --workspace --exclude roformer-gpu
-      # --workspace merges features across crates: m4a's dev-dependency
-      # turns on Symphonia's isomp4 and alac for engine too.  This step
-      # tests engine with the features of its own manifest only.
+      # --workspace merges features across crates: the default feature
+      # audio of app turns on the cpal feature of engine.  This step tests
+      # engine with the features of its own manifest only.
       - run: cargo test --locked -p engine
       # roformer-gpu's unit tests and doctests need no GPU.  They check every
       # shader against WebGPU's default limits with naga (GPU-1), that the

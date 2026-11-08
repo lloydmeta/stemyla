@@ -10,7 +10,11 @@
 //! crafted file cannot make it hold more (MEM-4).  It keeps the values of
 //! one track: the first sound track.  Of the others it keeps two flags.  A
 //! box of a size that does not fit ends the walk with what it found.  It
-//! never panics.
+//! never panics, also where `usize` has 32 bits.
+//!
+//! Symphonia's probe then reads the whole `moov`, cover art too.  So
+//! `engine::decode` refuses a `moov` larger than a bound before the probe
+//! (`MoovAt`, `most_moov_bytes`).
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -98,6 +102,16 @@ pub(crate) struct Found {
     pub sound: Option<SoundTrack>,
     /// The text of the `iTunSMPB` tag of `moov/udta/meta/ilst`.
     pub itunsmpb: Option<String>,
+    /// Where the first `moov` is.
+    pub moov: Option<MoovAt>,
+}
+
+/// Where a `moov` box is: its start, and its end, or `None` when it runs
+/// to the end of the file (a size of 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MoovAt {
+    pub start: u64,
+    pub end: Option<u64>,
 }
 
 /// The sample entries of a protected sound track.
@@ -106,10 +120,11 @@ const PROTECTED_ENTRIES: [&[u8; 4]; 3] = [b"drms", b"drmi", b"enca"];
 /// The box types that can start an MP4 file.
 const FIRST_BOXES: [&[u8; 4]; 6] = [b"ftyp", b"moov", b"free", b"wide", b"skip", b"mdat"];
 
-/// One box: its type, and its body from `body` to `end`.
+/// One box: its type, its start, and its body from `body` to `end`.
 #[derive(Clone, Copy, Debug)]
 struct BoxAt {
     kind: [u8; 4],
+    start: u64,
     body: u64,
     end: u64,
 }
@@ -181,6 +196,7 @@ impl Walker<'_> {
         };
         Ok(Some(BoxAt {
             kind,
+            start: at,
             body: at + header_len,
             end: box_end,
         }))
@@ -226,6 +242,10 @@ impl Walker<'_> {
     fn top(&mut self) -> std::io::Result<()> {
         self.children(0, u64::MAX, |walker, found| {
             if found.kind == *b"moov" {
+                walker.found.moov = Some(MoovAt {
+                    start: found.start,
+                    end: (found.end != u64::MAX).then_some(found.end),
+                });
                 walker.moov(found)?;
                 return Ok(false);
             }
@@ -290,15 +310,23 @@ impl Walker<'_> {
                 }
                 b"mdhd" => {
                     let body = walker.body(found, false)?.unwrap_or_default();
+                    // A duration of all ones is unknown (ISO/IEC 14496-12,
+                    // 8.4.2.3).
                     let (scale, duration) = if body.first() == Some(&1) {
-                        (u32_at(&body, 20), u64_at(&body, 24))
+                        (
+                            u32_at(&body, 20),
+                            u64_at(&body, 24).filter(|d| *d != u64::MAX),
+                        )
                     } else {
-                        (u32_at(&body, 12), u32_at(&body, 16).map(u64::from))
+                        let duration = u32_at(&body, 16).filter(|d| *d != u32::MAX);
+                        (u32_at(&body, 12), duration.map(u64::from))
                     };
                     trak.sound.media_timescale = scale;
                     trak.sound.duration = duration;
                 }
-                b"hdlr" => {
+                // The media handler.  A QuickTime `minf` has a data handler
+                // (`alis`) too, which is not the kind of the track.
+                b"hdlr" if parent.kind == *b"mdia" => {
                     let body = walker.body(found, false)?.unwrap_or_default();
                     trak.handler = body.get(8..12).and_then(|k| k.try_into().ok());
                 }
@@ -376,12 +404,15 @@ impl Walker<'_> {
 /// does not fit the body.
 fn edits(body: &[u8]) -> Option<Vec<EditEntry>> {
     let version = *body.first()?;
-    let count = u32_at(body, 4)? as usize;
-    let size = if version == 1 { 20 } else { 12 };
-    if body.len() < 8 + count.checked_mul(size)? {
+    let count = u32_at(body, 4)?;
+    let size: usize = if version == 1 { 20 } else { 12 };
+    // In `u64`, so the size cannot wrap where `usize` has 32 bits.
+    let needed = u64::from(count) * size as u64 + 8;
+    if needed > body.len() as u64 {
         return None;
     }
-    let mut entries = Vec::with_capacity(count);
+    let count = count as usize;
+    let mut entries = Vec::with_capacity(count.min(body.len() / size));
     for i in 0..count {
         let at = 8 + i * size;
         let entry = if version == 1 {
@@ -435,7 +466,9 @@ mod tests {
     #[test]
     fn the_walker_reads_the_values_of_the_sound_track() {
         for order in [Order::FastStart, Order::MoovLast] {
-            let found = walked(&alac(order));
+            let file = alac(order);
+            let (start, size) = top_box(&file, b"moov");
+            let found = walked(&file);
             assert_eq!(
                 found,
                 Some(Found {
@@ -454,6 +487,10 @@ mod tests {
                         }]),
                     }),
                     itunsmpb: None,
+                    moov: Some(MoovAt {
+                        start: start as u64,
+                        end: Some((start + size) as u64),
+                    }),
                 }),
                 "{order:?}"
             );
@@ -698,6 +735,265 @@ mod tests {
                 }
             }
             assert!(sizes >= 4 * 12, "fixture {k}: {sizes} sizes");
+            // Finding 1-5 of review round 1: the entry count of each `elst`
+            // too, with the counts whose size overflows 32 bits.
+            let mut counts = 0;
+            for at in 4..file.len().saturating_sub(12) {
+                if file[at..at + 4] != *b"elst" {
+                    continue;
+                }
+                for count in [0, 1, 357_913_941, 214_748_365, u32::MAX] {
+                    let mut bad = file.clone();
+                    bad[at + 8..at + 12].copy_from_slice(&count.to_be_bytes());
+                    walked(&bad);
+                    counts += 1;
+                }
+            }
+            assert!(counts >= 5, "fixture {k}: {counts} counts");
         }
+    }
+
+    /// An `elst` body of version `version`, with `count` in its header and
+    /// `held` entries of zeros.
+    fn elst_body(version: u8, count: u32, held: usize) -> Vec<u8> {
+        let size = if version == 1 { 20 } else { 12 };
+        let mut body = vec![version, 0, 0, 0];
+        body.extend_from_slice(&count.to_be_bytes());
+        body.resize(8 + held * size, 0);
+        body
+    }
+
+    /// Finding 1-1 of review round 1: a count whose entries pass 2^32
+    /// bytes counts as no `elst`, also where `usize` has 32 bits.  The
+    /// browser test `an_elst_count_past_32_bits_ends_the_head_check` of
+    /// `decode-worker` checks it on wasm32.
+    #[test]
+    fn an_elst_count_past_32_bits_counts_as_none() {
+        for (version, count) in [
+            (0, 357_913_941),
+            (0, 357_913_942),
+            (0, u32::MAX),
+            (1, 214_748_365),
+            (1, u32::MAX),
+        ] {
+            assert_eq!(
+                edits(&elst_body(version, count, 2)),
+                None,
+                "{version}, {count}"
+            );
+        }
+        assert_eq!(edits(&elst_body(0, 3, 2)), None, "a count past the body");
+        assert_eq!(edits(&elst_body(0, 2, 2)).map(|e| e.len()), Some(2));
+        assert_eq!(edits(&elst_body(1, 2, 2)).map(|e| e.len()), Some(2));
+        assert_eq!(edits(&elst_body(1, 0, 0)), Some(Vec::new()));
+    }
+
+    const FULL: [u8; 4] = [0; 4];
+
+    /// An `hdlr` of `pre_defined` and the handler type `handler`.
+    fn hdlr(pre_defined: &[u8; 4], handler: &[u8; 4]) -> Vec<u8> {
+        bx(b"hdlr", &[&FULL, pre_defined, handler, &[0; 12], &[0]])
+    }
+
+    /// A QuickTime track: the media handler in `mdia`, then a data handler
+    /// (`dhlr`, `alis`) in `minf`.
+    fn quicktime_trak(handler: &[u8; 4]) -> Vec<u8> {
+        let mdhd = bx(
+            b"mdhd",
+            &[
+                &FULL,
+                &[0; 8],
+                &44_100_u32.to_be_bytes(),
+                &4096_u32.to_be_bytes(),
+                &[0; 4],
+            ],
+        );
+        let entry = bx(b"mp4a", &[&[0; 28]]);
+        let stsd = bx(b"stsd", &[&FULL, &1_u32.to_be_bytes(), &entry]);
+        let minf = bx(b"minf", &[&hdlr(b"dhlr", b"alis"), &bx(b"stbl", &[&stsd])]);
+        let mdia = bx(b"mdia", &[&mdhd, &hdlr(b"mhlr", handler), &minf]);
+        bx(b"trak", &[&mdia])
+    }
+
+    /// Finding 1-2 of review round 1: the data handler of a QuickTime
+    /// `minf` does not hide the media handler of `mdia`.
+    #[test]
+    fn a_data_handler_in_minf_does_not_hide_the_media_handler() {
+        let sound = walked(&bx(b"moov", &[&quicktime_trak(b"soun")])).unwrap();
+        assert!(!sound.video);
+        assert!(sound.sound.is_some(), "a sound track");
+        let track = sound.sound.unwrap();
+        assert_eq!((track.entry, track.duration), (Some(*b"mp4a"), Some(4096)));
+        let video = walked(&bx(b"moov", &[&quicktime_trak(b"vide")])).unwrap();
+        assert!(video.video);
+        assert_eq!(video.sound, None);
+    }
+
+    /// Finding 1-3 of review round 1: an `mdhd` duration of all ones is
+    /// unknown (ISO/IEC 14496-12, 8.4.2.3), for each version.
+    #[test]
+    fn an_mdhd_duration_of_all_ones_is_unknown() {
+        let mdhd = bx(
+            b"mdhd",
+            &[
+                &FULL,
+                &[0; 8],
+                &44_100_u32.to_be_bytes(),
+                &u32::MAX.to_be_bytes(),
+                &[0; 4],
+            ],
+        );
+        let file = bx(
+            b"moov",
+            &[&bx(
+                b"trak",
+                &[&bx(b"mdia", &[&mdhd, &hdlr(b"\0\0\0\0", b"soun")])],
+            )],
+        );
+        let sound = walked(&file).unwrap().sound.expect("a sound track");
+        assert_eq!(
+            (sound.media_timescale, sound.duration),
+            (Some(44_100), None)
+        );
+        let mut v1 = version_1();
+        let at = crate::test_m4a::place_once(&v1, b"mdhd") + 4 + 24;
+        v1[at..at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+        let sound = walked(&v1).unwrap().sound.expect("a sound track");
+        assert_eq!(
+            (sound.media_timescale, sound.duration),
+            (Some(48_000), None)
+        );
+    }
+
+    /// Finding 1-19 of review round 1: a box of a 64-bit size of 1 GiB, in
+    /// a `moov` of size 0, is read 4 KiB at most, from a slice and from a
+    /// source that seeks.
+    #[test]
+    fn a_box_of_1_gib_is_read_4_kib_at_most() {
+        let large = |kind: &[u8; 4], body: &[u8]| {
+            let mut out = Vec::from(1_u32.to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(&(1_u64 << 30).to_be_bytes());
+            out.extend_from_slice(body);
+            out
+        };
+        let size_0 = |kind: &[u8; 4], body: &[u8]| {
+            let mut out = Vec::from(0_u32.to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(body);
+            out
+        };
+        let mvhd = large(
+            b"mvhd",
+            &[&FULL[..], &[0; 8], &1000_u32.to_be_bytes(), &[0; 8]].concat(),
+        );
+        let item = size_0(
+            b"----",
+            &[
+                bx(b"mean", &[&FULL, b"com.apple.iTunes"]),
+                bx(b"name", &[&FULL, b"iTunSMPB"]),
+                large(b"data", &[&[0, 0, 0, 1, 0, 0, 0, 0][..], b"lloyd"].concat()),
+            ]
+            .concat(),
+        );
+        let meta = size_0(b"meta", &[&FULL[..], &size_0(b"ilst", &item)].concat());
+        for file in [
+            size_0(b"moov", &mvhd),
+            size_0(b"moov", &size_0(b"udta", &meta)),
+        ] {
+            let (peak, found) = peak_of(|| walked(&file));
+            assert!(peak < 8 * 1024, "{peak} bytes from a slice");
+            let mut source = std::io::Cursor::new(file.clone());
+            let (peak, seeking) = peak_of(|| walk(&mut Seeking(&mut source)).ok().flatten());
+            assert!(peak < 8 * 1024, "{peak} bytes from a source");
+            assert_eq!(found, seeking);
+            let found = found.expect("an MP4 file");
+            assert!(
+                found.movie_timescale == Some(1000) || found.itunsmpb.as_deref() == Some("lloyd"),
+                "{found:?}"
+            );
+        }
+    }
+
+    /// A `----` item of the `iTunSMPB` text "lloyd".
+    fn freeform() -> Vec<u8> {
+        bx(
+            b"----",
+            &[
+                &bx(b"mean", &[&FULL, b"com.apple.iTunes"]),
+                &bx(b"name", &[&FULL, b"iTunSMPB"]),
+                &bx(b"data", &[&[0, 0, 0, 1, 0, 0, 0, 0], b"lloyd"]),
+            ],
+        )
+    }
+
+    /// Missed mutants 1-21 and 1-24 of review round 1: a `meta` in a
+    /// `meta`, and a QuickTime `meta` with no version and flags.
+    #[test]
+    fn the_tag_is_read_from_a_nested_or_a_plain_meta() {
+        let ilst = bx(b"ilst", &[&freeform()]);
+        let inner = bx(b"meta", &[&FULL, &ilst]);
+        let nested = bx(b"moov", &[&bx(b"udta", &[&bx(b"meta", &[&FULL, &inner])])]);
+        assert_eq!(walked(&nested).unwrap().itunsmpb.as_deref(), Some("lloyd"));
+        let plain_meta = bx(b"meta", &[&hdlr(b"\0\0\0\0", b"mdir"), &ilst]);
+        let plain = bx(b"moov", &[&bx(b"udta", &[&plain_meta])]);
+        assert_eq!(walked(&plain).unwrap().itunsmpb.as_deref(), Some("lloyd"));
+    }
+
+    fn mvhd(scale: u32) -> Vec<u8> {
+        bx(b"mvhd", &[&FULL, &[0; 8], &scale.to_be_bytes(), &[0; 80]])
+    }
+
+    /// Missed mutant 1-22 of review round 1: a box of a 64-bit size whose
+    /// header is cut at the end of the head ends the walk, and keeps what
+    /// the walk found.
+    #[test]
+    fn a_box_header_cut_in_its_64_bit_size_ends_the_walk() {
+        let mut file = Vec::from(0_u32.to_be_bytes());
+        file.extend_from_slice(b"moov");
+        file.extend_from_slice(&mvhd(44_100));
+        file.extend_from_slice(&1_u32.to_be_bytes());
+        file.extend_from_slice(b"mvhd");
+        file.extend_from_slice(&[0, 0, 0, 1]);
+        assert_eq!(walked(&file).unwrap().movie_timescale, Some(44_100));
+    }
+
+    /// Missed mutant 1-23 of review round 1: an `elst` body of exactly
+    /// 4096 bytes is read.
+    #[test]
+    fn an_elst_body_of_4096_bytes_is_read() {
+        let entry = [
+            &5_u32.to_be_bytes()[..],
+            &0_u32.to_be_bytes(),
+            &0x1_0000_u32.to_be_bytes(),
+        ]
+        .concat();
+        let elst = bx(
+            b"elst",
+            &[&FULL, &340_u32.to_be_bytes(), &entry.repeat(340), &[0; 8]],
+        );
+        assert_eq!(elst.len() - 8, MOST_BOX_BYTES);
+        let mdia = bx(b"mdia", &[&hdlr(b"\0\0\0\0", b"soun")]);
+        let file = bx(b"moov", &[&bx(b"trak", &[&bx(b"edts", &[&elst]), &mdia])]);
+        let edits = walked(&file).unwrap().sound.expect("a sound track").edits;
+        assert_eq!(edits.map(|e| e.len()), Some(340));
+    }
+
+    /// Missed mutant 1-26 of review round 1: an `hdlr` deeper than
+    /// `MOST_DEPTH` is not read.
+    #[test]
+    fn a_box_deeper_than_the_depth_limit_is_not_read() {
+        let mut nested = hdlr(b"\0\0\0\0", b"soun");
+        for _ in 0..5 {
+            nested = bx(b"mdia", &[&nested]);
+        }
+        let deep = bx(b"moov", &[&bx(b"trak", &[&nested])]);
+        assert_eq!(walked(&deep).unwrap().sound, None);
+        let mut shallow = hdlr(b"\0\0\0\0", b"soun");
+        for _ in 0..4 {
+            shallow = bx(b"mdia", &[&shallow]);
+        }
+        let file = bx(b"moov", &[&bx(b"trak", &[&shallow])]);
+        assert!(walked(&file).unwrap().sound.is_some(), "4 mdia boxes deep");
     }
 }

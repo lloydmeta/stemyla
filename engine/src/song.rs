@@ -197,9 +197,9 @@ impl Song {
     /// Loads in-memory files as [`Song::load_files`] does, bit for bit, for
     /// a song of at most `max_frames` frames at [`SONG_RATE`] (D3 of
     /// `plans/completed/stream-from-storage-catchup.md`), with [`SongWithin`].
-    /// A WAV or FLAC whose stated length passes it is refused before it
-    /// decodes, and any decode stops once it passes it, each with
-    /// `decode::TooLong`.
+    /// A file whose length is stated exactly (WAV, FLAC, M4A or AIFF) and
+    /// passes it is refused before it decodes.  Any decode stops once it
+    /// passes it.  Each gives `decode::TooLong`.
     pub fn load_files_within(files: Vec<(String, Vec<u8>)>, max_frames: usize) -> Result<Song> {
         files
             .into_iter()
@@ -250,9 +250,10 @@ impl SongWithin {
     }
 
     /// The song with the file `file_name` of `bytes` added, if it is a
-    /// stem ([`is_stem`]).  A WAV or FLAC whose stated length passes the
-    /// limit is refused before it decodes, and a decode stops once it
-    /// passes the limit, each with `decode::TooLong`.
+    /// stem ([`is_stem`]).  A file whose length is stated exactly (WAV,
+    /// FLAC, M4A or AIFF) and passes the limit is refused before it
+    /// decodes.  A decode stops once it passes the limit.  Each gives
+    /// `decode::TooLong`.
     pub fn with_file(self, file_name: &str, bytes: Vec<u8>) -> Result<Self> {
         let name = stem_name(file_name);
         if !is_stem(&name) {

@@ -91,12 +91,30 @@ impl std::error::Error for TooLong {}
 pub const VIDEO_TEXT: &str =
     "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC.";
 
+/// The text of an MP4 whose `moov` passes [`most_moov_bytes`]: tags,
+/// such as cover art, that Symphonia's probe would read whole (MEM-4).
+pub const TAGS_TEXT: &str = "This file holds more than 16 MB of tags, such as cover art.  Remove them, or open another file.";
+
+/// The most bytes of `moov` that the decode lets Symphonia's probe read:
+/// [`TAG_ROOM`], and 32 bytes of tables for each 1024 frames of the
+/// `mdhd` duration of the first sound track, up to the decode limit of a
+/// stereo file.  The probe reads the whole `moov`, cover art too.
+fn most_moov_bytes(found: &Found) -> u64 {
+    let most_frames = MAX_DECODED_BYTES / 8;
+    let frames = found
+        .sound
+        .as_ref()
+        .and_then(|sound| sound.duration)
+        .map_or(0, |duration| duration.min(most_frames));
+    TAG_ROOM + 32 * frames.div_ceil(1024)
+}
+
 /// The text of a protected file: a sound track of the sample entry
 /// `drms`, `drmi` or `enca`.
 pub const PROTECTED_TEXT: &str = "This file is protected (DRM), so it cannot open.";
 
 /// The text of an HE-AAC file: SBR or PS in its AudioSpecificConfig, or a
-/// core rate that is not the rate of its sample entry.
+/// core rate of half the rate of its sample entry.
 pub const HE_AAC_TEXT: &str = "HE-AAC is not supported.  Open an AAC-LC file.";
 
 /// The text of an AAC of an object type other than AAC-LC, of a program
@@ -123,12 +141,13 @@ fn check_aac(params: &AudioCodecParameters) -> Result<()> {
     let Some(config) = crate::aac_config::read(asc) else {
         return Err(anyhow!(AAC_KIND_TEXT));
     };
-    // An entry that states another rate than the core's is implicit SBR:
-    // the entry gives the rate of the output.
+    // An entry that states twice the rate of the core is implicit SBR: the
+    // entry gives the rate of the output.  An entry of rate 0 cannot hold
+    // the rate (88.2 or 96 kHz), so it is no sign.
     let implicit_sbr = config
         .rate
         .zip(params.sample_rate)
-        .is_some_and(|(core, entry)| core != entry);
+        .is_some_and(|(core, entry)| u64::from(entry) == 2 * u64::from(core));
     if config.sbr || implicit_sbr {
         return Err(anyhow!(HE_AAC_TEXT));
     }
@@ -242,10 +261,10 @@ pub const HEAD_BYTES: usize = 64 * 1024;
 /// ([`largest_file`]): 16 MiB.
 pub const TAG_ROOM: u64 = 16 << 20;
 
-/// The bytes of one second of the largest WAV or FLAC: two channels of
-/// 32-bit samples at 384 kHz, the highest rate that the page converts.
-/// The song keeps two channels.  [`largest_file`] uses it for every WAV
-/// or FLAC, with a stated length or without one.
+/// The bytes of one second of the largest PCM: two channels of 32-bit
+/// samples at 384 kHz, the highest rate that the page converts.  The song
+/// keeps two channels.  [`largest_file`] uses it for
+/// [`HeadLength::Frames`] and [`HeadLength::UnstatedPcm`].
 const PCM_BYTES_PER_SECOND: u64 = 384_000 * 2 * 4;
 
 /// The bytes of one second of the largest MP3: 320 kbit/s, the highest
@@ -280,9 +299,12 @@ fn mp4_length(found: &Found) -> HeadLength {
     if found.video {
         return HeadLength::Video;
     }
+    // A duration of 0, as a fragmented MP4 has, states no length.  The
+    // walker gives no duration for one of all ones (unknown).
     let stated = found.sound.as_ref().and_then(|sound| {
         let scale = sound.media_timescale.filter(|scale| *scale > 0)?;
-        Some(song_frames(sound.duration?, scale))
+        let duration = sound.duration.filter(|duration| *duration > 0)?;
+        Some(song_frames(duration, scale))
     });
     stated.map_or(HeadLength::UnstatedPcm, HeadLength::Frames)
 }
@@ -442,12 +464,14 @@ fn flac_length(flac: &[u8]) -> HeadLength {
 }
 
 /// The largest file, in bytes, of a song of at most `max_frames` frames at
-/// [`SONG_RATE`] whose head states `length`.  A WAV or FLAC: two channels
-/// of 32-bit samples at 384 kHz, for its stated frames if it states them,
-/// else for `max_frames`.  Anything else: an MP3 at 320 kbit/s for
-/// `max_frames`.  Each with [`TAG_ROOM`].  So a caller that reads a file
-/// whole holds at most this many bytes of it (finding 1-3 of review round
-/// 1 of the catch-up plan).
+/// [`SONG_RATE`] whose head states `length`, with [`TAG_ROOM`].
+/// [`HeadLength::Frames`]: two channels of 32-bit samples at 384 kHz, for
+/// its stated frames, at most `max_frames`.  [`HeadLength::UnstatedPcm`]:
+/// the same for `max_frames`.  [`HeadLength::Unstated`]: an MP3 at
+/// 320 kbit/s for `max_frames`.  [`HeadLength::Video`]: [`TAG_ROOM`] only,
+/// since a caller refuses a video first.  So a caller that reads a file
+/// whole holds at most this many bytes of it (finding 1-3 of review round 1
+/// of the catch-up plan).
 pub fn largest_file(length: HeadLength, max_frames: usize) -> u64 {
     let (frames, per_second) = match length {
         HeadLength::Frames(frames) => (frames.min(max_frames as u64), PCM_BYTES_PER_SECOND),
@@ -652,6 +676,13 @@ fn open_within(
         }
         if found.protected {
             return Err(anyhow!(PROTECTED_TEXT));
+        }
+        let moov_bytes = found.moov.and_then(|moov| {
+            let end = moov.end.or(byte_len)?;
+            Some(end.saturating_sub(moov.start))
+        });
+        if moov_bytes.is_some_and(|bytes| bytes > most_moov_bytes(found)) {
+            return Err(anyhow!(TAGS_TEXT));
         }
     }
     let mss = MediaSourceStream::new(source, Default::default());
@@ -1477,39 +1508,77 @@ mod tests {
 
     #[test]
     fn a_block_decode_keeps_its_memory_flat() {
-        const MIB: usize = 1 << 20;
         for rate in [44_100, 48_000] {
             for ext in ["wav", "flac", "mp3", "m4a", "aiff"] {
                 let (short, long) = (file_of(ext, 2, rate), file_of(ext, 60, rate));
-                let whole = decode_bytes(long.clone(), Some(ext));
-                assert!(whole.is_ok(), "{ext} at {rate} Hz: {whole:?}");
-                let want = whole.unwrap().frames();
-                let blocks = |bytes: Vec<u8>| {
-                    peak_of(|| {
-                        let decoder = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext));
-                        let mut counter = Counter(0);
-                        crate::song::decode_into(decoder.unwrap(), &mut counter).unwrap();
-                        counter.0
-                    })
-                };
-                let (short_peak, _) = blocks(short.clone());
-                let (long_peak, frames) = blocks(long.clone());
-                let case = format!("{ext} at {rate} Hz");
-                let want = (want as u64 * 44_100).div_ceil(u64::from(rate)) as usize;
-                assert_eq!(frames, want, "{case}: the frames of a minute");
-                assert!(
-                    long_peak.abs_diff(short_peak) < MIB,
-                    "{case}: 2 s peaks {short_peak} bytes, 60 s peaks {long_peak} bytes"
-                );
-                // The control: a whole decode of the long file holds it.
-                let (whole_short, _) = peak_of(|| decode_bytes(short, Some(ext)).unwrap());
-                let (whole_long, _) = peak_of(|| decode_bytes(long, Some(ext)).unwrap());
-                assert!(
-                    whole_long > whole_short + MIB,
-                    "{case}: the control peaks {whole_short} and {whole_long} bytes"
-                );
+                assert_block_decode_is_flat(short, long, ext, &format!("{ext} at {rate} Hz"));
             }
         }
+    }
+
+    /// Checks that a decode of `long` in blocks peaks within 1 MiB of one
+    /// of `short`, and that a whole decode of `long` does not (the
+    /// control).  The decode gives the frames of the whole decode.
+    fn assert_block_decode_is_flat(short: Vec<u8>, long: Vec<u8>, ext: &str, case: &str) {
+        const MIB: usize = 1 << 20;
+        let whole = decode_bytes(long.clone(), Some(ext));
+        assert!(whole.is_ok(), "{case}: {whole:?}");
+        let whole = whole.unwrap();
+        let blocks = |bytes: Vec<u8>| {
+            peak_of(|| {
+                let decoder = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext));
+                let mut counter = Counter(0);
+                crate::song::decode_into(decoder.unwrap(), &mut counter).unwrap();
+                counter.0
+            })
+        };
+        let (short_peak, _) = blocks(short.clone());
+        let (long_peak, frames) = blocks(long.clone());
+        let rate = u64::from(whole.sample_rate);
+        let want = (whole.frames() as u64 * 44_100).div_ceil(rate) as usize;
+        assert_eq!(frames, want, "{case}: the frames of the long file");
+        assert!(
+            long_peak.abs_diff(short_peak) < MIB,
+            "{case}: the short file peaks {short_peak} bytes, the long {long_peak} bytes"
+        );
+        // The control: a whole decode of the long file holds it.
+        let (whole_short, _) = peak_of(|| decode_bytes(short, Some(ext)).unwrap());
+        let (whole_long, _) = peak_of(|| decode_bytes(long, Some(ext)).unwrap());
+        assert!(
+            whole_long > whole_short + MIB,
+            "{case}: the control peaks {whole_short} and {whole_long} bytes"
+        );
+    }
+
+    /// Finding 1-20 of review round 1: a block decode of AAC keeps its
+    /// memory flat too, in an M4A with an `elst` trim and as a raw ADTS
+    /// stream.  An encode of AAC is slow in a test build, so the long file
+    /// is 20 s, and each length is encoded once.
+    #[test]
+    fn a_block_decode_of_aac_keeps_its_memory_flat() {
+        use crate::test_audio::tone;
+        use crate::test_m4a::{ENCODER_DELAY, aac_m4a_of, adts, adts_packets, config};
+        let files = |seconds: usize| {
+            let frames = seconds * 44_100;
+            let stream = adts(&[tone(0, frames, 44_100), tone(1, frames, 44_100)], 44_100);
+            let edit = m4a::Edit {
+                skip: ENCODER_DELAY as u32,
+                frames: frames as u64,
+            };
+            let m4a = aac_m4a_of(
+                &adts_packets(&stream),
+                2,
+                &config(2, 44_100, 2),
+                44_100,
+                Some(edit),
+                None,
+                m4a::Order::FastStart,
+            );
+            (m4a, stream)
+        };
+        let ((short_m4a, short_adts), (long_m4a, long_adts)) = (files(2), files(20));
+        assert_block_decode_is_flat(short_m4a, long_m4a, "m4a", "an AAC M4A with an elst");
+        assert_block_decode_is_flat(short_adts, long_adts, "aac", "a raw ADTS stream");
     }
 
     /// Whether `result` is the error of `too_long`.
@@ -2792,5 +2861,177 @@ mod tests {
     #[test]
     fn the_largest_file_of_a_video_is_the_room_for_tags() {
         assert_eq!(largest_file(HeadLength::Video, 100 * 44_100), TAG_ROOM);
+    }
+
+    /// Finding 1-18 of review round 1 (MEM-4): Symphonia's probe reads the
+    /// whole `moov`, so a `moov` with more than `TAG_ROOM` of tags is
+    /// refused before the probe.  A cover of 1 MiB still opens.
+    #[test]
+    fn an_m4a_with_more_than_16_mib_of_tags_is_refused_before_the_probe() {
+        use crate::test_m4a::with_cover;
+        let file = alac_of(m4a::Order::MoovLast);
+        assert_eq!(
+            refusal(with_cover(file.clone(), 17 << 20), "m4a"),
+            TAGS_TEXT
+        );
+        let audio = decode_bytes(with_cover(file, 1 << 20), Some("m4a"));
+        assert!(audio.is_ok(), "{audio:?}");
+        assert_eq!(audio.unwrap().frames(), 4096);
+    }
+
+    /// The bound of a `moov`: `TAG_ROOM`, and 32 bytes for each 1024
+    /// frames of the `mdhd` duration, up to the decode limit.
+    #[test]
+    fn the_bound_of_a_moov_grows_with_its_duration() {
+        use crate::mp4_boxes::{Found, SoundTrack};
+        let found = |duration: Option<u64>| Found {
+            sound: Some(SoundTrack {
+                duration,
+                ..SoundTrack::default()
+            }),
+            ..Found::default()
+        };
+        assert_eq!(most_moov_bytes(&Found::default()), TAG_ROOM);
+        assert_eq!(most_moov_bytes(&found(None)), TAG_ROOM);
+        assert_eq!(most_moov_bytes(&found(Some(10 * 1024))), TAG_ROOM + 320);
+        assert_eq!(most_moov_bytes(&found(Some(10 * 1024 + 1))), TAG_ROOM + 352);
+        let most = TAG_ROOM + 32 * (MAX_DECODED_BYTES / 8).div_ceil(1024);
+        assert_eq!(most_moov_bytes(&found(Some(u64::MAX))), most);
+    }
+
+    /// Finding 1-2 of review round 1: the data handler of a QuickTime
+    /// `minf` does not hide the kind of the track, in the head check and
+    /// in the decode.
+    #[test]
+    fn a_quicktime_data_handler_keeps_the_kind_of_the_track() {
+        use crate::test_m4a::{patched, with_data_handler};
+        let sound = with_data_handler(alac_with_edit(
+            &short_tone(),
+            2112,
+            700,
+            m4a::Order::MoovLast,
+        ));
+        assert_eq!(head_of(&sound), HeadLength::Frames(2112 + 4096 + 700));
+        let audio = decoded(sound, "a sound track");
+        assert_eq!(audio.frames(), 4096, "the trim of its elst");
+        let video = with_data_handler(patched(alac_of(m4a::Order::MoovLast), b"soun", b"vide"));
+        assert_eq!(head_of(&video), HeadLength::Video);
+        assert_eq!(refusal(video, "mp4"), VIDEO_TEXT);
+    }
+
+    /// `file` with the `mdhd` duration of its one track of version 0 as
+    /// `duration`.
+    fn with_mdhd_duration(mut file: Vec<u8>, duration: u32) -> Vec<u8> {
+        // After the type: version and flags, two times, the timescale.
+        let at = crate::test_m4a::place_once(&file, b"mdhd") + 4 + 16;
+        file[at..at + 4].copy_from_slice(&duration.to_be_bytes());
+        file
+    }
+
+    /// Finding 1-3 of review round 1: an `mdhd` duration of 0, or of all
+    /// ones (unknown), states no length.  Missed mutant 1-27: nor does a
+    /// timescale of 0.
+    #[test]
+    fn an_mdhd_of_no_length_states_no_length() {
+        use crate::test_m4a::{bx, place_once, version_1};
+        let file = alac_of(m4a::Order::FastStart);
+        for duration in [0, u32::MAX] {
+            assert_eq!(
+                head_of(&with_mdhd_duration(file.clone(), duration)),
+                HeadLength::UnstatedPcm,
+                "{duration}"
+            );
+        }
+        let mut v1 = version_1();
+        let at = place_once(&v1, b"mdhd") + 4 + 24;
+        v1[at..at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(head_of(&v1), HeadLength::UnstatedPcm);
+        v1[at..at + 8].copy_from_slice(&0_u64.to_be_bytes());
+        assert_eq!(head_of(&v1), HeadLength::UnstatedPcm);
+        let full = [0_u8; 4];
+        let mdhd = bx(
+            b"mdhd",
+            &[
+                &full,
+                &[0; 8],
+                &0_u32.to_be_bytes(),
+                &1000_u32.to_be_bytes(),
+                &[0; 4],
+            ],
+        );
+        let hdlr = bx(b"hdlr", &[&full, &[0; 4], b"soun"]);
+        let no_scale = bx(b"moov", &[&bx(b"trak", &[&bx(b"mdia", &[&mdhd, &hdlr])])]);
+        assert_eq!(head_of(&no_scale), HeadLength::UnstatedPcm);
+    }
+
+    /// Finding 1-4 of review round 1: an `mp4a` entry of rate 0 (it cannot
+    /// hold 88.2 or 96 kHz) states no rate.  It is no sign of SBR, and the
+    /// decode takes the rate of its first packet.
+    #[test]
+    fn an_mp4a_entry_of_rate_0_decodes_at_the_rate_of_its_config() {
+        use crate::test_m4a::{aac_m4a, place_once};
+        let mut file = aac_m4a(&chirps(), 44_100, None, None, m4a::Order::FastStart);
+        // After the type: reserved, the reference index, reserved, the
+        // channels, the sample size, then 4 bytes before the rate.
+        let at = place_once(&file, b"mp4a") + 4 + 6 + 2 + 8 + 2 + 2 + 4;
+        assert_eq!(file[at..at + 4], (44_100_u32 << 16).to_be_bytes());
+        file[at..at + 4].copy_from_slice(&[0; 4]);
+        let audio = decoded(file, "an entry of rate 0");
+        assert_eq!(audio.sample_rate, 44_100);
+        assert_eq!(
+            audio.frames() as u64,
+            crate::test_m4a::aac_track_frames(88_200)
+        );
+    }
+
+    /// The parts of an AIFF: a chunk of `id` and `body`, with its pad byte.
+    fn aiff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::from(*id);
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// A `COMM` chunk of 2 channels of 16 bits at 44.1 kHz.
+    fn aiff_comm(frames: u32) -> Vec<u8> {
+        const RATE: [u8; 10] = [0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0];
+        let body = [
+            &2_u16.to_be_bytes()[..],
+            &frames.to_be_bytes(),
+            &16_u16.to_be_bytes(),
+            &RATE,
+        ]
+        .concat();
+        aiff_chunk(b"COMM", &body)
+    }
+
+    fn aiff_form(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body = [&b"AIFF"[..], &chunks.concat()].concat();
+        [&b"FORM"[..], &(body.len() as u32).to_be_bytes(), &body].concat()
+    }
+
+    /// Missed mutants 1-25 and 1-28 of review round 1: the samples of an
+    /// `SSND` start after its offset, and a chunk of odd size has a pad
+    /// byte.
+    #[test]
+    fn an_aiff_head_takes_the_ssnd_offset_and_the_pad_byte() {
+        let mut ssnd = Vec::from(40_u32.to_be_bytes());
+        ssnd.extend_from_slice(&[0; 4 + 40 + 1000 * 4]);
+        let file = aiff_form(&[aiff_comm(1000), aiff_chunk(b"SSND", &ssnd)]);
+        // A file cut after 100 frames of samples.
+        let cut = file.len() - 900 * 4;
+        assert_eq!(
+            head_length(&file[..cut], cut as u64),
+            HeadLength::Frames(100)
+        );
+        let odd = aiff_form(&[
+            aiff_chunk(b"ANNO", b"abc"),
+            aiff_comm(1000),
+            aiff_chunk(b"SSND", &[0; 8 + 4000]),
+        ]);
+        assert_eq!(head_of(&odd), HeadLength::Frames(1000));
     }
 }

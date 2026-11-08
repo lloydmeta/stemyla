@@ -426,6 +426,44 @@ async fn an_m4a_with_an_edit_decodes_into_session_files() {
     assert!(mix == interleaved(&stem.left, &stem.right), "the mix");
 }
 
+/// A box of `kind` with the parts of `body`.
+fn mp4_box(kind: &[u8; 4], body: &[&[u8]]) -> Vec<u8> {
+    let body = body.concat();
+    let mut out = Vec::from(((8 + body.len()) as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Finding 1-1 of review round 1 of M2: where `usize` has 32 bits, an
+/// `elst` count of 357,913,941 gives entries of 2^32 + 4 bytes.  The head
+/// check must end with no trap; the `elst` counts as none.
+#[wasm_bindgen_test]
+fn an_elst_count_past_32_bits_ends_the_head_check() {
+    let full = [0_u8; 4];
+    let count = 357_913_941_u32.to_be_bytes();
+    let elst = mp4_box(b"elst", &[&full, &count, &[0; 24]]);
+    let mdhd = mp4_box(
+        b"mdhd",
+        &[
+            &full,
+            &[0; 8],
+            &44_100_u32.to_be_bytes(),
+            &4096_u32.to_be_bytes(),
+            &[0; 4],
+        ],
+    );
+    let hdlr = mp4_box(b"hdlr", &[&full, &[0; 4], b"soun"]);
+    let edts = mp4_box(b"edts", &[&elst]);
+    let mdia = mp4_box(b"mdia", &[&mdhd, &hdlr]);
+    let moov = mp4_box(b"moov", &[&mp4_box(b"trak", &[&edts, &mdia])]);
+    let file = [mp4_box(b"ftyp", &[b"M4A ", &[0; 4]]), moov].concat();
+    assert_eq!(
+        engine::decode::head_length(&file, file.len() as u64),
+        engine::decode::HeadLength::Frames(4096)
+    );
+}
+
 #[wasm_bindgen_test]
 async fn decode_writes_pass_whole_arrays() {
     fresh().await;

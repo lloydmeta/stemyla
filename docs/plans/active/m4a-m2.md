@@ -313,7 +313,7 @@ Not in CI, never in the repo (ASSET-1).  The file is copyrighted.
 
 * `engine/tests/local_aac.rs`: one test, `#[ignore = "local only: needs STEMYLA_LOCAL_AAC and STEMYLA_LOCAL_AAC_WAV"]`.  It reads the M4A path from `STEMYLA_LOCAL_AAC` and the path of Apple's decode from `STEMYLA_LOCAL_AAC_WAV`.  It panics with a clear text if either is missing.  It never writes a file.
 * It checks that `engine::decode::decode_path` gives 13,413,120 frames at 48,000 Hz (Apple's `afinfo`).  Then it takes the sum of the two channels of each decode, for 10 s from second 30, and finds the lag in -4096 to 4096 with the largest cross-correlation.  The lag must be 0.
-* Apple's decode: `afconvert -f WAVE -d LEI16 /Users/lloyd/Downloads/oasis-wonderwall.mp4 <scratch>/oasis.wav`, with `<scratch>` the team's scratch folder `m2/`, outside the repo: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/c41cb199-590d-46ab-827d-9e035ca7b9ed/scratchpad/m2/`.
+* Apple's decode: `afconvert -f WAVE -d LEI16 <the maintainer's file> <scratch>/oasis.wav`, with `<scratch>` the team's scratch folder, outside the repo.  The M2 brief gives both paths; the repo holds neither.
 * The command: `STEMYLA_LOCAL_AAC=... STEMYLA_LOCAL_AAC_WAV=... cargo test -p engine --release --test local_aac -- --ignored`.
 * No doc names this test as the enforcement of a rule, since `docs-check` refuses an ignored test there.
 
@@ -351,6 +351,18 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * [x] 2026-11-08: Step 8: debt, sizes and the local check.  Each TD went in the commit of its gap: TD-80 (Step 3), TD-81 (Step 4), TD-82 (Step 5) and TD-83 (Step 7); none is missing.  First failure of `the_real_aac_file_decodes_to_apples_length_and_lines_up_with_it`, with the trim off: "the frames of afinfo", 13,414,400 for 13,413,120.  Then it passes.  `cargo run -p xtask -- docs-check` passes.
 * [x] 2026-11-08: the checks before review round 1, at `9c5d6f8`: `check --tier push` (13 lines), `cargo build -p xtask` and `cargo test -p engine --release` pass.  On this Mac with chromedriver 155, `web-test --browser chrome` passes (324 tests in 7 runs), and `e2e decode --browser chrome` passes (52 checks).
 * [ ] Review rounds.
+  * [x] 2026-11-08: review round 1 fixes.  First failures:
+    * 1-1 (blocker): with the old `edits`, the browser test `an_elst_count_past_32_bits_ends_the_head_check` (`decode-worker`) failed with "RuntimeError: unreachable" at `engine/src/mp4_boxes.rs:409`.  The native `an_elst_count_past_32_bits_counts_as_none` cannot fail on 64 bits.  1-5: the fuzz test also sets each `elst` count to 0, 1, 357,913,941, 214,748,365 and `u32::MAX`.
+    * 1-2: `a_data_handler_in_minf_does_not_hide_the_media_handler` failed at "a sound track", and `a_quicktime_data_handler_keeps_the_kind_of_the_track` failed with the handler taken from any parent.
+    * 1-3: `an_mdhd_duration_of_all_ones_is_unknown` failed at its first assert, and `an_mdhd_of_no_length_states_no_length` at the duration 0.
+    * 1-4: `an_mp4a_entry_of_rate_0_decodes_at_the_rate_of_its_config` failed with the HE-AAC text.  With an entry of rate 0, the decoder takes the rate of its first packet, 44,100 Hz.
+    * 1-13: `the_symphonia_features_of_the_tests_of_m4a_are_engines` failed with `adpcm` added to the dev-dependency of `m4a` (not committed).
+    * 1-17: `an_undecodable_song_of_one_file_names_it` failed with the file name left out.  The browser tests `undecodable_in_a_restore_keeps_the_session` and `undecodable_shows_the_error_and_forgets_the_session` now expect the text after "Not opened: lloyd.wav.  ".  The second failed at its text with the change, as it must.
+    * 1-18: `an_m4a_with_more_than_16_mib_of_tags_is_refused_before_the_probe` failed at "m4a: it decodes" with no bound.  `the_bound_of_a_moov_grows_with_its_duration` failed with 16 bytes for each 1024 frames.
+    * 1-19: `a_box_of_1_gib_is_read_4_kib_at_most` failed with the cap of `Walker::body` removed ("1073741808 bytes from a slice").
+    * 1-20: `a_block_decode_of_aac_keeps_its_memory_flat` adds coverage and changes no behaviour, so it has no first failure.  A 10 s AAC encode takes 16 s in a test build, so its long file is 20 s, not 60 s.
+    * 1-21 to 1-28: each mutant fails a new test.  1-21 (`depth - 1` in `udta`) panics with an overflow, as the validator saw.  1-22, 1-23, 1-24, 1-25, 1-26, 1-27 and 1-28 fail on an assert.
+    * TD-83 closed: the native `WELCOME` names M4A and AIFF, with a new `app/tests/snapshots/empty_state.png`.
 
 ## Surprises and discoveries
 
@@ -358,7 +370,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, implementer, Step 5: Symphonia 0.6.1 refuses an M4A whose `mvhd` timescale is 0, with "malformed stream: isomp4 (mvhd): timescale is zero" (TD-82).
 * 2026-11-08, implementer, Step 5: `symphonia-format-isomp4` 0.6.1 opens a file whose first sample entry is of an unknown type, and takes the next sound track as its default track.  So the mismatch case of the trim runs as the plan says.
 * 2026-11-08, implementer, Step 8: the wasm sizes after M2, from `(cd app && trunk build --release)` at Step 7's tree: `app_bg.wasm` 6,313,749 B (before 5,836,422 B, +477,327), `decode-worker_bg.wasm` 1,294,325 B (before 809,845 B, +484,480), `stem-worker_bg.wasm` 1,250,988 B (no change).  The new Symphonia crates (`isomp4`, `alac`, `aac`, `aiff`) and the box reader are in the two modules that decode.
-* 2026-11-08, implementer, Step 8: the local check.  Commands: `afconvert -f WAVE -d LEI16 /Users/lloyd/Downloads/oasis-wonderwall.mp4 <scratch>/m2/oasis.wav` (0.3 s; `afinfo` of the WAV: 13,413,120 frames, 2 ch, 48 kHz), then `STEMYLA_LOCAL_AAC=/Users/lloyd/Downloads/oasis-wonderwall.mp4 STEMYLA_LOCAL_AAC_WAV=<scratch>/m2/oasis.wav cargo test -p engine --release --test local_aac -- --ignored`.  Result on 2026-11-08: passed in 4.2 s.  `engine::decode::decode_path` gives 13,413,120 frames at 48,000 Hz, and the cross-correlation with Apple's decode, 10 s from second 30, peaks at lag 0.  `afinfo` of the M4A: "13413120 valid frames + 1024 priming + 256 remainder = 13414400".  Neither file is in the repo.
+* 2026-11-08, implementer, Step 8: the local check.  Commands: `afconvert -f WAVE -d LEI16 <the maintainer's file> <scratch>/oasis.wav` (0.3 s; `afinfo` of the WAV: 13,413,120 frames, 2 ch, 48 kHz), then `STEMYLA_LOCAL_AAC=<the maintainer's file> STEMYLA_LOCAL_AAC_WAV=<scratch>/oasis.wav cargo test -p engine --release --test local_aac -- --ignored`.  Result on 2026-11-08: passed in 4.2 s.  `engine::decode::decode_path` gives 13,413,120 frames at 48,000 Hz, and the cross-correlation with Apple's decode, 10 s from second 30, peaks at lag 0.  `afinfo` of the M4A: "13413120 valid frames + 1024 priming + 256 remainder = 13414400".  Neither file is in the repo.
 * 2026-11-08, team leader: the maintainer's file states `segment_duration` in an `mvhd` timescale of 1000, not in the sample rate.  The `m4a` writer makes both timescales the sample rate, so the synthetic fixtures alone would miss the conversion.  Steps 4 and 5 have a patched fixture for it.
 
 ## Decision log
@@ -375,7 +387,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, agent (team leader): `engine` reads the ASC with its own bit reader, not with `symphonia_common`.  Reason: Symphonia reads the sync extension `0x2b7` only after an explicit object type 5 or 29, so its parse misses the backward-compatible SBR signal.  Round 1 had chosen `symphonia_common`; round 2 found the gap.
 * 2026-11-08, agent (team leader): an AAC M4A whose ASC rate differs from its `mp4a` rate gives the HE-AAC text.  Reason: such a file is implicit SBR, and the decode would play its core at the wrong speed.
 * 2026-11-08, agent (team leader): the native `WELCOME` text stays, with a TD entry.  Reason: the `empty_state` snapshot shows it, and a new snapshot can need the maintainer's approval (TD-29), whom the run does not ask.
-* 2026-11-08, agent (team leader): the two `CLAUDE.md` diffs land at the checkpoint before review round 1, not with Steps 1 and 3.  Reason: no check reads the two texts, and the run then needs no stop for the orchestrator in the middle of the steps.  `CLAUDE.md` lags the code in two lines for some commits.
+* 2026-11-08, agent (team leader): the two `CLAUDE.md` diffs land at the checkpoint before review round 1, not with Steps 1 and 3.  Reason: no check reads the two texts, and the run then needs no stop for the orchestrator in the middle of the steps.  Correction by review round 1 (finding 1-9): the lag broke DOC-1 in the commits of Steps 1 to 8, which made two lines of `CLAUDE.md` wrong.  Commit `59037e7` closed it.  The subject of `bf6b288` says that it lands the `CLAUDE.md` diffs, but its diff changes only this plan.  No TD, since HEAD is correct; the team leader names it for the PR.
 * 2026-11-08, agent (team leader): `app` takes `m4a` as a dev-dependency.  Reason: its video tests need an M4A, and D6 forbids a copy of the writer.
 * 2026-11-08, agent (team leader): an AAC is reserved for at most its length at 32 kbit/s.  Reason: AAC states its length exactly in `mdhd`, so only a crafted file overstates it; 32 kbit/s is below real AAC music files, and the limit of decision 0013 still holds.
 
@@ -410,6 +422,10 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, agent (implementer): the delay of `song.m4a` in `e2e decode` is the last 2112 frames of the mix, not silence.  Reason: with silence, a decode that kept the delay would still match in all but its length; with the mix, its samples differ too.
 * 2026-11-08, agent (implementer): `drop_and_open` gives each file the media type of its extension (`audio/mp4` for `.m4a`, else `audio/wav`).  Reason: the plan drops `song.m4a` as `audio/mp4`, and the other files keep their type.
 * 2026-11-08, agent (implementer): no test holds `SONG_FILES` or the web `WELCOME`, so no test changes with them.  TD-83 records the native `WELCOME`.
+
+* 2026-11-08, agent (implementer, review round 1, 1-18): the bound of a `moov` counts the `mdhd` duration up to the decode limit of a stereo file, 2^27 frames.  Reason: a crafted duration must not lift the bound; at the limit the tables are 4 MiB.  A `moov` of size 0 runs to the end of the file, so its size comes from the length of the source.
+* 2026-11-08, agent (implementer, review round 1, 1-4): an entry rate other than the core rate and twice it gets no refusal.  Reason: the round's rule names only twice the rate as implicit SBR.
+* 2026-11-08, agent (implementer, review round 1, 1-17): `undecodable_error` names the file only for a song of one stem file.  Reason: the worker's text names no file, and for several files the page cannot tell which failed.
 
 ## Outcomes and retrospective
 

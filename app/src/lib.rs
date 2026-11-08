@@ -652,7 +652,8 @@ pub fn about_menu(ui: &mut egui::Ui) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3/FLAC files), or press Demo song.";
+const WELCOME: &str =
+    "Drop a folder of stems (or several WAV/MP3/FLAC/M4A/AIFF files), or press Demo song.";
 #[cfg(target_arch = "wasm32")]
 const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC/M4A/AIFF stems, on the page), or press Demo song.";
 
@@ -879,7 +880,11 @@ async fn open_saved(
                 new_session: false,
             })
         }
-        Decode::Undecodable(text) | Decode::Reset(text) => Err(anyhow::anyhow!(text)),
+        Decode::Undecodable(text) => {
+            let files: Vec<&str> = chosen.iter().map(|(file, _)| file.as_str()).collect();
+            Err(undecodable_error(&text, &files))
+        }
+        Decode::Reset(text) => Err(anyhow::anyhow!(text)),
         Decode::OnThePage(failure) if resetting(decoder) => Err(anyhow::anyhow!(
             "a reset stopped the decode ({})",
             failure.why()
@@ -1165,7 +1170,12 @@ async fn restore_stored(
             let mix_frames = store::usable_mix_frames(id, &meta).await;
             match decode_session(id, &sources, mix_frames, decoder).await {
                 Decode::Song(song) => song,
-                Decode::Undecodable(text) | Decode::Reset(text) => {
+                Decode::Undecodable(text) => {
+                    let files: Vec<&str> =
+                        meta.files.iter().map(|(file, _)| file.as_str()).collect();
+                    return Some(Err(undecodable_error(&text, &files)));
+                }
+                Decode::Reset(text) => {
                     return Some(Err(anyhow::anyhow!(text)));
                 }
                 Decode::OnThePage(_) if resetting(decoder) => {
@@ -1682,6 +1692,21 @@ pub fn video_in_heads(heads: &[(String, Vec<u8>, u64)]) -> Option<&str> {
         .map(|(file, _, _)| file.as_str())
 }
 
+/// The error of a song that the decode worker could not decode (`text`).
+/// For a song of one stem file in `files` (original names), it names that
+/// file, as the head check does (finding 1-17 of review round 1 of M2), as
+/// a [`Refused`] line.
+pub fn undecodable_error(text: &str, files: &[&str]) -> anyhow::Error {
+    let stems: Vec<&&str> = files
+        .iter()
+        .filter(|file| engine::song::is_stem(&engine::song::stem_name(file)))
+        .collect();
+    match stems.as_slice() {
+        [file] => anyhow::Error::new(Refused(format!("Not opened: {file}.  {text}"))),
+        _ => anyhow::anyhow!("{text}"),
+    }
+}
+
 /// The status line of a song whose file `file` holds video.  It is a
 /// [`Refused`] line, shown as it is: the words of [`PageRefusal`] say "too
 /// long", which is wrong for a video.
@@ -1691,8 +1716,8 @@ pub fn video_text(file: &str) -> String {
 
 /// The refusal before any whole read of a song, from the head of each of
 /// its files (`heads`: name, first bytes, size), for the `limit` of its
-/// lanes.  It refuses a WAV or FLAC whose head states a length past the
-/// limit.  It also refuses a file larger than the largest file of its
+/// lanes.  It refuses a WAV, FLAC, M4A or AIFF whose head states a length
+/// past the limit.  It also refuses a file larger than the largest file of its
 /// stated length, or of the limit if it states none
 /// (`engine::decode::largest_file`).  `None` when the song can be read one
 /// file at a time.
@@ -6373,6 +6398,29 @@ mod tests {
             "Not opened: acme.mp4.  This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC."
         );
         assert_eq!(refusal_of_heads(&[video_head("lloyd.mp4")], 1), None);
+    }
+
+    /// Finding 1-17 of review round 1 of M2: when the decode worker cannot
+    /// decode a song of one stem file, the status line names that file, as
+    /// the head check does.  A song of several stems keeps the text alone.
+    #[test]
+    fn an_undecodable_song_of_one_file_names_it() {
+        let text = engine::decode::VIDEO_TEXT;
+        let one = undecodable_error(text, &["lloyd.mp4"]);
+        assert_eq!(
+            open_error_text("Could not load", &one),
+            video_text("lloyd.mp4")
+        );
+        let with_mix = undecodable_error(text, &["mix.wav", "lloyd.mp4"]);
+        assert_eq!(
+            open_error_text("Could not load", &with_mix),
+            video_text("lloyd.mp4")
+        );
+        let several = undecodable_error("no audio", &["bass.wav", "drums.wav"]);
+        assert_eq!(
+            open_error_text("Could not load", &several),
+            "Could not load: no audio"
+        );
     }
 
     /// The head of an ALAC M4A that states more than the limit refuses it,

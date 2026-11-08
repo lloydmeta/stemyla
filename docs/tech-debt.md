@@ -631,7 +631,7 @@ This entry concerns DEPS-1.  It is a known breach of "confirm that it exists and
 
 This entry concerns D7 of `plans/active/m4a.md`: the decode trims the AAC encoder delay and padding.
 
-A raw `.aac` file is a stream of ADTS frames, with no container.  No box states its delay or its padding, so `engine::decode` cannot trim them.  The decode gives the encoder delay as silence at the start (1024 frames from `oxideav-aac`, 2112 frames from Apple's encoder), and the padding at the end.  So a raw AAC stem starts late against a WAV lane.  The test `a_raw_adts_stream_decodes_with_its_delay` shows it.
+A raw `.aac` file is a stream of ADTS frames, with no container.  No box states its delay or its padding, so `engine::decode` cannot trim them.  The decode gives the encoder delay as silence at the start, and the padding at the end.  The delay is 1024 frames from `oxideav-aac`, and 2112 frames from Apple's encoder.  So a raw AAC stem starts late against a WAV lane.  The test `a_raw_adts_stream_decodes_with_its_delay` shows it.
 
 * Fix: no standard field holds the delay of ADTS.  An open could take a delay that the caller gives, or the delay of a known encoder.  An M4A of the same audio has no gap.
 
@@ -639,7 +639,7 @@ A raw `.aac` file is a stream of ADTS frames, with no container.  No box states 
 
 This entry concerns the HE-AAC text of M2 of `plans/active/m4a.md`.
 
-`engine::decode` refuses HE-AAC with "HE-AAC is not supported.  Open an AAC-LC file." when the AudioSpecificConfig shows SBR or PS, or states a core rate other than the rate of the `mp4a` entry (`check_aac`).  Two forms show none of these signs.  An M4A with implicit SBR whose `mp4a` entry states the core rate, and a raw ADTS stream of HE-AAC.  Symphonia 0.6.1 decodes each as AAC-LC at the core rate: half the band, at the right speed, with no message.  Symphonia does not tell `engine` that the stream holds SBR, and the plan forbids a patch of Symphonia.
+`engine::decode` refuses HE-AAC with "HE-AAC is not supported.  Open an AAC-LC file." (`check_aac`).  It does so when the AudioSpecificConfig shows SBR or PS, or states a core rate of half the rate of the `mp4a` entry.  Two forms show none of these signs.  One is an M4A with implicit SBR whose `mp4a` entry states the core rate.  The other is a raw ADTS stream of HE-AAC.  Symphonia 0.6.1 decodes each as AAC-LC at the core rate: half the band, at the right speed, with no message.  Symphonia does not tell `engine` that the stream holds SBR, and the plan forbids a patch of Symphonia.
 
 * Fix: Symphonia's HE-AAC decode, or a check of the first packets for SBR fill elements (`EXT_SBR_DATA` in a `fill_element`) before the decoder is made.
 
@@ -647,17 +647,17 @@ This entry concerns the HE-AAC text of M2 of `plans/active/m4a.md`.
 
 This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.1.
 
-`symphonia-format-isomp4` 0.6.1 refuses an `mvhd` timescale of 0 ("malformed stream: isomp4 (mvhd): timescale is zero"), so the decode shows "unsupported or unrecognised format" with that text.  The trim of such a file would drop the delay and keep every frame after it (`trim_of`).  The test `only_the_common_form_of_elst_gives_a_trim` checks the refusal, and `trim_of_a_movie_timescale_of_0_is_skip_only` checks the trim without a decode.  A timescale of 0 is not valid in ISO/IEC 14496-12, so real files are rare.
+`symphonia-format-isomp4` 0.6.1 refuses an `mvhd` timescale of 0 ("malformed stream: isomp4 (mvhd): timescale is zero").  So the decode shows "unsupported or unrecognised format" with that text.  The trim of such a file would drop the delay and keep every frame after it (`trim_of`).  The test `only_the_common_form_of_elst_gives_a_trim` checks the refusal, and `trim_of_a_movie_timescale_of_0_is_skip_only` checks the trim without a decode.  A timescale of 0 is not valid in ISO/IEC 14496-12, so real files are rare.
 
 * Fix: a Symphonia that takes the file, or a patch of the timescale before the probe.  The plan forbids a patch or a fork of Symphonia.
 
-### TD-83: the native welcome text names WAV, MP3 and FLAC only
+### TD-84: Symphonia reads tags and pictures whole, with no limit
 
-This entry concerns DOC-1 for the text of the app, and TD-29.
+This entry concerns MEM-4.
 
-Since M2 of `plans/active/m4a.md`, the native app opens M4A and AIFF stems from a folder (`engine::song::Song::load_folder`).  The web welcome text names them, but the native `WELCOME` in `app/src/lib.rs` still says "several WAV/MP3/FLAC files".  The `empty_state` snapshot of `app/tests/ui.rs` shows that text.  A new snapshot can need the maintainer's approval when lavapipe in CI does not match it (TD-29), and the run of M2 asks the maintainer nothing.
+Symphonia 0.6.1 reads each FLAC `PICTURE` block, each ID3v2 frame (such as `APIC`) and each APE item whole, with `read_boxed_slice_exact`.  No reader of 0.6.1 applies `MetadataOptions::limit_visual_bytes` or `limit_tag_bytes`.  So a file with a picture of hundreds of MB makes the decode worker hold it, in memory that never shrinks.  For an MP4, `engine::decode` refuses a `moov` larger than `most_moov_bytes` before the probe (finding 1-18 of review round 1 of `plans/active/m4a-m2.md`).  A FLAC or an MP3 has no such bound.
 
-* Fix: change the native `WELCOME` to "several WAV/MP3/FLAC/M4A/AIFF files" with a new `empty_state` snapshot, which the maintainer approves.
+* Fix: a check of the size of the FLAC metadata blocks and of the ID3v2 tag before the probe, as for `moov`.  Or a Symphonia that applies its limits.
 
 ## Legibility for agents
 
@@ -706,3 +706,4 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-56: closed by M7 of `plans/completed/stream-from-storage.md` (D12 of `plans/completed/stream-from-storage-m7.md`).  One counter gives a token to every open (a drop, a pick, a Storage open, the startup restore and Demo).  Only the newest open shows its song, and only `apply_inbox` makes a session current.  `a_late_drop_does_not_show_over_a_newer_song`, `a_late_drop_does_not_show_over_demo`, `two_opens_that_end_in_one_frame_show_the_newer` and `a_stale_restore_on_the_page_does_not_make_its_session_current` check it.
 * TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
 * TD-69: closed by `check_runs_each_check_on_a_repo` in `xtask/src/docs.rs` (tech-debt rung 1).  It runs `docs::check` on a copy of the repo's tracked files, and wants no problem.  Then it plants one problem for each check, and wants each one.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` fails it, so its `KNOWN_MISSED` entry is gone (VERIFY-1).
+* TD-83: closed by review round 1 of `plans/active/m4a-m2.md`.  The native `WELCOME` names M4A and AIFF, with a new `empty_state` snapshot that the maintainer approved.

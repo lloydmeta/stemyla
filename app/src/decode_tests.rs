@@ -477,9 +477,10 @@ async fn undecodable_shows_the_error_and_forgets_the_session() {
     let current = store::current().await;
     store::test_wipe().await;
     let error = opened.err().map(|e| format!("{e:#}"));
+    // Finding 1-17 of review round 1 of M2: a song of one file names it.
     assert_eq!(
         error.as_deref(),
-        Some("unsupported or unrecognised format: lloyd")
+        Some("Not opened: lloyd.wav.  unsupported or unrecognised format: lloyd")
     );
     assert_eq!(kept, None, "the new session is forgotten");
     assert_eq!(current, Some(before), "sessions/current is unchanged");
@@ -620,7 +621,10 @@ async fn undecodable_in_a_restore_keeps_the_session() {
     let kept = meta_of(&id).await;
     store::test_wipe().await;
     let error = restored.err().map(|e| format!("{e:#}"));
-    assert_eq!(error.as_deref(), Some("file decoded to no audio"));
+    assert_eq!(
+        error.as_deref(),
+        Some("Not opened: lloyd.wav.  file decoded to no audio")
+    );
     assert!(kept.is_some(), "the session stays");
 }
 

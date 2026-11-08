@@ -456,3 +456,40 @@ pub fn version_1() -> Vec<u8> {
     let trak = bx(b"trak", &[&tkhd, &bx(b"edts", &[&elst]), &mdia]);
     bx(b"moov", &[&mvhd, &trak])
 }
+
+/// `file`, which has `moov` last, with a cover image of `bytes` bytes in
+/// `moov/udta/meta/ilst/covr/data`.
+pub fn with_cover(mut file: Vec<u8>, bytes: usize) -> Vec<u8> {
+    let (moov, moov_size) = top_box(&file, b"moov");
+    assert_eq!(moov + moov_size, file.len(), "moov is last");
+    let image = vec![0xFF; bytes];
+    // The `data` type 13 is JPEG; the locale is 0.
+    let data = bx(b"data", &[&[0, 0, 0, 13, 0, 0, 0, 0], &image]);
+    let hdlr = bx(b"hdlr", &[&[0; 8], b"mdir", b"appl", &[0; 9]]);
+    let meta = bx(
+        b"meta",
+        &[&[0; 4], &hdlr, &bx(b"ilst", &[&bx(b"covr", &[&data])])],
+    );
+    let udta = bx(b"udta", &[&meta]);
+    file.extend_from_slice(&udta);
+    let size = (moov_size + udta.len()) as u32;
+    file[moov..moov + 4].copy_from_slice(&size.to_be_bytes());
+    file
+}
+
+/// `file`, which has `moov` last, with a QuickTime data handler (`dhlr`,
+/// `alis`) in the `minf` of its one track, before its other boxes.
+pub fn with_data_handler(mut file: Vec<u8>) -> Vec<u8> {
+    let (moov, moov_size) = top_box(&file, b"moov");
+    assert_eq!(moov + moov_size, file.len(), "moov is last");
+    let (trak, _) = child_box(&file, moov, b"trak");
+    let (mdia, _) = child_box(&file, trak, b"mdia");
+    let (minf, _) = child_box(&file, mdia, b"minf");
+    let hdlr = bx(b"hdlr", &[&[0; 4], b"dhlr", b"alis", &[0; 12], &[0]]);
+    file.splice(minf + 8..minf + 8, hdlr.iter().copied());
+    for at in [minf, mdia, trak, moov] {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap());
+        file[at..at + 4].copy_from_slice(&(size + hdlr.len() as u32).to_be_bytes());
+    }
+    file
+}

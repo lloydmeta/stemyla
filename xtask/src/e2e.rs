@@ -5,7 +5,8 @@
 //! * `smoke`: drop generated stems, Play (every lane from browser storage),
 //!   change the tempo.
 //! * `decode`: the decode worker writes the session files of a 44.1 kHz
-//!   WAV, a 48 kHz WAV and the generated stems, equal to the native decode;
+//!   WAV, a 48 kHz WAV, an ALAC M4A with an `elst` delay and the generated
+//!   stems, equal to the native decode;
 //!   a reload opens a complete session as stored lanes with no decode, and decodes a
 //!   session of the M4 layout (`e2e/decode.rs`).
 //! * `playback`: a song restored with six stems plays every lane, "original"

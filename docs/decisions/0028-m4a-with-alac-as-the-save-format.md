@@ -2,7 +2,7 @@
 
 Status: accepted (2026-11-08, by the maintainer, as D1, D2 and D6 of `plans/active/m4a.md`)
 
-Amended on 2026-11-08 by the agent, after round 1 of the intent review of M1 of `plans/active/m4a.md`: M2 adds the `esds` sample entry for AAC, not M4.  M2's decode tests need AAC files, and D6 forbids a copy of the writer in a test.  So `m4a` writes AAC from given packets, and M4 uses the same entry for its save.  The decision is unchanged.
+Amended on 2026-11-08 by the agent, after round 1 of the intent review of M1 of `plans/active/m4a.md`.  M2 adds the `esds` sample entry for AAC, not M4.  M2's decode tests need AAC files, and D6 forbids a copy of the writer in a test.  So `m4a` writes AAC from given packets, and M4 uses the same entry for its save.  The decision is unchanged.
 
 ## Context
 
