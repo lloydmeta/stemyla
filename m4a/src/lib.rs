@@ -15,6 +15,41 @@ mod mp4;
 pub use alac::{AlacEncoder, FRAMES_PER_PACKET, MAX_PACKET_BYTES};
 pub use mp4::{Edit, Error, Layout, Order, SampleEntry};
 
+/// The whole M4A file of `interleaved` 16-bit stereo, as ALAC.  It holds
+/// the file in memory, so it is for tests and tools: the worker writes in
+/// blocks with `Layout` and `AlacEncoder` (M3).  Every test that needs an
+/// M4A uses this one writer (TD-52).
+///
+/// # Panics
+///
+/// On an odd length of `interleaved`.
+pub fn alac_file(
+    interleaved: &[i16],
+    sample_rate: u32,
+    edit: Option<Edit>,
+    order: Order,
+) -> Result<Vec<u8>, Error> {
+    assert!(
+        interleaved.len().is_multiple_of(2),
+        "ALAC input is interleaved stereo, so its length must be even, not {}",
+        interleaved.len()
+    );
+    let layout = Layout::new((interleaved.len() / 2) as u64, sample_rate, edit, order)?;
+    let mut encoder = AlacEncoder::new(sample_rate);
+    let mut file = vec![0; layout.head_len()];
+    let sizes: Vec<u32> = interleaved
+        .chunks(FRAMES_PER_PACKET * 2)
+        .map(|packet| encoder.encode(packet, &mut file) as u32)
+        .collect();
+    let entry = SampleEntry::Alac {
+        cookie: encoder.cookie(),
+    };
+    let head = layout.head(&entry, &sizes)?;
+    file[..head.len()].copy_from_slice(&head);
+    file.extend_from_slice(&layout.tail(&entry, &sizes)?);
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
