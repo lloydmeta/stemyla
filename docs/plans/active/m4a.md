@@ -218,7 +218,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 
 * [x] 2026-11-08: plan written in a cloud session, with the evidence of the Context.  All decisions are open.
 * [x] 2026-11-08: the maintainer answered D1 to D7.  The preflight passed.
-* [ ] M1: the M4A writer and the ALAC encoder.
+* [x] 2026-11-08, M1: the M4A writer and the ALAC encoder (`plans/completed/m4a-m1.md`).  The crate `m4a` makes a fast-start M4A of 16-bit stereo ALAC, from a safe port of `alac-encoder` 0.3.0 that gives its packets byte for byte.  Symphonia decodes each test file bit for bit.  3 review rounds (`reviews/feature-m4a-m1.md`), 28 agents, 1,895,639 tokens, 72.6 wall minutes, 0 interventions.  Late rounds: none.  Debt: TD-79.  Decisions: 0028 (accepted), 0029 (proposed).
 * [ ] M2: open M4A (and AIFF by D5).
 * [ ] M3: save as ALAC M4A.
 * [ ] M4: save as AAC-LC (by D1).
@@ -246,6 +246,8 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, agent: the branch is `feature/m4a`, which the maintainer started, and not `claude/next-file-format-support-u3ib64`.  Reason: one branch and one PR for each plan.
 * 2026-11-08, maintainer: decision 0028 is accepted, because the answers to D1, D2 and D6 choose its content.
 * 2026-11-08, maintainer: the run does not block on the maintainer.  The plan's stop conditions become decisions of the orchestrator.
+* 2026-11-08, agent (M1): `m4a` is Apache-2.0 only, by decision 0029, `proposed`.  The rest of the workspace stays MIT or Apache-2.0.
+* 2026-11-08, agent (M1): CI and tier `push` run `cargo test -p engine` alone, a new CI step and a new line of `xtask check`.
 * 2026-11-08, agent: an audio-only `.mp4` opens (D4).  Reason: the maintainer's real file is one, and the D4 answer excludes only video.
 * 2026-11-08, agent: M1 checks the port of D2 against `alac-encoder` 0.3.0, pinned exactly, as a dev-dependency of `m4a` only.  Each test signal must give the same packets from both.  Reason: a round trip alone also passes an encoder that writes only escape (uncompressed) packets.  A test also checks that a music-like signal gives fewer bytes than its WAV.
 
