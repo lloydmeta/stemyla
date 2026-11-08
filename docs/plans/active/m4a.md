@@ -127,6 +127,7 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 * Messages: a DRM file gives "protected, cannot open".  An HE-AAC file gives "HE-AAC is not supported; use AAC-LC".  A file with more than 2 AAC channels gives its own message.
 * `SONG_FILES`, the `WELCOME` texts, the hover text of "Open song…", `Song::load_folder`, `xtask serve` (`audio/mp4`, `audio/aac`, and `audio/aiff` by D5).
 * The fixtures come from the M1 writer (ALAC) and from D3 (AAC).  No audio goes into git (ASSET-1).
+* A local check, not in CI: the maintainer's real AAC-LC file (see Surprises; its path is in the M2 brief, not in the repo).  `engine::decode` gives 13,413,120 frames, as Apple's `afinfo` says.  Its cross-correlation with Apple's decode (`afconvert -f WAVE -d LEI16`) peaks at lag 0.  Never copy the file into the repo (ASSET-1).
 * Measure the size of the wasm bundle before and after (`trunk build --release`).  Put both numbers in Surprises.
 * Acceptance:
   * Native: an ALAC M4A decodes bit for bit.  An ALAC M4A with an `elst` delay of 2112 frames decodes to the source's frames and length, bit for bit.  An AAC-LC M4A decodes to the source's length, and its cross-correlation with the source peaks at lag 0.  A file with `moov` after `mdat` decodes.  The DRM, HE-AAC and 6-channel fixtures give their messages.  A crafted ALAC file that states more than the limit is refused before it decodes.
@@ -180,6 +181,7 @@ Each entry is open until the maintainer answers.  The `orchestrate` skill asks t
   * Options: (a) out of scope; (b) in scope, with `largest_file` counting the audio track's `stsz` only.
   * Recommendation: (a).  It keeps the size check simple, and few songs come as video files.
   * Answer (maintainer, 2026-11-08): (a), with a clear message.  A file with a video track (an `hdlr` of type `vide`) gives "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC."  This applies also to an `.mp4` renamed to `.m4a`, and to a dropped file.  M2 tests the message.
+  * Agent decision, 2026-11-08: the app also opens an `.mp4` that holds only sound tracks.  Tools such as FFmpeg write audio-only `.mp4` files, and the size check holds for them.  An `.mp4` with a video track gives the message above.
 * D5, AIFF in M2.
   * Options: (a) yes; (b) no.
   * Recommendation: (a).  It costs one Symphonia feature and a header reader such as `wav_length`, and Logic and Pro Tools users have AIFF files.
@@ -229,6 +231,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, orchestrator: `mp4-atom` 0.17.1 is maintained but has no `alac` sample entry.  So the box writer of M1 is written by hand.
 * 2026-11-08, orchestrator: the session runs Opus 5.5 (the system prompt) at effort `high` (`modelSettings` in `~/.claude/settings.json`).  The preflight passed at `ff633a3`.  It ran `cargo test -p engine` (182 passed), `e2e decode --browser chrome` and `e2e save --browser chrome` (Chrome 156, chromedriver 155).
 * 2026-11-08, orchestrator: the wasm bundle before M2, from `trunk build --release` at `ff633a3`: `app_bg.wasm` 5,836,422 B, `decode-worker_bg.wasm` 809,845 B, `stem-worker_bg.wasm` 1,250,988 B.
+* 2026-11-08, orchestrator: the maintainer gave a real song for local checks: an audio-only `.mp4` with brand `M4A `, one `soun` track, AAC-LC, 48 kHz stereo, 279.44 s, 247 kbps, written by FFmpeg (`Lavf62.12.100`).  It is fast start.  Its `elst` gives a delay of 1024 frames, not Apple's 2112, and it has no `iTunSMPB`.  Apple's `afinfo` gives 13,413,120 valid frames, 1024 priming and 256 remainder.  Its `AudioSpecificConfig` (`11 90 56 e5 00`) also has the sync extension `0x2b7` with SBR not present, as FFmpeg writes it.  So it tests the `elst` trim and the parse of that extension.
 * 2026-11-08: the README of Symphonia on GitHub lists `opus`, `he-aac` and `he-aac-v2` features.  The published 0.6.1 has none of them.  Read the features of the pinned version, not the README.
 
 ## Decision log
@@ -239,6 +242,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, agent: the branch is `feature/m4a`, which the maintainer started, and not `claude/next-file-format-support-u3ib64`.  Reason: one branch and one PR for each plan.
 * 2026-11-08, maintainer: decision 0028 is accepted, because the answers to D1, D2 and D6 choose its content.
 * 2026-11-08, maintainer: the run does not block on the maintainer.  The plan's stop conditions become decisions of the orchestrator.
+* 2026-11-08, agent: an audio-only `.mp4` opens (D4).  Reason: the maintainer's real file is one, and the D4 answer excludes only video.
 * 2026-11-08, agent: M1 checks the port of D2 against `alac-encoder` 0.3.0, pinned exactly, as a dev-dependency of `m4a` only.  Each test signal must give the same packets from both.  Reason: a round trip alone also passes an encoder that writes only escape (uncompressed) packets.  A test also checks that a music-like signal gives fewer bytes than its WAV.
 
 ## Outcomes and retrospective
