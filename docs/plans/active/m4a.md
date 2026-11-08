@@ -269,6 +269,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, agent (M1): CI and tier `push` run `cargo test -p engine` alone, a new CI step and a new line of `xtask check`.
 * 2026-11-08, agent: an audio-only `.mp4` opens (D4).  Reason: the maintainer's real file is one, and the D4 answer excludes only video.
 * 2026-11-08, agent: M1 checks the port of D2 against `alac-encoder` 0.3.0, pinned exactly, as a dev-dependency of `m4a` only.  Each test signal must give the same packets from both.  Reason: a round trip alone also passes an encoder that writes only escape (uncompressed) packets.  A test also checks that a music-like signal gives fewer bytes than its WAV.
+* 2026-11-08, orchestrator: after round 1 of M2 (finding 1-9), the orchestrate skill says that a `CLAUDE.md` change that a step needs lands in that step's commit.  Reason: Steps 1 and 3 of M2 broke DOC-1 for 8 commits.  It is a harness change, so the PR lists it for the maintainer.
 
 ## Outcomes and retrospective
 
