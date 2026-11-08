@@ -9,7 +9,8 @@
 //!
 //! The walk of an MP4 plans its boxes (`engine::mp4_boxes`).  [`plan_of`]
 //! plans the other formats.  The view starts after any leading ID3v2 tags.
-//! FLAC PICTURE, VORBIS_COMMENT and APPLICATION blocks show as PADDING.
+//! FLAC PICTURE, VORBIS_COMMENT, APPLICATION and SEEKTABLE blocks show as
+//! PADDING.
 //! A WAV `LIST` chunk, and AIFF `MARK`, `APPL`, `COMT`, text and `ID3 `
 //! chunks, show as `JUNK`.
 
@@ -209,9 +210,10 @@ impl MediaSource for Hidden {
 }
 
 /// The FLAC metadata blocks that Symphonia 0.6.1 reads whole
-/// (`symphonia-bundle-flac` `demuxer.rs`): APPLICATION (2), VORBIS_COMMENT
-/// (4) and PICTURE (6).
-const FLAC_TAG_BLOCKS: [u8; 3] = [2, 4, 6];
+/// (`symphonia-bundle-flac` `demuxer.rs`, lines 106 to 140): APPLICATION
+/// (2), SEEKTABLE (3, line 112), VORBIS_COMMENT (4) and PICTURE (6).  The decode reads in order, so it
+/// needs no seek table (finding 6-3 of review round 6).
+const FLAC_TAG_BLOCKS: [u8; 4] = [2, 3, 4, 6];
 
 /// The type of a FLAC PADDING block, which Symphonia skips with a seek.
 const FLAC_PADDING: u8 = 1;

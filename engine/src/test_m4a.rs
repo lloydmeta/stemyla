@@ -629,3 +629,22 @@ pub fn dense_meta() -> Vec<u8> {
     assert!(meta.len() < 4096, "a small container");
     meta
 }
+
+/// `count` top-level `sidx` boxes (version 0) with no references, each of
+/// its own `reference_id`, of 32 bytes each.
+pub fn sidx_boxes(count: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(count * 32);
+    for id in 0..count as u32 {
+        out.extend_from_slice(&bx(
+            b"sidx",
+            &[
+                &[0; 4],
+                &id.to_be_bytes(),
+                &1000_u32.to_be_bytes(),
+                &[0; 8],
+                &[0; 4],
+            ],
+        ));
+    }
+    out
+}

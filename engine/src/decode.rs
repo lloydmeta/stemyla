@@ -3788,4 +3788,35 @@ mod tests {
             assert_eq!(head_of(&tagged), HeadLength::Frames(100), "{case}");
         }
     }
+
+    /// Finding 6-2 of review round 6 (MEM-4): Symphonia keeps an entry for
+    /// each top-level `sidx` of its own `reference_id`.  The decode reads
+    /// in order and needs no segment index, so each `sidx` is hidden as
+    /// `free`.  A file of 2000 of them opens at a flat peak.  One of about
+    /// 16 MiB of them is refused early by the limit of kept tags, past its
+    /// first `MOST_SMALL`.
+    #[test]
+    fn each_top_level_sidx_is_hidden() {
+        use crate::test_m4a::sidx_boxes;
+        let plain = alac_of(m4a::Order::MoovLast);
+        let some = [plain.clone(), sidx_boxes(2000)].concat();
+        assert_tags_are_hidden(plain.clone(), some, "m4a", "2000 sidx boxes");
+        let many = [plain, sidx_boxes(524_288)].concat();
+        assert_refused_early(many, "m4a", TAGS_TEXT, "16 MiB of sidx boxes");
+    }
+
+    /// Finding 6-3 of review round 6 (MEM-4): Symphonia holds each point of
+    /// a FLAC SEEKTABLE.  The decode reads in order and needs no seek table,
+    /// so it shows SEEKTABLE as PADDING.  A table of 932,067 points, the
+    /// most that a block holds, opens bit for bit at a flat peak.
+    #[test]
+    fn a_flac_seektable_is_hidden() {
+        use crate::test_audio::with_seektable;
+        let (left, right, _) = stereo_wav();
+        let flac = compressed(&left, &right, 44_100);
+        let small = with_seektable(&flac, 10);
+        assert_tags_are_hidden(flac.clone(), small, "flac", "a seek table of 10 points");
+        let large = with_seektable(&flac, 932_067);
+        assert_tags_are_hidden(flac, large, "flac", "a seek table of 932,067 points");
+    }
 }

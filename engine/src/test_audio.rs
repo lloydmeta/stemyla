@@ -434,3 +434,23 @@ pub fn with_dense_tags(plain: &[u8], dense: Dense, count: usize) -> Vec<u8> {
     }
     out
 }
+
+/// `flac` with a SEEKTABLE block of `points` seek points after its
+/// STREAMINFO block, each of 18 bytes, in ascending order.
+pub fn with_seektable(flac: &[u8], points: usize) -> Vec<u8> {
+    assert_eq!(flac[..4], *b"fLaC");
+    let streaminfo_last = flac[4] & 0x80 != 0;
+    let mut body = Vec::with_capacity(points * 18);
+    for point in 0..points as u64 {
+        body.extend_from_slice(&(point * 4096).to_be_bytes());
+        body.extend_from_slice(&(point * 100).to_be_bytes());
+        body.extend_from_slice(&4096_u16.to_be_bytes());
+    }
+    let mut out = Vec::with_capacity(flac.len() + body.len() + 4);
+    out.extend_from_slice(b"fLaC");
+    out.push(flac[4] & 0x7F);
+    out.extend_from_slice(&flac[5..42]);
+    out.extend_from_slice(&flac_block(3, streaminfo_last, &body));
+    out.extend_from_slice(&flac[42..]);
+    out
+}

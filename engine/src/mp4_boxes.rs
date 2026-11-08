@@ -13,8 +13,9 @@
 //! never panics, also where `usize` has 32 bits.
 //!
 //! Symphonia's MP4 reader reads `moov/udta`, each top-level `meta` and each
-//! `moov` whole, cover art too.  So the walker plans to hide each of them
-//! from Symphonia (`engine::hidden`).  The rest of the first `moov` that
+//! `moov` whole, cover art too, and keeps an entry for each top-level
+//! `sidx`.  So the walker plans to hide each of them from Symphonia
+//! (`engine::hidden`).  The rest of the first `moov` that
 //! Symphonia holds, its sample tables, has a bound (`most_moov_bytes`).
 
 use std::io::{Read, Seek, SeekFrom};
@@ -110,8 +111,8 @@ pub(crate) struct Found {
     pub moov_held: u64,
     /// The start of such a child that runs to the end of the file.
     pub moov_held_to_end_from: Option<u64>,
-    /// The boxes of tags that the decode hides from Symphonia: each
-    /// `moov/udta`, each top-level `meta`, and each `moov` and `ftyp` after
+    /// The boxes that the decode hides from Symphonia: each `moov/udta`,
+    /// each top-level `meta` and `sidx`, and each `moov` and `ftyp` after
     /// the first.
     pub hidden: crate::hidden::Plan,
     /// The size of the first `ftyp`, which Symphonia needs and reads whole
@@ -268,7 +269,11 @@ impl Walker<'_> {
     /// Walks the top-level boxes.  It reads the first `moov`, and reads
     /// only the header of each other box.  Symphonia reads each `moov`,
     /// `ftyp` and top-level `meta` whole, so it hides each `meta`, and each
-    /// `moov` and `ftyp` after the first.
+    /// `moov` and `ftyp` after the first.  Symphonia also keeps an entry for
+    /// each `sidx` of its own `reference_id` (`symphonia-format-isomp4`
+    /// `demuxer.rs`, line 189), only for the duration of a fragmented file.
+    /// The decode reads in order, so it hides each `sidx` too (finding 6-2
+    /// of review round 6).
     fn top(&mut self, start: u64) -> std::io::Result<()> {
         self.children(start, u64::MAX, |walker, found| {
             match &found.kind {
@@ -282,7 +287,7 @@ impl Walker<'_> {
                 b"ftyp" if walker.found.ftyp_bytes.is_none() => {
                     walker.found.ftyp_bytes = Some(size_of(found).unwrap_or(u64::MAX));
                 }
-                b"moov" | b"meta" | b"ftyp" => walker.hide(found),
+                b"moov" | b"meta" | b"ftyp" | b"sidx" => walker.hide(found),
                 _ => {}
             }
             Ok(true)
