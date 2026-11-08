@@ -1,0 +1,378 @@
+# M4A, M2: open M4A and AIFF
+
+## Purpose
+
+This is the milestone plan for M2 of `plans/active/m4a.md`.  The parent's M2 section stays the criteria.  After M2, the app opens an M4A (AAC-LC or ALAC), an audio-only `.mp4`, a raw `.aac` (ADTS) and an AIFF, as a song or as a stem.  The decode removes the AAC encoder delay and padding, so an AAC stem lines up with a WAV lane.  A file that holds video, a protected file, an HE-AAC file and an AAC file of more than 2 channels each give a clear message.
+
+Readers: the implementer, the review agents of M2's rounds, the orchestrator, and the team leaders of M3 and M4.
+
+## Context and orientation
+
+The state at the start, on 2026-11-08, at commit `ba4b231` on branch `feature/m4a`.  The review base of M2 is `ba4b231`.  M1 is done (`plans/completed/m4a-m1.md`).
+
+### The decisions that M2 follows
+
+All are in the parent's "Decisions for the maintainer" and Decision log, and in the orchestrator's brief of 2026-11-08.
+
+* D3 (a): the AAC fixtures come from `oxideav-aac` 0.1.7, a dev-dependency of `engine` only, pinned exactly (DEPS-1, `THIRD-PARTY.md`).
+* D4 (a), and the agent decision: an `.mp4` with a video track gives "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC."  An `.mp4` with only sound tracks opens.  The head check refuses a `vide` track that the head shows, with a new `HeadLength` variant, in both callers (`app/src/lib.rs` and `app/src/store.rs`).
+* D5 (a): AIFF opens.
+* D6 (a): extend the `m4a` crate.  Never copy the writer (TD-52).  Each change is test-first.
+* D7 (a): trim the delay and the padding from `elst`, else from `iTunSMPB`.
+* Any MP4 whose head does not show the `mdhd` of its first `soun` track gives `HeadLength::UnstatedPcm`.  So does a raw ADTS `.aac`.
+* The stop conditions of the parent are orchestrator decisions.  If a Symphonia limit blocks a check, narrow the case, give a clear message, add a TD entry, record it in the Decision log, and go on.  Do not patch or fork Symphonia.
+* Nobody asks the maintainer anything.  The implementer decides, records the decision in the Decision log, and goes on.
+
+### Facts that the team leader checked on 2026-11-08
+
+A spike in the scratchpad (`m2/spike/`, not in the repo) used `oxideav-aac` 0.1.7 and Symphonia 0.6.1 with `aac`, `isomp4`, `alac` and `aiff`.
+
+* `oxideav-aac` 0.1.7: MIT, released 2026-09-01, 0.1.0 on 2026-05-04 (crates.io lists earlier 0.0.x releases), repository `github.com/OxideAV/oxideav-aac`.  Its one dependency is `oxideav-core` `^0.1` (0.1.43 in the spike, with `bytemuck`, `serde_json`, `thiserror`).  `oxideav-aac`'s `src/` has no `unsafe`; `oxideav-core` 0.1.43 has some (`src/arena/mod.rs`).  `Cargo.lock` pins `oxideav-core`, and it is test-only.  It builds for `wasm32-unknown-unknown`, which `cargo clippy --target wasm32-unknown-unknown -p engine --all-targets` needs.
+* `oxideav_aac::encoder::StreamEncoder` (`EncoderConfig { sample_rate, channels, bitrate }`) gives one ADTS frame for each 1024 frames, plus one frame from `finish`.  `encode_all` gives `ceil(n / 1024) + 1` frames.  Its delay is exactly 1024 frames.  An ADTS frame has a 7-byte header, or 9 bytes when `protection_absent` is 0.  The raw packet for an M4A is the frame without its header.
+* Symphonia decodes its stereo output at 44.1 kHz: 88,977 frames give 90,112 decoded frames, and the cross-correlation with the source peaks at lag 1024.
+* Its 6-channel output (`channels: 6`) makes `make_audio_decoder` fail with "unsupported feature: aac: aac too complex".
+* `oxideav_aac::he_aac_encoder::HeAacEncoder` (`HeAacConfig::new(rate, channels, bitrate)`) gives HE-AAC.  `audio_specific_config(true)` gives an explicit config of object type 5 (`2b 92 08 00` at 44.1 kHz stereo).  `audio_specific_config(false)` gives object type 2 with the sync extension `0x2b7` and SBR present (`13 90 56 e5 a0`).  Symphonia's `AudioSpecificConfig::read` (`symphonia-common` 0.6.1, `src/mpeg/audio/mod.rs`, line 400) reads the sync extension only after an explicit object type 5 or 29.  So it refuses the first ("aac too complex"), but takes the second as AAC-LC at the core rate, 22,050 Hz.  In an M4A whose `mp4a` entry states 44,100 Hz, `engine::decode::Decoder` takes the rate of the entry (`decode.rs`, line 499).  Then the core decodes at twice its speed.  Plan review round 2 found this; the spike tested raw ADTS only.
+* Symphonia decodes the raw ADTS of `HeAacEncoder` (no config, so implicit SBR) as AAC-LC at the core rate, 22,050 Hz.  It gives 46,080 frames for 2 s, with no error.  So an HE-AAC file with implicit signalling decodes as its core only: half the rate, half the band.
+* `symphonia::default::get_probe` registers `AdtsReader` with the `aac` feature, so a raw `.aac` probes.  `AdtsReader` sets `num_frames` from an estimate of the bitrate (`approximate_frame_count`, `symphonia-codec-aac` 0.6.1 `src/adts.rs`).  So the length of a raw `.aac` is an estimate, as an MP3's is.
+* So `engine` reads the ASC itself, before it makes the decoder (Step 4).  The maintainer's file has `11 90 56 e5 00`: object type 2, 48 kHz, 2 channels, then `0x2b7`, object type 5 and an SBR flag of 0.  It must open.
+* `symphonia-format-isomp4` 0.6.1 sets no `bits_per_sample` for ALAC (`src/atoms/alac.rs`).  It gives the 24-byte cookie as `extra_data`; byte 5 of the cookie is the bit depth.
+* Symphonia names each MP4 track by the `track_ID` of its `tkhd` (`Track::new(trak.tkhd.id)`, `src/demuxer.rs`).  Its `default_track` is the first audio track of a known codec, since `symphonia-format-isomp4` sets no default flag (`symphonia-core` 0.6.1, `src/formats/mod.rs`, line 630).
+* With a seekable source, `AdtsReader` estimates from 100 frames at each of 0, 1/4, 1/2 and 3/4 of the bytes (`src/adts.rs`, lines 442 to 476).
+* Symphonia's `Track` has `delay` and `padding` fields, but `symphonia-format-isomp4` 0.6.1 sets neither, and reads no `iTunSMPB`.
+* The maintainer's real file (see "The local check") decodes through Symphonia to 13,414,400 frames, 13,100 packets of 1024.  `Track::num_frames` is 13,414,171, the `mdhd` duration.  Its boxes: `mvhd` timescale 1000, duration 279,441; one `elst` entry, version 0, `segment_duration` 279,440 (in the `mvhd` timescale), `media_time` 1024, rate 1.0; `mdhd` timescale 48,000; `stts` 13,099 packets of 1024 and one of 795; `sgpd` and `sbgp` boxes; `udta` with `meta`.  So `elst` gives 279,440 x 48,000 / 1000 = 13,413,120 frames from frame 1024, the number of Apple's `afinfo`.
+
+Two facts follow for the trim:
+
+* `segment_duration` is in the timescale of `mvhd`, not of `mdhd`.  `media_time` is in the timescale of `mdhd`.  The `m4a` writer makes both timescales the sample rate, so a test patches `mvhd` to make them differ.
+* Symphonia decodes the last packet to all 1024 frames, also when `stts` gives it fewer.  So the trim keeps a count of frames, and does not trust the last packet.
+
+### The code today
+
+* `engine/Cargo.toml`: Symphonia 0.6.1 with `flac`, `mp3`, `wav` and `pcm`.
+* `engine/src/decode.rs`:
+  * `head_length`, `wav_length`, `flac_length`, `id3_size`: the head check.  `HeadLength` has `Frames`, `UnstatedPcm` and `Unstated`.  The doc of `HeadLength` lists the cases; M2 changes it.
+  * `largest_file`: the largest file for a `HeadLength`.
+  * `most_frames`: the reservation cap for MP3, FLAC and the others.
+  * `open_within`: the probe, the refusal of a stated length past the limit (`stated_exactly` is every codec but MP3), and the reservation.
+  * `Decoder` (`new`, `within_song_frames`, `next_packet`, `frames`): every decode goes through it.  `decode_bytes`, `decode_path`, `engine::song::SongWithin` and the decode worker (`decoder/src/pass.rs`) use it.  So a trim in `Decoder` reaches the page and the decode worker.
+* `engine/src/song.rs`: `Song::load_folder` takes `wav`, `mp3` and `flac` only (line 167).
+* `engine/src/test_audio.rs`: the test writers `wav`, `flac`, `mp3` and `tone`.
+* `app/src/lib.rs`: `WELCOME` (two texts, lines 655 and 657), `SONG_FILES` (line 663), the hover text of "Open song…" (line 3168), `refusal_of_heads` (line 1677) and its caller `open_on_the_page` (line 954), `TooLongToOpen`, `PageRefusal`, `Refused` (a status line shown as it is) and `open_error_text`.
+* `app/src/store.rs`: `rebuild` calls `refusal_of_heads` (line 949).
+* `app/src/store_meta.rs` and `app/src/store.rs` keep the extension of a source as it is, in lower case.  So `m4a`, `mp4`, `aac`, `aif` and `aiff` need no change there.
+* `decoder/src/web/tests.rs`: the browser tests of the decode worker, with the writers `wav`, `flac` and `mp3`.
+* `xtask/src/e2e/decode.rs`: `run` drops a 44.1 kHz WAV, a 48 kHz WAV and the synthetic stems, and checks the session files against the native decode (`expected`, `session_checks`).
+* `xtask/src/serve.rs`: the MIME type of `wav`, `mp3` and `flac` (line 169), and its test (line 299).
+* `xtask/src/rules.rs`: `AUDIO_EXTENSIONS` (line 1660) has no `mp4`.  `.gitignore` (lines 14 to 23) has no `*.mp4`.
+* `xtask/src/check.rs`: `ENGINE`, `merges_into_engine` and the test `crate_tests_with_a_member_outside_engines_family_run_engine_alone` give `m4a` as the example of a member whose test features reach `engine`.  `CLAUDE.md` (the `cargo test -p engine` line), `docs/ARCHITECTURE.md` (line 296) and `README.md` (line 75, and the Tests list) give the same reason.
+* `app/tests/ui.rs`: the `empty_state` snapshot shows the native `WELCOME` text.  A new snapshot needs the maintainer's approval if lavapipe in CI does not match it (`README.md`, TD-29).
+* `app/src/decode_tests.rs`: the browser tests of the head refusal, such as `a_drop_with_no_storage_refuses_a_long_wav_from_its_head` and `a_restore_on_the_page_refuses_a_long_song_from_heads_or_meta`.  `decoder/src/pass/tests.rs`: native tests of the decode pass, which give `Undecodable` for a file that does not decode.
+* `xtask/src/e2e/decode.rs`: `drop_and_open` gives each dropped file the type `audio/wav` (line 325), whatever the server sends.
+* `m4a/src/mp4.rs`: `SampleEntry` (`Alac` only), `Layout` with the ALAC constants `FRAMES_PER_PACKET` and `MAX_PACKET_BYTES`, `ALAC_ENTRY_LEN`, `write_sample_entry`.  `m4a/src/lib.rs`: `alac_file`.
+* `docs/decisions/0028-m4a-with-alac-as-the-save-format.md`, Consequences: "M4 adds an `esds` entry for AAC".  M2 changes it.
+
+### The files that M2 touches
+
+* `m4a/src/mp4.rs`, `m4a/src/lib.rs`, `m4a/tests/mp4.rs`, `m4a/tests/round_trip.rs`, `m4a/Cargo.toml` (the Symphonia dev-dependency gets `aac`).
+* `engine/Cargo.toml`, `engine/src/decode.rs`, a new module for the box reader (for example `engine/src/mp4_boxes.rs`), `engine/src/song.rs`, `engine/src/test_audio.rs`, a new test module for the M4A fixtures (for example `engine/src/test_m4a.rs`), and a new local test file `engine/tests/local_aac.rs`.
+* `app/Cargo.toml` (dev-dependency `m4a`), `app/src/lib.rs`, `app/src/store.rs`, `app/src/decode_tests.rs`, and the tests that hold the texts that change.
+* `decoder/Cargo.toml` (dev-dependency `m4a`), `decoder/src/web/tests.rs`, `decoder/src/pass/tests.rs`.
+* `xtask/Cargo.toml` (dependency `m4a`), `xtask/src/e2e/decode.rs`, `xtask/src/serve.rs`, `xtask/src/rules.rs`, `xtask/src/check.rs` (`fixture()`, the engine family), `.gitignore`.
+* `Cargo.lock`, `THIRD-PARTY.md`.
+* `docs/ARCHITECTURE.md` (the layers table rows of `app`, `engine`, `decode-worker` and `xtask`; the text on `m4a`, the decode and the engine family), `README.md` (the formats, the `m4a` row, the engine family), `docs/tech-debt.md` (new entries), `docs/decisions/0028-m4a-with-alac-as-the-save-format.md`, `docs/README.md` (the line of 0028).
+* `docs/invariants.md` only if a rule text names the formats or the extensions of ASSET-1.
+
+`CLAUDE.md` changes twice, and only the orchestrator edits it.  The implementer never edits `CLAUDE.md` or `.claude/**`.  If a commit needs a change there, the implementer stops and tells the team leader, who gives the orchestrator a diff in `m2/`.
+
+* Step 1: the Layout line of `m4a/` says "16-bit stereo ALAC" only.  The diff `m2/claude-md-step1.diff` adds "or AAC from given packets".
+* Step 3: the `cargo test -p engine` line gives `m4a` as the reason.  The diff `m2/claude-md.diff` changes the reason to the features of other members, such as `app`'s `engine/cpal`.  The orchestrator applies each diff to the tree for the step's commit, and the step's commit holds it.
+
+### Checks that the changes meet
+
+* `crates_depend_only_downwards` (LAYER-1) reads the layers table of `docs/ARCHITECTURE.md`.  A dev-dependency counts too.  So the rows of `app`, `engine`, `decode-worker` and `xtask` get `m4a`.  `m4a` is in the Pure layer, below each of them.
+* The THIRD-PARTY check of `xtask/src/rules.rs` compares the tables of `THIRD-PARTY.md` with the shipped crates.  The new Symphonia features ship `symphonia-format-isomp4`, `symphonia-codec-aac`, `symphonia-codec-alac` and the `aiff` part of `symphonia-format-riff`.  So the commit that turns them on also changes `THIRD-PARTY.md`.
+* `young_crates_are_pinned` (DEPS-1): `oxideav-aac = "=0.1.7"`.
+* `the_fixture_graph_is_the_real_graph` (`xtask/src/check.rs`): the new edges `engine -> m4a` (dev), `app -> m4a` (dev), `decode-worker -> m4a` (dev) and `xtask -> m4a`.
+* The engine family (`merges_into_engine`): with `engine -> m4a`, `m4a` can join the family of `engine`.  Then the test `crate_tests_with_a_member_outside_engines_family_run_engine_alone` needs another member outside the family, and the reason texts change (see "The files that M2 touches").  After Step 3, `engine`'s own Symphonia features hold each feature of `m4a`'s dev-dependency, so the old reason is no longer true.  `app`'s default feature still turns on `engine/cpal` in a workspace build, so the `cargo test -p engine` line stays.
+* `no_audio_or_weights_are_tracked` (ASSET-1): every fixture is made in the test.  No audio file goes into git.  `mp4` joins `AUDIO_EXTENSIONS` and `.gitignore` in one commit, since an `.mp4` now opens as audio.
+* DOC-1: each step fixes the docs that it makes wrong, in its own commit.  Each TD entry goes in the commit that makes its gap.
+* M1's Surprises: `cargo test --workspace` merges the Symphonia features of every crate.  So a new decode test shows its first failure with `cargo test -p engine`, not with the workspace.
+
+### Terms
+
+* Head: the first `HEAD_BYTES` (64 KiB) of a file, which `head_length` reads.
+* Delay: the decoded frames before the first frame of the source.  Padding: the decoded frames after its last frame.
+* Trim: the decode drops the delay and the padding.  The trim gives `skip` (the frames to drop at the start) and `keep` (the frames to give after them).
+* Timescale: the ticks in one second of a box's times.  `mvhd` has the movie timescale; `mdhd` has the media timescale.
+* ASC: the `AudioSpecificConfig` of an AAC track, inside `esds`.
+* Object type: the first 5 bits of the ASC (31 means 6 more bits, plus 32).  1 is AAC Main, 2 is AAC-LC, 5 is SBR (HE-AAC), 29 is PS (HE-AAC v2).
+* Box reader: the engine code that walks MP4 boxes.  It reads; the `m4a` crate writes.
+
+## Plan of work
+
+Each step is one signed commit, after `cargo run -p xtask -- check --tier commit` (GIT-2).  Each new test fails first on an assert, then passes.  A test that needs a result writes `assert!(result.is_ok(), "{result:?}")` before it unwraps, so its first failure is an assert, not a panic in `unwrap`.  A stub that gives a wrong value makes the first run fail on an assert, not on `todo!()`.  Record each first failure in the Progress line of its step.  Stage each new file by name (`git add <path>`).  Never run `git add -A`.  Each step fixes, in its own commit, each doc that it makes wrong (DOC-1).
+
+### Step 1: the `m4a` crate takes AAC
+
+* The orchestrator applies `m2/claude-md-step1.diff` to the tree for the commit of Step 1, so `CLAUDE.md` is true at each commit (see "The files that M2 touches").
+* `m4a/src/mp4.rs`: a codec in `Layout`.  A sketch:
+
+  ```rust
+  /// The codec of the one track.
+  pub enum Codec {
+      /// 16-bit stereo Apple Lossless: 4096 frames in a packet.
+      Alac,
+      /// AAC: 1024 frames in a packet, with `channels` channels and an
+      /// AudioSpecificConfig of `config_len` bytes.
+      Aac { channels: u16, config_len: u8 },
+  }
+
+  impl Codec {
+      pub fn frames_per_packet(self) -> u32;   // 4096 or 1024
+      pub fn max_packet_bytes(self) -> usize;  // MAX_PACKET_BYTES, or 768 x channels
+      pub fn channels(self) -> u16;            // 2, or channels
+  }
+
+  pub enum SampleEntry {
+      Alac { cookie: [u8; 24] },
+      /// `mp4a` with an `esds` that holds `config`, the AudioSpecificConfig.
+      Aac { config: Vec<u8> },
+  }
+
+  impl Layout {
+      pub fn new(codec: Codec, frames: u64, sample_rate: u32, edit: Option<Edit>, order: Order) -> Result<Layout, Error>;
+  }
+  ```
+
+  * 768 bytes for each channel is the largest AAC packet: 6144 bits for each channel (ISO/IEC 14496-3, 4.5.3.2).  Cite it in the doc of `max_packet_bytes`.
+  * `Layout::new` refuses `Aac { channels: 0, .. }`, and a `config_len` of 0 or above 64, with new `Error` variants.  The 4 GiB worst case and the `stts` entries use the codec's values.
+  * `head` and `tail` refuse an entry whose codec is not the layout's, or whose ASC length is not `config_len` (`Error::EntryCodec`).  So `head().len() == head_len()` holds, since `moov`'s size depends on the ASC length.  They refuse a packet larger than the codec's bound (`Error::PacketSize`).
+  * The `mp4a` entry: an `AudioSampleEntry` with the codec's channel count, sample size 16 and the rate as 16.16 fixed point.  Then a full box `esds` (version and flags 0).  It holds an `ES_Descriptor` (tag 3, `ES_ID` 0, flags 0), with a `DecoderConfigDescriptor` (tag 4: `objectTypeIndication` 0x40, the byte 0x15 for `streamType` 5, `upStream` 0 and the reserved bit 1; `bufferSizeDB`, `maxBitrate` and `avgBitrate` 0), with a `DecoderSpecificInfo` (tag 5) that holds the ASC.  Then an `SLConfigDescriptor` (tag 6, `predefined` 2).
+  * Each descriptor size is one byte.  The largest ASC is 64 bytes, so the largest `ES_Descriptor` body is below 128 bytes.  The writer has no 4-byte size form.  A test shows that a 64-byte ASC gives an `ES_Descriptor` size below 128.
+  * `SampleEntry` loses `Copy`, since `Aac` holds a `Vec`.  `alac_file` and the tests change to match.  M3 uses `Alac` only.
+  * The doc of `SampleEntry` says that M2 added the `esds` entry for AAC, for its decode tests, and that M4 uses it for the save.
+* The docs that Step 1 makes wrong: the crate doc of `m4a/src/lib.rs`, the `m4a` lines of `README.md` (layout row) and `docs/ARCHITECTURE.md` (the list of crates).  Each says that the crate makes ALAC M4A files, and AAC M4A files from given packets.
+* `docs/decisions/0028-m4a-with-alac-as-the-save-format.md`, Consequences: M2 adds the `esds` entry for its AAC decode fixtures, and M4 uses it.  0028 is accepted, so add a dated line "Amended on 2026-11-08 by the agent" that says what changed and why (the parent's intent review of M1, round 1).  The change does not change the decision.  Its line in `docs/README.md` says "accepted, amended 2026-11-08".  The team leader names the amendment for the PR's "Needs your attention".
+* Tests, in `m4a/tests/mp4.rs` with its box reader:
+  * The structure of an AAC file of 3 packets, 2 channels and 48 kHz: the `mp4a` entry, its channel count, rate and `esds`.  The descriptor tags, sizes and fields hold the values above.  The ASC bytes are the ones given.  `stts` has packets of 1024.
+  * A 6-channel AAC layout gives a channel count of 6 and a packet bound of 4608.
+  * The refusals: 0 channels, a `config_len` of 0 and of 65, an ALAC entry in an AAC layout and the reverse, an ASC of 5 bytes in a layout of `config_len` 2, a packet of 769 bytes in a mono AAC layout.
+  * `head().len() == head_len()` for an ASC of 2 bytes and of 5 bytes.
+  * `head().len() == head_len()` for AAC, with and without an `Edit`, for 0, 1, 1024 and 1025 frames.
+  * Symphonia probes an AAC file with 3 dummy packets (zeros): its track has `CODEC_ID_AAC`, 2 channels, 44,100 Hz, `num_frames` 3072, and `extra_data` equal to the ASC.  No decode.
+  * The ALAC tests of M1 pass with `Codec::Alac`, with the same bytes.
+* Acceptance: `cargo test -p m4a` passes, with each new test failing first.
+
+### Step 2: the `iTunSMPB` tag
+
+* `m4a/src/mp4.rs`: an optional gapless tag in the `Layout`.  A sketch: `Layout::with_gapless(self, Gapless { delay: u32, padding: u32, frames: u64 }) -> Result<Layout, Error>`, or one more argument of `new`.  The implementer chooses, and records the choice.
+* The tag: `moov` gets `udta` after the `trak`.  `udta` holds `meta` (a full box, version and flags 0), which holds `hdlr` (handler type `mdir`, reserved first word 0, then `appl`) and `ilst`.  `ilst` holds one `----` item with `mean` ("com.apple.iTunes"), `name` ("iTunSMPB") and `data` (type 1, UTF-8; locale 0).  `mean` and `name` are full boxes (version and flags 0, then the text).
+* The text of `iTunSMPB`: 12 fields of hexadecimal, each with one space before it.  The first is 8 digits of 0, the second the delay in 8 digits, the third the padding in 8 digits, the fourth the frames in 16 digits, then 8 fields of 8 digits of 0.  Upper case.  An example from an Apple file: ` 00000000 00000840 000001CA 00000000003F31F6 00000000 00000000 ...`.
+* `head_len()` counts the tag, so `head().len() == head_len()` holds.  The 4 GiB worst case counts it too.
+* `Layout` refuses `delay + frames + padding` that is not the media frames (`Error::GaplessFrames`).
+* Tests:
+  * The structure: the box path `moov/udta/meta/ilst/----`, the `hdlr`, the `mean`, `name` and `data` texts, and the 12 fields of the text for a delay of 2112 (0x840), a padding of 458 (0x1CA) and 4,141,558 frames (0x3F31F6).  These are 4047 packets of 1024.
+  * `head().len() == head_len()` with the tag, for FastStart and MoovLast, with and without an `Edit`.
+  * The refusal of `GaplessFrames`.
+  * Symphonia probes and decodes an ALAC file with the tag bit for bit (`m4a/tests/round_trip.rs`).  So the tag does not stop a reader.
+* Acceptance: `cargo test -p m4a` passes, with each new test failing first.
+
+### Step 3: the engine decodes ALAC, ADTS and AIFF
+
+* `engine/Cargo.toml`: Symphonia gets the features `isomp4`, `alac`, `aac` and `aiff`.  Dev-dependencies: `m4a` (path, version 0.1.0) and `oxideav-aac = "=0.1.7"`, with a comment that gives the reason (D3) and says that it does not ship.  Check DEPS-1 for `oxideav-aac` and write the facts in the comment: its release dates, its repository, and that `oxideav-core` is a test-only crate of it with `unsafe` code.
+* `xtask/src/rules.rs`: `mp4` and `aifc` in `AUDIO_EXTENSIONS` (ASSET-1), with cases in its test.  `.gitignore` gets `*.mp4` and `*.aifc`.  Both in this step, since `load_folder` opens these files from this step.  If `docs/invariants.md` lists the extensions, it changes too.
+* `THIRD-PARTY.md`: the new shipped Symphonia crates in the tables; the note on Symphonia says that it also decodes M4A (AAC-LC, ALAC), raw AAC and AIFF; a note that `oxideav-aac` 0.1.7 (MIT) and `oxideav-core` are test-only crates of `engine`.  The note on `m4a` says that `symphonia-format-isomp4` and `symphonia-codec-alac` now ship (through `engine`), and that `engine` takes `m4a` for tests only.
+* The layers table row of `engine` gets `m4a`.  `xtask/src/check.rs` `fixture()` gets the edge.
+* The engine family (see "Checks that the changes meet"): the doc of `ENGINE`, of `merges_into_engine` and of `the_ci_runs_the_engine_tests_alone` (line 1787), the test `crate_tests_with_a_member_outside_engines_family_run_engine_alone` (another member outside the family, if `m4a` joins it), `docs/ARCHITECTURE.md` (line 296), and `README.md` (line 75 and the Tests list).  Each gives a true reason.  The orchestrator lands `m2/claude-md.diff` for the `CLAUDE.md` line.  Check each new reason with `cargo tree -e features` before the commit, as M1's retrospective asks.
+* The test fixtures, in one `#[cfg(test)]` module of `engine` (for example `engine/src/test_m4a.rs`), beside `test_audio.rs`:
+  * `alac_m4a(left, right, rate, edit, order)`: `m4a::alac_file` of the 16-bit samples with the rounding of `engine::wav::write_pcm16`.
+  * `aac_m4a(channels, rate, edit, gapless, order)`: the ADTS frames of `oxideav_aac::encoder::StreamEncoder` (128 kbit/s for each 2 channels), each without its ADTS header (7 bytes, or 9 if `protection_absent` is 0), in a `Layout` of `Codec::Aac`, with an ASC of object type 2 for the rate and channels.  The media frames are the packets times 1024.
+  * `with_apple_delay(pcm)`: 1088 frames of silence before the source, so the delay of the encode is 1024 + 1088 = 2112 frames, Apple's delay.
+  * `adts(pcm, rate)`: the ADTS stream of `StreamEncoder`, as it is.
+  * The over-limit ALAC fixture uses `Layout` and `AlacEncoder` directly: one silent packet, its size repeated for each packet, past 1 GiB of `f32` (`MAX_DECODED_BYTES`).  It does not call `alac_file`, which needs the whole input.
+  * AIFF: `aiff(channels, rate, bits)` in `engine/src/test_audio.rs`, a `FORM`/`AIFF` file with `COMM` (the rate as an 80-bit extended float) and `SSND`, big-endian samples.
+* `most_frames` (decision 0013):
+  * ALAC (`CODEC_ID_ALAC`): as FLAC, 16 times what its bytes hold as PCM at its bits.  The bits come from byte 5 of the cookie (`extra_data`), since Symphonia sets no `bits_per_sample` for ALAC.  A missing cookie, or bits outside 16 to 32, counts as 16.
+  * AAC (`CODEC_ID_AAC`): at most its length at 32 kbit/s, with an unknown or impossible rate counted as 96 kHz, in the form of the MP3 case.
+  * AIFF: the case of the other codecs (`bits_per_coded_sample`) holds.  A test shows it.
+  * Each case has a unit test with exact numbers, as `a_flac_is_reserved_for_16_times_its_pcm` has.
+* A raw ADTS stream states only an estimate.  `open_within` treats it as it treats an MP3: no refusal on its stated length, and the decoder stops it at the limit.  The test: `open_within` of an ADTS with a limit below its length opens, and its decode then stops with "too long to open"; `open_within` of an AAC M4A with the same limit refuses.  `open_within` tells the two apart by the format, not by the codec.  For example: the probed format's info (`FormatReader::format_info`), or the box walk of Step 4.  The implementer records which.
+* Tests:
+  * An ALAC M4A decodes bit for bit, FastStart and MoovLast, at 44.1 kHz and 48 kHz, through `decode_bytes` and through `Decoder` in blocks.
+  * A raw ADTS `.aac` decodes, with its delay (no container states it).
+  * An AIFF of 16 and 24 bits, and an AIFC of compression type `NONE`, decode exactly, as the FLAC tests do.
+  * The over-limit ALAC fixture is refused before it decodes, as `a_stated_length_past_the_limit_is_refused_before_it_decodes` does.  The file is below 2 MB.
+  * `a_block_decode_keeps_its_memory_flat` covers ALAC M4A and AIFF too.
+* `engine/src/song.rs`: `Song::load_folder` takes `m4a`, `mp4`, `aac`, `aif`, `aiff` and `aifc`, with a test.  Its doc and the doc of `decode_path` name the formats.
+* The docs that Step 3 makes wrong: `docs/ARCHITECTURE.md` (the decode text, each line that names WAV, MP3 and FLAC as the inputs, and line 141 on the files refused before the decode) and `THIRD-PARTY.md` (line 10: the Symphonia crates of `m4a` that "do not ship").
+* `docs/tech-debt.md`, in this commit: a raw ADTS `.aac` keeps its encoder delay, since no container states it.
+* Acceptance: `cargo test -p engine` passes, with each new test failing first.  `cargo clippy --target wasm32-unknown-unknown -p engine --all-targets -- -D warnings` passes.
+
+### Step 4: the box reader and the messages
+
+* The box reader (for example `engine/src/mp4_boxes.rs`).  One walker over a trait that reads `len` bytes at an offset, with two forms: a byte slice (the head, which can be cut off) and a `MediaSource` (`Read + Seek`).  The walker:
+  * reads a box header of 8 bytes; a size of 1 reads a 64-bit size; a size of 0 means "to the end of the file" (or of the parent).  A size below the header, or past the parent, ends the walk with what it found so far.  It never panics on any input.
+  * reads only the boxes that it needs: `moov/mvhd`; for each `trak`: `tkhd` (its `track_ID`), `edts/elst`, `mdia/mdhd`, `mdia/hdlr`, the first entry type of `mdia/minf/stbl/stsd`; and `moov/udta/meta/ilst/----`.  It skips each other box by its size, with a seek, and never reads `mdat`, `stsz`, `stco` or cover art.
+  * reads at most 4 KiB of one box (`elst`, `mdhd`, `hdlr`, `mean`, `name`, `data`), so a crafted file cannot make it hold more (MEM-4).  An `elst` of more than 4 KiB counts as no `elst`.
+  * keeps the values of one track only: the first `soun` track, with its `track_ID`.  For all the other tracks it keeps only two flags: a `vide` handler seen, and a protected entry seen.  So its memory does not grow with the count of tracks.
+  * reads `mdhd` and `elst` of version 0 (32-bit times) and of version 1 (64-bit times).
+  * gives: the flags, the movie timescale, and for the one track its handler type, sample entry type, media timescale, duration and `elst` entries; and the `iTunSMPB` text.
+* `Decoder::open` (through `open_within`) runs the walker on the source before the probe, then seeks the source to 0.  For a file whose first box type is not `ftyp`, `moov`, `free`, `wide`, `skip` or `mdat`, it reads nothing more.  The decode worker's `BlockSource` can seek, so the same path runs there.  After the probe, `engine` compares the `track_ID` of the walker's track with the `id` of Symphonia's `default_track`.  If they differ, Step 5 does no trim.
+* The messages, as `anyhow` errors with exactly these texts:
+  * A video track (a `trak` whose `hdlr` is `vide`): "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC."  A `pub const VIDEO_TEXT` in `engine::decode` holds the text, so `app` uses the same one.
+  * A protected file (a sample entry of type `drms`, `drmi` or `enca` in a sound track): "This file is protected (DRM), so it cannot open."
+  * AAC: `engine` checks each AAC track before it makes the decoder, not only after a refusal.  It reads the ASC (`extra_data`) itself, with a small bit reader: the object type (5 bits, or 5 + 6 when 31), the rate index (4 bits, or a 24-bit rate when 15), the channel configuration (4 bits); for object type 5 or 29, the core rate and object type that follow; for the GA object types, `frameLengthFlag`, `dependsOnCoreCoder` (and its 14 bits) and `extensionFlag`; then, with 16 bits or more left, the sync extension `0x2b7`, its object type and `sbrPresentFlag`.  A unit test parses each ASC of the fixtures and the maintainer's `11 90 56 e5 00`.  The texts:
+    * Object type 5 or 29, an `sbrPresentFlag` of 1, or an ASC rate that differs from the rate of the `mp4a` entry (implicit SBR, where the entry states the output rate): "HE-AAC is not supported.  Open an AAC-LC file."
+    * Else more than 2 channels, from the ASC or, for a raw ADTS with no ASC, from the codec parameters: "This AAC file has <n> channels.  Only mono and stereo AAC open."
+    * Else an object type other than 2, a channel configuration of 0 (a program config element), a `frameLengthFlag` of 1 (960 frames), or an ASC that does not parse: "This kind of AAC does not open.  Open an AAC-LC file."
+    * Else the decoder opens, as today.
+  * The walker finds the video and the protection before the probe.  So an `.mp4` with only a video track gives the video message, not "no audio track".
+* The fixtures that the writer does not make are patched from its output, in the test module of Step 3.  Each patch asserts that it changed exactly one place:
+  * `vide`: the handler type `soun` occurs once in a file of one track (`hdlr`); replace it.  A second track: append a copy of the `trak` with `vide` to the `moov` of a MoovLast file, and fix the `moov` size.
+  * `drms` from `alac`, and `enca` from `mp4a`: the 4-byte entry type.
+  * An `mvhd` timescale of 1000 (for Step 5): the `mvhd` timescale and duration, and the `elst` `segment_duration`, in that timescale.
+  * The HE-AAC fixtures: the packets of `oxideav_aac::he_aac_encoder::HeAacEncoder`, without their ADTS headers, with the ASC `audio_specific_config(true)` (object type 5) and `audio_specific_config(false)` (`0x2b7` with SBR), in an `mp4a` entry of 44,100 Hz.  A third fixture: an ASC of object type 2 at 22,050 Hz with no sync extension, in an entry of 44,100 Hz (implicit SBR).
+  * The 6-channel fixture: `StreamEncoder` with 6 channels and an ASC of channel configuration 6.  An AAC Main fixture (object type 1) and an ASC of channel configuration 0 with a program config element, each with dummy packets.
+* Tests (each in `engine`):
+  * Each fixture of the list above gives its exact text, through `decode_bytes` and through `Decoder::new`.  The AAC fixture of object type 2 with an SBR flag of 0 in its sync extension (the form of the maintainer's file) decodes.
+  * A video fixture named with the extension `m4a` gives the video text too (D4: a renamed `.mp4`).
+  * Native, in `decoder/src/pass/tests.rs`: the decode pass of a video `.mp4` gives `Undecodable` with `VIDEO_TEXT` (D4: a dropped file goes to the decode worker first).  `decoder/Cargo.toml` gets `m4a` under a plain `[dev-dependencies]` (its present dev-dependencies are for wasm32 only), with its layers row and `fixture()` edge.
+  * The two video fixtures and the `drms` and `enca` fixtures give their texts also when the file is MoovLast.
+  * The walker, given a `moov` of 10,000 tracks, keeps the values of one track: a test allocator (`engine/src/test_alloc.rs`, `peak_of`) shows that its peak does not grow with the track count.
+  * The walker on a MoovLast file reads the `moov` after `mdat` with a seek.  A test source counts the bytes read: below 64 KiB plus the size of `moov`, for a file of 1 MiB of `mdat`.
+  * The walker on every prefix of a fixture, and on a fixture with each box size set to 0, 1, 7 and `u32::MAX`, ends with no panic.
+  * The walker keeps the first sound track and its `track_ID`, in a file of two sound tracks (the second `trak` copied, with a new `track_ID`).
+* `docs/tech-debt.md`, in this commit: an HE-AAC file with implicit SBR whose `mp4a` entry states the core rate, and a raw ADTS of HE-AAC, decode as their AAC-LC core: half the band, with no message.  Symphonia 0.6.1 does not tell `engine` that the stream holds SBR.  The fix: Symphonia's HE-AAC, or a check of the first packets for SBR fill elements.
+* Acceptance: `cargo test -p engine` and `cargo test -p decode-worker` pass, with each new test failing first.
+
+### Step 5: the trim of the delay and the padding
+
+* The trim, by D7, for the walker's track, when its `track_ID` is the `id` of Symphonia's `default_track` (Step 4); else no trim:
+  * From `elst`: when its entries, after any leading empty edits (`media_time == -1`), are exactly one entry with `media_time >= 0` and rate 1.0.  `skip` is `media_time`.  `keep` is `segment_duration` times the media timescale over the movie timescale, rounded to the nearest frame.  The media timescale must equal the sample rate; else no trim from `elst`.  A movie timescale of 0, or a `segment_duration` of 0 (some writers mean "all"), gives `skip` with no `keep`.  The decode ignores a leading empty edit, which adds silence in a player.  Any other form of `elst`: no trim from `elst`.
+  * Else from `iTunSMPB`: when its text has at least 4 fields of hexadecimal: `skip` is field 2, and `keep` is field 4.  A field 4 of 0 gives `keep` as the `mdhd` duration minus `skip` and field 3 (the padding), if that is above 0; else no `keep`.  So a block decode never holds back frames.
+  * Else no trim.
+  * The trim applies to the frames at the file's rate, before the decode resamples to `SONG_RATE`.
+* `Decoder::next_packet` drops the first `skip` frames, also over several packets, and stops after `keep` frames.  A packet that passes `keep` is cut.  `Decoder::frames()` counts the frames given.  The limits count the frames given.  `open_within` keeps the refusal on the stated length (`mdhd`, with the delay).  The reservation takes `keep` when it exists.
+* Tests, each against the decoded result:
+  * An ALAC M4A with an `elst` delay of 2112 frames decodes to the source's frames and length, bit for bit.  FastStart and MoovLast, `decode_bytes` and `Decoder` in blocks.
+  * An AAC-LC M4A (stereo, 44.1 kHz) of the Apple delay (`with_apple_delay`), with an `elst` of `skip` 2112 and `keep` the source frames: its length is the source's, and its cross-correlation with the source peaks at lag 0.  The same with only `iTunSMPB`.  The same with the encoder's own delay (1024, as the maintainer's file has).  The same in blocks.
+  * An AAC-LC M4A with neither: its frames are the packets times 1024 (no trim).
+  * `elst` wins over an `iTunSMPB` that disagrees (D7 order).
+  * An `mvhd` timescale of 1000: `keep` is the rounded conversion, as the real file needs.  A case whose conversion is not a whole number of frames shows the rounding.
+  * Two `elst` entries, an `elst` of rate 0.5, and a negative `media_time` other than -1: no trim from `elst`, then `iTunSMPB` if present.  A leading empty edit then one entry: the trim of that entry.  A `segment_duration` of 0 and a movie timescale of 0: `skip` only.
+  * A `keep` past the decoded frames gives the decoded frames, with no error.  A `skip` past the decoded frames gives "file decoded to no audio".
+  * A malformed `iTunSMPB` (too few fields, a field that is not hexadecimal) is ignored.  A field 4 of 0 uses the `mdhd` duration.
+  * No trim on a mismatch: a file of two sound tracks whose first sample entry is patched to a type that Symphonia does not know, so Symphonia takes the second; the decode gives every frame of the second track.
+* `decoder/src/web/tests.rs`: the decode worker decodes an ALAC M4A, MoovLast, with an `elst` delay of 2112 frames, in blocks.  Its session files hold the native decode's samples, as the FLAC case does.  Its frames equal the source's frames, not the frames of the track, so the test fails without the trim.  MoovLast makes `BlockSource` seek.  `decoder/Cargo.toml` gets `m4a` in its wasm32 dev-dependencies too.
+* Acceptance: `cargo test -p engine` passes, with each new test failing first.  `cargo run -p xtask -- web-test` passes, with the new decode worker case failing first.
+
+### Step 6: the head check
+
+* `head_length`:
+  * An MP4 (the first box type as in Step 4): `mp4_length` runs the walker on the head slice.  The `moov` can end after the head; the walker reads the boxes that are in the head.
+    * A track whose `hdlr` is `vide`, in the head: `HeadLength::Video`, a new variant.
+    * Else the `mdhd` of the first `soun` track, in the head: `HeadLength::Frames(song_frames(duration, timescale))`.  The duration counts the AAC delay, so a song just at the limit can be refused; that is accepted.
+    * Else `HeadLength::UnstatedPcm`: a `moov` after the head, a `moov` whose first `soun` `mdhd` is past the head (for example after large cover art), or a walk that ends.
+  * A raw ADTS stream (after an ID3 tag, if any): the first 12 bits are 0xFFF and the 2 layer bits are 00.  An MP3 frame has layer bits that are not 00.  `HeadLength::UnstatedPcm`.
+  * An AIFF or AIFC (`FORM`, then `AIFF` or `AIFC`): `aiff_length` reads `COMM` (channels, frames, bits, the 80-bit rate) and `SSND`.  It gives `Frames`, with at most the frames that the file holds when `SSND` is in the head, as `wav_length` does.  A missing `COMM`, a rate of 0, or a frame count of 0 gives `UnstatedPcm`.
+  * Fix the doc of `HeadLength` and of each variant, which list the cases.
+* `largest_file(HeadLength::Video, _)`: the callers refuse a video before they call it.  It gives `TAG_ROOM` only, so a caller that forgets the refusal refuses the file.  A test shows it.
+* `app/src/lib.rs`: `video_in_heads(heads) -> Option<&str>` gives the name of the first file whose head is `HeadLength::Video`.  `open_on_the_page` and `store::rebuild` call it before `refusal_of_heads`.  A video gives `anyhow::Error::new(Refused(video_text(file)))`, with the text "Not opened: <file>.  " and then `engine::decode::VIDEO_TEXT`.  `Refused` is shown as it is (`open_error_text`), so the text does not get the "too long" words of `PageRefusal`.  `refusal_of_heads` ignores `Video` (it is not a length).
+* `app/Cargo.toml`: `m4a` as a dev-dependency, for the video fixtures.  The layers table row of `app` and `fixture()` get the edge.  The app test patches `soun` to `vide` as Step 4 does; it needs no box walk.
+* Tests:
+  * `head_length` of: an ALAC M4A FastStart (`Frames`); MoovLast (`UnstatedPcm`); a FastStart file whose `moov` ends after the head (more than 12.6 minutes at 44.1 kHz, or the over-limit fixture) (`Frames`); a `moov` with a `free` box of 70 KiB before its `trak` (`UnstatedPcm`); a version 1 `mdhd` (`Frames`); an `mdat` of size 1 with a 64-bit size before `moov` in the head (`Frames`); an `mdat` of size 0 before `moov` (`UnstatedPcm`); a second `vide` track in the head, and a single track patched to `vide` (`Video`); an AAC M4A (`Frames` with the delay); ADTS, with and without an ID3 tag (`UnstatedPcm`); an MP3 stays `Unstated`; AIFF and AIFC (`Frames`), and an AIFF with `COMM` past the head (`UnstatedPcm`).
+  * Every prefix of each fixture gives a result with no panic.
+  * Native, in `app`: `video_in_heads` and the status text, for a song of one file and of 3 files.  `refusal_of_heads` of the head of the over-limit ALAC fixture gives `Stated`.
+  * Browser, in `app/src/decode_tests.rs`, as `a_drop_with_no_storage_refuses_a_long_wav_from_its_head` and `a_restore_on_the_page_refuses_a_long_song_from_heads_or_meta` do: a drop of a video `.mp4` with no storage, and a restore on the page of a session that holds one, each give the video status line before any whole read.
+* The docs that Step 6 makes wrong: `docs/ARCHITECTURE.md` (line 141, the files that the head check refuses).
+* Acceptance: `cargo test -p engine` and `cargo test -p app` pass, with each new test failing first.  `cargo run -p xtask -- web-test` passes, with the two new browser tests failing first.
+
+### Step 7: the picker, the texts, the server and the browser checks
+
+* `app/src/lib.rs`:
+  * `SONG_FILES`: `".mp3,.wav,.flac,.m4a,.mp4,.aac,.aif,.aiff,.aifc"`.  Keep the reason of its doc (WebKit bug 242110), and add that `.mp4` is there for audio-only `.mp4` files.
+  * The web `WELCOME`: name M4A and AIFF too, for example "several WAV/MP3/FLAC/M4A/AIFF stems".
+  * The native `WELCOME` stays as it is, since the `empty_state` snapshot of `app/tests/ui.rs` shows it, and a new snapshot can need the maintainer (TD-29).  A TD entry in this commit records the gap.
+  * The hover text of "Open song…": "Choose an M4A, MP3, WAV, FLAC or AIFF file, or several stems of one song".
+  * Each test that holds one of these texts changes with it.
+* `README.md`: the formats that the app opens (the lines that name WAV, MP3 and FLAC).
+* `xtask/src/serve.rs`: `m4a` and `mp4` give `audio/mp4`, `aac` gives `audio/aac`, `aif`, `aiff` and `aifc` give `audio/aiff`, with cases in its test.
+* `xtask/src/e2e/decode.rs` (`m4a` as a dependency of `xtask`, with its layers row and `fixture()` edge): `run` drops `song.m4a` with the type `audio/mp4`.  It is an ALAC M4A of the same 2 s of the mix at 44.1 kHz, FastStart, with an `elst` delay of 2112 frames.  Its session files match the native decode (`expected`, `session_checks`), as `song.wav` does.  A unit test of `xtask` checks that the file decodes natively to the samples of `song.wav`.
+* Acceptance: `cargo test -p app` and `cargo test -p xtask` pass.  `cargo run -p xtask -- e2e decode --browser chrome` passes on this Mac, with `CHROMEDRIVER=~/.local/chromedriver-155/chromedriver-mac-x64/chromedriver` (`docs/references/local-browser-testing.md`).  Its M4A case fails first with the engine features of `ba4b231` (for example with `isomp4` off in a scratch change that is not committed).  Record the failure.
+
+### Step 8: debt, sizes and the local check
+
+* `docs/tech-debt.md`: an entry for any case that an earlier step narrowed for a Symphonia limit, if that step did not add it.  Each TD goes in the commit that makes its gap (CLAUDE.md, "Debt"); this step only checks that none is missing.
+* The wasm sizes: `trunk build --release` in `app/`, then the sizes of `app_bg.wasm`, `decode-worker_bg.wasm` and `stem-worker_bg.wasm` in `app/dist/`.  The team leader writes them in this plan's Surprises and gives them to the orchestrator for the parent's Surprises.  The sizes before M2 are 5,836,422 B, 809,845 B and 1,250,988 B.
+* The local check (see below).  Run it, and record the command, the date and the result in Surprises.  If it fails, find the cause, fix it with a test that fails first, and run it again.
+* Acceptance: `cargo run -p xtask -- docs-check` passes.
+
+### The local check, with the maintainer's real file
+
+Not in CI, never in the repo (ASSET-1).  The file is copyrighted.
+
+* `engine/tests/local_aac.rs`: one test, `#[ignore = "local only: needs STEMYLA_LOCAL_AAC and STEMYLA_LOCAL_AAC_WAV"]`.  It reads the M4A path from `STEMYLA_LOCAL_AAC` and the path of Apple's decode from `STEMYLA_LOCAL_AAC_WAV`.  It panics with a clear text if either is missing.  It never writes a file.
+* It checks that `engine::decode::decode_path` gives 13,413,120 frames at 48,000 Hz (Apple's `afinfo`).  Then it takes the sum of the two channels of each decode, for 10 s from second 30, and finds the lag in -4096 to 4096 with the largest cross-correlation.  The lag must be 0.
+* Apple's decode: `afconvert -f WAVE -d LEI16 /Users/lloyd/Downloads/oasis-wonderwall.mp4 <scratch>/oasis.wav`, with `<scratch>` the team's scratch folder `m2/`, outside the repo: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/c41cb199-590d-46ab-827d-9e035ca7b9ed/scratchpad/m2/`.
+* The command: `STEMYLA_LOCAL_AAC=... STEMYLA_LOCAL_AAC_WAV=... cargo test -p engine --release --test local_aac -- --ignored`.
+* No doc names this test as the enforcement of a rule, since `docs-check` refuses an ignored test there.
+
+### Before review round 1
+
+* `cargo run -p xtask -- check --tier push` and `cargo build -p xtask` pass.
+* `cargo test -p engine --release` passes.
+* `cargo run -p xtask -- web-test` and `e2e decode --browser chrome` pass on this Mac.
+
+## Validation and acceptance
+
+* `cargo test -p m4a`, `cargo test -p engine`, `cargo test -p app` and `cargo test -p decode-worker` pass, with the tests of Step 1 to Step 7.
+* `cargo test --workspace --exclude roformer-gpu` and `cargo run -p xtask -- docs-check` pass.
+* `cargo run -p xtask -- check --tier push` passes.
+* `cargo run -p xtask -- web-test` and `cargo run -p xtask -- e2e decode --browser chrome` pass, with the M4A cases.
+* The local check passes, and its run is in Surprises.
+* The wasm sizes before and after are in Surprises.
+
+## Idempotence and recovery
+
+Each step is one commit, and each commit passes `check --tier commit`.  The Symphonia features are additive: a `git revert` of Step 3 restores the decode of WAV, MP3 and FLAC only.  The messages, the trim and the head check are separate commits, so a revert of one keeps the others.  The `m4a` changes of Steps 1 and 2 keep the bytes of every ALAC file of M1.  A new implementer starts from this plan and its Progress.
+
+## Progress
+
+* [x] 2026-11-08: plan written by the team leader.
+* [ ] Step 1: the `m4a` crate takes AAC.
+* [ ] Step 2: the `iTunSMPB` tag.
+* [x] 2026-11-08: plan review round 1 (a `Plan` agent): 4 blockers, 11 should-fix and 5 nits.  The plan takes each (Decision log).
+* [x] 2026-11-08: plan review round 2 (a new `Plan` agent): 2 blockers, 9 should-fix and 6 nits.  The plan takes each (Decision log).  Round 2 is the last plan review round.
+* [ ] Step 3: the engine decodes ALAC, ADTS and AIFF.
+* [ ] Step 4: the box reader and the messages.
+* [ ] Step 5: the trim of the delay and the padding.
+* [ ] Step 6: the head check.
+* [ ] Step 7: the picker, the texts, the server and the browser checks.
+* [ ] Step 8: debt, sizes and the local check.
+* [ ] Review rounds.
+
+## Surprises and discoveries
+
+* 2026-11-08, team leader: the facts of "Facts that the team leader checked on 2026-11-08" came from a spike in the scratchpad.  The main ones: `oxideav-aac` output decodes through Symphonia with a delay of exactly 1024 frames, so D3 (a) holds.  Symphonia refuses 6 channels and explicit HE-AAC with "aac too complex", and decodes implicit HE-AAC as its core at half the rate.
+* 2026-11-08, team leader: the maintainer's file states `segment_duration` in an `mvhd` timescale of 1000, not in the sample rate.  The `m4a` writer makes both timescales the sample rate, so the synthetic fixtures alone would miss the conversion.  Steps 4 and 5 have a patched fixture for it.
+
+## Decision log
+
+* 2026-11-08, agent (team leader): `oxideav-aac` is a dev-dependency of `engine` only, not of `m4a`.  Reason: the `m4a` tests need only dummy AAC packets to check the boxes; the decode tests of real AAC are in `engine`.
+* 2026-11-08, agent (team leader): the AAC fixture with Apple's delay of 2112 frames puts 1088 frames of silence before the source.  Reason: `oxideav-aac` has a fixed delay of 1024 frames, and the parent asks for the delay of 2112.
+* 2026-11-08, agent (team leader): the browser checks use an ALAC M4A, not AAC.  Reason: ALAC is exact, so the session files match the native decode bit for bit, and `xtask` and `decode-worker` need no `oxideav-aac`.  The AAC path is the same `engine` code, which the native tests cover.
+* 2026-11-08, agent (team leader): the trim takes `elst` only in its common form (one entry with `media_time >= 0`, rate 1.0, after any leading empty edit).  Reason: other forms are rare in audio files, and a wrong trim is worse than none.
+* 2026-11-08, agent (team leader): a video refusal is a `Refused` status line, not a `TooLongToOpen` variant.  Reason: the text of a `PageRefusal` says "too long", which is wrong for a video.
+* 2026-11-08, agent (team leader): an HE-AAC file with implicit SBR that the ASC does not show (a raw ADTS, or an `mp4a` entry at the core rate) decodes as its core, with a TD entry.  Reason: Symphonia 0.6.1 gives no sign of it, and the parent forbids a patch of Symphonia.
+* 2026-11-08, agent (team leader): the local check is an ignored test in `engine/tests/local_aac.rs` with its paths from the environment.  Reason: it needs the copyrighted file, which CI does not have (ASSET-1).
+* 2026-11-08, agent (team leader): plan review round 1 found 4 blockers, 11 should-fix and 5 nits.  The plan takes each.  The main changes: the box reader moves before the messages (new Step 4); a raw ADTS counts as an estimate, as an MP3; the walker keeps one track's values only; the engine family and its reason texts change in Step 3, with a `CLAUDE.md` diff; each step fixes its own docs; the HE-AAC text needs SBR or PS in the ASC; ALAC takes its bits from the cookie; the trim matches Symphonia's track by `track_ID`; browser and decode-worker tests of the video refusal.
+* 2026-11-08, agent (team leader): plan review round 2 found 2 blockers, 9 should-fix and 6 nits.  The plan takes each.  The main changes: `Codec::Aac` holds the ASC length; `engine` reads the ASC itself before the decoder, and refuses HE-AAC by an explicit type, an SBR flag of 1 or a rate that differs from the entry's; the trim keeps the first sound track and does nothing when Symphonia picks another; each test moves to the step that adds its behaviour; each TD goes in the commit of its gap; ASSET-1's extensions move to Step 3; AIFC decodes in a test.
+* 2026-11-08, agent (team leader): `engine` reads the ASC with its own bit reader, not with `symphonia_common`.  Reason: Symphonia reads the sync extension `0x2b7` only after an explicit object type 5 or 29, so its parse misses the backward-compatible SBR signal.  Round 1 had chosen `symphonia_common`; round 2 found the gap.
+* 2026-11-08, agent (team leader): an AAC M4A whose ASC rate differs from its `mp4a` rate gives the HE-AAC text.  Reason: such a file is implicit SBR, and the decode would play its core at the wrong speed.
+* 2026-11-08, agent (team leader): the native `WELCOME` text stays, with a TD entry.  Reason: the `empty_state` snapshot shows it, and a new snapshot can need the maintainer's approval (TD-29), whom the run does not ask.
+* 2026-11-08, agent (team leader): `app` takes `m4a` as a dev-dependency.  Reason: its video tests need an M4A, and D6 forbids a copy of the writer.
+* 2026-11-08, agent (team leader): an AAC is reserved for at most its length at 32 kbit/s.  Reason: AAC states its length exactly in `mdhd`, so only a crafted file overstates it; 32 kbit/s is below real AAC music files, and the limit of decision 0013 still holds.
+
+## Outcomes and retrospective
+
+Not started.
