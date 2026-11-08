@@ -100,7 +100,7 @@ Start a new `general-purpose` subagent with the brief of "The brief of a team le
 * The team leader writes the milestone plan and its index line.  A new `Plan` agent reviews it, at most 2 rounds.  The team leader fixes what it finds, and commits.
 * The team leader starts the implementer.  Each new test fails first, on an assert.
 * Before the commit of a step that needs a change of `CLAUDE.md` or `.claude/rules/**`, the team leader gives a step checkpoint ("Who edits what").  Then it waits.
-* Before round 1, the team leader gives a checkpoint: the diffs of `.claude/**` and `CLAUDE.md` that no step needs, and the text for the plan.  Then it waits.
+* Before round 1, the team leader gives a checkpoint: the diffs of `.claude/**` and `CLAUDE.md` that no step checkpoint carried, and the text for the plan.  Then it waits.
 
 ### 3. A checkpoint
 
@@ -119,7 +119,7 @@ At each checkpoint of a team leader:
 * Before each round, the team leader runs `cargo run -p xtask -- check --tier push` and `cargo build -p xtask`.
 * The Write tool refuses `<run>/<round>/findings.md` and `<run>/log.md` to the team leader.  So the team leader runs each round to step 11 of the `review-rounds` skill: the fixes, their commit, and `review log-check` on a copy of the log in `m<n>/`.  Then it gives a checkpoint.
 * A round fix that needs a change of `CLAUDE.md` or `.claude/rules/**` gives a step checkpoint before the fix commit ("Who edits what").  Then the fix commit adds those paths by name.
-* The checkpoint of a round holds the whole text of the two files, the two commands of step 11, and a diff for each change of `.claude/**` or `CLAUDE.md` that no fix commit needs.
+* The checkpoint of a round holds the whole text of the two files, the two commands of step 11, and a diff for each change of `.claude/**` or `CLAUDE.md` that no step checkpoint of the round carried.
 * At that checkpoint, write the two files at their paths.  Then run `target/debug/xtask review log-check <run>/log.md`, then `target/debug/xtask review clean <round>`.  Then do the steps of "A checkpoint".
 * The team leader fills the `Significant` field and column.  Check each value, and change it if you do not agree.  A wording gap in a doc that no agent acts on is not significant.  A second reading of a rule that makes a team do wrong work is significant.
 * The stop rule is step 11 of the `review-rounds` skill (decision 0024).  Do not say the rule in another way.  There is no cap.
