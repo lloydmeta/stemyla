@@ -12,7 +12,7 @@
 //! box of a size that does not fit ends the walk with what it found.  It
 //! never panics, also where `usize` has 32 bits.
 //!
-//! Symphonia's probe reads `moov/udta`, each top-level `meta` and each
+//! Symphonia's MP4 reader reads `moov/udta`, each top-level `meta` and each
 //! `moov` whole, cover art too.  So the walker plans to hide each of them
 //! from Symphonia (`engine::hidden`).  The rest of the first `moov` that
 //! Symphonia holds, its sample tables, has a bound (`most_moov_bytes`).

@@ -333,3 +333,104 @@ pub fn with_small_wav_tags(wav: &[u8], count: usize) -> Vec<u8> {
     out[4..8].copy_from_slice(&riff.to_le_bytes());
     out
 }
+
+/// The dense forms of tags of review round 5 (finding 5-1): containers of
+/// fewer than 4096 bytes, each with as many tags as it can hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dense {
+    /// A FLAC VORBIS_COMMENT block of comments of one byte ("=").
+    FlacComments,
+    /// A WAV `LIST` chunk of form `INFO`, of subchunks of 2 bytes.
+    WavInfo,
+    /// An AIFF `COMT` chunk of comments of one byte.
+    AiffComments,
+    /// An AIFF `ID3 ` chunk of ID3v2 `TIT2` frames of one byte of text.
+    AiffId3,
+}
+
+/// One container of `dense`, as its bytes in the file.
+fn dense_container(dense: Dense) -> Vec<u8> {
+    match dense {
+        Dense::FlacComments => {
+            let count = 800_u32;
+            let mut body = Vec::from(0_u32.to_le_bytes());
+            body.extend_from_slice(&count.to_le_bytes());
+            for _ in 0..count {
+                body.extend_from_slice(&1_u32.to_le_bytes());
+                body.push(b'=');
+            }
+            flac_block(4, false, &body)
+        }
+        Dense::WavInfo => {
+            let mut body = Vec::from(*b"INFO");
+            for _ in 0..400 {
+                body.extend_from_slice(&chunk(b"ICMT", b"a", true));
+            }
+            chunk(b"LIST", &body, true)
+        }
+        Dense::AiffComments => {
+            let count = 445_u16;
+            let mut body = Vec::from(count.to_be_bytes());
+            for _ in 0..count {
+                // A time stamp, a marker of 0, a count of 1 and its byte.
+                body.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1, b'a']);
+            }
+            chunk(b"COMT", &body, false)
+        }
+        Dense::AiffId3 => {
+            let mut frames = Vec::new();
+            for _ in 0..330 {
+                // `TIT2` of 2 bytes: the text encoding, and one byte.
+                frames.extend_from_slice(b"TIT2");
+                frames.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, b'a']);
+            }
+            let mut tag = id3_tag(0);
+            let size = frames.len() as u32;
+            let synchsafe = [21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7F) as u8);
+            tag[6..10].copy_from_slice(&synchsafe);
+            tag.extend_from_slice(&frames);
+            chunk(b"ID3 ", &tag, false)
+        }
+    }
+}
+
+/// The size of one container of `dense` in the file.
+pub fn dense_container_bytes(dense: Dense) -> usize {
+    dense_container(dense).len()
+}
+
+/// `plain`, a FLAC, a WAV or an AIFF of the format of `dense`, with
+/// `count` containers of `dense` before its audio.
+pub fn with_dense_tags(plain: &[u8], dense: Dense, count: usize) -> Vec<u8> {
+    let one = dense_container(dense);
+    let tags = one.repeat(count);
+    let mut out = Vec::with_capacity(plain.len() + tags.len());
+    match dense {
+        Dense::FlacComments => {
+            out.extend_from_slice(&plain[..42]);
+            out.extend_from_slice(&tags);
+            out.extend_from_slice(&plain[42..]);
+            // The last-block bit moves from STREAMINFO to the last tag
+            // block, when STREAMINFO had it.
+            if plain[4] & 0x80 != 0 && count > 0 {
+                out[4] &= 0x7F;
+                out[42 + (count - 1) * one.len()] |= 0x80;
+            }
+        }
+        Dense::WavInfo => {
+            out.extend_from_slice(&plain[..36]);
+            out.extend_from_slice(&tags);
+            out.extend_from_slice(&plain[36..]);
+            let riff = (out.len() - 8) as u32;
+            out[4..8].copy_from_slice(&riff.to_le_bytes());
+        }
+        Dense::AiffComments | Dense::AiffId3 => {
+            out.extend_from_slice(&plain[..12]);
+            out.extend_from_slice(&tags);
+            out.extend_from_slice(&plain[12..]);
+            let form = (out.len() - 8) as u32;
+            out[4..8].copy_from_slice(&form.to_be_bytes());
+        }
+    }
+    out
+}

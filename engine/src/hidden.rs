@@ -28,22 +28,52 @@ pub(crate) const ALWAYS_HIDDEN: u64 = 4096;
 /// real file has thousands of tag containers; one has tens.
 pub(crate) const MOST_SMALL: usize = 4096;
 
-/// The bytes that Symphonia keeps for each tag past its container, as the
-/// decode counts them.  Measured with `peak_of` on 2026-11-09, for 50,000
-/// small containers past [`MOST_SMALL`]: an AIFF `NAME` chunk of 10 bytes
-/// keeps 176 bytes (an overhead of 166), a FLAC APPLICATION block of 1,028
-/// bytes keeps 1,168 (140), and an empty top-level M4A `meta` of 12 bytes
-/// keeps about 1.  The count takes 256, above the worst.
+/// The fewest bytes of one entry (one tag) of any container of tags.  A
+/// FLAC VORBIS_COMMENT holds a length of 4 bytes for each comment; each
+/// other form needs more.  So a container of `size` bytes holds at most
+/// `size / MIN_ENTRY_BYTES` entries ([`kept_charge`]).
+pub(crate) const MIN_ENTRY_BYTES: u64 = 4;
+
+/// The bytes that the decode counts for each entry that a small container
+/// past [`MOST_SMALL`] can hold ([`kept_charge`]).  What Symphonia keeps
+/// grows with the entries of a container, not with the container
+/// (finding 5-1 of review round 5).  Measured with `peak_of` on
+/// 2026-11-09, with no container hidden, as the worst over counts of 1 to
+/// 257 containers (100,000 for `NAME`), for each entry that the charge
+/// counts:
+///
+/// * a FLAC VORBIS_COMMENT of 4,012 bytes of 800 "=" comments: 90,512 to
+///   167,387 bytes for each container, so 163 for each entry past its
+///   bytes (Symphonia's lists grow by doubling);
+/// * a WAV `LIST`/`INFO` of 4,012 bytes of 400 subchunks of 2 bytes:
+///   55,123, so 51;
+/// * a top-level M4A `meta` of 3,803 bytes of 150 `ilst` items: 25,780,
+///   so 23;
+/// * an AIFF `NAME` chunk of 10 bytes: 268, so 129;
+/// * an empty WAV `LIST` of 12 bytes: 274, so 87;
+/// * an AIFF keeps one `COMT` and the last `ID3 ` chunk only, and refuses
+///   a second `COMT`.
+///
+/// The count takes 256, more than 1.5 times the worst.  A test holds the
+/// peak of each form at the limit under [`MOST_KEPT_BYTES`].
 pub(crate) const KEPT_OVERHEAD: u64 = 256;
 
-/// The most bytes of tags that Symphonia may keep, counted as the size of
-/// each small container past [`MOST_SMALL`] and [`KEPT_OVERHEAD`]: 16 MiB.
+/// The bytes that the decode counts for a small container of `size` bytes
+/// that Symphonia reads: its bytes, and [`KEPT_OVERHEAD`] for each entry
+/// that it can hold, one for each [`MIN_ENTRY_BYTES`], at least one.
+pub(crate) fn kept_charge(size: u64) -> u64 {
+    let entries = (size / MIN_ENTRY_BYTES).max(1);
+    size.saturating_add(entries.saturating_mul(KEPT_OVERHEAD))
+}
+
+/// The most bytes of tags that Symphonia may keep, counted as the
+/// [`kept_charge`] of each small container past [`MOST_SMALL`]: 16 MiB.
 /// It is the room for tags that the page gives each file
 /// (`engine::decode::TAG_ROOM`), far below the 1 GiB of samples of decision
 /// 0013 and the 2 GB of a tab (MEM-4).  A file past it is refused before
-/// the probe ([`Plan::too_much_kept`]).  So a file of 5000 small tags
-/// opens, and a file of a million tags of 2 bytes, which would keep about
-/// 140 MB, does not.
+/// Symphonia opens it ([`Plan::too_much_kept`]).  So a file of 5000 small
+/// tags opens.  A file of 4,200 dense VORBIS_COMMENT blocks of 4 KiB, which
+/// would keep about 500 MB, does not.
 pub(crate) const MOST_KEPT_BYTES: u64 = 16 << 20;
 
 /// One change: `len` bytes of `bytes` in place of the bytes at `at` of the
@@ -63,7 +93,7 @@ pub(crate) struct Plan {
     pub patches: Vec<Patch>,
     small: usize,
     /// The bytes that Symphonia keeps of the small containers that the
-    /// plan does not hide, with [`KEPT_OVERHEAD`] for each.
+    /// plan does not hide, as the [`kept_charge`] of each.
     pub kept: u64,
     /// [`Plan::kept`] passes [`MOST_KEPT_BYTES`], so the decode refuses the
     /// file.
@@ -78,7 +108,7 @@ impl Plan {
         if small {
             if self.small >= MOST_SMALL {
                 let size = size.unwrap_or(ALWAYS_HIDDEN);
-                self.kept = self.kept.saturating_add(size + KEPT_OVERHEAD);
+                self.kept = self.kept.saturating_add(kept_charge(size));
                 self.too_much_kept = self.kept > MOST_KEPT_BYTES;
                 return;
             }
@@ -556,6 +586,36 @@ mod tests {
         assert_eq!(patches(&plain), []);
     }
 
+    /// Findings 5-1 and 5-5 of review round 5: the charge of a small
+    /// container counts each entry that it can hold.  A plan that keeps
+    /// exactly `MOST_KEPT_BYTES` is not refused; one that keeps one byte
+    /// more is.
+    #[test]
+    fn a_plan_is_refused_only_past_the_kept_limit() {
+        assert_eq!(kept_charge(0), KEPT_OVERHEAD, "no entries is one entry");
+        assert_eq!(kept_charge(3), 3 + KEPT_OVERHEAD);
+        assert_eq!(kept_charge(4), 4 + KEPT_OVERHEAD);
+        assert_eq!(kept_charge(4012), 4012 + 1003 * KEPT_OVERHEAD);
+        // Sizes whose charges add to `MOST_KEPT_BYTES` exactly, and the
+        // same with one size of 3 bytes made 4, one byte more.
+        let at_the_limit = [vec![3; 64], vec![4092; 63], vec![60]].concat();
+        let one_more = [vec![3; 63], vec![4; 1], vec![4092; 63], vec![60]].concat();
+        let plan_of_sizes = |sizes: &[u64]| {
+            let mut plan = Plan::default();
+            for at in 0..MOST_SMALL as u64 {
+                plan.hide(at, b"JUNK", Some(8));
+            }
+            for size in sizes {
+                plan.hide(0, b"JUNK", Some(*size));
+            }
+            plan
+        };
+        let at = plan_of_sizes(&at_the_limit);
+        assert_eq!((at.kept, at.too_much_kept), (MOST_KEPT_BYTES, false));
+        let past = plan_of_sizes(&one_more);
+        assert_eq!((past.kept, past.too_much_kept), (MOST_KEPT_BYTES + 1, true));
+    }
+
     /// The rule of the container at the start of a view (findings 5-2 to
     /// 5-4 of review round 5).
     #[test]
@@ -639,7 +699,7 @@ mod tests {
         assert!(plan.is_ok(), "{plan:?}");
         let plan = plan.unwrap();
         assert_eq!(plan.patches.len(), MOST_SMALL);
-        assert_eq!(plan.kept, 520 + KEPT_OVERHEAD, "the one chunk past the cap");
+        assert_eq!(plan.kept, kept_charge(520), "the one chunk past the cap");
         assert!(!plan.too_much_kept);
     }
 
@@ -653,7 +713,7 @@ mod tests {
             plan.hide(at * 8, b"free", Some(8));
         }
         assert_eq!(plan.patches.len(), MOST_SMALL);
-        assert_eq!(plan.kept, 10 * (8 + KEPT_OVERHEAD));
+        assert_eq!(plan.kept, 10 * kept_charge(8));
         assert!(!plan.too_much_kept);
         plan.hide(1 << 40, b"free", Some(ALWAYS_HIDDEN));
         plan.hide(1 << 41, b"free", None);

@@ -90,7 +90,7 @@ pub const VIDEO_TEXT: &str =
     "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC.";
 
 /// The text of an MP4 whose sample tables pass [`most_moov_bytes`], which
-/// Symphonia's probe would read whole (MEM-4).
+/// Symphonia's MP4 reader would read whole (MEM-4).
 pub const MOOV_TEXT: &str =
     "The index of this file (its moov box) is too large for its length, so it cannot open.";
 
@@ -501,7 +501,8 @@ pub fn decode_path(path: &Path) -> Result<Audio> {
 }
 
 /// Decodes an in-memory file, for example one dropped into the web app.
-/// `ext` (such as `"mp3"`) helps the format probe.
+/// The decode takes the format from the bytes, so `ext` (such as `"mp3"`)
+/// is not used.
 pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<Audio> {
     decode_source(Box::new(Cursor::new(bytes)), ext)
 }
@@ -819,9 +820,9 @@ fn first_container(mss: &mut MediaSourceStream) -> Option<Container> {
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
 /// Each reader reads its marker from there (`try_new`), but for MP4: its
-/// reader steps back 4 bytes from the `ftyp` marker that the probe found
-/// (`IsoMp4Reader::try_new`), so the decode reads the 4 bytes of the first
-/// box size first.
+/// reader steps back 4 bytes from the box type that Symphonia's probe
+/// found (`IsoMp4Reader::try_new`), so the decode reads the 4 bytes of the
+/// first box size first.
 fn open_reader(
     mut mss: MediaSourceStream<'static>,
     container: Container,
@@ -880,7 +881,8 @@ pub struct Packet<'a> {
 }
 
 impl Decoder {
-    /// Opens `source`, with `ext` (such as `"mp3"`) to help the probe.
+    /// Opens `source`.  The decode takes the format from the bytes, so `ext`
+    /// (such as `"mp3"`) is not used.
     pub fn new(source: Box<dyn MediaSource>, ext: Option<&str>) -> Result<Decoder> {
         Decoder::within(source, ext, MAX_DECODED_BYTES)
     }
@@ -1747,7 +1749,7 @@ mod tests {
             fail_from: 20_000,
         };
         let decoder =
-            Decoder::new(Box::new(failing), Some("wav")).expect("the probe reads the start");
+            Decoder::new(Box::new(failing), Some("wav")).expect("the open reads the start");
         let ended = every_packet(decoder);
         let error = ended.expect_err("a failed read is an error");
         assert!(
@@ -3071,7 +3073,7 @@ mod tests {
     }
 
     /// The maintainer's design of review round 2 (MEM-4), and finding 2-8:
-    /// the probe gives up past 1 MiB of a leading ID3v2 tag, since
+    /// Symphonia's probe gives up past 1 MiB of a leading ID3v2 tag, since
     /// `engine`'s Symphonia has no ID3v2 reader.  The decode starts
     /// Symphonia's view after the tags, so an MP3, a raw AAC or a FLAC with
     /// a tag of 2 MiB or 64 MiB opens at a flat peak, bit for bit.
@@ -3116,7 +3118,8 @@ mod tests {
         }
     }
 
-    /// Checks that `bytes` is refused with `text` before the probe: through
+    /// Checks that `bytes` is refused with `text` before Symphonia opens it:
+    /// through
     /// `decode_bytes` and `Decoder`, and at a small peak.
     fn assert_refused_early(bytes: Vec<u8>, ext: &str, text: &str, case: &str) {
         assert_eq!(refusal(bytes.clone(), ext), text, "{case}");
@@ -3136,57 +3139,120 @@ mod tests {
     /// Finding 4-1 of review round 4 (MEM-4), by the maintainer's rule: a
     /// file is not refused for its count of tags.  A plan hides
     /// `MOST_SMALL` small containers, and Symphonia keeps the rest.  A file
-    /// opens while they keep at most `MOST_KEPT_BYTES`; one more is refused
-    /// before the probe, at a small peak.  A file of 5000 small tags opens.
+    /// opens while their `kept_charge` is at most `MOST_KEPT_BYTES`; one
+    /// more is refused before Symphonia opens it, at a small peak.  A file of 5000
+    /// small tags opens.
+    ///
+    /// Findings 5-1 and 5-5 of review round 5: the charge holds for the
+    /// densest containers too.  At the limit, the decode of each form peaks
+    /// at most `MOST_KEPT_BYTES` above the plain file, with 256 KiB for the
+    /// plan.
     #[test]
     fn a_file_is_refused_only_when_its_kept_tags_pass_the_limit() {
-        use crate::hidden::{KEPT_OVERHEAD, MOST_KEPT_BYTES, MOST_SMALL};
-        use crate::test_audio::{Aiff, aiff, with_small_aiff_tags, with_small_flac_tags};
-        let (left, right, _) = stereo_wav();
+        use crate::hidden::{MOST_KEPT_BYTES, MOST_SMALL, kept_charge};
+        use crate::test_audio::{
+            Aiff, Dense, aiff, dense_container_bytes, with_dense_tags, with_small_aiff_tags,
+            with_small_flac_tags,
+        };
+        use crate::test_m4a::{bx, dense_meta};
+        let (left, right, wav) = stereo_wav();
         let flac = compressed(&left, &right, 44_100);
         let plain_aiff = aiff(&[left, right], 44_100, 16, Aiff::Plain);
         let m4a = alac_of(m4a::Order::MoovLast);
-        let metas = |count: usize| {
-            let meta = crate::test_m4a::bx(b"meta", &[&[0; 4]]);
-            [m4a.clone(), meta.repeat(count)].concat()
-        };
         let five_thousand = with_small_aiff_tags(&plain_aiff, 5000);
         assert_eq!(decoded(five_thousand, "5000 tags").frames(), FRAMES);
-        // Each format: its container size, and a file of `count` of them.
+        let empty_meta = bx(b"meta", &[&[0; 4]]);
+        let dense_meta = dense_meta();
+        // Each form: its file, its container size, a file of `count` of
+        // them, and whether Symphonia opens a file of many of them.
         type Tagged<'a> = Box<dyn Fn(usize) -> Vec<u8> + 'a>;
-        let formats: [(&str, u64, Tagged); 3] = [
+        fn dense(plain: &[u8], form: Dense) -> (u64, Tagged<'_>) {
+            let size = dense_container_bytes(form) as u64;
+            let tagged = move |count| with_dense_tags(plain, form, count);
+            (size, Box::new(tagged))
+        }
+        fn metas<'a>(m4a: &'a [u8], meta: &'a [u8]) -> (u64, Tagged<'a>) {
+            let tagged = move |count| [m4a, &meta.repeat(count)].concat();
+            (meta.len() as u64, Box::new(tagged))
+        }
+        type Form<'a> = (&'a str, &'a str, &'a [u8], (u64, Tagged<'a>), bool);
+        let forms: [Form; 8] = [
             (
                 "flac",
-                1028,
-                Box::new(|count| with_small_flac_tags(&flac, count)),
+                "APPLICATION blocks",
+                &flac,
+                (1028, Box::new(|count| with_small_flac_tags(&flac, count))),
+                true,
             ),
             (
                 "aiff",
-                10,
-                Box::new(|count| with_small_aiff_tags(&plain_aiff, count)),
+                "NAME chunks",
+                &plain_aiff,
+                (
+                    10,
+                    Box::new(|count| with_small_aiff_tags(&plain_aiff, count)),
+                ),
+                true,
             ),
-            ("m4a", 12, Box::new(metas)),
+            ("m4a", "empty metas", &m4a, metas(&m4a, &empty_meta), true),
+            (
+                "flac",
+                "dense VORBIS_COMMENT",
+                &flac,
+                dense(&flac, Dense::FlacComments),
+                true,
+            ),
+            (
+                "wav",
+                "dense LIST/INFO",
+                &wav,
+                dense(&wav, Dense::WavInfo),
+                true,
+            ),
+            (
+                "aiff",
+                "dense ID3 chunks",
+                &plain_aiff,
+                dense(&plain_aiff, Dense::AiffId3),
+                true,
+            ),
+            // Symphonia refuses a second COMT chunk by itself.
+            (
+                "aiff",
+                "dense COMT",
+                &plain_aiff,
+                dense(&plain_aiff, Dense::AiffComments),
+                false,
+            ),
+            ("m4a", "dense ilst", &m4a, metas(&m4a, &dense_meta), true),
         ];
-        for (ext, size, tagged) in formats {
-            let most = MOST_SMALL + (MOST_KEPT_BYTES / (size + KEPT_OVERHEAD)) as usize;
-            let at = decode_bytes(tagged(most), Some(ext));
-            assert!(at.is_ok(), "{ext} at the limit: {:?}", at.err());
+        for (ext, form, plain, (size, tagged), opens) in forms {
+            let case = format!("{ext} of {form}");
+            let most = MOST_SMALL + (MOST_KEPT_BYTES / kept_charge(size)) as usize;
+            let (plain_peak, _) = block_peak(Vec::from(plain), ext);
+            let (peak, frames) = block_peak(tagged(most), ext);
+            assert_eq!(frames.is_ok(), opens, "{case} at the limit: {frames:?}");
+            let bound = plain_peak + MOST_KEPT_BYTES as usize + (256 << 10);
+            assert!(
+                peak <= bound,
+                "{case} at the limit: a peak of {peak} bytes, over {bound}"
+            );
             assert_refused_early(
                 tagged(most + 1),
                 ext,
                 TAGS_TEXT,
-                &format!("{ext} past the limit"),
+                &format!("{case} past the limit"),
             );
         }
     }
 
-    /// Finding 4-2 of review round 4 (MEM-4): Symphonia's probe scans up to
-    /// 1 MiB for `ftyp`, so an M4A behind an ID3v2 tag or a `uuid` box
-    /// opens as MP4.  The decode walks it from that `ftyp`, so its art is
-    /// hidden and its checks hold.
+    /// Finding 4-2 of review round 4 (MEM-4): an M4A behind an ID3v2 tag
+    /// opens at the start of its view, and one that starts with a `uuid`
+    /// box opens as MP4.  The decode walks it from the same start, so its
+    /// art is hidden and its checks hold.
     #[test]
     fn an_m4a_behind_an_id3_tag_or_a_uuid_box_is_walked() {
-        use crate::hidden::{KEPT_OVERHEAD, MOST_KEPT_BYTES, MOST_SMALL};
+        use crate::hidden::{MOST_KEPT_BYTES, MOST_SMALL, kept_charge};
         use crate::test_audio::id3_tag;
         use crate::test_m4a::{bx, top_box, with_cover, with_stco_moved};
         let plain = alac_of(m4a::Order::MoovLast);
@@ -3206,7 +3272,7 @@ mod tests {
             FTYP_TEXT,
             "an ftyp of 64 MiB behind an ID3 tag",
         );
-        let past = MOST_SMALL + (MOST_KEPT_BYTES / (12 + KEPT_OVERHEAD)) as usize + 1;
+        let past = MOST_SMALL + (MOST_KEPT_BYTES / kept_charge(12)) as usize + 1;
         let metas = bx(b"meta", &[&[0; 4]]).repeat(past);
         let many = [tag, plain, metas].concat();
         assert_refused_early(many, "m4a", TAGS_TEXT, "small metas behind an ID3 tag");
@@ -3214,7 +3280,7 @@ mod tests {
 
     /// Finding 3-2 of review round 3 (MEM-4): Symphonia reads each `ftyp`
     /// whole.  A later `ftyp` is hidden.  The first one, which Symphonia
-    /// needs, is refused before the probe past `MOST_BOX_BYTES`.
+    /// needs, is refused past `MOST_BOX_BYTES` before Symphonia opens it.
     #[test]
     fn a_large_ftyp_is_hidden_or_refused() {
         use crate::test_m4a::{bx, top_box};
@@ -3343,9 +3409,10 @@ mod tests {
     }
 
     /// Finding 2-2 of review round 2 (MEM-4): sample tables past
-    /// `most_moov_bytes` are refused before the probe, at a small peak.
+    /// `most_moov_bytes` are refused before Symphonia opens the file, at a
+    /// small peak.
     #[test]
-    fn an_m4a_with_tables_past_the_bound_is_refused_before_the_probe() {
+    fn an_m4a_with_tables_past_the_bound_is_refused_early() {
         use crate::test_m4a::with_grown_stsz;
         let grown = with_grown_stsz(alac_of(m4a::Order::MoovLast), 17 << 20);
         assert_eq!(refusal(grown.clone(), "m4a"), MOOV_TEXT);

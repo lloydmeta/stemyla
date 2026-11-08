@@ -613,3 +613,19 @@ pub fn with_ftyp_of(file: &[u8], size: usize) -> Vec<u8> {
     let out = [ftyp, Vec::from(&file[old_size..])].concat();
     with_stco_moved(out, size as i64 - old_size as i64)
 }
+
+/// A top-level `meta` of iTunes tags of fewer than 4096 bytes, with 150
+/// `ilst` items of a text of one byte: the dense form of M4A tags.
+pub fn dense_meta() -> Vec<u8> {
+    let item = bx(
+        b"\xA9nam",
+        &[&bx(b"data", &[&[0, 0, 0, 1, 0, 0, 0, 0], b"a"])],
+    );
+    let hdlr = bx(b"hdlr", &[&[0; 8], b"mdir", b"appl", &[0; 9]]);
+    let meta = bx(
+        b"meta",
+        &[&[0; 4], &hdlr, &bx(b"ilst", &[&item.repeat(150)])],
+    );
+    assert!(meta.len() < 4096, "a small container");
+    meta
+}
