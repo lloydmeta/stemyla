@@ -4,7 +4,7 @@
 //! writes the bytes, as `stem-worker` does for FLAC.
 //!
 //! The crate is Apache-2.0 only, because its ALAC encoder is a port of
-//! Apple's ALAC reference (decision 0028).
+//! Apple's ALAC reference (decision 0029).
 
 #![forbid(unsafe_code)]
 

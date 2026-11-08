@@ -90,6 +90,23 @@ fn the_port_gives_the_packets_and_the_cookie_of_the_reference() {
     }
 }
 
+/// The signals of the mutant probes of review round 1, in one full packet
+/// and in one partial packet.
+#[test]
+fn the_port_gives_the_packets_of_the_reference_on_the_probe_signals() {
+    for frames in [4096, 4000] {
+        for (name, input) in common::probe_signals(frames) {
+            let ours = port(&input);
+            let theirs = reference(&input);
+            assert!(
+                ours.packets == theirs.packets,
+                "{name}, {frames} frames: the packets differ"
+            );
+            assert_eq!(ours.cookie, theirs.cookie, "{name}, {frames} frames");
+        }
+    }
+}
+
 #[test]
 fn noise_gives_escape_packets_and_a_sine_compressed_packets() {
     let frames = 10 * FRAMES_PER_PACKET;
@@ -115,6 +132,25 @@ fn each_packet_is_appended_after_the_bytes_of_out() {
     assert!(size > 0);
     assert_eq!(out.len(), 3 + size);
     assert_eq!(out[..3], [1, 2, 3]);
+}
+
+/// A caller can reserve `MAX_PACKET_BYTES` for each packet, and `out` then
+/// never grows its allocation (MEM-4).
+#[test]
+fn a_packet_never_grows_out_past_max_packet_bytes() {
+    let music: common::Signal = common::music;
+    for (name, signal) in common::signals().into_iter().chain([("music-like", music)]) {
+        let input = signal(10 * FRAMES_PER_PACKET - 1_000);
+        let mut encoder = AlacEncoder::new(44_100);
+        let mut out = Vec::with_capacity(MAX_PACKET_BYTES);
+        let capacity = out.capacity();
+        for (i, packet) in input.chunks(FRAMES_PER_PACKET * 2).enumerate() {
+            out.clear();
+            let size = encoder.encode(packet, &mut out);
+            assert_eq!(size, out.len(), "{name}: packet {i}");
+            assert_eq!(out.capacity(), capacity, "{name}: packet {i}");
+        }
+    }
 }
 
 #[test]

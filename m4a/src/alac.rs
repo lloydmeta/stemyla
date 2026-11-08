@@ -12,10 +12,11 @@
 //! channels, `FormatDescription` and the log calls.  It drops the predictor
 //! branches that 16-bit stereo does not use, and makes the unrolled loops
 //! for 4 and 8 coefficients one loop.  Its trial encodes count bits, and
-//! keep no bytes.
+//! keep no bytes.  Its compressed try goes into a buffer of the encoder, not
+//! into the caller's output, so it needs no rewind.
 //!
 //! This crate takes `alac-encoder` under Apache-2.0, so the crate is
-//! Apache-2.0 only (decision 0028).
+//! Apache-2.0 only (decision 0029).
 //!
 //! The notice of `alac-encoder` 0.3.0 (its `LICENSE-MIT`):
 //!
@@ -73,6 +74,11 @@ pub const FRAMES_PER_PACKET: usize = 4096;
 
 /// The largest packet of 16-bit stereo: an escape packet of 4096 frames.
 pub const MAX_PACKET_BYTES: usize = 16_388;
+
+/// The size of the work buffer of the source for 2 channels.  The
+/// compressed try of a packet goes into a buffer of this size, so a try
+/// that does not pay never goes into the caller's output.
+const TRY_BYTES: usize = FRAMES_PER_PACKET * CHANNELS * 5 + 1;
 
 const BIT_DEPTH: u32 = 16;
 const CHANNELS: usize = 2;
@@ -141,6 +147,9 @@ pub struct AlacEncoder {
     coefs_u: CoefSets,
     coefs_v: CoefSets,
     max_packet_bytes: u32,
+    /// The compressed try of a packet.  It grows only if a try passes
+    /// `TRY_BYTES`.
+    compressed: Vec<u8>,
 }
 
 impl AlacEncoder {
@@ -156,11 +165,15 @@ impl AlacEncoder {
             coefs_u: coefs,
             coefs_v: coefs,
             max_packet_bytes: 0,
+            compressed: Vec::with_capacity(TRY_BYTES),
         }
     }
 
     /// Appends one packet to `out`, and gives its size in bytes.
     /// `interleaved` holds 1 to 4096 frames, left then right.
+    ///
+    /// `out` grows by at most `MAX_PACKET_BYTES`.  So a caller that reserves
+    /// `MAX_PACKET_BYTES` for each packet causes no new allocation of `out`.
     ///
     /// # Panics
     ///
@@ -202,24 +215,32 @@ impl AlacEncoder {
             (1..=FRAMES_PER_PACKET).contains(&frames),
             "an ALAC packet holds 1 to {FRAMES_PER_PACKET} frames, not {frames}"
         );
-        let mut bits = BitWriter::new(out);
-        bits.write(ELEMENT_CPE, 3);
-        bits.write(0, 4);
-        let kind = self.encode_stereo(&mut bits, interleaved, frames);
-        bits.write(ELEMENT_END, 3);
-        bits.byte_align();
-        let size = bits.bit_len() / 8;
+        let mut compressed = core::mem::take(&mut self.compressed);
+        compressed.clear();
+        let kind = self.encode_stereo(&mut compressed, interleaved, frames);
+        let size = match kind {
+            PacketKind::Compressed => {
+                out.extend_from_slice(&compressed);
+                compressed.len()
+            }
+            PacketKind::Escape | PacketKind::Rewound => {
+                write_escape_packet(out, interleaved, frames)
+            }
+        };
+        self.compressed = compressed;
         self.max_packet_bytes = self.max_packet_bytes.max(size as u32);
         (size, kind)
     }
 
+    /// Writes the whole compressed packet to `compressed` if the trial
+    /// encodes predict that it pays.  Gives `Compressed` only if that
+    /// packet is smaller than an escape packet.
     fn encode_stereo(
         &mut self,
-        bits: &mut BitWriter,
+        compressed: &mut Vec<u8>,
         interleaved: &[i16],
         frames: usize,
     ) -> PacketKind {
-        let start = bits.bit_len();
         let partial = frames != FRAMES_PER_PACKET;
         let partial_bits = if partial { 32 } else { 0 };
 
@@ -295,10 +316,13 @@ impl AlacEncoder {
         // 2 header bytes, and the frame count of a partial packet.
         let escape_bits = frames * BIT_DEPTH as usize * CHANNELS + partial_bits + 2 * 8;
         if min_bits >= escape_bits {
-            write_escape(bits, interleaved, frames);
             return PacketKind::Escape;
         }
 
+        let mut bits = BitWriter::new(compressed);
+        bits.write(ELEMENT_CPE, 3);
+        bits.write(0, 4);
+        let start = bits.bit_len();
         bits.write(0, 12);
         bits.write(u32::from(partial) << 3, 4);
         if partial {
@@ -306,28 +330,28 @@ impl AlacEncoder {
         }
         bits.write(MIX_BITS as u32, 8);
         bits.write(mix_res as u32, 8);
-        write_coefs(bits, coefs(&mut self.coefs_u, num_u));
-        write_coefs(bits, coefs(&mut self.coefs_v, num_v));
+        write_coefs(&mut bits, coefs(&mut self.coefs_u, num_u));
+        write_coefs(&mut bits, coefs(&mut self.coefs_v, num_v));
         pc_block(
             &self.mix_u,
             &mut self.predictor_u,
             frames,
             coefs(&mut self.coefs_u, num_u),
         );
-        dyn_comp(&self.predictor_u[..frames], bits);
+        dyn_comp(&self.predictor_u[..frames], &mut bits);
         pc_block(
             &self.mix_v,
             &mut self.predictor_v,
             frames,
             coefs(&mut self.coefs_v, num_v),
         );
-        dyn_comp(&self.predictor_v[..frames], bits);
+        dyn_comp(&self.predictor_v[..frames], &mut bits);
 
         if bits.bit_len() - start >= escape_bits {
-            bits.truncate(start);
-            write_escape(bits, interleaved, frames);
             return PacketKind::Rewound;
         }
+        bits.write(ELEMENT_END, 3);
+        bits.byte_align();
         PacketKind::Compressed
     }
 }
@@ -358,7 +382,12 @@ fn write_coefs(bits: &mut BitWriter, coefs: &[i16]) {
     }
 }
 
-fn write_escape(bits: &mut BitWriter, interleaved: &[i16], frames: usize) {
+/// Appends an escape packet, which holds the samples as they are, and gives
+/// its size in bytes.
+fn write_escape_packet(out: &mut Vec<u8>, interleaved: &[i16], frames: usize) -> usize {
+    let mut bits = BitWriter::new(out);
+    bits.write(ELEMENT_CPE, 3);
+    bits.write(0, 4);
     let partial = frames != FRAMES_PER_PACKET;
     bits.write(0, 12);
     // The low bit 1 means "not compressed".
@@ -369,6 +398,9 @@ fn write_escape(bits: &mut BitWriter, interleaved: &[i16], frames: usize) {
     for &sample in interleaved {
         bits.write(u32::from(sample as u16), 16);
     }
+    bits.write(ELEMENT_END, 3);
+    bits.byte_align();
+    bits.bit_len() / 8
 }
 
 fn trial_bits(predicted: &[i32]) -> usize {
@@ -552,6 +584,21 @@ mod tests {
         assert_eq!(out[1..5], [0b0010_0000, 0, 0b0000_0010, 0]);
         // The last 2 bits of the end tag, then zero bits to the byte end.
         assert_eq!(out[MAX_PACKET_BYTES], 0b1100_0000);
+    }
+
+    /// The try buffer has the size of the source's work buffer, and a
+    /// packet of noise does not grow it.
+    #[test]
+    fn the_try_buffer_is_sized_once_to_the_work_buffer_of_the_source() {
+        assert_eq!(TRY_BYTES, 40_961);
+        let mut encoder = AlacEncoder::new(44_100);
+        let capacity = encoder.compressed.capacity();
+        assert!(capacity >= TRY_BYTES);
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            encoder.encode_packet(&quiet_then_noise(FRAMES_PER_PACKET), &mut out);
+            assert_eq!(encoder.compressed.capacity(), capacity);
+        }
     }
 
     #[test]

@@ -44,6 +44,7 @@ cargo clippy -p app -- -D warnings              # app's lib and binary without a
 cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
 cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
+cargo test -p engine                            # engine alone: a workspace build merges m4a's Symphonia features into it
 cargo test -p roformer-gpu --lib                # CI runs it too; it needs no GPU
 cargo test -p roformer-gpu --doc                # CI runs it too; it needs no GPU
 cargo +nightly-2026-10-30 test -p roformer-gpu --doc  # CI runs it; nightly checks each compile_fail error code

@@ -103,3 +103,120 @@ pub fn signals() -> [(&'static str, Signal); 5] {
         ("rewind", rewind),
     ]
 }
+
+/// The noise of the mutant probes of review round 1: xorshift32, scaled to
+/// `-amp..amp`.
+pub struct ScaledNoise {
+    state: u32,
+    amp: i32,
+}
+
+impl ScaledNoise {
+    pub fn new(seed: u32, amp: i32) -> Self {
+        ScaledNoise { state: seed, amp }
+    }
+
+    pub fn next_i16(&mut self) -> i16 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 17;
+        self.state ^= self.state << 5;
+        (((self.state >> 16) as i32 - 32_768) * self.amp / 32_768) as i16
+    }
+
+    /// The seed of the probes for `amp`.
+    pub fn probe(amp: i32) -> Self {
+        ScaledNoise::new(0x2545_F491 ^ amp as u32, amp)
+    }
+}
+
+/// `value` on one channel at one frame in `every`, else silence.
+pub fn impulses(frames: usize, value: i16, every: usize, on_left: bool) -> Vec<i16> {
+    (0..frames)
+        .flat_map(|i| {
+            let impulse = if i % every == 0 { value } else { 0 };
+            if on_left { [impulse, 0] } else { [0, impulse] }
+        })
+        .collect()
+}
+
+/// Noise of amplitude `amp` on both channels.
+pub fn low_noise(frames: usize, seed: u32, amp: i32) -> Vec<i16> {
+    let mut noise = ScaledNoise::new(seed, amp);
+    (0..frames * 2).map(|_| noise.next_i16()).collect()
+}
+
+/// Noise of amplitude `amp` on `percent` % of the frames, else silence.
+pub fn sparse_noise(frames: usize, amp: i32, percent: u32) -> Vec<i16> {
+    let mut pick = Noise::new(0x0005_EED5);
+    let mut noise = ScaledNoise::probe(amp);
+    (0..frames)
+        .flat_map(|_| {
+            if (pick.next_i16() as u16 as u32) % 100 < percent {
+                [noise.next_i16(), noise.next_i16()]
+            } else {
+                [0, 0]
+            }
+        })
+        .collect()
+}
+
+/// In each packet, noise of amplitude `amp` in the first eighth if
+/// `noise_first`, else in the other seven eighths, and silence elsewhere.
+pub fn eighth_split(frames: usize, amp: i32, noise_first: bool) -> Vec<i16> {
+    let eighth = frames.min(4096) / 8;
+    let mut noise = ScaledNoise::probe(amp);
+    (0..frames)
+        .flat_map(|i| {
+            if (i % 4096 < eighth) == noise_first {
+                [noise.next_i16(), noise.next_i16()]
+            } else {
+                [0, 0]
+            }
+        })
+        .collect()
+}
+
+/// The signals that the mutant probes of review round 1 found, with a
+/// name.  They reach edges of the Golomb coder, the zero runs, the
+/// predictor's adaptation and the escape decision.  The amplitudes of the
+/// eighth splits put a packet within a few bits of the escape size, so a
+/// change of the escape decision by a few bits changes the bytes.
+pub fn probe_signals(frames: usize) -> Vec<(String, Vec<i16>)> {
+    let mut signals = Vec::new();
+    for (value, every, on_left) in [
+        (1, 13, true),
+        (1, 31, true),
+        (3, 13, true),
+        (-20_000, 2, true),
+        (3, 14, false),
+        (-20_000, 10, false),
+    ] {
+        signals.push((
+            format!("impulses {value} in {every}, on the left: {on_left}"),
+            impulses(frames, value, every, on_left),
+        ));
+    }
+    for seed in [1, 77] {
+        signals.push((format!("noise 2, seed {seed}"), low_noise(frames, seed, 2)));
+    }
+    signals.push((
+        "sparse noise 2 on 2 %".to_string(),
+        sparse_noise(frames, 2, 2),
+    ));
+    for amp in (9_300..=11_100).step_by(200).chain([10_550, 11_200]) {
+        signals.push((
+            format!("noise {amp} then silence"),
+            eighth_split(frames, amp, true),
+        ));
+    }
+    for amp in (15_600..=15_950)
+        .step_by(50)
+        .chain([16_020, 16_125, 16_500])
+    {
+        signals.push((
+            format!("silence then noise {amp}"),
+            eighth_split(frames, amp, false),
+        ));
+    }
+    signals
+}

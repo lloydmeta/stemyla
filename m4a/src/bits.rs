@@ -44,26 +44,6 @@ impl<'a> BitWriter<'a> {
             self.write(0, 8 - self.pending_bits);
         }
     }
-
-    /// Removes the bits after the first `bit_len` bits.  The next write
-    /// continues at `bit_len`.
-    pub(crate) fn truncate(&mut self, bit_len: usize) {
-        assert!(
-            bit_len <= self.bit_len(),
-            "cannot truncate {} bits to {bit_len}",
-            self.bit_len()
-        );
-        let whole = self.start + bit_len / 8;
-        let kept_bits = (bit_len % 8) as u32;
-        let kept = if whole < self.bytes.len() {
-            u64::from(self.bytes[whole]) >> (8 - kept_bits)
-        } else {
-            self.pending >> (self.pending_bits - kept_bits)
-        };
-        self.bytes.truncate(whole);
-        self.pending = kept;
-        self.pending_bits = kept_bits;
-    }
 }
 
 impl BitSink for BitWriter<'_> {
@@ -145,39 +125,6 @@ mod tests {
         writer.byte_align();
         assert_eq!(writer.bit_len(), 8);
         assert_eq!(bytes, [7, 8, 0xA0]);
-    }
-
-    #[test]
-    fn a_truncate_in_a_byte_then_a_write_is_as_if_the_bits_were_never_written() {
-        let want = written(&[(0b1011, 4), (0x1F, 5), (0b01, 2), (0xFFFF, 16)]);
-        // 31 bits put the cut in a pushed byte; 3 bits put it in the
-        // accumulator.
-        for dropped_bits in [31, 3] {
-            let mut bytes = vec![0x55];
-            let mut writer = BitWriter::new(&mut bytes);
-            writer.write(0b1011, 4);
-            writer.write(0x1F, 5);
-            let kept = writer.bit_len();
-            writer.write(u32::MAX, dropped_bits);
-            writer.truncate(kept);
-            assert_eq!(writer.bit_len(), kept);
-            writer.write(0b01, 2);
-            writer.write(0xFFFF, 16);
-            writer.byte_align();
-            assert_eq!(bytes[0], 0x55);
-            assert_eq!(bytes[1..], want, "dropped bits: {dropped_bits}");
-        }
-    }
-
-    #[test]
-    fn a_truncate_to_a_byte_boundary_drops_whole_bytes() {
-        let mut bytes = Vec::new();
-        let mut writer = BitWriter::new(&mut bytes);
-        writer.write(0xAB, 8);
-        writer.write(0xCDE, 12);
-        writer.truncate(8);
-        writer.write(0x12, 8);
-        assert_eq!(bytes, [0xAB, 0x12]);
     }
 
     #[test]

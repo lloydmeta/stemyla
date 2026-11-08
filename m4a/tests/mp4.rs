@@ -1,6 +1,11 @@
 //! The boxes of the M4A writer, read back with a small box reader.
 
-use m4a::{Edit, Error, FRAMES_PER_PACKET, Layout, MAX_PACKET_BYTES, Order, SampleEntry};
+mod common;
+
+use m4a::{
+    AlacEncoder, Edit, Error, FRAMES_PER_PACKET, Layout, MAX_PACKET_BYTES, Order, SampleEntry,
+    alac_file,
+};
 
 const RATE: u32 = 44_100;
 const COOKIE: [u8; 24] = [
@@ -90,13 +95,17 @@ fn packets(sizes: &[u32]) -> Vec<Vec<u8>> {
 /// Writes a file as the caller does: zeros for the head, each packet, the
 /// final head at position 0, then the tail.
 fn file(layout: &Layout, packets: &[Vec<u8>]) -> Vec<u8> {
+    file_with(layout, &ENTRY, packets)
+}
+
+fn file_with(layout: &Layout, entry: &SampleEntry, packets: &[Vec<u8>]) -> Vec<u8> {
     let sizes: Vec<u32> = packets.iter().map(|p| p.len() as u32).collect();
     let mut out = vec![0; layout.head_len()];
     packets.iter().for_each(|p| out.extend_from_slice(p));
-    let head = layout.head(&ENTRY, &sizes).expect("the head is made");
+    let head = layout.head(entry, &sizes).expect("the head is made");
     assert_eq!(head.len(), layout.head_len());
     out[..head.len()].copy_from_slice(&head);
-    let tail = layout.tail(&ENTRY, &sizes).expect("the tail is made");
+    let tail = layout.tail(entry, &sizes).expect("the tail is made");
     assert_eq!(tail.len(), layout.tail_len());
     out.extend_from_slice(&tail);
     out
@@ -112,10 +121,33 @@ fn stbl<'a>(moov: &Mp4Box<'a>) -> Mp4Box<'a> {
 
 const IDENTITY_MATRIX: [u32; 9] = [0x1_0000, 0, 0, 0, 0x1_0000, 0, 0, 0, 0x4000_0000];
 
+/// The rate and the cookie that a file must hold.
+struct Track {
+    rate: u32,
+    cookie: [u8; 24],
+}
+
+const TRACK: Track = Track {
+    rate: RATE,
+    cookie: COOKIE,
+};
+
 /// Checks the tables and each field that Apple's decoder can read.
 fn check_moov(moov: &Mp4Box, file: &[u8], packets: &[Vec<u8>], frames: u32, presented: u32) {
+    check_track(moov, file, packets, frames, presented, &TRACK);
+}
+
+fn check_track(
+    moov: &Mp4Box,
+    file: &[u8],
+    packets: &[Vec<u8>],
+    frames: u32,
+    presented: u32,
+    track: &Track,
+) {
+    let rate = track.rate;
     let mvhd = moov.child(0, "mvhd").u32s();
-    assert_eq!(mvhd[..4], [0, 0, RATE, presented], "mvhd times");
+    assert_eq!(mvhd[..4], [0, 0, rate, presented], "mvhd times");
     assert_eq!(mvhd[4], 0x1_0000, "mvhd rate 1.0");
     assert_eq!(mvhd[5] >> 16, 0x0100, "mvhd volume 1.0");
     assert_eq!(mvhd[8..17], IDENTITY_MATRIX, "mvhd matrix");
@@ -138,7 +170,7 @@ fn check_moov(moov: &Mp4Box, file: &[u8], packets: &[Vec<u8>], frames: u32, pres
     let mdia = trak.child(0, "mdia");
     assert_eq!(kinds(&mdia.children(0)), ["mdhd", "hdlr", "minf"]);
     let mdhd = mdia.child(0, "mdhd");
-    assert_eq!(mdhd.u32s()[..4], [0, 0, RATE, frames], "mdhd times");
+    assert_eq!(mdhd.u32s()[..4], [0, 0, rate, frames], "mdhd times");
     assert_eq!(
         mdhd.u16_at(20),
         (21 << 10) | (14 << 5) | 4,
@@ -163,11 +195,11 @@ fn check_moov(moov: &Mp4Box, file: &[u8], packets: &[Vec<u8>], frames: u32, pres
     assert_eq!(alac.u16_at(6), 1, "data_reference_index");
     assert_eq!(alac.u16_at(16), 2, "channels");
     assert_eq!(alac.u16_at(18), 16, "sample size");
-    assert_eq!(alac.u32_at(24), RATE << 16, "rate as 16.16");
+    assert_eq!(alac.u32_at(24), rate << 16, "rate as 16.16");
     let config = alac.child(28, "alac");
     assert_eq!(config.body.len(), 36 - 8);
     assert_eq!(config.body[..4], [0, 0, 0, 0], "version and flags 0");
-    assert_eq!(config.body[4..], COOKIE);
+    assert_eq!(config.body[4..], track.cookie);
 
     let full = frames / FRAMES_PER_PACKET as u32;
     let rest = frames % FRAMES_PER_PACKET as u32;
@@ -211,6 +243,84 @@ fn a_fast_start_file_has_moov_before_mdat_and_offsets_at_its_packets() {
     check_mdat(&top[2], &packets);
     assert!(!top[1].child(0, "trak").has_child("edts"));
     assert_eq!(layout.tail_len(), 0);
+}
+
+/// A cookie at `rate`, with `max_frame_bytes`, as the encoder gives it.
+fn cookie(max_frame_bytes: u32, rate: u32) -> [u8; 24] {
+    let mut cookie = COOKIE;
+    cookie[12..16].copy_from_slice(&max_frame_bytes.to_be_bytes());
+    cookie[20..].copy_from_slice(&rate.to_be_bytes());
+    cookie
+}
+
+#[test]
+fn a_file_at_48_khz_holds_its_rate_in_each_place() {
+    let frames = 2 * 4096 + 100;
+    let layout = Layout::new(frames, 48_000, None, Order::FastStart).unwrap();
+    let track = Track {
+        rate: 48_000,
+        cookie: cookie(2000, 48_000),
+    };
+    let entry = SampleEntry::Alac {
+        cookie: track.cookie,
+    };
+    let packets = packets(&[1000, 2000, 300]);
+    let file = file_with(&layout, &entry, &packets);
+    let top = boxes(&file);
+    assert_eq!(kinds(&top), ["ftyp", "moov", "mdat"]);
+    check_track(
+        &top[1],
+        &file,
+        &packets,
+        frames as u32,
+        frames as u32,
+        &track,
+    );
+}
+
+/// The packets of `interleaved` from a new encoder, and its final cookie.
+fn encoded(interleaved: &[i16], rate: u32) -> (Vec<Vec<u8>>, [u8; 24]) {
+    let mut encoder = AlacEncoder::new(rate);
+    let packets = interleaved
+        .chunks(FRAMES_PER_PACKET * 2)
+        .map(|packet| {
+            let mut out = Vec::new();
+            encoder.encode(packet, &mut out);
+            out
+        })
+        .collect();
+    (packets, encoder.cookie())
+}
+
+/// `alac_file` writes the cookie of the last packet: its maxFrameBytes is
+/// the largest `stsz` entry.  The last packet is the largest here.
+#[test]
+fn alac_file_writes_the_final_cookie_and_its_rate() {
+    let rate = 48_000;
+    let quiet = common::silence(2 * FRAMES_PER_PACKET);
+    let input: Vec<i16> = quiet.into_iter().chain(common::random(100)).collect();
+    let frames = input.len() as u32 / 2;
+    let file = alac_file(&input, rate, None, Order::FastStart).unwrap();
+    let (packets, final_cookie) = encoded(&input, rate);
+    let top = boxes(&file);
+    let track = Track {
+        rate,
+        cookie: final_cookie,
+    };
+    check_track(&top[1], &file, &packets, frames, frames, &track);
+    let stsz = stbl(&top[1]).child(0, "stsz").u32s();
+    let largest = *stsz[2..].iter().max().unwrap();
+    assert_eq!(
+        stsz[2..].last(),
+        Some(&largest),
+        "the last packet is the largest"
+    );
+    assert_eq!(final_cookie[12..16], largest.to_be_bytes(), "maxFrameBytes");
+    assert_eq!(
+        final_cookie[20..],
+        rate.to_be_bytes(),
+        "the rate of the cookie"
+    );
 }
 
 #[test]
@@ -303,17 +413,24 @@ fn a_file_that_can_reach_4_gib_is_refused() {
         // One frame more makes one packet more and an `stts` entry more.
         let next_worst = worst_case(&largest) + MAX_PACKET_BYTES as u64 + 8 + 8;
         assert!(next_worst >= FOUR_GIB, "{order:?}: {next_worst}");
-        assert!(
-            matches!(
-                Layout::new(most * 4096 + 1, RATE, None, order),
-                Err(Error::TooLarge { frames, .. }) if frames == most * 4096 + 1
-            ),
+        assert_eq!(
+            Layout::new(most * 4096 + 1, RATE, None, order),
+            Err(Error::TooLarge {
+                frames: most * 4096 + 1,
+                worst_case_bytes: u128::from(next_worst),
+            }),
             "{order:?}"
         );
-        assert!(matches!(
+        // The base holds one `stts` entry; u64::MAX frames need two.
+        let packets = u128::from(u64::MAX.div_ceil(4096));
+        assert_eq!(
             Layout::new(u64::MAX, RATE, None, order),
-            Err(Error::TooLarge { .. })
-        ));
+            Err(Error::TooLarge {
+                frames: u64::MAX,
+                worst_case_bytes: u128::from(base) + 8 + packets * (MAX_PACKET_BYTES as u128 + 8),
+            }),
+            "{order:?}"
+        );
     }
 }
 
@@ -348,6 +465,25 @@ fn an_edit_past_the_end_is_refused() {
         ..past
     };
     assert!(Layout::new(10_000, RATE, Some(to_the_end), Order::FastStart).is_ok());
+    // `skip + frames` overflows a u64 here.
+    for overflow in [
+        Edit {
+            skip: 1,
+            frames: u64::MAX,
+        },
+        Edit {
+            skip: u32::MAX,
+            frames: u64::MAX,
+        },
+    ] {
+        assert_eq!(
+            Layout::new(10_000, RATE, Some(overflow), Order::FastStart),
+            Err(Error::EditPastEnd {
+                edit: overflow,
+                frames: 10_000
+            })
+        );
+    }
 }
 
 #[test]

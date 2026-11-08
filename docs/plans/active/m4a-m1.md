@@ -8,7 +8,7 @@ Readers: the implementer, the review agents of M1's rounds, the orchestrator, an
 
 ## Context and orientation
 
-The state at the start, on 2026-11-08, at commit `b18c494` on branch `feature/m4a`.  The review base of M1 is `b1f588b`.  The range from it also holds the orchestrator's plan commit `b18c494`.
+The state at the start, on 2026-11-08, at commit `d2a81bb` on branch `feature/m4a`.  The review base of M1 is `b1f588b`.  The range from it also holds the orchestrator's plan commits `b18c494`, `f4ab3bc` and `d2a81bb`, this plan's commit `1323939`, and the orchestrator's commit `b17d023` of `CLAUDE.md` and `.claude/rules`.
 
 ### The decisions that M1 follows
 
@@ -31,7 +31,7 @@ Facts from the source that the port must keep, so that the bytes stay the same:
 
 * `encode_stereo` does trial encodes at `num_samples / 8` and `num_samples / 32` frames.  `pc_block` reads `input[1..=numactive]` even when `num` is smaller.  So a short packet reads the values of the earlier packet that are still in the buffers.  The port keeps each buffer at 4096 entries, as the source does.  Then a partial packet reads the same values.
 * The coefficients (`coefs_u`, `coefs_v`) and `last_mix_res` persist from packet to packet.  So a differential test must encode many packets in sequence, not one.
-* A compressed packet that is not smaller than an escape packet is written again as an escape packet (`set_position(start_position)`).  The port rewinds by truncation of its output.
+* A compressed packet that is not smaller than an escape packet is written again as an escape packet (`set_position(start_position)`).  The port writes the compressed try to a buffer of the encoder, and writes the escape packet to the output instead (review round 1, 1-2).
 * `magic_cookie` gives `max_frame_bytes`, the largest packet so far, and `avg_bit_rate` 0.  So the cookie is final only after the last packet.
 * `dp.rs` uses `Wrapping` in places.  The port uses the same wrapping operations at the same places, and plain operations elsewhere.
 
@@ -68,7 +68,7 @@ The `unsafe` sites and their safe forms (D2):
 
 ### The licence of the port
 
-Apple's ALAC reference is Apache-2.0 only.  `alac-encoder` offers MIT OR Apache-2.0, and the port takes it under Apache-2.0.  So `m4a/Cargo.toml` has `license = "Apache-2.0"`, not `license.workspace`.  The licence section of `README.md` says that `m4a/` is Apache-2.0 only.  Decision 0028 records this.
+Apple's ALAC reference is Apache-2.0 only.  `alac-encoder` offers MIT OR Apache-2.0, and the port takes it under Apache-2.0.  So `m4a/Cargo.toml` has `license = "Apache-2.0"`, not `license.workspace`.  The licence section of `README.md` says that `m4a/` is Apache-2.0 only.  Decision 0029 (`proposed`) records this, since D1, D2 and D6 choose no licence (review round 1, 1-4).
 
 ### Terms
 
@@ -98,7 +98,7 @@ Each step is one signed commit, after `cargo run -p xtask -- check --tier commit
 
 ### Step 2: the bit writer and the ALAC encoder
 
-* `m4a/src/bits.rs`: a bit writer with a 64-bit accumulator, as D2 says.  It has `write(value, bits)` for 1 to 32 bits, `byte_align`, `bit_len` and `truncate(bit_len)`.  Each write keeps only the low `bits` of the value, as `write_lte25` does.
+* `m4a/src/bits.rs`: a bit writer with a 64-bit accumulator, as D2 says.  It has `write(value, bits)` for 1 to 32 bits, `byte_align`, `bit_len` and `truncate(bit_len)`.  Review round 1 removed `truncate` (1-2).  Each write keeps only the low `bits` of the value, as `write_lte25` does.
   * Check `BitBuffer::write` for values with bits above `num_bits`.  With a negative `shift`, it does not mask them.  If a caller of a kept function can pass such a value, the port gives the same bytes as the source, and a unit test shows the case.  If no caller can, record that in Surprises.
 * `m4a/src/alac.rs` (or a folder with `ag.rs`, `dp.rs` and `matrix.rs`): the port.  The public API, as a sketch:
 
@@ -126,11 +126,11 @@ Each step is one signed commit, after `cargo run -p xtask -- check --tier commit
 * Tests, in `m4a/tests/alac.rs` or in the module:
   * The signals live in `m4a/tests/common/mod.rs`, since several test files use them.
   * The differential test.  The signals are silence, a full-scale square wave (32,767 and -32,768), a mono-like signal (left equals right, a sine), a random 16-bit signal from a fixed-seed generator in the test (no `rand` crate), and a music-like signal (Step 5).  The lengths are 1, 4095, 4096, 4097 and 10 x 4096 + 1,000 frames.  Each signal and length goes through one encoder of each kind, packet by packet.  The test compares each packet, and the cookie after the last packet.  The test gives the crate `i16::to_le_bytes`, since `mix16` reads little-endian bytes.
-  * The reference crate writes the whole compressed try into its output before its size check and rewind (`encode_stereo`).  A try can pass `MAX_PACKET_BYTES`, and the bit writer also writes up to 4 bytes past the bit position (`bit_buffer.rs`).  So the test gives it the source's own work-buffer size plus 8: 4096 x 2 x 5 + 1 + 8 bytes.  The port's `out` can also grow past `MAX_PACKET_BYTES` before `truncate`.  Its escape path casts the input to `&[i16]` (`from_raw_parts`), so the test asserts that the input's address is even before each call.
+  * The reference crate writes the whole compressed try into its output before its size check and rewind (`encode_stereo`).  A try can pass `MAX_PACKET_BYTES`, and the bit writer also writes up to 4 bytes past the bit position (`bit_buffer.rs`).  So the test gives it the source's own work-buffer size plus 8: 4096 x 2 x 5 + 1 + 8 bytes.  The port's `out` grows by at most `MAX_PACKET_BYTES` (review round 1, 1-2).  Its escape path casts the input to `&[i16]` (`from_raw_parts`), so the test asserts that the input's address is even before each call.
   * A rewind signal: in each packet, the first eighth is quiet and the rest is random.  The trial encode then predicts a small packet, and the full encode is rewound to an escape packet.  The differential test includes it.
   * A random signal makes escape packets, and a sine makes compressed packets.  The test asserts that both kinds occur.  The escape flag is bit 22 from the packet start: after the 3-bit tag, the 4-bit instance tag, 12 zero bits, the partial bit and 2 shift bits.
   * Each packet is at most `MAX_PACKET_BYTES`.
-* A unit test of the bit writer: `truncate` to a bit length in the middle of a byte, then a write, gives the same bytes as a writer that never had the truncated bits.
+* A unit test of the bit writer: `truncate` to a bit length in the middle of a byte, then a write, gives the same bytes as a writer that never had the truncated bits.  Review round 1 removed it with `truncate`.
 * Acceptance: `cargo test -p m4a` passes, with each test failing first.  `grep -rnE 'unsafe (\{|fn|impl)' m4a/src` finds nothing.
 
 ### Step 3: the box writer
@@ -222,6 +222,8 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 * [x] 2026-11-08, Step 4: the round trip through Symphonia.  First failures, with a stub `alac_file` that encodes silence of the same length and checks neither the length nor the rate: the round trip failed with "square, 1 frames: the samples differ", the `MoovLast` test with "square, 4097 frames: the samples differ", the edit test on its `assert!`, the refusal test on its `assert_eq!`, and `an_odd_length_panics` with "did not panic as expected".
 * [x] 2026-11-08, Step 5: the size check, the notices and decision 0028.  First failure, with the full packets forced to escape packets: `a_music_like_signal_gives_fewer_bytes_than_its_wav` failed with "1765889 >= 1764044".  The differential test now also runs the music-like signal.
 * [ ] Review rounds.
+  * [x] 2026-11-08, review round 1 fixes, before the missed mutants.  First failures: 1-1 `an_edit_past_the_end_is_refused` panicked "attempt to add with overflow" in debug, and failed its `assert_eq!` in release (`Ok` for `skip` 1, `frames` u64::MAX).  1-2 `a_packet_never_grows_out_past_max_packet_bytes` failed with "rewind: packet 0", capacity 32,776, not 16,388.  1-9 failed on `worst_case_bytes` 4294981961, not 4294981977, with the `stts` term of the worst case removed.  1-5: with a writer and an encoder that keep 44,100 Hz, `a_file_at_48_khz_holds_its_rate_in_each_place` failed at "mvhd times", and the 48 kHz round trip failed too.  1-13: with the cookie of a new encoder, `alac_file_writes_the_final_cookie_and_its_rate` failed on the cookie (maxFrameBytes 0, not 408).  1-10: with left and right swapped in the stereo mix, only the two music-like round trips failed ("music-like, 4097 frames: the samples differ").  1-8: 20 tests of `xtask/src/check.rs` failed on their asserts before `lines()` had the `engine` line, `the_ci_runs_the_engine_tests_alone` on "ci.yml has no `- run: cargo test --locked -p engine`".
+  * [x] 2026-11-08, review round 1, the missed mutants of `m4a/src/alac.rs`.  `the_port_gives_the_packets_of_the_reference_on_the_probe_signals` runs the probe signals of the validator at 4096 and 4000 frames: impulses on one channel, noise of amplitude 2, sparse noise, and eighth splits of noise and silence.  A scan with each mutant applied found the amplitudes and impulses that the escape decision needs (`if bits_v < min_bits_v`, `min_bits`, `escape_bits` and the size check of the try).  `cargo mutants -p m4a --file m4a/src/alac.rs` then: 314 mutants, 292 caught, 12 missed, 9 unviable, 1 timeout.  Each of the 26 confirmed and unproven mutants is caught.  The 6 missed in `write_coefs`, `write_escape_packet`, `pc_block` and `dyn_code` are the ones that the validator refuted as equivalent.  The other 6 were on `TRY_BYTES`, new in fix 1-2; `the_try_buffer_is_sized_once_to_the_work_buffer_of_the_source` now catches them (first failure: 40959, not 40961).
 
 ## Surprises and discoveries
 
@@ -229,7 +231,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 * 2026-11-08, Step 2: the one loop of `pc_block` for 4 and 8 coefficients, with the `Wrapping` sum, gives the same bytes as the source for every signal and length.  A mutation of its stop condition (`del * direction <= 0` to `< 0`) failed the differential test at "square, 4095 frames: packet 0 differs".  So the test sees a change in the adaptation.
 * 2026-11-08, Step 5: the music-like signal of 10 s gives 975,348 bytes of M4A against 1,764,044 bytes of 16-bit WAV, a ratio of 0.553.
 * 2026-11-08, Step 4: Symphonia 0.6.1 opens and decodes each file of the round trip, the file of 0 frames too.  For 0 frames it states 0 frames and gives no packet.  No case needs the orchestrator.
-* 2026-11-08, Step 4, for M2: feature unification.  `cargo tree --workspace -e features -i symphonia-format-isomp4` shows the feature `alac` from the dev-dependency of `m4a`, beside `engine`'s `flac`.  So `cargo test --workspace` builds one Symphonia with `isomp4` and `alac`, and `engine`'s tests then decode M4A before M2 turns the features on.  `cargo tree -p engine -e features -i symphonia-format-isomp4` finds no such package.  So M2 shows its first failures with `cargo test -p engine`.
+* 2026-11-08, Step 4, for M2: feature unification.  `cargo tree --workspace -e features -i symphonia-format-isomp4` shows the feature `alac` from the dev-dependency of `m4a`, beside `engine`'s `flac`.  So `cargo test --workspace` builds one Symphonia with `isomp4` and `alac`, and `engine`'s tests then decode M4A before M2 turns the features on.  `cargo tree -p engine -e features -i symphonia-format-isomp4` finds no such package.  Review round 1 (1-8) closes the gap: CI and `check --tier push` run `cargo test -p engine` alone, and tier `commit` runs it when its crate tests build `engine` with a member outside the closure and dependents of `engine`.
 * 2026-11-08, Step 4: Symphonia 0.6.1 reads no `elst`.  A file with an `Edit` of 2,112 frames decodes to every frame of its track (`a_file_with_an_edit_decodes_its_whole_track`).  This agrees with the parent's Context; M2 trims in `engine`.
 * 2026-11-08, Step 2: by a reading of the source, the values that `pc_block` leaves in the buffers reach the bytes only within one packet.  The trial over `frames / 32` keeps the entries from `max(frames / 32, 9)` to `frames / 8` that the trial of `frames / 8` of the same packet wrote, and the next `dyn_comp` reads them.  An entry from an earlier packet is read (`input[1..=numactive]`) but no read of it reaches `dyn_comp`, and no coefficient adapts on it.  The port keeps the buffers at 4096 entries in any case.  The differential test runs each length from a new encoder, so it does not separate the two cases.
 
@@ -254,6 +256,13 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 * 2026-11-08, agent (implementer): the `hdlr` name is "SoundHandler", and `stsc` has its one entry also for a file of 0 packets.
 * 2026-11-08, agent (implementer): `alac_file` panics on an odd length, as `AlacEncoder::encode` does, and gives the `Error` of `Layout` for a refusal.  Reason: an odd length is a bug of the caller, and a refusal depends on the input.
 * 2026-11-08, agent (implementer): the adaptive Golomb parameters are constants.  Reason: each call of the source gives `mb` 10, `pb` 40 (`(4 * 40) / 4`) and `kb` 14, with `fw` equal to `sw`, so the row logic of `dyn_comp` has no effect.
+
+* 2026-11-08, agent (implementer, review round 1, 1-7): `alac-encoder` 0.3.0 has had no release since January 2022, so DEPS-1's "maintained" does not hold.  It is accepted as a frozen reference: pinned exactly, test-only, never shipped and never updated.  `m4a/Cargo.toml` gives the same reason.
+* 2026-11-08, agent (implementer, review round 1, 1-12): `alac_file` holds a whole file in memory, so M3's worker must not call it.  M3's brief names this.  No code change.
+* 2026-11-08, agent (implementer, review round 1, 1-2): the compressed try of a packet goes into a buffer of the encoder, sized once in `new` to the source's work buffer (4096 x 2 x 5 + 1 bytes).  `encode` appends it to `out` only if it is smaller than an escape packet.  Else it writes the escape packet to `out`.  So `out` grows by at most `MAX_PACKET_BYTES`.  `BitWriter::truncate` then had no caller, and its two tests went with it.
+* 2026-11-08, agent (implementer, review round 1, 1-4): `m4a` is Apache-2.0 only by decision 0029, `proposed`, not by decision 0028.  Reason: 0028 is accepted as D1, D2 and D6, which choose no licence.
+* 2026-11-08, agent (implementer, review round 1, 1-8): tier `commit` runs `cargo test -p engine` only when its crate tests build `engine` with a member outside the closure and dependents of `engine`.  Reason: only such a member can bring features that `engine` does not turn on; a change to `engine` or `dsp` alone does not.
+* 2026-11-08, orchestrator: the `cargo test -p engine` line of CLAUDE.md lands in the commit of the round 1 fixes, since a commit of that line alone fails `check --tier commit`.
 
 ## Outcomes and retrospective
 

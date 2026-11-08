@@ -140,7 +140,10 @@ impl Layout {
             });
         }
         if let Some(edit) = edit
-            && u64::from(edit.skip) + edit.frames > frames
+            && edit
+                .frames
+                .checked_add(u64::from(edit.skip))
+                .is_none_or(|end| end > frames)
         {
             return Err(Error::EditPastEnd { edit, frames });
         }

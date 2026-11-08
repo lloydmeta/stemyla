@@ -71,10 +71,16 @@ fn decode(file: Vec<u8>) -> Decoded {
 }
 
 fn check(name: &str, input: &[i16], order: Order) {
-    let file = alac_file(input, RATE, None, order).expect("the file is made");
+    check_at(name, input, RATE, order);
+}
+
+/// Gives the size of the file.
+fn check_at(name: &str, input: &[i16], rate: u32, order: Order) -> usize {
+    let file = alac_file(input, rate, None, order).expect("the file is made");
+    let size = file.len();
     let decoded = decode(file);
     let frames = input.len() / 2;
-    assert_eq!(decoded.rate, Some(RATE), "{name}, {frames} frames");
+    assert_eq!(decoded.rate, Some(rate), "{name}, {frames} frames");
     assert_eq!(decoded.channels, 2, "{name}, {frames} frames");
     assert_eq!(
         decoded.stated_frames,
@@ -90,6 +96,7 @@ fn check(name: &str, input: &[i16], order: Order) {
         decoded.interleaved == input,
         "{name}, {frames} frames: the samples differ"
     );
+    size
 }
 
 #[test]
@@ -98,6 +105,31 @@ fn each_signal_decodes_bit_for_bit_at_each_length() {
         for frames in LENGTHS {
             check(name, &signal(frames), Order::FastStart);
         }
+    }
+}
+
+/// The music-like signal has left != right, and its packets are mostly
+/// compressed, so the stereo mix goes through Symphonia.
+#[test]
+fn a_music_like_signal_decodes_bit_for_bit() {
+    for frames in [4097, 10 * 4096 + 1000] {
+        let input = common::music(frames);
+        assert!(input.chunks_exact(2).any(|f| f[0] != f[1]));
+        let size = check_at("music-like", &input, RATE, Order::FastStart);
+        assert!(
+            size < frames * 4,
+            "{frames} frames: {size} bytes, not compressed"
+        );
+    }
+}
+
+#[test]
+fn a_file_at_48_khz_decodes_at_48_khz() {
+    for (name, signal) in [
+        ("mono-like", common::mono_like as common::Signal),
+        ("music-like", common::music),
+    ] {
+        check_at(name, &signal(4097), 48_000, Order::FastStart);
     }
 }
 
