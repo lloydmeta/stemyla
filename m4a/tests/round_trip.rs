@@ -165,3 +165,51 @@ fn a_refusal_of_the_layout_is_the_refusal_of_the_file() {
         Err(m4a::Error::SampleRate(0))
     );
 }
+
+/// Symphonia probes an AAC file of the writer: 3 packets of zeros, so no
+/// decode.  The track states the codec, channels, rate, length and the
+/// AudioSpecificConfig.
+#[test]
+fn symphonia_probes_an_aac_file() {
+    use symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
+    let config = [0x12, 0x10];
+    let layout = m4a::Layout::new(
+        m4a::Codec::Aac {
+            channels: 2,
+            config_len: 2,
+        },
+        3 * 1024,
+        RATE,
+        None,
+        Order::FastStart,
+    )
+    .unwrap();
+    let entry = m4a::SampleEntry::Aac {
+        config: config.into(),
+    };
+    let sizes = [20; 3];
+    let head = layout.head(&entry, &sizes);
+    assert!(head.is_ok(), "{head:?}");
+    let mut file = head.unwrap();
+    file.resize(file.len() + 60, 0);
+    let source = MediaSourceStream::new(Box::new(Cursor::new(file)), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("m4a");
+    let format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            source,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .expect("Symphonia opens the file");
+    let track = format
+        .default_track(TrackType::Audio)
+        .expect("the file has an audio track");
+    let params = track.codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+    assert_eq!(params.codec, CODEC_ID_AAC);
+    assert_eq!(params.channels.as_ref().map(|c| c.count()), Some(2));
+    assert_eq!(params.sample_rate, Some(44_100));
+    assert_eq!(track.num_frames, Some(3 * 1024));
+    assert_eq!(params.extra_data.as_deref(), Some(&config[..]));
+}

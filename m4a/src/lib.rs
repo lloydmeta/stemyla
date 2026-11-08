@@ -1,4 +1,6 @@
-//! The bytes of an M4A file that holds 16-bit stereo Apple Lossless (ALAC).
+//! The bytes of an M4A file that holds 16-bit stereo Apple Lossless (ALAC),
+//! or AAC from given packets.  The crate has no AAC encoder: the caller
+//! gives the packets and the AudioSpecificConfig.
 //!
 //! This crate makes bytes only.  It does no input or output.  The caller
 //! writes the bytes, as `stem-worker` does for FLAC.
@@ -13,7 +15,7 @@ mod bits;
 mod mp4;
 
 pub use alac::{AlacEncoder, FRAMES_PER_PACKET, MAX_PACKET_BYTES};
-pub use mp4::{Edit, Error, Layout, Order, SampleEntry};
+pub use mp4::{Codec, Edit, Error, Layout, MAX_CONFIG_LEN, Order, SampleEntry};
 
 /// The whole M4A file of `interleaved` 16-bit stereo, as ALAC.  It holds
 /// the file in memory, so it is for tests and tools: the worker writes in
@@ -34,7 +36,13 @@ pub fn alac_file(
         "ALAC input is interleaved stereo, so its length must be even, not {}",
         interleaved.len()
     );
-    let layout = Layout::new((interleaved.len() / 2) as u64, sample_rate, edit, order)?;
+    let layout = Layout::new(
+        Codec::Alac,
+        (interleaved.len() / 2) as u64,
+        sample_rate,
+        edit,
+        order,
+    )?;
     let mut encoder = AlacEncoder::new(sample_rate);
     let mut file = vec![0; layout.head_len()];
     let sizes: Vec<u32> = interleaved

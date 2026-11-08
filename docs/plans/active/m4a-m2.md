@@ -339,7 +339,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 ## Progress
 
 * [x] 2026-11-08: plan written by the team leader.
-* [ ] Step 1: the `m4a` crate takes AAC.
+* [x] 2026-11-08: Step 1: the `m4a` crate takes AAC.  First failures, with stubs (AAC values of ALAC, no refusals, an `esds` of zeros): each of the 10 new tests failed on an assert.  For example, `an_aac_file_has_an_mp4a_entry_with_its_esds` at the `mp4a` channel count, `an_aac_layout_has_1024_frames_in_each_packet` at 1 packet for 3, and `symphonia_probes_an_aac_file` at `head.is_ok()` (`PacketCount`).  Then `cargo test -p m4a` passes; the ALAC tests of M1 pass with `Codec::Alac`.
 * [ ] Step 2: the `iTunSMPB` tag.
 * [x] 2026-11-08: plan review round 1 (a `Plan` agent): 4 blockers, 11 should-fix and 5 nits.  The plan takes each (Decision log).
 * [x] 2026-11-08: plan review round 2 (a new `Plan` agent): 2 blockers, 9 should-fix and 6 nits.  The plan takes each (Decision log).  Round 2 is the last plan review round.
@@ -373,6 +373,10 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, agent (team leader): the two `CLAUDE.md` diffs land at the checkpoint before review round 1, not with Steps 1 and 3.  Reason: no check reads the two texts, and the run then needs no stop for the orchestrator in the middle of the steps.  `CLAUDE.md` lags the code in two lines for some commits.
 * 2026-11-08, agent (team leader): `app` takes `m4a` as a dev-dependency.  Reason: its video tests need an M4A, and D6 forbids a copy of the writer.
 * 2026-11-08, agent (team leader): an AAC is reserved for at most its length at 32 kbit/s.  Reason: AAC states its length exactly in `mdhd`, so only a crafted file overstates it; 32 kbit/s is below real AAC music files, and the limit of decision 0013 still holds.
+
+* 2026-11-08, agent (implementer): `Error::PacketSize` gets a field `most`, the codec's bound.  Reason: the bound differs for each codec, so the text names it.  The new variants are `NoChannels`, `ConfigLen` and `EntryCodec`.
+* 2026-11-08, agent (implementer): `m4a` gets no `aac_file` function.  Reason: an AAC fixture has its packets already, so a test calls `Layout::head` and `Layout::tail` (the writer) directly.  Only `engine` makes AAC fixtures.
+* 2026-11-08, agent (implementer): `MAX_CONFIG_LEN` (64) is public.  Reason: a caller can check an AudioSpecificConfig before it makes a `Layout`.
 
 ## Outcomes and retrospective
 

@@ -147,7 +147,7 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | `engine/` | decoding, playback, time-stretch, classic drum separation |
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
-| `m4a/` | the bytes of an M4A file of 16-bit stereo Apple Lossless (ALAC), with a safe port of an ALAC encoder |
+| `m4a/` | the bytes of an M4A file of 16-bit stereo Apple Lossless (ALAC), with a safe port of an ALAC encoder, or of AAC from given packets |
 | `protocol/` | the messages between the page and its workers (`stem-protocol`) |
 | `test-support/` | `skip` and `STEMYLA_REQUIRE`, which make a test that cannot run fail where evidence is claimed |
 | `xtask/` | the static server, the browser test runners and other tools |

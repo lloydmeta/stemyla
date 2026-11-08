@@ -18,7 +18,7 @@ license = "Apache-2.0"
 alac-encoder = "=0.3.0"
 # Decodes each test file bit for bit: a round trip of the writer.  The
 # version of `engine/Cargo.toml`.  A test-only crate; it does not ship.
-symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "alac"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "alac", "aac"] }
 
 [lints]
 workspace = true
