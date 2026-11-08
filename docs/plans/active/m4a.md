@@ -44,7 +44,7 @@ The planning session read the published crates (`symphonia-codec-aac`, `symphoni
 ### Risks for untrusted files
 
 * A small ALAC file can decode to a large one, as a FLAC can (decision 0013).  `most_frames` needs an ALAC case and an AAC case.
-* `largest_file` takes the whole file as audio.  An `.mp4` video is mostly video, so the check would refuse it.  So this plan opens `.m4a` and `.aac` only (D4).
+* `largest_file` takes the whole file as audio.  An `.mp4` video is mostly video, so the check would refuse it.  So this plan opens `.m4a`, `.aac` and an `.mp4` that holds only sound tracks.  An `.mp4` with a video track gives its own message (D4).
 * A file whose `moov` is after `mdat` has no length in the 64 KiB head.  It is `HeadLength::Unstated`, as an MP3 without a Xing tag is.
 * A file with FairPlay DRM (`.m4p`, a `drms` or `enca` sample entry) cannot decode.  It gets its own message.
 
@@ -111,7 +111,7 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 * The writer gives a fast-start file.  The packet count comes from the frame count, so the size of `moov` is known before the first packet.  The writer reserves that size, writes `mdat`, and then writes `moov` at the reserved place.  This is the same order as `FlacOut::replace_header`.
 * The writer can also write an `elst` entry, for the tests of M2 and for M4.
 * `stco` holds 32-bit offsets.  The writer refuses a file of 4 GiB or more.  A 1 GiB decode limit keeps a 16-bit save far below that.
-* Write decision 0028 as `proposed`: M4A with ALAC as the save format, and the location of the writer.
+* Write decision 0028 as `accepted`: M4A with ALAC as the save format, the location of the writer, and the safe port.  The maintainer's answers to D1, D2 and D6 accept it (Decision log).
 * `THIRD-PARTY.md` names each new crate (DEPS-1).
 * Acceptance: native tests that fail before the change.
   * A writer test round-trips through Symphonia (`isomp4`, `alac`) bit for bit: silence, a full-scale square wave, a mono-like and a random 16-bit signal, and lengths of 0, 1, 4095, 4096 and 4097 frames.
