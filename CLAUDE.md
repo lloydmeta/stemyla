@@ -9,6 +9,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `dsp/`: beginner-style pure audio functions with zero dependencies (DSP-1).
 * `engine/`: decoding, playback, mixing, time-stretch, classic drum separation, WAV writing.
 * `synth/`: the demo song, synthesised so its stems are known exactly; used by the app and as test audio.
+* `m4a/`: the bytes of an M4A file of 16-bit stereo Apple Lossless (ALAC), with a safe port of an ALAC encoder; no I/O.
 * `app/`: eframe/egui UI, native and web.  Trunk's entry point is `app/index.html`.
 * `roformer/`: STFT, chunking, weights, and the CPU reference network (Burn, ndarray).
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
