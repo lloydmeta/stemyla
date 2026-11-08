@@ -23,13 +23,28 @@ use crate::mp4_boxes::ReadAt;
 pub(crate) const ALWAYS_HIDDEN: u64 = 4096;
 
 /// The most containers of fewer than [`ALWAYS_HIDDEN`] bytes that a plan
-/// hides.  So the plan holds at most about 64 KiB for them.  A file with
-/// more is refused before the probe ([`Plan::too_many`]): Symphonia keeps
-/// each tag that it reads, with an overhead past its bytes, so a file of a
-/// million tags of 2 bytes holds about 140 MB in the decode worker.  The
-/// limit keeps that out of the memory of decision 0013 and MEM-4.  No real
-/// file has thousands of tag containers; one has tens.
+/// hides.  So the plan holds at most about 64 KiB for them.  Symphonia
+/// reads and keeps each small one past this count ([`Plan::kept`]).  No
+/// real file has thousands of tag containers; one has tens.
 pub(crate) const MOST_SMALL: usize = 4096;
+
+/// The bytes that Symphonia keeps for each tag past its container, as the
+/// decode counts them.  Measured with `peak_of` on 2026-11-09, for 50,000
+/// small containers past [`MOST_SMALL`]: an AIFF `NAME` chunk of 10 bytes
+/// keeps 176 bytes (an overhead of 166), a FLAC APPLICATION block of 1,028
+/// bytes keeps 1,168 (140), and an empty top-level M4A `meta` of 12 bytes
+/// keeps about 1.  The count takes 256, above the worst.
+pub(crate) const KEPT_OVERHEAD: u64 = 256;
+
+/// The most bytes of tags that Symphonia may keep, counted as the size of
+/// each small container past [`MOST_SMALL`] and [`KEPT_OVERHEAD`]: 16 MiB.
+/// It is the room for tags that the page gives each file
+/// (`engine::decode::TAG_ROOM`), far below the 1 GiB of samples of decision
+/// 0013 and the 2 GB of a tab (MEM-4).  A file past it is refused before
+/// the probe ([`Plan::too_much_kept`]).  So a file of 5000 small tags
+/// opens, and a file of a million tags of 2 bytes, which would keep about
+/// 140 MB, does not.
+pub(crate) const MOST_KEPT_BYTES: u64 = 16 << 20;
 
 /// One change: `len` bytes of `bytes` in place of the bytes at `at` of the
 /// file.
@@ -47,9 +62,12 @@ pub(crate) struct Plan {
     pub start: u64,
     pub patches: Vec<Patch>,
     small: usize,
-    /// More small containers than [`MOST_SMALL`]: the plan cannot hide
-    /// them all, so the decode refuses the file.
-    pub too_many: bool,
+    /// The bytes that Symphonia keeps of the small containers that the
+    /// plan does not hide, with [`KEPT_OVERHEAD`] for each.
+    pub kept: u64,
+    /// [`Plan::kept`] passes [`MOST_KEPT_BYTES`], so the decode refuses the
+    /// file.
+    pub too_much_kept: bool,
 }
 
 impl Plan {
@@ -59,7 +77,9 @@ impl Plan {
         let small = size.is_some_and(|size| size < ALWAYS_HIDDEN);
         if small {
             if self.small >= MOST_SMALL {
-                self.too_many = true;
+                let size = size.unwrap_or(ALWAYS_HIDDEN);
+                self.kept = self.kept.saturating_add(size + KEPT_OVERHEAD);
+                self.too_much_kept = self.kept > MOST_KEPT_BYTES;
                 return;
             }
             self.small += 1;
@@ -249,7 +269,7 @@ pub(crate) fn plan_of(source: &mut dyn ReadAt) -> std::io::Result<Plan> {
 /// other.  `engine`'s Symphonia has no ID3v2 reader, so its probe gives up
 /// past 1 MiB of a tag.  Each tag has a header of 10 bytes, a synchsafe
 /// size, and a footer of 10 bytes when its flags say so.
-fn leading_id3_bytes(source: &mut dyn ReadAt) -> std::io::Result<u64> {
+pub(crate) fn leading_id3_bytes(source: &mut dyn ReadAt) -> std::io::Result<u64> {
     let mut at = 0_u64;
     loop {
         let mut header = [0; 10];
@@ -481,12 +501,14 @@ mod tests {
         let plan = plan_of(&mut &file[..]);
         assert!(plan.is_ok(), "{plan:?}");
         let plan = plan.unwrap();
-        assert_eq!((plan.patches.len(), plan.too_many), (MOST_SMALL, true));
+        assert_eq!(plan.patches.len(), MOST_SMALL);
+        assert_eq!(plan.kept, 520 + KEPT_OVERHEAD, "the one chunk past the cap");
+        assert!(!plan.too_much_kept);
     }
 
     /// A plan keeps every container of `ALWAYS_HIDDEN` bytes or more, and
     /// at most `MOST_SMALL` smaller ones.  One more small one makes it
-    /// `too_many`.
+    /// counts in `kept`.
     #[test]
     fn a_plan_keeps_at_most_most_small_small_patches() {
         let mut plan = Plan::default();
@@ -494,7 +516,8 @@ mod tests {
             plan.hide(at * 8, b"free", Some(8));
         }
         assert_eq!(plan.patches.len(), MOST_SMALL);
-        assert!(plan.too_many);
+        assert_eq!(plan.kept, 10 * (8 + KEPT_OVERHEAD));
+        assert!(!plan.too_much_kept);
         plan.hide(1 << 40, b"free", Some(ALWAYS_HIDDEN));
         plan.hide(1 << 41, b"free", None);
         assert_eq!(plan.patches.len(), MOST_SMALL + 2);

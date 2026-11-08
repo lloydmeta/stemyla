@@ -584,3 +584,32 @@ pub fn with_sizes_of_0(mut file: Vec<u8>, path: &[&[u8; 4]]) -> Vec<u8> {
     }
     file
 }
+
+/// `file`, which has `moov` last, with each `stco` offset moved by
+/// `delta`.
+pub fn with_stco_moved(mut out: Vec<u8>, delta: i64) -> Vec<u8> {
+    // After the type of `stco`: version and flags, the count, the offsets.
+    let stco = place_once(&out, b"stco") + 4;
+    let count = u32::from_be_bytes(out[stco + 4..stco + 8].try_into().unwrap()) as usize;
+    for k in 0..count {
+        let at = stco + 8 + 4 * k;
+        let offset = u32::from_be_bytes(out[at..at + 4].try_into().unwrap());
+        out[at..at + 4].copy_from_slice(&((i64::from(offset) + delta) as u32).to_be_bytes());
+    }
+    out
+}
+
+/// `file`, which has `moov` last, with a first `ftyp` of `size` bytes:
+/// brands of `isom` after its major and minor brands.  The packets move
+/// by the change in length, so each `stco` offset moves too.
+pub fn with_ftyp_of(file: &[u8], size: usize) -> Vec<u8> {
+    assert!(
+        size >= 16 && size.is_multiple_of(4),
+        "an ftyp of whole brands"
+    );
+    let (_, old_size) = top_box(file, b"ftyp");
+    let brands = b"isom".repeat((size - 16) / 4);
+    let ftyp = bx(b"ftyp", &[b"M4A ", &[0; 4], &brands]);
+    let out = [ftyp, Vec::from(&file[old_size..])].concat();
+    with_stco_moved(out, size as i64 - old_size as i64)
+}

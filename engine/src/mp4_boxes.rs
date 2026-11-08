@@ -145,16 +145,63 @@ struct BoxAt {
 /// Walks the boxes of `source`.  `None` when the file does not start with
 /// an MP4 box, such as `ftyp` or `moov`; then it read only 8 bytes.
 pub(crate) fn walk(source: &mut dyn ReadAt) -> std::io::Result<Option<Found>> {
+    walk_from(source, 0)
+}
+
+/// Walks the boxes of `source` from `start`, as [`walk`] does from 0.
+pub(crate) fn walk_from(source: &mut dyn ReadAt, start: u64) -> std::io::Result<Option<Found>> {
     let mut first = [0; 8];
-    if source.read_at(0, &mut first)? < 8 || !FIRST_BOXES.iter().any(|k| first[4..] == k[..]) {
+    if source.read_at(start, &mut first)? < 8 || !FIRST_BOXES.iter().any(|k| first[4..] == k[..]) {
         return Ok(None);
     }
     let mut walker = Walker {
         source,
         found: Found::default(),
     };
-    walker.top()?;
+    walker.top(start)?;
     Ok(Some(walker.found))
+}
+
+/// The bytes of Symphonia's probe scan for a format marker
+/// (`max_probe_depth`, `symphonia-core` `formats/probe.rs`).
+pub(crate) const PROBE_DEPTH: u64 = 1 << 20;
+
+/// Where Symphonia reads an MP4 in a view that starts at `view`: at
+/// `view` if an MP4 box starts there.  Else, if the view starts with no
+/// magic of another format (`fLaC`, `RIFF`, `RF64`, `FORM`, or a frame
+/// sync of MP3 or ADTS), at 4 bytes before the first `ftyp` in the first
+/// [`PROBE_DEPTH`] bytes.  Symphonia's probe scans the view for the first
+/// marker, `ftyp` for MP4, and its MP4 reader starts 4 bytes before it
+/// (`symphonia-format-isomp4` `demuxer.rs`, `IsoMp4Reader::try_new`).
+pub(crate) fn mp4_start(source: &mut dyn ReadAt, view: u64) -> std::io::Result<Option<u64>> {
+    let mut first = [0; 8];
+    let read = source.read_at(view, &mut first)?;
+    if read == 8 && FIRST_BOXES.iter().any(|k| first[4..] == k[..]) {
+        return Ok(Some(view));
+    }
+    let other = [b"fLaC", b"RIFF", b"RF64", b"FORM"]
+        .iter()
+        .any(|magic| first[..4] == magic[..]);
+    let sync = first[0] == 0xFF && first[1] & 0xE0 == 0xE0;
+    if read < 8 || other || sync {
+        return Ok(None);
+    }
+    // Blocks of 64 KiB, each with the last 3 bytes of the one before.
+    const BLOCK: usize = 64 * 1024;
+    let mut block = vec![0; BLOCK + 3];
+    let mut at = view;
+    while at < view + PROBE_DEPTH {
+        let read = source.read_at(at, &mut block)?;
+        if let Some(found) = block[..read].windows(4).position(|w| w == b"ftyp") {
+            let marker = at + found as u64;
+            return Ok((marker >= view + 4).then(|| marker - 4));
+        }
+        if read < block.len() {
+            return Ok(None);
+        }
+        at += BLOCK as u64;
+    }
+    Ok(None)
 }
 
 /// The size of `found`, or `None` when it runs to the end of the file.
@@ -261,8 +308,8 @@ impl Walker<'_> {
     /// only the header of each other box.  Symphonia reads each `moov`,
     /// `ftyp` and top-level `meta` whole, so it hides each `meta`, and each
     /// `moov` and `ftyp` after the first.
-    fn top(&mut self) -> std::io::Result<()> {
-        self.children(0, u64::MAX, |walker, found| {
+    fn top(&mut self, start: u64) -> std::io::Result<()> {
+        self.children(start, u64::MAX, |walker, found| {
             match &found.kind {
                 b"moov" if walker.found.moov.is_none() => {
                     walker.found.moov = Some(MoovAt {

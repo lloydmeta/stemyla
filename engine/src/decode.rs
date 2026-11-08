@@ -96,8 +96,9 @@ pub const VIDEO_TEXT: &str =
 pub const MOOV_TEXT: &str =
     "The index of this file (its moov box) is too large for its length, so it cannot open.";
 
-/// The text of a file with more tag containers than the decode can hide
-/// from Symphonia (`engine::hidden::MOST_SMALL`).
+/// The text of a file whose tags that the decode cannot hide from
+/// Symphonia pass the memory that they may keep
+/// (`engine::hidden::MOST_KEPT_BYTES`).
 pub const TAGS_TEXT: &str =
     "This file holds too many tags to open safely.  Remove its tags, or open another file.";
 
@@ -681,13 +682,21 @@ fn open_within(
     max_song_frames: Option<usize>,
 ) -> Result<Opened> {
     let byte_len = source.byte_len();
-    let mut boxes = if source.is_seekable() {
-        let found = crate::mp4_boxes::walk(&mut crate::mp4_boxes::Seeking(&mut *source))
-            .context("reading the boxes of an MP4 file")?;
+    // The walk starts where Symphonia's probe will start the MP4: after
+    // any leading ID3v2 tags, and at the `ftyp` that it finds (finding 4-2).
+    let (view, mut boxes) = if source.is_seekable() {
+        let mut at = crate::mp4_boxes::Seeking(&mut *source);
+        let view =
+            crate::hidden::leading_id3_bytes(&mut at).context("reading the tags of the file")?;
+        let found = match crate::mp4_boxes::mp4_start(&mut at, view)? {
+            Some(start) => crate::mp4_boxes::walk_from(&mut at, start)
+                .context("reading the boxes of an MP4 file")?,
+            None => None,
+        };
         source.seek(SeekFrom::Start(0))?;
-        found
+        (view, found)
     } else {
-        None
+        (0, None)
     };
     if let Some(found) = &boxes {
         if found.video {
@@ -714,7 +723,11 @@ fn open_within(
     // MEM-4: Symphonia reads tags and pictures whole, so they are hidden
     // from it (`engine::hidden`).
     let plan = match &mut boxes {
-        Some(found) => std::mem::take(&mut found.hidden),
+        Some(found) => {
+            let mut plan = std::mem::take(&mut found.hidden);
+            plan.start = view;
+            plan
+        }
         None if source.is_seekable() => {
             let plan = crate::hidden::plan_of(&mut crate::mp4_boxes::Seeking(&mut *source))
                 .context("reading the tags of the file")?;
@@ -723,7 +736,7 @@ fn open_within(
         }
         None => crate::hidden::Plan::default(),
     };
-    if plan.too_many {
+    if plan.too_much_kept {
         return Err(anyhow!(TAGS_TEXT));
     }
     let source: Box<dyn MediaSource> = if plan.is_empty() {
@@ -3093,40 +3106,83 @@ mod tests {
         assert!(peak < 1 << 20, "{case}: the open peaks at {peak} bytes");
     }
 
-    /// Finding 3-1 of review round 3 (MEM-4): a plan hides at most
-    /// `MOST_SMALL` small tag containers.  At that count a file opens at a
-    /// flat peak.  One more is refused before the probe at a small peak.
+    /// Finding 4-1 of review round 4 (MEM-4), by the maintainer's rule: a
+    /// file is not refused for its count of tags.  A plan hides
+    /// `MOST_SMALL` small containers, and Symphonia keeps the rest.  A file
+    /// opens while they keep at most `MOST_KEPT_BYTES`; one more is refused
+    /// before the probe, at a small peak.  A file of 5000 small tags opens.
     #[test]
-    fn a_file_of_more_small_tags_than_the_plan_hides_is_refused() {
-        use crate::hidden::MOST_SMALL;
+    fn a_file_is_refused_only_when_its_kept_tags_pass_the_limit() {
+        use crate::hidden::{KEPT_OVERHEAD, MOST_KEPT_BYTES, MOST_SMALL};
         use crate::test_audio::{Aiff, aiff, with_small_aiff_tags, with_small_flac_tags};
         let (left, right, _) = stereo_wav();
         let flac = compressed(&left, &right, 44_100);
         let plain_aiff = aiff(&[left, right], 44_100, 16, Aiff::Plain);
         let m4a = alac_of(m4a::Order::MoovLast);
-        let small_metas = |count: usize| {
+        let metas = |count: usize| {
             let meta = crate::test_m4a::bx(b"meta", &[&[0; 4]]);
             [m4a.clone(), meta.repeat(count)].concat()
         };
-        for count in [MOST_SMALL, MOST_SMALL + 1] {
-            let files = [
-                ("flac", flac.clone(), with_small_flac_tags(&flac, count)),
-                (
-                    "aiff",
-                    plain_aiff.clone(),
-                    with_small_aiff_tags(&plain_aiff, count),
-                ),
-                ("m4a", m4a.clone(), small_metas(count)),
-            ];
-            for (ext, plain, tagged) in files {
-                let case = format!("{ext} of {count} small tags");
-                if count == MOST_SMALL {
-                    assert_tags_are_hidden(plain, tagged, ext, &case);
-                } else {
-                    assert_refused_early(tagged, ext, TAGS_TEXT, &case);
-                }
-            }
+        let five_thousand = with_small_aiff_tags(&plain_aiff, 5000);
+        assert_eq!(decoded(five_thousand, "5000 tags").frames(), FRAMES);
+        // Each format: its container size, and a file of `count` of them.
+        type Tagged<'a> = Box<dyn Fn(usize) -> Vec<u8> + 'a>;
+        let formats: [(&str, u64, Tagged); 3] = [
+            (
+                "flac",
+                1028,
+                Box::new(|count| with_small_flac_tags(&flac, count)),
+            ),
+            (
+                "aiff",
+                10,
+                Box::new(|count| with_small_aiff_tags(&plain_aiff, count)),
+            ),
+            ("m4a", 12, Box::new(metas)),
+        ];
+        for (ext, size, tagged) in formats {
+            let most = MOST_SMALL + (MOST_KEPT_BYTES / (size + KEPT_OVERHEAD)) as usize;
+            let at = decode_bytes(tagged(most), Some(ext));
+            assert!(at.is_ok(), "{ext} at the limit: {:?}", at.err());
+            assert_refused_early(
+                tagged(most + 1),
+                ext,
+                TAGS_TEXT,
+                &format!("{ext} past the limit"),
+            );
         }
+    }
+
+    /// Finding 4-2 of review round 4 (MEM-4): Symphonia's probe scans up to
+    /// 1 MiB for `ftyp`, so an M4A behind an ID3v2 tag or a `uuid` box
+    /// opens as MP4.  The decode walks it from that `ftyp`, so its art is
+    /// hidden and its checks hold.
+    #[test]
+    fn an_m4a_behind_an_id3_tag_or_a_uuid_box_is_walked() {
+        use crate::hidden::{KEPT_OVERHEAD, MOST_KEPT_BYTES, MOST_SMALL};
+        use crate::test_audio::id3_tag;
+        use crate::test_m4a::{bx, top_box, with_cover, with_stco_moved};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let tag = id3_tag(100);
+        let behind_tag = [tag.clone(), with_cover(plain.clone(), ART)].concat();
+        assert_tags_are_hidden(plain.clone(), behind_tag, "m4a", "art behind an ID3 tag");
+        let uuid = bx(b"uuid", &[&[7; 92]]);
+        let moved = with_stco_moved(with_cover(plain.clone(), ART), uuid.len() as i64);
+        let behind_uuid = [uuid, moved].concat();
+        assert_tags_are_hidden(plain.clone(), behind_uuid, "m4a", "art behind a uuid box");
+        let (_, ftyp_size) = top_box(&plain, b"ftyp");
+        let large = bx(b"ftyp", &[b"M4A ", &[0; 4], &b"isom".repeat(ART / 4)]);
+        let ftyp = [tag.clone(), large, Vec::from(&plain[ftyp_size..])].concat();
+        assert_refused_early(
+            ftyp,
+            "m4a",
+            FTYP_TEXT,
+            "an ftyp of 64 MiB behind an ID3 tag",
+        );
+        let past = MOST_SMALL + (MOST_KEPT_BYTES / (12 + KEPT_OVERHEAD)) as usize + 1;
+        let metas = bx(b"meta", &[&[0; 4]]).repeat(past);
+        let many = [tag, plain, metas].concat();
+        assert_refused_early(many, "m4a", TAGS_TEXT, "small metas behind an ID3 tag");
     }
 
     /// Finding 3-2 of review round 3 (MEM-4): Symphonia reads each `ftyp`
@@ -3143,6 +3199,20 @@ mod tests {
         let (_, ftyp_size) = top_box(&plain, b"ftyp");
         let first = [large, Vec::from(&plain[ftyp_size..])].concat();
         assert_refused_early(first, "m4a", FTYP_TEXT, "a first ftyp of 64 MiB");
+        // Finding 4-3 and missed mutant 4-13 of review round 4: a first
+        // `ftyp` of size 0 runs to the end of the file, so it is refused.
+        // One of `MOST_BOX_BYTES` opens; one of 4 bytes more is refused.
+        use crate::mp4_boxes::MOST_BOX_BYTES;
+        use crate::test_m4a::with_ftyp_of;
+        let mut size_0 = plain.clone();
+        size_0[..4].copy_from_slice(&[0; 4]);
+        assert_refused_early(size_0, "m4a", FTYP_TEXT, "a first ftyp of size 0");
+        let at_the_bound = with_ftyp_of(&plain, MOST_BOX_BYTES);
+        let want = decoded(plain.clone(), "the plain file");
+        let got = decoded(at_the_bound, "a first ftyp of MOST_BOX_BYTES");
+        assert!(got.channels == want.channels, "the samples differ");
+        let past = with_ftyp_of(&plain, MOST_BOX_BYTES + 4);
+        assert_refused_early(past, "m4a", FTYP_TEXT, "a first ftyp of MOST_BOX_BYTES + 4");
     }
 
     /// Finding 3-7 and missed mutant 3-22 of review round 3: a `moov`, its
