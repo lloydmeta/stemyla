@@ -45,7 +45,7 @@ The planning session read the published crates (`symphonia-codec-aac`, `symphoni
 
 * A small ALAC file can decode to a large one, as a FLAC can (decision 0013).  `most_frames` needs an ALAC case and an AAC case.
 * `largest_file` takes the whole file as audio.  An `.mp4` video is mostly video, so the check would refuse it.  So this plan opens `.m4a`, `.aac` and an `.mp4` that holds only sound tracks.  An `.mp4` with a video track gives its own message (D4).
-* A file whose `moov` is after `mdat` has no length in the 64 KiB head.  It is `HeadLength::Unstated`, as an MP3 without a Xing tag is.
+* A file whose `moov` starts after the 64 KiB head has no length in the head.  It is `HeadLength::UnstatedPcm`, not `Unstated`: `Unstated` prices a file at the MP3 rate, so a long ALAC file with `moov` last (FFmpeg's default) would be refused as too large.  The PCM rate bounds ALAC and AAC from above.
 * A file with FairPlay DRM (`.m4p`, a `drms` or `enca` sample entry) cannot decode.  It gets its own message.
 
 ### Terms
@@ -128,7 +128,9 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 * Fixtures that the writer does not make are crafted in the test from the writer's output: a `drms` or `enca` entry (patch the 4-byte type), and a video track (a second `trak` whose `hdlr` is `vide`, appended to a `MoovLast` file; and a single track patched from `soun` to `vide`).
 * The over-limit ALAC fixture uses `Layout` and `AlacEncoder` directly: one silent packet, its size repeated.  It does not call `alac_file`, which needs the whole input.
 * `most_frames`: an ALAC case and an AAC case, with the cap of decision 0013 on the stated length.
-* `head_length`: an `mp4_length` case that reads `mdhd`, `hdlr`, `stsd` (and `elst`) from a `moov` that starts in the head.  These boxes sit in the first few hundred bytes of `moov`.  The `moov` can end after the 64 KiB head: the writer adds 8 bytes for each packet, so a save of more than about 12.6 minutes at 44.1 kHz passes the head, and so does the over-limit fixture.  So `mp4_length` reads a `moov` cut off at the end of the head.  Only a file whose `moov` starts after the head gives `HeadLength::Unstated`.
+* `head_length`: an `mp4_length` case that reads `mdhd`, `hdlr`, `stsd` (and `elst`) from a `moov` that starts in the head.  These boxes sit in the first few hundred bytes of `moov`.  The `moov` can end after the 64 KiB head: the writer adds 8 bytes for each packet, so a save of more than about 12.6 minutes at 44.1 kHz passes the head, and so does the over-limit fixture.  So `mp4_length` reads a `moov` cut off at the end of the head.  Only a file whose `moov` starts after the head gives `HeadLength::UnstatedPcm` (see "Risks for untrusted files"); fix the comment at `engine/src/decode.rs` that lists the cases.
+* `mp4_length` takes `mdhd` from the `soun` track.  When the head shows a track whose `hdlr` is `vide`, the head check refuses the file with the D4 video message, so the page never reads a whole video.  A file whose `moov` starts after the head gets the message from the decode instead.
+* `mp4_length` accepts a version 1 `mdhd` (64-bit times), and an `mdat` of size 0 (to the end of the file) or 1 (a 64-bit size) as it walks the boxes.
 * The encoder delay and the padding: `engine::decode` reads `elst`, then `iTunSMPB` (by D7), through the same seekable source, and trims both.  So the decoded length equals the source's length.
 * Messages: a DRM file gives "protected, cannot open".  An HE-AAC file gives "HE-AAC is not supported; use AAC-LC".  A file with more than 2 AAC channels gives its own message.
 * `SONG_FILES`, the `WELCOME` texts, the hover text of "Open song…", `Song::load_folder`, `xtask serve` (`audio/mp4`, `audio/aac`, and `audio/aiff` by D5).
@@ -147,7 +149,7 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 * `app`: `Format::M4a` with the label "M4A (16-bit Apple Lossless)", in `Format::ALL` and in the Save menu.
 * Licence: from M3, the web app ships the Apache-2.0-only code of `m4a` (decision 0029, `proposed`).  Do the Consequences of 0029, such as the licence list, in M3.  The maintainer accepts 0029 at the review of the PR; the run does not wait for it.
 * Acceptance:
-  * `worker/src/web/tests.rs`: an ALAC encode in blocks decodes to the same 16 bits as `engine::wav::encode_pcm16`, on both paths.  Its peak memory grows with the length by the packet table only: the worker keeps 4 bytes for each packet, and `head()` makes `moov` at about 8 bytes for each packet.  That is about 12 bytes for each 4096 frames, or about 75 KB for 10 minutes.  The test allows that and nothing more.  Do not stream `moov`.
+  * `worker/src/web/tests.rs`: an ALAC encode in blocks decodes to the same 16 bits as `engine::wav::encode_pcm16`, on both paths.  Its peak memory grows with the length by the packet table only: the worker keeps 4 bytes for each packet, and `head()` makes `moov` at about 8 bytes for each packet.  That is about 12 bytes for each 4096 frames, or about 75 KB for 10 minutes.  The test allows that and nothing more.  Do not stream `moov`.  To keep to it, make the vector of packet sizes with `Vec::with_capacity(layout.packets())`, and write the placeholder of `head_len()` zeros in small fixed blocks, not as one buffer.
   * `cargo run -p xtask -- e2e save --browser chrome`: the M4A saves of 1 and 10 minutes meet the same limits as FLAC.  These are the JS heap, the WebAssembly memory, the longest slice and the worker's memory.  Each saved file decodes to the WAV save's samples, bit for bit.
   * The extension test in `app/src/export.rs` lists `m4a`.
 
@@ -155,7 +157,7 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 
 Only if D1 takes the AAC save.  The stem worker encodes with WebCodecs `AudioEncoder` (`mp4a.40.2`, 256 kbps), and the `m4a` writer makes the M4A with M2's `esds` sample entry and an `elst` for the encoder delay.
 
-* The packet count of an AAC encode is not known exactly before the encode, because the encoder adds priming and flush packets.  So M4 reserves the head for an upper bound of packets and fills the rest with a `free` box, or writes `moov` last (`Order::MoovLast`).  M4 picks one and records it.
+* The packet count of an AAC encode is not known exactly before the encode, because the encoder adds priming and flush packets.  So M4 reserves the head for an upper bound of packets and fills the rest with a `free` box, or writes `moov` last (`Order::MoovLast`).  M4 picks one and records it.  The first needs a change of `Layout`, which today wants exactly `packets()` sizes: M4 changes `m4a` with a test that fails first.
 
 * The menu shows "M4A (AAC 256 kbps)" only when `AudioEncoder.isConfigSupported` passes and a short test encode gives a packet.
 * The encode respects the encoder's queue (`encodeQueueSize`, `dequeue`), so its memory does not grow with the song.
@@ -256,6 +258,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, maintainer: decision 0028 is accepted, because the answers to D1, D2 and D6 choose its content.
 * 2026-11-08, maintainer: the run does not block on the maintainer.  The plan's stop conditions become decisions of the orchestrator.
 * 2026-11-08, orchestrator (intent review of M1, round 1): the `esds` entry and the `iTunSMPB` tag move into M2, in the `m4a` crate, since M2's AAC and `iTunSMPB` fixtures need them and D6 forbids writer copies.  M2's `mp4_length` reads a cut-off `moov`.  M3's memory test allows the packet table.  M3 does the Consequences of 0029.  M4 plans for an unknown packet count.
+* 2026-11-08, orchestrator (intent review of M1, round 2): a `moov` after the head gives `UnstatedPcm`; the head check gives the video message; M3 keeps the packet table to its allowance; M4 changes `Layout` test-first.
 * 2026-11-08, agent (M1): `m4a` is Apache-2.0 only, by decision 0029, `proposed`.  The rest of the workspace stays MIT or Apache-2.0.
 * 2026-11-08, agent (M1): CI and tier `push` run `cargo test -p engine` alone, a new CI step and a new line of `xtask check`.
 * 2026-11-08, agent: an audio-only `.mp4` opens (D4).  Reason: the maintainer's real file is one, and the D4 answer excludes only video.
