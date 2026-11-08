@@ -651,17 +651,6 @@ This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.
 
 * Fix: a Symphonia that takes the file, or a patch of the timescale before the probe.  The plan forbids a patch or a fork of Symphonia.
 
-### TD-84: Symphonia reads tags and pictures whole, with no limit
-
-This entry concerns MEM-4.
-
-Symphonia 0.6.1 reads tags and pictures whole, with `read_boxed_slice_exact`.  No reader of 0.6.1 applies `MetadataOptions::limit_visual_bytes` or `limit_tag_bytes`.  So a file with a picture of hundreds of MB makes the decode worker hold it, in memory that never shrinks.  Since review round 2 of `plans/active/m4a-m2.md`, the decode hides the tags of an M4A and of a FLAC from Symphonia (`engine::hidden`).  These are still read whole:
-
-* a WAV `LIST` chunk of form `INFO`;
-* an AIFF `APPL`, `COMT`, `MARK`, text (`NAME`, `AUTH`, `(c) `, `ANNO`) or `ID3 ` chunk.
-
-* Fix: hide each of them from Symphonia, as for M4A.
-
 ### TD-85: an M4A whose `moov` has a size of 0 does not open
 
 This entry concerns the decode of M4A, and the limits of Symphonia 0.6.1.
@@ -718,3 +707,4 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
 * TD-69: closed by `check_runs_each_check_on_a_repo` in `xtask/src/docs.rs` (tech-debt rung 1).  It runs `docs::check` on a copy of the repo's tracked files, and wants no problem.  Then it plants one problem for each check, and wants each one.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` fails it, so its `KNOWN_MISSED` entry is gone (VERIFY-1).
 * TD-83: closed by review round 1 of `plans/active/m4a-m2.md`.  The maintainer asked, through the orchestrator on 2026-11-08, that the native `WELCOME` name M4A and AIFF.  It does, with a new `app/tests/snapshots/empty_state.png`, which the PR lists for the maintainer to look at.
+* TD-84: closed by review round 2 of `plans/active/m4a-m2.md`.  The decode hides the tags and pictures of each format from Symphonia, which read them whole (`engine::hidden`): the M4A `moov/udta` and top-level `meta`, the FLAC PICTURE, VORBIS_COMMENT and APPLICATION blocks, a leading ID3v2 tag, the WAV `LIST` chunk, and the AIFF tag chunks.  `the_art_of_an_m4a_is_hidden_from_symphonia` and the tests beside it check a flat peak with 64 MiB of tags.

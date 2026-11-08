@@ -3036,6 +3036,25 @@ mod tests {
         }
     }
 
+    /// The maintainer's design of review round 2 (MEM-4): Symphonia reads a
+    /// WAV `LIST` chunk, and AIFF `APPL`, `MARK`, `COMT`, text and `ID3 `
+    /// chunks, whole.  The decode shows each as `JUNK`, which Symphonia
+    /// skips, so a file with 64 MiB of tags opens at a flat peak, bit for
+    /// bit.
+    #[test]
+    fn the_tags_of_a_wav_and_an_aiff_are_hidden_from_symphonia() {
+        use crate::test_audio::{Aiff, aiff, with_aiff_tags, with_wav_tags};
+        let (left, right, wav) = stereo_wav();
+        let channels = [left, right];
+        assert_tags_are_hidden(wav.clone(), with_wav_tags(&wav, ART), "wav", "a WAV");
+        assert_tags_are_hidden(wav.clone(), with_wav_tags(&wav, 101), "wav", "small tags");
+        for kind in [Aiff::Plain, Aiff::UncompressedAifc] {
+            let plain = aiff(&channels, 44_100, 16, kind);
+            let case = format!("{kind:?}");
+            assert_tags_are_hidden(plain.clone(), with_aiff_tags(&plain, ART), "aiff", &case);
+        }
+    }
+
     /// The `iTunSMPB` tag of a hidden `udta` still gives the trim: the
     /// walker reads it, not Symphonia.
     #[test]

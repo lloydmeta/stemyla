@@ -8,9 +8,10 @@
 //! [`Plan`] holds the changes, and [`Hidden`] gives them to each read.
 //!
 //! The walk of an MP4 plans its boxes (`engine::mp4_boxes`).  [`plan_of`]
-//! plans the other formats.  The view starts after any leading ID3v2 tags,
-//! and FLAC PICTURE, VORBIS_COMMENT and APPLICATION blocks show as
-//! PADDING.
+//! plans the other formats.  The view starts after any leading ID3v2 tags.
+//! FLAC PICTURE, VORBIS_COMMENT and APPLICATION blocks show as PADDING.
+//! A WAV `LIST` chunk, and AIFF `MARK`, `APPL`, `COMT`, text and `ID3 `
+//! chunks, show as `JUNK`.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -158,17 +159,81 @@ const FLAC_TAG_BLOCKS: [u8; 3] = [2, 4, 6];
 /// The type of a FLAC PADDING block, which Symphonia skips with a seek.
 const FLAC_PADDING: u8 = 1;
 
+/// The ID that a hidden RIFF or AIFF chunk shows to Symphonia: one that
+/// it does not know, so it skips the chunk with `ignore_bytes`
+/// (`symphonia-format-riff` `common.rs`, `ChunksReader::next`).
+const HIDDEN_CHUNK: &[u8; 4] = b"JUNK";
+
+/// The WAV chunk that Symphonia 0.6.1 reads whole: `LIST`, whose `INFO`
+/// form it parses into tags (`wave/chunks.rs`, line 602).
+const WAV_TAG_CHUNKS: [&[u8; 4]; 1] = [b"LIST"];
+
+/// The AIFF chunks that Symphonia 0.6.1 reads whole (`aiff/chunks.rs`,
+/// `ParseChunkTag`): `MARK`, `APPL`, `COMT`, the text chunks and `ID3 `.
+const AIFF_TAG_CHUNKS: [&[u8; 4]; 8] = [
+    b"MARK", b"APPL", b"COMT", b"NAME", b"AUTH", b"(c) ", b"ANNO", b"ID3 ",
+];
+
+/// Hides each chunk of `tags` of a RIFF or AIFF file, from the first chunk
+/// at `at`.  A chunk's body has an even length: an odd one has a pad
+/// byte.  The walk ends at the chunk `last`, if any, and at a chunk that
+/// runs past the file.  Symphonia's WAV reader reads no chunk after
+/// `data`; its AIFF reader reads the chunks after `SSND` too.
+fn chunk_plan(
+    source: &mut dyn ReadAt,
+    mut at: u64,
+    little_endian: bool,
+    tags: &[&[u8; 4]],
+    last: Option<&[u8; 4]>,
+    plan: &mut Plan,
+) -> std::io::Result<()> {
+    loop {
+        let mut header = [0; 8];
+        if source.read_at(at, &mut header)? < 8 {
+            return Ok(());
+        }
+        let id: [u8; 4] = [header[0], header[1], header[2], header[3]];
+        let size = [header[4], header[5], header[6], header[7]];
+        let size = u64::from(if little_endian {
+            u32::from_le_bytes(size)
+        } else {
+            u32::from_be_bytes(size)
+        });
+        if tags.iter().any(|tag| **tag == id) {
+            plan.hide(at, HIDDEN_CHUNK, Some(8 + size));
+        }
+        if last == Some(&id) {
+            return Ok(());
+        }
+        at += 8 + size + (size & 1);
+    }
+}
+
 /// The plan of a file that is not an MP4, from its headers in `source`.
 /// It starts the view after any leading ID3v2 tags, and hides the tag
-/// blocks of a FLAC.
+/// blocks of a FLAC and the tag chunks of a WAV and an AIFF.
 pub(crate) fn plan_of(source: &mut dyn ReadAt) -> std::io::Result<Plan> {
     let mut plan = Plan {
         start: leading_id3_bytes(source)?,
         ..Plan::default()
     };
-    let mut magic = [0; 4];
-    if source.read_at(plan.start, &mut magic)? == 4 && magic == *b"fLaC" {
-        flac_plan(source, plan.start + 4, &mut plan)?;
+    let mut magic = [0; 12];
+    let read = source.read_at(plan.start, &mut magic)?;
+    let chunks = plan.start + 12;
+    match (read, &magic[..4], &magic[8..]) {
+        (4.., b"fLaC", _) => flac_plan(source, plan.start + 4, &mut plan)?,
+        (12, b"RIFF", b"WAVE") => chunk_plan(
+            source,
+            chunks,
+            true,
+            &WAV_TAG_CHUNKS,
+            Some(b"data"),
+            &mut plan,
+        )?,
+        (12, b"FORM", b"AIFF" | b"AIFC") => {
+            chunk_plan(source, chunks, false, &AIFF_TAG_CHUNKS, None, &mut plan)?
+        }
+        _ => {}
     }
     Ok(plan)
 }
@@ -352,6 +417,30 @@ mod tests {
         assert_eq!(plan.ok().map(|plan| plan.start), Some(110 + 40));
         let none = plan_of(&mut &b"\xFF\xFB\x90\x00"[..]);
         assert_eq!(none.ok().map(|plan| plan.is_empty()), Some(true));
+    }
+
+    /// The plan of a WAV and an AIFF with tags: `JUNK` for each tag chunk.
+    #[test]
+    fn the_plan_of_a_wav_and_an_aiff_hides_their_tag_chunks() {
+        use crate::test_audio::{Aiff, aiff, with_aiff_tags, with_wav_tags};
+        let wav = crate::wav::encode_pcm16(&[0.25; 100], &[0.5; 100], 44_100);
+        let patches = |file: &[u8]| {
+            let plan = plan_of(&mut &file[..]);
+            assert!(plan.is_ok(), "{plan:?}");
+            let plan = plan.unwrap();
+            plan.patches
+                .iter()
+                .map(|p| (p.at, p.bytes, p.len))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(patches(&with_wav_tags(&wav, 100)), [(36, *b"JUNK", 4)]);
+        assert_eq!(patches(&wav), []);
+        let plain = aiff(&[vec![0.25; 100], vec![0.5; 100]], 44_100, 16, Aiff::Plain);
+        // NAME (8 + 5 + 1), ANNO (8 + 8), APPL (8 + 4 + 100), then ID3.
+        let at = [12, 26, 42, 154];
+        let want: Vec<_> = at.iter().map(|&at| (at, *b"JUNK", 4)).collect();
+        assert_eq!(patches(&with_aiff_tags(&plain, 100)), want);
+        assert_eq!(patches(&plain), []);
     }
 
     #[test]

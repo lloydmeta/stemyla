@@ -230,3 +230,60 @@ pub fn id3_tag(bytes: usize) -> Vec<u8> {
     out.resize(10 + bytes, 0);
     out
 }
+
+/// A RIFF or AIFF chunk of `id` and `body`, with its pad byte, its size
+/// little-endian for RIFF and big-endian for AIFF.
+fn chunk(id: &[u8; 4], body: &[u8], little_endian: bool) -> Vec<u8> {
+    let size = body.len() as u32;
+    let mut out = Vec::from(*id);
+    out.extend_from_slice(&if little_endian {
+        size.to_le_bytes()
+    } else {
+        size.to_be_bytes()
+    });
+    out.extend_from_slice(body);
+    if body.len() % 2 == 1 {
+        out.push(0);
+    }
+    out
+}
+
+/// `wav`, of the 44-byte header of `wav`, with a `LIST` chunk of form
+/// `INFO` before its `data` chunk: a comment of `bytes` bytes, and a
+/// title.  Symphonia 0.6.1 reads it whole.
+pub fn with_wav_tags(wav: &[u8], bytes: usize) -> Vec<u8> {
+    assert_eq!(wav[..4], *b"RIFF");
+    let title = chunk(b"INAM", b"lloyd", true);
+    let comment = chunk(b"ICMT", &vec![b'a'; bytes], true);
+    let list = chunk(b"LIST", &[&b"INFO"[..], &title, &comment].concat(), true);
+    let mut out = Vec::with_capacity(wav.len() + list.len());
+    out.extend_from_slice(&wav[..36]);
+    out.extend_from_slice(&list);
+    out.extend_from_slice(&wav[36..]);
+    let riff = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&riff.to_le_bytes());
+    out
+}
+
+/// `aiff` with tag chunks after its `FORM` header: `NAME`, `ANNO` of an
+/// odd size, `APPL` of `bytes` bytes and `ID3 `.  Symphonia 0.6.1 reads
+/// each whole.
+pub fn with_aiff_tags(aiff: &[u8], bytes: usize) -> Vec<u8> {
+    assert_eq!(aiff[..4], *b"FORM");
+    let mut application = Vec::from(*b"acme");
+    application.resize(4 + bytes, 0);
+    let tags = [
+        chunk(b"NAME", b"lloyd", false),
+        chunk(b"ANNO", b"beachape", false),
+        chunk(b"APPL", &application, false),
+        chunk(b"ID3 ", &id3_tag(100), false),
+    ]
+    .concat();
+    let mut out = Vec::with_capacity(aiff.len() + tags.len());
+    out.extend_from_slice(&aiff[..12]);
+    out.extend_from_slice(&tags);
+    out.extend_from_slice(&aiff[12..]);
+    let form = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&form.to_be_bytes());
+    out
+}
