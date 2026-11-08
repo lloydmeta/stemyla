@@ -69,6 +69,30 @@ pub fn rewind(frames: usize) -> Vec<i16> {
 /// Makes a signal of the given number of frames.
 pub type Signal = fn(usize) -> Vec<i16>;
 
+/// A music-like signal at 44.1 kHz: a chord of 4 sines, a note each half
+/// second with a decay, and low-level noise on each channel.
+pub fn music(frames: usize) -> Vec<i16> {
+    const PARTIALS: [(f64, f64); 4] = [(110.0, 0.30), (220.0, 0.20), (329.63, 0.15), (440.0, 0.10)];
+    let mut noise = Noise::new(0x5EED_0001);
+    (0..frames)
+        .flat_map(|i| {
+            let t = i as f64 / 44_100.0;
+            let envelope = (-(t % 0.5) * 6.0).exp();
+            let chord = |phase: f64| -> f64 {
+                PARTIALS
+                    .iter()
+                    .map(|&(hz, gain)| gain * (std::f64::consts::TAU * hz * t + phase).sin())
+                    .sum::<f64>()
+                    * envelope
+                    * 30_000.0
+            };
+            let left = chord(0.0) + f64::from(noise.next_i16()) / 256.0;
+            let right = chord(0.3) + f64::from(noise.next_i16()) / 256.0;
+            [left, right].map(|s| s.round().clamp(-32_768.0, 32_767.0) as i16)
+        })
+        .collect()
+}
+
 /// The signals of the differential test and the round trip, with a name.
 pub fn signals() -> [(&'static str, Signal); 5] {
     [

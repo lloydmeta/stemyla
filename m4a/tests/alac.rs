@@ -65,7 +65,8 @@ fn is_escape(packet: &[u8]) -> bool {
 
 #[test]
 fn the_port_gives_the_packets_and_the_cookie_of_the_reference() {
-    for (name, signal) in common::signals() {
+    let music: common::Signal = common::music;
+    for (name, signal) in common::signals().into_iter().chain([("music-like", music)]) {
         for frames in LENGTHS {
             let input = signal(frames);
             let ours = port(&input);
@@ -132,4 +133,18 @@ fn no_frames_panics() {
 #[should_panic(expected = "1 to 4096 frames, not 4097")]
 fn more_than_a_packet_panics() {
     AlacEncoder::new(44_100).encode(&[0; 2 * 4097], &mut Vec::new());
+}
+
+#[test]
+fn a_music_like_signal_gives_fewer_bytes_than_its_wav() {
+    let frames = 10 * 44_100;
+    let file = m4a::alac_file(&common::music(frames), 44_100, None, m4a::Order::FastStart)
+        .expect("the file is made");
+    let wav_bytes = 44 + frames * 4;
+    println!(
+        "music-like, 10 s: {} bytes of M4A, {wav_bytes} bytes of WAV, ratio {:.3}",
+        file.len(),
+        file.len() as f64 / wav_bytes as f64
+    );
+    assert!(file.len() < wav_bytes, "{} >= {wav_bytes}", file.len());
 }

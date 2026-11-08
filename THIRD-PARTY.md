@@ -7,6 +7,7 @@ The web app (the `app`, `stem-worker` and `decode-worker` WebAssembly modules) i
 * `self_cell` is offered under Apache-2.0 or GPL-2.0; this project uses it under Apache-2.0.
 * `rusty_mp3` (Apache-2.0) encodes MP3 downloads.
 * `flacenc` (Apache-2.0) encodes FLAC downloads, at 16 bits.
+* The workspace crate `m4a` holds a port of the encoder of `alac-encoder` 0.3.0 (MIT OR Apache-2.0, "Copyright (c) 2019 Linus Unnebäck").  That crate is itself a port of Apple's ALAC reference (Apache-2.0, "Copyright (c) 2011 Apple Inc.").  `m4a` takes them under Apache-2.0, so `m4a` is Apache-2.0 only (decision 0028).  `m4a/src/alac.rs` holds both notices.  `alac-encoder`, `symphonia-format-isomp4` and `symphonia-codec-alac` are test-only crates of `m4a`: they do not ship, so the tables do not list them.  No shipped crate takes `m4a` yet.
 
 The separation model's weights are not part of this repository or of the published app; see "The model" in the README.
 
