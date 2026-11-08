@@ -213,3 +213,45 @@ fn symphonia_probes_an_aac_file() {
     assert_eq!(track.num_frames, Some(3 * 1024));
     assert_eq!(params.extra_data.as_deref(), Some(&config[..]));
 }
+
+/// A reader that knows no `iTunSMPB` still reads the file: Symphonia
+/// decodes an ALAC file with the tag bit for bit.
+#[test]
+fn a_file_with_a_gapless_tag_decodes_bit_for_bit() {
+    use m4a::{AlacEncoder, Codec, FRAMES_PER_PACKET, Gapless, Layout, SampleEntry};
+    let input = common::music(3 * 4096 + 100);
+    let frames = (input.len() / 2) as u64;
+    for order in [Order::FastStart, Order::MoovLast] {
+        let layout = Layout::new(Codec::Alac, frames, RATE, None, order)
+            .unwrap()
+            .with_gapless(Gapless {
+                delay: 2112,
+                padding: 100,
+                frames: frames - 2212,
+            });
+        assert!(layout.is_ok(), "{layout:?}");
+        let layout = layout.unwrap();
+        let mut encoder = AlacEncoder::new(RATE);
+        let mut file = vec![0; layout.head_len()];
+        let sizes: Vec<u32> = input
+            .chunks(FRAMES_PER_PACKET * 2)
+            .map(|packet| encoder.encode(packet, &mut file) as u32)
+            .collect();
+        let entry = SampleEntry::Alac {
+            cookie: encoder.cookie(),
+        };
+        let head = layout.head(&entry, &sizes).unwrap();
+        file[..head.len()].copy_from_slice(&head);
+        file.extend_from_slice(&layout.tail(&entry, &sizes).unwrap());
+        assert!(
+            file.windows(8).any(|w| w == b"iTunSMPB"),
+            "{order:?}: the file holds the tag"
+        );
+        let decoded = decode(file);
+        assert_eq!(decoded.stated_frames, Some(frames), "{order:?}");
+        assert!(
+            decoded.interleaved == input,
+            "{order:?}: the samples differ"
+        );
+    }
+}

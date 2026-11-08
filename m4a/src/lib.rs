@@ -1,6 +1,7 @@
 //! The bytes of an M4A file that holds 16-bit stereo Apple Lossless (ALAC),
 //! or AAC from given packets.  The crate has no AAC encoder: the caller
-//! gives the packets and the AudioSpecificConfig.
+//! gives the packets and the AudioSpecificConfig.  A file can hold an
+//! `iTunSMPB` tag of its encoder delay and padding (`Layout::with_gapless`).
 //!
 //! This crate makes bytes only.  It does no input or output.  The caller
 //! writes the bytes, as `stem-worker` does for FLAC.
@@ -15,7 +16,7 @@ mod bits;
 mod mp4;
 
 pub use alac::{AlacEncoder, FRAMES_PER_PACKET, MAX_PACKET_BYTES};
-pub use mp4::{Codec, Edit, Error, Layout, MAX_CONFIG_LEN, Order, SampleEntry};
+pub use mp4::{Codec, Edit, Error, Gapless, Layout, MAX_CONFIG_LEN, Order, SampleEntry};
 
 /// The whole M4A file of `interleaved` 16-bit stereo, as ALAC.  It holds
 /// the file in memory, so it is for tests and tools: the worker writes in

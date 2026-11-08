@@ -3,7 +3,7 @@
 mod common;
 
 use m4a::{
-    AlacEncoder, Codec, Edit, Error, FRAMES_PER_PACKET, Layout, MAX_PACKET_BYTES, Order,
+    AlacEncoder, Codec, Edit, Error, FRAMES_PER_PACKET, Gapless, Layout, MAX_PACKET_BYTES, Order,
     SampleEntry, alac_file,
 };
 
@@ -758,4 +758,200 @@ fn each_aac_refusal_says_what_is_wrong() {
     for (error, text) in cases {
         assert!(error.to_string().contains(text), "{error}");
     }
+}
+
+/// The example of the plan: Apple's delay of 2112 frames (0x840), a
+/// padding of 458 (0x1CA) and 4,141,558 frames (0x3F31F6), in 4047 packets
+/// of 1024.
+const APPLE: Gapless = Gapless {
+    delay: 2112,
+    padding: 458,
+    frames: 4_141_558,
+};
+
+/// The size of the `udta` of an `iTunSMPB` tag.
+const UDTA_LEN: usize = 249;
+
+#[test]
+fn a_gapless_tag_is_an_itunsmpb_item_in_moov_udta() {
+    let frames = 4047 * 1024;
+    let layout = Layout::new(aac(2, 2), frames, RATE, None, Order::FastStart)
+        .unwrap()
+        .with_gapless(APPLE);
+    assert!(layout.is_ok(), "{layout:?}");
+    let layout = layout.unwrap();
+    let sizes = vec![1; 4047];
+    let entry = aac_entry(&[0x12, 0x10]);
+    let head = layout.head(&entry, &sizes).unwrap();
+    let top = boxes(&head[..head.len() - 8]);
+    assert_eq!(kinds(&top), ["ftyp", "moov"]);
+    let moov = top[1];
+    assert_eq!(kinds(&moov.children(0)), ["mvhd", "trak", "udta"]);
+    let udta = moov.child(0, "udta");
+    assert_eq!(udta.body.len() + 8, UDTA_LEN);
+    let meta = udta.child(0, "meta");
+    assert_eq!(meta.body[..4], [0, 0, 0, 0], "meta version and flags 0");
+    assert_eq!(kinds(&meta.children(4)), ["hdlr", "ilst"]);
+    let hdlr = meta.child(4, "hdlr");
+    assert_eq!(hdlr.body, *b"\0\0\0\0\0\0\0\0mdirappl\0\0\0\0\0\0\0\0\0");
+    let ilst = meta.child(4, "ilst");
+    assert_eq!(kinds(&ilst.children(0)), ["----"]);
+    let item = ilst.child(0, "----");
+    assert_eq!(kinds(&item.children(0)), ["mean", "name", "data"]);
+    assert_eq!(item.child(0, "mean").body, *b"\0\0\0\0com.apple.iTunes");
+    assert_eq!(item.child(0, "name").body, *b"\0\0\0\0iTunSMPB");
+    let data = item.child(0, "data");
+    assert_eq!(data.body[..8], [0, 0, 0, 1, 0, 0, 0, 0], "UTF-8, locale 0");
+    let text = std::str::from_utf8(&data.body[8..]).unwrap();
+    let fields: Vec<&str> = text.split(' ').collect();
+    assert_eq!(fields[0], "", "each field has one space before it");
+    assert_eq!(
+        fields[1..],
+        [
+            "00000000",
+            "00000840",
+            "000001CA",
+            "00000000003F31F6",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000"
+        ]
+    );
+}
+
+#[test]
+fn the_head_with_a_gapless_tag_has_its_reserved_length() {
+    let frames = 4047 * 1024;
+    for codec in [aac(2, 2), Codec::Alac] {
+        for edit in [
+            None,
+            Some(Edit {
+                skip: 2112,
+                frames: 4_141_558,
+            }),
+        ] {
+            for order in [Order::FastStart, Order::MoovLast] {
+                let plain = Layout::new(codec, frames, RATE, edit, order).unwrap();
+                let tagged = plain.clone().with_gapless(APPLE).unwrap();
+                let case = format!("{codec:?}, {edit:?}, {order:?}");
+                assert_eq!(
+                    tagged.head_len() + tagged.tail_len(),
+                    plain.head_len() + plain.tail_len() + UDTA_LEN,
+                    "{case}"
+                );
+                let entry = match codec {
+                    Codec::Alac => ENTRY,
+                    Codec::Aac { .. } => aac_entry(&[0x12, 0x10]),
+                };
+                let sizes = vec![1; tagged.packets()];
+                assert_eq!(
+                    tagged.head(&entry, &sizes).unwrap().len(),
+                    tagged.head_len(),
+                    "{case}"
+                );
+                assert_eq!(
+                    tagged.tail(&entry, &sizes).unwrap().len(),
+                    tagged.tail_len(),
+                    "{case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_gapless_tag_that_is_not_the_frames_of_the_track_is_refused() {
+    let layout = Layout::new(aac(2, 2), 4047 * 1024, RATE, None, Order::FastStart).unwrap();
+    for gapless in [
+        Gapless {
+            frames: APPLE.frames + 1,
+            ..APPLE
+        },
+        Gapless {
+            padding: 457,
+            ..APPLE
+        },
+        Gapless {
+            delay: u32::MAX,
+            padding: u32::MAX,
+            frames: u64::MAX,
+        },
+    ] {
+        assert_eq!(
+            layout.clone().with_gapless(gapless),
+            Err(Error::GaplessFrames {
+                gapless,
+                frames: 4047 * 1024
+            })
+        );
+    }
+    let error = Error::GaplessFrames {
+        gapless: APPLE,
+        frames: 5,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("2112 + 4141558 + 458 frames, not the 5 frames"),
+        "{error}"
+    );
+}
+
+/// The 4 GiB refusal counts the tag: near the limit, `with_gapless`
+/// refuses exactly the layouts that the 249 bytes of the tag take past it.
+#[test]
+fn a_gapless_tag_that_takes_the_file_to_4_gib_is_refused() {
+    let (mut refused, mut taken) = (0, 0);
+    for channels in 1..=8 {
+        for config_len in 1..=64 {
+            let codec = aac(channels, config_len);
+            let new =
+                |packets: u64| Layout::new(codec, packets * 1024, RATE, None, Order::FastStart);
+            // The most packets of 1024 frames below 4 GiB.
+            let (mut low, mut high) = (1_u64, 1 << 23);
+            while high - low > 1 {
+                let mid = (low + high) / 2;
+                if new(mid).is_ok() {
+                    low = mid
+                } else {
+                    high = mid
+                }
+            }
+            let layout = new(low).unwrap();
+            let head_len = layout.head_len();
+            let worst = head_len as u64 + low * codec.max_packet_bytes() as u64;
+            assert!(worst < FOUR_GIB);
+            let frames = low * 1024;
+            let gapless = Gapless {
+                delay: 0,
+                padding: 0,
+                frames,
+            };
+            let case = format!("{channels} channels, {config_len} bytes");
+            match layout.with_gapless(gapless) {
+                Ok(tagged) => {
+                    assert!(worst + (UDTA_LEN as u64) < FOUR_GIB, "{case}");
+                    assert_eq!(tagged.head_len(), head_len + UDTA_LEN, "{case}");
+                    taken += 1;
+                }
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        Error::TooLarge {
+                            frames,
+                            worst_case_bytes: u128::from(worst) + UDTA_LEN as u128
+                        },
+                        "{case}"
+                    );
+                    refused += 1;
+                }
+            }
+        }
+    }
+    assert!(refused > 0 && taken > 0, "{refused} refused, {taken} taken");
 }

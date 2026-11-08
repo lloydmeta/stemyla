@@ -95,6 +95,16 @@ pub struct Edit {
     pub frames: u64,
 }
 
+/// The gapless data of an `iTunSMPB` tag: the encoder delay, the padding
+/// and the frames of the source.  `delay + frames + padding` are the
+/// frames of the track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gapless {
+    pub delay: u32,
+    pub padding: u32,
+    pub frames: u64,
+}
+
 /// Where the `moov` goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Order {
@@ -128,6 +138,9 @@ pub enum Error {
     /// `head` or `tail` got a sample entry of another codec, or an
     /// AudioSpecificConfig of a length that is not the layout's.
     EntryCodec,
+    /// The delay, frames and padding of the gapless tag are not the
+    /// frames of the track.
+    GaplessFrames { gapless: Gapless, frames: u64 },
 }
 
 impl fmt::Display for Error {
@@ -159,6 +172,11 @@ impl fmt::Display for Error {
                 f,
                 "an AudioSpecificConfig has 1 to {MAX_CONFIG_LEN} bytes, not {len}"
             ),
+            Error::GaplessFrames { gapless, frames } => write!(
+                f,
+                "the gapless tag gives {} + {} + {} frames, not the {frames} frames of the track",
+                gapless.delay, gapless.frames, gapless.padding
+            ),
             Error::EntryCodec => write!(
                 f,
                 "the sample entry is not of the codec of the layout, or its AudioSpecificConfig has another length"
@@ -180,6 +198,7 @@ pub struct Layout {
     edit: Option<Edit>,
     order: Order,
     packets: usize,
+    gapless: Option<Gapless>,
 }
 
 const FTYP_LEN: usize = 8 + 4 + 4 + 3 * 4;
@@ -206,6 +225,20 @@ const AAC_ENTRY_LEN_WITHOUT_CONFIG: usize =
     AUDIO_ENTRY_FIELDS_LEN + 8 + 4 + ES_DESCRIPTOR_LEN_WITHOUT_CONFIG;
 /// The `stsd` without its one entry.
 const STSD_LEN_WITHOUT_ENTRY: usize = 8 + 4 + 4;
+
+const ITUNES_MEAN: &[u8] = b"com.apple.iTunes";
+const ITUNSMPB_NAME: &[u8] = b"iTunSMPB";
+/// The text of `iTunSMPB`: 11 fields of a space and 8 digits, and one of
+/// a space and 16 digits.
+const ITUNSMPB_TEXT_LEN: usize = 11 * 9 + 17;
+/// The `data` type of UTF-8 text, with version 0 in the top byte.
+const DATA_TYPE_UTF8: u32 = 1;
+const DATA_LEN: usize = 8 + 4 + 4 + ITUNSMPB_TEXT_LEN;
+const FREEFORM_LEN: usize = 8 + (12 + ITUNES_MEAN.len()) + (12 + ITUNSMPB_NAME.len()) + DATA_LEN;
+const META_HDLR_LEN: usize = 8 + 4 + 4 + 4 + 12 + 1;
+const META_LEN: usize = 12 + META_HDLR_LEN + 8 + FREEFORM_LEN;
+/// The `udta` of the `iTunSMPB` tag.
+const UDTA_LEN: usize = 8 + META_LEN;
 
 /// The descriptor tags of `esds` (ISO/IEC 14496-1, 7.2.2.1).
 const ES_DESCRIPTOR_TAG: u8 = 3;
@@ -258,19 +291,8 @@ impl Layout {
                 return Err(Error::ConfigLen(config_len));
             }
         }
-        let packets = u128::from(frames.div_ceil(u64::from(codec.frames_per_packet())));
-        let stts_entries = stts_entry_count(codec, frames) as u128;
-        let fixed = (FTYP_LEN
-            + MDAT_HEADER_LEN
-            + Self::moov_len_without_tables(codec, edit.is_some())) as u128;
-        let worst_case_bytes =
-            fixed + 8 * stts_entries + packets * (8 + codec.max_packet_bytes() as u128);
-        if worst_case_bytes >= 1 << 32 {
-            return Err(Error::TooLarge {
-                frames,
-                worst_case_bytes,
-            });
-        }
+        let packets = frames.div_ceil(u64::from(codec.frames_per_packet()));
+        refuse_4_gib(codec, frames, edit.is_some(), false)?;
         if let Some(edit) = edit
             && edit
                 .frames
@@ -286,6 +308,27 @@ impl Layout {
             edit,
             order,
             packets: packets as usize,
+            gapless: None,
+        })
+    }
+
+    /// The layout with an `iTunSMPB` tag of `gapless` in `moov/udta`.
+    /// Refuses a tag whose delay, frames and padding are not the frames of
+    /// the track, and a file that the tag makes reach 4 GiB.
+    pub fn with_gapless(self, gapless: Gapless) -> Result<Layout, Error> {
+        let sum = u64::from(gapless.delay)
+            .checked_add(u64::from(gapless.padding))
+            .and_then(|sum| sum.checked_add(gapless.frames));
+        if sum != Some(self.frames) {
+            return Err(Error::GaplessFrames {
+                gapless,
+                frames: self.frames,
+            });
+        }
+        refuse_4_gib(self.codec, self.frames, self.edit.is_some(), true)?;
+        Ok(Layout {
+            gapless: Some(gapless),
+            ..self
         })
     }
 
@@ -375,8 +418,9 @@ impl Layout {
         entries
     }
 
-    fn moov_len_without_tables(codec: Codec, has_edit: bool) -> usize {
+    fn moov_len_without_tables(codec: Codec, has_edit: bool, has_tag: bool) -> usize {
         let edts = if has_edit { EDTS_LEN } else { 0 };
+        let udta = if has_tag { UDTA_LEN } else { 0 };
         let stsd = STSD_LEN_WITHOUT_ENTRY + codec.entry_len();
         let stbl_fixed = 8 + stsd + 16 + 16 + 12 + 20 + 16;
         8 + MVHD_LEN
@@ -390,10 +434,11 @@ impl Layout {
             + SMHD_LEN
             + DINF_LEN
             + stbl_fixed
+            + udta
     }
 
     fn moov_len(&self) -> usize {
-        Self::moov_len_without_tables(self.codec, self.edit.is_some())
+        Self::moov_len_without_tables(self.codec, self.edit.is_some(), self.gapless.is_some())
             + 8 * stts_entry_count(self.codec, self.frames)
             + 8 * self.packets
     }
@@ -503,6 +548,9 @@ impl Layout {
                     });
                 });
             });
+            if let Some(gapless) = self.gapless {
+                write_gapless_tag(out, gapless);
+            }
         });
         debug_assert_eq!(out.0.len() - start, self.moov_len());
     }
@@ -539,6 +587,71 @@ fn write_sample_entry(out: &mut Boxes, entry: &SampleEntry, codec: Codec, sample
             out.full(b"esds", 0, |out| write_es_descriptor(out, config));
         }),
     }
+}
+
+/// Refuses a file of these values that can reach 4 GiB: the `stco`
+/// offsets are 32 bits.  Each packet counts at the codec's largest size.
+fn refuse_4_gib(codec: Codec, frames: u64, has_edit: bool, has_tag: bool) -> Result<(), Error> {
+    let packets = u128::from(frames.div_ceil(u64::from(codec.frames_per_packet())));
+    let stts_entries = stts_entry_count(codec, frames) as u128;
+    let fixed = (FTYP_LEN
+        + MDAT_HEADER_LEN
+        + Layout::moov_len_without_tables(codec, has_edit, has_tag)) as u128;
+    let worst_case_bytes =
+        fixed + 8 * stts_entries + packets * (8 + codec.max_packet_bytes() as u128);
+    if worst_case_bytes >= 1 << 32 {
+        return Err(Error::TooLarge {
+            frames,
+            worst_case_bytes,
+        });
+    }
+    Ok(())
+}
+
+/// The text of `iTunSMPB`: 12 fields of upper-case hexadecimal, each after
+/// one space.  Field 2 is the delay, field 3 the padding, and field 4 the
+/// frames in 16 digits.  The other fields are 0.
+pub(crate) fn itunsmpb_text(gapless: Gapless) -> String {
+    let Gapless {
+        delay,
+        padding,
+        frames,
+    } = gapless;
+    let mut text = format!(" 00000000 {delay:08X} {padding:08X} {frames:016X}");
+    for _ in 0..8 {
+        text.push_str(" 00000000");
+    }
+    text
+}
+
+/// The `udta` of `moov` with the `iTunSMPB` tag of `gapless`, as Apple's
+/// files hold it: `meta` (a full box) with an `hdlr` of type `mdir`, and
+/// an `ilst` of one `----` item with its `mean`, `name` and `data`.
+fn write_gapless_tag(out: &mut Boxes, gapless: Gapless) {
+    out.open(b"udta", |out| {
+        out.full(b"meta", 0, |out| {
+            out.full(b"hdlr", 0, |out| {
+                out.u32(0);
+                out.kind(b"mdir");
+                out.kind(b"appl");
+                out.zeros(8);
+                // An empty name.
+                out.u8(0);
+            });
+            out.open(b"ilst", |out| {
+                out.open(b"----", |out| {
+                    out.full(b"mean", 0, |out| out.bytes(ITUNES_MEAN));
+                    out.full(b"name", 0, |out| out.bytes(ITUNSMPB_NAME));
+                    out.open(b"data", |out| {
+                        out.u32(DATA_TYPE_UTF8);
+                        // The locale: 0.
+                        out.u32(0);
+                        out.bytes(itunsmpb_text(gapless).as_bytes());
+                    });
+                });
+            });
+        });
+    });
 }
 
 /// The `ES_Descriptor` of `esds` (ISO/IEC 14496-1, 7.2.6.5): `ES_ID` 0

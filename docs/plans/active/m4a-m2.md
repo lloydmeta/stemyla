@@ -340,7 +340,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 
 * [x] 2026-11-08: plan written by the team leader.
 * [x] 2026-11-08: Step 1: the `m4a` crate takes AAC.  First failures, with stubs (AAC values of ALAC, no refusals, an `esds` of zeros): each of the 10 new tests failed on an assert.  For example, `an_aac_file_has_an_mp4a_entry_with_its_esds` at the `mp4a` channel count, `an_aac_layout_has_1024_frames_in_each_packet` at 1 packet for 3, and `symphonia_probes_an_aac_file` at `head.is_ok()` (`PacketCount`).  Then `cargo test -p m4a` passes; the ALAC tests of M1 pass with `Codec::Alac`.
-* [ ] Step 2: the `iTunSMPB` tag.
+* [x] 2026-11-08: Step 2: the `iTunSMPB` tag.  First failures, with a stub `with_gapless` that keeps no tag and refuses nothing: each of the 4 new tests failed on an assert.  `a_gapless_tag_is_an_itunsmpb_item_in_moov_udta` at the children of `moov`, `the_head_with_a_gapless_tag_has_its_reserved_length` at the 249 bytes of the tag, `a_gapless_tag_that_is_not_the_frames_of_the_track_is_refused` at `GaplessFrames`, and `a_file_with_a_gapless_tag_decodes_bit_for_bit` at "the file holds the tag".  A fifth test, `a_gapless_tag_that_takes_the_file_to_4_gib_is_refused`, failed at "2 channels, 49 bytes" with the tag left out of the 4 GiB count.
 * [x] 2026-11-08: plan review round 1 (a `Plan` agent): 4 blockers, 11 should-fix and 5 nits.  The plan takes each (Decision log).
 * [x] 2026-11-08: plan review round 2 (a new `Plan` agent): 2 blockers, 9 should-fix and 6 nits.  The plan takes each (Decision log).  Round 2 is the last plan review round.
 * [ ] Step 3: the engine decodes ALAC, ADTS and AIFF.
@@ -376,6 +376,8 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 
 * 2026-11-08, agent (implementer): `Error::PacketSize` gets a field `most`, the codec's bound.  Reason: the bound differs for each codec, so the text names it.  The new variants are `NoChannels`, `ConfigLen` and `EntryCodec`.
 * 2026-11-08, agent (implementer): `m4a` gets no `aac_file` function.  Reason: an AAC fixture has its packets already, so a test calls `Layout::head` and `Layout::tail` (the writer) directly.  Only `engine` makes AAC fixtures.
+* 2026-11-08, agent (implementer): the tag comes from `Layout::with_gapless(self, Gapless)`, not from one more argument of `new`.  Reason: M3's ALAC save needs no tag, so the callers of `new` do not change; `with_gapless` checks the frames and the 4 GiB limit again.
+* 2026-11-08, agent (implementer): the `hdlr` of the tag's `meta` has an empty name of one zero byte.  Reason: the plan gives no name, and a reader needs only the handler type `mdir`.
 * 2026-11-08, agent (implementer): `MAX_CONFIG_LEN` (64) is public.  Reason: a caller can check an AudioSpecificConfig before it makes a `Layout`.
 
 ## Outcomes and retrospective
