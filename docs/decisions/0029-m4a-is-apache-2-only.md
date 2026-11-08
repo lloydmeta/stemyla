@@ -9,7 +9,7 @@ The workspace is MIT or Apache-2.0, at the user's option.  Decision 0028 puts an
 ## Options
 
 * Apache-2.0 only for `m4a`: `m4a/Cargo.toml` has `license = "Apache-2.0"`.  `alac-encoder` is taken under its Apache-2.0 option.  The other crates stay MIT or Apache-2.0.
-* MIT or Apache-2.0 for `m4a`, as the workspace is: this needs an encoder that is not a port of Apple's code, such as a new encoder written from the ALAC format only.  D2 chose the port, so this option means a new milestone and a new differential reference.
+* MIT or Apache-2.0 for `m4a`, as the workspace is.  This needs an encoder that is not a port of Apple's code.  An example is a new encoder from the ALAC format only.  D2 chose the port, so this option means a new milestone and a new differential reference.
 
 ## Decision
 

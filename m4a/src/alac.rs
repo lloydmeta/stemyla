@@ -127,8 +127,8 @@ pub(crate) enum PacketKind {
     Compressed,
     /// The trial encodes predicted that compression does not pay.
     Escape,
-    /// The compressed packet was not smaller than an escape packet, so it
-    /// was removed and written again as an escape packet.
+    /// The compressed try was not smaller than an escape packet, so the
+    /// encoder wrote an escape packet in its place.
     Rewound,
 }
 

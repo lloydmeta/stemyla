@@ -26,7 +26,7 @@ Before you add a crate, confirm that it exists and is maintained.  Pin a young c
 
 * Why: supply-chain risk, and the shipped page must credit every licence it bundles.
 * Enforced by: `young_crates_are_pinned` and `third_party_lists_what_ships` (CI `test` job).  The first fails a registry requirement that admits a version below 1.0 and is not an `=` pin, unless `SETTLED_CRATES` names the crate.  It also fails a source that is not a registry, such as git.  It does not check an entry's date; a reviewer does.  The second compares both tables of `THIRD-PARTY.md` with their commands.  Neither sees a young crate at 1.0 or later, or whether a crate is maintained.
-* Gaps: TD-7.
+* Gaps: TD-7, TD-79.
 
 ### LAYER-1: crates depend only downwards
 

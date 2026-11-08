@@ -679,7 +679,11 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
 
 /// True when `tested` holds `engine` and a member outside the closure and
 /// the dependents of `engine`.  Then one test build has both, so the
-/// features of that member can reach the dependencies of `engine`.
+/// features of that member can reach the dependencies of `engine`, as the
+/// Symphonia features of the tests of `m4a` do.  A dependent of `engine`
+/// can also turn on features of `engine`: `app` and `xtask` turn on
+/// `engine/cpal`.  Tier `push` and CI run `cargo test -p engine` alone, so
+/// they cover that case.
 fn merges_into_engine(graph: &Graph, tested: &BTreeSet<&String>) -> bool {
     let engine = BTreeSet::from([ENGINE.to_string()]);
     let family: BTreeSet<String> = graph
@@ -1795,10 +1799,9 @@ mod tests {
             "ci.yml has no `{}`",
             engine.trim()
         );
-        assert!(
-            ci.find(workspace) < ci.find(&engine),
-            "the workspace tests come first"
-        );
+        let workspace_at = ci.find(workspace).expect("ci.yml runs the workspace tests");
+        let engine_at = ci.find(&engine).expect("ci.yml runs the engine tests");
+        assert!(workspace_at < engine_at, "the workspace tests come first");
     }
 
     #[test]

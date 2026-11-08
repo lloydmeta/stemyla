@@ -619,6 +619,14 @@ No test with a rejected f16 variant goes through the worker's `gpu` and `load_fo
 
 * Fix: run `cargo mutants` on M9's files on a quiet machine: `roformer-gpu/src/lib.rs`, `bench.rs` and `net.rs`, `roformer/src/weights.rs`, `xtask/src/e2e/weights.rs`, `xtask/src/e2e.rs`, `protocol/src/lib.rs` and `test-support/src/lib.rs`.  Move the checks of `note_run` and `run` into pure functions with tests.  Call `gpu` and `load_format` from a test in `worker/src/web/tests.rs`, which can reach the private functions.
 
+### TD-79: `alac-encoder`, a test reference, has no maintainer release since 2022
+
+This entry concerns DEPS-1.  It is a known breach of "confirm that it exists and is maintained".
+
+`m4a` takes `alac-encoder` 0.3.0 as a dev-dependency only (`m4a/Cargo.toml`).  The differential test of the ALAC port compares each packet with this crate (decision 0028).  Its last release is 0.3.0, of January 2022.  It is pinned exactly, it never ships, and no update is wanted, since it is the fixed reference of the port.
+
+* Fix: remove the dev-dependency when the port no longer needs the reference.  For example, keep the reference packets of each test signal as stored test data.  Until then, do not update the pin.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings

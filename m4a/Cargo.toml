@@ -13,7 +13,7 @@ license = "Apache-2.0"
 # and this crate give the same packets.  A test-only crate; it does not
 # ship.  It has had no release since 0.3.0 of January 2022, so DEPS-1's
 # "maintained" does not hold.  It is a frozen reference: pinned exactly
-# (below 1.0), test-only, never shipped and never updated.
+# (below 1.0), test-only, never shipped and never updated (TD-79).
 [dev-dependencies]
 alac-encoder = "=0.3.0"
 # Decodes each test file bit for bit: a round trip of the writer.  The
