@@ -4,7 +4,7 @@ Status: accepted (2026-11-08, by the maintainer, as D1, D2 and D6 of `plans/acti
 
 ## Context
 
-The app saves WAV, MP3 and FLAC.  Apple's tools read AAC and Apple Lossless (ALAC) in an M4A file, but not FLAC: Logic Pro's list of compressed formats has no FLAC ([Logic Pro 10.1 help](https://help.apple.com/logicpro/mac/10.1/en.lproj/lgcp4f68cbe3.html)).  So a FLAC stem does not go directly into these tools.  The one Rust ALAC encoder on crates.io, `alac-encoder` 0.3.0, has `unsafe` code: a bit writer that a release build lets write past its buffer, casts of `&[u8]` to `&[i16]` with no check of alignment, and a `transmute` (the parent plan's D2).
+The app saves WAV, MP3 and FLAC.  Apple's tools read AAC and Apple Lossless (ALAC) in an M4A file, but not FLAC: Logic Pro's list of compressed formats has no FLAC ([Logic Pro 10.1 help](https://help.apple.com/logicpro/mac/10.1/en.lproj/lgcp4f68cbe3.html)).  So a FLAC stem does not go directly into these tools.  `alac-encoder` 0.3.0, the ALAC encoder crate that the plan reviewed, has `unsafe` code: a bit writer that a release build lets write past its buffer, casts of `&[u8]` to `&[i16]` with no check of alignment, and a `transmute` (the parent plan's D2).
 
 ## Decision
 
