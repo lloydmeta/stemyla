@@ -2,9 +2,10 @@
 //! `docs/plans/completed/stream-from-storage.md`, step 5 of
 //! `docs/plans/completed/stream-from-storage-m5.md`).  No model and no GPU.
 //!
-//! It drops a 44.1 kHz WAV of one source, a 48 kHz WAV of one source and
-//! the synthetic stems, and checks each session's files against the native
-//! `engine` decode of the same bytes.  It reloads to restore the last song
+//! It drops a 44.1 kHz WAV of one source, a 48 kHz WAV of one source, an
+//! ALAC M4A of one source with an encoder delay to trim, and the synthetic
+//! stems.  It checks each session's files against the native `engine`
+//! decode of the same bytes.  It reloads to restore the last song
 //! with no decode, as stored lanes, then plants a session of the M4 layout (no `decoded`
 //! line) and reloads to restore it through the decode worker.  Every case
 //! fails on a line `decoder: decoding on the page`, and no `.part` file may
@@ -318,12 +319,45 @@ await put(dir, "meta", "name\tm4\nrate\t44100\nfile\tsong.wav\t0.wav\n");
 await put(sessions, "current", id);
 "#;
 
+/// The frames of encoder delay that `song.m4a` states in its `elst`, as
+/// Apple's AAC encoder gives them.
+const M4A_DELAY: usize = 2112;
+
+/// An ALAC M4A at 44.1 kHz, with `moov` first, of `M4A_DELAY` frames of
+/// the end of `left` and `right`, then `left` and `right`.  Its `elst`
+/// skips the delay, so it decodes to the samples of the 16-bit WAV of
+/// `left` and `right`.
+pub(super) fn song_m4a(left: &[f32], right: &[f32]) -> Result<Vec<u8>> {
+    let frames = left.len();
+    let delay = M4A_DELAY.min(frames);
+    let step = |x: f32| (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
+    let interleaved: Vec<i16> = (frames - delay..frames)
+        .chain(0..frames)
+        .flat_map(|i| [step(left[i]), step(right[i])])
+        .collect();
+    let edit = m4a::Edit {
+        skip: delay as u32,
+        frames: frames as u64,
+    };
+    m4a::alac_file(&interleaved, 44_100, Some(edit), m4a::Order::FastStart)
+        .map_err(|e| anyhow::anyhow!("writing song.m4a: {e}"))
+}
+
+/// The media type of a dropped file of this name.
+fn media_type(name: &str) -> &'static str {
+    if name.ends_with(".m4a") {
+        "audio/mp4"
+    } else {
+        "audio/wav"
+    }
+}
+
 /// Drops `files` (served under `/decode/` or `/stems/`), waits for the
 /// song to open from its session, and records the check.
 fn drop_and_open(p: &mut Page, files: &[(&str, &str)], what: &str) -> Result<()> {
     let drop: Vec<(&str, &str, &str)> = files
         .iter()
-        .map(|(url, name)| (*url, *name, "audio/wav"))
+        .map(|(url, name)| (*url, *name, media_type(name)))
         .collect();
     let from = p.mark();
     p.drop_files(&drop)?;
@@ -354,6 +388,8 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     let at_48 = engine::wav::encode_pcm16(left, right, 48_000);
     std::fs::write(dir.join("song.wav"), &at_44)?;
     std::fs::write(dir.join("song48.wav"), &at_48)?;
+    let m4a = song_m4a(left, right)?;
+    std::fs::write(dir.join("song.m4a"), &m4a)?;
     let stems = super::synth_stems(&o.out)?;
     let base = super::start_server(
         &o.dist,
@@ -406,6 +442,19 @@ pub(super) fn run(o: &Opts) -> Result<()> {
             "the 48 kHz WAV has the native decode's {} frames",
             native.frames
         ),
+    );
+
+    // An ALAC M4A of one source, with an `elst` delay to trim: its
+    // samples in mix.f32, bit for bit, as the native decode gives them.
+    drop_and_open(
+        &mut p,
+        &[("/decode/song.m4a", "song.m4a")],
+        "an ALAC M4A with an edit",
+    )?;
+    let got = in_page(&mut p, READ_SESSION, json!([false]), 120)?;
+    check_all(
+        &mut p,
+        session_checks(&got, &expected(&[("song.m4a".into(), m4a)])?),
     );
 
     // The synthetic stems: a song of several sources.
@@ -511,6 +560,25 @@ mod tests {
             .iter()
             .map(|(n, b)| (n.to_string(), b.clone()))
             .collect()
+    }
+
+    /// The M4A of the run decodes natively to the samples of the WAV of
+    /// the same mix: its `elst` delay is trimmed.
+    #[test]
+    fn the_m4a_of_the_run_decodes_to_the_samples_of_its_wav() {
+        let song = crate::synth::generate();
+        let n = 2 * crate::synth::SAMPLE_RATE as usize;
+        let (left, right) = (&song.mix.left[..n], &song.mix.right[..n]);
+        let m4a = song_m4a(left, right).unwrap();
+        let wav = engine::wav::encode_pcm16(left, right, 44_100);
+        let from_m4a = engine::decode_bytes(m4a, Some("m4a"));
+        assert!(from_m4a.is_ok(), "{:?}", from_m4a.err());
+        let from_m4a = from_m4a.unwrap();
+        let from_wav = engine::decode_bytes(wav, Some("wav")).unwrap();
+        assert_eq!(from_m4a.frames(), n);
+        assert!(from_m4a.channels == from_wav.channels, "the samples differ");
+        assert_eq!(media_type("song.m4a"), "audio/mp4");
+        assert_eq!(media_type("song.wav"), "audio/wav");
     }
 
     #[test]

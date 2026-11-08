@@ -1137,7 +1137,11 @@ mod tests {
                 "stem-worker",
                 &["roformer", "roformer-gpu", "stem-protocol"],
             ),
-            ("xtask", "xtask", &["dsp", "engine", "roformer", "synth"]),
+            (
+                "xtask",
+                "xtask",
+                &["dsp", "engine", "m4a", "roformer", "synth"],
+            ),
         ])
     }
 

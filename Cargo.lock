@@ -10028,6 +10028,7 @@ dependencies = [
  "flacenc",
  "half",
  "hound",
+ "m4a",
  "proc-macro2",
  "quote",
  "roformer",

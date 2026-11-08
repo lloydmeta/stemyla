@@ -68,7 +68,7 @@ Each workspace crate depends only on the workspace crates that its row lists, an
 | Shells | `app` | `dsp`, `engine`, `m4a`, `stem-protocol`, `synth` |
 | Shells | `decode-worker` | `dsp`, `engine`, `m4a`, `stem-protocol` |
 | Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
-| Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
+| Tools | `xtask` | `dsp`, `engine`, `m4a`, `roformer`, `synth` |
 
 The rows run from the lowest layer to the highest.  Each row lists every workspace crate that its crate depends on, dev- and build-dependencies included, apart from `test-support`.  `crates_depend_only_downwards` compares the table with `cargo metadata`.  Change the table in the commit that adds or removes a crate, or a dependency between crates.  Every path crate in the build is a workspace crate with a row.  No crate from a registry or git has a workspace crate's name, or takes a workspace crate.  The layers are those of LAYER-1, and `LAYERS` in `xtask/src/rules.rs` holds them.
 

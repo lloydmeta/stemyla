@@ -654,13 +654,14 @@ pub fn about_menu(ui: &mut egui::Ui) {
 #[cfg(not(target_arch = "wasm32"))]
 const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3/FLAC files), or press Demo song.";
 #[cfg(target_arch = "wasm32")]
-const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC stems, on the page), or press Demo song.";
+const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC/M4A/AIFF stems, on the page), or press Demo song.";
 
 /// What the song picker offers: the formats `engine` decodes, as
 /// extensions, since iOS Safari treats `audio/*` as video (WebKit bug
-/// 242110).
+/// 242110).  `.mp4` is there for an `.mp4` of audio only; the head check
+/// refuses one that holds video.
 #[cfg(target_arch = "wasm32")]
-const SONG_FILES: &str = ".mp3,.wav,.flac";
+const SONG_FILES: &str = ".mp3,.wav,.flac,.m4a,.mp4,.aac,.aif,.aiff,.aifc";
 
 /// The status line while the files open: "Opening "<name>"…".
 #[cfg(target_arch = "wasm32")]
@@ -3188,7 +3189,9 @@ impl StemApp {
             #[cfg(target_arch = "wasm32")]
             if ui
                 .button("Open song…")
-                .on_hover_text("Choose an MP3, WAV or FLAC file, or several stems of one song")
+                .on_hover_text(
+                    "Choose an M4A, MP3, WAV, FLAC or AIFF file, or several stems of one song",
+                )
                 .clicked()
             {
                 let ctx = ui.ctx().clone();

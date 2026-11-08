@@ -651,6 +651,14 @@ This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.
 
 * Fix: a Symphonia that takes the file, or a patch of the timescale before the probe.  The plan forbids a patch or a fork of Symphonia.
 
+### TD-83: the native welcome text names WAV, MP3 and FLAC only
+
+This entry concerns DOC-1 for the text of the app, and TD-29.
+
+Since M2 of `plans/active/m4a.md`, the native app opens M4A and AIFF stems from a folder (`engine::song::Song::load_folder`).  The web welcome text names them, but the native `WELCOME` in `app/src/lib.rs` still says "several WAV/MP3/FLAC files".  The `empty_state` snapshot of `app/tests/ui.rs` shows that text.  A new snapshot can need the maintainer's approval when lavapipe in CI does not match it (TD-29), and the run of M2 asks the maintainer nothing.
+
+* Fix: change the native `WELCOME` to "several WAV/MP3/FLAC/M4A/AIFF files" with a new `empty_state` snapshot, which the maintainer approves.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
