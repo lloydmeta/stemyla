@@ -85,7 +85,7 @@ Two facts follow for the trim:
 `CLAUDE.md` changes twice, and only the orchestrator edits it.  The implementer never edits `CLAUDE.md` or `.claude/**`.  If a commit needs a change there, the implementer stops and tells the team leader, who gives the orchestrator a diff in `m2/`.
 
 * Step 1: the Layout line of `m4a/` says "16-bit stereo ALAC" only.  The diff `m2/claude-md-step1.diff` adds "or AAC from given packets".
-* Step 3: the `cargo test -p engine` line gives `m4a` as the reason.  The diff `m2/claude-md.diff` changes the reason to the features of other members, such as `app`'s `engine/cpal`.  The orchestrator applies each diff to the tree for the step's commit, and the step's commit holds it.
+* Step 3: the `cargo test -p engine` line gives `m4a` as the reason.  The diff `m2/claude-md.diff` changes the reason to the features of other members, such as `app`'s `engine/cpal`.  No check reads these two texts, so each step's commit passes `check --tier commit` without them.  The orchestrator lands both diffs at the checkpoint before review round 1.  Until then, `CLAUDE.md` lags the code in these two lines.
 
 ### Checks that the changes meet
 
@@ -114,7 +114,7 @@ Each step is one signed commit, after `cargo run -p xtask -- check --tier commit
 
 ### Step 1: the `m4a` crate takes AAC
 
-* The orchestrator applies `m2/claude-md-step1.diff` to the tree for the commit of Step 1, so `CLAUDE.md` is true at each commit (see "The files that M2 touches").
+* The orchestrator lands `m2/claude-md-step1.diff` at the checkpoint before review round 1 (see "The files that M2 touches").
 * `m4a/src/mp4.rs`: a codec in `Layout`.  A sketch:
 
   ```rust
@@ -183,7 +183,7 @@ Each step is one signed commit, after `cargo run -p xtask -- check --tier commit
 * `xtask/src/rules.rs`: `mp4` and `aifc` in `AUDIO_EXTENSIONS` (ASSET-1), with cases in its test.  `.gitignore` gets `*.mp4` and `*.aifc`.  Both in this step, since `load_folder` opens these files from this step.  If `docs/invariants.md` lists the extensions, it changes too.
 * `THIRD-PARTY.md`: the new shipped Symphonia crates in the tables; the note on Symphonia says that it also decodes M4A (AAC-LC, ALAC), raw AAC and AIFF; a note that `oxideav-aac` 0.1.7 (MIT) and `oxideav-core` are test-only crates of `engine`.  The note on `m4a` says that `symphonia-format-isomp4` and `symphonia-codec-alac` now ship (through `engine`), and that `engine` takes `m4a` for tests only.
 * The layers table row of `engine` gets `m4a`.  `xtask/src/check.rs` `fixture()` gets the edge.
-* The engine family (see "Checks that the changes meet"): the doc of `ENGINE`, of `merges_into_engine` and of `the_ci_runs_the_engine_tests_alone` (line 1787), the test `crate_tests_with_a_member_outside_engines_family_run_engine_alone` (another member outside the family, if `m4a` joins it), `docs/ARCHITECTURE.md` (line 296), and `README.md` (line 75 and the Tests list).  Each gives a true reason.  The orchestrator lands `m2/claude-md.diff` for the `CLAUDE.md` line.  Check each new reason with `cargo tree -e features` before the commit, as M1's retrospective asks.
+* The engine family (see "Checks that the changes meet"): the doc of `ENGINE`, of `merges_into_engine` and of `the_ci_runs_the_engine_tests_alone` (line 1787), the test `crate_tests_with_a_member_outside_engines_family_run_engine_alone` (another member outside the family, if `m4a` joins it), `docs/ARCHITECTURE.md` (line 296), and `README.md` (line 75 and the Tests list).  Each gives a true reason.  The orchestrator lands `m2/claude-md.diff` for the `CLAUDE.md` line at the checkpoint before review round 1.  Check each new reason with `cargo tree -e features` before the commit, as M1's retrospective asks.
 * The test fixtures, in one `#[cfg(test)]` module of `engine` (for example `engine/src/test_m4a.rs`), beside `test_audio.rs`:
   * `alac_m4a(left, right, rate, edit, order)`: `m4a::alac_file` of the 16-bit samples with the rounding of `engine::wav::write_pcm16`.
   * `aac_m4a(channels, rate, edit, gapless, order)`: the ADTS frames of `oxideav_aac::encoder::StreamEncoder` (128 kbit/s for each 2 channels), each without its ADTS header (7 bytes, or 9 if `protection_absent` is 0), in a `Layout` of `Codec::Aac`, with an ASC of object type 2 for the rate and channels.  The media frames are the packets times 1024.
@@ -370,6 +370,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, agent (team leader): `engine` reads the ASC with its own bit reader, not with `symphonia_common`.  Reason: Symphonia reads the sync extension `0x2b7` only after an explicit object type 5 or 29, so its parse misses the backward-compatible SBR signal.  Round 1 had chosen `symphonia_common`; round 2 found the gap.
 * 2026-11-08, agent (team leader): an AAC M4A whose ASC rate differs from its `mp4a` rate gives the HE-AAC text.  Reason: such a file is implicit SBR, and the decode would play its core at the wrong speed.
 * 2026-11-08, agent (team leader): the native `WELCOME` text stays, with a TD entry.  Reason: the `empty_state` snapshot shows it, and a new snapshot can need the maintainer's approval (TD-29), whom the run does not ask.
+* 2026-11-08, agent (team leader): the two `CLAUDE.md` diffs land at the checkpoint before review round 1, not with Steps 1 and 3.  Reason: no check reads the two texts, and the run then needs no stop for the orchestrator in the middle of the steps.  `CLAUDE.md` lags the code in two lines for some commits.
 * 2026-11-08, agent (team leader): `app` takes `m4a` as a dev-dependency.  Reason: its video tests need an M4A, and D6 forbids a copy of the writer.
 * 2026-11-08, agent (team leader): an AAC is reserved for at most its length at 32 kbit/s.  Reason: AAC states its length exactly in `mdhd`, so only a crafted file overstates it; 32 kbit/s is below real AAC music files, and the limit of decision 0013 still holds.
 
