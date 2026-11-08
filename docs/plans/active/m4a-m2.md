@@ -374,6 +374,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * `an_m4a_with_tables_past_the_bound_is_refused_before_the_probe` failed at "m4a: it decodes" with the bound off.  `an_m4a_with_art_keeps_its_itunsmpb_trim` failed with the walker no longer reading a hidden `udta`.
     * `engine::hidden`: `a_read_gives_the_patch_and_leaves_the_other_bytes` failed at "a read across it" with no patch, `a_view_seeks_and_states_its_length_from_its_start` with a seek that leaves out the start, and `a_plan_keeps_at_most_most_small_small_patches` with one patch too many.
   * [x] 2026-11-09: review round 2 fixes, part 3: FLAC tags.  First failures: `the_tags_of_a_flac_are_hidden_from_symphonia` failed with nothing hidden: "a FLAC with art: the plain file peaks at 140339 bytes, the file with tags at 79758197".  `the_plan_of_a_flac_hides_its_tag_blocks` failed with no patch.
+  * [x] 2026-11-09: review round 2 fixes, part 4: MP3 and raw AAC tags (also finding 2-8).  First failures: `a_leading_id3_tag_is_hidden_from_symphonia` failed at "mp3 after a tag of 2097152 bytes: ... no suitable format reader found".  `the_plan_starts_after_the_leading_id3_tags` failed with the footer of a tag left out.
 
 ## Surprises and discoveries
 
@@ -446,6 +447,8 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-09, agent (implementer, review round 2, 2-9): a `moov` of size 0 is a Symphonia limit (TD-85).  Symphonia 0.6.1 opens no such file, art or not, so the test checks a small peak and the error.
 
 * 2026-11-09, the maintainer's choice, through the orchestrator (review round 2, the closure of TD-84): the decode hides the tags of each format from Symphonia, as for M4A.  For a FLAC, it gives PADDING (1) for the type of each PICTURE (6), VORBIS_COMMENT (4) and APPLICATION (2) block, and keeps the bit of the last block.  Symphonia 0.6.1 reads those three whole (`symphonia-bundle-flac` `demuxer.rs`, lines 106 to 140), and skips PADDING with `ignore_bytes` (line 143), which seeks.  STREAMINFO, SEEKTABLE and CUESHEET stay as they are.
+
+* 2026-11-09, the maintainer's choice, through the orchestrator (review round 2, the closure of TD-84 and finding 2-8): Symphonia's view of a file starts after its leading ID3v2 tags, with its `byte_len` less those bytes.  Reason: `engine`'s Symphonia has no ID3v2 reader, so its probe gives up past 1 MiB (`max_probe_depth`, `symphonia-core` `formats/probe.rs`, line 304).  The MP3 and ADTS readers take each position from their own stream (`first_packet_pos` and `first_frame_pos` from `mss.pos()`), so a view that starts later is safe.  `head_length` reads no Xing or VBRI tag; an MP3 states no length there.  A FLAC after a tag gets the same view.
 
 ## Outcomes and retrospective
 

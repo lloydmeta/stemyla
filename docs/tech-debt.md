@@ -660,8 +660,6 @@ Symphonia 0.6.1 reads tags and pictures whole, with `read_boxed_slice_exact`.  N
 * a WAV `LIST` chunk of form `INFO`;
 * an AIFF `APPL`, `COMT`, `MARK`, text (`NAME`, `AUTH`, `(c) `, `ANNO`) or `ID3 ` chunk.
 
-An MP3 or a raw AAC with an ID3v2 tag has no ID3v2 reader in `engine`'s Symphonia features.  So the probe gives up after 1 MiB of tag (finding 2-8).
-
 * Fix: hide each of them from Symphonia, as for M4A.
 
 ### TD-85: an M4A whose `moov` has a size of 0 does not open

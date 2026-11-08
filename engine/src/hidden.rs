@@ -8,8 +8,9 @@
 //! [`Plan`] holds the changes, and [`Hidden`] gives them to each read.
 //!
 //! The walk of an MP4 plans its boxes (`engine::mp4_boxes`).  [`plan_of`]
-//! plans the other formats: FLAC PICTURE, VORBIS_COMMENT and APPLICATION
-//! blocks show as PADDING.
+//! plans the other formats.  The view starts after any leading ID3v2 tags,
+//! and FLAC PICTURE, VORBIS_COMMENT and APPLICATION blocks show as
+//! PADDING.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -157,15 +158,38 @@ const FLAC_TAG_BLOCKS: [u8; 3] = [2, 4, 6];
 /// The type of a FLAC PADDING block, which Symphonia skips with a seek.
 const FLAC_PADDING: u8 = 1;
 
-/// The plan of a file that is not an MP4, from its headers in `source`:
-/// it hides the tag blocks of a FLAC.
+/// The plan of a file that is not an MP4, from its headers in `source`.
+/// It starts the view after any leading ID3v2 tags, and hides the tag
+/// blocks of a FLAC.
 pub(crate) fn plan_of(source: &mut dyn ReadAt) -> std::io::Result<Plan> {
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        start: leading_id3_bytes(source)?,
+        ..Plan::default()
+    };
     let mut magic = [0; 4];
     if source.read_at(plan.start, &mut magic)? == 4 && magic == *b"fLaC" {
         flac_plan(source, plan.start + 4, &mut plan)?;
     }
     Ok(plan)
+}
+
+/// The bytes of the ID3v2 tags at the start of `source`, one after the
+/// other.  `engine`'s Symphonia has no ID3v2 reader, so its probe gives up
+/// past 1 MiB of a tag.  Each tag has a header of 10 bytes, a synchsafe
+/// size, and a footer of 10 bytes when its flags say so.
+fn leading_id3_bytes(source: &mut dyn ReadAt) -> std::io::Result<u64> {
+    let mut at = 0_u64;
+    loop {
+        let mut header = [0; 10];
+        if source.read_at(at, &mut header)? < 10 || header[..3] != *b"ID3" {
+            return Ok(at);
+        }
+        let size = header[6..10]
+            .iter()
+            .fold(0_u64, |size, byte| (size << 7) | u64::from(byte & 0x7F));
+        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+        at += 10 + size + footer;
+    }
 }
 
 /// Hides each tag block of the FLAC metadata from `at`: it gives PADDING
@@ -309,6 +333,25 @@ mod tests {
         );
         let plain = plan_of(&mut &flac[..]).map(|plan| plan.is_empty());
         assert_eq!(plain.ok(), Some(true), "a FLAC with no tags");
+    }
+
+    /// The plan of a file after ID3v2 tags starts after them, also after a
+    /// tag with a footer.
+    #[test]
+    fn the_plan_starts_after_the_leading_id3_tags() {
+        let mut with_footer = crate::test_audio::id3_tag(20);
+        with_footer[5] = 0x10;
+        with_footer.extend_from_slice(&[0; 10]);
+        let file = [
+            crate::test_audio::id3_tag(100),
+            with_footer,
+            Vec::from(*b"\xFF\xFB\x90\x00"),
+        ]
+        .concat();
+        let plan = plan_of(&mut &file[..]);
+        assert_eq!(plan.ok().map(|plan| plan.start), Some(110 + 40));
+        let none = plan_of(&mut &b"\xFF\xFB\x90\x00"[..]);
+        assert_eq!(none.ok().map(|plan| plan.is_empty()), Some(true));
     }
 
     #[test]

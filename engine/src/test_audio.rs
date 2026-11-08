@@ -219,3 +219,14 @@ pub fn with_flac_tags(flac: &[u8], picture: usize) -> Vec<u8> {
     out.extend_from_slice(&flac[42..]);
     out
 }
+
+/// An ID3v2.4 tag of `bytes` bytes of padding after its header, with its
+/// size in synchsafe form.
+pub fn id3_tag(bytes: usize) -> Vec<u8> {
+    let size = bytes as u32;
+    let synchsafe = [21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7F) as u8);
+    let mut out = vec![b'I', b'D', b'3', 4, 0, 0];
+    out.extend_from_slice(&synchsafe);
+    out.resize(10 + bytes, 0);
+    out
+}

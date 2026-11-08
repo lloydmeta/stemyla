@@ -3009,6 +3009,33 @@ mod tests {
         assert_tags_are_hidden(plain, small, "flac", "a FLAC with small tags");
     }
 
+    /// The maintainer's design of review round 2 (MEM-4), and finding 2-8:
+    /// the probe gives up past 1 MiB of a leading ID3v2 tag, since
+    /// `engine`'s Symphonia has no ID3v2 reader.  The decode starts
+    /// Symphonia's view after the tags, so an MP3, a raw AAC or a FLAC with
+    /// a tag of 2 MiB or 64 MiB opens at a flat peak, bit for bit.
+    #[test]
+    fn a_leading_id3_tag_is_hidden_from_symphonia() {
+        use crate::test_audio::{id3_tag, mp3, tone};
+        let tones = [tone(0, 44_100, 44_100), tone(1, 44_100, 44_100)];
+        let (left, right, _) = stereo_wav();
+        let files = [
+            ("mp3", mp3(&tones, 44_100)),
+            ("aac", crate::test_m4a::adts(&short_tone(), 44_100)),
+            ("flac", compressed(&left, &right, 44_100)),
+        ];
+        for (ext, plain) in files {
+            for bytes in [2 << 20, ART] {
+                let tagged = [id3_tag(bytes), plain.clone()].concat();
+                let case = format!("{ext} after a tag of {bytes} bytes");
+                assert_tags_are_hidden(plain.clone(), tagged, ext, &case);
+            }
+            // Two tags, one after the other.
+            let two = [id3_tag(100), id3_tag(2 << 20), plain.clone()].concat();
+            assert_tags_are_hidden(plain, two, ext, &format!("{ext} after two tags"));
+        }
+    }
+
     /// The `iTunSMPB` tag of a hidden `udta` still gives the trim: the
     /// walker reads it, not Symphonia.
     #[test]
