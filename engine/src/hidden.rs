@@ -236,20 +236,100 @@ fn chunk_plan(
     }
 }
 
-/// The plan of a file that is not an MP4, from its headers in `source`.
-/// It starts the view after any leading ID3v2 tags, and hides the tag
-/// blocks of a FLAC and the tag chunks of a WAV and an AIFF.
-pub(crate) fn plan_of(source: &mut dyn ReadAt) -> std::io::Result<Plan> {
+/// The container of a file, which says the one Symphonia reader that the
+/// decode opens.  The decode does not run Symphonia's probe, which scans up
+/// to 1 MiB for any format, and can open a part of the file that the plan
+/// never saw (findings 5-2 and 5-3 of review round 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Container {
+    Flac,
+    Wav,
+    Aiff,
+    Mp4,
+    Adts,
+    Mp3,
+}
+
+/// The container that `bytes` (the start of a view) start with: `fLaC`,
+/// `RIFF` with `WAVE` or `RF64`, `FORM` with `AIFF` or `AIFC`, an MP4 box
+/// (`mp4_boxes::FIRST_BOXES`), or the frame sync of an ADTS stream (layer
+/// 00) or of an MP3.  `None` for anything else.
+pub(crate) fn container_at(bytes: &[u8]) -> Option<Container> {
+    let magic = bytes.get(..4)?;
+    let form = bytes.get(8..12);
+    let mp4 = bytes
+        .get(4..8)
+        .is_some_and(|kind| crate::mp4_boxes::FIRST_BOXES.iter().any(|k| kind == &k[..]));
+    match (magic, form) {
+        (b"fLaC", _) => Some(Container::Flac),
+        (b"RIFF", Some(b"WAVE")) | (b"RF64", _) => Some(Container::Wav),
+        (b"FORM", Some(b"AIFF" | b"AIFC")) => Some(Container::Aiff),
+        _ if mp4 => Some(Container::Mp4),
+        _ if is_adts_sync(magic) => Some(Container::Adts),
+        _ if is_mp3_sync(magic) => Some(Container::Mp3),
+        _ => None,
+    }
+}
+
+/// An ADTS frame sync: 12 bits of 1, the ID bit, then a layer of 00.
+fn is_adts_sync(bytes: &[u8]) -> bool {
+    matches!(bytes, [0xFF, second, ..] if second & 0xF6 == 0xF0)
+}
+
+/// An MPEG audio frame sync: 11 bits of 1, then a layer other than 00.
+fn is_mp3_sync(bytes: &[u8]) -> bool {
+    matches!(bytes, [0xFF, second, ..] if second & 0xE0 == 0xE0 && second & 0x06 != 0)
+}
+
+/// The bytes after the start of a view that the decode scans for an MP3
+/// frame sync, when the view starts with no known container: 1 MiB, as
+/// Symphonia's probe does (`max_probe_depth`, `formats/probe.rs`).
+pub(crate) const MP3_SCAN_BYTES: u64 = 1 << 20;
+
+/// Where Symphonia's view of `source` starts (after any leading ID3v2
+/// tags), and its container there.  A view of no known container with an
+/// MP3 frame sync in its first [`MP3_SCAN_BYTES`] is an MP3: the MP3 reader
+/// skips junk before its first frame by itself (`read_mpeg_frame_strict`).
+pub(crate) fn start_of(source: &mut dyn ReadAt) -> std::io::Result<(u64, Option<Container>)> {
+    let view = leading_id3_bytes(source)?;
+    let mut magic = [0; 12];
+    let read = source.read_at(view, &mut magic)?;
+    if let Some(container) = container_at(&magic[..read]) {
+        return Ok((view, Some(container)));
+    }
+    // Blocks of 64 KiB, each with the last byte of the one before.
+    const BLOCK: usize = 64 * 1024;
+    let mut block = vec![0; BLOCK + 1];
+    let mut at = view;
+    while at < view + MP3_SCAN_BYTES {
+        let read = source.read_at(at, &mut block)?;
+        if block[..read].windows(2).any(is_mp3_sync) {
+            return Ok((view, Some(Container::Mp3)));
+        }
+        if read < block.len() {
+            break;
+        }
+        at += BLOCK as u64;
+    }
+    Ok((view, None))
+}
+
+/// The plan of a file of `container`, not an MP4, whose view starts at
+/// `view`.  It hides the tag blocks of a FLAC and the tag chunks of a WAV
+/// and an AIFF.
+pub(crate) fn plan_of(
+    source: &mut dyn ReadAt,
+    view: u64,
+    container: Option<Container>,
+) -> std::io::Result<Plan> {
     let mut plan = Plan {
-        start: leading_id3_bytes(source)?,
+        start: view,
         ..Plan::default()
     };
-    let mut magic = [0; 12];
-    let read = source.read_at(plan.start, &mut magic)?;
-    let chunks = plan.start + 12;
-    match (read, &magic[..4], &magic[8..]) {
-        (4.., b"fLaC", _) => flac_plan(source, plan.start + 4, &mut plan)?,
-        (12, b"RIFF", b"WAVE") => chunk_plan(
+    let chunks = view + 12;
+    match container {
+        Some(Container::Flac) => flac_plan(source, view + 4, &mut plan)?,
+        Some(Container::Wav) => chunk_plan(
             source,
             chunks,
             true,
@@ -257,7 +337,7 @@ pub(crate) fn plan_of(source: &mut dyn ReadAt) -> std::io::Result<Plan> {
             Some(b"data"),
             &mut plan,
         )?,
-        (12, b"FORM", b"AIFF" | b"AIFC") => {
+        Some(Container::Aiff) => {
             chunk_plan(source, chunks, false, &AIFF_TAG_CHUNKS, None, &mut plan)?
         }
         _ => {}
@@ -309,6 +389,12 @@ fn flac_plan(source: &mut dyn ReadAt, mut at: u64, plan: &mut Plan) -> std::io::
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// The plan of the whole `file`, as the decode makes it.
+    fn plan_of_file(mut file: &[u8]) -> std::io::Result<Plan> {
+        let (view, container) = start_of(&mut file)?;
+        plan_of(&mut file, view, container)
+    }
 
     /// 32 bytes, each its own offset.
     fn file() -> Vec<u8> {
@@ -396,7 +482,7 @@ mod tests {
     fn the_plan_of_a_flac_hides_its_tag_blocks() {
         let flac = crate::test_audio::flac(&[vec![0.25; 4096], vec![0.5; 4096]], 44_100);
         let tagged = crate::test_audio::with_flac_tags(&flac, 100);
-        let plan = plan_of(&mut &tagged[..]);
+        let plan = plan_of_file(&tagged[..]);
         assert!(plan.is_ok(), "{plan:?}");
         let plan = plan.unwrap();
         // STREAMINFO at 4, then VORBIS_COMMENT at 42, then APPLICATION.
@@ -421,7 +507,7 @@ mod tests {
                 (picture, [last | 1, 0, 0, 0], 1),
             ]
         );
-        let plain = plan_of(&mut &flac[..]).map(|plan| plan.is_empty());
+        let plain = plan_of_file(&flac[..]).map(|plan| plan.is_empty());
         assert_eq!(plain.ok(), Some(true), "a FLAC with no tags");
     }
 
@@ -438,9 +524,9 @@ mod tests {
             Vec::from(*b"\xFF\xFB\x90\x00"),
         ]
         .concat();
-        let plan = plan_of(&mut &file[..]);
+        let plan = plan_of_file(&file);
         assert_eq!(plan.ok().map(|plan| plan.start), Some(110 + 40));
-        let none = plan_of(&mut &b"\xFF\xFB\x90\x00"[..]);
+        let none = plan_of_file(&b"\xFF\xFB\x90\x00"[..]);
         assert_eq!(none.ok().map(|plan| plan.is_empty()), Some(true));
     }
 
@@ -450,7 +536,7 @@ mod tests {
         use crate::test_audio::{Aiff, aiff, with_aiff_tags, with_wav_tags};
         let wav = crate::wav::encode_pcm16(&[0.25; 100], &[0.5; 100], 44_100);
         let patches = |file: &[u8]| {
-            let plan = plan_of(&mut &file[..]);
+            let plan = plan_of_file(file);
             assert!(plan.is_ok(), "{plan:?}");
             let plan = plan.unwrap();
             plan.patches
@@ -470,11 +556,62 @@ mod tests {
         assert_eq!(patches(&plain), []);
     }
 
+    /// The rule of the container at the start of a view (findings 5-2 to
+    /// 5-4 of review round 5).
+    #[test]
+    fn the_container_is_the_one_at_the_start_of_the_view() {
+        use Container::*;
+        let cases: [(&[u8], Option<Container>); 17] = [
+            (b"fLaC\0\0\0\x22", Some(Flac)),
+            (b"RIFF\0\0\0\0WAVE", Some(Wav)),
+            (b"RF64\0\0\0\0WAVE", Some(Wav)),
+            (b"RIFF\0\0\0\0AVI ", None),
+            (b"FORM\0\0\0\0AIFF", Some(Aiff)),
+            (b"FORM\0\0\0\0AIFC", Some(Aiff)),
+            (b"FORM\0\0\0\0JUNK", None),
+            (b"\0\0\0\x20ftypM4A ", Some(Mp4)),
+            (b"\0\0\0\x08moov", Some(Mp4)),
+            (b"\0\0\0\x08free", Some(Mp4)),
+            (b"\0\0\0\x08uuid", Some(Mp4)),
+            (b"\0\0\0\x08junk", None),
+            (b"\xFF\xF1\x50\x80", Some(Adts)),
+            (b"\xFF\xFB\x90\x00", Some(Mp3)),
+            (b"\xFF\xE0\x00\x00", None),
+            (b"\xFF\x00\x00\x00", None),
+            (b"\x42\xE2\x00\x00", None),
+        ];
+        for (bytes, want) in cases {
+            assert_eq!(container_at(bytes), want, "{bytes:02x?}");
+        }
+        assert_eq!(container_at(b"fLa"), None, "too short");
+    }
+
+    /// A view of no known container is an MP3 when an MP3 frame sync is in
+    /// its first `MP3_SCAN_BYTES`, after any ID3v2 tags.
+    #[test]
+    fn a_view_of_no_known_container_is_an_mp3_only_with_a_sync_in_reach() {
+        use crate::test_audio::id3_tag;
+        let sync = [0xFF_u8, 0xFB, 0x90, 0x00];
+        let start = |file: &[u8]| start_of(&mut { file }).ok();
+        let near = [id3_tag(100), vec![0; 70_000], Vec::from(sync)].concat();
+        assert_eq!(start(&near), Some((110, Some(Container::Mp3))));
+        let edge = [vec![0; MP3_SCAN_BYTES as usize - 2], Vec::from(sync)].concat();
+        assert_eq!(start(&edge), Some((0, Some(Container::Mp3))), "at the edge");
+        let past = [
+            vec![0; MP3_SCAN_BYTES as usize + 64 * 1024],
+            Vec::from(sync),
+        ]
+        .concat();
+        assert_eq!(start(&past), Some((0, None)), "past the reach");
+        assert_eq!(start(&[0; 100]), Some((0, None)));
+        assert_eq!(start(&[]), Some((0, None)));
+    }
+
     /// Missed mutants 3-24 and 3-25 of review round 3: a header of 9 bytes
     /// is no ID3v2 tag, and the walk of a FLAC cut in its metadata ends.
     #[test]
     fn a_cut_id3_header_or_flac_ends_the_plan() {
-        let cut_id3 = plan_of(&mut &b"ID3\x04\x00\x00\x00\x00\x01"[..]);
+        let cut_id3 = plan_of_file(&b"ID3\x04\x00\x00\x00\x00\x01"[..]);
         assert_eq!(cut_id3.ok().map(|plan| plan.start), Some(0));
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -482,7 +619,7 @@ mod tests {
             let mut not_last = Vec::from(&flac[..42]);
             not_last[4] &= 0x7F;
             for file in [Vec::from(*b"fLaC"), not_last] {
-                let plan = plan_of(&mut &file[..]).map(|plan| plan.is_empty());
+                let plan = plan_of_file(&file[..]).map(|plan| plan.is_empty());
                 let _ = sender.send(plan.ok());
             }
         });
@@ -498,7 +635,7 @@ mod tests {
     fn small_wav_tag_chunks_count_against_the_cap() {
         let wav = crate::wav::encode_pcm16(&[0.25; 100], &[0.5; 100], 44_100);
         let file = crate::test_audio::with_small_wav_tags(&wav, MOST_SMALL + 1);
-        let plan = plan_of(&mut &file[..]);
+        let plan = plan_of_file(&file);
         assert!(plan.is_ok(), "{plan:?}");
         let plan = plan.unwrap();
         assert_eq!(plan.patches.len(), MOST_SMALL);
