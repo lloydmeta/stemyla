@@ -9950,12 +9950,14 @@ dependencies = [
  "half",
  "hound",
  "proc-macro2",
+ "quote",
  "roformer",
  "rusty_mp3",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "synth",
 ]
 

@@ -2345,6 +2345,758 @@ fn table_differences(table: &[(usize, LicenceRow)], rows: &BTreeSet<LicenceRow>)
     twice.chain(changed_or_stale).chain(missing).collect()
 }
 
+/// `path` with its `.` and `..` parts resolved, as `/`-separated text.  A
+/// `..` above the start stays as `..`, so the path does not start with any
+/// folder.
+fn normalised(path: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if parts.last().is_some_and(|last| last != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..".into());
+                }
+            }
+            std::path::Component::Normal(name) => parts.push(name.to_string_lossy().into()),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                parts.clear();
+                parts.push(String::new());
+            }
+        }
+    }
+    parts.join("/")
+}
+
+/// The string that a `#[path = "..."]` attribute group names, at any depth
+/// of the group, so `#[cfg_attr(x, path = "...")]` counts too.
+fn attribute_paths(stream: TokenStream, out: &mut Vec<(usize, String)>) {
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => attribute_paths(group.stream(), out),
+            TokenTree::Ident(ident) if ident == "path" => {
+                if punct_spacing(trees.get(index + 1), '=').is_some()
+                    && let Some((line, value)) = rust_string(trees.get(index + 2))
+                {
+                    out.push((line, value));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a source file names as code from another file: each `#[path]`
+/// attribute and each `include!`, with its line.  `None` in place of a
+/// path is an `include!` whose argument is not one string literal.
+fn source_includes(stream: TokenStream, out: &mut Vec<(usize, &'static str, Option<String>)>) {
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
+    for (index, tree) in trees.iter().enumerate() {
+        let TokenTree::Group(group) = tree else {
+            let is_include = ident_name(Some(tree))
+                .is_some_and(|name| name.trim_start_matches("r#") == "include")
+                && punct_spacing(trees.get(index + 1), '!').is_some();
+            if let (true, Some(TokenTree::Group(args))) = (is_include, trees.get(index + 2)) {
+                let inner: Vec<TokenTree> = args.stream().into_iter().collect();
+                let line = args.span().start().line;
+                let path = match inner.as_slice() {
+                    [only] => rust_string(Some(only)).map(|(_, value)| value),
+                    _ => None,
+                };
+                out.push((line, "include!", path));
+            }
+            continue;
+        };
+        let after_hash = index >= 1
+            && (punct_spacing(trees.get(index - 1), '#').is_some()
+                || (index >= 2
+                    && punct_spacing(trees.get(index - 1), '!').is_some()
+                    && punct_spacing(trees.get(index - 2), '#').is_some()));
+        if group.delimiter() == Delimiter::Bracket && after_hash {
+            let mut paths = Vec::new();
+            attribute_paths(group.stream(), &mut paths);
+            out.extend(
+                paths
+                    .into_iter()
+                    .map(|(line, value)| (line, "#[path]", Some(value))),
+            );
+        }
+        source_includes(group.stream(), out);
+    }
+}
+
+/// LAYER-1: no source of a member reaches into another folder through a
+/// `#[path]` attribute or an `include!` (TD-23).  `files` holds each Rust
+/// file with its text, and `member_dirs` the members' folders.  A path is
+/// read from the file's folder, as Rust reads a `#[path]` outside an
+/// inline module.  Inside an inline module, Rust reads it from a deeper
+/// folder, so the check can fail a path that stays in the crate, but
+/// never passes one that leaves it.  A file that does not tokenise gives
+/// no problem, since Cargo cannot build it either.  `include_str!` and
+/// `include_bytes!` pass from any folder, in every crate, so they can
+/// bring in a file of another crate (TD-23).  The check finds `include!`
+/// by its name, so a renamed import passes (TD-23).
+pub fn source_stays_in_its_crate(
+    files: &[(String, String)],
+    member_dirs: &[String],
+) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    for (file, text) in files {
+        let Some(dir) = member_dirs
+            .iter()
+            .filter(|dir| file.starts_with(&format!("{dir}/")))
+            .max_by_key(|dir| dir.len())
+        else {
+            continue;
+        };
+        let Ok(tokens) = TokenStream::from_str(text) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        source_includes(tokens, &mut found);
+        let folder = Path::new(file).parent().unwrap_or(Path::new(""));
+        for (line, form, path) in found {
+            let message = match path {
+                None => format!(
+                    "LAYER-1: {file}:{line} has an `include!` whose argument is not one string literal, so the check cannot read where it goes.  Fix: name the file as a literal in {dir}/, or move the code into the crate."
+                ),
+                Some(path) => {
+                    let target = normalised(&folder.join(&path));
+                    if target.starts_with(&format!("{dir}/")) {
+                        continue;
+                    }
+                    format!(
+                        "LAYER-1: {file}:{line} takes code from `{path}` with {form}, which is outside {dir}/.  Fix: depend on the crate that holds the code, down through the layers of docs/ARCHITECTURE.md."
+                    )
+                }
+            };
+            problems.push(Problem {
+                rule: "LAYER-1",
+                file: file.clone(),
+                line: Some(line),
+                message,
+            });
+        }
+    }
+    problems
+}
+
+/// The parts of `cargo metadata`'s JSON that the target check reads.
+#[derive(Deserialize)]
+struct TargetMetadata {
+    packages: Vec<TargetPackage>,
+    workspace_members: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TargetPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+    targets: Vec<Target>,
+}
+
+#[derive(Deserialize)]
+struct Target {
+    name: String,
+    src_path: PathBuf,
+}
+
+/// LAYER-1: each target of each member takes its source from the member's
+/// own folder, so no `[lib] path = "../other/src/lib.rs"` builds another
+/// crate's code (TD-23).
+pub fn targets_stay_in_their_crate(metadata: &str) -> Result<Vec<Problem>> {
+    let metadata: TargetMetadata =
+        serde_json::from_str(metadata).context("reading cargo metadata's JSON")?;
+    Ok(metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+        .flat_map(|package| {
+            let folder = package.manifest_path.parent().unwrap_or(Path::new(""));
+            // Cargo gives a `path` such as `../dsp/src/lib.rs` joined to the
+            // folder, with its `..` (finding of tech-debt rung 1).
+            let inside = format!("{}/", normalised(folder));
+            package
+                .targets
+                .iter()
+                .filter(move |target| !normalised(&target.src_path).starts_with(&inside))
+                .map(move |target| {
+                    layer1(
+                        &format!("{}/Cargo.toml", folder.display()),
+                        format!(
+                            "LAYER-1: target `{}` of {} takes its source from {}, outside {}.  Fix: keep each target's source in its own crate's folder, and depend on the other crate.",
+                            target.name,
+                            package.name,
+                            target.src_path.display(),
+                            folder.display()
+                        ),
+                    )
+                })
+        })
+        .collect())
+}
+
+/// The paths of the symbolic links in `git ls-files -s -z`'s output, whose
+/// entries are a mode, an object, a stage, a tab and a path.
+pub fn links_in_index(output: &str) -> Vec<String> {
+    output
+        .split_terminator('\0')
+        .filter_map(|entry| {
+            let (meta, path) = entry.split_once('\t')?;
+            meta.starts_with("120000 ").then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// LAYER-1: no tracked file is a symbolic link, which could point into
+/// another crate's source (TD-23).
+pub fn no_tracked_link(root: &Path) -> Result<Vec<Problem>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-s", "-z"])
+        .output()
+        .context("running git ls-files -s")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git ls-files -s failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let text =
+        String::from_utf8(output.stdout).context("git ls-files gave a path that is not UTF-8")?;
+    Ok(links_in_index(&text)
+        .into_iter()
+        .map(|path| {
+            layer1(
+                &path,
+                format!(
+                    "LAYER-1: {path} is a symbolic link in git, so it can bring another crate's source into a crate.  Fix: commit the file itself, or depend on the crate that holds it."
+                ),
+            )
+        })
+        .collect())
+}
+
+/// The members that ship no MEM-1 lint, each with the reason.
+pub const MEM1_EXEMPT: [(&str, &str); 3] = [
+    ("dsp", "DSP-1's method list bans the copies"),
+    ("xtask", "it does not ship"),
+    ("test-support", "it does not ship"),
+];
+
+/// The members whose lint also fails a copy of a JS array (MEM-1, MEM-2):
+/// the crates of the page and the workers that read JS arrays.
+pub const MEM1_JS_CRATES: [&str; 4] = ["app", "worker", "decoder", "protocol"];
+
+const MEM1_SLICE: &str = "path = \"slice::to_vec\"";
+const MEM1_JS: [&str; 2] = [
+    "path = \"js_sys::Uint8Array::to_vec\"",
+    "path = \"js_sys::Float32Array::to_vec\"",
+];
+
+/// The `cfg` conditions under which a canary still compiles in the clippy
+/// steps: a test, and the web build.
+const CANARY_CFGS: [&str; 2] = ["test", "target_arch=\"wasm32\""];
+
+/// True when the attribute group `attribute` (the part in `[...]`) turns
+/// the item off in a clippy step: a `cfg` whose condition is not one of
+/// [`CANARY_CFGS`], or any `cfg_attr`.
+fn turns_off(attribute: &proc_macro2::Group) -> bool {
+    let inner: Vec<TokenTree> = attribute.stream().into_iter().collect();
+    match ident_name(inner.first()).as_deref() {
+        Some("cfg") => {
+            let condition = match inner.get(1) {
+                Some(TokenTree::Group(args)) => args.stream().to_string().replace(' ', ""),
+                _ => String::new(),
+            };
+            !CANARY_CFGS.contains(&condition.as_str())
+        }
+        Some("cfg_attr") => true,
+        _ => false,
+    }
+}
+
+/// True when one of `attrs` turns its item off in a clippy step
+/// ([`turns_off`]).
+fn attrs_turn_off(attrs: &[syn::Attribute]) -> bool {
+    use quote::ToTokens;
+    attrs.iter().any(|attr| {
+        let tokens: Vec<TokenTree> = attr.to_token_stream().into_iter().collect();
+        tokens.iter().any(|tree| {
+            matches!(tree, TokenTree::Group(group) if group.delimiter() == Delimiter::Bracket && turns_off(group))
+        })
+    })
+}
+
+/// The outer attributes of an expression that can hold a canary.  Other
+/// kinds give none.  syn gives the attributes of an `Assign`, `Binary` or
+/// `Cast` to its left operand.  A `Continue`, `Infer` or `Lit`
+/// holds no code.  The check does not read a `Macro`, and only a macro
+/// makes a `Group`.
+fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
+    use syn::Expr::*;
+    match expr {
+        Array(e) => &e.attrs,
+        Async(e) => &e.attrs,
+        Await(e) => &e.attrs,
+        Block(e) => &e.attrs,
+        Break(e) => &e.attrs,
+        Call(e) => &e.attrs,
+        Closure(e) => &e.attrs,
+        Const(e) => &e.attrs,
+        Field(e) => &e.attrs,
+        ForLoop(e) => &e.attrs,
+        If(e) => &e.attrs,
+        Index(e) => &e.attrs,
+        Let(e) => &e.attrs,
+        Loop(e) => &e.attrs,
+        Match(e) => &e.attrs,
+        MethodCall(e) => &e.attrs,
+        Paren(e) => &e.attrs,
+        Path(e) => &e.attrs,
+        Range(e) => &e.attrs,
+        RawAddr(e) => &e.attrs,
+        Reference(e) => &e.attrs,
+        Repeat(e) => &e.attrs,
+        Return(e) => &e.attrs,
+        Struct(e) => &e.attrs,
+        Try(e) => &e.attrs,
+        TryBlock(e) => &e.attrs,
+        Tuple(e) => &e.attrs,
+        Unary(e) => &e.attrs,
+        Unsafe(e) => &e.attrs,
+        While(e) => &e.attrs,
+        Yield(e) => &e.attrs,
+        _ => &[],
+    }
+}
+
+/// The outer attributes of a pattern that can hold a canary.  A closure
+/// parameter with no type keeps its attributes here.  Other kinds give
+/// none.  A `Lit`, `Rest` or `Wild` holds no code, and the check does not
+/// read a `Macro`.  syn does not parse an `Or` as a closure parameter.
+fn pat_attrs(pat: &syn::Pat) -> &[syn::Attribute] {
+    use syn::Pat::*;
+    match pat {
+        Const(p) => &p.attrs,
+        Ident(p) => &p.attrs,
+        Paren(p) => &p.attrs,
+        Path(p) => &p.attrs,
+        Range(p) => &p.attrs,
+        Reference(p) => &p.attrs,
+        Slice(p) => &p.attrs,
+        Struct(p) => &p.attrs,
+        Tuple(p) => &p.attrs,
+        TupleStruct(p) => &p.attrs,
+        Type(p) => &p.attrs,
+        _ => &[],
+    }
+}
+
+/// The attributes of an item that can hold a canary, inner ones included
+/// for a `mod`.  Other kinds give none.  An `ExternCrate` or `Use` holds
+/// no code, and the check does not read a `Macro`.
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    use syn::Item::*;
+    match item {
+        Const(i) => &i.attrs,
+        Enum(i) => &i.attrs,
+        Fn(i) => &i.attrs,
+        ForeignMod(i) => &i.attrs,
+        Impl(i) => &i.attrs,
+        Mod(i) => &i.attrs,
+        Static(i) => &i.attrs,
+        Struct(i) => &i.attrs,
+        Trait(i) => &i.attrs,
+        TraitAlias(i) => &i.attrs,
+        Type(i) => &i.attrs,
+        Union(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+/// Finds the bodies of the functions named `name` that a clippy step
+/// compiles: it does not go into a node that an attribute turns off.
+struct CanaryFinder<'n> {
+    name: &'n str,
+    out: Vec<TokenStream>,
+}
+
+impl CanaryFinder<'_> {
+    fn found(&mut self, ident: &syn::Ident, block: &syn::Block) {
+        use quote::ToTokens;
+        if ident == self.name {
+            let mut body = TokenStream::new();
+            for stmt in &block.stmts {
+                stmt.to_tokens(&mut body);
+            }
+            self.out.push(body);
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CanaryFinder<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !attrs_turn_off(item_attrs(item)) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        self.found(&item.sig.ident, &item.block);
+        syn::visit::visit_item_fn(self, item);
+    }
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            _ => &[],
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        self.found(&item.sig.ident, &item.block);
+        syn::visit::visit_impl_item_fn(self, item);
+    }
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            _ => &[],
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_trait_item(self, item);
+        }
+    }
+    fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+        if let Some(block) = &item.default {
+            self.found(&item.sig.ident, block);
+        }
+        syn::visit::visit_trait_item_fn(self, item);
+    }
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if !attrs_turn_off(&local.attrs) {
+            syn::visit::visit_local(self, local);
+        }
+    }
+    fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+        if !attrs_turn_off(expr_attrs(expr)) {
+            syn::visit::visit_expr(self, expr);
+        }
+    }
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if !attrs_turn_off(&arm.attrs) {
+            syn::visit::visit_arm(self, arm);
+        }
+    }
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if !attrs_turn_off(&field.attrs) {
+            syn::visit::visit_field(self, field);
+        }
+    }
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        if !attrs_turn_off(&variant.attrs) {
+            syn::visit::visit_variant(self, variant);
+        }
+    }
+    fn visit_field_value(&mut self, value: &'ast syn::FieldValue) {
+        if !attrs_turn_off(&value.attrs) {
+            syn::visit::visit_field_value(self, value);
+        }
+    }
+    fn visit_generic_param(&mut self, param: &'ast syn::GenericParam) {
+        let attrs = match param {
+            syn::GenericParam::Lifetime(p) => &p.attrs,
+            syn::GenericParam::Type(p) => &p.attrs,
+            syn::GenericParam::Const(p) => &p.attrs,
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_generic_param(self, param);
+        }
+    }
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::ForeignItem::Fn(i) => &i.attrs,
+            syn::ForeignItem::Static(i) => &i.attrs,
+            syn::ForeignItem::Type(i) => &i.attrs,
+            _ => &[],
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_foreign_item(self, item);
+        }
+    }
+    fn visit_fn_arg(&mut self, arg: &'ast syn::FnArg) {
+        let attrs = match arg {
+            syn::FnArg::Receiver(r) => &r.attrs,
+            syn::FnArg::Typed(t) => &t.attrs,
+        };
+        if !attrs_turn_off(attrs) {
+            syn::visit::visit_fn_arg(self, arg);
+        }
+    }
+    fn visit_bare_fn_arg(&mut self, arg: &'ast syn::BareFnArg) {
+        if !attrs_turn_off(&arg.attrs) {
+            syn::visit::visit_bare_fn_arg(self, arg);
+        }
+    }
+    fn visit_pat(&mut self, pat: &'ast syn::Pat) {
+        if !attrs_turn_off(pat_attrs(pat)) {
+            syn::visit::visit_pat(self, pat);
+        }
+    }
+    fn visit_variadic(&mut self, variadic: &'ast syn::Variadic) {
+        if !attrs_turn_off(&variadic.attrs) {
+            syn::visit::visit_variadic(self, variadic);
+        }
+    }
+    fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
+        if !attrs_turn_off(&field.attrs) {
+            syn::visit::visit_field_pat(self, field);
+        }
+    }
+}
+
+/// The body of each function named `name` in `text`, as tokens, that a
+/// clippy step compiles.  The file is parsed with syn, so a name in a
+/// comment or a string does not count.  A function is left out when an
+/// attribute turns it off ([`turns_off`]) on it or on a node around it.
+/// Such a node is an item, a statement, an expression or a match arm.  It
+/// is also a field, a variant, a field value or a generic parameter.  It
+/// is also a foreign item, a function, closure or variadic parameter, or
+/// a field pattern.  An inner `#![...]` of its file or `mod` also counts.  A
+/// function in a macro call is not read.  A file that syn cannot parse
+/// gives none.
+fn fn_bodies(text: &str, name: &str) -> Vec<TokenStream> {
+    let Ok(file) = syn::parse_file(text) else {
+        return Vec::new();
+    };
+    if attrs_turn_off(&file.attrs) {
+        return Vec::new();
+    }
+    let mut finder = CanaryFinder {
+        name,
+        out: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut finder, &file);
+    finder.out
+}
+
+/// The copies that `body` expects the lint to fail.  A statement counts
+/// when one of its own attributes is `#[expect(clippy::disallowed_methods
+/// ...)]`, none is a `#[cfg]` or `#[cfg_attr]`, and the statement ends in
+/// `.to_vec()`.  The kind is the JS-array type that the receiver names
+/// outside any bracket, so `js_sys::Uint8Array::from(..).to_vec()` is
+/// `"Uint8Array"`, and `[..].to_vec()` is `"slice"`.  A word in a reason
+/// or in a nested group does not count.
+fn expected_copies(body: TokenStream) -> Vec<&'static str> {
+    let trees: Vec<TokenTree> = body.into_iter().collect();
+    let mut copies = Vec::new();
+    for statement in trees.split(|tree| punct_spacing(Some(tree), ';').is_some()) {
+        let mut index = 0;
+        let mut expected = false;
+        let mut configured = false;
+        while punct_spacing(statement.get(index), '#').is_some() {
+            let Some(TokenTree::Group(attribute)) = statement.get(index + 1) else {
+                break;
+            };
+            let inner: Vec<TokenTree> = attribute.stream().into_iter().collect();
+            let name = ident_name(inner.first()).unwrap_or_default();
+            let lint = match inner.get(1) {
+                Some(TokenTree::Group(args)) => args.stream().to_string().replace(' ', ""),
+                _ => String::new(),
+            };
+            expected |= name == "expect" && lint.starts_with("clippy::disallowed_methods");
+            configured |= name == "cfg" || name == "cfg_attr";
+            index += 2;
+        }
+        let rest = &statement[index..];
+        let n = rest.len();
+        let ends_in_to_vec = n >= 3
+            && punct_spacing(rest.get(n - 3), '.').is_some()
+            && ident_name(rest.get(n - 2)).as_deref() == Some("to_vec")
+            && matches!(rest.get(n - 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis && g.stream().is_empty());
+        if !expected || configured || !ends_in_to_vec {
+            continue;
+        }
+        // A `let` names its pattern and type before `=`; only the value
+        // after it is the receiver.
+        let value = if ident_name(rest.first()).as_deref() == Some("let") {
+            rest.iter()
+                .position(|tree| punct_spacing(Some(tree), '=') == Some(Spacing::Alone))
+                .map_or(n - 3, |at| at + 1)
+        } else {
+            0
+        };
+        let receiver = &rest[value.min(n - 3)..n - 3];
+        let kind = ["Uint8Array", "Float32Array"]
+            .into_iter()
+            .find(|name| {
+                receiver
+                    .iter()
+                    .any(|tree| ident_name(Some(tree)).as_deref() == Some(*name))
+            })
+            .unwrap_or("slice");
+        copies.push(kind);
+    }
+    copies
+}
+
+/// The text of the `disallowed-methods` array of a `clippy.toml`, with each
+/// `#` comment removed, or `""` if it has none.  A `#` inside a string is
+/// not a comment.
+fn disallowed_methods(config: &str) -> String {
+    let mut text = String::new();
+    for line in config.lines() {
+        let mut quote: Option<char> = None;
+        for c in line.chars() {
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '#' => break,
+                None => {}
+            }
+            text.push(c);
+        }
+        text.push('\n');
+    }
+    let Some(start) = text
+        .lines()
+        .scan(0, |at, line| {
+            let here = *at;
+            *at += line.len() + 1;
+            Some((here, line))
+        })
+        .find(|(_, line)| line.trim_start().starts_with("disallowed-methods"))
+        .map(|(at, _)| at)
+    else {
+        return String::new();
+    };
+    let rest = &text[start..];
+    let Some(open) = rest.find('[') else {
+        return String::new();
+    };
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    for (at, c) in rest[open..].char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '[' => depth += 1,
+            None if c == ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[open..open + at + 1].to_string();
+                }
+            }
+            None => {}
+        }
+    }
+    String::new()
+}
+
+/// MEM-1 and MEM-2: each member that ships has a `clippy.toml` that fails
+/// `slice::to_vec`, and a canary that proves the path (TD-26).  A canary
+/// proves a path with a `to_vec` under `#[expect(clippy::disallowed_methods)]`,
+/// which fails clippy if the path stops resolving.  Each crate of
+/// [`MEM1_JS_CRATES`] also fails the two JS-array copies, and its canary
+/// `mem1_lint_is_on_for_js_arrays` expects all three.  `configs` holds each
+/// member's `clippy.toml` text, or `None`; `files` holds the Rust files
+/// with their text.
+pub fn mem1_lint_problems(
+    members: &[String],
+    configs: &[(String, Option<String>)],
+    files: &[(String, String)],
+) -> Vec<Problem> {
+    let mem1 = |file: &str, message: String| Problem {
+        rule: "MEM-1",
+        file: file.to_string(),
+        line: None,
+        message,
+    };
+    let mut problems = Vec::new();
+    for dir in members {
+        if MEM1_EXEMPT.iter().any(|(exempt, _)| exempt == dir) {
+            continue;
+        }
+        let config_file = format!("{dir}/clippy.toml");
+        let config = configs
+            .iter()
+            .find(|(member, _)| member == dir)
+            .and_then(|(_, text)| text.as_deref())
+            .unwrap_or_default();
+        let config = disallowed_methods(config);
+        let js = MEM1_JS_CRATES.contains(&dir.as_str());
+        let wanted: Vec<&str> = std::iter::once(MEM1_SLICE)
+            .chain(MEM1_JS.into_iter().filter(|_| js))
+            .collect();
+        for path in &wanted {
+            if !config.contains(path) {
+                problems.push(mem1(
+                    &config_file,
+                    format!(
+                        "MEM-1: {config_file} lacks `{path}`.  Fix: copy the `disallowed-methods` entry of {}, or add {dir} to `MEM1_EXEMPT` in {RULES_FILE} with a reason.",
+                        match (js, dir.as_str()) {
+                            (true, "app") => "worker/clippy.toml",
+                            (true, _) => "app/clippy.toml",
+                            (false, "engine") => "roformer/clippy.toml",
+                            (false, _) => "engine/clippy.toml",
+                        }
+                    ),
+                ));
+            }
+        }
+        let (canary, proves): (&str, &[&str]) = if js {
+            (
+                "mem1_lint_is_on_for_js_arrays",
+                &["slice", "Uint8Array", "Float32Array"],
+            )
+        } else {
+            ("mem1_lint_is_on", &["slice"])
+        };
+        let proven = files
+            .iter()
+            .filter(|(file, _)| file.starts_with(&format!("{dir}/")))
+            .flat_map(|(_, text)| fn_bodies(text, canary))
+            .any(|body| {
+                let copies = expected_copies(body);
+                proves.iter().all(|kind| copies.contains(kind))
+            });
+        if !proven {
+            problems.push(mem1(
+                dir,
+                format!(
+                    "MEM-1: {dir} has no `{canary}` whose `#[expect(clippy::disallowed_methods)]` copies with each lint path, so nothing proves that the paths resolve.  Fix: add the canary of {}.",
+                    if js { "app/tests/web.rs" } else { "engine/src/song.rs" }
+                ),
+            ));
+        }
+    }
+    for name in MEM1_EXEMPT
+        .iter()
+        .map(|(exempt, _)| *exempt)
+        .chain(MEM1_JS_CRATES)
+    {
+        if !members.iter().any(|dir| dir == name) {
+            problems.push(mem1(
+                RULES_FILE,
+                format!(
+                    "MEM-1: {RULES_FILE} names {name}, which is not a member.  Fix: remove it."
+                ),
+            ));
+        }
+    }
+    problems
+}
+
 const PROTOCOL_LIB: &str = "protocol/src/lib.rs";
 const E2E_SCRIPTS: &str = "xtask/e2e";
 const E2E_RUST: &str = "xtask/src/e2e.rs";
@@ -6521,6 +7273,7 @@ fn f() {
             "if ('segmnt' != type) {}",
             "if (['alive', 'segmnt', 'done',].includes(d.type)) {}",
             "if (['alive', 'segmnt', 'done'].includes(type)) {}",
+            "if (['segmnt', 'alive'].includes(d.type)) {}",
             "if (typeof d === 'object' && d.type === 'segmnt') {}",
             "{ type: 'text' }",
         ];
@@ -6569,6 +7322,7 @@ fn f() {
             "const { type, of } = d;",
             "// { type: 'x' }",
             "/* d.type === 'x' */",
+            "/* a * { type: 'x' } b/c */",
             "`${ { type: 'x' } }`",
         ];
         for case in js_cases {
@@ -6583,6 +7337,8 @@ fn f() {
     let opts = json!({ "mm": "s64" });
     p.check(c["state"] == "running" && f("type") == "x");
     let pairs = m!["type": "x"];
+    p.check(r["end"]["type"] <= "x");
+    let made = json!({ "type": format!("x") });
     p.check(l.contains("Restored \"song\" from this browser"), "the page's song");
 }"#;
         assert_eq!(check(JS_OK, &format!("{rust}\n{RUST_OK}"), &[]), vec![]);
@@ -6595,6 +7351,33 @@ fn f() {
                 Some(3),
             )],
         );
+    }
+
+    /// An entry of `SCRIPT_ONLY_TYPES` that only the Rust of
+    /// `xtask e2e` uses is not stale.  A check that reads only the
+    /// JavaScript fails this test.
+    #[test]
+    fn a_script_only_type_in_the_rust_alone_is_not_stale() {
+        let worker_error = ("worker-error", "the reply that `e2e.ask` makes");
+        let rust = format!(
+            "{RUST_OK}\nfn g() {{ in_page(\"out.replies.push({{ type: 'worker-error' }});\"); }}"
+        );
+        assert_eq!(check(JS_OK, &rust, &[worker_error]), vec![]);
+    }
+
+    /// The lines of a `/*` comment count, so a type after it has
+    /// its own line.
+    #[test]
+    fn a_type_after_a_comment_of_several_lines_has_its_line() {
+        let js = format!("{JS_OK}\n/* a * b\n * c\n ** d\n*/ x({{ type: 'segmnt' }});");
+        assert_one_each("PROTO-1", &[(WORKER_JS, check(&js, RUST_OK, &[]), Some(5))]);
+        let first = format!("{JS_OK}\n/*\n a\n */ x({{ type: 'segmnt' }});");
+        assert_one_each(
+            "PROTO-1",
+            &[(WORKER_JS, check(&first, RUST_OK, &[]), Some(4))],
+        );
+        let unclosed = format!("{JS_OK}\n/* a\n b {{ type: 'segmnt' }}");
+        assert_eq!(check(&unclosed, RUST_OK, &[]), vec![]);
     }
 
     #[test]
@@ -7224,5 +8007,761 @@ mod agents_tests {
                 "{plant}: no problem names {named:?} in {problems:#?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn found(file: &str, text: &str) -> Vec<(Option<usize>, String)> {
+        let members = ["engine".to_string(), "roformer".to_string()];
+        source_stays_in_its_crate(&[(file.to_string(), text.to_string())], &members)
+            .into_iter()
+            .map(|p| (p.line, p.message))
+            .collect()
+    }
+
+    #[test]
+    fn code_from_the_crate_itself_passes() {
+        let text = "#[path = \"web/x.rs\"]\nmod x;\nmod y { include!(\"y.rs\"); }\nconst S: &str = \"#[path = \\\"../../roformer/src/a.rs\\\"]\";\nconst T: &str = include_str!(\"../../roformer/src/a.rs\");\nfn f() { let path = \"../../x\"; }\n#[doc = \"../../roformer/src/a.rs\"]\nfn g() {}\nm![path = \"../../roformer/src/a.rs\"];\n";
+        assert_eq!(found("engine/src/lib.rs", text), vec![]);
+        assert_eq!(
+            found("xtask/src/x.rs", "include!(\"../../roformer/src/a.rs\");"),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn code_from_another_folder_is_a_breach() {
+        let cases = [
+            "#[path = \"../../roformer/src/x.rs\"]\nmod x;",
+            "#![allow(unused)]\nfn f() { include!(\"../../roformer/src/x.rs\"); }",
+            "#[cfg_attr(unix, path = \"../../dsp/src/a.rs\")]\nmod a;",
+            "mod m {\n    #![cfg_attr(unix, path = \"../../dsp/src/a.rs\")]\n}",
+            "fn f() {\n    r#include!(\"../../x.rs\");\n}",
+            "mod m {\n    include!(\"/etc/x.rs\");\n}",
+            "macro_rules! m { () => { include!(\"../../x.rs\"); } }\nconst A: u8 = 0;",
+            "fn f() {\n    include!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\n}",
+        ];
+        for case in cases {
+            let problems = found("engine/src/lib.rs", case);
+            assert_eq!(problems.len(), 1, "{case}\n{problems:#?}");
+            let (line, message) = &problems[0];
+            assert!(line.is_some(), "{case}");
+            assert!(
+                message.starts_with("LAYER-1: engine/src/lib.rs:"),
+                "{message}"
+            );
+        }
+        let unreadable = found(
+            "engine/src/lib.rs",
+            "fn f() {\n    include!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\n}",
+        );
+        assert!(
+            unreadable[0].1.contains("not one string literal"),
+            "{unreadable:?}"
+        );
+        assert_eq!(unreadable[0].0, Some(2));
+        let path = found(
+            "engine/src/lib.rs",
+            "#[path = \"../../roformer/src/x.rs\"]\nmod x;",
+        );
+        assert!(
+            path[0].1.contains(
+                "takes code from `../../roformer/src/x.rs` with #[path], which is outside engine/."
+            ),
+            "{path:?}"
+        );
+    }
+
+    #[test]
+    fn paths_are_normalised() {
+        assert_eq!(normalised(Path::new("engine/src/../x.rs")), "engine/x.rs");
+        assert_eq!(normalised(Path::new("engine/src/../../x.rs")), "x.rs");
+        assert_eq!(normalised(Path::new("engine/../../x.rs")), "../x.rs");
+        assert_eq!(normalised(Path::new("./engine/./x.rs")), "engine/x.rs");
+        assert_eq!(
+            normalised(Path::new("engine/src/../../engine/x.rs")),
+            "engine/x.rs"
+        );
+        assert_eq!(normalised(Path::new("/etc/../etc/x.rs")), "/etc/x.rs");
+    }
+
+    fn metadata(src: &str) -> String {
+        format!(
+            r#"{{"workspace_members": ["engine 0.1.0", "app 0.1.0"], "packages": [
+                {{"id": "engine 0.1.0", "name": "engine", "manifest_path": "/r/engine/Cargo.toml",
+                  "targets": [{{"name": "engine", "src_path": "/r/engine/src/lib.rs"}},
+                              {{"name": "build-script-build", "src_path": "/r/engine/build.rs"}}]}},
+                {{"id": "app 0.1.0", "name": "app", "manifest_path": "/r/app/Cargo.toml",
+                  "targets": [{{"name": "app", "src_path": "{src}"}}]}},
+                {{"id": "dep 1.0.0", "name": "dep", "manifest_path": "/c/dep/Cargo.toml",
+                  "targets": [{{"name": "dep", "src_path": "/elsewhere/lib.rs"}}]}}
+            ]}}"#
+        )
+    }
+
+    #[test]
+    fn a_target_takes_its_source_from_its_own_folder() {
+        assert_eq!(
+            targets_stay_in_their_crate(&metadata("/r/app/src/main.rs")).unwrap(),
+            vec![]
+        );
+        let problems = targets_stay_in_their_crate(&metadata("/r/engine/src/lib.rs")).unwrap();
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert_eq!(problems[0].file, "/r/app/Cargo.toml");
+        assert!(
+            problems[0].message.starts_with("LAYER-1: target `app` of app takes its source from /r/engine/src/lib.rs, outside /r/app."),
+            "{}",
+            problems[0].message
+        );
+        let sibling = targets_stay_in_their_crate(&metadata("/r/app-other/src/main.rs")).unwrap();
+        assert_eq!(sibling.len(), 1, "a folder that only starts with the name");
+        let dotted = targets_stay_in_their_crate(&metadata("/r/app/../engine/src/lib.rs")).unwrap();
+        assert_eq!(dotted.len(), 1, "cargo keeps the `..` of a `path`");
+        let back = targets_stay_in_their_crate(&metadata("/r/app/src/../main.rs")).unwrap();
+        assert_eq!(back, vec![], "a `..` that stays in the folder");
+    }
+
+    /// `no_tracked_link` reads a repo's index: a link staged in a new repo
+    /// gives one problem, and a plain file gives none.
+    #[test]
+    fn a_tracked_link_in_a_repo_is_a_problem() {
+        let root = std::env::temp_dir().join(format!("xtask-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("engine/src")).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("engine/src/lib.rs"), "fn f() {}\n").unwrap();
+        git(&["add", "engine/src/lib.rs"]);
+        let plain = no_tracked_link(&root);
+        std::fs::write(root.join("target.txt"), "../dsp/src/lib.rs").unwrap();
+        let blob = git(&["hash-object", "-w", "target.txt"]);
+        git(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("120000,{blob},engine/src/link.rs"),
+        ]);
+        let linked = no_tracked_link(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(plain.unwrap(), vec![]);
+        let linked = linked.unwrap();
+        assert_eq!(linked.len(), 1, "{linked:#?}");
+        assert_eq!(linked[0].file, "engine/src/link.rs");
+        assert!(
+            linked[0]
+                .message
+                .starts_with("LAYER-1: engine/src/link.rs is a symbolic link in git")
+        );
+    }
+
+    #[test]
+    fn links_are_read_from_the_index() {
+        let output = [
+            "100644 aaaa 0\tsrc/a.rs",
+            "120000 bbbb 0\tsrc/link.rs",
+            "100755 cccc 0\ttools/x 120000",
+            "",
+        ]
+        .join("\0");
+        assert_eq!(links_in_index(&output), ["src/link.rs"]);
+        assert_eq!(links_in_index(""), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod mem1_tests {
+    use super::*;
+
+    const SLICE: &str =
+        "disallowed-methods = [\n  { path = \"slice::to_vec\", reason = \"x\" },\n]\n";
+    const ALL: &str = "disallowed-methods = [\n  { path = \"slice::to_vec\", reason = \"x\" },\n  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n  { path = \"js_sys::Float32Array::to_vec\", reason = \"x\" },\n]\n";
+    const CANARY: &str = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"MEM-1 canary\")]\n        let copy = [1.0_f32].to_vec();\n        assert_eq!(copy, [1.0]);\n    }\n}\n";
+    const JS_CANARY: &str = "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let b = js_sys::Uint8Array::from(&[2_u8][..]).to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let c = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();\n}\n";
+
+    /// A repo of the exempt crates, the JS crates and `engine`, each as it
+    /// should be, with `change` applied to the files.
+    fn problems(
+        change: impl FnOnce(&mut Vec<(String, Option<String>)>, &mut Vec<(String, String)>),
+    ) -> Vec<String> {
+        let mut members: Vec<String> = MEM1_EXEMPT.iter().map(|(dir, _)| dir.to_string()).collect();
+        members.extend(MEM1_JS_CRATES.iter().map(|dir| dir.to_string()));
+        members.push("engine".into());
+        let mut configs: Vec<(String, Option<String>)> = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
+        for dir in MEM1_JS_CRATES {
+            configs.push((dir.into(), Some(ALL.into())));
+            files.push((format!("{dir}/tests/web.rs"), JS_CANARY.into()));
+        }
+        configs.push(("engine".into(), Some(SLICE.into())));
+        files.push(("engine/src/song.rs".into(), CANARY.into()));
+        change(&mut configs, &mut files);
+        mem1_lint_problems(&members, &configs, &files)
+            .into_iter()
+            .map(|p| format!("{}: {}", p.file, p.message))
+            .collect()
+    }
+
+    /// A change to the configs and the files of the repo of [`problems`].
+    type Change = dyn FnOnce(&mut Vec<(String, Option<String>)>, &mut Vec<(String, String)>);
+
+    fn set(configs: &mut [(String, Option<String>)], dir: &str, text: Option<&str>) {
+        let entry = configs
+            .iter_mut()
+            .find(|(d, _)| d == dir)
+            .expect("a member");
+        entry.1 = text.map(str::to_string);
+    }
+
+    fn file(files: &mut [(String, String)], path: &str, text: &str) {
+        files.iter_mut().find(|(f, _)| f == path).expect("a file").1 = text.into();
+    }
+
+    #[test]
+    fn a_repo_that_lints_every_copy_passes() {
+        assert_eq!(problems(|_, _| {}), Vec::<String>::new());
+        // A `#[cfg]` or `#[cfg_attr]` on an item with a brace body ends
+        // with that body, so it does not turn off the canary after it.
+        let after = problems(|_, f| {
+            file(
+                f,
+                "engine/src/song.rs",
+                &format!(
+                    "#[cfg_attr(feature = \"x\", derive(Debug))]\nstruct S {{ a: u8 }}\n#[cfg(feature = \"x\")]\nimpl S {{}}\n{CANARY}"
+                ),
+            )
+        });
+        assert_eq!(after, Vec::<String>::new());
+        // A `#[cfg]` on an item that ends in `;` ends there too.
+        let after_use = problems(|_, f| {
+            file(
+                f,
+                "engine/src/song.rs",
+                &format!("#[cfg(feature = \"x\")]\nuse std::fmt;\n{CANARY}"),
+            )
+        });
+        assert_eq!(after_use, Vec::<String>::new());
+        // A `<` in a body is a comparison, not a generic argument.
+        let compare = problems(|_, f| {
+            file(
+                f,
+                "engine/src/song.rs",
+                "fn f(a: u8, b: u8) {\n    if a < b {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            )
+        });
+        assert_eq!(compare, Vec::<String>::new());
+        // A turbofish, a comparison and an item that ends in `;` before a
+        // good canary do not hide it.
+        for text in [
+            "fn g() {\n    if size_of::<fn()>() < 8 {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "fn g() {\n    let h: fn(u8) -> u8 = k;\n    if a < b {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "trait T {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "impl S {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "fn g() {\n    fn h() -> Vec<u8> { Vec::new() }\n    if a < b {}\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+        ] {
+            let found = problems(|_, f| file(f, "engine/src/song.rs", text));
+            assert_eq!(found, Vec::<String>::new(), "{text}");
+        }
+    }
+
+    #[test]
+    fn each_missing_path_or_canary_is_a_problem() {
+        let mut cases: Vec<(&str, Box<Change>)> = vec![
+            (
+                "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+                Box::new(|c, _| set(c, "engine", None)),
+            ),
+            (
+                "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+                Box::new(|c, _| set(c, "engine", Some("disallowed-methods = []\n"))),
+            ),
+            (
+                "decoder/clippy.toml: MEM-1: decoder/clippy.toml lacks `path = \"js_sys::Uint8Array::to_vec\"`",
+                Box::new(|c, _| {
+                    set(
+                        c,
+                        "decoder",
+                        Some(&ALL.replace(
+                            "  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n",
+                            "",
+                        )),
+                    )
+                }),
+            ),
+            (
+                "app/clippy.toml: MEM-1: app/clippy.toml lacks `path = \"js_sys::Float32Array::to_vec\"`",
+                Box::new(|c, _| {
+                    set(
+                        c,
+                        "app",
+                        Some(&ALL.replace(
+                            "  { path = \"js_sys::Float32Array::to_vec\", reason = \"x\" },\n",
+                            "",
+                        )),
+                    )
+                }),
+            ),
+            (
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(|_, f| file(f, "engine/src/song.rs", "fn other() {}\n")),
+            ),
+            (
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(|_, f| {
+                    file(
+                        f,
+                        "engine/src/song.rs",
+                        "// fn mem1_lint_is_on() { expect disallowed_methods to_vec }\nfn x() {}\n",
+                    )
+                }),
+            ),
+            (
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(|_, f| {
+                    file(
+                        f,
+                        "engine/src/song.rs",
+                        "fn mem1_lint_is_on() { let copy = [1.0_f32].to_vec(); }\n",
+                    )
+                }),
+            ),
+            (
+                "worker: MEM-1: worker has no `mem1_lint_is_on_for_js_arrays`",
+                Box::new(|_, f| file(f, "worker/tests/web.rs", CANARY)),
+            ),
+            (
+                "protocol: MEM-1: protocol has no `mem1_lint_is_on_for_js_arrays`",
+                Box::new(|_, f| {
+                    file(
+                        f,
+                        "protocol/tests/web.rs",
+                        &JS_CANARY.replace("Float32Array", "Int16Array"),
+                    )
+                }),
+            ),
+        ];
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "fn mem1_lint_is_on() {\n    #[allow(clippy::disallowed_methods)]\n    let copy = [1.0_f32].to_vec();\n    let _ = Some(copy).expect(\"x\");\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "protocol: MEM-1: protocol has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "protocol/tests/web.rs",
+                    "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    let _b = js_sys::Uint8Array::new_with_length(1);\n    let _c = js_sys::Float32Array::new_with_length(1);\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`.  Fix: copy the `disallowed-methods` entry of roformer/clippy.toml",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "engine",
+                    Some("# { path = \"slice::to_vec\", reason = \"x\" },\ndisallowed-methods = []\n"),
+                )
+            }),
+        ));
+        cases.push((
+            "app/clippy.toml: MEM-1: app/clippy.toml lacks `path = \"js_sys::Uint8Array::to_vec\"`.  Fix: copy the `disallowed-methods` entry of worker/clippy.toml",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "app",
+                    Some(&ALL.replace("  { path = \"js_sys::Uint8Array::to_vec\", reason = \"x\" },\n", "")),
+                )
+            }),
+        ));
+        // Round 3: an expected statement with no copy, a type named only
+        // in a reason or inside a slice, a statement under `#[cfg]`, and a
+        // path in a trailing comment or under another key.
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(f, "engine/src/song.rs", "fn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let _x = [1.0_f32].len();\n}\n")
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(f, "engine/src/song.rs", "fn mem1_lint_is_on() {\n    #[cfg(any())]\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n}\n")
+            }),
+        ));
+        cases.push((
+            "app: MEM-1: app has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(f, "app/tests/web.rs", "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"Uint8Array\")]\n    let b = [2_u8].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"Float32Array\")]\n    let c = [3.0_f32].to_vec();\n}\n")
+            }),
+        ));
+        cases.push((
+            "worker: MEM-1: worker has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(f, "worker/tests/web.rs", "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let b = [js_sys::Uint8Array::new_with_length(1)].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let c = [js_sys::Float32Array::new_with_length(1)].to_vec();\n}\n")
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`.  Fix: copy the `disallowed-methods` entry of roformer/clippy.toml",
+            Box::new(|c, _| {
+                set(c, "engine", Some("disallowed-methods = [] # { path = \"slice::to_vec\" }\n"))
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "engine",
+                    Some("disallowed-methods = []\ndisallowed-macros = [{ path = \"slice::to_vec\" }]\n"),
+                )
+            }),
+        ));
+        // Round 4: a JS type in the pattern or the type of a `let`, a
+        // `#[cfg]` on the canary, its module or its file, and a path in a
+        // comment inside the array.
+        cases.push((
+            "worker: MEM-1: worker has no `mem1_lint_is_on_for_js_arrays`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "worker/tests/web.rs",
+                    "fn mem1_lint_is_on_for_js_arrays() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let a = [1.0_f32].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let b: Vec<js_sys::Uint8Array> = [x].to_vec();\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let c: Vec<js_sys::Float32Array> = [y].to_vec();\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "#[cfg(any())]\nfn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    &format!("#[cfg(any())]\nmod off {{\n{CANARY}}}\n"),
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    &format!("#![cfg(feature = \"never\")]\n{CANARY}"),
+                )
+            }),
+        ));
+        cases.push((
+            "engine/clippy.toml: MEM-1: engine/clippy.toml lacks `path = \"slice::to_vec\"`",
+            Box::new(|c, _| {
+                set(
+                    c,
+                    "engine",
+                    Some("disallowed-methods = [\n  # { path = \"slice::to_vec\", reason = \"x\" },\n]\n"),
+                )
+            }),
+        ));
+        // Round 5: a `#[cfg]` on an `impl`, a `trait` or a block around the
+        // canary turns it off too.
+        for wrap in [
+            "impl S",
+            "trait T",
+            "const _: () =",
+            "impl S<{ 1 }>",
+            "impl Tr<{ 0 }> for S",
+        ] {
+            cases.push((
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(move |_, f| {
+                    file(
+                        f,
+                        "engine/src/song.rs",
+                        &format!("#[cfg(any())]\n{wrap} {{\n    fn mem1_lint_is_on() {{\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }}\n}}\n"),
+                    )
+                }),
+            ));
+        }
+        // Round 6: an `if` with an `else` is one statement, and a canary
+        // name holds only for its own item.
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "fn f() {\n    #[cfg(any())]\n    let _ = if c { 1 } else { fn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n} 2 };\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "fn mem1_lint_is_on() {}\nfn other() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n}\n",
+                )
+            }),
+        ));
+        cases.push((
+            "engine: MEM-1: engine has no `mem1_lint_is_on`",
+            Box::new(|_, f| {
+                file(
+                    f,
+                    "engine/src/song.rs",
+                    "trait U {\n    fn mem1_lint_is_on();\n    fn other() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n    }\n}\n",
+                )
+            }),
+        ));
+        // Round 7: syn parses the file, so each kind of item, statement,
+        // expression and match arm that a `#[cfg]` turns off is skipped.
+        for form in [
+            "#[cfg(any())]\nconst _: S<{ 1 }> = {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    0\n};\n",
+            "#[cfg(any())]\nstatic X: S<{ 1 }> = {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    0\n};\n",
+            "fn f() {\n    #[cfg(any())]\n    let _: S<{ 1 }> = {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    0\n    };\n}\n",
+            "fn f() {\n    #[cfg(any())]\n    let _ = match x { _ => 1 } + {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    2\n    };\n}\n",
+            "fn f() {\n    #[cfg(any())]\n    let _ = S { a: 1 }.g({\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    2\n    });\n}\n",
+            "#[cfg(any())]\nimpl X for S<fn() -> u8, { 1 }> {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "fn f() {\n    #[cfg(any())]\n    {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n    }\n}\n",
+            "fn f() {\n    match x {\n        #[cfg(any())]\n        _ => {\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n        }\n    }\n}\n",
+            "impl S {\n    #[cfg(any())]\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+            "trait T {\n    #[cfg(any())]\n    fn mem1_lint_is_on() {\n        #[expect(clippy::disallowed_methods, reason = \"c\")]\n        let copy = [1.0_f32].to_vec();\n    }\n}\n",
+        ] {
+            cases.push((
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(move |_, f| file(f, "engine/src/song.rs", form)),
+            ));
+        }
+        // Round 8: a `#[cfg]` on a field, a variant, a field value, a
+        // generic parameter, a foreign item or an argument turns it off.
+        const BODY: &str = "{ fn mem1_lint_is_on() {\n    #[expect(clippy::disallowed_methods, reason = \"c\")]\n    let copy = [1.0_f32].to_vec();\n} 1 }";
+        for form in [
+            "struct S {\n    #[cfg(any())]\n    a: [u8; BODY],\n}\n",
+            "struct S(#[cfg(any())] [u8; BODY]);\n",
+            "enum E {\n    #[cfg(any())]\n    A = BODY,\n}\n",
+            "fn f() {\n    let s = S {\n        #[cfg(any())]\n        a: BODY,\n    };\n}\n",
+            "struct S<#[cfg(any())] const N: usize = BODY>;\n",
+            "extern \"C\" {\n    #[cfg(any())]\n    static X: [u8; BODY];\n}\n",
+            "fn f(#[cfg(any())] x: [u8; BODY]) {}\n",
+            "type F = fn(#[cfg(any())] [u8; BODY]);\n",
+            // Round 9: a closure parameter.
+            "fn f() {\n    let c = |#[cfg(any())] x: [u8; BODY]| ();\n}\n",
+            // Round 10: a closure parameter with no type, and a field pattern.
+            "fn f() {\n    let c = |#[cfg(any())] None::<[u8; BODY]>| ();\n}\n",
+            "fn f() {\n    let c = |#[cfg(any())] Some::<[u8; BODY]>(x)| ();\n}\n",
+            "fn f(s: S) {\n    let S {\n        #[cfg(any())]\n        a: None::<[u8; BODY]>,\n        ..\n    } = s;\n}\n",
+            // Round 11: a C-variadic parameter.
+            "extern \"C\" {\n    fn g(x: u8, #[cfg(any())] None::<[u8; BODY]>: ...);\n}\n",
+            "unsafe extern \"C\" fn g(x: u8, #[cfg(any())] None::<[u8; BODY]>: ...) {}\n",
+        ] {
+            let text = form.replace("BODY", BODY);
+            cases.push((
+                "engine: MEM-1: engine has no `mem1_lint_is_on`",
+                Box::new(move |_, f| file(f, "engine/src/song.rs", &text)),
+            ));
+        }
+        for (want, change) in cases {
+            let found = problems(change);
+            assert_eq!(found.len(), 1, "{want}\n{found:#?}");
+            assert!(found[0].starts_with(want), "{want}\n{found:#?}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_member_is_a_problem() {
+        let members: Vec<String> = ["engine".to_string()].into();
+        let configs = [("engine".to_string(), Some(SLICE.to_string()))];
+        let files = [("engine/src/song.rs".to_string(), CANARY.to_string())];
+        let found = mem1_lint_problems(&members, &configs, &files);
+        assert_eq!(
+            found.len(),
+            MEM1_EXEMPT.len() + MEM1_JS_CRATES.len(),
+            "{found:#?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|p| p.file == RULES_FILE && p.message.contains("which is not a member"))
+        );
+    }
+
+    /// A block that holds a canary, for the `BODY` of [`NODES`].
+    const NODE_BODY: &str = "{ fn mem1_lint_is_on() {} 1 }";
+
+    /// Each kind of node that keeps its attributes, with `ATTR` on the
+    /// node and `BODY` inside it.
+    const NODES: &[&str] = &[
+        // Items.
+        "ATTR\nconst C: u8 = BODY;\n",
+        "ATTR\nenum E { A = BODY }\n",
+        "ATTR\nextern \"C\" {\n    static X: [u8; BODY];\n}\n",
+        "ATTR\nfn f() {\n    BODY;\n}\n",
+        "ATTR\nimpl S {\n    const C: u8 = BODY;\n}\n",
+        "ATTR\nmod m {\n    const C: u8 = BODY;\n}\n",
+        "ATTR\nstatic X: u8 = BODY;\n",
+        "ATTR\nstruct S {\n    a: [u8; BODY],\n}\n",
+        "ATTR\ntrait T {\n    const C: u8 = BODY;\n}\n",
+        "ATTR\ntrait A = B<[u8; BODY]>;\n",
+        "ATTR\ntype T = [u8; BODY];\n",
+        "ATTR\nunion U {\n    a: [u8; BODY],\n}\n",
+        // Items in an `impl`, a `trait` and an `extern` block.
+        "impl S {\n    ATTR\n    const C: u8 = BODY;\n}\n",
+        "impl S {\n    ATTR\n    fn f() {\n        BODY;\n    }\n}\n",
+        "impl S {\n    ATTR\n    type T = [u8; BODY];\n}\n",
+        "trait T {\n    ATTR\n    const C: u8 = BODY;\n}\n",
+        "trait T {\n    ATTR\n    fn f() {\n        BODY;\n    }\n}\n",
+        "trait T {\n    ATTR\n    type A = [u8; BODY];\n}\n",
+        "extern \"C\" {\n    ATTR\n    fn g(x: [u8; BODY]);\n}\n",
+        "extern \"C\" {\n    ATTR\n    static X: [u8; BODY];\n}\n",
+        "extern \"C\" {\n    ATTR\n    type T<const N: usize = BODY>;\n}\n",
+        // A `let` statement, and each kind of expression.
+        "fn f() {\n    ATTR\n    let x = BODY;\n}\n",
+        "fn f() {\n    ATTR\n    [BODY];\n}\n",
+        "fn f() {\n    ATTR\n    async BODY;\n}\n",
+        "fn f() {\n    ATTR\n    BODY.await;\n}\n",
+        "fn f() {\n    ATTR\n    BODY;\n}\n",
+        "fn f() {\n    ATTR\n    break BODY;\n}\n",
+        "fn f() {\n    ATTR\n    g(BODY);\n}\n",
+        "fn f() {\n    ATTR\n    || BODY;\n}\n",
+        "fn f() {\n    ATTR\n    const BODY;\n}\n",
+        "fn f() {\n    ATTR\n    BODY.a;\n}\n",
+        "fn f() {\n    ATTR\n    for x in y BODY\n}\n",
+        "fn f() {\n    ATTR\n    if c BODY\n}\n",
+        "fn f() {\n    ATTR\n    a[BODY];\n}\n",
+        "fn f() {\n    if ATTR let x = BODY {}\n}\n",
+        "fn f() {\n    ATTR\n    loop BODY\n}\n",
+        "fn f() {\n    ATTR\n    match BODY {}\n}\n",
+        "fn f() {\n    ATTR\n    a.g(BODY);\n}\n",
+        "fn f() {\n    ATTR\n    (BODY);\n}\n",
+        "fn f() {\n    ATTR\n    <[u8; BODY]>::X;\n}\n",
+        "fn f() {\n    ATTR\n    0..BODY;\n}\n",
+        "fn f() {\n    ATTR\n    &raw const BODY;\n}\n",
+        "fn f() {\n    ATTR\n    &BODY;\n}\n",
+        "fn f() {\n    ATTR\n    [0; BODY];\n}\n",
+        "fn f() {\n    ATTR\n    return BODY;\n}\n",
+        "fn f() {\n    ATTR\n    S { a: BODY };\n}\n",
+        "fn f() {\n    ATTR\n    BODY?;\n}\n",
+        "fn f() {\n    ATTR\n    try BODY;\n}\n",
+        "fn f() {\n    ATTR\n    (BODY, 1);\n}\n",
+        "fn f() {\n    ATTR\n    -BODY;\n}\n",
+        "fn f() {\n    ATTR\n    unsafe BODY;\n}\n",
+        "fn f() {\n    ATTR\n    while c BODY\n}\n",
+        "fn f() {\n    ATTR\n    yield BODY;\n}\n",
+        // A match arm, a field, a variant, a field value and a generic
+        // parameter.
+        "fn f() {\n    match x {\n        ATTR\n        _ => BODY,\n    }\n}\n",
+        "struct S {\n    ATTR\n    a: [u8; BODY],\n}\n",
+        "struct S(ATTR [u8; BODY]);\n",
+        "enum E {\n    ATTR\n    A = BODY,\n}\n",
+        "fn f() {\n    S {\n        ATTR\n        a: BODY,\n    };\n}\n",
+        "struct S<ATTR const N: usize = BODY>;\n",
+        "struct S<ATTR T = [u8; BODY]>;\n",
+        // Parameters of a function, a function pointer, a closure and a
+        // C-variadic function.
+        "fn f(ATTR x: [u8; BODY]) {}\n",
+        "impl S {\n    fn f(ATTR self: S<[u8; BODY]>) {}\n}\n",
+        "type F = fn(ATTR [u8; BODY]);\n",
+        "fn f() {\n    |ATTR x: [u8; BODY]| ();\n}\n",
+        "unsafe extern \"C\" fn g(x: u8, ATTR None::<[u8; BODY]>: ...) {}\n",
+        // Each kind of pattern of a closure parameter with no type, and a
+        // field pattern.
+        "fn f() {\n    |ATTR const BODY| ();\n}\n",
+        "fn f() {\n    |ATTR x @ Some::<[u8; BODY]>(y)| ();\n}\n",
+        "fn f() {\n    |ATTR (Some::<[u8; BODY]>(y))| ();\n}\n",
+        "fn f() {\n    |ATTR None::<[u8; BODY]>| ();\n}\n",
+        "fn f() {\n    |ATTR 0..=const BODY| ();\n}\n",
+        "fn f() {\n    |ATTR &Some::<[u8; BODY]>(y)| ();\n}\n",
+        "fn f() {\n    |ATTR [Some::<[u8; BODY]>(y)]| ();\n}\n",
+        "fn f() {\n    |ATTR S::<[u8; BODY]> { a }| ();\n}\n",
+        "fn f() {\n    |ATTR (Some::<[u8; BODY]>(y), z)| ();\n}\n",
+        "fn f() {\n    |ATTR Some::<[u8; BODY]>(y)| ();\n}\n",
+        "fn f(s: S) {\n    let S {\n        ATTR\n        a: None::<[u8; BODY]>,\n        ..\n    } = s;\n}\n",
+    ];
+
+    #[test]
+    fn a_node_that_an_attribute_turns_off_hides_its_canary() {
+        for form in NODES {
+            let text = |attr: &str| form.replace("ATTR", attr).replace("BODY", NODE_BODY);
+            let off = text("#[cfg(any())]");
+            assert_eq!(fn_bodies(&off, "mem1_lint_is_on").len(), 0, "{off}");
+            let on = text("#[cfg(test)]");
+            assert_eq!(fn_bodies(&on, "mem1_lint_is_on").len(), 1, "{on}");
+        }
+    }
+
+    #[test]
+    fn only_a_cfg_of_a_clippy_step_keeps_a_node_on() {
+        let form = "ATTR\nconst C: u8 = BODY;\n";
+        for (attr, found) in [
+            ("#[cfg(test)]", 1),
+            ("#[cfg(target_arch = \"wasm32\")]", 1),
+            ("#[allow(unused)]", 1),
+            ("#[cfg(any())]", 0),
+            ("#[cfg(unix)]", 0),
+            ("#[cfg_attr(test, allow(unused))]", 0),
+        ] {
+            let text = form.replace("ATTR", attr).replace("BODY", NODE_BODY);
+            assert_eq!(fn_bodies(&text, "mem1_lint_is_on").len(), found, "{text}");
+        }
+    }
+
+    #[test]
+    fn disallowed_methods_gives_the_array_without_its_comments() {
+        for (config, array) in [
+            ("disallowed-methods = [\"a\"]\n", "[\"a\"]"),
+            (
+                "a = 1\nb = 2\ndisallowed-types = []\ndisallowed-methods = [\"a\"]\n",
+                "[\"a\"]",
+            ),
+            (
+                "disallowed-methods = [\n  { path = \"a\" }, # { path = \"b\" }\n]\n",
+                "[\n  { path = \"a\" }, \n]",
+            ),
+            (
+                "disallowed-methods = [\n  { path = \"a\", reason = \"x ] # y\" },\n  { path = 'b', reason = 'z ]' },\n]\n",
+                "[\n  { path = \"a\", reason = \"x ] # y\" },\n  { path = 'b', reason = 'z ]' },\n]",
+            ),
+            ("disallowed-types = [\"a\"]\n", ""),
+        ] {
+            assert_eq!(disallowed_methods(config), array, "{config}");
+        }
+    }
+
+    #[test]
+    fn the_type_of_a_let_is_not_the_receiver() {
+        let body: TokenStream = "#[expect(clippy::disallowed_methods, reason = \"c\")]\nlet x: js_sys::Uint8Array = [1_u8].to_vec();"
+            .parse()
+            .expect("tokens");
+        assert_eq!(expected_copies(body), vec!["slice"]);
     }
 }

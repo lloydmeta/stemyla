@@ -1166,8 +1166,8 @@ pub struct Known {
 }
 
 /// The known-missed list: the missed mutants of TD-39 and TD-66 that the
-/// review rounds of PR #39 sent to tech debt, and the mutant of TD-69 of
-/// harness phase 3b, M3.  `cargo mutants --list` still shows each.  Each comment names the round's log and finding.
+/// review rounds of PR #39 sent to tech debt.  `cargo mutants --list` still
+/// shows each.  Each comment names the round's log and finding.
 /// `each_known_missed_entry_is_open_and_in_the_code` checks that each TD is
 /// open, and that each code line is once in a function of the mutation's
 /// name.  It does not check that the mutant is still at that code line.  An
@@ -1269,14 +1269,6 @@ pub const KNOWN_MISSED: &[Known] = &[
         file: "xtask/src/e2e/decode.rs",
         mutation: "replace drop_and_open -> Result<()> with Ok(())",
         code: "let drop: Vec<(&str, &str, &str)> = files",
-        offset: 1,
-    },
-    // Harness phase 3b, M3, round 1, finding 1-19.
-    Known {
-        debt: "TD-69",
-        file: "xtask/src/docs.rs",
-        mutation: "replace check -> Result<Vec<Problem>> with Ok(vec![])",
-        code: "let files = repo_files(root)?;",
         offset: 1,
     },
 ];

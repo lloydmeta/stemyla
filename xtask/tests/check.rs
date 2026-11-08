@@ -412,6 +412,7 @@ check: skip: (cd app && trunk build --release) (tier push runs it)
 check: skip: cargo run -p xtask --release -- serve app/dist --port 8080 (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
 check: skip: cargo run -p xtask -- web-test (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
 check: skip: cargo run -p xtask -- e2e <scenario> (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
+check: skip: cargo +nightly-2026-10-30 test -p roformer-gpu --doc (CI runs it; it needs the pinned nightly, and the stable doctest line runs the same doctests)
 check: skip: cargo run -p xtask --release -- publish (a person only (GIT-1))
 ";
     assert_eq!(stdout, want);
@@ -443,7 +444,7 @@ fn the_dry_run_prints_each_strict_hit_and_tier_push() {
             "check: run: cargo fmt --all --check (tier push runs every line)",
         ]
     );
-    assert_eq!(stdout.lines().count(), 7 + 16);
+    assert_eq!(stdout.lines().count(), 7 + 17);
 }
 
 #[test]
