@@ -73,8 +73,8 @@ The branch is `feature/m4a`, from `main` at `ff633a3`.  Its first commit is this
 #### Maintainer steps
 
 * Answer the open entries of "Decisions for the maintainer".
-* For M4 only: Safari 26 or later with "Allow Remote Automation", for `e2e` on the Mac.
-* After M3: open a saved ALAC M4A in Logic Pro or Music on the Mac.  This is evidence for the PR, not an acceptance check.
+* None that blocks the run.  After M3, the orchestrator decodes a saved ALAC M4A with Apple's decoder (`afconvert -f WAVE -d LEI16`) on the Mac, and compares it with the WAV save bit for bit.  Opening it in Logic Pro is optional evidence for the maintainer.
+* For M4 only: if Chrome on the Mac cannot encode AAC, Safari 26 or later with "Allow Remote Automation" (already set on 2026-10-21).
 
 #### Preflight
 
@@ -99,8 +99,9 @@ Decision 0024, through the `review-rounds` skill.
 
 #### Extra stop conditions
 
-* A Symphonia 0.6.1 limit blocks a milestone's acceptance, for example a decode panic on a valid fixture.  Stop and report.  Do not patch or fork Symphonia.
-* A new crate fails DEPS-1.  Stop and ask.
+* None beyond the skill's.  The orchestrator decides these cases, records them in the Decision log and the PR, and goes on:
+  * A Symphonia 0.6.1 limit blocks an acceptance check, for example a decode panic on a valid fixture.  Do not patch or fork Symphonia.  Narrow the case, give a clear message, and add a TD entry.
+  * A new crate fails DEPS-1.  Use another source, such as a fixture from the M1 writer or an encoder of this repo, and record it.
 
 ### M1: the M4A writer and the ALAC encoder
 
@@ -236,6 +237,8 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, agent: the answers of the maintainer go in "Decisions for the maintainer".
 * 2026-11-08, maintainer: D1 (a), D2 (c), D3 (a), D4 (a), D5 (a), D6 (a), D7 (a).  See "Decisions for the maintainer".
 * 2026-11-08, agent: the branch is `feature/m4a`, which the maintainer started, and not `claude/next-file-format-support-u3ib64`.  Reason: one branch and one PR for each plan.
+* 2026-11-08, maintainer: decision 0028 is accepted, because the answers to D1, D2 and D6 choose its content.
+* 2026-11-08, maintainer: the run does not block on the maintainer.  The plan's stop conditions become decisions of the orchestrator.
 * 2026-11-08, agent: M1 checks the port of D2 against `alac-encoder` 0.3.0, pinned exactly, as a dev-dependency of `m4a` only.  Each test signal must give the same packets from both.  Reason: a round trip alone also passes an encoder that writes only escape (uncompressed) packets.  A test also checks that a music-like signal gives fewer bytes than its WAV.
 
 ## Outcomes and retrospective
