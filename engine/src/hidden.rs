@@ -23,9 +23,12 @@ use crate::mp4_boxes::ReadAt;
 pub(crate) const ALWAYS_HIDDEN: u64 = 4096;
 
 /// The most containers of fewer than [`ALWAYS_HIDDEN`] bytes that a plan
-/// hides.  So the plan holds at most about 64 KiB for them, however many
-/// a crafted file has.  Symphonia reads each one past this count, which
-/// holds less than [`ALWAYS_HIDDEN`] bytes.
+/// hides.  So the plan holds at most about 64 KiB for them.  A file with
+/// more is refused before the probe ([`Plan::too_many`]): Symphonia keeps
+/// each tag that it reads, with an overhead past its bytes, so a file of a
+/// million tags of 2 bytes holds about 140 MB in the decode worker.  The
+/// limit keeps that out of the memory of decision 0013 and MEM-4.  No real
+/// file has thousands of tag containers; one has tens.
 pub(crate) const MOST_SMALL: usize = 4096;
 
 /// One change: `len` bytes of `bytes` in place of the bytes at `at` of the
@@ -44,6 +47,9 @@ pub(crate) struct Plan {
     pub start: u64,
     pub patches: Vec<Patch>,
     small: usize,
+    /// More small containers than [`MOST_SMALL`]: the plan cannot hide
+    /// them all, so the decode refuses the file.
+    pub too_many: bool,
 }
 
 impl Plan {
@@ -53,6 +59,7 @@ impl Plan {
         let small = size.is_some_and(|size| size < ALWAYS_HIDDEN);
         if small {
             if self.small >= MOST_SMALL {
+                self.too_many = true;
                 return;
             }
             self.small += 1;
@@ -363,8 +370,6 @@ mod tests {
         assert_eq!(view.stream_position().ok(), Some(28), "the offset stays");
     }
 
-    /// A plan keeps every container of `ALWAYS_HIDDEN` bytes or more, and
-    /// at most `MOST_SMALL` smaller ones.
     /// The plan of a FLAC with tags: PADDING for each tag block, with the
     /// bit of the last block kept.
     #[test]
@@ -437,12 +442,51 @@ mod tests {
         assert_eq!(patches(&wav), []);
         let plain = aiff(&[vec![0.25; 100], vec![0.5; 100]], 44_100, 16, Aiff::Plain);
         // NAME (8 + 5 + 1), ANNO (8 + 8), APPL (8 + 4 + 100), then ID3.
-        let at = [12, 26, 42, 154];
+        // Finding 3-10 of review round 3: and AUTH (8 + 4) after SSND.
+        let tagged = with_aiff_tags(&plain, 100);
+        let at = [12, 26, 42, 154, tagged.len() as u64 - 12];
         let want: Vec<_> = at.iter().map(|&at| (at, *b"JUNK", 4)).collect();
-        assert_eq!(patches(&with_aiff_tags(&plain, 100)), want);
+        assert_eq!(patches(&tagged), want);
         assert_eq!(patches(&plain), []);
     }
 
+    /// Missed mutants 3-24 and 3-25 of review round 3: a header of 9 bytes
+    /// is no ID3v2 tag, and the walk of a FLAC cut in its metadata ends.
+    #[test]
+    fn a_cut_id3_header_or_flac_ends_the_plan() {
+        let cut_id3 = plan_of(&mut &b"ID3\x04\x00\x00\x00\x00\x01"[..]);
+        assert_eq!(cut_id3.ok().map(|plan| plan.start), Some(0));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let flac = crate::test_audio::flac(&[vec![0.25; 100], vec![0.5; 100]], 44_100);
+            let mut not_last = Vec::from(&flac[..42]);
+            not_last[4] &= 0x7F;
+            for file in [Vec::from(*b"fLaC"), not_last] {
+                let plan = plan_of(&mut &file[..]).map(|plan| plan.is_empty());
+                let _ = sender.send(plan.ok());
+            }
+        });
+        for case in ["fLaC alone", "metadata with no last block"] {
+            let ended = receiver.recv_timeout(std::time::Duration::from_secs(10));
+            assert_eq!(ended, Ok(Some(true)), "{case}");
+        }
+    }
+
+    /// Missed mutant 3-27 of review round 3: a `LIST` chunk of 512 bytes
+    /// counts as small.
+    #[test]
+    fn small_wav_tag_chunks_count_against_the_cap() {
+        let wav = crate::wav::encode_pcm16(&[0.25; 100], &[0.5; 100], 44_100);
+        let file = crate::test_audio::with_small_wav_tags(&wav, MOST_SMALL + 1);
+        let plan = plan_of(&mut &file[..]);
+        assert!(plan.is_ok(), "{plan:?}");
+        let plan = plan.unwrap();
+        assert_eq!((plan.patches.len(), plan.too_many), (MOST_SMALL, true));
+    }
+
+    /// A plan keeps every container of `ALWAYS_HIDDEN` bytes or more, and
+    /// at most `MOST_SMALL` smaller ones.  One more small one makes it
+    /// `too_many`.
     #[test]
     fn a_plan_keeps_at_most_most_small_small_patches() {
         let mut plan = Plan::default();
@@ -450,6 +494,7 @@ mod tests {
             plan.hide(at * 8, b"free", Some(8));
         }
         assert_eq!(plan.patches.len(), MOST_SMALL);
+        assert!(plan.too_many);
         plan.hide(1 << 40, b"free", Some(ALWAYS_HIDDEN));
         plan.hide(1 << 41, b"free", None);
         assert_eq!(plan.patches.len(), MOST_SMALL + 2);

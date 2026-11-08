@@ -96,8 +96,20 @@ pub const VIDEO_TEXT: &str =
 pub const MOOV_TEXT: &str =
     "The index of this file (its moov box) is too large for its length, so it cannot open.";
 
-/// The most bytes of the first `moov` that Symphonia holds (`mvhd`, each
-/// `trak` and `mvex`, `Found::moov_held`): 16 MiB of slack ([`TAG_ROOM`]),
+/// The text of a file with more tag containers than the decode can hide
+/// from Symphonia (`engine::hidden::MOST_SMALL`).
+pub const TAGS_TEXT: &str =
+    "This file holds too many tags to open safely.  Remove its tags, or open another file.";
+
+/// The text of an MP4 whose first `ftyp` passes `MOST_BOX_BYTES`.
+/// Symphonia needs it and reads it whole.  A real `ftyp` has tens of
+/// bytes.
+pub const FTYP_TEXT: &str =
+    "The header of this file (its ftyp box) is too large, so it cannot open.";
+
+/// The most bytes of the first `moov` that Symphonia holds (`mvhd`,
+/// `mvex`, and `tkhd`, `edts` and `mdia` of each `trak`,
+/// `Found::moov_held`): 16 MiB of slack ([`TAG_ROOM`]),
 /// and 32 bytes of tables for each 1024 units of the `mdhd` duration of
 /// the first sound track, up to the decode limit of a stereo file.  The
 /// decode hides the tags of `moov` from Symphonia (`engine::hidden`), so
@@ -669,7 +681,7 @@ fn open_within(
     max_song_frames: Option<usize>,
 ) -> Result<Opened> {
     let byte_len = source.byte_len();
-    let boxes = if source.is_seekable() {
+    let mut boxes = if source.is_seekable() {
         let found = crate::mp4_boxes::walk(&mut crate::mp4_boxes::Seeking(&mut *source))
             .context("reading the boxes of an MP4 file")?;
         source.seek(SeekFrom::Start(0))?;
@@ -692,11 +704,17 @@ fn open_within(
         if held.is_some_and(|bytes| bytes > most_moov_bytes(found)) {
             return Err(anyhow!(MOOV_TEXT));
         }
+        if found
+            .ftyp_bytes
+            .is_some_and(|bytes| bytes > crate::mp4_boxes::MOST_BOX_BYTES as u64)
+        {
+            return Err(anyhow!(FTYP_TEXT));
+        }
     }
     // MEM-4: Symphonia reads tags and pictures whole, so they are hidden
     // from it (`engine::hidden`).
-    let plan = match &boxes {
-        Some(found) => found.hidden.clone(),
+    let plan = match &mut boxes {
+        Some(found) => std::mem::take(&mut found.hidden),
         None if source.is_seekable() => {
             let plan = crate::hidden::plan_of(&mut crate::mp4_boxes::Seeking(&mut *source))
                 .context("reading the tags of the file")?;
@@ -705,6 +723,9 @@ fn open_within(
         }
         None => crate::hidden::Plan::default(),
     };
+    if plan.too_many {
+        return Err(anyhow!(TAGS_TEXT));
+    }
     let source: Box<dyn MediaSource> = if plan.is_empty() {
         source
     } else {
@@ -3053,6 +3074,158 @@ mod tests {
             let case = format!("{kind:?}");
             assert_tags_are_hidden(plain.clone(), with_aiff_tags(&plain, ART), "aiff", &case);
         }
+    }
+
+    /// Checks that `bytes` is refused with `text` before the probe: through
+    /// `decode_bytes` and `Decoder`, and at a small peak.
+    fn assert_refused_early(bytes: Vec<u8>, ext: &str, text: &str, case: &str) {
+        assert_eq!(refusal(bytes.clone(), ext), text, "{case}");
+        let (peak, opened) = peak_of(|| {
+            open_within(
+                Box::new(Cursor::new(bytes)),
+                Some(ext),
+                MAX_DECODED_BYTES,
+                None,
+            )
+        });
+        let error = opened.err().map(|e| format!("{e:#}"));
+        assert_eq!(error.as_deref(), Some(text), "{case}");
+        assert!(peak < 1 << 20, "{case}: the open peaks at {peak} bytes");
+    }
+
+    /// Finding 3-1 of review round 3 (MEM-4): a plan hides at most
+    /// `MOST_SMALL` small tag containers.  At that count a file opens at a
+    /// flat peak.  One more is refused before the probe at a small peak.
+    #[test]
+    fn a_file_of_more_small_tags_than_the_plan_hides_is_refused() {
+        use crate::hidden::MOST_SMALL;
+        use crate::test_audio::{Aiff, aiff, with_small_aiff_tags, with_small_flac_tags};
+        let (left, right, _) = stereo_wav();
+        let flac = compressed(&left, &right, 44_100);
+        let plain_aiff = aiff(&[left, right], 44_100, 16, Aiff::Plain);
+        let m4a = alac_of(m4a::Order::MoovLast);
+        let small_metas = |count: usize| {
+            let meta = crate::test_m4a::bx(b"meta", &[&[0; 4]]);
+            [m4a.clone(), meta.repeat(count)].concat()
+        };
+        for count in [MOST_SMALL, MOST_SMALL + 1] {
+            let files = [
+                ("flac", flac.clone(), with_small_flac_tags(&flac, count)),
+                (
+                    "aiff",
+                    plain_aiff.clone(),
+                    with_small_aiff_tags(&plain_aiff, count),
+                ),
+                ("m4a", m4a.clone(), small_metas(count)),
+            ];
+            for (ext, plain, tagged) in files {
+                let case = format!("{ext} of {count} small tags");
+                if count == MOST_SMALL {
+                    assert_tags_are_hidden(plain, tagged, ext, &case);
+                } else {
+                    assert_refused_early(tagged, ext, TAGS_TEXT, &case);
+                }
+            }
+        }
+    }
+
+    /// Finding 3-2 of review round 3 (MEM-4): Symphonia reads each `ftyp`
+    /// whole.  A later `ftyp` is hidden.  The first one, which Symphonia
+    /// needs, is refused before the probe past `MOST_BOX_BYTES`.
+    #[test]
+    fn a_large_ftyp_is_hidden_or_refused() {
+        use crate::test_m4a::{bx, top_box};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let brands = b"isom".repeat(ART / 4);
+        let large = bx(b"ftyp", &[b"M4A ", &[0; 4], &brands]);
+        let appended = [plain.clone(), large.clone()].concat();
+        assert_tags_are_hidden(plain.clone(), appended, "m4a", "a later ftyp of 64 MiB");
+        let (_, ftyp_size) = top_box(&plain, b"ftyp");
+        let first = [large, Vec::from(&plain[ftyp_size..])].concat();
+        assert_refused_early(first, "m4a", FTYP_TEXT, "a first ftyp of 64 MiB");
+    }
+
+    /// Finding 3-7 and missed mutant 3-22 of review round 3: a `moov`, its
+    /// last `trak` and that `trak`'s last `mdia` of size 0 run to the end
+    /// of the file.  Their tables count to the end of the file.
+    #[test]
+    fn tables_that_run_to_the_end_of_the_file_count_in_the_bound() {
+        use crate::test_m4a::{with_grown_stsz, with_sizes_of_0};
+        let grown = with_grown_stsz(alac_of(m4a::Order::MoovLast), 17 << 20);
+        let to_the_end = with_sizes_of_0(grown, &[b"moov", b"trak", b"mdia"]);
+        assert_refused_early(to_the_end, "m4a", MOOV_TEXT, "tables to the end");
+    }
+
+    /// Missed mutant 3-21 of review round 3: a `moov` that holds exactly
+    /// `most_moov_bytes` opens; one more byte gets `MOOV_TEXT`.  Finding
+    /// 3-14: an `mvex` counts too, since Symphonia keeps a Vec of `trex`.
+    #[test]
+    fn a_moov_at_its_bound_opens_and_one_byte_more_is_refused() {
+        use crate::test_m4a::{bx, with_child};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let found = crate::mp4_boxes::walk(&mut &plain[..]).ok().flatten();
+        assert!(found.is_some(), "an MP4 file");
+        let found = found.unwrap();
+        let room = (most_moov_bytes(&found) - found.moov_held) as usize;
+        let free = |size: usize| bx(b"free", &[&vec![0; size - 8]]);
+        let at = with_child(plain.clone(), &[b"moov", b"trak", b"mdia"], &free(room));
+        assert_eq!(decoded(at, "at the bound").frames(), 4096);
+        let past = with_child(plain.clone(), &[b"moov", b"trak", b"mdia"], &free(room + 1));
+        assert_refused_early(past, "m4a", MOOV_TEXT, "one byte past the bound");
+        let mvex = bx(b"mvex", &[&vec![0; 17 << 20]]);
+        assert_refused_early(
+            with_child(plain, &[b"moov"], &mvex),
+            "m4a",
+            MOOV_TEXT,
+            "an mvex",
+        );
+    }
+
+    /// Finding 3-6 of review round 3: Symphonia reads `tkhd`, `edts` and
+    /// `mdia` of a `trak`, and skips its `udta`.  So art there opens.
+    #[test]
+    fn art_in_a_trak_opens() {
+        use crate::test_m4a::{bx, cover_meta, with_child};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let udta = bx(b"udta", &[&cover_meta(ART)]);
+        let tagged = with_child(plain.clone(), &[b"moov", b"trak"], &udta);
+        assert_tags_are_hidden(plain, tagged, "m4a", "art in trak/udta");
+    }
+
+    /// A source that cannot seek, as a FIFO.
+    struct Fifo(Cursor<Vec<u8>>);
+
+    impl std::io::Read for Fifo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl std::io::Seek for Fifo {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Err(std::io::Error::other("Illegal seek"))
+        }
+    }
+
+    impl MediaSource for Fifo {
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// Missed mutant 3-20 of review round 3: a source that cannot seek gets
+    /// no walk and no plan, and decodes.
+    #[test]
+    fn a_source_that_cannot_seek_decodes_with_no_plan() {
+        let (_, _, wav) = stereo_wav();
+        let decoder = Decoder::new(Box::new(Fifo(Cursor::new(wav))), Some("wav"));
+        assert!(decoder.is_ok(), "{:?}", decoder.err());
+        let frames = every_packet(decoder.unwrap());
+        assert_eq!(frames.ok(), Some(FRAMES as u64));
     }
 
     /// The `iTunSMPB` tag of a hidden `udta` still gives the trim: the

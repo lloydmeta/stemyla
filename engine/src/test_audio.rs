@@ -265,9 +265,9 @@ pub fn with_wav_tags(wav: &[u8], bytes: usize) -> Vec<u8> {
     out
 }
 
-/// `aiff` with tag chunks after its `FORM` header: `NAME`, `ANNO` of an
-/// odd size, `APPL` of `bytes` bytes and `ID3 `.  Symphonia 0.6.1 reads
-/// each whole.
+/// `aiff` with tag chunks after its `FORM` header: `NAME` of an odd
+/// size, `ANNO`, `APPL` of `bytes` bytes and `ID3 `, and an `AUTH` chunk
+/// after its `SSND`.  Symphonia 0.6.1 reads each whole, also after `SSND`.
 pub fn with_aiff_tags(aiff: &[u8], bytes: usize) -> Vec<u8> {
     assert_eq!(aiff[..4], *b"FORM");
     let mut application = Vec::from(*b"acme");
@@ -283,7 +283,53 @@ pub fn with_aiff_tags(aiff: &[u8], bytes: usize) -> Vec<u8> {
     out.extend_from_slice(&aiff[..12]);
     out.extend_from_slice(&tags);
     out.extend_from_slice(&aiff[12..]);
+    out.extend_from_slice(&chunk(b"AUTH", b"acme", false));
     let form = (out.len() - 8) as u32;
     out[4..8].copy_from_slice(&form.to_be_bytes());
+    out
+}
+
+/// `flac` with `count` APPLICATION blocks of 1024 bytes after its
+/// STREAMINFO block: small tag blocks.
+pub fn with_small_flac_tags(flac: &[u8], count: usize) -> Vec<u8> {
+    assert_eq!(flac[..4], *b"fLaC");
+    let streaminfo_last = flac[4] & 0x80 != 0;
+    let mut out = Vec::with_capacity(flac.len() + count * 1028);
+    out.extend_from_slice(b"fLaC");
+    out.push(flac[4] & 0x7F);
+    out.extend_from_slice(&flac[5..42]);
+    let body = [0_u8; 1024];
+    for k in 0..count {
+        out.extend_from_slice(&flac_block(2, streaminfo_last && k + 1 == count, &body));
+    }
+    out.extend_from_slice(&flac[42..]);
+    out
+}
+
+/// `aiff` with `count` `NAME` chunks of 2 bytes after its `FORM` header.
+pub fn with_small_aiff_tags(aiff: &[u8], count: usize) -> Vec<u8> {
+    let name = chunk(b"NAME", b"ll", false);
+    let mut out = Vec::with_capacity(aiff.len() + count * name.len());
+    out.extend_from_slice(&aiff[..12]);
+    for _ in 0..count {
+        out.extend_from_slice(&name);
+    }
+    out.extend_from_slice(&aiff[12..]);
+    let form = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&form.to_be_bytes());
+    out
+}
+
+/// `wav` with `count` `LIST` chunks of 512 bytes before its `data` chunk.
+pub fn with_small_wav_tags(wav: &[u8], count: usize) -> Vec<u8> {
+    let list = chunk(b"LIST", &[&b"INFO"[..], &[0; 508]].concat(), true);
+    let mut out = Vec::with_capacity(wav.len() + count * list.len());
+    out.extend_from_slice(&wav[..36]);
+    for _ in 0..count {
+        out.extend_from_slice(&list);
+    }
+    out.extend_from_slice(&wav[36..]);
+    let riff = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&riff.to_le_bytes());
     out
 }

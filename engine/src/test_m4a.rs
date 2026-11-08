@@ -548,3 +548,39 @@ pub fn with_grown_stsz(mut file: Vec<u8>, extra: usize) -> Vec<u8> {
     }
     file
 }
+
+/// `file`, which has `moov` last, with `child` appended to the box at the
+/// end of `path` from the top (such as `moov`, `trak`, `mdia`).  The sizes
+/// of the boxes of `path` grow to match.
+pub fn with_child(mut file: Vec<u8>, path: &[&[u8; 4]], child: &[u8]) -> Vec<u8> {
+    let (moov, moov_size) = top_box(&file, path[0]);
+    assert_eq!(moov + moov_size, file.len(), "moov is last");
+    let mut boxes = vec![moov];
+    for kind in &path[1..] {
+        let (at, _) = child_box(&file, *boxes.last().unwrap(), kind);
+        boxes.push(at);
+    }
+    let parent = *boxes.last().unwrap();
+    let end = parent + u32::from_be_bytes(file[parent..parent + 4].try_into().unwrap()) as usize;
+    file.splice(end..end, child.iter().copied());
+    for at in boxes {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap());
+        file[at..at + 4].copy_from_slice(&(size + child.len() as u32).to_be_bytes());
+    }
+    file
+}
+
+/// `file`, which has `moov` last, with each box of `path` from the top
+/// (such as `moov`, `trak`, `mdia`) of size 0: to the end of the file.
+pub fn with_sizes_of_0(mut file: Vec<u8>, path: &[&[u8; 4]]) -> Vec<u8> {
+    let (mut at, _) = top_box(&file, path[0]);
+    let mut boxes = vec![at];
+    for kind in &path[1..] {
+        at = child_box(&file, at, kind).0;
+        boxes.push(at);
+    }
+    for at in boxes {
+        file[at..at + 4].copy_from_slice(&[0; 4]);
+    }
+    file
+}

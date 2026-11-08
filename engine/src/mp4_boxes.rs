@@ -111,8 +111,12 @@ pub(crate) struct Found {
     /// The start of such a child that runs to the end of the file.
     pub moov_held_to_end_from: Option<u64>,
     /// The boxes of tags that the decode hides from Symphonia: each
-    /// `moov/udta`, each top-level `meta`, and each `moov` after the first.
+    /// `moov/udta`, each top-level `meta`, and each `moov` and `ftyp` after
+    /// the first.
     pub hidden: crate::hidden::Plan,
+    /// The size of the first `ftyp`, which Symphonia needs and reads whole
+    /// (`u64::MAX` when it runs to the end of the file).
+    pub ftyp_bytes: Option<u64>,
 }
 
 /// Where a `moov` box is: its start, and its end, or `None` when it runs
@@ -254,9 +258,9 @@ impl Walker<'_> {
     }
 
     /// Walks the top-level boxes.  It reads the first `moov`, and reads
-    /// only the header of each other box.  Symphonia reads each `moov` and
-    /// each top-level `meta` whole, so it hides each `meta`, and each
-    /// `moov` after the first.
+    /// only the header of each other box.  Symphonia reads each `moov`,
+    /// `ftyp` and top-level `meta` whole, so it hides each `meta`, and each
+    /// `moov` and `ftyp` after the first.
     fn top(&mut self) -> std::io::Result<()> {
         self.children(0, u64::MAX, |walker, found| {
             match &found.kind {
@@ -267,12 +271,23 @@ impl Walker<'_> {
                     });
                     walker.moov(found)?;
                 }
-                b"moov" | b"meta" => walker.hide(found),
+                b"ftyp" if walker.found.ftyp_bytes.is_none() => {
+                    walker.found.ftyp_bytes = Some(size_of(found).unwrap_or(u64::MAX));
+                }
+                b"moov" | b"meta" | b"ftyp" => walker.hide(found),
                 _ => {}
             }
             Ok(true)
         })?;
         Ok(())
+    }
+
+    /// Counts `found` in the bytes of `moov` that Symphonia holds.
+    fn hold(&mut self, found: BoxAt) {
+        match size_of(found) {
+            Some(size) => self.found.moov_held += size,
+            None => self.found.moov_held_to_end_from = Some(found.start),
+        }
     }
 
     /// Hides `found` from Symphonia: it gives `free` for its type.
@@ -284,11 +299,10 @@ impl Walker<'_> {
 
     fn moov(&mut self, moov: BoxAt) -> std::io::Result<()> {
         self.children(moov.body, moov.end, |walker, found| {
-            if matches!(&found.kind, b"mvhd" | b"trak" | b"mvex") {
-                match size_of(found) {
-                    Some(size) => walker.found.moov_held += size,
-                    None => walker.found.moov_held_to_end_from = Some(found.start),
-                }
+            // Symphonia reads these children of `moov` (`atoms/moov.rs`).
+            // Of a `trak`, it reads `tkhd`, `edts` and `mdia` (`trak`).
+            if matches!(&found.kind, b"mvhd" | b"mvex") {
+                walker.hold(found);
             }
             match &found.kind {
                 b"mvhd" => {
@@ -340,6 +354,9 @@ impl Walker<'_> {
             return Ok(());
         }
         self.children(parent.body, parent.end, |walker, found| {
+            if depth == 1 && matches!(&found.kind, b"tkhd" | b"edts" | b"mdia") {
+                walker.hold(found);
+            }
             match &found.kind {
                 b"tkhd" => {
                     let body = walker.body(found, false)?.unwrap_or_default();
@@ -529,10 +546,13 @@ mod tests {
                         start: start as u64,
                         end: Some((start + size) as u64),
                     }),
-                    // `mvhd` and the one `trak`: all of `moov` but its header.
-                    moov_held: size as u64 - 8,
+                    // `mvhd`, and `tkhd`, `edts` and `mdia` of the one
+                    // `trak`: all of `moov` but the headers of `moov` and
+                    // `trak`.
+                    moov_held: size as u64 - 8 - 8,
                     moov_held_to_end_from: None,
                     hidden: crate::hidden::Plan::default(),
+                    ftyp_bytes: Some(28),
                 }),
                 "{order:?}"
             );
