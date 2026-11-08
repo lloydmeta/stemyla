@@ -232,6 +232,10 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, orchestrator: the session runs Opus 5.5 (the system prompt) at effort `high` (`modelSettings` in `~/.claude/settings.json`).  The preflight passed at `ff633a3`.  It ran `cargo test -p engine` (182 passed), `e2e decode --browser chrome` and `e2e save --browser chrome` (Chrome 156, chromedriver 155).
 * 2026-11-08, orchestrator: the wasm bundle before M2, from `trunk build --release` at `ff633a3`: `app_bg.wasm` 5,836,422 B, `decode-worker_bg.wasm` 809,845 B, `stem-worker_bg.wasm` 1,250,988 B.
 * 2026-11-08, orchestrator: the maintainer gave a real song for local checks: an audio-only `.mp4` with brand `M4A `, one `soun` track, AAC-LC, 48 kHz stereo, 279.44 s, 247 kbps, written by FFmpeg (`Lavf62.12.100`).  It is fast start.  Its `elst` gives a delay of 1024 frames, not Apple's 2112, and it has no `iTunSMPB`.  Apple's `afinfo` gives 13,413,120 valid frames, 1024 priming and 256 remainder.  Its `AudioSpecificConfig` (`11 90 56 e5 00`) also has the sync extension `0x2b7` with SBR not present, as FFmpeg writes it.  So it tests the `elst` trim and the parse of that extension.
+* 2026-11-08, M1: Symphonia 0.6.1 decodes each M1 file bit for bit, the file of 0 frames included (`m4a/tests/round_trip.rs`).  So no Symphonia limit was found in M1.
+* 2026-11-08, M1: Symphonia 0.6.1 ignores `elst`.  A file with an edit decodes to every frame of its track.  So M2 must trim the delay itself (D7).
+* 2026-11-08, M1, for M2: `cargo test --workspace` builds one Symphonia with the features of every crate.  The dev-dependency of `m4a` turns on `isomp4` and `alac`, so `engine`'s tests decode M4A in that build before M2 turns the features on.  M2 shows its first failures with `cargo test -p engine`.
+* 2026-11-08, M1: a 10 s music-like test signal gives an ALAC M4A of 0.553 times the size of its 16-bit WAV.
 * 2026-11-08: the README of Symphonia on GitHub lists `opus`, `he-aac` and `he-aac-v2` features.  The published 0.6.1 has none of them.  Read the features of the pinned version, not the README.
 
 ## Decision log
