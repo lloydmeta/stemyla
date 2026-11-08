@@ -679,11 +679,12 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
 
 /// True when `tested` holds `engine` and a member outside the closure and
 /// the dependents of `engine`.  Then one test build has both, so the
-/// features of that member can reach the dependencies of `engine`, as the
-/// Symphonia features of the tests of `m4a` do.  A dependent of `engine`
-/// can also turn on features of `engine`: `app` and `xtask` turn on
-/// `engine/cpal`.  Tier `push` and CI run `cargo test -p engine` alone, so
-/// they cover that case.
+/// features of that member can reach the dependencies of `engine`.  An
+/// example is the Symphonia features of the tests of `m4a`.  A dependent of
+/// `engine` can also turn on features of `engine`: `app` turns on
+/// `engine/cpal` with its default feature `audio`.  `xtask` does so only
+/// with its own `cpal` feature, which is not a default.  Tier `push` and CI
+/// run `cargo test -p engine` alone, so they cover that case.
 fn merges_into_engine(graph: &Graph, tested: &BTreeSet<&String>) -> bool {
     let engine = BTreeSet::from([ENGINE.to_string()]);
     let family: BTreeSet<String> = graph

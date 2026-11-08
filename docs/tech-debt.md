@@ -625,7 +625,7 @@ This entry concerns DEPS-1.  It is a known breach of "confirm that it exists and
 
 `m4a` takes `alac-encoder` 0.3.0 as a dev-dependency only (`m4a/Cargo.toml`).  The differential test of the ALAC port compares each packet with this crate (decision 0028).  Its last release is 0.3.0, of January 2022.  It is pinned exactly, it never ships, and no update is wanted, since it is the fixed reference of the port.
 
-* Fix: remove the dev-dependency when the port no longer needs the reference.  For example, keep the reference packets of each test signal as stored test data.  Until then, do not update the pin.
+* Fix: remove the dev-dependency when the port no longer needs the reference.  For example, keep a SHA-256 digest of the reference packets of each test signal as test data.  Do not store the packets: they are encoded audio (ASSET-1).  Until then, do not update the pin.
 
 ## Legibility for agents
 
