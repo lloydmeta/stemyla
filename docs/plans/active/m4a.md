@@ -272,8 +272,9 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, orchestrator: after round 1 of M2 (finding 1-9), the orchestrate skill says that a `CLAUDE.md` change that a step needs lands in that step's commit.  Reason: Steps 1 to 8 of M2 and the commit after them broke DOC-1, 9 commits in all.  It is a harness change, so the PR lists it for the maintainer.
 * 2026-11-09, maintainer (during round 2 of M2): do not refuse a file because of its cover art or tags.  Hide them from Symphonia for every format that the app opens, and close TD-84 in the same change.
 * 2026-11-09, maintainer: if a format has no safe way to hide its tags, refuse only a file whose tags or art are large enough to put memory at risk (MEM-4).  Open each other file as usual.
-* 2026-11-09, orchestrator: the round 2 log counts these 4 messages of the maintainer as interventions.
+* 2026-11-09, orchestrator: the round 2 log counts 4 messages of the maintainer as interventions.  The two lines above record three of them: the second line holds both the refusal and its size limit.  The first message, to hide the M4A art, is in the Decision log of `plans/active/m4a-m2.md`.
 * 2026-11-09, orchestrator: after round 2 of M2 (finding 2-5), the orchestrate skill gives one flow for a step's change of `CLAUDE.md` or `.claude/rules/**`: a step checkpoint, then the team's step commit holds the change.
+* 2026-11-09, orchestrator: after round 3 of M2 (finding 3-1), a file is not refused for its count of tag containers alone.  The refusal holds only when the tags that Symphonia keeps pass a limit from the memory budget, counted as bytes plus the overhead of each tag.  Reason: the maintainer's rule of 2026-11-09 refuses only a file whose tags put memory at risk.
 
 ## Outcomes and retrospective
 
