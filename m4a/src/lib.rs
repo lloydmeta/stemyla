@@ -10,8 +10,10 @@
 
 mod alac;
 mod bits;
+mod mp4;
 
 pub use alac::{AlacEncoder, FRAMES_PER_PACKET, MAX_PACKET_BYTES};
+pub use mp4::{Edit, Error, Layout, Order, SampleEntry};
 
 #[cfg(test)]
 mod tests {
