@@ -8,6 +8,11 @@
 
 #![forbid(unsafe_code)]
 
+mod alac;
+mod bits;
+
+pub use alac::{AlacEncoder, FRAMES_PER_PACKET, MAX_PACKET_BYTES};
+
 #[cfg(test)]
 mod tests {
     #[test]

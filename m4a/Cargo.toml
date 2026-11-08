@@ -9,5 +9,11 @@ license = "Apache-2.0"
 
 [dependencies]
 
+# The reference of the ALAC port: a differential test checks that the port
+# and this crate give the same packets.  A test-only crate; it does not
+# ship.  Pinned: below 1.0 (DEPS-1).
+[dev-dependencies]
+alac-encoder = "=0.3.0"
+
 [lints]
 workspace = true

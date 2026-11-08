@@ -217,7 +217,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 
 * [x] 2026-11-08: plan written by the team leader.
 * [x] 2026-11-08, Step 1: the crate and its place in the layers.  First failures: `each_shipped_crate_lints_mem1_copies` failed with "m4a/clippy.toml lacks `path = "slice::to_vec"`" before `m4a/clippy.toml` existed.  `cargo clippy -p m4a --all-targets` failed with "this lint expectation is unfulfilled" on the canary.  `each_include_glob_routes_its_reviewer` failed with "m4a/src/lib.rs should route memory-reviewer ..., got []" before the change to `REVIEWERS`.  `the_fixture_graph_is_the_real_graph` failed on the new member before the change to `fixture()`.  `check_runs_each_check_on_a_repo` failed on the missing `m4a` lines of `README.md` and `docs/ARCHITECTURE.md`.  `every_reviewer_has_an_agent_file` failed until `git add` of `m4a/src/lib.rs`.
-* [ ] Step 2: the bit writer and the ALAC encoder.
+* [x] 2026-11-08, Step 2: the bit writer and the ALAC encoder.  First failures, with a stub writer that writes nothing and a stub `encode` that gives 0 bytes: each `bits` unit test failed on its `assert_eq!` (`a_truncate_to_a_byte_boundary_drops_whole_bytes` on the bound assert of `truncate`).  The differential test failed with "silence, 1 frames: packet 0 differs".  `noise_gives_escape_packets_and_a_sine_compressed_packets` failed on "all(|p| p.len() == MAX_PACKET_BYTES)", `each_packet_is_appended_after_the_bytes_of_out` on "size > 0", and the two unit tests of `alac` on `assert_eq!` and "small < big".  The three `#[should_panic]` tests failed with "did not panic as expected".  The real port then passed each test at the first run, in debug and in release.
 * [ ] Step 3: the box writer.
 * [ ] Step 4: the round trip through Symphonia.
 * [ ] Step 5: the size check, the notices and decision 0028.
@@ -225,7 +225,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-11-08, Step 2: no kept caller of `BitBuffer::write` can pass a value with bits above `num_bits`.  Its callers are `write(num_samples, 32)` and `dyn_code_32bit`'s `write(n, 17)`.  `n` is at most 131,071, below 2^17: each prediction error is 17-bit signed after `(del << 15) >> 15`, and `pc1[0]` is a mix value of at most 17 bits.  Also, with 17 bits the shift is `32 - (position & 7) - 17`, at least 8, so the masked branch runs.  The unmasked branch (shift below 0) runs only for 32 bits.  So no unit test shows the case.
+* 2026-11-08, Step 2: the one loop of `pc_block` for 4 and 8 coefficients, with the `Wrapping` sum, gives the same bytes as the source for every signal and length.  A mutation of its stop condition (`del * direction <= 0` to `< 0`) failed the differential test at "square, 4095 frames: packet 0 differs".  So the test sees a change in the adaptation.
+* 2026-11-08, Step 2: by a reading of the source, the values that `pc_block` leaves in the buffers reach the bytes only within one packet.  The trial over `frames / 32` keeps the entries from `max(frames / 32, 9)` to `frames / 8` that the trial of `frames / 8` of the same packet wrote, and the next `dyn_comp` reads them.  An entry from an earlier packet is read (`input[1..=numactive]`) but no read of it reaches `dyn_comp`, and no coefficient adapts on it.  The port keeps the buffers at 4096 entries in any case.  The differential test runs each length from a new encoder, so it does not separate the two cases.
 
 ## Decision log
 
@@ -240,6 +242,10 @@ None yet.
 * 2026-11-08, agent (team leader): `m4a` is Apache-2.0 only, since Apple's reference is.  Reason: "The licence of the port".
 * 2026-11-08, agent (team leader): the writer has `Order::MoovLast` for M2's fixture.  Reason: D6 forbids a copy of the writer in a test.
 * 2026-11-08, agent (team leader): an `iTunSMPB` tag is not in M1.  M2 adds it to the writer if a test of D7 needs it.
+* 2026-11-08, agent (implementer): the trial encodes write to a `BitCount`, a `BitSink` that counts bits, not to a work buffer.  Reason: they need only the bit count, so the port makes no work buffer.  `dyn_comp` takes any `BitSink`.
+* 2026-11-08, agent (implementer): the coefficients are `[[i16; 8]; 2]` for each channel, one set of 4 and one of 8, not `[[[i16; 16]; 16]; 8]`.  Reason: 16-bit stereo uses only those two sets, of channel 0.
+* 2026-11-08, agent (implementer): a crate-private `encode_packet` gives the size and a `PacketKind` (compressed, escape, rewound); the public `encode` gives the size only.  Reason: a unit test proves that the rewind path runs, and the public API stays that of the sketch.
+* 2026-11-08, agent (implementer): the adaptive Golomb parameters are constants.  Reason: each call of the source gives `mb` 10, `pb` 40 (`(4 * 40) / 4`) and `kb` 14, with `fw` equal to `sw`, so the row logic of `dyn_comp` has no effect.
 
 ## Outcomes and retrospective
 
