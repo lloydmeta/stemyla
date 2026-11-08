@@ -221,7 +221,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 * [x] 2026-11-08, Step 3: the box writer.  First failures, with a stub `Layout` of 0 packets that checks nothing and gives empty heads: the structure test failed at `assert_eq!(layout.packets(), 3)`; the `MoovLast` and `elst` tests at the box reader's assert "a box header needs 8 bytes"; the length test, the refusals of a rate, an edit and a packet count or size each on its `assert_eq!`; the 4 GiB test at `assert_eq!(one.packets(), 1)`.  With a stub `Display` that writes nothing, `each_refusal_says_what_is_wrong` failed on its `assert!`.
 * [x] 2026-11-08, Step 4: the round trip through Symphonia.  First failures, with a stub `alac_file` that encodes silence of the same length and checks neither the length nor the rate: the round trip failed with "square, 1 frames: the samples differ", the `MoovLast` test with "square, 4097 frames: the samples differ", the edit test on its `assert!`, the refusal test on its `assert_eq!`, and `an_odd_length_panics` with "did not panic as expected".
 * [x] 2026-11-08, Step 5: the size check, the notices and decision 0028.  First failure, with the full packets forced to escape packets: `a_music_like_signal_gives_fewer_bytes_than_its_wav` failed with "1765889 >= 1764044".  The differential test now also runs the music-like signal.
-* [ ] Review rounds.
+* [x] 2026-11-08, review rounds: 3 rounds, each in `docs/reviews/feature-m4a-m1.md`.  Round 3 is the last round by decision 0024.
   * [x] 2026-11-08, review round 1 fixes, before the missed mutants.  First failures: 1-1 `an_edit_past_the_end_is_refused` panicked "attempt to add with overflow" in debug, and failed its `assert_eq!` in release (`Ok` for `skip` 1, `frames` u64::MAX).  1-2 `a_packet_never_grows_out_past_max_packet_bytes` failed with "rewind: packet 0", capacity 32,776, not 16,388.  1-9 failed on `worst_case_bytes` 4294981961, not 4294981977, with the `stts` term of the worst case removed.  1-5: with a writer and an encoder that keep 44,100 Hz, `a_file_at_48_khz_holds_its_rate_in_each_place` failed at "mvhd times", and the 48 kHz round trip failed too.  1-13: with the cookie of a new encoder, `alac_file_writes_the_final_cookie_and_its_rate` failed on the cookie (maxFrameBytes 0, not 408).  1-10: with left and right swapped in the stereo mix, only the two music-like round trips failed ("music-like, 4097 frames: the samples differ").  1-8: 20 tests of `xtask/src/check.rs` failed on their asserts before `lines()` had the `engine` line, `the_ci_runs_the_engine_tests_alone` on "ci.yml has no `- run: cargo test --locked -p engine`".
   * [x] 2026-11-08, review round 1, the missed mutants of `m4a/src/alac.rs`.  `the_port_gives_the_packets_of_the_reference_on_the_probe_signals` runs the probe signals of the validator at 4096 and 4000 frames: impulses on one channel, noise of amplitude 2, sparse noise, and eighth splits of noise and silence.  A scan with each mutant applied found the amplitudes and impulses that the escape decision needs (`if bits_v < min_bits_v`, `min_bits`, `escape_bits` and the size check of the try).  `cargo mutants -p m4a --file m4a/src/alac.rs` then: 314 mutants, 292 caught, 12 missed, 9 unviable, 1 timeout.  Each of the 26 confirmed and unproven mutants is caught.  The 6 missed in `write_coefs`, `write_escape_packet`, `pc_block` and `dyn_code` are the ones that the validator refuted as equivalent.  The other 6 were on `TRY_BYTES`, new in fix 1-2; `the_try_buffer_is_sized_once_to_the_work_buffer_of_the_source` now catches them (first failure: 40959, not 40961).
   * [x] 2026-11-08, review round 2 fixes.  2-1: TD-79 records that `alac-encoder` breaks DEPS-1's "maintained".  2-2: the reason of the `cargo test -p engine` rule of tier `commit` now names the dependent of `engine` that turns on `engine/cpal` by default, `app` (corrected in review round 3, 3-1).  2-3, 2-5 and 2-6: plan and decision text.  2-4: `the_ci_runs_the_engine_tests_alone` fails if ci.yml loses its workspace test line.  First failure, with that line renamed in the test: "ci.yml runs the workspace tests".  2-7: the doc of `PacketKind::Rewound`.
@@ -268,4 +268,30 @@ Each step is one commit, and each commit passes `check --tier commit`.  No other
 
 ## Outcomes and retrospective
 
-Not started.
+Done on 2026-11-08.
+
+What M1 achieved:
+
+* The crate `m4a`, in the Pure layer with no dependencies, makes the bytes of an M4A file of 16-bit stereo ALAC.  It does no input or output (D6).
+* The ALAC encoder is a safe port of the encoder of `alac-encoder` 0.3.0, with `#![forbid(unsafe_code)]` (D2).  A differential test gives the same packets and cookie as the crate, on 7 signals at 5 lengths and on the probe signals of review round 1.
+* The box writer gives a fast-start file (`moov` before `mdat`), or a file with `moov` last for M2's fixture.  It can write one `elst` entry.  It refuses a file that can reach 4 GiB, and a rate above 65,535 Hz.
+* Symphonia 0.6.1 decodes each test file bit for bit, at 0, 1, 4095, 4096 and 4097 frames, at 44.1 kHz and 48 kHz.  A 10 s music-like signal gives 0.553 of its WAV size.
+* `encode` grows its output by at most `MAX_PACKET_BYTES`, so M3 can size a reserve.
+* CI and tier `push` run `cargo test -p engine` alone, since a workspace build merges the Symphonia features of the tests of `m4a` into `engine`.
+* Decision 0028 (accepted) records the format and the port.  Decision 0029 (`proposed`) records that `m4a` is Apache-2.0 only.  TD-79 records that `alac-encoder`, a test-only reference, breaks DEPS-1's "maintained".
+
+The review, in numbers: 3 rounds, 28 round agents, 1,895,639 tokens, 72.6 wall minutes, 0 interventions.  Round 1 found 8 confirmed blockers and should-fix, 8 nits, and 26 missed mutants that were confirmed or unproven (fixed in `c78fa58`).  Round 2 found 3 confirmed should-fix and 4 nits (fixed in `1432416`).  Round 3 found 1 confirmed should-fix that is not significant, and 2 nits (fixed in `883cf2e`).  Mutants: 35 missed of 539 in round 1, 0 missed of 27 in round 2, and none in the diff of round 3.
+
+What did not go well:
+
+* The differential test of Step 2 used signals that never reached the zero-run mode of the coder, or a packet near the escape limit.  So round 1 found 26 mutants that it missed.  The validator's probe signals then closed the gap.
+* Each fix of a reason or a rule made a new error in its own text: 1-8's reason (2-2), and the fix of 2-2 (3-1).  Each round found one in the text that the round before had changed.
+* The team leader's turns ended while its agents ran, so the orchestrator had to continue it many times.  One reviewer of round 3 looked stalled, and a second start cost 23,764 tokens before the first reported.
+
+What to do differently:
+
+* For a port, give the differential test signals that reach each branch of the source: quiet signals for run modes, and signals near each limit.
+* Check each claim of a new reason against `cargo tree` or the code before the commit.
+* Do not take a reviewer as stalled before the 30 minutes of the orchestrate skill.
+
+Debt: TD-79 is new.
