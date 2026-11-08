@@ -269,7 +269,11 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, agent (M1): CI and tier `push` run `cargo test -p engine` alone, a new CI step and a new line of `xtask check`.
 * 2026-11-08, agent: an audio-only `.mp4` opens (D4).  Reason: the maintainer's real file is one, and the D4 answer excludes only video.
 * 2026-11-08, agent: M1 checks the port of D2 against `alac-encoder` 0.3.0, pinned exactly, as a dev-dependency of `m4a` only.  Each test signal must give the same packets from both.  Reason: a round trip alone also passes an encoder that writes only escape (uncompressed) packets.  A test also checks that a music-like signal gives fewer bytes than its WAV.
-* 2026-11-08, orchestrator: after round 1 of M2 (finding 1-9), the orchestrate skill says that a `CLAUDE.md` change that a step needs lands in that step's commit.  Reason: Steps 1 and 3 of M2 broke DOC-1 for 8 commits.  It is a harness change, so the PR lists it for the maintainer.
+* 2026-11-08, orchestrator: after round 1 of M2 (finding 1-9), the orchestrate skill says that a `CLAUDE.md` change that a step needs lands in that step's commit.  Reason: Steps 1 to 8 of M2 and the commit after them broke DOC-1, 9 commits in all.  It is a harness change, so the PR lists it for the maintainer.
+* 2026-11-09, maintainer (during round 2 of M2): do not refuse a file because of its cover art or tags.  Hide them from Symphonia for every format that the app opens, and close TD-84 in the same change.
+* 2026-11-09, maintainer: if a format has no safe way to hide its tags, refuse only a file whose tags or art are large enough to put memory at risk (MEM-4).  Open each other file as usual.
+* 2026-11-09, orchestrator: the round 2 log counts these 4 messages of the maintainer as interventions.
+* 2026-11-09, orchestrator: after round 2 of M2 (finding 2-5), the orchestrate skill gives one flow for a step's change of `CLAUDE.md` or `.claude/rules/**`: a step checkpoint, then the team's step commit holds the change.
 
 ## Outcomes and retrospective
 
