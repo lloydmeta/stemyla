@@ -267,9 +267,10 @@ fn chunk_plan(
 }
 
 /// The container of a file, which says the one Symphonia reader that the
-/// decode opens.  The decode does not run Symphonia's probe, which scans up
-/// to 1 MiB for any format, and can open a part of the file that the plan
-/// never saw (findings 5-2 and 5-3 of review round 5).
+/// decode opens.  The decode does not run Symphonia's probe.  It finds the
+/// marker that the probe would find ([`start_of`]), and opens that reader
+/// there, where the plan and the walk start (findings 5-2 and 5-3 of review
+/// round 5, and 6-1 of review round 6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Container {
     Flac,
@@ -280,86 +281,235 @@ pub(crate) enum Container {
     Mp3,
 }
 
-/// The container that `bytes` (the start of a view) start with: `fLaC`,
-/// `RIFF` with `WAVE` or `RF64`, `FORM` with `AIFF` or `AIFC`, an MP4 box
-/// (`mp4_boxes::FIRST_BOXES`), or the frame sync of an ADTS stream (layer
-/// 00) or of an MP3.  `None` for anything else.
-pub(crate) fn container_at(bytes: &[u8]) -> Option<Container> {
-    let magic = bytes.get(..4)?;
-    let form = bytes.get(8..12);
-    let mp4 = bytes
-        .get(4..8)
-        .is_some_and(|kind| crate::mp4_boxes::FIRST_BOXES.iter().any(|k| kind == &k[..]));
-    match (magic, form) {
-        (b"fLaC", _) => Some(Container::Flac),
-        (b"RIFF", Some(b"WAVE")) | (b"RF64", _) => Some(Container::Wav),
-        (b"FORM", Some(b"AIFF" | b"AIFC")) => Some(Container::Aiff),
-        _ if mp4 => Some(Container::Mp4),
-        _ if is_adts_sync(magic) => Some(Container::Adts),
-        _ if is_mp3_sync(magic) => Some(Container::Mp3),
-        _ => None,
+/// The bytes of a view in which Symphonia 0.6.1's probe looks for a
+/// marker: `max_probe_depth`, 1 MiB (`symphonia-core` `formats/probe.rs`,
+/// line 304).
+pub(crate) const SCAN_BYTES: usize = 1 << 20;
+
+/// The last offset in a view at which the probe tests a marker.  The probe
+/// reads a byte, counts it, stops past `max_probe_depth`, and then tests the
+/// 2 bytes that end at that byte (`Probe::next`, lines 553 to 586).
+pub(crate) const LAST_MARKER: usize = SCAN_BYTES - 2;
+
+/// The most bytes from a marker that a score reads: an ADTS frame of up to
+/// 8,191 bytes, and the next header, with its CRC (9).
+pub(crate) const MOST_SCORE_BYTES: usize = 8191 + 9;
+
+/// The offsets of a view that [`start_of`] tests in one read.  A file
+/// that starts with its marker reads about 12 KiB, as the probe reads a
+/// few KiB, so a read that fails later in the file fails the decode, not
+/// the open.
+const SCAN_BLOCK: usize = 4 * 1024;
+
+/// The container whose marker Symphonia's probe accepts at `at` of
+/// `bytes`, if any.  It tests each reader of `engine`'s Symphonia in the
+/// order of `register_enabled_formats` (`symphonia` `lib.rs`, lines 262 to
+/// 283), with the checks of its `score`.  A score that reads past the end
+/// of `bytes` fails, as an end of the stream does.
+pub(crate) fn marker_at(bytes: &[u8], at: usize) -> Option<Container> {
+    let rest = bytes.get(at..)?;
+    let form = rest.get(8..12);
+    if adts_accepts(rest) {
+        Some(Container::Adts)
+    } else if rest.starts_with(b"fLaC") {
+        // `FlacReader::score` accepts each marker (`symphonia-bundle-flac`
+        // `demuxer.rs`, line 202).
+        Some(Container::Flac)
+    } else if rest.starts_with(b"ftyp") {
+        // `IsoMp4Reader::score` accepts each marker (`symphonia-format-isomp4`
+        // `demuxer.rs`, line 586).
+        Some(Container::Mp4)
+    } else if mpa_accepts(rest) {
+        Some(Container::Mp3)
+    } else if rest.starts_with(b"FORM") && matches!(form, Some(b"AIFF" | b"AIFC")) {
+        // `AiffReader::score` (`symphonia-format-riff` `aiff/mod.rs`, line
+        // 321).
+        Some(Container::Aiff)
+    } else if rest.starts_with(b"RIFF") && form == Some(b"WAVE") {
+        // `WavReader::score` (`wave/mod.rs`, line 185).  The marker is
+        // `RIFF` only: the reader of 0.6.1 refuses `RF64` (line 69).
+        Some(Container::Wav)
+    } else {
+        None
     }
 }
 
-/// An ADTS frame sync: 12 bits of 1, the ID bit, then a layer of 00.
-fn is_adts_sync(bytes: &[u8]) -> bool {
-    matches!(bytes, [0xFF, second, ..] if second & 0xF6 == 0xF0)
+/// Where the reader of `container` starts, for its marker at `marker`.
+/// `IsoMp4Reader::try_new` steps back 4 bytes from its marker `ftyp`, to the
+/// size of the box, and no further than the start of the stream.
+pub(crate) fn reader_start(container: Container, marker: u64) -> u64 {
+    match container {
+        Container::Mp4 => marker.saturating_sub(4),
+        _ => marker,
+    }
 }
 
-/// An MPEG audio frame sync: 11 bits of 1, then a layer other than 00.
-fn is_mp3_sync(bytes: &[u8]) -> bool {
-    matches!(bytes, [0xFF, second, ..] if second & 0xE0 == 0xE0 && second & 0x06 != 0)
+/// The first marker that Symphonia's probe accepts at an offset of
+/// `offsets` in `bytes`, and its offset.
+pub(crate) fn first_marker(
+    bytes: &[u8],
+    offsets: std::ops::Range<usize>,
+) -> Option<(Container, usize)> {
+    offsets
+        .take_while(|at| *at < bytes.len())
+        .find_map(|at| marker_at(bytes, at).map(|container| (container, at)))
 }
 
-/// The bytes after the start of a view that the decode scans for an MP3
-/// frame sync, when the view starts with no known container: 1 MiB, as
-/// Symphonia's probe does (`max_probe_depth`, `formats/probe.rs`).
-pub(crate) const MP3_SCAN_BYTES: u64 = 1 << 20;
+/// The length of the ADTS frame whose header starts `bytes`, as
+/// `AdtsHeader::read_no_resync` reads it (`symphonia-codec-aac` `adts.rs`,
+/// lines 138 to 226).  `None` when Symphonia refuses the header.
+fn adts_frame_bytes(bytes: &[u8]) -> Option<usize> {
+    let sync = u16::from_be_bytes([*bytes.first()?, *bytes.get(1)?]);
+    if sync & 0xFFF6 != 0xFFF0 {
+        return None;
+    }
+    let header_len = if sync & 1 == 0 { 9 } else { 7 };
+    let header = bytes.get(..header_len)?;
+    let rate_index = (header[2] >> 2) & 0x0F;
+    let frame_len = (usize::from(header[3] & 0x03) << 11)
+        | (usize::from(header[4]) << 3)
+        | usize::from(header[5] >> 5);
+    let raw_data_blocks = header[6] & 0x03;
+    let accepted = rate_index <= 12 && frame_len >= header_len && raw_data_blocks == 0;
+    accepted.then_some(frame_len)
+}
+
+/// `AdtsReader::score` (`adts.rs`, line 91): a header, and a second header
+/// after its frame.  The score has 16 KiB, more than a frame of 8,191 bytes
+/// and a header, so it never gives its partial score.
+fn adts_accepts(bytes: &[u8]) -> bool {
+    adts_frame_bytes(bytes)
+        .and_then(|frame| bytes.get(frame..))
+        .and_then(adts_frame_bytes)
+        .is_some()
+}
+
+/// Bit rates of MPEG audio, by version and layer, for the indexes 1 to 14
+/// (`symphonia-bundle-mp3` `header.rs`, lines 19 to 47).
+const MPEG1_L1: [u32; 14] = [
+    32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448,
+];
+const MPEG1_L2: [u32; 14] = [
+    32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+];
+const MPEG1_L3: [u32; 14] = [
+    32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+];
+const MPEG2_L1: [u32; 14] = [
+    32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256,
+];
+const MPEG2_L23: [u32; 14] = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+
+/// The bytes after the header of the MPEG audio frame whose header is
+/// `header`, as `parse_frame_header` gives them (`header.rs`, lines 102 to
+/// 243).  `None` when Symphonia refuses the header.
+fn mpa_frame_bytes(header: u32) -> Option<usize> {
+    // Version: 0 is 2.5, 2 is 2, 3 is 1; 1 is refused.
+    let version = (header >> 19) & 0x3;
+    // Layer: 1 is layer 3, 2 is layer 2, 3 is layer 1; 0 is refused.
+    let layer = (header >> 17) & 0x3;
+    let rate_index = ((header >> 12) & 0xF) as usize;
+    let sample_index = (header >> 10) & 0x3;
+    if version == 1 || layer == 0 || rate_index == 0 || rate_index == 15 || sample_index == 3 {
+        return None;
+    }
+    let table = match (version, layer) {
+        (3, 3) => &MPEG1_L1,
+        (3, 2) => &MPEG1_L2,
+        (3, _) => &MPEG1_L3,
+        (_, 3) => &MPEG2_L1,
+        _ => &MPEG2_L23,
+    };
+    let bit_rate = table[rate_index - 1] * 1000;
+    let base_rate = [11_025, 12_000, 8_000][sample_index as usize];
+    let sample_rate = base_rate << [0, 0, 1, 2][version as usize];
+    let mono = (header >> 6) & 0x3 == 3;
+    let layer2_refused = if mono {
+        [224_000, 256_000, 320_000, 384_000].contains(&bit_rate)
+    } else {
+        [32_000, 48_000, 56_000, 80_000].contains(&bit_rate)
+    };
+    if layer == 2 && layer2_refused {
+        return None;
+    }
+    let factor = match (version, layer) {
+        (_, 3) => 12,
+        (3, _) | (_, 2) => 144,
+        _ => 72,
+    };
+    let slot_bytes = if layer == 3 { 4 } else { 1 };
+    let padding = ((header >> 9) & 1) as usize;
+    let slots = (factor * bit_rate / sample_rate) as usize + padding;
+    (slots * slot_bytes).checked_sub(4)
+}
+
+/// `MpaReader::score` (`symphonia-bundle-mp3` `demuxer.rs`, line 51): a
+/// frame header after a frame sync of 11 bits of 1, and a second synced
+/// header after its frame.  The score has 16 KiB, more than a frame of
+/// 2,881 bytes and a header, so it never gives its partial score.
+fn mpa_accepts(bytes: &[u8]) -> bool {
+    let header_at = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    };
+    let synced = |header: u32| header & 0xFFE0_0000 == 0xFFE0_0000;
+    let Some(first) = header_at(0).filter(|header| synced(*header)) else {
+        return false;
+    };
+    let Some(frame) = mpa_frame_bytes(first) else {
+        return false;
+    };
+    header_at(4 + frame)
+        .filter(|second| synced(*second))
+        .and_then(mpa_frame_bytes)
+        .is_some()
+}
 
 /// Where Symphonia's view of `source` starts (after any leading ID3v2
-/// tags), and its container there.  A view of no known container with an
-/// MP3 frame sync in its first [`MP3_SCAN_BYTES`] is an MP3: the MP3 reader
-/// skips junk before its first frame by itself (`read_mpeg_frame_strict`).
-pub(crate) fn start_of(source: &mut dyn ReadAt) -> std::io::Result<(u64, Option<Container>)> {
+/// tags), and the container whose reader opens, with where that reader
+/// starts in the file.  It scans the view as Symphonia's probe does: each
+/// offset up to [`LAST_MARKER`], in order, until a marker that a score
+/// accepts ([`marker_at`]).  `None` when no marker is accepted.  It reads
+/// [`SCAN_BLOCK`] offsets at a time, with the bytes that their scores read.
+pub(crate) fn start_of(
+    source: &mut dyn ReadAt,
+) -> std::io::Result<(u64, Option<(Container, u64)>)> {
     let view = leading_id3_bytes(source)?;
-    let mut magic = [0; 12];
-    let read = source.read_at(view, &mut magic)?;
-    if let Some(container) = container_at(&magic[..read]) {
-        return Ok((view, Some(container)));
-    }
-    // Blocks of 64 KiB, each with the last byte of the one before.
-    const BLOCK: usize = 64 * 1024;
-    let mut block = vec![0; BLOCK + 1];
-    let mut at = view;
-    while at < view + MP3_SCAN_BYTES {
-        let read = source.read_at(at, &mut block)?;
-        if block[..read].windows(2).any(is_mp3_sync) {
-            return Ok((view, Some(Container::Mp3)));
+    // The last offset of a block, and the bytes that its score reads.
+    let mut block = vec![0; SCAN_BLOCK - 1 + MOST_SCORE_BYTES];
+    let mut base = 0;
+    while base <= LAST_MARKER {
+        let read = source.read_at(view + base as u64, &mut block)?;
+        let offsets = 0..SCAN_BLOCK.min(LAST_MARKER + 1 - base);
+        if let Some((container, at)) = first_marker(&block[..read], offsets) {
+            let marker = view + (base + at) as u64;
+            return Ok((view, Some((container, reader_start(container, marker)))));
         }
-        if read < block.len() {
+        // The next block starts at `SCAN_BLOCK` of this one.
+        if read <= SCAN_BLOCK {
             break;
         }
-        at += BLOCK as u64;
+        base += SCAN_BLOCK;
     }
     Ok((view, None))
 }
 
 /// The plan of a file of `container`, not an MP4, whose view starts at
-/// `view`.  It hides the tag blocks of a FLAC and the tag chunks of a WAV
-/// and an AIFF.
+/// `view` and whose reader starts at `at`.  It hides the tag blocks of a
+/// FLAC and the tag chunks of a WAV and an AIFF.
 pub(crate) fn plan_of(
     source: &mut dyn ReadAt,
     view: u64,
-    container: Option<Container>,
+    at: u64,
+    container: Container,
 ) -> std::io::Result<Plan> {
     let mut plan = Plan {
         start: view,
         ..Plan::default()
     };
-    let chunks = view + 12;
+    let chunks = at + 12;
     match container {
-        Some(Container::Flac) => flac_plan(source, view + 4, &mut plan)?,
-        Some(Container::Wav) => chunk_plan(
+        Container::Flac => flac_plan(source, at + 4, &mut plan)?,
+        Container::Wav => chunk_plan(
             source,
             chunks,
             true,
@@ -367,10 +517,8 @@ pub(crate) fn plan_of(
             Some(b"data"),
             &mut plan,
         )?,
-        Some(Container::Aiff) => {
-            chunk_plan(source, chunks, false, &AIFF_TAG_CHUNKS, None, &mut plan)?
-        }
-        _ => {}
+        Container::Aiff => chunk_plan(source, chunks, false, &AIFF_TAG_CHUNKS, None, &mut plan)?,
+        Container::Mp4 | Container::Adts | Container::Mp3 => {}
     }
     Ok(plan)
 }
@@ -422,8 +570,13 @@ mod tests {
 
     /// The plan of the whole `file`, as the decode makes it.
     fn plan_of_file(mut file: &[u8]) -> std::io::Result<Plan> {
-        let (view, container) = start_of(&mut file)?;
-        plan_of(&mut file, view, container)
+        match start_of(&mut file)? {
+            (view, Some((container, at))) => plan_of(&mut file, view, at, container),
+            (view, None) => Ok(Plan {
+                start: view,
+                ..Plan::default()
+            }),
+        }
     }
 
     /// 32 bytes, each its own offset.
@@ -616,53 +769,181 @@ mod tests {
         assert_eq!((past.kept, past.too_much_kept), (MOST_KEPT_BYTES + 1, true));
     }
 
-    /// The rule of the container at the start of a view (findings 5-2 to
-    /// 5-4 of review round 5).
-    #[test]
-    fn the_container_is_the_one_at_the_start_of_the_view() {
-        use Container::*;
-        let cases: [(&[u8], Option<Container>); 17] = [
-            (b"fLaC\0\0\0\x22", Some(Flac)),
-            (b"RIFF\0\0\0\0WAVE", Some(Wav)),
-            (b"RF64\0\0\0\0WAVE", Some(Wav)),
-            (b"RIFF\0\0\0\0AVI ", None),
-            (b"FORM\0\0\0\0AIFF", Some(Aiff)),
-            (b"FORM\0\0\0\0AIFC", Some(Aiff)),
-            (b"FORM\0\0\0\0JUNK", None),
-            (b"\0\0\0\x20ftypM4A ", Some(Mp4)),
-            (b"\0\0\0\x08moov", Some(Mp4)),
-            (b"\0\0\0\x08free", Some(Mp4)),
-            (b"\0\0\0\x08uuid", Some(Mp4)),
-            (b"\0\0\0\x08junk", None),
-            (b"\xFF\xF1\x50\x80", Some(Adts)),
-            (b"\xFF\xFB\x90\x00", Some(Mp3)),
-            (b"\xFF\xE0\x00\x00", None),
-            (b"\xFF\x00\x00\x00", None),
-            (b"\x42\xE2\x00\x00", None),
+    /// An ADTS frame header of `frame_len` bytes, stereo at 44.1 kHz, with
+    /// a CRC when `crc` is set, and its payload of zeros.
+    fn adts_frame(frame_len: usize, crc: bool) -> Vec<u8> {
+        let len = frame_len as u32;
+        let mut frame = vec![
+            0xFF,
+            if crc { 0xF0 } else { 0xF1 },
+            (1 << 6) | (4 << 2),
+            (0b10 << 6) | ((len >> 11) & 0x03) as u8,
+            (len >> 3) as u8,
+            (((len & 0x07) << 5) as u8) | 0x1F,
+            0xFC,
         ];
-        for (bytes, want) in cases {
-            assert_eq!(container_at(bytes), want, "{bytes:02x?}");
-        }
-        assert_eq!(container_at(b"fLa"), None, "too short");
+        frame.resize(frame_len, 0);
+        frame
     }
 
-    /// A view of no known container is an MP3 when an MP3 frame sync is in
-    /// its first `MP3_SCAN_BYTES`, after any ID3v2 tags.
+    /// Two MPEG audio frames of `header`, the first `frame` bytes long after
+    /// its header, and the second header only.
+    fn mpa_pair(header: u32, frame: usize) -> Vec<u8> {
+        let mut pair = Vec::from(header.to_be_bytes());
+        pair.resize(4 + frame, 0);
+        pair.extend_from_slice(&header.to_be_bytes());
+        pair
+    }
+
+    /// Finding 6-1 of review round 6: a marker is taken only where the
+    /// score of its Symphonia 0.6.1 reader accepts it.
     #[test]
-    fn a_view_of_no_known_container_is_an_mp3_only_with_a_sync_in_reach() {
-        use crate::test_audio::id3_tag;
-        let sync = [0xFF_u8, 0xFB, 0x90, 0x00];
-        let start = |file: &[u8]| start_of(&mut { file }).ok();
-        let near = [id3_tag(100), vec![0; 70_000], Vec::from(sync)].concat();
-        assert_eq!(start(&near), Some((110, Some(Container::Mp3))));
-        let edge = [vec![0; MP3_SCAN_BYTES as usize - 2], Vec::from(sync)].concat();
-        assert_eq!(start(&edge), Some((0, Some(Container::Mp3))), "at the edge");
-        let past = [
-            vec![0; MP3_SCAN_BYTES as usize + 64 * 1024],
-            Vec::from(sync),
+    fn a_marker_is_taken_only_where_its_score_accepts_it() {
+        use Container::*;
+        let adts = [adts_frame(16, false), adts_frame(16, false)].concat();
+        let adts_crc = [adts_frame(20, true), adts_frame(20, true)].concat();
+        let mut bad_rate = adts.clone();
+        bad_rate[2] = (1 << 6) | (13 << 2);
+        let mut two_blocks = adts.clone();
+        two_blocks[6] = 0xFD;
+        let short_frame = [adts_frame(16, false), adts_frame(6, false)].concat();
+        let mut rate_12 = adts.clone();
+        rate_12[2] = (1 << 6) | (12 << 2);
+        let shortest = [adts_frame(7, false), adts_frame(7, false)].concat();
+        let short_crc = [adts_frame(8, true), adts_frame(16, true)].concat();
+        let unsynced = [
+            &mpa_pair(0xFFFB_9000, 413)[..417],
+            &0x00FB_9000_u32.to_be_bytes(),
         ]
         .concat();
-        assert_eq!(start(&past), Some((0, None)), "past the reach");
+        let cases: Vec<(&str, Vec<u8>, Option<Container>)> = vec![
+            ("fLaC", Vec::from(*b"fLaC"), Some(Flac)),
+            ("WAVE", Vec::from(*b"RIFF\0\0\0\0WAVE"), Some(Wav)),
+            ("RF64", Vec::from(*b"RF64\0\0\0\0WAVE"), None),
+            ("AVI", Vec::from(*b"RIFF\0\0\0\0AVI "), None),
+            ("AIFF", Vec::from(*b"FORM\0\0\0\0AIFF"), Some(Aiff)),
+            ("AIFC", Vec::from(*b"FORM\0\0\0\0AIFC"), Some(Aiff)),
+            ("FORM JUNK", Vec::from(*b"FORM\0\0\0\0JUNK"), None),
+            ("FORM cut", Vec::from(*b"FORM\0\0\0\0AIF"), None),
+            ("ftyp", Vec::from(*b"ftypM4A "), Some(Mp4)),
+            ("free", Vec::from(*b"free"), None),
+            ("ADTS", adts.clone(), Some(Adts)),
+            ("ADTS with CRC", adts_crc, Some(Adts)),
+            ("one ADTS header", adts_frame(16, false), None),
+            ("an ADTS rate of 13", bad_rate, None),
+            ("two ADTS blocks", two_blocks, None),
+            ("an ADTS frame shorter than its header", short_frame, None),
+            ("an ADTS rate of 12", rate_12, Some(Adts)),
+            ("ADTS frames of only a header", shortest, Some(Adts)),
+            ("an ADTS frame shorter than its CRC header", short_crc, None),
+            ("MPEG2 layer 2", mpa_pair(0xFFF5_8000, 413), Some(Mp3)),
+            ("a second header with no sync", unsynced, None),
+            ("MPEG1 layer 3", mpa_pair(0xFFFB_9000, 413), Some(Mp3)),
+            (
+                "MPEG1 layer 3, off by one",
+                mpa_pair(0xFFFB_9000, 414),
+                None,
+            ),
+            (
+                "MPEG1 layer 3 padded",
+                mpa_pair(0xFFFB_9200, 414),
+                Some(Mp3),
+            ),
+            ("MPEG2 layer 3", mpa_pair(0xFFF3_9000, 257), Some(Mp3)),
+            ("MPEG2.5 layer 3", mpa_pair(0xFFE3_9000, 518), Some(Mp3)),
+            ("MPEG1 layer 1", mpa_pair(0xFFFF_9000, 308), Some(Mp3)),
+            ("MPEG2 layer 1", mpa_pair(0xFFF7_5000, 168), Some(Mp3)),
+            ("MPEG1 layer 2", mpa_pair(0xFFFD_B000, 727), Some(Mp3)),
+            (
+                "MPEG1 layer 2, mono at 224k",
+                mpa_pair(0xFFFD_B0C0, 727),
+                None,
+            ),
+            ("MPEG1 layer 2 at 32k", mpa_pair(0xFFFD_1000, 100), None),
+            (
+                "MPEG1 layer 2 mono at 32k",
+                mpa_pair(0xFFFD_10C0, 100),
+                Some(Mp3),
+            ),
+            ("a free bit rate", mpa_pair(0xFFFB_0000, 413), None),
+            ("a bit rate of 15", mpa_pair(0xFFFB_F000, 413), None),
+            ("a sample rate of 3", mpa_pair(0xFFFB_9C00, 413), None),
+            ("MPEG version 1", mpa_pair(0xFFEB_9000, 413), None),
+            ("layer 0", mpa_pair(0xFFF9_9000, 413), None),
+            (
+                "one MPEG header",
+                Vec::from(0xFFFB_9000_u32.to_be_bytes()),
+                None,
+            ),
+            ("no sync", mpa_pair(0xFF1B_9000, 413), None),
+        ];
+        for (case, bytes, want) in cases {
+            assert_eq!(marker_at(&bytes, 0), want, "{case}");
+            let behind = [vec![0x42], bytes].concat();
+            assert_eq!(marker_at(&behind, 1), want, "{case} behind a byte");
+        }
+        assert_eq!(reader_start(Mp4, 20), 16);
+        assert_eq!(reader_start(Mp4, 2), 0);
+        assert_eq!(reader_start(Flac, 20), 20);
+    }
+
+    /// Findings 6-1 and 6-6 of review round 6: the scan tests each offset
+    /// that Symphonia's probe tests, up to `LAST_MARKER`, after any ID3v2
+    /// tags, across the edges of its blocks.
+    #[test]
+    fn the_scan_tests_each_offset_of_the_probe() {
+        use crate::test_audio::id3_tag;
+        let start = |file: &[u8]| start_of(&mut { file }).ok();
+        let at = |offset: usize, marker: &[u8]| [vec![0; offset], Vec::from(marker)].concat();
+        let flac = *b"fLaC";
+        let mp3 = mpa_pair(0xFFFB_9000, 413);
+        let adts = [adts_frame(8191, true), adts_frame(9, true)].concat();
+        let found = |container, offset: usize| Some((0, Some((container, offset as u64))));
+        assert_eq!(start(&flac), found(Container::Flac, 0));
+        assert_eq!(
+            start(&at(LAST_MARKER, &flac)),
+            found(Container::Flac, LAST_MARKER)
+        );
+        assert_eq!(
+            LAST_MARKER, 1_048_574,
+            "2 bytes up to the 1 MiB of the probe"
+        );
+        assert_eq!(
+            start(&at(LAST_MARKER + 1, &flac)),
+            Some((0, None)),
+            "past the window"
+        );
+        let past = at(SCAN_BYTES + SCAN_BLOCK, &flac);
+        assert_eq!(start(&past), Some((0, None)), "a block past the window");
+        for edge in [
+            SCAN_BLOCK - 3,
+            SCAN_BLOCK - 1,
+            SCAN_BLOCK,
+            5 * SCAN_BLOCK - 1,
+        ] {
+            assert_eq!(
+                start(&at(edge, &flac)),
+                found(Container::Flac, edge),
+                "fLaC at {edge}"
+            );
+            assert_eq!(
+                start(&at(edge, &mp3)),
+                found(Container::Mp3, edge),
+                "MP3 at {edge}"
+            );
+            assert_eq!(
+                start(&at(edge, &adts)),
+                found(Container::Adts, edge),
+                "ADTS at {edge}"
+            );
+        }
+        let ftyp = at(SCAN_BLOCK + 2, b"ftyp");
+        assert_eq!(start(&ftyp), found(Container::Mp4, SCAN_BLOCK - 2));
+        let behind_tag = [id3_tag(100), at(70_000, &flac)].concat();
+        assert_eq!(
+            start(&behind_tag),
+            Some((110, Some((Container::Flac, 70_110))))
+        );
         assert_eq!(start(&[0; 100]), Some((0, None)));
         assert_eq!(start(&[]), Some((0, None)));
     }

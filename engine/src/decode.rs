@@ -21,7 +21,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 /// What a [`Decoder`] reads: `Read + Seek + Send + Sync`, with its length
 /// if known.  Re-exported so a caller can give its own source.
 pub use symphonia::core::io::MediaSource;
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
 
 /// Decoded audio: one `Vec<f32>` per channel, all the same length.  The
 /// decoders here leave no spare capacity (a song's channels are tens of MB,
@@ -293,24 +293,31 @@ const MP3_BYTES_PER_SECOND: u64 = 320_000 / 8;
 /// length.  It reads only `head` (at most [`HEAD_BYTES`] are needed), so a
 /// caller can refuse a long song before it reads the whole file.
 pub fn head_length(head: &[u8], file_bytes: u64) -> HeadLength {
-    // The rule and the start of the decode (finding 5-6 of review round 5):
-    // the container at the start of the view, after any ID3v2 tags.  A
-    // slice never fails a read.
+    // The scan and the start of the decode (finding 5-6 of review round 5,
+    // 6-1 of review round 6): the first marker that Symphonia's probe
+    // accepts after any ID3v2 tags, within the head.  A slice never fails a
+    // read.
+    use crate::hidden::{LAST_MARKER, first_marker, reader_start};
     let view = crate::hidden::leading_id3_bytes(&mut { head }).unwrap_or(0);
-    let Some(rest) = usize::try_from(view).ok().and_then(|view| head.get(view..)) else {
+    let Some(after_tags) = usize::try_from(view).ok().and_then(|view| head.get(view..)) else {
         return HeadLength::Unstated;
     };
-    let rest_bytes = file_bytes.saturating_sub(view);
-    match crate::hidden::container_at(rest) {
-        Some(Container::Wav) => wav_length(rest, rest_bytes),
-        Some(Container::Aiff) => aiff_length(rest, rest_bytes),
-        Some(Container::Flac) => flac_length(rest),
-        Some(Container::Mp4) => match crate::mp4_boxes::walk(&mut { rest }) {
+    let Some((container, marker)) = first_marker(after_tags, 0..LAST_MARKER + 1) else {
+        return HeadLength::Unstated;
+    };
+    let at = reader_start(container, marker as u64) as usize;
+    let rest = &after_tags[at..];
+    let rest_bytes = file_bytes.saturating_sub(view + at as u64);
+    match container {
+        Container::Wav => wav_length(rest, rest_bytes),
+        Container::Aiff => aiff_length(rest, rest_bytes),
+        Container::Flac => flac_length(rest),
+        Container::Mp4 => match crate::mp4_boxes::walk(&mut { rest }) {
             Ok(Some(found)) => mp4_length(&found),
             _ => HeadLength::UnstatedPcm,
         },
-        Some(Container::Adts) => HeadLength::UnstatedPcm,
-        Some(Container::Mp3) | None => HeadLength::Unstated,
+        Container::Adts => HeadLength::UnstatedPcm,
+        Container::Mp3 => HeadLength::Unstated,
     }
 }
 
@@ -668,24 +675,35 @@ fn open_within(
 ) -> Result<Opened> {
     let is_seekable = source.is_seekable();
     let byte_len = source.byte_len();
-    // `engine` decides the container from the start of the view, after any
-    // leading ID3v2 tags, and opens that one Symphonia reader there.  So
-    // the reader starts where the plan and the walk start (findings 5-2,
-    // 5-3 of review round 5).  A source that cannot seek gets no plan, and
-    // its container from its first bytes.
-    let (view, container, mut boxes) = if source.is_seekable() {
+    // `engine` finds the marker that Symphonia's probe would find, in the
+    // same window after any leading ID3v2 tags, and opens that one reader
+    // there.  So the reader starts where the plan and the walk start
+    // (findings 5-2 and 5-3 of review round 5, 6-1 of review round 6).  A
+    // source that cannot seek gets no plan.
+    let (source, view, start) = if source.is_seekable() {
         let mut at = crate::mp4_boxes::Seeking(&mut *source);
-        let (view, container) =
+        let (view, start) =
             crate::hidden::start_of(&mut at).context("reading the start of the file")?;
-        let found = match container {
-            Some(Container::Mp4) => crate::mp4_boxes::walk_from(&mut at, view)
-                .context("reading the boxes of an MP4 file")?,
-            _ => None,
-        };
-        source.seek(SeekFrom::Start(0))?;
-        (view, container, found)
+        (source, view, start)
     } else {
-        (0, None, None)
+        let (source, start) = scan_stream(source).context("reading the start of the file")?;
+        (source, 0, start)
+    };
+    let mut source = source;
+    let Some((container, reader_at)) = start else {
+        return Err(anyhow!(
+            "unsupported or unrecognised format: no known format at the start of the file"
+        ));
+    };
+    let mut boxes = match container {
+        Container::Mp4 if is_seekable => {
+            let mut at = crate::mp4_boxes::Seeking(&mut *source);
+            let found = crate::mp4_boxes::walk_from(&mut at, reader_at)
+                .context("reading the boxes of an MP4 file")?;
+            source.seek(SeekFrom::Start(0))?;
+            found
+        }
+        _ => None,
     };
     if let Some(found) = &boxes {
         if found.video {
@@ -717,9 +735,9 @@ fn open_within(
             plan.start = view;
             plan
         }
-        None if source.is_seekable() => {
+        None if is_seekable => {
             let mut at = crate::mp4_boxes::Seeking(&mut *source);
-            let plan = crate::hidden::plan_of(&mut at, view, container)
+            let plan = crate::hidden::plan_of(&mut at, view, reader_at, container)
                 .context("reading the tags of the file")?;
             source.seek(SeekFrom::Start(0))?;
             plan
@@ -736,16 +754,11 @@ fn open_within(
     };
     let byte_len = source.byte_len();
     let mut mss = MediaSourceStream::new(source, Default::default());
-    let container = match container {
-        Some(container) => Some(container),
-        None if is_seekable => None,
-        None => first_container(&mut mss),
-    };
-    let Some(container) = container else {
-        return Err(anyhow!(
-            "unsupported or unrecognised format: no known format at the start of the file"
-        ));
-    };
+    {
+        use symphonia::core::io::ReadBytes;
+        mss.ignore_bytes(reader_at - view)
+            .context("reading the start of the file")?;
+    }
     let format = open_reader(mss, container)
         .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?;
     let estimated = container == Container::Adts;
@@ -807,15 +820,23 @@ fn open_within(
     })
 }
 
-/// The container of a source that cannot seek, from its first bytes in
-/// `mss`, which stay in its buffer.  A view of no known container goes to
-/// the MP3 reader, which skips junk before its first frame by itself.
-fn first_container(mss: &mut MediaSourceStream) -> Option<Container> {
-    use symphonia::core::io::{ReadBytes, SeekBuffered};
-    let mut magic = [0; 12];
-    let read = mss.read_buf(&mut magic).ok()?;
-    mss.seek_buffered_rel(-(read as isize));
-    Some(crate::hidden::container_at(&magic[..read]).unwrap_or(Container::Mp3))
+/// A source to open, and its container with where its reader starts.
+type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
+
+/// The container of a source that cannot seek, and where its reader starts,
+/// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
+/// the window of the probe, at most about 1 MiB, and gives a source that
+/// reads those bytes again, then the rest.
+fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
+    use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES, first_marker, reader_start};
+    use std::io::Read;
+    let mut window = Vec::new();
+    let most = (LAST_MARKER + MOST_SCORE_BYTES) as u64;
+    (&mut source).take(most).read_to_end(&mut window)?;
+    let start = first_marker(&window, 0..LAST_MARKER + 1)
+        .map(|(container, at)| (container, reader_start(container, at as u64)));
+    let again = Cursor::new(window).chain(source);
+    Ok((Box::new(ReadOnlySource::new(again)), start))
 }
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
@@ -2791,6 +2812,11 @@ mod tests {
     }
 
     /// The head of `file`: at most `HEAD_BYTES` of it.
+    /// An `ftyp` box, the marker that Symphonia's probe takes for MP4.
+    fn ftyp() -> Vec<u8> {
+        crate::test_m4a::bx(b"ftyp", &[b"M4A ", &[0; 4]])
+    }
+
     fn head_of(file: &[u8]) -> HeadLength {
         head_length(&file[..HEAD_BYTES.min(file.len())], file.len() as u64)
     }
@@ -2876,7 +2902,7 @@ mod tests {
             "a free box of 70 KiB"
         );
         assert_eq!(
-            head_of(&version_1()),
+            head_of(&[ftyp(), version_1()].concat()),
             HeadLength::Frames(song_frames(3 << 32, 48_000))
         );
         let aac = aac_m4a(&short_tone(), 44_100, None, None, Order::FastStart);
@@ -2955,7 +2981,7 @@ mod tests {
         let fixtures = [
             alac_of(m4a::Order::FastStart),
             aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart),
-            version_1(),
+            [ftyp(), version_1()].concat(),
             aiff(
                 &[Vec::from(&left[..500]), Vec::from(&right[..500])],
                 44_100,
@@ -3492,7 +3518,7 @@ mod tests {
                 "{duration}"
             );
         }
-        let mut v1 = version_1();
+        let mut v1 = [ftyp(), version_1()].concat();
         let at = place_once(&v1, b"mdhd") + 4 + 24;
         v1[at..at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
         assert_eq!(head_of(&v1), HeadLength::UnstatedPcm);
@@ -3511,6 +3537,7 @@ mod tests {
         );
         let hdlr = bx(b"hdlr", &[&full, &[0; 4], b"soun"]);
         let no_scale = bx(b"moov", &[&bx(b"trak", &[&bx(b"mdia", &[&mdhd, &hdlr])])]);
+        let no_scale = [ftyp(), no_scale].concat();
         assert_eq!(head_of(&no_scale), HeadLength::UnstatedPcm);
     }
 
@@ -3608,13 +3635,12 @@ mod tests {
         assert!(peak < 4 << 20, "{case}: the decode peaks at {peak} bytes");
     }
 
-    /// Findings 5-2, 5-3 and 5-4 of review round 5 (MEM-4): `engine`
-    /// decides the container from the start of the view, and opens that one
-    /// reader there.  A part of the file after other bytes never opens, so
-    /// its tags are never read whole.  A file of a known container at the
-    /// start of its view opens, with its tags hidden.
+    /// Findings 5-2, 5-3 and 5-4 of review round 5 (MEM-4), and 6-1 of
+    /// review round 6: `engine` opens the one reader of the first marker
+    /// that Symphonia's probe accepts, where the plan and the walk start.
+    /// So the tags of the container that opens are hidden, after any bytes.
     #[test]
-    fn a_file_opens_only_by_the_container_at_the_start_of_its_view() {
+    fn a_file_opens_at_the_first_marker_with_its_tags_hidden() {
         use crate::test_audio::{
             Aiff, aiff, id3_tag, mp3, tone, with_aiff_tags, with_flac_tags, with_wav_tags,
         };
@@ -3640,15 +3666,11 @@ mod tests {
             let behind = [vec![0x42], tagged].concat();
             assert_small_peak(behind, ext, &format!("a {ext} behind one junk byte"));
         }
-        // A `free` box before the M4A: a known start, so it opens.
+        // A `free` box with `ftyp` in it: the probe takes that marker, so
+        // the MP4 reader starts in the `free` box, as on `main`.
         let decoy = bx(b"free", &[b"ftyp", &[0; 20]]);
         let moved = with_stco_moved(art.clone(), decoy.len() as i64);
-        assert_tags_are_hidden(
-            plain.clone(),
-            [decoy, moved].concat(),
-            "m4a",
-            "a free decoy",
-        );
+        assert_small_peak([decoy, moved].concat(), "m4a", "a free decoy");
         let uuid = bx(b"uuid", &[&vec![7; 100 << 10]]);
         let moved = with_stco_moved(art, uuid.len() as i64);
         assert_tags_are_hidden(plain, [uuid, moved].concat(), "m4a", "a uuid of 100 KiB");
@@ -3673,5 +3695,97 @@ mod tests {
         assert_eq!(head_of(&m4a), HeadLength::Frames(4096));
         let video = patched(alac_of(m4a::Order::FastStart), b"soun", b"vide");
         assert_eq!(head_of(&[id3_tag(100), video].concat()), HeadLength::Video);
+    }
+
+    /// Finding 6-1 of review round 6: a FLAC, a WAV, an AIFF and an M4A
+    /// behind junk bytes open bit for bit, as on `main`, since junk bytes
+    /// put no memory at risk.  Their tags stay hidden.  The M4A has `moov`
+    /// first: Symphonia 0.6.1 reads no packet of one with `moov` last behind
+    /// junk bytes, also through its own probe ("no atom pending read").
+    #[test]
+    fn a_file_behind_junk_bytes_opens() {
+        use crate::test_audio::{Aiff, aiff, with_flac_tags};
+        use crate::test_m4a::{cover_meta, with_stco_moved};
+        let (left, right, wav) = stereo_wav();
+        let flac = compressed(&left, &right, 44_100);
+        let plain_aiff = aiff(&[left, right], 44_100, 16, Aiff::Plain);
+        let m4a = alac_of(m4a::Order::FastStart);
+        let junks = [vec![0x42], vec![0x42; 100], vec![0xFF, 0xFB, 0x90, 0x00]];
+        for junk in &junks {
+            let moved = with_stco_moved(m4a.clone(), junk.len() as i64);
+            for (ext, plain, behind) in [
+                ("flac", &flac, [junk.as_slice(), &flac].concat()),
+                ("wav", &wav, [junk.as_slice(), &wav].concat()),
+                ("aiff", &plain_aiff, [junk.as_slice(), &plain_aiff].concat()),
+                ("m4a", &m4a, [junk.as_slice(), &moved].concat()),
+            ] {
+                let case = format!("a {ext} behind {} junk bytes", junk.len());
+                let want = decode_bytes(plain.clone(), Some(ext));
+                let got = decode_bytes(behind, Some(ext));
+                assert!(got.is_ok(), "{case}: {:?}", got.err());
+                assert!(got.unwrap().channels == want.unwrap().channels, "{case}");
+            }
+        }
+        let junk = vec![0x42; 100];
+        let moved = with_stco_moved(m4a.clone(), junk.len() as i64);
+        let behind = [junk.clone(), moved, cover_meta(ART)].concat();
+        assert_tags_are_hidden(m4a, behind, "m4a", "an M4A with art behind junk");
+        let behind = [junk, with_flac_tags(&flac, ART)].concat();
+        assert_tags_are_hidden(flac, behind, "flac", "a FLAC with art behind junk");
+    }
+
+    /// Finding 6-1 and missed mutant 6-13 of review round 6: a file with no
+    /// marker that the probe accepts in its first `SCAN_BYTES` is refused,
+    /// also an MP3 after that window, which the MP3 reader could reach.
+    #[test]
+    fn a_file_with_no_marker_in_the_window_is_refused() {
+        use crate::hidden::SCAN_BYTES;
+        use crate::test_audio::{mp3, tone};
+        let text = "unsupported or unrecognised format: no known format at the start of the file";
+        let (left, right, _) = stereo_wav();
+        let flac = compressed(&left, &right, 44_100);
+        let tones = [tone(0, 44_100, 44_100), tone(1, 44_100, 44_100)];
+        let far = vec![0; SCAN_BYTES + 64 * 1024];
+        for (ext, file) in [("flac", flac), ("mp3", mp3(&tones, 44_100))] {
+            let behind = [far.as_slice(), &file].concat();
+            assert_refused_early(behind, ext, text, &format!("a {ext} past the window"));
+        }
+        assert_refused_early(vec![0x42; 100], "wav", text, "no marker");
+    }
+
+    /// Finding 6-1 of review round 6: a source that cannot seek scans the
+    /// same window, and its reader opens after the junk bytes.
+    #[test]
+    fn a_source_that_cannot_seek_opens_behind_junk_bytes() {
+        let (_, _, wav) = stereo_wav();
+        let behind = [vec![0x42; 100], wav.clone()].concat();
+        let decoder = Decoder::new(Box::new(Fifo(Cursor::new(behind))), Some("wav"));
+        assert!(decoder.is_ok(), "{:?}", decoder.err());
+        let frames = every_packet(decoder.unwrap());
+        assert_eq!(frames.ok(), Some(FRAMES as u64));
+        use crate::hidden::LAST_MARKER;
+        let at = |offset: usize| Fifo(Cursor::new([vec![0; offset], wav.clone()].concat()));
+        let last = Decoder::new(Box::new(at(LAST_MARKER)), Some("wav"));
+        assert!(last.is_ok(), "at the last offset: {:?}", last.err());
+        let past = Decoder::new(Box::new(at(LAST_MARKER + 1)), Some("wav"));
+        assert!(past.is_err(), "past the window");
+    }
+
+    /// Findings 6-1 and 6-5 of review round 6: the head check scans as the
+    /// decode does, so a WAV behind junk states its length.  A WAV or an
+    /// AIFF that states more frames than it holds, behind an ID3v2 tag,
+    /// counts the frames that it holds after the tag.
+    #[test]
+    fn a_head_check_finds_the_marker_and_counts_the_frames_held() {
+        use crate::test_audio::{Aiff, aiff, id3_tag};
+        let (left, right, wav) = stereo_wav();
+        let behind = [vec![0x42; 100], wav.clone()].concat();
+        assert_eq!(head_of(&behind), HeadLength::Frames(FRAMES as u64));
+        let plain_aiff = aiff(&[left, right], 44_100, 16, Aiff::Plain);
+        let cut = |file: &[u8]| Vec::from(&file[..file.len() - (FRAMES - 100) * 4]);
+        for (case, file) in [("wav", cut(&wav)), ("aiff", cut(&plain_aiff))] {
+            let tagged = [id3_tag(1000), file].concat();
+            assert_eq!(head_of(&tagged), HeadLength::Frames(100), "{case}");
+        }
     }
 }
