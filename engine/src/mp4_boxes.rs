@@ -12,9 +12,10 @@
 //! box of a size that does not fit ends the walk with what it found.  It
 //! never panics, also where `usize` has 32 bits.
 //!
-//! Symphonia's probe then reads the whole `moov`, cover art too.  So
-//! `engine::decode` refuses a `moov` larger than a bound before the probe
-//! (`MoovAt`, `most_moov_bytes`).
+//! Symphonia's probe reads `moov/udta`, each top-level `meta` and each
+//! `moov` whole, cover art too.  So the walker plans to hide each of them
+//! from Symphonia (`engine::hidden`).  The rest of the first `moov` that
+//! Symphonia holds, its sample tables, has a bound (`most_moov_bytes`).
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -104,6 +105,14 @@ pub(crate) struct Found {
     pub itunsmpb: Option<String>,
     /// Where the first `moov` is.
     pub moov: Option<MoovAt>,
+    /// The bytes of the children of the first `moov` that Symphonia reads
+    /// and holds: `mvhd`, each `trak` and `mvex`.
+    pub moov_held: u64,
+    /// The start of such a child that runs to the end of the file.
+    pub moov_held_to_end_from: Option<u64>,
+    /// The boxes of tags that the decode hides from Symphonia: each
+    /// `moov/udta`, each top-level `meta`, and each `moov` after the first.
+    pub hidden: crate::hidden::Plan,
 }
 
 /// Where a `moov` box is: its start, and its end, or `None` when it runs
@@ -142,6 +151,11 @@ pub(crate) fn walk(source: &mut dyn ReadAt) -> std::io::Result<Option<Found>> {
     };
     walker.top()?;
     Ok(Some(walker.found))
+}
+
+/// The size of `found`, or `None` when it runs to the end of the file.
+fn size_of(found: BoxAt) -> Option<u64> {
+    (found.end != u64::MAX).then(|| found.end - found.start)
 }
 
 /// A big-endian `u32` at `at` of `bytes`.
@@ -239,23 +253,43 @@ impl Walker<'_> {
         Ok(Some(body))
     }
 
+    /// Walks the top-level boxes.  It reads the first `moov`, and reads
+    /// only the header of each other box.  Symphonia reads each `moov` and
+    /// each top-level `meta` whole, so it hides each `meta`, and each
+    /// `moov` after the first.
     fn top(&mut self) -> std::io::Result<()> {
         self.children(0, u64::MAX, |walker, found| {
-            if found.kind == *b"moov" {
-                walker.found.moov = Some(MoovAt {
-                    start: found.start,
-                    end: (found.end != u64::MAX).then_some(found.end),
-                });
-                walker.moov(found)?;
-                return Ok(false);
+            match &found.kind {
+                b"moov" if walker.found.moov.is_none() => {
+                    walker.found.moov = Some(MoovAt {
+                        start: found.start,
+                        end: size_of(found).map(|size| found.start + size),
+                    });
+                    walker.moov(found)?;
+                }
+                b"moov" | b"meta" => walker.hide(found),
+                _ => {}
             }
             Ok(true)
         })?;
         Ok(())
     }
 
+    /// Hides `found` from Symphonia: it gives `free` for its type.
+    fn hide(&mut self, found: BoxAt) {
+        self.found
+            .hidden
+            .hide(found.start + 4, b"free", size_of(found));
+    }
+
     fn moov(&mut self, moov: BoxAt) -> std::io::Result<()> {
         self.children(moov.body, moov.end, |walker, found| {
+            if matches!(&found.kind, b"mvhd" | b"trak" | b"mvex") {
+                match size_of(found) {
+                    Some(size) => walker.found.moov_held += size,
+                    None => walker.found.moov_held_to_end_from = Some(found.start),
+                }
+            }
             match &found.kind {
                 b"mvhd" => {
                     let body = walker.body(found, false)?.unwrap_or_default();
@@ -267,7 +301,11 @@ impl Walker<'_> {
                     walker.trak(found, &mut trak, 1)?;
                     walker.keep(trak);
                 }
-                b"udta" => walker.udta(found, 1)?,
+                // Symphonia reads `udta` whole (`atoms/moov.rs`).
+                b"udta" => {
+                    walker.udta(found, 1)?;
+                    walker.hide(found);
+                }
                 _ => {}
             }
             Ok(true)
@@ -491,6 +529,10 @@ mod tests {
                         start: start as u64,
                         end: Some((start + size) as u64),
                     }),
+                    // `mvhd` and the one `trak`: all of `moov` but its header.
+                    moov_held: size as u64 - 8,
+                    moov_held_to_end_from: None,
+                    hidden: crate::hidden::Plan::default(),
                 }),
                 "{order:?}"
             );

@@ -369,6 +369,10 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * 2-4: `the_symphonia_features_of_the_tests_of_m4a_are_engines` failed with `default-features = false` taken from the dev-dependency of `m4a` (not committed).
     * 2-6, 2-10: docs only.
     * The time of `cargo test -p engine --lib` (see Surprises): no first failure, since no behaviour changes.
+  * [x] 2026-11-09: review round 2 fixes, part 2: M4A tags.  First failures:
+    * 2-1, 2-2, 2-9 (the maintainer's design): `the_art_of_an_m4a_is_hidden_from_symphonia` failed with nothing hidden: "art in moov/udta: the plain file peaks at 156238 bytes, the file with tags at 130091575".
+    * `an_m4a_with_tables_past_the_bound_is_refused_before_the_probe` failed at "m4a: it decodes" with the bound off.  `an_m4a_with_art_keeps_its_itunsmpb_trim` failed with the walker no longer reading a hidden `udta`.
+    * `engine::hidden`: `a_read_gives_the_patch_and_leaves_the_other_bytes` failed at "a read across it" with no patch, `a_view_seeks_and_states_its_length_from_its_start` with a seek that leaves out the start, and `a_plan_keeps_at_most_most_small_small_patches` with one patch too many.
 
 ## Surprises and discoveries
 
@@ -435,6 +439,10 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-08, agent (implementer, review round 1, 1-17): `undecodable_error` names the file only for a song of one stem file.  Reason: the worker's text names no file, and for several files the page cannot tell which failed.
 
 * 2026-11-09, agent (implementer, review round 2): to make the engine tests fit the mutants baseline, `test_m4a::adts` keeps each encode by its input, so a test that shares an input does not encode it again.  The long AAC file of `a_block_decode_of_aac_keeps_its_memory_flat` is 8 s, not 20 s.  `a_block_decode_keeps_its_memory_flat` is split into one test for each format, which run in parallel, and keeps its name for the WAV case (`docs/invariants.md` names it).  Reason: the time is in the AAC encodes and in work done one format after the other, not in the opt-level of a dependency.
+
+* 2026-11-09, the maintainer's choice, through the orchestrator (review round 2, 2-1, 2-2 and 2-9): the decode does not refuse an M4A for its cover art.  It hides each `moov/udta`, each top-level `meta` and each `moov` after the first from Symphonia, with `free` for the type, at the same offsets (`engine::hidden::Hidden`).  Symphonia skips a `free` box with a seek (`MediaSourceStream::ignore_bytes`).  Only the sample tables of the first `moov` (`mvhd`, `trak`, `mvex`) have a bound, with `MOOV_TEXT`.
+* 2026-11-09, agent (implementer, review round 2): a later `moov` is hidden whole, not counted in the bound.  Reason: Symphonia gives "missing mvhd atom" for a `moov` of tags only, and the decode uses the first `moov`.  A plan hides every box of tags of 4 KiB or more, and at most 4096 smaller ones, so the plan stays small for a crafted file of many small boxes.
+* 2026-11-09, agent (implementer, review round 2, 2-9): a `moov` of size 0 is a Symphonia limit (TD-85).  Symphonia 0.6.1 opens no such file, art or not, so the test checks a small peak and the error.
 
 ## Outcomes and retrospective
 

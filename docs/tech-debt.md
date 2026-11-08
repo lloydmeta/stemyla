@@ -655,9 +655,23 @@ This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.
 
 This entry concerns MEM-4.
 
-Symphonia 0.6.1 reads each FLAC `PICTURE` block, each ID3v2 frame (such as `APIC`) and each APE item whole, with `read_boxed_slice_exact`.  No reader of 0.6.1 applies `MetadataOptions::limit_visual_bytes` or `limit_tag_bytes`.  So a file with a picture of hundreds of MB makes the decode worker hold it, in memory that never shrinks.  For an MP4, `engine::decode` refuses a `moov` larger than `most_moov_bytes` before the probe (finding 1-18 of review round 1 of `plans/active/m4a-m2.md`).  A FLAC or an MP3 has no such bound.
+Symphonia 0.6.1 reads tags and pictures whole, with `read_boxed_slice_exact`.  No reader of 0.6.1 applies `MetadataOptions::limit_visual_bytes` or `limit_tag_bytes`.  So a file with a picture of hundreds of MB makes the decode worker hold it, in memory that never shrinks.  Since review round 2 of `plans/active/m4a-m2.md`, the decode hides the art of an M4A from Symphonia (`engine::hidden`).  These are still read whole:
 
-* Fix: a check of the size of the FLAC metadata blocks and of the ID3v2 tag before the probe, as for `moov`.  Or a Symphonia that applies its limits.
+* a FLAC `PICTURE`, `VORBIS_COMMENT` or `APPLICATION` block;
+* a WAV `LIST` chunk of form `INFO`;
+* an AIFF `APPL`, `COMT`, `MARK`, text (`NAME`, `AUTH`, `(c) `, `ANNO`) or `ID3 ` chunk.
+
+An MP3 or a raw AAC with an ID3v2 tag has no ID3v2 reader in `engine`'s Symphonia features.  So the probe gives up after 1 MiB of tag (finding 2-8).
+
+* Fix: hide each of them from Symphonia, as for M4A.
+
+### TD-85: an M4A whose `moov` has a size of 0 does not open
+
+This entry concerns the decode of M4A, and the limits of Symphonia 0.6.1.
+
+A box of size 0 runs to the end of the file (ISO/IEC 14496-12, 4.2).  `symphonia-format-isomp4` 0.6.1 gives "unexpected end of file" for a `moov` of size 0 at the end of the file, with or without tags.  The test `the_art_of_an_m4a_is_hidden_from_symphonia` checks that its art stays hidden, so the open fails at a small peak.  Writers give `moov` a size; a size of 0 is rare.
+
+* Fix: a Symphonia that reads such a `moov`, or a wrapper that gives the `moov` its size.
 
 ## Legibility for agents
 

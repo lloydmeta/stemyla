@@ -524,3 +524,27 @@ pub fn with_data_handler(mut file: Vec<u8>) -> Vec<u8> {
     }
     file
 }
+
+/// `file`, which has `moov` last, with `extra` bytes of zeros at the end
+/// of its `stsz`, and its sample count grown to match.  The sizes of the
+/// boxes that hold it grow too.  So its sample tables pass their bound.
+pub fn with_grown_stsz(mut file: Vec<u8>, extra: usize) -> Vec<u8> {
+    let (moov, moov_size) = top_box(&file, b"moov");
+    assert_eq!(moov + moov_size, file.len(), "moov is last");
+    let (trak, _) = child_box(&file, moov, b"trak");
+    let (mdia, _) = child_box(&file, trak, b"mdia");
+    let (minf, _) = child_box(&file, mdia, b"minf");
+    let (stbl, _) = child_box(&file, minf, b"stbl");
+    let (stsz, stsz_size) = child_box(&file, stbl, b"stsz");
+    // After the header: version and flags, the sample size, the count.
+    let count_at = stsz + 8 + 4 + 4;
+    let count = u32::from_be_bytes(file[count_at..count_at + 4].try_into().unwrap());
+    file[count_at..count_at + 4].copy_from_slice(&(count + (extra / 4) as u32).to_be_bytes());
+    let end = stsz + stsz_size;
+    file.splice(end..end, std::iter::repeat_n(0, extra));
+    for at in [stsz, stbl, minf, mdia, trak, moov] {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap());
+        file[at..at + 4].copy_from_slice(&(size + extra as u32).to_be_bytes());
+    }
+    file
+}

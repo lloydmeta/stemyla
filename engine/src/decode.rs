@@ -91,14 +91,17 @@ impl std::error::Error for TooLong {}
 pub const VIDEO_TEXT: &str =
     "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC.";
 
-/// The text of an MP4 whose `moov` passes [`most_moov_bytes`]: tags,
-/// such as cover art, that Symphonia's probe would read whole (MEM-4).
-pub const TAGS_TEXT: &str = "This file holds more than 16 MB of tags, such as cover art.  Remove them, or open another file.";
+/// The text of an MP4 whose sample tables pass [`most_moov_bytes`], which
+/// Symphonia's probe would read whole (MEM-4).
+pub const MOOV_TEXT: &str =
+    "The index of this file (its moov box) is too large for its length, so it cannot open.";
 
-/// The most bytes of `moov` that the decode lets Symphonia's probe read:
-/// [`TAG_ROOM`], and 32 bytes of tables for each 1024 frames of the
-/// `mdhd` duration of the first sound track, up to the decode limit of a
-/// stereo file.  The probe reads the whole `moov`, cover art too.
+/// The most bytes of the first `moov` that Symphonia holds (`mvhd`, each
+/// `trak` and `mvex`, `Found::moov_held`): 16 MiB of slack ([`TAG_ROOM`]),
+/// and 32 bytes of tables for each 1024 units of the `mdhd` duration of
+/// the first sound track, up to the decode limit of a stereo file.  The
+/// decode hides the tags of `moov` from Symphonia (`engine::hidden`), so
+/// they do not count.
 fn most_moov_bytes(found: &Found) -> u64 {
     let most_frames = MAX_DECODED_BYTES / 8;
     let frames = found
@@ -681,14 +684,27 @@ fn open_within(
         if found.protected {
             return Err(anyhow!(PROTECTED_TEXT));
         }
-        let moov_bytes = found.moov.and_then(|moov| {
-            let end = moov.end.or(byte_len)?;
-            Some(end.saturating_sub(moov.start))
-        });
-        if moov_bytes.is_some_and(|bytes| bytes > most_moov_bytes(found)) {
-            return Err(anyhow!(TAGS_TEXT));
+        let to_end = match found.moov_held_to_end_from {
+            Some(start) => byte_len.map(|len| len.saturating_sub(start)),
+            None => Some(0),
+        };
+        let held = to_end.map(|to_end| found.moov_held + to_end);
+        if held.is_some_and(|bytes| bytes > most_moov_bytes(found)) {
+            return Err(anyhow!(MOOV_TEXT));
         }
     }
+    // MEM-4: Symphonia reads tags and pictures whole, so they are hidden
+    // from it (`engine::hidden`).
+    let plan = boxes
+        .as_ref()
+        .map(|found| found.hidden.clone())
+        .unwrap_or_default();
+    let source: Box<dyn MediaSource> = if plan.is_empty() {
+        source
+    } else {
+        Box::new(crate::hidden::Hidden::new(source, plan)?)
+    };
+    let byte_len = source.byte_len();
     let mss = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
     if let Some(e) = ext {
@@ -2893,20 +2909,120 @@ mod tests {
         assert_eq!(largest_file(HeadLength::Video, 100 * 44_100), TAG_ROOM);
     }
 
-    /// Finding 1-18 of review round 1 (MEM-4): Symphonia's probe reads the
-    /// whole `moov`, so a `moov` with more than `TAG_ROOM` of tags is
-    /// refused before the probe.  A cover of 1 MiB still opens.
-    #[test]
-    fn an_m4a_with_more_than_16_mib_of_tags_is_refused_before_the_probe() {
-        use crate::test_m4a::with_cover;
-        let file = alac_of(m4a::Order::MoovLast);
-        assert_eq!(
-            refusal(with_cover(file.clone(), 17 << 20), "m4a"),
-            TAGS_TEXT
+    /// The peak of a block decode of `bytes`, and its frames.
+    fn block_peak(bytes: Vec<u8>, ext: &str) -> (usize, Result<usize>) {
+        peak_of(|| {
+            let decoder = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext))?;
+            let mut counter = Counter(0);
+            crate::song::decode_into(decoder, &mut counter)?;
+            Ok(counter.0)
+        })
+    }
+
+    /// Checks that `tagged` decodes bit for bit to `plain`, and that its
+    /// block decode peaks within 1 MiB of that of `plain`: Symphonia does
+    /// not read its tags.
+    fn assert_tags_are_hidden(plain: Vec<u8>, tagged: Vec<u8>, ext: &str, case: &str) {
+        let want = decode_bytes(plain.clone(), Some(ext));
+        assert!(want.is_ok(), "{case}: {want:?}");
+        let got = decode_bytes(tagged.clone(), Some(ext));
+        assert!(got.is_ok(), "{case}: {got:?}");
+        assert!(
+            got.unwrap().channels == want.unwrap().channels,
+            "{case}: the samples differ"
         );
-        let audio = decode_bytes(with_cover(file, 1 << 20), Some("m4a"));
-        assert!(audio.is_ok(), "{audio:?}");
-        assert_eq!(audio.unwrap().frames(), 4096);
+        let (plain_peak, plain_frames) = block_peak(plain, ext);
+        let (tagged_peak, tagged_frames) = block_peak(tagged, ext);
+        assert!(tagged_frames.is_ok(), "{case}: {tagged_frames:?}");
+        assert_eq!(tagged_frames.ok(), plain_frames.ok(), "{case}: the frames");
+        assert!(
+            tagged_peak < plain_peak + (1 << 20),
+            "{case}: the plain file peaks at {plain_peak} bytes, the file with tags at {tagged_peak}"
+        );
+    }
+
+    /// The art of round 2 fixes: 64 MiB, which Symphonia would hold about
+    /// twice.
+    const ART: usize = 64 << 20;
+
+    /// Findings 2-1, 2-2 and 2-9 of review round 2 (MEM-4), by the
+    /// maintainer's design: Symphonia reads each `moov/udta`, each
+    /// top-level `meta` and each `moov` whole.  The decode hides them, so
+    /// an M4A with 64 MiB of art opens at a flat peak, bit for bit.
+    #[test]
+    fn the_art_of_an_m4a_is_hidden_from_symphonia() {
+        use crate::test_m4a::{bx, cover_meta, top_box, with_cover};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let in_udta = with_cover(plain.clone(), ART);
+        assert_tags_are_hidden(plain.clone(), in_udta.clone(), "m4a", "art in moov/udta");
+        // Finding 2-9: a `moov` of size 0 runs to the end of the file.
+        // Symphonia 0.6.1 opens no such file, with art or not (TD-85).  Its
+        // art stays hidden, so the open fails at a small peak.
+        let mut to_the_end = in_udta;
+        let (moov, _) = top_box(&to_the_end, b"moov");
+        to_the_end[moov..moov + 4].copy_from_slice(&[0; 4]);
+        let (peak, opened) = peak_of(|| {
+            open_within(
+                Box::new(Cursor::new(to_the_end)),
+                Some("m4a"),
+                MAX_DECODED_BYTES,
+                None,
+            )
+        });
+        let error = opened.err().map(|e| format!("{e:#}"));
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("unexpected end of file")),
+            "a moov of size 0: {error:?}"
+        );
+        assert!(
+            peak < 1 << 20,
+            "a moov of size 0: the open peaks at {peak} bytes"
+        );
+        let mut in_meta = plain.clone();
+        in_meta.extend_from_slice(&cover_meta(ART));
+        assert_tags_are_hidden(plain.clone(), in_meta, "m4a", "art in a top-level meta");
+        let mut second = plain.clone();
+        second.extend_from_slice(&bx(b"moov", &[&bx(b"udta", &[&cover_meta(ART)])]));
+        assert_tags_are_hidden(plain, second, "m4a", "art in a second moov");
+    }
+
+    /// The `iTunSMPB` tag of a hidden `udta` still gives the trim: the
+    /// walker reads it, not Symphonia.
+    #[test]
+    fn an_m4a_with_art_keeps_its_itunsmpb_trim() {
+        use crate::test_m4a::{ENCODER_DELAY, aac_m4a, aac_track_frames, with_cover};
+        let source = short_tone();
+        let track = aac_track_frames(4096);
+        let gapless = m4a::Gapless {
+            delay: ENCODER_DELAY as u32,
+            padding: (track - ENCODER_DELAY as u64 - 4096) as u32,
+            frames: 4096,
+        };
+        let file = aac_m4a(&source, 44_100, None, Some(gapless), m4a::Order::MoovLast);
+        let audio = decoded(with_cover(file, ART), "art and iTunSMPB");
+        assert_eq!(audio.frames(), 4096);
+    }
+
+    /// Finding 2-2 of review round 2 (MEM-4): sample tables past
+    /// `most_moov_bytes` are refused before the probe, at a small peak.
+    #[test]
+    fn an_m4a_with_tables_past_the_bound_is_refused_before_the_probe() {
+        use crate::test_m4a::with_grown_stsz;
+        let grown = with_grown_stsz(alac_of(m4a::Order::MoovLast), 17 << 20);
+        assert_eq!(refusal(grown.clone(), "m4a"), MOOV_TEXT);
+        let (peak, opened) = peak_of(|| {
+            open_within(
+                Box::new(Cursor::new(grown)),
+                Some("m4a"),
+                MAX_DECODED_BYTES,
+                None,
+            )
+        });
+        let error = opened.err().map(|e| format!("{e:#}"));
+        assert_eq!(error.as_deref(), Some(MOOV_TEXT));
+        assert!(peak < 1 << 20, "the open peaks at {peak} bytes");
     }
 
     /// The bound of a `moov`: `TAG_ROOM`, and 32 bytes for each 1024

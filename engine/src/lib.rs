@@ -4,6 +4,7 @@
 
 mod aac_config;
 pub mod decode;
+mod hidden;
 pub mod hpss;
 #[cfg(feature = "cpal")]
 pub mod live;
