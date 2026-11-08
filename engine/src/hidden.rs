@@ -6,10 +6,16 @@
 //! large one with a seek (`MediaSourceStream::ignore_bytes`).  The bytes
 //! keep their offsets, so the offsets in the file stay true.  A
 //! [`Plan`] holds the changes, and [`Hidden`] gives them to each read.
+//!
+//! The walk of an MP4 plans its boxes (`engine::mp4_boxes`).  [`plan_of`]
+//! plans the other formats: FLAC PICTURE, VORBIS_COMMENT and APPLICATION
+//! blocks show as PADDING.
 
 use std::io::{Read, Seek, SeekFrom};
 
 use symphonia::core::io::MediaSource;
+
+use crate::mp4_boxes::ReadAt;
 
 /// A container of tags of at least this many bytes is always hidden.
 pub(crate) const ALWAYS_HIDDEN: u64 = 4096;
@@ -143,6 +149,46 @@ impl MediaSource for Hidden {
     }
 }
 
+/// The FLAC metadata blocks that Symphonia 0.6.1 reads whole
+/// (`symphonia-bundle-flac` `demuxer.rs`): APPLICATION (2), VORBIS_COMMENT
+/// (4) and PICTURE (6).
+const FLAC_TAG_BLOCKS: [u8; 3] = [2, 4, 6];
+
+/// The type of a FLAC PADDING block, which Symphonia skips with a seek.
+const FLAC_PADDING: u8 = 1;
+
+/// The plan of a file that is not an MP4, from its headers in `source`:
+/// it hides the tag blocks of a FLAC.
+pub(crate) fn plan_of(source: &mut dyn ReadAt) -> std::io::Result<Plan> {
+    let mut plan = Plan::default();
+    let mut magic = [0; 4];
+    if source.read_at(plan.start, &mut magic)? == 4 && magic == *b"fLaC" {
+        flac_plan(source, plan.start + 4, &mut plan)?;
+    }
+    Ok(plan)
+}
+
+/// Hides each tag block of the FLAC metadata from `at`: it gives PADDING
+/// for its type, and keeps its bit of the last block.
+fn flac_plan(source: &mut dyn ReadAt, mut at: u64, plan: &mut Plan) -> std::io::Result<()> {
+    loop {
+        let mut header = [0; 4];
+        if source.read_at(at, &mut header)? < 4 {
+            return Ok(());
+        }
+        let last = header[0] & 0x80;
+        let kind = header[0] & 0x7F;
+        let len = u64::from(u32::from_be_bytes([0, header[1], header[2], header[3]]));
+        if FLAC_TAG_BLOCKS.contains(&kind) {
+            plan.hide(at, &[last | FLAC_PADDING], Some(4 + len));
+        }
+        if last != 0 {
+            return Ok(());
+        }
+        at += 4 + len;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +276,41 @@ mod tests {
 
     /// A plan keeps every container of `ALWAYS_HIDDEN` bytes or more, and
     /// at most `MOST_SMALL` smaller ones.
+    /// The plan of a FLAC with tags: PADDING for each tag block, with the
+    /// bit of the last block kept.
+    #[test]
+    fn the_plan_of_a_flac_hides_its_tag_blocks() {
+        let flac = crate::test_audio::flac(&[vec![0.25; 4096], vec![0.5; 4096]], 44_100);
+        let tagged = crate::test_audio::with_flac_tags(&flac, 100);
+        let plan = plan_of(&mut &tagged[..]);
+        assert!(plan.is_ok(), "{plan:?}");
+        let plan = plan.unwrap();
+        // STREAMINFO at 4, then VORBIS_COMMENT at 42, then APPLICATION.
+        let kinds: Vec<(u64, [u8; 4], u8)> = plan
+            .patches
+            .iter()
+            .map(|p| (p.at, p.bytes, p.len))
+            .collect();
+        let vorbis_len = 4 + 4 + 4 + 4 + 4 + 11;
+        let application = 42 + vorbis_len;
+        let picture = application + 4 + 8;
+        let last = if tagged[picture as usize] & 0x80 != 0 {
+            0x80
+        } else {
+            0
+        };
+        assert_eq!(
+            kinds,
+            [
+                (42, [1, 0, 0, 0], 1),
+                (application, [1, 0, 0, 0], 1),
+                (picture, [last | 1, 0, 0, 0], 1),
+            ]
+        );
+        let plain = plan_of(&mut &flac[..]).map(|plan| plan.is_empty());
+        assert_eq!(plain.ok(), Some(true), "a FLAC with no tags");
+    }
+
     #[test]
     fn a_plan_keeps_at_most_most_small_small_patches() {
         let mut plan = Plan::default();

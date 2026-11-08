@@ -373,6 +373,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * 2-1, 2-2, 2-9 (the maintainer's design): `the_art_of_an_m4a_is_hidden_from_symphonia` failed with nothing hidden: "art in moov/udta: the plain file peaks at 156238 bytes, the file with tags at 130091575".
     * `an_m4a_with_tables_past_the_bound_is_refused_before_the_probe` failed at "m4a: it decodes" with the bound off.  `an_m4a_with_art_keeps_its_itunsmpb_trim` failed with the walker no longer reading a hidden `udta`.
     * `engine::hidden`: `a_read_gives_the_patch_and_leaves_the_other_bytes` failed at "a read across it" with no patch, `a_view_seeks_and_states_its_length_from_its_start` with a seek that leaves out the start, and `a_plan_keeps_at_most_most_small_small_patches` with one patch too many.
+  * [x] 2026-11-09: review round 2 fixes, part 3: FLAC tags.  First failures: `the_tags_of_a_flac_are_hidden_from_symphonia` failed with nothing hidden: "a FLAC with art: the plain file peaks at 140339 bytes, the file with tags at 79758197".  `the_plan_of_a_flac_hides_its_tag_blocks` failed with no patch.
 
 ## Surprises and discoveries
 
@@ -443,6 +444,8 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-09, the maintainer's choice, through the orchestrator (review round 2, 2-1, 2-2 and 2-9): the decode does not refuse an M4A for its cover art.  It hides each `moov/udta`, each top-level `meta` and each `moov` after the first from Symphonia, with `free` for the type, at the same offsets (`engine::hidden::Hidden`).  Symphonia skips a `free` box with a seek (`MediaSourceStream::ignore_bytes`).  Only the sample tables of the first `moov` (`mvhd`, `trak`, `mvex`) have a bound, with `MOOV_TEXT`.
 * 2026-11-09, agent (implementer, review round 2): a later `moov` is hidden whole, not counted in the bound.  Reason: Symphonia gives "missing mvhd atom" for a `moov` of tags only, and the decode uses the first `moov`.  A plan hides every box of tags of 4 KiB or more, and at most 4096 smaller ones, so the plan stays small for a crafted file of many small boxes.
 * 2026-11-09, agent (implementer, review round 2, 2-9): a `moov` of size 0 is a Symphonia limit (TD-85).  Symphonia 0.6.1 opens no such file, art or not, so the test checks a small peak and the error.
+
+* 2026-11-09, the maintainer's choice, through the orchestrator (review round 2, the closure of TD-84): the decode hides the tags of each format from Symphonia, as for M4A.  For a FLAC, it gives PADDING (1) for the type of each PICTURE (6), VORBIS_COMMENT (4) and APPLICATION (2) block, and keeps the bit of the last block.  Symphonia 0.6.1 reads those three whole (`symphonia-bundle-flac` `demuxer.rs`, lines 106 to 140), and skips PADDING with `ignore_bytes` (line 143), which seeks.  STREAMINFO, SEEKTABLE and CUESHEET stay as they are.
 
 ## Outcomes and retrospective
 

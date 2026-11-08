@@ -695,10 +695,16 @@ fn open_within(
     }
     // MEM-4: Symphonia reads tags and pictures whole, so they are hidden
     // from it (`engine::hidden`).
-    let plan = boxes
-        .as_ref()
-        .map(|found| found.hidden.clone())
-        .unwrap_or_default();
+    let plan = match &boxes {
+        Some(found) => found.hidden.clone(),
+        None if source.is_seekable() => {
+            let plan = crate::hidden::plan_of(&mut crate::mp4_boxes::Seeking(&mut *source))
+                .context("reading the tags of the file")?;
+            source.seek(SeekFrom::Start(0))?;
+            plan
+        }
+        None => crate::hidden::Plan::default(),
+    };
     let source: Box<dyn MediaSource> = if plan.is_empty() {
         source
     } else {
@@ -2986,6 +2992,21 @@ mod tests {
         let mut second = plain.clone();
         second.extend_from_slice(&bx(b"moov", &[&bx(b"udta", &[&cover_meta(ART)])]));
         assert_tags_are_hidden(plain, second, "m4a", "art in a second moov");
+    }
+
+    /// The maintainer's design of review round 2 (MEM-4): Symphonia reads a
+    /// FLAC PICTURE, VORBIS_COMMENT and APPLICATION block whole.  The
+    /// decode shows each as PADDING, so a FLAC with 64 MiB of art opens at a
+    /// flat peak, bit for bit.
+    #[test]
+    fn the_tags_of_a_flac_are_hidden_from_symphonia() {
+        use crate::test_audio::with_flac_tags;
+        let (left, right, _) = stereo_wav();
+        let plain = compressed(&left, &right, 44_100);
+        let tagged = with_flac_tags(&plain, ART);
+        assert_tags_are_hidden(plain.clone(), tagged, "flac", "a FLAC with art");
+        let small = with_flac_tags(&plain, 100);
+        assert_tags_are_hidden(plain, small, "flac", "a FLAC with small tags");
     }
 
     /// The `iTunSMPB` tag of a hidden `udta` still gives the trim: the

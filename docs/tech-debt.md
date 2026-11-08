@@ -655,9 +655,8 @@ This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.
 
 This entry concerns MEM-4.
 
-Symphonia 0.6.1 reads tags and pictures whole, with `read_boxed_slice_exact`.  No reader of 0.6.1 applies `MetadataOptions::limit_visual_bytes` or `limit_tag_bytes`.  So a file with a picture of hundreds of MB makes the decode worker hold it, in memory that never shrinks.  Since review round 2 of `plans/active/m4a-m2.md`, the decode hides the art of an M4A from Symphonia (`engine::hidden`).  These are still read whole:
+Symphonia 0.6.1 reads tags and pictures whole, with `read_boxed_slice_exact`.  No reader of 0.6.1 applies `MetadataOptions::limit_visual_bytes` or `limit_tag_bytes`.  So a file with a picture of hundreds of MB makes the decode worker hold it, in memory that never shrinks.  Since review round 2 of `plans/active/m4a-m2.md`, the decode hides the tags of an M4A and of a FLAC from Symphonia (`engine::hidden`).  These are still read whole:
 
-* a FLAC `PICTURE`, `VORBIS_COMMENT` or `APPLICATION` block;
 * a WAV `LIST` chunk of form `INFO`;
 * an AIFF `APPL`, `COMT`, `MARK`, text (`NAME`, `AUTH`, `(c) `, `ANNO`) or `ID3 ` chunk.
 

@@ -168,3 +168,54 @@ pub fn aiff(channels: &[Vec<f32>], rate: u32, bits: u32, kind: Aiff) -> Vec<u8> 
     out.extend_from_slice(&body);
     out
 }
+
+/// A block of FLAC metadata of `kind` with `body`, the last one if `last`.
+fn flac_block(kind: u8, last: bool, body: &[u8]) -> Vec<u8> {
+    let len = (body.len() as u32).to_be_bytes();
+    let mut out = vec![kind | if last { 0x80 } else { 0 }, len[1], len[2], len[3]];
+    out.extend_from_slice(body);
+    out
+}
+
+/// `flac` with tags after its STREAMINFO block: a VORBIS_COMMENT block, an
+/// APPLICATION block, and `picture` bytes of art in PICTURE blocks of at
+/// most 16 MiB each.  Symphonia 0.6.1 reads each of them whole.
+pub fn with_flac_tags(flac: &[u8], picture: usize) -> Vec<u8> {
+    assert_eq!(flac[..4], *b"fLaC");
+    let streaminfo_last = flac[4] & 0x80 != 0;
+    let comment = b"TITLE=lloyd";
+    let vorbis = [
+        &4_u32.to_le_bytes()[..],
+        b"acme",
+        &1_u32.to_le_bytes(),
+        &(comment.len() as u32).to_le_bytes(),
+        comment,
+    ]
+    .concat();
+    let mut blocks = vec![(4, vorbis), (2, Vec::from(*b"beachape"))];
+    let mut left = picture;
+    while left > 0 {
+        let data = left.min((1 << 24) - 64);
+        let mime = b"image/jpeg";
+        let mut body = Vec::with_capacity(data + 64);
+        body.extend_from_slice(&3_u32.to_be_bytes());
+        body.extend_from_slice(&(mime.len() as u32).to_be_bytes());
+        body.extend_from_slice(mime);
+        // No description; width, height, depth and colours of 0.
+        body.extend_from_slice(&[0; 4 + 16]);
+        body.extend_from_slice(&(data as u32).to_be_bytes());
+        body.resize(body.len() + data, 0xFF);
+        blocks.push((6, body));
+        left -= data;
+    }
+    let count = blocks.len();
+    let mut out = Vec::with_capacity(flac.len() + picture + 1024);
+    out.extend_from_slice(b"fLaC");
+    out.push(flac[4] & 0x7F);
+    out.extend_from_slice(&flac[5..42]);
+    for (k, (kind, body)) in blocks.into_iter().enumerate() {
+        out.extend_from_slice(&flac_block(kind, streaminfo_last && k + 1 == count, &body));
+    }
+    out.extend_from_slice(&flac[42..]);
+    out
+}
