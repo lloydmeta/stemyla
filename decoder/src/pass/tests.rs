@@ -643,6 +643,41 @@ fn a_bad_source_ends_with_undecodable_and_leaves_no_part_file() {
     }
 }
 
+/// D4 of the M4A plan: a dropped `.mp4` goes to the decode worker first.
+/// A file with a video track ends with `Undecodable` and the video text.
+#[test]
+fn a_video_mp4_ends_with_undecodable_and_the_video_text() {
+    let frames = 4_096;
+    let interleaved: Vec<i16> = tone(frames, 0.5, 0)
+        .iter()
+        .flat_map(|x| {
+            let sample = (x * 32_768.0) as i16;
+            [sample, sample]
+        })
+        .collect();
+    let mut video = m4a::alac_file(&interleaved, 44_100, None, m4a::Order::FastStart)
+        .expect("the writer takes it");
+    let handler = video
+        .windows(4)
+        .position(|w| w == b"soun")
+        .expect("a sound handler");
+    video[handler..handler + 4].copy_from_slice(b"vide");
+    let mut memory = Memory::default();
+    memory.plant(&format!("{SESSION}/src/0.mp4"), video);
+    let sources = vec![Source {
+        file: "src/0.mp4".into(),
+        index: 0,
+        ext: "mp4".into(),
+        in_mix: true,
+    }];
+    let reply = memory.run(&request(sources, None));
+    assert!(
+        matches!(&reply, DecodeReply::Undecodable { text } if text.contains(engine::decode::VIDEO_TEXT)),
+        "{reply:?}"
+    );
+    no_part_is_left(&memory, "a video");
+}
+
 #[test]
 fn a_failed_write_ends_with_unstored_and_leaves_no_part_file() {
     // More than a block, so the first pass, the padding, the mix and the

@@ -22,6 +22,11 @@ wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 web-sys = { version = "0.3.106", features = ["DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
 
+# Makes the M4A files of the native tests: every test that needs an M4A
+# uses this writer (TD-52).
+[dev-dependencies]
+m4a = { version = "0.1.0", path = "../m4a" }
+
 # Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.79"

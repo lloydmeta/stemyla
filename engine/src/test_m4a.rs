@@ -232,3 +232,100 @@ pub fn peak_lag(
     }
     best.0
 }
+
+/// The places of `pattern` in `bytes`.
+fn places(bytes: &[u8], pattern: &[u8]) -> Vec<usize> {
+    bytes
+        .windows(pattern.len())
+        .enumerate()
+        .filter(|(_, window)| *window == pattern)
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The one place of `pattern` in `bytes`.
+pub fn place_once(bytes: &[u8], pattern: &[u8]) -> usize {
+    let found = places(bytes, pattern);
+    assert_eq!(found.len(), 1, "{pattern:?} is in one place");
+    found[0]
+}
+
+/// `file` with the one place of `from` changed to `to`.
+pub fn patched(mut file: Vec<u8>, from: &[u8; 4], to: &[u8; 4]) -> Vec<u8> {
+    let at = place_once(&file, from);
+    file[at..at + 4].copy_from_slice(to);
+    file
+}
+
+/// The start and the size of the first top-level box `kind` of `file`.
+pub fn top_box(file: &[u8], kind: &[u8; 4]) -> (usize, usize) {
+    let mut at = 0;
+    while at + 8 <= file.len() {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        if &file[at + 4..at + 8] == kind {
+            return (at, size);
+        }
+        assert!(size >= 8, "a box of {size} bytes at {at}");
+        at += size;
+    }
+    panic!("no {kind:?} box");
+}
+
+/// The start and the size of the child `kind` of the box at `parent`.
+pub fn child_box(file: &[u8], parent: usize, kind: &[u8; 4]) -> (usize, usize) {
+    let end = parent + u32::from_be_bytes(file[parent..parent + 4].try_into().unwrap()) as usize;
+    let mut at = parent + 8;
+    while at + 8 <= end {
+        let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+        if &file[at + 4..at + 8] == kind {
+            return (at, size);
+        }
+        assert!(size >= 8, "a box of {size} bytes at {at}");
+        at += size;
+    }
+    panic!("no {kind:?} box in the box at {parent}");
+}
+
+/// `file` with the type of the sample entry of its one track as `to`.
+pub fn with_entry(mut file: Vec<u8>, to: &[u8; 4]) -> Vec<u8> {
+    // After `stsd`: version and flags, the entry count, the entry size.
+    let at = place_once(&file, b"stsd") + 4 + 4 + 4 + 4;
+    file[at..at + 4].copy_from_slice(to);
+    file
+}
+
+/// `file`, which has `moov` last, with a copy of its first `trak` appended
+/// to `moov`.  The copy has the handler type `handler` and the `track_ID`
+/// `track_id`.
+pub fn with_second_trak(mut file: Vec<u8>, handler: &[u8; 4], track_id: u32) -> Vec<u8> {
+    let (moov, moov_size) = top_box(&file, b"moov");
+    assert_eq!(moov + moov_size, file.len(), "moov is last");
+    let (trak, trak_size) = child_box(&file, moov, b"trak");
+    let mut copy = Vec::from(&file[trak..trak + trak_size]);
+    let at = place_once(&copy, b"soun");
+    copy[at..at + 4].copy_from_slice(handler);
+    // The `track_ID` of a version 0 `tkhd`: after its header, version
+    // and flags, and two times.
+    let (tkhd, _) = child_box(&copy, 0, b"tkhd");
+    copy[tkhd + 20..tkhd + 24].copy_from_slice(&track_id.to_be_bytes());
+    file.extend_from_slice(&copy);
+    let size = (moov_size + trak_size) as u32;
+    file[moov..moov + 4].copy_from_slice(&size.to_be_bytes());
+    file
+}
+
+/// The ADTS stream of `channels` at `rate` from `HeAacEncoder`, and its
+/// two AudioSpecificConfigs: explicit (object type 5), and backward
+/// compatible (object type 2 with the sync extension and SBR).
+pub fn he_aac(channels: &[Vec<f32>], rate: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    use oxideav_aac::he_aac_encoder::{HeAacConfig, HeAacEncoder};
+    let count = channels.len() as u8;
+    let mut encoder = HeAacEncoder::new(HeAacConfig::new(rate, count, 48_000))
+        .expect("oxideav-aac takes the config");
+    let stream = encoder
+        .encode_all(&interleaved16(channels))
+        .expect("oxideav-aac encodes");
+    let explicit = encoder.audio_specific_config(true);
+    let compatible = encoder.audio_specific_config(false);
+    (stream, explicit, compatible)
+}

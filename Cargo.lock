@@ -2608,6 +2608,7 @@ dependencies = [
  "engine",
  "flacenc",
  "js-sys",
+ "m4a",
  "rusty_mp3",
  "stem-protocol",
  "wasm-bindgen",

@@ -1114,7 +1114,7 @@ mod tests {
             (
                 "decoder",
                 "decode-worker",
-                &["dsp", "engine", "stem-protocol"],
+                &["dsp", "engine", "m4a", "stem-protocol"],
             ),
             ("dsp", "dsp", &[]),
             ("engine", "engine", &["dsp", "m4a"]),

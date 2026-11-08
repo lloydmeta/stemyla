@@ -635,6 +635,14 @@ A raw `.aac` file is a stream of ADTS frames, with no container.  No box states 
 
 * Fix: no standard field holds the delay of ADTS.  An open could take a delay that the caller gives, or the delay of a known encoder.  An M4A of the same audio has no gap.
 
+### TD-81: some HE-AAC files decode as their AAC-LC core, with no message
+
+This entry concerns the HE-AAC text of M2 of `plans/active/m4a.md`.
+
+`engine::decode` refuses HE-AAC with "HE-AAC is not supported.  Open an AAC-LC file." when the AudioSpecificConfig shows SBR or PS, or states a core rate other than the rate of the `mp4a` entry (`check_aac`).  Two forms show none of these signs.  An M4A with implicit SBR whose `mp4a` entry states the core rate, and a raw ADTS stream of HE-AAC.  Symphonia 0.6.1 decodes each as AAC-LC at the core rate: half the band, at the right speed, with no message.  Symphonia does not tell `engine` that the stream holds SBR, and the plan forbids a patch of Symphonia.
+
+* Fix: Symphonia's HE-AAC decode, or a check of the first packets for SBR fill elements (`EXT_SBR_DATA` in a `fill_element`) before the decoder is made.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings

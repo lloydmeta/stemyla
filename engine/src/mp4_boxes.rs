@@ -1,0 +1,749 @@
+//! A reader of the few MP4 boxes that the decode needs (M2 of
+//! `plans/active/m4a.md`): the handler and the sample entry of each track,
+//! the times of the first sound track, and the `iTunSMPB` tag.  The `m4a`
+//! crate writes MP4 boxes; this module reads them.
+//!
+//! One walker reads from a [`ReadAt`]: the head of a file, which can be cut
+//! off, or a whole source that can seek.  It reads only the boxes that it
+//! needs, at most [`MOST_BOX_BYTES`] of each, and skips the others by their
+//! size.  So it never reads `mdat`, `stsz`, `stco` or cover art, and a
+//! crafted file cannot make it hold more (MEM-4).  It keeps the values of
+//! one track: the first sound track.  Of the others it keeps two flags.  A
+//! box of a size that does not fit ends the walk with what it found.  It
+//! never panics.
+
+use std::io::{Read, Seek, SeekFrom};
+
+/// The most bytes that the walker reads of one box.  An `elst` larger than
+/// this counts as no `elst`.
+pub(crate) const MOST_BOX_BYTES: usize = 4 * 1024;
+
+/// The deepest nesting of the boxes that the walker reads:
+/// `moov/trak/mdia/minf/stbl/stsd`.
+const MOST_DEPTH: usize = 6;
+
+/// What reads bytes at an offset.
+pub(crate) trait ReadAt {
+    /// Fills `buf` from `at`, or gives the bytes up to the end.  An error
+    /// is a failed read, not the end.
+    fn read_at(&mut self, at: u64, buf: &mut [u8]) -> std::io::Result<usize>;
+}
+
+impl ReadAt for &[u8] {
+    fn read_at(&mut self, at: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(rest) = usize::try_from(at).ok().and_then(|at| self.get(at..)) else {
+            return Ok(0);
+        };
+        let count = rest.len().min(buf.len());
+        buf[..count].copy_from_slice(&rest[..count]);
+        Ok(count)
+    }
+}
+
+/// A source that reads with a seek, as the decode does.
+pub(crate) struct Seeking<'a, S: Read + Seek + ?Sized>(pub &'a mut S);
+
+impl<S: Read + Seek + ?Sized> ReadAt for Seeking<'_, S> {
+    fn read_at(&mut self, at: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.seek(SeekFrom::Start(at))?;
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.0.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(filled)
+    }
+}
+
+/// One `elst` entry, in the timescales of its file: `segment_duration` in
+/// the movie timescale, `media_time` in the media timescale, and `rate` as
+/// 16.16 fixed point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EditEntry {
+    pub segment_duration: u64,
+    pub media_time: i64,
+    pub rate: i32,
+}
+
+/// The values of the first sound track.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SoundTrack {
+    /// The `track_ID` of its `tkhd`.
+    pub track_id: Option<u32>,
+    /// The type of its first sample entry, such as `mp4a` or `alac`.
+    pub entry: Option<[u8; 4]>,
+    /// The timescale of its `mdhd`.
+    pub media_timescale: Option<u32>,
+    /// The duration of its `mdhd`, in the media timescale.
+    pub duration: Option<u64>,
+    /// The entries of its `elst`.  `None` when it has no `elst`, or one
+    /// larger than [`MOST_BOX_BYTES`].
+    pub edits: Option<Vec<EditEntry>>,
+}
+
+/// What the walker found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Found {
+    /// A track whose handler is `vide`.
+    pub video: bool,
+    /// A sound track whose sample entry is `drms`, `drmi` or `enca`.
+    pub protected: bool,
+    /// The timescale of `mvhd`.
+    pub movie_timescale: Option<u32>,
+    /// The first sound track.
+    pub sound: Option<SoundTrack>,
+    /// The text of the `iTunSMPB` tag of `moov/udta/meta/ilst`.
+    pub itunsmpb: Option<String>,
+}
+
+/// The sample entries of a protected sound track.
+const PROTECTED_ENTRIES: [&[u8; 4]; 3] = [b"drms", b"drmi", b"enca"];
+
+/// The box types that can start an MP4 file.
+const FIRST_BOXES: [&[u8; 4]; 6] = [b"ftyp", b"moov", b"free", b"wide", b"skip", b"mdat"];
+
+/// One box: its type, and its body from `body` to `end`.
+#[derive(Clone, Copy, Debug)]
+struct BoxAt {
+    kind: [u8; 4],
+    body: u64,
+    end: u64,
+}
+
+/// Walks the boxes of `source`.  `None` when the file does not start with
+/// an MP4 box, such as `ftyp` or `moov`; then it read only 8 bytes.
+pub(crate) fn walk(source: &mut dyn ReadAt) -> std::io::Result<Option<Found>> {
+    let mut first = [0; 8];
+    if source.read_at(0, &mut first)? < 8 || !FIRST_BOXES.iter().any(|k| first[4..] == k[..]) {
+        return Ok(None);
+    }
+    let mut walker = Walker {
+        source,
+        found: Found::default(),
+    };
+    walker.top()?;
+    Ok(Some(walker.found))
+}
+
+/// A big-endian `u32` at `at` of `bytes`.
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// A big-endian `u64` at `at` of `bytes`.
+fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// The values of one track, while the walker reads it.
+#[derive(Default)]
+struct Trak {
+    handler: Option<[u8; 4]>,
+    sound: SoundTrack,
+}
+
+struct Walker<'a> {
+    source: &'a mut dyn ReadAt,
+    found: Found,
+}
+
+impl Walker<'_> {
+    /// The box at `at`, within its parent's end `end` (`u64::MAX` for the
+    /// file).  `None` when no header fits, or its size does not fit.
+    fn box_at(&mut self, at: u64, end: u64) -> std::io::Result<Option<BoxAt>> {
+        let mut header = [0; 16];
+        let read = self.source.read_at(at, &mut header)?;
+        if read < 8 || at.checked_add(8).is_none_or(|e| e > end) {
+            return Ok(None);
+        }
+        let size = u64::from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]));
+        let kind = [header[4], header[5], header[6], header[7]];
+        let (header_len, size) = match size {
+            0 => (8, None),
+            1 if read >= 16 => (16, u64_at(&header, 8)),
+            1 => return Ok(None),
+            size => (8, Some(size)),
+        };
+        let box_end = match size {
+            // To the end of the parent, or of the file.
+            None => end,
+            Some(size) if size < header_len => return Ok(None),
+            Some(size) => match at.checked_add(size) {
+                Some(box_end) if box_end <= end => box_end,
+                _ => return Ok(None),
+            },
+        };
+        Ok(Some(BoxAt {
+            kind,
+            body: at + header_len,
+            end: box_end,
+        }))
+    }
+
+    /// Calls `each` with each child box from `start` to `end`, until a box
+    /// does not fit or `each` says to stop.
+    fn children(
+        &mut self,
+        start: u64,
+        end: u64,
+        mut each: impl FnMut(&mut Self, BoxAt) -> std::io::Result<bool>,
+    ) -> std::io::Result<bool> {
+        let mut at = start;
+        while at < end {
+            let Some(found) = self.box_at(at, end)? else {
+                return Ok(false);
+            };
+            if !each(self, found)? {
+                return Ok(false);
+            }
+            if found.end == u64::MAX {
+                return Ok(true);
+            }
+            at = found.end;
+        }
+        Ok(true)
+    }
+
+    /// At most [`MOST_BOX_BYTES`] of the body of `at`.  `None` when the
+    /// body is larger and `whole` is set.
+    fn body(&mut self, at: BoxAt, whole: bool) -> std::io::Result<Option<Vec<u8>>> {
+        let len = at.end.saturating_sub(at.body);
+        if whole && len > MOST_BOX_BYTES as u64 {
+            return Ok(None);
+        }
+        let mut body = vec![0; len.min(MOST_BOX_BYTES as u64) as usize];
+        let read = self.source.read_at(at.body, &mut body)?;
+        body.truncate(read);
+        Ok(Some(body))
+    }
+
+    fn top(&mut self) -> std::io::Result<()> {
+        self.children(0, u64::MAX, |walker, found| {
+            if found.kind == *b"moov" {
+                walker.moov(found)?;
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    fn moov(&mut self, moov: BoxAt) -> std::io::Result<()> {
+        self.children(moov.body, moov.end, |walker, found| {
+            match &found.kind {
+                b"mvhd" => {
+                    let body = walker.body(found, false)?.unwrap_or_default();
+                    let at = if body.first() == Some(&1) { 20 } else { 12 };
+                    walker.found.movie_timescale = u32_at(&body, at);
+                }
+                b"trak" => {
+                    let mut trak = Trak::default();
+                    walker.trak(found, &mut trak, 1)?;
+                    walker.keep(trak);
+                }
+                b"udta" => walker.udta(found, 1)?,
+                _ => {}
+            }
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    /// Keeps what the walk of one track found: its flags, and its values
+    /// if it is the first sound track.
+    fn keep(&mut self, trak: Trak) {
+        match trak.handler {
+            Some([b'v', b'i', b'd', b'e']) => self.found.video = true,
+            Some([b's', b'o', b'u', b'n']) => {
+                if trak
+                    .sound
+                    .entry
+                    .is_some_and(|entry| PROTECTED_ENTRIES.iter().any(|k| entry == **k))
+                {
+                    self.found.protected = true;
+                }
+                if self.found.sound.is_none() {
+                    self.found.sound = Some(trak.sound);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads the boxes of a `trak` that the decode needs, at `depth`.
+    fn trak(&mut self, parent: BoxAt, trak: &mut Trak, depth: usize) -> std::io::Result<()> {
+        if depth >= MOST_DEPTH {
+            return Ok(());
+        }
+        self.children(parent.body, parent.end, |walker, found| {
+            match &found.kind {
+                b"tkhd" => {
+                    let body = walker.body(found, false)?.unwrap_or_default();
+                    let at = if body.first() == Some(&1) { 20 } else { 12 };
+                    trak.sound.track_id = u32_at(&body, at);
+                }
+                b"mdhd" => {
+                    let body = walker.body(found, false)?.unwrap_or_default();
+                    let (scale, duration) = if body.first() == Some(&1) {
+                        (u32_at(&body, 20), u64_at(&body, 24))
+                    } else {
+                        (u32_at(&body, 12), u32_at(&body, 16).map(u64::from))
+                    };
+                    trak.sound.media_timescale = scale;
+                    trak.sound.duration = duration;
+                }
+                b"hdlr" => {
+                    let body = walker.body(found, false)?.unwrap_or_default();
+                    trak.handler = body.get(8..12).and_then(|k| k.try_into().ok());
+                }
+                b"elst" => {
+                    trak.sound.edits = walker.body(found, true)?.and_then(|b| edits(&b));
+                }
+                b"stsd" => {
+                    let body = walker.body(found, false)?.unwrap_or_default();
+                    trak.sound.entry = body.get(12..16).and_then(|k| k.try_into().ok());
+                }
+                b"edts" | b"mdia" | b"minf" | b"stbl" => walker.trak(found, trak, depth + 1)?,
+                _ => {}
+            }
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    /// Reads `udta/meta/ilst/----` for the `iTunSMPB` tag.
+    fn udta(&mut self, parent: BoxAt, depth: usize) -> std::io::Result<()> {
+        if depth >= MOST_DEPTH {
+            return Ok(());
+        }
+        self.children(parent.body, parent.end, |walker, found| {
+            match &found.kind {
+                b"meta" => {
+                    // `meta` is a full box in ISO files and in iTunes' tags,
+                    // and a plain box in some QuickTime files.
+                    let mut peek = [0; 8];
+                    let read = walker.source.read_at(found.body, &mut peek)?;
+                    let skip = if read == 8 && peek[4..] == *b"hdlr" {
+                        0
+                    } else {
+                        4
+                    };
+                    let inner = BoxAt {
+                        body: found.body.saturating_add(skip).min(found.end),
+                        ..found
+                    };
+                    walker.udta(inner, depth + 1)?;
+                }
+                b"ilst" => walker.udta(found, depth + 1)?,
+                b"----" => walker.freeform(found)?,
+                _ => {}
+            }
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    /// Reads one `----` item, and keeps its text if it is `iTunSMPB`.
+    fn freeform(&mut self, item: BoxAt) -> std::io::Result<()> {
+        let (mut mean, mut name, mut data) = (None, None, None);
+        self.children(item.body, item.end, |walker, found| {
+            let body = walker.body(found, false)?.unwrap_or_default();
+            match &found.kind {
+                b"mean" => mean = body.get(4..).map(Vec::from),
+                b"name" => name = body.get(4..).map(Vec::from),
+                b"data" => data = body.get(8..).map(Vec::from),
+                _ => {}
+            }
+            Ok(true)
+        })?;
+        if mean.as_deref() == Some(b"com.apple.iTunes")
+            && name.as_deref() == Some(b"iTunSMPB")
+            && let Some(text) = data.and_then(|data| String::from_utf8(data).ok())
+        {
+            self.found.itunsmpb = Some(text);
+        }
+        Ok(())
+    }
+}
+
+/// The entries of an `elst` body of version 0 or 1, or `None` if its count
+/// does not fit the body.
+fn edits(body: &[u8]) -> Option<Vec<EditEntry>> {
+    let version = *body.first()?;
+    let count = u32_at(body, 4)? as usize;
+    let size = if version == 1 { 20 } else { 12 };
+    if body.len() < 8 + count.checked_mul(size)? {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = 8 + i * size;
+        let entry = if version == 1 {
+            EditEntry {
+                segment_duration: u64_at(body, at)?,
+                media_time: u64_at(body, at + 8)? as i64,
+                rate: u32_at(body, at + 16)? as i32,
+            }
+        } else {
+            EditEntry {
+                segment_duration: u64::from(u32_at(body, at)?),
+                media_time: i64::from(u32_at(body, at + 4)? as i32),
+                rate: u32_at(body, at + 8)? as i32,
+            }
+        };
+        entries.push(entry);
+    }
+    Some(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_alloc::peak_of;
+    use crate::test_m4a::{
+        aac_m4a, alac_m4a, chirp, file_of, patched, top_box, with_entry, with_second_trak,
+    };
+    use m4a::{Codec, Edit, Gapless, Layout, Order, SampleEntry};
+
+    fn walked(file: &[u8]) -> Option<Found> {
+        let found = walk(&mut { file });
+        assert!(found.is_ok(), "{found:?}");
+        found.unwrap()
+    }
+
+    fn tone(frames: usize) -> Vec<f32> {
+        chirp(0, frames, 44_100)
+    }
+
+    /// An ALAC file of 3 packets of tone, with an edit of Apple's delay.
+    fn alac(order: Order) -> Vec<u8> {
+        let tone = tone(3 * 4096);
+        let edit = Edit {
+            skip: 2112,
+            frames: 10_000,
+        };
+        alac_m4a(&tone, &tone, 44_100, Some(edit), order)
+    }
+
+    #[test]
+    fn the_walker_reads_the_values_of_the_sound_track() {
+        for order in [Order::FastStart, Order::MoovLast] {
+            let found = walked(&alac(order));
+            assert_eq!(
+                found,
+                Some(Found {
+                    video: false,
+                    protected: false,
+                    movie_timescale: Some(44_100),
+                    sound: Some(SoundTrack {
+                        track_id: Some(1),
+                        entry: Some(*b"alac"),
+                        media_timescale: Some(44_100),
+                        duration: Some(3 * 4096),
+                        edits: Some(vec![EditEntry {
+                            segment_duration: 10_000,
+                            media_time: 2112,
+                            rate: 0x1_0000,
+                        }]),
+                    }),
+                    itunsmpb: None,
+                }),
+                "{order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_walker_reads_the_itunsmpb_tag() {
+        let tone = tone(4096);
+        let channels = [tone.clone(), tone];
+        let frames = crate::test_m4a::aac_track_frames(4096);
+        let gapless = Gapless {
+            delay: 1024,
+            padding: (frames - 1024 - 4096) as u32,
+            frames: 4096,
+        };
+        for order in [Order::FastStart, Order::MoovLast] {
+            let file = aac_m4a(&channels, 44_100, None, Some(gapless), order);
+            let found = walked(&file).expect("an MP4 file");
+            assert_eq!(
+                found.itunsmpb.as_deref(),
+                Some(
+                    " 00000000 00000400 00000000 0000000000001000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000"
+                ),
+                "{order:?}"
+            );
+            let sound = found.sound.expect("a sound track");
+            assert_eq!(sound.entry, Some(*b"mp4a"));
+            assert_eq!(sound.edits, None);
+        }
+    }
+
+    #[test]
+    fn a_file_of_another_format_reads_8_bytes() {
+        let wav = crate::wav::encode_pcm16(&[0.0; 10], &[0.0; 10], 44_100);
+        assert_eq!(walked(&wav), None);
+        assert_eq!(walked(b"ID3"), None);
+        assert_eq!(walked(&[]), None);
+    }
+
+    #[test]
+    fn the_walker_finds_a_video_track_and_a_protected_entry() {
+        let single = patched(alac(Order::FastStart), b"soun", b"vide");
+        assert!(walked(&single).unwrap().video);
+        assert_eq!(walked(&single).unwrap().sound, None);
+        let second = with_second_trak(alac(Order::MoovLast), b"vide", 2);
+        let found = walked(&second).unwrap();
+        assert!(found.video);
+        assert_eq!(found.sound.and_then(|s| s.track_id), Some(1));
+        for kind in [b"drms", b"drmi", b"enca"] {
+            let found = walked(&with_entry(alac(Order::FastStart), kind)).unwrap();
+            assert!(found.protected, "{kind:?}");
+            assert!(!found.video, "{kind:?}");
+        }
+    }
+
+    /// The walker keeps the first sound track and its `track_ID`.
+    #[test]
+    fn the_walker_keeps_the_first_sound_track() {
+        let file = with_second_trak(alac(Order::MoovLast), b"soun", 7);
+        let found = walked(&file).unwrap();
+        assert_eq!(found.sound.and_then(|s| s.track_id), Some(1));
+        let file = with_second_trak(with_entry(alac(Order::MoovLast), b"lpcm"), b"soun", 7);
+        assert_eq!(
+            walked(&file).unwrap().sound.and_then(|s| s.entry),
+            Some(*b"lpcm")
+        );
+    }
+
+    /// A box of `kind` with `body`.
+    fn bx(kind: &[u8; 4], body: &[&[u8]]) -> Vec<u8> {
+        let body = body.concat();
+        let mut out = Vec::from(((8 + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A file of one sound track with an `mdhd` and an `elst` of version 1
+    /// (64-bit times), and a `tkhd` and an `mvhd` of version 1.
+    fn version_1() -> Vec<u8> {
+        let full = |version: u8| [version, 0, 0, 0];
+        let mvhd = bx(
+            b"mvhd",
+            &[&full(1), &[0; 16], &1000_u32.to_be_bytes(), &[0; 8]],
+        );
+        let tkhd = bx(b"tkhd", &[&full(1), &[0; 16], &9_u32.to_be_bytes()]);
+        let elst = bx(
+            b"elst",
+            &[
+                &full(1),
+                &1_u32.to_be_bytes(),
+                &(5_u64 << 32).to_be_bytes(),
+                &(1024_u64 << 32).to_be_bytes(),
+                &0x1_0000_u32.to_be_bytes(),
+            ],
+        );
+        let mdhd = bx(
+            b"mdhd",
+            &[
+                &full(1),
+                &[0; 16],
+                &48_000_u32.to_be_bytes(),
+                &(3_u64 << 32).to_be_bytes(),
+            ],
+        );
+        let hdlr = bx(b"hdlr", &[&full(0), &[0; 4], b"soun"]);
+        let entry = bx(b"mp4a", &[&[0; 28]]);
+        let stsd = bx(b"stsd", &[&full(0), &1_u32.to_be_bytes(), &entry]);
+        let stbl = bx(b"stbl", &[&stsd]);
+        let minf = bx(b"minf", &[&stbl]);
+        let mdia = bx(b"mdia", &[&mdhd, &hdlr, &minf]);
+        let trak = bx(b"trak", &[&tkhd, &bx(b"edts", &[&elst]), &mdia]);
+        bx(b"moov", &[&mvhd, &trak])
+    }
+
+    #[test]
+    fn the_walker_reads_version_1_boxes() {
+        let found = walked(&version_1()).unwrap();
+        assert_eq!(found.movie_timescale, Some(1000));
+        assert_eq!(
+            found.sound,
+            Some(SoundTrack {
+                track_id: Some(9),
+                entry: Some(*b"mp4a"),
+                media_timescale: Some(48_000),
+                duration: Some(3 << 32),
+                edits: Some(vec![EditEntry {
+                    segment_duration: 5 << 32,
+                    media_time: 1024 << 32,
+                    rate: 0x1_0000,
+                }]),
+            })
+        );
+    }
+
+    /// An `elst` of more than 4 KiB counts as none, and a negative
+    /// `media_time` of version 0 keeps its sign.
+    #[test]
+    fn an_elst_past_4_kib_counts_as_none() {
+        let full = [0_u8; 4];
+        let entry = [
+            &5_u32.to_be_bytes()[..],
+            &(-1_i32).to_be_bytes(),
+            &0x1_0000_u32.to_be_bytes(),
+        ]
+        .concat();
+        let elst = |count: usize| {
+            let entries = entry.repeat(count);
+            bx(b"elst", &[&full, &(count as u32).to_be_bytes(), &entries])
+        };
+        let file = |elst: Vec<u8>| {
+            let hdlr = bx(b"hdlr", &[&full, &[0; 4], b"soun"]);
+            bx(
+                b"moov",
+                &[&bx(
+                    b"trak",
+                    &[&bx(b"edts", &[&elst]), &bx(b"mdia", &[&hdlr])],
+                )],
+            )
+        };
+        let edits = |elst: Vec<u8>| {
+            let sound = walked(&file(elst)).and_then(|found| found.sound);
+            assert!(sound.is_some(), "a sound track");
+            sound.unwrap().edits
+        };
+        // 8 + 340 entries of 12 bytes is 4088 bytes of body.
+        let most = edits(elst(340));
+        assert_eq!(most.as_ref().map(Vec::len), Some(340));
+        assert_eq!(most.map(|m| m[0].media_time), Some(-1));
+        assert_eq!(edits(elst(341)), None);
+        // A count that the body does not hold.
+        let mut short = elst(2);
+        short[12..16].copy_from_slice(&3_u32.to_be_bytes());
+        assert_eq!(edits(short), None);
+    }
+
+    /// The walker's memory does not grow with the count of tracks.
+    #[test]
+    fn a_moov_of_10000_tracks_keeps_the_values_of_one() {
+        let mut few = alac(Order::MoovLast);
+        for id in 2..10 {
+            few = with_second_trak(few, b"soun", id);
+        }
+        let mut many = few.clone();
+        for id in 10..10_000 {
+            many = with_second_trak(many, if id % 2 == 0 { b"soun" } else { b"vide" }, id);
+        }
+        let (few_peak, few_found) = peak_of(|| walked(&few));
+        let (many_peak, many_found) = peak_of(|| walked(&many));
+        assert_eq!(few_found.unwrap().sound.and_then(|s| s.track_id), Some(1));
+        let many_found = many_found.unwrap();
+        assert_eq!(many_found.sound.and_then(|s| s.track_id), Some(1));
+        assert!(many_found.video);
+        assert!(
+            many_peak <= few_peak + 1024,
+            "10 tracks peak at {few_peak} bytes, 10,000 at {many_peak}"
+        );
+    }
+
+    /// Counts the bytes that it reads.
+    struct Counting {
+        file: std::io::Cursor<Vec<u8>>,
+        read: u64,
+    }
+
+    impl Read for Counting {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.file.read(buf)?;
+            self.read += count as u64;
+            Ok(count)
+        }
+    }
+
+    impl Seek for Counting {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(to)
+        }
+    }
+
+    /// On a file of `moov` after 1 MiB of `mdat`, the walker seeks past
+    /// `mdat` to read `moov`.
+    #[test]
+    fn the_walker_seeks_past_mdat_to_a_moov_last() {
+        let layout = Layout::new(Codec::Alac, 64 * 4096, 44_100, None, Order::MoovLast).unwrap();
+        let packets = vec![vec![7_u8; 16_384]; 64];
+        let entry = SampleEntry::Alac { cookie: [0; 24] };
+        let file = file_of(&layout, &entry, &packets);
+        let (_, moov_size) = top_box(&file, b"moov");
+        let mut source = Counting {
+            file: std::io::Cursor::new(file),
+            read: 0,
+        };
+        let found = walk(&mut Seeking(&mut source));
+        assert!(found.is_ok(), "{found:?}");
+        let sound = found.unwrap().and_then(|f| f.sound);
+        assert_eq!(sound.and_then(|s| s.duration), Some(64 * 4096));
+        assert!(
+            source.read < 64 * 1024 + moov_size as u64,
+            "{} bytes read, moov has {moov_size}",
+            source.read
+        );
+    }
+
+    /// The fixtures of the walker's tests that hold each box it reads.
+    fn fixtures() -> Vec<Vec<u8>> {
+        let tone = tone(1024);
+        let channels = [tone.clone(), tone];
+        let frames = crate::test_m4a::aac_track_frames(1024);
+        let gapless = Gapless {
+            delay: 1024,
+            padding: (frames - 2048) as u32,
+            frames: 1024,
+        };
+        let edit = Some(Edit {
+            skip: 1024,
+            frames: 1024,
+        });
+        vec![
+            aac_m4a(&channels, 44_100, edit, Some(gapless), Order::FastStart),
+            aac_m4a(&channels, 44_100, edit, Some(gapless), Order::MoovLast),
+            version_1(),
+        ]
+    }
+
+    /// The walker ends with no panic on every prefix of a fixture, and on
+    /// each box with a size of 0, 1, 7 or `u32::MAX`.
+    #[test]
+    fn the_walker_ends_on_any_prefix_or_box_size() {
+        const KINDS: [&[u8; 4]; 19] = [
+            b"ftyp", b"moov", b"mvhd", b"trak", b"tkhd", b"edts", b"elst", b"mdia", b"mdhd",
+            b"hdlr", b"minf", b"stbl", b"stsd", b"mdat", b"udta", b"meta", b"ilst", b"----",
+            b"data",
+        ];
+        for (k, file) in fixtures().iter().enumerate() {
+            for end in 0..=file.len() {
+                walked(&file[..end]);
+            }
+            let mut sizes = 0;
+            for at in 4..file.len().saturating_sub(4) {
+                if !KINDS.iter().any(|kind| file[at..at + 4] == kind[..]) {
+                    continue;
+                }
+                for size in [0, 1, 7, u32::MAX] {
+                    let mut bad = file.clone();
+                    bad[at - 4..at].copy_from_slice(&size.to_be_bytes());
+                    walked(&bad);
+                    sizes += 1;
+                }
+            }
+            assert!(sizes >= 4 * 12, "fixture {k}: {sizes} sizes");
+        }
+    }
+}

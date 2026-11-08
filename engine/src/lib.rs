@@ -2,11 +2,13 @@
 //! stretching and offline rendering.  Live audio output sits behind the
 //! `cpal` feature.
 
+mod aac_config;
 pub mod decode;
 pub mod hpss;
 #[cfg(feature = "cpal")]
 pub mod live;
 pub mod mixdown;
+mod mp4_boxes;
 pub mod overview;
 pub mod params;
 pub mod player;

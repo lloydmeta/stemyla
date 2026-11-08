@@ -7,7 +7,7 @@
 
 use crate::resample::SONG_RATE;
 use anyhow::{Context, Result, anyhow};
-use std::io::Cursor;
+use std::io::{Cursor, SeekFrom};
 use std::path::Path;
 use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::well_known::{
@@ -84,6 +84,63 @@ impl std::fmt::Display for TooLong {
 }
 
 impl std::error::Error for TooLong {}
+
+/// The text of a file that holds video (D4 of `plans/active/m4a.md`).
+/// `app` shows it too, when a head shows a video track.
+pub const VIDEO_TEXT: &str =
+    "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC.";
+
+/// The text of a protected file: a sound track of the sample entry
+/// `drms`, `drmi` or `enca`.
+pub const PROTECTED_TEXT: &str = "This file is protected (DRM), so it cannot open.";
+
+/// The text of an HE-AAC file: SBR or PS in its AudioSpecificConfig, or a
+/// core rate that is not the rate of its sample entry.
+pub const HE_AAC_TEXT: &str = "HE-AAC is not supported.  Open an AAC-LC file.";
+
+/// The text of an AAC of an object type other than AAC-LC, of a program
+/// config element, of 960 frames, or of an AudioSpecificConfig that does
+/// not parse.
+pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC file.";
+
+/// The text of an AAC file of more than 2 channels.
+pub fn aac_channels_text(channels: u32) -> String {
+    format!("This AAC file has {channels} channels.  Only mono and stereo AAC open.")
+}
+
+/// Refuses an AAC track that the decode cannot give right, before the
+/// decoder is made.  It reads the AudioSpecificConfig itself
+/// (`aac_config`).  A raw ADTS stream has none, so only its channels count.
+fn check_aac(params: &AudioCodecParameters) -> Result<()> {
+    let Some(asc) = params.extra_data.as_deref() else {
+        let channels = params.channels.as_ref().map_or(0, Channels::count) as u32;
+        if channels > 2 {
+            return Err(anyhow!(aac_channels_text(channels)));
+        }
+        return Ok(());
+    };
+    let Some(config) = crate::aac_config::read(asc) else {
+        return Err(anyhow!(AAC_KIND_TEXT));
+    };
+    // An entry that states another rate than the core's is implicit SBR:
+    // the entry gives the rate of the output.
+    let implicit_sbr = config
+        .rate
+        .zip(params.sample_rate)
+        .is_some_and(|(core, entry)| core != entry);
+    if config.sbr || implicit_sbr {
+        return Err(anyhow!(HE_AAC_TEXT));
+    }
+    if let Some(channels) = crate::aac_config::channels_of(config.channel_config)
+        && channels > 2
+    {
+        return Err(anyhow!(aac_channels_text(channels)));
+    }
+    if config.object_type != 2 || config.channel_config == 0 || config.frames_960 {
+        return Err(anyhow!(AAC_KIND_TEXT));
+    }
+    Ok(())
+}
 
 /// What the head of a file states about its length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,12 +447,28 @@ fn source_frames_within(max_song_frames: usize, rate: u32) -> u64 {
 /// that many frames at [`SONG_RATE`] ([`TooLong`]), and reserves no more
 /// than that.
 fn open_within(
-    source: Box<dyn MediaSource>,
+    mut source: Box<dyn MediaSource>,
     ext: Option<&str>,
     limit: u64,
     max_song_frames: Option<usize>,
 ) -> Result<Opened> {
     let byte_len = source.byte_len();
+    let boxes = if source.is_seekable() {
+        let found = crate::mp4_boxes::walk(&mut crate::mp4_boxes::Seeking(&mut *source))
+            .context("reading the boxes of an MP4 file")?;
+        source.seek(SeekFrom::Start(0))?;
+        found
+    } else {
+        None
+    };
+    if let Some(found) = &boxes {
+        if found.video {
+            return Err(anyhow!(VIDEO_TEXT));
+        }
+        if found.protected {
+            return Err(anyhow!(PROTECTED_TEXT));
+        }
+    }
     let mss = MediaSourceStream::new(source, Default::default());
     let mut hint = Hint::new();
     if let Some(e) = ext {
@@ -420,6 +493,9 @@ fn open_within(
         .ok_or_else(|| anyhow!("track has no audio codec parameters"))?
         .clone();
     let track_id = track.id;
+    if params.codec == CODEC_ID_AAC {
+        check_aac(&params)?;
+    }
     let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
     let stated_exactly = params.codec != CODEC_ID_MP3 && !estimated;
     if stated_exactly
@@ -1783,5 +1859,148 @@ mod tests {
             );
             assert_eq!(opened.reserve, FRAMES, "{bits} bits");
         }
+    }
+
+    /// The error text of `bytes` through `decode_bytes`, and through
+    /// `Decoder::new`, which must be the same.
+    fn refusal(bytes: Vec<u8>, ext: &str) -> String {
+        let whole = decode_bytes(bytes.clone(), Some(ext));
+        assert!(whole.is_err(), "{ext}: it decodes");
+        let blocks = Decoder::new(Box::new(Cursor::new(bytes)), Some(ext));
+        assert!(blocks.is_err(), "{ext}: the decoder opens");
+        let (whole, blocks) = (whole.unwrap_err(), blocks.err().unwrap());
+        assert_eq!(format!("{whole:#}"), format!("{blocks:#}"), "{ext}");
+        format!("{blocks:#}")
+    }
+
+    fn short_tone() -> Vec<Vec<f32>> {
+        use crate::test_m4a::chirp;
+        (0..2).map(|c| chirp(c, 4096, 44_100)).collect()
+    }
+
+    fn alac_of(order: m4a::Order) -> Vec<u8> {
+        let tone = short_tone();
+        crate::test_m4a::alac_m4a(&tone[0], &tone[1], 44_100, None, order)
+    }
+
+    /// D4 of the M4A plan: a file with a video track gives the video text,
+    /// with any extension, with `moov` first or last.
+    #[test]
+    fn a_file_with_video_gives_the_video_text() {
+        use crate::test_m4a::{patched, with_second_trak};
+        use m4a::Order;
+        for order in [Order::FastStart, Order::MoovLast] {
+            let only_video = patched(alac_of(order), b"soun", b"vide");
+            for ext in ["mp4", "m4a"] {
+                assert_eq!(
+                    refusal(only_video.clone(), ext),
+                    VIDEO_TEXT,
+                    "{order:?}, {ext}"
+                );
+            }
+        }
+        let second = with_second_trak(alac_of(Order::MoovLast), b"vide", 2);
+        assert_eq!(refusal(second, "mp4"), VIDEO_TEXT);
+    }
+
+    #[test]
+    fn a_protected_file_gives_the_protected_text() {
+        use crate::test_m4a::{aac_m4a, with_entry};
+        use m4a::Order;
+        for order in [Order::FastStart, Order::MoovLast] {
+            let drms = with_entry(alac_of(order), b"drms");
+            assert_eq!(refusal(drms, "m4a"), PROTECTED_TEXT, "{order:?}");
+            let aac = aac_m4a(&short_tone(), 44_100, None, None, order);
+            let enca = with_entry(aac, b"enca");
+            assert_eq!(refusal(enca, "m4a"), PROTECTED_TEXT, "{order:?}");
+        }
+    }
+
+    /// An AAC M4A of `config` with 3 packets of zeros, in an `mp4a` entry
+    /// of `channels` at `rate`.
+    fn dummy_aac(config: &[u8], channels: u16, rate: u32) -> Vec<u8> {
+        let packet = [0_u8; 16];
+        crate::test_m4a::aac_m4a_of(
+            &[&packet[..]; 3],
+            channels,
+            config,
+            rate,
+            None,
+            None,
+            m4a::Order::FastStart,
+        )
+    }
+
+    /// HE-AAC: an explicit object type 5, an SBR flag of 1 in the sync
+    /// extension, and implicit SBR whose entry states the output rate.
+    #[test]
+    fn an_he_aac_file_gives_the_he_aac_text() {
+        use crate::test_m4a::{aac_m4a_of, adts_packets, config, he_aac};
+        let (stream, explicit, compatible) = he_aac(&chirps(), 44_100);
+        let packets = adts_packets(&stream);
+        for asc in [explicit, compatible] {
+            let file = aac_m4a_of(&packets, 2, &asc, 44_100, None, None, m4a::Order::FastStart);
+            assert_eq!(refusal(file, "m4a"), HE_AAC_TEXT, "{asc:02x?}");
+        }
+        let implicit = dummy_aac(&config(2, 22_050, 2), 2, 44_100);
+        assert_eq!(refusal(implicit, "m4a"), HE_AAC_TEXT);
+    }
+
+    /// Symphonia 0.6.1 refuses 6 channels of AAC, so the decode says so.
+    #[test]
+    fn an_aac_of_more_than_2_channels_gives_its_channels() {
+        use crate::test_m4a::{aac_m4a, adts, chirp};
+        let six: Vec<Vec<f32>> = (0..6).map(|c| chirp(c, 4096, 44_100)).collect();
+        let text = aac_channels_text(6);
+        assert_eq!(
+            text,
+            "This AAC file has 6 channels.  Only mono and stereo AAC open."
+        );
+        let file = aac_m4a(&six, 44_100, None, None, m4a::Order::FastStart);
+        assert_eq!(refusal(file, "m4a"), text);
+        // A raw ADTS stream has no AudioSpecificConfig: its channels count.
+        assert_eq!(refusal(adts(&six, 44_100), "aac"), text);
+    }
+
+    /// AAC Main, a program config element, 960 frames, and a config that
+    /// does not parse.
+    #[test]
+    fn another_kind_of_aac_gives_the_aac_lc_text() {
+        use crate::test_m4a::config;
+        for (asc, case) in [
+            (Vec::from(config(1, 44_100, 2)), "AAC Main"),
+            (Vec::from(config(2, 44_100, 0)), "a program config element"),
+            (vec![0x12, 0x14], "960 frames"),
+            (vec![0xF8], "no parse"),
+        ] {
+            assert_eq!(
+                refusal(dummy_aac(&asc, 2, 44_100), "m4a"),
+                AAC_KIND_TEXT,
+                "{case}"
+            );
+        }
+    }
+
+    /// The form of the maintainer's file: AAC-LC with the sync extension
+    /// and an SBR flag of 0.  It decodes.
+    #[test]
+    fn an_aac_lc_file_with_an_sbr_flag_of_0_decodes() {
+        use crate::test_m4a::{aac_m4a_of, aac_track_frames, adts, adts_packets, config};
+        let source = chirps();
+        let stream = adts(&source, 44_100);
+        let mut asc = Vec::from(config(2, 44_100, 2));
+        asc.extend_from_slice(&[0x56, 0xE5, 0x00]);
+        let file = aac_m4a_of(
+            &adts_packets(&stream),
+            2,
+            &asc,
+            44_100,
+            None,
+            None,
+            m4a::Order::FastStart,
+        );
+        let audio = decode_bytes(file, Some("m4a"));
+        assert!(audio.is_ok(), "{audio:?}");
+        assert_eq!(audio.unwrap().frames() as u64, aac_track_frames(88_200));
     }
 }
