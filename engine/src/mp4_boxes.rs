@@ -128,6 +128,8 @@ pub(crate) struct Found {
     pub first_media: Option<u64>,
     /// The start of the first `ftyp`.
     pub ftyp_at: Option<u64>,
+    /// The start and the end of the last top-level `mdat`.
+    pub last_mdat: Option<(u64, u64)>,
     /// Where the timescale of `mvhd` is in the file, when it is 0.
     pub zero_movie_timescale_at: Option<u64>,
 }
@@ -177,7 +179,7 @@ pub(crate) fn walk_from(source: &mut dyn ReadAt, start: u64) -> std::io::Result<
     let mut walker = Walker {
         source,
         found: Found::default(),
-        seen_sidx: std::collections::HashSet::new(),
+        seen_sidx: std::collections::HashMap::new(),
     };
     walker.top(start)?;
     Ok(Some(walker.found))
@@ -209,8 +211,8 @@ struct Walker<'a> {
     source: &'a mut dyn ReadAt,
     found: Found,
     /// The `reference_id` of each `sidx` that Symphonia sees, so it holds
-    /// an entry for it.
-    seen_sidx: std::collections::HashSet<u32>,
+    /// an entry for it, with the timescale of that entry.
+    seen_sidx: std::collections::HashMap<u32, u32>,
 }
 
 impl Walker<'_> {
@@ -310,6 +312,9 @@ impl Walker<'_> {
                 }
                 b"mdat" | b"moof" => {
                     walker.found.first_media.get_or_insert(found.start);
+                    if found.kind == *b"mdat" {
+                        walker.found.last_mdat = Some((found.start, found.end));
+                    }
                     if found.kind == *b"mdat" && walker.found.mdats.len() < MOST_MDATS {
                         walker.found.mdats.push((found.body, found.end));
                     }
@@ -347,19 +352,32 @@ impl Walker<'_> {
     /// that Symphonia sees already stays visible, at no charge.  Each other
     /// one is hidden, or charged when the plan keeps it.
     fn sidx(&mut self, found: BoxAt) -> std::io::Result<()> {
-        let mut head = [0; 8];
+        let mut head = [0; 12];
         let read = self.source.read_at(found.body, &mut head)?;
-        let id = (read == 8).then(|| u32::from_be_bytes([head[4], head[5], head[6], head[7]]));
+        let id_and_scale = (read == 12).then(|| (u32_at(&head, 4), u32_at(&head, 8)));
+        let (id, scale) = match id_and_scale {
+            Some((Some(id), Some(scale))) => (Some(id), Some(scale)),
+            _ => (None, None),
+        };
         let small = size_of(found).is_some_and(|size| size < crate::hidden::ALWAYS_HIDDEN);
-        if small && id.is_some_and(|id| self.seen_sidx.contains(&id)) {
+        let seen = id.and_then(|id| self.seen_sidx.get(&id).copied());
+        if small && seen.is_some() && seen == scale {
             return Ok(());
         }
-        // Past the kept limit the file is refused, so the set stays small.
-        if !self.hide(found)
-            && !self.found.hidden.too_much_kept
-            && let Some(id) = id
+        if self.hide(found) {
+            return Ok(());
+        }
+        // The plan keeps it, and charges it.  Symphonia refuses a second
+        // timescale for an id (`demuxer.rs`, line 197), so a `sidx` of a
+        // seen id with another timescale is hidden all the same (B of
+        // review round 8).  Past the kept limit the file is refused, so the
+        // map stays small.
+        if seen.is_some() {
+            self.found.hidden.patch(found.start + 4, b"free");
+        } else if !self.found.hidden.too_much_kept
+            && let (Some(id), Some(scale)) = (id, scale)
         {
-            self.seen_sidx.insert(id);
+            self.seen_sidx.insert(id, scale);
         }
         Ok(())
     }
@@ -640,6 +658,7 @@ mod tests {
                     first_media: Some(mdat as u64),
                     ftyp_at: Some(0),
                     zero_movie_timescale_at: None,
+                    last_mdat: Some((mdat as u64, (mdat + mdat_size) as u64)),
                 }),
                 "{order:?}"
             );

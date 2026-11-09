@@ -308,7 +308,15 @@ pub fn head_length(head: &[u8], file_bytes: u64) -> HeadLength {
         return HeadLength::Unstated;
     };
     let Some((container, marker)) = first_marker(after_tags, 0..LAST_MARKER + 1) else {
-        return HeadLength::Unstated;
+        // The decode steps over a chain of top-level boxes to an `ftyp`
+        // past the window (`hidden::ftyp_after_boxes`), so a head that starts
+        // with such a box is an MP4 whose length the head does not show
+        // (finding 8-8 of review round 8).
+        return if starts_with_a_first_box(after_tags) {
+            HeadLength::UnstatedPcm
+        } else {
+            HeadLength::Unstated
+        };
     };
     let at = reader_start(container, marker as u64) as usize;
     let rest = &after_tags[at..];
@@ -324,6 +332,26 @@ pub fn head_length(head: &[u8], file_bytes: u64) -> HeadLength {
         Container::Adts => HeadLength::UnstatedPcm,
         Container::Mp3 => HeadLength::Unstated,
     }
+}
+
+/// Whether `bytes` start with a box that can start an MP4
+/// (`mp4_boxes::FIRST_BOXES`), of a size of at least its header.
+fn starts_with_a_first_box(bytes: &[u8]) -> bool {
+    let Some(kind) = bytes.get(4..8) else {
+        return false;
+    };
+    let first = crate::mp4_boxes::FIRST_BOXES
+        .iter()
+        .any(|first| kind == &first[..]);
+    let size = be_u32_at(bytes, 0).unwrap_or(0);
+    let large = bytes
+        .get(8..16)
+        .map(|large| u64::from_be_bytes(large.try_into().unwrap_or_default()));
+    let fits = match size {
+        1 => large.is_some_and(|large| large >= 16),
+        size => size >= 8,
+    };
+    first && fits
 }
 
 /// [`head_length`] of an MP4 file, from the boxes in its head.  The `moov`
@@ -806,7 +834,13 @@ fn open_within(
     if params.codec == CODEC_ID_AAC {
         check_aac(&params)?;
     }
-    let params = with_pce_channels(params);
+    // The mend reads an AAC config; other codecs have other extra data
+    // (finding 8-1 of review round 8).
+    let params = if params.codec == CODEC_ID_AAC {
+        with_pce_channels(params)
+    } else {
+        params
+    };
     let queued = if params.codec == CODEC_ID_AAC {
         first_packets_of_lc(&mut *format, track_id)?
     } else {
@@ -856,6 +890,7 @@ fn open_within(
 /// Changes the view of an MP4 where Symphonia 0.6.1 refuses a valid file,
 /// or reads a box whole that it does not need (review round 7).
 ///
+/// * A last `mdat` past the end of the file gets a size of 0.
 /// * A first `moov` of size 0 runs to the end of the file, but Symphonia
 ///   reads past the end of such a parent (`atoms/mod.rs`, line 640).  The
 ///   view gives it its size (TD-85).
@@ -868,6 +903,16 @@ fn open_within(
 ///   shows one past `MOST_BOX_BYTES` as 16 bytes with no brands, then a
 ///   `free` box of the rest, with a 64-bit size (B5).
 fn mend_mp4(found: &Found, byte_len: Option<u64>, plan: &mut crate::hidden::Plan) {
+    // A last `mdat` that ends past the end of the file, as in a cut file:
+    // Symphonia skips a top-level box that ends past the end of its stream
+    // (`atoms/mod.rs`, line 671), and then finds no `mdat`.  The view gives
+    // it a size of 0, to the end of the file (B of review round 8).
+    if let (Some((start, end)), Some(len)) = (found.last_mdat, byte_len)
+        && end != u64::MAX
+        && end > len
+    {
+        plan.patch(start, &[0; 4]);
+    }
     if let Some(moov) = &found.moov
         && moov.end.is_none()
         && let Some(size) =
@@ -961,8 +1006,8 @@ const MOST_CHECK_PACKETS: usize = 64;
 /// Reads the first [`SBR_CHECK_PACKETS`] packets of the AAC track
 /// `track_id`, and gives each packet that it read, to decode first.  It
 /// refuses an HE-AAC stream whose config shows no SBR (TD-81, closed by
-/// review round 7): each packet that it read ends with SBR data
-/// (`aac_config::ends_with_sbr`).  Symphonia 0.6.1 finds that data too
+/// review round 7): each packet of the track that it read holds SBR data in
+/// a fill element before its end (`aac_config::has_sbr_fill`).  Symphonia 0.6.1 finds that data too
 /// (`aac/mod.rs`, line 194), but does not show it, and decodes the AAC-LC
 /// core at half the band.
 fn first_packets_of_lc(
@@ -981,7 +1026,7 @@ fn first_packets_of_lc(
         };
         if packet.track_id == track_id {
             audio += 1;
-            if crate::aac_config::ends_with_sbr(&packet.data) {
+            if crate::aac_config::has_sbr_fill(&packet.data) {
                 with_sbr += 1;
             }
         }
@@ -4244,9 +4289,9 @@ mod tests {
     }
 
     /// TD-81, closed by review round 7: an HE-AAC stream whose config does
-    /// not show SBR carries SBR data in a fill element at the end of each
+    /// not show SBR carries SBR data in a fill element before the end of each
     /// packet.  The decode checks the first 8 packets, and gives the HE-AAC
-    /// text when each ends so: an M4A with the core rate in its entry, one
+    /// text when each holds it: an M4A with the core rate in its entry, one
     /// with an entry rate of 0, and an ADTS stream.  AAC-LC still opens,
     /// also with one such packet in the first 8.
     #[test]
@@ -4407,5 +4452,308 @@ mod tests {
             decode_bytes(sowt, Some("aiff")).is_ok(),
             "a type that Symphonia decodes"
         );
+    }
+
+    /// Finding 8-1 of review round 8: the mend of an AAC config runs only
+    /// for AAC.  A FLAC of a fixed block size of 4100 and frame sizes of 0
+    /// decodes.
+    #[test]
+    fn a_flac_of_a_fixed_block_of_4100_decodes() {
+        use crate::test_flac::{Blocks, by_hand};
+        let flac = by_hand(
+            44_100,
+            16,
+            2,
+            0,
+            Blocks::Silence {
+                block: 4100,
+                blocks: 3,
+            },
+        );
+        let audio = decode_bytes(flac, Some("flac"));
+        assert!(audio.is_ok(), "{:?}", audio.err());
+        assert_eq!(audio.unwrap().frames(), 3 * 4100);
+    }
+
+    /// A reader of `packets`, each (track, data), for the HE-AAC check.
+    struct Scripted(
+        std::collections::VecDeque<(u32, Vec<u8>)>,
+        Vec<symphonia::core::formats::Track>,
+    );
+
+    impl FormatReader for Scripted {
+        fn format_info(&self) -> &symphonia::core::formats::FormatInfo {
+            unimplemented!("not used by the check")
+        }
+
+        fn media_info(&self) -> &symphonia::core::formats::MediaInfo {
+            unimplemented!("not used by the check")
+        }
+
+        fn next_packet(&mut self) -> symphonia::core::errors::Result<Option<SymPacket>> {
+            Ok(self.0.pop_front().map(|(track, data)| {
+                SymPacket::new(
+                    track,
+                    symphonia::core::units::Timestamp::new(0),
+                    symphonia::core::units::Duration::new(1024),
+                    data,
+                )
+            }))
+        }
+
+        fn metadata(&mut self) -> symphonia::core::meta::Metadata<'_> {
+            unimplemented!("not used by the check")
+        }
+
+        fn chapters(&self) -> Option<&symphonia::core::meta::ChapterGroup> {
+            None
+        }
+
+        fn tracks(&self) -> &[symphonia::core::formats::Track] {
+            &self.1
+        }
+
+        fn seek(
+            &mut self,
+            _: symphonia::core::formats::SeekMode,
+            _: symphonia::core::formats::SeekTo,
+        ) -> symphonia::core::errors::Result<symphonia::core::formats::SeekedTo> {
+            unimplemented!("not used by the check")
+        }
+
+        fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
+        where
+            Self: 's,
+        {
+            unimplemented!("not used by the check")
+        }
+    }
+
+    /// Findings 8-7 and missed mutant 8-27 of review round 8: the HE-AAC
+    /// check counts only the packets of the audio track, reads at most
+    /// `MOST_CHECK_PACKETS` packets, and the first `SBR_CHECK_PACKETS` of the
+    /// track only.
+    #[test]
+    fn the_he_aac_check_takes_the_first_packets_of_the_audio_track() {
+        use crate::test_m4a::{adts, adts_packets, with_sbr_fill};
+        let stream = adts(&chirps(), 44_100);
+        let lc: Vec<Vec<u8>> = adts_packets(&stream).into_iter().map(Vec::from).collect();
+        let sbr: Vec<Vec<u8>> = lc.iter().map(|packet| with_sbr_fill(packet)).collect();
+        let check = |packets: Vec<(u32, Vec<u8>)>| {
+            let mut reader = Scripted(packets.into(), Vec::new());
+            first_packets_of_lc(&mut reader, 1)
+                .map(|queued| queued.len())
+                .map_err(|e| e.to_string())
+        };
+        let mixed = |audio: &[Vec<u8>], other: &[Vec<u8>]| {
+            audio
+                .iter()
+                .zip(other)
+                .flat_map(|(a, o)| [(1, a.clone()), (2, o.clone())])
+                .collect()
+        };
+        assert_eq!(
+            check(mixed(&sbr, &lc)),
+            Err(HE_AAC_TEXT.to_string()),
+            "SBR on the audio track"
+        );
+        assert_eq!(check(mixed(&lc, &sbr)), Ok(15), "SBR on the other track");
+        let first: Vec<(u32, Vec<u8>)> = (0..80).map(|k| (2, sbr[k % sbr.len()].clone())).collect();
+        let other_first = [first, sbr.iter().map(|p| (1, p.clone())).collect()].concat();
+        assert_eq!(check(other_first), Ok(MOST_CHECK_PACKETS), "the bound");
+        let late = [
+            sbr.iter().take(8).cloned().collect::<Vec<_>>(),
+            (0..80).map(|k| lc[k % lc.len()].clone()).collect(),
+        ]
+        .concat();
+        assert_eq!(
+            check(late.into_iter().map(|p| (1, p)).collect()),
+            Err(HE_AAC_TEXT.to_string())
+        );
+    }
+
+    /// Finding 8-8 of review round 8: the head of an M4A after a chain of
+    /// boxes past the window states no length, but is no MP3.
+    #[test]
+    fn the_head_of_an_m4a_after_a_large_box_is_unstated_pcm() {
+        use crate::test_m4a::{bx, with_stco_moved};
+        let plain = alac_of(m4a::Order::FastStart);
+        for kind in [b"free", b"uuid"] {
+            for size in [100 << 10, 2 << 20] {
+                let prefix = bx(kind, &[&vec![0; size]]);
+                let file = [
+                    prefix.clone(),
+                    with_stco_moved(plain.clone(), prefix.len() as i64),
+                ]
+                .concat();
+                let case = format!("{} of {size}", String::from_utf8_lossy(kind));
+                assert_eq!(head_of(&file), HeadLength::UnstatedPcm, "{case}");
+            }
+        }
+        assert_eq!(
+            head_of(&[vec![0x42; 2 << 20], plain].concat()),
+            HeadLength::Unstated,
+            "junk"
+        );
+    }
+
+    /// Missed mutants of review round 8, each with the validator's input.
+    #[test]
+    fn the_inputs_of_the_missed_mutants_of_round_8() {
+        use crate::test_audio::{Aiff, aiff};
+        use crate::test_m4a::{adts, bx, top_box};
+        // 8-21: an empty `mdat` before the real one, behind 26 junk bytes.
+        // The first chunk of the MP4 is 10 bytes into the real `mdat`, and
+        // from the start of the file it falls at the start of the empty
+        // one, in no body.
+        let plain = alac_of(m4a::Order::MoovLast);
+        let (ftyp, ftyp_size) = top_box(&plain, b"ftyp");
+        let (mdat, mdat_size) = top_box(&plain, b"mdat");
+        let real = [
+            &((mdat_size + 10) as u32).to_be_bytes()[..],
+            b"mdat",
+            &[0; 10],
+            &plain[mdat + 8..mdat + mdat_size],
+        ]
+        .concat();
+        let mp4 = [
+            &plain[..ftyp + ftyp_size],
+            &bx(b"mdat", &[]),
+            &bx(b"free", &[]),
+            &real,
+            &plain[mdat + mdat_size..],
+        ]
+        .concat();
+        let mp4 = crate::test_m4a::with_stco_moved(mp4, 26);
+        let want = decoded(mp4.clone(), "an empty mdat").channels;
+        let behind = [vec![0x42; 26], mp4].concat();
+        assert!(
+            decoded(behind, "an empty mdat behind junk").channels == want,
+            "8-21"
+        );
+        // 8-22: a WAV with a sample rate of 0 opens under a frame limit.
+        let (_, _, mut wav) = stereo_wav();
+        wav[24..32].copy_from_slice(&[0; 8]);
+        let opened = Decoder::within_song_frames(Box::new(Cursor::new(wav)), Some("wav"), 1 << 20);
+        assert!(opened.is_ok(), "8-22: {:?}", opened.err());
+        // 8-24: an ADTS stream of one frame is no stream of raw blocks.
+        let stream = adts(&short_tone(), 44_100);
+        let length = (usize::from(stream[3] & 3) << 11)
+            | (usize::from(stream[4]) << 3)
+            | usize::from(stream[5] >> 5);
+        let one = Vec::from(&stream[..length]);
+        let error = decode_bytes(one, Some("aac"))
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("no known format")),
+            "8-24: {error:?}"
+        );
+        // 8-29 and 8-33: an ADTS stream cut at 700 bytes decodes the whole
+        // frames that it holds.
+        let cut = &stream[..700];
+        let (mut at, mut whole) = (0, 0);
+        while at + 7 <= cut.len() {
+            let frame = (usize::from(cut[at + 3] & 3) << 11)
+                | (usize::from(cut[at + 4]) << 3)
+                | usize::from(cut[at + 5] >> 5);
+            if at + frame > cut.len() {
+                break;
+            }
+            whole += 1;
+            at += frame;
+        }
+        assert!(whole >= 1 && at < cut.len(), "a cut inside a frame");
+        let decoded_cut = decode_bytes(Vec::from(cut), Some("aac"));
+        assert!(decoded_cut.is_ok(), "8-29: {:?}", decoded_cut.err());
+        assert_eq!(decoded_cut.unwrap().frames(), whole * 1024, "8-29");
+        // 8-26: an AIFC cut inside its compression type.
+        let (left, right, _) = stereo_wav();
+        let aifc = aiff(&[left, right], 44_100, 16, Aiff::UncompressedAifc);
+        let at = (0..aifc.len())
+            .find(|at| aifc[*at..].starts_with(b"NONE"))
+            .unwrap();
+        let error = decode_bytes(Vec::from(&aifc[..at + 2]), Some("aiff"))
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("unexpected end of file")),
+            "8-26: {error:?}"
+        );
+        // 8-31: an odd-sized chunk before the COMM of a compressed AIFC.
+        let mut mac3 = aifc.clone();
+        mac3[at..at + 4].copy_from_slice(b"MAC3");
+        let odd = [&b"ANNO"[..], &1_u32.to_be_bytes(), b"a", &[0]].concat();
+        let mut odd_first = [&mac3[..12], &odd, &mac3[12..]].concat();
+        let form = (odd_first.len() - 8) as u32;
+        odd_first[4..8].copy_from_slice(&form.to_be_bytes());
+        assert_refused_early(odd_first, "aiff", AIFC_COMPRESSED_TEXT, "8-31");
+    }
+
+    /// Findings 8-6 and missed mutant 8-30 of review round 8, and a check
+    /// of the validation: each `sidx` that Symphonia would hold too much of,
+    /// or refuse, is hidden.
+    #[test]
+    fn each_sidx_that_symphonia_would_hold_or_refuse_is_hidden() {
+        use crate::test_m4a::{bx, same_sidx_boxes};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let sidx = |scale: u32, references: u16| {
+            let mut body = Vec::from([0_u8; 4]);
+            body.extend_from_slice(&1_u32.to_be_bytes());
+            body.extend_from_slice(&scale.to_be_bytes());
+            body.extend_from_slice(&[0; 8]);
+            body.extend_from_slice(&[0, 0]);
+            body.extend_from_slice(&references.to_be_bytes());
+            body.extend_from_slice(&vec![0; 12 * usize::from(references)]);
+            bx(b"sidx", &[&body])
+        };
+        // Past MOST_SMALL, the id is seen.  Then a large `sidx` of it, and a
+        // small one of another timescale.
+        let seen = same_sidx_boxes(crate::hidden::MOST_SMALL + 1);
+        let large = [plain.clone(), seen.clone(), sidx(1000, 65_535)].concat();
+        assert_tags_are_hidden(plain.clone(), large, "m4a", "a large sidx of a seen id");
+        let other = [plain.clone(), seen, sidx(2000, 0)].concat();
+        assert_tags_are_hidden(plain.clone(), other, "m4a", "a sidx of another timescale");
+        let three = [plain.clone(), sidx(1000, 0), sidx(2000, 0), sidx(1000, 0)].concat();
+        assert_tags_are_hidden(plain, three, "m4a", "timescales 1000, 2000, 1000");
+    }
+
+    /// B of review round 8: an M4A cut inside its last `mdat` decodes the
+    /// packets that it holds.  Symphonia skips a top-level box that ends past
+    /// the end of the stream (`atoms/mod.rs`, line 671), so it found no
+    /// `mdat` ("no atom pending read"), also at fca7f18.  The view gives that
+    /// `mdat` a size of 0: to the end of the file.
+    #[test]
+    fn an_m4a_cut_inside_its_mdat_decodes_what_it_holds() {
+        use crate::test_m4a::{aac_m4a, top_box};
+        let aac = aac_m4a(&chirps(), 44_100, None, None, m4a::Order::FastStart);
+        let tone = chirps();
+        let alac =
+            crate::test_m4a::alac_m4a(&tone[0], &tone[1], 44_100, None, m4a::Order::FastStart);
+        for (codec, file) in [("aac", aac), ("alac", alac)] {
+            let whole = decoded(file.clone(), codec).channels;
+            let (mdat, size) = top_box(&file, b"mdat");
+            for cut in [1, 100, 1000, 3001, size / 3, size * 2 / 3, size - 9] {
+                let case = format!("{codec} cut {cut} bytes into its mdat");
+                let got = decode_bytes(Vec::from(&file[..mdat + 8 + cut]), Some("m4a"));
+                let error = got.as_ref().err().map(|e| format!("{e:#}"));
+                let nothing_held = error.as_deref() == Some("file decoded to no audio");
+                assert!(
+                    got.is_ok() || (cut < size / 3 && nothing_held),
+                    "{case}: {error:?}"
+                );
+                if let Ok(audio) = got {
+                    let frames = audio.frames();
+                    assert!(frames > 0, "{case}");
+                    let prefix: Vec<&[f32]> = whole.iter().map(|c| &c[..frames]).collect();
+                    let held: Vec<&[f32]> = audio.channels.iter().map(Vec::as_slice).collect();
+                    assert!(held == prefix, "{case}: {frames} frames");
+                }
+            }
+        }
     }
 }

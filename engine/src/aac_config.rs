@@ -201,13 +201,23 @@ pub(crate) fn with_channel_config(asc: &[u8], at: usize, config: u8) -> Vec<u8> 
     out
 }
 
-/// Whether the AAC raw data block `packet` ends with a fill element of SBR
-/// data (`EXT_SBR_DATA` 0xD or `EXT_SBR_DATA_CRC` 0xE) just before its
-/// ID_END, as an HE-AAC packet does (ISO/IEC 14496-3, 4.4.2.1 and 4.5.2.1;
-/// Symphonia's syntax at `aac/mod.rs`, lines 178 to 205).  ID_END is the
-/// last 1 bits of the packet, before zeros to the byte.  It tests each
-/// length of a fill element that ends there.
-pub(crate) fn ends_with_sbr(packet: &[u8]) -> bool {
+/// The most fill elements before ID_END that [`has_sbr_fill`] walks.
+const MOST_TRAILING_FILLS: usize = 3;
+
+/// The extension types of a fill element that is not SBR data
+/// (ISO/IEC 14496-3, table 4.121): `EXT_FILL`, `EXT_FILL_DATA`,
+/// `EXT_DATA_ELEMENT`, `EXT_DYNAMIC_RANGE` and `EXT_SAC_DATA`.
+const OTHER_FILLS: [u32; 5] = [0x0, 0x1, 0x2, 0xB, 0xC];
+
+/// Whether the AAC raw data block `packet` holds a fill element of SBR
+/// data (`EXT_SBR_DATA` 0xD or `EXT_SBR_DATA_CRC` 0xE) in the fill elements
+/// just before its ID_END, as an HE-AAC packet does (ISO/IEC 14496-3,
+/// 4.4.2.1 and 4.5.2.1).  Symphonia's parser finds SBR data in any fill
+/// element (`aac/mod.rs`, lines 178 to 205).  ID_END is the last 1 bits of
+/// the packet, before zeros to the byte.  It walks back over up to
+/// [`MOST_TRAILING_FILLS`] fill elements, each of a length that ends where
+/// the next one starts, and of a known extension type.
+pub(crate) fn has_sbr_fill(packet: &[u8]) -> bool {
     let bit = |at: usize| u32::from((packet[at / 8] >> (7 - at % 8)) & 1);
     let read = |at: usize, count: usize| (0..count).fold(0, |value, k| (value << 1) | bit(at + k));
     let Some(end) = (0..packet.len() * 8)
@@ -217,12 +227,18 @@ pub(crate) fn ends_with_sbr(packet: &[u8]) -> bool {
     else {
         return false;
     };
-    if read(end, 3) != 7 {
+    read(end, 3) == 7 && sbr_in_fills(&read, end, MOST_TRAILING_FILLS)
+}
+
+/// Whether a chain of at most `depth` fill elements that ends at the bit
+/// `end` holds SBR data.  Each fill element is ID_FIL (3 bits), a count of
+/// 4 bits (15 and an escape of 8 bits: 15 + escape - 1), then the count in
+/// bytes, of which the first 4 bits are the extension type.
+fn sbr_in_fills(read: &dyn Fn(usize, usize) -> u32, end: usize, depth: usize) -> bool {
+    if depth == 0 {
         return false;
     }
-    // A count of 1 to 14 bytes, or 15 and an escape of 8 bits: the count
-    // is 15 + escape - 1.  The extension type is the first 4 bits.
-    (1..=269_usize).any(|count| {
+    (0..=269_usize).any(|count| {
         let head = if count < 15 { 3 + 4 } else { 3 + 4 + 8 };
         let Some(start) = end.checked_sub(head + count * 8) else {
             return false;
@@ -232,7 +248,15 @@ pub(crate) fn ends_with_sbr(packet: &[u8]) -> bool {
             15 => 15 + read(start + 7, 8) as usize - 1,
             field => field,
         };
-        read(start, 3) == 6 && stated == count && matches!(read(start + head, 4), 0xD | 0xE)
+        if read(start, 3) != 6 || stated != count {
+            return false;
+        }
+        let extension = (count > 0).then(|| read(start + head, 4));
+        match extension {
+            Some(0xD | 0xE) => true,
+            Some(other) if !OTHER_FILLS.contains(&other) => false,
+            _ => sbr_in_fills(read, start, depth - 1),
+        }
     })
 }
 
@@ -283,7 +307,7 @@ mod tests {
     /// TD-81, closed by review round 7: the end of a packet with a fill
     /// element of SBR data, of each length of its count.
     #[test]
-    fn a_packet_that_ends_with_sbr_data_is_found() {
+    fn a_packet_that_has_sbr_fill_data_is_found() {
         use crate::test_m4a::BitWriter;
         let packet = |count: usize, extension: u32, end: bool| {
             let mut bits = BitWriter::default();
@@ -304,15 +328,66 @@ mod tests {
             bits.bytes
         };
         for count in [1, 14, 15, 16, 269] {
-            assert!(ends_with_sbr(&packet(count, 0xD, true)), "{count}");
-            assert!(ends_with_sbr(&packet(count, 0xE, true)), "{count} with CRC");
+            assert!(has_sbr_fill(&packet(count, 0xD, true)), "{count}");
+            assert!(has_sbr_fill(&packet(count, 0xE, true)), "{count} with CRC");
         }
         for extension in [0x0, 0x1, 0xB] {
-            assert!(!ends_with_sbr(&packet(4, extension, true)), "{extension:x}");
+            assert!(!has_sbr_fill(&packet(4, extension, true)), "{extension:x}");
         }
-        assert!(!ends_with_sbr(&packet(4, 0xD, false)), "no ID_END");
-        assert!(!ends_with_sbr(&[]), "no bits");
-        assert!(!ends_with_sbr(&[0xE0]), "ID_END only");
+        assert!(!has_sbr_fill(&packet(4, 0xD, false)), "no ID_END");
+        assert!(!has_sbr_fill(&[]), "no bits");
+        assert!(!has_sbr_fill(&[0xE0]), "ID_END only");
+    }
+
+    /// Findings 8-4 and 8-9 of review round 8: SBR data in a fill element
+    /// before other fill elements is found, as Symphonia's parser finds it
+    /// in any fill element.  A data element (ID_DSE) with the same bits is
+    /// not a fill element.
+    #[test]
+    fn sbr_data_before_other_fill_elements_is_found() {
+        use crate::test_m4a::BitWriter;
+        let fill = |bits: &mut BitWriter, count: usize, extension: u32| {
+            bits.put(3, 6);
+            bits.put(4, count as u32);
+            if count > 0 {
+                bits.put(4, extension);
+                bits.put(count * 8 - 4, 0x5A);
+            }
+        };
+        let packet = |fills: &[(usize, u32)], id: u32| {
+            let mut bits = BitWriter::default();
+            bits.put(9, 0x15A);
+            let (first, rest) = fills.split_first().unwrap();
+            bits.put(3, id);
+            bits.put(4, first.0 as u32);
+            bits.put(4, first.1);
+            bits.put(first.0 * 8 - 4, 0x5A);
+            for (count, extension) in rest {
+                fill(&mut bits, *count, *extension);
+            }
+            bits.put(3, 7);
+            bits.bytes
+        };
+        assert!(
+            has_sbr_fill(&packet(&[(3, 0xD), (2, 0x0)], 6)),
+            "then EXT_FILL"
+        );
+        assert!(
+            has_sbr_fill(&packet(&[(3, 0xD), (2, 0x1)], 6)),
+            "then EXT_FILL_DATA"
+        );
+        assert!(
+            has_sbr_fill(&packet(&[(3, 0xE), (0, 0), (2, 0x1)], 6)),
+            "then two"
+        );
+        assert!(!has_sbr_fill(&packet(&[(3, 0x1), (2, 0x0)], 6)), "no SBR");
+        assert!(
+            !has_sbr_fill(&packet(&[(3, 0xD), (2, 0x7)], 6)),
+            "an unknown type after"
+        );
+        assert!(!has_sbr_fill(&packet(&[(3, 0xD)], 4)), "ID_DSE");
+        let deep = packet(&[(3, 0xD), (1, 0x0), (1, 0x0), (1, 0x0)], 6);
+        assert!(!has_sbr_fill(&deep), "past the most fill elements");
     }
 
     /// Each AudioSpecificConfig of the fixtures, and the maintainer's.
