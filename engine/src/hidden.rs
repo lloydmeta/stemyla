@@ -310,6 +310,17 @@ fn chunk_plan(
         if tags.iter().any(|tag| **tag == id) {
             plan.hide(at, HIDDEN_CHUNK, Some(8 + size));
         }
+        // Symphonia 0.6.1 refuses an AIFF SSND block size other than 0
+        // (`aiff/chunks.rs`, line 321).  The block size only aligns the
+        // samples, which start at the offset, so the view shows 0 (B6 of
+        // review round 7).
+        if id == *b"SSND" {
+            let mut block = [0; 4];
+            let read = source.read_at(at + 12, &mut block)?;
+            if read == 4 && block != [0; 4] {
+                plan.patch(at + 12, &[0; 4]);
+            }
+        }
         if last == Some(&id) {
             return Ok(());
         }

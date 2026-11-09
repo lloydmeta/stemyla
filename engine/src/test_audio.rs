@@ -454,3 +454,21 @@ pub fn with_seektable(flac: &[u8], points: usize) -> Vec<u8> {
     out.extend_from_slice(&flac[42..]);
     out
 }
+
+/// `aiff` with an SSND offset and block size of `align`: `align` bytes of
+/// zeros before its samples.
+pub fn with_block_aligned_ssnd(aiff: &[u8], align: u32) -> Vec<u8> {
+    let ssnd = (12..aiff.len())
+        .find(|at| aiff[*at..].starts_with(b"SSND"))
+        .expect("an SSND chunk");
+    let size = u32::from_be_bytes(aiff[ssnd + 4..ssnd + 8].try_into().unwrap());
+    let mut out = Vec::from(&aiff[..ssnd + 8]);
+    out[ssnd + 4..ssnd + 8].copy_from_slice(&(size + align).to_be_bytes());
+    out.extend_from_slice(&align.to_be_bytes());
+    out.extend_from_slice(&align.to_be_bytes());
+    out.extend_from_slice(&vec![0; align as usize]);
+    out.extend_from_slice(&aiff[ssnd + 16..]);
+    let form = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&form.to_be_bytes());
+    out
+}

@@ -126,6 +126,10 @@ pub(crate) struct Found {
     pub mdats: Vec<(u64, u64)>,
     /// The start of the first top-level `mdat` or `moof`.
     pub first_media: Option<u64>,
+    /// The start of the first `ftyp`.
+    pub ftyp_at: Option<u64>,
+    /// Where the timescale of `mvhd` is in the file, when it is 0.
+    pub zero_movie_timescale_at: Option<u64>,
 }
 
 /// The most `mdat` bodies that the walk keeps.  The first chunk of a
@@ -302,6 +306,7 @@ impl Walker<'_> {
                 }
                 b"ftyp" if walker.found.ftyp_bytes.is_none() => {
                     walker.found.ftyp_bytes = Some(size_of(found).unwrap_or(u64::MAX));
+                    walker.found.ftyp_at = Some(found.start);
                 }
                 b"mdat" | b"moof" => {
                     walker.found.first_media.get_or_insert(found.start);
@@ -371,6 +376,9 @@ impl Walker<'_> {
                     let body = walker.body(found, false)?.unwrap_or_default();
                     let at = if body.first() == Some(&1) { 20 } else { 12 };
                     walker.found.movie_timescale = u32_at(&body, at);
+                    if walker.found.movie_timescale == Some(0) {
+                        walker.found.zero_movie_timescale_at = Some(found.body + at as u64);
+                    }
                 }
                 b"trak" => {
                     let mut trak = Trak::default();
@@ -630,6 +638,8 @@ mod tests {
                     ftyp_bytes: Some(28),
                     mdats: vec![(mdat as u64 + 8, (mdat + mdat_size) as u64)],
                     first_media: Some(mdat as u64),
+                    ftyp_at: Some(0),
+                    zero_movie_timescale_at: None,
                 }),
                 "{order:?}"
             );
@@ -1135,5 +1145,28 @@ mod tests {
         }
         let file = bx(b"moov", &[&bx(b"trak", &[&shallow])]);
         assert!(walked(&file).unwrap().sound.is_some(), "4 mdia boxes deep");
+    }
+
+    /// TD-82, closed by review round 7: the walk gives where an `mvhd`
+    /// timescale of 0 is, for version 0 and version 1, so the view can
+    /// change it.
+    #[test]
+    fn the_walk_finds_a_movie_timescale_of_0() {
+        use crate::test_m4a::{bx, place_once, version_1};
+        let ftyp = bx(b"ftyp", &[b"M4A ", &[0; 4]]);
+        let mut v1 = [ftyp.clone(), version_1()].concat();
+        let body = place_once(&v1, b"mvhd") + 4;
+        assert_eq!(walked(&v1).unwrap().zero_movie_timescale_at, None);
+        v1[body + 20..body + 24].copy_from_slice(&[0; 4]);
+        assert_eq!(
+            walked(&v1).unwrap().zero_movie_timescale_at,
+            Some(body as u64 + 20)
+        );
+        let v0 = crate::test_m4a::with_movie_timescale(alac(Order::MoovLast), 0, 4096);
+        let body = place_once(&v0, b"mvhd") + 4;
+        assert_eq!(
+            walked(&v0).unwrap().zero_movie_timescale_at,
+            Some(body as u64 + 12)
+        );
     }
 }

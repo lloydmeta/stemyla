@@ -100,12 +100,6 @@ pub const MOOV_TEXT: &str =
 pub const TAGS_TEXT: &str =
     "This file holds too many tags to open safely.  Remove its tags, or open another file.";
 
-/// The text of an MP4 whose first `ftyp` passes `MOST_BOX_BYTES`.
-/// Symphonia needs it and reads it whole.  A real `ftyp` has tens of
-/// bytes.
-pub const FTYP_TEXT: &str =
-    "The header of this file (its ftyp box) is too large, so it cannot open.";
-
 /// The most bytes of the first `moov` that Symphonia holds (`mvhd`,
 /// `mvex`, and `tkhd`, `edts` and `mdia` of each `trak`,
 /// `Found::moov_held`): 16 MiB of slack ([`TAG_ROOM`]),
@@ -720,12 +714,6 @@ fn open_within(
         if held.is_some_and(|bytes| bytes > most_moov_bytes(found)) {
             return Err(anyhow!(MOOV_TEXT));
         }
-        if found
-            .ftyp_bytes
-            .is_some_and(|bytes| bytes > crate::mp4_boxes::MOST_BOX_BYTES as u64)
-        {
-            return Err(anyhow!(FTYP_TEXT));
-        }
     }
     // An MP4 behind other bytes: where its chunk offsets count from.
     let (view, late) = match &boxes {
@@ -741,6 +729,7 @@ fn open_within(
             if let Some(size) = late {
                 plan.free_after_return(size);
             }
+            mend_mp4(found, byte_len, &mut plan);
             plan
         }
         None if is_seekable => {
@@ -830,6 +819,54 @@ fn open_within(
         reserve,
         trim,
     })
+}
+
+/// Changes the view of an MP4 where Symphonia 0.6.1 refuses a valid file,
+/// or reads a box whole that it does not need (review round 7).
+///
+/// * A first `moov` of size 0 runs to the end of the file, but Symphonia
+///   reads past the end of such a parent (`atoms/mod.rs`, line 640).  The
+///   view gives it its size (TD-85).
+/// * Symphonia refuses an `mvhd` timescale of 0 (`atoms/mvhd.rs`, lines 51
+///   and 62), and uses it only for its `media_info` (`demuxer.rs`, line
+///   338), which `engine` does not read.  The view gives the timescale of
+///   the first sound track, or 1000 (TD-82).  The trim reads the file.
+/// * Symphonia needs a first `ftyp` only to exist (`demuxer.rs`, line 243),
+///   and reads each of its brands (`atoms/ftyp.rs`, line 43).  The view
+///   shows one past `MOST_BOX_BYTES` as 16 bytes with no brands, then a
+///   `free` box of the rest, with a 64-bit size (B5).
+fn mend_mp4(found: &Found, byte_len: Option<u64>, plan: &mut crate::hidden::Plan) {
+    if let Some(moov) = &found.moov
+        && moov.end.is_none()
+        && let Some(size) =
+            byte_len.and_then(|len| u32::try_from(len.checked_sub(moov.start)?).ok())
+    {
+        plan.patch(moov.start, &size.to_be_bytes());
+    }
+    if let Some(at) = found.zero_movie_timescale_at {
+        let scale = found
+            .sound
+            .as_ref()
+            .and_then(|sound| sound.media_timescale)
+            .filter(|scale| *scale > 0)
+            .unwrap_or(1000);
+        plan.patch(at, &scale.to_be_bytes());
+    }
+    if let (Some(at), Some(bytes)) = (found.ftyp_at, found.ftyp_bytes)
+        && bytes > crate::mp4_boxes::MOST_BOX_BYTES as u64
+    {
+        plan.patch(at, &16_u32.to_be_bytes());
+        plan.patch(at + 20, b"free");
+        if bytes == u64::MAX {
+            // It runs to the end of the file, and so does the `free` box.
+            plan.patch(at + 16, &[0; 4]);
+        } else {
+            let rest = (bytes - 16).to_be_bytes();
+            plan.patch(at + 16, &1_u32.to_be_bytes());
+            plan.patch(at + 24, &rest[..4]);
+            plan.patch(at + 28, &rest[4..]);
+        }
+    }
 }
 
 /// Where Symphonia's view of an MP4 starts, when other bytes come before
@@ -2754,14 +2791,14 @@ mod tests {
                 audio.frames()
             );
         }
-        // Symphonia 0.6.1 refuses a movie timescale of 0 (TD-82), so
-        // `trim_of_a_movie_timescale_of_0_is_skip_only` checks the trim.
-        let no_movie_scale = decode_bytes(with_movie_timescale(file.clone(), 0, 4096), Some("m4a"));
+        // Symphonia 0.6.1 refuses a movie timescale of 0, so the view gives
+        // `mvhd` the media timescale (TD-82, closed by review round 7).  The
+        // trim reads the file, so it is `skip` only.
+        let no_movie_scale = decoded(with_movie_timescale(file.clone(), 0, 4096), "scale 0");
+        let skip_only = frames_of(&whole, 2112, input_frames - 2112);
         assert!(
-            no_movie_scale
-                .as_ref()
-                .is_err_and(|e| format!("{e:#}").contains("timescale is zero")),
-            "a movie timescale of 0: {no_movie_scale:?}"
+            no_movie_scale.channels == skip_only,
+            "a movie timescale of 0"
         );
         let past = decode_bytes(
             with_elst(file, &[(10, input_frames as i32 + 10, ONE)]),
@@ -2774,8 +2811,8 @@ mod tests {
         );
     }
 
-    /// A movie timescale of 0 gives `skip` with no `keep`.  Symphonia
-    /// 0.6.1 does not open such a file (TD-82), so this checks `trim_of`.
+    /// A movie timescale of 0 gives `skip` with no `keep`.  The decode of
+    /// such a file is in `only_the_common_form_of_elst_gives_a_trim`.
     #[test]
     fn trim_of_a_movie_timescale_of_0_is_skip_only() {
         use crate::mp4_boxes::EditEntry;
@@ -3118,30 +3155,23 @@ mod tests {
         let in_udta = with_cover(plain.clone(), ART);
         assert_tags_are_hidden(plain.clone(), in_udta.clone(), "m4a", "art in moov/udta");
         // Finding 2-9: a `moov` of size 0 runs to the end of the file.
-        // Symphonia 0.6.1 opens no such file, with art or not (TD-85).  Its
-        // art stays hidden, so the open fails at a small peak.
-        let mut to_the_end = in_udta;
-        let (moov, _) = top_box(&to_the_end, b"moov");
-        to_the_end[moov..moov + 4].copy_from_slice(&[0; 4]);
-        let (peak, opened) = peak_of(|| {
-            open_within(
-                Box::new(Cursor::new(to_the_end)),
-                Some("m4a"),
-                MAX_DECODED_BYTES,
-                None,
-            )
-        });
-        let error = opened.err().map(|e| format!("{e:#}"));
-        assert!(
-            error
-                .as_deref()
-                .is_some_and(|e| e.contains("unexpected end of file")),
-            "a moov of size 0: {error:?}"
+        // Symphonia 0.6.1 reads past its end (`atoms/mod.rs`, line 640), so
+        // the view gives it its size (TD-85, closed by review round 7).
+        // ALAC and AAC open bit for bit, with the art hidden.
+        let size_0 = |mut file: Vec<u8>| {
+            let (moov, _) = top_box(&file, b"moov");
+            file[moov..moov + 4].copy_from_slice(&[0; 4]);
+            file
+        };
+        let to_the_end = size_0(in_udta);
+        assert_tags_are_hidden(
+            plain.clone(),
+            to_the_end,
+            "m4a",
+            "a moov of size 0 with art",
         );
-        assert!(
-            peak < 1 << 20,
-            "a moov of size 0: the open peaks at {peak} bytes"
-        );
+        let aac = crate::test_m4a::aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::MoovLast);
+        assert_tags_are_hidden(aac.clone(), size_0(aac), "m4a", "an AAC moov of size 0");
         let mut in_meta = plain.clone();
         in_meta.extend_from_slice(&cover_meta(ART));
         assert_tags_are_hidden(plain.clone(), in_meta, "m4a", "art in a top-level meta");
@@ -3347,7 +3377,7 @@ mod tests {
     fn an_m4a_behind_an_id3_tag_or_a_uuid_box_is_walked() {
         use crate::hidden::{MOST_KEPT_BYTES, MOST_SMALL, kept_charge};
         use crate::test_audio::id3_tag;
-        use crate::test_m4a::{bx, top_box, with_cover, with_stco_moved};
+        use crate::test_m4a::{bx, with_cover, with_stco_moved};
         let plain = alac_of(m4a::Order::MoovLast);
         let tag = id3_tag(100);
         let behind_tag = [tag.clone(), with_cover(plain.clone(), ART)].concat();
@@ -3356,13 +3386,12 @@ mod tests {
         let moved = with_stco_moved(with_cover(plain.clone(), ART), uuid.len() as i64);
         let behind_uuid = [uuid, moved].concat();
         assert_tags_are_hidden(plain.clone(), behind_uuid, "m4a", "art behind a uuid box");
-        let (_, ftyp_size) = top_box(&plain, b"ftyp");
-        let large = bx(b"ftyp", &[b"M4A ", &[0; 4], &b"isom".repeat(ART / 4)]);
-        let ftyp = [tag.clone(), large, Vec::from(&plain[ftyp_size..])].concat();
-        assert_refused_early(
+        let large = crate::test_m4a::with_ftyp_of(&plain, ART + 16);
+        let ftyp = [tag.clone(), large].concat();
+        assert_tags_are_hidden(
+            plain.clone(),
             ftyp,
             "m4a",
-            FTYP_TEXT,
             "an ftyp of 64 MiB behind an ID3 tag",
         );
         let past = MOST_SMALL + (MOST_KEPT_BYTES / kept_charge(12)) as usize + 1;
@@ -3372,33 +3401,33 @@ mod tests {
     }
 
     /// Finding 3-2 of review round 3 (MEM-4): Symphonia reads each `ftyp`
-    /// whole.  A later `ftyp` is hidden.  The first one, which Symphonia
-    /// needs, is refused past `MOST_BOX_BYTES` before Symphonia opens it.
+    /// whole.  A later `ftyp` is hidden.  B5 of review round 7: Symphonia
+    /// needs the first one only to exist, and reads no brand, so the view
+    /// shows one past `MOST_BOX_BYTES` as 16 bytes and a `free` box.  It
+    /// opens bit for bit at a flat peak.
     #[test]
-    fn a_large_ftyp_is_hidden_or_refused() {
-        use crate::test_m4a::{bx, top_box};
+    fn a_large_ftyp_is_hidden() {
+        use crate::test_m4a::bx;
         let plain = alac_of(m4a::Order::MoovLast);
         let brands = b"isom".repeat(ART / 4);
         let large = bx(b"ftyp", &[b"M4A ", &[0; 4], &brands]);
         let appended = [plain.clone(), large.clone()].concat();
         assert_tags_are_hidden(plain.clone(), appended, "m4a", "a later ftyp of 64 MiB");
-        let (_, ftyp_size) = top_box(&plain, b"ftyp");
-        let first = [large, Vec::from(&plain[ftyp_size..])].concat();
-        assert_refused_early(first, "m4a", FTYP_TEXT, "a first ftyp of 64 MiB");
-        // Finding 4-3 and missed mutant 4-13 of review round 4: a first
-        // `ftyp` of size 0 runs to the end of the file, so it is refused.
-        // One of `MOST_BOX_BYTES` opens; one of 4 bytes more is refused.
         use crate::mp4_boxes::MOST_BOX_BYTES;
         use crate::test_m4a::with_ftyp_of;
+        let first = with_ftyp_of(&plain, large.len());
+        assert_tags_are_hidden(plain.clone(), first, "m4a", "a first ftyp of 64 MiB");
+        // Finding 4-3 and missed mutant 4-13 of review round 4: a first
+        // `ftyp` of size 0 runs to the end of the file, so no `moov` follows.
         let mut size_0 = plain.clone();
         size_0[..4].copy_from_slice(&[0; 4]);
-        assert_refused_early(size_0, "m4a", FTYP_TEXT, "a first ftyp of size 0");
-        let at_the_bound = with_ftyp_of(&plain, MOST_BOX_BYTES);
-        let want = decoded(plain.clone(), "the plain file");
-        let got = decoded(at_the_bound, "a first ftyp of MOST_BOX_BYTES");
-        assert!(got.channels == want.channels, "the samples differ");
-        let past = with_ftyp_of(&plain, MOST_BOX_BYTES + 4);
-        assert_refused_early(past, "m4a", FTYP_TEXT, "a first ftyp of MOST_BOX_BYTES + 4");
+        let text =
+            "unsupported or unrecognised format: unsupported feature: isomp4: missing moov atom";
+        assert_refused_early(size_0, "m4a", text, "a first ftyp of size 0");
+        for size in [MOST_BOX_BYTES, MOST_BOX_BYTES + 4] {
+            let case = format!("a first ftyp of {size} bytes");
+            assert_tags_are_hidden(plain.clone(), with_ftyp_of(&plain, size), "m4a", &case);
+        }
     }
 
     /// Finding 3-7 and missed mutant 3-22 of review round 3: a `moov`, its
@@ -4066,5 +4095,21 @@ mod tests {
             "both at a start"
         );
         assert!(counts_from_mp4_start(5000, 100, &bodies), "neither");
+    }
+
+    /// B6 of review round 7: Symphonia 0.6.1 refuses an SSND block size
+    /// other than 0 (`aiff/chunks.rs`, line 321).  The block size only
+    /// aligns the samples, which start at the offset, so the view shows 0.
+    /// An AIFF and an AIFC with a block size and an offset of 4096 open bit
+    /// for bit.
+    #[test]
+    fn an_aiff_with_block_aligned_samples_opens() {
+        use crate::test_audio::{Aiff, aiff, with_block_aligned_ssnd};
+        let (left, right, _) = stereo_wav();
+        for form in [Aiff::Plain, Aiff::UncompressedAifc] {
+            let plain = aiff(&[left.clone(), right.clone()], 44_100, 16, form);
+            let aligned = with_block_aligned_ssnd(&plain, 4096);
+            assert_tags_are_hidden(plain, aligned, "aiff", &format!("{form:?}"));
+        }
     }
 }

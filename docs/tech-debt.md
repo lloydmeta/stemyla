@@ -643,22 +643,6 @@ This entry concerns the HE-AAC text of M2 of `plans/active/m4a.md`.
 
 * Fix: Symphonia's HE-AAC decode, or a check of the first packets for SBR fill elements (`EXT_SBR_DATA` in a `fill_element`) before the decoder is made.
 
-### TD-82: an M4A with a movie timescale of 0 does not open
-
-This entry concerns D7 of `plans/active/m4a.md` and the limits of Symphonia 0.6.1.
-
-`symphonia-format-isomp4` 0.6.1 refuses an `mvhd` timescale of 0 ("malformed stream: isomp4 (mvhd): timescale is zero").  So the decode shows "unsupported or unrecognised format" with that text.  The trim of such a file would drop the delay and keep every frame after it (`trim_of`).  The test `only_the_common_form_of_elst_gives_a_trim` checks the refusal, and `trim_of_a_movie_timescale_of_0_is_skip_only` checks the trim without a decode.  A timescale of 0 is not valid in ISO/IEC 14496-12, so real files are rare.
-
-* Fix: a Symphonia that takes the file, or a patch of the timescale before the probe.  The plan forbids a patch or a fork of Symphonia.
-
-### TD-85: an M4A whose `moov` has a size of 0 does not open
-
-This entry concerns the decode of M4A, and the limits of Symphonia 0.6.1.
-
-A box of size 0 runs to the end of the file (ISO/IEC 14496-12, 4.2).  `symphonia-format-isomp4` 0.6.1 gives "unexpected end of file" for a `moov` of size 0 at the end of the file, with or without tags.  The test `the_art_of_an_m4a_is_hidden_from_symphonia` checks that its art stays hidden, so the open fails at a small peak.  Writers give `moov` a size; a size of 0 is rare.
-
-* Fix: a Symphonia that reads such a `moov`, or a wrapper that gives the `moov` its size.
-
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
@@ -707,4 +691,6 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-61: closed by D11 and review rounds speed 3 and 4 of `plans/completed/stream-from-storage-m8.md`.  Before D11, a save advanced one block in each UI frame, and CI's `browser-tests` job took 51 minutes (run 40799703090).  CI run 40894815433 (2026-10-29), on `bf3334f`, passed in 18.6 minutes.  `web-test` took 9.6 minutes, the other e2e scenarios 4.0, and `e2e save` 3.3, within its goal of 5.  `web-test` took 7.8 minutes in run 40871041420, so it varies by about 2 minutes.
 * TD-69: closed by `check_runs_each_check_on_a_repo` in `xtask/src/docs.rs` (tech-debt rung 1).  It runs `docs::check` on a copy of the repo's tracked files, and wants no problem.  Then it plants one problem for each check, and wants each one.  The mutant `replace check -> Result<Vec<Problem>> with Ok(vec![])` fails it, so its `KNOWN_MISSED` entry is gone (VERIFY-1).
 * TD-83: closed by review round 1 of `plans/active/m4a-m2.md`.  The maintainer asked, through the orchestrator on 2026-11-08, that the native `WELCOME` name M4A and AIFF.  It does, with a new `app/tests/snapshots/empty_state.png`, which the PR lists for the maintainer to look at.
+* TD-82: closed by review round 7 of `plans/active/m4a-m2.md`.  Symphonia 0.6.1 refuses an `mvhd` timescale of 0 and uses it only for its `media_info`.  The view of the decode gives `mvhd` the timescale of the first sound track (`decode::mend_mp4`).  The trim reads the file, so it is the delay only.  `only_the_common_form_of_elst_gives_a_trim` decodes such a file.
+* TD-85: closed by review round 7 of `plans/active/m4a-m2.md`.  Symphonia 0.6.1 reads past the end of a `moov` of size 0.  The view of the decode gives that `moov` its size (`decode::mend_mp4`).  `the_art_of_an_m4a_is_hidden_from_symphonia` decodes an ALAC and an AAC file with such a `moov`, bit for bit.
 * TD-84: closed by review rounds 2 to 6 of `plans/active/m4a-m2.md`.  The decode hides the tags and pictures of each format from Symphonia, which reads them whole (`engine::hidden`): the M4A `moov/udta`, top-level `meta` and `sidx`, and later `ftyp`, the FLAC PICTURE, VORBIS_COMMENT, APPLICATION and SEEKTABLE blocks, a leading ID3v2 tag, the WAV `LIST` chunk, and the AIFF tag chunks.  It opens one Symphonia reader at the first marker that Symphonia's probe would accept, so the reader starts where the plan starts (`hidden::start_of`, review rounds 5 and 6).  A plan hides at most 4096 small containers (`MOST_SMALL`).  A file is refused before Symphonia opens it only when the small ones past that count, which Symphonia keeps, pass 16 MiB (`MOST_KEPT_BYTES`).  Each counts its bytes and 256 bytes for each entry that it can hold (`kept_charge`, review round 5).  `the_art_of_an_m4a_is_hidden_from_symphonia`, `a_file_opens_at_the_first_marker_with_its_tags_hidden` and the tests beside them check a flat peak with 64 MiB of tags.  `a_file_is_refused_only_when_its_kept_tags_pass_the_limit` checks the peak at the limit for the densest form of each format.
