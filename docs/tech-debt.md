@@ -643,18 +643,6 @@ An ADTS frame can hold up to 4 raw data blocks of AAC.  `symphonia-codec-aac` 0.
 
 * Fix: a Symphonia that reads each raw data block of a frame, or a parse in `engine` of the syntax of an AAC raw data block to find its end.
 
-### TD-88: the art of an M4A from a source that cannot seek is read whole
-
-This entry concerns MEM-4, and the tags of a stream of review round 12 of `plans/active/m4a-m2.md`.
-
-A source that cannot seek gets no plan of `engine::hidden`, and no walk of `engine::mp4_boxes`.  `engine::tag_stream::TagStream` hides the tags of an AIFF, a WAV or a FLAC as the bytes pass, but it reads no MP4 box.  So Symphonia 0.6.1 reads the `moov/udta` of a fast-start M4A whole.  Through `Fifo`, an ALAC M4A with 64 MiB of art in `moov/udta` peaks at 131,148,338 bytes, against 1,213,068 bytes with no art.  The checks of the walk (a video track, a protected track, the size of `moov`) do not apply to a stream either.
-
-The sources of the app seek: the page and the workers give files from memory or from browser storage, and a native folder gives files.  `decode_path` of a FIFO is the path that reaches it.
-
-A pass-through of one header at a time cannot close it.  The tag boxes are inside `moov`, at more than one level (`moov/udta`, `moov/trak/udta`, `moov/meta`).  The checks of the walk need all of `moov` before Symphonia reads it.
-
-* Fix: in `TagStream`, follow `moov` and its children as they pass, show each `udta` and `meta` as `free`, and make the checks of `mp4_boxes` on the boxes of `moov`.  Or hold a `moov` of at most `most_moov_bytes`, walk it, and then give it to Symphonia.
-
 ### TD-89: a stream behind a leading ID3v2 tag past the window does not open
 
 This entry concerns the formats of M2 of `plans/active/m4a.md`, and the tags of a stream of review round 12 of `plans/active/m4a-m2.md`.
@@ -716,4 +704,5 @@ The `gh-pages history` ruleset (id 25544673, since 2026-10-21) blocks force push
 * TD-82: closed by review round 7 of `plans/active/m4a-m2.md`.  Symphonia 0.6.1 refuses an `mvhd` timescale of 0 and uses it only for its `media_info`.  The view of the decode gives `mvhd` the timescale of the first sound track (`decode::mend_mp4`).  The trim reads the file, so it is the delay only.  `only_the_common_form_of_elst_gives_a_trim` decodes such a file.
 * TD-85: closed by review round 7 of `plans/active/m4a-m2.md`.  Symphonia 0.6.1 reads past the end of a `moov` of size 0.  The view of the decode gives that `moov` its size (`decode::mend_mp4`).  `the_art_of_an_m4a_is_hidden_from_symphonia` decodes an ALAC and an AAC file with such a `moov`, bit for bit.
 * TD-87: closed by review round 10 of `plans/active/m4a-m2.md`.  Symphonia 0.6.1 multiplies the step of Microsoft ADPCM with no bound (`codec_ms.rs`, line 96), and the step triples for each nibble of 8 from any start.  Before Symphonia decodes each packet, the decode walks the step of each channel of each block, and refuses the file with `MS_ADPCM_TEXT` when a step passes `i32::MAX / 768` (`engine::adpcm::ms_steps_fit`).  `a_crafted_ms_adpcm_wav_is_refused_with_no_panic` runs in each build, from steps of 16 and 32,767.
+* TD-88: closed by review round 13 of `plans/active/m4a-m2.md`.  From a source that cannot seek, Symphonia 0.6.1 read the art of an M4A whole, and the checks of the walk of `engine::mp4_boxes` did not apply.  The decode now gives an M4A stream to Symphonia through `engine::mp4_stream::Mp4`, the MP4 rule of `TagStream`.  It follows the head of the stream up to the first `mdat` or `moof`, shows each box that the walk hides as `free`, and gives `VIDEO_TEXT`, `PROTECTED_TEXT` and `MOOV_TEXT` by the rules of the walk.  `an_m4a_stream_gets_the_hiding_and_the_texts_of_the_walk` tests an ALAC and an AAC M4A through `Fifo`.
 * TD-84: closed by review rounds 2 to 6 of `plans/active/m4a-m2.md`.  The decode hides the tags and pictures of each format from Symphonia, which reads them whole (`engine::hidden`): the M4A `moov/udta`, top-level `meta` and `sidx`, and later `ftyp`, the FLAC PICTURE, VORBIS_COMMENT, APPLICATION and SEEKTABLE blocks, a leading ID3v2 tag, the WAV `LIST` chunk, and the AIFF tag chunks.  It opens one Symphonia reader at the first marker that Symphonia's probe would accept, so the reader starts where the plan starts (`hidden::start_of`, review rounds 5 and 6).  A plan hides at most 4096 small containers (`MOST_SMALL`).  A file is refused before Symphonia opens it only when the small ones past that count, which Symphonia keeps, pass 16 MiB (`MOST_KEPT_BYTES`).  Each counts its bytes and 256 bytes for each entry that it can hold (`kept_charge`, review round 5).  `the_art_of_an_m4a_is_hidden_from_symphonia`, `a_file_opens_at_the_first_marker_with_its_tags_hidden` and the tests beside them check a flat peak with 64 MiB of tags.  `a_file_is_refused_only_when_its_kept_tags_pass_the_limit` checks the peak at the limit for the densest form of each format.

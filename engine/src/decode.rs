@@ -111,12 +111,13 @@ pub const TAGS_TEXT: &str =
 /// decode hides the tags of `moov` from Symphonia (`engine::hidden`), so
 /// they do not count.
 fn most_moov_bytes(found: &Found) -> u64 {
-    let most_frames = MAX_DECODED_BYTES / 8;
-    let frames = found
-        .sound
-        .as_ref()
-        .and_then(|sound| sound.duration)
-        .map_or(0, |duration| duration.min(most_frames));
+    let duration = found.sound.as_ref().and_then(|sound| sound.duration);
+    most_moov_bytes_of(duration.unwrap_or(0))
+}
+
+/// [`most_moov_bytes`] for a sound track of `duration` units.
+pub(crate) fn most_moov_bytes_of(duration: u64) -> u64 {
+    let frames = duration.min(MAX_DECODED_BYTES / 8);
     TAG_ROOM + 32 * frames.div_ceil(1024)
 }
 
@@ -1233,10 +1234,15 @@ fn is_part_group(channels: usize, per_block: u64) -> bool {
 }
 
 /// The text of a read that [`crate::tag_stream::TagStream`] failed, for
-/// a `COMM` of more than [`MOST_CHANNELS`] channels.
+/// a header that the decode refuses before Symphonia gets it.
 fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
-    crate::tag_stream::refused_channels(error)
-        .map(|channels| anyhow!(channels_text(u32::from(channels))))
+    use crate::tag_stream::Refusal;
+    Some(match crate::tag_stream::refusal_of(error)? {
+        Refusal::Channels(channels) => anyhow!(channels_text(u32::from(channels))),
+        Refusal::Video => anyhow!(VIDEO_TEXT),
+        Refusal::Protected => anyhow!(PROTECTED_TEXT),
+        Refusal::Moov => anyhow!(MOOV_TEXT),
+    })
 }
 
 /// A source to open, and its container with where its reader starts.
@@ -5775,6 +5781,142 @@ mod tests {
         for (case, ext, file) in cases {
             let decoder = Decoder::new(Box::new(Fifo(Cursor::new(file))), Some(ext));
             assert_eq!(decoder.map(|d| d.reserve).ok(), Some(0), "{case}");
+        }
+    }
+
+    /// `file`, an MP4 with `moov` first, with `child` at the end of the box
+    /// at the end of `path` (such as `moov`, `udta`), or before `moov` for
+    /// an empty `path`.  The sizes of the boxes of `path` and each chunk
+    /// offset grow to match.
+    fn fast_start_with(file: &[u8], path: &[&[u8; 4]], child: &[u8]) -> Vec<u8> {
+        use crate::test_m4a::{child_box, top_box, with_stco_moved};
+        let (moov, _) = top_box(file, b"moov");
+        let mut boxes = Vec::new();
+        for kind in path {
+            let at = match boxes.last() {
+                None => top_box(file, kind).0,
+                Some(parent) => child_box(file, *parent, kind).0,
+            };
+            boxes.push(at);
+        }
+        let at = match boxes.last() {
+            None => moov,
+            Some(last) => {
+                last + u32::from_be_bytes(file[*last..last + 4].try_into().unwrap()) as usize
+            }
+        };
+        let mut out = [&file[..at], child, &file[at..]].concat();
+        for at in boxes {
+            let size = u32::from_be_bytes(out[at..at + 4].try_into().unwrap());
+            out[at..at + 4].copy_from_slice(&(size + child.len() as u32).to_be_bytes());
+        }
+        with_stco_moved(out, child.len() as i64)
+    }
+
+    /// `file`, an MP4 with `moov` first, with `boxes` after its `moov`.
+    fn after_moov(file: &[u8], boxes: &[u8]) -> Vec<u8> {
+        let (moov, size) = crate::test_m4a::top_box(file, b"moov");
+        let out = [&file[..moov + size], boxes, &file[moov + size..]].concat();
+        crate::test_m4a::with_stco_moved(out, boxes.len() as i64)
+    }
+
+    /// The error text of `file` through `Fifo`, with no panic, at a peak
+    /// under 2 MiB.
+    fn fifo_refusal(file: Vec<u8>, ext: &str, case: &str) -> Option<String> {
+        let (peak, error) = peak_of(|| {
+            std::panic::catch_unwind(|| {
+                decode_source(Box::new(Fifo(Cursor::new(file))), Some(ext))
+                    .err()
+                    .map(|e| format!("{e:#}"))
+            })
+        });
+        assert!(error.is_ok(), "{case}: a panic");
+        assert!(peak < 2 << 20, "{case}: the open peaks at {peak} bytes");
+        error.unwrap()
+    }
+
+    /// Finding 13-2 of review round 13 (TD-88, closed, MEM-4): an M4A from a
+    /// source that cannot seek gets the hiding and the texts of the walk as
+    /// its head passes (`engine::mp4_stream`).  Through `Fifo`, an ALAC and
+    /// an AAC M4A with 64 MiB of art in `moov/udta`, a top-level `meta`, and
+    /// `sidx` boxes decode bit for bit within 1 MiB of the plain stream.  A
+    /// `drms` or `enca` entry gives `PROTECTED_TEXT`, a `vide` track
+    /// `VIDEO_TEXT`, and tables past the bound of a stream `MOOV_TEXT`.
+    #[test]
+    fn an_m4a_stream_gets_the_hiding_and_the_texts_of_the_walk() {
+        use crate::test_m4a::{aac_m4a, bx, cover_meta, patched, sidx_boxes, with_entry};
+        let alac = alac_of(m4a::Order::FastStart);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        for (kind, plain, entry) in [("ALAC", alac, b"drms"), ("AAC", aac, b"enca")] {
+            let tagged = [
+                (
+                    "art in moov/udta",
+                    fast_start_with(&plain, &[b"moov"], &bx(b"udta", &[&cover_meta(ART)])),
+                ),
+                (
+                    "a top-level meta",
+                    fast_start_with(&plain, &[], &cover_meta(ART)),
+                ),
+                (
+                    "sidx boxes",
+                    fast_start_with(&plain, &[], &sidx_boxes(100_000)),
+                ),
+                (
+                    "a second moov",
+                    after_moov(&plain, &bx(b"moov", &[&bx(b"udta", &[&cover_meta(ART)])])),
+                ),
+                (
+                    "a first ftyp of 64 MiB",
+                    crate::test_m4a::with_ftyp_of(&plain, ART),
+                ),
+                ("an mvhd timescale of 0", {
+                    let mut zero = plain.clone();
+                    let mvhd = crate::test_m4a::place_once(&zero, b"mvhd") + 4;
+                    zero[mvhd + 12..mvhd + 16].copy_from_slice(&[0; 4]);
+                    zero
+                }),
+            ];
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            let (plain_peak, _) = stream_peak(plain.clone(), "m4a");
+            for (case, file) in tagged {
+                let case = format!("{kind}, {case}");
+                let (peak, got) = stream_peak(file, "m4a");
+                assert!(got.is_ok(), "{case}: {:?}", got.err());
+                assert!(got.unwrap() == want, "{case}: the samples differ");
+                assert!(
+                    peak < plain_peak + (1 << 20),
+                    "{case}: the plain stream peaks at {plain_peak} bytes, this one at {peak}"
+                );
+            }
+            let refused = [
+                (
+                    "a protected entry",
+                    with_entry(plain.clone(), entry),
+                    PROTECTED_TEXT,
+                ),
+                (
+                    "a vide track",
+                    patched(plain.clone(), b"soun", b"vide"),
+                    VIDEO_TEXT,
+                ),
+                (
+                    "tables past the bound",
+                    fast_start_with(
+                        &plain,
+                        &[b"moov", b"trak", b"mdia"],
+                        &bx(b"free", &[&vec![0; 21 << 20]]),
+                    ),
+                    MOOV_TEXT,
+                ),
+            ];
+            for (case, file, text) in refused {
+                let case = format!("{kind}, {case}");
+                assert_eq!(
+                    fifo_refusal(file, "m4a", &case).as_deref(),
+                    Some(text),
+                    "{case}"
+                );
+            }
         }
     }
 

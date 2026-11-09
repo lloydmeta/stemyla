@@ -128,18 +128,33 @@ pub(crate) enum Chunks {
     Flac,
 }
 
-/// The error of a read that holds a `COMM` of this many channels, more than
-/// [`MOST_CHANNELS`].
-#[derive(Debug)]
-pub(crate) struct TooManyChannels(pub(crate) u16);
+/// Why a read of a stream failed before Symphonia got a header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// A `COMM` of this many channels, more than [`MOST_CHANNELS`].
+    Channels(u16),
+    /// A track of the handler `vide`.
+    Video,
+    /// A sound track of a protected sample entry.
+    Protected,
+    /// A `moov` whose tables pass the bound of a stream.
+    Moov,
+}
 
-impl std::fmt::Display for TooManyChannels {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "a COMM of {} channels", self.0)
+        write!(f, "a stream refused for {self:?}")
     }
 }
 
-impl std::error::Error for TooManyChannels {}
+impl std::error::Error for Refusal {}
+
+impl Refusal {
+    /// The error of a read for this refusal.
+    pub(crate) fn error(self) -> std::io::Error {
+        std::io::Error::other(self)
+    }
+}
 
 impl Rule for Chunks {
     /// The ID, the size, the channels of a `COMM` (8 to 10), and the block
@@ -180,7 +195,7 @@ impl Rule for Chunks {
                 .get(8..10)
                 .map_or(0, |n| u16::from_be_bytes([n[0], n[1]]));
             if channels > MOST_CHANNELS {
-                return Err(std::io::Error::other(TooManyChannels(channels)));
+                return Err(Refusal::Channels(channels).error());
             }
         }
         if id == last {
@@ -235,14 +250,18 @@ pub(crate) fn stream_of(
         Container::Aiff => Box::new(TagStream::new(source, Chunks::Aiff, at + 12)),
         Container::Wav => Box::new(TagStream::new(source, Chunks::Wav, at + 12)),
         Container::Flac => Box::new(TagStream::new(source, Chunks::Flac, at + 4)),
+        Container::Mp4 => Box::new(TagStream::new(
+            source,
+            crate::mp4_stream::Mp4::default(),
+            at,
+        )),
         _ => source,
     }
 }
 
-/// The channels that [`TagStream`] refused, if it failed `error`.
-pub(crate) fn refused_channels(error: &std::io::Error) -> Option<u16> {
-    let refused = error.get_ref()?.downcast_ref::<TooManyChannels>()?;
-    Some(refused.0)
+/// Why [`TagStream`] failed `error`, if it did.
+pub(crate) fn refusal_of(error: &std::io::Error) -> Option<Refusal> {
+    error.get_ref()?.downcast_ref::<Refusal>().copied()
 }
 
 #[cfg(test)]
@@ -293,8 +312,12 @@ mod tests {
             let mut file = odd.clone();
             file[comm + 8..comm + 10].copy_from_slice(&count.to_be_bytes());
             let read = read_all(file.clone());
-            let error = read.as_ref().err().and_then(refused_channels);
-            assert_eq!(error, refused.then_some(count), "{count} channels");
+            let error = read.as_ref().err().and_then(refusal_of);
+            assert_eq!(
+                error,
+                refused.then_some(Refusal::Channels(count)),
+                "{count} channels"
+            );
             if !refused {
                 assert!(read.unwrap() == file, "{count} channels: the bytes");
             }

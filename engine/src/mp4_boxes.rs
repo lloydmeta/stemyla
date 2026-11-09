@@ -147,7 +147,7 @@ pub(crate) struct MoovAt {
 }
 
 /// The sample entries of a protected sound track.
-const PROTECTED_ENTRIES: [&[u8; 4]; 3] = [b"drms", b"drmi", b"enca"];
+pub(crate) const PROTECTED_ENTRIES: [&[u8; 4]; 3] = [b"drms", b"drmi", b"enca"];
 
 /// The box types that can start an MP4 file.  Symphonia's MP4 reader
 /// reads the top-level boxes in order from the first one.

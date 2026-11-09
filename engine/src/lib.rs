@@ -13,6 +13,7 @@ mod ima4;
 pub mod live;
 pub mod mixdown;
 mod mp4_boxes;
+mod mp4_stream;
 pub mod overview;
 pub mod params;
 pub mod player;
