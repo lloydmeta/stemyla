@@ -160,6 +160,10 @@ pub const MOST_CHANNELS: u16 = 128;
 pub const MS_ADPCM_TEXT: &str =
     "This WAV file holds Microsoft ADPCM that does not decode.  Open another file.";
 
+/// The text of an AIFF from a source that cannot seek, whose `COMM` is past
+/// the window of the scan (the residual of finding 11-4 of review round 11).
+pub const FAR_COMM_TEXT: &str = "This AIFF file holds its format after more than 1 MiB of other data, so it does not open from this source.";
+
 /// The text of a file of more than [`MOST_CHANNELS`] channels.
 pub fn channels_text(channels: u32) -> String {
     format!("This file has {channels} channels.  A file of at most {MOST_CHANNELS} channels opens.")
@@ -799,12 +803,10 @@ fn open_within(
             crate::hidden::start_of(&mut at).context("reading the start of the file")?;
         (source, view, start)
     } else {
-        let (source, start, channels) =
+        let (source, start, refusal) =
             scan_stream(source).context("reading the start of the file")?;
-        // Before any reader of Symphonia keeps a buffer for each channel
-        // (finding 11-4 of review round 11).
-        if let Some(channels) = channels.filter(|channels| *channels > MOST_CHANNELS) {
-            return Err(anyhow!(channels_text(u32::from(channels))));
+        if let Some(text) = refusal {
+            return Err(anyhow!(text));
         }
         (source, 0, start)
     };
@@ -954,10 +956,7 @@ fn open_within(
     if params.codec == CODEC_ID_AAC {
         check_aac(&params)?;
     }
-    let channel_count = params.channels.as_ref().map_or(0, Channels::count);
-    if channel_count > usize::from(MOST_CHANNELS) {
-        return Err(anyhow!(channels_text(channel_count as u32)));
-    }
+    check_channels(&params)?;
     // The mend reads an AAC config; other codecs have other extra data
     // (finding 8-1 of review round 8).
     let params = if params.codec == CODEC_ID_AAC {
@@ -1190,9 +1189,24 @@ fn with_pce_channels(mut params: AudioCodecParameters) -> AudioCodecParameters {
     params
 }
 
+/// Refuses a track of more than [`MOST_CHANNELS`] channels.  The checks
+/// before the open of the reader refuse each such file that the decode
+/// knows; this check stays for a reader that states more.
+fn check_channels(params: &AudioCodecParameters) -> Result<()> {
+    let count = params.channels.as_ref().map_or(0, Channels::count);
+    if count > usize::from(MOST_CHANNELS) {
+        return Err(anyhow!(channels_text(count as u32)));
+    }
+    Ok(())
+}
+
 /// A source to open, its container with where its reader starts, and the
-/// channels of the `COMM` of an AIFF.
-type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>, Option<u16>);
+/// text of a refusal that the scan found.
+type Scanned = (
+    Box<dyn MediaSource>,
+    Option<(Container, u64)>,
+    Option<String>,
+);
 
 /// The container of a source that cannot seek, and where its reader starts,
 /// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
@@ -1200,9 +1214,9 @@ type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>, Option<u16>);
 /// bytes, into one buffer of that size.  It gives a source that reads those
 /// bytes again, then the rest.  The open of a WAV of 4 MiB peaks at
 /// 1,130,166 bytes, and the buffer stays until the decode ends (finding 7-8
-/// of review round 7).  It also gives the channels of the `COMM` of an AIFF
-/// in the window, for the bound of channels (finding 11-4 of review round
-/// 11).
+/// of review round 7).  It refuses an AIFF of more than [`MOST_CHANNELS`]
+/// channels, or whose `COMM` is past the window (finding 11-4 of review
+/// round 11).
 fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
     use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES, first_marker, reader_start};
     use std::io::Read;
@@ -1214,12 +1228,23 @@ fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
         .or_else(|| {
             crate::hidden::is_adts_of_raw_blocks_with_crc(&window).then_some((Container::Adts, 0))
         });
-    let channels = match start {
-        Some((Container::Aiff, at)) => crate::hidden::aiff_channels(&mut window.as_slice(), at)?,
+    // Before any reader of Symphonia keeps a buffer for each channel
+    // (finding 11-4 of review round 11).  A full window with no `COMM` has
+    // it past the window, where the scan cannot read it.
+    let refusal = match start {
+        Some((Container::Aiff, at)) => {
+            match crate::hidden::aiff_channels(&mut window.as_slice(), at)? {
+                Some(channels) if channels > MOST_CHANNELS => {
+                    Some(channels_text(u32::from(channels)))
+                }
+                None if window.len() == most => Some(FAR_COMM_TEXT.to_owned()),
+                _ => None,
+            }
+        }
         _ => None,
     };
     let again = Cursor::new(window).chain(source);
-    Ok((Box::new(ReadOnlySource::new(again)), start, channels))
+    Ok((Box::new(ReadOnlySource::new(again)), start, refusal))
 }
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
@@ -5409,27 +5434,59 @@ mod tests {
                 "{count} channels: the open peaks at {peak} bytes"
             );
         }
-        // A chunk of 1.1 MB before `COMM` puts it out of the window.  Then
-        // the check after the open of the reader refuses 129 channels.
+        // A chunk of 1.1 MB before `COMM` puts it out of the window, so the
+        // scan cannot read its channels.  The open refuses it before any
+        // reader of Symphonia (the residual of finding 11-4).
         let filler = vec![0; 1_100_000];
-        let far = [
-            &file[..12],
-            b"APPL",
-            &(filler.len() as u32).to_be_bytes(),
-            &filler,
-            &file[12..],
-        ]
-        .concat();
-        let mut far = with_comm_channels(far, MOST_CHANNELS + 1);
-        let form = (far.len() - 8) as u32;
-        far[4..8].copy_from_slice(&form.to_be_bytes());
-        let opened = Decoder::new(Box::new(Fifo(Cursor::new(far))), Some("aiff"));
-        let text = channels_text(u32::from(MOST_CHANNELS + 1));
-        assert_eq!(
-            opened.err().map(|e| format!("{e:#}")),
-            Some(text),
-            "COMM out of the window"
-        );
+        for count in [2, u16::MAX] {
+            let far = [
+                &file[..12],
+                b"APPL",
+                &(filler.len() as u32).to_be_bytes(),
+                &filler,
+                &file[12..],
+            ]
+            .concat();
+            let mut far = with_comm_channels(far, count);
+            let form = (far.len() - 8) as u32;
+            far[4..8].copy_from_slice(&form.to_be_bytes());
+            let (peak, opened) = peak_of(|| {
+                std::panic::catch_unwind(|| {
+                    Decoder::new(Box::new(Fifo(Cursor::new(far))), Some("aiff"))
+                        .err()
+                        .map(|e| format!("{e:#}"))
+                })
+            });
+            assert!(
+                opened.is_ok(),
+                "COMM past the window, {count} channels: a panic"
+            );
+            assert_eq!(
+                opened.unwrap().as_deref(),
+                Some(FAR_COMM_TEXT),
+                "COMM past the window, {count} channels"
+            );
+            assert!(
+                peak < 2 << 20,
+                "COMM past the window, {count} channels: the open peaks at {peak} bytes"
+            );
+        }
+        // An AIFF whose `COMM` is in the window opens.
+        let opened = Decoder::new(Box::new(Fifo(Cursor::new(file))), Some("aiff"));
+        assert!(opened.is_ok(), "COMM in the window: {:?}", opened.err());
+    }
+
+    /// The check of channels after the open of the reader: no reader of
+    /// Symphonia 0.6.1 that the decode opens gives more than 128 channels
+    /// past the checks before it, so it is tested alone.
+    #[test]
+    fn the_channels_of_a_track_have_a_bound() {
+        let mut params = AudioCodecParameters::new();
+        params.with_channels(Channels::Discrete(MOST_CHANNELS));
+        assert!(check_channels(&params).is_ok(), "128 channels");
+        params.with_channels(Channels::Discrete(MOST_CHANNELS + 1));
+        let error = check_channels(&params).err().map(|e| format!("{e:#}"));
+        assert_eq!(error, Some(channels_text(129)), "129 channels");
     }
 
     /// Missed mutants 11-12, 11-13, 11-16, 11-18, 11-20, 11-29, 11-30,

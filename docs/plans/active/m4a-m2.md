@@ -478,6 +478,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * `a_pcm_wav_of_3_channels_decodes_as_each_mono_one` fails with the mutant 11-11.
   * [x] 2026-11-09: review round 11 fixes, part 3: the doc of `MOST_CHANNELS` names `adpcm::AdpcmChannels` as code, not as a link, since `cargo doc -p engine` warns of a link to a private item.
     * Before the commit: `cargo test -p engine --release` passed (319 tests of the library).  `web-test --browser chrome` (30 tests), `e2e decode --browser chrome` and the local real-file check passed.  The wasm bundle: `app_bg.wasm` 6,379,442 B and `decode-worker_bg.wasm` 1,358,044 B, against 6,378,935 B and 1,356,752 B at 2695b2a; `stem-worker_bg.wasm` 1,250,988 B, no change.
+  * [x] 2026-11-09: review round 11 fixes, part 4: a stream whose `COMM` is past the window (the residual of 11-4).  First failure, at f221f97: `a_stream_of_too_many_channels_is_refused_before_its_reader` opened a non-seekable AIFF of 2 channels whose `COMM` is behind a chunk of 1.1 MB, with no text.
+    * Now `scan_stream` refuses an AIFF with `FAR_COMM_TEXT` when its window is full and holds no `COMM`.  At 2 and 65,535 channels the open peaks at 1,057,048 bytes, with no panic in a test build.  An AIFF whose `COMM` is in the window opens.  With `!=` in place of `==` for the full window, the test fails.
+    * The check after the open of the reader is now `check_channels`, tested alone in `the_channels_of_a_track_have_a_bound`.  No path reaches it: the checks before it see each `COMM` that Symphonia's AIFF reader reads, and WAV, MP4, FLAC, MP3 and ADTS state their channels as positions (at most 32).
 
 ## Surprises and discoveries
 
@@ -588,6 +591,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 * 2026-11-09, agent (team leader, review round 10, 10-4): `adpcm::AdpcmChannels` decodes each ADPCM codec of more than 2 channels (`ima4`, IMA ADPCM in a WAV, Microsoft ADPCM).  It gives a mono block of each channel to its own mono decoder of Symphonia.  Reason: Symphonia's ADPCM decoder refuses more than 2 channels (`lib.rs`, line 99), and the samples of a channel depend on that channel only.
 * 2026-11-09, agent (team leader, review round 11, 11-1): for Microsoft ADPCM of an odd count of frames in a block, each mono decoder of `AdpcmChannels` gets 1 frame more, an even count.  Its block gets a last nibble of 0, and the frame of that nibble is dropped.  Reason: the mono decoder reads `frames_per_block / 2 - 1` nibble bytes (`codec_ms.rs`, `decode_mono`), so with an odd count it read the next block 1 byte early.  The last nibble of 0 multiplies the step by 230 only, so it cannot pass `i32` (a `const` assertion in `adpcm.rs`).
 * 2026-11-09, agent (team leader, review round 11, 11-4): a source that cannot seek gets the bound of channels from the `COMM` in the window of its scan, before any reader of Symphonia.  A `COMM` past the window gets the check after the open of the reader.  Reason: the window is in memory already, and a later `COMM` would need a read of the stream past it.
+* 2026-11-09, agent (team leader, review round 11, the residual of 11-4): from a source that cannot seek, an AIFF whose window of the scan is full and holds no `COMM` is refused with `FAR_COMM_TEXT`, before any reader of Symphonia.  Reason: the bound of channels needs `COMM` before Symphonia reads it, and no source of the app is non-seekable, so this refuses no file that a person can open today.
 
 ## Outcomes and retrospective
 
