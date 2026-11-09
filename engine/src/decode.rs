@@ -4112,4 +4112,25 @@ mod tests {
             assert_tags_are_hidden(plain, aligned, "aiff", &format!("{form:?}"));
         }
     }
+
+    /// B6 of review round 7: an `ftyp` past the first 1 MiB of the view,
+    /// after a chain of top-level boxes, opens bit for bit, with `moov`
+    /// first or last.  Bytes that are not a box before it still give no
+    /// known format.
+    #[test]
+    fn an_m4a_after_a_large_free_or_uuid_box_opens() {
+        use crate::test_m4a::{bx, with_stco_moved};
+        for kind in [b"free", b"uuid"] {
+            for order in [m4a::Order::MoovLast, m4a::Order::FastStart] {
+                let plain = alac_of(order);
+                let prefix = bx(kind, &[&vec![0; 2 << 20]]);
+                let moved = with_stco_moved(plain.clone(), prefix.len() as i64);
+                let case = format!("{order:?} after a {}", String::from_utf8_lossy(kind));
+                assert_tags_are_hidden(plain, [prefix, moved].concat(), "m4a", &case);
+            }
+        }
+        let junk = [vec![0x42; 2 << 20], alac_of(m4a::Order::FastStart)].concat();
+        let text = "unsupported or unrecognised format: no known format at the start of the file";
+        assert_refused_early(junk, "m4a", text, "an M4A after 2 MiB of junk");
+    }
 }

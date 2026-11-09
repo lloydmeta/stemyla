@@ -556,7 +556,54 @@ pub(crate) fn start_of(
         }
         base += SCAN_BLOCK;
     }
-    Ok((view, None))
+    let after_boxes = ftyp_after_boxes(source, view)?;
+    Ok((view, after_boxes.map(|at| (Container::Mp4, at))))
+}
+
+/// The most top-level boxes that [`ftyp_after_boxes`] steps over.
+const MOST_CHAIN_BOXES: usize = 1024;
+
+/// The start of the first `ftyp` of a chain of top-level boxes from the
+/// start of the view, past the window of the probe (B6 of review round 7).
+/// Each box before it must be one that can start an MP4
+/// (`mp4_boxes::FIRST_BOXES`), of a size that fits.  The MP4 reader then
+/// walks the boxes before it again from the start of the view.
+fn ftyp_after_boxes(source: &mut dyn ReadAt, view: u64) -> std::io::Result<Option<u64>> {
+    let mut at = view;
+    for _ in 0..MOST_CHAIN_BOXES {
+        let mut header = [0; 16];
+        let read = source.read_at(at, &mut header)?;
+        if read < 8 {
+            return Ok(None);
+        }
+        let kind = &header[4..8];
+        if kind == b"ftyp" {
+            return Ok(Some(at));
+        }
+        if !crate::mp4_boxes::FIRST_BOXES
+            .iter()
+            .any(|first| kind == &first[..])
+        {
+            return Ok(None);
+        }
+        // A size of 1 gives a 64-bit size after the type.  A size of 0 runs
+        // to the end, so no `ftyp` follows.
+        let small = u64::from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]));
+        let (size, header_len) = match small {
+            1 if read == 16 => (
+                u64::from_be_bytes(header[8..16].try_into().unwrap_or_default()),
+                16,
+            ),
+            small => (small, 8),
+        };
+        let Some(next) = at.checked_add(size).filter(|_| size >= header_len) else {
+            return Ok(None);
+        };
+        at = next;
+    }
+    Ok(None)
 }
 
 /// The plan of a file of `container`, not an MP4, whose view starts at
@@ -1065,6 +1112,45 @@ mod tests {
             bytes_at(&mut view, 0, 10),
             late,
             "after the seek to the start"
+        );
+    }
+
+    /// B6 of review round 7: the chain of top-level boxes to an `ftyp`.
+    #[test]
+    fn an_ftyp_after_a_chain_of_boxes_is_found() {
+        let header = |size: u32, kind: &[u8; 4]| [&size.to_be_bytes()[..], kind].concat();
+        let large = [
+            &1_u32.to_be_bytes()[..],
+            b"free",
+            &24_u64.to_be_bytes(),
+            &[0; 8],
+        ]
+        .concat();
+        let after = |prefix: Vec<u8>| {
+            let file = [prefix, header(16, b"ftyp"), vec![0; 8]].concat();
+            ftyp_after_boxes(&mut { file.as_slice() }, 0).ok().flatten()
+        };
+        assert_eq!(after(vec![]), Some(0));
+        assert_eq!(after([header(12, b"free"), vec![0; 4]].concat()), Some(12));
+        assert_eq!(
+            after([header(8, b"uuid"), header(8, b"skip")].concat()),
+            Some(16)
+        );
+        assert_eq!(after(large), Some(24), "a 64-bit size");
+        assert_eq!(
+            after([header(12, b"junk"), vec![0; 4]].concat()),
+            None,
+            "an unknown box"
+        );
+        assert_eq!(after(header(0, b"free")), None, "a size of 0");
+        assert_eq!(after(header(7, b"free")), None, "a size under its header");
+        let short_large = [&1_u32.to_be_bytes()[..], b"free", &8_u64.to_be_bytes()].concat();
+        assert_eq!(after(short_large), None, "a 64-bit size under its header");
+        let file = [header(8, b"free"), vec![0; 4]].concat();
+        assert_eq!(
+            ftyp_after_boxes(&mut { file.as_slice() }, 0).ok().flatten(),
+            None,
+            "a cut header"
         );
     }
 
