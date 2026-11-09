@@ -763,3 +763,120 @@ pub fn pce_config(rate: u32, elements: &[bool]) -> Vec<u8> {
     bits.put(8, 0);
     bits.bytes
 }
+
+/// The whole box of `kind` in `file`, whose type is once in it.
+fn box_of<'a>(file: &'a [u8], kind: &[u8; 4]) -> &'a [u8] {
+    let at = place_once(file, kind) - 4;
+    let size = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+    &file[at..at + size]
+}
+
+/// The big-endian `u32` at `at` of `bytes`.
+fn be32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+/// `file`, an M4A of one track with `moov` first, as a fragmented MP4: a
+/// `moov` with empty sample tables and an `mvex`, then a `moof` and an
+/// `mdat` for each `per_fragment` packets, with a `sidx` after `moov` when
+/// `sidx` is set.  Each `trun` states the duration and the size of each
+/// packet, and its data offset from the start of its `moof`.
+pub fn fragmented(file: &[u8], per_fragment: usize, sidx: bool) -> Vec<u8> {
+    let full = |flags: u32| flags.to_be_bytes();
+    let stsz = box_of(file, b"stsz");
+    let sizes: Vec<u32> = (0..be32(stsz, 16) as usize)
+        .map(|k| be32(stsz, 20 + 4 * k))
+        .collect();
+    let stts = box_of(file, b"stts");
+    let mut durations = Vec::new();
+    for k in 0..be32(stts, 12) as usize {
+        let (count, delta) = (be32(stts, 16 + 8 * k), be32(stts, 20 + 8 * k));
+        durations.extend(std::iter::repeat_n(delta, count as usize));
+    }
+    let stco = box_of(file, b"stco");
+    let first = be32(stco, 16) as usize;
+    let empty = |kind: &[u8; 4], fields: usize| bx(kind, &[&vec![0; 4 + 4 * fields]]);
+    let stbl = bx(
+        b"stbl",
+        &[
+            box_of(file, b"stsd"),
+            &empty(b"stts", 1),
+            &empty(b"stsc", 1),
+            &empty(b"stsz", 2),
+            &empty(b"stco", 1),
+        ],
+    );
+    let minf_parts: Vec<&[u8]> = [b"smhd", b"dinf"]
+        .iter()
+        .filter(|kind| places(file, &kind[..]).len() == 1)
+        .map(|kind| box_of(file, kind))
+        .chain([stbl.as_slice()])
+        .collect();
+    let minf = bx(b"minf", &minf_parts);
+    let mdia = bx(
+        b"mdia",
+        &[box_of(file, b"mdhd"), box_of(file, b"hdlr"), &minf],
+    );
+    let edts: Vec<&[u8]> = if places(file, b"edts").len() == 1 {
+        vec![box_of(file, b"edts")]
+    } else {
+        vec![]
+    };
+    let trak_parts: Vec<&[u8]> = [box_of(file, b"tkhd")]
+        .into_iter()
+        .chain(edts)
+        .chain([mdia.as_slice()])
+        .collect();
+    let trak = bx(b"trak", &trak_parts);
+    let trex = bx(
+        b"trex",
+        &[
+            &full(0),
+            &1_u32.to_be_bytes(),
+            &1_u32.to_be_bytes(),
+            &[0; 12],
+        ],
+    );
+    let moov = bx(
+        b"moov",
+        &[box_of(file, b"mvhd"), &trak, &bx(b"mvex", &[&trex])],
+    );
+    let mut out = [box_of(file, b"ftyp"), &moov].concat();
+    if sidx {
+        let scale = be32(box_of(file, b"mdhd"), 20);
+        out.extend_from_slice(&bx(
+            b"sidx",
+            &[
+                &full(0),
+                &1_u32.to_be_bytes(),
+                &scale.to_be_bytes(),
+                &[0; 12],
+            ],
+        ));
+    }
+    let mut at = first;
+    for (number, chunk) in sizes.chunks(per_fragment).enumerate() {
+        let start = number * per_fragment;
+        let bytes: usize = chunk.iter().map(|size| *size as usize).sum();
+        let trun = |offset: u32| {
+            let mut body = Vec::from(full(0x0301));
+            body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            body.extend_from_slice(&offset.to_be_bytes());
+            for (k, size) in chunk.iter().enumerate() {
+                body.extend_from_slice(&durations[start + k].to_be_bytes());
+                body.extend_from_slice(&size.to_be_bytes());
+            }
+            bx(b"trun", &[&body])
+        };
+        let moof = |offset: u32| {
+            let tfhd = bx(b"tfhd", &[&full(0x02_0000), &1_u32.to_be_bytes()]);
+            let mfhd = bx(b"mfhd", &[&full(0), &(number as u32 + 1).to_be_bytes()]);
+            bx(b"moof", &[&mfhd, &bx(b"traf", &[&tfhd, &trun(offset)])])
+        };
+        let size = moof(0).len() as u32;
+        out.extend_from_slice(&moof(size + 8));
+        out.extend_from_slice(&bx(b"mdat", &[&file[at..at + bytes]]));
+        at += bytes;
+    }
+    out
+}

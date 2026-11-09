@@ -432,6 +432,8 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * `an_adts_stream_of_more_than_one_raw_block_gives_its_text`: "no known format at the start of the file".
     * `a_program_config_of_one_front_element_gives_its_channels` and `a_packet_that_ends_with_sbr_data_is_found` test the parsers.
     * The local check, not in the repo: an ADTS HE-AAC file of `afconvert -f adts -d aach` gives the HE-AAC text (it opened at 24 kHz before); an M4A of `afconvert -d aach` with its config made AAC-LC only (implicit SBR) gives the text; the Apple HE-AAC and HE-AAC v2 M4A files give it as before; the Apple AAC-LC M4A and ADTS files open, 144,000 and 146,432 frames.
+  * [x] 2026-11-09: review round 7 fixes, part 6: a fragmented M4A and a compressed AIFC (B6).  `a_fragmented_m4a_decodes` passed at d958893: Symphonia reads the fragments, and the `sidx` stays hidden.  With a data offset 4 bytes long, it fails ("file decoded to no audio").  `a_compressed_aifc_gives_its_text` failed first at d958893 with Symphonia's text "aifc: compression type not supported".
+    * Before the commit: `cargo test -p engine --lib` (286 tests) passed in 37.2 s, and `--release` in 17.6 s.  `web-test --browser chrome`, `e2e decode --browser chrome` and the local real-file check passed.
 
 ## Surprises and discoveries
 
@@ -532,6 +534,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
   * A program config element in an AAC-LC config: Symphonia refuses it (`symphonia-common` `mpeg/audio/mod.rs`, line 289), and reads no bit of AAC-LC after the GASpecificConfig.  When the element holds one front element only, the decode puts its channel configuration (1 or 2) in a copy of the config in the codec parameters (`decode::with_pce_channels`).  The decoder ignores the element tags.  Another element gives `AAC_KIND_TEXT`.
   * An ADTS stream of more than one raw data block in a frame gets `ADTS_BLOCKS_TEXT`, and TD-86, since a view cannot give the decoder one packet for each block.
   * Reason: the criteria say that an upstream limit is no reason when the engine can close it, and a refusal needs a clear text.
+* 2026-11-09, agent (team leader, review round 7, B6, the orchestrator's items): a fragmented ALAC M4A, hand-built in `test_m4a::fragmented` (a `moov` of empty tables and an `mvex`, then `moof` and `mdat` pairs, with or without a `sidx`), decodes bit for bit with no change in `engine`.  An AIFC of a compression type that Symphonia 0.6.1 does not decode (`aiff/chunks.rs`, line 287) gets `AIFC_COMPRESSED_TEXT` before the open, in place of Symphonia's text.  Reason: VERIFY-1, and a refusal needs a clear text.
 
 ## Outcomes and retrospective
 

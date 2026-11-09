@@ -328,6 +328,45 @@ fn chunk_plan(
     }
 }
 
+/// The AIFC compression types that Symphonia 0.6.1 decodes
+/// (`symphonia-format-riff` `aiff/chunks.rs`, lines 276 to 286), in either
+/// case.
+const AIFC_TYPES: [&[u8; 4]; 11] = [
+    b"none", b"alaw", b"ulaw", b"in24", b"in32", b"23ni", b"fl32", b"fl64", b"sowt", b"twos",
+    b"raw ",
+];
+
+/// Whether the AIFC file whose `FORM` starts at `at` has a compression
+/// type that Symphonia 0.6.1 does not decode, by its `COMM` chunk.  An
+/// AIFF, or an AIFC with no `COMM`, gives `false`.
+pub(crate) fn is_aifc_of_other_type(source: &mut dyn ReadAt, at: u64) -> std::io::Result<bool> {
+    let mut form = [0; 4];
+    if source.read_at(at + 8, &mut form)? < 4 || form != *b"AIFC" {
+        return Ok(false);
+    }
+    let mut chunk = at + 12;
+    loop {
+        let mut header = [0; 8];
+        if source.read_at(chunk, &mut header)? < 8 {
+            return Ok(false);
+        }
+        let size = u64::from(u32::from_be_bytes([
+            header[4], header[5], header[6], header[7],
+        ]));
+        if header[..4] == *b"COMM" {
+            // The channels, the frames, the sample size, the rate of 10
+            // bytes, then the compression type.
+            let mut kind = [0; 4];
+            if source.read_at(chunk + 8 + 18, &mut kind)? < 4 {
+                return Ok(false);
+            }
+            kind.make_ascii_lowercase();
+            return Ok(!AIFC_TYPES.iter().any(|known| **known == kind));
+        }
+        chunk += 8 + size + (size & 1);
+    }
+}
+
 /// The container of a file, which says the one Symphonia reader that the
 /// decode opens.  The decode does not run Symphonia's probe.  It finds the
 /// marker that the probe would find ([`start_of`]), and opens that reader

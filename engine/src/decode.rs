@@ -136,6 +136,10 @@ pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC
 /// frame, which Symphonia 0.6.1 refuses (TD-86).
 pub const ADTS_BLOCKS_TEXT: &str = "This AAC file puts more than one AAC frame in each ADTS frame, so it cannot open.  Open an M4A file, or another AAC file.";
 
+/// The text of an AIFC file of a compression type that Symphonia 0.6.1
+/// does not decode, such as `ima4`.
+pub const AIFC_COMPRESSED_TEXT: &str = "This AIFC file is compressed in a form that does not open.  Open an uncompressed AIFF or AIFC file.";
+
 /// The text of an AAC file of more than 2 channels.
 pub fn aac_channels_text(channels: u32) -> String {
     format!("This AAC file has {channels} channels.  Only mono and stereo AAC open.")
@@ -753,6 +757,12 @@ fn open_within(
         }
         None if is_seekable => {
             let mut at = crate::mp4_boxes::Seeking(&mut *source);
+            if container == Container::Aiff
+                && crate::hidden::is_aifc_of_other_type(&mut at, reader_at)
+                    .context("reading the start of the file")?
+            {
+                return Err(anyhow!(AIFC_COMPRESSED_TEXT));
+            }
             let plan = crate::hidden::plan_of(&mut at, view, reader_at, container)
                 .context("reading the tags of the file")?;
             source.seek(SeekFrom::Start(0))?;
@@ -4353,5 +4363,49 @@ mod tests {
         let packets = adts_packets(&stream);
         let blocks = adts_of(&packets, 44_100, 2, 1);
         assert_refused_early(blocks, "aac", ADTS_BLOCKS_TEXT, "two raw blocks");
+    }
+
+    /// B6 of review round 7: a fragmented ALAC M4A, with a `moov` of empty
+    /// tables and an `mvex`, then `moof` and `mdat` pairs, decodes bit for
+    /// bit, with a `sidx` too.  The decode reads the fragments in order, and
+    /// needs no `sidx` (finding 6-2 of review round 6).
+    #[test]
+    fn a_fragmented_m4a_decodes() {
+        use crate::test_m4a::{alac_m4a, fragmented, places};
+        let tone = chirps();
+        let plain = alac_m4a(&tone[0], &tone[1], 44_100, None, m4a::Order::FastStart);
+        let packets = 88_200_usize.div_ceil(4096);
+        let want = decoded(plain.clone(), "the plain file").channels;
+        for (per_fragment, sidx) in [(1, false), (2, true), (100, true)] {
+            let case = format!("{per_fragment} packets in each fragment, sidx {sidx}");
+            let file = fragmented(&plain, per_fragment, sidx);
+            let moofs = places(&file, b"moof").len();
+            assert_eq!(moofs, packets.div_ceil(per_fragment), "{case}");
+            let got = decode_bytes(file, Some("m4a"));
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap().channels == want, "{case}");
+        }
+    }
+
+    /// B6 of review round 7: Symphonia 0.6.1 refuses a compressed AIFC type
+    /// that it does not decode (`aiff/chunks.rs`, line 287).  The decode
+    /// gives its own text for it.
+    #[test]
+    fn a_compressed_aifc_gives_its_text() {
+        use crate::test_audio::{Aiff, aiff};
+        let (left, right, _) = stereo_wav();
+        let plain = aiff(&[left, right], 44_100, 16, Aiff::UncompressedAifc);
+        let at = (0..plain.len())
+            .find(|at| plain[*at..].starts_with(b"NONE"))
+            .unwrap();
+        let mut ima4 = plain.clone();
+        ima4[at..at + 4].copy_from_slice(b"ima4");
+        assert_refused_early(ima4, "aiff", AIFC_COMPRESSED_TEXT, "ima4");
+        let mut sowt = plain;
+        sowt[at..at + 4].copy_from_slice(b"sowt");
+        assert!(
+            decode_bytes(sowt, Some("aiff")).is_ok(),
+            "a type that Symphonia decodes"
+        );
     }
 }
