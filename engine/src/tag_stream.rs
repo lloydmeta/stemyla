@@ -2,9 +2,10 @@
 //! (finding 12-2 and the tags of a stream, review round 12, MEM-4).
 //!
 //! A source that cannot seek gets no plan of `engine::hidden`, and gives no
-//! `COMM` to read first.  So [`TagStream`] follows the chunk or block
-//! headers of an AIFF, a WAV or a FLAC as the bytes go to Symphonia, by the
-//! rules of `engine::hidden`.
+//! `COMM` to read first.  So [`TagStream`] follows the headers of the
+//! stream as the bytes go to Symphonia, and a [`Rule`] changes each header.
+//! [`Chunks`] is the rule of an AIFF, a WAV or a FLAC, by the rules of
+//! `engine::hidden`:
 //! * It shows each tag chunk as `JUNK` and each tag block as PADDING, which
 //!   Symphonia reads past.
 //! * It shows the block size of an AIFF `SSND` as 0, as the plan does.
@@ -18,18 +19,110 @@ use symphonia::core::io::MediaSource;
 use crate::decode::MOST_CHANNELS;
 use crate::hidden::{AIFF_TAG_CHUNKS, FLAC_PADDING, FLAC_TAG_BLOCKS, HIDDEN_CHUNK, WAV_TAG_CHUNKS};
 
-/// The most bytes that a read from the inner source gives at once.  It is
-/// small, since the window of the scan of a stream is held too.
-const STAGE: usize = 4096;
+/// The bytes that a refill of the stage reads from the inner source at
+/// most.  It is small, since the window of the scan of a stream is held
+/// too.  The stage holds at most `STAGE + Rule::HEADER` bytes: a part
+/// header at its end waits for the next refill (finding 13-1 of review
+/// round 13).
+pub(crate) const STAGE: usize = 4096;
 
-/// The bytes of a chunk header that a rule reads: the ID, the size, the
-/// channels of a `COMM` (8 to 10), and the block size of an `SSND` (12 to
-/// 16).
-const HEADER: usize = 16;
+/// The headers of a stream, and how each changes as it passes.
+pub(crate) trait Rule {
+    /// The bytes of a header that [`Rule::change`] reads.
+    const HEADER: usize;
 
-/// The form of a stream, which says its headers.
+    /// Changes `header`, the first bytes of the header at `at`: `HEADER`
+    /// bytes, or fewer at the end of the stream.  Gives where the next
+    /// header starts, or `None` when Symphonia reads no more headers.
+    fn change(&mut self, at: u64, header: &mut [u8]) -> std::io::Result<Option<u64>>;
+}
+
+/// A source that cannot seek, which changes its headers by `R` as they
+/// pass.
+pub(crate) struct TagStream<R> {
+    inner: Box<dyn MediaSource>,
+    rule: R,
+    /// The bytes from the inner source that the next reads give, with the
+    /// headers in them changed, then a part header.
+    stage: Vec<u8>,
+    /// The bytes of `stage` that the reads gave.
+    given: usize,
+    /// The bytes of `stage` that the reads can give: the rest is a part
+    /// header.
+    ready: usize,
+    /// The position in the stream of the first byte of `stage`.
+    at: u64,
+    /// Where the next header starts, until the last one that Symphonia
+    /// reads.
+    next: Option<u64>,
+    ended: bool,
+}
+
+impl<R: Rule> TagStream<R> {
+    /// `inner` from its start, whose first header is at `first`.
+    pub(crate) fn new(inner: Box<dyn MediaSource>, rule: R, first: u64) -> Self {
+        TagStream {
+            inner,
+            rule,
+            stage: Vec::with_capacity(STAGE + R::HEADER),
+            given: 0,
+            ready: 0,
+            at: 0,
+            next: Some(first),
+            ended: false,
+        }
+    }
+
+    /// Reads into the free room of `stage`, at most `STAGE + HEADER` bytes.
+    fn fill(&mut self) -> std::io::Result<()> {
+        let from = self.stage.len();
+        self.stage.resize(STAGE + R::HEADER, 0);
+        let read = self.inner.read(&mut self.stage[from..])?;
+        self.stage.truncate(from + read);
+        self.ended = read == 0;
+        Ok(())
+    }
+
+    /// Moves the part header to the front of `stage`, reads after it, and
+    /// changes each whole header.  The bytes before a part header are
+    /// ready.
+    fn stage_next(&mut self) -> std::io::Result<()> {
+        self.stage.drain(..self.ready);
+        self.at += self.ready as u64;
+        self.given = 0;
+        self.ready = 0;
+        while self.ready == 0 && !(self.ended && self.stage.is_empty()) {
+            self.fill()?;
+            self.ready = self.change_whole()?;
+        }
+        Ok(())
+    }
+
+    /// Changes each header in `stage` that is whole, or that the end of the
+    /// stream cuts, and gives the bytes before the first part header.
+    fn change_whole(&mut self) -> std::io::Result<usize> {
+        while let Some(next) = self.next {
+            let end = self.at + self.stage.len() as u64;
+            if next >= end && !self.ended {
+                return Ok(self.stage.len());
+            }
+            let from = usize::try_from(next - self.at).unwrap_or(usize::MAX);
+            if from >= self.stage.len() {
+                return Ok(self.stage.len());
+            }
+            if from + R::HEADER > self.stage.len() && !self.ended {
+                return Ok(from);
+            }
+            let to = self.stage.len().min(from + R::HEADER);
+            self.next = self.rule.change(next, &mut self.stage[from..to])?;
+        }
+        Ok(self.stage.len())
+    }
+}
+
+/// The rule of the chunks of an AIFF or a WAV, or the blocks of a FLAC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Form {
+pub(crate) enum Chunks {
     Aiff,
     Wav,
     Flac,
@@ -48,122 +141,65 @@ impl std::fmt::Display for TooManyChannels {
 
 impl std::error::Error for TooManyChannels {}
 
-/// A source that cannot seek, which changes its headers as they pass.
-pub(crate) struct TagStream {
-    inner: Box<dyn MediaSource>,
-    form: Form,
-    /// The bytes from the inner source that the next reads give, with the
-    /// headers in them changed.
-    stage: Vec<u8>,
-    /// The bytes of `stage` that the reads gave.
-    given: usize,
-    /// The position in the stream of the first byte of `stage`.
-    at: u64,
-    /// Where the next header starts, until the last header that Symphonia
-    /// reads from a stream: `SSND`, `data`, or the last FLAC block.
-    next: Option<u64>,
-}
+impl Rule for Chunks {
+    /// The ID, the size, the channels of a `COMM` (8 to 10), and the block
+    /// size of an `SSND` (12 to 16).
+    const HEADER: usize = 16;
 
-impl TagStream {
-    /// `inner` from its start, whose first header of `form` is at `first`.
-    pub(crate) fn new(inner: Box<dyn MediaSource>, form: Form, first: u64) -> Self {
-        TagStream {
-            inner,
-            form,
-            stage: Vec::with_capacity(STAGE + HEADER),
-            given: 0,
-            at: 0,
-            next: Some(first),
-        }
-    }
-
-    /// Reads into `stage` up to `len` bytes, and gives whether the source
-    /// ended.
-    fn fill(&mut self, len: usize) -> std::io::Result<bool> {
-        let from = self.stage.len();
-        self.stage.resize(len, 0);
-        let read = self.inner.read(&mut self.stage[from..])?;
-        self.stage.truncate(from + read);
-        Ok(read == 0)
-    }
-
-    /// Reads the next bytes into `stage`, each header in them whole, and
-    /// changes the headers.
-    fn stage_next(&mut self) -> std::io::Result<()> {
-        self.at += self.stage.len() as u64;
-        self.stage.clear();
-        self.given = 0;
-        let mut ended = self.fill(STAGE)?;
-        while let Some(next) = self.next {
-            let end = self.at + self.stage.len() as u64;
-            if next >= end {
-                return Ok(());
+    fn change(&mut self, at: u64, header: &mut [u8]) -> std::io::Result<Option<u64>> {
+        let form = *self;
+        if let (Chunks::Flac, Some(&[a, b, c, d])) = (form, header.get(..4)) {
+            let len = u64::from(u32::from_be_bytes([0, b, c, d]));
+            if FLAC_TAG_BLOCKS.contains(&(a & 0x7F)) {
+                header[0] = (a & 0x80) | FLAC_PADDING;
             }
-            let from = (next - self.at) as usize;
-            while !ended && self.stage.len() < from + HEADER {
-                ended = self.fill(from + HEADER)?;
+            return Ok((a & 0x80 == 0).then_some(at + 4 + len));
+        }
+        let Some(&[a, b, c, d, e, f, g, h]) = header.get(..8).filter(|_| form != Chunks::Flac)
+        else {
+            return Ok(None);
+        };
+        let id = [a, b, c, d];
+        let (size, tags, last) = match form {
+            Chunks::Wav => (
+                u32::from_le_bytes([e, f, g, h]),
+                &WAV_TAG_CHUNKS[..],
+                *b"data",
+            ),
+            _ => (
+                u32::from_be_bytes([e, f, g, h]),
+                &AIFF_TAG_CHUNKS[..],
+                *b"SSND",
+            ),
+        };
+        if tags.iter().any(|tag| **tag == id) {
+            header[..4].copy_from_slice(HIDDEN_CHUNK);
+        }
+        if form == Chunks::Aiff && id == *b"COMM" {
+            let channels = header
+                .get(8..10)
+                .map_or(0, |n| u16::from_be_bytes([n[0], n[1]]));
+            if channels > MOST_CHANNELS {
+                return Err(std::io::Error::other(TooManyChannels(channels)));
             }
-            let to = self.stage.len().min(from + HEADER);
-            let form = self.form;
-            self.next = change(form, &mut self.stage[from..to])?.map(|len| next + len);
         }
-        Ok(())
+        if id == last {
+            if let Some(block) = header.get_mut(12..16).filter(|_| form == Chunks::Aiff) {
+                block.fill(0);
+            }
+            return Ok(None);
+        }
+        let size = u64::from(size);
+        Ok(Some(at + 8 + size + (size & 1)))
     }
 }
 
-/// Changes `header`, of `form`, by the rules of `engine::hidden`, and gives
-/// the bytes to the next header, if Symphonia reads one.
-fn change(form: Form, header: &mut [u8]) -> std::io::Result<Option<u64>> {
-    if let (Form::Flac, Some(&[a, b, c, d])) = (form, header.get(..4)) {
-        let len = u64::from(u32::from_be_bytes([0, b, c, d]));
-        if FLAC_TAG_BLOCKS.contains(&(a & 0x7F)) {
-            header[0] = (a & 0x80) | FLAC_PADDING;
-        }
-        return Ok((a & 0x80 == 0).then_some(4 + len));
-    }
-    let Some(&[a, b, c, d, e, f, g, h]) = header.get(..8).filter(|_| form != Form::Flac) else {
-        return Ok(None);
-    };
-    let id = [a, b, c, d];
-    let (size, tags, last) = match form {
-        Form::Wav => (
-            u32::from_le_bytes([e, f, g, h]),
-            &WAV_TAG_CHUNKS[..],
-            *b"data",
-        ),
-        _ => (
-            u32::from_be_bytes([e, f, g, h]),
-            &AIFF_TAG_CHUNKS[..],
-            *b"SSND",
-        ),
-    };
-    if tags.iter().any(|tag| **tag == id) {
-        header[..4].copy_from_slice(HIDDEN_CHUNK);
-    }
-    if form == Form::Aiff && id == *b"COMM" {
-        let channels = header
-            .get(8..10)
-            .map_or(0, |n| u16::from_be_bytes([n[0], n[1]]));
-        if channels > MOST_CHANNELS {
-            return Err(std::io::Error::other(TooManyChannels(channels)));
-        }
-    }
-    if id == last {
-        if let Some(block) = header.get_mut(12..16).filter(|_| form == Form::Aiff) {
-            block.fill(0);
-        }
-        return Ok(None);
-    }
-    let size = u64::from(size);
-    Ok(Some(8 + size + (size & 1)))
-}
-
-impl Read for TagStream {
+impl<R: Rule> Read for TagStream<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.given == self.stage.len() {
+        if self.given == self.ready {
             self.stage_next()?;
         }
-        let staged = &self.stage[self.given..];
+        let staged = &self.stage[self.given..self.ready];
         let len = staged.len().min(buf.len());
         buf[..len].copy_from_slice(&staged[..len]);
         self.given += len;
@@ -171,13 +207,13 @@ impl Read for TagStream {
     }
 }
 
-impl Seek for TagStream {
+impl<R> Seek for TagStream<R> {
     fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 
-impl MediaSource for TagStream {
+impl<R: Rule + Send + Sync> MediaSource for TagStream<R> {
     fn is_seekable(&self) -> bool {
         false
     }
@@ -196,9 +232,9 @@ pub(crate) fn stream_of(
 ) -> Box<dyn MediaSource> {
     use crate::hidden::Container;
     match container {
-        Container::Aiff => Box::new(TagStream::new(source, Form::Aiff, at + 12)),
-        Container::Wav => Box::new(TagStream::new(source, Form::Wav, at + 12)),
-        Container::Flac => Box::new(TagStream::new(source, Form::Flac, at + 4)),
+        Container::Aiff => Box::new(TagStream::new(source, Chunks::Aiff, at + 12)),
+        Container::Wav => Box::new(TagStream::new(source, Chunks::Wav, at + 12)),
+        Container::Flac => Box::new(TagStream::new(source, Chunks::Flac, at + 4)),
         _ => source,
     }
 }
@@ -231,7 +267,7 @@ mod tests {
     fn read_all(file: Vec<u8>) -> std::io::Result<Vec<u8>> {
         let source = Box::new(ReadOnlySource::new(OneByte(Cursor::new(file))));
         let mut out = Vec::new();
-        TagStream::new(source, Form::Aiff, 12).read_to_end(&mut out)?;
+        TagStream::new(source, Chunks::Aiff, 12).read_to_end(&mut out)?;
         Ok(out)
     }
 
@@ -263,5 +299,32 @@ mod tests {
                 assert!(read.unwrap() == file, "{count} channels: the bytes");
             }
         }
+    }
+
+    /// Finding 13-1 of review round 13: over a run of 1,000,000 empty
+    /// chunks, each shorter than a header, the stage stays at most
+    /// `STAGE + Chunks::HEADER` bytes, and the bytes pass as they are.
+    #[test]
+    fn the_stage_has_a_bound() {
+        let tone = vec![0.25; 16];
+        let plain = aiff(&vec![tone; 2], 44_100, 16, Aiff::Plain);
+        let empty = [&b"JUNK"[..], &[0; 4]].concat();
+        let file = [&plain[..12], &empty.repeat(1_000_000), &plain[12..]].concat();
+        let source = Box::new(ReadOnlySource::new(Cursor::new(file.clone())));
+        let mut stream = TagStream::new(source, Chunks::Aiff, 12);
+        let (mut out, mut buf) = (Vec::new(), [0; 16]);
+        loop {
+            let read = stream.read(&mut buf).unwrap();
+            assert!(
+                stream.stage.capacity() <= STAGE + Chunks::HEADER,
+                "the stage holds {}",
+                stream.stage.capacity()
+            );
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read]);
+        }
+        assert!(out == file, "the bytes");
     }
 }

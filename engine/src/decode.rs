@@ -5682,6 +5682,102 @@ mod tests {
         }
     }
 
+    /// `file`, an AIFF or a WAV, with `count` empty `JUNK` chunks after its
+    /// form header.
+    fn with_empty_chunks(file: &[u8], count: usize, little_endian: bool) -> Vec<u8> {
+        let empty = [&b"JUNK"[..], &[0; 4]].concat();
+        let mut out = [&file[..12], &empty.repeat(count), &file[12..]].concat();
+        let form = (out.len() - 8) as u32;
+        let form = if little_endian {
+            form.to_le_bytes()
+        } else {
+            form.to_be_bytes()
+        };
+        out[4..8].copy_from_slice(&form);
+        out
+    }
+
+    /// `flac` with `count` empty PADDING blocks after its STREAMINFO.
+    fn with_empty_blocks(flac: &[u8], count: usize) -> Vec<u8> {
+        let last = flac[4] & 0x80;
+        let mut blocks = [1_u8, 0, 0, 0].repeat(count);
+        blocks[4 * (count - 1)] |= last;
+        [
+            &flac[..4],
+            &[flac[4] & 0x7F],
+            &flac[5..42],
+            &blocks,
+            &flac[42..],
+        ]
+        .concat()
+    }
+
+    /// Finding 13-1 of review round 13 (MEM-4): a run of chunks or blocks
+    /// shorter than a header does not grow the stage of `TagStream`.  An
+    /// AIFF, a WAV and a FLAC with 1,000,000 empty chunks or blocks decode
+    /// through `Fifo` bit for bit, within 1 MiB of the peak of the plain
+    /// stream.
+    #[test]
+    fn a_run_of_empty_chunks_keeps_the_stage_small() {
+        use crate::test_audio::{Aiff, aiff};
+        let (left, right, wav) = stereo_wav();
+        let pa = aiff(&[left.clone(), right.clone()], 44_100, 16, Aiff::Plain);
+        let flac = compressed(&left, &right, 44_100);
+        let count = 1_000_000;
+        let cases = [
+            (
+                "an AIFF",
+                "aiff",
+                pa.clone(),
+                with_empty_chunks(&pa, count, false),
+            ),
+            (
+                "a WAV",
+                "wav",
+                wav.clone(),
+                with_empty_chunks(&wav, count, true),
+            ),
+            (
+                "a FLAC",
+                "flac",
+                flac.clone(),
+                with_empty_blocks(&flac, count),
+            ),
+        ];
+        for (case, ext, plain, run) in cases {
+            let want = decode_bytes(plain.clone(), Some(ext)).unwrap().channels;
+            let (plain_peak, _) = stream_peak(plain, ext);
+            let (peak, got) = stream_peak(run, ext);
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap() == want, "{case}: the samples differ");
+            assert!(
+                peak < plain_peak + (1 << 20),
+                "{case}: the plain stream peaks at {plain_peak} bytes, the run at {peak}"
+            );
+        }
+    }
+
+    /// Missed mutant 13-12 of review round 13: a stream through `TagStream`
+    /// states no length, so a FLAC and an 8-bit AIFF stream reserve no
+    /// frames.
+    #[test]
+    fn a_stream_reserves_no_frames() {
+        use crate::test_audio::{Aiff, aiff};
+        let (left, right, _) = stereo_wav();
+        let cases = [
+            ("a FLAC", "flac", compressed(&left, &right, 44_100)),
+            (
+                "an 8-bit AIFF",
+                "aiff",
+                aiff(&[left], 44_100, 8, Aiff::Plain),
+            ),
+        ];
+        for (case, ext, file) in cases {
+            let decoder = Decoder::new(Box::new(Fifo(Cursor::new(file))), Some(ext));
+            assert_eq!(decoder.map(|d| d.reserve).ok(), Some(0), "{case}");
+        }
+    }
+
     /// The check of channels after the open of the reader: no reader of
     /// Symphonia 0.6.1 that the decode opens gives more than 128 channels
     /// past the checks before it, so it is tested alone.

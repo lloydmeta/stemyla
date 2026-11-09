@@ -499,10 +499,16 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * FLAC PICTURE 80,818,239 B against 1,302,546 B; one VORBIS_COMMENT of 15 MiB (a FLAC block holds at most 16 MiB) 32,584,598 B.
     * MP3 and ADTS behind an ID3v2 tag of 64 MiB: "no known format" at 1,056,934 B, no memory at risk (TD-89).
     * A fast-start ALAC M4A with 64 MiB of art in `moov/udta`: 131,148,338 B against 1,213,068 B (TD-88).
-    * Now `engine::tag_stream::TagStream` (the old `aiff_stream`, 153 lines of code with no comments and no tests) follows the headers of an AIFF, a WAV or a FLAC stream with the rules of `engine::hidden`.  It shows each tag chunk as `JUNK` and each tag block as PADDING, and an AIFF `SSND` block size as 0.  It stages at most 4 KiB, so that each header is whole when it changes it.
+    * Now `engine::tag_stream::TagStream` (the old `aiff_stream`, 153 lines of code with no comments and no tests) follows the headers of an AIFF, a WAV or a FLAC stream with the rules of `engine::hidden`.  It shows each tag chunk as `JUNK` and each tag block as PADDING, and an AIFF `SSND` block size as 0.  It stages 4 KiB, so that each header is whole when it changes it.  Corrected by review round 13 (13-1): a run of chunks shorter than a header grew the stage with no bound.
     * First failures, at f4c395d: `the_tags_of_a_stream_are_hidden_from_symphonia` peaked at 131,146,278 B for an AIFF with 64 MiB of tags, and `an_aiff_decodes_through_a_fifo` at 131,146,254 B through `decode_path` of a FIFO.  Now each AIFF, AIFC, WAV and FLAC case decodes bit for bit at the peak of the file with no tags (1,261,646 B, 1,261,174 B and 1,306,738 B), and the FIFO case peaks under 8 MiB.
     * The mutants with the `SSND` patch off, `JUNK` off, PADDING off, the last bit of a FLAC block dropped, the WAV form off, a header in parts, and no pad byte each fail a test.
     * Before the commit: `cargo test -p engine --release` passed (324 tests of the library).  `web-test --browser chrome` (30 tests), `e2e decode --browser chrome` and the local real-file check passed.  The wasm bundle: `app_bg.wasm` 6,386,762 B and `decode-worker_bg.wasm` 1,364,031 B, against 6,384,965 B and 1,363,236 B at f4c395d; `stem-worker_bg.wasm` 1,250,988 B, no change.
+  * [x] 2026-11-10: review round 13 fixes, part 1: the bound of the stage of `TagStream` (13-1), and the reserve of a stream (13-12).  First failures, at f1e4414:
+    * `tag_stream::tests::the_stage_has_a_bound`: over 1,000,000 empty chunks, the stage held 8,421,376 bytes.
+    * `a_run_of_empty_chunks_keeps_the_stage_small`: the AIFF stream of 1,000,000 empty chunks peaked at 13,754,542 bytes, against 1,261,646 bytes for the plain stream.
+    * Now the stage holds at most `STAGE + Rule::HEADER` bytes.  A part header at its end waits, and the next refill reads after it.  The AIFF, WAV and FLAC runs decode bit for bit at the peak of the plain stream (1,261,654 B, 1,261,182 B and 1,306,746 B).  The mutant that drops the part header fails 3 tests.
+    * `TagStream` now takes a `Rule`, so that an MP4 rule can use the same stage.  `Chunks` is the rule of an AIFF, a WAV or a FLAC.
+    * `a_stream_reserves_no_frames`: a FLAC and an 8-bit AIFF through `Fifo` reserve 0 frames; with `byte_len` as `Some(1)` the test fails (13-12).
 
 ## Surprises and discoveries
 
