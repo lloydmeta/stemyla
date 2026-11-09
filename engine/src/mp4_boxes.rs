@@ -161,6 +161,7 @@ pub(crate) fn walk_from(source: &mut dyn ReadAt, start: u64) -> std::io::Result<
     let mut walker = Walker {
         source,
         found: Found::default(),
+        seen_sidx: std::collections::HashSet::new(),
     };
     walker.top(start)?;
     Ok(Some(walker.found))
@@ -191,6 +192,9 @@ struct Trak {
 struct Walker<'a> {
     source: &'a mut dyn ReadAt,
     found: Found,
+    /// The `reference_id` of each `sidx` that Symphonia sees, so it holds
+    /// an entry for it.
+    seen_sidx: std::collections::HashSet<u32>,
 }
 
 impl Walker<'_> {
@@ -287,7 +291,10 @@ impl Walker<'_> {
                 b"ftyp" if walker.found.ftyp_bytes.is_none() => {
                     walker.found.ftyp_bytes = Some(size_of(found).unwrap_or(u64::MAX));
                 }
-                b"moov" | b"meta" | b"ftyp" | b"sidx" => walker.hide(found),
+                b"moov" | b"meta" | b"ftyp" => {
+                    walker.hide(found);
+                }
+                b"sidx" => walker.sidx(found)?,
                 _ => {}
             }
             Ok(true)
@@ -303,11 +310,35 @@ impl Walker<'_> {
         }
     }
 
-    /// Hides `found` from Symphonia: it gives `free` for its type.
-    fn hide(&mut self, found: BoxAt) {
+    /// Hides `found` from Symphonia: it gives `free` for its type.  It
+    /// gives `false` when the plan keeps it visible.
+    fn hide(&mut self, found: BoxAt) -> bool {
         self.found
             .hidden
-            .hide(found.start + 4, b"free", size_of(found));
+            .hide(found.start + 4, b"free", size_of(found))
+    }
+
+    /// A top-level `sidx`.  Symphonia keeps one entry for each new
+    /// `reference_id` (`demuxer.rs`, line 193), and nothing for one that it
+    /// has (finding 7-4 of review round 7).  So a small `sidx` of an id
+    /// that Symphonia sees already stays visible, at no charge.  Each other
+    /// one is hidden, or charged when the plan keeps it.
+    fn sidx(&mut self, found: BoxAt) -> std::io::Result<()> {
+        let mut head = [0; 8];
+        let read = self.source.read_at(found.body, &mut head)?;
+        let id = (read == 8).then(|| u32::from_be_bytes([head[4], head[5], head[6], head[7]]));
+        let small = size_of(found).is_some_and(|size| size < crate::hidden::ALWAYS_HIDDEN);
+        if small && id.is_some_and(|id| self.seen_sidx.contains(&id)) {
+            return Ok(());
+        }
+        // Past the kept limit the file is refused, so the set stays small.
+        if !self.hide(found)
+            && !self.found.hidden.too_much_kept
+            && let Some(id) = id
+        {
+            self.seen_sidx.insert(id);
+        }
+        Ok(())
     }
 
     fn moov(&mut self, moov: BoxAt) -> std::io::Result<()> {

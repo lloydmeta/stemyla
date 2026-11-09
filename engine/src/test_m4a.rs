@@ -648,3 +648,19 @@ pub fn sidx_boxes(count: usize) -> Vec<u8> {
     }
     out
 }
+
+/// `count` top-level `sidx` boxes as [`sidx_boxes`] makes them, all of
+/// `reference_id` 1.
+pub fn same_sidx_boxes(count: usize) -> Vec<u8> {
+    let one = bx(
+        b"sidx",
+        &[
+            &[0; 4],
+            &1_u32.to_be_bytes(),
+            &1000_u32.to_be_bytes(),
+            &[0; 8],
+            &[0; 4],
+        ],
+    );
+    one.repeat(count)
+}

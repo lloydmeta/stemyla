@@ -756,7 +756,11 @@ fn open_within(
     let mut mss = MediaSourceStream::new(source, Default::default());
     {
         use symphonia::core::io::ReadBytes;
-        mss.ignore_bytes(reader_at - view)
+        // `start_of` gives a reader start at or after the view.
+        let skip = reader_at.checked_sub(view).ok_or_else(|| {
+            anyhow!("unsupported or unrecognised format: a start before the file")
+        })?;
+        mss.ignore_bytes(skip)
             .context("reading the start of the file")?;
     }
     let format = open_reader(mss, container)
@@ -825,14 +829,17 @@ type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
 
 /// The container of a source that cannot seek, and where its reader starts,
 /// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
-/// the window of the probe, at most about 1 MiB, and gives a source that
-/// reads those bytes again, then the rest.
+/// the window of the probe and the reach of its scores, at most 1,056,773
+/// bytes, into one buffer of that size.  It gives a source that reads those
+/// bytes again, then the rest.  The open of a WAV of 4 MiB peaks at
+/// 1,130,166 bytes, and the buffer stays until the decode ends (finding 7-8
+/// of review round 7).
 fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
     use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES, first_marker, reader_start};
     use std::io::Read;
-    let mut window = Vec::new();
-    let most = (LAST_MARKER + MOST_SCORE_BYTES) as u64;
-    (&mut source).take(most).read_to_end(&mut window)?;
+    let most = LAST_MARKER + MOST_SCORE_BYTES;
+    let mut window = Vec::with_capacity(most);
+    (&mut source).take(most as u64).read_to_end(&mut window)?;
     let start = first_marker(&window, 0..LAST_MARKER + 1)
         .map(|(container, at)| (container, reader_start(container, at as u64)));
     let again = Cursor::new(window).chain(source);
@@ -3784,9 +3791,27 @@ mod tests {
         let plain_aiff = aiff(&[left, right], 44_100, 16, Aiff::Plain);
         let cut = |file: &[u8]| Vec::from(&file[..file.len() - (FRAMES - 100) * 4]);
         for (case, file) in [("wav", cut(&wav)), ("aiff", cut(&plain_aiff))] {
-            let tagged = [id3_tag(1000), file].concat();
+            let tagged = [id3_tag(1000), file.clone()].concat();
             assert_eq!(head_of(&tagged), HeadLength::Frames(100), "{case}");
+            // Finding 7-2 of review round 7: the bytes before the marker
+            // count too.
+            let behind = [vec![0; 1000], file].concat();
+            assert_eq!(
+                head_of(&behind),
+                HeadLength::Frames(100),
+                "{case} behind junk"
+            );
         }
+        // Findings 7-11 and 7-16 of review round 7: a head that holds the
+        // last offset that the scan tests.
+        use crate::hidden::LAST_MARKER;
+        let far = [vec![0; LAST_MARKER], wav].concat();
+        let head = head_length(&far, far.len() as u64);
+        assert_eq!(
+            head,
+            HeadLength::Frames(FRAMES as u64),
+            "at the last offset"
+        );
     }
 
     /// Finding 6-2 of review round 6 (MEM-4): Symphonia keeps an entry for
@@ -3801,8 +3826,12 @@ mod tests {
         let plain = alac_of(m4a::Order::MoovLast);
         let some = [plain.clone(), sidx_boxes(2000)].concat();
         assert_tags_are_hidden(plain.clone(), some, "m4a", "2000 sidx boxes");
-        let many = [plain, sidx_boxes(524_288)].concat();
+        let many = [plain.clone(), sidx_boxes(524_288)].concat();
         assert_refused_early(many, "m4a", TAGS_TEXT, "16 MiB of sidx boxes");
+        // Finding 7-4 of review round 7: Symphonia keeps one entry for an
+        // id, so the `sidx` of an id that it holds costs nothing.
+        let one_id = [plain.clone(), crate::test_m4a::same_sidx_boxes(13_000)].concat();
+        assert_tags_are_hidden(plain, one_id, "m4a", "13,000 sidx boxes of one id");
     }
 
     /// Finding 6-3 of review round 6 (MEM-4): Symphonia holds each point of
@@ -3818,5 +3847,89 @@ mod tests {
         assert_tags_are_hidden(flac.clone(), small, "flac", "a seek table of 10 points");
         let large = with_seektable(&flac, 932_067);
         assert_tags_are_hidden(flac, large, "flac", "a seek table of 932,067 points");
+    }
+
+    /// Finding 7-1 of review round 7: an `ftyp` at offsets 0 to 3 of the
+    /// view after an ID3v2 tag does not panic.  The MP4 reader starts at the
+    /// view, and it refuses the file.
+    #[test]
+    fn an_ftyp_at_the_start_of_a_view_does_not_panic() {
+        use crate::test_audio::id3_tag;
+        for offset in 0..4 {
+            let file = [
+                id3_tag(100),
+                vec![0; offset],
+                Vec::from(*b"ftyp"),
+                vec![0; 64],
+            ]
+            .concat();
+            let opened = decode_bytes(file, Some("m4a"));
+            assert!(opened.is_err(), "{offset}");
+        }
+    }
+
+    /// A source that cannot seek and counts the bytes read from it.
+    struct Counted(
+        Cursor<Vec<u8>>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    );
+
+    impl std::io::Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.0.read(buf)?;
+            self.1.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
+            Ok(read)
+        }
+    }
+
+    impl std::io::Seek for Counted {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Err(std::io::Error::other("Illegal seek"))
+        }
+    }
+
+    impl MediaSource for Counted {
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// Finding 7-8 and missed mutant 7-13 of review round 7: the scan of a
+    /// source that cannot seek takes at most the window and the reach of its
+    /// scores from the source, and the open of a WAV of 4 MiB peaks under
+    /// 1.1 MiB.
+    #[test]
+    fn a_source_that_cannot_seek_reads_at_most_the_window() {
+        use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES};
+        let tone: Vec<f32> = (0..1 << 20)
+            .map(|i| (i as f32 * 0.01).sin() * 0.5)
+            .collect();
+        let wav = encode_pcm16(&tone, &tone, 44_100);
+        assert!(wav.len() > 4 << 20);
+        let read = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = Counted(Cursor::new(wav.clone()), read.clone());
+        let scanned = scan_stream(Box::new(source));
+        assert!(scanned.is_ok());
+        let read = read.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(read, LAST_MARKER + MOST_SCORE_BYTES, "the bytes taken");
+        let source = Fifo(Cursor::new(wav));
+        let (peak, opened) = peak_of(|| Decoder::new(Box::new(source), Some("wav")));
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        assert!(peak < 1_153_434, "the open peaks at {peak} bytes");
+    }
+
+    /// Missed mutant 7-17 of review round 7: an M4A with `moov` first from a
+    /// source that cannot seek decodes bit for bit, with no walk.
+    #[test]
+    fn a_fast_start_m4a_that_cannot_seek_decodes() {
+        let file = alac_of(m4a::Order::FastStart);
+        let want = decode_bytes(file.clone(), Some("m4a"));
+        let got = decode_source(Box::new(Fifo(Cursor::new(file))), Some("m4a"));
+        assert!(got.is_ok(), "{:?}", got.err());
+        assert!(got.unwrap().channels == want.unwrap().channels);
     }
 }

@@ -103,18 +103,27 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// Hides a container of `size` bytes (`None` when it runs to the end
-    /// of the file), with `bytes` in place of the bytes at `at`.
-    pub fn hide(&mut self, at: u64, bytes: &[u8], size: Option<u64>) {
+    /// of the file), with `bytes` in place of the bytes at `at`.  It gives
+    /// `false` when it keeps the container visible: a small one past
+    /// [`MOST_SMALL`], which it charges to [`Plan::kept`].
+    pub fn hide(&mut self, at: u64, bytes: &[u8], size: Option<u64>) -> bool {
         let small = size.is_some_and(|size| size < ALWAYS_HIDDEN);
         if small {
             if self.small >= MOST_SMALL {
                 let size = size.unwrap_or(ALWAYS_HIDDEN);
                 self.kept = self.kept.saturating_add(kept_charge(size));
                 self.too_much_kept = self.kept > MOST_KEPT_BYTES;
-                return;
+                return false;
             }
             self.small += 1;
         }
+        self.patch(at, bytes);
+        true
+    }
+
+    /// Shows at most 4 bytes of `bytes` in place of the bytes at `at`.  It
+    /// is not a container, so it counts towards no limit.
+    pub fn patch(&mut self, at: u64, bytes: &[u8]) {
         let mut patch = Patch {
             at,
             bytes: [0; 4],
@@ -483,8 +492,12 @@ pub(crate) fn start_of(
         let read = source.read_at(view + base as u64, &mut block)?;
         let offsets = 0..SCAN_BLOCK.min(LAST_MARKER + 1 - base);
         if let Some((container, at)) = first_marker(&block[..read], offsets) {
-            let marker = view + (base + at) as u64;
-            return Ok((view, Some((container, reader_start(container, marker)))));
+            // The reader steps back from its marker no further than the
+            // start of the view, which is the start of its stream (finding
+            // 7-1 of review round 7).
+            let marker = (base + at) as u64;
+            let start = view + reader_start(container, marker);
+            return Ok((view, Some((container, start))));
         }
         // The next block starts at `SCAN_BLOCK` of this one.
         if read <= SCAN_BLOCK {
@@ -804,6 +817,16 @@ mod tests {
         use Container::*;
         let adts = [adts_frame(16, false), adts_frame(16, false)].concat();
         let adts_crc = [adts_frame(20, true), adts_frame(20, true)].concat();
+        let adts_crc_2 = adts_crc.clone();
+        // The ID bit of each header set: MPEG-2 (finding 7-5 of review
+        // round 7).
+        let mpeg2 = |pair: &[u8], second: u8| {
+            let mut pair = Vec::from(pair);
+            let frame = pair.len() / 2;
+            pair[1] = second;
+            pair[frame + 1] = second;
+            pair
+        };
         let mut bad_rate = adts.clone();
         bad_rate[2] = (1 << 6) | (13 << 2);
         let mut two_blocks = adts.clone();
@@ -831,6 +854,8 @@ mod tests {
             ("free", Vec::from(*b"free"), None),
             ("ADTS", adts.clone(), Some(Adts)),
             ("ADTS with CRC", adts_crc, Some(Adts)),
+            ("MPEG-2 ADTS", mpeg2(&adts, 0xF9), Some(Adts)),
+            ("MPEG-2 ADTS with CRC", mpeg2(&adts_crc_2, 0xF8), Some(Adts)),
             ("one ADTS header", adts_frame(16, false), None),
             ("an ADTS rate of 13", bad_rate, None),
             ("two ADTS blocks", two_blocks, None),
@@ -948,6 +973,19 @@ mod tests {
         );
         assert_eq!(start(&[0; 100]), Some((0, None)));
         assert_eq!(start(&[]), Some((0, None)));
+    }
+
+    /// Finding 7-1 of review round 7: an `ftyp` at offsets 0 to 3 of a view
+    /// after an ID3v2 tag gives a reader start at the view, where the MP4
+    /// reader's step back stops, and never inside the tag.
+    #[test]
+    fn an_mp4_reader_starts_no_earlier_than_the_view() {
+        use crate::test_audio::id3_tag;
+        for offset in 0..4 {
+            let file = [id3_tag(100), vec![0; offset], Vec::from(*b"ftyp")].concat();
+            let start = start_of(&mut { file.as_slice() }).ok();
+            assert_eq!(start, Some((110, Some((Container::Mp4, 110)))), "{offset}");
+        }
     }
 
     /// Missed mutants 3-24 and 3-25 of review round 3: a header of 9 bytes
