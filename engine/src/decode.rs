@@ -160,10 +160,6 @@ pub const MOST_CHANNELS: u16 = 128;
 pub const MS_ADPCM_TEXT: &str =
     "This WAV file holds Microsoft ADPCM that does not decode.  Open another file.";
 
-/// The text of an AIFF from a source that cannot seek, whose `COMM` is past
-/// the window of the scan (the residual of finding 11-4 of review round 11).
-pub const FAR_COMM_TEXT: &str = "This AIFF file holds its format after more than 1 MiB of other data, so it does not open from this source.";
-
 /// The text of an IMA ADPCM WAV of 2 channels or more whose block holds a
 /// part group (finding 12-1 of review round 12).  Microsoft's "Multimedia
 /// Data Standards Update" of 15 April 1994 (DVI ADPCM, pages 30 to 32) puts
@@ -817,11 +813,15 @@ fn open_within(
             crate::hidden::start_of(&mut at).context("reading the start of the file")?;
         (source, view, start)
     } else {
-        let (source, start, refusal) =
-            scan_stream(source).context("reading the start of the file")?;
-        if let Some(text) = refusal {
-            return Err(anyhow!(text));
-        }
+        let (source, start) = scan_stream(source).context("reading the start of the file")?;
+        // Before any reader of Symphonia keeps a buffer for each channel
+        // (findings 11-4 and 12-2 of review rounds 11 and 12).
+        let source: Box<dyn MediaSource> = match start {
+            Some((Container::Aiff, form)) => {
+                Box::new(crate::aiff_stream::AiffStream::new(source, form))
+            }
+            _ => source,
+        };
         (source, 0, start)
     };
     let mut source = source;
@@ -945,15 +945,23 @@ fn open_within(
     {
         use symphonia::core::io::ReadBytes;
         mss.ignore_bytes(skip)
-            .context("reading the start of the file")?;
+            .map_err(|e| match refused_channels(&e) {
+                Some(text) => text,
+                None => anyhow!(e).context("reading the start of the file"),
+            })?;
     }
     let mut format: Box<dyn FormatReader> = match ima4 {
         Some(layout) => Box::new(
             crate::ima4::Ima4Reader::new(mss, layout, reader_at)
                 .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?,
         ),
-        None => open_reader(mss, container)
-            .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?,
+        None => open_reader(mss, container).map_err(|e| {
+            match &e {
+                SymError::IoError(io) => refused_channels(io),
+                _ => None,
+            }
+            .unwrap_or_else(|| anyhow!("unsupported or unrecognised format: {e}"))
+        })?,
     };
     let estimated = container == Container::Adts;
     let track = format
@@ -1225,13 +1233,15 @@ fn is_part_group(channels: usize, per_block: u64) -> bool {
     channels >= 2 && (per_block == 0 || !(per_block - 1).is_multiple_of(8))
 }
 
-/// A source to open, its container with where its reader starts, and the
-/// text of a refusal that the scan found.
-type Scanned = (
-    Box<dyn MediaSource>,
-    Option<(Container, u64)>,
-    Option<String>,
-);
+/// The text of a read that [`crate::aiff_stream::AiffStream`] failed, for
+/// a `COMM` of more than [`MOST_CHANNELS`] channels.
+fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
+    crate::aiff_stream::refused_channels(error)
+        .map(|channels| anyhow!(channels_text(u32::from(channels))))
+}
+
+/// A source to open, and its container with where its reader starts.
+type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
 
 /// The container of a source that cannot seek, and where its reader starts,
 /// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
@@ -1239,9 +1249,7 @@ type Scanned = (
 /// bytes, into one buffer of that size.  It gives a source that reads those
 /// bytes again, then the rest.  The open of a WAV of 4 MiB peaks at
 /// 1,130,166 bytes, and the buffer stays until the decode ends (finding 7-8
-/// of review round 7).  It refuses an AIFF of more than [`MOST_CHANNELS`]
-/// channels, or whose `COMM` is past the window (finding 11-4 of review
-/// round 11).
+/// of review round 7).
 fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
     use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES, first_marker, reader_start};
     use std::io::Read;
@@ -1253,23 +1261,8 @@ fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
         .or_else(|| {
             crate::hidden::is_adts_of_raw_blocks_with_crc(&window).then_some((Container::Adts, 0))
         });
-    // Before any reader of Symphonia keeps a buffer for each channel
-    // (finding 11-4 of review round 11).  A full window with no `COMM` has
-    // it past the window, where the scan cannot read it.
-    let refusal = match start {
-        Some((Container::Aiff, at)) => {
-            match crate::hidden::aiff_channels(&mut window.as_slice(), at)? {
-                Some(channels) if channels > MOST_CHANNELS => {
-                    Some(channels_text(u32::from(channels)))
-                }
-                None if window.len() == most => Some(FAR_COMM_TEXT.to_owned()),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
     let again = Cursor::new(window).chain(source);
-    Ok((Box::new(ReadOnlySource::new(again)), start, refusal))
+    Ok((Box::new(ReadOnlySource::new(again)), start))
 }
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
@@ -5464,72 +5457,141 @@ mod tests {
         }
     }
 
-    /// Finding 11-4 of review round 11 (MEM-4): a source that cannot seek
-    /// gets the bound of channels from the window of its scan, before any
-    /// reader of Symphonia reads `COMM`.  So the open peaks at the window,
-    /// with no panic in a test build.
+    /// `file`, an AIFF, with a `JUNK` chunk of 1.1 MB before its `COMM`, so
+    /// the `COMM` is past the window of the scan of a stream.  Symphonia
+    /// skips a chunk that it does not know, and keeps an `APPL` chunk whole.
+    /// The chunk has an odd size, and its pad byte.
+    fn with_far_comm(file: &[u8]) -> Vec<u8> {
+        let filler = vec![0; 1_100_001];
+        let size = (filler.len() as u32).to_be_bytes();
+        let mut far = [&file[..12], b"JUNK", &size, &filler, &[0], &file[12..]].concat();
+        let form = (far.len() - 8) as u32;
+        far[4..8].copy_from_slice(&form.to_be_bytes());
+        far
+    }
+
+    /// The error text of the open of `file` through `Fifo`, with no panic,
+    /// and the peak of the open.
+    fn fifo_open(file: Vec<u8>) -> (usize, Option<String>) {
+        let (peak, opened) = peak_of(|| {
+            std::panic::catch_unwind(|| {
+                Decoder::new(Box::new(Fifo(Cursor::new(file))), Some("aiff"))
+                    .err()
+                    .map(|e| format!("{e:#}"))
+            })
+        });
+        assert!(opened.is_ok(), "a panic");
+        (peak, opened.unwrap())
+    }
+
+    /// Findings 11-4 and 12-2 of review rounds 11 and 12 (MEM-4): a source
+    /// that cannot seek gets the bound of channels as its bytes go to
+    /// Symphonia, before any reader reads the channels of `COMM`, also past
+    /// the window of the scan.  So the open peaks small, with no panic in a
+    /// test build.  Findings 12-3 and 12-8: 128 channels open, and a short
+    /// stream with no `COMM` gets Symphonia's own error.
     #[test]
     fn a_stream_of_too_many_channels_is_refused_before_its_reader() {
         use crate::test_audio::{Aiff, aiff};
         let tone: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
-        let file = aiff(&vec![tone; 4], 44_100, 16, Aiff::Plain);
+        let file = aiff(&vec![tone.clone(); 4], 44_100, 16, Aiff::Plain);
         for count in [MOST_CHANNELS + 1, u16::MAX] {
-            let many = with_comm_channels(file.clone(), count);
-            let (peak, opened) = peak_of(|| {
-                std::panic::catch_unwind(|| {
-                    Decoder::new(Box::new(Fifo(Cursor::new(many))), Some("aiff"))
-                        .err()
-                        .map(|e| format!("{e:#}"))
-                })
-            });
-            assert!(opened.is_ok(), "{count} channels: a panic");
             let text = channels_text(u32::from(count));
-            assert_eq!(opened.unwrap().as_deref(), Some(text.as_str()), "{count}");
-            assert!(
-                peak < 2 << 20,
-                "{count} channels: the open peaks at {peak} bytes"
-            );
+            for (place, many) in [
+                ("in the window", with_comm_channels(file.clone(), count)),
+                (
+                    "past the window",
+                    with_comm_channels(with_far_comm(&file), count),
+                ),
+            ] {
+                let case = format!("{count} channels, COMM {place}");
+                let (peak, error) = fifo_open(many);
+                assert_eq!(error.as_deref(), Some(text.as_str()), "{case}");
+                assert!(peak < 2 << 20, "{case}: the open peaks at {peak} bytes");
+            }
         }
-        // A chunk of 1.1 MB before `COMM` puts it out of the window, so the
-        // scan cannot read its channels.  The open refuses it before any
-        // reader of Symphonia (the residual of finding 11-4).
-        let filler = vec![0; 1_100_000];
-        for count in [2, u16::MAX] {
-            let far = [
-                &file[..12],
-                b"APPL",
-                &(filler.len() as u32).to_be_bytes(),
-                &filler,
-                &file[12..],
-            ]
-            .concat();
-            let mut far = with_comm_channels(far, count);
-            let form = (far.len() - 8) as u32;
-            far[4..8].copy_from_slice(&form.to_be_bytes());
-            let (peak, opened) = peak_of(|| {
-                std::panic::catch_unwind(|| {
-                    Decoder::new(Box::new(Fifo(Cursor::new(far))), Some("aiff"))
-                        .err()
-                        .map(|e| format!("{e:#}"))
-                })
-            });
-            assert!(
-                opened.is_ok(),
-                "COMM past the window, {count} channels: a panic"
-            );
-            assert_eq!(
-                opened.unwrap().as_deref(),
-                Some(FAR_COMM_TEXT),
-                "COMM past the window, {count} channels"
-            );
-            assert!(
-                peak < 2 << 20,
-                "COMM past the window, {count} channels: the open peaks at {peak} bytes"
-            );
+        // Behind other bytes, the read of the first block skips them.
+        let behind = [
+            &[0; 1000][..],
+            &with_comm_channels(file.clone(), MOST_CHANNELS + 1),
+        ]
+        .concat();
+        let text = channels_text(u32::from(MOST_CHANNELS + 1));
+        assert_eq!(
+            fifo_open(behind).1.as_deref(),
+            Some(text.as_str()),
+            "behind other bytes"
+        );
+        // 2 channels with `COMM` past the window decode as from a file that
+        // can seek.
+        let two = with_far_comm(&aiff(&vec![tone.clone(); 2], 44_100, 16, Aiff::Plain));
+        let want = decode_bytes(two.clone(), Some("aiff")).unwrap();
+        let got = decode_source(Box::new(Fifo(Cursor::new(two))), Some("aiff")).unwrap();
+        assert!(
+            got.channels == want.channels,
+            "2 channels, COMM past the window"
+        );
+        // 12-3: 128 channels open, in the window and past it.
+        let most = aiff(
+            &vec![tone; usize::from(MOST_CHANNELS)],
+            44_100,
+            16,
+            Aiff::Plain,
+        );
+        for (place, file) in [
+            ("in the window", most.clone()),
+            ("past the window", with_far_comm(&most)),
+        ] {
+            assert_eq!(fifo_open(file).1, None, "128 channels, COMM {place}");
         }
-        // An AIFF whose `COMM` is in the window opens.
-        let opened = Decoder::new(Box::new(Fifo(Cursor::new(file))), Some("aiff"));
-        assert!(opened.is_ok(), "COMM in the window: {:?}", opened.err());
+        // 12-8: a short stream with no `COMM`.
+        let comm = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"COMM"))
+            .unwrap();
+        let size = u32::from_be_bytes([
+            file[comm + 4],
+            file[comm + 5],
+            file[comm + 6],
+            file[comm + 7],
+        ]) as usize;
+        let mut none = [&file[..comm], &file[comm + 8 + size + size % 2..]].concat();
+        let form = (none.len() - 8) as u32;
+        none[4..8].copy_from_slice(&form.to_be_bytes());
+        let error = fifo_open(none).1;
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("missing common")),
+            "no COMM: {error:?}"
+        );
+    }
+
+    /// Finding 12-2 of review round 12: `decode_path` of a FIFO reads a
+    /// source that cannot seek.  A 2-channel AIFF with `COMM` past the
+    /// window decodes through one as from the file.
+    #[cfg(unix)]
+    #[test]
+    fn an_aiff_decodes_through_a_fifo() {
+        use crate::test_audio::{Aiff, aiff};
+        let tone: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let file = with_far_comm(&aiff(&vec![tone; 2], 44_100, 16, Aiff::Plain));
+        let dir = std::env::temp_dir().join(format!("stemyla-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("lloyd.aiff");
+        let _ = std::fs::remove_file(&fifo);
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.is_ok_and(|status| status.success()), "mkfifo");
+        let writer = {
+            let (fifo, file) = (fifo.clone(), file.clone());
+            std::thread::spawn(move || std::fs::write(fifo, file))
+        };
+        let got = decode_path(&fifo);
+        let written = writer.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(written.is_ok_and(|w| w.is_ok()), "the write to the FIFO");
+        let want = decode_bytes(file, Some("aiff")).unwrap();
+        assert!(got.is_ok(), "{:?}", got.err());
+        assert!(got.unwrap().channels == want.channels);
     }
 
     /// The check of channels after the open of the reader: no reader of
