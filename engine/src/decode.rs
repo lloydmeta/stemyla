@@ -993,6 +993,7 @@ fn open_within(
         .clone();
     let track_id = track.id;
     let num_frames = track.num_frames;
+    let duration = track.duration.map(|duration| duration.get());
     if params.codec == CODEC_ID_AAC {
         check_aac(&params)?;
     }
@@ -1007,7 +1008,7 @@ fn open_within(
     let mut end = StatedEnd {
         mp4: container == Container::Mp4,
         track_id,
-        stated: num_frames,
+        stated: duration,
         read: 0,
     };
     let queued = if params.codec == CODEC_ID_AAC {
@@ -1190,7 +1191,10 @@ pub(crate) fn offsets_base(chunk: u64, bases: &[u64], bodies: &[(u64, u64)]) -> 
 struct StatedEnd {
     mp4: bool,
     track_id: u32,
-    /// The stated length of the track, in its time base.
+    /// The stated duration of the track, in its time base, the unit of the
+    /// time stamp and the duration of each packet.  The number of frames
+    /// is no such length: Symphonia states it only when the timescale is the
+    /// rate (`demuxer.rs`, lines 66 to 74; finding 16-1 of review round 16).
     stated: Option<u64>,
     /// The end of the last packet of the track that Symphonia gave.
     read: u64,
@@ -6278,6 +6282,133 @@ mod tests {
                     "{case}"
                 );
             }
+        }
+    }
+
+    /// `file`, an MP4 of one track, with its `mdhd` timescale and duration
+    /// and each `stts` delta doubled: a timescale that is not the rate.
+    fn with_double_timescale(mut file: Vec<u8>) -> Vec<u8> {
+        use crate::test_m4a::place_once;
+        let double = |file: &mut Vec<u8>, at: usize| {
+            let value = u32::from_be_bytes(file[at..at + 4].try_into().unwrap());
+            file[at..at + 4].copy_from_slice(&(2 * value).to_be_bytes());
+        };
+        // After the type of `mdhd` of version 0: version and flags, two
+        // times, the timescale, the duration.
+        let mdhd = place_once(&file, b"mdhd") + 4;
+        double(&mut file, mdhd + 12);
+        double(&mut file, mdhd + 16);
+        // After the type of `stts`: version and flags, the count, then a
+        // count and a delta for each entry.
+        let stts = place_once(&file, b"stts") + 4;
+        let count = u32::from_be_bytes(file[stts + 4..stts + 8].try_into().unwrap()) as usize;
+        for k in 0..count {
+            double(&mut file, stts + 8 + 8 * k + 4);
+        }
+        file
+    }
+
+    /// Finding 16-1 of review round 16: the stated length of `StatedEnd` is
+    /// the duration of the track in its time base, which Symphonia states
+    /// also when the timescale is not the rate.  ALAC and AAC with a
+    /// timescale of 88,200, and a last `mdat` of size 0, decode bit for bit
+    /// through `Fifo`.
+    #[test]
+    fn a_stream_whose_timescale_is_not_its_rate_ends_at_its_length() {
+        use crate::test_m4a::{aac_m4a, top_box};
+        let alac = alac_of(m4a::Order::FastStart);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            let mut file = with_double_timescale(plain);
+            let (mdat, _) = top_box(&file, b"mdat");
+            file[mdat..mdat + 4].copy_from_slice(&[0; 4]);
+            let got = decode_bytes(file.clone(), Some("m4a"));
+            assert!(
+                got.as_ref().is_ok_and(|got| got.channels == want),
+                "{kind}, a file: {:?}",
+                got.err()
+            );
+            let (_, got) = stream_peak(file, "m4a");
+            assert!(
+                got.as_ref().is_ok_and(|got| *got == want),
+                "{kind}, a stream: {:?}",
+                got.err()
+            );
+        }
+    }
+
+    /// A source that can seek of `real` bytes, then zeros up to `len`.
+    struct PastReal {
+        real: Vec<u8>,
+        len: u64,
+        at: u64,
+    }
+
+    impl std::io::Read for PastReal {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let left = self.len.saturating_sub(self.at);
+            let count = (buf.len() as u64).min(left) as usize;
+            for (k, byte) in buf[..count].iter_mut().enumerate() {
+                *byte = self
+                    .real
+                    .get((self.at + k as u64) as usize)
+                    .copied()
+                    .unwrap_or(0);
+            }
+            self.at += count as u64;
+            Ok(count)
+        }
+    }
+
+    impl std::io::Seek for PastReal {
+        fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+            self.at = match to {
+                SeekFrom::Start(at) => at,
+                SeekFrom::End(delta) => self.len.saturating_add_signed(delta),
+                SeekFrom::Current(delta) => self.at.saturating_add_signed(delta),
+            };
+            Ok(self.at)
+        }
+    }
+
+    impl MediaSource for PastReal {
+        fn is_seekable(&self) -> bool {
+            true
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.len)
+        }
+    }
+
+    /// Missed mutant 16-7 of review round 16: a file past 4 GiB whose last
+    /// `mdat` has a size of 64 bits that ends at the end of the file keeps
+    /// its size, and decodes.  The source serves the real bytes, then zeros.
+    #[test]
+    fn a_last_mdat_of_64_bits_at_the_end_of_a_file_past_4_gib_decodes() {
+        use crate::test_m4a::{aac_m4a, top_box, with_stco_moved};
+        let alac = alac_of(m4a::Order::FastStart);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            let (mdat, _) = top_box(&plain, b"mdat");
+            let len = (5_u64 << 30) + 100;
+            let large = [
+                &1_u32.to_be_bytes()[..],
+                b"mdat",
+                &(len - mdat as u64).to_be_bytes(),
+            ]
+            .concat();
+            let real = [&plain[..mdat], &large, &plain[mdat + 8..]].concat();
+            let real = with_stco_moved(real, 8);
+            let source = PastReal { real, len, at: 0 };
+            let got = decode_source(Box::new(source), Some("m4a"));
+            assert!(
+                got.as_ref().is_ok_and(|got| got.channels == want),
+                "{kind}: {:?}",
+                got.err()
+            );
         }
     }
 
