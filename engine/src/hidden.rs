@@ -473,6 +473,12 @@ pub(crate) fn is_adts_of_raw_blocks(bytes: &[u8]) -> bool {
 
 /// The frame length and the field of the raw data blocks of the ADTS
 /// header that starts `bytes`, when Symphonia takes its other fields.
+pub(crate) fn adts_header_of(bytes: &[u8]) -> Option<(usize, u8)> {
+    adts_header(bytes)
+}
+
+/// The frame length and the field of the raw data blocks of the ADTS
+/// header that starts `bytes`, when Symphonia takes its other fields.
 fn adts_header(bytes: &[u8]) -> Option<(usize, u8)> {
     let sync = u16::from_be_bytes([*bytes.first()?, *bytes.get(1)?]);
     if sync & 0xFFF6 != 0xFFF0 {

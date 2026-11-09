@@ -4868,4 +4868,54 @@ mod tests {
             }
         }
     }
+
+    /// Findings 9-2, 9-6 and 9-25 of review round 9 (TD-86): the split takes
+    /// each frame after bytes that are not a frame, and a cut last frame of
+    /// more blocks gives the whole blocks that it holds.  A split stream
+    /// keeps the length of the file for its reserve.
+    #[test]
+    fn a_split_adts_stream_takes_junk_and_a_cut_end() {
+        use crate::test_m4a::{adts, adts_in_blocks, adts_packets};
+        let stream = adts(&chirps(), 44_100);
+        let packets = adts_packets(&stream);
+        let whole = decoded(
+            adts_in_blocks(&packets, 44_100, 2, &[1], false),
+            "one block",
+        )
+        .channels;
+        let (first, rest) = packets.split_at(10);
+        for junk in [vec![0x00], vec![0x42; 3]] {
+            let file = [
+                adts_in_blocks(first, 44_100, 2, &[1], false),
+                junk.clone(),
+                adts_in_blocks(rest, 44_100, 2, &[2], true),
+            ]
+            .concat();
+            let case = format!("{} junk bytes between frames", junk.len());
+            let got = decode_bytes(file, Some("aac"));
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap().channels == whole, "{case}");
+        }
+        let three = adts_in_blocks(&packets, 44_100, 2, &[3], true);
+        let reserve =
+            Decoder::new(Box::new(Cursor::new(three.clone())), Some("aac")).map(|d| d.reserve);
+        assert!(
+            reserve.as_ref().is_ok_and(|r| *r > 0),
+            "the reserve: {reserve:?}"
+        );
+        for cut in [1, 2, 5, 100] {
+            let case = format!("cut by {cut} bytes");
+            let got = decode_bytes(Vec::from(&three[..three.len() - cut]), Some("aac"));
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            let got = got.unwrap();
+            let frames = got.frames();
+            assert!(
+                frames > 0 && frames.is_multiple_of(1024) && frames < whole[0].len(),
+                "{case}: {frames}"
+            );
+            let prefix: Vec<&[f32]> = whole.iter().map(|c| &c[..frames]).collect();
+            let held: Vec<&[f32]> = got.channels.iter().map(Vec::as_slice).collect();
+            assert!(held == prefix, "{case}");
+        }
+    }
 }
