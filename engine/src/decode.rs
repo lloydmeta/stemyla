@@ -149,8 +149,8 @@ pub const AIFC_COMPRESSED_TEXT: &str = "This AIFC file is compressed in a form t
 /// round 10, MEM-4).  The decoders of Symphonia keep a buffer for each
 /// channel when they are made, before the first packet: measured with
 /// `peak_of` on 2026-11-09, `Decoder::new` of an `ima4` AIFC holds about
-/// 33 KB for each channel ([`crate::adpcm::AdpcmChannels`]: a mono decoder
-/// and a plane of 4096 frames), and of a PCM AIFF about 2.4 KB.  So the bound
+/// 33 KB for each channel (`adpcm::AdpcmChannels`: a mono decoder and a
+/// plane of 4096 frames), and of a PCM AIFF about 2.4 KB.  So the bound
 /// keeps the open of each format under 8 MiB, with a margin of 2.  A WAV
 /// has at most 26 (`symphonia-format-riff` `wave/chunks.rs`, line 716).
 pub const MOST_CHANNELS: u16 = 128;

@@ -476,6 +476,8 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * `scan_stream` gives the channels of the `COMM` in its window, and the open refuses more than 128 there.  The open of 129 and of 65,535 channels peaks at 1,057,062 bytes, the window.  A `COMM` past the window gets the check after the open of the reader: the test puts it behind a chunk of 1.1 MB.  Each of the two checks off fails the test.
     * `the_walk_to_comm_steps_over_each_chunk` fails with the mutants 11-12, 11-13, 11-16, 11-18, 11-29, 11-30, 11-32 and 11-33; with 11-20 the tests do not end, since a chunk of size 0 keeps the walk in one place.  It holds an AIFC with `FVER` first, an AIFF with a chunk of 3 bytes before `COMM`, an AIFF with no `COMM`, the literal text of `channels_text(129)`, and the head of 128 channels.
     * `a_pcm_wav_of_3_channels_decodes_as_each_mono_one` fails with the mutant 11-11.
+  * [x] 2026-11-09: review round 11 fixes, part 3: the doc of `MOST_CHANNELS` names `adpcm::AdpcmChannels` as code, not as a link, since `cargo doc -p engine` warns of a link to a private item.
+    * Before the commit: `cargo test -p engine --release` passed (319 tests of the library).  `web-test --browser chrome` (30 tests), `e2e decode --browser chrome` and the local real-file check passed.  The wasm bundle: `app_bg.wasm` 6,379,442 B and `decode-worker_bg.wasm` 1,358,044 B, against 6,378,935 B and 1,356,752 B at 2695b2a; `stem-worker_bg.wasm` 1,250,988 B, no change.
 
 ## Surprises and discoveries
 
