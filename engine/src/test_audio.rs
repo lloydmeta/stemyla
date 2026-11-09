@@ -654,9 +654,15 @@ pub fn adpcm_wav_of_blocks(
                     }
                     ima_index[channel] = index;
                 }
-                // Groups of 4 bytes (8 nibbles, the low one first) of each
-                // channel in turn.
-                for group in 0..(per_block - 1) / 8 {
+                // Mono: the nibbles in turn, the low one first.  More
+                // channels: groups of 4 bytes (8 nibbles) of each channel in
+                // turn.
+                if count == 1 {
+                    for pair in nibbles[0].chunks(2) {
+                        data.push(pair[0] | (pair.get(1).copied().unwrap_or(0) << 4));
+                    }
+                }
+                for group in 0..(per_block - 1) / 8 * usize::from(count > 1) {
                     for channel_nibbles in &nibbles {
                         for pair in channel_nibbles[group * 8..group * 8 + 8].chunks(2) {
                             data.push(pair[0] | (pair[1] << 4));

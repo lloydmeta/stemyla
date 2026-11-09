@@ -164,6 +164,15 @@ pub const MS_ADPCM_TEXT: &str =
 /// the window of the scan (the residual of finding 11-4 of review round 11).
 pub const FAR_COMM_TEXT: &str = "This AIFF file holds its format after more than 1 MiB of other data, so it does not open from this source.";
 
+/// The text of an IMA ADPCM WAV of 2 channels or more whose block holds a
+/// part group (finding 12-1 of review round 12).  Microsoft's "Multimedia
+/// Data Standards Update" of 15 April 1994 (DVI ADPCM, pages 30 to 32) puts
+/// each block on 32-bit words: `nBlockAlign` is (N + 1) x 4 x `nChannels`
+/// for 4 bits.  So the frames of a block, less 1, are a multiple of 8, and
+/// no layout of a part group is defined.  Symphonia's stereo decoder
+/// refuses the same blocks (`codec_ima_wav.rs`, line 47).
+pub const IMA_BLOCKS_TEXT: &str = "This WAV file holds IMA ADPCM in blocks of a size that the format does not allow.  Open another file.";
+
 /// The text of a file of more than [`MOST_CHANNELS`] channels.
 pub fn channels_text(channels: u32) -> String {
     format!("This file has {channels} channels.  A file of at most {MOST_CHANNELS} channels opens.")
@@ -527,7 +536,12 @@ fn wav_length(head: &[u8], file_bytes: u64) -> HeadLength {
             let block = u16_at(head, body + 12);
             let per_block = match (u16_at(head, body), u16_at(head, body + 2), block) {
                 (Some(tag), Some(channels), Some(block)) => {
-                    adpcm_frames_per_block(tag, channels, block)
+                    let per_block = adpcm_frames_per_block(tag, channels, block);
+                    if tag == 0x0011 && is_part_group(usize::from(channels), per_block.unwrap_or(0))
+                    {
+                        return HeadLength::UnstatedPcm;
+                    }
+                    per_block
                 }
                 _ => None,
             };
@@ -1197,7 +1211,18 @@ fn check_channels(params: &AudioCodecParameters) -> Result<()> {
     if count > usize::from(MOST_CHANNELS) {
         return Err(anyhow!(channels_text(count as u32)));
     }
+    let per_block = params.frames_per_block.unwrap_or(0);
+    if params.codec == CODEC_ID_ADPCM_IMA_WAV && is_part_group(count, per_block) {
+        return Err(anyhow!(IMA_BLOCKS_TEXT));
+    }
     Ok(())
+}
+
+/// Whether an IMA ADPCM block of `channels` and `per_block` frames holds a
+/// part group of 4 bytes ([`IMA_BLOCKS_TEXT`]).  A mono block is a run of
+/// bytes, so each size decodes.
+fn is_part_group(channels: usize, per_block: u64) -> bool {
+    channels >= 2 && (per_block == 0 || !(per_block - 1).is_multiple_of(8))
 }
 
 /// A source to open, its container with where its reader starts, and the
@@ -5234,6 +5259,37 @@ mod tests {
                     "{case}"
                 );
             }
+        }
+    }
+
+    /// Finding 12-1 of review round 12: an IMA ADPCM WAV of 2 channels or more
+    /// whose frames of a block, less 1, are not a multiple of 8 holds a part
+    /// group of 4 bytes, which the format does not allow.  It is refused with
+    /// a text before the decode, with no panic and at a small peak.  Mono,
+    /// and blocks of whole groups with spare bytes, still decode.
+    #[test]
+    fn an_ima_adpcm_wav_of_a_part_group_is_refused_with_a_text() {
+        use crate::test_audio::{WavAdpcm, adpcm_wav_of_blocks};
+        let tone = chirps();
+        let channels = |count: usize| -> Vec<Vec<f32>> {
+            (0..count)
+                .map(|k| Vec::from(&tone[k % 2][k * 8..k * 8 + 8000]))
+                .collect()
+        };
+        for (count, align) in [(2, 260), (3, 772), (3, 774), (6, 1540)] {
+            let case = format!("{count} channels, blocks of {align} bytes");
+            let (file, _) = adpcm_wav_of_blocks(&channels(count), 44_100, WavAdpcm::Ima, align);
+            assert_eq!(head_of(&file), HeadLength::UnstatedPcm, "{case}");
+            let refused = std::panic::catch_unwind(|| refusal(file.clone(), "wav"));
+            assert_eq!(refused.ok().as_deref(), Some(IMA_BLOCKS_TEXT), "{case}");
+            assert_refused_early(file, "wav", IMA_BLOCKS_TEXT, &case);
+        }
+        for (count, align) in [(1, 255), (3, 780), (3, 25), (6, 1536)] {
+            let case = format!("{count} channels, blocks of {align} bytes");
+            let (file, want) = adpcm_wav_of_blocks(&channels(count), 44_100, WavAdpcm::Ima, align);
+            let got = decode_bytes(file, Some("wav"));
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap().channels == want, "{case}");
         }
     }
 
