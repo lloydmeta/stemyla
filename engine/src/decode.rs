@@ -874,8 +874,11 @@ fn open_within(
             return Err(anyhow!(MOOV_TEXT));
         }
     }
-    // An MP4 behind other bytes: where its chunk offsets count from.
+    // An MP4 behind other bytes: where its chunk offsets count from.  The
+    // leading ID3v2 tags count as such bytes too (part 4 of review round
+    // 13), so the choice runs from the start of the file.
     let (view, late) = match &boxes {
+        Some(found) if reader_at == view => mp4_view(found, 0, reader_at),
         Some(found) => mp4_view(found, view, reader_at),
         None => (view, None),
     };
@@ -1101,6 +1104,9 @@ fn mend_mp4(found: &Found, byte_len: Option<u64>, plan: &mut crate::hidden::Plan
 /// it in the view that starts at `view`, and its reader starts at
 /// `reader_at` (B1 of review round 7).  Symphonia takes each chunk offset
 /// as a position in its stream.
+///
+/// An MP4 right after leading ID3v2 tags comes here with a `view` of 0:
+/// the tags are the other bytes (part 4 of review round 13).
 ///
 /// * When the offsets count from the MP4 start, the view starts there.
 /// * Else they count from `view`, and the view stays.  When `moov` is last,
@@ -5729,6 +5735,62 @@ mod tests {
                     Some(ID3_OFFSETS_TEXT),
                     "{case}: offsets from the file start"
                 );
+            }
+        }
+    }
+
+    /// An M4A behind a leading ID3v2 tag, from a file that can seek, whose
+    /// chunk offsets count from the MP4 start or from the start of the tag
+    /// (part 4 of review round 13).  When they count from the start of the
+    /// tag, the view starts at the start of the file, and the tag is the
+    /// other bytes of B1 of review round 7.  ALAC and AAC, with `moov` first
+    /// and last, behind a tag of 100 bytes and of 2 MiB, decode bit for bit
+    /// in both forms.  The head states the length of the plain file behind
+    /// the tag of 100 bytes; past the head (`HEAD_BYTES`), it states none.
+    /// With 64 MiB of art, the peak stays flat.
+    #[test]
+    fn an_m4a_behind_a_tag_opens_wherever_its_offsets_count_from() {
+        use crate::test_audio::id3_tag;
+        use crate::test_m4a::{aac_m4a, bx, cover_meta, with_cover, with_stco_moved};
+        use m4a::Order;
+        for order in [Order::FastStart, Order::MoovLast] {
+            let alac = alac_of(order);
+            let aac = aac_m4a(&short_tone(), 44_100, None, None, order);
+            for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
+                let art = match order {
+                    Order::FastStart => {
+                        fast_start_with(&plain, &[b"moov"], &bx(b"udta", &[&cover_meta(ART)]))
+                    }
+                    Order::MoovLast => with_cover(plain.clone(), ART),
+                };
+                for bytes in [100, 2 << 20] {
+                    let tag = id3_tag(bytes);
+                    let moved = |file: &[u8]| with_stco_moved(file.to_owned(), tag.len() as i64);
+                    for (form, file, with_art) in [
+                        ("from the MP4 start", plain.clone(), art.clone()),
+                        ("from the file start", moved(&plain), moved(&art)),
+                    ] {
+                        let case =
+                            format!("{kind}, {order:?}, a tag of {bytes} bytes, offsets {form}");
+                        let tagged = [tag.clone(), file].concat();
+                        // The head holds `HEAD_BYTES` (64 KiB), so past a tag
+                        // of 2 MiB it states no length, as for each format.
+                        let head = if tag.len() < HEAD_BYTES {
+                            head_of(&plain)
+                        } else {
+                            HeadLength::Unstated
+                        };
+                        assert_eq!(head_of(&tagged), head, "{case}: the head");
+                        assert_tags_are_hidden(plain.clone(), tagged, "m4a", &case);
+                        let with_art = [tag.clone(), with_art].concat();
+                        assert_tags_are_hidden(
+                            plain.clone(),
+                            with_art,
+                            "m4a",
+                            &format!("{case}, with art"),
+                        );
+                    }
+                }
             }
         }
     }
