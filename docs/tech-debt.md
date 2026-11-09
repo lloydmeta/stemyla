@@ -643,6 +643,27 @@ An ADTS frame can hold up to 4 raw data blocks of AAC.  `symphonia-codec-aac` 0.
 
 * Fix: a Symphonia that reads each raw data block of a frame, or a parse in `engine` of the syntax of an AAC raw data block to find its end.
 
+### TD-88: the art of an M4A from a source that cannot seek is read whole
+
+This entry concerns MEM-4, and the tags of a stream of review round 12 of `plans/active/m4a-m2.md`.
+
+A source that cannot seek gets no plan of `engine::hidden`, and no walk of `engine::mp4_boxes`.  `engine::tag_stream::TagStream` hides the tags of an AIFF, a WAV or a FLAC as the bytes pass, but it reads no MP4 box.  So Symphonia 0.6.1 reads the `moov/udta` of a fast-start M4A whole.  Through `Fifo`, an ALAC M4A with 64 MiB of art in `moov/udta` peaks at 131,148,338 bytes, against 1,213,068 bytes with no art.  The checks of the walk (a video track, a protected track, the size of `moov`) do not apply to a stream either.
+
+The sources of the app seek: the page and the workers give files from memory or from browser storage, and a native folder gives files.  `decode_path` of a FIFO is the path that reaches it.
+
+A pass-through of one header at a time cannot close it.  The tag boxes are inside `moov`, at more than one level (`moov/udta`, `moov/trak/udta`, `moov/meta`).  The checks of the walk need all of `moov` before Symphonia reads it.
+
+* Fix: in `TagStream`, follow `moov` and its children as they pass, show each `udta` and `meta` as `free`, and make the checks of `mp4_boxes` on the boxes of `moov`.  Or hold a `moov` of at most `most_moov_bytes`, walk it, and then give it to Symphonia.
+
+### TD-89: a stream behind a leading ID3v2 tag past the window does not open
+
+This entry concerns the formats of M2 of `plans/active/m4a.md`, and the tags of a stream of review round 12 of `plans/active/m4a-m2.md`.
+
+The scan of a source that cannot seek reads a window of about 1 MiB from the start, and does not step over a leading ID3v2 tag.  A file that can seek starts its view after the tags.  So an MP3 or an ADTS stream behind a tag of 64 MiB gets "no known format at the start of the file", at a peak of 1,056,934 bytes.  No memory is at risk.  `decode_path` of a FIFO is the path that reaches it, and the sources of the app seek.
+
+* Fix: in `scan_stream`, read past each leading ID3v2 tag with no buffer, then scan.  An M4A behind a tag needs its chunk offsets moved too, as `mp4_view` does for a file that can seek.
+
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings

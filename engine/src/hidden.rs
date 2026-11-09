@@ -13,6 +13,9 @@
 //! PADDING.
 //! A WAV `LIST` chunk, and AIFF `MARK`, `APPL`, `COMT`, text and `ID3 `
 //! chunks, show as `JUNK`.
+//!
+//! A source that cannot seek gets no plan.  `engine::tag_stream` hides the
+//! tags of its AIFF, WAV or FLAC by the same rules, as the bytes pass.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -262,23 +265,23 @@ impl MediaSource for Hidden {
 /// (`symphonia-bundle-flac` `demuxer.rs`, lines 106 to 140): APPLICATION
 /// (2), SEEKTABLE (3, line 112), VORBIS_COMMENT (4) and PICTURE (6).  The decode reads in order, so it
 /// needs no seek table (finding 6-3 of review round 6).
-const FLAC_TAG_BLOCKS: [u8; 4] = [2, 3, 4, 6];
+pub(crate) const FLAC_TAG_BLOCKS: [u8; 4] = [2, 3, 4, 6];
 
 /// The type of a FLAC PADDING block, which Symphonia skips with a seek.
-const FLAC_PADDING: u8 = 1;
+pub(crate) const FLAC_PADDING: u8 = 1;
 
 /// The ID that a hidden RIFF or AIFF chunk shows to Symphonia: one that
 /// it does not know, so it skips the chunk with `ignore_bytes`
 /// (`symphonia-format-riff` `common.rs`, `ChunksReader::next`).
-const HIDDEN_CHUNK: &[u8; 4] = b"JUNK";
+pub(crate) const HIDDEN_CHUNK: &[u8; 4] = b"JUNK";
 
 /// The WAV chunk that Symphonia 0.6.1 reads whole: `LIST`, whose `INFO`
 /// form it parses into tags (`wave/chunks.rs`, line 602).
-const WAV_TAG_CHUNKS: [&[u8; 4]; 1] = [b"LIST"];
+pub(crate) const WAV_TAG_CHUNKS: [&[u8; 4]; 1] = [b"LIST"];
 
 /// The AIFF chunks that Symphonia 0.6.1 reads whole (`aiff/chunks.rs`,
 /// `ParseChunkTag`): `MARK`, `APPL`, `COMT`, the text chunks and `ID3 `.
-const AIFF_TAG_CHUNKS: [&[u8; 4]; 8] = [
+pub(crate) const AIFF_TAG_CHUNKS: [&[u8; 4]; 8] = [
     b"MARK", b"APPL", b"COMT", b"NAME", b"AUTH", b"(c) ", b"ANNO", b"ID3 ",
 ];
 

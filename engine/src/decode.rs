@@ -814,13 +814,12 @@ fn open_within(
         (source, view, start)
     } else {
         let (source, start) = scan_stream(source).context("reading the start of the file")?;
-        // Before any reader of Symphonia keeps a buffer for each channel
-        // (findings 11-4 and 12-2 of review rounds 11 and 12).
+        // The tags and the bound of channels, before any reader of
+        // Symphonia reads them (findings 11-4 and 12-2 of review rounds 11
+        // and 12, and the tags of a stream).
         let source: Box<dyn MediaSource> = match start {
-            Some((Container::Aiff, form)) => {
-                Box::new(crate::aiff_stream::AiffStream::new(source, form))
-            }
-            _ => source,
+            Some((container, at)) => crate::tag_stream::stream_of(source, container, at),
+            None => source,
         };
         (source, 0, start)
     };
@@ -1233,10 +1232,10 @@ fn is_part_group(channels: usize, per_block: u64) -> bool {
     channels >= 2 && (per_block == 0 || !(per_block - 1).is_multiple_of(8))
 }
 
-/// The text of a read that [`crate::aiff_stream::AiffStream`] failed, for
+/// The text of a read that [`crate::tag_stream::TagStream`] failed, for
 /// a `COMM` of more than [`MOST_CHANNELS`] channels.
 fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
-    crate::aiff_stream::refused_channels(error)
+    crate::tag_stream::refused_channels(error)
         .map(|channels| anyhow!(channels_text(u32::from(channels))))
 }
 
@@ -5568,13 +5567,15 @@ mod tests {
 
     /// Finding 12-2 of review round 12: `decode_path` of a FIFO reads a
     /// source that cannot seek.  A 2-channel AIFF with `COMM` past the
-    /// window decodes through one as from the file.
+    /// window, and with 64 MiB of tags, decodes through one as from the
+    /// file, at a flat peak (the tags of a stream, review round 12).
     #[cfg(unix)]
     #[test]
     fn an_aiff_decodes_through_a_fifo() {
-        use crate::test_audio::{Aiff, aiff};
+        use crate::test_audio::{Aiff, aiff, with_aiff_tags};
         let tone: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
-        let file = with_far_comm(&aiff(&vec![tone; 2], 44_100, 16, Aiff::Plain));
+        let plain = with_far_comm(&aiff(&vec![tone; 2], 44_100, 16, Aiff::Plain));
+        let file = with_aiff_tags(&plain, ART);
         let dir = std::env::temp_dir().join(format!("stemyla-fifo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("lloyd.aiff");
@@ -5585,13 +5586,100 @@ mod tests {
             let (fifo, file) = (fifo.clone(), file.clone());
             std::thread::spawn(move || std::fs::write(fifo, file))
         };
-        let got = decode_path(&fifo);
+        let (peak, got) = peak_of(|| decode_path(&fifo));
         let written = writer.join();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(written.is_ok_and(|w| w.is_ok()), "the write to the FIFO");
         let want = decode_bytes(file, Some("aiff")).unwrap();
         assert!(got.is_ok(), "{:?}", got.err());
         assert!(got.unwrap().channels == want.channels);
+        assert!(
+            peak < 8 << 20,
+            "the decode through the FIFO peaks at {peak} bytes"
+        );
+    }
+
+    /// The decode of `bytes` through `Fifo`, a source that cannot seek: its
+    /// peak, and its samples.
+    fn stream_peak(bytes: Vec<u8>, ext: &str) -> (usize, Result<Vec<Vec<f32>>>) {
+        let (peak, got) = peak_of(|| decode_source(Box::new(Fifo(Cursor::new(bytes))), Some(ext)));
+        (peak, got.map(|audio| audio.channels))
+    }
+
+    /// The tags of a stream (review round 12, MEM-4): a source that cannot
+    /// seek gets no plan, so its tags are hidden as the bytes pass.  Each
+    /// AIFF, WAV and FLAC with 64 MiB of tags decodes through `Fifo` bit
+    /// for bit, within 1 MiB of the peak of the file with no tags.  An AIFF
+    /// SSND block size also shows as 0, as from a file that can seek.
+    #[test]
+    fn the_tags_of_a_stream_are_hidden_from_symphonia() {
+        use crate::test_audio::{
+            Aiff, aiff, with_aiff_tags, with_block_aligned_ssnd, with_flac_tags, with_wav_tags,
+        };
+        let (left, right, wav) = stereo_wav();
+        let pa = aiff(&[left.clone(), right.clone()], 44_100, 16, Aiff::Plain);
+        let pc = aiff(
+            &[left.clone(), right.clone()],
+            44_100,
+            16,
+            Aiff::UncompressedAifc,
+        );
+        let flac = compressed(&left, &right, 44_100);
+        // One VORBIS_COMMENT block of 15 MiB, under the bound of 16 MiB of
+        // a FLAC block.
+        let comment = [b"TITLE=".as_slice(), &vec![b'a'; 15 << 20]].concat();
+        let vorbis = [
+            &4_u32.to_le_bytes()[..],
+            b"acme",
+            &1_u32.to_le_bytes(),
+            &(comment.len() as u32).to_le_bytes(),
+            &comment,
+        ]
+        .concat();
+        let len = (vorbis.len() as u32).to_be_bytes();
+        let flac_vorbis = [
+            &flac[..4],
+            &[flac[4] & 0x7F],
+            &flac[5..42],
+            &[4 | (flac[4] & 0x80), len[1], len[2], len[3]],
+            &vorbis,
+            &flac[42..],
+        ]
+        .concat();
+        let cases = [
+            ("an AIFF", "aiff", pa.clone(), with_aiff_tags(&pa, ART)),
+            ("an AIFC", "aiff", pc.clone(), with_aiff_tags(&pc, ART)),
+            (
+                "an AIFF of an SSND block size",
+                "aiff",
+                pa.clone(),
+                with_block_aligned_ssnd(&pa, 4096),
+            ),
+            ("a WAV", "wav", wav.clone(), with_wav_tags(&wav, ART)),
+            (
+                "a FLAC with art",
+                "flac",
+                flac.clone(),
+                with_flac_tags(&flac, ART),
+            ),
+            (
+                "a FLAC with a VORBIS_COMMENT",
+                "flac",
+                flac.clone(),
+                flac_vorbis,
+            ),
+        ];
+        for (case, ext, plain, tagged) in cases {
+            let want = decode_bytes(plain.clone(), Some(ext)).unwrap().channels;
+            let (plain_peak, _) = stream_peak(plain, ext);
+            let (peak, got) = stream_peak(tagged, ext);
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap() == want, "{case}: the samples differ");
+            assert!(
+                peak < plain_peak + (1 << 20),
+                "{case}: the plain stream peaks at {plain_peak} bytes, the one with tags at {peak}"
+            );
+        }
     }
 
     /// The check of channels after the open of the reader: no reader of

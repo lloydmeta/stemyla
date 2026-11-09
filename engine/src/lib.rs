@@ -5,7 +5,6 @@
 mod aac_config;
 mod adpcm;
 mod adts_split;
-mod aiff_stream;
 pub mod decode;
 mod hidden;
 pub mod hpss;
@@ -23,6 +22,7 @@ pub mod slot;
 pub mod song;
 pub mod source;
 pub mod stretch;
+mod tag_stream;
 #[cfg(test)]
 mod test_alloc;
 #[cfg(test)]
