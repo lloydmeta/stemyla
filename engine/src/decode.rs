@@ -149,8 +149,8 @@ pub const AIFC_COMPRESSED_TEXT: &str = "This AIFC file is compressed in a form t
 /// round 10, MEM-4).  The decoders of Symphonia keep a buffer for each
 /// channel when they are made, before the first packet: measured with
 /// `peak_of` on 2026-11-09, `Decoder::new` of an `ima4` AIFC holds about
-/// 33 KB for each channel (`ima4::Ima4Channels`: a mono decoder and a
-/// plane of 4096 frames), and of a PCM AIFF about 2.4 KB.  So the bound
+/// 33 KB for each channel ([`crate::adpcm::AdpcmChannels`]: a mono decoder
+/// and a plane of 4096 frames), and of a PCM AIFF about 2.4 KB.  So the bound
 /// keeps the open of each format under 8 MiB, with a margin of 2.  A WAV
 /// has at most 26 (`symphonia-format-riff` `wave/chunks.rs`, line 716).
 pub const MOST_CHANNELS: u16 = 128;
@@ -799,7 +799,13 @@ fn open_within(
             crate::hidden::start_of(&mut at).context("reading the start of the file")?;
         (source, view, start)
     } else {
-        let (source, start) = scan_stream(source).context("reading the start of the file")?;
+        let (source, start, channels) =
+            scan_stream(source).context("reading the start of the file")?;
+        // Before any reader of Symphonia keeps a buffer for each channel
+        // (finding 11-4 of review round 11).
+        if let Some(channels) = channels.filter(|channels| *channels > MOST_CHANNELS) {
+            return Err(anyhow!(channels_text(u32::from(channels))));
+        }
         (source, 0, start)
     };
     let mut source = source;
@@ -1184,8 +1190,9 @@ fn with_pce_channels(mut params: AudioCodecParameters) -> AudioCodecParameters {
     params
 }
 
-/// A source to open, and its container with where its reader starts.
-type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
+/// A source to open, its container with where its reader starts, and the
+/// channels of the `COMM` of an AIFF.
+type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>, Option<u16>);
 
 /// The container of a source that cannot seek, and where its reader starts,
 /// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
@@ -1193,7 +1200,9 @@ type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
 /// bytes, into one buffer of that size.  It gives a source that reads those
 /// bytes again, then the rest.  The open of a WAV of 4 MiB peaks at
 /// 1,130,166 bytes, and the buffer stays until the decode ends (finding 7-8
-/// of review round 7).
+/// of review round 7).  It also gives the channels of the `COMM` of an AIFF
+/// in the window, for the bound of channels (finding 11-4 of review round
+/// 11).
 fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
     use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES, first_marker, reader_start};
     use std::io::Read;
@@ -1205,8 +1214,12 @@ fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
         .or_else(|| {
             crate::hidden::is_adts_of_raw_blocks_with_crc(&window).then_some((Container::Adts, 0))
         });
+    let channels = match start {
+        Some((Container::Aiff, at)) => crate::hidden::aiff_channels(&mut window.as_slice(), at)?,
+        _ => None,
+    };
     let again = Cursor::new(window).chain(source);
-    Ok((Box::new(ReadOnlySource::new(again)), start))
+    Ok((Box::new(ReadOnlySource::new(again)), start, channels))
 }
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
@@ -5367,6 +5380,145 @@ mod tests {
                 let text = channels_text(u32::from(count));
                 assert_refused_early(many, "aiff", &text, &format!("{case} of {count} channels"));
             }
+        }
+    }
+
+    /// Finding 11-4 of review round 11 (MEM-4): a source that cannot seek
+    /// gets the bound of channels from the window of its scan, before any
+    /// reader of Symphonia reads `COMM`.  So the open peaks at the window,
+    /// with no panic in a test build.
+    #[test]
+    fn a_stream_of_too_many_channels_is_refused_before_its_reader() {
+        use crate::test_audio::{Aiff, aiff};
+        let tone: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let file = aiff(&vec![tone; 4], 44_100, 16, Aiff::Plain);
+        for count in [MOST_CHANNELS + 1, u16::MAX] {
+            let many = with_comm_channels(file.clone(), count);
+            let (peak, opened) = peak_of(|| {
+                std::panic::catch_unwind(|| {
+                    Decoder::new(Box::new(Fifo(Cursor::new(many))), Some("aiff"))
+                        .err()
+                        .map(|e| format!("{e:#}"))
+                })
+            });
+            assert!(opened.is_ok(), "{count} channels: a panic");
+            let text = channels_text(u32::from(count));
+            assert_eq!(opened.unwrap().as_deref(), Some(text.as_str()), "{count}");
+            assert!(
+                peak < 2 << 20,
+                "{count} channels: the open peaks at {peak} bytes"
+            );
+        }
+        // A chunk of 1.1 MB before `COMM` puts it out of the window.  Then
+        // the check after the open of the reader refuses 129 channels.
+        let filler = vec![0; 1_100_000];
+        let far = [
+            &file[..12],
+            b"APPL",
+            &(filler.len() as u32).to_be_bytes(),
+            &filler,
+            &file[12..],
+        ]
+        .concat();
+        let mut far = with_comm_channels(far, MOST_CHANNELS + 1);
+        let form = (far.len() - 8) as u32;
+        far[4..8].copy_from_slice(&form.to_be_bytes());
+        let opened = Decoder::new(Box::new(Fifo(Cursor::new(far))), Some("aiff"));
+        let text = channels_text(u32::from(MOST_CHANNELS + 1));
+        assert_eq!(
+            opened.err().map(|e| format!("{e:#}")),
+            Some(text),
+            "COMM out of the window"
+        );
+    }
+
+    /// Missed mutants 11-12, 11-13, 11-16, 11-18, 11-20, 11-29, 11-30,
+    /// 11-32 and 11-33 of review round 11: the walk to `COMM` steps over each
+    /// chunk before it, with its pad byte, and stops at the end of the file.
+    #[test]
+    fn the_walk_to_comm_steps_over_each_chunk() {
+        use crate::test_audio::{Aiff, aiff};
+        assert_eq!(
+            channels_text(129),
+            "This file has 129 channels.  A file of at most 128 channels opens."
+        );
+        let tone: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        // 11-32: the head of a file at the bound states its frames.
+        let most = aiff(
+            &vec![tone.clone(); usize::from(MOST_CHANNELS)],
+            44_100,
+            16,
+            Aiff::Plain,
+        );
+        assert_eq!(head_of(&most), HeadLength::Frames(256), "128 channels");
+        let text = channels_text(u32::from(u16::MAX));
+        // 11-13, 11-16, 11-18 and 11-20: `FVER` comes before `COMM`.
+        let aifc = aiff(
+            std::slice::from_ref(&tone),
+            44_100,
+            16,
+            Aiff::UncompressedAifc,
+        );
+        assert_eq!(&aifc[12..16], b"FVER");
+        let many = with_comm_channels(aifc, u16::MAX);
+        assert_refused_early(many, "aiff", &text, "an AIFC with FVER first");
+        // 11-29: a chunk of 3 bytes and its pad byte come before `COMM`.
+        let plain = aiff(std::slice::from_ref(&tone), 44_100, 16, Aiff::Plain);
+        let mut odd = [
+            &plain[..12],
+            b"NAME",
+            &3_u32.to_be_bytes(),
+            b"abc\0",
+            &plain[12..],
+        ]
+        .concat();
+        let form = u32::from_be_bytes([odd[4], odd[5], odd[6], odd[7]]) + 12;
+        odd[4..8].copy_from_slice(&form.to_be_bytes());
+        assert_eq!(
+            decode_bytes(odd.clone(), Some("aiff"))
+                .map(|song| song.channels.len())
+                .ok(),
+            Some(1)
+        );
+        let many = with_comm_channels(odd, u16::MAX);
+        assert_refused_early(many, "aiff", &text, "an odd chunk before COMM");
+        // 11-12: no `COMM` is an error, and the walk ends.
+        let comm = (0..plain.len())
+            .find(|at| plain[*at..].starts_with(b"COMM"))
+            .unwrap();
+        let size = u32::from_be_bytes([
+            plain[comm + 4],
+            plain[comm + 5],
+            plain[comm + 6],
+            plain[comm + 7],
+        ]) as usize;
+        let mut none = [&plain[..comm], &plain[comm + 8 + size + size % 2..]].concat();
+        let form = (none.len() - 8) as u32;
+        none[4..8].copy_from_slice(&form.to_be_bytes());
+        let (sent, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sent.send(decode_bytes(none, Some("aiff")).is_err()));
+        let refused = got.recv_timeout(std::time::Duration::from_secs(30));
+        assert_eq!(refused, Ok(true), "an AIFF with no COMM");
+    }
+
+    /// Missed mutant 11-11 of review round 11: a PCM WAV of 3 channels goes
+    /// to Symphonia's PCM decoder, and each channel decodes as the mono WAV
+    /// of that channel.
+    #[test]
+    fn a_pcm_wav_of_3_channels_decodes_as_each_mono_one() {
+        use crate::test_audio::{WavSamples, wav};
+        let tone = chirps();
+        let channels: Vec<Vec<f32>> = (0..3)
+            .map(|k| Vec::from(&tone[k % 2][k * 8..k * 8 + 4000]))
+            .collect();
+        let all = decode_bytes(wav(&channels, 44_100, WavSamples::Pcm16), Some("wav")).unwrap();
+        for (k, channel) in channels.iter().enumerate() {
+            let mono = decode_bytes(
+                wav(std::slice::from_ref(channel), 44_100, WavSamples::Pcm16),
+                Some("wav"),
+            )
+            .unwrap();
+            assert!(all.channels[k] == mono.channels[0], "channel {k}");
         }
     }
 
