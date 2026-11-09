@@ -139,6 +139,9 @@ pub(crate) enum Refusal {
     Protected,
     /// A `moov` whose tables pass the bound of a stream.
     Moov,
+    /// An MP4 behind a leading ID3v2 tag whose chunk offsets count from the
+    /// start of the tag, which the stream read past.
+    Id3Offsets,
 }
 
 impl std::fmt::Display for Refusal {
@@ -238,12 +241,14 @@ impl<R: Rule + Send + Sync> MediaSource for TagStream<R> {
     }
 }
 
-/// `source`, a stream of `container` whose reader starts at `at`, through
-/// a [`TagStream`] if its form has tags that it can hide.
+/// `source`, a stream of `container` whose reader starts at `at`, after
+/// `dropped` bytes of leading ID3v2 tags, through a [`TagStream`] if its
+/// form has headers that it changes.
 pub(crate) fn stream_of(
     source: Box<dyn MediaSource>,
     container: crate::hidden::Container,
     at: u64,
+    dropped: u64,
 ) -> Box<dyn MediaSource> {
     use crate::hidden::Container;
     match container {
@@ -252,7 +257,7 @@ pub(crate) fn stream_of(
         Container::Flac => Box::new(TagStream::new(source, Chunks::Flac, at + 4)),
         Container::Mp4 => Box::new(TagStream::new(
             source,
-            crate::mp4_stream::Mp4::default(),
+            crate::mp4_stream::Mp4::behind(dropped),
             at,
         )),
         _ => source,

@@ -170,6 +170,11 @@ pub const MS_ADPCM_TEXT: &str =
 /// refuses the same blocks (`codec_ima_wav.rs`, line 47).
 pub const IMA_BLOCKS_TEXT: &str = "This WAV file holds IMA ADPCM in blocks of a size that the format does not allow.  Open another file.";
 
+/// The text of an M4A stream behind a leading ID3v2 tag whose chunk
+/// offsets count from the start of the tag (TD-89, closed by review round
+/// 13).
+pub const ID3_OFFSETS_TEXT: &str = "This M4A file has an ID3v2 tag at its start, and its index counts from the start of the tag.  So it does not open from this source.  Open it from a file.";
+
 /// The text of a file of more than [`MOST_CHANNELS`] channels.
 pub fn channels_text(channels: u32) -> String {
     format!("This file has {channels} channels.  A file of at most {MOST_CHANNELS} channels opens.")
@@ -814,12 +819,13 @@ fn open_within(
             crate::hidden::start_of(&mut at).context("reading the start of the file")?;
         (source, view, start)
     } else {
-        let (source, start) = scan_stream(source).context("reading the start of the file")?;
+        let (source, start, dropped) =
+            scan_stream(source).context("reading the start of the file")?;
         // The tags and the bound of channels, before any reader of
         // Symphonia reads them (findings 11-4 and 12-2 of review rounds 11
         // and 12, and the tags of a stream).
         let source: Box<dyn MediaSource> = match start {
-            Some((container, at)) => crate::tag_stream::stream_of(source, container, at),
+            Some((container, at)) => crate::tag_stream::stream_of(source, container, at, dropped),
             None => source,
         };
         (source, 0, start)
@@ -1131,7 +1137,7 @@ fn mp4_view(found: &Found, view: u64, reader_at: u64) -> (u64, Option<u32>) {
 /// offset in a body wins.  When both or neither do, the form that puts it
 /// at the start of a body wins, and else the MP4 start, as after an ID3v2
 /// tag.
-fn counts_from_mp4_start(chunk: u64, before: u64, bodies: &[(u64, u64)]) -> bool {
+pub(crate) fn counts_from_mp4_start(chunk: u64, before: u64, bodies: &[(u64, u64)]) -> bool {
     let from_mp4 = chunk.saturating_add(before);
     let inside = |at: u64| bodies.iter().any(|(body, end)| (*body..*end).contains(&at));
     let at_start = |at: u64| bodies.iter().any(|(body, _)| *body == at);
@@ -1242,11 +1248,13 @@ fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
         Refusal::Video => anyhow!(VIDEO_TEXT),
         Refusal::Protected => anyhow!(PROTECTED_TEXT),
         Refusal::Moov => anyhow!(MOOV_TEXT),
+        Refusal::Id3Offsets => anyhow!(ID3_OFFSETS_TEXT),
     })
 }
 
-/// A source to open, and its container with where its reader starts.
-type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
+/// A source to open, its container with where its reader starts, and the
+/// bytes of the leading ID3v2 tags that the scan read past.
+type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>, u64);
 
 /// The container of a source that cannot seek, and where its reader starts,
 /// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
@@ -1254,20 +1262,38 @@ type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
 /// bytes, into one buffer of that size.  It gives a source that reads those
 /// bytes again, then the rest.  The open of a WAV of 4 MiB peaks at
 /// 1,130,166 bytes, and the buffer stays until the decode ends (finding 7-8
-/// of review round 7).
+/// of review round 7).  It reads past each leading ID3v2 tag first, as a
+/// file that can seek starts its view after them, and gives their bytes.
 fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
     use crate::hidden::{LAST_MARKER, MOST_SCORE_BYTES, first_marker, reader_start};
     use std::io::Read;
     let most = LAST_MARKER + MOST_SCORE_BYTES;
     let mut window = Vec::with_capacity(most);
-    (&mut source).take(most as u64).read_to_end(&mut window)?;
+    // Each leading ID3v2 tag, read past with no buffer (TD-89, closed by
+    // review round 13).
+    let mut dropped = 0;
+    loop {
+        (&mut source).take(10).read_to_end(&mut window)?;
+        match crate::hidden::id3_tag_bytes(&window) {
+            Some(bytes) => {
+                let rest = bytes - 10;
+                let read = std::io::copy(&mut (&mut source).take(rest), &mut std::io::sink())?;
+                dropped += 10 + read;
+                window.clear();
+            }
+            None => break,
+        }
+    }
+    (&mut source)
+        .take((most - window.len()) as u64)
+        .read_to_end(&mut window)?;
     let start = first_marker(&window, 0..LAST_MARKER + 1)
         .map(|(container, at)| (container, reader_start(container, at as u64)))
         .or_else(|| {
             crate::hidden::is_adts_of_raw_blocks_with_crc(&window).then_some((Container::Adts, 0))
         });
     let again = Cursor::new(window).chain(source);
-    Ok((Box::new(ReadOnlySource::new(again)), start))
+    Ok((Box::new(ReadOnlySource::new(again)), start, dropped))
 }
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
@@ -5582,20 +5608,7 @@ mod tests {
         let tone: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
         let plain = with_far_comm(&aiff(&vec![tone; 2], 44_100, 16, Aiff::Plain));
         let file = with_aiff_tags(&plain, ART);
-        let dir = std::env::temp_dir().join(format!("stemyla-fifo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let fifo = dir.join("lloyd.aiff");
-        let _ = std::fs::remove_file(&fifo);
-        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
-        assert!(made.is_ok_and(|status| status.success()), "mkfifo");
-        let writer = {
-            let (fifo, file) = (fifo.clone(), file.clone());
-            std::thread::spawn(move || std::fs::write(fifo, file))
-        };
-        let (peak, got) = peak_of(|| decode_path(&fifo));
-        let written = writer.join();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(written.is_ok_and(|w| w.is_ok()), "the write to the FIFO");
+        let (peak, got) = through_fifo(&file, "lloyd.aiff");
         let want = decode_bytes(file, Some("aiff")).unwrap();
         assert!(got.is_ok(), "{:?}", got.err());
         assert!(got.unwrap().channels == want.channels);
@@ -5603,6 +5616,121 @@ mod tests {
             peak < 8 << 20,
             "the decode through the FIFO peaks at {peak} bytes"
         );
+    }
+
+    /// The decode of `file` by `decode_path` of a FIFO (`mkfifo`) of `name`,
+    /// with its peak.  Another thread writes the file into the FIFO.
+    #[cfg(unix)]
+    fn through_fifo(file: &[u8], name: &str) -> (usize, Result<Audio>) {
+        let dir = std::env::temp_dir().join(format!("stemyla-fifo-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join(name);
+        let _ = std::fs::remove_file(&fifo);
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.is_ok_and(|status| status.success()), "mkfifo");
+        let writer = {
+            let (fifo, file) = (fifo.clone(), file.to_owned());
+            std::thread::spawn(move || std::fs::write(fifo, file))
+        };
+        let (peak, got) = peak_of(|| decode_path(&fifo));
+        let written = writer.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(written.is_ok_and(|w| w.is_ok()), "the write to the FIFO");
+        (peak, got)
+    }
+
+    /// TD-89 of review round 12 (closed by review round 13): a stream reads
+    /// past each leading ID3v2 tag with no buffer, as a file that can seek
+    /// starts its view after them.  An MP3, an ADTS and a FLAC behind a tag
+    /// of 2 MiB or 64 MiB, behind two tags, and behind a tag with a footer
+    /// decode through `Fifo` bit for bit, within 1 MiB of the plain stream.
+    /// The MP3 behind 64 MiB decodes through a FIFO too.  Main (ff633a3)
+    /// does not open a stream behind a tag of 2 MiB either.
+    #[test]
+    fn a_stream_behind_a_leading_id3_tag_opens() {
+        use crate::test_audio::{id3_tag, mp3, tone};
+        let tones = [tone(0, 44_100, 44_100), tone(1, 44_100, 44_100)];
+        let (left, right, _) = stereo_wav();
+        let mut footer = id3_tag(100);
+        footer[5] |= 0x10;
+        footer.extend_from_slice(b"3DI\x04\0\x10\0\0\0\0");
+        let files = [
+            ("mp3", mp3(&tones, 44_100)),
+            ("aac", crate::test_m4a::adts(&short_tone(), 44_100)),
+            ("flac", compressed(&left, &right, 44_100)),
+        ];
+        for (ext, plain) in files {
+            let want = decode_bytes(plain.clone(), Some(ext)).unwrap().channels;
+            let (plain_peak, _) = stream_peak(plain.clone(), ext);
+            let tags = [
+                ("a tag of 2 MiB", id3_tag(2 << 20)),
+                ("a tag of 64 MiB", id3_tag(ART)),
+                ("two tags", [id3_tag(100), id3_tag(2 << 20)].concat()),
+                (
+                    "a tag with a footer",
+                    [footer.clone(), id3_tag(2 << 20)].concat(),
+                ),
+            ];
+            for (case, tag) in tags {
+                let case = format!("{ext} after {case}");
+                let (peak, got) = stream_peak([tag, plain.clone()].concat(), ext);
+                assert!(got.is_ok(), "{case}: {:?}", got.err());
+                assert!(got.unwrap() == want, "{case}: the samples differ");
+                assert!(
+                    peak < plain_peak + (1 << 20),
+                    "{case}: the plain stream peaks at {plain_peak} bytes, this one at {peak}"
+                );
+            }
+        }
+        #[cfg(unix)]
+        {
+            let plain = mp3(&tones, 44_100);
+            let file = [id3_tag(ART), plain.clone()].concat();
+            let (peak, got) = through_fifo(&file, "lloyd.mp3");
+            let want = decode_bytes(plain, Some("mp3")).unwrap().channels;
+            assert!(got.is_ok(), "the FIFO: {:?}", got.err());
+            assert!(
+                got.unwrap().channels == want,
+                "the FIFO: the samples differ"
+            );
+            assert!(peak < 8 << 20, "the FIFO: the decode peaks at {peak} bytes");
+        }
+    }
+
+    /// TD-89: an M4A behind a leading ID3v2 tag on a stream.  When its chunk
+    /// offsets count from the MP4 start, as the view of a file that can
+    /// seek takes them after a tag, it decodes bit for bit through `Fifo`.
+    /// When they count from the start of the tag, the stream has lost the
+    /// tag bytes before `stco` comes, and it is refused with
+    /// `ID3_OFFSETS_TEXT` (`mp4_stream`).
+    #[test]
+    fn an_m4a_stream_behind_a_tag_checks_where_its_offsets_count_from() {
+        use crate::test_audio::id3_tag;
+        use crate::test_m4a::{aac_m4a, with_stco_moved};
+        let alac = alac_of(m4a::Order::FastStart);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            for bytes in [100, 2 << 20] {
+                let tag = id3_tag(bytes);
+                let case = format!("{kind} after a tag of {bytes} bytes");
+                let from_mp4 = [tag.clone(), plain.clone()].concat();
+                let (_, got) = stream_peak(from_mp4, "m4a");
+                assert!(got.is_ok(), "{case}: {:?}", got.err());
+                assert!(got.unwrap() == want, "{case}: the samples differ");
+                let from_file = [
+                    tag.clone(),
+                    with_stco_moved(plain.clone(), tag.len() as i64),
+                ]
+                .concat();
+                let error = fifo_refusal(from_file, "m4a", &case);
+                assert_eq!(
+                    error.as_deref(),
+                    Some(ID3_OFFSETS_TEXT),
+                    "{case}: offsets from the file start"
+                );
+            }
+        }
     }
 
     /// The decode of `bytes` through `Fifo`, a source that cannot seek: its

@@ -747,15 +747,26 @@ pub(crate) fn leading_id3_bytes(source: &mut dyn ReadAt) -> std::io::Result<u64>
     let mut at = 0_u64;
     loop {
         let mut header = [0; 10];
-        if source.read_at(at, &mut header)? < 10 || header[..3] != *b"ID3" {
-            return Ok(at);
+        let read = source.read_at(at, &mut header)?;
+        match id3_tag_bytes(&header[..read]) {
+            Some(bytes) => at += bytes,
+            None => return Ok(at),
         }
-        let size = header[6..10]
-            .iter()
-            .fold(0_u64, |size, byte| (size << 7) | u64::from(byte & 0x7F));
-        let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
-        at += 10 + size + footer;
     }
+}
+
+/// The bytes of the ID3v2 tag whose header is `header`, with the header
+/// and the footer, or `None` when `header` is not the 10 bytes of an ID3v2
+/// header.  A file that can seek and a stream read past a tag by this rule.
+pub(crate) fn id3_tag_bytes(header: &[u8]) -> Option<u64> {
+    if header.len() < 10 || header[..3] != *b"ID3" {
+        return None;
+    }
+    let size = header[6..10]
+        .iter()
+        .fold(0_u64, |size, byte| (size << 7) | u64::from(byte & 0x7F));
+    let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
+    Some(10 + size + footer)
 }
 
 /// Hides each tag block of the FLAC metadata from `at`: it gives PADDING

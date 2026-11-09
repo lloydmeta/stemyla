@@ -42,9 +42,38 @@ pub(crate) struct Mp4 {
     /// The handler and the first sample entry of the open `trak`.
     handler: Option<[u8; 4]>,
     entry: Option<[u8; 4]>,
+    /// The bytes of the leading ID3v2 tags that the stream read past.
+    dropped: u64,
+    /// The first chunk offset of the first sound track.
+    first_chunk: Option<u64>,
 }
 
 impl Mp4 {
+    /// The rule of an MP4 stream after `dropped` bytes of leading ID3v2
+    /// tags.
+    pub(crate) fn behind(dropped: u64) -> Self {
+        Mp4 {
+            dropped,
+            ..Mp4::default()
+        }
+    }
+
+    /// Refuses the first `mdat`, from `body` to `end`, when the first chunk
+    /// offset counts from the start of the leading tags.  The stream read
+    /// past them, so Symphonia's positions count from the MP4 start, as
+    /// the view of a file that can seek does after a tag.  The rule of
+    /// `decode::counts_from_mp4_start` decides, with the positions of the
+    /// file (TD-89, closed by review round 13).
+    fn check_offsets(&self, body: u64, end: u64) -> std::io::Result<()> {
+        let Some(chunk) = self.first_chunk.filter(|_| self.dropped > 0) else {
+            return Ok(());
+        };
+        let bodies = [(body + self.dropped, end.saturating_add(self.dropped))];
+        if crate::decode::counts_from_mp4_start(chunk, self.dropped, &bodies) {
+            return Ok(());
+        }
+        Err(Refusal::Id3Offsets.error())
+    }
     fn hold(&mut self, size: u64) -> std::io::Result<()> {
         self.held = self.held.saturating_add(size);
         if self.held > most_held() {
@@ -98,7 +127,11 @@ impl Rule for Mp4 {
         let field = |from: usize| four(header, head + from);
         let mut follow = false;
         match (self.open.last().map(|(kind, _)| kind), &kind) {
-            (None, b"mdat" | b"moof") => return Ok(None),
+            (None, b"mdat") => {
+                self.check_offsets(at + head as u64, end)?;
+                return Ok(None);
+            }
+            (None, b"moof") => return Ok(None),
             (None, b"ftyp") if !self.ftyp => {
                 self.ftyp = true;
                 if size > (8 + MOST_BOX_BYTES) as u64 && size != u64::MAX - at && header.len() >= 32
@@ -140,6 +173,21 @@ impl Rule for Mp4 {
             (Some(b"stbl"), b"stsd") => {
                 self.entry = field(12);
                 self.check()?;
+            }
+            // The version and flags, the count, then the first entry.
+            (Some(b"stbl"), b"stco" | b"co64")
+                if self.handler == Some(*b"soun") && self.first_chunk.is_none() =>
+            {
+                let count = field(4).map_or(0, u32::from_be_bytes);
+                self.first_chunk = match (&kind, field(8), field(12)) {
+                    (b"stco", Some(first), _) => Some(u64::from(u32::from_be_bytes(first))),
+                    (_, Some(high), Some(low)) => Some(
+                        u64::from(u32::from_be_bytes(high)) << 32
+                            | u64::from(u32::from_be_bytes(low)),
+                    ),
+                    _ => None,
+                }
+                .filter(|_| count > 0);
             }
             _ => {}
         }
