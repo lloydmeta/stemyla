@@ -14,8 +14,8 @@ use std::io::{Cursor, SeekFrom};
 use std::path::Path;
 use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::well_known::{
-    CODEC_ID_AAC, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_MS, CODEC_ID_ALAC, CODEC_ID_FLAC,
-    CODEC_ID_MP3,
+    CODEC_ID_AAC, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_ALAC,
+    CODEC_ID_FLAC, CODEC_ID_MP3,
 };
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
@@ -1316,17 +1316,21 @@ impl Decoder {
             trim,
         } = open_within(source, ext, limit, max_song_frames)?;
         let more_than_stereo = params.channels.as_ref().is_some_and(|c| c.count() > 2);
-        let codec: Box<dyn AudioDecoder> =
-            if params.codec == CODEC_ID_ADPCM_IMA_QT && more_than_stereo {
-                Box::new(
-                    crate::ima4::Ima4Channels::new(&params)
-                        .map_err(|e| anyhow!("no decoder for codec: {e}"))?,
-                )
-            } else {
-                symphonia::default::get_codecs()
-                    .make_audio_decoder(&params, &AudioDecoderOptions::default())
-                    .map_err(|e| anyhow!("no decoder for codec: {e}"))?
-            };
+        let adpcm = [
+            CODEC_ID_ADPCM_IMA_QT,
+            CODEC_ID_ADPCM_IMA_WAV,
+            CODEC_ID_ADPCM_MS,
+        ];
+        let codec: Box<dyn AudioDecoder> = if adpcm.contains(&params.codec) && more_than_stereo {
+            Box::new(
+                crate::adpcm::AdpcmChannels::new(&params)
+                    .map_err(|e| anyhow!("no decoder for codec: {e}"))?,
+            )
+        } else {
+            symphonia::default::get_codecs()
+                .make_audio_decoder(&params, &AudioDecoderOptions::default())
+                .map_err(|e| anyhow!("no decoder for codec: {e}"))?
+        };
         Ok(Decoder {
             format,
             queued,
@@ -5165,8 +5169,9 @@ mod tests {
     }
 
     /// Finding 9-3 of review round 9: the feature `adpcm` makes Symphonia
-    /// decode IMA and Microsoft ADPCM in a WAV too, on purpose.  Mono and
-    /// stereo of each decode to the output of the encoder of the test, and
+    /// decode IMA and Microsoft ADPCM in a WAV too, on purpose.  Finding 10-4
+    /// of review round 10: also of more than 2 channels.  1, 2, 3 and 6
+    /// channels of each decode to the output of the encoder of the test, and
     /// the head states the frames that they decode: blocks times the frames
     /// of a block.
     #[test]
@@ -5174,7 +5179,10 @@ mod tests {
         use crate::test_audio::{WavAdpcm, adpcm_wav};
         let tone = chirps();
         for kind in [WavAdpcm::Ima, WavAdpcm::Ms] {
-            for channels in [vec![tone[0].clone()], tone.clone()] {
+            for count in [1, 2, 3, 6] {
+                let channels: Vec<Vec<f32>> = (0..count)
+                    .map(|k| Vec::from(&tone[k % 2][k * 8..k * 8 + 80_000]))
+                    .collect();
                 let case = format!("{kind:?}, {} channels", channels.len());
                 let (file, want) = adpcm_wav(&channels, 44_100, kind);
                 let got = decode_bytes(file.clone(), Some("wav"));
@@ -5220,7 +5228,7 @@ mod tests {
     /// runs in each build: no panic, also with overflow checks.
     #[test]
     fn a_crafted_ms_adpcm_wav_is_refused_with_no_panic() {
-        for channels in [1, 2] {
+        for channels in [1, 2, 3] {
             for step in [16, 32_767] {
                 let case = format!("{channels} channels from a step of {step}");
                 let file = growing_ms_adpcm(channels, step);

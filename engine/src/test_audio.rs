@@ -596,7 +596,7 @@ const MS_ADAPTATION: [i32; 16] = [
     230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,
 ];
 
-/// A WAV of `kind` ADPCM of `channels` (1 or 2) at `rate`, in blocks of
+/// A WAV of `kind` ADPCM of `channels` at `rate`, in blocks of
 /// 256 bytes for each channel, and what a decoder gives for it, as `f32`.
 /// The frames of a block: IMA, 505, of which the first is the preamble's
 /// predictor; Microsoft, 500, of which the first 2 are the preamble's
@@ -683,16 +683,14 @@ pub fn adpcm_wav(channels: &[Vec<f32>], rate: u32, kind: WavAdpcm) -> (Vec<u8>, 
                         decoded[channel].push(value as f32 / 32_768.0);
                     }
                 }
-                // Mono: two nibbles of one channel in a byte, the high one
-                // first.  Stereo: the left channel high, the right low.
-                if count == 1 {
-                    for pair in nibbles[0].chunks(2) {
-                        data.push((pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
-                    }
-                } else {
-                    for (left, right) in nibbles[0].iter().zip(&nibbles[1]) {
-                        data.push((left << 4) | right);
-                    }
+                // The nibbles of each frame, one channel after the other,
+                // two in a byte, the high one first: so a mono byte holds two
+                // frames, and a stereo byte the left channel high.
+                let all: Vec<u8> = (0..per_block - 2)
+                    .flat_map(|frame| nibbles.iter().map(move |channel| channel[frame]))
+                    .collect();
+                for pair in all.chunks(2) {
+                    data.push((pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
                 }
             }
         }

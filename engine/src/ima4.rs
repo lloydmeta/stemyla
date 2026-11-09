@@ -8,15 +8,11 @@
 
 use std::io;
 
+use symphonia::core::audio::Channels;
 use symphonia::core::audio::layouts::{CHANNEL_LAYOUT_MONO, CHANNEL_LAYOUT_STEREO};
-use symphonia::core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels, GenericAudioBufferRef,
-};
-use symphonia::core::codecs::CodecInfo;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::AudioCodecParameters;
 use symphonia::core::codecs::audio::well_known::CODEC_ID_ADPCM_IMA_QT;
-use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions, FinalizeResult};
 use symphonia::core::errors::{Error, Result, SeekErrorKind};
 use symphonia::core::formats::well_known::FORMAT_ID_AIFF;
 use symphonia::core::formats::{
@@ -25,7 +21,6 @@ use symphonia::core::formats::{
 use symphonia::core::io::{MediaSourceStream, ReadBytes};
 use symphonia::core::meta::{ChapterGroup, Metadata, MetadataLog};
 use symphonia::core::packet::Packet;
-use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration, Timestamp};
 
 use crate::mp4_boxes::ReadAt;
@@ -226,89 +221,6 @@ impl FormatReader for Ima4Reader {
         Self: 's,
     {
         self.mss
-    }
-}
-
-/// A decoder of `ima4` of more than 2 channels, which Symphonia's ADPCM
-/// decoder refuses (finding 9-7 of review round 9).  The blocks of each
-/// channel stand alone, so it gives the blocks of each channel to its own
-/// mono decoder of Symphonia, and puts the channels side by side.
-pub(crate) struct Ima4Channels {
-    params: AudioCodecParameters,
-    channels: Vec<Box<dyn AudioDecoder>>,
-    /// The blocks of one channel of a packet.
-    blocks: Vec<u8>,
-    /// The samples of one channel.
-    plane: Vec<Vec<i32>>,
-    buf: AudioBuffer<i32>,
-}
-
-impl Ima4Channels {
-    pub(crate) fn new(params: &AudioCodecParameters) -> Result<Self> {
-        let count = params.channels.as_ref().map_or(0, Channels::count);
-        let rate = params.sample_rate.unwrap_or(0);
-        let mut mono = params.clone();
-        mono.with_channels(CHANNEL_LAYOUT_MONO);
-        let channels = (0..count)
-            .map(|_| {
-                symphonia::default::get_codecs()
-                    .make_audio_decoder(&mono, &AudioDecoderOptions::default())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let spec = AudioSpec::new(rate, Channels::Discrete(count as u16));
-        Ok(Ima4Channels {
-            params: params.clone(),
-            channels,
-            blocks: Vec::new(),
-            plane: Vec::new(),
-            buf: AudioBuffer::new(spec, (PACKET_BLOCKS * BLOCK_FRAMES) as usize),
-        })
-    }
-}
-
-impl AudioDecoder for Ima4Channels {
-    fn reset(&mut self) {
-        self.channels.iter_mut().for_each(|channel| channel.reset());
-    }
-
-    fn codec_info(&self) -> &CodecInfo {
-        self.channels[0].codec_info()
-    }
-
-    fn codec_params(&self) -> &AudioCodecParameters {
-        &self.params
-    }
-
-    fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
-        let count = self.channels.len();
-        let block = BLOCK_BYTES as usize;
-        let frames = packet.data.len() / (block * count) * BLOCK_FRAMES as usize;
-        self.buf.clear();
-        self.buf.render_uninit(Some(frames));
-        for (index, channel) in self.channels.iter_mut().enumerate() {
-            self.blocks.clear();
-            for frame in packet.data.chunks_exact(block * count) {
-                self.blocks
-                    .extend_from_slice(&frame[index * block..(index + 1) * block]);
-            }
-            let mono = PacketRef::new(0, packet.pts, packet.dur, &self.blocks);
-            channel
-                .decode_ref(&mono)?
-                .copy_to_vecs_planar::<i32>(&mut self.plane);
-            if let (Some(plane), Some(samples)) = (self.buf.plane_mut(index), self.plane.first()) {
-                let len = plane.len().min(samples.len());
-                plane[..len].copy_from_slice(&samples[..len]);
-            }
-        }
-        Ok(self.buf.as_generic_audio_buffer_ref())
-    }
-
-    fn finalize(&mut self) -> FinalizeResult {
-        FinalizeResult::default()
-    }
-
-    fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
-        self.buf.as_generic_audio_buffer_ref()
     }
 }
 
