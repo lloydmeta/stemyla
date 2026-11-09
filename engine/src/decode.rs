@@ -5167,4 +5167,89 @@ mod tests {
             std::panic::catch_unwind(|| decode_bytes(growing_ms_adpcm(), Some("wav")).is_ok());
         assert!(decoded.is_ok(), "a panic");
     }
+
+    /// The samples of `bytes` through Symphonia's own probe and decoder: the
+    /// path of the decode on `main`.
+    fn through_symphonia(bytes: Vec<u8>) -> Vec<Vec<f32>> {
+        use symphonia::core::formats::probe::Hint;
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let probe = symphonia::default::get_probe();
+        let mut format = probe
+            .probe(&Hint::new(), mss, Default::default(), Default::default())
+            .expect("the probe opens it");
+        let track = format
+            .default_track(TrackType::Audio)
+            .expect("an audio track");
+        let id = track.id;
+        let params = track
+            .codec_params
+            .as_ref()
+            .and_then(|p| p.audio())
+            .expect("audio")
+            .clone();
+        let mut codec = symphonia::default::get_codecs()
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
+            .expect("a decoder");
+        let mut out: Vec<Vec<f32>> = Vec::new();
+        let mut planes: Vec<Vec<f32>> = Vec::new();
+        while let Ok(Some(packet)) = format.next_packet() {
+            if packet.track_id != id {
+                continue;
+            }
+            let Ok(buf) = codec.decode(&packet) else {
+                continue;
+            };
+            buf.copy_to_vecs_planar::<f32>(&mut planes);
+            out.resize(planes.len(), Vec::new());
+            for (all, plane) in out.iter_mut().zip(&planes) {
+                all.extend_from_slice(plane);
+            }
+        }
+        out
+    }
+
+    /// The orchestrator's check of review round 9: an MP3, which `main`
+    /// opens, decodes to the samples of Symphonia's own path, with no tags
+    /// and with an ID3v2 tag of a title (`TIT2`) and a small picture
+    /// (`APIC`).  The file with the tag decodes to the same samples as the
+    /// one with none.
+    #[test]
+    fn an_mp3_decodes_as_on_main_with_and_without_a_tag() {
+        use crate::test_audio::{mp3, tone};
+        let frame = |id: &[u8; 4], body: &[u8]| {
+            let size = body.len() as u32;
+            let synchsafe = [21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7F) as u8);
+            [&id[..], &synchsafe, &[0, 0], body].concat()
+        };
+        let title = frame(b"TIT2", &[&[3][..], b"lloyd"].concat());
+        let picture = frame(
+            b"APIC",
+            &[&[3][..], b"image/png\0", &[3], b"\0", &[0x89; 200]].concat(),
+        );
+        let frames = [title, picture].concat();
+        let size = frames.len() as u32;
+        let synchsafe = [21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7F) as u8);
+        let tag = [&b"ID3"[..], &[4, 0, 0], &synchsafe, &frames].concat();
+        let tones = [tone(0, 44_100, 44_100), tone(1, 44_100, 44_100)];
+        let plain = mp3(&tones, 44_100);
+        let tagged = [tag, plain.clone()].concat();
+        let want = through_symphonia(plain.clone());
+        assert!(
+            !want.is_empty() && want[0].len() > 44_100,
+            "the path of main decodes it"
+        );
+        for (case, file) in [("no tags", plain), ("an ID3v2 tag", tagged)] {
+            let main_path = through_symphonia(file.clone());
+            let got = decoded_as(file, "mp3", case);
+            assert!(got == main_path, "{case}: as on main");
+            assert!(got == want, "{case}: as with no tags");
+        }
+    }
+
+    /// The channels of `file` as `ext`, which must decode.
+    fn decoded_as(file: Vec<u8>, ext: &str, case: &str) -> Vec<Vec<f32>> {
+        let audio = decode_bytes(file, Some(ext));
+        assert!(audio.is_ok(), "{case}: {:?}", audio.err());
+        audio.unwrap().channels
+    }
 }
