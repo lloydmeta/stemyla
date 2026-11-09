@@ -106,6 +106,14 @@ impl Rule for Mp4 {
     const HEADER: usize = 40;
 
     fn change(&mut self, at: u64, header: &mut [u8]) -> std::io::Result<Option<u64>> {
+        while self.open.last().is_some_and(|(_, end)| *end <= at) {
+            self.open.pop();
+        }
+        // Each child stays inside its parent, as Symphonia's `next_header`
+        // keeps it (`atoms/mod.rs`, lines 640 to 697; finding 14-1 of review
+        // round 14).  With too few bytes left for a header, or a child that
+        // runs past the end, Symphonia goes on at the end of the parent.
+        let parent_end = self.open.last().map_or(u64::MAX, |(_, end)| *end);
         let (Some(size), Some(kind)) = (four(header, 0), four(header, 4)) else {
             return Ok(None);
         };
@@ -114,19 +122,20 @@ impl Rule for Mp4 {
                 Some(large) => (16, u64::from_be_bytes(large.try_into().unwrap_or_default())),
                 None => return Ok(None),
             },
-            0 => (8, u64::MAX - at),
+            0 => (8, parent_end - at),
             size => (8, u64::from(size)),
         };
+        if parent_end - at < head as u64 || size > parent_end - at {
+            return Ok((parent_end < u64::MAX).then_some(parent_end));
+        }
         if size < head as u64 {
             return Ok(None);
         }
-        let end = at.saturating_add(size);
-        while self.open.last().is_some_and(|(_, end)| *end <= at) {
-            self.open.pop();
-        }
+        let end = at + size;
         let field = |from: usize| four(header, head + from);
         let mut follow = false;
         match (self.open.last().map(|(kind, _)| kind), &kind) {
+            (None, b"mdat" | b"moof") if !self.moov => return Err(Refusal::MoovLast.error()),
             (None, b"mdat") => {
                 self.check_offsets(at + head as u64, end)?;
                 return Ok(None);

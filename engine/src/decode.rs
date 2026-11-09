@@ -175,6 +175,10 @@ pub const IMA_BLOCKS_TEXT: &str = "This WAV file holds IMA ADPCM in blocks of a 
 /// 13).
 pub const ID3_OFFSETS_TEXT: &str = "This M4A file has an ID3v2 tag at its start, and its index counts from the start of the tag.  So it does not open from this source.  Open it from a file.";
 
+/// The text of an M4A from a source that cannot seek whose `moov` comes
+/// after its `mdat`.
+pub const MOOV_LAST_TEXT: &str = "This M4A file holds its index (its moov box) after its audio, so it does not open from this source.  Open it from a file.";
+
 /// The text of a file of more than [`MOST_CHANNELS`] channels.
 pub fn channels_text(channels: u32) -> String {
     format!("This file has {channels} channels.  A file of at most {MOST_CHANNELS} channels opens.")
@@ -1254,6 +1258,7 @@ fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
         Refusal::Video => anyhow!(VIDEO_TEXT),
         Refusal::Protected => anyhow!(PROTECTED_TEXT),
         Refusal::Moov => anyhow!(MOOV_TEXT),
+        Refusal::MoovLast => anyhow!(MOOV_LAST_TEXT),
         Refusal::Id3Offsets => anyhow!(ID3_OFFSETS_TEXT),
     })
 }
@@ -5979,7 +5984,14 @@ mod tests {
     /// an empty `path`.  The sizes of the boxes of `path` and each chunk
     /// offset grow to match.
     fn fast_start_with(file: &[u8], path: &[&[u8; 4]], child: &[u8]) -> Vec<u8> {
-        use crate::test_m4a::{child_box, top_box, with_stco_moved};
+        let out = fast_start_raw(file, path, child);
+        crate::test_m4a::with_stco_moved(out, child.len() as i64)
+    }
+
+    /// [`fast_start_with`] with no change of the chunk offsets, for a file
+    /// that a check refuses before its samples, or of more than one `stco`.
+    fn fast_start_raw(file: &[u8], path: &[&[u8; 4]], child: &[u8]) -> Vec<u8> {
+        use crate::test_m4a::{child_box, top_box};
         let (moov, _) = top_box(file, b"moov");
         let mut boxes = Vec::new();
         for kind in path {
@@ -6000,7 +6012,127 @@ mod tests {
             let size = u32::from_be_bytes(out[at..at + 4].try_into().unwrap());
             out[at..at + 4].copy_from_slice(&(size + child.len() as u32).to_be_bytes());
         }
-        with_stco_moved(out, child.len() as i64)
+        out
+    }
+
+    /// Finding 14-1 of review round 14 (MEM-4): `mp4_stream` keeps each
+    /// child inside the end of its parent, as Symphonia's `next_header`
+    /// does (`atoms/mod.rs`, lines 640 to 697).  Through `Fifo`, for ALAC
+    /// and AAC: 4 bytes of zeros at the end of `moov`, or a child of `moov`
+    /// that runs past its end, then a top-level `meta` of 64 MiB, decode bit
+    /// for bit at a flat peak.  A gap at the end of the first `trak`, then a
+    /// `vide` track or a protected one, gives `VIDEO_TEXT` or
+    /// `PROTECTED_TEXT`.
+    #[test]
+    fn an_m4a_stream_keeps_each_box_inside_its_parent() {
+        use crate::test_m4a::{aac_m4a, child_box, cover_meta, top_box};
+        let alac = alac_of(m4a::Order::FastStart);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        for (kind, plain, entry) in [("ALAC", alac, b"alac"), ("AAC", aac, b"mp4a")] {
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            let (plain_peak, _) = stream_peak(plain.clone(), "m4a");
+            let long = [&100_000_u32.to_be_bytes()[..], b"zzzz", &[0; 8]].concat();
+            for (case, gap) in [
+                ("4 bytes of zeros", vec![0; 4]),
+                ("a child past the end", long),
+            ] {
+                let case = format!("{kind}, {case} at the end of moov");
+                let file = fast_start_with(&plain, &[b"moov"], &gap);
+                let file = after_moov(&file, &cover_meta(ART));
+                let (peak, got) = stream_peak(file, "m4a");
+                assert!(got.is_ok(), "{case}: {:?}", got.err());
+                assert!(got.unwrap() == want, "{case}: the samples differ");
+                assert!(
+                    peak < plain_peak + (1 << 20),
+                    "{case}: the plain stream peaks at {plain_peak} bytes, this one at {peak}"
+                );
+            }
+            let (moov, _) = top_box(&plain, b"moov");
+            let (trak, size) = child_box(&plain, moov, b"trak");
+            let first = &plain[trak..trak + size];
+            let swap = |from: &[u8; 4], to: &[u8; 4]| {
+                let at = (0..first.len())
+                    .find(|at| first[*at..].starts_with(from))
+                    .unwrap();
+                [&first[..at], to, &first[at + 4..]].concat()
+            };
+            for (case, second, text) in [
+                ("a vide track", swap(b"soun", b"vide"), VIDEO_TEXT),
+                ("a protected track", swap(entry, b"drms"), PROTECTED_TEXT),
+            ] {
+                let case = format!("{kind}, a gap in the first trak, then {case}");
+                let file = fast_start_raw(&plain, &[b"moov", b"trak"], &[0; 4]);
+                let file = fast_start_raw(&file, &[b"moov"], &second);
+                assert_eq!(
+                    fifo_refusal(file, "m4a", &case).as_deref(),
+                    Some(text),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// Finding 14-2 and missed mutant 14-12 of review round 14: an `mvhd`,
+    /// an `mvex`, a `tkhd` and an `edts` that each pass the bound of a
+    /// stream (20 MiB) get `MOOV_TEXT` through `Fifo`, at a small peak.
+    #[test]
+    fn each_held_box_of_an_m4a_stream_counts_in_its_bound() {
+        use crate::test_m4a::bx;
+        let plain = alac_of(m4a::Order::FastStart);
+        let big = vec![0; 21 << 20];
+        let cases = [
+            ("an mvhd", fast_start_raw(&plain, &[b"moov", b"mvhd"], &big)),
+            (
+                "an mvex",
+                fast_start_raw(&plain, &[b"moov"], &bx(b"mvex", &[&big])),
+            ),
+            (
+                "a tkhd",
+                fast_start_raw(&plain, &[b"moov", b"trak", b"tkhd"], &big),
+            ),
+            (
+                "an edts",
+                fast_start_raw(&plain, &[b"moov", b"trak"], &bx(b"edts", &[&big])),
+            ),
+        ];
+        for (case, file) in cases {
+            assert_eq!(
+                fifo_refusal(file, "m4a", case).as_deref(),
+                Some(MOOV_TEXT),
+                "{case}"
+            );
+        }
+    }
+
+    /// Missed mutants 14-16 and 14-17 of review round 14, and a `moov` after
+    /// `mdat` on a stream.  An `mdat` of size 0 past the start passes with
+    /// no panic.  A fragmented M4A, whose head ends at its first `moof`,
+    /// decodes through `Fifo` behind a tag.  An M4A with `moov` last gets
+    /// `MOOV_LAST_TEXT`: a stream cannot hold the `mdat` that comes first.
+    #[test]
+    fn an_m4a_stream_of_other_layouts() {
+        use crate::test_audio::id3_tag;
+        use crate::test_m4a::{fragmented, top_box};
+        let plain = alac_of(m4a::Order::FastStart);
+        let (mdat, _) = top_box(&plain, b"mdat");
+        let mut size_0 = plain.clone();
+        size_0[mdat..mdat + 4].copy_from_slice(&[0; 4]);
+        let decoded = std::panic::catch_unwind(|| stream_peak(size_0, "m4a").1.is_ok());
+        assert!(decoded.is_ok(), "an mdat of size 0: a panic");
+        let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+        let fragments = fragmented(&plain, 4, false);
+        let behind = [id3_tag(100), fragments].concat();
+        let (_, got) = stream_peak(behind, "m4a");
+        assert!(
+            got.as_ref().is_ok_and(|got| *got == want),
+            "a fragmented M4A behind a tag: {:?}",
+            got.err()
+        );
+        let last = alac_of(m4a::Order::MoovLast);
+        assert_eq!(
+            fifo_refusal(last, "m4a", "moov last").as_deref(),
+            Some(MOOV_LAST_TEXT)
+        );
     }
 
     /// `file`, an MP4 with `moov` first, with `boxes` after its `moov`.

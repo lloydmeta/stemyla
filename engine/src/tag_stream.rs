@@ -139,6 +139,8 @@ pub(crate) enum Refusal {
     Protected,
     /// A `moov` whose tables pass the bound of a stream.
     Moov,
+    /// An MP4 whose `mdat` or `moof` comes before its `moov`.
+    MoovLast,
     /// An MP4 behind a leading ID3v2 tag whose chunk offsets count from the
     /// start of the tag, which the stream read past.
     Id3Offsets,
