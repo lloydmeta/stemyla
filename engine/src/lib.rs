@@ -3,6 +3,7 @@
 //! `cpal` feature.
 
 mod aac_config;
+mod adts_split;
 pub mod decode;
 mod hidden;
 pub mod hpss;

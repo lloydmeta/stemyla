@@ -880,3 +880,57 @@ pub fn fragmented(file: &[u8], per_fragment: usize, sidx: bool) -> Vec<u8> {
     }
     out
 }
+
+/// An ADTS stream of AAC-LC `packets` at `rate`, with `channels` in the
+/// channel configuration, in frames of `per_frame[k]` raw data blocks for
+/// the k-th frame (the last count for the rest).  A frame of more than one
+/// block with `crc` states the position of each block after the first
+/// (ISO/IEC 13818-7, `adts_header_error_check`: from the start of the first
+/// block), then a header CRC, and a CRC after each block.  Each CRC is 0.
+pub fn adts_in_blocks(
+    packets: &[&[u8]],
+    rate: u32,
+    channels: u8,
+    per_frame: &[usize],
+    crc: bool,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut left = packets;
+    let mut frame = 0;
+    while !left.is_empty() {
+        let count = per_frame[frame.min(per_frame.len() - 1)].min(left.len());
+        let (blocks, rest) = left.split_at(count);
+        left = rest;
+        frame += 1;
+        let protected = crc && count > 1;
+        let mut body = Vec::new();
+        if protected {
+            let mut position = 0;
+            for block in &blocks[..count - 1] {
+                position += block.len() + 2;
+                body.extend_from_slice(&(position as u16).to_be_bytes());
+            }
+            body.extend_from_slice(&[0, 0]);
+            for block in blocks {
+                body.extend_from_slice(block);
+                body.extend_from_slice(&[0, 0]);
+            }
+        } else {
+            for block in blocks {
+                body.extend_from_slice(block);
+            }
+        }
+        let len = (body.len() + 7) as u32;
+        out.extend_from_slice(&[
+            0xFF,
+            if protected { 0xF0 } else { 0xF1 },
+            (1 << 6) | (rate_index(rate) << 2) | (channels >> 2),
+            ((channels & 3) << 6) | ((len >> 11) & 3) as u8,
+            (len >> 3) as u8,
+            (((len & 7) << 5) as u8) | 0x1F,
+            0xFC | (count - 1) as u8,
+        ]);
+        out.extend_from_slice(&body);
+    }
+    out
+}

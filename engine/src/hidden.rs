@@ -609,8 +609,24 @@ pub(crate) fn start_of(
         }
         base += SCAN_BLOCK;
     }
-    let after_boxes = ftyp_after_boxes(source, view)?;
-    Ok((view, after_boxes.map(|at| (Container::Mp4, at))))
+    if let Some(at) = ftyp_after_boxes(source, view)? {
+        return Ok((view, Some((Container::Mp4, at))));
+    }
+    let mut head = [0; HEADER_OF_BLOCKS];
+    let read = source.read_at(view, &mut head)?;
+    let blocks = is_adts_of_raw_blocks_with_crc(&head[..read]);
+    Ok((view, blocks.then_some((Container::Adts, view))))
+}
+
+/// The bytes that [`is_adts_of_raw_blocks_with_crc`] reads.
+pub(crate) const HEADER_OF_BLOCKS: usize = 9;
+
+/// Whether `bytes` start with an ADTS header of more than one raw data
+/// block and a CRC, which states where each block starts.  The decode
+/// splits such a frame (`engine::adts_split`, finding 8-3 of review round
+/// 8), but Symphonia's score takes no such frame, so no marker is found.
+pub(crate) fn is_adts_of_raw_blocks_with_crc(bytes: &[u8]) -> bool {
+    is_adts_of_raw_blocks(bytes) && bytes[1] & 0x01 == 0
 }
 
 /// The most top-level boxes that [`ftyp_after_boxes`] steps over.

@@ -132,8 +132,9 @@ pub const HE_AAC_TEXT: &str = "HE-AAC is not supported.  Open an AAC-LC file.";
 /// parse, or of a sample entry rate that is not the rate of its config.
 pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC file.";
 
-/// The text of an ADTS stream of more than one raw data block in each
-/// frame, which Symphonia 0.6.1 refuses (TD-86).
+/// The text of an ADTS frame of more than one raw data block and no CRC.
+/// Symphonia 0.6.1 refuses more than one block, and with no CRC the frame
+/// states no position of its blocks to split it by (TD-86).
 pub const ADTS_BLOCKS_TEXT: &str = "This AAC file puts more than one AAC frame in each ADTS frame, so it cannot open.  Open an M4A file, or another AAC file.";
 
 /// The text of an AIFC file of a compression type that Symphonia 0.6.1
@@ -312,7 +313,10 @@ pub fn head_length(head: &[u8], file_bytes: u64) -> HeadLength {
         // past the window (`hidden::ftyp_after_boxes`), so a head that starts
         // with such a box is an MP4 whose length the head does not show
         // (finding 8-8 of review round 8).
-        return if starts_with_a_first_box(after_tags) {
+        // An ADTS stream of more raw data blocks in a frame has no marker
+        // either (finding 8-3 of review round 8).
+        let adts_of_blocks = crate::hidden::is_adts_of_raw_blocks(after_tags);
+        return if starts_with_a_first_box(after_tags) || adts_of_blocks {
             HeadLength::UnstatedPcm
         } else {
             HeadLength::Unstated
@@ -727,8 +731,10 @@ fn open_within(
     let mut source = source;
     let Some((container, reader_at)) = start else {
         // Symphonia's ADTS reader refuses more than one raw data block in a
-        // frame, so its score takes no such stream (TD-86).
-        let mut head = [0; 9];
+        // frame, so its score takes no such stream.  The scan takes one with
+        // a CRC, which the decode splits; one with no CRC states no position
+        // of its blocks (TD-86).
+        let mut head = [0; crate::hidden::HEADER_OF_BLOCKS];
         if is_seekable {
             use crate::mp4_boxes::ReadAt;
             let read = crate::mp4_boxes::Seeking(&mut *source).read_at(view, &mut head)?;
@@ -807,13 +813,28 @@ fn open_within(
         Box::new(crate::hidden::Hidden::new(source, plan)?)
     };
     let byte_len = source.byte_len();
+    // `start_of` gives a reader start at or after the view.
+    let skip = reader_at
+        .checked_sub(view)
+        .ok_or_else(|| anyhow!("unsupported or unrecognised format: a start before the file"))?;
+    let (source, skip): (Box<dyn MediaSource>, u64) = if container == Container::Adts {
+        // Each ADTS frame of more raw data blocks and a CRC is split into a
+        // frame for each block (finding 8-3 of review round 8, TD-86).
+        use std::io::Read;
+        let mut source = source;
+        std::io::copy(&mut (&mut source).take(skip), &mut std::io::sink())
+            .context("reading the start of the file")?;
+        let left = byte_len.map(|len| len.saturating_sub(skip));
+        (
+            Box::new(crate::adts_split::SplitSource::new(source, left)),
+            0,
+        )
+    } else {
+        (source, skip)
+    };
     let mut mss = MediaSourceStream::new(source, Default::default());
     {
         use symphonia::core::io::ReadBytes;
-        // `start_of` gives a reader start at or after the view.
-        let skip = reader_at.checked_sub(view).ok_or_else(|| {
-            anyhow!("unsupported or unrecognised format: a start before the file")
-        })?;
         mss.ignore_bytes(skip)
             .context("reading the start of the file")?;
     }
@@ -1083,7 +1104,10 @@ fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
     let mut window = Vec::with_capacity(most);
     (&mut source).take(most as u64).read_to_end(&mut window)?;
     let start = first_marker(&window, 0..LAST_MARKER + 1)
-        .map(|(container, at)| (container, reader_start(container, at as u64)));
+        .map(|(container, at)| (container, reader_start(container, at as u64)))
+        .or_else(|| {
+            crate::hidden::is_adts_of_raw_blocks_with_crc(&window).then_some((Container::Adts, 0))
+        });
     let again = Cursor::new(window).chain(source);
     Ok((Box::new(ReadOnlySource::new(again)), start))
 }
@@ -4399,8 +4423,8 @@ mod tests {
     }
 
     /// B6 of review round 7: Symphonia refuses an ADTS frame of more than one
-    /// raw data block (`adts.rs`, line 192), and a view cannot split it.  So
-    /// the decode gives its own text (TD-86).
+    /// raw data block (`adts.rs`, line 192).  With no CRC, the frame states
+    /// no position of its blocks, so the decode gives its own text (TD-86).
     #[test]
     fn an_adts_stream_of_more_than_one_raw_block_gives_its_text() {
         use crate::test_m4a::{adts, adts_of, adts_packets};
@@ -4755,5 +4779,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Finding 8-3 of review round 8 (TD-86): an ADTS frame with a CRC states
+    /// where each of its raw data blocks starts, so the decode gives each
+    /// block as its own frame.  Streams of 2, 3 and 4 blocks in each frame,
+    /// one that starts with frames of one block, and one from a source that
+    /// cannot seek decode bit for bit.  A frame of more blocks with no CRC
+    /// gives `ADTS_BLOCKS_TEXT`, first or later.
+    #[test]
+    fn an_adts_stream_of_raw_blocks_with_a_crc_decodes() {
+        use crate::test_m4a::{adts, adts_in_blocks, adts_packets};
+        let stream = adts(&chirps(), 44_100);
+        let packets = adts_packets(&stream);
+        let want = decoded(
+            adts_in_blocks(&packets, 44_100, 2, &[1], false),
+            "one block",
+        )
+        .channels;
+        for per_frame in [&[2][..], &[3], &[4], &[1, 1, 3]] {
+            let case = format!("{per_frame:?} blocks");
+            let file = adts_in_blocks(&packets, 44_100, 2, per_frame, true);
+            assert_eq!(head_of(&file), HeadLength::UnstatedPcm, "{case}");
+            let got = decode_bytes(file.clone(), Some("aac"));
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap().channels == want, "{case}");
+            let fifo = decode_source(Box::new(Fifo(Cursor::new(file))), Some("aac"));
+            assert!(
+                fifo.is_ok(),
+                "{case}, a source that cannot seek: {:?}",
+                fifo.err()
+            );
+            assert!(
+                fifo.unwrap().channels == want,
+                "{case}, a source that cannot seek"
+            );
+        }
+        let later = adts_in_blocks(&packets, 44_100, 2, &[1, 1, 2], false);
+        let error = decode_bytes(later, Some("aac"))
+            .err()
+            .map(|e| format!("{e:#}"));
+        assert!(
+            error.is_some_and(|e| e.contains(ADTS_BLOCKS_TEXT)),
+            "a later frame of 2 with no CRC"
+        );
     }
 }

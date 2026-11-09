@@ -635,13 +635,13 @@ A raw `.aac` file is a stream of ADTS frames, with no container.  No box states 
 
 * Fix: no standard field holds the delay of ADTS.  An open could take a delay that the caller gives, or the delay of a known encoder.  An M4A of the same audio has no gap.
 
-### TD-86: an ADTS stream of more than one raw data block in a frame does not open
+### TD-86: an ADTS frame of more than one raw data block and no CRC does not open
 
 This entry concerns the ADTS promise of M2 of `plans/active/m4a.md`, and the limits of Symphonia 0.6.1.
 
-An ADTS frame can hold up to 4 raw data blocks of AAC.  `symphonia-codec-aac` 0.6.1 refuses more than one ("only 1 aac frame per adts packet is supported", `adts.rs`, line 192), so its score takes no such stream.  The decode gives `ADTS_BLOCKS_TEXT` when the view starts with such a frame (`an_adts_stream_of_more_than_one_raw_block_gives_its_text`).  A view cannot close it: the decoder needs one packet for each raw data block, and only a frame of one block states where its block ends.  Encoders write one block in each frame, so such files are rare.  A stream whose later frames hold more blocks fails in the decode with Symphonia's text.
+An ADTS frame can hold up to 4 raw data blocks of AAC.  `symphonia-codec-aac` 0.6.1 refuses more than one ("only 1 aac frame per adts packet is supported", `adts.rs`, line 192).  When the frame has a CRC, its header states where each block starts, so the decode gives each block as its own frame (`engine::adts_split`, review round 8), in any frame of the stream, from a source that seeks or not.  When the frame has no CRC (`protection_absent` 1), nothing states where a block ends.  Only a parse of the AAC bitstream of the block finds its end, and that parse is the work of the decoder.  So the decode refuses such a frame with `ADTS_BLOCKS_TEXT`: before the open when it is the first frame of a source that seeks, and in the decode when it comes later.  A first such frame from a source that cannot seek gets "no known format", since the scan does not keep its first bytes.  `an_adts_stream_of_more_than_one_raw_block_gives_its_text` and `an_adts_stream_of_raw_blocks_with_a_crc_decodes` test it.
 
-* Fix: a Symphonia that splits the raw data blocks of a frame, or a packet source in `engine` that reads the `raw_data_block_position` fields of a frame with a CRC.
+* Fix: a Symphonia that reads each raw data block of a frame, or a parse in `engine` of the syntax of an AAC raw data block to find its end.
 
 ## Legibility for agents
 
