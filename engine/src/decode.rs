@@ -137,8 +137,11 @@ pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC
 /// states no position of its blocks to split it by (TD-86).
 pub const ADTS_BLOCKS_TEXT: &str = "This AAC file puts more than one AAC frame in each ADTS frame, so it cannot open.  Open an M4A file, or another AAC file.";
 
-/// The text of an AIFC file of a compression type that Symphonia 0.6.1
-/// does not decode, such as `ima4`.
+/// The text of an AIFC file of a compression type that no decoder of
+/// Symphonia 0.6.1 decodes, such as `MAC3`, `MAC6`, `GSM ` or `QDMC`.  The
+/// AIFF reader of Symphonia maps only PCM, A-law and µ-law types
+/// (`aiff/chunks.rs`, lines 276 to 287), each of which opens.  `ima4` opens
+/// through `engine::ima4` and Symphonia's ADPCM decoder.
 pub const AIFC_COMPRESSED_TEXT: &str = "This AIFC file is compressed in a form that does not open.  Open an uncompressed AIFF or AIFC file.";
 
 /// The text of an AAC file of more than 2 channels.
@@ -777,6 +780,9 @@ fn open_within(
         Some(found) => mp4_view(found, view, reader_at),
         None => (view, None),
     };
+    // An AIFC of Apple's IMA ADPCM, which `engine` reads itself (finding 8-5
+    // of review round 8).
+    let mut ima4 = None;
     // MEM-4: Symphonia reads tags and pictures whole, so they are hidden
     // from it (`engine::hidden`).
     let plan = match &mut boxes {
@@ -791,11 +797,14 @@ fn open_within(
         }
         None if is_seekable => {
             let mut at = crate::mp4_boxes::Seeking(&mut *source);
-            if container == Container::Aiff
-                && crate::hidden::is_aifc_of_other_type(&mut at, reader_at)
-                    .context("reading the start of the file")?
-            {
-                return Err(anyhow!(AIFC_COMPRESSED_TEXT));
+            if container == Container::Aiff {
+                ima4 = crate::ima4::ima4_of(&mut at, reader_at)
+                    .context("reading the start of the file")?;
+                let other = crate::hidden::is_aifc_of_other_type(&mut at, reader_at)
+                    .context("reading the start of the file")?;
+                if ima4.is_none() && other {
+                    return Err(anyhow!(AIFC_COMPRESSED_TEXT));
+                }
             }
             let plan = crate::hidden::plan_of(&mut at, view, reader_at, container)
                 .context("reading the tags of the file")?;
@@ -838,8 +847,14 @@ fn open_within(
         mss.ignore_bytes(skip)
             .context("reading the start of the file")?;
     }
-    let mut format = open_reader(mss, container)
-        .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?;
+    let mut format: Box<dyn FormatReader> = match ima4 {
+        Some(layout) => Box::new(
+            crate::ima4::Ima4Reader::new(mss, layout, reader_at)
+                .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?,
+        ),
+        None => open_reader(mss, container)
+            .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?,
+    };
     let estimated = container == Container::Adts;
     let track = format
         .default_track(TrackType::Audio)
@@ -4458,7 +4473,8 @@ mod tests {
 
     /// B6 of review round 7: Symphonia 0.6.1 refuses a compressed AIFC type
     /// that it does not decode (`aiff/chunks.rs`, line 287).  The decode
-    /// gives its own text for it.
+    /// gives its own text for it, such as `MAC3`, for which Symphonia has no
+    /// decoder.  `ima4` opens (`an_ima4_aifc_decodes`).
     #[test]
     fn a_compressed_aifc_gives_its_text() {
         use crate::test_audio::{Aiff, aiff};
@@ -4467,9 +4483,9 @@ mod tests {
         let at = (0..plain.len())
             .find(|at| plain[*at..].starts_with(b"NONE"))
             .unwrap();
-        let mut ima4 = plain.clone();
-        ima4[at..at + 4].copy_from_slice(b"ima4");
-        assert_refused_early(ima4, "aiff", AIFC_COMPRESSED_TEXT, "ima4");
+        let mut mac3 = plain.clone();
+        mac3[at..at + 4].copy_from_slice(b"MAC3");
+        assert_refused_early(mac3, "aiff", AIFC_COMPRESSED_TEXT, "MAC3");
         let mut sowt = plain;
         sowt[at..at + 4].copy_from_slice(b"sowt");
         assert!(
@@ -4823,5 +4839,33 @@ mod tests {
             error.is_some_and(|e| e.contains(ADTS_BLOCKS_TEXT)),
             "a later frame of 2 with no CRC"
         );
+    }
+
+    /// Finding 8-5 of review round 8: Symphonia 0.6.1 decodes Apple's IMA
+    /// ADPCM (`ima4`, `symphonia-codec-adpcm` `CODEC_ID_ADPCM_IMA_QT`), but its
+    /// AIFF reader gives no such codec (`aiff/chunks.rs`, line 287).  The
+    /// decode reads the blocks of such an AIFC itself, and gives them to that
+    /// decoder.  Mono and stereo decode to the output of the encoder of the
+    /// test, also with tags and with an offset in SSND.
+    #[test]
+    fn an_ima4_aifc_decodes() {
+        use crate::test_audio::ima4_aifc;
+        let tone = chirps();
+        let frames = 64 * 300;
+        let left = Vec::from(&tone[0][..frames]);
+        let right = Vec::from(&tone[1][..frames]);
+        for channels in [vec![left.clone()], vec![left, right]] {
+            let case = format!("{} channels", channels.len());
+            let (file, want) = ima4_aifc(&channels, 44_100);
+            let tagged = crate::test_audio::with_aiff_tags(&file, 1 << 20);
+            let aligned = crate::test_audio::with_block_aligned_ssnd(&file, 4096);
+            for (form, file) in [("plain", file), ("tags", tagged), ("offset", aligned)] {
+                let got = decode_bytes(file, Some("aiff"));
+                assert!(got.is_ok(), "{case}, {form}: {:?}", got.err());
+                let got = got.unwrap();
+                assert_eq!(got.sample_rate, 44_100, "{case}, {form}");
+                assert!(got.channels == want, "{case}, {form}");
+            }
+        }
     }
 }

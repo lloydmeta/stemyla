@@ -98,7 +98,7 @@ pub fn mp3(channels: &[Vec<f32>], rate: u32) -> Vec<u8> {
 
 /// `rate` as the 80-bit extended float of an AIFF `COMM` chunk: a sign
 /// and 15-bit exponent, then a 64-bit mantissa with its top bit set.
-fn extended(rate: u32) -> [u8; 10] {
+pub fn extended(rate: u32) -> [u8; 10] {
     let mut out = [0; 10];
     if rate == 0 {
         return out;
@@ -471,4 +471,88 @@ pub fn with_block_aligned_ssnd(aiff: &[u8], align: u32) -> Vec<u8> {
     let form = (out.len() - 8) as u32;
     out[4..8].copy_from_slice(&form.to_be_bytes());
     out
+}
+
+/// The step sizes of IMA ADPCM (IMA Recommended Practices for Enhancing
+/// Digital Audio Compatibility, 1992).
+const IMA_STEPS: [i32; 89] = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
+    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449,
+    494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272,
+    2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493,
+    10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
+];
+
+/// The change of the step index for each nibble of IMA ADPCM.
+const IMA_INDEX_CHANGE: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
+
+/// An AIFC of Apple's IMA ADPCM (`ima4`) of `channels` at `rate`, and what
+/// a decoder gives for it, as `f32`.  Each block of each channel is 34
+/// bytes: a preamble of the top 9 bits of the predictor and a step index
+/// of 7 bits, then 64 samples in nibbles, the low nibble first (Apple
+/// QuickTime IMA ADPCM, https://wiki.multimedia.cx/index.php/Apple_QuickTime_IMA_ADPCM).
+/// The blocks of the channels take turns.  The frames are a whole number
+/// of blocks of 64.
+pub fn ima4_aifc(channels: &[Vec<f32>], rate: u32) -> (Vec<u8>, Vec<Vec<f32>>) {
+    let frames = channels[0].len();
+    assert!(frames.is_multiple_of(64), "whole blocks");
+    let mut decoded = vec![Vec::with_capacity(frames); channels.len()];
+    // The state of each channel: the predictor and the step index.
+    let mut state = vec![(0_i32, 0_i32); channels.len()];
+    let mut ssnd = vec![0; 8];
+    for block in 0..frames / 64 {
+        for (channel, input) in channels.iter().enumerate() {
+            let (mut predictor, mut index) = state[channel];
+            // The preamble keeps the top 9 bits of the predictor.
+            predictor = i32::from((predictor as i16) & !0x7F);
+            ssnd.extend_from_slice(&(((predictor as u16) & 0xFF80) | index as u16).to_be_bytes());
+            let mut nibbles = [0_u8; 64];
+            for (k, nibble) in nibbles.iter_mut().enumerate() {
+                let sample = step(input[block * 64 + k], 16);
+                let step_size = IMA_STEPS[index as usize];
+                let difference = sample - predictor;
+                let sign = if difference < 0 { 8 } else { 0 };
+                // The magnitude of 3 bits whose ((2m + 1) step) / 8 is
+                // nearest to the difference.
+                let magnitude = (0..8)
+                    .min_by_key(|m| ((2 * m + 1) * step_size / 8 - difference.abs()).abs())
+                    .unwrap_or(0);
+                *nibble = (sign | magnitude) as u8;
+                let change = ((2 * magnitude + 1) * step_size) >> 3;
+                predictor = if sign == 8 {
+                    predictor - change
+                } else {
+                    predictor + change
+                };
+                predictor = predictor.clamp(-32_768, 32_767);
+                index = (index + IMA_INDEX_CHANGE[magnitude as usize]).clamp(0, 88);
+                decoded[channel].push(predictor as f32 / 32_768.0);
+            }
+            for pair in nibbles.chunks(2) {
+                ssnd.push(pair[0] | (pair[1] << 4));
+            }
+            state[channel] = (predictor, index);
+        }
+    }
+    let mut comm = Vec::new();
+    comm.extend_from_slice(&(channels.len() as u16).to_be_bytes());
+    comm.extend_from_slice(&((frames / 64) as u32).to_be_bytes());
+    comm.extend_from_slice(&16_u16.to_be_bytes());
+    comm.extend_from_slice(&extended(rate));
+    comm.extend_from_slice(b"ima4");
+    comm.extend_from_slice(&[0, 0]);
+    let mut body = Vec::from(*b"AIFC");
+    for (id, chunk) in [
+        (b"FVER", Vec::from(0xA280_5140_u32.to_be_bytes())),
+        (b"COMM", comm),
+        (b"SSND", ssnd),
+    ] {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        body.extend_from_slice(&chunk);
+    }
+    let mut out = Vec::from(*b"FORM");
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    (out, decoded)
 }

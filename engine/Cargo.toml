@@ -9,7 +9,7 @@ cpal = { version = "0.18.2", optional = true }
 cute-dsp = { version = "=0.0.41", optional = true }
 dsp = { version = "0.1.0", path = "../dsp" }
 realfft = "3.5.0"
-symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "wav", "pcm", "isomp4", "alac", "aac", "aiff"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "wav", "pcm", "isomp4", "alac", "aac", "aiff", "adpcm"] }
 timestretch = { version = "=0.15.0", optional = true }
 web-time = "1.1.0"
 wsola = { version = "=0.2.0", optional = true }
