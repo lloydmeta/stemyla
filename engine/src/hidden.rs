@@ -86,12 +86,40 @@ pub(crate) struct Patch {
     pub len: u8,
 }
 
+impl Patch {
+    /// At most 4 bytes of `bytes` at `at`.
+    fn of(at: u64, bytes: &[u8]) -> Patch {
+        let mut patch = Patch {
+            at,
+            bytes: [0; 4],
+            len: bytes.len().min(4) as u8,
+        };
+        patch.bytes[..usize::from(patch.len)].copy_from_slice(&bytes[..usize::from(patch.len)]);
+        patch
+    }
+
+    /// Puts the bytes of the patch that fall in `from..from + buf.len()`
+    /// in `buf`.
+    fn apply(&self, from: u64, buf: &mut [u8]) {
+        let to = from + buf.len() as u64;
+        for k in 0..u64::from(self.len) {
+            let at = self.at + k;
+            if (from..to).contains(&at) {
+                buf[(at - from) as usize] = self.bytes[k as usize];
+            }
+        }
+    }
+}
+
 /// The changes to a file: where Symphonia's view of it starts, and each
 /// [`Patch`], at an offset of the file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub start: u64,
     pub patches: Vec<Patch>,
+    /// The patches that the view shows only after a seek to its start,
+    /// over the other patches.
+    pub late: Vec<Patch>,
     small: usize,
     /// The bytes that Symphonia keeps of the small containers that the
     /// plan does not hide, as the [`kept_charge`] of each.
@@ -124,18 +152,19 @@ impl Plan {
     /// Shows at most 4 bytes of `bytes` in place of the bytes at `at`.  It
     /// is not a container, so it counts towards no limit.
     pub fn patch(&mut self, at: u64, bytes: &[u8]) {
-        let mut patch = Patch {
-            at,
-            bytes: [0; 4],
-            len: bytes.len().min(4) as u8,
-        };
-        patch.bytes[..usize::from(patch.len)].copy_from_slice(&bytes[..usize::from(patch.len)]);
-        self.patches.push(patch);
+        self.patches.push(Patch::of(at, bytes));
+    }
+
+    /// Shows a `free` box header of `size` bytes at the start of the view,
+    /// only after a seek to that start.
+    pub fn free_after_return(&mut self, size: u32) {
+        self.late.push(Patch::of(self.start, &size.to_be_bytes()));
+        self.late.push(Patch::of(self.start + 4, b"free"));
     }
 
     /// Whether the plan changes nothing.
     pub fn is_empty(&self) -> bool {
-        self.start == 0 && self.patches.is_empty()
+        self.start == 0 && self.patches.is_empty() && self.late.is_empty()
     }
 }
 
@@ -145,6 +174,10 @@ pub(crate) struct Hidden {
     inner: Box<dyn MediaSource>,
     start: u64,
     patches: Vec<Patch>,
+    /// The late patches of the plan, and whether a seek to the start of the
+    /// view has shown them.
+    late: Vec<Patch>,
+    late_shown: bool,
     /// The offset of the next read, in the file.
     at: u64,
 }
@@ -160,6 +193,8 @@ impl Hidden {
             inner,
             start: plan.start,
             patches,
+            late: plan.late,
+            late_shown: false,
             at: plan.start,
         })
     }
@@ -175,11 +210,11 @@ impl Read for Hidden {
             if patch.at >= to {
                 break;
             }
-            for k in 0..u64::from(patch.len) {
-                let at = patch.at + k;
-                if (from..to).contains(&at) {
-                    buf[(at - from) as usize] = patch.bytes[k as usize];
-                }
+            patch.apply(from, &mut buf[..count]);
+        }
+        if self.late_shown {
+            for patch in &self.late {
+                patch.apply(from, &mut buf[..count]);
             }
         }
         self.at = to;
@@ -202,6 +237,11 @@ impl Seek for Hidden {
             ));
         }
         self.at = at;
+        // Symphonia's MP4 reader walks the top-level boxes again from the
+        // start of its stream when `moov` is last (`demuxer.rs`, line 257).
+        if at == self.start {
+            self.late_shown = true;
+        }
         Ok(at - self.start)
     }
 }
@@ -986,6 +1026,35 @@ mod tests {
             let start = start_of(&mut { file.as_slice() }).ok();
             assert_eq!(start, Some((110, Some((Container::Mp4, 110)))), "{offset}");
         }
+    }
+
+    /// B1 of review round 7: a late patch shows only after a seek to the
+    /// start of the view, and then over the other patches.
+    #[test]
+    fn a_late_patch_shows_after_a_seek_to_the_start() {
+        let mut plan = Plan {
+            start: 2,
+            ..Plan::default()
+        };
+        plan.patch(4, b"ab");
+        plan.free_after_return(9);
+        let hidden = Hidden::new(Box::new(Cursor::new(file())), plan);
+        assert!(hidden.is_ok());
+        let mut view = hidden.unwrap();
+        let mut first = [0; 10];
+        assert_eq!(view.read(&mut first).ok(), Some(10));
+        assert_eq!(
+            first,
+            [2, 3, b'a', b'b', 6, 7, 8, 9, 10, 11],
+            "before the seek"
+        );
+        assert_eq!(bytes_at(&mut view, 4, 2), [6, 7], "a seek elsewhere");
+        let late = [0, 0, 0, 9, b'f', b'r', b'e', b'e', 10, 11];
+        assert_eq!(
+            bytes_at(&mut view, 0, 10),
+            late,
+            "after the seek to the start"
+        );
     }
 
     /// Missed mutants 3-24 and 3-25 of review round 3: a header of 9 bytes

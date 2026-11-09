@@ -727,12 +727,20 @@ fn open_within(
             return Err(anyhow!(FTYP_TEXT));
         }
     }
+    // An MP4 behind other bytes: where its chunk offsets count from.
+    let (view, late) = match &boxes {
+        Some(found) => mp4_view(found, view, reader_at),
+        None => (view, None),
+    };
     // MEM-4: Symphonia reads tags and pictures whole, so they are hidden
     // from it (`engine::hidden`).
     let plan = match &mut boxes {
         Some(found) => {
             let mut plan = std::mem::take(&mut found.hidden);
             plan.start = view;
+            if let Some(size) = late {
+                plan.free_after_return(size);
+            }
             plan
         }
         None if is_seekable => {
@@ -822,6 +830,57 @@ fn open_within(
         reserve,
         trim,
     })
+}
+
+/// Where Symphonia's view of an MP4 starts, when other bytes come before
+/// it in the view that starts at `view`, and its reader starts at
+/// `reader_at` (B1 of review round 7).  Symphonia takes each chunk offset
+/// as a position in its stream.
+///
+/// * When the offsets count from the MP4 start, the view starts there.
+/// * Else they count from `view`, and the view stays.  When `moov` is last,
+///   Symphonia's MP4 reader walks the top-level boxes again from the start
+///   of its stream (`demuxer.rs`, line 257), where the other bytes are not
+///   a box.  So the view shows a `free` box from its start to the first
+///   `mdat` or `moof`, after that seek only: the reader's first walk starts
+///   at `reader_at`, inside that box.  It gives the size of that box.
+fn mp4_view(found: &Found, view: u64, reader_at: u64) -> (u64, Option<u32>) {
+    let before = reader_at.saturating_sub(view);
+    if before == 0 {
+        return (view, None);
+    }
+    let bodies: Vec<(u64, u64)> = found
+        .mdats
+        .iter()
+        .map(|(body, end)| (body.saturating_sub(view), end.saturating_sub(view)))
+        .collect();
+    let first_chunk = found.sound.as_ref().and_then(|sound| sound.first_chunk);
+    let from_mp4 = first_chunk.is_none_or(|chunk| counts_from_mp4_start(chunk, before, &bodies));
+    if from_mp4 {
+        return (reader_at, None);
+    }
+    let free = found
+        .first_media
+        .and_then(|media| u32::try_from(media.saturating_sub(view)).ok())
+        .filter(|size| *size >= 8);
+    (view, free)
+}
+
+/// Whether the chunk offsets of an MP4 that starts `before` bytes into its
+/// view count from the MP4 start, by the first offset `chunk` and the
+/// `mdat` bodies (from the start of the view).  The one form that puts the
+/// offset in a body wins.  When both or neither do, the form that puts it
+/// at the start of a body wins, and else the MP4 start, as after an ID3v2
+/// tag.
+fn counts_from_mp4_start(chunk: u64, before: u64, bodies: &[(u64, u64)]) -> bool {
+    let from_mp4 = chunk.saturating_add(before);
+    let inside = |at: u64| bodies.iter().any(|(body, end)| (*body..*end).contains(&at));
+    let at_start = |at: u64| bodies.iter().any(|(body, _)| *body == at);
+    match (inside(from_mp4), inside(chunk)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => at_start(from_mp4) || !at_start(chunk),
+    }
 }
 
 /// A source to open, and its container with where its reader starts.
@@ -2730,6 +2789,7 @@ mod tests {
                 media_time: 2112,
                 rate: EDIT_RATE_ONE,
             }]),
+            first_chunk: None,
         };
         let found = |movie_timescale| Found {
             movie_timescale,
@@ -3706,9 +3766,9 @@ mod tests {
 
     /// Finding 6-1 of review round 6: a FLAC, a WAV, an AIFF and an M4A
     /// behind junk bytes open bit for bit, as on `main`, since junk bytes
-    /// put no memory at risk.  Their tags stay hidden.  The M4A has `moov`
-    /// first: Symphonia 0.6.1 reads no packet of one with `moov` last behind
-    /// junk bytes, also through its own probe ("no atom pending read").
+    /// put no memory at risk.  Their tags stay hidden.  The M4A here has
+    /// `moov` first; `an_m4a_behind_junk_opens_wherever_its_offsets_count_from`
+    /// tests each form of M4A behind junk.
     #[test]
     fn a_file_behind_junk_bytes_opens() {
         use crate::test_audio::{Aiff, aiff, with_flac_tags};
@@ -3931,5 +3991,80 @@ mod tests {
         let got = decode_source(Box::new(Fifo(Cursor::new(file))), Some("m4a"));
         assert!(got.is_ok(), "{:?}", got.err());
         assert!(got.unwrap().channels == want.unwrap().channels);
+    }
+
+    /// B1 of review round 7: an M4A behind junk bytes opens bit for bit,
+    /// with `moov` first or last, whether its chunk offsets count from the
+    /// MP4 start or from the file start.  With `moov` last, Symphonia walks
+    /// the boxes again from the start of its stream (`demuxer.rs`, line
+    /// 257): the view starts at the MP4 start, or shows the junk as a `free`
+    /// box after that seek, also for 1 to 7 bytes.  The head check gives the
+    /// length of the plain file.
+    #[test]
+    fn an_m4a_behind_junk_opens_wherever_its_offsets_count_from() {
+        use crate::test_m4a::{aac_m4a, with_stco_moved};
+        let alac = |order| alac_of(order);
+        let aac = |order| aac_m4a(&short_tone(), 44_100, None, None, order);
+        type Make<'a> = &'a dyn Fn(m4a::Order) -> Vec<u8>;
+        let codecs: [(&str, Make); 2] = [("alac", &alac), ("aac", &aac)];
+        for (codec, make) in codecs {
+            for order in [m4a::Order::MoovLast, m4a::Order::FastStart] {
+                let plain = make(order);
+                let want = decode_bytes(plain.clone(), Some("m4a"));
+                assert!(want.is_ok(), "{codec} {order:?}");
+                let want = want.unwrap().channels;
+                for before in [100, 8, 7, 4, 1] {
+                    let junk = vec![0x42; before];
+                    let moved = with_stco_moved(plain.clone(), before as i64);
+                    for (form, file) in [
+                        ("from the MP4 start", [junk.as_slice(), &plain].concat()),
+                        ("from the file start", [junk.as_slice(), &moved].concat()),
+                    ] {
+                        let case = format!("{codec} {order:?} behind {before} bytes, {form}");
+                        assert_eq!(head_of(&file), head_of(&plain), "{case}");
+                        let got = decode_bytes(file, Some("m4a"));
+                        assert!(got.is_ok(), "{case}: {:?}", got.err());
+                        assert!(got.unwrap().channels == want, "{case}");
+                    }
+                }
+            }
+        }
+        use crate::test_m4a::with_cover;
+        let plain = alac_of(m4a::Order::MoovLast);
+        let junk = vec![0x42; 100];
+        let art = [junk.clone(), with_cover(plain.clone(), ART)].concat();
+        assert_tags_are_hidden(plain.clone(), art, "m4a", "art, from the MP4 start");
+        let moved = with_stco_moved(with_cover(plain.clone(), ART), 100);
+        let art = [junk, moved].concat();
+        assert_tags_are_hidden(plain, art, "m4a", "art, from the file start");
+    }
+
+    /// B1 of review round 7: the form of the chunk offsets of an MP4 behind
+    /// other bytes.
+    #[test]
+    fn the_chunk_offsets_count_from_where_they_fall_in_an_mdat() {
+        // One `mdat` body from 116 to 1000 of the view, the MP4 at 100.
+        let bodies = [(116, 1000)];
+        assert!(
+            counts_from_mp4_start(16, 100, &bodies),
+            "only from the MP4 start"
+        );
+        assert!(
+            !counts_from_mp4_start(116, 100, &bodies),
+            "at a body start from the file start"
+        );
+        assert!(
+            !counts_from_mp4_start(900, 100, &bodies),
+            "only from the file start"
+        );
+        assert!(
+            counts_from_mp4_start(120, 100, &bodies),
+            "inside for both, at no start"
+        );
+        assert!(
+            counts_from_mp4_start(16, 100, &[(116, 1000), (16, 50)]),
+            "both at a start"
+        );
+        assert!(counts_from_mp4_start(5000, 100, &bodies), "neither");
     }
 }

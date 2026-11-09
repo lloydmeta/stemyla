@@ -89,6 +89,9 @@ pub(crate) struct SoundTrack {
     /// The entries of its `elst`.  `None` when it has no `elst`, or one
     /// larger than [`MOST_BOX_BYTES`].
     pub edits: Option<Vec<EditEntry>>,
+    /// The first entry of its `stco` or `co64`: where its first chunk is,
+    /// as the file states it.
+    pub first_chunk: Option<u64>,
 }
 
 /// What the walker found.
@@ -118,7 +121,16 @@ pub(crate) struct Found {
     /// The size of the first `ftyp`, which Symphonia needs and reads whole
     /// (`u64::MAX` when it runs to the end of the file).
     pub ftyp_bytes: Option<u64>,
+    /// The body of each top-level `mdat`, from its start to its end, up to
+    /// [`MOST_MDATS`].
+    pub mdats: Vec<(u64, u64)>,
+    /// The start of the first top-level `mdat` or `moof`.
+    pub first_media: Option<u64>,
 }
+
+/// The most `mdat` bodies that the walk keeps.  The first chunk of a
+/// track is in one of the first few.
+pub(crate) const MOST_MDATS: usize = 64;
 
 /// Where a `moov` box is: its start, and its end, or `None` when it runs
 /// to the end of the file (a size of 0).
@@ -291,6 +303,12 @@ impl Walker<'_> {
                 b"ftyp" if walker.found.ftyp_bytes.is_none() => {
                     walker.found.ftyp_bytes = Some(size_of(found).unwrap_or(u64::MAX));
                 }
+                b"mdat" | b"moof" => {
+                    walker.found.first_media.get_or_insert(found.start);
+                    if found.kind == *b"mdat" && walker.found.mdats.len() < MOST_MDATS {
+                        walker.found.mdats.push((found.body, found.end));
+                    }
+                }
                 b"moov" | b"meta" | b"ftyp" => {
                     walker.hide(found);
                 }
@@ -436,6 +454,17 @@ impl Walker<'_> {
                     let body = walker.body(found, false)?.unwrap_or_default();
                     trak.sound.entry = body.get(12..16).and_then(|k| k.try_into().ok());
                 }
+                // The version and flags, the count, then the first entry.
+                b"stco" | b"co64" => {
+                    let mut head = [0; 16];
+                    let read = walker.source.read_at(found.body, &mut head)?;
+                    let count = u32_at(&head[..read], 4).unwrap_or(0);
+                    let first = match &found.kind {
+                        b"stco" => u32_at(&head[..read], 8).map(u64::from),
+                        _ => u64_at(&head[..read], 8),
+                    };
+                    trak.sound.first_chunk = first.filter(|_| count > 0);
+                }
                 b"edts" | b"mdia" | b"minf" | b"stbl" => walker.trak(found, trak, depth + 1)?,
                 _ => {}
             }
@@ -567,6 +596,7 @@ mod tests {
         for order in [Order::FastStart, Order::MoovLast] {
             let file = alac(order);
             let (start, size) = top_box(&file, b"moov");
+            let (mdat, mdat_size) = top_box(&file, b"mdat");
             let found = walked(&file);
             assert_eq!(
                 found,
@@ -584,6 +614,7 @@ mod tests {
                             media_time: 2112,
                             rate: 0x1_0000,
                         }]),
+                        first_chunk: Some(mdat as u64 + 8),
                     }),
                     itunsmpb: None,
                     moov: Some(MoovAt {
@@ -597,6 +628,8 @@ mod tests {
                     moov_held_to_end_from: None,
                     hidden: crate::hidden::Plan::default(),
                     ftyp_bytes: Some(28),
+                    mdats: vec![(mdat as u64 + 8, (mdat + mdat_size) as u64)],
+                    first_media: Some(mdat as u64),
                 }),
                 "{order:?}"
             );
@@ -682,6 +715,7 @@ mod tests {
                     media_time: 1024 << 32,
                     rate: 0x1_0000,
                 }]),
+                first_chunk: None,
             })
         );
     }
