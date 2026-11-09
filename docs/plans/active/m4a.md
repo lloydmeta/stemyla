@@ -279,6 +279,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-09, maintainer: "it did not open on `main`" is no reason for a gap in a format that this plan adds, since `main` did not open M4A.  Measure each gap against the plan's promise.
 * 2026-11-09, orchestrator (audit that the maintainer asked for): TD-81, TD-82, TD-85 and the `ftyp` refusal over 4 KiB rested on "a Symphonia limit", "rare" or "no patch of Symphonia".  A view in `engine` is not a patch.  Round 7 of M2 closes each, and the review criteria from round 7 judge each TD, `pre-existing` verdict and refusal in a new format against the plan's promise.
 * 2026-11-10, orchestrator: from round 17 of M2, a round adds no new behaviour.  It fixes only what it finds.  A gap only on a source that cannot seek goes to a TD with a clear text.  Fix it only if it puts memory at risk or makes a panic.  Reason: the maintainer asked how many late findings were real blockers.  Rounds 12 to 16 closed gaps that only `decode_path` of a FIFO reaches, and each closure brought new findings.  The app's sources all seek.  Round 16's hold of a `moov`-last stream (`547bf74`) stays, since it is done and tested.
+* 2026-11-10, maintainer: the hold of a `moov`-last stream (`547bf74`) is fine, since the browser cannot reach it.  It holds up to 1 GiB, only on a native FIFO.
 
 ## Outcomes and retrospective
 
