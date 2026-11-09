@@ -581,3 +581,167 @@ pub fn with_ssnd_first(aiff: &[u8]) -> Vec<u8> {
     ]
     .concat()
 }
+
+/// The kinds of ADPCM in a WAV.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WavAdpcm {
+    /// IMA ADPCM (format 0x0011).
+    Ima,
+    /// Microsoft ADPCM (format 0x0002).
+    Ms,
+}
+
+/// The adaptation of the step of Microsoft ADPCM for each nibble.
+const MS_ADAPTATION: [i32; 16] = [
+    230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,
+];
+
+/// A WAV of `kind` ADPCM of `channels` (1 or 2) at `rate`, in blocks of
+/// 256 bytes for each channel, and what a decoder gives for it, as `f32`.
+/// The frames of a block: IMA, 505, of which the first is the preamble's
+/// predictor; Microsoft, 500, of which the first 2 are the preamble's
+/// samples.  The input is cut to whole blocks.  The predictor of
+/// Microsoft ADPCM is 0 (coefficients 256 and 0) in each block.
+pub fn adpcm_wav(channels: &[Vec<f32>], rate: u32, kind: WavAdpcm) -> (Vec<u8>, Vec<Vec<f32>>) {
+    let count = channels.len();
+    let align = 256 * count;
+    let per_block = match kind {
+        WavAdpcm::Ima => (8 * (align - 4 * count)) / (4 * count) + 1,
+        WavAdpcm::Ms => (8 * (align - 7 * count)) / (4 * count) + 2,
+    };
+    let blocks = channels[0].len() / per_block;
+    let mut data = Vec::new();
+    let mut decoded = vec![Vec::new(); count];
+    let mut ima_index = vec![0_i32; count];
+    for block in 0..blocks {
+        let input = |channel: usize, k: usize| step(channels[channel][block * per_block + k], 16);
+        let mut nibbles: Vec<Vec<u8>> = vec![Vec::new(); count];
+        match kind {
+            WavAdpcm::Ima => {
+                for channel in 0..count {
+                    let mut predictor = input(channel, 0);
+                    let mut index = ima_index[channel];
+                    data.extend_from_slice(&(predictor as i16).to_le_bytes());
+                    data.extend_from_slice(&[index as u8, 0]);
+                    decoded[channel].push(predictor as f32 / 32_768.0);
+                    for k in 1..per_block {
+                        let size = IMA_STEPS[index as usize];
+                        let difference = input(channel, k) - predictor;
+                        let sign = if difference < 0 { 8 } else { 0 };
+                        let magnitude = (0..8)
+                            .min_by_key(|m| ((2 * m + 1) * size / 8 - difference.abs()).abs())
+                            .unwrap_or(0);
+                        nibbles[channel].push((sign | magnitude) as u8);
+                        let change = ((2 * magnitude + 1) * size) >> 3;
+                        predictor = if sign == 8 {
+                            predictor - change
+                        } else {
+                            predictor + change
+                        };
+                        predictor = predictor.clamp(-32_768, 32_767);
+                        index = (index + IMA_INDEX_CHANGE[magnitude as usize]).clamp(0, 88);
+                        decoded[channel].push(predictor as f32 / 32_768.0);
+                    }
+                    ima_index[channel] = index;
+                }
+                // Groups of 4 bytes (8 nibbles, the low one first) of each
+                // channel in turn.
+                for group in 0..(per_block - 1) / 8 {
+                    for channel_nibbles in &nibbles {
+                        for pair in channel_nibbles[group * 8..group * 8 + 8].chunks(2) {
+                            data.push(pair[0] | (pair[1] << 4));
+                        }
+                    }
+                }
+            }
+            WavAdpcm::Ms => {
+                let mut state: Vec<(i32, i32, i32)> = (0..count)
+                    .map(|channel| (16, input(channel, 1), input(channel, 0)))
+                    .collect();
+                // The predictor, then each field of each channel in turn.
+                data.extend(std::iter::repeat_n(0_u8, count));
+                for field in 0..3 {
+                    for (delta, sample1, sample2) in &state {
+                        let value = [*delta, *sample1, *sample2][field];
+                        data.extend_from_slice(&(value as i16).to_le_bytes());
+                    }
+                }
+                for (channel, (_, sample1, sample2)) in state.iter().enumerate() {
+                    decoded[channel].push(*sample2 as f32 / 32_768.0);
+                    decoded[channel].push(*sample1 as f32 / 32_768.0);
+                }
+                for k in 2..per_block {
+                    for (channel, (delta, sample1, sample2)) in state.iter_mut().enumerate() {
+                        let predicted = (*sample1 * 256) / 256;
+                        let wanted = (input(channel, k) - predicted) as f32 / *delta as f32;
+                        let nibble = (wanted.round() as i32).clamp(-8, 7);
+                        let value = (predicted + nibble * *delta).clamp(-32_768, 32_767);
+                        *sample2 = *sample1;
+                        *sample1 = value;
+                        *delta = (MS_ADAPTATION[(nibble & 0x0F) as usize] * *delta / 256).max(16);
+                        nibbles[channel].push((nibble & 0x0F) as u8);
+                        decoded[channel].push(value as f32 / 32_768.0);
+                    }
+                }
+                // Mono: two nibbles of one channel in a byte, the high one
+                // first.  Stereo: the left channel high, the right low.
+                if count == 1 {
+                    for pair in nibbles[0].chunks(2) {
+                        data.push((pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
+                    }
+                } else {
+                    for (left, right) in nibbles[0].iter().zip(&nibbles[1]) {
+                        data.push((left << 4) | right);
+                    }
+                }
+            }
+        }
+        data.resize((block + 1) * align, 0);
+    }
+    let mut fmt = Vec::new();
+    let tag: u16 = match kind {
+        WavAdpcm::Ima => 0x0011,
+        WavAdpcm::Ms => 0x0002,
+    };
+    fmt.extend_from_slice(&tag.to_le_bytes());
+    fmt.extend_from_slice(&(count as u16).to_le_bytes());
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&((rate as usize * align / per_block) as u32).to_le_bytes());
+    fmt.extend_from_slice(&(align as u16).to_le_bytes());
+    fmt.extend_from_slice(&4_u16.to_le_bytes());
+    match kind {
+        WavAdpcm::Ima => {
+            fmt.extend_from_slice(&2_u16.to_le_bytes());
+            fmt.extend_from_slice(&(per_block as u16).to_le_bytes());
+        }
+        WavAdpcm::Ms => {
+            fmt.extend_from_slice(&32_u16.to_le_bytes());
+            fmt.extend_from_slice(&(per_block as u16).to_le_bytes());
+            fmt.extend_from_slice(&7_u16.to_le_bytes());
+            for (one, two) in [
+                (256, 0),
+                (512, -256),
+                (0, 0),
+                (192, 64),
+                (240, 0),
+                (460, -208),
+                (392, -232),
+            ] {
+                fmt.extend_from_slice(&(one as i16).to_le_bytes());
+                fmt.extend_from_slice(&(two as i16).to_le_bytes());
+            }
+        }
+    }
+    let mut body = Vec::from(*b"WAVE");
+    body.extend_from_slice(&chunk(b"fmt ", &fmt, true));
+    body.extend_from_slice(&chunk(
+        b"fact",
+        &((blocks * per_block) as u32).to_le_bytes(),
+        true,
+    ));
+    body.extend_from_slice(&chunk(b"data", &data, true));
+    let mut out = Vec::from(*b"RIFF");
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    (out, decoded)
+}

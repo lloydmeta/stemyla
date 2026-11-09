@@ -486,25 +486,33 @@ fn wav_length(head: &[u8], file_bytes: u64) -> HeadLength {
     if !head.starts_with(b"RIFF") || head.get(8..12) != Some(b"WAVE") {
         return HeadLength::UnstatedPcm;
     }
-    let mut format: Option<(u32, u16)> = None;
+    // The rate, the bytes of a block, and the frames of a block.
+    let mut format: Option<(u32, u16, u64)> = None;
     let mut at = 12;
     while let (Some(id), Some(size)) = (head.get(at..at + 4), u32_at(head, at + 4)) {
         let body = at + 8;
         if id == b"fmt " {
             let rate = u32_at(head, body + 4);
             let block = u16_at(head, body + 12);
+            let per_block = match (u16_at(head, body), u16_at(head, body + 2), block) {
+                (Some(tag), Some(channels), Some(block)) => {
+                    adpcm_frames_per_block(tag, channels, block)
+                }
+                _ => None,
+            };
             format = rate
                 .zip(block)
-                .filter(|(rate, block)| *rate > 0 && *block > 0);
+                .filter(|(rate, block)| *rate > 0 && *block > 0)
+                .map(|(rate, block)| (rate, block, per_block.unwrap_or(1)));
         } else if id == b"data" {
-            let Some((rate, block)) = format else {
+            let Some((rate, block, per_block)) = format else {
                 return HeadLength::UnstatedPcm;
             };
             if size == 0 || size == u32::MAX {
                 return HeadLength::UnstatedPcm;
             }
             let held = file_bytes.saturating_sub(body as u64);
-            let frames = u64::from(size).min(held) / u64::from(block);
+            let frames = u64::from(size).min(held) / u64::from(block) * per_block;
             return HeadLength::Frames(song_frames(frames, rate));
         }
         // A chunk's body has an even length: an odd one has a pad byte.
@@ -515,6 +523,23 @@ fn wav_length(head: &[u8], file_bytes: u64) -> HeadLength {
         }
     }
     HeadLength::UnstatedPcm
+}
+
+/// The frames of a block of an ADPCM WAV of format `tag`, `channels` and
+/// `block` bytes, as Symphonia 0.6.1 counts them (`symphonia-format-riff`
+/// `common.rs`, lines 231 to 255): Microsoft ADPCM (0x0002) has 7 bytes of
+/// preamble for each channel and 2 frames in it; IMA ADPCM (0x0011) has 4
+/// bytes and 1 frame.  Each other frame is 4 bits for each channel.  `None`
+/// for another format (finding 9-3 of review round 9).
+fn adpcm_frames_per_block(tag: u16, channels: u16, block: u16) -> Option<u64> {
+    let (preamble, in_preamble) = match tag {
+        0x0002 => (7, 2),
+        0x0011 => (4, 1),
+        _ => return None,
+    };
+    let channels = u64::from(channels).max(1);
+    let data = u64::from(block).checked_sub(preamble * channels)?;
+    Some(8 * data / (4 * channels) + in_preamble)
 }
 
 /// [`head_length`] of a FLAC stream that starts at `flac`: its STREAMINFO
@@ -5082,5 +5107,64 @@ mod tests {
         };
         assert_eq!(head_of(&head(32)), HeadLength::UnstatedPcm);
         assert_eq!(head_of(&head(8)), HeadLength::Unstated);
+    }
+
+    /// Finding 9-3 of review round 9: the feature `adpcm` makes Symphonia
+    /// decode IMA and Microsoft ADPCM in a WAV too, on purpose.  Mono and
+    /// stereo of each decode to the output of the encoder of the test, and
+    /// the head states the frames that they decode: blocks times the frames
+    /// of a block.
+    #[test]
+    fn an_adpcm_wav_decodes_and_states_its_length() {
+        use crate::test_audio::{WavAdpcm, adpcm_wav};
+        let tone = chirps();
+        for kind in [WavAdpcm::Ima, WavAdpcm::Ms] {
+            for channels in [vec![tone[0].clone()], tone.clone()] {
+                let case = format!("{kind:?}, {} channels", channels.len());
+                let (file, want) = adpcm_wav(&channels, 44_100, kind);
+                let got = decode_bytes(file.clone(), Some("wav"));
+                assert!(got.is_ok(), "{case}: {:?}", got.err());
+                let got = got.unwrap();
+                assert!(got.channels == want, "{case}");
+                let frames = want[0].len() as u64;
+                assert_eq!(
+                    head_of(&file),
+                    HeadLength::Frames(song_frames(frames, 44_100)),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// A mono Microsoft ADPCM WAV of one block whose step grows past `i32`:
+    /// a preamble step of 32,767, then nibbles of the largest adaptation.
+    #[cfg(not(debug_assertions))]
+    fn growing_ms_adpcm() -> Vec<u8> {
+        use crate::test_audio::{WavAdpcm, adpcm_wav};
+        let (mut file, _) = adpcm_wav(&[vec![0.0; 500]], 44_100, WavAdpcm::Ms);
+        let data = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"data"))
+            .unwrap()
+            + 8;
+        // The predictor, the step, then the two samples.
+        file[data + 1..data + 3].copy_from_slice(&32_767_i16.to_le_bytes());
+        for byte in &mut file[data + 7..data + 256] {
+            *byte = 0x88;
+        }
+        file
+    }
+
+    /// Finding 9-3 of review round 9 (TD-87): in the profiles that ship
+    /// (`release` and `web-release`, with no overflow checks), a crafted
+    /// Microsoft ADPCM WAV decodes with no panic.  A build with overflow
+    /// checks panics in `symphonia-codec-adpcm` (`codec_ms.rs`, line 96), so
+    /// the test runs only in a build with no debug assertions, which
+    /// `cargo test -p engine --release` is.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_crafted_ms_adpcm_wav_does_not_panic_in_a_release_build() {
+        let decoded =
+            std::panic::catch_unwind(|| decode_bytes(growing_ms_adpcm(), Some("wav")).is_ok());
+        assert!(decoded.is_ok(), "a panic");
     }
 }

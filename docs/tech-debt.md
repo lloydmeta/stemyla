@@ -643,6 +643,14 @@ An ADTS frame can hold up to 4 raw data blocks of AAC.  `symphonia-codec-aac` 0.
 
 * Fix: a Symphonia that reads each raw data block of a frame, or a parse in `engine` of the syntax of an AAC raw data block to find its end.
 
+### TD-87: a crafted Microsoft ADPCM WAV panics a build with overflow checks
+
+This entry concerns the decode of ADPCM WAV (review round 9 of `plans/active/m4a-m2.md`), and the limits of Symphonia 0.6.1.
+
+`symphonia-codec-adpcm` 0.6.1 multiplies the step of Microsoft ADPCM by its adaptation with no bound (`codec_ms.rs`, line 96).  A block whose preamble states a step of 32,767, then nibbles of the largest adaptation, passes `i32` within a few samples.  The profiles that ship, `release` and `web-release`, have no overflow checks, so the step wraps and the decode goes on (`a_crafted_ms_adpcm_wav_does_not_panic_in_a_release_build`, which runs in `cargo test -p engine --release`).  A build with overflow checks, as `dev` and `test` are, panics there.  A real encoder never states such a step.
+
+* Fix: a Symphonia that saturates the step, or a check in `engine` of the preamble steps of each block before the decoder reads it.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
