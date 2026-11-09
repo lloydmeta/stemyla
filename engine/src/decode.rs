@@ -819,8 +819,17 @@ fn open_within(
             crate::hidden::start_of(&mut at).context("reading the start of the file")?;
         (source, view, start)
     } else {
-        let (source, start, dropped) =
+        let (mut source, start, dropped, moov_last) =
             scan_stream(source).context("reading the start of the file")?;
+        // An MP4 with `moov` last: held whole up to the limit, and opened as
+        // a source that can seek (finding 16-2 of review round 16, TD-90).
+        if moov_last {
+            let held = crate::held::Held::read(&mut source, dropped, limit)
+                .context("reading the file")?
+                .ok_or_else(|| anyhow!(MOOV_LAST_TEXT))?;
+            drop(source);
+            return open_within(Box::new(held), _ext, limit, max_song_frames);
+        }
         // The tags and the bound of channels, before any reader of
         // Symphonia reads them (findings 11-4 and 12-2 of review rounds 11
         // and 12, and the tags of a stream).
@@ -1010,6 +1019,7 @@ fn open_within(
         track_id,
         stated: duration,
         read: 0,
+        ended: false,
     };
     let queued = if params.codec == CODEC_ID_AAC {
         first_packets_of_lc(&mut *format, &mut end)?
@@ -1198,6 +1208,10 @@ struct StatedEnd {
     stated: Option<u64>,
     /// The end of the last packet of the track that Symphonia gave.
     read: u64,
+    /// Whether the packets ended at the stated length.  The end stays: a
+    /// new read would take the bytes after the error as a box header (the
+    /// validator's input of 16-7 of review round 16).
+    ended: bool,
 }
 
 impl StatedEnd {
@@ -1206,6 +1220,9 @@ impl StatedEnd {
         &mut self,
         format: &mut dyn FormatReader,
     ) -> symphonia::core::errors::Result<Option<SymPacket>> {
+        if self.ended {
+            return Ok(None);
+        }
         match format.next_packet() {
             Ok(Some(packet)) => {
                 if packet.track_id == self.track_id {
@@ -1217,6 +1234,7 @@ impl StatedEnd {
             Err(SymError::DecodeError("sync lost"))
                 if self.mp4 && self.stated.is_some_and(|stated| self.read >= stated) =>
             {
+                self.ended = true;
                 Ok(None)
             }
             other => other,
@@ -1329,9 +1347,10 @@ fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
     })
 }
 
-/// A source to open, its container with where its reader starts, and the
-/// bytes of the leading ID3v2 tags that the scan read past.
-type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>, u64);
+/// A source to open, its container with where its reader starts, the
+/// bytes of the leading ID3v2 tags that the scan read past, and whether an
+/// MP4 has its `mdat` or `moof` before `moov` in the window.
+type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>, u64, bool);
 
 /// The container of a source that cannot seek, and where its reader starts,
 /// as [`crate::hidden::start_of`] finds them with no ID3v2 tags.  It reads
@@ -1369,8 +1388,15 @@ fn scan_stream(mut source: Box<dyn MediaSource>) -> std::io::Result<Scanned> {
         .or_else(|| {
             crate::hidden::is_adts_of_raw_blocks_with_crc(&window).then_some((Container::Adts, 0))
         });
+    let moov_last = matches!(start, Some((Container::Mp4, at))
+        if crate::held::media_before_moov(&window, at as usize));
     let again = Cursor::new(window).chain(source);
-    Ok((Box::new(ReadOnlySource::new(again)), start, dropped))
+    Ok((
+        Box::new(ReadOnlySource::new(again)),
+        start,
+        dropped,
+        moov_last,
+    ))
 }
 
 /// Opens the one Symphonia reader of `container` at the start of `mss`.
@@ -4881,6 +4907,7 @@ mod tests {
                 track_id: 1,
                 stated: None,
                 read: 0,
+                ended: false,
             };
             first_packets_of_lc(&mut reader, &mut end)
                 .map(|queued| queued.len())
@@ -6412,6 +6439,75 @@ mod tests {
         }
     }
 
+    /// Missed mutant 16-7 of review round 16, with the validator's input: a
+    /// fragmented M4A with `moov` first, then a last `mdat` of 64 bits of
+    /// 5 GiB and 16 bytes to the end of a source past 4 GiB, keeps its size
+    /// and decodes, for ALAC and AAC, with the `mdhd` duration as it is and
+    /// raised by 4096.
+    #[test]
+    fn a_fragmented_m4a_with_a_last_mdat_of_64_bits_past_4_gib_decodes() {
+        use crate::test_m4a::{aac_m4a, fragmented, place_once};
+        let alac = alac_of(m4a::Order::FastStart);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            for more in [0, 4096] {
+                let case = format!("{kind}, mdhd raised by {more}");
+                let mut fragments = fragmented(&plain, 2, false);
+                let mdhd = place_once(&fragments, b"mdhd") + 4 + 16;
+                let stated = u32::from_be_bytes(fragments[mdhd..mdhd + 4].try_into().unwrap());
+                fragments[mdhd..mdhd + 4].copy_from_slice(&(stated + more).to_be_bytes());
+                let size = (5_u64 << 30) + 16;
+                let len = fragments.len() as u64 + size;
+                let real = [
+                    &fragments[..],
+                    &1_u32.to_be_bytes(),
+                    b"mdat",
+                    &size.to_be_bytes(),
+                ]
+                .concat();
+                let source = PastReal { real, len, at: 0 };
+                let decoder = Decoder::new(Box::new(source), Some("m4a"));
+                let got = decoder.and_then(|mut decoder| {
+                    let mut channels = vec![Vec::new(); want.len()];
+                    while let Some(packet) = decoder.next_packet()? {
+                        for (channel, plane) in channels.iter_mut().zip(packet.planes) {
+                            channel.extend_from_slice(plane);
+                        }
+                    }
+                    Ok(channels)
+                });
+                assert!(
+                    got.as_ref().is_ok_and(|got| *got == want),
+                    "{case}: {:?}",
+                    got.err()
+                );
+            }
+        }
+    }
+
+    /// The end of `StatedEnd` stays: a fragmented AAC stream whose last
+    /// `mdat` has a size of 0, with bytes after its last sample that are no
+    /// box, decodes
+    /// bit for bit.  The AAC check reads past the last sample, and a second
+    /// read would take those bytes as a box header ("invalid atom size").
+    #[test]
+    fn the_stated_end_of_a_stream_stays() {
+        use crate::test_m4a::{aac_m4a, fragmented, places};
+        let plain = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+        let fragments = fragmented(&plain, 2, false);
+        let last = places(&fragments, b"mdat").pop().unwrap() - 4;
+        let mut file = [&fragments[..], &1_u32.to_be_bytes(), b"lloy", &[0; 8]].concat();
+        file[last..last + 4].copy_from_slice(&[0; 4]);
+        let (_, got) = stream_peak(file, "m4a");
+        assert!(
+            got.as_ref().is_ok_and(|got| *got == want),
+            "{:?}",
+            got.err()
+        );
+    }
+
     /// Missed mutant 15-11 of review round 15: an empty `edts` that fills
     /// the rest of its `trak`, when the tables before it are at the bound of
     /// a stream, passes the bound, and gets `MOOV_TEXT` through `Fifo`.
@@ -6575,11 +6671,91 @@ mod tests {
             "a fragmented M4A behind a tag: {:?}",
             got.err()
         );
+        // With `moov` last behind more top-level boxes than the window of
+        // the scan, the stream cannot know the order in time (TD-90).
         let last = alac_of(m4a::Order::MoovLast);
+        let (ftyp, size) = top_box(&last, b"ftyp");
+        let free = crate::test_m4a::bx(b"free", &[&vec![0; 2 << 20]]);
+        let far = [&last[..ftyp + size], &free, &last[ftyp + size..]].concat();
+        let far = crate::test_m4a::with_stco_moved(far, free.len() as i64);
         assert_eq!(
-            fifo_refusal(last, "m4a", "moov last").as_deref(),
+            fifo_refusal(far, "m4a", "moov last, far").as_deref(),
             Some(MOOV_LAST_TEXT)
         );
+    }
+
+    /// Finding 16-2 of review round 16: an M4A from a source that cannot
+    /// seek whose `mdat` comes before `moov` is held whole, up to the limit
+    /// of the decode, and opened as a source that can seek.  ALAC and AAC
+    /// with `moov` last decode bit for bit through `Fifo`, also behind a tag
+    /// in both forms of offsets, and through a FIFO.  With 64 MiB of art,
+    /// the peak is about one held copy of the file above the plain stream.
+    /// Past the limit, it gets `MOOV_LAST_TEXT`.
+    #[test]
+    fn an_m4a_stream_with_moov_last_is_held_and_opens() {
+        use crate::test_audio::id3_tag;
+        use crate::test_m4a::{aac_m4a, with_cover, with_stco_moved};
+        let alac = alac_of(m4a::Order::MoovLast);
+        let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::MoovLast);
+        for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
+            let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
+            let tag = id3_tag(100);
+            let moved = with_stco_moved(plain.clone(), tag.len() as i64);
+            for (case, file) in [
+                ("no tag", plain.clone()),
+                (
+                    "a tag, offsets from the MP4 start",
+                    [tag.clone(), plain.clone()].concat(),
+                ),
+                (
+                    "a tag, offsets from the file start",
+                    [tag.clone(), moved].concat(),
+                ),
+            ] {
+                let (_, got) = stream_peak(file, "m4a");
+                assert!(
+                    got.as_ref().is_ok_and(|got| *got == want),
+                    "{kind}, {case}: {:?}",
+                    got.err()
+                );
+            }
+            let (plain_peak, _) = stream_peak(plain.clone(), "m4a");
+            let art = with_cover(plain.clone(), ART);
+            let (peak, got) = stream_peak(art.clone(), "m4a");
+            assert!(
+                got.as_ref().is_ok_and(|got| *got == want),
+                "{kind}, art: {:?}",
+                got.err()
+            );
+            let most = plain_peak + art.len() + (4 << 20);
+            assert!(
+                peak < most,
+                "{kind}, art: the stream peaks at {peak} bytes, over {most}"
+            );
+            let limit = plain.len() as u64 / 2;
+            let past = decode_source_within(
+                Box::new(Fifo(Cursor::new(plain.clone()))),
+                Some("m4a"),
+                limit,
+            );
+            let error = past.err().map(|e| format!("{e:#}"));
+            assert_eq!(
+                error.as_deref(),
+                Some(MOOV_LAST_TEXT),
+                "{kind}, past the limit"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let plain = alac_of(m4a::Order::MoovLast);
+            let (_, got) = through_fifo(&plain, "lloyd-last.m4a");
+            let want = decode_bytes(plain, Some("m4a")).unwrap().channels;
+            assert!(
+                got.as_ref().is_ok_and(|got| got.channels == want),
+                "the FIFO: {:?}",
+                got.err()
+            );
+        }
     }
 
     /// `file`, an MP4 with `moov` first, with `boxes` after its `moov`.

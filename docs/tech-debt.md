@@ -643,15 +643,18 @@ An ADTS frame can hold up to 4 raw data blocks of AAC.  `symphonia-codec-aac` 0.
 
 * Fix: a Symphonia that reads each raw data block of a frame, or a parse in `engine` of the syntax of an AAC raw data block to find its end.
 
-### TD-90: an M4A stream with `mdat` or `moof` before `moov` does not open
+### TD-90: an M4A stream with `moov` last past the limit, or far into the stream, does not open
 
-This entry concerns the M4A promise of M2 of `plans/active/m4a.md`, and MEM-4.
+This entry concerns the M4A promise of M2 of `plans/active/m4a.md`.
 
-From a source that cannot seek, Symphonia 0.6.1 stops its walk of the top-level boxes at the first `mdat` or `moof` (`symphonia-format-isomp4` `demuxer.rs`, lines 210 to 225), and then has no `moov` ("isomp4: missing moov atom", lines 246 to 248).  So `engine::mp4_stream` refuses such a stream with `MOOV_LAST_TEXT` when it sees the `mdat` or `moof`.  To open it, `engine` would have to hold the song-sized `mdat` until `moov` comes, and MEM-4 forbids that.  `an_m4a_stream_of_other_layouts` tests the text.  The sources of the app seek, so a file with `moov` last opens there; `decode_path` of a FIFO is the path that reaches this gap.
+From a source that cannot seek, Symphonia 0.6.1 stops its walk of the top-level boxes at the first `mdat` or `moof` (`symphonia-format-isomp4` `demuxer.rs`, lines 210 to 225), and then has no `moov` (lines 246 to 248).  When the window of the scan (about 1 MiB) shows an `mdat` or `moof` before any `moov`, the decode holds the stream whole, up to the limit of its samples (`MAX_DECODED_BYTES` by default), and opens it as a source that can seek (`engine::held`, review round 16).  Two cases keep `MOOV_LAST_TEXT`:
 
-* Fix: none in view with no buffer.  A caller that can seek, or that can read the file twice, opens it.
+* A stream past that limit.  A file of more bytes than the decoded samples that the decode takes can hold no song that it opens, but for its tags.
+* A stream with more than the window of top-level boxes before its first `mdat` or `moof`.  The order shows only after those bytes pass.  To hold them for each M4A stream would break the flat peak of a stream with `moov` first and a large box before it, which `an_m4a_stream_gets_the_hiding_and_the_texts_of_the_walk` pins.
 
-## Legibility for agents
+`an_m4a_stream_of_other_layouts` tests the second case, and `an_m4a_stream_with_moov_last_is_held_and_opens` the first.  The sources of the app seek; `decode_path` of a FIFO is the path that reaches these cases.
+
+* Fix: for the second case, a hold that starts only at a box that the stream does not hide.  No fix is in view for the first.
 
 ### TD-18: large files and JavaScript inside Rust strings
 

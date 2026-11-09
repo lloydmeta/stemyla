@@ -6,6 +6,7 @@ mod aac_config;
 mod adpcm;
 mod adts_split;
 pub mod decode;
+mod held;
 mod hidden;
 pub mod hpss;
 mod ima4;
