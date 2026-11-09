@@ -144,6 +144,21 @@ pub const ADTS_BLOCKS_TEXT: &str = "This AAC file puts more than one AAC frame i
 /// through `engine::ima4` and Symphonia's ADPCM decoder.
 pub const AIFC_COMPRESSED_TEXT: &str = "This AIFC file is compressed in a form that does not open.  Open an uncompressed AIFF or AIFC file.";
 
+/// The most channels of a file that the decode opens (finding 10-1 of review
+/// round 10, MEM-4).  The decoders of Symphonia keep a buffer for each
+/// channel when they are made, before the first packet: measured with
+/// `peak_of` on 2026-11-09, `Decoder::new` of an `ima4` AIFC holds about
+/// 33 KB for each channel (`ima4::Ima4Channels`: a mono decoder and a
+/// plane of 4096 frames), and of a PCM AIFF about 2.4 KB.  So the bound
+/// keeps the open of each format under 8 MiB, with a margin of 2.  A WAV
+/// has at most 26 (`symphonia-format-riff` `wave/chunks.rs`, line 716).
+pub const MOST_CHANNELS: u16 = 128;
+
+/// The text of a file of more than [`MOST_CHANNELS`] channels.
+pub fn channels_text(channels: u32) -> String {
+    format!("This file has {channels} channels.  A file of at most {MOST_CHANNELS} channels opens.")
+}
+
 /// The text of an AAC file of more than 2 channels.
 pub fn aac_channels_text(channels: u32) -> String {
     format!("This AAC file has {channels} channels.  Only mono and stereo AAC open.")
@@ -421,6 +436,12 @@ fn aiff_length(head: &[u8], file_bytes: u64) -> HeadLength {
                 break;
             };
             let channels = u64::from(u16::from_be_bytes([comm[0], comm[1]]));
+            // A file past the bound of channels is refused when it opens, so
+            // the head states no length for it (finding 10-1 of review round
+            // 10).
+            if channels == 0 || channels > u64::from(MOST_CHANNELS) {
+                return HeadLength::UnstatedPcm;
+            }
             let frames = u64::from(u32::from_be_bytes([comm[2], comm[3], comm[4], comm[5]]));
             let bits = u64::from(u16::from_be_bytes([comm[6], comm[7]]));
             let mut rate = [0; 10];
@@ -842,6 +863,13 @@ fn open_within(
         None if is_seekable => {
             let mut at = crate::mp4_boxes::Seeking(&mut *source);
             if container == Container::Aiff {
+                // Before any reader or decoder of Symphonia keeps a buffer
+                // for each channel (finding 10-1 of review round 10).
+                let channels = crate::hidden::aiff_channels(&mut at, reader_at)
+                    .context("reading the start of the file")?;
+                if let Some(channels) = channels.filter(|channels| *channels > MOST_CHANNELS) {
+                    return Err(anyhow!(channels_text(u32::from(channels))));
+                }
                 ima4 = crate::ima4::ima4_of(&mut at, reader_at)
                     .context("reading the start of the file")?;
                 let other = crate::hidden::is_aifc_of_other_type(&mut at, reader_at)
@@ -913,6 +941,10 @@ fn open_within(
     let num_frames = track.num_frames;
     if params.codec == CODEC_ID_AAC {
         check_aac(&params)?;
+    }
+    let channel_count = params.channels.as_ref().map_or(0, Channels::count);
+    if channel_count > usize::from(MOST_CHANNELS) {
+        return Err(anyhow!(channels_text(channel_count as u32)));
     }
     // The mend reads an AAC config; other codecs have other extra data
     // (finding 8-1 of review round 8).
@@ -5251,5 +5283,95 @@ mod tests {
         let audio = decode_bytes(file, Some(ext));
         assert!(audio.is_ok(), "{case}: {:?}", audio.err());
         audio.unwrap().channels
+    }
+
+    /// The channels of the `COMM` of `file`, an AIFF or AIFC, set to `count`.
+    fn with_comm_channels(mut file: Vec<u8>, count: u16) -> Vec<u8> {
+        let comm = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"COMM"))
+            .unwrap();
+        file[comm + 8..comm + 10].copy_from_slice(&count.to_be_bytes());
+        file
+    }
+
+    /// Finding 10-1 of review round 10 (MEM-4): a file of more than
+    /// `MOST_CHANNELS` channels is refused before any decoder is made, with
+    /// a text.  At the bound, the open of an `ima4` AIFC and of a PCM AIFF
+    /// peaks under 8 MiB.  The head of such a file states no length.
+    #[test]
+    fn a_file_of_too_many_channels_is_refused_before_its_decoder() {
+        use crate::test_audio::{Aiff, aiff, ima4_aifc};
+        let tone: Vec<f32> = (0..64 * 4).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let most = usize::from(MOST_CHANNELS);
+        let (ima4, _) = ima4_aifc(&vec![tone.clone(); most], 44_100);
+        let pcm = aiff(&vec![tone.clone(); most], 44_100, 16, Aiff::Plain);
+        for (case, file) in [("ima4", ima4), ("PCM", pcm)] {
+            let (peak, opened) = peak_of(|| {
+                Decoder::new(Box::new(Cursor::new(file.clone())), Some("aiff")).map(|_| ())
+            });
+            assert!(opened.is_ok(), "{case} at the bound: {:?}", opened.err());
+            assert!(
+                peak < 8 << 20,
+                "{case} at the bound: the open peaks at {peak} bytes"
+            );
+            for count in [MOST_CHANNELS + 1, u16::MAX] {
+                let many = with_comm_channels(file.clone(), count);
+                assert_eq!(head_of(&many), HeadLength::UnstatedPcm, "{case} of {count}");
+                let text = channels_text(u32::from(count));
+                assert_refused_early(many, "aiff", &text, &format!("{case} of {count} channels"));
+            }
+        }
+    }
+
+    /// Missed mutants 10-12, 10-14, 10-15, 10-19 and 10-22 of review round
+    /// 10: the head and the open of AIFF of no channel, of a cut AIFC, and of
+    /// a whole mono AIFF.
+    #[test]
+    fn the_heads_and_opens_of_aiff_edge_cases() {
+        use crate::test_audio::{Aiff, aiff, ima4_aifc};
+        let tone: Vec<f32> = (0..64 * 100)
+            .map(|i| (i as f32 * 0.01).sin() * 0.5)
+            .collect();
+        // 10-22: a whole mono 16-bit AIFF.
+        let mono = aiff(std::slice::from_ref(&tone), 44_100, 16, Aiff::Plain);
+        assert_eq!(
+            head_of(&mono),
+            HeadLength::Frames(6400),
+            "a whole mono AIFF"
+        );
+        // 10-14 and 10-15: an AIFC NONE whose COMM states more frames than it
+        // holds keeps its stated frames.
+        let aifc = aiff(
+            std::slice::from_ref(&tone),
+            44_100,
+            16,
+            Aiff::UncompressedAifc,
+        );
+        let comm = (0..aifc.len())
+            .find(|at| aifc[*at..].starts_with(b"COMM"))
+            .unwrap();
+        let mut more = aifc.clone();
+        more[comm + 10..comm + 14].copy_from_slice(&1_000_000_u32.to_be_bytes());
+        assert_eq!(
+            head_of(&more),
+            HeadLength::Frames(1_000_000),
+            "a cut AIFC NONE"
+        );
+        // 10-12 and 10-19: no channel, in the head and in the open.
+        let (ima4, _) = ima4_aifc(&[tone], 44_100);
+        for (case, file) in [("ima4", ima4), ("AIFF", mono)] {
+            let none = with_comm_channels(file, 0);
+            assert_eq!(
+                head_of(&none),
+                HeadLength::UnstatedPcm,
+                "{case} of no channel"
+            );
+            let opened = std::panic::catch_unwind(|| decode_bytes(none, Some("aiff")).is_err());
+            assert_eq!(
+                opened.ok(),
+                Some(true),
+                "{case} of no channel is refused with no panic"
+            );
+        }
     }
 }

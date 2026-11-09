@@ -366,6 +366,25 @@ pub(crate) fn is_aifc_of_other_type(source: &mut dyn ReadAt, at: u64) -> std::io
     }
 }
 
+/// The channels that the `COMM` chunk of the AIFF or AIFC whose `FORM`
+/// starts at `at` states, if it has one in reach.
+pub(crate) fn aiff_channels(source: &mut dyn ReadAt, at: u64) -> std::io::Result<Option<u16>> {
+    let mut chunk = at + 12;
+    loop {
+        let mut header = [0; 10];
+        if source.read_at(chunk, &mut header)? < 10 {
+            return Ok(None);
+        }
+        let size = u64::from(u32::from_be_bytes([
+            header[4], header[5], header[6], header[7],
+        ]));
+        if header[..4] == *b"COMM" {
+            return Ok(Some(u16::from_be_bytes([header[8], header[9]])));
+        }
+        chunk += 8 + size + (size & 1);
+    }
+}
+
 /// Whether `kind` is an AIFC compression type that Symphonia 0.6.1's AIFF
 /// reader does not map, in either case.
 pub(crate) fn is_other_aifc_type(kind: &[u8]) -> bool {
