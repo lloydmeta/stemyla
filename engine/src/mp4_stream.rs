@@ -361,6 +361,11 @@ mod tests {
     /// A small MP4 behind `tags` bytes of tags, its first chunk at `first`
     /// in a `co64` or an `stco`, and its first `mdat` at the end.
     fn head_of(first: u64, co64: bool) -> Vec<u8> {
+        head_with(first, co64, &bx(b"mdat", &[b"beachape"]))
+    }
+
+    /// [`head_of`] with `mdat` as its last box.
+    fn head_with(first: u64, co64: bool, mdat: &[u8]) -> Vec<u8> {
         let hdlr = bx(b"hdlr", &[&[0; 8], b"soun", &[0; 12]]);
         let offsets = if co64 {
             bx(
@@ -376,19 +381,19 @@ mod tests {
         let stbl = bx(b"stbl", &[&offsets]);
         let mdia = bx(b"mdia", &[&hdlr, &bx(b"minf", &[&stbl])]);
         let moov = bx(b"moov", &[&bx(b"trak", &[&mdia])]);
-        [
-            bx(b"ftyp", &[b"M4A ", &[0; 4]]),
-            moov,
-            bx(b"mdat", &[b"beachape"]),
-        ]
-        .concat()
+        [bx(b"ftyp", &[b"M4A ", &[0; 4]]), moov, Vec::from(mdat)].concat()
     }
 
     /// Reads `file` through the rule of a stream behind `tags` bytes, 1 byte
     /// at a time.
     fn through(file: &[u8], tags: u64) -> (Vec<u8>, Option<u64>) {
+        through_junk(file, tags, 0)
+    }
+
+    /// [`through`] of `file`, which starts with `junk` bytes before the MP4.
+    fn through_junk(file: &[u8], tags: u64, junk: u64) -> (Vec<u8>, Option<u64>) {
         let source = Box::new(ReadOnlySource::new(OneByte(Cursor::new(file.to_owned()))));
-        let mut stream = TagStream::new(source, Mp4::behind(tags, 0), 0);
+        let mut stream = TagStream::new(source, Mp4::behind(tags, junk), junk);
         let mut out = Vec::new();
         stream.read_to_end(&mut out).unwrap();
         (out, stream.rule().first_chunk)
@@ -429,5 +434,76 @@ mod tests {
         let past = (1_u64 << 32) + 8;
         let (_, first) = through(&head_of(past, true), tags);
         assert_eq!(first, Some(past), "a co64 past 4 GiB");
+    }
+
+    /// Finding 15-1 and missed mutant 15-13 of review round 15: behind 4
+    /// bytes of junk, with the first chunk at the start of the body of
+    /// `mdat` from the file start, 4 bytes are missing: fewer than a box.
+    /// So the `mdat` grows by 4 bytes of zeros after its header, with a
+    /// size of 32 bits, of 64 bits, and of 0, which stays 0.  The growth
+    /// keeps the boxes after `mdat` where a stream that skips `mdat` by its
+    /// size looks for them.
+    #[test]
+    fn fewer_than_8_missing_bytes_grow_the_first_mdat() {
+        let junk = 4_u64;
+        let body = b"beachape";
+        let large = [
+            &1_u32.to_be_bytes()[..],
+            b"mdat",
+            &24_u64.to_be_bytes(),
+            body,
+        ]
+        .concat();
+        let open = [&0_u32.to_be_bytes()[..], b"mdat", body].concat();
+        for (case, mdat, head, grown) in [
+            ("32 bits", bx(b"mdat", &[body]), 8, Some((0..4, 20_u64))),
+            ("64 bits", large, 16, Some((8..16, 28))),
+            ("0", open, 8, None),
+        ] {
+            let probe = head_with(0, false, &mdat);
+            let at = probe.len() - mdat.len();
+            let first = junk + (at + head) as u64;
+            let file = [vec![b'j'; junk as usize], head_with(first, false, &mdat)].concat();
+            let (out, _) = through_junk(&file, 0, junk);
+            let mdat_at = junk as usize + at;
+            let mut header = Vec::from(&file[mdat_at..mdat_at + head]);
+            if let Some((place, size)) = grown {
+                let bytes = size.to_be_bytes();
+                header[place.clone()].copy_from_slice(&bytes[8 - place.len()..]);
+            }
+            let want = [&file[..mdat_at], &header, &[0; 4], &file[mdat_at + head..]].concat();
+            assert!(out == want, "a size of {case}: {out:?}");
+        }
+    }
+
+    /// Missed mutant 15-10 of review round 15: an `mdat` with an empty body,
+    /// behind 100 bytes of tags, with the first chunk at its body from the
+    /// file start, gets the `free` box of 100 bytes.
+    #[test]
+    fn an_empty_mdat_behind_tags_gets_the_free_box() {
+        let tags = 100;
+        let mdat = bx(b"mdat", &[]);
+        let at = head_with(0, false, &mdat).len() - 8;
+        let file = head_with(tags + at as u64 + 8, false, &mdat);
+        let (out, _) = through(&file, tags);
+        let free = [
+            &(tags as u32).to_be_bytes()[..],
+            b"free",
+            &vec![0; tags as usize - 8],
+        ]
+        .concat();
+        assert!(
+            out == [&file[..at], &free, &file[at..]].concat(),
+            "the free box"
+        );
+    }
+
+    /// Missed mutant 15-12 of review round 15: a first box of size 0 at the
+    /// start of the stream passes with no panic.
+    #[test]
+    fn a_first_box_of_size_0_passes() {
+        let file = [&[0_u8; 4][..], b"ftyp", b"M4A ", &[0; 4]].concat();
+        let (out, _) = through(&file, 0);
+        assert!(out == file, "the bytes");
     }
 }

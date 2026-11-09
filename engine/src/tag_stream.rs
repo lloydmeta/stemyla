@@ -417,4 +417,48 @@ mod tests {
         }
         assert!(out == file, "the bytes");
     }
+
+    /// A rule that puts `0` before its first header.
+    struct InsertFirst(Option<Insert>);
+
+    impl Rule for InsertFirst {
+        const HEADER: usize = 8;
+
+        fn change(&mut self, _: u64, _: &mut [u8]) -> std::io::Result<Option<u64>> {
+            Ok(None)
+        }
+
+        fn insert(&mut self) -> Option<Insert> {
+            self.0.take()
+        }
+    }
+
+    /// Missed mutant 15-15 of review round 15: a `free` box with a header
+    /// of 16 bytes, of a size of 64 bits, comes in reads of 3 bytes, with no
+    /// panic.
+    #[test]
+    fn a_header_of_16_bytes_is_given_in_parts() {
+        let file = Vec::from(&b"lloyd and beachape"[..]);
+        let (header, head) = crate::mp4_stream::free_header(u64::from(u32::MAX) + 1);
+        let insert = Insert {
+            at: 6,
+            header,
+            head,
+            zeros: 4,
+        };
+        let source = Box::new(ReadOnlySource::new(Cursor::new(file.clone())));
+        let mut stream = TagStream::new(source, InsertFirst(Some(insert)), 6);
+        let (mut out, mut buf) = (Vec::new(), [0; 3]);
+        loop {
+            let read = stream.read(&mut buf).unwrap();
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read]);
+        }
+        assert!(
+            out == [&file[..6], &header[..16], &[0; 4], &file[6..]].concat(),
+            "the bytes"
+        );
+    }
 }
