@@ -14,7 +14,8 @@ use std::io::{Cursor, SeekFrom};
 use std::path::Path;
 use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::well_known::{
-    CODEC_ID_AAC, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3,
+    CODEC_ID_AAC, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_MS, CODEC_ID_ALAC, CODEC_ID_FLAC,
+    CODEC_ID_MP3,
 };
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
@@ -153,6 +154,11 @@ pub const AIFC_COMPRESSED_TEXT: &str = "This AIFC file is compressed in a form t
 /// keeps the open of each format under 8 MiB, with a margin of 2.  A WAV
 /// has at most 26 (`symphonia-format-riff` `wave/chunks.rs`, line 716).
 pub const MOST_CHANNELS: u16 = 128;
+
+/// The text of a Microsoft ADPCM WAV whose step passes the range that
+/// Symphonia 0.6.1 can multiply (findings 10-2 and 10-3 of review round 10).
+pub const MS_ADPCM_TEXT: &str =
+    "This WAV file holds Microsoft ADPCM that does not decode.  Open another file.";
 
 /// The text of a file of more than [`MOST_CHANNELS`] channels.
 pub fn channels_text(channels: u32) -> String {
@@ -1257,6 +1263,9 @@ pub struct Decoder {
     /// padding.
     keep: Option<u64>,
     planes: Vec<Vec<f32>>,
+    /// The channels and the frames of a block of a Microsoft ADPCM track,
+    /// whose steps the decode walks before Symphonia decodes each packet.
+    ms_adpcm: Option<(usize, u64)>,
 }
 
 /// The samples of one packet.
@@ -1331,6 +1340,10 @@ impl Decoder {
             skip: trim.skip,
             keep: trim.keep,
             planes: Vec::new(),
+            ms_adpcm: (params.codec == CODEC_ID_ADPCM_MS).then(|| {
+                let channels = params.channels.as_ref().map_or(1, Channels::count);
+                (channels, params.frames_per_block.unwrap_or(1))
+            }),
         })
     }
 
@@ -1359,6 +1372,16 @@ impl Decoder {
             };
             if packet.track_id != self.track_id {
                 continue;
+            }
+            if let Some((channels, per_block)) = self.ms_adpcm
+                && !crate::adpcm::ms_steps_fit(
+                    &packet.data,
+                    channels,
+                    per_block,
+                    packet.block_dur().get(),
+                )
+            {
+                return Err(anyhow!(MS_ADPCM_TEXT));
             }
             match self.codec.decode(&packet) {
                 Ok(buf) => {
@@ -5168,36 +5191,52 @@ mod tests {
         }
     }
 
-    /// A mono Microsoft ADPCM WAV of one block whose step grows past `i32`:
-    /// a preamble step of 32,767, then nibbles of the largest adaptation.
-    #[cfg(not(debug_assertions))]
-    fn growing_ms_adpcm() -> Vec<u8> {
+    /// A Microsoft ADPCM WAV of `channels` channels and one block whose step
+    /// grows past `i32`: a preamble step of `step`, then nibbles of the
+    /// largest adaptation (8: 768 / 256, 3 times the step for each nibble).
+    fn growing_ms_adpcm(channels: usize, step: i16) -> Vec<u8> {
         use crate::test_audio::{WavAdpcm, adpcm_wav};
-        let (mut file, _) = adpcm_wav(&[vec![0.0; 500]], 44_100, WavAdpcm::Ms);
+        let (mut file, _) = adpcm_wav(&vec![vec![0.0; 500]; channels], 44_100, WavAdpcm::Ms);
         let data = (0..file.len())
             .find(|at| file[*at..].starts_with(b"data"))
             .unwrap()
             + 8;
-        // The predictor, the step, then the two samples.
-        file[data + 1..data + 3].copy_from_slice(&32_767_i16.to_le_bytes());
-        for byte in &mut file[data + 7..data + 256] {
+        // The predictor of each channel, then the step of each channel.
+        for channel in 0..channels {
+            let at = data + channels + 2 * channel;
+            file[at..at + 2].copy_from_slice(&step.to_le_bytes());
+        }
+        for byte in &mut file[data + 7 * channels..data + 256 * channels] {
             *byte = 0x88;
         }
         file
     }
 
-    /// Finding 9-3 of review round 9 (TD-87): in the profiles that ship
-    /// (`release` and `web-release`, with no overflow checks), a crafted
-    /// Microsoft ADPCM WAV decodes with no panic.  A build with overflow
-    /// checks panics in `symphonia-codec-adpcm` (`codec_ms.rs`, line 96), so
-    /// the test runs only in a build with no debug assertions, which
-    /// `cargo test -p engine --release` is.
-    #[cfg(not(debug_assertions))]
+    /// Findings 10-2 and 10-3 of review round 10 (TD-87, closed): the step
+    /// of Microsoft ADPCM triples for each nibble of 8 from any start, and
+    /// Symphonia multiplies it with no bound (`symphonia-codec-adpcm`
+    /// `codec_ms.rs`, line 96).  The decode walks the steps of each block
+    /// before Symphonia decodes it, and refuses the file with a text.  It
+    /// runs in each build: no panic, also with overflow checks.
     #[test]
-    fn a_crafted_ms_adpcm_wav_does_not_panic_in_a_release_build() {
-        let decoded =
-            std::panic::catch_unwind(|| decode_bytes(growing_ms_adpcm(), Some("wav")).is_ok());
-        assert!(decoded.is_ok(), "a panic");
+    fn a_crafted_ms_adpcm_wav_is_refused_with_no_panic() {
+        for channels in [1, 2] {
+            for step in [16, 32_767] {
+                let case = format!("{channels} channels from a step of {step}");
+                let file = growing_ms_adpcm(channels, step);
+                let decoded = std::panic::catch_unwind(|| {
+                    decode_bytes(file, Some("wav"))
+                        .err()
+                        .map(|e| format!("{e:#}"))
+                });
+                assert!(decoded.is_ok(), "{case}: a panic");
+                let error = decoded.unwrap();
+                assert!(
+                    error.as_deref().is_some_and(|e| e.contains(MS_ADPCM_TEXT)),
+                    "{case}: {error:?}"
+                );
+            }
+        }
     }
 
     /// The samples of `bytes` through Symphonia's own probe and decoder: the
