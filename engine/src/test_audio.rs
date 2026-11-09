@@ -603,8 +603,18 @@ const MS_ADAPTATION: [i32; 16] = [
 /// samples.  The input is cut to whole blocks.  The predictor of
 /// Microsoft ADPCM is 0 (coefficients 256 and 0) in each block.
 pub fn adpcm_wav(channels: &[Vec<f32>], rate: u32, kind: WavAdpcm) -> (Vec<u8>, Vec<Vec<f32>>) {
+    adpcm_wav_of_blocks(channels, rate, kind, 256 * channels.len())
+}
+
+/// [`adpcm_wav`] with blocks of `align` bytes for all channels.  The frames
+/// of a block come from `align`, as Symphonia counts them.
+pub fn adpcm_wav_of_blocks(
+    channels: &[Vec<f32>],
+    rate: u32,
+    kind: WavAdpcm,
+    align: usize,
+) -> (Vec<u8>, Vec<Vec<f32>>) {
     let count = channels.len();
-    let align = 256 * count;
     let per_block = match kind {
         WavAdpcm::Ima => (8 * (align - 4 * count)) / (4 * count) + 1,
         WavAdpcm::Ms => (8 * (align - 7 * count)) / (4 * count) + 2,

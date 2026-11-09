@@ -5421,4 +5421,138 @@ mod tests {
             );
         }
     }
+
+    /// Finding 11-2 of review round 11: a WAV of 2 or 3 channels, with one
+    /// channel other than 0 from a step of 32,767 and nibbles of 8, and the
+    /// others from 16 with nibbles of 0, is refused with no panic.
+    #[test]
+    fn a_loud_channel_other_than_0_is_refused_with_no_panic() {
+        use crate::test_audio::{WavAdpcm, adpcm_wav};
+        for channels in [2, 3] {
+            for loud in 1..channels {
+                let case = format!("channel {loud} of {channels}");
+                let (mut file, _) =
+                    adpcm_wav(&vec![vec![0.0; 500]; channels], 44_100, WavAdpcm::Ms);
+                let data = (0..file.len())
+                    .find(|at| file[*at..].starts_with(b"data"))
+                    .unwrap()
+                    + 8;
+                let at = data + channels + 2 * loud;
+                file[at..at + 2].copy_from_slice(&32_767_i16.to_le_bytes());
+                let nibbles = 256 * channels - 7 * channels;
+                for k in (loud..2 * nibbles).step_by(channels) {
+                    let byte = &mut file[data + 7 * channels + k / 2];
+                    *byte |= if k % 2 == 0 { 0x80 } else { 0x08 };
+                }
+                let decoded = std::panic::catch_unwind(|| {
+                    decode_bytes(file, Some("wav"))
+                        .err()
+                        .map(|e| format!("{e:#}"))
+                });
+                assert!(decoded.is_ok(), "{case}: a panic");
+                let error = decoded.unwrap();
+                assert!(
+                    error.as_deref().is_some_and(|e| e.contains(MS_ADPCM_TEXT)),
+                    "{case}: {error:?}"
+                );
+            }
+        }
+    }
+
+    /// Finding 11-1 of review round 11: before the fix, the mono decoders of
+    /// 3 channels of 499 frames a block read block 2 one byte early.  So a
+    /// step of 127 that the walk passes read as 0x7F00, and 8 nibbles of 8
+    /// took it past `i32` in Symphonia.  Now the file decodes with no panic.
+    #[test]
+    fn a_misread_step_of_ms_adpcm_cannot_panic() {
+        use crate::test_audio::{WavAdpcm, adpcm_wav_of_blocks};
+        let (channels, align) = (3, 767);
+        let (mut file, _) = adpcm_wav_of_blocks(
+            &vec![vec![0.0; 4 * 499]; channels],
+            44_100,
+            WavAdpcm::Ms,
+            align,
+        );
+        let block2 = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"data"))
+            .unwrap()
+            + 8
+            + align;
+        for channel in 0..channels {
+            let at = block2 + channels + 2 * channel;
+            file[at..at + 2].copy_from_slice(&127_i16.to_le_bytes());
+        }
+        let nibbles = block2 + 7 * channels;
+        file[nibbles..nibbles + 4 * channels].fill(0x88);
+        let decoded = std::panic::catch_unwind(|| {
+            decode_bytes(file, Some("wav")).map(|song| song.channels[0].len())
+        });
+        assert!(decoded.is_ok(), "a panic");
+        let decoded = decoded.unwrap();
+        assert!(
+            decoded.as_ref().is_ok_and(|frames| *frames == 4 * 499),
+            "{:?}",
+            decoded.err()
+        );
+    }
+
+    /// Missed mutants 11-17 and 11-24 of review round 11: the mono decoder
+    /// of an odd block gets a last nibble of 0, not the spare low nibble of
+    /// the block.  Here channel 0 ends at a step of 2,834,352 with 11
+    /// nibbles of 8, which the walk passes.  A last nibble of 8 then takes
+    /// the step past `i32` in Symphonia, and a nibble of 0 does not.
+    #[test]
+    fn the_last_nibble_of_an_odd_mono_block_is_0() {
+        use crate::test_audio::{WavAdpcm, adpcm_wav_of_blocks};
+        let (channels, align, frames) = (3, 767, 499);
+        let (mut file, _) = adpcm_wav_of_blocks(
+            &vec![vec![0.0; 2 * frames]; channels],
+            44_100,
+            WavAdpcm::Ms,
+            align,
+        );
+        let data = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"data"))
+            .unwrap()
+            + 8;
+        let nibbles = data + 7 * channels;
+        for frame in frames - 2 - 11..frames - 2 {
+            let k = frame * channels;
+            file[nibbles + k / 2] |= if k % 2 == 0 { 0x80 } else { 0x08 };
+        }
+        file[data + align - 1] |= 0x08;
+        let decoded = std::panic::catch_unwind(|| {
+            decode_bytes(file, Some("wav")).map(|song| song.channels[0].len())
+        });
+        assert!(decoded.is_ok(), "a panic");
+        let decoded = decoded.unwrap();
+        assert!(
+            decoded.as_ref().is_ok_and(|got| *got == 2 * frames),
+            "{:?}",
+            decoded.err()
+        );
+    }
+
+    /// Finding 11-1 and missed mutants 11-17, 11-24 and 11-25 of review
+    /// round 11: Microsoft ADPCM of 3 channels of 4, 5, 6 and 499 frames a
+    /// block, with 2 blocks or more, decodes to the encoder of the test.  An
+    /// odd count of frames is the case where Symphonia's mono decoder reads
+    /// a byte less than the block holds.
+    #[test]
+    fn ms_adpcm_of_3_channels_decodes_at_each_block_size() {
+        use crate::test_audio::{WavAdpcm, adpcm_wav_of_blocks};
+        let tone = chirps();
+        let channels: Vec<Vec<f32>> = (0..3)
+            .map(|k| Vec::from(&tone[k % 2][k * 8..k * 8 + 4000]))
+            .collect();
+        for (align, frames) in [(24, 4), (26, 5), (27, 6), (767, 499)] {
+            let case = format!("blocks of {align} bytes, {frames} frames");
+            let (file, want) = adpcm_wav_of_blocks(&channels, 44_100, WavAdpcm::Ms, align);
+            assert!(want[0].len() >= 2 * frames, "{case}: 2 blocks or more");
+            assert_eq!(want[0].len() % frames, 0, "{case}: whole blocks");
+            let got = decode_bytes(file, Some("wav"));
+            assert!(got.is_ok(), "{case}: {:?}", got.err());
+            assert!(got.unwrap().channels == want, "{case}");
+        }
+    }
 }
