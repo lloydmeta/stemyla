@@ -556,3 +556,28 @@ pub fn ima4_aifc(channels: &[Vec<f32>], rate: u32) -> (Vec<u8>, Vec<Vec<f32>>) {
     out.extend_from_slice(&body);
     (out, decoded)
 }
+
+/// `aiff`, an AIFF or AIFC, with its `SSND` chunk moved before `COMM`.
+pub fn with_ssnd_first(aiff: &[u8]) -> Vec<u8> {
+    let chunk_at = |id: &[u8; 4]| {
+        let mut at = 12;
+        loop {
+            let size = u32::from_be_bytes(aiff[at + 4..at + 8].try_into().unwrap()) as usize;
+            let end = at + 8 + size + (size & 1);
+            if aiff[at..at + 4] == *id {
+                return (at, end);
+            }
+            at = end;
+        }
+    };
+    let (ssnd, ssnd_end) = chunk_at(b"SSND");
+    let (comm, _) = chunk_at(b"COMM");
+    assert!(comm < ssnd, "COMM before SSND");
+    [
+        &aiff[..comm],
+        &aiff[ssnd..ssnd_end],
+        &aiff[comm..ssnd],
+        &aiff[ssnd_end..],
+    ]
+    .concat()
+}

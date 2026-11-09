@@ -360,11 +360,17 @@ pub(crate) fn is_aifc_of_other_type(source: &mut dyn ReadAt, at: u64) -> std::io
             if source.read_at(chunk + 8 + 18, &mut kind)? < 4 {
                 return Ok(false);
             }
-            kind.make_ascii_lowercase();
-            return Ok(!AIFC_TYPES.iter().any(|known| **known == kind));
+            return Ok(is_other_aifc_type(&kind));
         }
         chunk += 8 + size + (size & 1);
     }
+}
+
+/// Whether `kind` is an AIFC compression type that Symphonia 0.6.1's AIFF
+/// reader does not map, in either case.
+pub(crate) fn is_other_aifc_type(kind: &[u8]) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    !AIFC_TYPES.iter().any(|known| known[..] == kind[..])
 }
 
 /// The container of a file, which says the one Symphonia reader that the

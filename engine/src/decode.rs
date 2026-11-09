@@ -14,7 +14,7 @@ use std::io::{Cursor, SeekFrom};
 use std::path::Path;
 use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::well_known::{
-    CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3,
+    CODEC_ID_AAC, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_MP3,
 };
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
@@ -408,6 +408,9 @@ fn aiff_length(head: &[u8], file_bytes: u64) -> HeadLength {
     let plain = head.get(8..12) == Some(b"AIFF");
     // The frames, the rate and the bytes of a frame, from `COMM`.
     let mut format: Option<(u64, u32, u64)> = None;
+    // An AIFC of `ima4`: `COMM` counts blocks of 64 frames, each of 34 bytes
+    // for each channel (finding 9-1 of review round 9).
+    let mut ima4 = false;
     // The bytes of samples that the file holds, from `SSND`.
     let mut held: Option<u64> = None;
     let mut at = 12;
@@ -426,7 +429,22 @@ fn aiff_length(head: &[u8], file_bytes: u64) -> HeadLength {
             if rate == 0 || frames == 0 {
                 return HeadLength::UnstatedPcm;
             }
-            format = Some((frames, rate, channels * bits.div_ceil(8)));
+            // The compression type of an AIFC.  Another compressed type than
+            // `ima4` states no frames that the head can count.
+            if !plain {
+                let Some(kind) = head.get(body + 18..body + 22) else {
+                    return HeadLength::UnstatedPcm;
+                };
+                ima4 = kind.eq_ignore_ascii_case(b"ima4");
+                if !ima4 && crate::hidden::is_other_aifc_type(kind) {
+                    return HeadLength::UnstatedPcm;
+                }
+            }
+            format = Some(if ima4 {
+                (frames.saturating_mul(64), rate, channels * 34)
+            } else {
+                (frames, rate, channels * bits.div_ceil(8))
+            });
         } else if id == b"SSND" {
             // The samples start after `offset` and `blockSize`.
             let offset = u64::from(be_u32_at(head, body).unwrap_or(0));
@@ -446,6 +464,7 @@ fn aiff_length(head: &[u8], file_bytes: u64) -> HeadLength {
     };
     let frames = match held {
         Some(held) if plain && block > 0 => frames.min(held / block),
+        Some(held) if ima4 && block > 0 => frames.min(held / block * 64),
         _ => frames,
     };
     HeadLength::Frames(song_frames(frames, rate))
@@ -1230,9 +1249,18 @@ impl Decoder {
             reserve,
             trim,
         } = open_within(source, ext, limit, max_song_frames)?;
-        let codec = symphonia::default::get_codecs()
-            .make_audio_decoder(&params, &AudioDecoderOptions::default())
-            .map_err(|e| anyhow!("no decoder for codec: {e}"))?;
+        let more_than_stereo = params.channels.as_ref().is_some_and(|c| c.count() > 2);
+        let codec: Box<dyn AudioDecoder> =
+            if params.codec == CODEC_ID_ADPCM_IMA_QT && more_than_stereo {
+                Box::new(
+                    crate::ima4::Ima4Channels::new(&params)
+                        .map_err(|e| anyhow!("no decoder for codec: {e}"))?,
+                )
+            } else {
+                symphonia::default::get_codecs()
+                    .make_audio_decoder(&params, &AudioDecoderOptions::default())
+                    .map_err(|e| anyhow!("no decoder for codec: {e}"))?
+            };
         Ok(Decoder {
             format,
             queued,
@@ -1908,6 +1936,11 @@ mod tests {
                 crate::test_m4a::alac_m4a(&tones[0], &tones[1], rate, None, m4a::Order::FastStart)
             }
             "aiff" => crate::test_audio::aiff(&tones, rate, 16, crate::test_audio::Aiff::Plain),
+            "ima4" => {
+                let whole = frames - frames % 64;
+                let tones = [Vec::from(&tones[0][..whole]), Vec::from(&tones[1][..whole])];
+                crate::test_audio::ima4_aifc(&tones, rate).0
+            }
             _ => mp3(&tones, rate),
         }
     }
@@ -1926,6 +1959,16 @@ mod tests {
     #[test]
     fn a_block_decode_keeps_its_memory_flat() {
         block_decode_is_flat_for("wav");
+    }
+
+    /// Finding 9-5 of review round 9: an `ima4` AIFC, whose reader gives
+    /// packets of 64 blocks.
+    #[test]
+    fn a_block_decode_of_ima4_keeps_its_memory_flat() {
+        for rate in [44_100, 48_000] {
+            let (short, long) = (file_of("ima4", 2, rate), file_of("ima4", 60, rate));
+            assert_block_decode_is_flat(short, long, "aiff", &format!("ima4 at {rate} Hz"));
+        }
     }
 
     #[test]
@@ -4917,5 +4960,127 @@ mod tests {
             let held: Vec<&[f32]> = got.channels.iter().map(Vec::as_slice).collect();
             assert!(held == prefix, "{case}");
         }
+    }
+
+    /// Findings 9-1 and 9-7, and missed mutants 9-18, 9-20 and 9-26 of review
+    /// round 9: an `ima4` AIFC with `SSND` before `COMM`, and of 3 and 6
+    /// channels, decodes to the encoder's output.  Its head states the
+    /// frames that it decodes: `COMM` counts blocks of 64 frames.  A rate of 0
+    /// is refused, a partial last block is dropped, and a file cut inside its
+    /// `SSND` offset is refused with the AIFC text.
+    #[test]
+    fn each_ima4_aifc_decodes_and_states_its_length() {
+        use crate::test_audio::{ima4_aifc, with_ssnd_first};
+        let tone = chirps();
+        let frames = 64 * 300;
+        let channel = |k: usize| Vec::from(&tone[k % 2][k * 64..k * 64 + frames]);
+        for rate in [44_100, 48_000] {
+            for count in [1, 2, 3, 6] {
+                let channels: Vec<Vec<f32>> = (0..count).map(channel).collect();
+                let (file, want) = ima4_aifc(&channels, rate);
+                let case = format!("{count} channels at {rate} Hz");
+                assert_eq!(
+                    head_of(&file),
+                    HeadLength::Frames(song_frames(frames as u64, rate)),
+                    "{case}"
+                );
+                for (form, file) in [
+                    ("COMM first", file.clone()),
+                    ("SSND first", with_ssnd_first(&file)),
+                ] {
+                    let got = decode_bytes(file, Some("aiff"));
+                    assert!(got.is_ok(), "{case}, {form}: {:?}", got.err());
+                    assert!(got.unwrap().channels == want, "{case}, {form}");
+                }
+            }
+        }
+        let (file, want) = ima4_aifc(&[channel(0)], 44_100);
+        // A `COMM` that states more blocks than `SSND` holds.
+        let comm = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"COMM"))
+            .unwrap();
+        let mut more = file.clone();
+        more[comm + 10..comm + 14].copy_from_slice(&600_u32.to_be_bytes());
+        assert_eq!(
+            head_of(&more),
+            HeadLength::Frames(song_frames(frames as u64, 44_100)),
+            "more blocks than held"
+        );
+        // 9-18: a rate of 0.
+        let comm = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"COMM"))
+            .unwrap();
+        let mut rate_0 = file.clone();
+        rate_0[comm + 16..comm + 26].copy_from_slice(&[0; 10]);
+        assert!(decode_bytes(rate_0, Some("aiff")).is_err(), "a rate of 0");
+        // 9-20: a partial last block.
+        let ssnd = (0..file.len())
+            .find(|at| file[*at..].starts_with(b"SSND"))
+            .unwrap();
+        let mut partial = [&file[..], &[0x11; 10]].concat();
+        let size = u32::from_be_bytes(partial[ssnd + 4..ssnd + 8].try_into().unwrap()) + 10;
+        partial[ssnd + 4..ssnd + 8].copy_from_slice(&size.to_be_bytes());
+        let form = (partial.len() - 8) as u32;
+        partial[4..8].copy_from_slice(&form.to_be_bytes());
+        let got = decode_bytes(partial, Some("aiff"));
+        assert!(
+            got.is_ok_and(|audio| audio.channels == want),
+            "a partial last block"
+        );
+        // 9-26: cut inside the `SSND` offset.
+        let cut = Vec::from(&file[..ssnd + 10]);
+        assert_refused_early(cut, "aiff", AIFC_COMPRESSED_TEXT, "cut in the SSND offset");
+    }
+
+    /// Finding 9-4 of review round 9: the patches of the `sidx` boxes of a
+    /// seen id with another timescale stop at the kept limit, and the file is
+    /// refused.
+    #[test]
+    fn the_patches_of_sidx_boxes_have_a_bound() {
+        use crate::test_m4a::{bx, same_sidx_boxes};
+        let plain = alac_of(m4a::Order::MoovLast);
+        let other = bx(
+            b"sidx",
+            &[
+                &[0; 4],
+                &1_u32.to_be_bytes(),
+                &2000_u32.to_be_bytes(),
+                &[0; 12],
+            ],
+        );
+        let file = [
+            plain,
+            same_sidx_boxes(crate::hidden::MOST_SMALL + 1),
+            other.repeat(200_000),
+        ]
+        .concat();
+        let found = crate::mp4_boxes::walk(&mut file.as_slice()).ok().flatten();
+        let patches = found.as_ref().map_or(0, |found| found.hidden.patches.len());
+        assert!(
+            found.is_some_and(|found| found.hidden.too_much_kept),
+            "refused"
+        );
+        assert!(
+            patches < 2 * crate::hidden::MOST_SMALL + 10_000,
+            "{patches} patches"
+        );
+        assert_refused_early(file, "m4a", TAGS_TEXT, "200,000 sidx boxes");
+    }
+
+    /// Missed mutant 9-23 of review round 9: a first box with a 64-bit size of
+    /// 32 is an MP4 box; one of 8, under its header of 16, is not.
+    #[test]
+    fn a_first_box_of_a_64_bit_size_must_hold_its_header() {
+        let head = |size: u64| {
+            [
+                &1_u32.to_be_bytes()[..],
+                b"free",
+                &size.to_be_bytes(),
+                &[0x42; 64],
+            ]
+            .concat()
+        };
+        assert_eq!(head_of(&head(32)), HeadLength::UnstatedPcm);
+        assert_eq!(head_of(&head(8)), HeadLength::Unstated);
     }
 }

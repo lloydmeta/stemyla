@@ -9,9 +9,14 @@
 use std::io;
 
 use symphonia::core::audio::layouts::{CHANNEL_LAYOUT_MONO, CHANNEL_LAYOUT_STEREO};
+use symphonia::core::audio::{
+    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels, GenericAudioBufferRef,
+};
+use symphonia::core::codecs::CodecInfo;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::AudioCodecParameters;
 use symphonia::core::codecs::audio::well_known::CODEC_ID_ADPCM_IMA_QT;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions, FinalizeResult};
 use symphonia::core::errors::{Error, Result, SeekErrorKind};
 use symphonia::core::formats::well_known::FORMAT_ID_AIFF;
 use symphonia::core::formats::{
@@ -20,6 +25,7 @@ use symphonia::core::formats::{
 use symphonia::core::io::{MediaSourceStream, ReadBytes};
 use symphonia::core::meta::{ChapterGroup, Metadata, MetadataLog};
 use symphonia::core::packet::Packet;
+use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration, Timestamp};
 
 use crate::mp4_boxes::ReadAt;
@@ -51,16 +57,19 @@ pub(crate) struct Ima4 {
 }
 
 /// The `ima4` layout of the AIFC whose `FORM` starts at `at`, by its `COMM`
-/// and `SSND` chunks.  `None` for an AIFF, another type, more than 2
-/// channels, or a file with no such chunks.
+/// and `SSND` chunks, in either order (finding 9-7 of review round 9).
+/// `None` for an AIFF, another type, a rate of 0, no channel, or a file with
+/// no such chunks.
 pub(crate) fn ima4_of(source: &mut dyn ReadAt, at: u64) -> io::Result<Option<Ima4>> {
     let mut form = [0; 4];
     if source.read_at(at + 8, &mut form)? < 4 || form != *b"AIFC" {
         return Ok(None);
     }
     let mut comm = None;
+    // The start of the blocks, and the bytes that `SSND` states for them.
+    let mut ssnd = None;
     let mut chunk = at + 12;
-    loop {
+    while comm.is_none() || ssnd.is_none() {
         let mut header = [0; 8];
         if source.read_at(chunk, &mut header)? < 8 {
             return Ok(None);
@@ -81,10 +90,10 @@ pub(crate) fn ima4_of(source: &mut dyn ReadAt, at: u64) -> io::Result<Option<Ima
                 }
                 let channels = u16::from_be_bytes([body[0], body[1]]);
                 let rate = rate_of(body[8..18].try_into().unwrap_or([0; 10]));
-                let rate = rate.filter(|rate| *rate > 0);
-                comm = rate
-                    .filter(|_| (1..=2).contains(&channels))
-                    .map(|rate| (channels, rate));
+                let Some(rate) = rate.filter(|rate| *rate > 0 && channels > 0) else {
+                    return Ok(None);
+                };
+                comm = Some((channels, rate));
             }
             b"SSND" => {
                 let mut offset = [0; 4];
@@ -92,22 +101,22 @@ pub(crate) fn ima4_of(source: &mut dyn ReadAt, at: u64) -> io::Result<Option<Ima
                     return Ok(None);
                 }
                 let offset = u64::from(u32::from_be_bytes(offset));
-                let Some((channels, rate)) = comm else {
-                    return Ok(None);
-                };
-                let frame_bytes = BLOCK_BYTES * u64::from(channels);
-                let held = size.saturating_sub(8 + offset);
-                return Ok(Some(Ima4 {
-                    channels,
-                    rate,
-                    data: chunk + 16 + offset,
-                    data_bytes: held - held % frame_bytes,
-                }));
+                ssnd = Some((chunk + 16 + offset, size.saturating_sub(8 + offset)));
             }
             _ => {}
         }
         chunk += 8 + size + (size & 1);
     }
+    let (Some((channels, rate)), Some((data, held))) = (comm, ssnd) else {
+        return Ok(None);
+    };
+    let frame_bytes = BLOCK_BYTES * u64::from(channels);
+    Ok(Some(Ima4 {
+        channels,
+        rate,
+        data,
+        data_bytes: held - held % frame_bytes,
+    }))
 }
 
 /// The rate of an 80-bit IEEE extended number (the `COMM` rate of AIFF),
@@ -151,10 +160,10 @@ impl Ima4Reader {
         params
             .for_codec(CODEC_ID_ADPCM_IMA_QT)
             .with_sample_rate(layout.rate)
-            .with_channels(if layout.channels == 2 {
-                CHANNEL_LAYOUT_STEREO
-            } else {
-                CHANNEL_LAYOUT_MONO
+            .with_channels(match layout.channels {
+                1 => CHANNEL_LAYOUT_MONO,
+                2 => CHANNEL_LAYOUT_STEREO,
+                count => Channels::Discrete(count),
             })
             .with_frames_per_block(BLOCK_FRAMES)
             .with_max_frames_per_packet(PACKET_BLOCKS * BLOCK_FRAMES);
@@ -220,6 +229,89 @@ impl FormatReader for Ima4Reader {
     }
 }
 
+/// A decoder of `ima4` of more than 2 channels, which Symphonia's ADPCM
+/// decoder refuses (finding 9-7 of review round 9).  The blocks of each
+/// channel stand alone, so it gives the blocks of each channel to its own
+/// mono decoder of Symphonia, and puts the channels side by side.
+pub(crate) struct Ima4Channels {
+    params: AudioCodecParameters,
+    channels: Vec<Box<dyn AudioDecoder>>,
+    /// The blocks of one channel of a packet.
+    blocks: Vec<u8>,
+    /// The samples of one channel.
+    plane: Vec<Vec<i32>>,
+    buf: AudioBuffer<i32>,
+}
+
+impl Ima4Channels {
+    pub(crate) fn new(params: &AudioCodecParameters) -> Result<Self> {
+        let count = params.channels.as_ref().map_or(0, Channels::count);
+        let rate = params.sample_rate.unwrap_or(0);
+        let mut mono = params.clone();
+        mono.with_channels(CHANNEL_LAYOUT_MONO);
+        let channels = (0..count)
+            .map(|_| {
+                symphonia::default::get_codecs()
+                    .make_audio_decoder(&mono, &AudioDecoderOptions::default())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let spec = AudioSpec::new(rate, Channels::Discrete(count as u16));
+        Ok(Ima4Channels {
+            params: params.clone(),
+            channels,
+            blocks: Vec::new(),
+            plane: Vec::new(),
+            buf: AudioBuffer::new(spec, (PACKET_BLOCKS * BLOCK_FRAMES) as usize),
+        })
+    }
+}
+
+impl AudioDecoder for Ima4Channels {
+    fn reset(&mut self) {
+        self.channels.iter_mut().for_each(|channel| channel.reset());
+    }
+
+    fn codec_info(&self) -> &CodecInfo {
+        self.channels[0].codec_info()
+    }
+
+    fn codec_params(&self) -> &AudioCodecParameters {
+        &self.params
+    }
+
+    fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
+        let count = self.channels.len();
+        let block = BLOCK_BYTES as usize;
+        let frames = packet.data.len() / (block * count) * BLOCK_FRAMES as usize;
+        self.buf.clear();
+        self.buf.render_uninit(Some(frames));
+        for (index, channel) in self.channels.iter_mut().enumerate() {
+            self.blocks.clear();
+            for frame in packet.data.chunks_exact(block * count) {
+                self.blocks
+                    .extend_from_slice(&frame[index * block..(index + 1) * block]);
+            }
+            let mono = PacketRef::new(0, packet.pts, packet.dur, &self.blocks);
+            channel
+                .decode_ref(&mono)?
+                .copy_to_vecs_planar::<i32>(&mut self.plane);
+            if let (Some(plane), Some(samples)) = (self.buf.plane_mut(index), self.plane.first()) {
+                let len = plane.len().min(samples.len());
+                plane[..len].copy_from_slice(&samples[..len]);
+            }
+        }
+        Ok(self.buf.as_generic_audio_buffer_ref())
+    }
+
+    fn finalize(&mut self) -> FinalizeResult {
+        FinalizeResult::default()
+    }
+
+    fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
+        self.buf.as_generic_audio_buffer_ref()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +330,35 @@ mod tests {
             None,
             "too large"
         );
+    }
+
+    /// Finding 9-5 of review round 9: a packet holds at most
+    /// `PACKET_BLOCKS` blocks of each channel.
+    #[test]
+    fn a_packet_holds_at_most_64_blocks_of_each_channel() {
+        use crate::test_audio::ima4_aifc;
+        let tone: Vec<f32> = (0..64 * 200)
+            .map(|i| (i as f32 * 0.01).sin() * 0.5)
+            .collect();
+        for count in [1, 2, 3] {
+            let (file, _) = ima4_aifc(&vec![tone.clone(); count], 44_100);
+            let layout = ima4_of(&mut file.as_slice(), 0).ok().flatten();
+            assert!(layout.is_some(), "{count} channels");
+            let layout = layout.unwrap();
+            let mss =
+                MediaSourceStream::new(Box::new(std::io::Cursor::new(file)), Default::default());
+            let mut reader = Ima4Reader::new(mss, layout, 0).expect("the reader");
+            let most = (PACKET_BLOCKS * BLOCK_BYTES) as usize * count;
+            let mut blocks = 0;
+            while let Ok(Some(packet)) = reader.next_packet() {
+                assert!(
+                    packet.data.len() <= most,
+                    "{count} channels: {}",
+                    packet.data.len()
+                );
+                blocks += packet.data.len() / (34 * count);
+            }
+            assert_eq!(blocks, 200, "{count} channels");
+        }
     }
 }

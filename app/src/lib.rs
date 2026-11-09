@@ -6285,6 +6285,57 @@ mod tests {
         head
     }
 
+    /// The head of a stereo `ima4` AIFC of `blocks` blocks of 64 frames at
+    /// `rate`, and the size of its file: 34 bytes for each block of each
+    /// channel.
+    fn ima4_head(rate: u32, blocks: u32) -> (Vec<u8>, u64) {
+        let zeros = u64::from(rate).leading_zeros();
+        let exponent = (16_383 + 63 - zeros) as u16;
+        let mantissa = u64::from(rate) << zeros;
+        let mut comm = Vec::from(2_u16.to_be_bytes());
+        comm.extend_from_slice(&blocks.to_be_bytes());
+        comm.extend_from_slice(&16_u16.to_be_bytes());
+        comm.extend_from_slice(&exponent.to_be_bytes());
+        comm.extend_from_slice(&mantissa.to_be_bytes());
+        comm.extend_from_slice(b"ima4");
+        comm.extend_from_slice(&[0, 0]);
+        let data = u64::from(blocks) * 34 * 2;
+        let mut head = Vec::from(*b"FORM");
+        let form_at = head.len();
+        head.extend_from_slice(&[0; 4]);
+        head.extend_from_slice(b"AIFC");
+        head.extend_from_slice(b"COMM");
+        head.extend_from_slice(&(comm.len() as u32).to_be_bytes());
+        head.extend_from_slice(&comm);
+        head.extend_from_slice(b"SSND");
+        head.extend_from_slice(&((data + 8) as u32).to_be_bytes());
+        head.extend_from_slice(&[0; 8]);
+        let bytes = head.len() as u64 + data;
+        head[form_at..form_at + 4].copy_from_slice(&((bytes - 8) as u32).to_be_bytes());
+        (head, bytes)
+    }
+
+    /// Finding 9-1 of review round 9: the `COMM` of an `ima4` AIFC counts
+    /// blocks of 64 frames.  A song of 6 minutes of 96 kHz stereo `ima4`
+    /// passes the heads under a limit of 7 minutes, and one of 8 minutes is
+    /// refused for its stated length.
+    #[test]
+    fn the_heads_count_the_frames_of_an_ima4_aifc() {
+        let limit = 7 * 60 * 44_100;
+        let file = |minutes: u32| {
+            let (head, bytes) = ima4_head(96_000, minutes * 60 * 96_000 / 64);
+            ("lloyd.aifc".to_string(), head, bytes)
+        };
+        assert_eq!(refusal_of_heads(&[file(6)], limit), None, "6 minutes");
+        assert_eq!(
+            refusal_of_heads(&[file(8)], limit),
+            Some(TooLongToOpen::Stated {
+                frames: 8 * 60 * 44_100
+            }),
+            "8 minutes"
+        );
+    }
+
     /// D3 of the catch-up plan: the page refuses a song before it reads a
     /// whole file, from the head of each file.  A WAV or FLAC states its
     /// length; a file that states none is refused when it is larger than

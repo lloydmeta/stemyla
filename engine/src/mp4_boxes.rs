@@ -371,12 +371,13 @@ impl Walker<'_> {
         // timescale for an id (`demuxer.rs`, line 197), so a `sidx` of a
         // seen id with another timescale is hidden all the same (B of
         // review round 8).  Past the kept limit the file is refused, so the
-        // map stays small.
+        // map and the patches stay small (finding 9-4 of review round 9).
+        if self.found.hidden.too_much_kept {
+            return Ok(());
+        }
         if seen.is_some() {
             self.found.hidden.patch(found.start + 4, b"free");
-        } else if !self.found.hidden.too_much_kept
-            && let (Some(id), Some(scale)) = (id, scale)
-        {
+        } else if let (Some(id), Some(scale)) = (id, scale) {
             self.seen_sidx.insert(id, scale);
         }
         Ok(())
