@@ -20,7 +20,7 @@
 //!   reads them.
 
 use crate::mp4_boxes::{MOST_BOX_BYTES, PROTECTED_ENTRIES};
-use crate::tag_stream::{Refusal, Rule};
+use crate::tag_stream::{Insert, Refusal, Rule};
 
 /// The bound of the tables of `moov` that Symphonia holds, for a stream:
 /// the stream cannot read the duration of the sound track first, so the
@@ -42,38 +42,91 @@ pub(crate) struct Mp4 {
     /// The handler and the first sample entry of the open `trak`.
     handler: Option<[u8; 4]>,
     entry: Option<[u8; 4]>,
-    /// The bytes of the leading ID3v2 tags that the stream read past.
-    dropped: u64,
-    /// The first chunk offset of the first sound track.
+    /// The bytes before the MP4 start: the leading ID3v2 tags that the
+    /// stream read past, then other bytes, which the decode reads past.
+    tags: u64,
+    junk: u64,
+    /// The first chunk offset of the open `trak`, and of the first sound
+    /// track, as the walk takes them (`mp4_boxes::Walker::trak`).
+    trak_chunk: Option<u64>,
     first_chunk: Option<u64>,
+    sound_seen: bool,
+    /// The bytes to put before the first chunk, for [`Rule::insert`].
+    insert: Option<Insert>,
 }
 
 impl Mp4 {
-    /// The rule of an MP4 stream after `dropped` bytes of leading ID3v2
-    /// tags.
-    pub(crate) fn behind(dropped: u64) -> Self {
+    /// The rule of an MP4 stream after `tags` bytes of leading ID3v2 tags,
+    /// then `junk` other bytes, before the MP4 start.
+    pub(crate) fn behind(tags: u64, junk: u64) -> Self {
         Mp4 {
-            dropped,
+            tags,
+            junk,
             ..Mp4::default()
         }
     }
 
-    /// Refuses the first `mdat`, from `body` to `end`, when the first chunk
-    /// offset counts from the start of the leading tags.  The stream read
-    /// past them, so Symphonia's positions count from the MP4 start, as
-    /// the view of a file that can seek does after a tag.  The rule of
-    /// `decode::counts_from_mp4_start` decides, with the positions of the
-    /// file (TD-89, closed by review round 13).
-    fn check_offsets(&self, body: u64, end: u64) -> std::io::Result<()> {
-        let Some(chunk) = self.first_chunk.filter(|_| self.dropped > 0) else {
-            return Ok(());
-        };
-        let bodies = [(body + self.dropped, end.saturating_add(self.dropped))];
-        if crate::decode::counts_from_mp4_start(chunk, self.dropped, &bodies) {
-            return Ok(());
+    /// Keeps the first chunk of the `trak` that ends, if it is the first
+    /// sound track.
+    fn end_trak(&mut self) {
+        if self.handler == Some(*b"soun") && !self.sound_seen {
+            self.sound_seen = true;
+            self.first_chunk = self.trak_chunk;
         }
-        Err(Refusal::Id3Offsets.error())
     }
+
+    /// The first `mdat` of the stream, from `at` with a header of `head`
+    /// bytes and a body to `end`.  The positions of the stream count from
+    /// the MP4 start.  When the chunk offsets count from before it, from
+    /// the file start or from the end of the tags as `decode::offsets_base`
+    /// chooses, the stream gives the bytes that they count past just
+    /// before the first chunk (findings 14-3 and 14-4 of review round 14).
+    /// * 8 bytes or more: a `free` box before `mdat`.
+    /// * Fewer: zeros after the header of `mdat`, whose size grows to hold
+    ///   them.  A size of 32 bits that cannot grow shows as 0, to the end.
+    fn first_mdat(&mut self, at: u64, head: usize, end: u64, header: &mut [u8]) {
+        let Some(chunk) = self.first_chunk else {
+            return;
+        };
+        // The file positions of the MP4 start, of the end of the tags, and
+        // of the body of `mdat`.  `at` counts from the end of the tags.
+        let start = self.tags + self.junk;
+        let body = (self.tags + at + head as u64, end.saturating_add(self.tags));
+        let base = crate::decode::offsets_base(chunk, &[start, self.tags, 0], &[body]);
+        let missing = start - base;
+        self.insert = match missing {
+            0 => None,
+            8.. => {
+                let (header, head) = free_header(missing);
+                Some(Insert {
+                    at,
+                    header,
+                    head,
+                    zeros: missing - head as u64,
+                })
+            }
+            _ => {
+                match u32::from_be_bytes(header[..4].try_into().unwrap_or_default()) {
+                    0 => {}
+                    1 => {
+                        let size = u64::from_be_bytes(header[8..16].try_into().unwrap_or_default());
+                        header[8..16].copy_from_slice(&size.saturating_add(missing).to_be_bytes());
+                    }
+                    size => {
+                        let grown = u32::try_from(u64::from(size) + missing).unwrap_or(0);
+                        header[..4].copy_from_slice(&grown.to_be_bytes());
+                    }
+                }
+                Some(Insert {
+                    at: at + head as u64,
+                    header: [0; 16],
+                    head: 0,
+                    zeros: missing,
+                })
+            }
+        };
+    }
+
     fn hold(&mut self, size: u64) -> std::io::Result<()> {
         self.held = self.held.saturating_add(size);
         if self.held > most_held() {
@@ -95,19 +148,43 @@ impl Mp4 {
     }
 }
 
+/// The header of a `free` box of `len` bytes, at least 8, and its length:
+/// 8 bytes, or 16 with a size of 64 bits past `u32::MAX`.
+pub(crate) fn free_header(len: u64) -> ([u8; 16], usize) {
+    let mut header = [0; 16];
+    header[4..8].copy_from_slice(b"free");
+    match u32::try_from(len) {
+        Ok(size) => {
+            header[..4].copy_from_slice(&size.to_be_bytes());
+            (header, 8)
+        }
+        Err(_) => {
+            header[..4].copy_from_slice(&1_u32.to_be_bytes());
+            header[8..].copy_from_slice(&len.to_be_bytes());
+            (header, 16)
+        }
+    }
+}
+
 /// The 4 bytes at `at` of `bytes`, if it holds them.
 fn four(bytes: &[u8], at: usize) -> Option<[u8; 4]> {
     bytes.get(at..at + 4)?.try_into().ok()
 }
 
 impl Rule for Mp4 {
+    fn insert(&mut self) -> Option<Insert> {
+        self.insert.take()
+    }
+
     /// The size, the type, a size of 64 bits, and the body fields that the
     /// rules read: up to the timescale of an `mvhd` of version 1.
     const HEADER: usize = 40;
 
     fn change(&mut self, at: u64, header: &mut [u8]) -> std::io::Result<Option<u64>> {
         while self.open.last().is_some_and(|(_, end)| *end <= at) {
-            self.open.pop();
+            if self.open.pop().is_some_and(|(kind, _)| kind == *b"trak") {
+                self.end_trak();
+            }
         }
         // Each child stays inside its parent, as Symphonia's `next_header`
         // keeps it (`atoms/mod.rs`, lines 640 to 697; finding 14-1 of review
@@ -137,7 +214,7 @@ impl Rule for Mp4 {
         match (self.open.last().map(|(kind, _)| kind), &kind) {
             (None, b"mdat" | b"moof") if !self.moov => return Err(Refusal::MoovLast.error()),
             (None, b"mdat") => {
-                self.check_offsets(at + head as u64, end)?;
+                self.first_mdat(at, head, end, header);
                 return Ok(None);
             }
             (None, b"moof") => return Ok(None),
@@ -167,7 +244,7 @@ impl Rule for Mp4 {
             }
             (Some(b"moov"), b"mvex") | (Some(b"trak"), b"tkhd" | b"edts") => self.hold(size)?,
             (Some(b"moov"), b"trak") => {
-                (self.handler, self.entry) = (None, None);
+                (self.handler, self.entry, self.trak_chunk) = (None, None, None);
                 follow = true;
             }
             (Some(b"trak"), b"mdia") => {
@@ -184,11 +261,11 @@ impl Rule for Mp4 {
                 self.check()?;
             }
             // The version and flags, the count, then the first entry.
-            (Some(b"stbl"), b"stco" | b"co64")
-                if self.handler == Some(*b"soun") && self.first_chunk.is_none() =>
-            {
+            // The version and flags, the count, then the first entry.  The
+            // last of them in a `trak` is the one, as in the walk.
+            (Some(b"stbl"), b"stco" | b"co64") => {
                 let count = field(4).map_or(0, u32::from_be_bytes);
-                self.first_chunk = match (&kind, field(8), field(12)) {
+                self.trak_chunk = match (&kind, field(8), field(12)) {
                     (b"stco", Some(first), _) => Some(u64::from(u32::from_be_bytes(first))),
                     (_, Some(high), Some(low)) => Some(
                         u64::from(u32::from_be_bytes(high)) << 32
@@ -259,5 +336,98 @@ mod tests {
         // The timescale of 0 of the `mvhd` shows as 1000.
         want[moov + 8 + 8 + 12..moov + 8 + 8 + 16].copy_from_slice(&1000_u32.to_be_bytes());
         assert!(out == want, "the head");
+    }
+
+    /// Finding 14-3 of review round 14: the header of a `free` box of 10
+    /// bytes, of `u32::MAX` bytes, and of one byte more, of 64 bits.
+    #[test]
+    fn the_free_box_has_a_header_of_its_length() {
+        let (ten, head) = free_header(10);
+        assert_eq!(
+            (&ten[..head], head),
+            (&[0, 0, 0, 10, b'f', b'r', b'e', b'e'][..], 8)
+        );
+        let (most, head) = free_header(u64::from(u32::MAX));
+        assert_eq!(
+            (&most[..head], head),
+            (&[0xFF, 0xFF, 0xFF, 0xFF, b'f', b'r', b'e', b'e'][..], 8)
+        );
+        let more = u64::from(u32::MAX) + 1;
+        let (large, head) = free_header(more);
+        let want = [&1_u32.to_be_bytes()[..], b"free", &more.to_be_bytes()].concat();
+        assert_eq!((&large[..head], head), (&want[..], 16));
+    }
+
+    /// A small MP4 behind `tags` bytes of tags, its first chunk at `first`
+    /// in a `co64` or an `stco`, and its first `mdat` at the end.
+    fn head_of(first: u64, co64: bool) -> Vec<u8> {
+        let hdlr = bx(b"hdlr", &[&[0; 8], b"soun", &[0; 12]]);
+        let offsets = if co64 {
+            bx(
+                b"co64",
+                &[&[0; 4], &1_u32.to_be_bytes(), &first.to_be_bytes()],
+            )
+        } else {
+            bx(
+                b"stco",
+                &[&[0; 4], &1_u32.to_be_bytes(), &(first as u32).to_be_bytes()],
+            )
+        };
+        let stbl = bx(b"stbl", &[&offsets]);
+        let mdia = bx(b"mdia", &[&hdlr, &bx(b"minf", &[&stbl])]);
+        let moov = bx(b"moov", &[&bx(b"trak", &[&mdia])]);
+        [
+            bx(b"ftyp", &[b"M4A ", &[0; 4]]),
+            moov,
+            bx(b"mdat", &[b"beachape"]),
+        ]
+        .concat()
+    }
+
+    /// Reads `file` through the rule of a stream behind `tags` bytes, 1 byte
+    /// at a time.
+    fn through(file: &[u8], tags: u64) -> (Vec<u8>, Option<u64>) {
+        let source = Box::new(ReadOnlySource::new(OneByte(Cursor::new(file.to_owned()))));
+        let mut stream = TagStream::new(source, Mp4::behind(tags, 0), 0);
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).unwrap();
+        (out, stream.rule().first_chunk)
+    }
+
+    /// Findings 14-3, 14-20 and 14-23 of review round 14: behind 100 bytes
+    /// of tags, with its first chunk at the start of the body of `mdat`
+    /// counted from the file start, a `free` box of 100 bytes comes just
+    /// before `mdat`, with reads of 1 byte.  An `stco` and a `co64` give
+    /// the same, and a `co64` past 4 GiB gives its 64 bits.
+    #[test]
+    fn the_free_box_comes_just_before_the_first_mdat() {
+        let tags = 100;
+        for co64 in [false, true] {
+            let probe = head_of(0, co64);
+            let mdat = probe.len() - 16;
+            let file = head_of(tags + mdat as u64 + 8, co64);
+            let (out, first) = through(&file, tags);
+            assert_eq!(
+                first,
+                Some(tags + mdat as u64 + 8),
+                "co64 {co64}: the first chunk"
+            );
+            let free = [
+                &(tags as u32).to_be_bytes()[..],
+                b"free",
+                &vec![0; tags as usize - 8],
+            ]
+            .concat();
+            let want = [&file[..mdat], &free, &file[mdat..]].concat();
+            assert!(out == want, "co64 {co64}: the bytes");
+            let (out, _) = through(&head_of(mdat as u64 + 8, co64), tags);
+            assert!(
+                out == head_of(mdat as u64 + 8, co64),
+                "co64 {co64}: from the MP4 start, no box"
+            );
+        }
+        let past = (1_u64 << 32) + 8;
+        let (_, first) = through(&head_of(past, true), tags);
+        assert_eq!(first, Some(past), "a co64 past 4 GiB");
     }
 }

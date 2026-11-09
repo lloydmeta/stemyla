@@ -35,6 +35,28 @@ pub(crate) trait Rule {
     /// bytes, or fewer at the end of the stream.  Gives where the next
     /// header starts, or `None` when Symphonia reads no more headers.
     fn change(&mut self, at: u64, header: &mut [u8]) -> std::io::Result<Option<u64>>;
+
+    /// Bytes that the last [`Rule::change`] puts in the stream.
+    fn insert(&mut self) -> Option<Insert> {
+        None
+    }
+}
+
+/// Bytes that a rule puts in the stream before the byte at `at`: `head`
+/// bytes of `header`, then `zeros` bytes of 0, which the reads make as
+/// they give them, with no buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Insert {
+    pub(crate) at: u64,
+    pub(crate) header: [u8; 16],
+    pub(crate) head: usize,
+    pub(crate) zeros: u64,
+}
+
+impl Insert {
+    fn len(&self) -> u64 {
+        self.head as u64 + self.zeros
+    }
 }
 
 /// A source that cannot seek, which changes its headers by `R` as they
@@ -56,6 +78,8 @@ pub(crate) struct TagStream<R> {
     /// reads.
     next: Option<u64>,
     ended: bool,
+    /// The bytes that a rule puts at `ready`, with how many the reads gave.
+    insert: Option<(Insert, u64)>,
 }
 
 impl<R: Rule> TagStream<R> {
@@ -70,7 +94,14 @@ impl<R: Rule> TagStream<R> {
             at: 0,
             next: Some(first),
             ended: false,
+            insert: None,
         }
+    }
+
+    /// The rule, as the bytes so far left it.
+    #[cfg(test)]
+    pub(crate) fn rule(&self) -> &R {
+        &self.rule
     }
 
     /// Reads into the free room of `stage`, at most `STAGE + HEADER` bytes.
@@ -91,7 +122,7 @@ impl<R: Rule> TagStream<R> {
         self.at += self.ready as u64;
         self.given = 0;
         self.ready = 0;
-        while self.ready == 0 && !(self.ended && self.stage.is_empty()) {
+        while self.ready == 0 && self.insert.is_none() && !(self.ended && self.stage.is_empty()) {
             self.fill()?;
             self.ready = self.change_whole()?;
         }
@@ -115,6 +146,12 @@ impl<R: Rule> TagStream<R> {
             }
             let to = self.stage.len().min(from + R::HEADER);
             self.next = self.rule.change(next, &mut self.stage[from..to])?;
+            if let Some(insert) = self.rule.insert() {
+                self.insert = Some((insert, 0));
+                return Ok(usize::try_from(insert.at - self.at)
+                    .unwrap_or(usize::MAX)
+                    .min(self.stage.len()));
+            }
         }
         Ok(self.stage.len())
     }
@@ -141,9 +178,6 @@ pub(crate) enum Refusal {
     Moov,
     /// An MP4 whose `mdat` or `moof` comes before its `moov`.
     MoovLast,
-    /// An MP4 behind a leading ID3v2 tag whose chunk offsets count from the
-    /// start of the tag, which the stream read past.
-    Id3Offsets,
 }
 
 impl std::fmt::Display for Refusal {
@@ -216,14 +250,40 @@ impl Rule for Chunks {
 
 impl<R: Rule> Read for TagStream<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.given == self.ready {
+        loop {
+            if self.given < self.ready {
+                let staged = &self.stage[self.given..self.ready];
+                let len = staged.len().min(buf.len());
+                buf[..len].copy_from_slice(&staged[..len]);
+                self.given += len;
+                return Ok(len);
+            }
+            if let Some((insert, given)) = self.insert.as_mut() {
+                if *given < insert.len() {
+                    let len = usize::try_from(insert.len() - *given)
+                        .unwrap_or(usize::MAX)
+                        .min(buf.len());
+                    for (k, byte) in buf[..len].iter_mut().enumerate() {
+                        let at = *given + k as u64;
+                        let in_head = at < insert.head as u64;
+                        *byte = if in_head {
+                            insert.header[at as usize]
+                        } else {
+                            0
+                        };
+                    }
+                    *given += len as u64;
+                    return Ok(len);
+                }
+                self.insert = None;
+                self.ready = self.change_whole()?;
+                continue;
+            }
             self.stage_next()?;
+            if self.given == self.ready && self.insert.is_none() {
+                return Ok(0);
+            }
         }
-        let staged = &self.stage[self.given..self.ready];
-        let len = staged.len().min(buf.len());
-        buf[..len].copy_from_slice(&staged[..len]);
-        self.given += len;
-        Ok(len)
     }
 }
 
@@ -259,7 +319,7 @@ pub(crate) fn stream_of(
         Container::Flac => Box::new(TagStream::new(source, Chunks::Flac, at + 4)),
         Container::Mp4 => Box::new(TagStream::new(
             source,
-            crate::mp4_stream::Mp4::behind(dropped),
+            crate::mp4_stream::Mp4::behind(dropped, at),
             at,
         )),
         _ => source,

@@ -170,11 +170,6 @@ pub const MS_ADPCM_TEXT: &str =
 /// refuses the same blocks (`codec_ima_wav.rs`, line 47).
 pub const IMA_BLOCKS_TEXT: &str = "This WAV file holds IMA ADPCM in blocks of a size that the format does not allow.  Open another file.";
 
-/// The text of an M4A stream behind a leading ID3v2 tag whose chunk
-/// offsets count from the start of the tag (TD-89, closed by review round
-/// 13).
-pub const ID3_OFFSETS_TEXT: &str = "This M4A file has an ID3v2 tag at its start, and its index counts from the start of the tag.  So it does not open from this source.  Open it from a file.";
-
 /// The text of an M4A from a source that cannot seek whose `moov` comes
 /// after its `mdat`.
 pub const MOOV_LAST_TEXT: &str = "This M4A file holds its index (its moov box) after its audio, so it does not open from this source.  Open it from a file.";
@@ -878,11 +873,9 @@ fn open_within(
             return Err(anyhow!(MOOV_TEXT));
         }
     }
-    // An MP4 behind other bytes: where its chunk offsets count from.  The
-    // leading ID3v2 tags count as such bytes too (part 4 of review round
-    // 13), so the choice runs from the start of the file.
+    // An MP4 behind other bytes, tags or junk: where its chunk offsets
+    // count from (B1 of review round 7, finding 14-4 of review round 14).
     let (view, late) = match &boxes {
-        Some(found) if reader_at == view => mp4_view(found, 0, reader_at),
         Some(found) => mp4_view(found, view, reader_at),
         None => (view, None),
     };
@@ -951,6 +944,17 @@ fn open_within(
             Box::new(crate::adts_split::SplitSource::new(source, left)),
             0,
         )
+    } else if container == Container::Mp4 && !is_seekable {
+        // The positions of a stream count from the MP4 start, and
+        // `mp4_stream` shows the bytes that its offsets count past before the
+        // first `mdat` (findings 14-3 and 14-4 of review round 14).
+        use std::io::Read;
+        let mut source = source;
+        std::io::copy(&mut (&mut source).take(skip), &mut std::io::sink()).map_err(|e| {
+            refused_channels(&e)
+                .unwrap_or_else(|| anyhow!(e).context("reading the start of the file"))
+        })?;
+        (source, 0)
     } else {
         (source, skip)
     };
@@ -1105,57 +1109,61 @@ fn mend_mp4(found: &Found, byte_len: Option<u64>, plan: &mut crate::hidden::Plan
 }
 
 /// Where Symphonia's view of an MP4 starts, when other bytes come before
-/// it in the view that starts at `view`, and its reader starts at
-/// `reader_at` (B1 of review round 7).  Symphonia takes each chunk offset
-/// as a position in its stream.
-///
-/// An MP4 right after leading ID3v2 tags comes here with a `view` of 0:
-/// the tags are the other bytes (part 4 of review round 13).
+/// it: leading ID3v2 tags up to `view`, then other bytes up to the start
+/// of its reader at `reader_at` (B1 of review round 7, finding 14-4 of
+/// review round 14).  Symphonia takes each chunk offset as a position in
+/// its stream, and the offsets can count from the file start, from the end
+/// of the tags, or from the MP4 start: [`offsets_base`] chooses.
 ///
 /// * When the offsets count from the MP4 start, the view starts there.
-/// * Else they count from `view`, and the view stays.  When `moov` is last,
+/// * Else the view starts where they count from.  When `moov` is last,
 ///   Symphonia's MP4 reader walks the top-level boxes again from the start
 ///   of its stream (`demuxer.rs`, line 257), where the other bytes are not
 ///   a box.  So the view shows a `free` box from its start to the first
 ///   `mdat` or `moof`, after that seek only: the reader's first walk starts
 ///   at `reader_at`, inside that box.  It gives the size of that box.
 fn mp4_view(found: &Found, view: u64, reader_at: u64) -> (u64, Option<u32>) {
-    let before = reader_at.saturating_sub(view);
-    if before == 0 {
-        return (view, None);
-    }
-    let bodies: Vec<(u64, u64)> = found
-        .mdats
-        .iter()
-        .map(|(body, end)| (body.saturating_sub(view), end.saturating_sub(view)))
-        .collect();
     let first_chunk = found.sound.as_ref().and_then(|sound| sound.first_chunk);
-    let from_mp4 = first_chunk.is_none_or(|chunk| counts_from_mp4_start(chunk, before, &bodies));
-    if from_mp4 {
+    let base = first_chunk.map_or(reader_at, |chunk| {
+        offsets_base(chunk, &[reader_at, view, 0], &found.mdats)
+    });
+    if base == reader_at {
         return (reader_at, None);
     }
     let free = found
         .first_media
-        .and_then(|media| u32::try_from(media.saturating_sub(view)).ok())
+        .and_then(|media| u32::try_from(media.saturating_sub(base)).ok())
         .filter(|size| *size >= 8);
-    (view, free)
+    (base, free)
 }
 
-/// Whether the chunk offsets of an MP4 that starts `before` bytes into its
-/// view count from the MP4 start, by the first offset `chunk` and the
-/// `mdat` bodies (from the start of the view).  The one form that puts the
-/// offset in a body wins.  When both or neither do, the form that puts it
-/// at the start of a body wins, and else the MP4 start, as after an ID3v2
-/// tag.
-pub(crate) fn counts_from_mp4_start(chunk: u64, before: u64, bodies: &[(u64, u64)]) -> bool {
-    let from_mp4 = chunk.saturating_add(before);
-    let inside = |at: u64| bodies.iter().any(|(body, end)| (*body..*end).contains(&at));
-    let at_start = |at: u64| bodies.iter().any(|(body, _)| *body == at);
-    match (inside(from_mp4), inside(chunk)) {
-        (true, false) => true,
-        (false, true) => false,
-        _ => at_start(from_mp4) || !at_start(chunk),
+/// Where the chunk offsets of an MP4 count from: the one of `bases` (file
+/// positions, the MP4 start first) that puts the first offset `chunk` in
+/// an `mdat` body of `bodies` (file positions).  When more than one or none
+/// do, the first of them that puts it at the start of a body wins, and else
+/// the MP4 start.  A file that can seek and a stream take this rule.
+pub(crate) fn offsets_base(chunk: u64, bases: &[u64], bodies: &[(u64, u64)]) -> u64 {
+    let mp4 = bases.first().copied().unwrap_or(0);
+    let position = |base: u64| chunk.checked_add(base);
+    let inside = |base: u64| {
+        position(base)
+            .is_some_and(|at| bodies.iter().any(|(body, end)| (*body..*end).contains(&at)))
+    };
+    let at_start =
+        |base: u64| position(base).is_some_and(|at| bodies.iter().any(|(body, _)| *body == at));
+    let mut inside_bases = bases.iter().copied().filter(|base| inside(*base));
+    if let Some(first) = inside_bases.next()
+        && inside_bases.all(|base| base == first)
+    {
+        return first;
     }
+    let any_inside = bases.iter().any(|base| inside(*base));
+    bases
+        .iter()
+        .copied()
+        .filter(|base| !any_inside || inside(*base))
+        .find(|base| at_start(*base))
+        .unwrap_or(mp4)
 }
 
 /// The packets of the audio track that the HE-AAC check reads.
@@ -1259,7 +1267,6 @@ fn refused_channels(error: &std::io::Error) -> Option<anyhow::Error> {
         Refusal::Protected => anyhow!(PROTECTED_TEXT),
         Refusal::Moov => anyhow!(MOOV_TEXT),
         Refusal::MoovLast => anyhow!(MOOV_LAST_TEXT),
-        Refusal::Id3Offsets => anyhow!(ID3_OFFSETS_TEXT),
     })
 }
 
@@ -4493,26 +4500,26 @@ mod tests {
         // One `mdat` body from 116 to 1000 of the view, the MP4 at 100.
         let bodies = [(116, 1000)];
         assert!(
-            counts_from_mp4_start(16, 100, &bodies),
+            offsets_base(16, &[100, 0], &bodies) == 100,
             "only from the MP4 start"
         );
         assert!(
-            !counts_from_mp4_start(116, 100, &bodies),
+            offsets_base(116, &[100, 0], &bodies) == 0,
             "at a body start from the file start"
         );
         assert!(
-            !counts_from_mp4_start(900, 100, &bodies),
+            offsets_base(900, &[100, 0], &bodies) == 0,
             "only from the file start"
         );
         assert!(
-            counts_from_mp4_start(120, 100, &bodies),
+            offsets_base(120, &[100, 0], &bodies) == 100,
             "inside for both, at no start"
         );
         assert!(
-            counts_from_mp4_start(16, 100, &[(116, 1000), (16, 50)]),
+            offsets_base(16, &[100, 0], &[(116, 1000), (16, 50)]) == 100,
             "both at a start"
         );
-        assert!(counts_from_mp4_start(5000, 100, &bodies), "neither");
+        assert!(offsets_base(5000, &[100, 0], &bodies) == 100, "neither");
     }
 
     /// B6 of review round 7: Symphonia 0.6.1 refuses an SSND block size
@@ -5708,39 +5715,176 @@ mod tests {
         }
     }
 
-    /// TD-89: an M4A behind a leading ID3v2 tag on a stream.  When its chunk
-    /// offsets count from the MP4 start, as the view of a file that can
-    /// seek takes them after a tag, it decodes bit for bit through `Fifo`.
-    /// When they count from the start of the tag, the stream has lost the
-    /// tag bytes before `stco` comes, and it is refused with
-    /// `ID3_OFFSETS_TEXT` (`mp4_stream`).
+    /// `file`, an MP4 with `moov` first, with each entry of each `stco` and
+    /// `co64` moved by `delta`.
+    fn with_offsets_moved(mut file: Vec<u8>, delta: i64) -> Vec<u8> {
+        for (kind, width) in [(b"stco", 4), (b"co64", 8)] {
+            let places = crate::test_m4a::places(&file, kind);
+            for at in places {
+                // After the type: the version and flags, the count, the entries.
+                let body = at + 4;
+                let count =
+                    u32::from_be_bytes(file[body + 4..body + 8].try_into().unwrap()) as usize;
+                for k in 0..count {
+                    let entry = body + 8 + width * k;
+                    let mut bytes = [0; 8];
+                    bytes[8 - width..].copy_from_slice(&file[entry..entry + width]);
+                    let moved = (u64::from_be_bytes(bytes) as i64 + delta) as u64;
+                    file[entry..entry + width].copy_from_slice(&moved.to_be_bytes()[8 - width..]);
+                }
+            }
+        }
+        file
+    }
+
+    /// `file`, an MP4 with `moov` first and one `stco`, with a `co64` of the
+    /// same offsets in its place.
+    fn with_co64(file: &[u8]) -> Vec<u8> {
+        use crate::test_m4a::{bx, child_box, top_box};
+        let (moov, _) = top_box(file, b"moov");
+        let (trak, _) = child_box(file, moov, b"trak");
+        let (mdia, _) = child_box(file, trak, b"mdia");
+        let (minf, _) = child_box(file, mdia, b"minf");
+        let (stbl, _) = child_box(file, minf, b"stbl");
+        let (stco, size) = child_box(file, stbl, b"stco");
+        let count = u32::from_be_bytes(file[stco + 12..stco + 16].try_into().unwrap());
+        let entries: Vec<u8> = (0..count as usize)
+            .flat_map(|k| {
+                let at = stco + 16 + 4 * k;
+                u64::from(u32::from_be_bytes(file[at..at + 4].try_into().unwrap())).to_be_bytes()
+            })
+            .collect();
+        let co64 = bx(b"co64", &[&[0; 4], &count.to_be_bytes(), &entries]);
+        let grow = co64.len() - size;
+        let mut out = [&file[..stco], &co64, &file[stco + size..]].concat();
+        for at in [moov, trak, mdia, minf, stbl] {
+            let old = u32::from_be_bytes(out[at..at + 4].try_into().unwrap());
+            out[at..at + 4].copy_from_slice(&(old + grow as u32).to_be_bytes());
+        }
+        with_offsets_moved(out, grow as i64)
+    }
+
+    /// Finding 14-4 of review round 14, and the free box of 14-3: an M4A
+    /// behind other bytes (leading ID3v2 tags, then junk) whose chunk
+    /// offsets count from the file start, from the end of the tags, or from
+    /// the MP4 start.  The rule of `mp4_view` chooses, for a file that can
+    /// seek and for a stream.  On a stream, `mp4_stream` shows a `free` box,
+    /// or a longer `mdat` for fewer than 8 bytes, before the first chunk.
+    /// ALAC and AAC with `moov` first decode bit for bit in each form, from
+    /// a file and through `Fifo`, the stream within 1 MiB of the plain
+    /// stream.  A `co64` (14-20), an `stco` of count 0 before the real one
+    /// (14-11) and a second sound track (14-13) take the same rule.
     #[test]
-    fn an_m4a_stream_behind_a_tag_checks_where_its_offsets_count_from() {
+    fn an_m4a_behind_tags_and_junk_opens_wherever_its_offsets_count_from() {
         use crate::test_audio::id3_tag;
-        use crate::test_m4a::{aac_m4a, with_stco_moved};
+        use crate::test_m4a::{aac_m4a, bx, child_box, top_box};
         let alac = alac_of(m4a::Order::FastStart);
         let aac = aac_m4a(&short_tone(), 44_100, None, None, m4a::Order::FastStart);
+        let junk = |bytes: usize| vec![b'j'; bytes];
         for (kind, plain) in [("ALAC", alac), ("AAC", aac)] {
             let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
-            for bytes in [100, 2 << 20] {
-                let tag = id3_tag(bytes);
-                let case = format!("{kind} after a tag of {bytes} bytes");
-                let from_mp4 = [tag.clone(), plain.clone()].concat();
-                let (_, got) = stream_peak(from_mp4, "m4a");
-                assert!(got.is_ok(), "{case}: {:?}", got.err());
-                assert!(got.unwrap() == want, "{case}: the samples differ");
-                let from_file = [
-                    tag.clone(),
-                    with_stco_moved(plain.clone(), tag.len() as i64),
-                ]
-                .concat();
-                let error = fifo_refusal(from_file, "m4a", &case);
-                assert_eq!(
-                    error.as_deref(),
-                    Some(ID3_OFFSETS_TEXT),
-                    "{case}: offsets from the file start"
-                );
+            let (plain_peak, _) = stream_peak(plain.clone(), "m4a");
+            // Other files of the same samples, as `(case, file)`.
+            let empty_stco = bx(b"stco", &[&[0; 8]]);
+            let (moov, _) = top_box(&plain, b"moov");
+            let (trak, size) = child_box(&plain, moov, b"trak");
+            let mut second = Vec::from(&plain[trak..trak + size]);
+            let tkhd = (0..second.len())
+                .find(|at| second[*at..].starts_with(b"tkhd"))
+                .unwrap();
+            second[tkhd + 4 + 12..tkhd + 4 + 16].copy_from_slice(&2_u32.to_be_bytes());
+            let stco = (0..second.len())
+                .find(|at| second[*at..].starts_with(b"stco"))
+                .unwrap();
+            let count =
+                u32::from_be_bytes(second[stco + 8..stco + 12].try_into().unwrap()) as usize;
+            second[stco + 12..stco + 12 + 4 * count].fill(0);
+            let two_tracks = fast_start_raw(&plain, &[b"moov"], &second);
+            let two_tracks = with_offsets_moved(two_tracks, second.len() as i64);
+            let before_stco = {
+                let (mdia, _) = child_box(&plain, trak, b"mdia");
+                let (minf, _) = child_box(&plain, mdia, b"minf");
+                let (stbl, _) = child_box(&plain, minf, b"stbl");
+                let (stco, _) = child_box(&plain, stbl, b"stco");
+                let mut out = [&plain[..stco], &empty_stco, &plain[stco..]].concat();
+                for at in [moov, trak, mdia, minf, stbl] {
+                    let old = u32::from_be_bytes(out[at..at + 4].try_into().unwrap());
+                    out[at..at + 4].copy_from_slice(&(old + empty_stco.len() as u32).to_be_bytes());
+                }
+                with_offsets_moved(out, empty_stco.len() as i64)
+            };
+            let layouts = [
+                ("one stco", plain.clone()),
+                ("a co64", with_co64(&plain)),
+                ("an empty stco first", before_stco),
+                ("a second sound track", two_tracks),
+            ];
+            let prefixes = [
+                ("5 bytes of junk", Vec::new(), junk(5)),
+                ("1000 bytes of junk", Vec::new(), junk(1000)),
+                ("a tag of 100 bytes", id3_tag(100), Vec::new()),
+                ("a tag of 2 MiB", id3_tag(2 << 20), Vec::new()),
+                ("a tag of 64 MiB", id3_tag(ART), Vec::new()),
+                ("a tag, then 5 bytes of junk", id3_tag(100), junk(5)),
+                ("a tag, then 1000 bytes of junk", id3_tag(100), junk(1000)),
+            ];
+            for (layout, file) in &layouts {
+                let file_want = decode_bytes(file.clone(), Some("m4a")).unwrap().channels;
+                assert!(file_want == want, "{kind}, {layout}: the plain file");
+                for (prefix, tag, junk) in &prefixes {
+                    if *layout != "one stco" && tag.len() > 1000 {
+                        continue;
+                    }
+                    let (n, j) = (tag.len() as i64, junk.len() as i64);
+                    for (form, shift) in [
+                        ("the file start", n + j),
+                        ("the end of the tags", j),
+                        ("the MP4 start", 0),
+                    ] {
+                        let case = format!("{kind}, {layout}, {prefix}, offsets from {form}");
+                        let whole = [
+                            tag.clone(),
+                            junk.clone(),
+                            with_offsets_moved(file.clone(), shift),
+                        ]
+                        .concat();
+                        let got = decode_bytes(whole.clone(), Some("m4a"));
+                        assert!(
+                            got.as_ref().is_ok_and(|got| got.channels == want),
+                            "{case}, a file: {:?}",
+                            got.err()
+                        );
+                        let (peak, got) = stream_peak(whole, "m4a");
+                        assert!(
+                            got.as_ref().is_ok_and(|got| *got == want),
+                            "{case}, a stream: {:?}",
+                            got.err()
+                        );
+                        assert!(
+                            peak < plain_peak + (1 << 20),
+                            "{case}: the plain stream peaks at {plain_peak} bytes, this one at {peak}"
+                        );
+                    }
+                }
             }
+        }
+        #[cfg(unix)]
+        {
+            let plain = alac_of(m4a::Order::FastStart);
+            let tag = id3_tag(ART);
+            let file = [
+                tag.clone(),
+                with_offsets_moved(plain.clone(), tag.len() as i64),
+            ]
+            .concat();
+            let (peak, got) = through_fifo(&file, "lloyd.m4a");
+            let want = decode_bytes(plain, Some("m4a")).unwrap().channels;
+            assert!(
+                got.as_ref().is_ok_and(|got| got.channels == want),
+                "the FIFO: {:?}",
+                got.err()
+            );
+            assert!(peak < 8 << 20, "the FIFO: the decode peaks at {peak} bytes");
         }
     }
 
