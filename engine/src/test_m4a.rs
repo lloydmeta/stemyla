@@ -664,3 +664,102 @@ pub fn same_sidx_boxes(count: usize) -> Vec<u8> {
     );
     one.repeat(count)
 }
+
+/// Bits, written from the top of each byte.
+#[derive(Default)]
+pub struct BitWriter {
+    pub bytes: Vec<u8>,
+    bits: usize,
+}
+
+impl BitWriter {
+    /// Writes the low `count` bits of `value`, with zeros above bit 31.
+    pub fn put(&mut self, count: usize, value: u32) {
+        for k in (0..count).rev() {
+            if self.bits.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            let bit = (value.checked_shr(k as u32).unwrap_or(0) & 1) as u8;
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= bit << (7 - self.bits % 8);
+            self.bits += 1;
+        }
+    }
+}
+
+/// `packet`, an AAC raw data block, with a fill element of SBR data
+/// (`EXT_SBR_DATA`, 0xD) of 2 bytes before its ID_END: the form of an
+/// HE-AAC packet whose config does not show SBR (TD-81).
+pub fn with_sbr_fill(packet: &[u8]) -> Vec<u8> {
+    let bit = |at: usize| u32::from((packet[at / 8] >> (7 - at % 8)) & 1);
+    let last_one = (0..packet.len() * 8)
+        .rev()
+        .find(|at| bit(*at) == 1)
+        .expect("an ID_END");
+    let end = last_one - 2;
+    let mut out = BitWriter::default();
+    for at in 0..end {
+        out.put(1, bit(at));
+    }
+    // ID_FIL, a count of 2 bytes, EXT_SBR_DATA and 12 bits of payload.
+    out.put(3, 6);
+    out.put(4, 2);
+    out.put(4, 0xD);
+    out.put(12, 0x5A5);
+    out.put(3, 7);
+    out.bytes
+}
+
+/// An ADTS stream of AAC-LC `packets` at `rate`, with `channels` in the
+/// channel configuration, and no CRC.  `raw_blocks` is the field of the
+/// raw data blocks of each header: 0 for one block.
+pub fn adts_of(packets: &[&[u8]], rate: u32, channels: u8, raw_blocks: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    for packet in packets {
+        let len = (packet.len() + 7) as u32;
+        out.extend_from_slice(&[
+            0xFF,
+            0xF1,
+            (1 << 6) | (rate_index(rate) << 2) | (channels >> 2),
+            ((channels & 3) << 6) | ((len >> 11) & 3) as u8,
+            (len >> 3) as u8,
+            (((len & 7) << 5) as u8) | 0x1F,
+            0xFC | (raw_blocks & 3),
+        ]);
+        out.extend_from_slice(packet);
+    }
+    out
+}
+
+/// An AudioSpecificConfig of AAC-LC at `rate` with a channel configuration
+/// of 0 and a program config element of the front `elements` (`true` for a
+/// channel pair), then its byte alignment and no comment.
+pub fn pce_config(rate: u32, elements: &[bool]) -> Vec<u8> {
+    let mut bits = BitWriter::default();
+    bits.put(5, 2);
+    bits.put(4, u32::from(rate_index(rate)));
+    bits.put(4, 0);
+    // GASpecificConfig: 1024 frames, no core coder, no extension.
+    bits.put(3, 0);
+    // The tag, the object type (1 is LC), the rate index, then the counts:
+    // front, side, back, LFE, data and coupling elements.
+    bits.put(4, 0);
+    bits.put(2, 1);
+    bits.put(4, u32::from(rate_index(rate)));
+    bits.put(4, elements.len() as u32);
+    bits.put(4, 0);
+    bits.put(4, 0);
+    bits.put(2, 0);
+    bits.put(3, 0);
+    bits.put(4, 0);
+    // No mono, stereo or matrix mixdown.
+    bits.put(3, 0);
+    for (tag, pair) in elements.iter().enumerate() {
+        bits.put(1, u32::from(*pair));
+        bits.put(4, tag as u32);
+    }
+    let pad = (8 - bits.bits % 8) % 8;
+    bits.put(pad, 0);
+    bits.put(8, 0);
+    bits.bytes
+}

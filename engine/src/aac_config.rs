@@ -13,6 +13,11 @@ pub(crate) struct AacConfig {
     pub rate: Option<u32>,
     /// The channel configuration: 0 means a program config element.
     pub channel_config: u8,
+    /// The bit of the ASC where the channel configuration starts.
+    pub channel_config_bit: usize,
+    /// The channels of a program config element of one front element only:
+    /// 1 for one channel, 2 for a channel pair.
+    pub pce_channels: Option<u32>,
     /// SBR (HE-AAC): object type 5 or 29, or a sync extension with
     /// `sbrPresentFlag` 1.
     pub sbr: bool,
@@ -93,6 +98,7 @@ pub(crate) fn read(bytes: &[u8]) -> Option<AacConfig> {
     let mut bits = Bits { bytes, at: 0 };
     let mut object_type = bits.object_type()?;
     let rate = bits.rate()?;
+    let channel_config_bit = bits.at;
     let channel_config = bits.read(4)? as u8;
     let mut sbr = false;
     if object_type == SBR || object_type == PS {
@@ -110,11 +116,13 @@ pub(crate) fn read(bytes: &[u8]) -> Option<AacConfig> {
         }
         let extension = bits.read(1)?;
         if channel_config == 0 {
-            // A program config element follows; the decode refuses it.
+            // A program config element follows.
             return Some(AacConfig {
                 object_type,
                 rate,
                 channel_config,
+                channel_config_bit,
+                pce_channels: pce_channels(&mut bits),
                 sbr,
                 frames_960,
             });
@@ -140,8 +148,91 @@ pub(crate) fn read(bytes: &[u8]) -> Option<AacConfig> {
         object_type,
         rate,
         channel_config,
+        channel_config_bit,
+        pce_channels: None,
         sbr,
         frames_960,
+    })
+}
+
+/// The channels of the program config element at `bits` (ISO/IEC 14496-3,
+/// 4.4.1.1), when it holds one front element and no other: 1 for a single
+/// channel, 2 for a channel pair.  Data elements do not count, since the
+/// decoder skips them.
+fn pce_channels(bits: &mut Bits) -> Option<u32> {
+    // The tag, the object type and the rate index.
+    bits.read(4 + 2 + 4)?;
+    let front = bits.read(4)?;
+    let side = bits.read(4)?;
+    let back = bits.read(4)?;
+    let lfe = bits.read(2)?;
+    let _data = bits.read(3)?;
+    let coupling = bits.read(4)?;
+    // The mono, stereo and matrix mixdowns.
+    for extra in [4, 4, 3] {
+        if bits.read(1)? == 1 {
+            bits.read(extra)?;
+        }
+    }
+    if (front, side, back, lfe, coupling) != (1, 0, 0, 0, 0) {
+        return None;
+    }
+    let pair = bits.read(1)?;
+    Some(if pair == 1 { 2 } else { 1 })
+}
+
+/// `asc` with the channel configuration `config` in place at the bit
+/// `at`.  Symphonia 0.6.1 reads no bit of AAC-LC after the
+/// GASpecificConfig, so the program config element after it stays.
+pub(crate) fn with_channel_config(asc: &[u8], at: usize, config: u8) -> Vec<u8> {
+    let mut out = Vec::from(asc);
+    for k in 0..4 {
+        let bit = at + k;
+        let Some(byte) = out.get_mut(bit / 8) else {
+            break;
+        };
+        let mask = 1 << (7 - bit % 8);
+        if (config >> (3 - k)) & 1 == 1 {
+            *byte |= mask;
+        } else {
+            *byte &= !mask;
+        }
+    }
+    out
+}
+
+/// Whether the AAC raw data block `packet` ends with a fill element of SBR
+/// data (`EXT_SBR_DATA` 0xD or `EXT_SBR_DATA_CRC` 0xE) just before its
+/// ID_END, as an HE-AAC packet does (ISO/IEC 14496-3, 4.4.2.1 and 4.5.2.1;
+/// Symphonia's syntax at `aac/mod.rs`, lines 178 to 205).  ID_END is the
+/// last 1 bits of the packet, before zeros to the byte.  It tests each
+/// length of a fill element that ends there.
+pub(crate) fn ends_with_sbr(packet: &[u8]) -> bool {
+    let bit = |at: usize| u32::from((packet[at / 8] >> (7 - at % 8)) & 1);
+    let read = |at: usize, count: usize| (0..count).fold(0, |value, k| (value << 1) | bit(at + k));
+    let Some(end) = (0..packet.len() * 8)
+        .rev()
+        .find(|at| bit(*at) == 1)
+        .and_then(|last| last.checked_sub(2))
+    else {
+        return false;
+    };
+    if read(end, 3) != 7 {
+        return false;
+    }
+    // A count of 1 to 14 bytes, or 15 and an escape of 8 bits: the count
+    // is 15 + escape - 1.  The extension type is the first 4 bits.
+    (1..=269_usize).any(|count| {
+        let head = if count < 15 { 3 + 4 } else { 3 + 4 + 8 };
+        let Some(start) = end.checked_sub(head + count * 8) else {
+            return false;
+        };
+        let field = read(start + 3, 4) as usize;
+        let stated = match field {
+            15 => 15 + read(start + 7, 8) as usize - 1,
+            field => field,
+        };
+        read(start, 3) == 6 && stated == count && matches!(read(start + head, 4), 0xD | 0xE)
     })
 }
 
@@ -155,9 +246,73 @@ mod tests {
             object_type: 2,
             rate: Some(rate),
             channel_config,
+            channel_config_bit: 9,
+            pce_channels: None,
             sbr: false,
             frames_960: false,
         }
+    }
+
+    /// B6 of review round 7: a program config element of one front element
+    /// gives its channels, and the channel configuration goes in place.
+    #[test]
+    fn a_program_config_of_one_front_element_gives_its_channels() {
+        use crate::test_m4a::pce_config;
+        let pce =
+            |elements: &[bool]| read(&pce_config(44_100, elements)).and_then(|c| c.pce_channels);
+        assert_eq!(pce(&[true]), Some(2));
+        assert_eq!(pce(&[false]), Some(1));
+        assert_eq!(pce(&[true, false]), None);
+        assert_eq!(pce(&[]), None);
+        let asc = pce_config(44_100, &[true]);
+        let mended = with_channel_config(&asc, 9, 2);
+        assert_eq!(read(&mended).map(|c| c.channel_config), Some(2));
+        assert_eq!(&mended[2..], &asc[2..], "the rest stays");
+        assert_eq!(
+            with_channel_config(&config(2, 44_100, 2), 9, 1),
+            config(2, 44_100, 1)
+        );
+        // A side, back, LFE or coupling element is not one front element.
+        for (field, at) in [("side", 30), ("back", 34), ("lfe", 39), ("coupling", 44)] {
+            let mut other = pce_config(44_100, &[true]);
+            other[at / 8] |= 1 << (7 - at % 8);
+            assert_eq!(read(&other).and_then(|c| c.pce_channels), None, "{field}");
+        }
+    }
+
+    /// TD-81, closed by review round 7: the end of a packet with a fill
+    /// element of SBR data, of each length of its count.
+    #[test]
+    fn a_packet_that_ends_with_sbr_data_is_found() {
+        use crate::test_m4a::BitWriter;
+        let packet = |count: usize, extension: u32, end: bool| {
+            let mut bits = BitWriter::default();
+            // A few bits of another element first.
+            bits.put(9, 0x15A);
+            bits.put(3, 6);
+            if count < 15 {
+                bits.put(4, count as u32);
+            } else {
+                bits.put(4, 15);
+                bits.put(8, (count - 14) as u32);
+            }
+            bits.put(4, extension);
+            bits.put(count * 8 - 4, 0);
+            if end {
+                bits.put(3, 7);
+            }
+            bits.bytes
+        };
+        for count in [1, 14, 15, 16, 269] {
+            assert!(ends_with_sbr(&packet(count, 0xD, true)), "{count}");
+            assert!(ends_with_sbr(&packet(count, 0xE, true)), "{count} with CRC");
+        }
+        for extension in [0x0, 0x1, 0xB] {
+            assert!(!ends_with_sbr(&packet(4, extension, true)), "{extension:x}");
+        }
+        assert!(!ends_with_sbr(&packet(4, 0xD, false)), "no ID_END");
+        assert!(!ends_with_sbr(&[]), "no bits");
+        assert!(!ends_with_sbr(&[0xE0]), "ID_END only");
     }
 
     /// Each AudioSpecificConfig of the fixtures, and the maintainer's.

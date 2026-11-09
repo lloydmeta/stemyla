@@ -421,6 +421,20 @@ pub(crate) fn first_marker(
 /// `AdtsHeader::read_no_resync` reads it (`symphonia-codec-aac` `adts.rs`,
 /// lines 138 to 226).  `None` when Symphonia refuses the header.
 fn adts_frame_bytes(bytes: &[u8]) -> Option<usize> {
+    adts_header(bytes)
+        .filter(|(_, raw_data_blocks)| *raw_data_blocks == 0)
+        .map(|(frame_len, _)| frame_len)
+}
+
+/// Whether `bytes` start with an ADTS header that Symphonia 0.6.1 refuses
+/// only for more than one raw data block (`adts.rs`, line 192).
+pub(crate) fn is_adts_of_raw_blocks(bytes: &[u8]) -> bool {
+    adts_header(bytes).is_some_and(|(_, raw_data_blocks)| raw_data_blocks > 0)
+}
+
+/// The frame length and the field of the raw data blocks of the ADTS
+/// header that starts `bytes`, when Symphonia takes its other fields.
+fn adts_header(bytes: &[u8]) -> Option<(usize, u8)> {
     let sync = u16::from_be_bytes([*bytes.first()?, *bytes.get(1)?]);
     if sync & 0xFFF6 != 0xFFF0 {
         return None;
@@ -432,8 +446,8 @@ fn adts_frame_bytes(bytes: &[u8]) -> Option<usize> {
         | (usize::from(header[4]) << 3)
         | usize::from(header[5] >> 5);
     let raw_data_blocks = header[6] & 0x03;
-    let accepted = rate_index <= 12 && frame_len >= header_len && raw_data_blocks == 0;
-    accepted.then_some(frame_len)
+    let accepted = rate_index <= 12 && frame_len >= header_len;
+    accepted.then_some((frame_len, raw_data_blocks))
 }
 
 /// `AdtsReader::score` (`adts.rs`, line 91): a header, and a second header

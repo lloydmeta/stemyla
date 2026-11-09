@@ -9,6 +9,7 @@ use crate::hidden::Container;
 use crate::mp4_boxes::{Found, SoundTrack};
 use crate::resample::SONG_RATE;
 use anyhow::{Context, Result, anyhow};
+use std::collections::VecDeque;
 use std::io::{Cursor, SeekFrom};
 use std::path::Path;
 use symphonia::core::audio::Channels;
@@ -22,6 +23,7 @@ use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 /// if known.  Re-exported so a caller can give its own source.
 pub use symphonia::core::io::MediaSource;
 use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
+use symphonia::core::packet::Packet as SymPacket;
 
 /// Decoded audio: one `Vec<f32>` per channel, all the same length.  The
 /// decoders here leave no spare capacity (a song's channels are tens of MB,
@@ -130,6 +132,10 @@ pub const HE_AAC_TEXT: &str = "HE-AAC is not supported.  Open an AAC-LC file.";
 /// parse, or of a sample entry rate that is not the rate of its config.
 pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC file.";
 
+/// The text of an ADTS stream of more than one raw data block in each
+/// frame, which Symphonia 0.6.1 refuses (TD-86).
+pub const ADTS_BLOCKS_TEXT: &str = "This AAC file puts more than one AAC frame in each ADTS frame, so it cannot open.  Open an M4A file, or another AAC file.";
+
 /// The text of an AAC file of more than 2 channels.
 pub fn aac_channels_text(channels: u32) -> String {
     format!("This AAC file has {channels} channels.  Only mono and stereo AAC open.")
@@ -168,7 +174,8 @@ fn check_aac(params: &AudioCodecParameters) -> Result<()> {
     {
         return Err(anyhow!(aac_channels_text(channels)));
     }
-    if config.object_type != 2 || config.channel_config == 0 || config.frames_960 {
+    let no_layout = config.channel_config == 0 && config.pce_channels.is_none();
+    if config.object_type != 2 || no_layout || config.frames_960 {
         return Err(anyhow!(AAC_KIND_TEXT));
     }
     Ok(())
@@ -633,6 +640,8 @@ fn passes(limit: u64, channels: usize, frames: u64) -> bool {
 /// frames to reserve for each channel.
 struct Opened {
     format: Box<dyn FormatReader>,
+    /// The packets that the open read for its checks, to decode first.
+    queued: VecDeque<SymPacket>,
     track_id: u32,
     params: AudioCodecParameters,
     reserve: usize,
@@ -685,6 +694,16 @@ fn open_within(
     };
     let mut source = source;
     let Some((container, reader_at)) = start else {
+        // Symphonia's ADTS reader refuses more than one raw data block in a
+        // frame, so its score takes no such stream (TD-86).
+        let mut head = [0; 9];
+        if is_seekable {
+            use crate::mp4_boxes::ReadAt;
+            let read = crate::mp4_boxes::Seeking(&mut *source).read_at(view, &mut head)?;
+            if crate::hidden::is_adts_of_raw_blocks(&head[..read]) {
+                return Err(anyhow!(ADTS_BLOCKS_TEXT));
+            }
+        }
         return Err(anyhow!(
             "unsupported or unrecognised format: no known format at the start of the file"
         ));
@@ -760,7 +779,7 @@ fn open_within(
         mss.ignore_bytes(skip)
             .context("reading the start of the file")?;
     }
-    let format = open_reader(mss, container)
+    let mut format = open_reader(mss, container)
         .map_err(|e| anyhow!("unsupported or unrecognised format: {e}"))?;
     let estimated = container == Container::Adts;
     let track = format
@@ -773,9 +792,16 @@ fn open_within(
         .ok_or_else(|| anyhow!("track has no audio codec parameters"))?
         .clone();
     let track_id = track.id;
+    let num_frames = track.num_frames;
     if params.codec == CODEC_ID_AAC {
         check_aac(&params)?;
     }
+    let params = with_pce_channels(params);
+    let queued = if params.codec == CODEC_ID_AAC {
+        first_packets_of_lc(&mut *format, track_id)?
+    } else {
+        VecDeque::new()
+    };
     // The walker keeps the first sound track.  Symphonia takes the first
     // track of a known codec.  When they differ, no trim.
     let trim = boxes
@@ -787,16 +813,11 @@ fn open_within(
         .unwrap_or_default();
     let channels = params.channels.as_ref().map_or(1, Channels::count).max(1);
     let stated_exactly = params.codec != CODEC_ID_MP3 && !estimated;
-    if stated_exactly
-        && track
-            .num_frames
-            .is_some_and(|frames| passes(limit, channels, frames))
-    {
+    if stated_exactly && num_frames.is_some_and(|frames| passes(limit, channels, frames)) {
         return Err(too_long(limit));
     }
     let rate = params.sample_rate.filter(|rate| *rate > 0);
-    let stated_song_frames = track
-        .num_frames
+    let stated_song_frames = num_frames
         .zip(rate)
         .filter(|_| stated_exactly)
         .map(|(frames, rate)| song_frames(frames, rate));
@@ -810,10 +831,11 @@ fn open_within(
         .zip(rate)
         .map_or(u64::MAX, |(max, rate)| source_frames_within(max, rate));
     let within_limit = (frames_within(limit, channels) as u64).min(within_song);
-    let stated = trim.keep.or(track.num_frames);
+    let stated = trim.keep.or(num_frames);
     let reserve = frames_to_reserve(stated, most.map(|m| m.min(within_limit)));
     Ok(Opened {
         format,
+        queued,
         track_id,
         params,
         reserve,
@@ -920,6 +942,75 @@ fn counts_from_mp4_start(chunk: u64, before: u64, bodies: &[(u64, u64)]) -> bool
     }
 }
 
+/// The packets of the audio track that the HE-AAC check reads.
+const SBR_CHECK_PACKETS: usize = 8;
+
+/// The most packets of any track that the HE-AAC check reads.
+const MOST_CHECK_PACKETS: usize = 64;
+
+/// Reads the first [`SBR_CHECK_PACKETS`] packets of the AAC track
+/// `track_id`, and gives each packet that it read, to decode first.  It
+/// refuses an HE-AAC stream whose config shows no SBR (TD-81, closed by
+/// review round 7): each packet that it read ends with SBR data
+/// (`aac_config::ends_with_sbr`).  Symphonia 0.6.1 finds that data too
+/// (`aac/mod.rs`, line 194), but does not show it, and decodes the AAC-LC
+/// core at half the band.
+fn first_packets_of_lc(
+    format: &mut dyn FormatReader,
+    track_id: u32,
+) -> Result<VecDeque<SymPacket>> {
+    let mut queued = VecDeque::new();
+    let mut audio = 0;
+    let mut with_sbr = 0;
+    while audio < SBR_CHECK_PACKETS && queued.len() < MOST_CHECK_PACKETS {
+        let packet = match format.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(anyhow!("reading packet: {e}")),
+        };
+        if packet.track_id == track_id {
+            audio += 1;
+            if crate::aac_config::ends_with_sbr(&packet.data) {
+                with_sbr += 1;
+            }
+        }
+        queued.push_back(packet);
+    }
+    if audio > 0 && with_sbr == audio {
+        return Err(anyhow!(HE_AAC_TEXT));
+    }
+    Ok(queued)
+}
+
+/// `params` of an AAC-LC track whose config holds a program config element
+/// of one front element: with the channel configuration of that element
+/// (1 or 2) in a copy of the config (B6 of review round 7).  Symphonia
+/// 0.6.1 refuses a program config element in the config
+/// (`symphonia-common` `mpeg/audio/mod.rs`, line 289), and reads no bit
+/// after the GASpecificConfig of AAC-LC.  Other `params` stay.
+fn with_pce_channels(mut params: AudioCodecParameters) -> AudioCodecParameters {
+    use symphonia::core::audio::layouts::{CHANNEL_LAYOUT_MONO, CHANNEL_LAYOUT_STEREO};
+    let Some(asc) = params.extra_data.as_deref() else {
+        return params;
+    };
+    let Some(config) = crate::aac_config::read(asc) else {
+        return params;
+    };
+    let Some(channels) = config.pce_channels.filter(|_| config.channel_config == 0) else {
+        return params;
+    };
+    let mended =
+        crate::aac_config::with_channel_config(asc, config.channel_config_bit, channels as u8);
+    params.extra_data = Some(mended.into_boxed_slice());
+    params.channels = Some(if channels == 2 {
+        CHANNEL_LAYOUT_STEREO
+    } else {
+        CHANNEL_LAYOUT_MONO
+    });
+    params
+}
+
 /// A source to open, and its container with where its reader starts.
 type Scanned = (Box<dyn MediaSource>, Option<(Container, u64)>);
 
@@ -976,6 +1067,8 @@ fn open_reader(
 /// file's.
 pub struct Decoder {
     format: Box<dyn FormatReader>,
+    /// The packets that the open read for its checks, to decode first.
+    queued: VecDeque<SymPacket>,
     codec: Box<dyn AudioDecoder>,
     track_id: u32,
     /// The frames that `open` found to reserve, for `decode_bytes`.
@@ -1037,6 +1130,7 @@ impl Decoder {
     ) -> Result<Decoder> {
         let Opened {
             format,
+            queued,
             track_id,
             params,
             reserve,
@@ -1047,6 +1141,7 @@ impl Decoder {
             .map_err(|e| anyhow!("no decoder for codec: {e}"))?;
         Ok(Decoder {
             format,
+            queued,
             codec,
             track_id,
             reserve,
@@ -1071,7 +1166,11 @@ impl Decoder {
             if self.keep == Some(0) {
                 return Ok(None);
             }
-            let packet = match self.format.next_packet() {
+            let next = match self.queued.pop_front() {
+                Some(packet) => Ok(Some(packet)),
+                None => self.format.next_packet(),
+            };
+            let packet = match next {
                 Ok(Some(p)) => p,
                 Ok(None) => return Ok(None),
                 Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -4132,5 +4231,127 @@ mod tests {
         let junk = [vec![0x42; 2 << 20], alac_of(m4a::Order::FastStart)].concat();
         let text = "unsupported or unrecognised format: no known format at the start of the file";
         assert_refused_early(junk, "m4a", text, "an M4A after 2 MiB of junk");
+    }
+
+    /// TD-81, closed by review round 7: an HE-AAC stream whose config does
+    /// not show SBR carries SBR data in a fill element at the end of each
+    /// packet.  The decode checks the first 8 packets, and gives the HE-AAC
+    /// text when each ends so: an M4A with the core rate in its entry, one
+    /// with an entry rate of 0, and an ADTS stream.  AAC-LC still opens,
+    /// also with one such packet in the first 8.
+    #[test]
+    fn an_aac_whose_packets_carry_sbr_gives_the_he_aac_text() {
+        use crate::test_m4a::{
+            aac_m4a_of, adts, adts_of, adts_packets, config, place_once, with_sbr_fill,
+        };
+        let stream = adts(&chirps(), 44_100);
+        let plain = adts_packets(&stream);
+        let sbr: Vec<Vec<u8>> = plain.iter().map(|packet| with_sbr_fill(packet)).collect();
+        let sbr: Vec<&[u8]> = sbr.iter().map(Vec::as_slice).collect();
+        let lc = config(2, 44_100, 2);
+        let order = m4a::Order::MoovLast;
+        let m4a = aac_m4a_of(&sbr, 2, &lc, 44_100, None, None, order);
+        assert_eq!(
+            refusal(m4a.clone(), "m4a"),
+            HE_AAC_TEXT,
+            "an entry at the core rate"
+        );
+        let mut rate_0 = m4a;
+        let at = place_once(&rate_0, b"mp4a") + 4 + 6 + 2 + 8 + 2 + 2 + 4;
+        rate_0[at..at + 4].copy_from_slice(&[0; 4]);
+        assert_eq!(refusal(rate_0, "m4a"), HE_AAC_TEXT, "an entry rate of 0");
+        assert_eq!(
+            refusal(adts_of(&sbr, 44_100, 2, 0), "aac"),
+            HE_AAC_TEXT,
+            "ADTS"
+        );
+        let few = aac_m4a_of(&sbr[..3], 2, &lc, 44_100, None, None, order);
+        assert_eq!(refusal(few, "m4a"), HE_AAC_TEXT, "3 packets");
+        let mut one = plain.clone();
+        one[3] = sbr[3];
+        let lc_with_one = aac_m4a_of(&one, 2, &lc, 44_100, None, None, order);
+        let want = decoded(
+            aac_m4a_of(&plain, 2, &lc, 44_100, None, None, order),
+            "AAC-LC",
+        );
+        assert!(decoded(lc_with_one, "one SBR tail").channels == want.channels);
+        // The eighth packet of the check is AAC-LC, so the file opens.
+        assert!(plain.len() > 8, "packets past the check");
+        let mut seven = sbr.clone();
+        seven[7] = plain[7];
+        let seven = aac_m4a_of(&seven, 2, &lc, 44_100, None, None, order);
+        assert!(decode_bytes(seven, Some("m4a")).is_ok(), "7 SBR tails of 8");
+        let adts_lc = decode_bytes(adts_of(&plain, 44_100, 2, 0), Some("aac"));
+        assert!(adts_lc.is_ok(), "ADTS AAC-LC: {:?}", adts_lc.err());
+        // A track of no packet is no HE-AAC.
+        let empty = aac_m4a_of(&[], 2, &lc, 44_100, None, None, order);
+        let opened = Decoder::new(Box::new(Cursor::new(empty)), Some("m4a"));
+        assert!(opened.is_ok(), "no packet: {:?}", opened.err());
+    }
+
+    /// B6 of review round 7: Symphonia refuses a program config element in
+    /// the AudioSpecificConfig (`symphonia-common` `mpeg/audio/mod.rs`, line
+    /// 289), and reads no bit after the GASpecificConfig of AAC-LC.  So a
+    /// config of one front element, a channel pair or one channel, gets the
+    /// channel configuration 2 or 1, and decodes bit for bit.  Another
+    /// program config gives the text of the kind of AAC.
+    #[test]
+    fn an_aac_with_a_program_config_of_one_element_opens() {
+        use crate::test_m4a::{aac_m4a_of, adts, adts_packets, config, pce_config};
+        let order = m4a::Order::MoovLast;
+        let tone = short_tone();
+        for (channels, pair) in [
+            (vec![tone[0].clone(), tone[1].clone()], true),
+            (vec![tone[0].clone()], false),
+        ] {
+            let stream = adts(&channels, 44_100);
+            let packets = adts_packets(&stream);
+            let count = channels.len() as u8;
+            let plain = aac_m4a_of(
+                &packets,
+                u16::from(count),
+                &config(2, 44_100, count),
+                44_100,
+                None,
+                None,
+                order,
+            );
+            let pce = aac_m4a_of(
+                &packets,
+                u16::from(count),
+                &pce_config(44_100, &[pair]),
+                44_100,
+                None,
+                None,
+                order,
+            );
+            let want = decoded(plain, "the channel configuration");
+            let got = decoded(pce, &format!("a program config of {count} channels"));
+            assert!(got.channels == want.channels, "{count} channels");
+        }
+        let stream = adts(&tone, 44_100);
+        let packets = adts_packets(&stream);
+        let two = aac_m4a_of(
+            &packets,
+            2,
+            &pce_config(44_100, &[false, false]),
+            44_100,
+            None,
+            None,
+            order,
+        );
+        assert_eq!(refusal(two, "m4a"), AAC_KIND_TEXT, "two front elements");
+    }
+
+    /// B6 of review round 7: Symphonia refuses an ADTS frame of more than one
+    /// raw data block (`adts.rs`, line 192), and a view cannot split it.  So
+    /// the decode gives its own text (TD-86).
+    #[test]
+    fn an_adts_stream_of_more_than_one_raw_block_gives_its_text() {
+        use crate::test_m4a::{adts, adts_of, adts_packets};
+        let stream = adts(&short_tone(), 44_100);
+        let packets = adts_packets(&stream);
+        let blocks = adts_of(&packets, 44_100, 2, 1);
+        assert_refused_early(blocks, "aac", ADTS_BLOCKS_TEXT, "two raw blocks");
     }
 }
