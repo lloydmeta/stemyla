@@ -1399,3 +1399,61 @@ async fn an_m4a_encode_error_names_m4a_encoding() {
         "M4A encoding failed: ALAC encoder: the stem has no samples"
     );
 }
+
+/// Finding 1-1 of review round 1 of M3: when browser storage refuses the
+/// save file, a save of each worker format posts the request of its kind
+/// on the memory path, with the two arrays transferred (MEM-2).
+#[wasm_bindgen_test]
+async fn a_memory_save_posts_the_arrays_of_its_format() {
+    let id = "m3-memory-formats";
+    let frames = 2 * SECOND;
+    let (shown, _) = stored_song(id, frames, 2).await;
+    let mut outcomes = Vec::new();
+    for format in [
+        export::Format::Flac,
+        export::Format::M4a,
+        export::Format::Mp3,
+    ] {
+        store::test_remove(store::SAVES).await;
+        let (mut app, worker) = page(id, shown.clone(), true);
+        let worker = worker.expect("a worker");
+        store::tests::refuse_next_writable();
+        app.start_save(None, format);
+        run_save(&mut app).await;
+        outcomes.push((format, requests(&worker), app.status.clone()));
+        app.load_demo();
+    }
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    for (format, posted, status) in outcomes {
+        let ext = format.extension();
+        assert_eq!(posted.len(), 1, "{ext}: one request ({status})");
+        let (request, transfer) = &posted[0];
+        let want = match format {
+            export::Format::Flac => "flac",
+            export::Format::M4a => "alac",
+            _ => "mp3",
+        };
+        assert_eq!(request.kind(), want, "{ext}: the request of the format");
+        let (name, left, right) = match request {
+            stem_protocol::Request::Flac { name, source }
+            | stem_protocol::Request::Alac { name, source }
+            | stem_protocol::Request::Mp3 { name, source } => match source {
+                stem_protocol::Encode::Arrays { left, right, .. } => {
+                    (name.clone(), left.clone(), right.clone())
+                }
+                other => panic!("{ext}: {other:?}"),
+            },
+            other => panic!("{ext}: {other:?}"),
+        };
+        assert_eq!(name, Some(format!("lloyd - mix.{ext}")));
+        assert_eq!(left.length() as usize, frames, "{ext}");
+        assert_eq!(transfer.length(), 2, "MEM-2: {ext}: both arrays cross");
+        assert!(
+            js_sys::Object::is(&transfer.get(0), &left.buffer())
+                && js_sys::Object::is(&transfer.get(1), &right.buffer()),
+            "MEM-2: {ext}: the transfer list holds the arrays of the request"
+        );
+        assert!(status.contains("held in memory"), "{ext}: {status}");
+    }
+}

@@ -326,6 +326,11 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
   * Acceptance, `e2e save`: the M4A saves of 1 and 10 minutes passed the limits of FLAC, and each decoded to the WAV save's samples, bit for bit (Step 5).
   * Acceptance, the extension test: `only_wav_is_made_without_the_worker` lists `m4a`.
 * [ ] Review rounds.
+  * Review round 1 fixes, 2026-11-10.  First failures:
+    * 1-1: `a_memory_save_posts_the_arrays_of_its_format`, with `encode_flac` in the `JsSink::M4a` arm: "m4a: the request of the format", `flac`, not `alac`.
+    * 1-11 and 1-12: `each_request_names_its_type`, with `Request::kind` giving "" for each request but `init`: the kinds were `["init", "", ...]`.
+    * 1-9: `an_alac_is_encoded_in_blocks`, with the default name from `codec.kind()`: `stem.alac`, not `stem.m4a`.
+    * 1-8, 1-2 to 1-7 and 1-10 change text only.  A whole `web-test --browser chrome` took 279 s on this Mac (Surprises).
 
 ## Surprises and discoveries
 
@@ -338,6 +343,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, implementer: the first `check --tier commit` of Step 4 failed in `an_aiff_decodes_through_a_fifo` of `engine`, on "the write to the FIFO".  No step of M3 changes `engine`.  The test passed 6 times alone, and the next tier run passed.  It looks like a race between the writer thread and the end of the read, under load.
 * 2026-11-10, implementer: the 10-minute M4A of `e2e save` is 23.7 MB, 22% of its WAV and 1.7 times its FLAC.  So ALAC gives a larger file than FLAC for these slow sines.
 * 2026-11-10, implementer: the wasm bundle after Step 5, from `trunk build --release`: `app_bg.wasm` 6,415,004 bytes (8,765 more), `decode-worker_bg.wasm` 1,381,067 bytes (the same), and `stem-worker_bg.wasm` 1,295,428 bytes.  So `m4a` adds 45,336 bytes, 3.6%, to `stem-worker_bg.wasm`.
+* 2026-11-10, implementer (review round 1): a whole `web-test --browser chrome` took 279 s on this Mac.  The `app` lib tests took 179 s and the `stem-worker` tests 31 s.  Before M3, they took about 174 s and 17 s.  So M3 adds about 19 s here, and about 40 s on CI, which takes about twice as long.  The steps before `e2e save` then take about 16 minutes on CI, and the job limit of 75 minutes leaves about 9 minutes.
 
 ## Decision log
 
@@ -359,10 +365,10 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, agent (implementer): `flac_and_mp3_saves_post_paths_then_offer_the_workers_file` runs for M4A too, with the new name `worker_saves_post_paths_then_offer_the_workers_file`.  It asserts the kind of each request, so it is the test that the M4A save posts `Request::Alac`.  Reason: the loop already makes the stored save of each format, and MEM-2 names it.
 * 2026-11-10, agent (implementer): `end_stored_save` picks the encode with one `match` on the format, whose `Wav` arm offers the WAV and returns.  Reason: no arm can send a format to the wrong encode, and no arm is unreachable.
 * 2026-11-10, agent (implementer): TD-53 keeps the "FLAC encoding" and "MP3 encoding" labels as untested, and names the test of "M4A encoding".  Reason: Step 4 adds that test, so the M4A label is not a gap.
-
 * 2026-11-10, agent (implementer): `READS` is a constant, `FORMATS.len() + 1`, and a unit test counts `reads_back` over the formats and lengths against it.  Reason: `reads_back` compares text, so a `const fn` cannot call it.
 * 2026-11-10, agent (implementer): the unit test of `file_checks` gives no 10-minute M4A, so that check fails there.  `an_m4a_check_decodes_to_the_planted_mix` passes the check of the M4A on a mix of 2 s.  Reason: the debug build of `m4a` takes too long for an ALAC of 10 minutes.
-* 2026-11-10, agent (implementer): the `browser-tests` job comment gives "about 5 to 10 minutes to spare".  Reason: the steps before `e2e save` took about 15.3 minutes before M3, and M3 adds ALAC tests to `web-test`.
+* 2026-11-10, agent (implementer): the `browser-tests` job comment gives "about 9 minutes to spare", from the measure of review round 1 (Surprises).  The limit stays 75 minutes, since the spare is above 5 minutes.
+
 ## Outcomes and retrospective
 
 Not started.

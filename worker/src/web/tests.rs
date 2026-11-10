@@ -2007,7 +2007,9 @@ async fn arrays_peak(codec: Codec, seconds: usize) -> usize {
 /// The parent allows 12 bytes for each packet more: 4 for its size, and
 /// about 8 in `moov`.  At these lengths the peak is in the loop, where only
 /// the sizes grow, so the growth is also at most 4 bytes for each packet.
-/// Each bound has a fixed slack of 1 KiB.
+/// The 4-byte bound implies the 12-byte one here.  No test measures the
+/// end of the encode, where the sizes and `moov` live together.  Each bound
+/// has a fixed slack of 1 KiB.
 fn assert_packet_table_growth(path: &str, ten: usize, sixty: usize) {
     let more = alac_packets_of(60) - alac_packets_of(10);
     let slack = 1024;
@@ -2022,8 +2024,9 @@ fn assert_packet_table_growth(path: &str, ten: usize, sixty: usize) {
     assert!(
         growth <= 12 * more + slack,
         "MEM-1: on the {path} path, an ALAC of 60 s held {growth} bytes more than one of 10 s, \
-         more than 12 bytes for each of {more} more packets and {slack}.  Fix: keep only the \
-         packet sizes, and put each packet at once."
+         more than 12 bytes for each of {more} more packets and {slack}, the parent's \
+         allowance.  At these lengths the 4-byte bound below implies it.  Fix: keep only \
+         the packet sizes, and put each packet at once."
     );
     assert!(
         growth <= 4 * more + slack,
@@ -2055,6 +2058,16 @@ async fn a_stored_alac_holds_only_its_packet_table() {
 async fn an_alac_is_encoded_in_blocks() {
     let ten = arrays_peak(Codec::Alac, 10).await;
     let sixty = arrays_peak(Codec::Alac, 60).await;
+    // Nit 1-9 of review round 1 of M3: a request with no name gets the
+    // name of an M4A, not of the kind `alac`.
+    let reply = sent("alac").pop();
+    assert!(reply.is_some(), "an alac reply");
+    assert_eq!(
+        field(&reply.expect("a reply"), "name")
+            .as_string()
+            .as_deref(),
+        Some("stem.m4a")
+    );
     assert_packet_table_growth("memory", ten, sixty);
 }
 

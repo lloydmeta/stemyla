@@ -1,6 +1,6 @@
 # Local browser testing
 
-Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 26.7.1, Safari 27.0), as of 2026-10-19.  Since 2026-11-10, the maintainer also runs them on an Apple silicon Mac (arm64).  The commands and their prerequisites are in `README.md` (browser tests); this is what that machine adds.
+Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 26.7.1, Safari 27.0), as of 2026-10-19.  Since 2026-11-10, the maintainer also runs them on an Apple silicon Mac (arm64).  The commands and their prerequisites are in `README.md` (browser tests); this is what those machines add.
 
 ## Which browser
 
@@ -26,7 +26,7 @@ A test that clicks a download link saves the file in `~/Downloads`: headless Chr
 
 ## The model
 
-`e2e selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on this machine, so the reference tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail (TD-8).
+`e2e selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on either Mac, so the reference tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail (TD-8).
 
 ## Memory on an iPhone
 

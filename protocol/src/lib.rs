@@ -1047,6 +1047,66 @@ mod tests {
         );
     }
 
+    /// Findings 1-11 and 1-12 of review round 1 of M3: each request's
+    /// `type`, for the requests that a native test can make.  The arrays of
+    /// a mix, an encode and a model file are JS values, so the browser tests
+    /// cover those forms.
+    #[test]
+    fn each_request_names_its_type() {
+        let stored = || Encode::Stored {
+            wav: "saves/1-1.wav".into(),
+            frames: 4,
+            out: "saves/1-1.out".into(),
+            rate: 44_100,
+        };
+        let name = || Some("lloyd - mix".to_string());
+        let kinds: Vec<&str> = [
+            Request::Init,
+            Request::Model(None),
+            Request::Download,
+            Request::ForgetModel,
+            Request::Separate {
+                mix: Mix::Stored {
+                    path: "sessions/1/mix.f32".into(),
+                    frames: 4,
+                },
+                session: None,
+            },
+            Request::Selftest { base: None },
+            Request::Bench,
+            Request::Mp3 {
+                name: name(),
+                source: stored(),
+            },
+            Request::Flac {
+                name: name(),
+                source: stored(),
+            },
+            Request::Alac {
+                name: name(),
+                source: stored(),
+            },
+        ]
+        .iter()
+        .map(Request::kind)
+        .collect();
+        assert_eq!(
+            kinds,
+            [
+                "init",
+                "model",
+                "download",
+                "forget_model",
+                "separate",
+                "selftest",
+                "bench",
+                "mp3",
+                "flac",
+                "alac"
+            ]
+        );
+    }
+
     #[test]
     fn a_stem_file_name_keeps_only_safe_characters() {
         assert_eq!(stem_file("bass"), "bass.wav");

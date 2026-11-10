@@ -361,8 +361,8 @@ impl Separator {
                     posted.borrow_mut().pop_front();
                     Some(Event::Unstored(text))
                 }
-                // An MP3, FLAC or self-test error leaves a running
-                // separation be.
+                // An encode or self-test error leaves a running separation
+                // be.
                 Reply::Error { of, text } if of != kind::SEPARATE => {
                     Some(Event::Error { of, text })
                 }
