@@ -424,7 +424,7 @@ What M4 achieved:
 * Apple's `afinfo` and `afconvert` read the 1-minute AAC save with a priming of the skip, 4160 frames.
 * Wasm: `stem-worker_bg.wasm` grew by 36,352 bytes (2.8%) at Step 7.
 
-The review, in numbers: 5 rounds, 35 agents, 3,028,241 tokens, 92.1 wall minutes, 0 interventions.  Three plan reviews ran before any code.
+The review of the steps, in numbers: 5 rounds, 35 agents, 3,028,241 tokens, 92.1 wall minutes, 0 interventions.  Three plan reviews ran before any code.  The table covers rounds 1 to 5.  More rounds ran after the intent review.  The parent's M4 Progress line and `reviews/feature-m4a-m4.md` hold the numbers of all rounds.
 
 | Round | Agents | Tokens | Wall minutes | Found | Significant |
 | - | - | - | - | - | - |
@@ -447,4 +447,4 @@ What to do differently:
 * In a fake, raise an error that must come first in a microtask, not in a timer.
 * Name a unique worktree path in each reviewer's brief.
 
-Debt: TD-92 and TD-93 are new.  TD-39 names `check_heap`.
+Debt: TD-92 and TD-93 are new.  The intent review added TD-94 and TD-95.  TD-39 names `check_heap`.
