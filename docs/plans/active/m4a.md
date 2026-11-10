@@ -230,7 +230,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * [x] 2026-11-08: plan written in a cloud session, with the evidence of the Context.  All decisions are open.
 * [x] 2026-11-08: the maintainer answered D1 to D7.  The preflight passed.
 * [x] 2026-11-08, M1: the M4A writer and the ALAC encoder (`plans/completed/m4a-m1.md`).  The crate `m4a` makes a fast-start M4A of 16-bit stereo ALAC, from a safe port of `alac-encoder` 0.3.0 that gives its packets byte for byte.  Symphonia decodes each test file bit for bit.  3 review rounds (`reviews/feature-m4a-m1.md`), 28 agents, 1,895,639 tokens, 72.6 wall minutes, 0 interventions.  Late rounds: none.  Debt: TD-79.  Decisions: 0028 (accepted), 0029 (proposed).
-* [ ] M2: open M4A (and AIFF by D5).
+* [x] 2026-11-10, M2: open M4A, audio-only `.mp4` and AIFF (`plans/completed/m4a-m2.md`).  ALAC and AAC-LC M4A, AIFF and AIFC (PCM and `ima4`) open, with tags and art hidden from Symphonia and refused only past a memory bound.  An M4A with video, protection or HE-AAC gets a clear text.  19 review rounds (`reviews/feature-m4a-m2.md`), 189 agents, 12,410,055 tokens, 559.4 wall minutes, 4 interventions.  Late rounds (4 to 18): 160 findings fixed, 12 of them blockers.  Debt: TD-80, TD-86, TD-90 open; TD-81 to TD-85 and TD-87 to TD-89 closed.
 * [ ] M3: save as ALAC M4A.
 * [ ] M4: save as AAC-LC (by D1).
 
