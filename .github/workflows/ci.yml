@@ -173,7 +173,7 @@ jobs:
     # other scenarios 4.0 and `e2e save` 3.3, after the setup.  `web-test`
     # took 7.8 minutes in run 40871041420, so it varies by about 2.  The
     # steps before `e2e save` took about 15.3 minutes in run 40894815433.
-    # That was before M1, M2 and M3 of docs/plans/active/m4a.md.  Run
+    # That was before M1, M2 and M3 of docs/plans/completed/m4a.md.  Run
     # 42777211457 (2026-11-10, after M1 and M2) took 10.5 minutes for those
     # steps, with `web-test` 5.9, and 2.8 for `e2e save`.  M3 adds about
     # 19 s to a local `web-test` of 279 s, so about 30 s on CI.  The two
@@ -224,7 +224,7 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
         # It took 3.3 minutes in run 40894815433, with the save during
         # playback of review round speed 4 of M8.  M3 of
-        # docs/plans/active/m4a.md adds two M4A saves, and M4 two AAC saves.
+        # docs/plans/completed/m4a.md adds two M4A saves, and M4 two AAC saves.
         # The limit is the longest
         # that all the waits of a run can take
         # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal

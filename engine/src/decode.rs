@@ -87,7 +87,7 @@ impl std::fmt::Display for TooLong {
 
 impl std::error::Error for TooLong {}
 
-/// The text of a file that holds video (D4 of `plans/active/m4a.md`).
+/// The text of a file that holds video (D4 of `plans/completed/m4a.md`).
 /// `app` shows it too, when a head shows a video track.
 pub const VIDEO_TEXT: &str =
     "This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC.";
@@ -226,7 +226,7 @@ fn check_aac(params: &AudioCodecParameters) -> Result<()> {
 
 /// The frames that a decode drops at the start (`skip`), and the most that
 /// it gives after them (`keep`, if known): the encoder delay and the
-/// padding of an M4A (D7 of `plans/active/m4a.md`).  The frames are at
+/// padding of an M4A (D7 of `plans/completed/m4a.md`).  The frames are at
 /// the file's rate, before any conversion to [`SONG_RATE`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Trim {
@@ -238,7 +238,7 @@ struct Trim {
 const EDIT_RATE_ONE: i32 = 0x1_0000;
 
 /// The trim of the walker's sound track at `rate`: from `elst`, else from
-/// `iTunSMPB`, else none (D7 of `plans/active/m4a.md`).
+/// `iTunSMPB`, else none (D7 of `plans/completed/m4a.md`).
 fn trim_of(found: &Found, sound: &SoundTrack, rate: Option<u32>) -> Trim {
     edit_trim(found, sound, rate)
         .or_else(|| itunsmpb_trim(found.itunsmpb.as_deref()?, sound.duration))
@@ -311,7 +311,7 @@ pub enum HeadLength {
     /// Any other file, such as an MP3, which states an estimate at most.
     Unstated,
     /// An MP4 whose head shows a track of video (D4 of
-    /// `plans/active/m4a.md`).  A caller refuses it with [`VIDEO_TEXT`].
+    /// `plans/completed/m4a.md`).  A caller refuses it with [`VIDEO_TEXT`].
     Video,
 }
 
@@ -1557,7 +1557,7 @@ impl Decoder {
     /// end of the file.  A corrupt packet is skipped, as players do.  An
     /// error comes before the frames so far pass the limit.  It drops the
     /// encoder delay and the padding that an M4A states (D7 of
-    /// `plans/active/m4a.md`), so a packet can give fewer frames, and the
+    /// `plans/completed/m4a.md`), so a packet can give fewer frames, and the
     /// limits count the frames given.
     pub fn next_packet(&mut self) -> Result<Option<Packet<'_>>> {
         loop {

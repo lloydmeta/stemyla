@@ -9,7 +9,7 @@
 //! then does the same for the 10-minute session.  Each restore
 //! is a reload, so each save has a new page and new workers.
 //!
-//! AAC (M4 of `docs/plans/active/m4a.md`): each page logs the line of its
+//! AAC (M4 of `docs/plans/completed/m4a.md`): each page logs the line of its
 //! AAC probe.  The line of the first page decides whether the run saves AAC
 //! ([`aac_rule`]).  On macOS the run fails if the page does not offer AAC,
 //! and on Linux if it does.  Each save waits for the probe line of its own
@@ -44,7 +44,7 @@
 //! the same samples, and the MP3 to the same frames within one MP3 frame
 //! and the encoder's delay.  Each ALAC M4A, of 1 and of 10 minutes, decodes
 //! to the samples of the mix of its length, bit for bit (M3 of
-//! `docs/plans/active/m4a.md`).  Each AAC M4A passes [`aac_checks`].
+//! `docs/plans/completed/m4a.md`).  Each AAC M4A passes [`aac_checks`].
 //!
 //! Checks of D11 (a save that does not wait for the UI frame): for each
 //! format, a 10-minute save grows the page's WebAssembly memory by at most
@@ -111,7 +111,7 @@ pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
 /// output.  Since review round speed 4 of M8, a run takes about 3 minutes
 /// on the maintainer's Mac (174 to 176 s), in Chrome and with
 /// `--swiftshader`, and 3.3 minutes on CI (run 40894815433).  With the two
-/// M4A saves of M3 of `docs/plans/active/m4a.md`, a run took 2.8 minutes
+/// M4A saves of M3 of `docs/plans/completed/m4a.md`, a run took 2.8 minutes
 /// (168 s) on an Apple M2 Pro in Chrome on 2026-11-10.
 pub(super) const STEP_LIMIT_S: u64 = 60 * 60;
 /// The longest that a save of `seconds` of audio may take from its click to its
@@ -149,13 +149,13 @@ pub(super) const PLANT_WAIT_S: u64 = 60;
 /// 0.1 s.  The FLAC and the MP3 (about 1.4 MB each) are read whole, as
 /// base64, which that run did not reach.  The 10-minute M4A (23.7 MB) is
 /// read whole too.  It took about 2 s on an Apple M2 Pro on 2026-11-10 (M3
-/// of `docs/plans/active/m4a.md`).  So 30 s leaves a wide margin.
+/// of `docs/plans/completed/m4a.md`).  So 30 s leaves a wide margin.
 pub(super) const READ_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for the removal of the sessions and the
 /// save files.  In CI run 40788465048, the first clean-up and the plant of
 /// the 1-minute session took 0.4 s together.  The last clean-up removes
 /// about 356 MB, which that run did not reach.  The two M4A saves of M3 of
-/// `docs/plans/active/m4a.md` add 26 MB of it.  The two AAC saves of M4
+/// `docs/plans/completed/m4a.md` add 26 MB of it.  The two AAC saves of M4
 /// add up to 21.3 MB more: 1.9 MB and 19.4 MB in Safari, the larger, on
 /// 2026-11-11.
 pub(super) const CLEAN_WAIT_S: u64 = 30;
@@ -2538,7 +2538,7 @@ mod tests {
         assert_eq!(save_wait(&going[..31], 60.0, 60), Wait::OverCap);
     }
 
-    /// M4 of `docs/plans/active/m4a.md`: a run that saves AAC checks its two
+    /// M4 of `docs/plans/completed/m4a.md`: a run that saves AAC checks its two
     /// AAC saves as the others: the offer of a `.m4a`, the page's memory,
     /// the JS heap, and the worker's growth.  A run without AAC needs none.
     #[test]

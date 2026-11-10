@@ -1177,7 +1177,7 @@ pub struct Known {
 /// mutant goes to the validator, so nothing is hidden.
 pub const KNOWN_MISSED: &[Known] = &[
     // M8, round 2, finding 2-15.  Since Step 6 of M4 of
-    // `docs/plans/active/m4a.md`, `restore` gives the mark of the log at
+    // `docs/plans/completed/m4a.md`, `restore` gives the mark of the log at
     // its reload, so its body has two mutants (TD-39).
     Known {
         debt: "TD-39",
@@ -1193,7 +1193,7 @@ pub const KNOWN_MISSED: &[Known] = &[
         code: "let id = session_id(seconds);",
         offset: 1,
     },
-    // M4 of `docs/plans/active/m4a.md`, review round 2, finding 2-10:
+    // M4 of `docs/plans/completed/m4a.md`, review round 2, finding 2-10:
     // `check_heap` only gives the result of `heap_report` to a `Page`, which
     // only a live WebDriver makes (TD-39).
     Known {

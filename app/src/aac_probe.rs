@@ -1,5 +1,5 @@
 //! The page's probe of the browser's AAC encoder (M4 of
-//! `plans/active/m4a.md`): it decides whether the Save menu offers
+//! `plans/completed/m4a.md`): it decides whether the Save menu offers
 //! "M4A (AAC 256 kbps)".  It runs once at start, on the page, with no
 //! message to the worker.  It passes when four things hold:
 //! `AudioEncoder` exists, `isConfigSupported` passes for

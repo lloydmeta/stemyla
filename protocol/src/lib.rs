@@ -112,7 +112,7 @@ pub struct AacEncoderConfig {
     /// The bit rate in bits each second.
     pub bitrate: u32,
     /// `constant`, since Safari's `variable` mode gave 72 kbit/s for a
-    /// target of 256 kbit/s (M4 of `plans/active/m4a.md`).
+    /// target of 256 kbit/s (M4 of `plans/completed/m4a.md`).
     pub bitrate_mode: &'static str,
 }
 

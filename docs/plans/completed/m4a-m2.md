@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M2 of `plans/active/m4a.md`.  The parent's M2 section stays the criteria.  After M2, the app opens an M4A (AAC-LC or ALAC), an audio-only `.mp4`, a raw `.aac` (ADTS) and an AIFF, as a song or as a stem.  The decode removes the AAC encoder delay and padding, so an AAC stem lines up with a WAV lane.  A file that holds video, a protected file, an HE-AAC file and an AAC file of more than 2 channels each give a clear message.
+This is the milestone plan for M2 of `plans/completed/m4a.md`.  The parent's M2 section stays the criteria.  After M2, the app opens an M4A (AAC-LC or ALAC), an audio-only `.mp4`, a raw `.aac` (ADTS) and an AIFF, as a song or as a stem.  The decode removes the AAC encoder delay and padding, so an AAC stem lines up with a WAV lane.  A file that holds video, a protected file, an HE-AAC file and an AAC file of more than 2 channels each give a clear message.
 
 Readers: the implementer, the review agents of M2's rounds, the orchestrator, and the team leaders of M3 and M4.
 
@@ -572,7 +572,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * Evidence of chance matches: 23 of 2,790 packets of oxideav-aac tones end in bits that look like an SBR fill, 2 of them with an SBR header; 21 of the 13,100 packets of the maintainer's AAC-LC file from Apple do, 3 of them with a header (local only, not in the repo).  The silent packets of oxideav-aac do not match.  The first packet of each oxideav-aac HE-AAC stream has an SBR header, and every eighth packet after it.
     * Now the bit reader of `has_sbr_fill` gives no field past the end of the packet.  The check refuses only when the first packet of the track also starts its SBR fill with a header: `bs_header_flag` 1 and `bs_reserved` 0 (`aac_config::has_sbr_header`).  A chance match then refuses about 1 time in 8, not each time.  The SBR fixture `with_sbr_fill` now holds a header.
     * Silent oxideav-aac streams, and 10 of a packet of a tone, mono and stereo at 44.1 and 48 kHz, as ADTS and as M4A, decode.  `the_header_of_an_sbr_fill_is_read` tests the header bits, with and without the CRC.
-    * The texts: `HE_AAC_TEXT` is "This file is HE-AAC, which does not open.  Open an AAC-LC file."; `ADTS_BLOCKS_TEXT` is "This AAC file has an ADTS frame of more than one raw data block, so it does not open.  Open an M4A file, or another AAC file."; `PROTECTED_TEXT` and `MOOV_TEXT` say "does not open", not "cannot open".  The orchestrator applies the change of `plans/active/m4a.md`, line 135, itself.
+    * The texts: `HE_AAC_TEXT` is "This file is HE-AAC, which does not open.  Open an AAC-LC file."; `ADTS_BLOCKS_TEXT` is "This AAC file has an ADTS frame of more than one raw data block, so it does not open.  Open an M4A file, or another AAC file."; `PROTECTED_TEXT` and `MOOV_TEXT` say "does not open", not "cannot open".  The orchestrator applies the change of `plans/completed/m4a.md`, line 135, itself.
   * [x] 2026-11-10: review round 20 fixes, part 1: the HE-AAC check of a cut stream (20-1, 20-8), the bound of the SBR header (20-3), the reader of the fill (20-2), and the docs (20-4 to 20-6).  First failures, at 5d0d605:
     * `an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text`: the HE-AAC stream of oxideav-aac, with its header in each eighth packet, cut at packet 1, opened as AAC-LC.
     * `the_header_of_an_sbr_fill_is_read`: an SBR fill of 1 byte before a fill of type 0 gave a header, from the bits of the next fill.

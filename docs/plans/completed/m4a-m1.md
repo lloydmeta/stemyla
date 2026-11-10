@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M1 of `plans/active/m4a.md`.  The parent's M1 section stays the criteria.  M1 adds a new crate, `m4a`, in the Pure layer.  The crate makes the bytes of an M4A file that holds 16-bit stereo Apple Lossless (ALAC).  It does no input or output, and no other crate uses it yet.  M2 uses it for the decode fixtures, and M3 for the save.
+This is the milestone plan for M1 of `plans/completed/m4a.md`.  The parent's M1 section stays the criteria.  M1 adds a new crate, `m4a`, in the Pure layer.  The crate makes the bytes of an M4A file that holds 16-bit stereo Apple Lossless (ALAC).  It does no input or output, and no other crate uses it yet.  M2 uses it for the decode fixtures, and M3 for the save.
 
 Readers: the implementer, the review agents of M1's rounds, the orchestrator, and the team leaders of M2 to M4.
 
@@ -192,7 +192,7 @@ Each step is one signed commit, after `cargo run -p xtask -- check --tier commit
 
 * The music-like signal: a sum of 3 to 5 sines with an envelope, plus low-level noise from the fixed-seed generator, 10 seconds at 44.1 kHz.  A test checks that `alac_file` of it is smaller than its 16-bit WAV (`44 + frames x 4` bytes).  Write the ratio in Surprises.
 * `THIRD-PARTY.md`: a note bullet.  It says that `m4a` holds a port of `alac-encoder` 0.3.0 (MIT OR Apache-2.0, "Copyright (c) 2019 Linus Unnebäck"), itself a port of Apple's ALAC reference (Apache-2.0, "Copyright (c) 2011 Apple Inc.").  It says that `m4a` is Apache-2.0, and names the module that holds both notices.  It names `alac-encoder`, `symphonia-format-isomp4` and `symphonia-codec-alac` as test-only crates of `m4a`.  The tables do not change in M1, since no shipped crate takes `m4a` yet.
-* `docs/decisions/0028-m4a-with-alac-as-the-save-format.md`, `Status: accepted (2026-11-08, by the maintainer, as D1, D2 and D6 of plans/active/m4a.md)`.  The maintainer's answers choose its content (the parent's Decision log).  Context: Apple's tools read ALAC M4A but not FLAC (the parent's Purpose).  Decision: the save format M4A with ALAC; the writer in the `m4a` crate of the Pure layer (D6); the encoder as a safe port of `alac-encoder` 0.3.0 (D2), checked against it.  Consequences: the D6 rules, the 4 GiB limit, M4's `esds` entry, and `m4a` under Apache-2.0 only.  Review round 1 moved the licence to decision 0029, `proposed` (1-4).
+* `docs/decisions/0028-m4a-with-alac-as-the-save-format.md`, `Status: accepted (2026-11-08, by the maintainer, as D1, D2 and D6 of plans/completed/m4a.md)`.  The maintainer's answers choose its content (the parent's Decision log).  Context: Apple's tools read ALAC M4A but not FLAC (the parent's Purpose).  Decision: the save format M4A with ALAC; the writer in the `m4a` crate of the Pure layer (D6); the encoder as a safe port of `alac-encoder` 0.3.0 (D2), checked against it.  Consequences: the D6 rules, the 4 GiB limit, M4's `esds` entry, and `m4a` under Apache-2.0 only.  Review round 1 moved the licence to decision 0029, `proposed` (1-4).
 * `docs/README.md`: the line of decision 0028.
 * Acceptance: `cargo test -p m4a` passes.  `cargo run -p xtask -- docs-check` passes.
 

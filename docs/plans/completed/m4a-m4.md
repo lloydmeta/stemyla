@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M4 of `plans/active/m4a.md`.  The parent's M4 section stays the criteria.  After M4, the Save menu of each lane has "M4A (AAC 256 kbps)" where the browser has an AAC encoder.  The stem worker encodes the save with WebCodecs `AudioEncoder`, and the `m4a` crate makes the M4A.  For music, an AAC M4A is about a third of the ALAC M4A of M3.  Apple's tools take it (the parent's Purpose).
+This is the milestone plan for M4 of `plans/completed/m4a.md`.  The parent's M4 section stays the criteria.  After M4, the Save menu of each lane has "M4A (AAC 256 kbps)" where the browser has an AAC encoder.  The stem worker encodes the save with WebCodecs `AudioEncoder`, and the `m4a` crate makes the M4A.  For music, an AAC M4A is about a third of the ALAC M4A of M3.  Apple's tools take it (the parent's Purpose).
 
 Readers: the implementer, the review agents of M4's rounds, the orchestrator, and the maintainer at the review of the PR.
 

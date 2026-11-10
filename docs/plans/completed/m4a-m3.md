@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M3 of `plans/active/m4a.md`.  The parent's M3 section stays the criteria.  After M3, the Save menu of a stem lane and of the mix lane has "M4A (16-bit Apple Lossless)".  The stem worker encodes the save as ALAC with the `m4a` crate, on the storage path and on the memory path.  Logic Pro and GarageBand then take a saved stem directly (the parent's Purpose).
+This is the milestone plan for M3 of `plans/completed/m4a.md`.  The parent's M3 section stays the criteria.  After M3, the Save menu of a stem lane and of the mix lane has "M4A (16-bit Apple Lossless)".  The stem worker encodes the save as ALAC with the `m4a` crate, on the storage path and on the memory path.  Logic Pro and GarageBand then take a saved stem directly (the parent's Purpose).
 
 Readers: the implementer, the review agents of M3's rounds, the orchestrator, and the team leader of M4.
 

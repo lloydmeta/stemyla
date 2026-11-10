@@ -1233,7 +1233,7 @@ export function spy_on_post(worker) {
         );
     }
 
-    /// M4 of `plans/active/m4a.md`: an AAC reply reaches the page as an
+    /// M4 of `plans/completed/m4a.md`: an AAC reply reaches the page as an
     /// `Event::Aac` with the worker's `Blob`.
     #[wasm_bindgen_test]
     fn an_aac_reply_reaches_the_page_as_sent() {

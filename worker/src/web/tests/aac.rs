@@ -1,4 +1,4 @@
-//! Browser tests of the AAC encode of a save (M4 of `plans/active/m4a.md`),
+//! Browser tests of the AAC encode of a save (M4 of `plans/completed/m4a.md`),
 //! with a fake `AudioEncoder`, `AudioDecoder` and `AudioData` in place of
 //! the browser's.  CI's Chrome on Linux has no AAC encoder (TD-92), so
 //! these tests are the AAC encode's checks in CI.
@@ -356,7 +356,7 @@ async fn stored_aac(frames: usize) -> (Encoded, Option<Vec<u8>>, Float32Array, F
     (last_file("aac"), read_at(SAVE_M4A).await, left, right)
 }
 
-/// M4 of `plans/active/m4a.md`: an AAC save is the M4A of its packets.  Its
+/// M4 of `plans/completed/m4a.md`: an AAC save is the M4A of its packets.  Its
 /// head is 36 bytes, the packets follow in order, then `moov`.  The skip of
 /// its `elst` entry and of its `iTunSMPB` tag is the lead-in and the
 /// encoder's delay.

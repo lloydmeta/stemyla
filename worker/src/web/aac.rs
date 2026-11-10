@@ -1,4 +1,4 @@
-//! The AAC-LC encode of a save (M4 of `plans/active/m4a.md`), with the
+//! The AAC-LC encode of a save (M4 of `plans/completed/m4a.md`), with the
 //! browser's WebCodecs `AudioEncoder`.  The `m4a` crate makes the M4A.
 //!
 //! WebCodecs goes through the inline JS module below, not through the

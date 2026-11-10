@@ -1,5 +1,5 @@
 //! A reader of the few MP4 boxes that the decode needs (M2 of
-//! `plans/active/m4a.md`): the handler and the sample entry of each track,
+//! `plans/completed/m4a.md`): the handler and the sample entry of each track,
 //! the times of the first sound track, and the `iTunSMPB` tag.  The `m4a`
 //! crate writes MP4 boxes; this module reads them.
 //!

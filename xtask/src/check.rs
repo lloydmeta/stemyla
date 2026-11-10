@@ -682,7 +682,7 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
 /// features of that member can reach the dependencies of `engine`.  It
 /// cannot see a member in the closure of `engine` whose dependents are all
 /// in the family, such as `dsp`.  `m4a` is in the closure too, since
-/// `engine` takes it for its tests.  From M3 of `plans/active/m4a.md`, its
+/// `engine` takes it for its tests.  From M3 of `plans/completed/m4a.md`, its
 /// dependent `stem-worker` is outside the family, so a change of `m4a` runs
 /// `engine` alone.  The test
 /// `the_symphonia_features_of_the_tests_of_m4a_are_engines` and tier
@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     /// `m4a` is in the closure of `engine`, since `engine` takes it for
-    /// its tests.  From M3 of `plans/active/m4a.md`, `stem-worker` takes it
+    /// its tests.  From M3 of `plans/completed/m4a.md`, `stem-worker` takes it
     /// too, and `stem-worker` is outside the family of `engine`.  So the
     /// crate tests of `m4a` merge features into `engine`, and run `engine`
     /// alone.

@@ -4,7 +4,7 @@ Status: proposed (2026-11-08, by the agent)
 
 ## Context
 
-The workspace is MIT or Apache-2.0, at the user's option.  Decision 0028 puts an ALAC encoder in the crate `m4a`, as a safe port of `alac-encoder` 0.3.0.  `alac-encoder` is MIT OR Apache-2.0 ([crates.io](https://crates.io/crates/alac-encoder)).  It is itself a port of Apple's ALAC reference ([macosforge/alac](https://github.com/macosforge/alac)).  The header of Apple's `codec/ALACEncoder.cpp` gives Apache-2.0 only.  Apple's repository has no `NOTICE` file.  The Apache-2.0 terms of Apple's code hold in a port of it, so the port cannot be offered under MIT alone.  The D1, D2 and D6 answers of `plans/active/m4a.md` choose no licence.
+The workspace is MIT or Apache-2.0, at the user's option.  Decision 0028 puts an ALAC encoder in the crate `m4a`, as a safe port of `alac-encoder` 0.3.0.  `alac-encoder` is MIT OR Apache-2.0 ([crates.io](https://crates.io/crates/alac-encoder)).  It is itself a port of Apple's ALAC reference ([macosforge/alac](https://github.com/macosforge/alac)).  The header of Apple's `codec/ALACEncoder.cpp` gives Apache-2.0 only.  Apple's repository has no `NOTICE` file.  The Apache-2.0 terms of Apple's code hold in a port of it, so the port cannot be offered under MIT alone.  The D1, D2 and D6 answers of `plans/completed/m4a.md` choose no licence.
 
 ## Options
 

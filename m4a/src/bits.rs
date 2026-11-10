@@ -3,7 +3,7 @@
 //! It keeps the bits that do not yet fill a byte in a 64-bit accumulator,
 //! and pushes each whole byte into a `Vec<u8>`.  So it never writes past
 //! the end of its buffer, which the `unsafe` bit writer of `alac-encoder`
-//! 0.3.0 could do in a release build (D2 of `plans/active/m4a.md`).
+//! 0.3.0 could do in a release build (D2 of `plans/completed/m4a.md`).
 
 /// A destination for bits.  The ALAC encoder writes its trial encodes to a
 /// `BitCount`, and its packets to a `BitWriter`.

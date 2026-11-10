@@ -1,4 +1,4 @@
-//! The local check of M2 of `plans/active/m4a.md`, with the maintainer's
+//! The local check of M2 of `plans/completed/m4a.md`, with the maintainer's
 //! real AAC-LC file.  The file is copyrighted, so it is never in the repo
 //! (ASSET-1), and CI does not run this test.
 //!

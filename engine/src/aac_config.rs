@@ -1,6 +1,6 @@
 //! The AudioSpecificConfig (ASC) of an AAC track (ISO/IEC 14496-3,
 //! 1.6.2.1), read before the decoder is made (M2 of
-//! `plans/active/m4a.md`).  Symphonia 0.6.1 reads the sync extension
+//! `plans/completed/m4a.md`).  Symphonia 0.6.1 reads the sync extension
 //! `0x2b7` only after an explicit object type 5 or 29, so it misses the
 //! backward-compatible sign of SBR.  This reader takes it.
 

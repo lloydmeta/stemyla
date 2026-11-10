@@ -1451,7 +1451,7 @@ pub struct StemApp {
     #[cfg(target_arch = "wasm32")]
     save_reports: Vec<String>,
     /// Whether this browser can save AAC, from the probe at start (M4 of
-    /// `plans/active/m4a.md`).  `None` until the probe ends, and the Save
+    /// `plans/completed/m4a.md`).  `None` until the probe ends, and the Save
     /// menu does not offer AAC until then.
     #[cfg(target_arch = "wasm32")]
     aac_encoder: std::rc::Rc<std::cell::Cell<Option<bool>>>,
@@ -1711,7 +1711,7 @@ impl std::fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 /// The name of the first file of `heads` (name, first bytes, size) whose
-/// head shows a track of video (D4 of `plans/active/m4a.md`).  The page
+/// head shows a track of video (D4 of `plans/completed/m4a.md`).  The page
 /// refuses such a song before any whole read, with [`video_text`].
 pub fn video_in_heads(heads: &[(String, Vec<u8>, u64)]) -> Option<&str> {
     use engine::decode::{HeadLength, head_length};
@@ -2147,7 +2147,7 @@ impl StemApp {
             Ok(s) => app.separator = Some(s),
             Err(e) => log::warn!("stem separation unavailable: {e}"),
         }
-        // M4 of `plans/active/m4a.md`: the Save menu offers AAC once the
+        // M4 of `plans/completed/m4a.md`: the Save menu offers AAC once the
         // browser's encoder passes the probe.
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(app.probe_aac(aac_probe::PROBE_MS));
@@ -4579,7 +4579,7 @@ impl StemApp {
     }
 
     /// The formats of the Save menu: AAC only after the probe at start
-    /// passed (M4 of `plans/active/m4a.md`).
+    /// passed (M4 of `plans/completed/m4a.md`).
     #[cfg(target_arch = "wasm32")]
     fn save_formats(&self) -> Vec<export::Format> {
         export::offered(self.aac_encoder.get() == Some(true)).collect()
@@ -4967,7 +4967,7 @@ impl StemApp {
             self.status = format!("Saved {name}.{}", note.unwrap_or_default());
             return;
         };
-        // M4 of `plans/active/m4a.md`: the encoder failed, not browser
+        // M4 of `plans/completed/m4a.md`: the encoder failed, not browser
         // storage, so a second encode in memory fails the same way.
         if let Some(label) = encoder {
             log::warn!("save: {name}: the encoder failed: {why}");

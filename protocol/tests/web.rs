@@ -899,7 +899,7 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
             matches!(&file, Encoded::Stored { path } if path == "saves/1-2.flac"),
             "{kind}: {file:?}"
         );
-        // M4 of `plans/active/m4a.md`: a failure of the encoder, or of
+        // M4 of `plans/completed/m4a.md`: a failure of the encoder, or of
         // browser storage.
         for in_encoder in [false, true] {
             let failed = made(
@@ -934,7 +934,7 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
     }
 }
 
-/// M4 of `plans/active/m4a.md`, TD-16: a failed reply with no `in_encoder`,
+/// M4 of `plans/completed/m4a.md`, TD-16: a failed reply with no `in_encoder`,
 /// as an older worker sends, is a failure of browser storage.
 #[wasm_bindgen_test]
 fn a_failed_reply_without_in_encoder_is_a_storage_failure() {

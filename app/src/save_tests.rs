@@ -1387,7 +1387,7 @@ async fn two_save_failures_each_show_once() {
     }
 }
 
-/// M3 of `plans/active/m4a.md`: an `error` reply of an M4A encode names
+/// M3 of `plans/completed/m4a.md`: an `error` reply of an M4A encode names
 /// M4A encoding on the status line, as one of FLAC or MP3 names its own.
 #[wasm_bindgen_test]
 async fn an_m4a_encode_error_names_m4a_encoding() {
@@ -1480,7 +1480,7 @@ async fn a_memory_save_posts_the_arrays_of_its_format() {
     }
 }
 
-/// M4 of `plans/active/m4a.md`: an `error` reply of an AAC encode names
+/// M4 of `plans/completed/m4a.md`: an `error` reply of an AAC encode names
 /// AAC encoding on the status line, not M4A encoding.
 #[wasm_bindgen_test]
 async fn an_aac_encode_error_names_aac_encoding() {
@@ -1527,7 +1527,7 @@ async fn posted_save(
     }
 }
 
-/// M4 of `plans/active/m4a.md`: a stored AAC encode whose encoder failed
+/// M4 of `plans/completed/m4a.md`: a stored AAC encode whose encoder failed
 /// says so, and does not encode again in memory.  A second encode would
 /// fail the same way, and browser storage did not fail.  This holds for a
 /// short song and for one too long for the memory path.
@@ -1635,7 +1635,7 @@ extern "C" {
     fn unstub_audio_encoder() -> Vec<f64>;
 }
 
-/// M4 of `plans/active/m4a.md`: the page's probe passes only for an
+/// M4 of `plans/completed/m4a.md`: the page's probe passes only for an
 /// encoder that gives a packet within its time.  Each failure gives false,
 /// and the probe closes each `AudioData` and encoder that it made.  It runs
 /// in CI, with a stubbed `AudioEncoder`.
@@ -1670,7 +1670,7 @@ fn menu_labels(app: &StemApp) -> Vec<&'static str> {
     app.save_formats().iter().map(|f| f.label()).collect()
 }
 
-/// M4 of `plans/active/m4a.md`: the Save menu takes its formats from the
+/// M4 of `plans/completed/m4a.md`: the Save menu takes its formats from the
 /// page's kept probe.  Before the probe ends it has four items.  After a
 /// probe that passes it has five, with "M4A (AAC 256 kbps)" last.  After a
 /// probe that fails it has four.  It runs in CI, with a stubbed encoder.

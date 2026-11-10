@@ -1,14 +1,14 @@
 # 0028: M4A with Apple Lossless as a save format
 
-Status: accepted (2026-11-08, by the maintainer, as D1, D2 and D6 of `plans/active/m4a.md`)
+Status: accepted (2026-11-08, by the maintainer, as D1, D2 and D6 of `plans/completed/m4a.md`)
 
-Amended on 2026-11-08 by the agent, after round 1 of the intent review of M1 of `plans/active/m4a.md`.  M2 adds the `esds` sample entry for AAC, not M4.  M2's decode tests need AAC files, and D6 forbids a copy of the writer in a test.  So `m4a` writes AAC from given packets, and M4 uses the same entry for its save.  The decision is unchanged.
+Amended on 2026-11-08 by the agent, after round 1 of the intent review of M1 of `plans/completed/m4a.md`.  M2 adds the `esds` sample entry for AAC, not M4.  M2's decode tests need AAC files, and D6 forbids a copy of the writer in a test.  So `m4a` writes AAC from given packets, and M4 uses the same entry for its save.  The decision is unchanged.
 
-Amended on 2026-11-10 by the agent, after round 2 of the intent review of M3 of `plans/active/m4a.md`.  M3 replaced `FlacOut::replace_header` in `worker/src/web/encode.rs` with one sink for FLAC and ALAC, `EncodeOut`.  `m4a` gives `head_len()` before the encode, and `head()` once at the end.  `EncodeOut::reserve` writes the zeros, and `replace_head` puts the final head in their place.  JS makes the zeros: blocks of at most 64 KiB on the storage path, and one JS part on the memory path.  So no head of zeros is in WebAssembly memory.  The decision is unchanged.
+Amended on 2026-11-10 by the agent, after round 2 of the intent review of M3 of `plans/completed/m4a.md`.  M3 replaced `FlacOut::replace_header` in `worker/src/web/encode.rs` with one sink for FLAC and ALAC, `EncodeOut`.  `m4a` gives `head_len()` before the encode, and `head()` once at the end.  `EncodeOut::reserve` writes the zeros, and `replace_head` puts the final head in their place.  JS makes the zeros: blocks of at most 64 KiB on the storage path, and one JS part on the memory path.  So no head of zeros is in WebAssembly memory.  The decision is unchanged.
 
 ## Context
 
-The app saves WAV, MP3 and FLAC.  Logic Pro's list of compressed formats has no FLAC.  The list names AIFF, WAV, AAC, MP3 and Apple Lossless (ALAC) ([Logic Pro 10.1 help, "Import compressed audio files"](https://help.apple.com/logicpro/mac/10.1/en.lproj/lgcp4f68cbe3.html)).  So a FLAC stem does not go directly into Logic Pro.  `alac-encoder` 0.3.0 is the ALAC encoder crate that the plan reviewed.  It has `unsafe` code (D2 of `plans/active/m4a.md`).  Its bit writer can write past its buffer in a release build.  It casts `&[u8]` to `&[i16]` with no check of alignment.  It uses a `transmute`.
+The app saves WAV, MP3 and FLAC.  Logic Pro's list of compressed formats has no FLAC.  The list names AIFF, WAV, AAC, MP3 and Apple Lossless (ALAC) ([Logic Pro 10.1 help, "Import compressed audio files"](https://help.apple.com/logicpro/mac/10.1/en.lproj/lgcp4f68cbe3.html)).  So a FLAC stem does not go directly into Logic Pro.  `alac-encoder` 0.3.0 is the ALAC encoder crate that the plan reviewed.  It has `unsafe` code (D2 of `plans/completed/m4a.md`).  Its bit writer can write past its buffer in a release build.  It casts `&[u8]` to `&[i16]` with no check of alignment.  It uses a `transmute`.
 
 ## Decision
 

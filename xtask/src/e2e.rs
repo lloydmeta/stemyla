@@ -33,7 +33,7 @@
 //!   not grow with the song, nor the worker's memory during a FLAC, an
 //!   ALAC or an AAC encode, and an MP3 encode is bounded.  Each ALAC M4A
 //!   decodes to the WAV's samples, and each AAC M4A to the mix's length at
-//!   lag 0 (M8, M3 and M4 of `docs/plans/active/m4a.md`, `e2e/save.rs`).
+//!   lag 0 (M8, M3 and M4 of `docs/plans/completed/m4a.md`, `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).

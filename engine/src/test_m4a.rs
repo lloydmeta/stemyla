@@ -1,6 +1,6 @@
 //! M4A and raw AAC (ADTS) files for the decoder's tests, made in memory
 //! (ASSET-1).  Every M4A comes from the writer of `m4a` (TD-52).  The AAC
-//! packets come from `oxideav-aac` (D3 of `plans/active/m4a.md`).
+//! packets come from `oxideav-aac` (D3 of `plans/completed/m4a.md`).
 
 use m4a::{AlacEncoder, Codec, Edit, FRAMES_PER_PACKET, Gapless, Layout, Order, SampleEntry};
 use oxideav_aac::encoder::{EncoderConfig, StreamEncoder};

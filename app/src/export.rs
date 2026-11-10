@@ -1186,7 +1186,7 @@ mod tests {
         );
     }
 
-    /// M4 of `plans/active/m4a.md`: the Save menu offers AAC only where the
+    /// M4 of `plans/completed/m4a.md`: the Save menu offers AAC only where the
     /// page's probe passes, last.
     #[test]
     fn the_menu_offers_aac_only_where_the_browser_encodes_it() {

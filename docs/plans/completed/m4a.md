@@ -94,7 +94,7 @@ Decision 0024, through the `review-rounds` skill.
 #### Kick-off prompt
 
 ```text
-/orchestrate docs/plans/active/m4a.md
+/orchestrate docs/plans/completed/m4a.md
 ```
 
 #### Extra stop conditions
@@ -321,4 +321,42 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 
 ## Outcomes and retrospective
 
-Not started.
+Done on 2026-11-11, in orchestrated mode, on `feature/m4a` (PR #43).  M1 and M2 ran on the first Mac (x64), and M3 and M4 on the second (arm64).
+
+What the plan achieved:
+
+* The app opens an M4A as a song or a stem, with AAC-LC or ALAC in it.  It also opens an audio-only `.mp4`, a raw `.aac`, AIFF and AIFC, and IMA and Microsoft ADPCM in a WAV (M2).  The decode trims the AAC encoder delay with `elst`, then `iTunSMPB` (D7).
+* A file with a video track, HE-AAC, protection or a header past a memory bound gets a clear text, not a panic (D4, M2).
+* The crate `m4a` makes the bytes of an M4A, with no I/O (D6).  Its ALAC encoder is a safe port of `alac-encoder` 0.3.0, with `#![forbid(unsafe_code)]` (D2, M1).
+* The Save menu offers "M4A (16-bit Apple Lossless)" (M3).  Each file equals `alac_file` of its 16-bit samples, and Symphonia and Apple's `afconvert` decode it to the WAV save's samples, bit for bit.
+* Where the page's probe of an AAC encoder at 256 kbit/s passes, the Save menu also offers "M4A (AAC 256 kbps)" (M4).  The stem worker encodes through WebCodecs, measures the encoder's delay at each encode, and writes `moov` last.  Apple's `afinfo` gives the source's frames and the priming.
+* Each save holds no song-sized buffer (MEM-1 to MEM-5).  `e2e save` measures the saves of 1 and 10 minutes.
+
+The review, in numbers:
+
+| Milestone | Rounds | Agents | Tokens | Wall minutes | Interventions |
+| - | - | - | - | - | - |
+| M1 | 3 | 28 | 1,895,639 | 72.6 | 0 |
+| M2 | 23 | 211 | 13,392,805 | 628.7 | 4 |
+| M3 | 4 | 23 | 2,177,255 | 50.3 | 0 |
+| M4 | 9 | 48 | 3,770,058 | 128.2 | 0 |
+| All | 39 | 310 | 21,235,757 | 879.8 | 4 |
+
+What did not go well:
+
+* M2 took 23 rounds.  Each round found a new case of the same bullet, on sources that the browser cannot reach.  The maintainer's rules of 2026-11-09 and 2026-11-10 stopped that: measure a gap against the plan, and add no new behaviour from round 4.  M3 and M4 used those rules from the start.
+* M4's intent review found false records of test runs: a Safari `web-test` that did not run all crates, and a decode-worker pass with no log.  Records of a browser run must name the log and the crates that ran.
+* Two reviewers shared one worktree name in round 3 of M4, and one reviewer wrote into another's worktree in round 2 of M3.  From round 4 of M4, each brief names a unique worktree path.  The `review-rounds` skill does not yet give one.
+* The maintainer stopped the first M4 team leader by mistake.  A stopped agent cannot continue, so a new one started from the last commit.  Only one plan review round was lost, because each step was committed.
+* A Safari `web-test` does not pass on this Mac, before or after the plan (TD-93, TD-95).  So Safari's checks of M4 ran crate by crate.
+
+What went well:
+
+* D2's review of `alac-encoder` found `unsafe` code that could write past a buffer in a release build.  The safe port gives its packets byte for byte.
+* The AAC spike of M4 found Safari's quirks before any code: the silent first 1024 frames, the whole `ES_Descriptor`, and the low rate of the default mode.
+
+Left open:
+
+* Decision 0029 (`m4a` is Apache-2.0 only) is `proposed`.  The maintainer accepts it at the PR review.
+* TD-91: the page ships no licence text.  TD-92: CI cannot run the real AAC encode.  TD-93 and TD-95: Safari `web-test` failures that are older than M4.  TD-94: Chrome and Edge on Windows probably offer no AAC at 256 kbit/s.
+* Nobody opened a saved M4A in Logic Pro, or ran the AAC save on Windows, Android or iOS.
