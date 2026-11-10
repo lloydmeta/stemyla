@@ -313,7 +313,18 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
   * `an_m4a_check_decodes_to_the_planted_mix` and `the_file_checks_pass_the_planted_files_and_fail_wrong_ones`: an M4A check that always passes passed no file.
   * `the_ci_step_limit_is_the_waits_limit` and `the_caps_leave_room_for_the_slowest_save`: 40 minutes, not 50, and caps of 720 s, not 960 s.
   * `e2e save --browser chrome` passed in 2 minutes 48 s (168 s).  The M4A files were 2,296,677 bytes (1 minute) and 23,658,230 bytes (10 minutes).  The 10-minute WAV is 105,840,044 bytes, and the 10-minute FLAC 13,818,943 bytes.  Each M4A decoded to the planted mix, bit for bit.  The worker grew by 196,608 bytes in each M4A encode.  The page's JS heap measure was 2.12 MB and 3.95 MB, and its WebAssembly memory grew by 7.34 MB and 7.47 MB.  The longest slice was 1.1 ms.  The M4A saves took 0.56 s and 4.47 s, and the FLAC saves 1.45 s and 13.39 s.  So FLAC stays the slowest save, and `SLOWEST_SAVE_S` and the caps do not change.  The read of the 10-minute M4A took about 2 s, within `READ_WAIT_S`.
-* [ ] Step 6: the numbers and the close.
+* [x] Step 6: the numbers and the close.  2026-11-10: the bundle is in Surprises.  `e2e decode --browser chrome` passed in 10 s.  The parent's M3 section, line by line:
+  * `stem-protocol`: `kind::ALAC`, `Request::Alac` and `Reply::Alac` go through the same `to_js` and `from_js` as `flac` (PROTO-1).  `a_lossless_request_keeps_its_name_and_rate`, `a_lossless_reply_keeps_its_blob`, `a_stored_encode_names_its_files_and_transfers_nothing` and `a_stored_encode_reply_names_its_file_or_why_it_failed` test them.  No hand-written script of `xtask e2e` writes or reads `alac` (TD-16, Step 2).  `e2e save` reads only the worker's log line.
+  * `stem-worker`, memory path: `alac_blob` gives a `Blob` of the parts, of type `audio/mp4` (`an_alac_decodes_to_the_stem`).
+  * `stem-worker`, storage path: `alac_into` writes to an `OutFile`.  It reserves the head at 0, writes each packet, then writes the head with `moov` at 0 (`stored_encodes_write_whole_arrays_as_they_read`).
+  * Each write is a whole new `Uint8Array` (MEM-5): the order test finds no view, and `a_reserve_is_one_unit_that_the_head_replaces` pins the blocks of the reserve.
+  * No song-sized buffer (MEM-1, MEM-4): the peak grew by 4 bytes for each packet on each path (Step 3), and `e2e save` measured 196,608 bytes for each M4A encode of 1 and 10 minutes.
+  * `app`: `Format::M4a` has the label "M4A (16-bit Apple Lossless)", is in `Format::ALL`, and is the third item of the Save menu.  `only_wav_is_made_without_the_worker` checks the labels, and `e2e save` saved through that item.
+  * Licence: `THIRD-PARTY.md`, `README.md` and the Consequences of decision 0029 give `m4a` as Apache-2.0 only.  Decision 0029 stays `proposed`.  TD-91 records that the page ships no licence text.
+  * Acceptance, the 16 bits: each ALAC equals `alac_file` of `pcm16` of its input, and decodes to it bit for bit, on both paths, at 1 to 3 x 4096 + 7 frames.  `an_alac_clips_at_full_scale_and_rounds` pins the rounding of `engine::wav::encode_pcm16`.
+  * Acceptance, the memory: `a_stored_alac_holds_only_its_packet_table` and `an_alac_is_encoded_in_blocks` allow 12 and 4 bytes for each packet.  The sizes use `Vec::with_capacity(layout.packets())`, the reserve goes in blocks of at most 64 KiB, and `moov` is not streamed.
+  * Acceptance, `e2e save`: the M4A saves of 1 and 10 minutes passed the limits of FLAC, and each decoded to the WAV save's samples, bit for bit (Step 5).
+  * Acceptance, the extension test: `only_wav_is_made_without_the_worker` lists `m4a`.
 * [ ] Review rounds.
 
 ## Surprises and discoveries
@@ -326,6 +337,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, implementer: the wasm bundle at `2193806` (the same code as `6983ca9`), from `trunk build --release`: `app_bg.wasm` 6,406,239 bytes, `decode-worker_bg.wasm` 1,381,067 bytes, `stem-worker_bg.wasm` 1,250,092 bytes.
 * 2026-11-10, implementer: the first `check --tier commit` of Step 4 failed in `an_aiff_decodes_through_a_fifo` of `engine`, on "the write to the FIFO".  No step of M3 changes `engine`.  The test passed 6 times alone, and the next tier run passed.  It looks like a race between the writer thread and the end of the read, under load.
 * 2026-11-10, implementer: the 10-minute M4A of `e2e save` is 23.7 MB, 22% of its WAV and 1.7 times its FLAC.  So ALAC gives a larger file than FLAC for these slow sines.
+* 2026-11-10, implementer: the wasm bundle after Step 5, from `trunk build --release`: `app_bg.wasm` 6,415,004 bytes (8,765 more), `decode-worker_bg.wasm` 1,381,067 bytes (the same), and `stem-worker_bg.wasm` 1,295,428 bytes.  So `m4a` adds 45,336 bytes, 3.6%, to `stem-worker_bg.wasm`.
 
 ## Decision log
 
