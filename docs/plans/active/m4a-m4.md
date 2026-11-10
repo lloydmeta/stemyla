@@ -369,6 +369,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
   * 3-3: each flush has the time limit of the output wait: the probe's encoder and decoder, and the encoder of the save.  `a_flush_that_does_not_end_ends_the_encode` failed in both browsers with plain flushes.  With only the decoder's limit removed, it failed on the decoder case in Chrome.
   * 3-7: the f16 test checks for "Expected a Identifier".  It passed in Safari 27.2 with `WASM_BINDGEN_NO_DEBUG=1`, and in Chrome 157.
   * The docs of 3-4 to 3-6 and 3-8 changed with no test.
+* [x] Review round 4 fixes (2026-11-11).  4-1: the fake has the option `probe_flush_never`, and `a_flush_that_does_not_end_ends_the_encode` has a case of the probe's encoder.  With `await s.enc.flush();` in place of `await aac_flush(s, ms);` in `aac_probe`, it failed with "the encode did not end within 3 s" in Chrome 157 and in Safari 27.2.  The nits 4-2 and 4-3 are reported, not fixed.
 ## Surprises and discoveries
 
 * 2026-11-10, team leader: Safari encodes the first 1024 input frames as silence, and its description is a whole `ES_Descriptor`, not the bare config ("Facts").

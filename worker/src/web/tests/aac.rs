@@ -28,14 +28,15 @@ let fake = null;
 // * record: whether the encoder keeps each input sample.
 // * stuck_queue: `encode` adds to the queue, which never moves and sends
 //   no `dequeue` event.
-// * flush_never, decoder_flush_never: the flush of the encoder of the save,
-//   or of the decoder of the probe, never ends.
+// * flush_never, probe_flush_never, decoder_flush_never: the flush of the
+//   encoder of the save, of the probe's encoder, or of the probe's
+//   decoder, never ends.
 export function fake_aac_install(json) {
   if (fake) throw new Error("a fake AAC is already installed");
   const o = Object.assign({ delay: 2112, probe_delay: null, extra: 3, description: [0x12, 0x10],
     main_description: undefined, supported: true, queue: true, hold_ms: 0, output_ms: 0,
     flush_only: false, error_after: -1, peak: 1.0, record: true, stuck_queue: false, error_microtask: false, flush_never: false,
-    decoder_flush_never: false }, JSON.parse(json));
+    probe_flush_never: false, decoder_flush_never: false }, JSON.parse(json));
   const bytes = (d) => (d === null ? null : new Uint8Array(d));
   const stats = { data_made: 0, data_closed: 0, enc_made: 0, enc_closed: 0, dec_made: 0,
     dec_closed: 0, max_queue: 0, max_lag: 0, max_burst: 0, encoders: [], decoder_description: null };
@@ -159,6 +160,7 @@ export function fake_aac_install(json) {
     }
     async flush() {
       if (o.flush_never && this.index > 0) return new Promise(() => {});
+      if (o.probe_flush_never && this.index === 0) return new Promise(() => {});
       while (this.state !== "closed" && this.encodeQueueSize > 0) await new Promise((r) => setTimeout(r, 1));
       await new Promise((r) => setTimeout(r, o.output_ms + 1));
       if (this.state === "closed") throw new DOMException("the fake failed", "EncodingError");
@@ -1229,14 +1231,18 @@ async fn an_encoder_error_in_the_queue_wait_ends_the_encode() {
 
 /// Finding 3-3 of review round 3 of M4: a flush that never ends ends the
 /// encode after the time limit of the output wait, with its own text.  This
-/// holds for the encoder of the save and for the decoder of the probe, and
-/// each codec is closed after it.
+/// holds for the encoder of the save, the probe's encoder and the probe's
+/// decoder, and each codec is closed after it.
 #[wasm_bindgen_test]
 async fn a_flush_that_does_not_end_ends_the_encode() {
     for (options, text) in [
         (
             r#"{"flush_never": true, "record": false}"#,
             "AAC encoder: the encoder's flush did not end",
+        ),
+        (
+            r#"{"probe_flush_never": true, "record": false}"#,
+            "AAC encoder: the probe failed: the encoder's flush did not end",
         ),
         (
             r#"{"decoder_flush_never": true, "record": false}"#,
