@@ -2,6 +2,9 @@
 //! or AAC from given packets.  The crate has no AAC encoder: the caller
 //! gives the packets and the AudioSpecificConfig.  A file can hold an
 //! `iTunSMPB` tag of its encoder delay and padding (`Layout::with_gapless`).
+//! `audio_specific_config` takes the AudioSpecificConfig out of the
+//! description of a WebCodecs AAC encoder, and `AacConfig::read` reads its
+//! fields.
 //!
 //! This crate makes bytes only.  It does no input or output.  The caller
 //! writes the bytes, as `stem-worker` does for FLAC.
@@ -13,9 +16,11 @@
 
 mod alac;
 mod bits;
+mod esds;
 mod mp4;
 
 pub use alac::{AlacEncoder, FRAMES_PER_PACKET, MAX_PACKET_BYTES};
+pub use esds::{AAC_RATES, AacConfig, audio_specific_config};
 pub use mp4::{Codec, Edit, Error, Gapless, Layout, MAX_CONFIG_LEN, Order, SampleEntry};
 
 /// The whole M4A file of `interleaved` 16-bit stereo, as ALAC.  It holds

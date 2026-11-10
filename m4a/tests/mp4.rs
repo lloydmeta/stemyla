@@ -3,8 +3,8 @@
 mod common;
 
 use m4a::{
-    AlacEncoder, Codec, Edit, Error, FRAMES_PER_PACKET, Gapless, Layout, MAX_PACKET_BYTES, Order,
-    SampleEntry, alac_file,
+    AAC_RATES, AacConfig, AlacEncoder, Codec, Edit, Error, FRAMES_PER_PACKET, Gapless, Layout,
+    MAX_PACKET_BYTES, Order, SampleEntry, alac_file, audio_specific_config,
 };
 
 const RATE: u32 = 44_100;
@@ -982,4 +982,325 @@ fn a_gapless_tag_that_takes_the_file_to_4_gib_is_refused() {
         }
     }
     assert!(refused > 0 && taken > 0, "{refused} refused, {taken} taken");
+}
+
+/// The description of Safari 27.2's `AudioEncoder` for AAC-LC at 44.1 kHz
+/// in stereo: a whole `ES_Descriptor` with 4-byte sizes, around `12 10`.
+const SAFARI_DESCRIPTION: [u8; 39] = [
+    0x03, 0x80, 0x80, 0x80, 0x22, 0x00, 0x00, 0x00, 0x04, 0x80, 0x80, 0x80, 0x14, 0x40, 0x14, 0x00,
+    0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x80, 0x80, 0x80, 0x02, 0x12,
+    0x10, 0x06, 0x80, 0x80, 0x80, 0x01, 0x02,
+];
+
+/// The AudioSpecificConfig of AAC-LC at 44.1 kHz in stereo, which Chrome
+/// gives as its whole description.
+const ASC_44K_STEREO: [u8; 2] = [0x12, 0x10];
+
+#[test]
+fn a_bare_description_is_its_config() {
+    let config = audio_specific_config(&ASC_44K_STEREO);
+    assert_eq!(config, Ok(&ASC_44K_STEREO[..]));
+}
+
+#[test]
+fn safaris_description_gives_the_config_in_its_tag_5() {
+    let config = audio_specific_config(&SAFARI_DESCRIPTION);
+    assert_eq!(config, Ok(&ASC_44K_STEREO[..]));
+}
+
+/// The `esds` of the writer, with its 1-byte sizes, is a description too.
+/// With `MoovLast`, `moov` is in the tail.
+#[test]
+fn the_esds_of_the_writer_gives_its_config() {
+    for len in [2_u8, 5, 64] {
+        let config: Vec<u8> = (0..len).map(|i| 0x12 ^ i).collect();
+        let layout = Layout::new(aac(2, len), 1024, RATE, None, Order::MoovLast).unwrap();
+        let entry = aac_entry(&config);
+        let tail = layout.tail(&entry, &[10]).unwrap();
+        let moov = boxes(&tail)[0];
+        assert_eq!(moov.kind(), "moov");
+        let esds = stbl(&moov)
+            .child(0, "stsd")
+            .child(8, "mp4a")
+            .child(28, "esds");
+        let found = audio_specific_config(&esds.body[4..]);
+        assert_eq!(found, Ok(&config[..]), "{len} bytes");
+    }
+}
+
+/// An `ES_Descriptor` of `flags`, with the fields that they add, and each
+/// size in `size_bytes` bytes.
+fn es_descriptor(flags: u8, size_bytes: usize, config: &[u8]) -> Vec<u8> {
+    fn descriptor(tag: u8, size_bytes: usize, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        for i in (0..size_bytes).rev() {
+            let seven = ((body.len() >> (7 * i)) & 0x7f) as u8;
+            out.push(if i > 0 { seven | 0x80 } else { seven });
+        }
+        out.extend_from_slice(body);
+        out
+    }
+    let mut es = vec![0x00, 0x01, flags];
+    if flags & 0x80 != 0 {
+        es.extend([0x00, 0x02]);
+    }
+    if flags & 0x40 != 0 {
+        es.push(3);
+        es.extend(b"abc");
+    }
+    if flags & 0x20 != 0 {
+        es.extend([0x00, 0x03]);
+    }
+    let mut decoder = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    decoder.extend(descriptor(5, size_bytes, config));
+    es.extend(descriptor(4, size_bytes, &decoder));
+    es.extend(descriptor(6, size_bytes, &[2]));
+    descriptor(3, size_bytes, &es)
+}
+
+#[test]
+fn a_descriptor_with_each_flag_gives_its_config() {
+    for flags in [0x00, 0x80, 0x40, 0x20, 0xE0, 0xE0 | 0x1F] {
+        for size_bytes in 1..=4 {
+            let description = es_descriptor(flags, size_bytes, &ASC_44K_STEREO);
+            let config = audio_specific_config(&description);
+            assert_eq!(
+                config,
+                Ok(&ASC_44K_STEREO[..]),
+                "flags {flags:#x}, {size_bytes} size bytes"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_description_whose_config_has_0_or_65_bytes_is_refused() {
+    for (config, len) in [(&[][..], 0), (&[0x12; 65][..], 65)] {
+        let description = es_descriptor(0, 1, config);
+        assert_eq!(
+            audio_specific_config(&description),
+            Err(Error::ConfigBytes(len))
+        );
+        assert_eq!(audio_specific_config(config), Err(Error::ConfigBytes(len)));
+    }
+    assert!(audio_specific_config(&[0x12; 64]).is_ok());
+}
+
+#[test]
+fn a_descriptor_size_of_5_bytes_is_refused() {
+    let description = [0x03, 0x80, 0x80, 0x80, 0x80, 0x05, 0, 0, 0, 0, 0];
+    assert_eq!(
+        audio_specific_config(&description),
+        Err(Error::DescriptorSizeBytes { tag: 3 })
+    );
+}
+
+#[test]
+fn a_cut_at_each_byte_of_safaris_description_is_refused() {
+    for len in 0..SAFARI_DESCRIPTION.len() {
+        let config = audio_specific_config(&SAFARI_DESCRIPTION[..len]);
+        assert!(config.is_err(), "{len} bytes: {config:?}");
+    }
+    assert_eq!(
+        audio_specific_config(&SAFARI_DESCRIPTION[..1]),
+        Err(Error::DescriptorPastEnd { tag: 3 })
+    );
+    assert_eq!(
+        audio_specific_config(&SAFARI_DESCRIPTION[..38]),
+        Err(Error::DescriptorPastEnd { tag: 3 })
+    );
+}
+
+#[test]
+fn a_descriptor_without_tag_4_or_tag_5_is_refused() {
+    let no_4 = [0x03, 0x06, 0x00, 0x01, 0x00, 0x06, 0x01, 0x02];
+    assert_eq!(
+        audio_specific_config(&no_4),
+        Err(Error::NoDescriptor { tag: 4, within: 3 })
+    );
+    let no_5 = [
+        0x03, 0x12, 0x00, 0x01, 0x00, 0x04, 0x0D, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(
+        audio_specific_config(&no_5),
+        Err(Error::NoDescriptor { tag: 5, within: 4 })
+    );
+    let short_4 = [0x03, 0x07, 0x00, 0x01, 0x00, 0x04, 0x02, 0x40, 0x15];
+    assert_eq!(
+        audio_specific_config(&short_4),
+        Err(Error::DescriptorPastEnd { tag: 4 })
+    );
+    let url_past_end = [0x03, 0x04, 0x00, 0x01, 0x40, 0x09];
+    assert_eq!(
+        audio_specific_config(&url_past_end),
+        Err(Error::DescriptorPastEnd { tag: 3 })
+    );
+}
+
+/// A fixed-seed walk over short descriptions and AudioSpecificConfigs.
+/// Each read gives a result, and none panics.
+#[test]
+fn no_description_or_config_makes_a_panic() {
+    let mut noise = common::Noise::new(7);
+    for _ in 0..20_000 {
+        let len = (noise.next_i16() as u16 % 48) as usize;
+        let mut bytes: Vec<u8> = (0..len).map(|_| noise.next_i16() as u8).collect();
+        if let Some(first) = bytes.first_mut() {
+            *first = if noise.next_i16() > 0 { 3 } else { *first };
+        }
+        let _ = audio_specific_config(&bytes);
+        let _ = AacConfig::read(&bytes);
+    }
+    for a in 0..=255 {
+        for b in 0..=255 {
+            let _ = audio_specific_config(&[a, b]);
+            let _ = AacConfig::read(&[a, b]);
+        }
+    }
+}
+
+#[test]
+fn each_description_refusal_says_what_is_wrong() {
+    let cases = [
+        (Error::ConfigBytes(65), "has 65 bytes, not 1 to 64"),
+        (
+            Error::DescriptorPastEnd { tag: 4 },
+            "descriptor tag 4 of the description runs past the end",
+        ),
+        (
+            Error::DescriptorSizeBytes { tag: 3 },
+            "tag 3 of the description has more than 4 bytes",
+        ),
+        (
+            Error::NoDescriptor { tag: 5, within: 4 },
+            "tag 4 of the description has no descriptor tag 5",
+        ),
+        (
+            Error::ConfigEnds {
+                field: "frameLengthFlag",
+            },
+            "ends before its frameLengthFlag",
+        ),
+        (Error::ConfigRateIndex(13), "the reserved rate index 13"),
+    ];
+    for (error, text) in cases {
+        assert!(error.to_string().contains(text), "{error}");
+    }
+}
+
+/// The bits of `fields`, each `(value, bits)`, from the top bit, padded
+/// with zeros to a whole byte.
+fn bit_bytes(fields: &[(u32, usize)]) -> (Vec<u8>, usize) {
+    let bits: Vec<u8> = fields
+        .iter()
+        .flat_map(|&(value, count)| (0..count).rev().map(move |i| ((value >> i) & 1) as u8))
+        .collect();
+    (pack(&bits), bits.len())
+}
+
+fn pack(bits: &[u8]) -> Vec<u8> {
+    bits.chunks(8)
+        .map(|byte| {
+            byte.iter()
+                .enumerate()
+                .fold(0, |out, (i, &bit)| out | (bit << (7 - i)))
+        })
+        .collect()
+}
+
+fn config(object_type: u32, rate: u32, channel_config: u8, frames_960: bool) -> AacConfig {
+    AacConfig {
+        object_type,
+        rate,
+        channel_config,
+        frames_960,
+    }
+}
+
+#[test]
+fn aac_config_reads_the_fields_of_each_form() {
+    let explicit = bit_bytes(&[(2, 5), (15, 4), (44_100, 24), (2, 4), (0, 1), (0, 2)]).0;
+    let escape = bit_bytes(&[(31, 5), (10, 6), (4, 4), (2, 4), (0, 1)]).0;
+    let cases: [(&[u8], AacConfig); 6] = [
+        (&ASC_44K_STEREO, config(2, 44_100, 2, false)),
+        (&[0x2b, 0x92, 0x08, 0x00], config(5, 22_050, 2, false)),
+        (&[0x12, 0x08], config(2, 44_100, 1, false)),
+        (&[0x12, 0x14], config(2, 44_100, 2, true)),
+        (&escape, config(42, 44_100, 2, false)),
+        (&explicit, config(2, 44_100, 2, false)),
+    ];
+    for (bytes, want) in cases {
+        assert_eq!(AacConfig::read(bytes), Ok(want), "{bytes:02x?}");
+    }
+    assert_eq!(AAC_RATES[4], 44_100);
+}
+
+#[test]
+fn aac_config_refuses_a_reserved_rate_index() {
+    for index in [13, 14] {
+        let bytes = bit_bytes(&[(2, 5), (index, 4), (2, 4), (0, 3)]).0;
+        assert_eq!(
+            AacConfig::read(&bytes),
+            Err(Error::ConfigRateIndex(index as u8))
+        );
+    }
+}
+
+/// Each config cut at each bit, padded with zeros to a byte, parses when
+/// its bytes hold every field, and else gives `ConfigEnds`.
+#[test]
+fn aac_config_refuses_a_cut_at_each_bit() {
+    let forms: [&[(u32, usize)]; 5] = [
+        &[(2, 5), (4, 4), (2, 4), (0, 1)],
+        &[(5, 5), (7, 4), (2, 4), (4, 4), (2, 5), (0, 1)],
+        &[(2, 5), (4, 4), (2, 4), (1, 1)],
+        &[(31, 5), (10, 6), (4, 4), (2, 4)],
+        &[(2, 5), (15, 4), (44_100, 24), (2, 4), (0, 1)],
+    ];
+    for fields in forms {
+        let (whole, needed) = bit_bytes(fields);
+        let bits: Vec<u8> = (0..needed)
+            .map(|i| (whole[i / 8] >> (7 - i % 8)) & 1)
+            .collect();
+        for cut in 0..=needed {
+            let bytes = pack(&bits[..cut]);
+            let read = AacConfig::read(&bytes);
+            let case = format!("{fields:?} cut at bit {cut}: {read:?}");
+            if bytes.len() * 8 >= needed {
+                assert!(read.is_ok(), "{case}");
+            } else {
+                assert!(matches!(read, Err(Error::ConfigEnds { .. })), "{case}");
+            }
+        }
+    }
+}
+
+/// The worker reserves the head of an AAC save before it knows the packet
+/// count.  So the head of `MoovLast` is 36 bytes at each length.
+#[test]
+fn an_aac_moov_last_head_is_36_bytes_at_each_length() {
+    for frames in [0, 1, 1024, 100_000_000] {
+        for edit in [None, Some(Edit { skip: 0, frames })] {
+            for gapless in [
+                None,
+                Some(Gapless {
+                    delay: 0,
+                    padding: 0,
+                    frames,
+                }),
+            ] {
+                let layout = Layout::new(aac(2, 2), frames, RATE, edit, Order::MoovLast).unwrap();
+                let layout = match gapless {
+                    Some(gapless) => layout.with_gapless(gapless).unwrap(),
+                    None => layout,
+                };
+                let case = format!("{frames}, {edit:?}, {gapless:?}");
+                assert_eq!(layout.head_len(), 36, "{case}");
+                let sizes = vec![1; layout.packets()];
+                let head = layout.head(&aac_entry(&ASC_44K_STEREO), &sizes);
+                assert!(head.is_ok(), "{case}: {head:?}");
+                assert_eq!(head.unwrap().len(), 36, "{case}");
+            }
+        }
+    }
 }

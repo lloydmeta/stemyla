@@ -9,6 +9,7 @@
 use core::fmt;
 
 use crate::alac::{FRAMES_PER_PACKET, MAX_PACKET_BYTES};
+use crate::esds::{DECODER_CONFIG_TAG, DECODER_SPECIFIC_TAG, ES_DESCRIPTOR_TAG};
 
 /// The codec of the one track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +112,10 @@ pub struct Gapless {
 pub enum Order {
     /// `moov` before `mdat`, so a reader needs no seek to the end.
     FastStart,
-    /// `moov` after `mdat`.  Only tests use it, as a file that needs a seek.
+    /// `moov` after `mdat`.  The AAC save of `stem-worker` uses it, since
+    /// the packet count of an AAC encode is known only at its end.  Its head
+    /// is `ftyp` and the `mdat` header only, so its length does not depend
+    /// on the packets.
     MoovLast,
 }
 
@@ -142,6 +146,20 @@ pub enum Error {
     /// The delay, frames and padding of the gapless tag are not the
     /// frames of the track.
     GaplessFrames { gapless: Gapless, frames: u64 },
+    /// The AudioSpecificConfig of a description has 0 bytes, or more
+    /// than `MAX_CONFIG_LEN`.
+    ConfigBytes(usize),
+    /// A descriptor of a description runs past the end of the bytes that
+    /// hold it.
+    DescriptorPastEnd { tag: u8 },
+    /// A descriptor size of a description has more than 4 bytes.
+    DescriptorSizeBytes { tag: u8 },
+    /// The descriptor of tag `within` has no child of tag `tag`.
+    NoDescriptor { tag: u8, within: u8 },
+    /// An AudioSpecificConfig ends before its `field`.
+    ConfigEnds { field: &'static str },
+    /// An AudioSpecificConfig has the reserved rate index 13 or 14.
+    ConfigRateIndex(u8),
 }
 
 impl fmt::Display for Error {
@@ -181,6 +199,29 @@ impl fmt::Display for Error {
             Error::EntryCodec => write!(
                 f,
                 "the sample entry is not of the codec of the layout, or its AudioSpecificConfig has another length"
+            ),
+            Error::ConfigBytes(len) => write!(
+                f,
+                "the AudioSpecificConfig of the description has {len} bytes, not 1 to {MAX_CONFIG_LEN}"
+            ),
+            Error::DescriptorPastEnd { tag } => write!(
+                f,
+                "descriptor tag {tag} of the description runs past the end of its bytes"
+            ),
+            Error::DescriptorSizeBytes { tag } => write!(
+                f,
+                "the size of descriptor tag {tag} of the description has more than 4 bytes"
+            ),
+            Error::NoDescriptor { tag, within } => write!(
+                f,
+                "descriptor tag {within} of the description has no descriptor tag {tag}"
+            ),
+            Error::ConfigEnds { field } => {
+                write!(f, "the AudioSpecificConfig ends before its {field}")
+            }
+            Error::ConfigRateIndex(index) => write!(
+                f,
+                "the AudioSpecificConfig has the reserved rate index {index}"
             ),
         }
     }
@@ -241,10 +282,7 @@ const META_LEN: usize = 12 + META_HDLR_LEN + 8 + FREEFORM_LEN;
 /// The `udta` of the `iTunSMPB` tag.
 const UDTA_LEN: usize = 8 + META_LEN;
 
-/// The descriptor tags of `esds` (ISO/IEC 14496-1, 7.2.2.1).
-const ES_DESCRIPTOR_TAG: u8 = 3;
-const DECODER_CONFIG_TAG: u8 = 4;
-const DECODER_SPECIFIC_TAG: u8 = 5;
+/// The tag of the `SLConfigDescriptor` (ISO/IEC 14496-1, 7.2.2.1).
 const SL_CONFIG_TAG: u8 = 6;
 /// `objectTypeIndication` 0x40: Audio ISO/IEC 14496-3.
 const OBJECT_TYPE_AUDIO: u8 = 0x40;

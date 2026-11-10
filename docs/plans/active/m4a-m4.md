@@ -330,7 +330,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
 
 * [x] 2026-11-10: plan written by the team leader, after the spike of "Facts".  Plan review round 1 found 1 blocker, 7 should-fix and 9 nits.  The plan takes each (Decision log).  Round 2 found 1 blocker, 3 should-fix and 6 nits, and the plan takes each too.
 * [x] 2026-11-10: a new team leader took over after the first one stopped by accident.  The orchestrator asked for one more plan review, the last.  It found 0 blockers, 3 should-fix and 4 nits, and the plan takes each (Decision log).
-* [ ] Step 1: the AudioSpecificConfig of a description.
+* [x] Step 1 (2026-11-10): the AudioSpecificConfig of a description.  `m4a::audio_specific_config` and `m4a::AacConfig::read` are in the new module `m4a/src/esds.rs`, with 6 new `Error` variants.  The 16 new tests in `m4a/tests/mp4.rs` failed first on an assert, with three stubs.  The stub `Ok(&description[1..])` and an `AacConfig::read` of fixed fields failed 12 tests.  A `head_len` of `MoovLast` that counts 8 bytes for each packet failed `an_aac_moov_last_head_is_36_bytes_at_each_length`.  A stub of wrong `Display` texts failed `each_description_refusal_says_what_is_wrong`.  An index in place of `get` failed `no_description_or_config_makes_a_panic` on a panic, which is what it checks.  `cargo test -p m4a` passes.
 * [ ] Step 2: the wire kind `aac`, the worker's encode and the page's reply.
 * [ ] Step 3: the memory of the AAC encode.
 * [ ] Step 4: the real encode.
